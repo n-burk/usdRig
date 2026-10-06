@@ -128,22 +128,26 @@ bool RigExecBakedValidateStepGraph(const RigExecBakedProgramImpl &program,
 ///
 /// One Kahn sort over the declared reads: an edge from the head step that
 /// writes a slot to every head step that reads it. Among the steps ready
-/// at once the lowest (`object`, `part`, first written slot) goes first --
-/// for property revisions the chain's place in _propertyChainOrder, then
-/// the revision -- so where the declarations allow the evaluator's order,
-/// that order is the result, and it comes from the declarations rather than
-/// from statement order. False with the step left unordered when the reads
-/// form a cycle.
+/// at once the lowest (kind, `object`, `part`, first written slot) goes
+/// first, the property revisions before the rest and ladder ops -- for
+/// property revisions the chain's place in _propertyChainOrder, then the
+/// revision; for the rest and ladder ops the compose group, then the
+/// rest before the ladder -- so where the declarations allow the
+/// evaluator's order, that order is the result, and it comes from the
+/// declarations rather than from statement order. False with the step left
+/// unordered when the reads form a cycle.
 bool RigExecBakedSortHeadTier(RigExecBakedProgramImpl *program,
                               std::string *error);
 
 /// Whether \p program's head tier is one RigExecBakedRunHeadTier may trust,
 /// which Build asks before it hands the program out: in `headOrder`, every
-/// slot a head step reads was written by an earlier head step, no head
-/// step reads a region domain, no slot has two head producers, and every
-/// walk that meets a chain target or a phased record's consumer declares
-/// that chain's final version or that record. On failure \p error receives
-/// the first violation and how many more there were.
+/// slot a head step reads was written by an earlier head step, every
+/// property revision precedes every rest and ladder op (the two run in
+/// separate passes), no head step reads a region domain, no slot has two
+/// head producers, and every walk that meets a chain target or a phased
+/// record's consumer declares that chain's final version or that record.
+/// On failure \p error receives the first violation and how many more
+/// there were.
 bool RigExecBakedValidateHeadTier(const RigExecBakedProgramImpl &program,
                                   std::string *error);
 
@@ -164,6 +168,48 @@ bool RigExecBakedValidateHeadTier(const RigExecBakedProgramImpl &program,
 void RigExecBakedRunHeadTier(RigExecBakedProgramImpl *program,
                              UsdTimeCode time, RigExecRigPose *pose,
                              bool force, bool verify);
+
+/// Runs \p program's rest and ladder ops (RigExecBakedHeadKind::RestCompose
+/// and LadderCompose), in `headOrder`, after the property revisions and
+/// the chain-routed leaf sample, before the region. Serial, owning thread.
+///
+/// An op runs when \p force or after a moved program stamp; on the tier's
+/// first run when one of its leaves varies (Build composed the rest from
+/// capture-time samples); and when one of its binding leaves (a
+/// chain-written channel's leaf moves with its walk) or a Rest or Ladder
+/// slot it reads moved this run. Otherwise its outputs stand: they were
+/// composed from equal inputs. A run op compares its
+/// outputs bitwise with what the slot held and records the moves in
+/// `restChanged`/`restMoved` and `ladderChanged`/`ladderMoved`, which the
+/// closure seeds from. With \p verify a second, forced pass runs from the
+/// same state and every table entry that differs is a parity mismatch on
+/// \p pose; the state the forced pass left stands, and the head trace
+/// keeps what the first pass ran.
+void RigExecBakedRunRestTier(RigExecBakedProgramImpl *program,
+                             RigExecRigPose *pose, bool force, bool verify);
+
+/// The clusters a value edit on override index \p index re-runs, when the
+/// index is a ladder channel's (kEditRouteHead): the rest and ladder ops
+/// whose binding leaves hold it, their forward closure within the head
+/// tier (a parent's RestCompose reaches its children's through
+/// `Rest[parent]`), and the cluster of every region step that declares a
+/// head output of an op in that closure. Sorted and unique; empty for an
+/// index no head op reads.
+std::vector<int> RigExecBakedHeadSeeds(const RigExecBakedProgramImpl &program,
+                                       int index);
+
+/// RigExecBakedHeadSeeds in parts, for a caller asking for many indices:
+/// per head step, the clusters its closure's outputs reach; the head steps
+/// whose binding leaves hold \p index's leaf; and the clusters a set of
+/// head steps reaches, sorted.
+std::vector<RigExecBakedClusterSet> RigExecBakedHeadOpSeeds(
+    const RigExecBakedProgramImpl &program);
+std::vector<uint32_t> RigExecBakedHeadOpsReading(
+    const RigExecBakedProgramImpl &program, int index);
+std::vector<int> RigExecBakedHeadSeedsFrom(
+    const RigExecBakedProgramImpl &program,
+    const std::vector<RigExecBakedClusterSet> &opSeeds,
+    const std::vector<uint32_t> &ops);
 
 /// Assigns every step from \p firstStep on its size, its cost and its
 /// longest-path level.

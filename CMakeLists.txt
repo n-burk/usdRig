@@ -1296,6 +1296,19 @@ add_test(NAME testRigExecPropertyOps COMMAND testRigExecPropertyOps
 rigexec_add_baked_parity_test(testRigExecPropertyOps REQUIRE_BAKE CONE_VERIFY
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
 
+# The rest chain and the default-space ladder as head-tier ops: the ten
+# exported tables equal the single loop the ops were split from, every rest
+# reader declares what it indexes, a rest that moves alone re-runs its
+# readers and not its compose, and a rest edit seeds through the tier.
+add_executable(testRigExecRestOps tests/testRigExecRestOps.cpp)
+target_link_libraries(testRigExecRestOps PRIVATE rigExec)
+target_compile_definitions(testRigExecRestOps PRIVATE
+    ${_rigexec_schema_resource_define})
+add_test(NAME testRigExecRestOps COMMAND testRigExecRestOps
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+rigexec_add_baked_parity_test(testRigExecRestOps REQUIRE_BAKE CONE_VERIFY
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+
 add_executable(testRigExecScopedClears tests/testRigExecScopedClears.cpp)
 target_link_libraries(testRigExecScopedClears PRIVATE rigExec)
 target_compile_definitions(testRigExecScopedClears PRIVATE

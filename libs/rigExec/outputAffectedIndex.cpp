@@ -1,6 +1,8 @@
 // RigExec output-affected index. See outputAffectedIndex.h.
 #include "outputAffectedIndex.h"
 
+#include "bakedSchedule.h"
+
 #include <algorithm>
 
 namespace rigExec {
@@ -215,11 +217,10 @@ RigExecOutputAffectedIndex::Build(const RigExecBakedProgramImpl &program,
     // Overridable inputs: every property an input's walk reads, the path a
     // stage value edit on it names (unified-program spec rule S7). An edit
     // there re-runs exactly what an override on it would -- the steps that
-    // declare the input, or the provider compose its avar lands in -- so it
-    // is seeded exactly as the override is. A path one of whose inputs is
-    // re-read by the provider ladder instead stays foreign: what a moved
-    // ladder dirties is decided by the values the prologue recomposes, which
-    // no seed names. So does a path that seeds nothing.
+    // declare the input, the provider compose its avar lands in, or the
+    // readers of what the rest and ladder ops reading it can move -- so it
+    // is seeded exactly as the override is. A path that seeds nothing stays
+    // foreign.
     const std::vector<std::vector<int>> indexSeeds = _IndexSeeds(program);
     for (const auto &[path, indices] : program.overridableInputs) {
         bool seedable = !indices.empty();
@@ -228,8 +229,7 @@ RigExecOutputAffectedIndex::Build(const RigExecBakedProgramImpl &program,
                 index >= 0 && size_t(index) < program.cones.editRoute.size()
                     ? program.cones.editRoute[size_t(index)]
                     : 0;
-            seedable = seedable && route != 0 &&
-                       (route & kEditRouteLadder) == 0;
+            seedable = seedable && route != 0;
         }
         if (!seedable) {
             continue;
@@ -477,12 +477,14 @@ namespace {
 // Override index -> the clusters a change to that input dirties, for every
 // index at once: the clusters of the steps that declare it (bakedSchedule's
 // override rule -- a step whose overrideInputs carry a flagged index dirties
-// its cluster), and the compose cluster of the avar binding behind it (the
+// its cluster), the compose cluster of the avar binding behind it (the
 // input block writes an overridden avar into the dense table, and the
-// per-provider value comparison dirties its compose cluster). Matched by
-// index, not by head path, so an override standing on a walk hop resolves
-// to the same provider as one on the head. Flat slot / 11, as in Build; a
-// seedless provider contributes nothing.
+// per-provider value comparison dirties its compose cluster), and for a
+// ladder channel the readers of every rest and ladder op its leaf can move
+// (RigExecBakedHeadSeeds). Matched by index, not by head path, so an
+// override standing on a walk hop resolves to the same provider as one on
+// the head. Flat slot / 11, as in Build; a seedless provider contributes
+// nothing.
 std::vector<std::vector<int>>
 _IndexSeeds(const RigExecBakedProgramImpl &program)
 {
@@ -530,6 +532,42 @@ _IndexSeeds(const RigExecBakedProgramImpl &program)
                     const int reader = program.steps[size_t(step)].cluster;
                     if (reader >= 0 && size_t(reader) < clusters) {
                         add(binding.input.overrideIndex, reader);
+                    }
+                }
+            }
+        }
+    }
+    if (!program.ladderOverrides.empty()) {
+        // Per head op once, and per leaf the ops reading it once: a rig
+        // registers a ladder index per authored channel.
+        const std::vector<RigExecBakedClusterSet> opSeeds =
+            RigExecBakedHeadOpSeeds(program);
+        std::vector<std::vector<int>> opClusters(opSeeds.size());
+        for (size_t i = 0; i < opSeeds.size(); ++i) {
+            opClusters[i] = RigExecBakedHeadSeedsFrom(program, opSeeds,
+                                                      {uint32_t(i)});
+        }
+        std::vector<std::vector<uint32_t>> opsOfLeaf(program.leafRefs.size());
+        for (size_t i = 0; i < program.headSteps.size(); ++i) {
+            for (const uint32_t leaf : program.headSteps[i].bindingLeaves) {
+                if (leaf < opsOfLeaf.size()) {
+                    opsOfLeaf[leaf].push_back(uint32_t(i));
+                }
+            }
+        }
+        for (const int index : program.ladderOverrides) {
+            if (index < 0 || size_t(index) >= program.leafOfOverride.size() ||
+                program.leafOfOverride[size_t(index)] < 0) {
+                continue;
+            }
+            const size_t leaf = size_t(program.leafOfOverride[size_t(index)]);
+            if (leaf >= opsOfLeaf.size()) {
+                continue;
+            }
+            for (const uint32_t op : opsOfLeaf[leaf]) {
+                for (const int cluster : opClusters[op]) {
+                    if (size_t(cluster) < clusters) {
+                        add(index, cluster);
                     }
                 }
             }

@@ -1957,8 +1957,8 @@ RigExecBakedBuildCones(RigExecBakedProgramImpl *program)
     // reader it reaches. Three readers qualify: a step that declares the
     // input (the closure's override rule re-runs it), the avar table (the
     // prologue re-reads every varying binding and compares the table by
-    // value), and the provider ladder -- but only a ladder the prologue
-    // recomposes every frame; a ladder composed once holds what Build read.
+    // value), and the rest and ladder ops, which re-run when the channel's
+    // leaf moved and seed the readers of what they moved.
     // An index with none of the three is answered by a stamp bump.
     cones.editRoute.assign(B.overridden.size(), 0);
     const auto route = [&cones](int index, uint8_t reader) {
@@ -1976,10 +1976,8 @@ RigExecBakedBuildCones(RigExecBakedProgramImpl *program)
             route(binding.input.overrideIndex, kEditRouteAvar);
         }
     }
-    if (B.ladderVarying) {
-        for (const int input : B.ladderOverrides) {
-            route(input, kEditRouteLadder);
-        }
+    for (const int input : B.ladderOverrides) {
+        route(input, kEditRouteHead);
     }
 
     cones.avarCluster.assign(B.paths.size(), -1);
@@ -2052,15 +2050,29 @@ RigExecBakedBuildCones(RigExecBakedProgramImpl *program)
             break;
         }
     }
-    // The steps a moved property version or a moved reader walk reaches.
+    // The steps a moved property version, a moved rest or ladder slot, or
+    // a moved reader walk reaches.
     cones.headReaders.assign(B.propertyVersionCount, {});
+    cones.restReaders.assign(B.paths.size(), {});
+    cones.ladderReaders.assign(B.paths.size(), {});
     cones.walkReaders.assign(B.readerWalks.size(), {});
     for (const RigExecBakedStep &step : B.steps) {
         const int index = int(&step - B.steps.data());
         for (const RigExecBakedHeadRange &range : step.headReads) {
+            std::vector<std::vector<int>> *readers =
+                range.domain == RigExecBakedHeadDomain::PropertyVersion
+                    ? &cones.headReaders
+                : range.domain == RigExecBakedHeadDomain::Rest
+                    ? &cones.restReaders
+                : range.domain == RigExecBakedHeadDomain::Ladder
+                    ? &cones.ladderReaders
+                    : nullptr;
+            if (!readers) {
+                continue;
+            }
             for (uint32_t id = range.begin;
-                 id < range.end && id < cones.headReaders.size(); ++id) {
-                cones.headReaders[id].push_back(index);
+                 id < range.end && id < readers->size(); ++id) {
+                (*readers)[id].push_back(index);
             }
         }
         for (const int walk : step.readerWalks) {
@@ -2297,13 +2309,18 @@ RigExecBakedComputeClosure(RigExecBakedProgramImpl *program, UsdTimeCode time,
                 dirtyAvarReaders(size_t(B.xformSlots[k]));
             }
         }
-        // The provider ladder, where the prologue recomposed it and found a
-        // value moved: a rest, a default space or an authored posed:space
-        // that moved recomposes its provider, and the compose group is what
-        // declares the write every reader of that frame -- and of the
-        // rest -> pose matrices beside it -- hangs off.
-        for (const int slot : B.ladderMovedSlots) {
-            dirtyAvarReaders(size_t(slot));
+        // The rest and ladder outputs the rest tier moved this run, by the
+        // steps that declare them: a moved ladder recomposes its provider's
+        // group, and a moved rest re-runs what measures against it.
+        for (const int slot : B.restMoved) {
+            for (const int index : cones.restReaders[size_t(slot)]) {
+                dirty.Set(index);
+            }
+        }
+        for (const int slot : B.ladderMoved) {
+            for (const int index : cones.ladderReaders[size_t(slot)]) {
+                dirty.Set(index);
+            }
         }
         // A constraint's own authored tables, which the prologue re-reads
         // at the frame's time. Compared by value, values and diagnostic
@@ -3549,14 +3566,26 @@ RigExecBakedSortHeadTier(RigExecBakedProgramImpl *program, std::string *error)
             B.headSteps[pred].succs.push_back(uint32_t(i));
         }
     }
-    // Min-key Kahn: the lowest (object, part, first written slot) of the
-    // ready steps first. Over edges for which the identity order is already
+    // Min-key Kahn: the lowest (kind, object, part, first written slot) of
+    // the ready steps first, the property revisions ranking before the rest
+    // and ladder ops, which rank together so a group's rest precedes its
+    // ladder. Over edges for which the identity order is already
     // topological this returns the identity order.
-    const auto key = [&B](uint32_t i) {
+    const auto rank = [](RigExecBakedHeadKind kind) {
+        switch (kind) {
+        case RigExecBakedHeadKind::PropertyRevision: return 0;
+        case RigExecBakedHeadKind::RestCompose:
+        case RigExecBakedHeadKind::LadderCompose: return 1;
+        case RigExecBakedHeadKind::SkinTopology: return 2;
+        }
+        return 3;
+    };
+    const auto key = [&B, &rank](uint32_t i) {
         const RigExecBakedHeadStep &step = B.headSteps[i];
         const uint32_t first =
             step.writes.empty() ? 0 : step.writes.front().begin;
-        return std::make_tuple(step.object, step.part, first, i);
+        return std::make_tuple(rank(step.kind), step.object, step.part,
+                               first, i);
     };
     const auto later = [&key](uint32_t a, uint32_t b) {
         return key(a) > key(b);
@@ -3614,6 +3643,10 @@ RigExecBakedValidateHeadTier(const RigExecBakedProgramImpl &B,
             position[B.headOrder[p]] = p;
         }
     }
+    // The property revisions run in a pass of their own, before the
+    // chain-routed leaves are sampled and the rest and ladder ops run
+    // (RigExecBakedRunRestTier), so no rest or ladder op may precede one.
+    const RigExecBakedHeadStep *restSeen = nullptr;
     for (size_t p = 0; p < B.headOrder.size(); ++p) {
         const uint32_t index = B.headOrder[p];
         if (index >= B.headSteps.size()) {
@@ -3622,6 +3655,15 @@ RigExecBakedValidateHeadTier(const RigExecBakedProgramImpl &B,
             continue;
         }
         const RigExecBakedHeadStep &step = B.headSteps[index];
+        if (step.kind == RigExecBakedHeadKind::RestCompose ||
+            step.kind == RigExecBakedHeadKind::LadderCompose) {
+            restSeen = restSeen ? restSeen : &step;
+        } else if (step.kind == RigExecBakedHeadKind::PropertyRevision &&
+                   restSeen) {
+            add("head step " + step.label + " is ordered after " +
+                restSeen->label + ", which runs after every property "
+                "revision");
+        }
         for (const RigExecBakedSlotRange &range : step.regionReads) {
             add("head step " + step.label + " reads the region domain " +
                 RigExecBakedSlotDomainName(range.domain));
@@ -3717,10 +3759,13 @@ RigExecBakedValidateHeadReads(const RigExecBakedProgramImpl &B,
         }
     };
     const auto writers = HeadWriters(B, nullptr);
-    const std::vector<int> &versionWriters =
-        writers[size_t(RigExecBakedHeadDomain::PropertyVersion)];
-    const auto produced = [&versionWriters](uint32_t id) {
-        return id < versionWriters.size() && versionWriters[id] >= 0;
+    const auto producedIn = [&writers](RigExecBakedHeadDomain domain,
+                                       uint32_t id) {
+        const std::vector<int> &table = writers[size_t(domain)];
+        return id < table.size() && table[id] >= 0;
+    };
+    const auto produced = [&producedIn](uint32_t id) {
+        return producedIn(RigExecBakedHeadDomain::PropertyVersion, id);
     };
     for (const RigExecBakedStep &step : B.steps) {
         const auto declares = [&step](uint32_t id) {
@@ -3733,15 +3778,10 @@ RigExecBakedValidateHeadReads(const RigExecBakedProgramImpl &B,
             return false;
         };
         for (const RigExecBakedHeadRange &range : step.headReads) {
-            if (range.domain != RigExecBakedHeadDomain::PropertyVersion) {
-                add("step " + step.label + " reads the head domain " +
-                    RigExecBakedHeadDomainName(range.domain) +
-                    ", which no head step writes");
-                continue;
-            }
             for (uint32_t id = range.begin; id < range.end; ++id) {
-                if (!produced(id)) {
-                    add("step " + step.label + " reads PropertyVersion slot " +
+                if (!producedIn(range.domain, id)) {
+                    add("step " + step.label + " reads " +
+                        RigExecBakedHeadDomainName(range.domain) + " slot " +
                         std::to_string(id) + ", which no head step writes");
                 }
             }
@@ -3855,11 +3895,11 @@ ExecuteHeadTier(RigExecBakedProgramImpl *program, UsdTimeCode time,
     int spanChain = -1;
     for (const uint32_t index : B.headOrder) {
         RigExecBakedHeadStep &step = B.headSteps[index];
-        step.runSeq = 0;
         if (step.kind != RigExecBakedHeadKind::PropertyRevision) {
-            TF_CODING_ERROR("head step %s has no body", step.label.c_str());
+            // The rest tier's, run after the chain-routed leaves.
             continue;
         }
+        step.runSeq = 0;
         if (force || step.alwaysRuns || HeadStepDirty(B, step)) {
             if (step.alwaysRuns) {
                 for (size_t c = 0; c < finished.size(); ++c) {
@@ -4067,6 +4107,352 @@ RigExecBakedRunHeadTier(RigExecBakedProgramImpl *program, UsdTimeCode time,
         pose->diagnostics.insert(pose->diagnostics.end(), step.lines.begin(),
                                  step.lines.end());
     }
+}
+
+// The rest tier.
+
+namespace {
+
+// Whether anything rest or ladder op \p step reads moved this run: one of
+// its binding leaves, or a Rest or Ladder slot an earlier op moved. A
+// chain-written channel's version reaches the op through its leaf, which
+// the chain-routed pass re-samples when its walk moved; the declared
+// PropertyVersion reads only order the op after the revisions.
+bool
+RestStepDirty(const RigExecBakedProgramImpl &B,
+              const RigExecBakedHeadStep &step)
+{
+    for (const uint32_t leaf : step.bindingLeaves) {
+        if (RigExecBakedLeafChanged(B, leaf)) {
+            return true;
+        }
+    }
+    for (const RigExecBakedHeadRange &range : step.reads) {
+        const std::vector<char> *changed =
+            range.domain == RigExecBakedHeadDomain::Rest ? &B.restChanged
+            : range.domain == RigExecBakedHeadDomain::Ladder
+                ? &B.ladderChanged
+                : nullptr;
+        if (!changed) {
+            continue;
+        }
+        for (uint32_t slot = range.begin;
+             slot < range.end && slot < changed->size(); ++slot) {
+            if ((*changed)[slot]) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool
+IsRestKind(RigExecBakedHeadKind kind)
+{
+    return kind == RigExecBakedHeadKind::RestCompose ||
+           kind == RigExecBakedHeadKind::LadderCompose;
+}
+
+// One pass of the rest and ladder ops over the head order.
+void
+ExecuteRestTier(RigExecBakedProgramImpl *program, bool force, bool first)
+{
+    RigExecBakedProgramImpl &B = *program;
+    for (const int slot : B.restMoved) {
+        B.restChanged[size_t(slot)] = 0;
+    }
+    for (const int slot : B.ladderMoved) {
+        B.ladderChanged[size_t(slot)] = 0;
+    }
+    B.restMoved.clear();
+    B.ladderMoved.clear();
+    // After the property revisions this run executed, in the head trace.
+    uint32_t seq = 0;
+    for (const RigExecBakedHeadStep &step : B.headSteps) {
+        if (step.kind == RigExecBakedHeadKind::PropertyRevision) {
+            seq = std::max(seq, step.runSeq);
+        }
+    }
+    bool ran = false;
+    for (const uint32_t index : B.headOrder) {
+        RigExecBakedHeadStep &step = B.headSteps[index];
+        if (!IsRestKind(step.kind)) {
+            continue;
+        }
+        step.runSeq = 0;
+        if (!(force || (first && step.varyingLeaves) ||
+              RestStepDirty(B, step))) {
+            continue;
+        }
+        const RigExecBakedComposeGroup &group =
+            B.composeGroups[size_t(step.object)];
+        {
+            const RigExecOpBodyScope body(
+                B.purityAudit ? &B.purityViolations.count : nullptr);
+            if (step.kind == RigExecBakedHeadKind::RestCompose) {
+                RigExecBakedComposeRestRange(&B, group.begin, group.end,
+                                             /* trackMoves = */ true);
+            } else {
+                RigExecBakedComposeLadderRange(&B, group.begin, group.end,
+                                               /* trackMoves = */ true);
+            }
+        }
+        step.runSeq = ++seq;
+        ++B.headOpsRun;
+        ran = true;
+    }
+    if (ran || !B.ladderMovedSlots.empty()) {
+        B.ladderMovedSlots.assign(B.restMoved.begin(), B.restMoved.end());
+        B.ladderMovedSlots.insert(B.ladderMovedSlots.end(),
+                                  B.ladderMoved.begin(), B.ladderMoved.end());
+        std::sort(B.ladderMovedSlots.begin(), B.ladderMovedSlots.end());
+        B.ladderMovedSlots.erase(std::unique(B.ladderMovedSlots.begin(),
+                                             B.ladderMovedSlots.end()),
+                                 B.ladderMovedSlots.end());
+    }
+}
+
+// What a rest tier pass leaves, for the cone verifier.
+struct RestState {
+    RigExecBakedProgramTesting::LadderTables tables;
+    std::vector<GfMatrix4d> lastRestM, lastSelfD, lastParentDinv,
+        lastPosedAuthoredM;
+    std::vector<char> lastPosedAuthored;
+    std::vector<TfToken> lastRotOrder;
+    std::vector<char> restChanged, ladderChanged;
+    std::vector<int> restMoved, ladderMoved, ladderMovedSlots;
+    std::vector<uint32_t> runSeq;
+    uint64_t opsRun = 0;
+
+    void Capture(const RigExecBakedProgramImpl &B)
+    {
+        tables.restM = B.restM;
+        tables.restPts = B.restPts;
+        tables.restFrames = B.restFrames;
+        tables.selfD = B.selfD;
+        tables.parentDinv = B.parentDinv;
+        tables.rotOrder = B.rotOrder;
+        tables.restRoundTrip = B.restRoundTrip;
+        tables.defaultRoundTrip = B.defaultRoundTrip;
+        tables.posedAuthored = B.posedAuthored;
+        tables.posedAuthoredM = B.posedAuthoredM;
+        lastRestM = B.lastRestM;
+        lastSelfD = B.lastSelfD;
+        lastParentDinv = B.lastParentDinv;
+        lastPosedAuthoredM = B.lastPosedAuthoredM;
+        lastPosedAuthored = B.lastPosedAuthored;
+        lastRotOrder = B.lastRotOrder;
+        restChanged = B.restChanged;
+        ladderChanged = B.ladderChanged;
+        restMoved = B.restMoved;
+        ladderMoved = B.ladderMoved;
+        ladderMovedSlots = B.ladderMovedSlots;
+        runSeq.resize(B.headSteps.size());
+        for (size_t i = 0; i < B.headSteps.size(); ++i) {
+            runSeq[i] = B.headSteps[i].runSeq;
+        }
+        opsRun = B.headOpsRun;
+    }
+
+    void Restore(RigExecBakedProgramImpl *program) const
+    {
+        RigExecBakedProgramImpl &B = *program;
+        B.restM = tables.restM;
+        B.restPts = tables.restPts;
+        B.restFrames = tables.restFrames;
+        B.selfD = tables.selfD;
+        B.parentDinv = tables.parentDinv;
+        B.rotOrder = tables.rotOrder;
+        B.restRoundTrip = tables.restRoundTrip;
+        B.defaultRoundTrip = tables.defaultRoundTrip;
+        B.posedAuthored = tables.posedAuthored;
+        B.posedAuthoredM = tables.posedAuthoredM;
+        B.lastRestM = lastRestM;
+        B.lastSelfD = lastSelfD;
+        B.lastParentDinv = lastParentDinv;
+        B.lastPosedAuthoredM = lastPosedAuthoredM;
+        B.lastPosedAuthored = lastPosedAuthored;
+        B.lastRotOrder = lastRotOrder;
+        B.restChanged = restChanged;
+        B.ladderChanged = ladderChanged;
+        B.restMoved = restMoved;
+        B.ladderMoved = ladderMoved;
+        B.ladderMovedSlots = ladderMovedSlots;
+        for (size_t i = 0; i < B.headSteps.size(); ++i) {
+            B.headSteps[i].runSeq = runSeq[i];
+        }
+        B.headOpsRun = opsRun;
+    }
+};
+
+// The table entries the cone pass \p memo and the forced pass in \p B
+// disagree about, bit for bit, and whether they moved the same slots.
+size_t
+CompareRestPasses(const RigExecBakedProgramImpl &B, const RestState &memo,
+                  std::vector<std::string> *differences)
+{
+    size_t mismatches = 0;
+    const auto bits = [](const auto &a, const auto &b) {
+        return std::memcmp(&a, &b, sizeof(a)) == 0;
+    };
+    const RigExecBakedProgramTesting::LadderTables &T = memo.tables;
+    for (size_t slot = 0; slot < B.paths.size(); ++slot) {
+        const bool same =
+            bits(T.restM[slot], B.restM[slot]) &&
+            bits(T.restPts[slot], B.restPts[slot]) &&
+            T.restFrames[slot].flags == B.restFrames[slot].flags &&
+            bits(T.restFrames[slot].points, B.restFrames[slot].points) &&
+            bits(T.restRoundTrip[slot], B.restRoundTrip[slot]) &&
+            bits(T.selfD[slot], B.selfD[slot]) &&
+            bits(T.parentDinv[slot], B.parentDinv[slot]) &&
+            bits(T.defaultRoundTrip[slot], B.defaultRoundTrip[slot]) &&
+            T.posedAuthored[slot] == B.posedAuthored[slot] &&
+            bits(T.posedAuthoredM[slot], B.posedAuthoredM[slot]) &&
+            T.rotOrder[slot] == B.rotOrder[slot] &&
+            memo.restChanged[slot] == B.restChanged[slot] &&
+            memo.ladderChanged[slot] == B.ladderChanged[slot];
+        if (!same) {
+            ++mismatches;
+            differences->push_back("baked cone mismatch: head rest or ladder "
+                                   "of " + B.paths[slot].GetString() +
+                                   " differs");
+        }
+    }
+    return mismatches;
+}
+
+}  // namespace
+
+void
+RigExecBakedRunRestTier(RigExecBakedProgramImpl *program,
+                        RigExecRigPose *pose, bool force, bool verify)
+{
+    RigExecBakedProgramImpl &B = *program;
+    const bool first = !B.restTierEverRan;
+    force = force || B.restTierStamp != B.programStamp;
+    if (verify) {
+        RestState before, memo;
+        before.Capture(B);
+        ExecuteRestTier(&B, force, first);
+        memo.Capture(B);
+        before.Restore(&B);
+        ExecuteRestTier(&B, true, first);
+        std::vector<std::string> differences;
+        const size_t mismatches = CompareRestPasses(B, memo, &differences);
+        // The trace and the counter say what the cone pass did.
+        for (size_t i = 0; i < B.headSteps.size(); ++i) {
+            if (IsRestKind(B.headSteps[i].kind)) {
+                B.headSteps[i].runSeq = memo.runSeq[i];
+            }
+        }
+        B.headOpsRun = memo.opsRun;
+        if (mismatches > 0) {
+            pose->bakedParityMismatches += mismatches;
+            for (std::string &difference : differences) {
+                pose->diagnostics.push_back(std::move(difference));
+            }
+            TF_WARN("rigExec: baked parity mismatch: %zu difference(s) "
+                    "between the rest tier's cone run and a forced run",
+                    mismatches);
+        }
+    } else {
+        ExecuteRestTier(&B, force, first);
+    }
+    B.restTierEverRan = true;
+    B.restTierStamp = B.programStamp;
+}
+
+std::vector<RigExecBakedClusterSet>
+RigExecBakedHeadOpSeeds(const RigExecBakedProgramImpl &B)
+{
+    const size_t clusters = B.clustering.clusters.size();
+    std::vector<RigExecBakedClusterSet> seeds(B.headSteps.size());
+    // Reverse head order: every successor's set is final before a
+    // predecessor unions it.
+    for (size_t k = B.headOrder.size(); k-- > 0;) {
+        const uint32_t i = B.headOrder[k];
+        const RigExecBakedHeadStep &step = B.headSteps[i];
+        RigExecBakedClusterSet &set = seeds[i];
+        set.Resize(clusters);
+        const auto readers = [&](const std::vector<std::vector<int>> &table,
+                                 uint32_t id) {
+            if (id >= table.size()) {
+                return;
+            }
+            for (const int reader : table[id]) {
+                if (reader >= 0 && size_t(reader) < B.steps.size()) {
+                    set.Set(B.steps[size_t(reader)].cluster);
+                }
+            }
+        };
+        for (const RigExecBakedHeadRange &range : step.writes) {
+            for (uint32_t id = range.begin; id < range.end; ++id) {
+                switch (range.domain) {
+                case RigExecBakedHeadDomain::PropertyVersion:
+                    readers(B.cones.headReaders, id);
+                    break;
+                case RigExecBakedHeadDomain::Rest:
+                    readers(B.cones.restReaders, id);
+                    break;
+                case RigExecBakedHeadDomain::Ladder:
+                    readers(B.cones.ladderReaders, id);
+                    break;
+                case RigExecBakedHeadDomain::SkinTopology:
+                    break;
+                }
+            }
+        }
+        for (const uint32_t succ : step.succs) {
+            set.Union(seeds[succ]);
+        }
+    }
+    return seeds;
+}
+
+std::vector<int>
+RigExecBakedHeadSeedsFrom(const RigExecBakedProgramImpl &B,
+                          const std::vector<RigExecBakedClusterSet> &opSeeds,
+                          const std::vector<uint32_t> &ops)
+{
+    RigExecBakedClusterSet set;
+    set.Resize(B.clustering.clusters.size());
+    for (const uint32_t op : ops) {
+        if (op < opSeeds.size()) {
+            set.Union(opSeeds[op]);
+        }
+    }
+    std::vector<int> out;
+    for (size_t c = 0; c < B.clustering.clusters.size(); ++c) {
+        if (set.Test(int(c))) {
+            out.push_back(int(c));
+        }
+    }
+    return out;
+}
+
+std::vector<uint32_t>
+RigExecBakedHeadOpsReading(const RigExecBakedProgramImpl &B, int index)
+{
+    std::vector<uint32_t> ops;
+    if (index < 0 || size_t(index) >= B.leafOfOverride.size() ||
+        B.leafOfOverride[size_t(index)] < 0) {
+        return ops;
+    }
+    const uint32_t leaf = uint32_t(B.leafOfOverride[size_t(index)]);
+    for (size_t i = 0; i < B.headSteps.size(); ++i) {
+        const std::vector<uint32_t> &leaves = B.headSteps[i].bindingLeaves;
+        if (std::find(leaves.begin(), leaves.end(), leaf) != leaves.end()) {
+            ops.push_back(uint32_t(i));
+        }
+    }
+    return ops;
+}
+
+std::vector<int>
+RigExecBakedHeadSeeds(const RigExecBakedProgramImpl &B, int index)
+{
+    return RigExecBakedHeadSeedsFrom(B, RigExecBakedHeadOpSeeds(B),
+                                     RigExecBakedHeadOpsReading(B, index));
 }
 
 }  // namespace rigExec

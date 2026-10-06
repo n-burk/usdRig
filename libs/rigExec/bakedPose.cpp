@@ -2611,38 +2611,9 @@ RigExecBakedDeclareInputDependencies(RigExecBakedProgramImpl *program)
             step.overrideInputs.end());
     }
     // The property versions those inputs' walks, and the path leaves'
-    // walks, can read.
+    // walks, can read; then the rests and ladders the bodies index.
     RigExecBakedDeclareHeadReads(&B);
-}
-
-bool
-RigExecBakedLadderWatchMoved(RigExecBakedProgramImpl *program,
-                             UsdTimeCode time, std::vector<char> *moved,
-                             bool peek)
-{
-    RigExecBakedProgramImpl &B = *program;
-    const RigExecResolvedInputs &R = *B.resolvedInputs;
-    bool any = false;
-    for (RigExecBakedProgramImpl::LadderWatch &watch : B.ladderWatched) {
-        const double value = RigExecBakedRead(
-            B.ladders[size_t(watch.slot)].defaultAvars[watch.channel], R,
-            time, &B.overridden);
-        // NaN never equals: the first run after Build always recomposes.
-        if (value == watch.last) {
-            continue;
-        }
-        any = true;
-        if (moved) {
-            if (moved->size() != B.paths.size()) {
-                moved->assign(B.paths.size(), 0);
-            }
-            (*moved)[size_t(watch.slot)] = 1;
-        }
-        if (!peek) {
-            watch.last = value;
-        }
-    }
-    return any;
+    RigExecBakedDeclareRestReads(&B);
 }
 
 namespace {
@@ -2831,44 +2802,68 @@ RigExecBakedSampleLeaves(RigExecBakedProgramImpl *program, UsdTimeCode time,
 }
 
 void
-RigExecBakedComposeLadder(RigExecBakedProgramImpl *program, UsdTimeCode time,
-                          bool trackMoves, const std::vector<char> *only)
+RigExecBakedComposeRestRange(RigExecBakedProgramImpl *program, int begin,
+                             int end, bool trackMoves)
 {
     RigExecBakedProgramImpl &B = *program;
-    const int N = int(B.paths.size());
     const GfMatrix4d identity(1.0);
-    if (trackMoves) {
-        B.ladderMovedSlots.clear();
-    }
-    // The channels as sampled at \p time (RigExecBakedSampleLeaves ran
+    // The channels as sampled for this run (RigExecBakedSampleLeaves ran
     // first, at Build and in the prologue).
     const auto rd = [&B](const auto &input) {
         return RigExecBakedLeafRead(B, input);
     };
-    // A partial compose: the marked slots and everything below them, which
-    // one forward pass settles because a parent's slot is always lower.
-    std::vector<char> redo;
-    if (only) {
-        redo.assign(size_t(N), 0);
-    }
-    for (int i = 0; i < N; ++i) {
+    for (int i = begin; i < end; ++i) {
         const size_t slot = size_t(i);
-        if (only) {
-            const int up = B.parent[slot];
-            redo[slot] = (slot < only->size() && (*only)[slot]) ||
-                                 (up >= 0 && redo[size_t(up)])
-                             ? 1
-                             : 0;
-            if (!redo[slot]) {
-                continue;
+        if (B.slotKind[slot] != RigExecBakedSlotKind::FirstFramePose) {
+            // An xform-derived slot has no rest chain: the dynamic path
+            // gives it the identity rest frame outright. Build set it and
+            // nothing here may move it -- including the round trip, which
+            // stays the identity a descendant of one would inherit.
+            continue;
+        }
+        const RigExecBakedProgramImpl::Ladder &L = B.ladders[slot];
+        GfMatrix4d rest =
+            RigExecBakedComposeAvars(rd(L.restAvars[0]), rd(L.restAvars[1]),
+                                     rd(L.restAvars[2]), 1, 1, 1,
+                                     rd(L.restAvars[3]), rd(L.restAvars[4]),
+                                     rd(L.restAvars[5]), 0, B.xyzToken) *
+            rd(L.restSpace);
+        rest.Orthonormalize(/* issueWarning = */ false);
+        const int parent = B.parent[slot];
+        const GfMatrix4d parentRest =
+            parent >= 0 ? B.restRoundTrip[size_t(parent)] : identity;
+        B.restM[slot] = rest * parentRest;
+        B.restFrames[slot] = RigExecFrameFromMatrix(B.restM[slot]);
+        B.restPts[slot] = B.restFrames[slot].points;
+        B.restRoundTrip[slot] = RigExecBakedRoundTrip(B.restM[slot]);
+
+        // Compared by VALUE: a recompose that landed on the same numbers
+        // moved nothing, and the readers of the rest may sit it out.
+        // `restPts`, `restFrames` and `restRoundTrip` are functions of
+        // `restM`, so it stands for all four.
+        if (trackMoves && B.restM[slot] != B.lastRestM[slot]) {
+            B.lastRestM[slot] = B.restM[slot];
+            if (!B.restChanged[slot]) {
+                B.restChanged[slot] = 1;
+                B.restMoved.push_back(i);
             }
         }
+    }
+}
+
+void
+RigExecBakedComposeLadderRange(RigExecBakedProgramImpl *program, int begin,
+                               int end, bool trackMoves)
+{
+    RigExecBakedProgramImpl &B = *program;
+    const GfMatrix4d identity(1.0);
+    const auto rd = [&B](const auto &input) {
+        return RigExecBakedLeafRead(B, input);
+    };
+    for (int i = begin; i < end; ++i) {
+        const size_t slot = size_t(i);
         if (B.slotKind[slot] != RigExecBakedSlotKind::FirstFramePose) {
-            // An xform-derived slot has no rest chain and no default-space
-            // ladder: the dynamic path gives it the identity rest frame
-            // outright and reads its pose off the stage. Build set both and
-            // nothing here may move them -- including the round trips, which
-            // stay the identity a descendant of one would inherit.
+            // No default-space ladder either; see the rest above.
             continue;
         }
         const RigExecBakedProgramImpl::Ladder &L = B.ladders[slot];
@@ -2880,21 +2875,9 @@ RigExecBakedComposeLadder(RigExecBakedProgramImpl *program, UsdTimeCode time,
         B.posedAuthored[slot] = posed != identity ? 1 : 0;
         B.posedAuthoredM[slot] = posed;
 
-        GfMatrix4d rest =
-            RigExecBakedComposeAvars(rd(L.restAvars[0]), rd(L.restAvars[1]),
-                                     rd(L.restAvars[2]), 1, 1, 1,
-                                     rd(L.restAvars[3]), rd(L.restAvars[4]),
-                                     rd(L.restAvars[5]), 0, TfToken("XYZ")) *
-            rd(L.restSpace);
-        rest.Orthonormalize(/* issueWarning = */ false);
         const int parent = B.parent[slot];
         const GfMatrix4d parentRest =
             parent >= 0 ? B.restRoundTrip[size_t(parent)] : identity;
-        B.restM[slot] = rest * parentRest;
-        B.restFrames[slot] = RigExecFrameFromMatrix(B.restM[slot]);
-        B.restPts[slot] = B.restFrames[slot].points;
-        B.restRoundTrip[slot] = RigExecBakedRoundTrip(B.restM[slot]);
-
         // default:space is a space EXPRESSION: a non-identity authored value
         // wins, otherwise the computed ladder.
         const GfMatrix4d authoredDefault = rd(L.defaultSpace);
@@ -2907,37 +2890,377 @@ RigExecBakedComposeLadder(RigExecBakedProgramImpl *program, UsdTimeCode time,
                 rd(L.defaultAvars[0]), rd(L.defaultAvars[1]),
                 rd(L.defaultAvars[2]), 1, 1, 1, rd(L.defaultAvars[3]),
                 rd(L.defaultAvars[4]), rd(L.defaultAvars[5]), 0,
-                TfToken("XYZ"));
+                B.xyzToken);
             B.selfD[slot] = offset * B.restRoundTrip[slot] *
                             parentRest.GetInverse() * parentDefault;
         }
         B.defaultRoundTrip[slot] = RigExecBakedRoundTrip(B.selfD[slot]);
         B.parentDinv[slot] = parentDefault.GetInverse();
         const TfToken order = rd(L.rotationOrder);
-        B.rotOrder[slot] = order.IsEmpty() ? TfToken("XYZ") : order;
+        B.rotOrder[slot] = order.IsEmpty() ? B.xyzToken : order;
 
-        if (!trackMoves) {
-            continue;
-        }
-        // Compared by VALUE, the way every other source of this program is:
-        // "the ladder was recomputed" is not the predicate, because a
-        // recompute that landed on the same numbers moved nothing and the
-        // compose below it is entitled to be skipped.
-        if (B.restM[slot] != B.lastRestM[slot] ||
-            B.selfD[slot] != B.lastSelfD[slot] ||
-            B.parentDinv[slot] != B.lastParentDinv[slot] ||
-            B.posedAuthored[slot] != B.lastPosedAuthored[slot] ||
-            B.posedAuthoredM[slot] != B.lastPosedAuthoredM[slot] ||
-            B.rotOrder[slot] != B.lastRotOrder[slot]) {
-            B.ladderMovedSlots.push_back(i);
-            B.lastRestM[slot] = B.restM[slot];
+        // By value, as the rest is; `defaultRoundTrip` is a function of
+        // `selfD`.
+        if (trackMoves &&
+            (B.selfD[slot] != B.lastSelfD[slot] ||
+             B.parentDinv[slot] != B.lastParentDinv[slot] ||
+             B.posedAuthored[slot] != B.lastPosedAuthored[slot] ||
+             B.posedAuthoredM[slot] != B.lastPosedAuthoredM[slot] ||
+             B.rotOrder[slot] != B.lastRotOrder[slot])) {
             B.lastSelfD[slot] = B.selfD[slot];
             B.lastParentDinv[slot] = B.parentDinv[slot];
             B.lastPosedAuthored[slot] = B.posedAuthored[slot];
             B.lastPosedAuthoredM[slot] = B.posedAuthoredM[slot];
             B.lastRotOrder[slot] = B.rotOrder[slot];
+            if (!B.ladderChanged[slot]) {
+                B.ladderChanged[slot] = 1;
+                B.ladderMoved.push_back(i);
+            }
         }
     }
+}
+
+namespace {
+
+// The ladder channels a RestCompose (\p rest) or LadderCompose reads for
+// one slot, in a fixed order.
+template <class Fn>
+void
+_ForEachLadderChannel(const RigExecBakedProgramImpl::Ladder &L, bool rest,
+                      Fn &&fn)
+{
+    if (rest) {
+        for (const RigExecBakedInput<double> &input : L.restAvars) {
+            fn(input);
+        }
+        fn(L.restSpace);
+    } else {
+        fn(L.posedSpace);
+        fn(L.defaultSpace);
+        for (const RigExecBakedInput<double> &input : L.defaultAvars) {
+            fn(input);
+        }
+        fn(L.rotationOrder);
+    }
+}
+
+}  // namespace
+
+void
+RigExecBakedBuildRestSteps(RigExecBakedProgramImpl *program)
+{
+    RigExecBakedProgramImpl &B = *program;
+    const auto ranges = [](RigExecBakedHeadDomain domain,
+                           const std::set<uint32_t> &slots,
+                           std::vector<RigExecBakedHeadRange> *out) {
+        for (const uint32_t slot : slots) {
+            if (!out->empty() && out->back().domain == domain &&
+                out->back().end == slot) {
+                ++out->back().end;
+            } else {
+                out->push_back(RigExecBakedHeadOne(domain, slot));
+            }
+        }
+    };
+    for (size_t g = 0; g < B.composeGroups.size(); ++g) {
+        const RigExecBakedComposeGroup &group = B.composeGroups[g];
+        const SdfPath &first = B.paths[size_t(group.begin)];
+        for (const bool rest : {true, false}) {
+            RigExecBakedHeadStep step;
+            step.kind = rest ? RigExecBakedHeadKind::RestCompose
+                             : RigExecBakedHeadKind::LadderCompose;
+            step.object = int(g);
+            step.part = rest ? 0 : 1;
+            step.label =
+                std::string(rest ? "RestCompose " : "LadderCompose ") +
+                first.GetString();
+            std::set<uint32_t> versions, rests, ladders;
+            for (int i = group.begin; i < group.end; ++i) {
+                const size_t slot = size_t(i);
+                if (B.slotKind[slot] != RigExecBakedSlotKind::FirstFramePose) {
+                    continue;
+                }
+                const int parent = B.parent[slot];
+                if (parent >= 0 &&
+                    (parent < group.begin || parent >= group.end)) {
+                    rests.insert(uint32_t(parent));
+                    if (!rest) {
+                        ladders.insert(uint32_t(parent));
+                    }
+                }
+                _ForEachLadderChannel(
+                    B.ladders[slot], rest, [&](const auto &input) {
+                        if (input.walk >= 0) {
+                            const RigExecBakedReaderWalk &reader =
+                                B.readerWalks[size_t(input.walk)];
+                            versions.insert(reader.versions.begin(),
+                                            reader.versions.end());
+                        }
+                    });
+            }
+            if (!rest) {
+                // The ladder reads the rests of its own slots.
+                for (int i = group.begin; i < group.end; ++i) {
+                    rests.insert(uint32_t(i));
+                }
+            }
+            ranges(RigExecBakedHeadDomain::PropertyVersion, versions,
+                   &step.reads);
+            ranges(RigExecBakedHeadDomain::Rest, rests, &step.reads);
+            ranges(RigExecBakedHeadDomain::Ladder, ladders, &step.reads);
+            step.writes.push_back(RigExecBakedHeadRange{
+                rest ? RigExecBakedHeadDomain::Rest
+                     : RigExecBakedHeadDomain::Ladder,
+                uint32_t(group.begin), uint32_t(group.end)});
+            B.headSteps.push_back(std::move(step));
+        }
+    }
+    const size_t N = B.paths.size();
+    B.restChanged.assign(N, 0);
+    B.ladderChanged.assign(N, 0);
+    B.restMoved.clear();
+    B.ladderMoved.clear();
+    B.restTierEverRan = false;
+}
+
+void
+RigExecBakedNoteRestLeaves(RigExecBakedProgramImpl *program)
+{
+    RigExecBakedProgramImpl &B = *program;
+    for (RigExecBakedHeadStep &step : B.headSteps) {
+        if (step.kind != RigExecBakedHeadKind::RestCompose &&
+            step.kind != RigExecBakedHeadKind::LadderCompose) {
+            continue;
+        }
+        step.bindingLeaves.clear();
+        step.varyingLeaves = false;
+        const RigExecBakedComposeGroup &group =
+            B.composeGroups[size_t(step.object)];
+        const bool rest = step.kind == RigExecBakedHeadKind::RestCompose;
+        for (int i = group.begin; i < group.end; ++i) {
+            const size_t slot = size_t(i);
+            if (B.slotKind[slot] != RigExecBakedSlotKind::FirstFramePose) {
+                continue;
+            }
+            _ForEachLadderChannel(
+                B.ladders[slot], rest, [&](const auto &input) {
+                    using T = std::decay_t<decltype(input.constant)>;
+                    if (input.leaf < 0) {
+                        return;
+                    }
+                    step.bindingLeaves.push_back(
+                        B.leaves.Of<T>().id[size_t(input.leaf)]);
+                    step.varyingLeaves = step.varyingLeaves || input.varying;
+                });
+        }
+    }
+    // A notice between Build and the first run moves the stamp past this.
+    B.restTierStamp = B.programStamp;
+}
+
+void
+RigExecBakedDeclareRestReads(RigExecBakedProgramImpl *program)
+{
+    RigExecBakedProgramImpl &B = *program;
+    const int N = int(B.paths.size());
+    for (RigExecBakedStep &step : B.steps) {
+        std::set<uint32_t> rests, ladders;
+        const auto rest = [&rests, N](int slot) {
+            if (slot >= 0 && slot < N) {
+                rests.insert(uint32_t(slot));
+            }
+        };
+        const auto ladder = [&ladders, N](int slot) {
+            if (slot >= 0 && slot < N) {
+                ladders.insert(uint32_t(slot));
+            }
+        };
+        const auto version =
+            [&ladder](
+                const RigExecBakedProgramImpl::SpaceSwitch::FrameVersion
+                    &read) {
+                for (const int slot : read.recompose) {
+                    ladder(slot);
+                }
+            };
+        switch (step.kind) {
+        case RigExecBakedStepKind::ComposeSubtree: {
+            const RigExecBakedComposeGroup &group =
+                B.composeGroups[size_t(step.object)];
+            for (int slot = group.begin; slot < group.end; ++slot) {
+                ladder(slot);
+            }
+            for (const int parent : group.parentSlots) {
+                ladder(parent);
+            }
+            for (int slot = group.begin; slot < group.end; ++slot) {
+                const int switchIndex =
+                    B.spaceSwitchBySlot.empty()
+                        ? -1 : B.spaceSwitchBySlot[size_t(slot)];
+                if (switchIndex < 0) {
+                    continue;
+                }
+                const RigExecBakedProgramImpl::SpaceSwitch &sw =
+                    B.spaceSwitches[size_t(switchIndex)];
+                ladder(B.parent[size_t(slot)]);
+                ladder(sw.spaceSlot);
+                for (const int source : sw.sourceSlots) {
+                    ladder(source);
+                }
+                version(sw.parentRead);
+                version(sw.spaceRead);
+                for (const auto &read : sw.sourceReads) {
+                    version(read);
+                }
+            }
+            break;
+        }
+        case RigExecBakedStepKind::Solve:
+            for (const int slot : B.solvers[size_t(step.object)].restSlots) {
+                rest(slot);
+            }
+            break;
+        case RigExecBakedStepKind::Constraint: {
+            const RigExecBakedProgramImpl::WalkStep &walk =
+                B.walkSteps[size_t(step.object)];
+            if (walk.solverBatch || walk.index < 0) {
+                break;
+            }
+            const RigExecBakedProgramImpl::Constraint &c =
+                B.constraints[size_t(walk.index)];
+            if (!c.useAnimatedTs) {
+                for (const int slot : c.targetSlots) {
+                    rest(slot);
+                }
+            }
+            if (c.type == "RigExecMatrixMover") {
+                for (const int slot : c.sources) {
+                    rest(slot);
+                }
+            }
+            ladder(c.spaceSlot);
+            break;
+        }
+        case RigExecBakedStepKind::ProviderMatrix:
+            rest(step.object);
+            break;
+        case RigExecBakedStepKind::FrameMatrix:
+            rest(B.frameRecords[size_t(step.object)].slot);
+            break;
+        case RigExecBakedStepKind::PoseInterpolator: {
+            const RigExecBakedProgramImpl::PoseInterpolator &interpolator =
+                B.poseInterpolators[size_t(step.object)];
+            if (interpolator.valueInputs.empty()) {
+                rest(interpolator.driverSlot);
+                rest(interpolator.parentSlot);
+            }
+            break;
+        }
+        case RigExecBakedStepKind::Derived: {
+            const auto &[c, d] = B.derivedIndex[size_t(step.object)];
+            const RigExecBakedProgramImpl::GeomRevision &revision =
+                B.chains[size_t(c)].derived[size_t(d)].revision;
+            rest(revision.transformSlot);
+            rest(revision.transformSpaceSlot);
+            rest(revision.carrySpaceSlot);
+            break;
+        }
+        default:
+            break;
+        }
+        for (const auto &[domain, slots] :
+             {std::make_pair(RigExecBakedHeadDomain::Rest, &rests),
+              std::make_pair(RigExecBakedHeadDomain::Ladder, &ladders)}) {
+            for (const uint32_t slot : *slots) {
+                if (!step.headReads.empty() &&
+                    step.headReads.back().domain == domain &&
+                    step.headReads.back().end == slot) {
+                    ++step.headReads.back().end;
+                } else {
+                    step.headReads.push_back(
+                        RigExecBakedHeadOne(domain, slot));
+                }
+            }
+        }
+    }
+}
+
+RigExecBakedProgramTesting::LadderTables
+RigExecBakedProgramTesting::LadderTablesOf(const RigExecBakedProgram &program)
+{
+    const RigExecBakedProgramImpl &B = *program._impl;
+    LadderTables T;
+    T.restM = B.restM;
+    T.restPts = B.restPts;
+    T.restFrames = B.restFrames;
+    T.selfD = B.selfD;
+    T.parentDinv = B.parentDinv;
+    T.rotOrder = B.rotOrder;
+    T.restRoundTrip = B.restRoundTrip;
+    T.defaultRoundTrip = B.defaultRoundTrip;
+    T.posedAuthored = B.posedAuthored;
+    T.posedAuthoredM = B.posedAuthoredM;
+    return T;
+}
+
+RigExecBakedProgramTesting::LadderTables
+RigExecBakedProgramTesting::ComposeLadderReference(
+    const RigExecBakedProgram &program)
+{
+    const RigExecBakedProgramImpl &B = *program._impl;
+    LadderTables T = LadderTablesOf(program);
+    const int N = int(B.paths.size());
+    const GfMatrix4d identity(1.0);
+    const auto rd = [&B](const auto &input) {
+        return RigExecBakedLeafRead(B, input);
+    };
+    // The single slot-order loop the two ops were split from, statement for
+    // statement, into the copies.
+    for (int i = 0; i < N; ++i) {
+        const size_t slot = size_t(i);
+        if (B.slotKind[slot] != RigExecBakedSlotKind::FirstFramePose) {
+            continue;
+        }
+        const RigExecBakedProgramImpl::Ladder &L = B.ladders[slot];
+        const GfMatrix4d posed = rd(L.posedSpace);
+        T.posedAuthored[slot] = posed != identity ? 1 : 0;
+        T.posedAuthoredM[slot] = posed;
+
+        GfMatrix4d rest =
+            RigExecBakedComposeAvars(rd(L.restAvars[0]), rd(L.restAvars[1]),
+                                     rd(L.restAvars[2]), 1, 1, 1,
+                                     rd(L.restAvars[3]), rd(L.restAvars[4]),
+                                     rd(L.restAvars[5]), 0, TfToken("XYZ")) *
+            rd(L.restSpace);
+        rest.Orthonormalize(/* issueWarning = */ false);
+        const int parent = B.parent[slot];
+        const GfMatrix4d parentRest =
+            parent >= 0 ? T.restRoundTrip[size_t(parent)] : identity;
+        T.restM[slot] = rest * parentRest;
+        T.restFrames[slot] = RigExecFrameFromMatrix(T.restM[slot]);
+        T.restPts[slot] = T.restFrames[slot].points;
+        T.restRoundTrip[slot] = RigExecBakedRoundTrip(T.restM[slot]);
+
+        const GfMatrix4d authoredDefault = rd(L.defaultSpace);
+        const GfMatrix4d parentDefault =
+            parent >= 0 ? T.defaultRoundTrip[size_t(parent)] : identity;
+        if (authoredDefault != identity) {
+            T.selfD[slot] = authoredDefault;
+        } else {
+            const GfMatrix4d offset = RigExecBakedComposeAvars(
+                rd(L.defaultAvars[0]), rd(L.defaultAvars[1]),
+                rd(L.defaultAvars[2]), 1, 1, 1, rd(L.defaultAvars[3]),
+                rd(L.defaultAvars[4]), rd(L.defaultAvars[5]), 0,
+                TfToken("XYZ"));
+            T.selfD[slot] = offset * T.restRoundTrip[slot] *
+                            parentRest.GetInverse() * parentDefault;
+        }
+        T.defaultRoundTrip[slot] = RigExecBakedRoundTrip(T.selfD[slot]);
+        T.parentDinv[slot] = parentDefault.GetInverse();
+        const TfToken order = rd(L.rotationOrder);
+        T.rotOrder[slot] = order.IsEmpty() ? TfToken("XYZ") : order;
+    }
+    return T;
 }
 
 void
@@ -2945,13 +3268,12 @@ RigExecBakedRunInputs(RigExecBakedProgramImpl *program, UsdTimeCode time)
 {
     RigExecBakedProgramImpl &B = *program;
     RIGEXEC_PROFILE_SCOPE_CAT(*B.profiler, "BakedInputs", "baked");
-    // The provider ladder, before the avars that compose against it.
-    // Three ways a frame can move it and nothing else can: a channel that
-    // varies with time or resolves through a property chain (settled at
-    // Build), a drag standing on one of its channels, and the frame after
-    // such a drag is released -- the ladder holds the dragged value until
-    // something writes the authored one back over it, which is the same
-    // one-more-pass the avar table below owes its own constants.
+    // The rest and ladder ops composed the provider ladder before this
+    // (RigExecBakedRunRestTier). What is settled here is the solver
+    // refresh gate: a run on which a ladder channel varies with time or
+    // resolves through a property chain (settled at Build), a drag stands
+    // on one of its channels, or such a drag was released the run before --
+    // the one-more-pass the avar table below owes its own constants.
     bool ladderDragged = false;
     if (B.anyOverridden) {
         for (const int index : B.ladderOverrides) {
@@ -2963,21 +3285,8 @@ RigExecBakedRunInputs(RigExecBakedProgramImpl *program, UsdTimeCode time)
     }
     B.ladderRecomputed = B.ladderVarying || ladderDragged ||
                          B.ladderDisturbed;
-    std::vector<char> watchMoved;
     if (B.ladderRecomputed) {
-        RigExecBakedComposeLadder(&B, time, /* trackMoves = */ true);
         B.ladderDisturbed = ladderDragged;
-        RigExecBakedLadderWatchMoved(&B, time, nullptr);
-    } else if (!B.ladderWatched.empty() &&
-               RigExecBakedLadderWatchMoved(&B, time, &watchMoved)) {
-        // A chain-driven offset moved: its subtree only.
-        RigExecBakedComposeLadder(&B, time, /* trackMoves = */ true,
-                                  &watchMoved);
-        B.ladderRecomputed = true;
-    } else if (!B.ladderMovedSlots.empty()) {
-        // Nothing recomputed, so nothing moved -- and last run's list would
-        // otherwise dirty a compose this run has no reason to run.
-        B.ladderMovedSlots.clear();
     }
     // Every read below is a leaf RigExecBakedSampleLeaves left this run.
     for (const auto &binding : B.avarBindings) {
@@ -3656,7 +3965,7 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
                     }
                     // defaultRoundTrip, not selfD: the ladder's own
                     // parent link is the ROUND TRIPPED default (see
-                    // parentDinv in RigExecBakedComposeLadder), which is
+                    // parentDinv in RigExecBakedComposeLadderRange), which is
                     // what exec's computeDefaultFrame hands back, and a
                     // space source has to be read the same way its
                     // namespace parent would be or the two paths

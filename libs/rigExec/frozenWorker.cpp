@@ -284,8 +284,8 @@ _FrozenPrologue(_FrozenWorker *worker, const RigExecFrozenProgram &snapshot,
     // them.
     RigExecBakedSampleLeaves(&B, time, /* all = */ true);
 
-    // RunInputs: ladders recompose from stage reads, so a recompute
-    // declines; everything else replays the leaves.
+    // RunInputs: a frozen job runs no rest or ladder op, so a ladder that
+    // would recompose declines; everything else replays the leaves.
     bool ladderDragged = false;
     if (B.anyOverridden) {
         for (const int ladderIndex : B.ladderOverrides) {
@@ -300,14 +300,24 @@ _FrozenPrologue(_FrozenWorker *worker, const RigExecFrozenProgram &snapshot,
     if (B.ladderRecomputed) {
         return false;
     }
-    // A chain-driven ladder offset that differs from the snapshot's would
-    // recompose; the worker declines that frame rather than compose.
-    if (!B.ladderWatched.empty() &&
-        RigExecBakedLadderWatchMoved(&B, time, nullptr, /* peek = */ true)) {
-        return false;
+    // Nothing composed, so nothing moved: the clone's records of live's
+    // last moves would seed readers this job has no reason to run.
+    for (const int slot : B.restMoved) {
+        B.restChanged[size_t(slot)] = 0;
     }
-    if (!B.ladderMovedSlots.empty()) {
-        B.ladderMovedSlots.clear();
+    for (const int slot : B.ladderMoved) {
+        B.ladderChanged[size_t(slot)] = 0;
+    }
+    B.restMoved.clear();
+    B.ladderMoved.clear();
+    B.ladderMovedSlots.clear();
+    // And the job's head trace names no rest or ladder op: the clone's
+    // run numbers are live's.
+    for (RigExecBakedHeadStep &step : B.headSteps) {
+        if (step.kind == RigExecBakedHeadKind::RestCompose ||
+            step.kind == RigExecBakedHeadKind::LadderCompose) {
+            step.runSeq = 0;
+        }
     }
     for (const auto &binding : B.avarBindings) {
         B.avars[binding.slot] = RigExecBakedLeafRead(B, binding.input);

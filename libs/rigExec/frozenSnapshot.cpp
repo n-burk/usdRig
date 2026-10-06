@@ -79,6 +79,13 @@ _CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst)
     D.lastPosedAuthoredM = src.lastPosedAuthoredM;
     D.lastPosedAuthored = src.lastPosedAuthored;
     D.lastRotOrder = src.lastRotOrder;
+    D.restChanged = src.restChanged;
+    D.ladderChanged = src.ladderChanged;
+    D.restMoved = src.restMoved;
+    D.ladderMoved = src.ladderMoved;
+    D.restTierEverRan = src.restTierEverRan;
+    D.restTierStamp = src.restTierStamp;
+    D.xyzToken = src.xyzToken;
     D.noScaleAvars = src.noScaleAvars;
     D.rotationSign = src.rotationSign;
     D.poseInterpolators = src.poseInterpolators;

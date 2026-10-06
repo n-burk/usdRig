@@ -566,6 +566,116 @@ TestStaticControlEditInvalidatesCachedFrames()
     }
 }
 
+// A two-joint rig whose root rest:tx is animated, each joint under an
+// authored non-identity default:space, skinning one mesh: an edit of the
+// root rest moves both rests and neither ladder.
+UsdStageRefPtr
+MakeRestRig()
+{
+    UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    stage->SetStartTimeCode(1.0);
+    stage->SetEndTimeCode(3.0);
+    stage->DefinePrim(SdfPath("/Asset"), TfToken("Scope"));
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    stage->DefinePrim(SdfPath("/Asset/Rig/Joints"), TfToken("Scope"));
+    const UsdPrim root = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Joints/Root"), TfToken("RigExecJoint"));
+    const UsdPrim child = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Joints/Root/Child"), TfToken("RigExecJoint"));
+    const UsdAttribute restTx =
+        root.CreateAttribute(TfToken("rest:tx"), SdfValueTypeNames->Double);
+    restTx.Set(1.0, UsdTimeCode(1.0));
+    restTx.Set(2.0, UsdTimeCode(2.0));
+    restTx.Set(4.0, UsdTimeCode(3.0));
+    child.CreateAttribute(TfToken("rest:tx"), SdfValueTypeNames->Double)
+        .Set(1.0);
+    GfMatrix4d rootSpace(1.0), childSpace(1.0);
+    rootSpace.SetTranslateOnly(GfVec3d(0.0, 1.0, 0.0));
+    childSpace.SetTranslateOnly(GfVec3d(0.0, 0.0, 1.0));
+    root.CreateAttribute(TfToken("default:space"),
+                         SdfValueTypeNames->Matrix4d).Set(rootSpace);
+    child.CreateAttribute(TfToken("default:space"),
+                          SdfValueTypeNames->Matrix4d).Set(childSpace);
+    stage->DefinePrim(SdfPath("/Asset/Rig/Movers"), TfToken("Scope"));
+    const SdfPath meshPath("/Asset/Geom/Mesh_0");
+    const UsdPrim prim = stage->DefinePrim(meshPath, TfToken("Mesh"));
+    VtVec3fArray points(kTinyPointCount);
+    for (size_t i = 0; i < kTinyPointCount; ++i) {
+        points[i] = GfVec3f(float(i) * 0.5f, float(i) * -0.25f, 0.125f);
+    }
+    prim.GetAttribute(TfToken("points")).Set(points);
+    const UsdPrim skin = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Movers/Skin_0"), TfToken("RigExecSkinMover"));
+    skin.ApplyAPI(TfToken("RigExecMoverAPI"));
+    skin.GetRelationship(TfToken("rigExec:moves"))
+        .SetTargets({meshPath.AppendProperty(TfToken("points"))});
+    skin.GetAttribute(TfToken("inputs:defaultWeight")).Set(1.0f);
+    skin.CreateRelationship(TfToken("rigExec:influences"))
+        .SetTargets({root.GetPath(), child.GetPath()});
+    skin.CreateAttribute(TfToken("rigExec:elementSize"),
+                         SdfValueTypeNames->Int).Set(2);
+    VtIntArray indices(kTinyPointCount * 2);
+    VtFloatArray weights(kTinyPointCount * 2);
+    for (size_t i = 0; i < kTinyPointCount; ++i) {
+        indices[i * 2] = 0;
+        indices[i * 2 + 1] = 1;
+        weights[i * 2] = 0.5f;
+        weights[i * 2 + 1] = 0.5f;
+    }
+    skin.CreateAttribute(TfToken("rigExec:jointIndices"),
+                         SdfValueTypeNames->IntArray).Set(indices);
+    skin.CreateAttribute(TfToken("rigExec:jointWeights"),
+                         SdfValueTypeNames->FloatArray).Set(weights);
+    return stage;
+}
+
+// A rest edit is seeded through the head tier (the rest and ladder ops'
+// closure), so a frame it moved is not served from the cache: revisited
+// after the edit, frame 1 equals the cache-off session's, and differs from
+// the frame before the edit.
+void
+TestARestEditIsNotServedStale()
+{
+    std::printf("progress: TestARestEditIsNotServedStale\n");
+    std::fflush(stdout);
+    const SdfPath rig("/Asset/Rig");
+    auto drive = [&](UsdStageRefPtr stage, _GenerationGeometry *before,
+                     _GenerationGeometry *after) {
+        RigExecImagingRegistry &registry =
+            RigExecImagingRegistry::GetInstance();
+        std::vector<std::string> errors;
+        CHECK(registry.Activate(stage, rig, UsdTimeCode(1.0), &errors));
+        CHECK(registry.SetTime(UsdTimeCode(2.0)));
+        CHECK(registry.SetTime(UsdTimeCode(3.0)));
+        CHECK(registry.SetTime(UsdTimeCode(1.0)));
+        *before = _CaptureGeometry(registry.GetStore()->Get());
+        CHECK(registry.SetTime(UsdTimeCode(2.0)));
+        stage->GetPrimAtPath(SdfPath("/Asset/Rig/Joints/Root"))
+            .GetAttribute(TfToken("rest:tx"))
+            .Set(1.75, UsdTimeCode(1.0));
+        CHECK(registry.SetTime(UsdTimeCode(1.0)));
+        *after = _CaptureGeometry(registry.GetStore()->Get());
+        CHECK(!after->points.empty());
+        registry.Deactivate();
+    };
+
+    _GenerationGeometry referenceBefore, reference;
+    SetEnv("RIGEXEC_FRAME_CACHE", "off");
+    drive(MakeRestRig(), &referenceBefore, &reference);
+    CHECK(!_SameGeometry(referenceBefore, reference));
+
+    _GenerationGeometry cachedBefore, cached;
+    SetEnv("RIGEXEC_FRAME_CACHE", "on");
+    SetEnv("RIGEXEC_FRAME_CACHE_VERIFY", "0");
+    drive(MakeRestRig(), &cachedBefore, &cached);
+    CHECK(_SameGeometry(referenceBefore, cachedBefore));
+    if (!_SameGeometry(reference, cached)) {
+        std::printf("cache-on served a pre-edit pose at frame 1 after a "
+                    "rest edit\n");
+        CHECK(false);
+    }
+}
+
 // EPOCH. A stage notice that hits the baked capture index drops the epoch's
 // cached frames eagerly on the notice -- while the epoch half still names
 // them -- instead of leaving them for LRU; a notice that misses the index
@@ -4168,6 +4278,7 @@ main(int argc, char **argv)
     TestScrubWarmsThenHits();
     TestCacheOffMatchesCacheOn();
     TestStaticControlEditInvalidatesCachedFrames();
+    TestARestEditIsNotServedStale();
     TestCaptureIndexHitDropsEpochEagerly();
     TestOverlayChangeClearsCache();
     TestPlaybackBypassesCache(scratch);

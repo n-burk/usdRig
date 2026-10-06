@@ -142,6 +142,18 @@ StageFrom(const std::string &text)
     return stage;
 }
 
+// How many head steps are property revisions: the tier also holds the
+// rest and ladder composes.
+size_t
+PropertySteps(const RigExecBakedProgramImpl &B)
+{
+    return size_t(std::count_if(
+        B.headSteps.begin(), B.headSteps.end(),
+        [](const RigExecBakedHeadStep &step) {
+            return step.kind == RigExecBakedHeadKind::PropertyRevision;
+        }));
+}
+
 // The head tier's lines, in head order: what the run put first in the
 // generation's diagnostics.
 std::vector<std::string>
@@ -399,7 +411,7 @@ TestPropertyOpsEqualTheEvaluatorChains(const std::string &examples)
                     "drags on %s, %s, %s\n",
                     f.name, program->propertyChains.size(),
                     program->propertyRecords.size(),
-                    program->headSteps.size(), compared, dynamic,
+                    PropertySteps(*program), compared, dynamic,
                     input.GetText(), target.GetText(), hop.GetText());
 
         // A generation that runs both paths binds the dynamic chain memo;
@@ -562,7 +574,10 @@ Ran(const RigExecBakedProgramImpl &B)
     std::set<std::pair<SdfPath, int>> ran;
     for (const RigExecOpTraceEntry &entry : RigExecBakedLastHeadTrace(B)) {
         const RigExecBakedHeadStep &step = B.headSteps[entry.step];
-        ran.emplace(B.propertyChains[size_t(step.object)].target, step.part);
+        if (step.kind == RigExecBakedHeadKind::PropertyRevision) {
+            ran.emplace(B.propertyChains[size_t(step.object)].target,
+                        step.part);
+        }
     }
     return ran;
 }
@@ -604,7 +619,7 @@ TestPerVersionMemo()
     const SdfPath early("/Asset/Rig/Channels/Out.rigExec:early");
     CHECK(B.propertyChains[0].target == dial);
     CHECK(B.propertyRecords.size() == 1);
-    CHECK(Ran(B).size() == B.headSteps.size());
+    CHECK(Ran(B).size() == PropertySteps(B));
     CHECK(CheckAgainstTheEvaluator(evaluator.get(), t, pose, "memo first") ==
           0);
 
@@ -825,6 +840,9 @@ TestHeadOrderIsChainOrder()
     bool ordered = B.headOrder.size() == B.headSteps.size();
     for (const uint32_t index : B.headOrder) {
         const RigExecBakedHeadStep &step = B.headSteps[index];
+        if (step.kind != RigExecBakedHeadKind::PropertyRevision) {
+            continue;
+        }
         ordered = ordered && (step.object > lastChain ||
                               (step.object == lastChain &&
                                step.part == lastPart + 1));
@@ -834,6 +852,9 @@ TestHeadOrderIsChainOrder()
     CHECK(ordered);
     // No step of one chain reads the other's.
     for (const RigExecBakedHeadStep &step : B.headSteps) {
+        if (step.kind != RigExecBakedHeadKind::PropertyRevision) {
+            continue;
+        }
         for (const uint32_t pred : step.preds) {
             CHECK(B.headSteps[pred].object == step.object);
         }

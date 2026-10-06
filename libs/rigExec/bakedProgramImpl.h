@@ -704,9 +704,11 @@ RigExecBakedOne(RigExecBakedSlotDomain domain, int index)
 // The head tier.
 // Ops the prologue runs serially before the region, in an order derived from
 // what they declare they read (RigExecBakedSortHeadTier), each re-run only
-// when something it reads moved (RigExecBakedRunHeadTier): today the
-// property revisions. The tier keeps its own step list, kinds and domains
-// until the runtime reads them: RigExecBakedStepKind and
+// when something it reads moved: the property revisions
+// (RigExecBakedRunHeadTier), then the rest and ladder composes
+// (RigExecBakedRunRestTier), which read chain-routed ladder channels sampled
+// after the revisions published. The tier keeps its own step list, kinds
+// and domains until the runtime reads them: RigExecBakedStepKind and
 // RigExecBakedSlotDomain end where the exporter's wire asserts pin them, and
 // nothing here is exported.
 
@@ -714,7 +716,12 @@ RigExecBakedOne(RigExecBakedSlotDomain domain, int index)
 enum class RigExecBakedHeadKind : uint8_t {
     /// Revision `part` of property chain `object`; part 0 is the base.
     PropertyRevision,
+    /// The rest chain of compose group `object` (part 0): `restM`,
+    /// `restPts`, `restFrames` and `restRoundTrip` of its slots.
     RestCompose,
+    /// The default-space ladder of compose group `object` (part 1):
+    /// `selfD`, `parentDinv`, `defaultRoundTrip`, `posedAuthored`,
+    /// `posedAuthoredM` and `rotOrder` of its slots.
     LadderCompose,
     SkinTopology,
 };
@@ -726,7 +733,9 @@ enum class RigExecBakedHeadDomain : uint8_t {
     /// versions, one id per phased record (RigExecBakedPropertyRecord::id),
     /// written by the part that writes the version the record reads.
     PropertyVersion,
+    /// Per provider slot: what RestCompose writes.
     Rest,
+    /// Per provider slot: what LadderCompose writes.
     Ladder,
     SkinTopology,
 };
@@ -765,6 +774,14 @@ struct RigExecBakedHeadStep {
     std::vector<RigExecBakedSlotRange> regionReads;
     /// The head leaves and the override slots its body reads.
     std::vector<uint32_t> leaves, overrideSlots;
+    /// The binding leaves (RigExecBakedProgramImpl::leafRefs ids) its body
+    /// reads: a rest or ladder op's ladder channels. Filled after Build's
+    /// last RigExecBakedNumberLeaves (RigExecBakedNoteRestLeaves).
+    std::vector<uint32_t> bindingLeaves;
+    /// One of `bindingLeaves` varies with time. Build composed the ladder
+    /// from its capture-time sample, which the leaf pools do not keep, so
+    /// such an op runs on the tier's first run.
+    bool varyingLeaves = false;
     /// Reads of a chain's final version through a walk that meets one of
     /// that chain's records first, as (version id, record index). While the
     /// record does not stand aside it answers the walk (or, with the chain
@@ -1193,10 +1210,12 @@ struct RigExecBakedStep {
     std::vector<int> overrideInputs;
     /// The reader walks (RigExecBakedProgramImpl::readerWalks) of the
     /// inputs and path leaves this step reads, sorted and deduplicated, and
-    /// the PropertyVersion ids they declare as head reads. Not exported;
-    /// a version that moved dirties the step
+    /// the head outputs it reads: the PropertyVersion ids those walks
+    /// declare, then the Rest and Ladder slots its body indexes. Not
+    /// exported; a version that moved dirties the step
     /// (RigExecBakedCones::headReaders), and so does a walk whose value
-    /// moved (`walkReaders`).
+    /// moved (`walkReaders`) and a Rest or Ladder slot that moved
+    /// (`restReaders`, `ladderReaders`).
     std::vector<int> readerWalks;
     std::vector<RigExecBakedHeadRange> headReads;
     /// The `headReads` ids every walk of the step that declares them reads
@@ -1438,7 +1457,9 @@ struct RigExecBakedClusterSet {
 enum : uint8_t {
     kEditRouteStep = 1,
     kEditRouteAvar = 2,
-    kEditRouteLadder = 4,
+    /// A ladder channel: the rest and ladder ops that read its leaf re-run,
+    /// and their moved outputs seed their readers (RigExecBakedHeadSeeds).
+    kEditRouteHead = 4,
 };
 
 /// What Build knows about re-running part of a program (§7).
@@ -1491,10 +1512,13 @@ struct RigExecBakedCones {
     /// reader walk -> the steps that read it. What a moved version and a
     /// moved walk value dirty.
     std::vector<std::vector<int>> headReaders, walkReaders;
+    /// Provider slot -> the steps that declare its Rest, and its Ladder, in
+    /// `headReads`. What a moved rest or ladder output dirties.
+    std::vector<std::vector<int>> restReaders, ladderReaders;
     /// Override index -> what re-reads an input of that number when the
     /// stage value under it moves: a step that lists it in its
     /// `overrideInputs` (kEditRouteStep), the prologue's avar table
-    /// (kEditRouteAvar), or the provider ladder (kEditRouteLadder). Zero
+    /// (kEditRouteAvar), or the rest and ladder ops (kEditRouteHead). Zero
     /// where nothing does -- a value read into the prologue and handed to a
     /// step no dirty set can name -- and an edit there bumps the program
     /// stamp instead of being routed (unified-program spec rules S2, S3).
@@ -1850,25 +1874,14 @@ struct RigExecBakedProgramImpl {
     /// True while the ladder still holds values recomputed for a drag; the
     /// same one-more-pass rule the avar table's `avarsDisturbed` states.
     bool ladderDisturbed = false;
-    /// The slots whose ladder values moved this run, which is the skip hook
-    /// a recomputed ladder owes the schedule: a provider whose rest or
-    /// default space moved has to recompose, and so does everything reading
-    /// the rest -> pose matrices below it.
+    /// The slots whose Rest or Ladder output moved this run, in slot order.
+    /// Written by the rest tier and read by nothing: the closure seeds from
+    /// `restMoved` and `ladderMoved`.
     std::vector<int> ladderMovedSlots;
-    /// default:t/r channels a property chain writes. They are read and
-    /// compared every run, and only a slot whose value moved -- with the
-    /// slots below it -- recomposes, so a chain-driven offset costs the
-    /// frame nothing until it changes and then only its own subtree.
-    struct LadderWatch {
-        int slot = -1;
-        int channel = 0;  // index into Ladder::defaultAvars
-        double last = std::numeric_limits<double>::quiet_NaN();
-    };
-    std::vector<LadderWatch> ladderWatched;
-    /// True on a run whose prologue recomposed the ladder. A solver rest
-    /// description is rebuilt from the rests, so it is rebuilt exactly on
-    /// these runs -- including the one after a drag is released, which is
-    /// why the flag is "did it run" and not "does it vary".
+    /// True on a run where a ladder channel varies, is dragged, or was
+    /// dragged the run before. A solver rest description is rebuilt from
+    /// the rests on these runs -- including the one after a drag is
+    /// released. Read only by the Solve step's rest-refresh gate.
     bool ladderRecomputed = false;
     /// Per slot, whether the REST CHAIN reaching it can move within the
     /// epoch: its own rest channels, or any ancestor's. A solver measures
@@ -1892,12 +1905,25 @@ struct RigExecBakedProgramImpl {
     /// which a deep chain drifts without. Per slot, in slot order, because
     /// a child reads its parent's.
     std::vector<GfMatrix4d> restRoundTrip, defaultRoundTrip;
-    /// What the run before composed, for the move comparison above. Sized
-    /// only when a ladder can actually move.
+    /// What the last compose of each slot left, for the move comparison
+    /// that sets `restChanged` and `ladderChanged`. Seeded by Build.
     std::vector<GfMatrix4d> lastRestM, lastSelfD, lastParentDinv,
         lastPosedAuthoredM;
     std::vector<char> lastPosedAuthored;
     std::vector<TfToken> lastRotOrder;
+    /// The rest tier's outputs that moved this run: per slot, and as the
+    /// slots in the order they moved, which is what the closure seeds from
+    /// and what the next tier run clears.
+    std::vector<char> restChanged, ladderChanged;
+    std::vector<int> restMoved, ladderMoved;
+    /// The rest tier's last run (RigExecBakedRunRestTier); `restTierStamp`
+    /// is seeded by Build, so a notice before the first run forces it.
+    bool restTierEverRan = false;
+    uint64_t restTierStamp = 0;
+    /// The rotation order a rest or default offset composes in, and the
+    /// order an empty `avars:rotationOrder` stands for. Built at Build, so
+    /// no compose builds a token from text.
+    TfToken xyzToken;
     /// Per provider slot: the scale avars are read and DISCARDED.
     ///
     /// A volume weight is a RigExecXformable whose point frame is composed
@@ -3490,6 +3516,32 @@ RigExecBakedMarkLeaf(RigExecBakedProgramImpl *program, uint32_t id)
     });
 }
 
+/// Whether binding leaf \p id (a `leafRefs` id) moved in this run's sample.
+inline bool
+RigExecBakedLeafChanged(const RigExecBakedProgramImpl &program, uint32_t id)
+{
+    if (id >= program.leafRefs.size()) {
+        return false;
+    }
+    const RigExecBakedLeafRef &ref = program.leafRefs[id];
+    const auto at = [&ref](const auto &pool) {
+        return ref.index < pool.changed.size() &&
+               pool.changed[ref.index] != 0;
+    };
+    const RigExecBakedLeafPools &pools = program.leaves;
+    switch (ref.type) {
+    case RigExecBakedLeafType::Double: return at(pools.Of<double>());
+    case RigExecBakedLeafType::Float: return at(pools.Of<float>());
+    case RigExecBakedLeafType::Int: return at(pools.Of<int>());
+    case RigExecBakedLeafType::Bool: return at(pools.Of<bool>());
+    case RigExecBakedLeafType::Token: return at(pools.Of<TfToken>());
+    case RigExecBakedLeafType::Matrix4d: return at(pools.Of<GfMatrix4d>());
+    case RigExecBakedLeafType::Vec3d: return at(pools.Of<GfVec3d>());
+    case RigExecBakedLeafType::Vec3f: return at(pools.Of<GfVec3f>());
+    }
+    return false;
+}
+
 /// Numbers one leaf per binding _ForEachPatchableInput visits, in its order,
 /// seeded with the binding's constant, and files each under every path
 /// `overridableInputs` gives its override number. Then numbers every path
@@ -3703,11 +3755,22 @@ VtValue RigExecBakedSampleWalkedPathLeaf(
 /// `avarHeadReads`. Build only.
 void RigExecBakedDeclareHeadReads(RigExecBakedProgramImpl *program);
 
+/// Appends to every region step's `headReads` the Rest and Ladder slots its
+/// body indexes: ComposeSubtree the ladders of its group, of the parents
+/// it composes against and of every switch source, space and recomposed
+/// slot; Solve the rests of its `restSlots`; Constraint the rests of its
+/// IK targets (without animated translations) and of a matrix mover's
+/// sources, and the ladder of its space; ProviderMatrix and FrameMatrix
+/// their slot's rest; PoseInterpolator its driver's and parent's rests;
+/// Derived the rests of its projector slots. Build only, after
+/// RigExecBakedDeclareHeadReads.
+void RigExecBakedDeclareRestReads(RigExecBakedProgramImpl *program);
+
 /// The region half of the head tier's validation, once the steps exist:
-/// every PropertyVersion id a step or an avar slot declares has a head
-/// producer, and every reader walk a step reads declares each chain target
-/// and record consumer it meets ("walk <path> meets chain target without
-/// declaring it"). False with the first violation in \p error.
+/// every head output a step or an avar slot declares has a head producer,
+/// and every reader walk a step reads declares each chain target and record
+/// consumer it meets ("walk <path> meets chain target without declaring
+/// it"). False with the first violation in \p error.
 bool RigExecBakedValidateHeadReads(const RigExecBakedProgramImpl &program,
                                    std::string *error);
 
@@ -4382,33 +4445,44 @@ void RigExecBakedNoteWeightInputs(
 void RigExecBakedSkipGeometryStep(RigExecBakedProgramImpl *program,
                                   RigExecBakedStep *step);
 
-/// Resolves every provider's rest chain and default-space ladder from the
-/// bound channels of RigExecBakedProgramImpl::ladders, in slot order, as
-/// their leaves were last sampled (at \p time: the caller samples first).
+/// Resolves the rest chain of slots [\p begin, \p end) from the bound
+/// channels of RigExecBakedProgramImpl::ladders, in slot order, as their
+/// leaves were last sampled: `restM`, `restFrames`, `restPts` and
+/// `restRoundTrip`. A parent outside the range must be composed already.
 ///
-/// ONE definition, called from Build (once, at the capture time) and from
-/// the prologue (on any frame a channel can have moved). computations.cpp
-/// resolves the same eight computations per provider per evaluation; the
-/// frame round trips exec performs between them are reproduced, not
-/// simplified away, because a deep chain drifts without them.
+/// ONE definition, called from Build (once, over every slot, at the capture
+/// time) and by the RestCompose head op. computations.cpp resolves the same
+/// computations per provider per evaluation; the frame round trips exec
+/// performs between them are reproduced, not simplified away, because a
+/// deep chain drifts without them.
 ///
-/// \p trackMoves fills RigExecBakedProgramImpl::ladderMovedSlots by
-/// comparing what it composes against what the run before composed, which
-/// is what dirties the compose of a provider whose rest moved. Build passes
-/// false: there is no run before, and the first run dirties everything.
-///
-/// \p only, when given, limits the compose to the slots it marks and every
-/// slot below one of them (slots are in namespace pre-order).
-void RigExecBakedComposeLadder(RigExecBakedProgramImpl *program,
-                               UsdTimeCode time, bool trackMoves,
-                               const std::vector<char> *only = nullptr);
+/// \p trackMoves compares each slot's `restM` with `lastRestM` and, where it
+/// moved, sets `restChanged`, appends to `restMoved` and updates
+/// `lastRestM`. Build passes false and seeds the comparison buffers itself.
+void RigExecBakedComposeRestRange(RigExecBakedProgramImpl *program,
+                                  int begin, int end, bool trackMoves);
 
-/// Reads every watched chain-driven ladder channel; marks the slots whose
-/// value differs from the last run's in \p moved (sized to the slots) and
-/// updates the remembered values unless \p peek. True when any moved.
-bool RigExecBakedLadderWatchMoved(RigExecBakedProgramImpl *program,
-                                  UsdTimeCode time, std::vector<char> *moved,
-                                  bool peek = false);
+/// The default-space ladder of slots [\p begin, \p end), as above:
+/// `posedAuthored`, `posedAuthoredM`, `selfD`, `defaultRoundTrip`,
+/// `parentDinv` and `rotOrder`. Reads the range's rests and its parents'
+/// rests and ladders, which must be composed already. \p trackMoves
+/// compares `selfD`, `parentDinv`, `posedAuthored`, `posedAuthoredM` and
+/// `rotOrder` with their `last` buffers and records a move in
+/// `ladderChanged` and `ladderMoved`.
+void RigExecBakedComposeLadderRange(RigExecBakedProgramImpl *program,
+                                    int begin, int end, bool trackMoves);
+
+/// One RestCompose (part 0) and one LadderCompose (part 1) head op per
+/// compose group, appended to `headSteps`, with their declared reads: the
+/// parent rests and ladders outside the group, the group's own rests for
+/// the ladder, and the PropertyVersion ids the chain-routed channels'
+/// reader walks declare. The caller sorts and validates the tier.
+void RigExecBakedBuildRestSteps(RigExecBakedProgramImpl *program);
+
+/// Fills each rest and ladder op's `bindingLeaves` and `varyingLeaves`
+/// from the ladder channels' leaves. Called after the last
+/// RigExecBakedNumberLeaves of Build.
+void RigExecBakedNoteRestLeaves(RigExecBakedProgramImpl *program);
 
 /// The pose half of the prologue: the bound inputs, once per run.
 void RigExecBakedRunInputs(RigExecBakedProgramImpl *program, UsdTimeCode time);
@@ -4717,7 +4791,7 @@ void RigExecBakedDeclareInputDependencies(RigExecBakedProgramImpl *program);
 /// belongs either in Compare or in this list.
 ///
 ///  * everything Build wrote and no run touches -- the slot tables, the
-///    rests, the input bindings, the step graph, the clustering, the cones.
+///    input bindings, the step graph, the clustering, the cones.
 ///    A run that changed one of those would be a run editing the program.
 ///  * what only a NOTICE writes and no run reads: `valueEditSerial`/
 ///    `editSerial` and the routing's `connectedSources` cache.
@@ -4727,9 +4801,13 @@ void RigExecBakedDeclareInputDependencies(RigExecBakedProgramImpl *program);
 ///    geometry prologue's `haveBase`/`baseDirty`/`lastBase`/`created`/
 ///    `scheduleDirty`/`topology`/the partition and the path leaves (each
 ///    revision's and weight object's, `pathLeafChainResults`/
-///    `pathLeafChainSerial`, `pathLeafSamples`), and the head tier's state
+///    `pathLeafChainSerial`, `pathLeafSamples`), the head tier's state
 ///    (the head leaves, overrides, versions, records and lines, which
-///    RigExecBakedRunHeadTier verifies against a forced run of its own).
+///    RigExecBakedRunHeadTier verifies against a forced run of its own),
+///    and the rest tier's (the ten rest and ladder tables, their `last`
+///    buffers, `restChanged`/`ladderChanged`, `restMoved`/`ladderMoved`,
+///    `ladderMovedSlots`, `restTierEverRan`/`restTierStamp`, which
+///    RigExecBakedRunRestTier verifies the same way).
 ///    The prologue runs ONCE per
 ///    generation, before either pass, so both passes see one value of each
 ///    by construction. Several are captured and restored anyway, because
@@ -4944,6 +5022,25 @@ struct RigExecBakedProgramTesting {
     /// \p index must be below `solvers.size()`.
     static RigExecBakedProgramImpl::Solver RefreshedSolverRests(
         const RigExecBakedProgram &program, size_t index);
+    /// The ten rest and ladder tables the bake exports.
+    struct LadderTables {
+        std::vector<GfMatrix4d> restM;
+        std::vector<std::array<GfVec3d, 4>> restPts;
+        std::vector<RigExecPointFrame> restFrames;
+        std::vector<GfMatrix4d> selfD, parentDinv;
+        std::vector<TfToken> rotOrder;
+        std::vector<GfMatrix4d> restRoundTrip, defaultRoundTrip;
+        std::vector<char> posedAuthored;
+        std::vector<GfMatrix4d> posedAuthoredM;
+    };
+    /// \p program's ten tables as they stand.
+    static LadderTables LadderTablesOf(const RigExecBakedProgram &program);
+    /// The ten tables as the single slot-order loop the rest and ladder ops
+    /// were split from composes them from the leaves \p program holds now,
+    /// starting from its current tables (xform-derived slots keep theirs).
+    /// The program is not modified.
+    static LadderTables ComposeLadderReference(
+        const RigExecBakedProgram &program);
     /// Assembles every revision of \p program whose packet its path leaves
     /// assemble (chain revisions whose chain read a base this run, and
     /// non-matrix derived targets) twice, from the leaves the last run

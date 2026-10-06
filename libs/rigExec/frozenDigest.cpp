@@ -206,10 +206,17 @@ RigExecFrozenPurityAudit()
          "(D4) keeps frozen runs on the serial variants, which compute "
          "byte-identical numbers"},
         {"RigExecBakedProgramImpl structure (steps, edges, clusters, "
-         "cones, walk, ladder tables)",
+         "cones, walk, rest and ladder op declarations)",
          RigExecFrozenPurity::EpochPinned,
          "immutable after Build; safe as the programDigest check names it, "
          "never as a live read of per-frame working state"},
+        {"ladder tables (restM through rotOrder)",
+         RigExecFrozenPurity::Pure,
+         "op-written: the RestCompose and LadderCompose head ops compose "
+         "them in the live prologue from sampled ladder leaves, serially "
+         "on the owning thread, under the body purity mark; a frozen job "
+         "runs no rest or ladder op and declines any ladder that would "
+         "recompose, so it reads the clone's tables as live left them"},
         {"skin/blend bindings (shared_ptr<const> topologies and layouts)",
          RigExecFrozenPurity::EpochPinned,
          "immutable snapshots resolved at Build/prologue; the worker runs "

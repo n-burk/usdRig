@@ -2157,6 +2157,10 @@ _PrintProgramDigest(const RigExecBakedProgramImpl &B)
             for (const uint32_t slot : step.overrideSlots) {
                 t.Int(int64_t(slot));
             }
+            for (const uint32_t leaf : step.bindingLeaves) {
+                t.Int(int64_t(leaf));
+            }
+            t.Int(step.varyingLeaves ? 1 : 0);
             for (const auto &[version, record] : step.shadowedReads) {
                 t.Int(int64_t(version));
                 t.Int(int64_t(record));
@@ -2641,8 +2645,10 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     // frame path never reads one again, while a rig that animates, connects
     // or chain-writes a rest keeps the same fifteen bindings and recomposes
     // the ladder in the prologue. One resolution either way --
-    // RigExecBakedComposeLadder, called once below and again per frame --
-    // so the two cannot drift.
+    // RigExecBakedComposeRestRange and RigExecBakedComposeLadderRange,
+    // called once below over every slot and per compose group by the rest
+    // and ladder head ops -- so the two cannot drift.
+    B.xyzToken = TfToken("XYZ");
     B.posedAuthored.assign(size_t(N), 0);
     B.posedAuthoredM.assign(size_t(N), GfMatrix4d(1.0));
     B.restM.assign(N, GfMatrix4d(1.0));
@@ -2650,7 +2656,7 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     B.restFrames.resize(N);
     B.selfD.assign(N, GfMatrix4d(1.0));
     B.parentDinv.assign(N, GfMatrix4d(1.0));
-    B.rotOrder.assign(N, TfToken("XYZ"));
+    B.rotOrder.assign(N, B.xyzToken);
     B.restRoundTrip.assign(N, GfMatrix4d(1.0));
     B.defaultRoundTrip.assign(N, GfMatrix4d(1.0));
     B.ladders.resize(size_t(N));
@@ -2885,20 +2891,7 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
         noteLadderInput(ladder.rotationOrder);
         for (int c = 0; c < 6; ++c) {
             noteLadderInput(ladder.restAvars[c]);
-            const RigExecBakedInput<double> &d = ladder.defaultAvars[c];
-            if (d.varying && d.resolvedAttr && !d.query.IsValid()) {
-                // Resolved the long way each run (a chain writes it): watch
-                // the value rather than recomposing every frame.
-                RigExecBakedProgramImpl::LadderWatch watch;
-                watch.slot = i;
-                watch.channel = c;
-                B.ladderWatched.push_back(watch);
-                if (d.overrideIndex >= 0) {
-                    B.ladderOverrides.push_back(d.overrideIndex);
-                }
-            } else {
-                noteLadderInput(d);
-            }
+            noteLadderInput(ladder.defaultAvars[c]);
         }
     }
     // Per slot, whether the rest chain reaching it can move. A rest is its
@@ -2932,22 +2925,20 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     // numbered and sampled first; the end of Build numbers them all again.
     RigExecBakedNumberLeaves(&B);
     RigExecBakedSampleLeaves(&B, capture, /* all = */ true);
-    RigExecBakedComposeLadder(&B, capture, /* trackMoves = */ false);
+    // Every rest before any ladder: a ladder reads its own slot's rest and
+    // its parent's, and a slot's parent is below it.
+    RigExecBakedComposeRestRange(&B, 0, N, /* trackMoves = */ false);
+    RigExecBakedComposeLadderRange(&B, 0, N, /* trackMoves = */ false);
     bindPhases.Close();
-    // The comparison buffers the per-frame recompose dirties against, sized
-    // only for a ladder that can actually move. Seeded with what Build just
-    // composed: the first run dirties every pose cluster outright, so what
-    // they hold on it is never read, and a later run that recomposes to the
-    // same numbers correctly finds nothing moved.
-    if (B.ladderVarying || !B.ladderOverrides.empty() ||
-        !B.ladderWatched.empty()) {
-        B.lastRestM = B.restM;
-        B.lastSelfD = B.selfD;
-        B.lastParentDinv = B.parentDinv;
-        B.lastPosedAuthored = B.posedAuthored;
-        B.lastPosedAuthoredM = B.posedAuthoredM;
-        B.lastRotOrder = B.rotOrder;
-    }
+    // The comparison buffers the rest and ladder ops compare against,
+    // seeded with what Build just composed: a later compose that lands on
+    // the same numbers finds nothing moved.
+    B.lastRestM = B.restM;
+    B.lastSelfD = B.selfD;
+    B.lastParentDinv = B.parentDinv;
+    B.lastPosedAuthored = B.posedAuthored;
+    B.lastPosedAuthoredM = B.posedAuthoredM;
+    B.lastRotOrder = B.rotOrder;
 
     // The seed's two comparison buffers, sized once and never resized in a
     // run. Their first-run values are never read: the first run of a program
@@ -3598,6 +3589,17 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
                "the other's space composed first", E._rigPath);
         return nullptr;
     }
+    // The rest and ladder composes as head ops, one pair per compose group,
+    // ordered with the property revisions by what they read.
+    RigExecBakedBuildRestSteps(&B);
+    {
+        std::string invalid;
+        if (!RigExecBakedSortHeadTier(&B, &invalid) ||
+            !RigExecBakedValidateHeadTier(B, &invalid)) {
+            refuse("the baked head tier is invalid: " + invalid, E._rigPath);
+            return nullptr;
+        }
+    }
     // Between the two halves, which is where a weight object belongs in
     // program order: its placement comes from the pose walk and its packet is
     // what a revision assembles against.
@@ -3641,6 +3643,7 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     // One leaf per binding, now that every binding exists. The first run
     // samples them all (RigExecBakedSampleLeaves, rule 1).
     RigExecBakedNumberLeaves(&B);
+    RigExecBakedNoteRestLeaves(&B);
     if (RigExecBakedScheduleReportRequested()) {
         const std::string report = RigExecBakedScheduleReport(B);
         std::fwrite(report.data(), 1, report.size(), stderr);
@@ -3857,6 +3860,11 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
         }
         RigExecBakedSampleLeaves(&B, time, fullRunRequested,
                                  RigExecBakedLeafPass::ChainRouted);
+        // The rest and ladder ops, from leaves sampled now (a chain-written
+        // channel among them): each re-runs only when what it reads moved,
+        // and the bake's forced run composes them all at its time.
+        RigExecBakedRunRestTier(&B, pose, fullRunRequested,
+                                RigExecBakedVerifyConesRequested());
         RigExecBakedRunInputs(&B, time);
         RigExecBakedRunSolverSources(&B, time);
         stageFramesOk = stageFrames();
