@@ -2022,6 +2022,34 @@ _PrintProgramDigest(const RigExecBakedProgramImpl &B)
         t.count = B.leafRefs.size();
     }
     {
+        // Per path leaf, in id order: its owner, its key and every path its
+        // read can reach.
+        _DigestTable &t = table("pathLeaves");
+        for (const RigExecBakedPathLeafRef &ref : B.pathLeafRefs) {
+            t.Int(int64_t(ref.owner));
+            t.Int(int64_t(ref.a));
+            t.Int(int64_t(ref.b));
+            t.Int(int64_t(ref.key));
+            const RigExecBakedPathLeaves *leaves =
+                RigExecBakedPathLeavesOf(B, ref);
+            if (!leaves || ref.key >= leaves->decl.keys.size()) {
+                continue;
+            }
+            const RigExecRevisionLeafKey &key = leaves->decl.keys[ref.key];
+            t.Path(key.path);
+            t.Int(int64_t(key.type));
+            t.Int(int64_t(key.time));
+            t.Int(int64_t(key.flavour));
+            if (ref.key < leaves->hops.size()) {
+                t.Int(int64_t(leaves->hops[ref.key].size()));
+                for (const SdfPath &hop : leaves->hops[ref.key]) {
+                    t.Path(hop);
+                }
+            }
+        }
+        t.count = B.pathLeafRefs.size();
+    }
+    {
         _DigestTable &t = table("schedule");
         t.Str(RigExecBakedScheduleReport(B));
         t.count = B.steps.size();
@@ -3607,7 +3635,8 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
         stageFramesOk = stageFrames();
         if (stageFramesOk) {
             constraintArrays();
-            RigExecBakedRunGeometryPrologue(&B, time, pose);
+            RigExecBakedRunGeometryPrologue(&B, time, pose,
+                                            fullRunRequested);
         }
     }
     if (!stageFramesOk) {

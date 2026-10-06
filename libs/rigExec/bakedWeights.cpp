@@ -245,6 +245,26 @@ RigExecBakedBakeWeightObject(RigExecBakedBuildContext *ctx,
         }
     }
 
+    // The point gathers' reads as path leaves, one per attribute in gather
+    // order, sampled in the prologue through the generation's resolved
+    // inputs: the packet step reads them instead of the stage.
+    const auto declare = [&object](const std::vector<UsdAttribute> &points) {
+        const size_t begin = object.pointLeaves.decl.keys.size();
+        for (const UsdAttribute &a : points) {
+            object.pointLeaves.decl.Add(
+                {a.GetPath(), RigExecRevisionLeafType::Vec3fArray,
+                 RigExecRevisionLeafTime::AtTime,
+                 RigExecRevisionLeafFlavour::ResolvedOnly,
+                 VtValue(VtVec3fArray())});
+        }
+        return begin;
+    };
+    object.targetLeaves = declare(object.targetPoints);
+    object.sampleLeaves = declare(object.samplePoints);
+    object.curveLeaves = declare(object.curvePoints);
+    object.combineLeaves = declare(object.combineTargetPoints);
+    RigExecBakedBindPathLeaves(B.stage, &object.pointLeaves);
+
     const int index = int(B.weightObjects.size());
     B.weightIndex[path] = index;  // replaces the under-way marker
     B.weightObjects.push_back(std::move(object));
@@ -255,7 +275,7 @@ RigExecWeightPacket
 RigExecBakedWeightPacket(const RigExecBakedProgramImpl &program,
                          RigExecBakedProgramImpl::WeightObject *objectPtr,
                          const std::vector<RigExecWeightPacket> &packets,
-                         UsdTimeCode time)
+                         UsdTimeCode /*time: the leaves are this run's*/)
 {
     const RigExecBakedProgramImpl &B = program;
     RigExecBakedProgramImpl::WeightObject &object = *objectPtr;
@@ -296,12 +316,14 @@ RigExecBakedWeightPacket(const RigExecBakedProgramImpl &program,
         // array: a combine consults its own weight target only when every
         // input is constant and none of them can say how many elements the
         // field has.
+        // A read that found nothing is an empty leaf, and adds nothing.
         size_t targetCount = 0;
-        for (const UsdAttribute &a : object.combineTargetPoints) {
-            VtVec3fArray value;
-            if (B.resolvedInputs->GetAttribute(a, time, &value)) {
-                targetCount += value.size();
-            }
+        for (size_t i = 0; i < object.combineTargetPoints.size(); ++i) {
+            targetCount += object.pointLeaves
+                               .Value<VtVec3fArray>(
+                                   int(object.combineLeaves + i),
+                                   VtVec3fArray())
+                               .size();
         }
         return RigExecBuildCombineWeightPacket(
             object.representation, object.rangePolicy, object.combineMode,
@@ -358,20 +380,25 @@ RigExecBakedWeightPacket(const RigExecBakedProgramImpl &program,
         // structural half has said the volume can produce a field at all --
         // which is the order the exec adapters gather them in, and the
         // reason RigExecVolumeWeightCanBuild exists.
-        const auto gather = [&](const std::vector<UsdAttribute> &attributes,
-                                std::vector<GfVec3f> *out) {
-            for (const UsdAttribute &a : attributes) {
-                VtVec3fArray value;
-                if (B.resolvedInputs->GetAttribute(a, time, &value)) {
-                    out->insert(out->end(), value.begin(), value.end());
-                }
+        // A read that found nothing is an empty leaf, and contributes
+        // nothing to the concatenation.
+        const auto gather = [&object](size_t begin, size_t count,
+                                      std::vector<GfVec3f> *out) {
+            for (size_t i = 0; i < count; ++i) {
+                const VtVec3fArray value =
+                    object.pointLeaves.Value<VtVec3fArray>(int(begin + i),
+                                                           VtVec3fArray());
+                out->insert(out->end(), value.begin(), value.end());
             }
         };
         if (RigExecVolumeWeightCanBuild(object.type, inputs)) {
-            gather(object.targetPoints, &inputs.targetPoints);
-            gather(object.samplePoints, &inputs.samplePoints);
+            gather(object.targetLeaves, object.targetPoints.size(),
+                   &inputs.targetPoints);
+            gather(object.sampleLeaves, object.samplePoints.size(),
+                   &inputs.samplePoints);
             if (object.type == _tokens->curveWeight) {
-                gather(object.curvePoints, &inputs.curvePoints);
+                gather(object.curveLeaves, object.curvePoints.size(),
+                       &inputs.curvePoints);
             }
         }
         return RigExecBuildVolumeWeightPacket(object.type, inputs);

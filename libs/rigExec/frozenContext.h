@@ -115,6 +115,16 @@ struct RigExecFrameInputs {
     /// frozen executor landed (a job needing packets it was not given
     /// declines).
     std::vector<RigExecMoverParameters> revisionPackets;
+    /// Per-chain-revision path leaves (GeomRevision::leaves), parallel to
+    /// the baked program's revisionIndex: one value per key, read on the UI
+    /// thread at sample time by the live sampler's own reads
+    /// (RigExecSampleRevisionLeaf) through the refreshed inputs, for each
+    /// revision whose packet the leaves assemble on the worker (every such
+    /// operation but a skin, whose packet travels whole above); empty for
+    /// the rest. Transport-only, like the packets: every value is a pure
+    /// function of digest-covered samples (the same attributes, sampled by
+    /// path in `values`), so the leaves are EXCLUDED from the digest.
+    std::vector<std::vector<VtValue>> revisionLeaves;
     /// Per blend sample's sparse layout, resolved at sample time through the
     /// live blend-shape cache: [revisionIndex position][channel][sample], by
     /// shared pointer. A null entry means the revision is not a blendshape or

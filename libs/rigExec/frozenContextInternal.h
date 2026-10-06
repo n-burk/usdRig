@@ -26,8 +26,10 @@ namespace frozenDetail {
 // doubles is three orders of magnitude past anything a real job sizes.
 inline constexpr size_t kMaxFrozenArenaSlots = size_t(1) << 27;
 
-// Shared scalar schema for sampling and worker reconstruction. The stage
-// sampler and worker must agree on every iterative deformer input.
+// Shared scalar schema for the iterative deformers' inputs: the frozen
+// stage sampler and worker reconstruction agree on it, and the .rigexec
+// exporter lists the same inputs as input slots (rigExecBake/
+// computedCapture.cpp), so it stays while the exporter calls it.
 template <class Fn>
 void
 _VisitIterativeMoverScalars(RigExecRevisionOp op,

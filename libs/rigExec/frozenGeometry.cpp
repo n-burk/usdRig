@@ -398,65 +398,6 @@ _FrozenAssembleIterativeMover(
     return validSamples;
 }
 
-// RigExecAssembleMatrixParameters over frozen state: kind, the enabled
-// sample, the shared envelope, then the fold's transform and the
-// finite/affine checks -- in live order, so an envelope failure leaves
-// kind+enabled set exactly as live does.
-bool
-_FrozenAssembleMatrix(
-    const RigExecBakedProgramImpl &B,
-    const RigExecBakedProgramImpl::GeomRevision &revision, float defaultWeight,
-    const std::map<SdfPath, size_t> &index, const RigExecFrameInputs &inputs,
-    RigExecMoverParameters *params)
-{
-    params->kind = RigExecRevisionKindToken(RigExecRevisionOp::Matrix);
-    // rigExec:weightBlend, off the recorded read rather than the stage, as
-    // every other structural token here is. The frozen replay must choose
-    // the same arc as live: a radial cluster blended linearly here and
-    // radially on the live path reports as a parity mismatch on every
-    // weighted point of every painted falloff on the rig.
-    {
-        static const TfToken radial("radial");
-        const SdfPath key = revision.moverPath.AppendProperty(
-            TfToken("rigExec:weightBlend"));
-        const auto found = index.find(key);
-        if (found != index.end()) {
-            const RigExecSampledInput &sample = inputs.values[found->second];
-            TfToken blend;
-            if (sample.hasValue && _SampleHolds(sample.value, &blend)) {
-                params->radialWeight = blend == radial;
-            }
-        }
-    }
-    params->enabled =
-        _FrozenSampledEnabled(index, inputs, revision.moverPath);
-    if (!params->enabled) {
-        params->valid = true;  // disabled is an ordinary pass-through
-        return true;
-    }
-    if (!revision.haveTransform) {
-        return true;  // MoverFailed (valid stays false)
-    }
-    if (!_FrozenCommonEnvelope(B, revision, defaultWeight, params)) {
-        return true;  // invalid common envelope => MoverFailed
-    }
-    params->transform = revision.transform;
-    const GfMatrix4d &transform = params->transform;
-    for (int i = 0; i < 4; ++i) {
-        for (int j = 0; j < 4; ++j) {
-            if (!std::isfinite(transform[i][j])) {
-                return true;
-            }
-        }
-    }
-    if (transform[0][3] != 0 || transform[1][3] != 0 ||
-        transform[2][3] != 0 || transform[3][3] != 1) {
-        return true;
-    }
-    params->valid = true;
-    return true;
-}
-
 // The wire assembly arm (moverGraph.cpp) over frozen state: rest/order/
 // knots/dropoff/bind samples plus the fold's influence table, or the posed
 // driver curve when no driver transforms bind. Table math (pick/measured,
@@ -621,170 +562,6 @@ _FrozenAssembleWire(
     return true;
 }
 
-// AssembleRevision call replaced by the transported packet (skin) or the
-// The BlendShape arm (moverGraph.cpp RigExecAssembleParameters) over frozen
-// state: the channel gather from AssembleRevision restated over sampled
-// values and transported layouts, summed by the same
-// RigExecSumBlendChannels, then kind/enabled/envelope/deltaSpace in live
-// order. Only plain data from the clone's channels is touched (paths, pose
-// slots, phases, blend-shape paths) -- never the dead UsdAttributes, never
-// the freeze-time layouts, never the evaluator-bound resolve callback.
-// R.Find answers the pose-slot question exactly as live: the worker's
-// resolved inputs hold the job's overrides and chain results and nothing
-// else, which are the only things live R can hold at a weight path that
-// the pose slot does not already answer. (An interpolator's fill at the
-// weight path itself is the slot's own value placed, so the slot answers
-// it identically.)
-bool
-_FrozenAssembleBlendShape(
-    const RigExecBakedProgramImpl &B,
-    const RigExecBakedProgramImpl::GeomRevision &revision,
-    float defaultWeight, const VtVec3fArray &lastBase,
-    size_t revisionPosition, const std::map<SdfPath, size_t> &index,
-    const RigExecFrameInputs &inputs, RigExecMoverParameters *params)
-{
-    const SdfPath &moverPath = revision.moverPath;
-    const RigExecRevisionBinding &binding = revision.binding;
-    const RigExecResolvedInputs &R = *B.resolvedInputs;
-    params->kind = RigExecRevisionKindToken(RigExecRevisionOp::BlendShape);
-    params->enabled =
-        _FrozenSampledEnabled(index, inputs, moverPath);
-    if (!params->enabled) {
-        params->valid = true;  // disabled is an ordinary pass-through
-        return true;
-    }
-    if (!_FrozenCommonEnvelope(B, revision, defaultWeight, params)) {
-        return true;  // MoverFailed (kind+enabled stay set, as live)
-    }
-    const auto findSample = [&](const SdfPath &key) {
-        const auto found = index.find(key);
-        if (found == index.end()) {
-            return static_cast<const RigExecSampledInput *>(nullptr);
-        }
-        return &inputs.values[found->second];
-    };
-    std::vector<RigExecBlendChannel> channels;
-    channels.reserve(revision.blendChannels.size());
-    for (size_t c = 0; c < revision.blendChannels.size(); ++c) {
-        const RigExecBakedProgramImpl::GeomBlendChannel &bound =
-            revision.blendChannels[c];
-        RigExecBlendChannel channel;
-        if (bound.poseWeight >= 0 && !R.Find(bound.weightPath)) {
-            if (size_t(bound.poseWeight) >= B.poseWeights.size()) {
-                return false;
-            }
-            channel.weight = B.poseWeights[size_t(bound.poseWeight)];
-        } else {
-            channel.weight = 0.0f;
-            if (const RigExecSampledInput *sample =
-                    findSample(bound.weightPath)) {
-                // Always present when the attribute exists (the sampler
-                // stores the fallback on a miss); absent means no
-                // attribute, which reads as the channel's 0 init.
-                if (sample->hasValue &&
-                    !_SampleHolds(sample->value, &channel.weight)) {
-                    return false;
-                }
-            }
-        }
-        for (size_t s = 0; s < bound.samples.size(); ++s) {
-            const RigExecBakedProgramImpl::GeomBlendChannel::Sample
-                &boundSample = bound.samples[s];
-            if (!boundSample.phase.IsBase()) {
-                return false;  // freeze refused; a stale-vector guard
-            }
-            RigExecBlendSampleData sample;
-            sample.activation = 1.0f;
-            if (const RigExecSampledInput *asample =
-                    findSample(boundSample.activationPath)) {
-                if (asample->hasValue &&
-                    !_SampleHolds(asample->value, &sample.activation)) {
-                    return false;
-                }
-            }
-            if (!boundSample.blendShape.IsEmpty()) {
-                if (revisionPosition >= inputs.blendLayouts.size()) {
-                    return false;
-                }
-                const auto &channelLayouts =
-                    inputs.blendLayouts[revisionPosition];
-                if (c >= channelLayouts.size() ||
-                    s >= channelLayouts[c].size() ||
-                    !channelLayouts[c][s]) {
-                    return false;
-                }
-                sample.layout = channelLayouts[c][s];
-            } else if (const RigExecSampledInput *psample = findSample(
-                           _FrozenBlendInputKey(boundSample.samplePath,
-                                                "points"))) {
-                if (psample->hasValue) {
-                    if (!psample->value.IsHolding<VtVec3fArray>()) {
-                        return false;
-                    }
-                    const VtVec3fArray &held =
-                        psample->value.UncheckedGet<VtVec3fArray>();
-                    sample.points.assign(held.begin(), held.end());
-                }
-            }
-            channel.samples.push_back(std::move(sample));
-        }
-        std::stable_sort(channel.samples.begin(), channel.samples.end(),
-                         [](const RigExecBlendSampleData &a,
-                            const RigExecBlendSampleData &b) {
-                             return a.activation < b.activation;
-                         });
-        channels.push_back(std::move(channel));
-    }
-    std::vector<GfVec3f> basePoints(lastBase.begin(), lastBase.end());
-    std::vector<GfVec3f> blendDeltas;
-    if (!RigExecSumBlendChannels(channels, basePoints, &blendDeltas)) {
-        blendDeltas.clear();
-    }
-    params->blendDeltas = std::move(blendDeltas);
-    TfToken space("target");
-    if (const RigExecSampledInput *sample = findSample(
-            moverPath.AppendProperty(TfToken("rigExec:deltaSpace")))) {
-        if (sample->hasValue &&
-            !_SampleHolds(sample->value, &space)) {
-            return false;
-        }
-    }
-    if (space != "target" && space != "surfaceFrame") {
-        return true;  // valid stays false, as live
-    }
-    params->blendSurfaceFrame = space == "surfaceFrame";
-    if (params->blendSurfaceFrame) {
-        params->restPoints = basePoints;
-        if (const RigExecSampledInput *sample =
-                findSample(binding.topologyCounts)) {
-            if (sample->hasValue) {
-                if (!sample->value.IsHolding<VtIntArray>()) {
-                    return false;
-                }
-                const VtIntArray &held =
-                    sample->value.UncheckedGet<VtIntArray>();
-                params->topologyCounts.assign(held.begin(), held.end());
-            }
-        }
-        if (const RigExecSampledInput *sample =
-                findSample(binding.topologyIndices)) {
-            if (sample->hasValue) {
-                if (!sample->value.IsHolding<VtIntArray>()) {
-                    return false;
-                }
-                const VtIntArray &held =
-                    sample->value.UncheckedGet<VtIntArray>();
-                params->topologyIndices.assign(held.begin(), held.end());
-            }
-        }
-        if (params->topologyCounts.empty()) {
-            return true;
-        }
-    }
-    params->valid = !params->blendDeltas.empty();
-    return true;
-}
-
 // Reads one _Array arm's sample: missing or valueless is the empty array,
 // as live; a mistyped holding fails closed (the sampler only ever stores
 // the arm's own type, so anything else is a corrupt vector).
@@ -811,68 +588,6 @@ _FrozenSampledArray(const std::map<SdfPath, size_t> &index,
     }
     const VtArray<T> &held = sample.value.UncheckedGet<VtArray<T>>();
     out->assign(held.begin(), held.end());
-    return true;
-}
-
-// The VolumeCorrect arm over frozen state: kind, enabled, the shared
-// envelope, then the bound volume of the chain's base -- measured off the
-// worker's own last base, which is the array live copies into
-// values.basePoints before measuring, so no copy is needed to agree.
-bool
-_FrozenAssembleVolumeCorrect(
-    const RigExecBakedProgramImpl &B,
-    const RigExecBakedProgramImpl::GeomRevision &revision,
-    float defaultWeight, const VtVec3fArray &lastBase,
-    const std::map<SdfPath, size_t> &index,
-    const RigExecFrameInputs &inputs, RigExecMoverParameters *params)
-{
-    params->kind = RigExecRevisionKindToken(RigExecRevisionOp::VolumeCorrect);
-    params->enabled =
-        _FrozenSampledEnabled(index, inputs, revision.moverPath);
-    if (!params->enabled) {
-        params->valid = true;  // disabled is an ordinary pass-through
-        return true;
-    }
-    if (!_FrozenCommonEnvelope(B, revision, defaultWeight, params)) {
-        return true;  // MoverFailed (kind+enabled stay set, as live)
-    }
-    params->strength = 1.0f;
-    if (!lastBase.empty()) {
-        params->referenceVolume =
-            RigExecBoundVolume(lastBase.cdata(), lastBase.size());
-        params->valid = true;
-    }
-    return true;
-}
-
-// The Smooth arm over frozen state: kind, enabled, the shared envelope,
-// then the sampled topology at the evaluated time.
-bool
-_FrozenAssembleSmooth(
-    const RigExecBakedProgramImpl &B,
-    const RigExecBakedProgramImpl::GeomRevision &revision,
-    float defaultWeight, const std::map<SdfPath, size_t> &index,
-    const RigExecFrameInputs &inputs, RigExecMoverParameters *params)
-{
-    const RigExecRevisionBinding &binding = revision.binding;
-    params->kind = RigExecRevisionKindToken(RigExecRevisionOp::Smooth);
-    params->enabled =
-        _FrozenSampledEnabled(index, inputs, revision.moverPath);
-    if (!params->enabled) {
-        params->valid = true;  // disabled is an ordinary pass-through
-        return true;
-    }
-    if (!_FrozenCommonEnvelope(B, revision, defaultWeight, params)) {
-        return true;  // MoverFailed (kind+enabled stay set, as live)
-    }
-    params->strength = 1.0f;
-    if (!_FrozenSampledArray(index, inputs, binding.topologyCounts,
-                             &params->topologyCounts) ||
-        !_FrozenSampledArray(index, inputs, binding.topologyIndices,
-                             &params->topologyIndices)) {
-        return false;
-    }
-    params->valid = !params->topologyCounts.empty();
     return true;
 }
 
@@ -932,146 +647,14 @@ _FrozenAssembleLattice(
     return true;
 }
 
-// The SurfaceProject arm over frozen state: kind, enabled, the shared
-// envelope, then the driver surface and its topology at the evaluated
-// time. Strength is fixed at full: the schema declares no strength input,
-// and reading a default would project half way.
-bool
-_FrozenAssembleSurfaceProject(
-    const RigExecBakedProgramImpl &B,
-    const RigExecBakedProgramImpl::GeomRevision &revision,
-    float defaultWeight, const std::map<SdfPath, size_t> &index,
-    const RigExecFrameInputs &inputs, RigExecMoverParameters *params)
-{
-    const RigExecRevisionBinding &binding = revision.binding;
-    params->kind = RigExecRevisionKindToken(RigExecRevisionOp::SurfaceProject);
-    params->enabled =
-        _FrozenSampledEnabled(index, inputs, revision.moverPath);
-    if (!params->enabled) {
-        params->valid = true;  // disabled is an ordinary pass-through
-        return true;
-    }
-    if (!_FrozenCommonEnvelope(B, revision, defaultWeight, params)) {
-        return true;  // MoverFailed (kind+enabled stay set, as live)
-    }
-    params->strength = 1.0f;
-    if (!_FrozenSideArray(
-            revision, binding.surfacePoints,
-            _FrozenSurfaceInputKey(revision.moverPath, "surfacePoints"),
-            index, inputs, &params->auxPoints) ||
-        !_FrozenSampledArray(index, inputs, binding.topologyCounts,
-                             &params->topologyCounts) ||
-        !_FrozenSampledArray(index, inputs, binding.topologyIndices,
-                             &params->topologyIndices)) {
-        return false;
-    }
-    params->valid =
-        !params->auxPoints.empty() && !params->topologyCounts.empty();
-    return true;
-}
-
-// The driver solver's aggregate for a ribbon-family revision: the
-// worker's own Solve-step output, which is this run's by program order --
-// the Aggregate-slot edge runs the solver before the revision on both
-// paths. Null when no driver binds, exactly as live.
-const RigExecPointFrameArray *
-_FrozenDriverFrames(const RigExecBakedProgramImpl &B,
-                    const RigExecBakedProgramImpl::GeomRevision &revision,
-                    bool *usable)
-{
-    *usable = true;
-    if (revision.driverFramesSolver < 0) {
-        return nullptr;
-    }
-    if (size_t(revision.driverFramesSolver) >= B.aggregates.size()) {
-        *usable = false;
-        return nullptr;
-    }
-    return &B.aggregates[size_t(revision.driverFramesSolver)];
-}
-
-// The Ribbon arm over frozen state: kind, enabled, the shared envelope,
-// then the driver's frames plus the sampled bind coordinates.
-bool
-_FrozenAssembleRibbon(
-    const RigExecBakedProgramImpl &B,
-    const RigExecBakedProgramImpl::GeomRevision &revision,
-    float defaultWeight, const std::map<SdfPath, size_t> &index,
-    const RigExecFrameInputs &inputs, RigExecMoverParameters *params)
-{
-    params->kind = RigExecRevisionKindToken(RigExecRevisionOp::Ribbon);
-    params->enabled =
-        _FrozenSampledEnabled(index, inputs, revision.moverPath);
-    if (!params->enabled) {
-        params->valid = true;  // disabled is an ordinary pass-through
-        return true;
-    }
-    if (!_FrozenCommonEnvelope(B, revision, defaultWeight, params)) {
-        return true;  // MoverFailed (kind+enabled stay set, as live)
-    }
-    bool usable = true;
-    const RigExecPointFrameArray *frames =
-        _FrozenDriverFrames(B, revision, &usable);
-    if (!usable) {
-        return false;
-    }
-    if (!frames || frames->IsEmpty() ||
-        frames->rests.size() != frames->GetSize()) {
-        return true;  // MoverFailed
-    }
-    params->frames = *frames;
-    if (!_FrozenSideArray(
-            revision, revision.binding.bindCoords,
-            _FrozenRibbonInputKey(revision.moverPath, "bindCoords"), index,
-            inputs, &params->bindCoords)) {
-        return false;
-    }
-    params->valid = !params->bindCoords.empty();
-    return true;
-}
-
-// The EmitGuidePoints arm over frozen state: the driver's frames, valid
-// whenever they are well-formed. No bind coordinates: the kernel writes
-// one guide per frame origin.
-bool
-_FrozenAssembleEmitGuidePoints(
-    const RigExecBakedProgramImpl &B,
-    const RigExecBakedProgramImpl::GeomRevision &revision,
-    float defaultWeight, const std::map<SdfPath, size_t> &index,
-    const RigExecFrameInputs &inputs, RigExecMoverParameters *params)
-{
-    params->kind =
-        RigExecRevisionKindToken(RigExecRevisionOp::EmitGuidePoints);
-    params->enabled =
-        _FrozenSampledEnabled(index, inputs, revision.moverPath);
-    if (!params->enabled) {
-        params->valid = true;  // disabled is an ordinary pass-through
-        return true;
-    }
-    if (!_FrozenCommonEnvelope(B, revision, defaultWeight, params)) {
-        return true;  // MoverFailed (kind+enabled stay set, as live)
-    }
-    bool usable = true;
-    const RigExecPointFrameArray *frames =
-        _FrozenDriverFrames(B, revision, &usable);
-    if (!usable) {
-        return false;
-    }
-    if (!frames || frames->IsEmpty() ||
-        frames->rests.size() != frames->GetSize()) {
-        return true;  // MoverFailed
-    }
-    params->frames = *frames;
-    params->valid = true;
-    return true;
-}
-
 // The frozen RevisionStatic: the RevisionStatic arm of
-// RigExecBakedRunGeometryStep (bakedGeometry.cpp) with the
-// worker-side derived assembly (normals/extent), and the mover-prim
-// defaultWeight read replaced by its sample. Everything else -- status,
-// dirty compare, publication sizing, layout and envelope decisions -- is the
-// same code shape over the same fields.
+// RigExecBakedRunGeometryStep (bakedGeometry.cpp), with the mover-prim
+// defaultWeight read replaced by its sample. A revision the path leaves
+// assemble is assembled by the live function itself from the job's leaves
+// (RigExecBakedAssembleFromLeaves; a skin from its transported packet), the
+// rest by the worker-side arms above. Everything else -- status, dirty
+// compare, publication sizing, layout and envelope decisions -- is the same
+// code shape over the same fields.
 bool
 _FrozenRevisionStatic(_FrozenWorker *worker, RigExecBakedStep *step,
                       const std::map<SdfPath, size_t> &index,
@@ -1104,19 +687,53 @@ _FrozenRevisionStatic(_FrozenWorker *worker, RigExecBakedStep *step,
             }
         }
     }
+    const bool fromLeaves = revision.leaves.decl.assembles &&
+                            revision.op != RigExecRevisionOp::Skin;
     // One overlay per revision that declares phases: the worker's resolved
     // inputs plus whatever the phases' bindings resolve to over the
     // worker's own chains -- the overlay AssembleRevision builds, by the
     // same function. The side-input reads below consult it by binding path
     // before their samples, exactly where live consults values.resolved.
+    // The leaf assembly builds its own.
     if (!revision.binding.phases.empty()) {
         if (!B.resolvedInputs) {
             return false;
         }
-        RigExecBakedOverlayPointReads(&B, &revision, *B.resolvedInputs,
-                                      &step->diagnostics);
+        if (!fromLeaves) {
+            RigExecBakedOverlayPointReads(&B, &revision, *B.resolvedInputs,
+                                          &step->diagnostics);
+        }
     }
-    if (revision.op == RigExecRevisionOp::Skin) {
+    if (fromLeaves) {
+        // What a consistent job always holds, checked so a stale vector
+        // declines rather than indexes past the worker's tables: the
+        // driver's aggregate, the weight packet, the pose weight slots, a
+        // layout for every sparse blend sample, and base-phase samples
+        // (freeze refuses the rest).
+        if (revision.driverFramesSolver >= 0 &&
+            size_t(revision.driverFramesSolver) >= B.aggregates.size()) {
+            return false;
+        }
+        if (revision.weightObject >= 0 &&
+            size_t(revision.weightObject) >= B.weightPackets.size()) {
+            return false;
+        }
+        for (const auto &channel : revision.blendChannels) {
+            if (channel.poseWeight >= 0 &&
+                size_t(channel.poseWeight) >= B.poseWeights.size()) {
+                return false;
+            }
+            for (const auto &sample : channel.samples) {
+                if (!sample.phase.IsBase() ||
+                    (!sample.blendShape.IsEmpty() && !sample.layout)) {
+                    return false;
+                }
+            }
+        }
+        revision.parameters = RigExecBakedAssembleFromLeaves(
+            &B, &revision, chain.lastBase.cdata(), chain.lastBase.size(),
+            &step->diagnostics);
+    } else if (revision.op == RigExecRevisionOp::Skin) {
         if (size_t(step->object) >= inputs.revisionPackets.size()) {
             return false;
         }
@@ -1130,39 +747,9 @@ _FrozenRevisionStatic(_FrozenWorker *worker, RigExecBakedStep *step,
                 revision.parameters.valid = false;
             }
         }
-    } else if (revision.op == RigExecRevisionOp::RecomputeNormals ||
-               revision.op == RigExecRevisionOp::RecomputeExtent) {
-        if (!_AssembleDerivedPacket(revision, chain.lastBase.cdata(),
-                                    chain.lastBase.size(), index, inputs,
-                                    &revision.parameters)) {
-            return false;
-        }
-    } else if (revision.op == RigExecRevisionOp::Matrix) {
-        if (!_FrozenAssembleMatrix(B, revision, revision.defaultWeight,
-                                   index, inputs, &revision.parameters)) {
-            return false;
-        }
     } else if (revision.op == RigExecRevisionOp::Wire) {
         if (!_FrozenAssembleWire(B, revision, revision.defaultWeight,
                                  index, inputs, &revision.parameters)) {
-            return false;
-        }
-    } else if (revision.op == RigExecRevisionOp::BlendShape) {
-        if (!_FrozenAssembleBlendShape(B, revision, revision.defaultWeight,
-                                       chain.lastBase, size_t(step->object),
-                                       index, inputs,
-                                       &revision.parameters)) {
-            return false;
-        }
-    } else if (revision.op == RigExecRevisionOp::VolumeCorrect) {
-        if (!_FrozenAssembleVolumeCorrect(B, revision, revision.defaultWeight,
-                                          chain.lastBase, index, inputs,
-                                          &revision.parameters)) {
-            return false;
-        }
-    } else if (revision.op == RigExecRevisionOp::Smooth) {
-        if (!_FrozenAssembleSmooth(B, revision, revision.defaultWeight,
-                                   index, inputs, &revision.parameters)) {
             return false;
         }
     } else if (revision.op == RigExecRevisionOp::DeltaMush ||
@@ -1176,23 +763,6 @@ _FrozenRevisionStatic(_FrozenWorker *worker, RigExecBakedStep *step,
         if (!_FrozenAssembleLattice(B, revision, revision.defaultWeight,
                                     chain.lastBase, index, inputs,
                                     &revision.parameters)) {
-            return false;
-        }
-    } else if (revision.op == RigExecRevisionOp::SurfaceProject) {
-        if (!_FrozenAssembleSurfaceProject(B, revision, revision.defaultWeight,
-                                           index, inputs,
-                                           &revision.parameters)) {
-            return false;
-        }
-    } else if (revision.op == RigExecRevisionOp::Ribbon) {
-        if (!_FrozenAssembleRibbon(B, revision, revision.defaultWeight,
-                                   index, inputs, &revision.parameters)) {
-            return false;
-        }
-    } else if (revision.op == RigExecRevisionOp::EmitGuidePoints) {
-        if (!_FrozenAssembleEmitGuidePoints(B, revision,
-                                            revision.defaultWeight, index,
-                                            inputs, &revision.parameters)) {
             return false;
         }
     } else {

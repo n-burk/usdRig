@@ -38,10 +38,12 @@
 //    the evaluator.
 //  * Geometry chunk/fuse/status bodies (bakedGeometry.cpp:2370-2718, minus
 //    RevisionStatic/Derived) are pure functions of program slots plus the
-//    shared kernels. RevisionStatic and Derived call the static,
-//    stage-reading AssembleRevision, so the frozen run does NOT call them:
-//    chain-revision packets are assembled on the UI thread by the REAL
-//    RigExecAssembleSkinParameters and travel with the job, and the small
+//    shared kernels. RevisionStatic and Derived call AssembleRevision, which
+//    reads the stage for the operations the path leaves do not assemble
+//    yet, so the frozen run does NOT call them: a skin packet is assembled
+//    on the UI thread by the REAL RigExecAssembleSkinParameters and travels
+//    with the job, an operation the leaves assemble is assembled by the live
+//    RigExecBakedAssembleFromLeaves from the job's leaves, and the small
 //    pure remainder of each body is replicated line-for-line below
 //    (_FrozenRevisionStatic, _FrozenDerived, _AssembleDerivedPacket).
 //  * RigExecBakedComputeClosure (bakedSchedule.cpp:1223) and
@@ -590,6 +592,51 @@ _FrozenPrologue(_FrozenWorker *worker, const RigExecFrozenProgram &snapshot,
             revision.topology->indices.size(), revision.topology->elementSize,
             int(revision.chunks.size()));
         revision.partitionTopology = revision.topology;
+    }
+    // The revisions the worker assembles from leaves: the job's leaves, read
+    // on the UI thread by the live prologue's reads, and the blend layouts
+    // the job resolved. Whether the job's resolved inputs hold a blend
+    // weight's path is the worker's own placement's answer, as the live
+    // gather asks its own. A missing layout is left null for RevisionStatic
+    // to decline on, as it is only read where the chain reads a base.
+    if (inputs.revisionLeaves.size() != B.revisionIndex.size()) {
+        return false;
+    }
+    for (size_t r = 0; r < B.revisionIndex.size(); ++r) {
+        const auto &[chainIndex, revisionIndex] = B.revisionIndex[r];
+        RigExecBakedProgramImpl::GeomRevision &revision =
+            B.chains[size_t(chainIndex)].revisions[size_t(revisionIndex)];
+        if (!revision.leaves.decl.assembles ||
+            revision.op == RigExecRevisionOp::Skin) {
+            continue;
+        }
+        const std::vector<VtValue> &values = inputs.revisionLeaves[r];
+        if (values.size() != revision.leaves.decl.keys.size()) {
+            return false;
+        }
+        revision.leaves.values = values;
+        for (size_t k = 0; k < values.size(); ++k) {
+            const RigExecRevisionLeafKey &key = revision.leaves.decl.keys[k];
+            if (key.flavour == RigExecRevisionLeafFlavour::Present) {
+                revision.leaves.values[k] =
+                    VtValue(B.resolvedInputs->Find(key.path) != nullptr);
+            }
+        }
+        for (size_t c = 0; c < revision.blendChannels.size(); ++c) {
+            auto &channel = revision.blendChannels[c];
+            for (size_t s = 0; s < channel.samples.size(); ++s) {
+                auto &sample = channel.samples[s];
+                if (sample.blendShape.IsEmpty()) {
+                    continue;
+                }
+                sample.layout = nullptr;
+                if (r < inputs.blendLayouts.size() &&
+                    c < inputs.blendLayouts[r].size() &&
+                    s < inputs.blendLayouts[r][c].size()) {
+                    sample.layout = inputs.blendLayouts[r][c][s];
+                }
+            }
+        }
     }
     return true;
 }

@@ -2697,6 +2697,42 @@ RigExecBakedNumberLeaves(RigExecBakedProgramImpl *program)
                                       std::move(ids));
         }
     }
+    // The path leaves after them, in program order: chain revisions and
+    // derived targets chain by chain, then weight objects. Each is filed
+    // under every path its read can reach, so a value edit there or on its
+    // routed prim marks it (ApplyValueEdits).
+    B.pathLeafRefs.clear();
+    const auto number = [&B](const RigExecBakedPathLeaves &leaves,
+                             RigExecBakedPathLeafRef ref) {
+        for (size_t k = 0; k < leaves.decl.keys.size(); ++k) {
+            ref.key = uint32_t(k);
+            const uint32_t id =
+                uint32_t(B.leafRefs.size() + B.pathLeafRefs.size());
+            B.pathLeafRefs.push_back(ref);
+            if (k < leaves.hops.size()) {
+                for (const SdfPath &hop : leaves.hops[k]) {
+                    B.leafByPath[hop].push_back(id);
+                }
+            }
+        }
+    };
+    for (size_t c = 0; c < B.chains.size(); ++c) {
+        const RigExecBakedProgramImpl::GeomChain &chain = B.chains[c];
+        for (size_t r = 0; r < chain.revisions.size(); ++r) {
+            number(chain.revisions[r].leaves,
+                   {RigExecBakedPathLeafOwner::Revision, uint32_t(c),
+                    uint32_t(r), 0});
+        }
+        for (size_t d = 0; d < chain.derived.size(); ++d) {
+            number(chain.derived[d].revision.leaves,
+                   {RigExecBakedPathLeafOwner::Derived, uint32_t(c),
+                    uint32_t(d), 0});
+        }
+    }
+    for (size_t w = 0; w < B.weightObjects.size(); ++w) {
+        number(B.weightObjects[w].pointLeaves,
+               {RigExecBakedPathLeafOwner::Weight, uint32_t(w), 0, 0});
+    }
 }
 
 void

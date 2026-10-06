@@ -211,6 +211,13 @@ _CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst)
     D.routedOverrides = src.routedOverrides;
     D.lastRoutedOverrides = src.lastRoutedOverrides;
     D.leafSamples = src.leafSamples;
+    // The path leaves' bookkeeping. Their values ride the chains and weight
+    // objects above; a frozen job takes its revisions' leaves from the job's
+    // vector (RigExecFrameInputs::revisionLeaves) and samples none itself.
+    D.pathLeafRefs = src.pathLeafRefs;
+    D.pathLeafChainResults = src.pathLeafChainResults;
+    D.pathLeafChainSerial = src.pathLeafChainSerial;
+    D.pathLeafSamples = src.pathLeafSamples;
     D.resolvedRoutedPrims = src.resolvedRoutedPrims;
     D.avarsDisturbed = src.avarsDisturbed;
     D.folded = src.folded;

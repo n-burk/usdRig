@@ -439,6 +439,62 @@ struct RigExecBakedLeafPools {
     }
 };
 
+/// The path leaves of one revision or weight object: the reads its packet
+/// assembly makes (RigExecRevisionLeafDecl), sampled on the owning thread in
+/// the geometry prologue (RigExecBakedSamplePathLeaves) and read by the step
+/// bodies instead of the stage. No binding of _ForEachPatchableInput owns
+/// them; RigExecBakedNumberLeaves numbers them after the visitor's leaves.
+struct RigExecBakedPathLeaves {
+    /// Build state.
+    RigExecRevisionLeafDecl decl;
+    /// Per key, the attribute at its path (invalid when none stands there),
+    /// every path its read can reach, and whether the read can move with the
+    /// time. Owning thread only: a frozen worker never touches them.
+    std::vector<UsdAttribute> attributes;
+    std::vector<std::vector<SdfPath>> hops;
+    std::vector<char> varying;
+    /// Per key, the value the last sample read, and whether that sample
+    /// moved it (bitwise, as the binding leaves compare).
+    std::vector<VtValue> values;
+    std::vector<char> changed;
+    /// Per key, the next sample must re-read it whatever else holds: a value
+    /// edit reached one of its paths, or a sample skipped it.
+    std::vector<char> mustSample;
+    /// What the last sample saw: whether there was one, its time, the
+    /// program stamp, whether an interactive override stood, and the chain
+    /// results' serial (RigExecBakedProgramImpl::pathLeafChainSerial).
+    bool sampled = false;
+    UsdTimeCode time = UsdTimeCode::Default();
+    uint64_t stamp = 0;
+    bool overrides = false;
+    uint64_t chainSerial = 0;
+
+    /// Key \p k's value as \p T, or \p fallback when \p k is out of range or
+    /// holds another type.
+    template <class T>
+    T Value(int k, const T &fallback) const
+    {
+        if (k < 0 || size_t(k) >= values.size() ||
+            !values[size_t(k)].IsHolding<T>()) {
+            return fallback;
+        }
+        return values[size_t(k)].UncheckedGet<T>();
+    }
+};
+
+/// Which path-leaf owner a path leaf id names (ids from
+/// RigExecBakedProgramImpl::leafRefs.size() on).
+enum class RigExecBakedPathLeafOwner : uint8_t { Revision, Derived, Weight };
+
+/// One path leaf: its owner (chain and revision, chain and derived target,
+/// or weight object) and its key there.
+struct RigExecBakedPathLeafRef {
+    RigExecBakedPathLeafOwner owner = RigExecBakedPathLeafOwner::Revision;
+    uint32_t a = 0;
+    uint32_t b = 0;
+    uint32_t key = 0;
+};
+
 /// Publishes \p value at \p key into \p map, in one comparison when the
 /// caller walks its keys in ascending order.
 ///
@@ -2381,8 +2437,16 @@ struct RigExecBakedProgramImpl {
             /// them as the sample's static points. Dense form only; a sparse
             /// sample's shape rides its layout instead.
             std::vector<GfVec3f> lastPoints;
+            /// The revision's path leaves (GeomRevision::leaves) holding
+            /// `rigExec:activation` and, dense form only, the points, or -1.
+            int activationLeaf = -1;
+            int pointsLeaf = -1;
         };
         std::vector<Sample> samples;
+        /// The revision's path leaves holding `inputs:weight` and whether the
+        /// generation's resolved inputs hold its path, or -1.
+        int weightLeaf = -1;
+        int weightHeldLeaf = -1;
     };
 
     struct GeomRevision {
@@ -2633,6 +2697,14 @@ struct RigExecBakedProgramImpl {
         /// the prologue answered.
         std::shared_ptr<const RigExecSkinTopology> topology;
         bool topologyResolved = false;
+        /// Every read RevisionStatic and the packet assembly make, sampled
+        /// in the geometry prologue. For an operation the leaves assemble
+        /// (`leaves.decl.assembles`), the assembler's reads and the blend
+        /// gather's; for every chain revision, `defaultWeightLeaf`.
+        RigExecBakedPathLeaves leaves;
+        /// RevisionStatic's `inputs:defaultWeight` read, as a key of
+        /// `leaves`; -1 for a derived revision, which reads none.
+        int defaultWeightLeaf = -1;
     };
     struct GeomChain {
         SdfPath target;
@@ -2774,6 +2846,13 @@ struct RigExecBakedProgramImpl {
         std::vector<UsdAttribute> targetPoints, samplePoints, curvePoints;
         /// The epoch's resampled falloff remap, copied from falloffLuts.
         std::vector<float> falloffCurve;
+        /// The point gathers' reads, one key per attribute of
+        /// `targetPoints`, `samplePoints`, `curvePoints` and
+        /// `combineTargetPoints` in that order, each list starting at its
+        /// index below.
+        RigExecBakedPathLeaves pointLeaves;
+        size_t targetLeaves = 0, sampleLeaves = 0, curveLeaves = 0,
+               combineLeaves = 0;
 
     };
     std::vector<WeightObject> weightObjects;
@@ -2883,6 +2962,19 @@ struct RigExecBakedProgramImpl {
     /// Leaves re-read by every sample so far, Build's included. Test
     /// observable; written only by the sampler.
     uint64_t leafSamples = 0;
+    /// Every path leaf (RigExecBakedPathLeaves of a chain revision, a
+    /// derived target or a weight object), in program order; path leaf id
+    /// `leafRefs.size() + i` is entry i, filed in `leafByPath` under every
+    /// path its read can reach.
+    std::vector<RigExecBakedPathLeafRef> pathLeafRefs;
+    /// The chain results the path leaves last compared against, and a serial
+    /// that moves whenever they differ from the run's (a path leaf whose
+    /// sample saw another serial re-reads).
+    std::map<SdfPath, VtValue> pathLeafChainResults;
+    uint64_t pathLeafChainSerial = 0;
+    /// Path leaves re-read by every sample so far. Test observable; written
+    /// only by RigExecBakedSamplePathLeaves.
+    uint64_t pathLeafSamples = 0;
     /// Every property a chain writes: RigExecBakedBuildContext::chainTargets
     /// as Build classified the inputs against it, kept so a bake can
     /// recompute each input's walk the same way.
@@ -2947,11 +3039,57 @@ RigExecBakedLeafRead(const RigExecBakedProgramImpl &program,
     return RigExecBakedLeaf(program, input);
 }
 
-/// Sets leaf \p id's `mustSample` byte, so the next sample re-reads it.
+/// The path leaves path leaf \p ref belongs to, or null when the program no
+/// longer holds its owner.
+inline RigExecBakedPathLeaves *
+RigExecBakedPathLeavesOf(RigExecBakedProgramImpl *program,
+                         const RigExecBakedPathLeafRef &ref)
+{
+    switch (ref.owner) {
+    case RigExecBakedPathLeafOwner::Revision:
+        if (ref.a < program->chains.size() &&
+            ref.b < program->chains[ref.a].revisions.size()) {
+            return &program->chains[ref.a].revisions[ref.b].leaves;
+        }
+        return nullptr;
+    case RigExecBakedPathLeafOwner::Derived:
+        if (ref.a < program->chains.size() &&
+            ref.b < program->chains[ref.a].derived.size()) {
+            return &program->chains[ref.a].derived[ref.b].revision.leaves;
+        }
+        return nullptr;
+    case RigExecBakedPathLeafOwner::Weight:
+        if (ref.a < program->weightObjects.size()) {
+            return &program->weightObjects[ref.a].pointLeaves;
+        }
+        return nullptr;
+    }
+    return nullptr;
+}
+
+inline const RigExecBakedPathLeaves *
+RigExecBakedPathLeavesOf(const RigExecBakedProgramImpl &program,
+                         const RigExecBakedPathLeafRef &ref)
+{
+    return RigExecBakedPathLeavesOf(
+        const_cast<RigExecBakedProgramImpl *>(&program), ref);
+}
+
+/// Sets leaf \p id's `mustSample` byte, so the next sample re-reads it. An
+/// id past the binding leaves names a path leaf.
 inline void
 RigExecBakedMarkLeaf(RigExecBakedProgramImpl *program, uint32_t id)
 {
     if (id >= program->leafRefs.size()) {
+        const size_t i = id - program->leafRefs.size();
+        if (i >= program->pathLeafRefs.size()) {
+            return;
+        }
+        const RigExecBakedPathLeafRef &ref = program->pathLeafRefs[i];
+        RigExecBakedPathLeaves *leaves = RigExecBakedPathLeavesOf(program, ref);
+        if (leaves && ref.key < leaves->mustSample.size()) {
+            leaves->mustSample[ref.key] = 1;
+        }
         return;
     }
     const RigExecBakedLeafRef &ref = program->leafRefs[id];
@@ -2966,9 +3104,38 @@ RigExecBakedMarkLeaf(RigExecBakedProgramImpl *program, uint32_t id)
 
 /// Numbers one leaf per binding _ForEachPatchableInput visits, in its order,
 /// seeded with the binding's constant, and files each under every path
-/// `overridableInputs` gives its override number. Renumbers from scratch,
-/// so Build calls it again once every binding exists.
+/// `overridableInputs` gives its override number. Then numbers every path
+/// leaf after them (`pathLeafRefs`), filed under every path its read can
+/// reach. Renumbers from scratch, so Build calls it again once every binding
+/// exists.
 void RigExecBakedNumberLeaves(RigExecBakedProgramImpl *program);
+
+/// Resolves \p leaves' keys on \p stage at Build: each key's attribute, the
+/// paths its read can reach and whether it can move with the time; seeds
+/// every value with its key's fallback. Owning thread.
+void RigExecBakedBindPathLeaves(const UsdStageRefPtr &stage,
+                                RigExecBakedPathLeaves *leaves);
+
+/// Re-reads, through RigExecSampleRevisionLeaf over the generation's
+/// resolved inputs at \p time, every key of \p leaves that one of these says
+/// can have moved since its last sample, and sets its `changed` byte:
+///  1. the first sample, a moved program stamp, or \p all (a forced run);
+///  2. an interactive override standing now or at the last sample: a drag on
+///     any hop, numbered or routed, reaches the read through the resolved
+///     inputs, so every key re-reads while one stands and once after;
+///  3. a moved time, for a key read at the time that can vary with it (or
+///     when the time moves to or from Default);
+///  4. its `mustSample` byte: a value edit reached one of its paths
+///     (ApplyValueEdits files it under each), and its time variance is
+///     re-derived with the read;
+///  5. moved chain results (`pathLeafChainSerial`).
+/// Keys in \p skip are not read; each is marked to re-read when it next is
+/// not skipped. Every other key keeps its value. Owning thread, prologue
+/// only.
+void RigExecBakedSamplePathLeaves(RigExecBakedProgramImpl *program,
+                                  RigExecBakedPathLeaves *leaves,
+                                  UsdTimeCode time, bool all,
+                                  const std::vector<int> &skip = {});
 
 /// Re-reads, through RigExecBakedRead at \p time, every leaf that one of
 /// these says can have moved since it was last sampled, and sets its
@@ -3610,6 +3777,23 @@ void RigExecBakedOverlayPointReads(
     const RigExecResolvedInputs &resolved,
     std::vector<std::string> *diagnostics);
 
+/// \p revision's packet from its path leaves, for an operation they
+/// assemble (`leaves.decl.assembles`): the provider values as the stage
+/// assembly takes them, the phase overlay (RigExecBakedOverlayPointReads
+/// over the generation's resolved inputs), the blend gather from leaves --
+/// which writes each dense sample's `lastPoints`, as the stage gather did --
+/// and RigExecAssembleFromLeaves. \p basePoints are the chain's authored
+/// base for a chain revision and its final points for a derived one. Reads
+/// no stage: the live RevisionStatic and Derived bodies and the frozen
+/// RevisionStatic all assemble here. \p missing: see
+/// RigExecRevisionLeafView.
+RigExecMoverParameters RigExecBakedAssembleFromLeaves(
+    RigExecBakedProgramImpl *program,
+    RigExecBakedProgramImpl::GeomRevision *revision,
+    const GfVec3f *basePoints, size_t basePointCount,
+    std::vector<std::string> *diagnostics,
+    std::vector<std::string> *missing = nullptr);
+
 /// Appends one VolumePlacements step per volume provider slot (object =
 /// slot, part 1), then one WeightPacket step per weight object in the
 /// table's dependency order -- all of it between the pose half and the
@@ -3691,8 +3875,11 @@ void RigExecBakedRunSolverSources(RigExecBakedProgramImpl *program,
 /// authored base, the point-count-moved reset, the node-creation accounting,
 /// and the skin layouts -- the one lock a frame takes, kept out of the
 /// region.
+/// Also samples the weight objects' and the revisions' path leaves
+/// (RigExecBakedSamplePathLeaves; \p all re-reads every one).
 void RigExecBakedRunGeometryPrologue(RigExecBakedProgramImpl *program,
-                                     UsdTimeCode time, RigExecRigPose *pose);
+                                     UsdTimeCode time, RigExecRigPose *pose,
+                                     bool all);
 
 /// The pose half of the epilogue: the joint and control publication, the
 /// solver guides and the property-domain results.
@@ -3774,7 +3961,8 @@ int RigExecBakedBakeWeightObject(RigExecBakedBuildContext *ctx,
 ///
 /// \p packets holds the packets already built for the objects BEFORE this
 /// one in the table, which dependency order guarantees are the ones it
-/// composes.
+/// composes. Every stage read is a leaf the prologue sampled at \p time
+/// (`pointLeaves` and the bound inputs').
 RigExecWeightPacket RigExecBakedWeightPacket(
     const RigExecBakedProgramImpl &program,
     RigExecBakedProgramImpl::WeightObject *object,
@@ -3968,7 +4156,9 @@ void RigExecBakedDeclareInputDependencies(RigExecBakedProgramImpl *program);
 ///    `overridden`/`anyOverridden`/`folded`, the sampled `leaves`,
 ///    `routedOverrides`/`lastRoutedOverrides` and `leafSamples`, and the
 ///    geometry prologue's `haveBase`/`baseDirty`/`lastBase`/`created`/
-///    `scheduleDirty`/`topology`/the partition. The prologue runs ONCE per
+///    `scheduleDirty`/`topology`/the partition and the path leaves (each
+///    revision's and weight object's, `pathLeafChainResults`/
+///    `pathLeafChainSerial`, `pathLeafSamples`). The prologue runs ONCE per
 ///    generation, before either pass, so both passes see one value of each
 ///    by construction. Several are captured and restored anyway, because
 ///    they are cheap and putting the second pass back on exactly the first
@@ -4181,6 +4371,21 @@ struct RigExecBakedProgramTesting {
     /// \p index must be below `solvers.size()`.
     static RigExecBakedProgramImpl::Solver RefreshedSolverRests(
         const RigExecBakedProgram &program, size_t index);
+    /// Assembles every revision of \p program whose packet its path leaves
+    /// assemble (chain revisions whose chain read a base this run, and
+    /// non-matrix derived targets) twice, from the leaves the last run
+    /// sampled and from the stage through \p resolved at \p time, as the
+    /// stage assembly did before the leaves, and returns one line per
+    /// revision whose packets, statuses or lines differ or whose leaf
+    /// assembly read a role its declaration lacks (named). \p edit, when
+    /// set, changes a copy of each declaration first (by mover path). Leaves
+    /// the program as it found it. \p compared counts the revisions.
+    static std::vector<std::string> ShadowAssembly(
+        const RigExecBakedProgram &program,
+        const RigExecResolvedInputs &resolved, UsdTimeCode time,
+        const std::function<void(const SdfPath &, RigExecRevisionLeafDecl *)>
+            &edit,
+        size_t *compared);
 };
 
 }  // namespace rigExec

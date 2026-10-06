@@ -417,6 +417,41 @@ RigExecBakedBuildGeometry(RigExecBakedBuildContext *ctx,
             out.weightCurrentPhase =
                 B.currentPhaseWeights.count(r.binding.weightObject) > 0;
         }
+        // The packet assembly's reads as path leaves, sampled in the
+        // prologue: the assembler's, for an operation the leaves assemble,
+        // and the blend gather's, which reads the generation's resolved
+        // inputs and not the phase overlay.
+        RigExecRevisionLeafDecl &decl = out.leaves.decl;
+        RigExecDeclareRevisionLeaves(out.op, out.moverPath, out.binding,
+                                     &decl);
+        if (decl.assembles) {
+            using Type = RigExecRevisionLeafType;
+            using Flavour = RigExecRevisionLeafFlavour;
+            const RigExecRevisionLeafTime at =
+                RigExecRevisionLeafTime::AtTime;
+            for (RigExecBakedProgramImpl::GeomBlendChannel &channel :
+                     out.blendChannels) {
+                channel.weightHeldLeaf =
+                    decl.Add({channel.weightPath, Type::Bool, at,
+                              Flavour::Present, VtValue(false)});
+                channel.weightLeaf = decl.Add(
+                    {channel.weightPath, Type::Float, at,
+                     Flavour::ResolvedOnly,
+                     VtValue(RigExecBlendChannel().weight)});
+                for (auto &sample : channel.samples) {
+                    sample.activationLeaf = decl.Add(
+                        {sample.activationPath, Type::Float, at,
+                         Flavour::ResolvedOnly,
+                         VtValue(RigExecBlendSampleData().activation)});
+                    if (sample.blendShape.IsEmpty()) {
+                        sample.pointsLeaf =
+                            decl.Add({sample.pointsPath, Type::Vec3fArray, at,
+                                      Flavour::ResolvedOnly,
+                                      VtValue(VtVec3fArray())});
+                    }
+                }
+            }
+        }
         return out;
     };
     for (const RigExecBakedChainSpec &spec : chains) {
@@ -434,6 +469,16 @@ RigExecBakedBuildGeometry(RigExecBakedBuildContext *ctx,
         }
         for (const RigExecBakedRevisionSpec &revision : spec.revisions) {
             chain.revisions.push_back(bakeRevision(revision));
+            // RevisionStatic's own defaultWeight read, which the fuse's
+            // diagnostic is about: the generation's resolved inputs alone.
+            RigExecBakedProgramImpl::GeomRevision &baked =
+                chain.revisions.back();
+            baked.defaultWeightLeaf = baked.leaves.decl.Add(
+                {baked.moverPath.AppendProperty(_tokens->defaultWeight),
+                 RigExecRevisionLeafType::Float,
+                 RigExecRevisionLeafTime::AtTime,
+                 RigExecRevisionLeafFlavour::ResolvedOnly, VtValue(1.0f)});
+            RigExecBakedBindPathLeaves(B.stage, &baked.leaves);
         }
         for (const RigExecBakedRevisionSpec &derived : spec.derived) {
             RigExecBakedProgramImpl::GeomChain::Derived d;
@@ -451,6 +496,7 @@ RigExecBakedBuildGeometry(RigExecBakedBuildContext *ctx,
                 refuse("derived target has no attribute", derived.target);
             }
             d.revision = bakeRevision(derived);
+            RigExecBakedBindPathLeaves(B.stage, &d.revision.leaves);
             chain.derived.push_back(std::move(d));
         }
         B.chains.push_back(std::move(chain));
@@ -1712,25 +1758,14 @@ namespace {
 // Taken as a range rather than a vector because the two callers hold the
 // points in different containers and RigExecProviderValues copies them
 // anyway.
-RigExecMoverParameters
-AssembleRevision(RigExecBakedProgramImpl &B,
-                 RigExecBakedProgramImpl::GeomRevision *revision,
-                 const GfVec3f *basePoints, size_t basePointCount,
-                 UsdTimeCode time, RigExecBakedStep *step)
+//
+// The provider values both assemblies take: everything but the stage reads.
+RigExecProviderValues
+RevisionValues(RigExecBakedProgramImpl &B,
+               RigExecBakedProgramImpl::GeomRevision *revision,
+               const GfVec3f *basePoints, size_t basePointCount)
 {
-    const RigExecResolvedInputs &R = *B.resolvedInputs;
     RigExecProviderValues values;
-    values.resolved = &R;
-    // One overlay per REVISION: the generation-wide resolved inputs, plus
-    // whatever this revision's declared phases resolve to through their
-    // bindings. The assembler reads inputs by path and never learns a phase
-    // exists, which is what lets a phase apply to any input. Built only for
-    // a revision that declares one, and owned by that revision, because one
-    // buffer shared by the walk is state two steps could be inside at once.
-    if (!revision->binding.phases.empty()) {
-        RigExecBakedOverlayPointReads(&B, revision, R, &step->diagnostics);
-        values.resolved = &revision->revisionInputs;
-    }
     // The fold decided whether there is a matrix at all -- a bound transform
     // provider, or a geometry-domain constraint's delta -- and wrote it.
     // A SKIN revision is assembled without one, and that is not an omission:
@@ -1788,83 +1823,6 @@ AssembleRevision(RigExecBakedProgramImpl &B,
         values.driverFrames =
             &B.aggregates[size_t(revision->driverFramesSolver)];
     }
-    // The blend channels. Gathered here rather than inside the assembler
-    // because the dynamic walk gathers them here too, and the ORDER is the
-    // whole contract: channels in `binding.blendInputs` order, which compile
-    // sorted, and each channel's samples stable-sorted by activation. Float
-    // addition is not associative, so a different order is a different last
-    // bit of every point.
-    // The reads go through the generation-wide resolved inputs and NOT
-    // through this revision's phase overlay: a sample's own phase is looked
-    // up directly, which is what lets one blend sample read another chain
-    // while the rest of the channel reads the stage.
-    if (!revision->blendChannels.empty()) {
-        std::vector<RigExecBlendChannel> channels;
-        channels.reserve(revision->blendChannels.size());
-        for (size_t c = 0; c < revision->blendChannels.size(); ++c) {
-            RigExecBakedProgramImpl::GeomBlendChannel &bound =
-                revision->blendChannels[c];
-            RigExecBlendChannel channel;
-            // A pose-driven weight is this run's slot -- unless an override
-            // stands on the weight itself, which the dynamic walk's lookup
-            // finds before it follows the connection and which the resolved
-            // inputs therefore answer here too.
-            if (bound.poseWeight >= 0 && !R.Find(bound.weightPath)) {
-                channel.weight = B.poseWeights[size_t(bound.poseWeight)];
-            } else {
-                R.GetAttribute(bound.weight, time, &channel.weight);
-            }
-            for (size_t s = 0; s < bound.samples.size(); ++s) {
-                auto &boundSample = bound.samples[s];
-                RigExecBlendSampleData sample;
-                R.GetAttribute(boundSample.activation, time,
-                               &sample.activation);
-                if (!boundSample.blendShape.IsEmpty()) {
-                    // Sparse: the shape the prologue resolved, shared by
-                    // pointer. The packet compares layouts by pointer, so an
-                    // unchanged sample costs one compare and not an array.
-                    sample.layout = boundSample.layout;
-                    channel.samples.push_back(std::move(sample));
-                    continue;
-                }
-                // A phased sample reads the version it is bound to, and the
-                // resolved input when that chain read no base: silently,
-                // as the dynamic gather falls back.
-                const GfVec3f *phased = nullptr;
-                size_t phasedCount = 0;
-                const bool answered =
-                    boundSample.pointBinding.id >= 0 &&
-                    RigExecBakedResolvePoints(B, boundSample.pointBinding,
-                                              &phased, &phasedCount);
-                if (boundSample.pointBinding.id >= 0) {
-                    CapturePointRead(&B, boundSample.pointBinding, phased,
-                                     phasedCount, answered);
-                }
-                if (answered) {
-                    sample.points.assign(phased, phased + phasedCount);
-                } else {
-                    VtVec3fArray points;
-                    R.GetAttribute(boundSample.points, time, &points);
-                    sample.points.assign(points.begin(), points.end());
-                }
-                boundSample.lastPoints = sample.points;
-                channel.samples.push_back(std::move(sample));
-            }
-            std::stable_sort(channel.samples.begin(), channel.samples.end(),
-                             [](const RigExecBlendSampleData &a,
-                                const RigExecBlendSampleData &b) {
-                                 return a.activation < b.activation;
-                             });
-            channels.push_back(std::move(channel));
-        }
-        // A structural failure leaves blendDeltas empty, which is what makes
-        // the assembled packet invalid -- the same atomic MoverFailed
-        // pass-through the kernel produces.
-        if (!RigExecSumBlendChannels(channels, values.basePoints,
-                                     &values.blendDeltas)) {
-            values.blendDeltas.clear();
-        }
-    }
     // Epoch-fixed layouts were resolved in the PROLOGUE, through the same
     // evaluator cache the dynamic path's assembly resolves through -- so the
     // two paths cannot hold different arrays, and no step body takes the
@@ -1872,8 +1830,225 @@ AssembleRevision(RigExecBakedProgramImpl &B,
     if (revision->topologyResolved) {
         values.skinTopology = &revision->topology;
     }
+    return values;
+}
+
+// The blend channels. Gathered here rather than inside the assembler
+// because the dynamic walk gathers them here too, and the ORDER is the
+// whole contract: channels in `binding.blendInputs` order, which compile
+// sorted, and each channel's samples stable-sorted by activation. Float
+// addition is not associative, so a different order is a different last
+// bit of every point.
+// The reads are the generation-wide resolved inputs' and NOT this
+// revision's phase overlay's: a sample's own phase is looked up directly,
+// which is what lets one blend sample read another chain while the rest of
+// the channel reads the stage. \p read answers each one: the stage gather
+// through the resolved inputs, the leaf gather from the leaves the prologue
+// sampled through them. \p record writes each dense sample's `lastPoints`.
+template <class Read>
+void
+GatherBlendChannels(RigExecBakedProgramImpl &B,
+                    RigExecBakedProgramImpl::GeomRevision *revision,
+                    const Read &read, bool record,
+                    RigExecProviderValues *values)
+{
+    if (revision->blendChannels.empty()) {
+        return;
+    }
+    std::vector<RigExecBlendChannel> channels;
+    channels.reserve(revision->blendChannels.size());
+    for (size_t c = 0; c < revision->blendChannels.size(); ++c) {
+        RigExecBakedProgramImpl::GeomBlendChannel &bound =
+            revision->blendChannels[c];
+        RigExecBlendChannel channel;
+        // A pose-driven weight is this run's slot -- unless an override
+        // stands on the weight itself, which the dynamic walk's lookup
+        // finds before it follows the connection and which the resolved
+        // inputs therefore answer here too.
+        if (bound.poseWeight >= 0 && !read.WeightHeld(bound)) {
+            channel.weight = B.poseWeights[size_t(bound.poseWeight)];
+        } else {
+            read.Weight(bound, &channel.weight);
+        }
+        for (size_t s = 0; s < bound.samples.size(); ++s) {
+            auto &boundSample = bound.samples[s];
+            RigExecBlendSampleData sample;
+            read.Activation(boundSample, &sample.activation);
+            if (!boundSample.blendShape.IsEmpty()) {
+                // Sparse: the shape the prologue resolved, shared by
+                // pointer. The packet compares layouts by pointer, so an
+                // unchanged sample costs one compare and not an array.
+                sample.layout = boundSample.layout;
+                channel.samples.push_back(std::move(sample));
+                continue;
+            }
+            // A phased sample reads the version it is bound to, and the
+            // resolved input when that chain read no base: silently,
+            // as the dynamic gather falls back.
+            const GfVec3f *phased = nullptr;
+            size_t phasedCount = 0;
+            const bool answered =
+                boundSample.pointBinding.id >= 0 &&
+                RigExecBakedResolvePoints(B, boundSample.pointBinding,
+                                          &phased, &phasedCount);
+            if (boundSample.pointBinding.id >= 0) {
+                CapturePointRead(&B, boundSample.pointBinding, phased,
+                                 phasedCount, answered);
+            }
+            if (answered) {
+                sample.points.assign(phased, phased + phasedCount);
+            } else {
+                read.Points(boundSample, &sample.points);
+            }
+            if (record) {
+                boundSample.lastPoints = sample.points;
+            }
+            channel.samples.push_back(std::move(sample));
+        }
+        std::stable_sort(channel.samples.begin(), channel.samples.end(),
+                         [](const RigExecBlendSampleData &a,
+                            const RigExecBlendSampleData &b) {
+                             return a.activation < b.activation;
+                         });
+        channels.push_back(std::move(channel));
+    }
+    // A structural failure leaves blendDeltas empty, which is what makes
+    // the assembled packet invalid -- the same atomic MoverFailed
+    // pass-through the kernel produces.
+    if (!RigExecSumBlendChannels(channels, values->basePoints,
+                                 &values->blendDeltas)) {
+        values->blendDeltas.clear();
+    }
+}
+
+// The blend gather's reads, off the stage through the resolved inputs.
+struct _StageBlendReads {
+    const RigExecResolvedInputs &R;
+    UsdTimeCode time;
+
+    bool WeightHeld(
+        const RigExecBakedProgramImpl::GeomBlendChannel &bound) const {
+        return R.Find(bound.weightPath) != nullptr;
+    }
+    void Weight(const RigExecBakedProgramImpl::GeomBlendChannel &bound,
+                float *out) const {
+        R.GetAttribute(bound.weight, time, out);
+    }
+    void Activation(
+        const RigExecBakedProgramImpl::GeomBlendChannel::Sample &sample,
+        float *out) const {
+        R.GetAttribute(sample.activation, time, out);
+    }
+    void Points(const RigExecBakedProgramImpl::GeomBlendChannel::Sample &sample,
+                std::vector<GfVec3f> *out) const {
+        VtVec3fArray points;
+        R.GetAttribute(sample.points, time, &points);
+        out->assign(points.begin(), points.end());
+    }
+};
+
+// The same reads, from the revision's path leaves.
+struct _LeafBlendReads {
+    const RigExecBakedPathLeaves &leaves;
+
+    bool WeightHeld(
+        const RigExecBakedProgramImpl::GeomBlendChannel &bound) const {
+        return leaves.Value<bool>(bound.weightHeldLeaf, false);
+    }
+    void Weight(const RigExecBakedProgramImpl::GeomBlendChannel &bound,
+                float *out) const {
+        *out = leaves.Value<float>(bound.weightLeaf, *out);
+    }
+    void Activation(
+        const RigExecBakedProgramImpl::GeomBlendChannel::Sample &sample,
+        float *out) const {
+        *out = leaves.Value<float>(sample.activationLeaf, *out);
+    }
+    void Points(const RigExecBakedProgramImpl::GeomBlendChannel::Sample &sample,
+                std::vector<GfVec3f> *out) const {
+        const VtVec3fArray points =
+            leaves.Value<VtVec3fArray>(sample.pointsLeaf, VtVec3fArray());
+        out->assign(points.begin(), points.end());
+    }
+};
+
+// The packet off the stage, through \p R (or the revision's phase overlay
+// over it), with RigExecAssembleParameters: the operations the path leaves
+// do not assemble yet, and the shadow test's reference for those they do.
+RigExecMoverParameters
+AssembleRevisionFromStage(RigExecBakedProgramImpl &B,
+                          const RigExecResolvedInputs &R,
+                          RigExecBakedProgramImpl::GeomRevision *revision,
+                          const GfVec3f *basePoints, size_t basePointCount,
+                          UsdTimeCode time,
+                          std::vector<std::string> *diagnostics, bool record)
+{
+    RigExecProviderValues values =
+        RevisionValues(B, revision, basePoints, basePointCount);
+    values.resolved = &R;
+    // One overlay per REVISION: the generation-wide resolved inputs, plus
+    // whatever this revision's declared phases resolve to through their
+    // bindings. The assembler reads inputs by path and never learns a phase
+    // exists, which is what lets a phase apply to any input. Built only for
+    // a revision that declares one, and owned by that revision, because one
+    // buffer shared by the walk is state two steps could be inside at once.
+    if (!revision->binding.phases.empty()) {
+        RigExecBakedOverlayPointReads(&B, revision, R, diagnostics);
+        values.resolved = &revision->revisionInputs;
+    }
+    GatherBlendChannels(B, revision, _StageBlendReads{R, time}, record,
+                        &values);
     return RigExecAssembleParameters(revision->moverPrim, revision->op,
                                      revision->binding, values, time);
+}
+
+}  // namespace
+
+RigExecMoverParameters
+RigExecBakedAssembleFromLeaves(
+    RigExecBakedProgramImpl *program,
+    RigExecBakedProgramImpl::GeomRevision *revision,
+    const GfVec3f *basePoints, size_t basePointCount,
+    std::vector<std::string> *diagnostics, std::vector<std::string> *missing)
+{
+    RigExecBakedProgramImpl &B = *program;
+    RigExecProviderValues values =
+        RevisionValues(B, revision, basePoints, basePointCount);
+    RigExecRevisionLeafView view;
+    view.decl = &revision->leaves.decl;
+    view.values = &revision->leaves.values;
+    view.missing = missing;
+    // The phase overlay, as the stage assembly builds it: a phased points
+    // read takes the version it is bound to before its leaf.
+    if (!revision->binding.phases.empty()) {
+        RigExecBakedOverlayPointReads(&B, revision, *B.resolvedInputs,
+                                      diagnostics);
+        view.phased = &revision->revisionInputs;
+    }
+    GatherBlendChannels(B, revision, _LeafBlendReads{revision->leaves},
+                        /*record=*/true, &values);
+    return RigExecAssembleFromLeaves(revision->op, revision->binding, view,
+                                     values);
+}
+
+namespace {
+
+// The packet of \p revision this run: from its path leaves for an operation
+// they assemble, off the stage for the rest.
+RigExecMoverParameters
+AssembleRevision(RigExecBakedProgramImpl &B,
+                 RigExecBakedProgramImpl::GeomRevision *revision,
+                 const GfVec3f *basePoints, size_t basePointCount,
+                 UsdTimeCode time, RigExecBakedStep *step)
+{
+    if (revision->leaves.decl.assembles) {
+        return RigExecBakedAssembleFromLeaves(&B, revision, basePoints,
+                                              basePointCount,
+                                              &step->diagnostics);
+    }
+    return AssembleRevisionFromStage(B, *B.resolvedInputs, revision,
+                                     basePoints, basePointCount, time,
+                                     &step->diagnostics, /*record=*/true);
 }
 
 /// The skin revision over its whole array, out of the fuse.
@@ -1909,10 +2084,22 @@ FuseWholeRevision(const RigExecBakedProgramImpl::GeomChain &chain,
 
 void
 RigExecBakedRunGeometryPrologue(RigExecBakedProgramImpl *program,
-                                UsdTimeCode time, RigExecRigPose *pose)
+                                UsdTimeCode time, RigExecRigPose *pose,
+                                bool all)
 {
     RigExecBakedProgramImpl &B = *program;
     RIGEXEC_PROFILE_SCOPE_CAT(*B.profiler, "BakedChainBase", "geometry");
+    // The path leaves' chain rule: the results every leaf read through
+    // moved since the serial a leaf last saw.
+    if (B.hasPropertyChains &&
+        B.propertyResults != B.pathLeafChainResults) {
+        B.pathLeafChainResults = B.propertyResults;
+        ++B.pathLeafChainSerial;
+    }
+    // The weight objects' point gathers, read by WeightPacket steps.
+    for (RigExecBakedProgramImpl::WeightObject &object : B.weightObjects) {
+        RigExecBakedSamplePathLeaves(&B, &object.pointLeaves, time, all);
+    }
     // Everything a frame reads off the stage for a chain, plus the one lock a
     // frame takes. Building the geometry state is reported once per node and
     // once per schedule, not once per program: a program rebuilt over state
@@ -2002,6 +2189,27 @@ RigExecBakedRunGeometryPrologue(RigExecBakedProgramImpl *program,
             }
         }
     };
+    // A revision's leaves, once its layout is resolved: a skin revision
+    // holding an epoch layout reads no per-frame layout arrays, so those
+    // keys wait until a run reads them.
+    std::vector<int> skip;
+    const auto sampleRevision =
+        [&B, time, all, &skip](RigExecBakedProgramImpl::GeomRevision *revision) {
+            skip.clear();
+            if (revision->topologyResolved && revision->topology) {
+                const RigExecRevisionLeafDecl &decl = revision->leaves.decl;
+                for (const RigExecRevisionLeafRole role :
+                     {RigExecRevisionLeafRole::JointIndices,
+                      RigExecRevisionLeafRole::JointWeights,
+                      RigExecRevisionLeafRole::ElementSize}) {
+                    if (decl.Role(role) >= 0) {
+                        skip.push_back(decl.Role(role));
+                    }
+                }
+            }
+            RigExecBakedSamplePathLeaves(&B, &revision->leaves, time, all,
+                                         skip);
+        };
     for (RigExecBakedProgramImpl::GeomChain &chain : B.chains) {
         VtVec3fArray basePoints;
         chain.haveBase =
@@ -2050,6 +2258,7 @@ RigExecBakedRunGeometryPrologue(RigExecBakedProgramImpl *program,
                  chain.revisions) {
             resolveTopology(&revision);
             resolveBlendLayouts(&revision, basePoints.size());
+            sampleRevision(&revision);
         }
         for (RigExecBakedProgramImpl::GeomChain::Derived &derived :
                  chain.derived) {
@@ -2086,6 +2295,7 @@ RigExecBakedRunGeometryPrologue(RigExecBakedProgramImpl *program,
                 !derived.haveResult || derivedBase != derived.lastBase;
             derived.lastBase = derivedBase;
             resolveTopology(&derived.revision);
+            sampleRevision(&derived.revision);
         }
     }
 }
@@ -2392,16 +2602,13 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
         // This is the half of the decision the packet and the status carry;
         // the chain's sticky bit and the influence table's own comparison are
         // ORed in by the fuse, which is the first step that has all three.
-        // The scalar the fuse's one diagnostic is about, read here because
-        // this step always runs and the fuse may not. Compared like every
-        // other source value: two different out-of-range weights can leave
-        // the packet identical, and the line the fuse emits is about the
-        // weight rather than about the packet.
-        revision.defaultWeight = 1.0f;
-        if (const UsdAttribute attribute =
-                revision.moverPrim.GetAttribute(_tokens->defaultWeight)) {
-            R.GetAttribute(attribute, time, &revision.defaultWeight);
-        }
+        // The scalar the fuse's one diagnostic is about, taken here (its
+        // leaf) because this step always runs and the fuse may not. Compared
+        // like every other source value: two different out-of-range weights
+        // can leave the packet identical, and the line the fuse emits is
+        // about the weight rather than about the packet.
+        revision.defaultWeight =
+            revision.leaves.Value<float>(revision.defaultWeightLeaf, 1.0f);
         revision.staticDirty = !revision.ran ||
                                revision.parameters != revision.lastParameters ||
                                revision.status != revision.lastStatus ||
@@ -2937,6 +3144,198 @@ RigExecBakedRunProjectorTarget(
         std::vector<GfVec3f>(chain.lastBase.begin(), chain.lastBase.end()),
         std::vector<GfVec3f>(chain.result.begin(), chain.result.end()),
         &resolved, time, matrix, diagnostics);
+}
+
+void
+RigExecBakedBindPathLeaves(const UsdStageRefPtr &stage,
+                           RigExecBakedPathLeaves *leaves)
+{
+    const size_t n = leaves->decl.keys.size();
+    leaves->attributes.assign(n, UsdAttribute());
+    leaves->hops.assign(n, std::vector<SdfPath>());
+    leaves->varying.assign(n, 0);
+    leaves->values.clear();
+    leaves->values.reserve(n);
+    for (size_t k = 0; k < n; ++k) {
+        const RigExecRevisionLeafKey &key = leaves->decl.keys[k];
+        if (stage && key.path.IsPropertyPath()) {
+            leaves->attributes[k] = stage->GetAttributeAtPath(key.path);
+        }
+        bool varying = false;
+        RigExecRevisionLeafHops(key, leaves->attributes[k], &leaves->hops[k],
+                                &varying);
+        leaves->varying[k] = varying ? 1 : 0;
+        leaves->values.push_back(key.fallback);
+    }
+    leaves->changed.assign(n, 0);
+    leaves->mustSample.assign(n, 0);
+    leaves->sampled = false;
+}
+
+void
+RigExecBakedSamplePathLeaves(RigExecBakedProgramImpl *program,
+                             RigExecBakedPathLeaves *leaves, UsdTimeCode time,
+                             bool all, const std::vector<int> &skip)
+{
+    RigExecBakedProgramImpl &B = *program;
+    const bool overrides =
+        B.interactiveOverrides && !B.interactiveOverrides->empty();
+    all = all || !leaves->sampled || leaves->stamp != B.programStamp;
+    const bool overridden = overrides || leaves->overrides;
+    const bool chainsMoved = leaves->chainSerial != B.pathLeafChainSerial;
+    const bool timeMoved = !leaves->sampled || time != leaves->time;
+    // Default and a numeric time read different opinions of an attribute
+    // that holds both, whatever its variance.
+    const bool defaultMoved =
+        timeMoved && (time.IsDefault() || leaves->time.IsDefault());
+    std::vector<SdfPath> hops;
+    for (size_t k = 0; k < leaves->decl.keys.size(); ++k) {
+        leaves->changed[k] = 0;
+        if (std::find(skip.begin(), skip.end(), int(k)) != skip.end()) {
+            leaves->mustSample[k] = 1;
+            continue;
+        }
+        const RigExecRevisionLeafKey &key = leaves->decl.keys[k];
+        const bool rebind = all || leaves->mustSample[k];
+        const bool atTime = key.time == RigExecRevisionLeafTime::AtTime;
+        if (!rebind && !overridden && !chainsMoved &&
+            !(atTime && timeMoved && (leaves->varying[k] || defaultMoved))) {
+            continue;
+        }
+        if (rebind) {
+            // An edit can author time samples where there were none.
+            bool varying = false;
+            RigExecRevisionLeafHops(key, leaves->attributes[k], &hops,
+                                    &varying);
+            leaves->varying[k] = varying ? 1 : 0;
+        }
+        leaves->mustSample[k] = 0;
+        ++B.pathLeafSamples;
+        VtValue value = RigExecSampleRevisionLeaf(
+            key, leaves->attributes[k], B.resolvedInputs, time);
+        leaves->changed[k] = value == leaves->values[k] ? 0 : 1;
+        leaves->values[k] = std::move(value);
+    }
+    leaves->sampled = true;
+    leaves->time = time;
+    leaves->stamp = B.programStamp;
+    leaves->overrides = overrides;
+    leaves->chainSerial = B.pathLeafChainSerial;
+}
+
+namespace {
+
+// The packet fields two assemblies disagree on, by name.
+std::string
+PacketDifference(const RigExecMoverParameters &a,
+                 const RigExecMoverParameters &b)
+{
+    std::string out;
+    const auto field = [&out](bool same, const char *name) {
+        if (!same) {
+            out += out.empty() ? name : std::string(", ") + name;
+        }
+    };
+    field(a.kind == b.kind, "kind");
+    field(a.enabled == b.enabled, "enabled");
+    field(a.valid == b.valid, "valid");
+    field(a.transform == b.transform, "transform");
+    field(a.radialWeight == b.radialWeight, "radialWeight");
+    field(a.weights == b.weights, "weights");
+    field(a.blendDeltas == b.blendDeltas, "blendDeltas");
+    field(a.blendSurfaceFrame == b.blendSurfaceFrame, "blendSurfaceFrame");
+    field(a.referenceVolume == b.referenceVolume, "referenceVolume");
+    field(a.strength == b.strength, "strength");
+    field(a.topologyCounts == b.topologyCounts, "topologyCounts");
+    field(a.topologyIndices == b.topologyIndices, "topologyIndices");
+    field(a.restPoints == b.restPoints, "restPoints");
+    field(a.auxPoints == b.auxPoints, "auxPoints");
+    field(a.bindCoords == b.bindCoords, "bindCoords");
+    field(a.widths == b.widths, "widths");
+    field(a.skinTransforms == b.skinTransforms, "skinTransforms");
+    field(a.skinIndices == b.skinIndices, "skinIndices");
+    field(a.skinWeights == b.skinWeights, "skinWeights");
+    field(a.skinElementSize == b.skinElementSize, "skinElementSize");
+    field(a.skinningMethod == b.skinningMethod, "skinningMethod");
+    field(a.skinTopology == b.skinTopology, "skinTopology");
+    return out.empty() ? std::string("another field") : out;
+}
+
+}  // namespace
+
+std::vector<std::string>
+RigExecBakedProgramTesting::ShadowAssembly(
+    const RigExecBakedProgram &program, const RigExecResolvedInputs &resolved,
+    UsdTimeCode time,
+    const std::function<void(const SdfPath &, RigExecRevisionLeafDecl *)>
+        &edit,
+    size_t *compared)
+{
+    RigExecBakedProgramImpl &B = *program._impl;
+    std::vector<std::string> report;
+    size_t count = 0;
+    // Both assemblies over the caller's resolved inputs, each on a copy of
+    // the revision, so the program keeps the state the run left.
+    RigExecResolvedInputs local = resolved;
+    RigExecResolvedInputs *const saved = B.resolvedInputs;
+    B.resolvedInputs = &local;
+    const auto shadow = [&](const RigExecBakedProgramImpl::GeomRevision &live,
+                            const GfVec3f *base, size_t baseCount) {
+        if (!live.leaves.decl.assembles) {
+            return;
+        }
+        ++count;
+        RigExecBakedProgramImpl::GeomRevision fromLeaves = live;
+        RigExecBakedProgramImpl::GeomRevision fromStage = live;
+        if (edit) {
+            edit(live.moverPath, &fromLeaves.leaves.decl);
+        }
+        std::vector<std::string> missing, leafLines, stageLines;
+        const RigExecMoverParameters a = RigExecBakedAssembleFromLeaves(
+            &B, &fromLeaves, base, baseCount, &leafLines, &missing);
+        const RigExecMoverParameters b = AssembleRevisionFromStage(
+            B, local, &fromStage, base, baseCount, time, &stageLines,
+            /*record=*/false);
+        const std::string where = live.moverPath.GetString();
+        for (const std::string &name : missing) {
+            report.push_back(where + ": undeclared read " + name);
+        }
+        if (!(a == b)) {
+            report.push_back(where + ": packets differ (" +
+                             PacketDifference(a, b) + ")");
+        }
+        if (RigExecStatusForParameters(a, live.moverPath) !=
+            RigExecStatusForParameters(b, live.moverPath)) {
+            report.push_back(where + ": statuses differ");
+        }
+        if (leafLines != stageLines) {
+            report.push_back(where + ": diagnostic lines differ");
+        }
+    };
+    for (const RigExecBakedProgramImpl::GeomChain &chain : B.chains) {
+        if (!chain.haveBase) {
+            continue;
+        }
+        for (const RigExecBakedProgramImpl::GeomRevision &revision :
+             chain.revisions) {
+            shadow(revision, chain.lastBase.cdata(), chain.lastBase.size());
+        }
+        if (!chain.haveResult) {
+            continue;
+        }
+        for (const RigExecBakedProgramImpl::GeomChain::Derived &derived :
+             chain.derived) {
+            if (!derived.matrixTarget && derived.haveBase) {
+                shadow(derived.revision, chain.result.cdata(),
+                       chain.result.size());
+            }
+        }
+    }
+    B.resolvedInputs = saved;
+    if (compared) {
+        *compared = count;
+    }
+    return report;
 }
 
 }  // namespace rigExec

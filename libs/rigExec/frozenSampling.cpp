@@ -606,6 +606,38 @@ _SampleStageFrameSeeds(const RigExecBakedProgram &program, UsdTimeCode time,
     return true;
 }
 
+// The path leaves of every chain revision the worker assembles from leaves
+// (every covered operation but a skin, whose packet travels whole), read by
+// the live prologue's own reads through the refreshed inputs at the job's
+// time: the worker assembles from these as the live RevisionStatic does from
+// its prologue's. Parallel to revisionIndex; empty for the rest.
+void
+_SampleRevisionLeaves(const RigExecBakedProgramImpl &B,
+                      const RigExecResolvedInputs *refreshed, UsdTimeCode time,
+                      RigExecFrameInputs *sampled)
+{
+    sampled->revisionLeaves.assign(B.revisionIndex.size(),
+                                   std::vector<VtValue>());
+    for (size_t r = 0; r < B.revisionIndex.size(); ++r) {
+        const auto &[chainIndex, revisionIndex] = B.revisionIndex[r];
+        const RigExecBakedPathLeaves &leaves =
+            B.chains[size_t(chainIndex)]
+                .revisions[size_t(revisionIndex)]
+                .leaves;
+        if (!leaves.decl.assembles ||
+            B.chains[size_t(chainIndex)].revisions[size_t(revisionIndex)].op ==
+                RigExecRevisionOp::Skin) {
+            continue;
+        }
+        std::vector<VtValue> &values = sampled->revisionLeaves[r];
+        values.reserve(leaves.decl.keys.size());
+        for (size_t k = 0; k < leaves.decl.keys.size(); ++k) {
+            values.push_back(RigExecSampleRevisionLeaf(
+                leaves.decl.keys[k], leaves.attributes[k], refreshed, time));
+        }
+    }
+}
+
 // Resolves every sparse blend sample's layout through the live cache,
 // exactly as the geometry prologue does (bakedGeometry.cpp
 // resolveBlendLayouts): the worker cannot take the cache's lock, so the
@@ -1498,7 +1530,9 @@ _SampleWithPinnedChainBindings(
     // Mover scalars the packet assembly reads per frame (enabled,
     // defaultWeight, skinningMethod), keyed by mover path, plus the derived
     // topology arrays (counts, indices, extent widths), keyed by binding
-    // path. The worker replays these; it cannot read the mover prim.
+    // path. The worker replays these; it cannot read the mover prim. For a
+    // revision the worker assembles from leaves (revisionLeaves), the
+    // samples of the same reads are what the digest folds for them.
     for (const auto &[chainIndex, revisionIndex] : B.revisionIndex) {
         const RigExecBakedProgramImpl::GeomRevision &revision =
             B.chains[size_t(chainIndex)].revisions[size_t(revisionIndex)];
@@ -1638,6 +1672,7 @@ _SampleWithPinnedChainBindings(
             /*weights=*/nullptr, time, &refreshed, B.skinTopologies,
             topology ? &topology : nullptr);
     }
+    _SampleRevisionLeaves(B, &refreshed, time, &sampled);
     {
         std::string layoutError;
         if (!_SampleBlendLayouts(B, time, &sampled, &layoutError)) {
@@ -2130,6 +2165,7 @@ RigExecSampleFrameInputsWithBurstCache(
             /*weights=*/nullptr, time, &refreshed, B.skinTopologies,
             topology ? &topology : nullptr);
     }
+    _SampleRevisionLeaves(B, &refreshed, time, &sampled);
     {
         std::string layoutError;
         if (!_SampleBlendLayouts(B, time, &sampled, &layoutError)) {

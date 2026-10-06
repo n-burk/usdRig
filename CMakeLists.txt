@@ -1236,8 +1236,9 @@ add_test(NAME testRigExecValueEdits COMMAND testRigExecValueEdits
 rigexec_add_baked_parity_test(testRigExecValueEdits REQUIRE_BAKE CONE_VERIFY
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
 
-# Sampled leaves: every patchable binding read before the region, equal to
-# the read it replaced, re-read exactly when that read can have moved.
+# Sampled leaves: every patchable binding and every packet assembly read
+# before the region, equal to the read it replaced, re-read exactly when
+# that read can have moved.
 add_executable(testRigExecLeaves tests/testRigExecLeaves.cpp)
 target_link_libraries(testRigExecLeaves PRIVATE rigExecBake)
 target_compile_definitions(testRigExecLeaves PRIVATE

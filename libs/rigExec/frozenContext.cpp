@@ -65,6 +65,7 @@ RigExecFrameInputs::Clear()
     time = UsdTimeCode::Default();
     values.clear();
     revisionPackets.clear();
+    revisionLeaves.clear();
     stageSeeds = RigExecStageFrameSeeds();
     chainDiagnostics.clear();
     chainResults.clear();

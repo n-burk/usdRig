@@ -32,7 +32,9 @@
 #include "pxr/usd/usd/timeCode.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
+#include <cstdint>
 #include <functional>
 #include <iterator>
 #include <map>
@@ -1515,6 +1517,148 @@ RigExecMoverParameters RigExecAssembleParameters(
     const RigExecRevisionBinding &binding,
     const RigExecProviderValues &values,
     UsdTimeCode time = UsdTimeCode::Default());
+
+/// What a revision leaf holds. Arrays are VtArrays, shared, not copied.
+enum class RigExecRevisionLeafType : uint8_t {
+    Bool,
+    Int,
+    Float,
+    Token,
+    IntArray,
+    FloatArray,
+    Vec2fArray,
+    Vec3fArray,
+};
+
+/// When a revision leaf is read: at the evaluated time, or at Default (an
+/// authored rest value).
+enum class RigExecRevisionLeafTime : uint8_t { AtTime, AtDefault };
+
+/// How a revision leaf is read; each is one read site of the stage
+/// assemblers, restated exactly (RigExecSampleRevisionLeaf).
+enum class RigExecRevisionLeafFlavour : uint8_t {
+    /// UsdAttribute::Get over the fallback (_Token, _RecordedToken).
+    Raw,
+    /// RigExecResolvedInputs::GetAttribute, then Raw (_Read, _Enabled).
+    Resolved,
+    /// RigExecResolvedInputs::GetAttribute alone, over the fallback (the
+    /// blend gather, RevisionStatic's defaultWeight, the weight gathers).
+    ResolvedOnly,
+    /// RigExecResolvedInputs::Get at the exact path, then Raw (_Array).
+    OverlayThenRaw,
+    /// Whether the resolved inputs hold the exact path, as a Bool.
+    Present,
+};
+
+/// The reads RigExecAssembleFromLeaves takes, one per read site of
+/// RigExecAssembleParameters for the operations it covers.
+enum class RigExecRevisionLeafRole : uint8_t {
+    Enabled,
+    DefaultWeight,
+    SkinningMethod,
+    ElementSize,
+    JointIndices,
+    JointWeights,
+    WeightBlend,
+    PointFrame,
+    DeltaSpace,
+    TopologyCounts,
+    TopologyIndices,
+    SurfacePoints,
+    BindCoords,
+    Widths,
+    Count,
+};
+
+/// One read a revision's assembly makes: the path, the value type, the time
+/// policy and the read site's flavour, plus what the site answers when the
+/// read finds nothing.
+struct RigExecRevisionLeafKey {
+    SdfPath path;
+    RigExecRevisionLeafType type = RigExecRevisionLeafType::Float;
+    RigExecRevisionLeafTime time = RigExecRevisionLeafTime::AtTime;
+    RigExecRevisionLeafFlavour flavour = RigExecRevisionLeafFlavour::Raw;
+    VtValue fallback;
+};
+
+/// The reads of one revision (or weight object), in declaration order, and
+/// which of them answers each role.
+struct RigExecRevisionLeafDecl {
+    std::vector<RigExecRevisionLeafKey> keys;
+    /// Key index per RigExecRevisionLeafRole, or -1 when the operation does
+    /// not read it (an empty binding path reads an empty array).
+    std::array<int, size_t(RigExecRevisionLeafRole::Count)> roles;
+    /// RigExecAssembleFromLeaves covers the operation.
+    bool assembles = false;
+
+    RigExecRevisionLeafDecl() { roles.fill(-1); }
+    int Add(RigExecRevisionLeafKey key) {
+        keys.push_back(std::move(key));
+        return int(keys.size()) - 1;
+    }
+    int Role(RigExecRevisionLeafRole role) const {
+        return roles[size_t(role)];
+    }
+};
+
+/// Whether RigExecAssembleFromLeaves covers \p op: matrix, skin, blend
+/// shape, volume correct, smooth, surface project, ribbon, guide points,
+/// normals and extent.
+bool RigExecRevisionOpAssemblesFromLeaves(RigExecRevisionOp op);
+
+/// Declares every read RigExecAssembleParameters can make for \p op on the
+/// mover at \p moverPath -- a superset of what one call reads, whichever
+/// branch its values take -- with the read site's flavour, time policy and
+/// fallback. Declares nothing when \p op is not covered. Stage-free.
+void RigExecDeclareRevisionLeaves(RigExecRevisionOp op,
+                                  const SdfPath &moverPath,
+                                  const RigExecRevisionBinding &binding,
+                                  RigExecRevisionLeafDecl *decl);
+
+/// The value \p key's read site answers at \p time (Default for an
+/// AtDefault key) through \p resolved, or the key's fallback when it finds
+/// nothing. \p attribute is the attribute at the key's path, invalid when
+/// none stands there. Reads the stage: owning thread only.
+VtValue RigExecSampleRevisionLeaf(const RigExecRevisionLeafKey &key,
+                                  const UsdAttribute &attribute,
+                                  const RigExecResolvedInputs *resolved,
+                                  UsdTimeCode time);
+
+/// The attributes \p key's read can reach from \p attribute: the attribute
+/// itself, and for a connection-following flavour every hop of the
+/// single-connection walk RigExecResolvedInputs::GetAttribute takes. Sets
+/// \p varying when the read is at the time and some hop's value might vary
+/// with it. Reads the stage: owning thread only.
+void RigExecRevisionLeafHops(const RigExecRevisionLeafKey &key,
+                             const UsdAttribute &attribute,
+                             std::vector<SdfPath> *hops, bool *varying);
+
+/// Sampled revision leaves as RigExecAssembleFromLeaves reads them.
+struct RigExecRevisionLeafView {
+    const RigExecRevisionLeafDecl *decl = nullptr;
+    /// One value per key of \p decl.
+    const std::vector<VtValue> *values = nullptr;
+    /// The revision's phase overlay (the generation's resolved inputs plus
+    /// the points its phased reads resolved to this run), or null. A points
+    /// read takes the overlay's array at its path before the leaf, as the
+    /// stage assembler reads through that overlay. The overlay adds only
+    /// point arrays, so no other read can see it.
+    const RigExecResolvedInputs *phased = nullptr;
+    /// When set, every scalar role the operation reads that \p decl does not
+    /// declare is appended by attribute name (a test's report); the read
+    /// answers the site's fallback.
+    std::vector<std::string> *missing = nullptr;
+};
+
+/// RigExecAssembleParameters for a covered operation, from sampled leaves:
+/// the same arms, gates and order, with every stage read replaced by its
+/// leaf. Reads no stage, takes no lock and builds no token from text.
+/// \p values carries the provider values as for the stage assembler; its
+/// `resolved` and `skinTopologyCache` are not read.
+RigExecMoverParameters RigExecAssembleFromLeaves(
+    RigExecRevisionOp op, const RigExecRevisionBinding &binding,
+    const RigExecRevisionLeafView &leaves,
+    const RigExecProviderValues &values);
 
 /// A compiled mover graph.
 ///
