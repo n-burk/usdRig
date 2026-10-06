@@ -3269,11 +3269,8 @@ RigExecBakedRunInputs(RigExecBakedProgramImpl *program, UsdTimeCode time)
     RigExecBakedProgramImpl &B = *program;
     RIGEXEC_PROFILE_SCOPE_CAT(*B.profiler, "BakedInputs", "baked");
     // The rest and ladder ops composed the provider ladder before this
-    // (RigExecBakedRunRestTier). What is settled here is the solver
-    // refresh gate: a run on which a ladder channel varies with time or
-    // resolves through a property chain (settled at Build), a drag stands
-    // on one of its channels, or such a drag was released the run before --
-    // the one-more-pass the avar table below owes its own constants.
+    // (RigExecBakedRunRestTier), and each Solve step refreshes from the
+    // rests that moved there. `ladderDisturbed` is only recorded.
     bool ladderDragged = false;
     if (B.anyOverridden) {
         for (const int index : B.ladderOverrides) {
@@ -3283,11 +3280,7 @@ RigExecBakedRunInputs(RigExecBakedProgramImpl *program, UsdTimeCode time)
             }
         }
     }
-    B.ladderRecomputed = B.ladderVarying || ladderDragged ||
-                         B.ladderDisturbed;
-    if (B.ladderRecomputed) {
-        B.ladderDisturbed = ladderDragged;
-    }
+    B.ladderDisturbed = ladderDragged;
     // Every read below is a leaf RigExecBakedSampleLeaves left this run.
     for (const auto &binding : B.avarBindings) {
         B.avars[binding.slot] = RigExecBakedLeafRead(B, binding.input);
@@ -4070,15 +4063,28 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
                 liveFlags[k] = s.restIsLive[k];
             }
         }
-        // The rest description, where this run recomposed the rests it is
-        // measured from. Pure arithmetic over the ladder the prologue left:
-        // no lock, no USD read and no pose write, which is what lets it sit
-        // in a step body at all.
+        // The rest description, where the rest tier moved a rest it is
+        // measured from this run (`restSlots` holds the space slot too), or
+        // where the closure trusts nothing it holds: a full run can follow
+        // a generation whose rest tier moved rests and whose region never
+        // ran. The refresh is a pure function of those rests, so skipping
+        // it over unchanged ones keeps the description it would write
+        // (TestRefreshSolverRestsOnBuildStateIsIdentity). Pure arithmetic
+        // over the tables the prologue left: no lock, no USD read and no
+        // pose write, which is what lets it sit in a step body at all.
         // A LIVE rest depends on THIS frame pose, so a solver carrying one
-        // refreshes on every evaluation and not only when the prologue
-        // recomposed the ladder.
-        if ((B.ladderRecomputed && !s.restSlots.empty()) || s.hasLiveRest) {
+        // refreshes on every evaluation.
+        bool refresh =
+            s.hasLiveRest || (B.closureFull && !s.restSlots.empty());
+        for (size_t k = 0; !refresh && k < s.restSlots.size(); ++k) {
+            const size_t slot = size_t(s.restSlots[k]);
+            refresh = slot < B.restChanged.size() && B.restChanged[slot];
+        }
+        if (refresh) {
             RefreshSolverRests(B, &s);
+            if (!B.measurementSuspended) {
+                ++s.restRefreshes;
+            }
         }
         RigExecPointFrameArray &aggregate = B.aggregates[size_t(step->object)];
         aggregate.frames.clear();

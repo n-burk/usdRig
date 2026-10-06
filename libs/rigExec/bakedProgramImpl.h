@@ -1871,18 +1871,14 @@ struct RigExecBakedProgramImpl {
     /// Consulted only while a drag stands, to decide whether that drag is
     /// one of THESE inputs.
     std::vector<int> ladderOverrides;
-    /// True while the ladder still holds values recomputed for a drag; the
-    /// same one-more-pass rule the avar table's `avarsDisturbed` states.
+    /// True while a drag stands on a ladder channel. Written by
+    /// RigExecBakedRunInputs and read by nothing: the rest tier answers a
+    /// release by value, and each solver refreshes on its own rests.
     bool ladderDisturbed = false;
     /// The slots whose Rest or Ladder output moved this run, in slot order.
     /// Written by the rest tier and read by nothing: the closure seeds from
     /// `restMoved` and `ladderMoved`.
     std::vector<int> ladderMovedSlots;
-    /// True on a run where a ladder channel varies, is dragged, or was
-    /// dragged the run before. A solver rest description is rebuilt from
-    /// the rests on these runs -- including the one after a drag is
-    /// released. Read only by the Solve step's rest-refresh gate.
-    bool ladderRecomputed = false;
     /// Per slot, whether the REST CHAIN reaching it can move within the
     /// epoch: its own rest channels, or any ancestor's. A solver measures
     /// its description from these, so it is the question a solver asks.
@@ -2081,10 +2077,11 @@ struct RigExecBakedProgramImpl {
         TfToken type;
         // Exec rebuilds every one of the rest members below from the
         // epoch's rests on EVERY evaluation, because it is a pure function
-        // of them. The bake resolves it once, and RigExecBakedRefreshSolver
-        // Rests resolves it again on any run whose prologue recomposed the
-        // ladder -- which is what lets a solver measure against an animated,
-        // chain-written or dragged rest instead of refusing the rig.
+        // of them. The bake resolves it once, and the Solve step resolves it
+        // again (RefreshSolverRests) on a run on which one of its
+        // `restSlots` moved -- which is what lets a solver measure against
+        // an animated, chain-written or dragged rest instead of refusing
+        // the rig.
         /// Every provider slot whose rest this description folded in.
         std::vector<int> restSlots;
         /// (slot, element) for the two computations that remap by element:
@@ -2103,6 +2100,10 @@ struct RigExecBakedProgramImpl {
         /// per-frame: it is refreshed on EVERY evaluation and can never be
         /// concluded constant.
         bool hasLiveRest = false;
+        /// Test hook: how many times the Solve step refreshed this
+        /// description, the cone verifier's second pass excluded. Written
+        /// only by this solver's own Solve step; read by no step.
+        uint64_t restRefreshes = 0;
         /// One per rest ref, in element order: the basis a solver APPLIES its
         /// solved map to. For RigExecFkChain that is the joint's rest
         /// reference rather than the control's own rest, so a step below the
@@ -2608,6 +2609,12 @@ struct RigExecBakedProgramImpl {
     /// value like any other and is compared like one (§7).
     uint64_t programStamp = 0;
     uint64_t lastProgramStamp = 0;
+    /// Whether the closure this run computed trusts nothing it holds (a
+    /// forced run, or a moved program stamp). Set by
+    /// RigExecBakedComputeClosure before any region step runs and read by
+    /// the Solve step's rest-refresh gate: such a run can follow a
+    /// generation whose rest tier moved rests and whose region never ran.
+    bool closureFull = false;
     /// How many clusters the last run ran, and how many there are, for the
     /// schedule run report.
     size_t lastClosedClusters = 0;

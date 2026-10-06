@@ -28,6 +28,7 @@
 #include "pxr/base/vt/array.h"
 #include "pxr/usd/sdf/types.h"
 #include "pxr/usd/usd/attribute.h"
+#include "pxr/usd/usd/editContext.h"
 #include "pxr/usd/usd/notice.h"
 #include "pxr/usd/usd/prim.h"
 #include "pxr/usd/usd/stage.h"
@@ -350,6 +351,40 @@ TestAChainMoverInputReachesThroughTheChain(const std::string &examplesDir)
         float v = 1.0f;
         a.Get(&v);
         CHECK(a.Set(v >= 0.5f ? v - 0.25f : v + 0.25f));
+    };
+    RunCase(c);
+}
+
+// A keyed rest a solver measures its bone lengths from, edited at the held
+// time: the rest tier recomposes it, and the solver, holding no live rest
+// on a run that is not full, re-measures only because one of its own rests
+// moved. (An edit on a static rest rebuilds the program instead.) Authored
+// in the session layer, which no other case opens.
+const SdfPath kIkSpaceRig("/IkSpaceAsset/Rig");
+const SdfPath kIkSpaceKnee("/IkSpaceAsset/Rig/Joints/Hip/Knee");
+
+void
+TestAKeyedRestSampleReachesItsSolver(const std::string &examplesDir)
+{
+    Case c;
+    c.name = "keyed rest under a solver";
+    c.stagePath = examplesDir + "/../tests/fixtures/computed_ik_space.usda";
+    c.rig = kIkSpaceRig;
+    c.time = 5.0;
+    c.setup = [](const UsdStageRefPtr &stage) {
+        UsdEditContext session(stage, stage->GetSessionLayer());
+        const UsdAttribute a =
+            stage->GetPrimAtPath(kIkSpaceKnee)
+                .CreateAttribute(TfToken("rest:ty"),
+                                 SdfValueTypeNames->Double);
+        CHECK(a.Set(0.0, UsdTimeCode(1.0)));
+        CHECK(a.Set(0.25, UsdTimeCode(5.0)));
+        CHECK(a.Set(0.5, UsdTimeCode(10.0)));
+    };
+    c.edit = [](const UsdStageRefPtr &stage) {
+        UsdEditContext session(stage, stage->GetSessionLayer());
+        CHECK(Attr(stage, kIkSpaceKnee, "rest:ty")
+                  .Set(0.75, UsdTimeCode(5.0)));
     };
     RunCase(c);
 }
@@ -746,6 +781,7 @@ main(int argc, char **argv)
     TestLayerMetadataRebuilds(examplesDir);
     TestANamedInputNoStepDeclaresBumpsTheStamp(examplesDir);
     TestAConnectedChainSourceIsReported(examplesDir);
+    TestAKeyedRestSampleReachesItsSolver(examplesDir);
 
     } catch (const std::exception &error) {
         std::printf("FAIL: threw: %s\n", error.what());

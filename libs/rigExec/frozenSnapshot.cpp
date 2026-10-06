@@ -60,8 +60,6 @@ _CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst)
     D.ladderOverrides = src.ladderOverrides;
     D.ladderDisturbed = src.ladderDisturbed;
     D.ladderMovedSlots = src.ladderMovedSlots;
-    D.ladderWatched = src.ladderWatched;
-    D.ladderRecomputed = src.ladderRecomputed;
     D.restChainVaries = src.restChainVaries;
     D.posedAuthored = src.posedAuthored;
     D.posedAuthoredM = src.posedAuthoredM;

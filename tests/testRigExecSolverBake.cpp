@@ -1024,14 +1024,14 @@ CheckRibbonPointsEdit(const char *what, bool editDefault)
 // TestRefreshSolverRestsOnBuildStateIsIdentity.
 //
 // The Solve step rebuilds a solver's rest description (RefreshSolverRests)
-// only on a run that recomposed the ladder. Skipping it is sound only if a
-// refresh over unchanged rests reproduces, bit for bit, the description the
-// solver already holds. Each refresh is compared with the description the
-// solver holds now and, wherever the solver's rests are bit-identical to the
-// ones Build measured from, with the Build description. A run that already
-// refreshed the solver makes the first comparison a determinism check only;
-// the second is the one a per-solver skip relies on, including on a run that
-// recomposed the ladder for another solver's rests. A rest ref read LIVE
+// only on a run on which one of its own rests moved. Skipping it is sound
+// only if a refresh over unchanged rests reproduces, bit for bit, the
+// description the solver already holds. Each refresh is compared with the
+// description the solver holds now and, wherever the solver's rests are
+// bit-identical to the ones Build measured from, with the Build description.
+// A run that already refreshed the solver makes the first comparison a
+// determinism check only; the second is the one a per-solver skip relies on,
+// including on a run that moved another solver's rests. A rest ref read LIVE
 // from `fin` differs from Build's authored rest by design and refreshes
 // every run, so each field fed by one is excluded.
 
@@ -1297,7 +1297,8 @@ struct RestCounts {
     size_t excluded = 0;
     /// Against the Build description, where the rests are Build's.
     size_t sinceBuild = 0;
-    /// The subset of `sinceBuild` on a run that recomposed the ladder.
+    /// The subset of `sinceBuild` on a run on which the rest tier moved a
+    /// rest: another solver's, since this one's are still Build's.
     size_t sinceBuildRecomposed = 0;
 };
 
@@ -1357,7 +1358,7 @@ CompareProgramRests(const std::string &where,
         since.where = name + " against Build";
         CompareRestDescription(build->solvers[i], refreshed, &since);
         counts->sinceBuild += since.compared;
-        if (B.ladderRecomputed) {
+        if (!B.restMoved.empty()) {
             counts->sinceBuildRecomposed += since.compared;
         }
     }
@@ -1397,7 +1398,7 @@ CompileFixture(const char *what, const UsdStageRefPtr &stage)
 }
 
 /// Returns the fields compared against the Build description on a run
-/// that recomposed the ladder.
+/// that moved another rest.
 size_t
 TestRefreshSolverRestsOnBuildStateIsIdentity(const char *what,
                                              const MakeStage &make)
@@ -1515,7 +1516,8 @@ TestRefreshSolverRestsOnBuildStateIsIdentity(const char *what,
 
     std::printf("%s: %zu rest field(s) compared with the held description, "
                 "%zu live field(s) excluded, %zu compared with Build's "
-                "(%zu on a recomposed ladder); the drag moved %zu field(s)\n",
+                "(%zu on a run that moved a rest); the drag moved %zu "
+                "field(s)\n",
                 what, counts.compared, counts.excluded, counts.sinceBuild,
                 counts.sinceBuildRecomposed, moved.differing);
     return counts.sinceBuildRecomposed;
@@ -1751,6 +1753,116 @@ TestASpaceRestMoveReachesTheSolve(const std::string &examples)
     }
     std::printf("a moved space rest: %zu of %zu generation(s) disagreed\n",
                 disagreeing, generations);
+}
+
+// TestASolverRefreshesOnlyForItsOwnRests.
+//
+// The Solve step refreshes a solver's rest description only on a run on
+// which a rest it measures from moved: one of its `restSlots`, the space
+// slot among them. On computed_ik_space a keyed rest on the leg's Hip joint
+// moves LegIK's rests and no other solver's, and a keyed rest on the Master
+// control moves ArmIK's space rest alone (and TailIK's, whose space and
+// spline controls sit under Master). Either way the ladder varies, which is
+// the case where a program-wide gate would refresh every solver on every
+// run. Counters are Solver::restRefreshes, which excludes the cone
+// verifier's second pass.
+
+const SdfPath kIkSpaceHipJoint("/IkSpaceAsset/Rig/Joints/Hip");
+const SdfPath kIkSpaceArmIk("/IkSpaceAsset/Rig/Solvers/ArmIK");
+const SdfPath kIkSpaceLegIk("/IkSpaceAsset/Rig/Solvers/LegIK");
+const SdfPath kIkSpaceReachIk("/IkSpaceAsset/Rig/Solvers/ReachIK");
+const SdfPath kIkSpaceTailIk("/IkSpaceAsset/Rig/Solvers/TailIK");
+
+/// computed_ik_space with \p attribute on \p prim keyed {1: 0, 10: \p last}
+/// in the session layer.
+MakeStage
+KeyedIkSpaceRest(const std::string &examples, const SdfPath &prim,
+                 const char *attribute, double last)
+{
+    const std::string file =
+        examples + "/../tests/fixtures/computed_ik_space.usda";
+    const std::string name(attribute);
+    return [file, prim, name, last] {
+        const UsdStageRefPtr stage = UsdStage::Open(file);
+        if (!stage) return stage;
+        UsdEditContext session(stage, stage->GetSessionLayer());
+        UsdAttribute a = stage->GetPrimAtPath(prim).CreateAttribute(
+            TfToken(name), SdfValueTypeNames->Double);
+        a.Set(0.0, UsdTimeCode(1.0));
+        a.Set(last, UsdTimeCode(10.0));
+        return stage;
+    };
+}
+
+/// Evaluates \p make at frames 1, 5 and 10 against dynamic, then requires
+/// a refresh of every solver in \p refreshing and none of every solver in
+/// \p still.
+void
+CheckOwnRestRefreshes(const char *what, const MakeStage &make,
+                      const std::vector<SdfPath> &refreshing,
+                      const std::vector<SdfPath> &still)
+{
+    EvaluatorPair pair;
+    if (!MakeEvaluatorPair(what, make, &pair)) return;
+    RigExecRigPose dynamic;
+    for (const double frame : {1.0, 5.0, 10.0}) {
+        GenerationsAgree(std::string(what) + " frame " +
+                             std::to_string(int(frame)),
+                         &pair, frame, &dynamic);
+    }
+    const RigExecBakedProgram *program = pair.baked->GetBakedProgram();
+    if (!program) {
+        ++failures;
+        std::printf("FAIL %s: no baked program\n", what);
+        return;
+    }
+    const RigExecBakedProgramImpl &B = program->GetStepGraph();
+    if (!B.ladderVarying) {
+        ++failures;
+        std::printf("FAIL %s: the ladder does not vary, so the case says "
+                    "nothing\n",
+                    what);
+    }
+    const auto refreshesOf = [&B](const SdfPath &path) -> long long {
+        for (const SolverDesc &s : B.solvers) {
+            if (s.path == path) return (long long)s.restRefreshes;
+        }
+        return -1;
+    };
+    for (const SdfPath &path : refreshing) {
+        const long long n = refreshesOf(path);
+        std::printf("%s: %s refreshed %lld time(s)\n", what, path.GetText(),
+                    n);
+        if (n <= 0) {
+            ++failures;
+            std::printf("FAIL %s: %s never refreshed its rests\n", what,
+                        path.GetText());
+        }
+    }
+    for (const SdfPath &path : still) {
+        const long long n = refreshesOf(path);
+        std::printf("%s: %s refreshed %lld time(s)\n", what, path.GetText(),
+                    n);
+        if (n != 0) {
+            ++failures;
+            std::printf("FAIL %s: %s refreshed although none of its rests "
+                        "moved\n",
+                        what, path.GetText());
+        }
+    }
+}
+
+void
+TestASolverRefreshesOnlyForItsOwnRests(const std::string &examples)
+{
+    CheckOwnRestRefreshes(
+        "a keyed rest on the leg's hip joint",
+        KeyedIkSpaceRest(examples, kIkSpaceHipJoint, "rest:tx", 1.5),
+        {kIkSpaceLegIk}, {kIkSpaceArmIk, kIkSpaceReachIk, kIkSpaceTailIk});
+    CheckOwnRestRefreshes(
+        "a keyed rest on the arm's space",
+        KeyedIkSpaceRest(examples, kIkSpaceMaster, "rest:ry", 20.0),
+        {kIkSpaceArmIk, kIkSpaceTailIk}, {kIkSpaceLegIk, kIkSpaceReachIk});
 }
 
 // The space-rest candidates. The refresh writes Solver::spaceRest from
@@ -2115,16 +2227,17 @@ main(int argc, char **argv)
             recomposed += TestRefreshSolverRestsOnBuildStateIsIdentity(
                 what.c_str(), make);
         }
-        // A skipped refresh while another solver's rests recompose is the
-        // case the gate exists for, so it has to have been exercised.
+        // A skipped refresh while another solver's rests move is the case
+        // the per-solver gate exists for, so it has to have been exercised.
         if (recomposed == 0) {
             ++failures;
             std::printf("FAIL no solver kept Build's rests on a run that "
-                        "recomposed the ladder\n");
+                        "moved another rest\n");
         }
     }
 
     TestASpaceRestMoveReachesTheSolve(argv[1]);
+    TestASolverRefreshesOnlyForItsOwnRests(argv[1]);
 
     if (failures) {
         std::printf("testRigExecSolverBake: %d FAILURE(S)\n", failures);

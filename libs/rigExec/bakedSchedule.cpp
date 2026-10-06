@@ -2209,6 +2209,7 @@ RigExecBakedComputeClosure(RigExecBakedProgramImpl *program, UsdTimeCode time,
     // that persist across runs like every other slot. The first run of a
     // program is NOT one of them either -- it has its own dirty set below.
     bool full = force || B.programStamp != B.lastProgramStamp;
+    B.closureFull = full;
     if (full) {
         // Everything; the closure below is not consulted.
     } else if (!B.everRan) {

@@ -294,23 +294,8 @@ _FrozenPrologue(_FrozenWorker *worker, const RigExecFrozenProgram &snapshot,
     // move records and run numbers first.
     RigExecBakedRunRestTier(&B, pose, /*force=*/false, /*verify=*/false);
 
-    // RunInputs: the solver refresh gate, with live's predicate and its
-    // one-more-run after a drag on a ladder channel is released (the
-    // clone's ladderDisturbed is live's); everything else replays leaves.
-    bool ladderDragged = false;
-    if (B.anyOverridden) {
-        for (const int ladderIndex : B.ladderOverrides) {
-            if (B.overridden[size_t(ladderIndex)]) {
-                ladderDragged = true;
-                break;
-            }
-        }
-    }
-    B.ladderRecomputed =
-        B.ladderVarying || ladderDragged || B.ladderDisturbed;
-    if (B.ladderRecomputed) {
-        B.ladderDisturbed = ladderDragged;
-    }
+    // RunInputs, replayed from leaves. The Solve steps refresh from the
+    // rests the tier above moved against the clone's tables.
     for (const auto &binding : B.avarBindings) {
         B.avars[binding.slot] = RigExecBakedLeafRead(B, binding.input);
     }
