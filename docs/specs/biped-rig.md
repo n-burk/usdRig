@@ -28,6 +28,42 @@ lists the available layers and their composition.
 | Feet | Heel, toe, ball-roll, and bank controls beneath the leg IK controls |
 | Face | Skull, upper/lower face, jaw, nose, eyes, brows, and mouth layers |
 
+Switch a limb between IK and FK with its button in the Control Picker, or by
+right-clicking any of its controls in usdview and choosing **Switch ... to IK**
+(or **FK**). The switch first matches the half that takes over to the limb's
+current joints, so the limb does not move, and the whole change is one undo
+step. In animation write mode the switch keys the channels it sets.
+
+Space switches (`avars:space`, in `Biped_spaces.usda`):
+
+| Control | Spaces (index order) | Default |
+|---|---|---|
+| `L_ArmIK`, `R_ArmIK` | world, chest, head, hip_swivel, hips | world |
+| `L_LegIK`, `R_LegIK` | world, hip_swivel, hips | world |
+| `L_ArmPV`, `R_ArmPV` | world, chest, hand | world |
+| `L_LegPV`, `R_LegPV` | world, pelvis, foot | foot |
+| `L_UpArmSwing`, `R_UpArmSwing` | local, world, hips | world |
+| `M_Neck`, `M_Head` | local, world, hips | local |
+| `M_Look` | local, world | local |
+
+The IK, pole and look spaces are full parent spaces. The shoulder swing, neck
+and head **world** and **hips** spaces are rotation-only (`orient`): the
+control keeps its rotation in that space while its position still rides on
+the body. "world" is the `Aux` master. A space button in the Control Picker
+switches without moving the control: it solves the control's translate and
+rotate channels in the new space, and the whole change is one undo step that
+keys in animation write mode.
+
+The clavicles follow the arms (`Biped_autoclav.usda`): raising or swinging an
+arm turns its shoulder point about the clavicle by a fraction of the arm's
+swing, weighted by how far the arm is up, down, forward or back, so the
+shoulder lifts with a raised arm. In FK the swing is read from the FK upper
+arm; in IK it is estimated from the IK hand and pole. The arm itself keeps its
+orientation; only its root moves, and the skinned clavicle follows. The dial is
+`avars:autoClav` on `L_Shldr` and `R_Shldr`: 1 (the default) is the full
+effect and 0 turns it off. A matched IK/FK switch still leaves the arm where
+it is.
+
 Use the RigExec viewport tools and graph editor to edit controls and animate
 scalar channels. Keep edits in a separate layer when comparing against the
 reference stage. Native transform controls, solver output joints, and

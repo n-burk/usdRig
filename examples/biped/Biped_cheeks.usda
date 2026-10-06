@@ -2173,8 +2173,6 @@ def "Biped"
                                                     {
                                                         def "M_Skull"
                                                         {
-                                                            custom double avars:space = 0
-
                                                             def "M_UpFace"
                                                             {
                                                                 def RigExecControl "cheek_l_auto" (

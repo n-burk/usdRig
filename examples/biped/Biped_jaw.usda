@@ -112,8 +112,6 @@ over "Biped"
                                                     {
                                                         over "M_Skull"
                                                         {
-                                                            custom double avars:space = 0
-
                                                             over "M_LoFace"
                                                             {
                                                                 def RigExecControl "jaw_compression_auto" (

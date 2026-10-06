@@ -467,7 +467,8 @@ class RigExecUsdviewContainer(PluginContainer):
                     0, os.path.dirname(os.path.abspath(__file__)))
                 import outlinerArcMenu
             outlinerArcMenu.InstallPrimContextMenuHook(
-                self._api, self._UndoStack())
+                self._api, self._UndoStack(),
+                extras=(self.AppendIkFkItem,))
         except Exception as error:
             Tf.Warn("rigExecUsdview: prim menu arcs unavailable: %s"
                     % error)
@@ -878,6 +879,108 @@ class RigExecUsdviewContainer(PluginContainer):
                     0.0 if isDefault else time.GetValue(), int(isDefault), values):
             return None
         return Gf.Matrix4d(*[tuple(values[r*4:(r+1)*4]) for r in range(4)])
+
+    def _IkFkLimbs(self, stage):
+        """The stage's switchable limbs, found once per stage."""
+        try:
+            import ikfkMatch
+        except ImportError:
+            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+            import ikfkMatch
+        if getattr(self, "_ikfkStage", None) is not stage:
+            self._ikfkStage = stage
+            self._ikfkLimbs = ikfkMatch.FindLimbs(stage)
+            self._ikfkRest = {}
+        return ikfkMatch, self._ikfkLimbs
+
+    def _IkFkTargets(self, api, prim):
+        """The limbs a right-click on `prim` switches: its own, and when it
+        is part of the selection, every selected control's."""
+        ikfkMatch, limbs = self._IkFkLimbs(api.stage)
+        clicked = ikfkMatch.LimbFor(limbs, prim.GetPath())             if prim is not None else None
+        if clicked is None:
+            return []
+        selected = [p.GetPath() for p in api.dataModel.selection.getPrims()]
+        chosen = [clicked]
+        if prim.GetPath() in selected:
+            for path in selected:
+                limb = ikfkMatch.LimbFor(limbs, path)
+                if limb is not None and limb not in chosen:
+                    chosen.append(limb)
+        return chosen
+
+    def AppendIkFkItem(self, menu, prim, usdviewApi=None):
+        """usdview's right-click menu: on a control of a switchable limb,
+        "Switch <limb> to IK / FK". Adds nothing anywhere else."""
+        api = usdviewApi or self._api
+        stage = getattr(api, "stage", None)
+        if stage is None or prim is None or not prim.IsValid():
+            return None
+        limbs = self._IkFkTargets(api, prim)
+        if not limbs:
+            return None
+        time = self._IkFkTime(api)
+        names = ", ".join(
+            "%s to %s" % (limb.switchControl.name,
+                          "FK" if limb.IsIk(stage, time) else "IK")
+            for limb in limbs)
+        menu.addSeparator()
+        action = menu.addAction("Switch " + names)
+        action.triggered.connect(
+            lambda *_: self.SwitchIkFk(api, limbs))
+        return action
+
+    @staticmethod
+    def _IkFkTime(api):
+        frame = getattr(api, "frame", None)
+        if isinstance(frame, Usd.TimeCode):
+            return frame
+        return Usd.TimeCode(float(frame)) if frame is not None else             Usd.TimeCode.Default()
+
+    def SwitchIkFk(self, usdviewApi=None, limbs=None):
+        """Switch `limbs` (default: every limb a selected control belongs
+        to) to their other half, matched, as one undo entry. Returns
+        [(limb, toIk, channels)]."""
+        api = usdviewApi or self._api
+        stage = getattr(api, "stage", None)
+        if stage is None:
+            return []
+        ikfkMatch, known = self._IkFkLimbs(stage)
+        import gizmoMath
+        chosen = list(limbs or [])
+        if not chosen:
+            for prim in api.dataModel.selection.getPrims():
+                limb = ikfkMatch.LimbFor(known, prim.GetPath())
+                if limb is not None and limb not in chosen:
+                    chosen.append(limb)
+        if not chosen:
+            return []
+        time = self._IkFkTime(api)
+        mode = gizmoMath.WRITE_ANIMATION
+        try:
+            import gizmoUI
+            controller = gizmoUI.GetController(api)
+            if controller is not None:
+                mode = controller.WriteMode()
+        except Exception:
+            pass
+        try:
+            done = ikfkMatch.SwitchLimbs(stage, chosen, time, mode,
+                                         self._UndoStack(), self._ikfkRest)
+        except Exception as error:
+            self._ShowStatus(api, "Switch IK / FK failed: %s" % error)
+            return []
+        self._ShowStatus(api, "Switched " + ", ".join(
+            "%s to %s" % (limb.switchControl.name, "IK" if toIk else "FK")
+            for limb, toIk, _ in done) + " (matched)")
+        return done
+
+    @staticmethod
+    def _ShowStatus(api, text):
+        window = getattr(api, "qMainWindow", None)
+        bar = window.statusBar() if window is not None else None
+        if bar is not None:
+            bar.showMessage(text, 6000)
 
     def _ToggleViewportTools(self):
         """Menu item: show or hide the toolbar and its manipulators."""

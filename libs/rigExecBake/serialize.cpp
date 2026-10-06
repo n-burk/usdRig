@@ -862,6 +862,32 @@ RigExecBakeConvertDomainPose(const RigExecBakedProgramImpl &program,
         }
         pose.spaceSwitches.push_back(std::move(out));
     }
+    // Memory only: the AutoClavicle section carries these (see bake.cpp).
+    for (const RigExecBakedProgramImpl::AutoClavicle &ac :
+         program.autoClavicles) {
+        RigExecWireAutoClavicle out;
+        out.slot = int32_t(ac.slot);
+        out.pivotSlot = int32_t(ac.pivotSlot);
+        out.anchorSlot = int32_t(ac.anchorSlot);
+        for (int i = 0; i < 3; ++i) out.fkSlot[i] = int32_t(ac.fkSlot[i]);
+        out.ikTargetSlot = int32_t(ac.ikTargetSlot);
+        out.poleSlot = int32_t(ac.poleSlot);
+        out.ikBlend = ac.ikBlendIsFloat ? _ToInput(ac.ikBlendFloat, writer)
+                                        : _ToInput(ac.ikBlendInput, writer);
+        out.amount = ac.amountIsFloat ? _ToInput(ac.amountFloat, writer)
+                                      : _ToInput(ac.amountInput, writer);
+        const RigExecAutoClavicleConstants &c = ac.constants;
+        for (int k = 0; k < 9; ++k) out.basis[k] = c.basis[k];
+        out.ikValue = c.ikValue;
+        out.gain = c.gain;
+        out.kernel = uint8_t(c.kernel);
+        out.normalize = c.normalize ? 1 : 0;
+        out.swings = c.swings;
+        out.widths = c.widths;
+        out.gains = c.gains;
+        out.weights = c.weights;
+        pose.autoClavicles.push_back(std::move(out));
+    }
     pose.commits.reserve(program.commits.size());
     for (const RigExecBakedCommit &commit : program.commits) {
         RigExecWireCommit out;

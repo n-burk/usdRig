@@ -328,10 +328,22 @@ RrBlendTransforms(const RrMat4d &a, const RrMat4d &b, double weight)
 }
 
 RrMat4d
+RrOrientSpaceDelta(const RrMat4d &delta, const RrMat4d &local,
+                   const RrMat4d &localInverse, const RrMat4d &unswitched)
+{
+    RrMat4d frame = delta * local;
+    frame[3][0] = unswitched[3][0];
+    frame[3][1] = unswitched[3][1];
+    frame[3][2] = unswitched[3][2];
+    return frame * localInverse;
+}
+
+RrMat4d
 RrFilterSpaceRotation(const RrMat4d &m, const RrVec3d &axis,
                       RrRotationFilter filter)
 {
-    if (filter == RrRotationFilter::All) {
+    if (filter == RrRotationFilter::All ||
+        filter == RrRotationFilter::Orient) {
         return m;
     }
     const double length = axis.GetLength();

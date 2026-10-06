@@ -174,6 +174,22 @@ def "Biped"
                     uniform color4f ui:valueColor = (0.92156863, 0.92156863, 0.92156863, 1)
                 }
 
+                def RigExecPickerButton "t_Ctrl_Vis"
+                {
+                    uniform token rigExec:picker:command = "ctrl_vis"
+                    uniform float ui:depth = 0.0003
+                    uniform color4f ui:fill = (0.39607844, 0.39607844, 0.39607844, 1)
+                    uniform float ui:fontSize = 10
+                    uniform float2 ui:position = (34, 486)
+                    uniform float ui:roundness = 3
+                    uniform token ui:shape = "rectangle"
+                    uniform float2 ui:size = (59, 17)
+                    uniform color4f ui:stroke = (0.12156863, 0.12156863, 0.12156863, 1)
+                    uniform string ui:text = "Ctrl Vis"
+                    uniform color4f ui:textColor = (0.78431374, 0.78431374, 0.78431374, 1)
+                    uniform color4f ui:valueColor = (0.92156863, 0.92156863, 0.92156863, 1)
+                }
+
                 def RigExecPickerButton "b_L_ThumbBase"
                 {
                     rel rigExec:picker:controls = </Biped/Rig/Main/Shot/Aux/Controls/thumbCup_l_bind_fk_follow/L_ThumbMeta/L_ThumbBase>
@@ -2719,7 +2735,7 @@ def "Biped"
                 def RigExecPickerButton "s_L_ArmIK"
                 {
                     custom rel rigExec:picker:attribute = </Biped/Rig/Main/Shot/Aux/Controls/L_ArmIK.avars:space>
-                    uniform token[] rigExec:picker:attributeLabels = ["world", "chest", "head", "hips"]
+                    uniform token[] rigExec:picker:attributeLabels = ["world", "chest", "head", "hip_swivel", "hips"]
                     rel rigExec:picker:mirror = </Biped/Rig/Uman/Body/s_R_ArmIK>
                     uniform float ui:depth = 0.0038
                     uniform color4f ui:fill = (0.21176471, 0.21176471, 0.21176471, 1)
@@ -2739,7 +2755,7 @@ def "Biped"
                 def RigExecPickerButton "s_R_ArmIK"
                 {
                     custom rel rigExec:picker:attribute = </Biped/Rig/Main/Shot/Aux/Controls/R_ArmIK.avars:space>
-                    uniform token[] rigExec:picker:attributeLabels = ["world", "chest", "head", "hips"]
+                    uniform token[] rigExec:picker:attributeLabels = ["world", "chest", "head", "hip_swivel", "hips"]
                     rel rigExec:picker:mirror = </Biped/Rig/Uman/Body/s_L_ArmIK>
                     uniform float ui:depth = 0.0038
                     uniform color4f ui:fill = (0.21176471, 0.21176471, 0.21176471, 1)
@@ -2759,7 +2775,7 @@ def "Biped"
                 def RigExecPickerButton "s_L_ArmPV"
                 {
                     custom rel rigExec:picker:attribute = </Biped/Rig/Main/Shot/Aux/Controls/L_ArmPV.avars:space>
-                    uniform token[] rigExec:picker:attributeLabels = ["local", "chest", "hand"]
+                    uniform token[] rigExec:picker:attributeLabels = ["world", "chest", "hand"]
                     uniform token rigExec:picker:mode = "ik"
                     custom rel rigExec:picker:modeDial = </Biped/Rig/Main/Shot/Aux/Controls/L_Arm.avars:ikfk>
                     uniform float ui:depth = 0.0038
@@ -2780,7 +2796,7 @@ def "Biped"
                 def RigExecPickerButton "s_R_ArmPV"
                 {
                     custom rel rigExec:picker:attribute = </Biped/Rig/Main/Shot/Aux/Controls/R_ArmPV.avars:space>
-                    uniform token[] rigExec:picker:attributeLabels = ["local", "chest", "hand"]
+                    uniform token[] rigExec:picker:attributeLabels = ["world", "chest", "hand"]
                     uniform token rigExec:picker:mode = "ik"
                     custom rel rigExec:picker:modeDial = </Biped/Rig/Main/Shot/Aux/Controls/R_Arm.avars:ikfk>
                     uniform float ui:depth = 0.0038
@@ -2800,8 +2816,8 @@ def "Biped"
 
                 def RigExecPickerButton "s_L_UpArm"
                 {
-                    custom rel rigExec:picker:attribute = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/L_Shldr/L_UpArmSwing/L_UpArm.avars:space>
-                    uniform token[] rigExec:picker:attributeLabels = ["local", "world"]
+                    custom rel rigExec:picker:attribute = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/L_Shldr/L_UpArmSwing.avars:space>
+                    uniform token[] rigExec:picker:attributeLabels = ["local", "world", "hips"]
                     uniform token rigExec:picker:mode = "fk"
                     custom rel rigExec:picker:modeDial = </Biped/Rig/Main/Shot/Aux/Controls/L_Arm.avars:ikfk>
                     uniform float ui:depth = 0.0038
@@ -2821,8 +2837,8 @@ def "Biped"
 
                 def RigExecPickerButton "s_R_UpArm"
                 {
-                    custom rel rigExec:picker:attribute = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/R_Shldr/R_UpArmSwing/R_UpArm.avars:space>
-                    uniform token[] rigExec:picker:attributeLabels = ["local", "world"]
+                    custom rel rigExec:picker:attribute = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/R_Shldr/R_UpArmSwing.avars:space>
+                    uniform token[] rigExec:picker:attributeLabels = ["local", "world", "hips"]
                     uniform token rigExec:picker:mode = "fk"
                     custom rel rigExec:picker:modeDial = </Biped/Rig/Main/Shot/Aux/Controls/R_Arm.avars:ikfk>
                     uniform float ui:depth = 0.0038
@@ -2843,7 +2859,7 @@ def "Biped"
                 def RigExecPickerButton "s_L_LegPV"
                 {
                     custom rel rigExec:picker:attribute = </Biped/Rig/Main/Shot/Aux/Controls/L_LegPV.avars:space>
-                    uniform token[] rigExec:picker:attributeLabels = ["local", "pelvis", "foot"]
+                    uniform token[] rigExec:picker:attributeLabels = ["world", "pelvis", "foot"]
                     rel rigExec:picker:mirror = </Biped/Rig/Uman/Body/s_R_LegPV>
                     uniform float ui:depth = 0.0038
                     uniform color4f ui:fill = (0.21176471, 0.21176471, 0.21176471, 1)
@@ -2863,7 +2879,7 @@ def "Biped"
                 def RigExecPickerButton "s_R_LegPV"
                 {
                     custom rel rigExec:picker:attribute = </Biped/Rig/Main/Shot/Aux/Controls/R_LegPV.avars:space>
-                    uniform token[] rigExec:picker:attributeLabels = ["local", "pelvis", "foot"]
+                    uniform token[] rigExec:picker:attributeLabels = ["world", "pelvis", "foot"]
                     rel rigExec:picker:mirror = </Biped/Rig/Uman/Body/s_L_LegPV>
                     uniform float ui:depth = 0.0038
                     uniform color4f ui:fill = (0.21176471, 0.21176471, 0.21176471, 1)
@@ -2883,7 +2899,7 @@ def "Biped"
                 def RigExecPickerButton "s_L_LegIK"
                 {
                     custom rel rigExec:picker:attribute = </Biped/Rig/Main/Shot/Aux/Controls/L_LegIK.avars:space>
-                    uniform token[] rigExec:picker:attributeLabels = ["world", "hips"]
+                    uniform token[] rigExec:picker:attributeLabels = ["world", "hip_swivel", "hips"]
                     uniform float ui:depth = 0.0038
                     uniform color4f ui:fill = (0.21176471, 0.21176471, 0.21176471, 1)
                     uniform float ui:fontSize = 12
@@ -2902,7 +2918,7 @@ def "Biped"
                 def RigExecPickerButton "s_R_LegIK"
                 {
                     custom rel rigExec:picker:attribute = </Biped/Rig/Main/Shot/Aux/Controls/R_LegIK.avars:space>
-                    uniform token[] rigExec:picker:attributeLabels = ["world", "hips"]
+                    uniform token[] rigExec:picker:attributeLabels = ["world", "hip_swivel", "hips"]
                     uniform float ui:depth = 0.0038
                     uniform color4f ui:fill = (0.21176471, 0.21176471, 0.21176471, 1)
                     uniform float ui:fontSize = 12
@@ -2921,7 +2937,7 @@ def "Biped"
                 def RigExecPickerButton "s_M_Neck"
                 {
                     custom rel rigExec:picker:attribute = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck.avars:space>
-                    uniform token[] rigExec:picker:attributeLabels = ["local", "world"]
+                    uniform token[] rigExec:picker:attributeLabels = ["local", "world", "hips"]
                     uniform float ui:depth = 0.0038
                     uniform color4f ui:fill = (0.21176471, 0.21176471, 0.21176471, 1)
                     uniform float ui:fontSize = 12
@@ -2939,8 +2955,8 @@ def "Biped"
 
                 def RigExecPickerButton "s_M_Head"
                 {
-                    custom rel rigExec:picker:attribute = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull.avars:space>
-                    uniform token[] rigExec:picker:attributeLabels = ["local", "world"]
+                    custom rel rigExec:picker:attribute = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head.avars:space>
+                    uniform token[] rigExec:picker:attributeLabels = ["local", "world", "hips"]
                     uniform float ui:depth = 0.0038
                     uniform color4f ui:fill = (0.21176471, 0.21176471, 0.21176471, 1)
                     uniform float ui:fontSize = 12

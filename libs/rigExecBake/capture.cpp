@@ -141,6 +141,19 @@ RigExecBakeCapture::RigExecBakeCapture(RigExecRigEvaluator &evaluator,
          program.spaceSwitches) {
         Add(sw.activeInput, RigExecWireInput::Tag::Double);
     }
+    for (const RigExecBakedProgramImpl::AutoClavicle &ac :
+         program.autoClavicles) {
+        if (ac.ikBlendIsFloat) {
+            Add(ac.ikBlendFloat, RigExecWireInput::Tag::Float);
+        } else {
+            Add(ac.ikBlendInput, RigExecWireInput::Tag::Double);
+        }
+        if (ac.amountIsFloat) {
+            Add(ac.amountFloat, RigExecWireInput::Tag::Float);
+        } else {
+            Add(ac.amountInput, RigExecWireInput::Tag::Double);
+        }
+    }
     for (const RigExecBakedProgramImpl::PoseInterpolator &interp :
          program.poseInterpolators) {
         Add(interp.enabled, RigExecWireInput::Tag::Bool);

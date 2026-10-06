@@ -601,8 +601,21 @@ over "Biped"
                             prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
                         )
                         {
-                            custom float avars:lookAt = 1
-                            custom double avars:space = 1
+                            custom float avars:lookAt = 1 (
+                                customData = {
+                                    dictionary limits = {
+                                        dictionary hard = {
+                                            double maximum = 1
+                                            double minimum = 0
+                                        }
+                                        dictionary soft = {
+                                            double maximum = 1
+                                            double minimum = 0
+                                        }
+                                    }
+                                }
+                            )
+                            custom double avars:space = 0
                             color3f guide:displayColor = (0, 1, 0)
                             uniform token guide:planeNormal = "Z"
                             double guide:scaleX = 7.3778
@@ -640,7 +653,6 @@ over "Biped"
                                                             prepend apiSchemas = ["RigExecControlAPI"]
                                                         )
                                                         {
-                                                            custom double avars:space = 0
                                                             color3f guide:displayColor = (0, 1, 0)
                                                             double3 guide:offset = (9.209549980346068, 3.619456931891832e-8, 5.820475301732131e-8)
                                                             double guide:scaleX = 11.104650019653931
@@ -753,7 +765,20 @@ over "Biped"
                                                                         prepend apiSchemas = ["RigExecControlAPI"]
                                                                     )
                                                                     {
-                                                                        custom float avars:convergence = 0
+                                                                        custom float avars:convergence = 0 (
+                                                                            customData = {
+                                                                                dictionary limits = {
+                                                                                    dictionary hard = {
+                                                                                        double maximum = 1
+                                                                                        double minimum = 0
+                                                                                    }
+                                                                                    dictionary soft = {
+                                                                                        double maximum = 1
+                                                                                        double minimum = 0
+                                                                                    }
+                                                                                }
+                                                                            }
+                                                                        )
                                                                         custom float avars:socketFollow = 1 (
                                                                             customData = {
                                                                                 dictionary limits = {

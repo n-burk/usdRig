@@ -2033,7 +2033,6 @@ over "Biped"
                                                     prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
                                                 )
                                                 {
-                                                    custom double avars:space = 0
                                                     color3f guide:displayColor = (0, 0, 1)
                                                     float guide:displayOpacity.connect = </Biped/Rig/Main/Shot/Aux/Controls/L_Arm.avars:ikfk>
                                                     uniform bool guide:displayOpacityInvert = 1

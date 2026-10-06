@@ -3232,11 +3232,13 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
                         source.filter = RigExecRotationFilter::Twist;
                     } else if (filter == "swing") {
                         source.filter = RigExecRotationFilter::Swing;
+                    } else if (filter == "orient") {
+                        source.filter = RigExecRotationFilter::Orient;
                     } else if (!filter.IsEmpty() && filter != "all") {
                         return fail(path.GetString() +
                                     " has an unknown rigExec:rotationFilters "
                                     "entry " + filter.GetString() +
-                                    "; expected all, twist or swing");
+                                    "; expected all, twist, swing or orient");
                     }
                 }
                 record.sources.push_back(source);
@@ -3366,6 +3368,175 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
                                               TfToken("computeDefaultFrame")));
             }
             newSpaceSwitches.push_back(std::move(record));
+        }
+    }
+
+    compileBlocks.Next("PrepareRequests.AutoClavicles");
+    // RigExecAutoClavicle: like a switch, taps on the seed request and no
+    // place in the pose stack.
+    std::vector<_AutoClavicle> newAutoClavicles;
+    if (const UsdPrim rig = _stage->GetPrimAtPath(_rigPath)) {
+        std::set<SdfPath> movedTargets;
+        for (const UsdPrim &prim : UsdPrimRange(rig)) {
+            if (prim.GetTypeName() != "RigExecAutoClavicle") continue;
+            const SdfPath path = prim.GetPath();
+            _AutoClavicle record;
+            record.nodePath = path;
+            const auto one = [&](const char *name, bool required,
+                                 SdfPath *out) {
+                const SdfPathVector targets = getTargets(prim, name);
+                if (targets.size() > 1 || (required && targets.empty())) {
+                    return fail(path.GetString() + " must have " +
+                                (required ? "exactly one " : "at most one ") +
+                                name);
+                }
+                if (targets.empty()) return true;
+                if (!isFrameProvider(targets[0])) {
+                    return fail(path.GetString() + " " + name + " names " +
+                                targets[0].GetString() +
+                                ", which is not a RigExec transform provider");
+                }
+                *out = targets[0];
+                seedProvider(targets[0]);
+                return true;
+            };
+            if (!one("rigExec:target", true, &record.target) ||
+                !one("rigExec:pivot", true, &record.pivot) ||
+                !one("rigExec:anchor", true, &record.anchor) ||
+                !one("rigExec:ikTarget", false, &record.ikTarget) ||
+                !one("rigExec:poleControl", false, &record.pole)) {
+                return false;
+            }
+            if (record.anchor.HasPrefix(record.target)) {
+                return fail(path.GetString() + " measures its limb in " +
+                            record.anchor.GetString() +
+                            ", which its own target moves");
+            }
+            const SdfPathVector fk = getTargets(prim, "rigExec:fkControls");
+            if (fk.size() != 3) {
+                return fail(path.GetString() +
+                            " needs three rigExec:fkControls, got " +
+                            std::to_string(fk.size()));
+            }
+            for (int i = 0; i < 3; ++i) {
+                if (!isFrameProvider(fk[size_t(i)])) {
+                    return fail(path.GetString() + " rigExec:fkControls names " +
+                                fk[size_t(i)].GetString() +
+                                ", which is not a RigExec transform provider");
+                }
+                record.fk[i] = fk[size_t(i)];
+                seedProvider(fk[size_t(i)]);
+            }
+            for (const auto &[name, out] :
+                 {std::pair<const char *, SdfPath *>{
+                      "rigExec:ikBlendAttribute", &record.ikBlendAttribute},
+                  {"rigExec:amountAttribute", &record.amountAttribute}}) {
+                const SdfPathVector targets = getTargets(prim, name);
+                if (targets.size() > 1 ||
+                    (!targets.empty() && !targets[0].IsPropertyPath())) {
+                    return fail(path.GetString() + " " + name +
+                                " must target at most one property");
+                }
+                if (!targets.empty()) *out = targets[0];
+            }
+            if (!movedTargets.insert(record.target).second) {
+                return fail(record.target.GetString() +
+                            " is the target of more than one auto clavicle");
+            }
+
+            RigExecAutoClavicleConstants &c = record.constants;
+            prim.GetAttribute(TfToken("rigExec:ikValue")).Get(&c.ikValue);
+            prim.GetAttribute(TfToken("inputs:gain")).Get(&c.gain);
+            GfMatrix4d basis(1.0);
+            prim.GetAttribute(TfToken("rigExec:basis")).Get(&basis);
+            for (int r = 0; r < 3; ++r) {
+                for (int k = 0; k < 3; ++k) c.basis[r * 3 + k] = basis[r][k];
+            }
+            VtQuatfArray rotations;
+            VtFloatArray falloffs;
+            VtDoubleArray gains;
+            prim.GetAttribute(TfToken("rigExec:poseRotations")).Get(&rotations);
+            prim.GetAttribute(TfToken("rigExec:poseFalloffs")).Get(&falloffs);
+            prim.GetAttribute(TfToken("rigExec:poseGains")).Get(&gains);
+            if (falloffs.size() != rotations.size() ||
+                gains.size() != rotations.size()) {
+                return fail(path.GetString() + " has " +
+                            std::to_string(rotations.size()) +
+                            " poses but " + std::to_string(falloffs.size()) +
+                            " falloffs and " + std::to_string(gains.size()) +
+                            " gains");
+            }
+            if (!rotations.empty()) {
+                // The pose constants are the interpolator's own, solved
+                // once: swing poses about the basis X axis.
+                RigExecRbfSolverDesc desc;
+                TfToken kernel("gaussian");
+                prim.GetAttribute(TfToken("rigExec:kernel")).Get(&kernel);
+                desc.kernel = kernel == TfToken("linear")
+                                  ? RigExecRbfKernel::Linear
+                                  : RigExecRbfKernel::Gaussian;
+                float regularization = 0.0f;
+                prim.GetAttribute(TfToken("rigExec:regularization"))
+                    .Get(&regularization);
+                desc.regularization = regularization;
+                desc.twistAxis = GfVec3d(1.0, 0.0, 0.0);
+                for (size_t i = 0; i < rotations.size(); ++i) {
+                    const GfQuatf &q = rotations[i];
+                    desc.poses.push_back(RigExecRbfEulerFromQuaternion(
+                        GfQuatd(q.GetReal(), GfVec3d(q.GetImaginary()))));
+                    desc.falloffs.push_back(double(falloffs[i]));
+                    desc.poseTypes.push_back(RigExecRbfPoseType::Swing);
+                }
+                RigExecRbfSolver solver(desc);
+                if (!solver.Solve() || solver.GetWeights().size() !=
+                                           rotations.size()) {
+                    return fail(path.GetString() +
+                                " poses could not be solved; two of them are "
+                                "the same swing");
+                }
+                c.kernel = desc.kernel == RigExecRbfKernel::Linear ? 1 : 0;
+                c.normalize = desc.normalize;
+                const std::vector<double> &radii = solver.GetRadii();
+                for (size_t i = 0; i < rotations.size(); ++i) {
+                    GfQuatd swing, twist;
+                    RigExecRbfSwingTwist(
+                        RigExecRbfQuaternionFromEuler(solver.GetPoses()[i]),
+                        desc.twistAxis, &swing, &twist);
+                    c.swings.push_back(swing.GetReal());
+                    for (int k = 0; k < 3; ++k) {
+                        c.swings.push_back(swing.GetImaginary()[k]);
+                    }
+                    c.widths.push_back(i < radii.size() ? radii[i]
+                                                        : solver.GetRadius());
+                    c.gains.push_back(gains[i]);
+                    for (const double w : solver.GetWeights()[i]) {
+                        c.weights.push_back(w);
+                    }
+                }
+            }
+            const auto posed = [&](const SdfPath &p) {
+                return newFirstFramePoseTaps->Add(
+                    RigExecValueAddress::Prim(p, _computePointFrame));
+            };
+            const auto rest = [&](const SdfPath &p) {
+                return newFirstFramePoseTaps->Add(RigExecValueAddress::Prim(
+                    p, TfToken("computeDefaultFrame")));
+            };
+            record.targetPosedTap = posed(record.target);
+            record.pivotPosedTap = posed(record.pivot);
+            record.anchorPosedTap = posed(record.anchor);
+            record.anchorDefaultTap = rest(record.anchor);
+            record.fkPosedTap = posed(record.fk[0]);
+            for (int i = 0; i < 3; ++i) {
+                record.fkDefaultTap[i] = rest(record.fk[i]);
+            }
+            if (!record.ikTarget.IsEmpty()) {
+                record.ikTargetPosedTap = posed(record.ikTarget);
+            }
+            if (!record.pole.IsEmpty()) {
+                record.polePosedTap = posed(record.pole);
+            }
+            newAutoClavicles.push_back(std::move(record));
         }
     }
 
@@ -4141,6 +4312,9 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
     _controlFrameTaps = std::move(newControlFrameTaps);
     _frameConstraints = std::move(newFrameConstraints);
     _spaceSwitches = std::move(newSpaceSwitches);
+    _autoClavicles = std::move(newAutoClavicles);
+    _lastAutoClavicleOverrides.clear();
+    _autoClavicleSnapshot = RigExecSnapshot();
     _frameChains = std::move(newFrameChains);
     _providerBaseFrameTaps = std::move(newProviderBaseFrameTaps);
     _xformDerivedProviders = std::move(newXformDerivedProviders);

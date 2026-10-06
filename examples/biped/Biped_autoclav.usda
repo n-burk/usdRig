@@ -1,0 +1,120 @@
+#usda 1.0
+(
+    defaultPrim = "Biped"
+    doc = "The auto clavicles: each shoulder swing control is carried by its arm's own swing, a pose-weighted fraction of it turning the shoulder point about the clavicle. The dial is avars:autoClav on L_Shldr and R_Shldr, 1 by default. Adds prims and one channel per clavicle, so dropping this sublayer leaves the character exactly as it was."
+)
+
+over "Biped"
+{
+    over "Rig"
+    {
+        def "AutoClavicles"
+        {
+            def RigExecAutoClavicle "clavicle_l_auto"
+            {
+                rel rigExec:amountAttribute = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/L_Shldr.avars:autoClav>
+                rel rigExec:anchor = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop>
+                matrix4d rigExec:basis = ( (0.0, 0.0, -1.0, 0), (0.0, 1.0, 0.0, 0), (1.0, 0.0, 0.0, 0), (0, 0, 0, 1) )
+                rel rigExec:fkControls = [
+                    </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/L_Shldr/L_UpArmSwing/L_UpArm>,
+                    </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/L_Shldr/L_UpArmSwing/L_UpArm/L_LoArm>,
+                    </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/L_Shldr/L_UpArmSwing/L_UpArm/L_LoArm/L_Hand>,
+                ]
+                rel rigExec:ikBlendAttribute = </Biped/Rig/Main/Shot/Aux/Controls/L_Arm.avars:ikfk>
+                rel rigExec:ikTarget = </Biped/Rig/Main/Shot/Aux/Controls/L_ArmIK/wrist_l_ikOrient>
+                double rigExec:ikValue = 1.0
+                uniform token rigExec:kernel = "gaussian"
+                rel rigExec:pivot = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/L_Shldr>
+                rel rigExec:poleControl = </Biped/Rig/Main/Shot/Aux/Controls/L_ArmPV>
+                float[] rigExec:poseFalloffs = [0.5, 0.5, 0.3, 0.5, 0.5, 0.5, 0.5, 0.3, 0.5, 0.5]
+                double[] rigExec:poseGains = [0, 1.15, 0.1, 1, 1, 2, 2, 0, 0, 0]
+                quatf[] rigExec:poseRotations = [(0.922522, 0.0134332, 0.3852636, -0.0185667), (0.7071068, 0, -0.7071068, 0), (0.7071068, 0, 0.7071068, 0), (0.7071068, 0, 0, -0.7071068), (0.7071068, 0, 0, 0.7071068), (0.3420201, 0, 0, -0.9396926), (0.3420201, 0, 0, 0.9396926), (0.3420201, 0, 0.9396926, 0), (0.6743797, -0.2126311, 0.2126311, 0.6743797), (0.6743797, 0.2126311, 0.2126311, -0.6743797)]
+                float rigExec:regularization = 100
+                rel rigExec:target = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/L_Shldr/L_UpArmSwing>
+            }
+
+            def RigExecAutoClavicle "clavicle_r_auto"
+            {
+                rel rigExec:amountAttribute = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/R_Shldr.avars:autoClav>
+                rel rigExec:anchor = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop>
+                matrix4d rigExec:basis = ( (0.0, 0.0, 1.0, 0), (0.0, 1.0, 0.0, 0), (1.0, 0.0, 0.0, 0), (0, 0, 0, 1) )
+                rel rigExec:fkControls = [
+                    </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/R_Shldr/R_UpArmSwing/R_UpArm>,
+                    </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/R_Shldr/R_UpArmSwing/R_UpArm/R_LoArm>,
+                    </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/R_Shldr/R_UpArmSwing/R_UpArm/R_LoArm/R_Hand>,
+                ]
+                rel rigExec:ikBlendAttribute = </Biped/Rig/Main/Shot/Aux/Controls/R_Arm.avars:ikfk>
+                rel rigExec:ikTarget = </Biped/Rig/Main/Shot/Aux/Controls/R_ArmIK/wrist_r_ikOrient>
+                double rigExec:ikValue = 1.0
+                uniform token rigExec:kernel = "gaussian"
+                rel rigExec:pivot = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/R_Shldr>
+                rel rigExec:poleControl = </Biped/Rig/Main/Shot/Aux/Controls/R_ArmPV>
+                float[] rigExec:poseFalloffs = [0.5, 0.5, 0.3, 0.5, 0.5, 0.5, 0.5, 0.3, 0.5, 0.5]
+                double[] rigExec:poseGains = [0, 1.15, 0.1, 1, 1, 2, 2, 0, 0, 0]
+                quatf[] rigExec:poseRotations = [(0.922522, 0.0134332, 0.3852636, -0.0185667), (0.7071068, 0, -0.7071068, 0), (0.7071068, 0, 0.7071068, 0), (0.7071068, 0, 0, -0.7071068), (0.7071068, 0, 0, 0.7071068), (0.3420201, 0, 0, -0.9396926), (0.3420201, 0, 0, 0.9396926), (0.3420201, 0, 0.9396926, 0), (0.6743797, -0.2126311, 0.2126311, 0.6743797), (0.6743797, 0.2126311, 0.2126311, -0.6743797)]
+                float rigExec:regularization = 100
+                rel rigExec:target = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/R_Shldr/R_UpArmSwing>
+            }
+        }
+
+        over "Main"
+        {
+            over "Shot"
+            {
+                over "Aux"
+                {
+                    over "Controls"
+                    {
+                        over "M_Body"
+                        {
+                            over "M_Torso"
+                            {
+                                over "M_Chest"
+                                {
+                                    over "M_ChestTop"
+                                    {
+                                        over "L_Shldr"
+                                        {
+                                            custom double avars:autoClav = 1 (
+                                                customData = {
+                                                    dictionary limits = {
+                                                        dictionary hard = {
+                                                            double maximum = 1
+                                                            double minimum = 0
+                                                        }
+                                                        dictionary soft = {
+                                                            double maximum = 1
+                                                            double minimum = 0
+                                                        }
+                                                    }
+                                                }
+                                            )
+                                        }
+
+                                        over "R_Shldr"
+                                        {
+                                            custom double avars:autoClav = 1 (
+                                                customData = {
+                                                    dictionary limits = {
+                                                        dictionary hard = {
+                                                            double maximum = 1
+                                                            double minimum = 0
+                                                        }
+                                                        dictionary soft = {
+                                                            double maximum = 1
+                                                            double minimum = 0
+                                                        }
+                                                    }
+                                                }
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

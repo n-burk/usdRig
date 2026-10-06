@@ -2924,8 +2924,6 @@ over "Biped"
                                                     {
                                                         over "M_Skull"
                                                         {
-                                                            custom double avars:space = 0
-
                                                             over "M_LoFace"
                                                             {
                                                                 over "face_mid_compress"

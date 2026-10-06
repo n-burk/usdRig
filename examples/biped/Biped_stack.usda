@@ -22,6 +22,7 @@
     metersPerUnit = 0.01
     subLayers = [
         @./Biped_spaces.usda@,
+        @./Biped_autoclav.usda@,
         @./Biped_squetch.usda@,
         @./Biped_face_rig.usda@,
         @./Biped_body.usda@

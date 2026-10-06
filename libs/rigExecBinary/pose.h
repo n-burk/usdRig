@@ -387,6 +387,30 @@ struct RigExecWireSpaceSwitch {
     bool affectScale[3] = {true, true, true};
 };
 
+/// One RigExecAutoClavicle: the slots it reads, the two per-frame channels
+/// and the solved pose constants RigExecAutoClavicleShift takes. Memory
+/// only on RigExecWireDomainPose: these travel in the optional
+/// AutoClavicle section.
+struct RigExecWireAutoClavicle {
+    int32_t slot = -1;
+    int32_t pivotSlot = -1;
+    int32_t anchorSlot = -1;
+    int32_t fkSlot[3] = {-1, -1, -1};
+    int32_t ikTargetSlot = -1;
+    int32_t poleSlot = -1;
+    RigExecWireInput ikBlend;
+    RigExecWireInput amount;
+    double basis[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+    double ikValue = 1.0;
+    double gain = 0.4;
+    uint8_t kernel = 0;
+    uint8_t normalize = 1;
+    std::vector<double> swings;
+    std::vector<double> widths;
+    std::vector<double> gains;
+    std::vector<double> weights;
+};
+
 /// The DomainPose section: every table the pose-half steps index, plus the
 /// publication inputs the epilogue reads.
 struct RigExecWireDomainPose {
@@ -415,6 +439,8 @@ struct RigExecWireDomainPose {
     /// Memory only: the SpaceSwitch section carries these (see bake.cpp).
     /// Sparse -- one entry per switched provider, in slot order.
     std::vector<RigExecWireSpaceSwitch> spaceSwitches;
+    /// Memory only: the AutoClavicle section carries these.
+    std::vector<RigExecWireAutoClavicle> autoClavicles;
 };
 
 void RigExecWirePutInput(std::vector<uint8_t> *out,
@@ -461,6 +487,12 @@ bool RigExecWireDecodePoseNumerics(
 bool RigExecWireEncodeSpaceSwitches(
     const std::vector<RigExecWireSpaceSwitch> &switches,
     std::vector<uint8_t> *out);
+bool RigExecWireEncodeAutoClavicles(
+    const std::vector<RigExecWireAutoClavicle> &records,
+    std::vector<uint8_t> *out);
+bool RigExecWireDecodeAutoClavicles(
+    RigExecWireReader *reader,
+    std::vector<RigExecWireAutoClavicle> *records, std::string *error);
 bool RigExecWireDecodeSpaceSwitches(
     RigExecWireReader *reader,
     std::vector<RigExecWireSpaceSwitch> *switches, std::string *error);

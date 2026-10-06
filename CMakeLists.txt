@@ -197,7 +197,8 @@ add_library(rigExecBinary STATIC
     libs/rigExecBinary/program.cpp
     libs/rigExecBinary/pose.cpp
     libs/rigExecBinary/geometry.cpp
-    libs/rigExecBinary/inputTable.cpp)
+    libs/rigExecBinary/inputTable.cpp
+    libs/rigExecBinary/propertyChains.cpp)
 target_include_directories(rigExecBinary PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs>
     $<INSTALL_INTERFACE:${RIGEXEC_INSTALL_INCLUDEDIR}>)
@@ -232,7 +233,8 @@ endif ()
 add_library(rigExecBake SHARED
     libs/rigExecBake/bake.cpp
     libs/rigExecBake/serialize.cpp
-    libs/rigExecBake/capture.cpp)
+    libs/rigExecBake/capture.cpp
+    libs/rigExecBake/propertyChainsBake.cpp)
 target_include_directories(rigExecBake PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs>
     $<INSTALL_INTERFACE:${RIGEXEC_INSTALL_INCLUDEDIR}>)
@@ -273,6 +275,11 @@ add_executable(testRigExecMath tests/testRigExecMath.cpp)
 add_executable(testRigExecDeltaMush tests/testRigExecDeltaMush.cpp)
 target_link_libraries(testRigExecDeltaMush PRIVATE rigExec rigExecRigging rigExecBake rigExecRuntime)
 add_test(NAME testRigExecDeltaMush COMMAND testRigExecDeltaMush "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
+add_executable(testRigExecRuntimeLiveFace tests/testRigExecRuntimeLiveFace.cpp)
+target_link_libraries(testRigExecRuntimeLiveFace PRIVATE rigExec rigExecBake rigExecRuntime)
+add_test(NAME testRigExecRuntimeLiveFace COMMAND testRigExecRuntimeLiveFace
+    "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources"
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples/biped/Biped_stack.usda")
 add_executable(testRigExecDeltaMushRuntime tests/testRigExecDeltaMushRuntime.cpp)
 target_link_libraries(testRigExecDeltaMushRuntime PRIVATE rigExecRuntime)
 add_test(NAME testRigExecDeltaMushBakeFile COMMAND rigExecBakeTool
@@ -1282,6 +1289,18 @@ if (RIGEXEC_BUILD_PYTHON AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
     add_test(NAME testMoverChainOrder
         COMMAND ${Python3_EXECUTABLE}
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_mover_chain_order.py")
+    add_test(NAME testIkFkMatch
+        COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_ikfk_match.py"
+            "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
+    add_test(NAME testSpaceMatch
+        COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_space_match.py"
+            "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
+    add_test(NAME testAutoClavicle
+        COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_auto_clavicle.py"
+            "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
     add_test(NAME testGizmoPreview
         COMMAND ${Python3_EXECUTABLE}
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_gizmo_preview.py")
@@ -1344,7 +1363,8 @@ if (RIGEXEC_BUILD_PYTHON AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
                          testPoseReaderViz
                          testLayerOpinionsModel testCompositionArcsModel
                          testPathSpelling
-                         testMoverChainOrder
+                         testMoverChainOrder testIkFkMatch testSpaceMatch
+                         testAutoClavicle
                          testAvarEditorModel
                          testGizmoPreview
                          testGizmoSettings testGizmoDrag testGizmoSnap

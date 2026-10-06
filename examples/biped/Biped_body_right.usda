@@ -1966,7 +1966,6 @@ over "Biped"
                                                 )
                                                 {
                                                     double3 avars:rotationSign = (-1, -1, 1)
-                                                    custom double avars:space = 0
                                                     color3f guide:displayColor = (1, 0, 0)
                                                     float guide:displayOpacity.connect = </Biped/Rig/Main/Shot/Aux/Controls/R_Arm.avars:ikfk>
                                                     double3 guide:offset = (-2.6858000000000435, -0.6944499999999839, -5.503400000000071)

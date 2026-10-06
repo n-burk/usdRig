@@ -7,6 +7,7 @@
 #include "rigExecRuntime/runtime.h"
 
 #include <algorithm>
+#include <set>
 
 namespace rigExec {
 
@@ -229,6 +230,40 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
                            &bytesOut)) {
         _gOverridableInputs = bytesOut >= 1 && data[0] != 0;
     }
+    // Optional: a file without it replays every chain's recorded value.
+    if (reader.FindSection(RigExecBinarySection::PropertyChains, &data,
+                           &bytesOut)) {
+        RigExecWireReader cursor(data, bytesOut);
+        std::string chainError;
+        if (!RigExecWireDecodePropertyChains(&cursor, &self->_chains,
+                                             &chainError) ||
+            !cursor.Exhausted()) {
+            return fail(chainError.empty() ? "malformed property chains"
+                                           : chainError);
+        }
+        self->_hasPropertyChains = true;
+        std::set<uint32_t> targets;
+        for (size_t c = 0; c < self->_chains.chains.size(); ++c) {
+            self->_chainOfTarget[self->_chains.chains[c].target] = c;
+            targets.insert(self->_chains.chains[c].target);
+        }
+        for (const RigExecWirePropertyChain &chain : self->_chains.chains) {
+            for (const RigExecWirePropertyChainRevision &revision : chain.revisions) {
+                for (const RigExecWirePropertyChainInput *input :
+                     {&revision.enabled, &revision.defaultWeight,
+                      &revision.value, &revision.minimum,
+                      &revision.maximum}) {
+                    for (uint32_t hop : input->hops) {
+                        std::string text;
+                        if (!targets.count(hop) &&
+                            reader.GetString(hop, &text)) {
+                            self->_chainInputPaths[text] = hop;
+                        }
+                    }
+                }
+            }
+        }
+    }
     if (!section(RigExecBinarySection::Steps, "steps", &data, &bytesOut)) {
         return fail(*error);
     }
@@ -347,6 +382,17 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
             return fail("malformed space-switch section");
         }
     }
+    // Optional: absent means no limb root is carried.
+    if (section(RigExecBinarySection::AutoClavicle, "auto clavicles", &data,
+                &bytesOut)) {
+        RigExecWireReader cursor(data, bytesOut);
+        if (!RigExecWireDecodeAutoClavicles(&cursor,
+                                            &self->_poses.autoClavicles,
+                                            error) ||
+            !cursor.Exhausted()) {
+            return fail("malformed auto-clavicle section");
+        }
+    }
     if (section(RigExecBinarySection::DomainGeometry, "geometry domain",
                 &data, &bytesOut)) {
         RigExecWireReader cursor(data, bytesOut);
@@ -444,6 +490,49 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
                 }
             }
             program.spaceSwitchBySlot[size_t(sw.slot)] = int32_t(i);
+        }
+    }
+    // Auto clavicles route right after the switches, the order the bake
+    // captures them in.
+    const size_t clavicles = self->_poses.autoClavicles.size();
+    program.autoClavicleUid.assign(clavicles, {-1, -1});
+    program.autoClavicleConstants.assign(clavicles, {});
+    for (size_t i = 0; i < clavicles; ++i) {
+        const RigExecWireAutoClavicle &ac = self->_poses.autoClavicles[i];
+        if (!_RouteField(ac.ikBlend, directory, &nextUid,
+                         &program.autoClavicleUid[i][0], error) ||
+            !_RouteField(ac.amount, directory, &nextUid,
+                         &program.autoClavicleUid[i][1], error)) {
+            return fail(*error);
+        }
+        for (const int32_t s :
+             {ac.slot, ac.pivotSlot, ac.anchorSlot, ac.fkSlot[0],
+              ac.fkSlot[1], ac.fkSlot[2]}) {
+            if (s < 0 || size_t(s) >= slots) {
+                return fail("auto clavicle names no slot");
+            }
+        }
+        for (const int32_t s : {ac.ikTargetSlot, ac.poleSlot}) {
+            if (s >= 0 && size_t(s) >= slots) {
+                return fail("auto clavicle names no slot");
+            }
+        }
+        RigExecAutoClavicleConstants &c = program.autoClavicleConstants[i];
+        for (int k = 0; k < 9; ++k) c.basis[k] = ac.basis[k];
+        c.ikValue = ac.ikValue;
+        c.gain = ac.gain;
+        c.kernel = int(ac.kernel);
+        c.normalize = ac.normalize != 0;
+        c.swings = ac.swings;
+        c.widths = ac.widths;
+        c.gains = ac.gains;
+        c.weights = ac.weights;
+    }
+    if (clavicles != 0) {
+        program.autoClavicleBySlot.assign(slots, -1);
+        for (size_t i = 0; i < clavicles; ++i) {
+            program.autoClavicleBySlot[size_t(
+                self->_poses.autoClavicles[i].slot)] = int32_t(i);
         }
     }
     program.interpUid.assign(self->_poses.poseInterpolators.size(), -1);
@@ -898,6 +987,34 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
     }
     store.overridden.assign(size_t(maxOverride + 1), 0);
     store.lastOverridden.assign(size_t(maxOverride + 1), 0);
+
+    // The override routing, joined to the uids: each path an overridable
+    // input's walk visits reaches the holders of that input.
+    {
+        std::map<int32_t, std::vector<uint32_t>> uidsOf;
+        for (size_t uid = 0; uid < directory.size(); ++uid) {
+            if (directory[uid].overrideIndex >= 0) {
+                uidsOf[directory[uid].overrideIndex].push_back(uint32_t(uid));
+            }
+        }
+        const auto &paths = self->_inputs.overridablePaths;
+        const auto &indices = self->_inputs.overridableIndices;
+        for (size_t i = 0; i < paths.size() && i < indices.size(); ++i) {
+            std::string path;
+            if (!reader.GetString(paths[i], &path)) {
+                continue;
+            }
+            for (int32_t index : indices[i]) {
+                const auto found = uidsOf.find(index);
+                if (found == uidsOf.end()) {
+                    continue;
+                }
+                for (uint32_t uid : found->second) {
+                    self->_overridableInputs[path].emplace_back(uid, index);
+                }
+            }
+        }
+    }
 
     if (!RrPoseSizeScratch(&program, error)) {
         return fail(error ? *error : std::string("pose sizing failed"));

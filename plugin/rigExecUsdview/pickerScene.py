@@ -192,6 +192,8 @@ def read(picker_prim, live_paths=None):
     picker.name = (str(_v(picker_prim, "ui:label", ""))
                    or picker_prim.GetName())
     picker.path = str(picker_prim.GetPath())
+    rig = rig_for(picker_prim)
+    picker.rig_path = str(rig.GetPath()) if rig else ""
     return picker
 
 

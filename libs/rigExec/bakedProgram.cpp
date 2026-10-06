@@ -342,6 +342,30 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
             }
         }
     }
+    // An auto clavicle reads its frames out of slots, and composes its first
+    // FK control inline from the target's frame, so that control must hang
+    // directly from the target with no space of its own.
+    std::set<SdfPath> switchedTargets;
+    for (const RigExecRigEvaluator::_SpaceSwitch &sw : E._spaceSwitches) {
+        switchedTargets.insert(sw.target);
+    }
+    for (const RigExecRigEvaluator::_AutoClavicle &ac : E._autoClavicles) {
+        for (const SdfPath &path :
+             {ac.target, ac.pivot, ac.anchor, ac.fk[0], ac.fk[1], ac.fk[2],
+              ac.ikTarget, ac.pole}) {
+            if (!path.IsEmpty() && !E._firstFramePoseFrames.count(path)) {
+                say("auto clavicle frame has no slot", path);
+            }
+        }
+        if (ac.fk[0].GetParentPath() != ac.target) {
+            say("auto clavicle's first FK control is not a child of its "
+                "target", ac.fk[0]);
+        }
+        if (switchedTargets.count(ac.fk[0])) {
+            say("auto clavicle's first FK control has a space switch",
+                ac.fk[0]);
+        }
+    }
     for (const auto &[path, tap] : E._firstFramePoseFrames) {
         const UsdPrim prim = E._stage->GetPrimAtPath(path);
         if (!prim) {
@@ -2926,6 +2950,51 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
         }
         B.spaceSwitchBySlot[size_t(out.slot)] = int(B.spaceSwitches.size());
         B.spaceSwitches.push_back(std::move(out));
+    }
+
+    // ---- auto clavicles ----------------------------------------------------
+    //
+    // Slots for the frames, and the two per-frame channels bound like a
+    // switch's index, so keying either dirties the compose step reading it.
+    B.autoClavicleBySlot.assign(B.paths.size(), -1);
+    for (const RigExecRigEvaluator::_AutoClavicle &ac : E._autoClavicles) {
+        RigExecBakedProgramImpl::AutoClavicle out;
+        out.slot = slotOf(ac.target);
+        out.pivotSlot = slotOf(ac.pivot);
+        out.anchorSlot = slotOf(ac.anchor);
+        for (int i = 0; i < 3; ++i) out.fkSlot[i] = slotOf(ac.fk[i]);
+        out.ikTargetSlot = ac.ikTarget.IsEmpty() ? -1 : slotOf(ac.ikTarget);
+        out.poleSlot = ac.pole.IsEmpty() ? -1 : slotOf(ac.pole);
+        if (out.slot < 0 || out.pivotSlot < 0 || out.anchorSlot < 0 ||
+            out.fkSlot[0] < 0 || out.fkSlot[1] < 0 || out.fkSlot[2] < 0) {
+            continue;
+        }
+        out.constants = ac.constants;
+        const auto bind = [&](const SdfPath &attr, double fallback,
+                              RigExecBakedInput<double> *input,
+                              RigExecBakedInput<float> *asFloat,
+                              bool *isFloat) {
+            input->constant = fallback;
+            if (attr.IsEmpty()) return;
+            const UsdPrim owner = B.stage->GetPrimAtPath(attr.GetPrimPath());
+            if (!owner) return;
+            const UsdAttribute a = owner.GetAttribute(attr.GetNameToken());
+            if (a && a.GetTypeName() == SdfValueTypeNames->Float) {
+                *isFloat = true;
+                *asFloat = ctx.Bind<float>(owner, attr.GetName().c_str(),
+                                           float(fallback));
+            } else {
+                *input = ctx.Bind<double>(owner, attr.GetName().c_str(),
+                                          fallback);
+            }
+        };
+        bind(ac.ikBlendAttribute, 1.0 - ac.constants.ikValue,
+             &out.ikBlendInput, &out.ikBlendFloat, &out.ikBlendIsFloat);
+        bind(ac.amountAttribute, 1.0, &out.amountInput, &out.amountFloat,
+             &out.amountIsFloat);
+        B.autoClavicleBySlot[size_t(out.slot)] =
+            int(B.autoClavicles.size());
+        B.autoClavicles.push_back(std::move(out));
     }
 
     std::vector<RigExecBakedChainSpec> chainSpecs;

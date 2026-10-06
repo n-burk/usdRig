@@ -645,11 +645,12 @@ RrRunPoseStep(RrProgram *program, size_t step, double time,
                         parent >= 0
                             ? scratch->defaultRoundTrip[size_t(parent)]
                             : _RrIdentity();
-                    const RrMat4d local =
+                    const RrMat4d unswitched =
                         RrRoundTrip(avars * scratch->selfD[size_t(i)] *
                                     scratch->parentDinv[size_t(i)] *
-                                    parentPosed) *
-                        parentPosed.GetInverse() * parentDefault;
+                                    parentPosed);
+                    const RrMat4d local =
+                        unswitched * parentPosed.GetInverse() * parentDefault;
                     const RrMat4d localInverse = local.GetInverse();
                     const int count = int(sw.sourceSlots.size());
                     if (count <= 0) {
@@ -691,7 +692,7 @@ RrRunPoseStep(RrProgram *program, size_t step, double time,
                                 store.posedM[size_t(sw.spaceSlot)];
                         carryInverse = carry.GetInverse();
                     }
-                    const auto deltaOf = [&](int index) {
+                    const auto rawDeltaOf = [&](int index) {
                         const int slot = sw.sourceSlots[size_t(index)];
                         if (slot < 0) {
                             // World: the source never moves, so the only
@@ -725,6 +726,18 @@ RrRunPoseStep(RrProgram *program, size_t step, double time,
                                 : RrFilterSpaceRotation(moved, axis, filter);
                         return local * motion * localInverse;
                     };
+                    // An `orient` source turns the control with the space
+                    // and keeps it where its namespace parent carries it.
+                    const auto deltaOf = [&](int index) {
+                        const RrMat4d d = rawDeltaOf(index);
+                        if (sw.filters.empty() ||
+                            RrRotationFilter(sw.filters[size_t(index)]) !=
+                                RrRotationFilter::Orient) {
+                            return d;
+                        }
+                        return RrOrientSpaceDelta(d, local, localInverse,
+                                                  unswitched);
+                    };
                     RrMat4d delta = deltaOf(lower);
                     if (upper != lower && blend > 0.0) {
                         delta = RrBlendTransforms(delta, deltaOf(upper),
@@ -739,6 +752,96 @@ RrRunPoseStep(RrProgram *program, size_t step, double time,
                     store.base[size_t(i)] = RrFrameFromMatrix(
                         avars * scratch->selfD[size_t(i)] *
                         scratch->parentDinv[size_t(i)] * parentPosed);
+                }
+            }
+            // An auto clavicle on this slot: the composed (and switched)
+            // frame translated before any descendant reads it, with the
+            // first FK control composed against the unshifted frame, as
+            // bakedPose.cpp's ApplyAutoClavicle does.
+            if (const int clavicleIndex =
+                    program->autoClavicleBySlot.empty()
+                        ? -1 : program->autoClavicleBySlot[size_t(i)];
+                clavicleIndex >= 0) {
+                const RigExecWireAutoClavicle &ac =
+                    program->poses->autoClavicles[size_t(clavicleIndex)];
+                RrMat4d target;
+                const int u = ac.fkSlot[0];
+                if (store.base[size_t(i)].IsValid() &&
+                    !store.base[size_t(i)].IsDegenerate() &&
+                    RrPointsToMatrix(RrIdentityLandmarks(),
+                                     store.base[size_t(i)].points, &target)) {
+                    RrPointFrame fkFrame;
+                    if (scratch->posedAuthored[size_t(u)]) {
+                        fkFrame =
+                            RrFrameFromMatrix(scratch->posedAuthoredM[size_t(u)]);
+                    } else {
+                        const double *a = &store.avars[size_t(u) * 11];
+                        const double units = a[10];
+                        const bool noScale =
+                            scratch->noScaleAvars[size_t(u)] != 0;
+                        const unsigned sign =
+                            size_t(u) < scratch->rotationSign.size()
+                                ? scratch->rotationSign[size_t(u)] : 0u;
+                        const double signX = _RrRotationSign(sign, 0);
+                        const RrMat4d avars = _RrComposeAvars(
+                            a[0] * units, a[1] * units, a[2] * units,
+                            noScale ? 1.0 : a[3], noScale ? 1.0 : a[4],
+                            noScale ? 1.0 : a[5], a[6] * signX,
+                            a[7] * _RrRotationSign(sign, 1),
+                            a[8] * _RrRotationSign(sign, 2), a[9] * signX,
+                            program->TextOrEmpty(
+                                scratch->rotOrder[size_t(u)]));
+                        fkFrame = RrFrameFromMatrix(
+                            avars * scratch->selfD[size_t(u)] *
+                            scratch->parentDinv[size_t(u)] * target);
+                    }
+                    RrMat4d fk;
+                    if (fkFrame.IsValid() && !fkFrame.IsDegenerate() &&
+                        RrPointsToMatrix(RrIdentityLandmarks(),
+                                         fkFrame.points, &fk)) {
+                        const auto row = [](const RrMat4d &m) {
+                            return &m[0][0];
+                        };
+                        RigExecAutoClavicleFrames f;
+                        f.anchorPosed = row(store.posedM[size_t(ac.anchorSlot)]);
+                        f.anchorDefault =
+                            row(scratch->defaultRoundTrip[size_t(ac.anchorSlot)]);
+                        f.pivotPosed = row(store.posedM[size_t(ac.pivotSlot)]);
+                        f.targetPosed = row(target);
+                        f.fkPosed = row(fk);
+                        for (int k = 0; k < 3; ++k) {
+                            f.fkDefault[k] = row(
+                                scratch->defaultRoundTrip[size_t(ac.fkSlot[k])]);
+                        }
+                        if (ac.ikTargetSlot >= 0) {
+                            f.ikTargetPosed =
+                                row(store.posedM[size_t(ac.ikTargetSlot)]);
+                        }
+                        if (ac.poleSlot >= 0) {
+                            f.polePosed = row(store.posedM[size_t(ac.poleSlot)]);
+                        }
+                        // The channel in its own type: the IK/FK dial is
+                        // float.
+                        const auto scalar = [](const RrInputValue &v) {
+                            return v.tag == RigExecWireInput::Tag::Float
+                                       ? double(v.f32) : v.f64;
+                        };
+                        f.ikBlend = scalar(program->ReadAutoClavicle(
+                            size_t(clavicleIndex), 0));
+                        f.amount = scalar(program->ReadAutoClavicle(
+                            size_t(clavicleIndex), 1));
+                        double delta[3];
+                        RigExecAutoClavicleShift(
+                            program->autoClavicleConstants[size_t(clavicleIndex)],
+                            f, delta);
+                        if (delta[0] != 0.0 || delta[1] != 0.0 ||
+                            delta[2] != 0.0) {
+                            for (int k = 0; k < 3; ++k) {
+                                target[3][k] = target[3][k] + delta[k];
+                            }
+                            store.base[size_t(i)] = RrFrameFromMatrix(target);
+                        }
+                    }
                 }
             }
             store.fin[size_t(i)] = store.base[size_t(i)];

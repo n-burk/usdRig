@@ -379,7 +379,7 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                     hasCarry = true;
                 }
             }
-            const auto deltaOf = [&](int index, bool *valid) {
+            const auto rawDeltaOf = [&](int index, bool *valid) {
                 const _SpaceSwitch::Source &source = sw.sources[size_t(index)];
                 *valid = true;
                 if (source.path.IsEmpty()) {
@@ -414,6 +414,17 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                               sourceDefault.TransformDir(sw.twistAxis),
                               source.filter);
                 return local * motion * local.GetInverse();
+            };
+            // An `orient` source turns the control with the space and keeps
+            // it where its namespace parent carries it.
+            const auto deltaOf = [&](int index, bool *valid) {
+                const GfMatrix4d d = rawDeltaOf(index, valid);
+                if (sw.sources[size_t(index)].filter !=
+                    RigExecRotationFilter::Orient) {
+                    return d;
+                }
+                return RigExecOrientSpaceDelta(d, local, local.GetInverse(),
+                                               targetWorld);
             };
             bool lowerOk = true, upperOk = true;
             GfMatrix4d delta = deltaOf(lower, &lowerOk);
@@ -473,6 +484,119 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
             if (begin >= _spaceSwitches.size()) {
                 _spaceSwitchSnapshot = switched;
                 _lastSpaceSwitchOverrides = switchOverrides;
+            }
+        }
+    }
+
+    // 1c. Auto clavicles. After every switch, so each reads its limb's
+    // controls in the spaces they are in, and republished as an override on
+    // the target's computePointFrame -- the switch's own override for that
+    // target when there is one, translated -- so the target's descendants
+    // and the solvers read the moved frame, as they read a switched one.
+    if (!_autoClavicles.empty() && _firstFramePoseTaps &&
+        seedSnapshot.IsValid()) {
+        RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "AutoClavicles", "pose");
+        const auto frameOf = [&](RigExecTapId tap, GfMatrix4d *m) {
+            if (tap < 0) return false;
+            const RigExecPointFrame frame =
+                seedSnapshot.Get<RigExecPointFrame>(tap);
+            return frame.IsValid() && !frame.IsDegenerate() &&
+                   RigExecPointsToMatrix(RigExecIdentityLandmarks(),
+                                         frame.points, m);
+        };
+        const auto readScalar = [&](const SdfPath &attrPath,
+                                    double fallback) {
+            if (attrPath.IsEmpty()) return fallback;
+            const UsdAttribute attribute =
+                _stage->GetAttributeAtPath(attrPath);
+            double value = 0.0;
+            float asFloat = 0.0f;
+            if (!attribute) return fallback;
+            if (_resolvedInputs.GetAttribute(attribute, time, &value) ||
+                attribute.Get(&value, time)) {
+                return value;
+            }
+            if (_resolvedInputs.GetAttribute(attribute, time, &asFloat) ||
+                attribute.Get(&asFloat, time)) {
+                return double(asFloat);
+            }
+            return fallback;
+        };
+        std::vector<RigExecValueOverride> moved;
+        for (const _AutoClavicle &ac : _autoClavicles) {
+            GfMatrix4d target, pivot, anchor, anchorRest, fk, fkRest[3],
+                ikTarget, pole;
+            bool ok = frameOf(ac.targetPosedTap, &target) &&
+                      frameOf(ac.pivotPosedTap, &pivot) &&
+                      frameOf(ac.anchorPosedTap, &anchor) &&
+                      frameOf(ac.anchorDefaultTap, &anchorRest) &&
+                      frameOf(ac.fkPosedTap, &fk);
+            for (int i = 0; i < 3; ++i) {
+                ok = ok && frameOf(ac.fkDefaultTap[i], &fkRest[i]);
+            }
+            if (!ok) {
+                pose.diagnostics.push_back(
+                    ac.nodePath.GetString() +
+                    " has no usable frame for its limb; the clavicle is not "
+                    "carried");
+                continue;
+            }
+            RigExecAutoClavicleFrames f;
+            f.anchorPosed = anchor.data();
+            f.anchorDefault = anchorRest.data();
+            f.pivotPosed = pivot.data();
+            f.targetPosed = target.data();
+            f.fkPosed = fk.data();
+            for (int i = 0; i < 3; ++i) f.fkDefault[i] = fkRest[i].data();
+            if (frameOf(ac.ikTargetPosedTap, &ikTarget)) {
+                f.ikTargetPosed = ikTarget.data();
+            }
+            if (frameOf(ac.polePosedTap, &pole)) f.polePosed = pole.data();
+            f.ikBlend =
+                readScalar(ac.ikBlendAttribute, 1.0 - ac.constants.ikValue);
+            f.amount = readScalar(ac.amountAttribute, 1.0);
+            double delta[3];
+            RigExecAutoClavicleShift(ac.constants, f, delta);
+            if (delta[0] == 0.0 && delta[1] == 0.0 && delta[2] == 0.0) {
+                continue;
+            }
+            GfMatrix4d shifted = target;
+            shifted.SetTranslateOnly(target.ExtractTranslation() +
+                                     GfVec3d(delta[0], delta[1], delta[2]));
+            moved.push_back(RigExecValueOverride{
+                ac.target, _computePointFrame, TfToken(),
+                VtValue(RigExecFrameFromMatrix(shifted))});
+        }
+        if (!moved.empty()) {
+            const bool same = seedFromCache && _autoClavicleSnapshot.IsValid() &&
+                moved == _lastAutoClavicleOverrides;
+            for (const RigExecValueOverride &o : moved) {
+                const auto it = std::find_if(
+                    baseOverrides.begin(), baseOverrides.end(),
+                    [&](const RigExecValueOverride &b) {
+                        return b.prim == o.prim &&
+                               b.computation == o.computation &&
+                               b.attribute.IsEmpty();
+                    });
+                if (it != baseOverrides.end()) {
+                    it->value = o.value;
+                } else {
+                    baseOverrides.push_back(o);
+                }
+            }
+            if (same) {
+                seedSnapshot = _autoClavicleSnapshot;
+            } else {
+                const RigExecSnapshot carried =
+                    _firstFramePoseTaps->Evaluate(time, baseOverrides);
+                if (!carried.IsValid() || !carried.IsComplete()) {
+                    pose.diagnostics.push_back(
+                        "auto clavicle evaluation incomplete");
+                    return pose;
+                }
+                seedSnapshot = carried;
+                _autoClavicleSnapshot = carried;
+                _lastAutoClavicleOverrides = moved;
             }
         }
     }

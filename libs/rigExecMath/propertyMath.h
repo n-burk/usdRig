@@ -15,12 +15,12 @@
 #include "pxr/base/gf/vec3f.h"
 #include "pxr/base/tf/token.h"
 
+#include "rigExecMath/propertyMathKernel.h"
+
 PXR_NAMESPACE_USING_DIRECTIVE
 
 namespace rigExec {
 
-/// The operation a property mover performs (schema `rigExec:operation`).
-enum class RigExecPropertyOp { Add, Multiply, Clamp, Remap, Blend, Curve };
 
 /// Parses a `rigExec:operation` token. Returns false for an unknown token
 /// rather than substituting a default: the operation selects the compiled

@@ -20,6 +20,7 @@
 #include "rigExecBinary/inputTable.h"
 #include "rigExecBinary/pose.h"
 #include "rigExecBinary/program.h"
+#include "rigExecBinary/propertyChains.h"
 #include "rigExecRuntime/runtimeMath.h"
 #include "rigExecRuntime/store.h"
 
@@ -102,10 +103,12 @@ public:
     // miss when the file carries no such frame.
     bool SetFrame(double frame, std::string *error);
 
-    // Persistent local TRS avar overrides, applied after the selected frame
-    // and before FK/geometry evaluation. Angles are degrees. Only compiled
-    // control slots with TRS poses are supported; property-mover outputs are refused
-    // because those chains are captured, not re-executed by this runtime.
+    // Persistent avar overrides, applied after the selected frame and
+    // before FK/geometry evaluation. Angles are degrees. Accepted: a TRS
+    // avar on a compiled control slot, and -- when the file carries its
+    // property chains -- any input those chains read (a face slider such as
+    // `avars:autoSquash`), which the chains then recompute from. Refused: a
+    // property chain's own output, which the chain writes.
     bool SetAvar(const std::string &propertyPath, double value,
                  std::string *error);
     void ClearAvars();
@@ -180,6 +183,20 @@ public:
     bool HasClusters() const { return _hasClusters; }
     bool HasSlotMeta() const { return _hasSlotMeta; }
     bool HasConstants() const { return _hasConstants; }
+    // Whether the file carries its property chains as programs, so they
+    // follow SetAvar instead of replaying their recorded values.
+    bool HasPropertyChains() const { return _hasPropertyChains; }
+
+    /// The posed frame of the control or joint at `primPath` (its last
+    /// version),
+    /// asset space, as a row-vector matrix: the three handle vectors, then
+    /// the origin, 16 numbers row-major. The frame the evaluator publishes
+    /// as the control's. False when the path names no slot.
+    bool GetControlFrame(const std::string &primPath, double out[16]) const;
+
+    // The last Execute's property-chain results, scalar ones only, by
+    // target path: what the chains published, computed or replayed.
+    std::map<std::string, double> GetPropertyResults() const;
 
 private:
     RigExecRuntimeReader() = default;
@@ -201,12 +218,36 @@ private:
     bool _hasClusters = false;
     bool _hasSlotMeta = false;
     bool _hasConstants = false;
+    bool _hasPropertyChains = false;
+    RigExecWirePropertyChains _chains;
+    // Each chain's target path id, and every path a chain input's walk
+    // visits that no chain writes (what SetAvar may set for the chains).
+    std::map<uint32_t, size_t> _chainOfTarget;
+    std::map<std::string, uint32_t> _chainInputPaths;
 
     RrProgram _program;
 
     size_t _frameIndex = 0;
     bool _frameSelected = false;
     std::map<size_t, double> _avarOverrides;
+    // Every value SetAvar accepted, by path id: what a chain input's walk
+    // reads as a live value.
+    std::map<uint32_t, double> _pathOverrides;
+
+    // Inputs a poseable bake routed to holders, by every path their walks
+    // visit: (uid, override index) pairs. A mode switch read straight off
+    // an avar (a blend weight, a space switch's active index) is set here.
+    std::map<std::string, std::vector<std::pair<uint32_t, int32_t>>>
+        _overridableInputs;
+    // Values SetAvar accepted for those inputs, and the holder values they
+    // displaced, restored when the overrides go or the frame changes.
+    std::map<std::string, double> _inputOverrides;
+    std::map<uint32_t, RrInputValue> _inputBase;
+    void _RestoreInputs();
+
+    // Computes the property chains for the selected frame into the store,
+    // and hands each result to the input holders it feeds.
+    void _RunPropertyChains();
 
     std::vector<RigExecRuntimeJointMatrix> _jointMatrices;
     std::vector<RigExecRuntimePoints> _points;

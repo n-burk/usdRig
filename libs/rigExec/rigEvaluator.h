@@ -16,6 +16,7 @@
 #include "tapSet.h"
 #include "types.h"
 
+#include "rigExecMath/autoClavicleKernel.h"
 #include "rigExecMath/rbf.h"
 #include "rigExecMath/solvers.h"
 
@@ -1820,6 +1821,33 @@ private:
     /// stepped once and then held.
     std::vector<RigExecValueOverride> _lastSpaceSwitchOverrides;
     RigExecSnapshot _spaceSwitchSnapshot;
+
+    /// One compiled RigExecAutoClavicle. Like a space switch it writes no
+    /// pose: it republishes its target's composed frame, translated by
+    /// RigExecAutoClavicleShift, as a value override on computePointFrame,
+    /// after every switch has resolved, so the target's descendants and the
+    /// solvers read the moved frame.
+    struct _AutoClavicle {
+        SdfPath nodePath;
+        SdfPath target, pivot, anchor;
+        SdfPath fk[3];
+        SdfPath ikTarget, pole;
+        SdfPath ikBlendAttribute, amountAttribute;
+        RigExecAutoClavicleConstants constants;
+        RigExecTapId targetPosedTap = -1;
+        RigExecTapId pivotPosedTap = -1;
+        RigExecTapId anchorPosedTap = -1;
+        RigExecTapId anchorDefaultTap = -1;
+        RigExecTapId fkPosedTap = -1;
+        RigExecTapId fkDefaultTap[3] = {-1, -1, -1};
+        RigExecTapId ikTargetPosedTap = -1;
+        RigExecTapId polePosedTap = -1;
+    };
+    std::vector<_AutoClavicle> _autoClavicles;
+    /// As for the switches: the overrides last published and the seed they
+    /// produced, so a held pose pays no second evaluation.
+    std::vector<RigExecValueOverride> _lastAutoClavicleOverrides;
+    RigExecSnapshot _autoClavicleSnapshot;
 
     /// One property-domain revision: a float/vec3f/matrix math mover's
     /// operation over the preceding value of an exact scalar property.

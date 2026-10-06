@@ -19,7 +19,7 @@
 #
 import os
 
-from pxr import Sdf, Usd
+from pxr import Sdf, Usd, UsdGeom
 
 RIG = "/Biped/Rig"
 
@@ -239,10 +239,13 @@ def testUsdviewInputFunction(appController):
     _Check(attr and attr.IsValid(),
            "%s carries %s" % (target["path"], target["attr"]))
 
-    before = float(attr.Get())
+    # Read at the panel's frame: a switch authors through the gizmo's
+    # writer, which keys the channel there in animation mode.
+    frame = panel._Frame()
+    before = float(attr.Get(frame))
     view.picked.emit([switch], "replace")
     appController._processEvents()
-    after = float(attr.Get())
+    after = float(attr.Get(frame))
     _Check(after != before,
            "clicking the switch changed %s: %g -> %g"
            % (target["attr"], before, after))
@@ -256,8 +259,116 @@ def testUsdviewInputFunction(appController):
 
     view.picked.emit([switch], "replace")
     appController._processEvents()
-    _Check(float(attr.Get()) == before,
+    _Check(float(attr.Get(frame)) == before,
            "clicking again cycled back to %g" % before)
+
+    # --- 6b. the switch MATCHES ------------------------------------------
+    # The half taking over is posed onto the joints first, so a switch
+    # moves nothing: pose the left arm in FK, switch it, and the joints
+    # stay put while the IK control and pole are written; one undo puts
+    # every channel back.
+    import gizmoMath
+    import ikfkMatch
+    limbs = ikfkMatch.FindLimbs(stage)
+    arm = next(b for b in switches
+               if b.attr_target["path"].endswith("/L_Arm"))
+    limb = ikfkMatch.LimbFor(limbs, Sdf.Path(arm.attr_target["path"]))
+    _Check(limb is not None and limb.switchPath ==
+           Sdf.Path(arm.attr_target["path"]).AppendProperty(
+               arm.attr_target["attr"]),
+           "the L_Arm button drives a limb ikfkMatch found")
+    pose = {limb.switchPath: limb.fkValue,
+            limb.fkControls[0].AppendProperty("avars:rz"): -30.0,
+            limb.fkControls[0].AppendProperty("avars:rx"): 20.0,
+            limb.fkControls[1].AppendProperty("avars:rz"): -45.0,
+            limb.fkControls[2].AppendProperty("avars:ry"): 15.0}
+    for path, value in pose.items():
+        gizmoMath.SetAnimated(stage.GetAttributeAtPath(path), value, frame)
+    appController._processEvents()
+    evaluate = ikfkMatch.Evaluator(stage, limb.rigRoot)
+    ikChannels = [limb.ikControl.AppendProperty("avars:" + n)
+                  for n in ("tx", "ty", "tz", "rx", "ry", "rz")] +         [limb.pole.AppendProperty("avars:" + n) for n in ("tx", "ty", "tz")]
+
+    def Read(paths):
+        return [float(stage.GetAttributeAtPath(p).Get(frame) or 0.0)
+                for p in paths]
+
+    channelsBefore = Read(ikChannels)
+    jointsBefore = [ikfkMatch.JointFrame(evaluate({}, frame), j)
+                    for j in limb.joints]
+    switchAttr = stage.GetAttributeAtPath(limb.switchPath)
+    view.picked.emit([arm], "replace")
+    appController._processEvents()
+    _Check(float(switchAttr.Get(frame)) == limb.ikValue,
+           "the matched switch put L_Arm in IK, got %g"
+           % float(switchAttr.Get(frame)))
+    jointsAfter = [ikfkMatch.JointFrame(evaluate({}, frame), j)
+                   for j in limb.joints]
+    moved = max((a.ExtractTranslation() - b.ExtractTranslation())
+                .GetLength() for a, b in zip(jointsBefore, jointsAfter))
+    _Check(moved < 1e-5,
+           "switching L_Arm to IK moved its joints by %.3g" % moved)
+    channelsAfter = Read(ikChannels)
+    _Check(channelsAfter != channelsBefore,
+           "the IK control and pole were matched: %s" % channelsAfter)
+    _Check("matched" in panel._status.text(),
+           "the status says it matched: %r" % panel._status.text())
+    switchUndo = getattr(panel, "_undo", None)
+    _Check(switchUndo is not None and switchUndo.CanUndo(),
+           "the matched switch pushed an undo entry")
+    if switchUndo is not None and switchUndo.CanUndo():
+        switchUndo.Undo()
+        appController._processEvents()
+        _Check(float(switchAttr.Get(frame)) == limb.fkValue and
+               Read(ikChannels) == channelsBefore,
+               "one undo restored the switch and every matched channel")
+
+    # --- 6c. ...and from usdview's right-click menu, per control ---------
+    # The prim menu (hierarchy and viewport right-click) offers "Switch
+    # R_Arm to IK" on a control of a switchable limb and nothing on any
+    # other prim; choosing it switches that limb, matched.
+    import rigExecUsdview
+    from pxr.Usdviewq.usdviewApi import UsdviewApi
+    container = rigExecUsdview.ContainerFor(UsdviewApi(appController))
+    _Check(getattr(appController, "_rigExecArcMenuInstalled", False),
+           "the prim context menu hook is installed")
+    right = next(l for l in limbs if l.switchControl.name == "R_Arm")
+    for path, value in {
+            right.switchPath: right.fkValue,
+            right.fkControls[0].AppendProperty("avars:rz"): -25.0,
+            right.fkControls[1].AppendProperty("avars:rz"): -50.0}.items():
+        gizmoMath.SetAnimated(stage.GetAttributeAtPath(path), value, frame)
+    appController._processEvents()
+    rightJoints = [ikfkMatch.JointFrame(evaluate({}, frame), j)
+                   for j in right.joints]
+    jaw = next(p for p in stage.Traverse() if p.GetName() == "M_Jaw")
+    _Check(container.AppendIkFkItem(QtWidgets.QMenu(), jaw) is None,
+           "a face control gets no IK/FK item")
+    menu = QtWidgets.QMenu()
+    hand = stage.GetPrimAtPath(right.fkControls[2])
+    action = container.AppendIkFkItem(menu, hand)
+    _Check(action is not None and action.text() == "Switch R_Arm to IK",
+           "right-clicking R_Hand offers 'Switch R_Arm to IK', got %r"
+           % (action.text() if action is not None else None))
+    if action is not None:
+        action.trigger()
+    appController._processEvents()
+    rightSwitch = stage.GetAttributeAtPath(right.switchPath)
+    _Check(float(rightSwitch.Get(frame)) == right.ikValue,
+           "the right-click switched R_Arm to IK, got %g"
+           % float(rightSwitch.Get(frame)))
+    movedRight = max(
+        (a.ExtractTranslation() - ikfkMatch.JointFrame(
+            evaluate({}, frame), j).ExtractTranslation()).GetLength()
+        for a, j in zip(rightJoints, right.joints))
+    _Check(movedRight < 1e-5,
+           "the right-click switch moved R_Arm's joints by %.3g"
+           % movedRight)
+    if switchUndo is not None and switchUndo.CanUndo():
+        switchUndo.Undo()
+        appController._processEvents()
+        _Check(float(rightSwitch.Get(frame)) == right.fkValue,
+               "undo put R_Arm back in FK")
 
 
 
@@ -337,6 +448,90 @@ def testUsdviewInputFunction(appController):
     appController._processEvents()
     _Check(view._modes.get(dial) == was and knob.value == label,
            "and back again: %r / %r" % (view._modes.get(dial), knob.value))
+
+    # --- 7b. Ctrl Vis: hide and show the rig's controls ----------------
+    vis = next((b for b in picker.buttons if b.command == "ctrl_vis"), None)
+    _Check(vis is not None, "the picker has a Ctrl Vis button")
+    _Check(vis.live and not vis.decoration and vis.checkbox,
+           "and it is a live, clickable checkbox")
+    controls = panel._ControlsPrim(picker)
+    _Check(controls is not None and controls.GetParent().GetName() == "Aux",
+           "it finds the Controls prim under Aux: %s"
+           % (controls.GetPath() if controls else None))
+    _Check(vis.checked, "ticked while the controls are visible")
+    view.picked.emit([vis], "replace")
+    appController._processEvents()
+    imageable = UsdGeom.Imageable(controls)
+    _Check(imageable.ComputeVisibility() == UsdGeom.Tokens.invisible,
+           "a click hides the controls")
+    session = stage.GetSessionLayer().GetPropertyAtPath(
+        controls.GetPath().AppendProperty("visibility"))
+    _Check(session is not None,
+           "with an opinion in the session layer, not the rig's files")
+    _Check(not vis.checked, "and the tick clears")
+    view.picked.emit([vis], "replace")
+    appController._processEvents()
+    _Check(imageable.ComputeVisibility() != UsdGeom.Tokens.invisible,
+           "a second click shows them again")
+    _Check(vis.checked, "and the tick comes back")
+    # Hidden from outside the picker: the tick follows.
+    with Usd.EditContext(stage, stage.GetSessionLayer()):
+        imageable.GetVisibilityAttr().Set(UsdGeom.Tokens.invisible)
+    appController._processEvents()
+    _Check(not vis.checked, "the tick follows a hide made elsewhere")
+    with Usd.EditContext(stage, stage.GetSessionLayer()):
+        imageable.GetVisibilityAttr().Clear()
+    appController._processEvents()
+    _Check(vis.checked, "and a show made elsewhere")
+
+    # --- 7c. Space buttons switch without moving the control ----------
+    import ikfkMatch
+    ct = "/Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest"
+    swing = ct + "/M_ChestTop/L_Shldr/L_UpArmSwing"
+    space_button = next(
+        (b for b in picker.buttons if b.attr_target and
+         b.attr_target["path"] == swing and
+         b.attr_target["attr"] == "avars:space"), None)
+    _Check(space_button is not None, "the L shoulder swing has a space button")
+    _Check(space_button.attr_target.get("enum") == ["local", "world", "hips"],
+           "offering local / world / hips: %s"
+           % space_button.attr_target.get("enum"))
+    posed = {ct + ".avars:rx": 30.0, swing + ".avars:ry": 15.0,
+             swing + ".avars:space": 0.0}
+    for path, value in posed.items():
+        attr = stage.GetAttributeAtPath(path)
+        if not attr:
+            prim = stage.GetPrimAtPath(Sdf.Path(path).GetPrimPath())
+            attr = prim.CreateAttribute(Sdf.Path(path).name,
+                                        Sdf.ValueTypeNames.Double)
+        attr.Set(value)
+    appController._processEvents()
+    evaluate = ikfkMatch.Evaluator(stage, Sdf.Path("/Biped/Rig"))
+    # The panel writes the way a drag does -- keyed at its frame in
+    # animation mode -- so everything is read at that frame.
+    now = panel._Frame()
+    before = ikfkMatch.ControlFrame(evaluate({}, now), Sdf.Path(swing))
+    panel._WriteSwitch(space_button, "world")
+    appController._processEvents()
+    after = ikfkMatch.ControlFrame(evaluate({}, now), Sdf.Path(swing))
+    off = max(abs(before[i][j] - after[i][j])
+              for i in range(4) for j in range(4))
+    _Check(stage.GetAttributeAtPath(swing + ".avars:space").Get(now) == 1.0,
+           "the button set the swing to world (%s)" % panel._status.text())
+    _Check(off < 1e-5, "and the swing did not move (%.3g)" % off)
+    _Check(abs(stage.GetAttributeAtPath(swing + ".avars:ry").Get(now) - 15.0)
+           > 1e-3, "its rotation channels took up the difference")
+    undo = getattr(panel, "_undo", None)
+    if undo is not None and undo.CanUndo():
+        undo.Undo()
+        appController._processEvents()
+        _Check(stage.GetAttributeAtPath(swing + ".avars:space").Get(now) == 0.0
+               and abs(stage.GetAttributeAtPath(swing + ".avars:ry").Get(now)
+                       - 15.0) < 1e-9,
+               "one undo restores the space and the channels")
+    for path in posed:
+        stage.GetAttributeAtPath(path).Clear()
+    appController._processEvents()
 
     # --- 8. Zero Ctrls -------------------------------------------------
     zero = next((b for b in picker.buttons if b.command == "zero_ctrls"),

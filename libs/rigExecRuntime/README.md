@@ -19,3 +19,15 @@ already-solved weights; regularization and matrix inversion belong to baking.
 
 The runtime pose and binary round-trip tests compare these results against the
 baked evaluator. Run the repository's build helper to build and run CTest.
+
+## Posing live
+
+A poseable bake (`RigExecBakeOpts::overridableInputs`) also carries the
+property chains as programs (`rigExecBinary/propertyChains.h`). `Execute`
+computes them from the selected frame and the values `SetAvar` holds, then
+hands each result to the input holders it feeds, so a face slider that only
+drives chains moves the mesh. Blend channels bound to a pose interpolator read
+the interpolator's live slot, as the baked gather does. Both use the
+evaluator's own kernels (`rigExecMath/propertyMathKernel.h`), and
+`testRigExecRuntimeLiveFace` holds the biped's runtime to the evaluator point
+for point. A file without the chain section replays the recorded chain values.

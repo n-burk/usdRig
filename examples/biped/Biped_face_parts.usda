@@ -2315,8 +2315,6 @@ def "Biped"
                                                     {
                                                         over "M_Skull"
                                                         {
-                                                            custom double avars:space = 0
-
                                                             over "M_UpFace"
                                                             {
                                                                 def RigExecControl "face_upper_aim"

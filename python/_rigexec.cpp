@@ -1164,8 +1164,26 @@ PYBIND11_MODULE(_rigexec, m) {
                 return it->second;
             }, py::arg("path"))
 
+        .def("control_matrices_bytes", [](const rigExec::RigExecRigPose &p,
+                                          const std::vector<std::string> &paths) {
+                std::string out(paths.size() * 16 * sizeof(double), '\0');
+                double *cursor = reinterpret_cast<double *>(out.data());
+                for (const std::string &path : paths) {
+                    auto it = p.controlFrames.find(SdfPath(path));
+                    if (it == p.controlFrames.end()) {
+                        throw py::key_error("no control frame for " + path);
+                    }
+                    const GfMatrix4d m = _FrameToMatrix(it->second);
+                    std::copy(m.data(), m.data() + 16, cursor);
+                    cursor += 16;
+                }
+                return py::bytes(out);
+            }, py::arg("paths"),
+           "The asset-space matrices of the named control frames, as packed\n"
+           "little-endian float64, 16 row-major per control in the order given.")
+
         // Provider xforms.
-        .def("provider_paths", [](const rigExec::RigExecRigPose &p) {
+        .def("provider_paths",[](const rigExec::RigExecRigPose &p) {
                 std::vector<std::string> out;
                 for (const auto &kv : p.providerXforms) out.push_back(_PathStr(kv.first));
                 return out;
@@ -1196,6 +1214,18 @@ PYBIND11_MODULE(_rigexec, m) {
                 return _VtToPython(it->second);
             }, py::arg("path"),
            "The final computed value of one moved property, converted by held type.")
+        .def("moved_points_bytes", [](const rigExec::RigExecRigPose &p, std::string path) {
+                auto it = p.movedProperties.find(SdfPath(path));
+                if (it == p.movedProperties.end() ||
+                    !it->second.IsHolding<VtVec3fArray>()) {
+                    throw py::key_error("no moved points for " + path);
+                }
+                const VtVec3fArray &a = it->second.UncheckedGet<VtVec3fArray>();
+                return py::bytes(reinterpret_cast<const char *>(a.cdata()),
+                                 a.size() * sizeof(GfVec3f));
+            }, py::arg("path"),
+           "One moved point array as packed little-endian float32 xyz, for\n"
+           "consumers that hand the buffer on without touching each point.")
         .def("moved_properties", [](const rigExec::RigExecRigPose &p) {
                 py::dict out;
                 for (const auto &kv : p.movedProperties) {

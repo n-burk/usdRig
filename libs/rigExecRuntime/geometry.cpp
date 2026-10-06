@@ -7491,6 +7491,16 @@ RrGeoAssembleBlendDeltas(const RrGeoAssembleInputs &in,
                                                              [in.revision][c];
             }
         }
+        // A pose-driven weight is this run's interpolator slot, as the baked
+        // gather reads it (bakedGeometry.cpp): computed from the live pose,
+        // not the value the bake recorded. An override on the weight itself
+        // is the one thing that outranks the slot there, and the runtime
+        // places none on a blend weight.
+        if (bound.poseWeight >= 0 &&
+            size_t(bound.poseWeight) < in.program->store.poseWeights.size()) {
+            channel.weight =
+                in.program->store.poseWeights[size_t(bound.poseWeight)];
+        }
         for (size_t s = 0; s < bound.samples.size(); ++s) {
             const RigExecWireBlendChannel::Sample &boundSample =
                 bound.samples[s];

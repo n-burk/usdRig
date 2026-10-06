@@ -230,6 +230,22 @@ over "Biped"
                     uniform color4f ui:valueColor = (0.92156863, 0.92156863, 0.92156863, 1)
                 }
 
+                def RigExecPickerButton "t_Ctrl_Vis"
+                {
+                    uniform token rigExec:picker:command = "ctrl_vis"
+                    uniform float ui:depth = 0.0004
+                    uniform color4f ui:fill = (0.39607844, 0.39607844, 0.39607844, 1)
+                    uniform float ui:fontSize = 10
+                    uniform float2 ui:position = (445, 466)
+                    uniform float ui:roundness = 3
+                    uniform token ui:shape = "rectangle"
+                    uniform float2 ui:size = (59, 17)
+                    uniform color4f ui:stroke = (0.12156863, 0.12156863, 0.12156863, 1)
+                    uniform string ui:text = "Ctrl Vis"
+                    uniform color4f ui:textColor = (0.78431374, 0.78431374, 0.78431374, 1)
+                    uniform color4f ui:valueColor = (0.92156863, 0.92156863, 0.92156863, 1)
+                }
+
                 def RigExecPickerButton "t_Body"
                 {
                     uniform token rigExec:picker:command = "body"

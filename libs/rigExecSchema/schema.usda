@@ -1438,7 +1438,7 @@ class RigExecSpaceSwitch "RigExecSpaceSwitch" (
         authored it is authoritative and inputs:activeSpace is ignored."""
     )
     uniform token[] rigExec:rotationFilters = [] (
-        allowedTokens = ["all", "twist", "swing"]
+        allowedTokens = ["all", "twist", "swing", "orient"]
         doc = """Optional per-source rotation filter, parallel to
         rigExec:sources. Empty, or "all", passes the source's rotation
         through whole.
@@ -1455,12 +1455,129 @@ class RigExecSpaceSwitch "RigExecSpaceSwitch" (
         thing it aims is a pole that fights the animator.
 
         Translation and scale are unaffected: the pole still follows the
-        hand's position."""
+        hand's position.
+
+        "orient" makes the source a rotation-only space: the target takes
+        the source's whole rotation, and its position stays where its
+        namespace parent carries it, as if the space were not switched. A
+        shoulder, neck or head held to the world turns with the world and
+        still rides on the body."""
     )
     double3 rigExec:twistAxis = (1, 0, 0) (
         doc = """Twist axis for rigExec:rotationFilters, in the SOURCE's own
         rest axes -- the limb axis for a wrist or an ankle. One axis serves
         every filtered source; a switch needing two would be two switches."""
+    )
+}
+
+class RigExecAutoClavicle "RigExecAutoClavicle" (
+    inherits = </Typed>
+    customData = {
+        string className = "AutoClavicle"
+    }
+    doc = """Carries a limb's root with the limb's own swing, as a clavicle
+    lifts when the arm is raised.
+
+    It runs where space switches run: after the controls compose and before
+    any solver reads them. It moves rigExec:target -- the control the limb
+    hangs from -- by translation only, and its namespace descendants follow,
+    so the FK chain and the root of the IK solve move together and keep
+    their orientation.
+
+    Each frame, in row-vector convention and the anchor's axes:
+
+        d    = the upper limb's direction: the first FK control's rest bone
+               axis carried by its posed frame, or the upper bone of a
+               two-bone solve from the target's moved origin to
+               rigExec:ikTarget, bending toward rigExec:poleControl,
+               blended by rigExec:ikBlendAttribute
+        p_k  = the pose weights of d, measured as the swing that takes the
+               basis X axis onto d (rigExec:basis), against
+               rigExec:poseRotations
+        w    = clamp(inputs:gain * amount * sum_k gain_k * clamp(p_k, 0, 1),
+                     0, 1)
+        R    = slerp(identity, shortest arc from the rest direction to d, w)
+
+    and the target's origin is turned by R about rigExec:pivot's origin. The
+    rest direction and the bone lengths are read from the default frames, so
+    at rest R is the identity and the node moves nothing.
+
+    The FK direction reads only the first FK control's rotation, which the
+    translation does not change. The IK root moves with the shift it helps
+    decide, so the solve and the shift are iterated to their fixed point;
+    there an IK limb matched to an FK one gives the FK direction back, and a
+    matched IK/FK switch moves nothing."""
+)
+{
+    rel rigExec:target (
+        doc = """The RigExecControl moved: the limb's root control, whose
+        descendants hold the FK chain and whose frame roots the IK solve.
+        Exactly one."""
+    )
+    rel rigExec:pivot (
+        doc = """The control whose posed origin the root turns about: the
+        clavicle. Exactly one."""
+    )
+    rel rigExec:anchor (
+        doc = """The control the limb's direction is measured in: the chest.
+        It must not be moved by rigExec:target. Exactly one."""
+    )
+    rel rigExec:fkControls (
+        doc = """The FK chain's three controls, root to end. The first gives
+        the FK direction; the rest frames of all three give the bone axis,
+        the bone lengths of the IK estimate and the rest root."""
+    )
+    rel rigExec:ikTarget (
+        doc = """Optional: the prim whose posed origin the IK half reaches
+        for, normally the IK effector. Without it the FK direction is used
+        whatever the blend says."""
+    )
+    rel rigExec:poleControl (
+        doc = """Optional: the pole the IK estimate bends toward. Without it
+        the estimate bends toward the FK direction."""
+    )
+    rel rigExec:ikBlendAttribute (
+        doc = """Optional float or double property selecting between the FK
+        and IK directions, normally the limb's IK/FK switch. Absent reads as
+        FK."""
+    )
+    double rigExec:ikValue = 1 (
+        doc = """The value of rigExec:ikBlendAttribute that means fully IK;
+        1 - ikValue means fully FK, and values between blend the two
+        directions."""
+    )
+    rel rigExec:amountAttribute (
+        doc = """Optional float or double property scaling the effect, the
+        animator's on/off dial. Absent reads as 1."""
+    )
+    double inputs:gain = 0.4 (
+        doc = """Scales the summed pose weights into the blend weight w."""
+    )
+    matrix4d rigExec:basis = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
+        doc = """The frame rigExec:poseRotations are expressed in, relative
+        to the anchor's posed frame: its X axis is the limb axis at a zero
+        rotation. Only its rotation is read, and it may carry a reflection,
+        which is how a right limb shares a left limb's poses."""
+    )
+    quatf[] rigExec:poseRotations = [] (
+        doc = """Swing poses of the limb, each a rotation of the basis X axis,
+        in rigExec:basis. Only the swing about X is measured."""
+    )
+    float[] rigExec:poseFalloffs = [] (
+        doc = """Per-pose falloff, parallel to rigExec:poseRotations, stated
+        relative to each pose's nearest neighbour as RigExecPose's is."""
+    )
+    double[] rigExec:poseGains = [] (
+        doc = """Per-pose contribution to the blend weight, parallel to
+        rigExec:poseRotations. A pose that only shapes the interpolation
+        carries 0."""
+    )
+    uniform token rigExec:kernel = "gaussian" (
+        allowedTokens = ["gaussian", "linear"]
+        doc = "The interpolation kernel, as RigExecPoseInterpolator's."
+    )
+    float rigExec:regularization = 0 (
+        doc = "Added to the interpolation matrix diagonal, as RigExecPoseInterpolator's."
     )
 }
 

@@ -152,8 +152,11 @@ GfMatrix4d RigExecMaskTransform(const GfMatrix4d &m,
                                 const bool rotation[3],
                                 const bool scale[3]);
 
-/// How RigExecFilterSpaceRotation splits a rotation.
-enum class RigExecRotationFilter { All, Twist, Swing };
+/// How RigExecFilterSpaceRotation splits a rotation. `Orient` keeps the
+/// whole rotation; the space switch then takes the position from the
+/// target's unswitched frame (RigExecOrientSpaceDelta), which is what makes
+/// it a rotation-only space.
+enum class RigExecRotationFilter { All, Twist, Swing, Orient };
 
 /// Keep only the twist of \p m's rotation about \p axis, or only the swing,
 /// leaving its translation and scale exactly as they were.
@@ -170,6 +173,16 @@ enum class RigExecRotationFilter { All, Twist, Swing };
 GfMatrix4d RigExecFilterSpaceRotation(const GfMatrix4d &m,
                                       const GfVec3d &axis,
                                       RigExecRotationFilter filter);
+
+/// A rotation-only space: the switch delta \p delta (target-local, so the
+/// switched frame is `delta * local`) with the switched frame's origin
+/// replaced by the origin of \p unswitched, the target's frame under its
+/// namespace parent. The control turns with the space and stays where its
+/// parent carries it.
+GfMatrix4d RigExecOrientSpaceDelta(const GfMatrix4d &delta,
+                                   const GfMatrix4d &local,
+                                   const GfMatrix4d &localInverse,
+                                   const GfMatrix4d &unswitched);
 
 }  // namespace rigExec
 

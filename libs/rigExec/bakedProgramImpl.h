@@ -23,6 +23,7 @@
 #include "curvenetWeightComputations.h"
 #include "weightPackets.h"
 
+#include "rigExecMath/autoClavicleKernel.h"
 #include "rigExecMath/avarScale.h"
 #include "rigExecMath/dualQuat.h"
 #include "rigExecMath/pointFrame.h"
@@ -1853,6 +1854,33 @@ struct RigExecBakedProgramImpl {
     /// the compose, so the ordinary rig pays one array lookup and nothing
     /// else for a feature it does not use.
     std::vector<int> spaceSwitchBySlot;
+
+    /// One compiled RigExecAutoClavicle, in the program's own terms. The
+    /// compose applies it to its target slot right after the slot's own
+    /// compose (and space switch), translating the frame by
+    /// RigExecAutoClavicleShift before any descendant reads it. The first FK
+    /// control is a direct child of the target and is composed inline from
+    /// its avars for the direction, exactly as its own compose will later.
+    struct AutoClavicle {
+        int slot = -1;
+        int pivotSlot = -1;
+        int anchorSlot = -1;
+        int fkSlot[3] = {-1, -1, -1};
+        int ikTargetSlot = -1;
+        int poleSlot = -1;
+        RigExecAutoClavicleConstants constants;
+        /// The two channels, bound in the attribute's own type (the
+        /// biped's IK/FK dial is float, its other avars double).
+        RigExecBakedInput<double> ikBlendInput;
+        RigExecBakedInput<float> ikBlendFloat;
+        bool ikBlendIsFloat = false;
+        RigExecBakedInput<double> amountInput;
+        RigExecBakedInput<float> amountFloat;
+        bool amountIsFloat = false;
+    };
+    std::vector<AutoClavicle> autoClavicles;
+    /// Per provider slot: its auto clavicle's index, or -1.
+    std::vector<int> autoClavicleBySlot;
 
     /// Set when the compose groups could not be put in dependency order:
     /// two space switches each need the other composed first. Read by Build,

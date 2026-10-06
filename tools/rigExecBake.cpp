@@ -72,7 +72,10 @@ main(int argc, char **argv)
         std::printf(
             "usage: rigExecBake <stage> [--rig <primPath>] "
             "--frames a,b,c -o <file.rigexec> "
-            "[--manifest-out <file.json>]\n");
+            "[--manifest-out <file.json>] [--poseable]\n"
+            "  --poseable  a file a client can pose, not only replay: every\n"
+            "              input an override can reach, and the property\n"
+            "              chains as programs\n");
         return 2;
     }
     std::string stagePath = argv[1];
@@ -80,6 +83,7 @@ main(int argc, char **argv)
     std::string output;
     std::string manifestOut;
     std::vector<double> frames;
+    bool poseable = false;
     for (int i = 2; i < argc; ++i) {
         const std::string arg = argv[i];
         if (arg == "--rig" && i + 1 < argc) {
@@ -90,6 +94,8 @@ main(int argc, char **argv)
             output = argv[++i];
         } else if (arg == "--manifest-out" && i + 1 < argc) {
             manifestOut = argv[++i];
+        } else if (arg == "--poseable") {
+            poseable = true;
         } else {
             std::printf("unknown argument: %s\n", arg.c_str());
             return 2;
@@ -136,6 +142,7 @@ main(int argc, char **argv)
     evaluator.SetEvaluationMode(rigExec::RigExecEvaluationMode::Baked);
     rigExec::RigExecBakeOpts opts;
     opts.frames = frames;
+    opts.overridableInputs = poseable;
     rigExec::RigExecBakeResult result;
     std::string error;
     if (!rigExec::RigExecBakeToBinary(evaluator, opts, &result, &error)) {

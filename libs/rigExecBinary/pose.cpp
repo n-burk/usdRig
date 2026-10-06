@@ -103,8 +103,9 @@ _ReadRotationFilters(RigExecWireReader *reader,
     if (!_ReadU8s(reader, values)) {
         return false;
     }
+    // All, Twist, Swing, Orient.
     for (uint8_t value : *values) {
-        if (value > 2) {
+        if (value > 3) {
             return false;
         }
     }
@@ -1451,6 +1452,79 @@ RigExecWireDecodeSpaceSwitches(
         if (error) {
             *error = "trailing bytes in space switches";
         }
+        return false;
+    }
+    return true;
+}
+
+bool
+RigExecWireEncodeAutoClavicles(
+    const std::vector<RigExecWireAutoClavicle> &records,
+    std::vector<uint8_t> *out)
+{
+    RigExecWirePutU32(out, uint32_t(records.size()));
+    for (const RigExecWireAutoClavicle &r : records) {
+        for (const int32_t slot :
+             {r.slot, r.pivotSlot, r.anchorSlot, r.fkSlot[0], r.fkSlot[1],
+              r.fkSlot[2], r.ikTargetSlot, r.poleSlot}) {
+            RigExecWirePutI32(out, slot);
+        }
+        _PutInput(out, r.ikBlend);
+        _PutInput(out, r.amount);
+        for (const double v : r.basis) RigExecWirePutF64(out, v);
+        RigExecWirePutF64(out, r.ikValue);
+        RigExecWirePutF64(out, r.gain);
+        RigExecWirePutU8(out, r.kernel);
+        RigExecWirePutU8(out, r.normalize);
+        _PutF64s(out, r.swings);
+        _PutF64s(out, r.widths);
+        _PutF64s(out, r.gains);
+        _PutF64s(out, r.weights);
+    }
+    return true;
+}
+
+bool
+RigExecWireDecodeAutoClavicles(
+    RigExecWireReader *reader,
+    std::vector<RigExecWireAutoClavicle> *records, std::string *error)
+{
+    uint32_t count = 0;
+    if (!reader->ReadU32(&count)) {
+        return _Fail(error);
+    }
+    records->resize(count);
+    for (uint32_t i = 0; i < count; ++i) {
+        RigExecWireAutoClavicle &r = (*records)[i];
+        for (int32_t *slot :
+             {&r.slot, &r.pivotSlot, &r.anchorSlot, &r.fkSlot[0],
+              &r.fkSlot[1], &r.fkSlot[2], &r.ikTargetSlot, &r.poleSlot}) {
+            if (!reader->ReadI32(slot)) return _Fail(error);
+        }
+        if (!_ReadInput(reader, &r.ikBlend) ||
+            !_ReadInput(reader, &r.amount)) {
+            return _Fail(error);
+        }
+        for (double &v : r.basis) {
+            if (!reader->ReadF64(&v)) return _Fail(error);
+        }
+        if (!reader->ReadF64(&r.ikValue) || !reader->ReadF64(&r.gain) ||
+            !reader->ReadU8(&r.kernel) || !reader->ReadU8(&r.normalize) ||
+            r.kernel > 1 || r.normalize > 1 || !_ReadF64s(reader, &r.swings) ||
+            !_ReadF64s(reader, &r.widths) || !_ReadF64s(reader, &r.gains) ||
+            !_ReadF64s(reader, &r.weights)) {
+            return _Fail(error);
+        }
+        // The pose tables must agree, or the shift would index past them.
+        const size_t n = r.widths.size();
+        if (r.swings.size() != n * 4 || r.gains.size() != n ||
+            r.weights.size() != n * n) {
+            if (error) *error = "inconsistent auto clavicle pose tables";
+            return false;
+        }
+    }
+    if (!reader->Exhausted()) {
+        if (error) *error = "trailing bytes in auto clavicles";
         return false;
     }
     return true;

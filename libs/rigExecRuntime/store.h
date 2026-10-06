@@ -15,6 +15,7 @@
 #include "rigExecBinary/pose.h"
 #include "rigExecBinary/program.h"
 #include "rigExecRuntime/values.h"
+#include "rigExecMath/autoClavicleKernel.h"
 
 #include <cstdint>
 #include <map>
@@ -246,6 +247,11 @@ struct RrProgram {
     // Open so the compose pays one array lookup per slot and a rig with
     // no switch pays nothing at all. Empty when the binary carries none.
     std::vector<int32_t> spaceSwitchBySlot;
+    // Per auto clavicle: the IK blend and amount uids, its constants, and
+    // per provider slot its index (empty when the binary carries none).
+    std::vector<std::array<int32_t, 2>> autoClavicleUid;
+    std::vector<RigExecAutoClavicleConstants> autoClavicleConstants;
+    std::vector<int32_t> autoClavicleBySlot;
     std::vector<std::array<int32_t, RrSolverFieldCount>> solverUid;
     std::vector<std::array<int32_t, RrConstraintFieldCount>> constraintUid;
     std::vector<std::array<int32_t, RrWeightFieldCount>> weightUid;
@@ -340,6 +346,12 @@ struct RrProgram {
         return ReadUid(in.valueInputs[axis],
                        interpValueUid[interp][axis]);
     }
+    RrInputValue ReadAutoClavicle(size_t index, size_t which) const
+    {
+        const RigExecWireAutoClavicle &ac = poses->autoClavicles[index];
+        return ReadUid(which == 0 ? ac.ikBlend : ac.amount,
+                       autoClavicleUid[index][which]);
+    }
     RrInputValue ReadSpaceSwitch(size_t index) const
     {
         return ReadUid(poses->spaceSwitches[index].active,
@@ -427,12 +439,18 @@ RrMat4d RrMaskTransform(const RrMat4d &m, const bool translation[3],
                         const bool rotation[3], const bool scale[3]);
 
 /// Mirrors RigExecRotationFilter bit for bit.
-enum class RrRotationFilter : uint8_t { All = 0, Twist = 1, Swing = 2 };
+enum class RrRotationFilter : uint8_t { All = 0, Twist = 1, Swing = 2, Orient = 3 };
 
 /// RigExecFilterSpaceRotation: keep only the twist of \p m's rotation about
 /// \p axis, or only the swing. `All` returns \p m untouched.
 RrMat4d RrFilterSpaceRotation(const RrMat4d &m, const RrVec3d &axis,
                               RrRotationFilter filter);
+
+/// RigExecOrientSpaceDelta: \p delta with the switched frame's origin taken
+/// from \p unswitched -- a rotation-only space.
+RrMat4d RrOrientSpaceDelta(const RrMat4d &delta, const RrMat4d &local,
+                           const RrMat4d &localInverse,
+                           const RrMat4d &unswitched);
 
 }  // namespace rigExec
 

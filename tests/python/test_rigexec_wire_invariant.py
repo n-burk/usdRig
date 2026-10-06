@@ -225,20 +225,27 @@ def _check_look_at_drives_the_lids():
     # THE LOOK-AT IS PUT IN WORLD SPACE, explicitly, because what this
     # measures only exists there.
     #
-    # M_Look's avars:space indexes look_spaces, whose labels are
-    # ["world", "local"]. In WORLD the target stays where it is while
-    # the head turns, the eyes counter-rotate to keep looking at it,
-    # and the drag carries the lids -- which is the thing being
-    # asserted. In LOCAL the target rides M_UpFace, so a head turn
+    # M_Look's avars:space indexes look_spaces. In WORLD the target stays
+    # where it is while the head turns, the eyes counter-rotate to keep
+    # looking at it, and the drag carries the lids -- which is the thing
+    # being asserted. In LOCAL the target rides M_UpFace, so a head turn
     # carries it along and the eyes have nothing to counter: measured
     # 0.000514 at ry=60, against 0.433 in world.
     #
-    # That is local working, not the drag breaking, and the default is
-    # now 1 -- so leaving it implicit made this file fail the moment the
-    # default moved. Set, not assumed.
+    # That is local working, not the drag breaking, so world is set
+    # explicitly -- and by its LABEL, looked up on the switch, because the
+    # index of "world" has already moved once with the space order.
     space = stage.GetPrimAtPath(_LOOK).GetAttribute("avars:space")
     assert space and space.IsValid(), "M_Look has no avars:space"
-    space.Set(0.0)
+    labels = None
+    for prim in stage.Traverse():
+        if prim.GetTypeName() != "RigExecSpaceSwitch":
+            continue
+        rel = prim.GetRelationship("rigExec:activeSpaceAttribute")
+        if rel and space.GetPath() in rel.GetTargets():
+            labels = list(prim.GetAttribute("rigExec:spaceLabels").Get())
+    assert labels and "world" in labels, ("no world space for M_Look", labels)
+    space.Set(float(labels.index("world")))
     look = stage.GetPrimAtPath(_LOOK).GetAttribute("avars:lookAt")
     look.Set(0.0)
     off = _points(rig)

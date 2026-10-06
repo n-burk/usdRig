@@ -70,6 +70,14 @@ enum class RigExecBinarySection : uint32_t {
     /// every input an override can reach, and the loader has to route by
     /// the same widened rule or the uids drift apart. See capture.h.
     InputPolicy = 16,
+    /// The property chains as programs (propertyChains.h). Absent means
+    /// every chain replays its recorded value, which is what every binary
+    /// written before this section does, so its absence is the old answer
+    /// and no version moves.
+    PropertyChains = 17,
+    /// RigExecAutoClavicle records. Absent means no limb root is carried,
+    /// which is what every binary written before this section does.
+    AutoClavicle = 18,
 };
 
 /// Builds a .rigexec file in memory.

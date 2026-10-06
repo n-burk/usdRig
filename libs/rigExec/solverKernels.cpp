@@ -273,10 +273,23 @@ RigExecBlendTransforms(const GfMatrix4d &a, const GfMatrix4d &b, double weight)
 }
 
 GfMatrix4d
+RigExecOrientSpaceDelta(const GfMatrix4d &delta, const GfMatrix4d &local,
+                        const GfMatrix4d &localInverse,
+                        const GfMatrix4d &unswitched)
+{
+    GfMatrix4d frame = delta * local;
+    frame[3][0] = unswitched[3][0];
+    frame[3][1] = unswitched[3][1];
+    frame[3][2] = unswitched[3][2];
+    return frame * localInverse;
+}
+
+GfMatrix4d
 RigExecFilterSpaceRotation(const GfMatrix4d &m, const GfVec3d &axis,
                            RigExecRotationFilter filter)
 {
-    if (filter == RigExecRotationFilter::All) {
+    if (filter == RigExecRotationFilter::All ||
+        filter == RigExecRotationFilter::Orient) {
         return m;
     }
     const double length = axis.GetLength();

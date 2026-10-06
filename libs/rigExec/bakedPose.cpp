@@ -1317,6 +1317,15 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
             const int after = sw.slot + subtreeSize[size_t(sw.slot)];
             if (after < N) forced.insert(after);
         }
+        // An auto clavicle reads frames from other branches, exactly as a
+        // switch reads its sources, so its subtree is cut out the same way.
+        for (const RigExecBakedProgramImpl::AutoClavicle &ac :
+                 B.autoClavicles) {
+            if (ac.slot < 0) continue;
+            forced.insert(ac.slot);
+            const int after = ac.slot + subtreeSize[size_t(ac.slot)];
+            if (after < N) forced.insert(after);
+        }
         std::vector<int> starts;
         for (int i = 0; i < N;) {
             // The shallowest node whose whole subtree fits is a cut; one
@@ -1373,6 +1382,18 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
     // space source is not a parent: /Rig/Controls/arm_l_ik sorts before the
     // chest it may be parented into, so the group that composes the chest
     // has to be emitted first.
+    const auto autoClavicleReads =
+        [&B](int slot) {
+            std::vector<int> reads;
+            const int index = B.autoClavicleBySlot.empty()
+                                  ? -1 : B.autoClavicleBySlot[size_t(slot)];
+            if (index < 0) return reads;
+            const RigExecBakedProgramImpl::AutoClavicle &ac =
+                B.autoClavicles[size_t(index)];
+            reads = {ac.pivotSlot, ac.anchorSlot, ac.ikTargetSlot,
+                     ac.poleSlot};
+            return reads;
+        };
     std::vector<size_t> emission(B.composeGroups.size());
     {
         for (size_t g = 0; g < emission.size(); ++g) emission[g] = g;
@@ -1393,6 +1414,13 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
                 }
             }
             for (int slot = group.begin; slot < group.end; ++slot) {
+                for (const int source : autoClavicleReads(slot)) {
+                    if (source < 0) continue;
+                    const int owner = groupOfSlot[size_t(source)];
+                    if (owner < 0 || size_t(owner) == g) continue;
+                    after[g].push_back(owner);
+                    if (size_t(owner) > g) reordered = true;
+                }
                 const int switchIndex =
                     B.spaceSwitchBySlot.empty()
                         ? -1 : B.spaceSwitchBySlot[size_t(slot)];
@@ -1457,6 +1485,23 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
         // group is already ordered by the loop itself, and one at -1 is
         // world, which is a constant and no read at all.
         for (int slot = group.begin; slot < group.end; ++slot) {
+            for (const int source : autoClavicleReads(slot)) {
+                if (source >= 0 &&
+                    (source < group.begin || source >= group.end)) {
+                    step.reads.push_back(RigExecBakedOne(
+                        RigExecBakedSlotDomain::PosedM, source));
+                }
+            }
+            if (const int index = B.autoClavicleBySlot.empty()
+                                      ? -1 : B.autoClavicleBySlot[size_t(slot)];
+                index >= 0) {
+                const RigExecBakedProgramImpl::AutoClavicle &ac =
+                    B.autoClavicles[size_t(index)];
+                RigExecBakedNoteInput(ac.ikBlendInput, &step);
+                RigExecBakedNoteInput(ac.ikBlendFloat, &step);
+                RigExecBakedNoteInput(ac.amountInput, &step);
+                RigExecBakedNoteInput(ac.amountFloat, &step);
+            }
             const int switchIndex =
                 B.spaceSwitchBySlot.empty()
                     ? -1 : B.spaceSwitchBySlot[size_t(slot)];
@@ -2164,6 +2209,36 @@ RigExecBakedDeclareInputDependencies(RigExecBakedProgramImpl *program)
             RigExecBakedNoteWeightInputs(
                 B.weightObjects[size_t(step.object)], &step);
             break;
+        case RigExecBakedStepKind::ComposeSubtree: {
+            // A switched slot's space index, which the step reads per frame:
+            // re-declared here because this pass starts every step from
+            // nothing, and an index left off makes an override on it -- a
+            // space match's trial switch, a preview -- reach no step at all.
+            const RigExecBakedComposeGroup &group =
+                B.composeGroups[size_t(step.object)];
+            for (int slot = group.begin; slot < group.end; ++slot) {
+                const int switchIndex =
+                    B.spaceSwitchBySlot.empty()
+                        ? -1 : B.spaceSwitchBySlot[size_t(slot)];
+                if (switchIndex >= 0) {
+                    RigExecBakedNoteInput(
+                        B.spaceSwitches[size_t(switchIndex)].activeInput,
+                        &step);
+                }
+                const int clavicleIndex =
+                    B.autoClavicleBySlot.empty()
+                        ? -1 : B.autoClavicleBySlot[size_t(slot)];
+                if (clavicleIndex >= 0) {
+                    const RigExecBakedProgramImpl::AutoClavicle &ac =
+                        B.autoClavicles[size_t(clavicleIndex)];
+                    RigExecBakedNoteInput(ac.ikBlendInput, &step);
+                    RigExecBakedNoteInput(ac.ikBlendFloat, &step);
+                    RigExecBakedNoteInput(ac.amountInput, &step);
+                    RigExecBakedNoteInput(ac.amountFloat, &step);
+                }
+            }
+            break;
+        }
         default:
             break;
         }
@@ -2627,6 +2702,71 @@ FinishCommit(RigExecBakedProgramImpl *program, RigExecBakedStep *step,
     record();
 }
 
+/// Translates an auto clavicle's target slot, whose base the compose has
+/// just written, by RigExecAutoClavicleShift. The first FK control is a
+/// direct child of the target (checked at build) and is composed here from
+/// its avars against the unshifted target, exactly as the dynamic path reads
+/// it before the shift is republished.
+void
+ApplyAutoClavicle(RigExecBakedProgramImpl &B,
+                  const RigExecBakedProgramImpl::AutoClavicle &ac,
+                  double ikBlend, double amount, int slot)
+{
+    GfMatrix4d target;
+    if (!B.base[size_t(slot)].IsValid() || B.base[size_t(slot)].IsDegenerate() ||
+        !RigExecPointsToMatrix(RigExecIdentityLandmarks(),
+                               B.base[size_t(slot)].points, &target)) {
+        return;
+    }
+    const int u = ac.fkSlot[0];
+    RigExecPointFrame fkFrame;
+    if (B.posedAuthored[size_t(u)]) {
+        fkFrame = RigExecFrameFromMatrix(B.posedAuthoredM[size_t(u)]);
+    } else {
+        const double *a = &B.avars[size_t(u) * 11];
+        const double units = a[10];
+        const bool noScale = B.noScaleAvars[size_t(u)] != 0;
+        const unsigned sign = size_t(u) < B.rotationSign.size()
+            ? B.rotationSign[size_t(u)] : 0u;
+        const double sx = RigExecRotationSignFromMask(sign, 0);
+        const GfMatrix4d avars = RigExecBakedComposeAvars(
+            a[0] * units, a[1] * units, a[2] * units,
+            noScale ? 1.0 : a[3], noScale ? 1.0 : a[4], noScale ? 1.0 : a[5],
+            a[6] * sx, a[7] * RigExecRotationSignFromMask(sign, 1),
+            a[8] * RigExecRotationSignFromMask(sign, 2), a[9] * sx,
+            B.rotOrder[size_t(u)]);
+        fkFrame = RigExecFrameFromMatrix(avars * B.selfD[size_t(u)] *
+                                         B.parentDinv[size_t(u)] * target);
+    }
+    GfMatrix4d fk;
+    if (!fkFrame.IsValid() || fkFrame.IsDegenerate() ||
+        !RigExecPointsToMatrix(RigExecIdentityLandmarks(), fkFrame.points,
+                               &fk)) {
+        return;
+    }
+    RigExecAutoClavicleFrames f;
+    f.anchorPosed = B.posedM[size_t(ac.anchorSlot)].data();
+    f.anchorDefault = B.defaultRoundTrip[size_t(ac.anchorSlot)].data();
+    f.pivotPosed = B.posedM[size_t(ac.pivotSlot)].data();
+    f.targetPosed = target.data();
+    f.fkPosed = fk.data();
+    for (int k = 0; k < 3; ++k) {
+        f.fkDefault[k] = B.defaultRoundTrip[size_t(ac.fkSlot[k])].data();
+    }
+    if (ac.ikTargetSlot >= 0) {
+        f.ikTargetPosed = B.posedM[size_t(ac.ikTargetSlot)].data();
+    }
+    if (ac.poleSlot >= 0) f.polePosed = B.posedM[size_t(ac.poleSlot)].data();
+    f.ikBlend = ikBlend;
+    f.amount = amount;
+    double delta[3];
+    RigExecAutoClavicleShift(ac.constants, f, delta);
+    if (delta[0] == 0.0 && delta[1] == 0.0 && delta[2] == 0.0) return;
+    target.SetTranslateOnly(target.ExtractTranslation() +
+                            GfVec3d(delta[0], delta[1], delta[2]));
+    B.base[size_t(slot)] = RigExecFrameFromMatrix(target);
+}
+
 /// Rebuilds one solver's rest description from the ladder this run composed.
 ///
 /// Exec rebuilds every one of these from computeRestFrame on EVERY
@@ -2811,11 +2951,12 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
                         B.parent[size_t(i)] >= 0
                             ? B.defaultRoundTrip[size_t(B.parent[size_t(i)])]
                             : GfMatrix4d(1.0);
-                    const GfMatrix4d local =
+                    const GfMatrix4d unswitched =
                         RigExecBakedRoundTrip(avars * B.selfD[size_t(i)] *
                                               B.parentDinv[size_t(i)] *
-                                              parentPosed) *
-                        parentPosed.GetInverse() * parentDefault;
+                                              parentPosed);
+                    const GfMatrix4d local =
+                        unswitched * parentPosed.GetInverse() * parentDefault;
                     const GfMatrix4d localInverse = local.GetInverse();
                     const int count = int(sw.sourceSlots.size());
                     // Read here rather than in a prologue: the index is one
@@ -2849,7 +2990,7 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
                                 B.posedM[size_t(sw.spaceSlot)];
                         carryInverse = carry.GetInverse();
                     }
-                    const auto deltaOf = [&](int index) {
+                    const auto rawDeltaOf = [&](int index) {
                         const int slot = sw.sourceSlots[size_t(index)];
                         if (slot < 0) {
                             // World: the source never moves, so the only
@@ -2892,6 +3033,18 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
                                                              filter);
                         return local * motion * localInverse;
                     };
+                    // An `orient` source turns the control with the space
+                    // and keeps it where its namespace parent carries it.
+                    const auto deltaOf = [&](int index) {
+                        const GfMatrix4d d = rawDeltaOf(index);
+                        if (sw.filters.empty() ||
+                            sw.filters[size_t(index)] !=
+                                RigExecRotationFilter::Orient) {
+                            return d;
+                        }
+                        return RigExecOrientSpaceDelta(d, local, localInverse,
+                                                       unswitched);
+                    };
                     GfMatrix4d delta = deltaOf(lower);
                     if (upper != lower && blend > 0.0) {
                         delta = RigExecBlendTransforms(delta, deltaOf(upper),
@@ -2911,6 +3064,23 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
                     avars * B.selfD[size_t(i)] * B.parentDinv[size_t(i)] *
                     parentPosed);
                 }
+            }
+            // An auto clavicle on this slot: the composed (and switched)
+            // frame translated before any descendant reads it, as the
+            // dynamic path republishes it.
+            if (const int clavicleIndex =
+                    B.autoClavicleBySlot.empty()
+                        ? -1 : B.autoClavicleBySlot[size_t(i)];
+                clavicleIndex >= 0) {
+                const RigExecBakedProgramImpl::AutoClavicle &ac =
+                    B.autoClavicles[size_t(clavicleIndex)];
+                ApplyAutoClavicle(
+                    B, ac,
+                    ac.ikBlendIsFloat ? double(rd(ac.ikBlendFloat))
+                                      : rd(ac.ikBlendInput),
+                    ac.amountIsFloat ? double(rd(ac.amountFloat))
+                                     : rd(ac.amountInput),
+                    i);
             }
             B.fin[size_t(i)] = B.base[size_t(i)];
             // _SpaceFromFrame: an unusable frame selects the NaN sentinel, so

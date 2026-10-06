@@ -1806,7 +1806,7 @@ class RigExecSpaceSwitch "RigExecSpaceSwitch" (
         }
     )
     uniform token[] rigExec:rotationFilters = [] (
-        allowedTokens = ["all", "twist", "swing"]
+        allowedTokens = ["all", "twist", "swing", "orient"]
         customData = {
             string userDocBrief = """Optional per-source rotation filter, parallel to
         rigExec:sources."""
@@ -1843,6 +1843,108 @@ class RigExecSpaceSwitch "RigExecSpaceSwitch" (
         customData = {
             string userDocBrief = """Twist axis for rigExec:rotationFilters, in the SOURCE's own
         rest axes -- the limb axis for a wrist or an ankle."""
+        }
+    )
+}
+
+class RigExecAutoClavicle "RigExecAutoClavicle" (
+    customData = {
+        string userDocBrief = """Carries a limb's root with the limb's own swing, as a clavicle
+    lifts when the arm is raised."""
+    }
+)
+{
+    double inputs:gain = 0.4 (
+        customData = {
+            string userDocBrief = "Scales the summed pose weights into the blend weight w."
+        }
+    )
+    rel rigExec:amountAttribute (
+        customData = {
+            string userDocBrief = """Optional float or double property scaling the effect, the
+        animator's on/off dial."""
+        }
+    )
+    rel rigExec:anchor (
+        customData = {
+            string userDocBrief = "The control the limb's direction is measured in: the chest."
+        }
+    )
+    matrix4d rigExec:basis = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
+        customData = {
+            string userDocBrief = """The frame rigExec:poseRotations are expressed in, relative
+        to the anchor's posed frame: its X axis is the limb axis at a zero
+        rotation."""
+        }
+    )
+    rel rigExec:fkControls (
+        customData = {
+            string userDocBrief = "The FK chain's three controls, root to end."
+        }
+    )
+    rel rigExec:ikBlendAttribute (
+        customData = {
+            string userDocBrief = """Optional float or double property selecting between the FK
+        and IK directions, normally the limb's IK/FK switch."""
+        }
+    )
+    rel rigExec:ikTarget (
+        customData = {
+            string userDocBrief = """Optional: the prim whose posed origin the IK half reaches
+        for, normally the IK effector."""
+        }
+    )
+    double rigExec:ikValue = 1 (
+        customData = {
+            string userDocBrief = """The value of rigExec:ikBlendAttribute that means fully IK;
+        1 - ikValue means fully FK, and values between blend the two
+        directions."""
+        }
+    )
+    uniform token rigExec:kernel = "gaussian" (
+        allowedTokens = ["gaussian", "linear"]
+        customData = {
+            string userDocBrief = "The interpolation kernel, as RigExecPoseInterpolator's."
+        }
+    )
+    rel rigExec:pivot (
+        customData = {
+            string userDocBrief = """The control whose posed origin the root turns about: the
+        clavicle."""
+        }
+    )
+    rel rigExec:poleControl (
+        customData = {
+            string userDocBrief = "Optional: the pole the IK estimate bends toward."
+        }
+    )
+    float[] rigExec:poseFalloffs = [] (
+        customData = {
+            string userDocBrief = """Per-pose falloff, parallel to rigExec:poseRotations, stated
+        relative to each pose's nearest neighbour as RigExecPose's is."""
+        }
+    )
+    double[] rigExec:poseGains = [] (
+        customData = {
+            string userDocBrief = """Per-pose contribution to the blend weight, parallel to
+        rigExec:poseRotations."""
+        }
+    )
+    quatf[] rigExec:poseRotations = [] (
+        customData = {
+            string userDocBrief = """Swing poses of the limb, each a rotation of the basis X axis,
+        in rigExec:basis."""
+        }
+    )
+    float rigExec:regularization = 0 (
+        customData = {
+            string userDocBrief = "Added to the interpolation matrix diagonal, as RigExecPoseInterpolator's."
+        }
+    )
+    rel rigExec:target (
+        customData = {
+            string userDocBrief = """The RigExecControl moved: the limb's root control, whose
+        descendants hold the FK chain and whose frame roots the IK solve."""
         }
     )
 }

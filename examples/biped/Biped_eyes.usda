@@ -3128,8 +3128,6 @@ over "Biped"
                                                     {
                                                         over "M_Skull"
                                                         {
-                                                            custom double avars:space = 0
-
                                                             over "M_UpFace"
                                                             {
                                                                 over "lookRot_aim"

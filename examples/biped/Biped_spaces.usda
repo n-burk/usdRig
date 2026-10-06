@@ -1,7 +1,7 @@
 #usda 1.0
 (
     defaultPrim = "Biped"
-    doc = "Space switches for the IK handles, the pole vectors, the FK shoulders, the neck and the head: one RigExecSpaceSwitch per control and the avars:space dial it reads, with the space lists taken from the source rig's picker. Adds prims and overrides nothing, so dropping this sublayer leaves the character exactly as it was."
+    doc = "Space switches for the IK handles, the pole vectors, the shoulder swings, the neck, the head and the look target: one RigExecSpaceSwitch per control and the avars:space dial it reads, with each control's spaces, their order and their defaults. The shoulder, neck and head world and hips spaces are rotation-only (orient): the control turns with the space and keeps riding on the body. Adds prims and overrides nothing, so dropping this sublayer leaves the character exactly as it was."
 )
 
 over "Biped"
@@ -17,10 +17,11 @@ over "Biped"
                     </Biped/Rig/Main/Shot/Aux>,
                     </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop>,
                     </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull>,
+                    </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_HipSwivel>,
                     </Biped/Rig/Main/Shot/Aux/Controls/M_Body>,
                 ]
                 rel rigExec:space = </Biped/Rig/Main/Shot/Aux>
-                uniform token[] rigExec:spaceLabels = ["world", "chest", "head", "hips"]
+                uniform token[] rigExec:spaceLabels = ["world", "chest", "head", "hip_swivel", "hips"]
                 rel rigExec:target = </Biped/Rig/Main/Shot/Aux/Controls/L_ArmIK>
             }
 
@@ -34,7 +35,7 @@ over "Biped"
                     </Biped/Rig/Main/Shot/Aux/Controls/L_ArmIK>,
                 ]
                 rel rigExec:space = </Biped/Rig/Main/Shot/Aux>
-                uniform token[] rigExec:spaceLabels = ["local", "chest", "hand"]
+                uniform token[] rigExec:spaceLabels = ["world", "chest", "hand"]
                 rel rigExec:target = </Biped/Rig/Main/Shot/Aux/Controls/L_ArmPV>
                 double3 rigExec:twistAxis = (0.6964629191117421, -0.7098055540683189, 0.10542996593055506)
             }
@@ -44,10 +45,11 @@ over "Biped"
                 rel rigExec:activeSpaceAttribute = </Biped/Rig/Main/Shot/Aux/Controls/L_LegIK.avars:space>
                 rel rigExec:sources = [
                     </Biped/Rig/Main/Shot/Aux>,
+                    </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_HipSwivel>,
                     </Biped/Rig/Main/Shot/Aux/Controls/M_Body>,
                 ]
                 rel rigExec:space = </Biped/Rig/Main/Shot/Aux>
-                uniform token[] rigExec:spaceLabels = ["world", "hips"]
+                uniform token[] rigExec:spaceLabels = ["world", "hip_swivel", "hips"]
                 rel rigExec:target = </Biped/Rig/Main/Shot/Aux/Controls/L_LegIK>
             }
 
@@ -61,21 +63,23 @@ over "Biped"
                     </Biped/Rig/Main/Shot/Aux/Controls/L_LegIK>,
                 ]
                 rel rigExec:space = </Biped/Rig/Main/Shot/Aux>
-                uniform token[] rigExec:spaceLabels = ["local", "pelvis", "foot"]
+                uniform token[] rigExec:spaceLabels = ["world", "pelvis", "foot"]
                 rel rigExec:target = </Biped/Rig/Main/Shot/Aux/Controls/L_LegPV>
                 double3 rigExec:twistAxis = (1.4512820906544433e-16, -0.9980091550935452, -0.0630692187161716)
             }
 
-            def RigExecSpaceSwitch "arm_l_fk_shoulder_spaces"
+            def RigExecSpaceSwitch "arm_l_shoulder_swing_spaces"
             {
-                rel rigExec:activeSpaceAttribute = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/L_Shldr/L_UpArmSwing/L_UpArm.avars:space>
+                rel rigExec:activeSpaceAttribute = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/L_Shldr/L_UpArmSwing.avars:space>
+                uniform token[] rigExec:rotationFilters = ["all", "orient", "orient"]
                 rel rigExec:sources = [
-                    </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/L_Shldr/L_UpArmSwing>,
+                    </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/L_Shldr>,
                     </Biped/Rig/Main/Shot/Aux>,
+                    </Biped/Rig/Main/Shot/Aux/Controls/M_Body>,
                 ]
                 rel rigExec:space = </Biped/Rig/Main/Shot/Aux>
-                uniform token[] rigExec:spaceLabels = ["local", "world"]
-                rel rigExec:target = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/L_Shldr/L_UpArmSwing/L_UpArm>
+                uniform token[] rigExec:spaceLabels = ["local", "world", "hips"]
+                rel rigExec:target = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/L_Shldr/L_UpArmSwing>
             }
 
             def RigExecSpaceSwitch "arm_r_ik_spaces"
@@ -85,10 +89,11 @@ over "Biped"
                     </Biped/Rig/Main/Shot/Aux>,
                     </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop>,
                     </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull>,
+                    </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_HipSwivel>,
                     </Biped/Rig/Main/Shot/Aux/Controls/M_Body>,
                 ]
                 rel rigExec:space = </Biped/Rig/Main/Shot/Aux>
-                uniform token[] rigExec:spaceLabels = ["world", "chest", "head", "hips"]
+                uniform token[] rigExec:spaceLabels = ["world", "chest", "head", "hip_swivel", "hips"]
                 rel rigExec:target = </Biped/Rig/Main/Shot/Aux/Controls/R_ArmIK>
             }
 
@@ -102,7 +107,7 @@ over "Biped"
                     </Biped/Rig/Main/Shot/Aux/Controls/R_ArmIK>,
                 ]
                 rel rigExec:space = </Biped/Rig/Main/Shot/Aux>
-                uniform token[] rigExec:spaceLabels = ["local", "chest", "hand"]
+                uniform token[] rigExec:spaceLabels = ["world", "chest", "hand"]
                 rel rigExec:target = </Biped/Rig/Main/Shot/Aux/Controls/R_ArmPV>
                 double3 rigExec:twistAxis = (-0.696462919111743, -0.7098055540683179, 0.10542996593055526)
             }
@@ -112,10 +117,11 @@ over "Biped"
                 rel rigExec:activeSpaceAttribute = </Biped/Rig/Main/Shot/Aux/Controls/R_LegIK.avars:space>
                 rel rigExec:sources = [
                     </Biped/Rig/Main/Shot/Aux>,
+                    </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_HipSwivel>,
                     </Biped/Rig/Main/Shot/Aux/Controls/M_Body>,
                 ]
                 rel rigExec:space = </Biped/Rig/Main/Shot/Aux>
-                uniform token[] rigExec:spaceLabels = ["world", "hips"]
+                uniform token[] rigExec:spaceLabels = ["world", "hip_swivel", "hips"]
                 rel rigExec:target = </Biped/Rig/Main/Shot/Aux/Controls/R_LegIK>
             }
 
@@ -129,57 +135,62 @@ over "Biped"
                     </Biped/Rig/Main/Shot/Aux/Controls/R_LegIK>,
                 ]
                 rel rigExec:space = </Biped/Rig/Main/Shot/Aux>
-                uniform token[] rigExec:spaceLabels = ["local", "pelvis", "foot"]
+                uniform token[] rigExec:spaceLabels = ["world", "pelvis", "foot"]
                 rel rigExec:target = </Biped/Rig/Main/Shot/Aux/Controls/R_LegPV>
                 double3 rigExec:twistAxis = (2.2805861424569806e-16, -0.9980091550935455, -0.06306921871616765)
             }
 
-            def RigExecSpaceSwitch "arm_r_fk_shoulder_spaces"
+            def RigExecSpaceSwitch "arm_r_shoulder_swing_spaces"
             {
-                rel rigExec:activeSpaceAttribute = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/R_Shldr/R_UpArmSwing/R_UpArm.avars:space>
+                rel rigExec:activeSpaceAttribute = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/R_Shldr/R_UpArmSwing.avars:space>
+                uniform token[] rigExec:rotationFilters = ["all", "orient", "orient"]
                 rel rigExec:sources = [
-                    </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/R_Shldr/R_UpArmSwing>,
+                    </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/R_Shldr>,
                     </Biped/Rig/Main/Shot/Aux>,
+                    </Biped/Rig/Main/Shot/Aux/Controls/M_Body>,
                 ]
                 rel rigExec:space = </Biped/Rig/Main/Shot/Aux>
-                uniform token[] rigExec:spaceLabels = ["local", "world"]
-                rel rigExec:target = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/R_Shldr/R_UpArmSwing/R_UpArm>
+                uniform token[] rigExec:spaceLabels = ["local", "world", "hips"]
+                rel rigExec:target = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/R_Shldr/R_UpArmSwing>
             }
 
             def RigExecSpaceSwitch "neck_spaces"
             {
                 rel rigExec:activeSpaceAttribute = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck.avars:space>
+                uniform token[] rigExec:rotationFilters = ["all", "orient", "orient"]
                 rel rigExec:sources = [
                     </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop>,
                     </Biped/Rig/Main/Shot/Aux>,
+                    </Biped/Rig/Main/Shot/Aux/Controls/M_Body>,
                 ]
                 rel rigExec:space = </Biped/Rig/Main/Shot/Aux>
-                uniform token[] rigExec:spaceLabels = ["local", "world"]
+                uniform token[] rigExec:spaceLabels = ["local", "world", "hips"]
                 rel rigExec:target = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck>
             }
 
             def RigExecSpaceSwitch "head_spaces"
             {
-                rel rigExec:activeSpaceAttribute = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull.avars:space>
+                rel rigExec:activeSpaceAttribute = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head.avars:space>
+                uniform token[] rigExec:rotationFilters = ["all", "orient", "orient"]
                 rel rigExec:sources = [
-                    </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow>,
+                    </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck>,
                     </Biped/Rig/Main/Shot/Aux>,
+                    </Biped/Rig/Main/Shot/Aux/Controls/M_Body>,
                 ]
                 rel rigExec:space = </Biped/Rig/Main/Shot/Aux>
-                uniform token[] rigExec:spaceLabels = ["local", "world"]
-                rel rigExec:target = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull>
+                uniform token[] rigExec:spaceLabels = ["local", "world", "hips"]
+                rel rigExec:target = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head>
             }
 
             def RigExecSpaceSwitch "look_spaces"
             {
-                double inputs:activeSpace = 1
                 rel rigExec:activeSpaceAttribute = </Biped/Rig/Main/Shot/Aux/Controls/M_Look.avars:space>
                 rel rigExec:sources = [
-                    </Biped/Rig/Main/Shot/Aux>,
                     </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace>,
+                    </Biped/Rig/Main/Shot/Aux>,
                 ]
                 rel rigExec:space = </Biped/Rig/Main/Shot/Aux>
-                uniform token[] rigExec:spaceLabels = ["world", "local"]
+                uniform token[] rigExec:spaceLabels = ["local", "world"]
                 rel rigExec:target = </Biped/Rig/Main/Shot/Aux/Controls/M_Look>
             }
         }
@@ -194,42 +205,146 @@ over "Biped"
                     {
                         over "L_LegIK"
                         {
-                            custom double avars:space = 0
+                            custom double avars:space = 0 (
+                                customData = {
+                                    dictionary limits = {
+                                        dictionary hard = {
+                                            double maximum = 2
+                                            double minimum = 0
+                                        }
+                                        dictionary soft = {
+                                            double maximum = 2
+                                            double minimum = 0
+                                        }
+                                    }
+                                }
+                            )
                         }
 
                         over "R_LegIK"
                         {
-                            custom double avars:space = 0
+                            custom double avars:space = 0 (
+                                customData = {
+                                    dictionary limits = {
+                                        dictionary hard = {
+                                            double maximum = 2
+                                            double minimum = 0
+                                        }
+                                        dictionary soft = {
+                                            double maximum = 2
+                                            double minimum = 0
+                                        }
+                                    }
+                                }
+                            )
                         }
 
                         over "R_ArmIK"
                         {
-                            custom double avars:space = 0
+                            custom double avars:space = 0 (
+                                customData = {
+                                    dictionary limits = {
+                                        dictionary hard = {
+                                            double maximum = 4
+                                            double minimum = 0
+                                        }
+                                        dictionary soft = {
+                                            double maximum = 4
+                                            double minimum = 0
+                                        }
+                                    }
+                                }
+                            )
                         }
 
                         over "R_LegPV"
                         {
-                            custom double avars:space = 2
+                            custom double avars:space = 2 (
+                                customData = {
+                                    dictionary limits = {
+                                        dictionary hard = {
+                                            double maximum = 2
+                                            double minimum = 0
+                                        }
+                                        dictionary soft = {
+                                            double maximum = 2
+                                            double minimum = 0
+                                        }
+                                    }
+                                }
+                            )
                         }
 
                         over "L_LegPV"
                         {
-                            custom double avars:space = 2
+                            custom double avars:space = 2 (
+                                customData = {
+                                    dictionary limits = {
+                                        dictionary hard = {
+                                            double maximum = 2
+                                            double minimum = 0
+                                        }
+                                        dictionary soft = {
+                                            double maximum = 2
+                                            double minimum = 0
+                                        }
+                                    }
+                                }
+                            )
                         }
 
                         over "L_ArmIK"
                         {
-                            custom double avars:space = 0
+                            custom double avars:space = 0 (
+                                customData = {
+                                    dictionary limits = {
+                                        dictionary hard = {
+                                            double maximum = 4
+                                            double minimum = 0
+                                        }
+                                        dictionary soft = {
+                                            double maximum = 4
+                                            double minimum = 0
+                                        }
+                                    }
+                                }
+                            )
                         }
 
                         over "R_ArmPV"
                         {
-                            custom double avars:space = 0
+                            custom double avars:space = 0 (
+                                customData = {
+                                    dictionary limits = {
+                                        dictionary hard = {
+                                            double maximum = 2
+                                            double minimum = 0
+                                        }
+                                        dictionary soft = {
+                                            double maximum = 2
+                                            double minimum = 0
+                                        }
+                                    }
+                                }
+                            )
                         }
 
                         over "L_ArmPV"
                         {
-                            custom double avars:space = 0
+                            custom double avars:space = 0 (
+                                customData = {
+                                    dictionary limits = {
+                                        dictionary hard = {
+                                            double maximum = 2
+                                            double minimum = 0
+                                        }
+                                        dictionary soft = {
+                                            double maximum = 2
+                                            double minimum = 0
+                                        }
+                                    }
+                                }
+                            )
                         }
 
                         over "M_Body"
@@ -248,9 +363,23 @@ over "Biped"
 
                                             over "L_UpArmSwing"
                                             {
+                                                custom double avars:space = 1 (
+                                                    customData = {
+                                                        dictionary limits = {
+                                                            dictionary hard = {
+                                                                double maximum = 2
+                                                                double minimum = 0
+                                                            }
+                                                            dictionary soft = {
+                                                                double maximum = 2
+                                                                double minimum = 0
+                                                            }
+                                                        }
+                                                    }
+                                                )
+
                                                 over "L_UpArm"
                                                 {
-                                                    custom double avars:space = 0
                                                     custom token guide:shape = "circle"
                                                 }
                                             }
@@ -262,9 +391,23 @@ over "Biped"
 
                                             over "R_UpArmSwing"
                                             {
+                                                custom double avars:space = 1 (
+                                                    customData = {
+                                                        dictionary limits = {
+                                                            dictionary hard = {
+                                                                double maximum = 2
+                                                                double minimum = 0
+                                                            }
+                                                            dictionary soft = {
+                                                                double maximum = 2
+                                                                double minimum = 0
+                                                            }
+                                                        }
+                                                    }
+                                                )
+
                                                 over "R_UpArm"
                                                 {
-                                                    custom double avars:space = 0
                                                     custom token guide:shape = "circle"
                                                 }
                                             }
@@ -272,18 +415,44 @@ over "Biped"
 
                                         over "M_Neck"
                                         {
-                                            custom double avars:space = 0
+                                            custom double avars:space = 0 (
+                                                customData = {
+                                                    dictionary limits = {
+                                                        dictionary hard = {
+                                                            double maximum = 2
+                                                            double minimum = 0
+                                                        }
+                                                        dictionary soft = {
+                                                            double maximum = 2
+                                                            double minimum = 0
+                                                        }
+                                                    }
+                                                }
+                                            )
 
                                             over "M_Head"
                                             {
+                                                custom double avars:space = 0 (
+                                                    customData = {
+                                                        dictionary limits = {
+                                                            dictionary hard = {
+                                                                double maximum = 2
+                                                                double minimum = 0
+                                                            }
+                                                            dictionary soft = {
+                                                                double maximum = 2
+                                                                double minimum = 0
+                                                            }
+                                                        }
+                                                    }
+                                                )
+
                                                 over "M_HeadGimbal"
                                                 {
                                                     over "skull_follow"
                                                     {
                                                         over "M_Skull"
                                                         {
-                                                            custom double avars:space = 0
-
                                                             over "M_UpFace"
                                                             {
                                                                 over "lookRot_aim"
@@ -301,6 +470,24 @@ over "Biped"
                                     }
                                 }
                             }
+                        }
+
+                        over "M_Look"
+                        {
+                            custom double avars:space (
+                                customData = {
+                                    dictionary limits = {
+                                        dictionary hard = {
+                                            double maximum = 1
+                                            double minimum = 0
+                                        }
+                                        dictionary soft = {
+                                            double maximum = 1
+                                            double minimum = 0
+                                        }
+                                    }
+                                }
+                            )
                         }
                     }
                 }

@@ -2915,8 +2915,6 @@ over "Biped"
                                                     {
                                                         over "M_Skull"
                                                         {
-                                                            custom double avars:space = 0
-
                                                             def RigExecControl "face_psd_drivers" (
                                                                 prepend apiSchemas = ["RigExecControlAPI"]
                                                             )

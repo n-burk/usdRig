@@ -623,6 +623,30 @@ RigExecRigEvaluator::_ComputeStructureDigest(
         digest += '|';
     }
     digest += '|';
+    // RigExecAutoClavicle: its prims and constants decide taps and solved
+    // pose tables. The blend and amount PROPERTIES it reads are per-frame
+    // channels and stay out, as a switch's active index does.
+    for (const UsdPrim &prim :
+         UsdPrimRange(_stage->GetPrimAtPath(_rigPath))) {
+        if (prim.GetTypeName() != "RigExecAutoClavicle") continue;
+        digest += prim.GetPath().GetString();
+        digest += '|';
+        for (const char *rel :
+             {"rigExec:target", "rigExec:pivot", "rigExec:anchor",
+              "rigExec:fkControls", "rigExec:ikTarget", "rigExec:poleControl",
+              "rigExec:ikBlendAttribute", "rigExec:amountAttribute"}) {
+            appendRelTargets(prim, rel, false);
+        }
+        for (const char *name :
+             {"rigExec:ikValue", "inputs:gain", "rigExec:basis",
+              "rigExec:poseRotations", "rigExec:poseFalloffs",
+              "rigExec:poseGains", "rigExec:kernel",
+              "rigExec:regularization"}) {
+            appendScalar(prim, name);
+        }
+        digest += '|';
+    }
+    digest += '|';
 
     stampDigestRegion("Digest.OutputSets");
         stampDigestRegion("Digest.OutputSets");

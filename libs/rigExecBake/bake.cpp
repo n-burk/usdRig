@@ -1,5 +1,6 @@
 // .rigexec baking.
 #include "rigExecBake/bake.h"
+#include "rigExecBake/propertyChainsBake.h"
 #include "rigExecBake/serialize.h"
 #include "rigExecBake/capture.h"
 #include "rigExec/rigEvaluator.h"
@@ -251,6 +252,16 @@ RigExecBakeToBinary(RigExecRigEvaluator &evaluator,
     }
     writer.AddSection(RigExecBinarySection::SpaceSwitch, payload);
     payload.clear();
+    // Written only when the rig has one, so every other rig's file is
+    // unchanged.
+    if (!wirePose.autoClavicles.empty()) {
+        if (!RigExecWireEncodeAutoClavicles(wirePose.autoClavicles,
+                                            &payload)) {
+            return Fail("cannot encode the auto clavicles");
+        }
+        writer.AddSection(RigExecBinarySection::AutoClavicle, payload);
+        payload.clear();
+    }
     const RigExecWireDomainGeometry wireGeometry =
         RigExecBakeConvertDomainGeometry(program, &writer);
     size_t revisionCount = 0;
@@ -278,6 +289,29 @@ RigExecBakeToBinary(RigExecRigEvaluator &evaluator,
     }
     writer.AddSection(RigExecBinarySection::InputTable, payload);
     payload.clear();
+    // A poseable bake carries the property chains as programs, so the
+    // runtime computes them from the inputs a client sets rather than
+    // replaying their recorded values (rigExecBinary/propertyChains.h).
+    RigExecWirePropertyChains propertyChains;
+    std::vector<std::string> chainsSkipped;
+    if (opts.overridableInputs) {
+        std::string chainError;
+        if (!RigExecBakePropertyChains(evaluator, opts.frames,
+                                       capture.GetTable(), &writer,
+                                       &propertyChains, &chainsSkipped,
+                                       &chainError)) {
+            return Fail("cannot bake the property chains: " + chainError);
+        }
+        if (!propertyChains.chains.empty()) {
+            if (!RigExecWireEncodePropertyChains(propertyChains,
+                                                 &payload)) {
+                return Fail("cannot encode the property chains");
+            }
+            writer.AddSection(RigExecBinarySection::PropertyChains,
+                              payload);
+            payload.clear();
+        }
+    }
     std::string manifest = "{\n";
     manifest += "  \"format\": 1,\n";
     manifest += "  \"rig\": " + _EscapeJson(evaluator.GetRigPath().GetString()) +
@@ -310,6 +344,15 @@ RigExecBakeToBinary(RigExecRigEvaluator &evaluator,
                 ",\n";
     manifest += "  \"movers\": " +
                 std::to_string(evaluator.GetMoverOrder().size()) + ",\n";
+    if (!propertyChains.chains.empty()) {
+        manifest += "  \"propertyChains\": " +
+                    std::to_string(propertyChains.chains.size()) + ",\n";
+        manifest += "  \"propertyChainsSkipped\": [";
+        for (size_t i = 0; i < chainsSkipped.size(); ++i) {
+            manifest += (i ? ", " : "") + _EscapeJson(chainsSkipped[i]);
+        }
+        manifest += "],\n";
+    }
     // The compile notices a fresh evaluator seeds its first generation
     // with (inert movers, purpose warnings). The runtime replays them
     // ahead of the program lines on its first Execute, exactly once.

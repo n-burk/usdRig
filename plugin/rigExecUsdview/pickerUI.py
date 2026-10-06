@@ -16,15 +16,18 @@ by a button that silently does nothing.
 import os
 import sys
 
-from pxr import Sdf, Tf, Usd
+from pxr import Sdf, Tf, Usd, UsdGeom
 from pxr.Usdviewq.qt import QtCore, QtGui, QtWidgets
 
 if __name__ != "__main__":
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import avarEditorModel
+import gizmoMath
+import ikfkMatch
 import pickerModel
 import pickerScene
 import rigExecUndo
+import spaceMatch
 
 try:
     import sessionRegistry
@@ -545,6 +548,7 @@ class PickerPanel(QtWidgets.QDialog):
         # whose tab is showing. `_picker` stays the ACTIVE picker so the
         # single-character code below reads the same as it always did.
         self._pickers = []
+        self._visAttrs = []
         self._picker = None
         self._views = []
         self._noticeKey = None
@@ -677,6 +681,12 @@ class PickerPanel(QtWidgets.QDialog):
             if notice.AffectedObject(attr):
                 self._RefreshModes()
                 return
+        # The controls hidden or shown from outside the picker (usdview's
+        # own hide, an override layer): keep the toggle's tick honest.
+        for attr in self._visAttrs:
+            if notice.AffectedObject(attr):
+                self._SyncToggles()
+                return
 
         # THE PICKER ITSELF WAS EDITED. Somebody deactivated a button,
         # moved one, renamed one, retargeted one, or sublayered a whole
@@ -807,6 +817,7 @@ class PickerPanel(QtWidgets.QDialog):
         self._tabs.currentChanged.connect(self._OnCharacterChanged)
 
         self._RefreshModes()
+        self._SyncToggles()
         self._Status()
         self._OnSelectionChanged()
 
@@ -858,6 +869,64 @@ class PickerPanel(QtWidgets.QDialog):
                 fn()
                 return
 
+
+    def _ControlsPrim(self, picker=None):
+        """The prim holding the rig's controls: the `Controls` scope under
+        `Aux` in the rig the picker names (the whole stage when it names
+        none), or any `Controls` scope when no `Aux` parents one."""
+        stage = self._stage()
+        picker = picker or self._picker
+        if stage is None or picker is None:
+            return None
+        root = stage.GetPrimAtPath(getattr(picker, "rig_path", "") or "/")
+        if not root or not root.IsValid():
+            root = stage.GetPseudoRoot()
+        fallback = None
+        for prim in Usd.PrimRange(root):
+            if prim.GetName() != "Controls":
+                continue
+            if prim.GetParent().GetName() == "Aux":
+                return prim
+            fallback = fallback or prim
+        return fallback
+
+    def _ToggleControlsVisibility(self):
+        """Hide or show the rig's controls, as usdview's own hide does:
+        a visibility opinion in the session layer, so the rig's files are
+        never touched and reopening the stage shows them again."""
+        stage = self._stage()
+        prim = self._ControlsPrim()
+        if stage is None or prim is None:
+            self._status.setText("No Controls prim under Aux on this rig.")
+            return
+        imageable = UsdGeom.Imageable(prim)
+        hide = imageable.ComputeVisibility() != UsdGeom.Tokens.invisible
+        with Usd.EditContext(stage, stage.GetSessionLayer()):
+            attr = imageable.GetVisibilityAttr()
+            if hide:
+                attr.Set(UsdGeom.Tokens.invisible)
+            else:
+                attr.Clear()
+                # Still hidden: the rig itself, or an ancestor, says so.
+                if imageable.ComputeVisibility() == UsdGeom.Tokens.invisible:
+                    attr.Set(UsdGeom.Tokens.inherited)
+        self._SyncToggles()
+        self._status.setText("Controls %s." % ("hidden" if hide else "shown"))
+
+    def _SyncToggles(self):
+        """Tick each Ctrl Vis button when its rig's controls are visible."""
+        self._visAttrs = []
+        for picker in self._pickers:
+            prim = self._ControlsPrim(picker)
+            shown = prim is not None and UsdGeom.Imageable(
+                prim).ComputeVisibility() != UsdGeom.Tokens.invisible
+            if prim is not None:
+                self._visAttrs.append(UsdGeom.Imageable(prim).GetVisibilityAttr())
+            for button in picker.buttons:
+                if button.command == "ctrl_vis":
+                    button.checked = shown
+        for view in self._views:
+            view.update()
 
     def _ZeroControls(self):
         """Zero the selected controls, or the whole rig if none are.
@@ -984,6 +1053,9 @@ class PickerPanel(QtWidgets.QDialog):
         if len(buttons) == 1 and mode == "replace":
             if buttons[0].command == "zero_ctrls":
                 self._ZeroControls()
+                return
+            if buttons[0].command == "ctrl_vis":
+                self._ToggleControlsVisibility()
                 return
             if buttons[0].attr_target:
                 # No position passed: _OnPicked has no event, and the
@@ -1172,6 +1244,9 @@ class PickerPanel(QtWidgets.QDialog):
                 return
             self._WriteSwitch(button, chosen)
             return
+        limb = self._LimbForSwitch(target)
+        if limb is not None and self._MatchedSwitch(button, target, limb):
+            return
         prim = stage.GetPrimAtPath(Sdf.Path(target["path"]))
         if not prim or not prim.IsValid():
             return
@@ -1183,6 +1258,70 @@ class PickerPanel(QtWidgets.QDialog):
         if value is None:
             return
         self._ApplySwitch(button, target, attr, value, label)
+
+    # -- IK/FK: match, then switch ----------------------------------------
+
+    def _LimbForSwitch(self, target):
+        """The limb whose IK/FK switch this button drives, or None."""
+        stage = self._stage()
+        if stage is None or not target:
+            return None
+        try:
+            path = Sdf.Path(target["path"]).AppendProperty(target["attr"])
+        except Exception:
+            return None
+        if getattr(self, "_limbStage", None) is not stage:
+            self._limbStage = stage
+            self._limbs = ikfkMatch.FindLimbs(stage)
+            self._limbRest = {}
+        for limb in self._limbs:
+            if limb.switchPath == path:
+                return limb
+        return None
+
+    def _MatchedSwitch(self, button, target, limb):
+        """Switch a limb to its other half without moving it: the half
+        taking over is matched to the joints first (ikfkMatch.Plan), and
+        both land as one edit and one undo entry. False when the match
+        could not be made, so the caller falls back to a plain toggle."""
+        stage = self._stage()
+        try:
+            done = ikfkMatch.SwitchLimbs(stage, [limb], self._Frame(),
+                                         self._WriteMode(), self._undo,
+                                         self._limbRest)
+        except Exception as error:
+            self._status.setText("IK/FK match failed (%s); switched "
+                                 "without matching." % error)
+            return False
+        if not done:
+            return False
+        _, toIk, channels = done[0]
+        value = limb.ikValue if toIk else limb.fkValue
+        labels = target.get("enum") or []
+        if labels:
+            index = int(round(value))
+            if target.get("invert"):
+                index = len(labels) - 1 - index
+            if 0 <= index < len(labels):
+                button.value = labels[index]
+        self._RefreshModes()
+        for view in self._views:
+            view.update()
+        self._status.setText("%s -> %s, matched (%d channels)" % (
+            limb.switchControl.name, "IK" if toIk else "FK", channels))
+        return True
+
+    def _WriteMode(self):
+        """Where a switch lands: the gizmo's write mode (keys in animation
+        mode, defaults otherwise), so a switch and a drag author alike."""
+        try:
+            import gizmoUI
+            controller = gizmoUI.GetController(self._api)
+            if controller is not None:
+                return controller.WriteMode()
+        except Exception:
+            pass
+        return gizmoMath.WRITE_ANIMATION
 
     def _ChooseValue(self, button, labels, at):
         """A menu of the named spaces, returning the label picked."""
@@ -1221,13 +1360,20 @@ class PickerPanel(QtWidgets.QDialog):
         # An IK/FK switch is a pose change like any other -- it decides
         # which half of a limb drives the joints -- so it belongs on the
         # same stack as the drag that follows it.
-        scope = self._UndoScope("Switch %s" % target["attr"],
-                                [attr.GetPath()])
-        try:
-            attr.Set(float(value))
-        finally:
-            if scope is not None:
-                scope.__exit__(None, None, None)
+        stage = self._stage()
+        time = self._Frame()
+        mode = self._WriteMode()
+        matched = self._MatchSpace(stage, attr, value, label, time, mode)
+        if matched is None:
+            scope = self._UndoScope("Switch %s" % target["attr"],
+                                    [attr.GetPath()])
+            try:
+                writer = gizmoMath.Writer(stage, time, mode)
+                writer.Set(attr, float(value))
+                writer.CommitToStage()
+            finally:
+                if scope is not None:
+                    scope.__exit__(None, None, None)
         button.value = label
         # The limb just changed mode, so the other half of its controls
         # should appear and this half disappear.
@@ -1236,9 +1382,32 @@ class PickerPanel(QtWidgets.QDialog):
         # both panels, and the label is what the animator reads back.
         for view in self._views:
             view.update()
-        self._status.setText("%s -> %s (%s = %g)"
+        self._status.setText("%s -> %s (%s = %g)%s"
                              % (target.get("source") or button.id, label,
-                                target["attr"], value))
+                                target["attr"], value,
+                                ", matched (%d channels)" % matched
+                                if matched else ""))
+
+    def _MatchSpace(self, stage, attr, value, label, time, mode):
+        """Switch a control's space without moving it, as one edit and one
+        undo entry. The number of channels matched, or None when no space
+        switch reads `attr` or the match could not be made -- the caller
+        then writes the value alone."""
+        control = spaceMatch.SwitchTarget(stage, attr.GetPath())
+        if control is None:
+            return None
+        try:
+            rig = ikfkMatch._RigRoot(stage.GetPrimAtPath(control))
+            evaluate = ikfkMatch.Evaluator(stage, rig)
+            plan = spaceMatch.Plan(stage, control, attr.GetPath(), value,
+                                   time, evaluate)
+            spaceMatch.Apply(stage, plan, time, mode, self._undo,
+                             "Switch %s to %s" % (control.name, label))
+        except Exception as error:
+            self._status.setText("Space match failed (%s); switched "
+                                 "without matching." % error)
+            return None
+        return len(plan) - 1
 
     def _OnSelectionChanged(self, *args):
         model = getattr(self._api, "dataModel", None)

@@ -25,7 +25,11 @@ MIN_HIT = 4.0
 # The command buttons this panel actually implements. Anything else a
 # picker
 # carries is a script we cannot run, and is left inert.
-IMPLEMENTED_COMMANDS = ("zero_ctrls",)
+IMPLEMENTED_COMMANDS = ("zero_ctrls", "ctrl_vis")
+
+# Commands that are toggles: drawn with a checkbox whose tick the panel
+# keeps in step with what the command controls.
+TOGGLE_COMMANDS = ("ctrl_vis",)
 
 
 # Shapes that are interface chrome rather than parts of the character:
@@ -91,6 +95,8 @@ class Button(object):
                 and (record.get("text") or "").strip()):
             self.command = (record["text"].strip().lower()
                             .replace(" ", "_"))
+        if self.command in TOGGLE_COMMANDS:
+            self.checkbox = True
         self.mode = record.get("mode") or None
         self.dial = record.get("dial") or None
 

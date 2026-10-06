@@ -25,10 +25,12 @@ from pxr.Usdviewq.qt import QtGui, QtWidgets
 _HOOKED_ATTR = "_rigExecArcMenuInstalled"
 
 
-def InstallPrimContextMenuHook(usdviewApi, undoStack):
+def InstallPrimContextMenuHook(usdviewApi, undoStack, extras=()):
     """
     Append "Add Composition Arc" to usdview's prim context menu, once.
-    Returns True when the hook is in place.
+    `extras` are further item builders, each called as fn(menu, prim) and
+    free to add nothing for a prim they do not concern. Returns True when
+    the hook is in place.
     """
     controller = getattr(usdviewApi, "_UsdviewApi__appController", None)
     if controller is None:
@@ -46,8 +48,10 @@ def InstallPrimContextMenuHook(usdviewApi, undoStack):
     def _ShowPrimContextMenu(item):
         try:
             menu = PrimContextMenu(controller._mainWindow, item, controller)
-            AppendArcMenu(menu, usdviewApi, undoStack, _PrimFor(item,
-                                                                usdviewApi))
+            prim = _PrimFor(item, usdviewApi)
+            AppendArcMenu(menu, usdviewApi, undoStack, prim)
+            for extra in extras:
+                extra(menu, prim)
         except Exception:
             # Never cost the artist usdview's own menu over ours.
             return original(item)

@@ -121,6 +121,8 @@ _CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst)
     // frames of a rig that is standing in the same place.
     D.spaceSwitches = src.spaceSwitches;
     D.spaceSwitchBySlot = src.spaceSwitchBySlot;
+    D.autoClavicles = src.autoClavicles;
+    D.autoClavicleBySlot = src.autoClavicleBySlot;
     D.commits = src.commits;
     D.revisionIndex = src.revisionIndex;
     D.derivedIndex = src.derivedIndex;
