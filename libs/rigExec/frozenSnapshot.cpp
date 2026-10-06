@@ -348,10 +348,6 @@ RigExecCanFreezeProgram(const RigExecRigEvaluator &evaluator,
                         "the live stage");
         }
     }
-    if (B.ladderVarying) {
-        return fail("a time-varying provider ladder recomposes from stage "
-                    "reads the frozen executor cannot reproduce");
-    }
     for (const RigExecBakedProgramImpl::GeomChain &chain : B.chains) {
         for (const RigExecBakedProgramImpl::GeomRevision &revision :
              chain.revisions) {

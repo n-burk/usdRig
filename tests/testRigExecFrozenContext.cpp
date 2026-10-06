@@ -35,6 +35,7 @@
 #include "pxr/usd/sdf/layer.h"
 #include "pxr/usd/sdf/types.h"
 #include "pxr/usd/usd/attribute.h"
+#include "pxr/usd/usd/editTarget.h"
 #include "pxr/usd/usd/primRange.h"
 #include "pxr/usd/usd/relationship.h"
 #include "pxr/usd/usd/stage.h"
@@ -44,6 +45,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <limits>
 #include <map>
 #include <memory>
@@ -5692,6 +5694,327 @@ TestFrozenVolumePlacementUsesTheSharedGate(const std::string &examplesDir)
     }
 }
 
+// A rig whose provider ladder recomposes, for the frozen ladder cases below:
+// the stage, a session-layer edit authored before Compile, the frames its
+// rests move over, and a ladder channel to drag at the last of them.
+struct _RecomposingLadderCase {
+    const char *label = "";
+    std::string stagePath;
+    SdfPath rig;
+    std::function<void(const UsdStageRefPtr &)> edit;
+    std::vector<double> frames;
+    SdfPath dragPrim;
+    TfToken dragAttribute;
+    double dragValues[2] = {0.0, 0.0};
+    // Whether a ladder channel is read per frame (Build's ladderVarying):
+    // the rigs the freeze refused before the worker ran the rest tier.
+    bool varying = true;
+    // A joint whose final frame the moved rest moves.
+    SdfPath watched;
+};
+
+// A frozen job over a ladder that recomposes equals live, bit for bit: at
+// each frame, frozen from the live run before it (so the job's ladder leaves
+// differ from the clone's and its rest and ladder ops re-run), then under
+// two values of a drag on a ladder channel at a held frame, and after its
+// release. Each job is accepted, not declined.
+void
+CheckRecomposingLadderFreezes(const _RecomposingLadderCase &c)
+{
+    UsdStageRefPtr stage = UsdStage::Open(c.stagePath);
+    CHECK(stage);
+    if (!stage) {
+        return;
+    }
+    if (c.edit) {
+        stage->SetEditTarget(UsdEditTarget(stage->GetSessionLayer()));
+        c.edit(stage);
+    }
+    std::vector<std::string> errors;
+    std::string error;
+    RigExecRigEvaluator evaluator(stage, c.rig);
+    CHECK(evaluator.Compile(&errors));
+    CHECK(evaluator.IsBakeable());
+    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+    CHECK(evaluator.Evaluate(UsdTimeCode(c.frames.front())).valid);
+    CHECK(evaluator.GetBakedProgram() != nullptr);
+    if (!evaluator.GetBakedProgram()) {
+        return;
+    }
+    const RigExecBakedProgramImpl &B =
+        evaluator.GetBakedProgram()->GetStepGraph();
+    CHECK(B.ladderVarying == c.varying);
+    CHECK(RigExecCanFreezeProgram(evaluator, &error));
+
+    RigExecBackgroundScheduler scheduler;
+    const auto warm = [&](const std::string &where, double frame,
+                          const std::vector<RigExecValueOverride> &overrides)
+        -> RigExecRigPose {
+        std::shared_ptr<const RigExecFrozenProgram> frozen;
+        CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
+        if (!frozen) {
+            std::printf("FAIL %s: freeze refused: %s\n", where.c_str(),
+                        error.c_str());
+            ++failures;
+            return RigExecRigPose();
+        }
+        RigExecFrameInputs inputs;
+        CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(frame),
+                                       overrides, &inputs, &error));
+        const RigExecRigPose warmed = RunWarmingJob(
+            &evaluator, c.rig, frozen, inputs, &scheduler, nullptr);
+        CheckJobAccepted(where.c_str(), inputs, warmed);
+        evaluator.SetInteractiveOverrides(overrides);
+        const RigExecRigPose live = evaluator.Evaluate(UsdTimeCode(frame));
+        CHECK(live.valid);
+        CheckPosesBitIdentical((where + " warmed").c_str(), live, warmed);
+        return warmed;
+    };
+    // A rest move shows in the joint's final frame or, where its default
+    // space carries the move, in its rest-to-pose matrix.
+    const auto watchedFrame = [&c](const RigExecRigPose &pose) {
+        const auto found = pose.jointFramesFinal.find(c.watched);
+        CHECK(found != pose.jointFramesFinal.end());
+        return found == pose.jointFramesFinal.end() ? RigExecPointFrame()
+                                                    : found->second;
+    };
+    const auto watchedMatrix = [&c](const RigExecRigPose &pose) {
+        const auto found = pose.jointMatricesFinal.find(c.watched);
+        CHECK(found != pose.jointMatricesFinal.end());
+        return found == pose.jointMatricesFinal.end() ? GfMatrix4d(1.0)
+                                                      : found->second;
+    };
+    const auto moved = [&](const std::string &what, const RigExecRigPose &a,
+                           const RigExecRigPose &b) {
+        const RigExecPointFrame x = watchedFrame(a), y = watchedFrame(b);
+        if (x.flags == y.flags && x.points == y.points &&
+            watchedMatrix(a) == watchedMatrix(b)) {
+            std::printf("FAIL %s %s: %s did not move\n", c.label,
+                        what.c_str(), c.watched.GetText());
+            ++failures;
+        }
+    };
+
+    // Forward over the frames, then back to the first.
+    std::vector<double> frames = c.frames;
+    frames.push_back(c.frames.front());
+    std::vector<RigExecRigPose> warmed;
+    for (const double frame : frames) {
+        warmed.push_back(warm(TfStringPrintf("%s frame %g", c.label, frame),
+                              frame, {}));
+    }
+    if (c.varying) {
+        moved("over the frames", warmed.front(), warmed[warmed.size() - 2]);
+    }
+
+    // A drag on a ladder channel at the held last frame, moved, released.
+    const double held = c.frames.back();
+    const auto drag = [&c](double value) {
+        return std::vector<RigExecValueOverride>{RigExecValueOverride{
+            c.dragPrim, TfToken(), c.dragAttribute, VtValue(value)}};
+    };
+    const RigExecRigPose settled = warmed[warmed.size() - 2];
+    const RigExecRigPose first = warm(
+        TfStringPrintf("%s dragged to %g", c.label, c.dragValues[0]), held,
+        drag(c.dragValues[0]));
+    moved("under the drag", settled, first);
+    warm(TfStringPrintf("%s dragged to %g", c.label, c.dragValues[1]), held,
+         drag(c.dragValues[1]));
+    const RigExecRigPose released =
+        warm(TfStringPrintf("%s released", c.label), held, {});
+    evaluator.SetInteractiveOverrides({});
+    CheckSameReadings(TfStringPrintf("%s released vs settled", c.label)
+                          .c_str(),
+                      settled, released);
+
+    // One snapshot serving every job, as the warmer's does: frozen from the
+    // live run at the first frame, and again from the run under the first
+    // drag, so a job's leaves and ladder flags differ from the clone's by
+    // more than one run. Values only: the work a job does follows from what
+    // its snapshot last ran, not from live's history.
+    struct _Job {
+        std::string what;
+        double frame;
+        std::vector<RigExecValueOverride> overrides;
+    };
+    std::vector<_Job> jobs;
+    for (const double frame : frames) {
+        jobs.push_back({TfStringPrintf("frame %g", frame), frame, {}});
+    }
+    jobs.push_back({TfStringPrintf("dragged to %g", c.dragValues[1]), held,
+                    drag(c.dragValues[1])});
+    jobs.push_back({"released", held, {}});
+    const auto sameValues = [&c](const std::string &what,
+                                 const RigExecRigPose &live,
+                                 const RigExecRigPose &warmed) {
+        CheckSameReadings(what.c_str(), live, warmed);
+        if (live.jointMatricesFinal != warmed.jointMatricesFinal ||
+            live.providerXforms != warmed.providerXforms ||
+            live.providerBaseXforms != warmed.providerBaseXforms) {
+            std::printf("FAIL %s: joint matrices or provider transforms "
+                        "differ\n", what.c_str());
+            ++failures;
+        }
+    };
+    const auto fromOneSnapshot =
+        [&](const std::string &where, double frame,
+            const std::vector<RigExecValueOverride> &overrides) {
+            evaluator.SetInteractiveOverrides(overrides);
+            CHECK(evaluator.Evaluate(UsdTimeCode(frame)).valid);
+            std::shared_ptr<const RigExecFrozenProgram> frozen;
+            CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
+            if (!frozen) {
+                return;
+            }
+            for (const _Job &job : jobs) {
+                const std::string what = TfStringPrintf(
+                    "%s, one snapshot %s: %s", c.label, where.c_str(),
+                    job.what.c_str());
+                RigExecFrameInputs inputs;
+                CHECK(RigExecSampleFrameInputs(evaluator,
+                                               UsdTimeCode(job.frame),
+                                               job.overrides, &inputs,
+                                               &error));
+                const RigExecRigPose warmed = RunWarmingJob(
+                    &evaluator, c.rig, frozen, inputs, &scheduler, nullptr);
+                CheckJobAccepted(what.c_str(), inputs, warmed);
+                evaluator.SetInteractiveOverrides(job.overrides);
+                const RigExecRigPose live =
+                    evaluator.Evaluate(UsdTimeCode(job.frame));
+                CHECK(live.valid);
+                sameValues(what, live, warmed);
+            }
+        };
+    fromOneSnapshot("at the first frame", c.frames.front(), {});
+    fromOneSnapshot("under the drag", held, drag(c.dragValues[0]));
+    evaluator.SetInteractiveOverrides({});
+}
+
+// The tail (examples/01_FkChainTail.usda) with testRigExecEpochRests'
+// animated rests on Seg2 -- a time-sampled rest:tx, a rest:space connected
+// to an animated driver, a property chain writing rest:space -- plus the
+// unedited tail, whose static ladder recomposes only under the drag. Each
+// freezes, and every job equals live.
+void
+TestRecomposingLaddersFreeze(const std::string &examplesDir)
+{
+    const SdfPath rig("/TailAsset/Rig");
+    const SdfPath joint("/TailAsset/Rig/Joints/Seg1/Seg2");
+    const SdfPath child = joint.AppendChild(TfToken("Seg3"));
+    const std::vector<double> frames{1001.0, 1005.0, 1009.0};
+    const auto translation = [](double x) {
+        GfMatrix4d m(1.0);
+        m.SetTranslateOnly(GfVec3d(x, 0.0, 0.0));
+        return m;
+    };
+    _RecomposingLadderCase base;
+    base.stagePath = examplesDir + "/01_FkChainTail.usda";
+    base.rig = rig;
+    base.frames = frames;
+    base.dragPrim = joint;
+    base.dragAttribute = TfToken("rest:tx");
+    base.dragValues[0] = 1.5;
+    base.dragValues[1] = 4.0;
+    base.watched = child;
+
+    _RecomposingLadderCase sampled = base;
+    sampled.label = "a time-sampled rest";
+    sampled.edit = [&](const UsdStageRefPtr &stage) {
+        UsdAttribute restTx = stage->GetPrimAtPath(joint).CreateAttribute(
+            TfToken("rest:tx"), SdfValueTypeNames->Double);
+        restTx.Set(0.0, UsdTimeCode(frames[0]));
+        restTx.Set(3.0, UsdTimeCode(frames[1]));
+        restTx.Set(6.0, UsdTimeCode(frames[2]));
+    };
+    CheckRecomposingLadderFreezes(sampled);
+
+    _RecomposingLadderCase connected = base;
+    connected.label = "a connected rest space";
+    connected.edit = [&](const UsdStageRefPtr &stage) {
+        const UsdPrim prim = stage->GetPrimAtPath(joint);
+        const UsdAttribute driver = prim.CreateAttribute(
+            TfToken("inputs:restSpaceDriver"), SdfValueTypeNames->Matrix4d);
+        driver.Set(translation(0.0), UsdTimeCode(frames[0]));
+        driver.Set(translation(2.5), UsdTimeCode(frames[1]));
+        driver.Set(translation(5.0), UsdTimeCode(frames[2]));
+        prim.CreateAttribute(TfToken("rest:space"),
+                             SdfValueTypeNames->Matrix4d)
+            .SetConnections({driver.GetPath()});
+    };
+    CheckRecomposingLadderFreezes(connected);
+
+    _RecomposingLadderCase chained = base;
+    chained.label = "a property chain on a rest";
+    chained.edit = [&](const UsdStageRefPtr &stage) {
+        const UsdPrim prim = stage->DefinePrim(
+            rig.AppendChild(TfToken("Movers"))
+                .AppendChild(TfToken("RestOffset")),
+            TfToken("RigExecMatrixMathMover"));
+        prim.ApplyAPI(TfToken("RigExecMoverAPI"));
+        prim.CreateAttribute(TfToken("rigExec:operation"),
+                             SdfValueTypeNames->Token)
+            .Set(TfToken("multiply"));
+        const UsdAttribute value = prim.CreateAttribute(
+            TfToken("inputs:value"), SdfValueTypeNames->Matrix4d);
+        value.Set(translation(1.0), UsdTimeCode(frames[0]));
+        value.Set(translation(2.0), UsdTimeCode(frames[1]));
+        value.Set(translation(3.0), UsdTimeCode(frames[2]));
+        prim.CreateAttribute(TfToken("inputs:defaultWeight"),
+                             SdfValueTypeNames->Float)
+            .Set(1.0f);
+        prim.CreateRelationship(TfToken("rigExec:moves"))
+            .SetTargets({joint.AppendProperty(TfToken("rest:space"))});
+    };
+    CheckRecomposingLadderFreezes(chained);
+
+    _RecomposingLadderCase still = base;
+    still.label = "a static ladder under a drag";
+    still.varying = false;
+    CheckRecomposingLadderFreezes(still);
+}
+
+// tests/fixtures/computed_ik_space.usda with Master's rest keyed (the
+// space rest testRigExecSolverBake's TestASpaceRestMoveReachesTheSolve
+// moves): the TwoBoneIk arm and the SplineIk tail measure their space from
+// Master's rest, so a job whose Solve did not refresh its space rest from
+// the rests its own rest ops composed would differ from live at 5 and 10.
+void
+TestARecomposedSpaceRestFreezes(const std::string &examplesDir)
+{
+    _RecomposingLadderCase c;
+    c.label = "a keyed space rest";
+    c.stagePath = examplesDir + "/../tests/fixtures/computed_ik_space.usda";
+    c.rig = SdfPath("/IkSpaceAsset/Rig");
+    const SdfPath master("/IkSpaceAsset/Rig/Controls/Master");
+    c.edit = [&master](const UsdStageRefPtr &stage) {
+        const UsdPrim prim = stage->GetPrimAtPath(master);
+        const auto key = [&prim](const char *name, double last) {
+            UsdAttribute a = prim.CreateAttribute(TfToken(name),
+                                                  SdfValueTypeNames->Double);
+            a.Set(0.0, UsdTimeCode(1.0));
+            a.Set(last, UsdTimeCode(10.0));
+        };
+        key("rest:ry", 20.0);
+        key("rest:tx", 3.0);
+    };
+    c.frames = {1.0, 5.0, 10.0};
+    c.dragPrim = master;
+    c.dragAttribute = TfToken("rest:ry");
+    c.dragValues[0] = 15.0;
+    c.dragValues[1] = 25.0;
+    c.watched = SdfPath("/IkSpaceAsset/Rig/Joints/Shoulder/Elbow/Wrist");
+    CheckRecomposingLadderFreezes(c);
+
+    // Unkeyed, the ladder recomposes only under the drag, so the Solve
+    // refreshes on the drag and once after its release (ladderDisturbed),
+    // including in a job frozen while the drag stood.
+    _RecomposingLadderCase still = c;
+    still.label = "a static space rest under a drag";
+    still.edit = nullptr;
+    still.varying = false;
+    CheckRecomposingLadderFreezes(still);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -5758,6 +6081,8 @@ main(int argc, char **argv)
         TestFrameRecordFallbacksFreeze(argv[1]);
         TestSolverCheckpointFreezes(argv[1]);
         TestPrecedingOwnChainFreezes(argv[1]);
+        TestRecomposingLaddersFreeze(argv[1]);
+        TestARecomposedSpaceRestFreezes(argv[1]);
     } else {
         std::printf("skipping the biped (no examples directory given)\n");
     }

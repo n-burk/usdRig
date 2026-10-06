@@ -71,7 +71,9 @@
 //    the same leaves, the override slots and the tier's versions through
 //    its reader walk (RigExecBakedResolveReaderWalk). Override slots
 //    are found by (prim, attribute), building no path. The worker passes
-//    no cone verifier and a disabled profiler.
+//    no cone verifier and a disabled profiler. The rest and ladder ops
+//    (RigExecBakedRunRestTier) run after the leaf sample, from the ladder
+//    leaves and the Rest and Ladder tables of the clone only.
 //  * Shared kernels (skin, derived, solvers, constraints) are pure per-point
 //    math over worker-owned buffers, and their five WorkParallelForN launch
 //    sites in moverGraph.cpp (the blend-channel sum among them, which the
@@ -284,8 +286,17 @@ _FrozenPrologue(_FrozenWorker *worker, const RigExecFrozenProgram &snapshot,
     // them.
     RigExecBakedSampleLeaves(&B, time, /* all = */ true);
 
-    // RunInputs: a frozen job runs no rest or ladder op, so a ladder that
-    // would recompose declines; everything else replays the leaves.
+    // The rest and ladder ops, as on the live path, from the ladder leaves
+    // just sampled: an op re-runs when one of its leaves differs from the
+    // clone's (live's last sample) or a Rest or Ladder slot it reads moved,
+    // and the moves it records seed the closure against the clone's tables,
+    // which live composed from those leaves. Each pass clears the clone's
+    // move records and run numbers first.
+    RigExecBakedRunRestTier(&B, pose, /*force=*/false, /*verify=*/false);
+
+    // RunInputs: the solver refresh gate, with live's predicate and its
+    // one-more-run after a drag on a ladder channel is released (the
+    // clone's ladderDisturbed is live's); everything else replays leaves.
     bool ladderDragged = false;
     if (B.anyOverridden) {
         for (const int ladderIndex : B.ladderOverrides) {
@@ -298,26 +309,7 @@ _FrozenPrologue(_FrozenWorker *worker, const RigExecFrozenProgram &snapshot,
     B.ladderRecomputed =
         B.ladderVarying || ladderDragged || B.ladderDisturbed;
     if (B.ladderRecomputed) {
-        return false;
-    }
-    // Nothing composed, so nothing moved: the clone's records of live's
-    // last moves would seed readers this job has no reason to run.
-    for (const int slot : B.restMoved) {
-        B.restChanged[size_t(slot)] = 0;
-    }
-    for (const int slot : B.ladderMoved) {
-        B.ladderChanged[size_t(slot)] = 0;
-    }
-    B.restMoved.clear();
-    B.ladderMoved.clear();
-    B.ladderMovedSlots.clear();
-    // And the job's head trace names no rest or ladder op: the clone's
-    // run numbers are live's.
-    for (RigExecBakedHeadStep &step : B.headSteps) {
-        if (step.kind == RigExecBakedHeadKind::RestCompose ||
-            step.kind == RigExecBakedHeadKind::LadderCompose) {
-            step.runSeq = 0;
-        }
+        B.ladderDisturbed = ladderDragged;
     }
     for (const auto &binding : B.avarBindings) {
         B.avars[binding.slot] = RigExecBakedLeafRead(B, binding.input);

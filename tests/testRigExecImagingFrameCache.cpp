@@ -102,6 +102,7 @@
 #include "rigExecImaging/registry.h"
 #include "rigExecBake/bake.h"
 #include "rigExec/backgroundScheduler.h"
+#include "rigExec/bakedProgramImpl.h"
 #include "rigExec/frameCache.h"
 #include "rigExec/frameCacheSparsity.h"
 #include "rigExec/frozenContext.h"
@@ -674,6 +675,144 @@ TestARestEditIsNotServedStale()
                     "rest edit\n");
         CHECK(false);
     }
+}
+
+// WARM over a recomposing ladder. MakeRestRig's root rest:tx is animated,
+// so its provider ladder recomposes every frame; the rig freezes, and the
+// production worker warms frames 2 and 3 by running the rest and ladder ops
+// from each job's sampled ladder leaves. A scrub over the range then serves
+// every frame from the cache with no evaluation, and each served frame
+// equals the live evaluation of it after the cache is cleared.
+void
+TestAnAnimatedRestRigServesWarmedHits()
+{
+    std::printf("progress: TestAnAnimatedRestRigServesWarmedHits\n");
+    std::fflush(stdout);
+    SetEnv("RIGEXEC_FRAME_CACHE", "on");
+    SetEnv("RIGEXEC_FRAME_CACHE_VERIFY", "0");
+    if (RigExecFrameCacheModeFromEnvironment() ==
+            RigExecFrameCacheMode::Off ||
+        RigExecFrameCacheVerifyRequested()) {
+        return;
+    }
+    RigExecImagingRegistry &registry = RigExecImagingRegistry::GetInstance();
+    if (!RigExecBackgroundWarmingEnabled()) {
+        std::printf("SKIP TestAnAnimatedRestRigServesWarmedHits: warming "
+                    "unavailable in this process\n");
+        return;
+    }
+    const UsdStageRefPtr stage = MakeRestRig();
+    const SdfPath rig("/Asset/Rig");
+    const std::vector<double> frames{1.0, 2.0, 3.0};
+    std::vector<std::string> errors;
+    CHECK(registry.Activate(stage, rig, UsdTimeCode(1.0), &errors));
+    RigExecImagingBridge *bridge = registry.GetBridge(rig);
+    CHECK(bridge != nullptr);
+    if (!bridge) {
+        registry.Deactivate();
+        return;
+    }
+    const RigExecBakedProgram *program =
+        bridge->GetEvaluator().GetBakedProgram();
+    CHECK(program != nullptr);
+    // Not vacuous: the ladder is read per frame, which the freeze refused
+    // before the worker ran the rest tier.
+    CHECK(program && program->GetStepGraph().ladderVarying);
+    std::string why;
+    CHECK(RigExecCanFreezeProgram(bridge->GetEvaluator(), &why));
+    if (!why.empty()) {
+        std::printf("    freeze refused: %s\n", why.c_str());
+    }
+    CHECK(registry.SetWarmRange(rig, frames));
+    const RigExecBackgroundSchedulerStats before =
+        registry.GetBackgroundStats();
+    for (size_t tick = 0; tick < frames.size() + 4; ++tick) {
+        bool allCached = true;
+        for (const RigExecWarmFrameState state :
+             registry.GetFrameStates(rig, frames)) {
+            allCached = allCached && state == RigExecWarmFrameState::Cached;
+        }
+        if (allCached) {
+            break;
+        }
+        CHECK(registry.OnIdle() >= 0);
+        registry.WaitUntilBackgroundIdle();
+    }
+    for (const RigExecWarmFrameState state :
+         registry.GetFrameStates(rig, frames)) {
+        CHECK(state == RigExecWarmFrameState::Cached);
+    }
+    const RigExecBackgroundSchedulerStats stats =
+        registry.GetBackgroundStats();
+    // Frame 1 is the Activate memo; 2 and 3 are warmed by frozen jobs.
+    CHECK(stats.published - before.published == frames.size() - 1);
+    CHECK(stats.declinedInvalid - before.declinedInvalid == 0);
+    CHECK(stats.declinedFreezeRefused - before.declinedFreezeRefused == 0);
+    CHECK(stats.declinedUnsampleable - before.declinedUnsampleable == 0);
+
+    const size_t evalsBefore = registry.GetSessionEvaluationCount(rig);
+    const size_t hitsBefore = registry.GetFrameCacheStats(rig).hits;
+    std::map<double, _GenerationGeometry> warmed;
+    for (const double frame : {3.0, 2.0, 1.0}) {
+        CHECK(registry.SetTime(UsdTimeCode(frame)));
+        warmed[frame] = _CaptureGeometry(registry.GetStore()->Get());
+        CHECK(!warmed[frame].points.empty());
+    }
+    CHECK(registry.GetSessionEvaluationCount(rig) == evalsBefore);
+    CHECK(registry.GetFrameCacheStats(rig).hits - hitsBefore ==
+          frames.size());
+    // The rests moved the mesh between the warmed frames.
+    CHECK(!_SameGeometry(warmed[2.0], warmed[3.0]));
+    registry.ClearFrameCache(rig);
+    for (const double frame : {2.0, 3.0, 1.0}) {
+        CHECK(registry.SetTime(UsdTimeCode(frame)));
+        const _GenerationGeometry live =
+            _CaptureGeometry(registry.GetStore()->Get());
+        if (!_SameGeometry(warmed[frame], live)) {
+            std::printf("warmed-vs-live differs at frame %g on the animated "
+                        "rest rig\n", frame);
+            CHECK(false);
+        }
+    }
+    CHECK(registry.GetSessionEvaluationCount(rig) ==
+          evalsBefore + frames.size());
+
+    // A value edit on the child's static rest, and the range warmed again:
+    // each frame served after it equals its live evaluation, so nothing
+    // keyed before the edit is served after it.
+    stage->GetPrimAtPath(SdfPath("/Asset/Rig/Joints/Root/Child"))
+        .GetAttribute(TfToken("rest:tx"))
+        .Set(2.5);
+    for (size_t tick = 0; tick < frames.size() + 4; ++tick) {
+        bool allCached = true;
+        for (const RigExecWarmFrameState state :
+             registry.GetFrameStates(rig, frames)) {
+            allCached = allCached && state == RigExecWarmFrameState::Cached;
+        }
+        if (allCached) {
+            break;
+        }
+        CHECK(registry.OnIdle() >= 0);
+        registry.WaitUntilBackgroundIdle();
+    }
+    std::map<double, _GenerationGeometry> edited;
+    for (const double frame : {3.0, 2.0, 1.0}) {
+        CHECK(registry.SetTime(UsdTimeCode(frame)));
+        edited[frame] = _CaptureGeometry(registry.GetStore()->Get());
+    }
+    CHECK(!_SameGeometry(edited[2.0], warmed[2.0]));
+    registry.ClearFrameCache(rig);
+    for (const double frame : {2.0, 3.0, 1.0}) {
+        CHECK(registry.SetTime(UsdTimeCode(frame)));
+        if (!_SameGeometry(edited[frame],
+                           _CaptureGeometry(registry.GetStore()->Get()))) {
+            std::printf("served-vs-live differs at frame %g after a static "
+                        "rest edit\n", frame);
+            CHECK(false);
+        }
+    }
+    registry.ClearFrameCache(rig);
+    registry.Deactivate();
 }
 
 // EPOCH. A stage notice that hits the baked capture index drops the epoch's
@@ -4279,6 +4418,7 @@ main(int argc, char **argv)
     TestCacheOffMatchesCacheOn();
     TestStaticControlEditInvalidatesCachedFrames();
     TestARestEditIsNotServedStale();
+    TestAnAnimatedRestRigServesWarmedHits();
     TestCaptureIndexHitDropsEpochEagerly();
     TestOverlayChangeClearsCache();
     TestPlaybackBypassesCache(scratch);

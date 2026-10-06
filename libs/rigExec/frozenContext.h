@@ -254,12 +254,15 @@ struct RigExecFrozenProgram {
 /// dynamically, which no snapshot can reproduce), a pose-domain constraint
 /// or property chain binding a weight object (whose oracle resolves from
 /// the live stage), a current-phase weight read, an unsupported revision
-/// operation, a blend-sample read phase, a derived-target read phase, a
-/// time-varying provider ladder, or an unfixed skin layout.
+/// operation, a blend-sample read phase, a derived-target read phase, or an
+/// unfixed skin layout.
 /// \p error, when given, says which. Anything refused
 /// here evaluates live when asked; a refusal is never served wrong. Weight
 /// objects and their steps DO freeze: their scalars patch from samples and
-/// their point arrays sample per frame into the shared packet kernels.
+/// their point arrays sample per frame into the shared packet kernels. So
+/// does a provider ladder that recomposes (a time-varying, connected,
+/// dragged or chain-written ladder channel): the frozen prologue runs the
+/// rest and ladder ops from the job's sampled ladder leaves.
 ///
 /// Property chains are supported: the sampler samples every head leaf the
 /// chains and the reader walks read (RigExecForEachHeadLeaf, under its

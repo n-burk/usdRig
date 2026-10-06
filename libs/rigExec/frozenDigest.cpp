@@ -213,10 +213,10 @@ RigExecFrozenPurityAudit()
         {"ladder tables (restM through rotOrder)",
          RigExecFrozenPurity::Pure,
          "op-written: the RestCompose and LadderCompose head ops compose "
-         "them in the live prologue from sampled ladder leaves, serially "
-         "on the owning thread, under the body purity mark; a frozen job "
-         "runs no rest or ladder op and declines any ladder that would "
-         "recompose, so it reads the clone's tables as live left them"},
+         "them from sampled ladder leaves, serially, under the body purity "
+         "mark -- in the live prologue on the owning thread, and in a "
+         "frozen job's prologue over the clone's tables from the job's "
+         "patched ladder leaves"},
         {"skin/blend bindings (shared_ptr<const> topologies and layouts)",
          RigExecFrozenPurity::EpochPinned,
          "immutable snapshots resolved at Build/prologue; the worker runs "
