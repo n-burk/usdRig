@@ -33,6 +33,7 @@
 #include "rigExec/rigEvaluatorPropertyBindings.h"
 #include "rigExecBake/bake.h"
 #include "rigExecMath/propertyMath.h"
+#include "rigExecPromotionCases.h"
 
 #include "pxr/base/gf/math.h"
 #include "pxr/base/gf/quatf.h"
@@ -76,6 +77,17 @@ static int failures = 0;
     } while (0)
 
 namespace {
+
+// Head entries are part of the ordinary execution trace.
+static std::vector<RigExecOpTraceEntry>
+ExecutedHeads(const RigExecBakedProgramImpl &B)
+{
+    auto trace = RigExecBakedLastRunTrace(B);
+    trace.erase(std::remove_if(trace.begin(),trace.end(),
+        [&B](const auto &entry) { return !B.steps[entry.step].isHead; }),trace.end());
+    return trace;
+}
+
 
 struct Fixture {
     const char *name;
@@ -148,9 +160,9 @@ size_t
 PropertySteps(const RigExecBakedProgramImpl &B)
 {
     return size_t(std::count_if(
-        B.headSteps.begin(), B.headSteps.end(),
-        [](const RigExecBakedHeadStep &step) {
-            return step.kind == RigExecBakedHeadKind::PropertyRevision;
+        B.steps.begin(), B.steps.end(),
+        [](const RigExecBakedStep &step) {
+            return step.kind == RigExecBakedStepKind::PropertyRevision;
         }));
 }
 
@@ -160,8 +172,8 @@ std::vector<std::string>
 HeadLines(const RigExecBakedProgramImpl &B)
 {
     std::vector<std::string> lines;
-    for (const uint32_t index : B.headOrder) {
-        const RigExecBakedHeadStep &step = B.headSteps[index];
+    for (const uint32_t index : RigExecBakedHeadIndices(B)) {
+        const RigExecBakedStep &step = B.steps[index];
         lines.insert(lines.end(), step.lines.begin(), step.lines.end());
     }
     return lines;
@@ -572,9 +584,9 @@ std::set<std::pair<SdfPath, int>>
 Ran(const RigExecBakedProgramImpl &B)
 {
     std::set<std::pair<SdfPath, int>> ran;
-    for (const RigExecOpTraceEntry &entry : RigExecBakedLastHeadTrace(B)) {
-        const RigExecBakedHeadStep &step = B.headSteps[entry.step];
-        if (step.kind == RigExecBakedHeadKind::PropertyRevision) {
+    for (const RigExecOpTraceEntry &entry : ExecutedHeads(B)) {
+        const RigExecBakedStep &step = B.steps[entry.step];
+        if (step.kind == RigExecBakedStepKind::PropertyRevision) {
             ran.emplace(B.propertyChains[size_t(step.object)].target,
                         step.part);
         }
@@ -837,10 +849,10 @@ TestHeadOrderIsChainOrder()
           SdfPath("/Asset/Rig/Channels/A.rigExec:x"));
     // The order holds every step, chain by chain, part by part.
     int lastChain = -1, lastPart = -1;
-    bool ordered = B.headOrder.size() == B.headSteps.size();
-    for (const uint32_t index : B.headOrder) {
-        const RigExecBakedHeadStep &step = B.headSteps[index];
-        if (step.kind != RigExecBakedHeadKind::PropertyRevision) {
+    bool ordered = true;
+    for (const uint32_t index : RigExecBakedHeadIndices(B)) {
+        const RigExecBakedStep &step = B.steps[index];
+        if (step.kind != RigExecBakedStepKind::PropertyRevision) {
             continue;
         }
         ordered = ordered && (step.object > lastChain ||
@@ -851,12 +863,12 @@ TestHeadOrderIsChainOrder()
     }
     CHECK(ordered);
     // No step of one chain reads the other's.
-    for (const RigExecBakedHeadStep &step : B.headSteps) {
-        if (step.kind != RigExecBakedHeadKind::PropertyRevision) {
+    for (const RigExecBakedStep &step : B.steps) {
+        if (step.kind != RigExecBakedStepKind::PropertyRevision) {
             continue;
         }
         for (const uint32_t pred : step.preds) {
-            CHECK(B.headSteps[pred].object == step.object);
+            CHECK(B.steps[pred].object == step.object);
         }
     }
     const std::vector<std::string> want = {
@@ -1014,8 +1026,8 @@ TestACleanHeadTierStillPublishes(const std::string &examples)
         const RigExecRigPose again = evaluator->Evaluate(t);
         CHECK(again.valid);
         size_t ran = 0, volatileRan = 0;
-        for (const RigExecOpTraceEntry &entry : RigExecBakedLastHeadTrace(B)) {
-            if (B.headSteps[entry.step].alwaysRuns) {
+        for (const RigExecOpTraceEntry &entry : ExecutedHeads(B)) {
+            if (B.steps[entry.step].alwaysRuns) {
                 ++volatileRan;
             } else {
                 ++ran;
@@ -1083,8 +1095,8 @@ TestABakeAfterAnEvaluationExportsTheChains(const std::string &examples)
             standing->RequestFullRun();
             CHECK(evaluator->Evaluate(UsdTimeCode(t)).valid);
             CHECK(evaluator->GetBakedProgram() == standing);
-            CHECK(RigExecBakedLastHeadTrace(standing->GetStepGraph()).size() ==
-                  standing->GetStepGraph().headSteps.size());
+            CHECK(ExecutedHeads(standing->GetStepGraph()).size() ==
+                  RigExecBakedHeadIndices(standing->GetStepGraph()).size());
         }
         RigExecBakeOpts opts;
         opts.time = t;
@@ -1103,8 +1115,8 @@ TestABakeAfterAnEvaluationExportsTheChains(const std::string &examples)
         const RigExecBakedProgramImpl *program = Program(*evaluator);
         CHECK(program);
         if (program) {
-            CHECK(RigExecBakedLastHeadTrace(*program).size() ==
-                  program->headSteps.size());
+            CHECK(ExecutedHeads(*program).size() ==
+                  RigExecBakedHeadIndices(*program).size());
         }
         auto fresh = MakeEvaluator(stage, f.rig, RigExecEvaluationMode::Baked);
         RigExecBakeResult reference;
@@ -1526,7 +1538,7 @@ TestOnlyReadersOfTheChangedVersionRerun()
     // Each reads a walk, and declares its version.
     for (const int index : {follow, base, viaHop}) {
         CHECK(!B.steps[size_t(index)].readerWalks.empty());
-        CHECK(!B.steps[size_t(index)].headReads.empty());
+        CHECK(!B.steps[size_t(index)].reads.empty());
     }
     const auto check = [&](const std::vector<RigExecValueOverride> &drag,
                            const std::string &what) {
@@ -1768,9 +1780,10 @@ TestReaderWalksDeclareTheirVersions(const std::string &examples)
                 for (const uint32_t id :
                      B.readerWalks[size_t(walk)].versions) {
                     bool declared = false;
-                    for (const RigExecBakedHeadRange &range : step.headReads) {
+                    for (const RigExecBakedSlotRange &range : step.reads) {
                         declared = declared ||
-                                   (range.begin <= id && id < range.end);
+                                   (range.domain == RigExecBakedSlotDomain::PropertyResult &&
+                                    range.begin <= id && id < range.end);
                     }
                     CHECK(declared);
                 }
@@ -1788,17 +1801,22 @@ TestReaderWalksDeclareTheirVersions(const std::string &examples)
         if (first < 0) {
             continue;
         }
-        // One declaration out: refused, naming the walk.
+        // Remove only property declarations, retaining required Rest/Ladder
+        // inputs so the refusal still names the undeclared reader walk.
         RigExecBakedStep &step = B.steps[size_t(first)];
-        const std::vector<RigExecBakedHeadRange> saved = step.headReads;
-        step.headReads.clear();
+        const std::vector<RigExecBakedSlotRange> saved = step.reads;
+        step.reads.erase(std::remove_if(step.reads.begin(), step.reads.end(),
+            [](const auto &range) {
+                return range.domain == RigExecBakedSlotDomain::PropertyResult;
+            }), step.reads.end());
+        CHECK(step.reads.size() < saved.size());
         error.clear();
         CHECK(!RigExecBakedValidateHeadReads(B, &error));
         CHECK(error.rfind("walk ", 0) == 0 &&
               error.find(" without declaring it") != std::string::npos);
         std::printf("reader walks %s: undeclared: %s\n", r.name.c_str(),
                     error.c_str());
-        step.headReads = saved;
+        step.reads = saved;
         CHECK(RigExecBakedValidateHeadReads(B, &error));
     }
     CHECK(declaring > 0);
@@ -1888,150 +1906,61 @@ TestAChainDragIsNoLongerAWholeRigCost(const std::string &examples)
     SameReadings(forced, cone, "chain drag: cone against forced");
 }
 
-// The always-dirty set as the exporter writes it: the labels of the steps
-// with externalReads and of `cones.alwaysSteps`, hashed (FNV-1a), with
-// `cones.always` checked to be exactly the clusters of those steps. Labels,
-// not indices: chunk counts and clusters depend on the schedule settings.
-uint64_t
-AlwaysSetDigest(const RigExecBakedProgramImpl &B, size_t *count)
-{
-    std::vector<std::string> labels;
-    RigExecBakedClusterSet clusters;
-    clusters.Resize(B.clustering.clusters.size());
-    for (size_t i = 0; i < B.steps.size(); ++i) {
-        const RigExecBakedStep &step = B.steps[i];
-        const bool always = B.cones.alwaysSteps.Test(int(i));
-        CHECK(always == step.externalReads);
-        if (step.externalReads) {
-            labels.push_back(step.label);
-            clusters.Set(step.cluster);
-        }
-    }
-    CHECK(clusters.words == B.cones.always.words);
-    std::sort(labels.begin(), labels.end());
-    uint64_t hash = 1469598103934665603ull;
-    for (const std::string &label : labels) {
-        for (const char c : label + "\n") {
-            hash = (hash ^ uint64_t(uint8_t(c))) * 1099511628211ull;
-        }
-    }
-    *count = labels.size();
-    return hash;
-}
-
-// The exported `externalReads` and `cones.always` keep the numeric pose
-// interpolators and the Derived steps always-dirty whatever they declare,
-// until the runtime seeds head reads itself. Every rig of the examples, the
-// biped and tests/fixtures against digests recorded before the steps
-// declared head reads.
+// Pin semantic identities and region-relative indices across the promotion,
+// including all source/always members. Expected values come from the native
+// graph before promotion, with only numeric interpolator/Derived removals.
 void
-TestTheAlwaysSetIsUnchangedUntilT1(const std::string &examples)
+TestTheSourceAndAlwaysSetsSurviveThePromotion(const std::string &examples)
 {
-    // Recorded at 9b9fe16: file -> (always-dirty step count, digest).
-    static const std::map<std::string, std::pair<size_t, uint64_t>> kParent =
-        {
-            {"01_FkChainTail.usda", {6, 0xfe4062d5934b8fe3ull}},
-            {"02_TwoBoneIkLeg.usda", {5, 0x662d4e63e658ccaeull}},
-            {"03_IkFkBlendClamp.usda", {5, 0xc6a90d21ca6bdec2ull}},
-            {"04_BlendShapeFace.usda", {3, 0xe3a9a89a0b52e33full}},
-            {"05_TwistRibbonSpine.usda", {8, 0x33413310e1ccd36full}},
-            {"06_LatticeBulge.usda", {5, 0xccc18d2a33cdb131ull}},
-            {"07_SurfaceDrape.usda", {6, 0x70e93e45a305017bull}},
-            {"08_AimEyes.usda", {6, 0x85f9c9b44430ce39ull}},
-            {"09_PropertyMathMovers.usda", {2, 0x1ad397bdc801248full}},
-            {"10_AimXformTurret.usda", {0, 0x14650fb0739d0383ull}},
-            {"11_VolumeWeights.usda", {8, 0x766a76c65735b2b7ull}},
-            {"13_ReadPhases.usda", {4, 0x0368a6f68bc4d5e9ull}},
-            {"14_VolumeConstrainedSweep.usda", {3, 0x38b28c1305471657ull}},
-            {"15_TransformMatrixMover.usda", {0, 0x14650fb0739d0383ull}},
-            {"16_ConnectionReadPhases.usda", {6, 0xc9a3d4a85b17d4faull}},
-            {"ArmRig.usda", {10, 0x0f858b1656d084c7ull}},
-            {"ArmShotAnim.usda", {10, 0x962e672a80772035ull}},
-            {"aimtest.usda", {0, 0x14650fb0739d0383ull}},
-            {"aimtest_points.usda", {2, 0x00872694e9e34627ull}},
-            {"Biped_anim.usda", {1, 0xdffb9a848b5bf349ull}},
-            {"rigexec_flat.usda", {0, 0x14650fb0739d0383ull}},
-            {"rotateConstraint.usda", {0, 0x14650fb0739d0383ull}},
-            {"spider_legs_assembly_ref.usda", {0, 0x14650fb0739d0383ull}},
-            {"computed_chains.usda", {0, 0x14650fb0739d0383ull}},
-            {"computed_ik_space.usda", {0, 0x14650fb0739d0383ull}},
-            {"computed_path_reads.usda", {3, 0xcd9338b497693511ull}},
-            {"computed_weights.usda", {7, 0x96ad9dc08ce7b9afull}},
-            {"frame_record_fallbacks.usda", {5, 0x3fe7408988a0b80cull}},
-            {"oneloop_cross_domain.usda", {3, 0x8ce05dc478d2c0e6ull}},
-            {"oneloop_cycle.usda", {2, 0x5f865f28967f701dull}},
-            {"oneloop_two_limbs.usda", {2, 0xa18efb0f611cb5b2ull}},
-            {"phased_blend_samples.usda", {3, 0xabd1f90bfe97c048ull}},
-            {"preceding_own_chain.usda", {4, 0x3b09c24fca9ec6faull}},
-            {"projector_spaces.usda", {3, 0x176b71ae5cd20c0full}},
-            {"raw_skin_layouts.usda", {6, 0xf78b139674a7d2b1ull}},
-            {"solver_checkpoint.usda", {4, 0xd2653d3e22743355ull}},
-            {"space_switch_carry.usda", {0, 0x14650fb0739d0383ull}},
-            {"space_switch_dial.usda", {0, 0x14650fb0739d0383ull}},
-            {"space_switch_nested.usda", {0, 0x14650fb0739d0383ull}},
-            {"space_switch_same_round.usda", {0, 0x14650fb0739d0383ull}},
-            // Not in that recording: its meshes author no extent.
-            {"upstream_inputs.usda", {0, 0x14650fb0739d0383ull}},
-            {"upstream_inputs_chunked.usda", {0, 0x14650fb0739d0383ull}},
-            {"volume_placements.usda", {6, 0x88e3f470ded483ebull}},
-        };
-    std::vector<std::string> files;
-    for (const std::string &dir :
-         {examples, examples + "/../tests/fixtures"}) {
-        for (const std::string &name : TfListDir(dir)) {
-            if (TfStringEndsWith(name, ".usda")) {
-                files.push_back(name);
-            }
-        }
-    }
-    files.push_back(examples + "/biped/Biped_anim.usda");
-    std::sort(files.begin(), files.end());
-    size_t checked = 0;
-    for (const std::string &file : files) {
-        UsdStageRefPtr stage = UsdStage::Open(file);
-        if (!stage) {
-            continue;
-        }
-        SdfPath rig;
-        for (const UsdPrim &prim : stage->Traverse()) {
-            if (prim.GetTypeName() == TfToken("RigExecRoot")) {
-                rig = prim.GetPath();
-                break;
-            }
-        }
-        if (rig.IsEmpty()) {
-            continue;
-        }
-        RigExecRigEvaluator evaluator(stage, rig);
+    size_t checked=0, totalRegion=0, totalSources=0, totalAlways=0;
+    constexpr uint64_t initial=14695981039346656037ull;
+    for (const auto &expected : rigExecTest::rigExecPromotionCases) {
+        auto stage=UsdStage::Open(examples+"/../"+expected.fixture);
+        CHECK(stage); if (!stage) continue;
+        RigExecRigEvaluator evaluator(stage,SdfPath(expected.rig));
         std::vector<std::string> errors;
-        if (!evaluator.Compile(&errors)) {
-            continue;
-        }
+        CHECK(evaluator.Compile(&errors));
         evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
-        const RigExecBakedProgramImpl *program = Program(evaluator);
-        if (!program) {
-            continue;
+        const auto *program=Program(evaluator);
+        CHECK(program); if (!program) continue;
+        const auto &B=*program;
+        size_t H=0;
+        while (H<B.steps.size() && B.steps[H].isHead) ++H;
+        size_t sources=0, always=0;
+        uint64_t headIdentity=initial, regionIdentity=initial,
+            sourceIdentity=initial, alwaysIdentity=initial;
+        const auto hash=[](uint64_t *value,size_t index,const RigExecBakedStep &step) {
+            const std::string text=std::to_string(index)+"|"+
+                RigExecBakedStepKindName(step.kind)+"|"+std::to_string(step.object)+
+                "|"+std::to_string(step.part)+"|"+step.label+"\n";
+            for (const unsigned char c:text) *value=(*value^uint64_t(c))*1099511628211ull;
+        };
+        for (size_t i=0;i<B.steps.size();++i) {
+            const auto &step=B.steps[i];
+            CHECK(step.isHead==(i<H));
+            CHECK(B.cones.alwaysSteps.Test(int(i))==step.externalReads);
+            if (i<H) {
+                CHECK(!step.isSource && !step.externalReads);
+                hash(&headIdentity,i,step);
+            } else {
+                hash(&regionIdentity,i-H,step);
+                if (step.isSource) { ++sources; hash(&sourceIdentity,i-H,step); }
+                if (step.externalReads) { ++always; hash(&alwaysIdentity,i-H,step); }
+            }
         }
-        const std::string name = TfGetBaseName(file);
-        size_t count = 0;
-        const uint64_t digest = AlwaysSetDigest(*program, &count);
-        std::printf("always set %s: %zu step(s), %016llx\n", name.c_str(),
-                    count, static_cast<unsigned long long>(digest));
-        ++checked;
-        const auto found = kParent.find(name);
-        CHECK(found != kParent.end());
-        if (found != kParent.end() &&
-            (found->second.first != count || found->second.second != digest)) {
-            ++failures;
-            std::printf("FAIL always set %s: %zu step(s) %016llx, the "
-                        "parent's %zu %016llx\n",
-                        name.c_str(), count,
-                        static_cast<unsigned long long>(digest),
-                        found->second.first,
-                        static_cast<unsigned long long>(found->second.second));
-        }
+        const bool same=H==expected.heads && B.steps.size()-H==expected.region &&
+            sources==expected.sources && always==expected.always &&
+            headIdentity==expected.headIdentity && regionIdentity==expected.regionIdentity &&
+            sourceIdentity==expected.sourceIdentity && alwaysIdentity==expected.alwaysIdentity;
+        CHECK(same);
+        if (!same) std::printf("promotion %s %s: H%zu region%zu source%zu always%zu hashes %016llx %016llx %016llx %016llx\n",
+            expected.fixture,expected.rig,H,B.steps.size()-H,sources,always,
+            static_cast<unsigned long long>(headIdentity),static_cast<unsigned long long>(regionIdentity),
+            static_cast<unsigned long long>(sourceIdentity),static_cast<unsigned long long>(alwaysIdentity));
+        ++checked; totalRegion+=B.steps.size()-H; totalSources+=sources; totalAlways+=always;
     }
-    CHECK(checked == kParent.size());
+    CHECK(checked==47);
+    CHECK(totalRegion==7154 && totalSources==345 && totalAlways==375);
 }
 
 }  // namespace
@@ -2059,7 +1988,7 @@ main(int argc, char **argv)
     TestARecordOfAnotherTypeShadowsNothing();
     TestReaderWalksDeclareTheirVersions(examples);
     TestAChainDragIsNoLongerAWholeRigCost(examples);
-    TestTheAlwaysSetIsUnchangedUntilT1(examples);
+    TestTheSourceAndAlwaysSetsSurviveThePromotion(examples);
     std::printf("testRigExecPropertyOps: %d failure(s)\n", failures);
     return failures ? 1 : 0;
 }

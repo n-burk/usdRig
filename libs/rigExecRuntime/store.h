@@ -25,6 +25,7 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <unordered_map>
 
 namespace rigExec {
 
@@ -187,6 +188,16 @@ struct RrStore {
     // an unpublished entry holds a zero value. The closure compares them
     // with the last run's.
     std::vector<RrPropertyValue> propertyValues, lastPropertyValues;
+    std::vector<RrPropertyValue> propertyVersions;
+    std::vector<char> propertyVersionValid, propertyVersionChanged;
+    std::vector<char> propertyChainValid, propertyRecordStoodAside;
+    std::vector<int32_t> propertyPublishedVersions;
+    std::unordered_map<uint32_t, uint32_t> propertyPathSlots;
+    std::vector<char> headOutputChanged, headRan;
+    std::vector<char> restChanged, ladderChanged, topologyChanged;
+    std::vector<std::vector<std::string>> headLines;
+    std::vector<std::string> headMemoKeys;
+    std::vector<std::vector<uint8_t>> headMemoPresence, headMemoAuthored;
     std::vector<char> propertyPublished, lastPropertyPublished;
     std::vector<char> chainHaveBase, chainBaseDirty, lastHaveBase;
     std::vector<char> derivedHaveBase;
@@ -580,6 +591,15 @@ bool RrPropertySizeScratch(RrProgram *program, std::string *error);
 /// the target sees it. Diagnostics are appended to \p poseDiagnostics in
 /// chain order. False only when the file and the classified chains
 /// disagree.
+bool RrRunPropertyPart(RrProgram *program, size_t chain, size_t part,
+                       std::vector<std::string> *diagnostics);
+void RrPropertyBegin(RrProgram *program);
+void RrPropertyPublish(RrProgram *program);
+void RrPropertyPublishFinished(RrProgram *program, const std::vector<char> &finished);
+bool RrRunHeadSteps(RrProgram *program, std::vector<std::string> *diagnostics,
+                    std::string *error);
+bool RrRunRestHead(RrProgram *program, size_t group, bool ladder);
+bool RrRunTopologyHead(RrProgram *program, size_t revision);
 bool RrRunPropertyChains(RrProgram *program,
                          std::vector<std::string> *poseDiagnostics);
 

@@ -52,7 +52,8 @@ _RrWireLandmarks(const std::array<RigExecWireVec3d, 4> &wire)
 // RigExecBakedComposeLadder (bakedPose.cpp), over the scratch tables.
 // Reads through ReadLadder, the runtime form of RigExecBakedRead.
 void
-_RrComposeLadder(RrProgram *program, bool trackMoves)
+_RrComposeLadder(RrProgram *program, bool trackMoves,
+                 size_t begin, size_t end, bool restOnly, bool ladderOnly)
 {
     RrStore &store = program->store;
     RrPoseScratch *scratch = _RrScratch(program);
@@ -62,15 +63,17 @@ _RrComposeLadder(RrProgram *program, bool trackMoves)
     if (trackMoves) {
         store.ladderMovedSlots.clear();
     }
-    for (size_t i = 0; i < slots; ++i) {
+    for (size_t i = begin; i < std::min(end, slots); ++i) {
         if (i >= meta.slotKind.size() ||
             meta.slotKind[i] != RigExecWireSlotKind::FirstFramePose) {
             continue;
         }
         const RrMat4d posed =
             program->ReadLadder(i, RrLadderPosedSpace).matrix;
-        scratch->posedAuthored[i] = posed != identity ? 1 : 0;
-        scratch->posedAuthoredM[i] = posed;
+        if (!restOnly) {
+            scratch->posedAuthored[i] = posed != identity ? 1 : 0;
+            scratch->posedAuthoredM[i] = posed;
+        }
 
         const RrInputValue restAvar0 =
             program->ReadLadder(i, RrLadderRestAvar0 + 0);
@@ -95,10 +98,13 @@ _RrComposeLadder(RrProgram *program, bool trackMoves)
         const RrMat4d parentRest =
             parent >= 0 ? scratch->restRoundTrip[size_t(parent)]
                         : identity;
-        scratch->restM[i] = rest * parentRest;
-        scratch->restFrames[i] = RrFrameFromMatrix(scratch->restM[i]);
-        scratch->restPts[i] = scratch->restFrames[i].points;
-        scratch->restRoundTrip[i] = RrRoundTrip(scratch->restM[i]);
+        if (!ladderOnly) {
+            scratch->restM[i] = rest * parentRest;
+            scratch->restFrames[i] = RrFrameFromMatrix(scratch->restM[i]);
+            scratch->restPts[i] = scratch->restFrames[i].points;
+            scratch->restRoundTrip[i] = RrRoundTrip(scratch->restM[i]);
+        }
+        if (!restOnly) {
 
         const RrMat4d authoredDefault =
             program->ReadLadder(i, RrLadderDefaultSpace).matrix;
@@ -160,6 +166,7 @@ _RrComposeLadder(RrProgram *program, bool trackMoves)
             live.rotationOrder = orderId;
         }
 
+        }
         if (!trackMoves) {
             continue;
         }
@@ -455,6 +462,17 @@ RrPoseSizeScratch(RrProgram *program, std::string *error)
 }
 
 bool
+RrRunRestHead(RrProgram *program, size_t group, bool ladder)
+{
+    const auto &range = program->poses->composeGroups[group];
+    _RrComposeLadder(program, true, size_t(range.begin), size_t(range.end),
+                     !ladder, ladder);
+    auto &changed = ladder ? program->store.ladderChanged : program->store.restChanged;
+    for (const int slot : program->store.ladderMovedSlots) changed[size_t(slot)] = 1;
+    return !program->store.ladderMovedSlots.empty();
+}
+
+bool
 RrProloguePose(RrProgram *program,
                std::vector<std::string> *poseDiagnostics,
                std::string *error)
@@ -468,29 +486,7 @@ RrProloguePose(RrProgram *program,
     const RigExecWireDomainGeometry &geometry = *program->geometry;
     // The validator checked the static tables' sizes against the program.
     const RrStatic &statics = program->statics;
-    // RigExecBakedRunInputs. The provider ladder, before the avars that
-    // compose against it: it recomposes when a channel varies, while a drag
-    // stands on one of its channels, and once more after that drag is
-    // released, which writes the authored values back over the dragged.
     const RrInputState &inputs = program->inputState;
-    bool ladderDragged = false;
-    if (store.anyOverridden) {
-        for (const int32_t index : inputs.ladderOverrides) {
-            if (size_t(index) < store.overridden.size() &&
-                store.overridden[size_t(index)]) {
-                ladderDragged = true;
-                break;
-            }
-        }
-    }
-    scratch->ladderRecomputed =
-        poses.ladderVarying || ladderDragged || scratch->ladderDisturbed;
-    if (scratch->ladderRecomputed) {
-        _RrComposeLadder(program, /* trackMoves = */ true);
-        scratch->ladderDisturbed = ladderDragged;
-    } else if (!store.ladderMovedSlots.empty()) {
-        store.ladderMovedSlots.clear();
-    }
     // The avar table: each binding read per run. A drag lands on avars
     // the bake captured as constants, so while one stands, and once more
     // after it is released, every constant binding is walked too: the

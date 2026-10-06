@@ -548,8 +548,8 @@ _IndexSeeds(const RigExecBakedProgramImpl &program)
                                                       {uint32_t(i)});
         }
         std::vector<std::vector<uint32_t>> opsOfLeaf(program.leafRefs.size());
-        for (size_t i = 0; i < program.headSteps.size(); ++i) {
-            for (const uint32_t leaf : program.headSteps[i].bindingLeaves) {
+        for (size_t i = 0; i < program.steps.size(); ++i) {
+            for (const uint32_t leaf : program.steps[i].bindingLeaves) {
                 if (leaf < opsOfLeaf.size()) {
                     opsOfLeaf[leaf].push_back(uint32_t(i));
                 }

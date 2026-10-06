@@ -979,16 +979,16 @@ RigExecBakedProgram::_BindPropertyChains(const RigExecRigEvaluator &E,
 namespace {
 
 // Ascending ids as head ranges, one per run of consecutive ids.
-std::vector<RigExecBakedHeadRange>
+std::vector<RigExecBakedSlotRange>
 Ranges(const std::set<uint32_t> &ids)
 {
-    std::vector<RigExecBakedHeadRange> out;
+    std::vector<RigExecBakedSlotRange> out;
     for (const uint32_t id : ids) {
         if (!out.empty() && out.back().end == id) {
             ++out.back().end;
         } else {
-            out.push_back(RigExecBakedHeadOne(
-                RigExecBakedHeadDomain::PropertyVersion, id));
+            out.push_back(RigExecBakedOne(
+                RigExecBakedSlotDomain::PropertyResult, id));
         }
     }
     return out;
@@ -1031,6 +1031,7 @@ RigExecBakedDeclareHeadReads(RigExecBakedProgramImpl *program)
         }
     };
     for (RigExecBakedStep &step : B.steps) {
+        if (step.isHead) continue;
         if (step.kind == RigExecBakedStepKind::RevisionStatic) {
             const auto &[c, r] = B.revisionIndex[size_t(step.object)];
             pathWalks(B.chains[size_t(c)].revisions[size_t(r)].leaves,
@@ -1063,7 +1064,8 @@ RigExecBakedDeclareHeadReads(RigExecBakedProgramImpl *program)
                 }
             }
         }
-        step.headReads = Ranges(versions);
+        const auto ranges = Ranges(versions);
+        step.reads.insert(step.reads.end(),ranges.begin(),ranges.end());
         step.shadowedReads.clear();
         for (const auto &[id, record] : shadowed) {
             if (!unshadowed.count(id)) {
@@ -1099,13 +1101,14 @@ RigExecBakedBuildPropertySteps(RigExecBakedProgramImpl *program)
         record.id = id++;
     }
     B.propertyVersionCount = id;
-    B.headSteps.clear();
+    B.steps.clear();
     for (size_t c = 0; c < B.propertyChains.size(); ++c) {
         const Chain &chain = B.propertyChains[c];
         const size_t n = chain.revisions.size();
         for (size_t k = 0; k <= n; ++k) {
-            RigExecBakedHeadStep step;
-            step.kind = RigExecBakedHeadKind::PropertyRevision;
+            RigExecBakedStep step;
+            step.isHead = true;
+            step.kind = RigExecBakedStepKind::PropertyRevision;
             step.object = int(c);
             step.part = int(k);
             std::set<uint32_t> reads, writes, leaves, slots;
@@ -1184,7 +1187,7 @@ RigExecBakedBuildPropertySteps(RigExecBakedProgramImpl *program)
             }
             step.leaves.assign(leaves.begin(), leaves.end());
             step.overrideSlots.assign(slots.begin(), slots.end());
-            B.headSteps.push_back(std::move(step));
+            B.steps.push_back(std::move(step));
         }
     }
     // Run state, sized once.
@@ -1615,7 +1618,7 @@ Revise(const RigExecBakedProgramImpl &B, const Chain::Revision &r,
 
 template <class ValueT>
 void
-RunPart(RigExecBakedProgramImpl *program, RigExecBakedHeadStep *step,
+RunPart(RigExecBakedProgramImpl *program, RigExecBakedStep *step,
         UsdTimeCode time)
 {
     RigExecBakedProgramImpl &B = *program;
@@ -1657,7 +1660,7 @@ RunPart(RigExecBakedProgramImpl *program, RigExecBakedHeadStep *step,
 
 void
 RigExecBakedRunPropertyStep(RigExecBakedProgramImpl *program,
-                            RigExecBakedHeadStep *step, UsdTimeCode time)
+                            RigExecBakedStep *step, UsdTimeCode time)
 {
     switch (program->propertyChains[size_t(step->object)].arm) {
     case Chain::Arm::Float: RunPart<float>(program, step, time); return;
@@ -1671,7 +1674,7 @@ RigExecBakedRunPropertyStep(RigExecBakedProgramImpl *program,
 
 void
 RigExecBakedFinishPropertyStep(RigExecBakedProgramImpl *program,
-                               const RigExecBakedHeadStep &step)
+                               const RigExecBakedStep &step)
 {
     RigExecBakedProgramImpl &B = *program;
     const Chain &chain = B.propertyChains[size_t(step.object)];

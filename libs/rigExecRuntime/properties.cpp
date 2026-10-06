@@ -270,35 +270,27 @@ _RrApplyVec3f(const RrProgram *program, const RigExecWirePropertyRevision &revis
 // consumers' values. A skipped chain publishes nothing.
 template <class T, class Apply>
 void
-_RrRunChain(RrProgram *program, RrPropertyScratch *scratch, size_t c,
-            T value, const Apply &apply,
-            std::vector<std::string> *diagnostics)
+_RrRunPart(RrProgram *program, RrPropertyScratch *scratch, size_t c, size_t part,
+           T value, const Apply &apply, std::vector<std::string> *diagnostics)
 {
-    const RigExecWireFile &file = *program->inputState.file;
-    const RigExecWirePropertyChain &chain = file.propertyChains[c];
-    const RrPropertyScratch::Chain &plan = scratch->chains[c];
-    if (!_RrFinite(value)) {
-        diagnostics->push_back("property chain " + plan.target +
-                               ": authored base is not finite; chain "
-                               "skipped");
-        return;
-    }
-    // The value after each revision, base first, so a phased consumer can
-    // read the chain where it asked to. A revision that passes through
-    // still takes its place.
-    const bool phased = plan.phasedBegin != plan.phasedEnd;
-    std::vector<RrPropertyValue> &history = scratch->history;
-    history.clear();
-    for (size_t r = 0; r < chain.revisions.size(); ++r) {
-        const RigExecWirePropertyRevision &revision = chain.revisions[r];
-        const RrPropertyScratch::Revision &bound = plan.revisions[r];
-        if (phased) {
-            history.push_back(_RrHold(value));
-        }
+    const auto &file = *program->inputState.file;
+    const auto &chain = file.propertyChains[c];
+    const auto &plan = scratch->chains[c];
+    auto &store = program->store;
+    if (part == 0) {
+        store.propertyChainValid[c] = _RrFinite(value) ? 1 : 0;
+        if (!store.propertyChainValid[c])
+            diagnostics->push_back("property chain " + plan.target +
+                ": authored base is not finite; chain skipped");
+    } else if (store.propertyChainValid[c]) {
+        const size_t r = part - 1;
+        const auto &revision = chain.revisions[r];
+        const auto &bound = plan.revisions[r];
+        do {
         if (RrReadInput(program, *revision.enabled).bits == 0) {
             diagnostics->push_back("diag " + bound.mover +
                                    ": disabled; revision passed through");
-            continue;
+            break;
         }
         float envelope = 1.0f;
         if (revision.envelope >= 0) {
@@ -308,7 +300,7 @@ _RrRunChain(RrProgram *program, RrPropertyScratch *scratch, size_t c,
                 scratch->weights.size() != 1) {
                 diagnostics->push_back("diag " + bound.mover + ": " + error +
                                        "; revision passed through");
-                continue;
+                break;
             }
             envelope = scratch->weights[0];
         } else {
@@ -320,7 +312,7 @@ _RrRunChain(RrProgram *program, RrPropertyScratch *scratch, size_t c,
                     "diag " + bound.mover +
                     ": inputs:defaultWeight must be finite and in [0, 1]; "
                     "revision passed through");
-                continue;
+                break;
             }
         }
         T next = value;
@@ -328,37 +320,31 @@ _RrRunChain(RrProgram *program, RrPropertyScratch *scratch, size_t c,
             diagnostics->push_back("diag " + bound.mover +
                                    ": inputs unusable; revision passed "
                                    "through");
-            continue;
+            break;
         }
         if (!_RrFinite(next)) {
             diagnostics->push_back("diag " + bound.mover +
                                    ": produced a non-finite value; revision "
                                    "passed through");
-            continue;
+            break;
         }
         value = next;
+        } while (false);
     }
-    // Published at once: a later chain that reads this target sees the
-    // revised value.
-    _RrPublish(program, *scratch, plan.publish, _RrHold(value));
-    if (!phased) {
-        return;
-    }
-    history.push_back(_RrHold(value));
+    const size_t version = size_t(chain.versionBase) + part;
+    store.propertyVersions[version] = _RrHold(value);
+    store.propertyVersionValid[version] = store.propertyChainValid[c];
     for (size_t k = plan.phasedBegin; k < plan.phasedEnd; ++k) {
-        const RigExecWirePhasedConsumer &consumer = file.phasedConsumers[k];
-        RrPropertyValue held =
-            history[std::min(size_t(consumer.applied), history.size() - 1)];
-        // RigExecPhasedConsumerValue: a float/double pair converts, every
-        // other pair passes the value as it is.
+        const auto &consumer = file.phasedConsumers[k];
+        if (size_t(consumer.applied) != part) continue;
+        auto held = _RrHold(value);
         if (consumer.consumerType == RigExecWirePropertyValueType::Double &&
-            held.tag == _RrTag::Float) {
-            held = _RrHold(double(held.f32));
-        } else if (consumer.consumerType == RigExecWirePropertyValueType::Float &&
-                   held.tag == _RrTag::Double) {
-            held = _RrHold(float(held.f64));
-        }
-        _RrPublish(program, *scratch, scratch->phasedPublish[k], held);
+            held.tag == _RrTag::Float) held = _RrHold(double(held.f32));
+        else if (consumer.consumerType == RigExecWirePropertyValueType::Float &&
+                 held.tag == _RrTag::Double) held = _RrHold(float(held.f64));
+        store.propertyVersions[consumer.version] = held;
+        store.propertyVersionValid[consumer.version] =
+            store.propertyChainValid[c] && !store.propertyRecordStoodAside[k];
     }
 }
 
@@ -464,63 +450,121 @@ RrPropertySizeScratch(RrProgram *program, std::string *error)
     store.lastPropertyValues.assign(entries, _RrPropertyZero());
     store.propertyPublished.assign(entries, 0);
     store.lastPropertyPublished.assign(entries, 0);
+    size_t versions = 0;
+    for (const auto &chain : file->propertyChains)
+        versions = std::max(versions, size_t(chain.versionBase) + chain.revisions.size() + 1);
+    for (const auto &record : file->phasedConsumers)
+        versions = std::max(versions, size_t(record.version) + 1);
+    store.propertyVersions.assign(versions, _RrPropertyZero());
+    store.propertyVersionValid.assign(versions, 0);
+    store.propertyVersionChanged.assign(versions, 0);
+    store.propertyChainValid.assign(file->propertyChains.size(), 0);
+    store.propertyRecordStoodAside.assign(file->phasedConsumers.size(), 0);
+    store.propertyPublishedVersions.assign(slots, -1);
+    store.propertyPathSlots.clear();
+    for (size_t slot = 0; slot < slots; ++slot)
+        store.propertyPathSlots.emplace(file->inputs[slot].name(), uint32_t(slot));
     program->properties = scratch;
     return true;
 }
 
-bool
-RrRunPropertyChains(RrProgram *program,
-                    std::vector<std::string> *poseDiagnostics)
+void
+RrPropertyBegin(RrProgram *program)
 {
-    RrStore &store = program->store;
+    auto &store = program->store;
     store.propertyResults.clear();
-    std::fill(store.propertyValues.begin(), store.propertyValues.end(),
-              _RrPropertyZero());
-    std::fill(store.propertyPublished.begin(), store.propertyPublished.end(),
-              char(0));
-    const RigExecWireFile *file = program->inputState.file;
-    if (file->propertyChains.empty()) {
+    std::fill(store.propertyPublishedVersions.begin(), store.propertyPublishedVersions.end(), -1);
+    std::fill(store.propertyPublished.begin(), store.propertyPublished.end(), char(0));
+    std::fill(store.propertyVersionChanged.begin(), store.propertyVersionChanged.end(), char(0));
+    const auto &records = program->inputState.file->phasedConsumers;
+    for (size_t k = 0; k < records.size(); ++k) {
+        // The runtime authored API changes the raw upstream layer. It
+        // supplies no interactive overlay, so it never stands a record aside.
+        const bool standing = false;
+        store.propertyRecordStoodAside[k] = standing ? 1 : 0;
+        // The producer owns the value; publication validity follows this
+        // generation's override kind even while that producer stays clean.
+        const char valid = store.propertyChainValid[records[k].chain] && !standing;
+        if (store.propertyVersionValid[records[k].version] != valid)
+            store.propertyVersionChanged[records[k].version] = 1;
+        store.propertyVersionValid[records[k].version] = valid;
+    }
+}
+
+void
+RrPropertyPublishFinished(RrProgram *program, const std::vector<char> &finished)
+{
+    auto &store = program->store;
+    const auto &file = *program->inputState.file;
+    const auto *scratch = static_cast<RrPropertyScratch *>(program->properties.get());
+    if (!scratch) return;
+    for (size_t c = 0; c < file.propertyChains.size(); ++c) {
+        if (!finished[c] || !store.propertyChainValid[c]) continue;
+        const auto &chain = file.propertyChains[c];
+        const size_t version = size_t(chain.versionBase) + chain.revisions.size();
+        store.propertyPublishedVersions[chain.target] = int32_t(version);
+        _RrPublish(program, *scratch, scratch->chains[c].publish,
+                   store.propertyVersions[version]);
+        for (size_t k = scratch->chains[c].phasedBegin;
+             k < scratch->chains[c].phasedEnd; ++k) {
+            const auto &record = file.phasedConsumers[k];
+            if (!store.propertyVersionValid[record.version]) continue;
+            store.propertyPublishedVersions[record.consumer] = int32_t(record.version);
+            _RrPublish(program, *scratch, scratch->phasedPublish[k],
+                       store.propertyVersions[record.version]);
+        }
+    }
+}
+
+void
+RrPropertyPublish(RrProgram *program)
+{
+    const std::vector<char> finished(program->inputState.file->propertyChains.size(), 1);
+    RrPropertyPublishFinished(program, finished);
+}
+
+bool
+RrRunPropertyPart(RrProgram *program, size_t c, size_t part,
+                  std::vector<std::string> *diagnostics)
+{
+    auto &store = program->store;
+    const auto &file = *program->inputState.file;
+    auto *scratch = static_cast<RrPropertyScratch *>(program->properties.get());
+    if (!scratch || c >= file.propertyChains.size() ||
+        part > file.propertyChains[c].revisions.size()) return false;
+    const auto &chain = file.propertyChains[c];
+    RrWireValue base;
+    if (part == 0 && !RrChainBase(program, c, scratch->chains[c].baseTag, &base)) {
+        store.propertyChainValid[c] = 0;
+        store.propertyVersionValid[chain.versionBase] = 0;
+        for (const auto &record : file.phasedConsumers)
+            if (record.chain == c && record.applied == 0)
+                store.propertyVersionValid[record.version] = 0;
+        diagnostics->push_back("property chain " + scratch->chains[c].target +
+                              ": target has no authored value; chain skipped");
         return true;
     }
-    RrPropertyScratch *scratch =
-        static_cast<RrPropertyScratch *>(program->properties.get());
-    if (!scratch || scratch->chains.size() != file->propertyChains.size()) {
-        return false;
+    const auto &previous = store.propertyVersions[
+        size_t(chain.versionBase) + (part ? part - 1 : 0)];
+    switch (chain.valueType) {
+    case RigExecWirePropertyValueType::Float:
+        _RrRunPart(program, scratch, c, part,
+                   part ? previous.f32 : RrWireValueFloat(base), _RrApplyFloat, diagnostics);
+        break;
+    case RigExecWirePropertyValueType::Double: {
+        double value = previous.f64;
+        if (!part) std::memcpy(&value, &base.bits, sizeof(value));
+        _RrRunPart(program, scratch, c, part, value, _RrApplyDouble, diagnostics);
+        break;
     }
-    for (size_t c = 0; c < file->propertyChains.size(); ++c) {
-        const RigExecWirePropertyChain &chain = file->propertyChains[c];
-        const RrPropertyScratch::Chain &plan = scratch->chains[c];
-        // The base: the target's own value, which an input set there
-        // authors; a missing value, or one of another type, fails that
-        // read.
-        RrWireValue base;
-        if (!RrChainBase(program, c, plan.baseTag, &base)) {
-            poseDiagnostics->push_back("property chain " + plan.target +
-                                       ": target has no authored value; "
-                                       "chain skipped");
-            continue;
-        }
-        switch (chain.valueType) {
-        case RigExecWirePropertyValueType::Float:
-            _RrRunChain(program, scratch, c, RrWireValueFloat(base),
-                        _RrApplyFloat, poseDiagnostics);
-            break;
-        case RigExecWirePropertyValueType::Double: {
-            double value = 0.0;
-            std::memcpy(&value, &base.bits, sizeof(value));
-            _RrRunChain(program, scratch, c, value, _RrApplyDouble,
-                        poseDiagnostics);
-            break;
-        }
-        case RigExecWirePropertyValueType::Matrix4d:
-            _RrRunChain(program, scratch, c, _RrMatrix(base.matrix),
-                        _RrApplyMatrix, poseDiagnostics);
-            break;
-        case RigExecWirePropertyValueType::Vec3f:
-            _RrRunChain(program, scratch, c, _RrVec3f(base), _RrApplyVec3f,
-                        poseDiagnostics);
-            break;
-        }
+    case RigExecWirePropertyValueType::Matrix4d:
+        _RrRunPart(program, scratch, c, part,
+                   part ? previous.matrix : _RrMatrix(base.matrix), _RrApplyMatrix, diagnostics);
+        break;
+    case RigExecWirePropertyValueType::Vec3f:
+        _RrRunPart(program, scratch, c, part,
+                   part ? previous.vec : _RrVec3f(base), _RrApplyVec3f, diagnostics);
+        break;
     }
     return true;
 }

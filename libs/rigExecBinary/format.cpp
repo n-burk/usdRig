@@ -500,8 +500,8 @@ _Has(const Table &table, int64_t index)
 
 // The step rules, the step labels and the step graph's domain names cover
 // every kind and domain up to these; an appended one needs its own.
-static_assert(fb::StepKind::MAX == fb::StepKind::FrameMatrix &&
-                  fb::SlotDomain::MAX == fb::SlotDomain::FrameMatrix,
+static_assert(fb::StepKind::MAX == fb::StepKind::SkinTopology &&
+                  fb::SlotDomain::MAX == fb::SlotDomain::SkinTopology,
               "a step kind or slot domain was appended: give it its rules");
 // The array tags and sources are frozen; the runtime mirrors the numbers.
 static_assert(uint8_t(fb::InputTag::IntArray) == 8 &&
@@ -535,8 +535,8 @@ private:
         return _Root() && _Paths() && _Values() && _Pools() && _Slots() &&
                _SlotMeta() && _Constants() && _Steps() && _Cones() &&
                _Pose() && _Geometry() && _LayoutValues() &&
-               _PhaseBindings() && _StepGraph() &&
-               _PropertyChains() && _External() && _Overrides() &&
+               _PhaseBindings() && _PropertyChains() && _HeadChecks() && _StepGraph() &&
+               _External() && _Overrides() &&
                _Presentation();
     }
 
@@ -728,6 +728,37 @@ private:
                             ", not the read's " + _TagName(input->tag));
             }
         }
+        const auto candidates = [&](const auto &list) {
+            for (size_t k = 0; k < list.size(); ++k) {
+                const auto &candidate = list[k];
+                const auto kind = fb::PropertyCandidateKind(candidate.kind);
+                if (candidate.slot >= _f.inputs.size() ||
+                    candidate.kind > uint8_t(fb::PropertyCandidateKind::PhasedRecord) ||
+                    (kind == fb::PropertyCandidateKind::SlotOnly ? candidate.version != -1 : candidate.version < 0))
+                    return _Bad(where() + ": malformed property candidate");
+                const auto &slot = _f.inputs[candidate.slot];
+                if (kind == fb::PropertyCandidateKind::ChainFinal) {
+                    if (slot.chain() < 0 || size_t(slot.chain()) >= _f.propertyChains.size())
+                        return _Bad(where() + ": candidate names no chain hop");
+                    const auto &chain = _f.propertyChains[size_t(slot.chain())];
+                    if (candidate.version != int32_t(chain.versionBase + chain.revisions.size()))
+                        return _Bad(where() + ": candidate version is not its chain final");
+                } else if (kind == fb::PropertyCandidateKind::PhasedRecord) {
+                    if (slot.phased() < 0 || size_t(slot.phased()) >= _f.phasedConsumers.size() ||
+                        candidate.version != int32_t(_f.phasedConsumers[size_t(slot.phased())].version))
+                        return _Bad(where() + ": candidate version is not its phased record");
+                }
+            }
+            return true;
+        };
+        if (!candidates(input->propertyCandidates) || !candidates(input->doubleCandidates)) return false;
+        if (input->rawFallbackSlot < -1 ||
+            (input->rawFallbackSlot >= 0 && size_t(input->rawFallbackSlot) >= _f.inputs.size()) ||
+            (!input->doubleCandidates.empty() && input->tag != InputTag::Float) ||
+            (input->mode == ReadMode::Raw && (!input->propertyCandidates.empty() ||
+                                             !input->doubleCandidates.empty())))
+            return _Bad(where() + ": invalid property binding fallback or double tail");
+        _readUses.emplace_back(input, where());
         if (array) {
             if (input->mode != ReadMode::Raw &&
                 input->mode != ReadMode::Resolved) {
@@ -1455,6 +1486,416 @@ private:
         const std::string why =
             RigExecStepGraphError(_f.steps, *_f.clustering, _GraphRange);
         return why.empty() || _Bad(why);
+    }
+
+    bool _HeadChecks()
+    {
+        const size_t slots = _f.slotMeta->paths.size();
+        const size_t layouts = _f.geometry->revisionIndex.size() + _f.geometry->derivedIndex.size();
+        size_t versions = 0;
+        for (size_t c = 0; c < _f.propertyChains.size(); ++c) {
+            const auto &chain = _f.propertyChains[c];
+            if (chain.versionBase != versions)
+                return _Bad("PropertyRevision chain " + _N(c) + ": noncanonical version_base");
+            versions += chain.revisions.size() + 1;
+        }
+        for (size_t r = 0; r < _f.phasedConsumers.size(); ++r)
+            if (_f.phasedConsumers[r].version != versions++)
+                return _Bad("PropertyRevision record " + _N(r) + ": noncanonical version");
+        std::vector<int64_t> writers(versions, -1);
+        std::vector<int64_t> rest(slots, -1), ladder(slots, -1), topology(layouts, -1);
+        bool region = false;
+        const auto producerDomain = [](fb::SlotDomain domain) {
+            return domain == fb::SlotDomain::PropertyResult || domain == fb::SlotDomain::Rest ||
+                   domain == fb::SlotDomain::Ladder || domain == fb::SlotDomain::SkinTopology;
+        };
+        for (size_t i = 0; i < _f.steps.size(); ++i) {
+            const auto &step = _f.steps[i];
+            const bool kindHead = step.kind >= fb::StepKind::PropertyRevision;
+            if (step.isHead != kindHead || (step.isHead && region))
+                return _Bad(_StepName(i) + ": heads must form the contiguous prefix with head kinds");
+            region = region || !step.isHead;
+            if (step.isHead && (step.isSource || step.externalReads))
+                return _Bad(_StepName(i) + ": a head is never a source or always region step");
+            for (const auto pred : step.preds)
+                if (step.isHead && (pred < 0 || size_t(pred) >= i || !_f.steps[size_t(pred)].isHead))
+                    return _Bad(_StepName(i) + ": head depends on a non-head or later producer");
+            for (const auto &range : step.writes) {
+                if (!producerDomain(range.domain())) continue;
+                if (!step.isHead) return _Bad(_StepName(i) + ": region writes a head domain");
+                auto *table = range.domain() == fb::SlotDomain::PropertyResult ? &writers
+                    : range.domain() == fb::SlotDomain::Rest ? &rest
+                    : range.domain() == fb::SlotDomain::Ladder ? &ladder : &topology;
+                if (range.end() > table->size()) return _Bad(_StepName(i) + ": head write out of range");
+                const auto required = range.domain() == fb::SlotDomain::PropertyResult ? fb::StepKind::PropertyRevision
+                    : range.domain() == fb::SlotDomain::Rest ? fb::StepKind::RestCompose
+                    : range.domain() == fb::SlotDomain::Ladder ? fb::StepKind::LadderCompose : fb::StepKind::SkinTopology;
+                if (step.kind != required) return _Bad(_StepName(i) + ": wrong head domain writer kind");
+                for (uint32_t v = range.begin(); v < range.end(); ++v) {
+                    if ((*table)[v] >= 0) return _Bad(_StepName(i) + ": duplicate head domain writer");
+                    (*table)[v] = int64_t(i);
+                }
+            }
+            if (step.kind == fb::StepKind::PropertyRevision) {
+                if (!_Has(_f.propertyChains, step.object)) return _Bad(_StepName(i) + ": invalid chain object");
+                const auto &chain = _f.propertyChains[size_t(step.object)];
+                if (step.part < 0 || size_t(step.part) > chain.revisions.size())
+                    return _Bad(_StepName(i) + ": invalid property part");
+                std::set<uint32_t> expected{chain.versionBase + uint32_t(step.part)};
+                for (const auto &record : _f.phasedConsumers)
+                    if (record.chain == uint32_t(step.object) && record.applied == uint32_t(step.part))
+                        expected.insert(record.version);
+                std::set<uint32_t> actual;
+                for (const auto &range : step.writes) {
+                    if (range.domain() != fb::SlotDomain::PropertyResult)
+                        return _Bad(_StepName(i) + ": property part writes a foreign domain");
+                    for (uint32_t v = range.begin(); v < range.end(); ++v) actual.insert(v);
+                }
+                if (actual != expected) return _Bad(_StepName(i) + ": property version/record ownership differs");
+                if (step.part && !_Declares(i, fb::SlotDomain::PropertyResult,
+                                           chain.versionBase + uint32_t(step.part) - 1))
+                    return _Bad(_StepName(i) + ": part does not declare predecessor version");
+            } else if (step.kind == fb::StepKind::RestCompose || step.kind == fb::StepKind::LadderCompose) {
+                if (!_Has(_f.pose->composeGroups, step.object)) return _Bad(_StepName(i) + ": invalid compose group");
+                const auto &group = _f.pose->composeGroups[size_t(step.object)];
+                const auto domain = step.kind == fb::StepKind::RestCompose ? fb::SlotDomain::Rest : fb::SlotDomain::Ladder;
+                if (step.part != (step.kind == fb::StepKind::RestCompose ? 0 : 1) ||
+                    step.writes.size() != 1 || step.writes[0].domain() != domain ||
+                    step.writes[0].begin() != uint32_t(group.begin) || step.writes[0].end() != uint32_t(group.end))
+                    return _Bad(_StepName(i) + ": compose output is not its group range");
+            } else if (step.kind == fb::StepKind::SkinTopology) {
+                if (step.object < 0 || size_t(step.object) >= layouts || step.part != 0 ||
+                    step.writes.size() != 1 || step.writes[0].domain() != fb::SlotDomain::SkinTopology ||
+                    step.writes[0].begin() != uint32_t(step.object) || step.writes[0].end() != uint32_t(step.object + 1))
+                    return _Bad(_StepName(i) + ": invalid topology output ownership");
+            }
+            for (const auto slot : step.headInputSlots)
+                if (slot >= _f.inputs.size()) return _Bad(_StepName(i) + ": memo slot out of range");
+            if (!std::is_sorted(step.headInputSlots.begin(), step.headInputSlots.end()) ||
+                std::adjacent_find(step.headInputSlots.begin(), step.headInputSlots.end()) != step.headInputSlots.end())
+                return _Bad(_StepName(i) + ": memo slots are not sorted unique");
+            if (!step.isHead && (!step.headInputSlots.empty() || !step.headInputReads.empty() ||
+                                 step.headVaryingLeaves || step.headAlwaysRuns))
+                return _Bad(_StepName(i) + ": region carries head memo metadata");
+            if (step.kind == fb::StepKind::PropertyRevision) {
+                const auto &chain = _f.propertyChains[size_t(step.object)];
+                std::set<uint32_t> expectedSlots;
+                bool volatileBody = false;
+                if (step.part == 0) expectedSlots.insert(chain.target);
+                else {
+                    const auto &revision = chain.revisions[size_t(step.part - 1)];
+                    volatileBody = revision.envelope >= 0;
+                    if (volatileBody) {
+                        std::vector<int32_t> pending{revision.envelope};
+                        std::unordered_set<int32_t> visited;
+                        while (!pending.empty()) {
+                            const int32_t object = pending.back();
+                            pending.pop_back();
+                            if (!visited.insert(object).second) continue;
+                            if (!_Has(_f.geometry->weightObjects, object))
+                                return _Bad(_StepName(i) + ": property envelope object out of range");
+                            const auto &weight = _f.geometry->weightObjects[size_t(object)];
+                            const std::string type = RigExecFormatPathText(_f, weight.type);
+                            if (type == "RigExecSphereWeight" || type == "RigExecPlaneWeight" ||
+                                type == "RigExecCurveWeight")
+                                return _Bad(_StepName(i) + ": property envelope contains a volume");
+                            if (weight.base >= 0) pending.push_back(weight.base);
+                            pending.insert(pending.end(), weight.inputs.begin(), weight.inputs.end());
+                        }
+                    }
+                    for (const auto *input : {revision.enabled.get(), revision.defaultWeight.get(),
+                                             revision.value.get(), revision.min.get(), revision.max.get()}) {
+                        if (!input) continue;
+                        for (const auto *list : {&input->propertyCandidates, &input->doubleCandidates})
+                            for (const auto &candidate : *list)
+                                if (!(_f.inputs[candidate.slot].type() >= InputTag::IntArray))
+                                    expectedSlots.insert(candidate.slot);
+                    }
+                }
+                if (std::set<uint32_t>(step.headInputSlots.begin(), step.headInputSlots.end()) != expectedSlots ||
+                    !step.headInputReads.empty())
+                    return _Bad(_StepName(i) + ": property memo does not cover exactly its body inputs");
+                if (step.headAlwaysRuns != volatileBody)
+                    return _Bad(_StepName(i) + ": volatile property memo flag differs from its envelope");
+            } else if (step.headAlwaysRuns)
+                return _Bad(_StepName(i) + ": non-property head is volatile");
+            if (step.kind == fb::StepKind::SkinTopology) {
+                const size_t layout = size_t(step.object);
+                const bool derived = layout >= _f.geometry->revisionIndex.size();
+                const auto &index = derived ? _f.geometry->derivedIndex[layout - _f.geometry->revisionIndex.size()]
+                                            : _f.geometry->revisionIndex[layout];
+                const auto &revision = derived ? *_f.geometry->chains[size_t(index.first)].derived[size_t(index.second)].revision
+                                              : _f.geometry->chains[size_t(index.first)].revisions[size_t(index.second)];
+                if (!revision.skinTopologyFixed)
+                    return _Bad(_StepName(i) + ": topology head has no fixed layout body");
+                std::set<uint32_t> expected;
+                for (size_t slot = 0; slot < _f.inputs.size(); ++slot)
+                    if (_SlotIs(int32_t(slot), revision.moverPath, "rigExec:jointIndices") ||
+                        _SlotIs(int32_t(slot), revision.moverPath, "rigExec:jointWeights") ||
+                        _SlotIs(int32_t(slot), revision.moverPath, "rigExec:elementSize")) expected.insert(uint32_t(slot));
+                if (std::set<uint32_t>(step.headInputSlots.begin(), step.headInputSlots.end()) != expected ||
+                    !step.headInputReads.empty())
+                    return _Bad(_StepName(i) + ": topology memo does not cover exactly its layout leaves");
+            }
+            if (step.kind == fb::StepKind::PropertyRevision || step.kind == fb::StepKind::SkinTopology) {
+                if (step.headVaryingLeaves)
+                    return _Bad(_StepName(i) + ": raw head carries binding-varying flag");
+            }
+            if (step.kind == fb::StepKind::RestCompose || step.kind == fb::StepKind::LadderCompose) {
+                const auto &group = _f.pose->composeGroups[size_t(step.object)];
+                std::vector<const RigExecWireInput *> expected;
+                const bool restBody = step.kind == fb::StepKind::RestCompose;
+                for (int slot = group.begin; slot < group.end; ++slot) {
+                    if (_f.slotMeta->slotKind[size_t(slot)] != fb::SlotKind::FirstFramePose) continue;
+                    const auto &ladderBody = _f.pose->ladders[size_t(slot)];
+                    if (restBody) {
+                        for (const auto &read : ladderBody.restAvars) expected.push_back(&read);
+                        expected.push_back(ladderBody.restSpace.get());
+                    } else {
+                        expected.push_back(ladderBody.posedSpace.get());
+                        expected.push_back(ladderBody.defaultSpace.get());
+                        for (const auto &read : ladderBody.defaultAvars) expected.push_back(&read);
+                        expected.push_back(ladderBody.rotationOrder.get());
+                    }
+                }
+                const auto same = [](const auto &a, const auto &b) {
+                    return a.tag == b.tag && a.mode == b.mode && a.flags == b.flags &&
+                        a.constant == b.constant && a.selected == b.selected &&
+                        a.overrideIndex == b.overrideIndex && a.walk == b.walk &&
+                        a.propertyCandidates == b.propertyCandidates &&
+                        a.doubleCandidates == b.doubleCandidates && a.rawFallbackSlot == b.rawFallbackSlot;
+                };
+                bool varying = false;
+                if (!step.headInputSlots.empty() || step.headInputReads.size() != expected.size())
+                    return _Bad(_StepName(i) + ": compose memo does not cover exactly its body bindings");
+                for (size_t r = 0; r < expected.size(); ++r) {
+                    if (!expected[r] || !same(*expected[r], step.headInputReads[r]))
+                        return _Bad(_StepName(i) + ": compose memo binding order or value differs from its body");
+                    varying = varying || (expected[r]->flags & uint16_t(fb::InputReadFlags::Varying));
+                }
+                if (step.headVaryingLeaves != varying)
+                    return _Bad(_StepName(i) + ": compose binding-varying flag differs from its body");
+            }
+            for (const auto &pair : step.shadowedReads)
+                if (pair.first < 0 || size_t(pair.first) >= versions || pair.second < 0 ||
+                    size_t(pair.second) >= _f.phasedConsumers.size() ||
+                    !_Declares(i, fb::SlotDomain::PropertyResult, uint32_t(pair.first)))
+                    return _Bad(_StepName(i) + ": invalid shadowed property read");
+            const size_t registered = _overrideUses.size();
+            for (size_t r = 0; r < step.headInputReads.size(); ++r)
+                if (!_Read(&step.headInputReads[r], -1, _Baked,
+                           _StepName(i), "head_input_reads", long(r))) return false;
+            _overrideUses.resize(registered);
+        }
+        std::map<const RigExecWireInput *, size_t> owners;
+        for (size_t i = 0; i < _f.steps.size(); ++i) {
+            const auto &step = _f.steps[i];
+            for (const auto &read : step.headInputReads) owners.emplace(&read, i);
+            if (step.kind != fb::StepKind::PropertyRevision || step.part == 0) continue;
+            const auto &revision = _f.propertyChains[size_t(step.object)].revisions[size_t(step.part - 1)];
+            for (const auto *read : {revision.enabled.get(), revision.defaultWeight.get(), revision.value.get(),
+                                     revision.min.get(), revision.max.get()}) owners.emplace(read, i);
+        }
+        for (const auto &[input, label] : _readUses) {
+            if (input->mode == ReadMode::Raw) continue;
+            const auto owner = owners.find(input);
+            const int chainLimit = owner != owners.end() &&
+                _f.steps[owner->second].kind == fb::StepKind::PropertyRevision
+                ? _f.steps[owner->second].object : int(_f.propertyChains.size());
+            for (const uint32_t slotId : input->walk) {
+                const auto &slot = _f.inputs[slotId];
+                const bool chain = slot.chain() >= 0 && slot.chain() < chainLimit;
+                const bool record = slot.phased() >= 0 &&
+                    _f.phasedConsumers[size_t(slot.phased())].chain < uint32_t(chainLimit);
+                if (!chain && !record) continue;
+                const auto expected = chain ? fb::PropertyCandidateKind::ChainFinal : fb::PropertyCandidateKind::PhasedRecord;
+                bool found = false;
+                for (const auto *list : {&input->propertyCandidates, &input->doubleCandidates})
+                    for (const auto &candidate : *list)
+                        found = found || (candidate.slot == slotId && candidate.kind == uint8_t(expected));
+                if (!found) return _Bad((owner == owners.end() ? label : _StepName(owner->second)) +
+                                        ": chain crossing lacks its property candidate");
+            }
+            size_t doubleStart = 0;
+            if (!input->doubleCandidates.empty()) {
+                if (input->walk.empty()) return _Bad(label + ": double segment has no walk");
+                const uint32_t start = input->propertyCandidates.empty() ? input->walk.front()
+                    : input->propertyCandidates.back().slot;
+                const auto at = std::find(input->walk.begin(), input->walk.end(), start);
+                if (at == input->walk.end() || _f.inputs[start].type() != InputTag::Double ||
+                    input->doubleCandidates.front().slot != start)
+                    return _Bad(label + ": double segment does not start at its double hop");
+                doubleStart = size_t(at - input->walk.begin());
+                const size_t suffix = input->walk.size() - doubleStart;
+                if (input->doubleCandidates.size() < suffix)
+                    return _Bad(label + ": double segment omits its walk suffix");
+                for (size_t k = 0; k < suffix; ++k)
+                    if (input->doubleCandidates[k].slot != input->walk[doubleStart + k])
+                        return _Bad(label + ": double segment differs from its walk suffix");
+            }
+            for (const auto *list : {&input->propertyCandidates, &input->doubleCandidates}) {
+                size_t previous = 0;
+                bool first = true;
+                for (const auto &candidate : *list) {
+                    const auto &slot = _f.inputs[candidate.slot];
+                    const bool chain = slot.chain() >= 0 && slot.chain() < chainLimit;
+                    const bool record = slot.phased() >= 0 &&
+                        _f.phasedConsumers[size_t(slot.phased())].chain < uint32_t(chainLimit);
+                    const auto expected = chain ? fb::PropertyCandidateKind::ChainFinal :
+                        record ? fb::PropertyCandidateKind::PhasedRecord : fb::PropertyCandidateKind::SlotOnly;
+                    if (candidate.kind != uint8_t(expected))
+                        return _Bad(label + ": candidate kind disagrees with its reader phase");
+                    const bool raw = list == &input->doubleCandidates || input->doubleCandidates.empty();
+                    if (candidate.raw != raw)
+                        return _Bad(label + ": candidate raw flag disagrees with its segment");
+                    const auto at = std::find(input->walk.begin(), input->walk.end(), candidate.slot);
+                    if (at == input->walk.end()) return _Bad(label + ": candidate slot is not on its walk");
+                    size_t position = size_t(at - input->walk.begin());
+                    if (list == &input->doubleCandidates)
+                        position = (position + input->walk.size() - doubleStart) % input->walk.size();
+                    if (!first && position <= previous) return _Bad(label + ": property candidates are out of walk order");
+                    first = false; previous = position;
+                    if (candidate.version >= 0 && owner != owners.end() &&
+                        !_Declares(owner->second, fb::SlotDomain::PropertyResult, uint32_t(candidate.version)))
+                        return _Bad(_StepName(owner->second) + ": candidate version is not a declared read");
+                }
+            }
+            if (input->rawFallbackSlot >= 0 &&
+                (input->walk.empty() || input->rawFallbackSlot != int32_t(input->walk.front())))
+                return _Bad(label + ": own raw fallback is not its head slot");
+        }
+        for (size_t v = 0; v < writers.size(); ++v)
+            if (writers[v] < 0) return _Bad("PropertyRevision version " + _N(v) + ": no writer");
+        for (size_t i = 0; i < _f.steps.size(); ++i) {
+            const auto &step = _f.steps[i];
+            for (const auto &range : step.reads) {
+                if (!producerDomain(range.domain())) continue;
+                const auto *table = range.domain() == fb::SlotDomain::PropertyResult ? &writers
+                    : range.domain() == fb::SlotDomain::Rest ? &rest
+                    : range.domain() == fb::SlotDomain::Ladder ? &ladder : &topology;
+                if (range.end() > table->size()) return _Bad(_StepName(i) + ": head read out of range");
+                for (uint32_t v = range.begin(); v < range.end(); ++v)
+                    if ((*table)[v] < 0 || size_t((*table)[v]) >= i)
+                        return _Bad(_StepName(i) + ": head read has no earlier producer");
+            }
+            const auto require = [&](fb::SlotDomain domain, int slot) {
+                if (slot < 0 || size_t(slot) >= slots) return true;
+                return _Declares(i, domain, uint32_t(slot)) ||
+                    _Bad(_StepName(i) + ": missing " + rigExecStepGraphDetail::DomainName(uint8_t(domain)) +
+                         "[" + _N(size_t(slot)) + "] read");
+            };
+            if (step.kind == fb::StepKind::RestCompose || step.kind == fb::StepKind::LadderCompose) {
+                const auto &group = _f.pose->composeGroups[size_t(step.object)];
+                const bool ladderBody = step.kind == fb::StepKind::LadderCompose;
+                for (int slot = group.begin; slot < group.end; ++slot) {
+                    if (ladderBody && !require(fb::SlotDomain::Rest, slot)) return false;
+                    if (_f.slotMeta->slotKind[size_t(slot)] != fb::SlotKind::FirstFramePose) continue;
+                    const int parent = _f.slotMeta->parent[size_t(slot)];
+                    if (parent >= 0 && (parent < group.begin || parent >= group.end)) {
+                        if (!require(fb::SlotDomain::Rest, parent) ||
+                            (ladderBody && !require(fb::SlotDomain::Ladder, parent))) return false;
+                    }
+                }
+            }
+            const fb::RigExecWireRevision *bodyRevision = nullptr;
+            size_t layoutId = 0;
+            if ((step.kind == fb::StepKind::RevisionStatic || step.kind == fb::StepKind::RevisionChunk ||
+                 step.kind == fb::StepKind::RevisionFuse) && _Has(_f.geometry->revisionIndex, step.object)) {
+                const auto &index = _f.geometry->revisionIndex[size_t(step.object)];
+                bodyRevision = &_f.geometry->chains[size_t(index.first)].revisions[size_t(index.second)];
+                layoutId = size_t(step.object);
+            } else if (step.kind == fb::StepKind::Derived && _Has(_f.geometry->derivedIndex, step.object)) {
+                const auto &index = _f.geometry->derivedIndex[size_t(step.object)];
+                bodyRevision = _f.geometry->chains[size_t(index.first)].derived[size_t(index.second)].revision.get();
+                layoutId = _f.geometry->revisionIndex.size() + size_t(step.object);
+                if (bodyRevision && (!require(fb::SlotDomain::Rest, bodyRevision->transformSlot) ||
+                    !require(fb::SlotDomain::Rest, bodyRevision->transformSpaceSlot) ||
+                    !require(fb::SlotDomain::Rest, bodyRevision->carrySpaceSlot))) return false;
+            }
+            if (bodyRevision && bodyRevision->chunked &&
+                step.kind == fb::StepKind::RevisionChunk) {
+                if (!_Has(bodyRevision->chunks, step.part))
+                    return _Bad(_StepName(i) + ": chunk part out of range");
+                const auto domain = bodyRevision->finalPhase ? fb::SlotDomain::FinalMatrix
+                                                             : fb::SlotDomain::BaseMatrix;
+                std::set<uint32_t> expected, actual;
+                for (const int position : bodyRevision->chunks[size_t(step.part)].key) {
+                    if (!_Has(bodyRevision->influenceSlots, position))
+                        return _Bad(_StepName(i) + ": chunk influence out of range");
+                    const int slot = bodyRevision->influenceSlots[size_t(position)];
+                    if (slot >= 0) expected.insert(uint32_t(slot));
+                }
+                for (const auto &range : step.reads) {
+                    if (range.domain() != fb::SlotDomain::BaseMatrix &&
+                        range.domain() != fb::SlotDomain::FinalMatrix &&
+                        range.domain() != fb::SlotDomain::FrameMatrix) continue;
+                    if (range.domain() != domain)
+                        return _Bad(_StepName(i) + ": chunk matrix reads differ from its influence key");
+                    for (uint32_t slot = range.begin(); slot < range.end(); ++slot)
+                        actual.insert(slot);
+                }
+                if (actual != expected)
+                    return _Bad(_StepName(i) + ": chunk matrix reads differ from its influence key");
+            }
+            if (bodyRevision && bodyRevision->skinTopologyFixed &&
+                !_Declares(i, fb::SlotDomain::SkinTopology, uint32_t(layoutId)))
+                return _Bad(_StepName(i) + ": missing SkinTopology[" + _N(layoutId) + "] read");
+            if (step.kind == fb::StepKind::ProviderMatrix && !require(fb::SlotDomain::Rest, step.object)) return false;
+            if (step.kind == fb::StepKind::FrameMatrix && _Has(_f.pose->frameRecords, step.object) &&
+                !require(fb::SlotDomain::Rest, int(_f.pose->frameRecords[size_t(step.object)].slot()))) return false;
+            if (step.kind == fb::StepKind::Solve && _Has(_f.pose->solvers, step.object))
+                for (const auto slot : _f.pose->solvers[size_t(step.object)].restSlots)
+                    if (!require(fb::SlotDomain::Rest, slot)) return false;
+            if (step.kind == fb::StepKind::ComposeSubtree && _Has(_f.pose->composeGroups, step.object)) {
+                const auto &group = _f.pose->composeGroups[size_t(step.object)];
+                for (int slot = group.begin; slot < group.end; ++slot)
+                    if (!require(fb::SlotDomain::Ladder, slot)) return false;
+                for (const int slot : group.parentSlots)
+                    if (!require(fb::SlotDomain::Ladder, slot)) return false;
+                for (const auto &sw : _f.pose->spaceSwitches) {
+                    if (sw.slot < group.begin || sw.slot >= group.end) continue;
+                    for (const int slot : sw.sourceSlots)
+                        if (!require(fb::SlotDomain::Ladder, slot)) return false;
+                    if (!require(fb::SlotDomain::Ladder, sw.spaceSlot) ||
+                        !require(fb::SlotDomain::Ladder, _f.slotMeta->parent[size_t(sw.slot)])) return false;
+                    for (const auto *read : {sw.parentRead.get(), sw.spaceRead.get()})
+                        if (read) for (const auto slot : read->recompose)
+                            if (!require(fb::SlotDomain::Ladder, slot)) return false;
+                    for (const auto &read : sw.sourceReads)
+                        for (const auto slot : read.recompose)
+                            if (!require(fb::SlotDomain::Ladder, slot)) return false;
+                }
+            }
+            if (step.kind == fb::StepKind::PoseInterpolator && _Has(_f.pose->poseInterpolators, step.object)) {
+                const auto &interp = _f.pose->poseInterpolators[size_t(step.object)];
+                if (interp.valueInputs.empty() &&
+                    (!require(fb::SlotDomain::Rest, interp.driverSlot) ||
+                     !require(fb::SlotDomain::Rest, interp.parentSlot))) return false;
+            }
+            if (step.kind == fb::StepKind::Constraint && _Has(_f.pose->walkSteps, step.object)) {
+                const auto &walk = _f.pose->walkSteps[size_t(step.object)];
+                if (walk.solverBatch || !_Has(_f.pose->constraints, walk.index)) continue;
+                const auto &constraint = _f.pose->constraints[size_t(walk.index)];
+                if (!constraint.useAnimatedTs)
+                    for (const int slot : constraint.targetSlots)
+                        if (!require(fb::SlotDomain::Rest, slot)) return false;
+                if (RigExecFormatPathText(_f, constraint.type) == "RigExecMatrixMover")
+                    for (const int slot : constraint.sources)
+                        if (!require(fb::SlotDomain::Rest, slot)) return false;
+                if (!require(fb::SlotDomain::Ladder, constraint.spaceSlot)) return false;
+            }
+        }
+        for (size_t layout = 0; layout < layouts; ++layout) {
+            const bool derived = layout >= _f.geometry->revisionIndex.size();
+            const auto &index = derived ? _f.geometry->derivedIndex[layout - _f.geometry->revisionIndex.size()]
+                                        : _f.geometry->revisionIndex[layout];
+            const auto &chain = _f.geometry->chains[size_t(index.first)];
+            const auto *revision = derived ? chain.derived[size_t(index.second)].revision.get()
+                                           : &chain.revisions[size_t(index.second)];
+            if (revision && revision->skinTopologyFixed && topology[layout] < 0)
+                return _Bad("SkinTopology layout " + _N(layout) + ": fixed layout body has no producer");
+        }
+        return true;
     }
 
     /// A step's read or write range as the step graph checks it.
@@ -2422,6 +2863,9 @@ private:
             r.partitionTopology ? r.partitionTopology.get()
             : r.partitionSameAsTopology ? r.topology.get()
                                         : nullptr;
+        if (!layout) {
+            return _Bad(row + ": chunked partition has no layout");
+        }
         if (layout) {
             const uint64_t entries =
                 layout->raw ? uint64_t(layout->rawIndices.size())
@@ -2431,6 +2875,39 @@ private:
                 r.partitionIndexCount != entries) {
                 return _Bad(row + ": the partition's element_size and "
                                   "index_count are not its layout's");
+            }
+            std::vector<int32_t> indices;
+            std::vector<float> weights;
+            RigExecFormatExpandTopology(*layout, &indices, &weights);
+            const size_t width = size_t(std::max(r.partitionElementSize, 0));
+            for (const auto &chunk : r.chunks) {
+                std::vector<int32_t> key;
+                for (size_t point = size_t(chunk.begin); point < size_t(chunk.end); ++point) {
+                    for (size_t k = 0; k < width; ++k) {
+                        const size_t at = point * width + k;
+                        if (at >= indices.size())
+                            return _Bad(row + ": chunk range exceeds its partition layout");
+                        const int32_t position = indices[at];
+                        if (position >= 0 && size_t(position) < r.influenceSlots.size())
+                            key.push_back(position);
+                    }
+                }
+                std::sort(key.begin(), key.end());
+                key.erase(std::unique(key.begin(), key.end()), key.end());
+                if (key != chunk.key) {
+                    std::string owner = row;
+                    for (size_t step = 0; step < _f.steps.size(); ++step) {
+                        const auto &read = _f.steps[step];
+                        if (read.kind != fb::StepKind::RevisionChunk ||
+                            !_Has(_f.geometry->revisionIndex, read.object) ||
+                            read.part != int(&chunk - r.chunks.data())) continue;
+                        const auto &index = _f.geometry->revisionIndex[size_t(read.object)];
+                        if (&_f.geometry->chains[size_t(index.first)].revisions[size_t(index.second)] == &r) {
+                            owner = _StepName(step); break;
+                        }
+                    }
+                    return _Bad(owner + ": chunk key differs from its partition layout");
+                }
             }
         }
         return true;
@@ -3856,6 +4333,7 @@ private:
     /// below it.
     uint64_t _finPool = 0;
     std::vector<uint32_t> _overrideUses;
+    std::vector<std::pair<const RigExecWireInput *, std::string>> _readUses;
     /// Per path node: 0 for paths[0], else its parent's depth plus one.
     std::vector<uint32_t> _depth;
     /// The steps in playback order, and each step's position in it.
@@ -3887,12 +4365,12 @@ namespace {
 std::string
 _VersionRefusal(uint32_t version)
 {
-    static_assert(RigExecFormatVersion == 8,
+    static_assert(RigExecFormatVersion == 9,
                   "name what the previous format version lacks");
     return "unsupported .rigexec format version " + _N(version) +
            " (this reader reads " + _N(RigExecFormatVersion) + "); " +
-           (version + 1 == RigExecFormatVersion ? "re-export: array inputs"
-                                                : "rebake");
+           (version < RigExecFormatVersion ? "re-export: S3 head tier"
+                                              : "rebake");
 }
 
 /// Open after the identifier checks: copy, version probe, bounding walk,
@@ -4073,6 +4551,10 @@ _StepKindName(fb::StepKind kind)
     case fb::StepKind::ChainStatus: return "ChainStatus";
     case fb::StepKind::Derived: return "Derived";
     case fb::StepKind::FrameMatrix: return "FrameMatrix";
+    case fb::StepKind::PropertyRevision: return "PropertyRevision";
+    case fb::StepKind::RestCompose: return "RestCompose";
+    case fb::StepKind::LadderCompose: return "LadderCompose";
+    case fb::StepKind::SkinTopology: return "SkinTopology";
     }
     return "unknown";
 }
@@ -4132,6 +4614,44 @@ _StepObject(const RigExecWireFile &file, const fb::RigExecWireStep &step,
     case fb::StepKind::SnapshotFinals:
         *out = "every provider";
         return true;
+    case fb::StepKind::PropertyRevision: {
+        if (!_Has(file.propertyChains, object)) return false;
+        const auto &chain = file.propertyChains[size_t(object)];
+        if (step.part == 0) {
+            if (chain.target >= file.inputs.size()) return false;
+            *out = text(file.inputs[chain.target].name()) + " base";
+        } else {
+            if (!_Has(chain.revisions, int64_t(step.part) - 1)) return false;
+            *out = text(chain.revisions[size_t(step.part - 1)].mover);
+        }
+        return true;
+    }
+    case fb::StepKind::RestCompose:
+    case fb::StepKind::LadderCompose: {
+        if (!pose || !meta || !_Has(pose->composeGroups, object)) return false;
+        const int first = pose->composeGroups[size_t(object)].begin;
+        if (!_Has(meta->paths, first)) return false;
+        *out = text(meta->paths[size_t(first)]);
+        return true;
+    }
+    case fb::StepKind::SkinTopology: {
+        if (!geometry || object < 0) return false;
+        const size_t layout = size_t(object);
+        const bool derived = layout >= geometry->revisionIndex.size();
+        if (derived && layout - geometry->revisionIndex.size() >= geometry->derivedIndex.size()) return false;
+        const auto &index = derived ? geometry->derivedIndex[layout - geometry->revisionIndex.size()]
+                                    : geometry->revisionIndex[layout];
+        if (!_Has(geometry->chains, index.first)) return false;
+        const auto &chain = geometry->chains[size_t(index.first)];
+        if (derived) {
+            if (!_Has(chain.derived, index.second) || !chain.derived[size_t(index.second)].revision) return false;
+            *out = text(chain.derived[size_t(index.second)].revision->moverPath);
+        } else {
+            if (!_Has(chain.revisions, index.second)) return false;
+            *out = text(chain.revisions[size_t(index.second)].moverPath);
+        }
+        return true;
+    }
     case fb::StepKind::FrameMatrix: {
         if (!pose || !_Has(pose->frameRecords, object)) {
             *out = "record " + std::to_string(object);

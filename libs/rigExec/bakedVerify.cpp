@@ -365,6 +365,10 @@ CaptureRevision(const RigExecBakedProgramImpl::GeomRevision &revision,
     state->currentPhasePacket = revision.currentPhasePacket;
     state->weightFieldPublished = revision.weightFieldPublished;
     state->layoutUsable = revision.layoutUsable;
+    state->layoutHandle = revision.layoutHandle;
+    state->layoutCandidate = revision.layoutCandidate;
+    state->layoutFixed = revision.layoutFixed;
+    state->layoutRan = revision.layoutRan;
     state->envelopeOk = revision.envelopeOk;
     state->fullStrength = revision.fullStrength;
     state->chunks.resize(revision.chunks.size());
@@ -410,6 +414,10 @@ RestoreRevision(const RigExecBakedRunShadow::RevisionState &state,
     revision->currentPhasePacket = state.currentPhasePacket;
     revision->weightFieldPublished = state.weightFieldPublished;
     revision->layoutUsable = state.layoutUsable;
+    revision->layoutHandle = state.layoutHandle;
+    revision->layoutCandidate = state.layoutCandidate;
+    revision->layoutFixed = state.layoutFixed;
+    revision->layoutRan = state.layoutRan;
     revision->envelopeOk = state.envelopeOk;
     revision->fullStrength = state.fullStrength;
     for (size_t k = 0; k < revision->chunks.size() && k < state.chunks.size();
@@ -428,6 +436,14 @@ CompareRevision(std::vector<std::string> *differences, size_t *count,
                 const RigExecBakedRunShadow::RevisionState &shadow,
                 const RigExecBakedProgramImpl::GeomRevision &revision)
 {
+    const auto sameLayout=[](const auto &a,const auto &b) {
+        return bool(a)==bool(b) && (!a || *a==*b);
+    };
+    if (!sameLayout(shadow.layoutHandle,revision.layoutHandle) ||
+        !sameLayout(shadow.layoutCandidate,revision.layoutCandidate))
+        Differ(differences,count,where+" layout handle");
+    CompareValue(differences,count,where+" layoutFixed",shadow.layoutFixed,revision.layoutFixed);
+    CompareValue(differences,count,where+" layoutRan",shadow.layoutRan,revision.layoutRan);
     // The values.
     CompareVector(differences, count, where + " output", shadow.output,
                   revision.output);
@@ -523,6 +539,42 @@ CompareRevision(std::vector<std::string> *differences, size_t *count,
 void
 RigExecBakedRunShadow::Capture(const RigExecBakedProgramImpl &program)
 {
+    const auto &B=program;
+    sequence=B.runSeqCounter.next.load(std::memory_order_relaxed);
+
+    values = B.propertyValues;
+    versionValid = B.propertyVersionValid;
+    changed = B.propertyChanged;
+    chainValid = B.chainValid;
+    recordStoodAside = B.recordStoodAside;
+    chainFinal = B.chainFinal;
+    recordValues = B.recordValues;
+
+
+    tables.restM = B.restM;
+    tables.restPts = B.restPts;
+    tables.restFrames = B.restFrames;
+    tables.selfD = B.selfD;
+    tables.parentDinv = B.parentDinv;
+    tables.rotOrder = B.rotOrder;
+    tables.restRoundTrip = B.restRoundTrip;
+    tables.defaultRoundTrip = B.defaultRoundTrip;
+    tables.posedAuthored = B.posedAuthored;
+    tables.posedAuthoredM = B.posedAuthoredM;
+    lastRestM = B.lastRestM;
+    lastSelfD = B.lastSelfD;
+    lastParentDinv = B.lastParentDinv;
+    lastPosedAuthoredM = B.lastPosedAuthoredM;
+    lastPosedAuthored = B.lastPosedAuthored;
+    lastRotOrder = B.lastRotOrder;
+    restChanged = B.restChanged;
+    ladderChanged = B.ladderChanged;
+    restMoved = B.restMoved;
+    ladderMoved = B.ladderMoved;
+    ladderMovedSlots = B.ladderMovedSlots;
+
+    opsRun = B.headOpsRun;
+
     avars = program.avars;
     poseWeights = program.poseWeights;
     weightPackets = program.weightPackets;
@@ -588,6 +640,8 @@ RigExecBakedRunShadow::Capture(const RigExecBakedProgramImpl &program)
     steps.resize(program.steps.size());
     for (size_t k = 0; k < program.steps.size(); ++k) {
         steps[k].diagnostics = program.steps[k].diagnostics;
+        steps[k].lines = program.steps[k].lines;
+        steps[k].runSeq = program.steps[k].runSeq;
         steps[k].counters = program.steps[k].counters;
         steps[k].bail = program.steps[k].bail;
     }
@@ -597,6 +651,41 @@ void
 RigExecBakedRunShadow::Restore(RigExecBakedProgramImpl *program) const
 {
     RigExecBakedProgramImpl &B = *program;
+    B.runSeqCounter.next.store(sequence,std::memory_order_relaxed);
+
+    B.propertyValues = values;
+    B.propertyVersionValid = versionValid;
+    B.propertyChanged = changed;
+    B.chainValid = chainValid;
+    B.recordStoodAside = recordStoodAside;
+    B.chainFinal = chainFinal;
+    B.recordValues = recordValues;
+
+
+    B.restM = tables.restM;
+    B.restPts = tables.restPts;
+    B.restFrames = tables.restFrames;
+    B.selfD = tables.selfD;
+    B.parentDinv = tables.parentDinv;
+    B.rotOrder = tables.rotOrder;
+    B.restRoundTrip = tables.restRoundTrip;
+    B.defaultRoundTrip = tables.defaultRoundTrip;
+    B.posedAuthored = tables.posedAuthored;
+    B.posedAuthoredM = tables.posedAuthoredM;
+    B.lastRestM = lastRestM;
+    B.lastSelfD = lastSelfD;
+    B.lastParentDinv = lastParentDinv;
+    B.lastPosedAuthoredM = lastPosedAuthoredM;
+    B.lastPosedAuthored = lastPosedAuthored;
+    B.lastRotOrder = lastRotOrder;
+    B.restChanged = restChanged;
+    B.ladderChanged = ladderChanged;
+    B.restMoved = restMoved;
+    B.ladderMoved = ladderMoved;
+    B.ladderMovedSlots = ladderMovedSlots;
+
+    B.headOpsRun = opsRun;
+
     B.avars = avars;
     B.poseWeights = poseWeights;
     B.weightPackets = weightPackets;
@@ -659,6 +748,8 @@ RigExecBakedRunShadow::Restore(RigExecBakedProgramImpl *program) const
     }
     for (size_t k = 0; k < B.steps.size() && k < steps.size(); ++k) {
         B.steps[k].diagnostics = steps[k].diagnostics;
+        B.steps[k].lines = steps[k].lines;
+        B.steps[k].runSeq = steps[k].runSeq;
         B.steps[k].counters = steps[k].counters;
         B.steps[k].bail = steps[k].bail;
     }
@@ -669,6 +760,128 @@ RigExecBakedRunShadow::Compare(const RigExecBakedProgramImpl &program,
                                std::vector<std::string> *differences) const
 {
     size_t count = 0;
+    CompareVector(differences,&count,"property version validity",versionValid,program.propertyVersionValid);
+    CompareVector(differences,&count,"property chain validity",chainValid,program.chainValid);
+    CompareVector(differences,&count,"property changed",changed,program.propertyChanged);
+    CompareVector(differences,&count,"phased record stand-aside",recordStoodAside,program.recordStoodAside);
+
+    { const auto &B=program; const auto &memo=*this;
+    size_t mismatches = 0;
+    const auto differ = [&](const std::string &what) {
+        ++mismatches;
+        differences->push_back("baked cone mismatch: " + what);
+    };
+    for (size_t c = 0; c < B.propertyChains.size(); ++c) {
+        const RigExecBakedPropertyChain &chain = B.propertyChains[c];
+        for (size_t k = 0; k <= chain.revisions.size(); ++k) {
+            const uint32_t id = chain.versionBase + uint32_t(k);
+            if (memo.versionValid[id] != B.propertyVersionValid[id]) {
+                differ("head version " + std::to_string(k) + " of " +
+                       chain.target.GetString() + " differs in validity");
+                continue;
+            }
+            if (!B.propertyVersionValid[id]) {
+                continue;
+            }
+            const RigExecBakedPropertyValue &a = memo.values[id];
+            const RigExecBakedPropertyValue &b = B.propertyValues[id];
+            bool same = true;
+            switch (chain.arm) {
+            case RigExecBakedPropertyChain::Arm::Float:
+                same = std::memcmp(&a.f, &b.f, sizeof(a.f)) == 0;
+                break;
+            case RigExecBakedPropertyChain::Arm::Double:
+                same = std::memcmp(&a.d, &b.d, sizeof(a.d)) == 0;
+                break;
+            case RigExecBakedPropertyChain::Arm::Matrix4d:
+                same = std::memcmp(&a.m, &b.m, sizeof(a.m)) == 0;
+                break;
+            case RigExecBakedPropertyChain::Arm::Vec3f:
+                same = std::memcmp(&a.v, &b.v, sizeof(a.v)) == 0;
+                break;
+            }
+            if (!same) {
+                differ("head version " + std::to_string(k) + " of " +
+                       chain.target.GetString() + " differs");
+            }
+        }
+        if (B.chainValid[c] &&
+            !RigExecBakedHeadValueSame(memo.chainFinal[c], B.chainFinal[c])) {
+            differ("head final value of " + chain.target.GetString() +
+                   " differs");
+        }
+        for (const uint32_t r : chain.records) {
+            if (B.chainValid[c] && !B.recordStoodAside[r] &&
+                !RigExecBakedHeadValueSame(memo.recordValues[r],
+                                           B.recordValues[r])) {
+                differ("head record " +
+                       B.propertyRecords[r].consumer.GetString() +
+                       " differs");
+            }
+        }
+    }
+    for (size_t i = 0; i < B.steps.size(); ++i) {
+        if (memo.steps[i].lines != B.steps[i].lines) {
+            differ("head step " + B.steps[i].label +
+                   " reports different lines");
+        }
+    }
+    count += mismatches;
+
+    }
+    { const auto &B=program; const auto &memo=*this;
+    size_t mismatches = 0;
+    const auto bits = [](const auto &a, const auto &b) {
+        return std::memcmp(&a, &b, sizeof(a)) == 0;
+    };
+    const RigExecBakedLadderTables &T = memo.tables;
+    for (size_t slot = 0; slot < B.paths.size(); ++slot) {
+        const bool same =
+            bits(T.restM[slot], B.restM[slot]) &&
+            bits(T.restPts[slot], B.restPts[slot]) &&
+            T.restFrames[slot].flags == B.restFrames[slot].flags &&
+            bits(T.restFrames[slot].points, B.restFrames[slot].points) &&
+            bits(T.restRoundTrip[slot], B.restRoundTrip[slot]) &&
+            bits(T.selfD[slot], B.selfD[slot]) &&
+            bits(T.parentDinv[slot], B.parentDinv[slot]) &&
+            bits(T.defaultRoundTrip[slot], B.defaultRoundTrip[slot]) &&
+            T.posedAuthored[slot] == B.posedAuthored[slot] &&
+            bits(T.posedAuthoredM[slot], B.posedAuthoredM[slot]) &&
+            T.rotOrder[slot] == B.rotOrder[slot] &&
+            memo.restChanged[slot] == B.restChanged[slot] &&
+            memo.ladderChanged[slot] == B.ladderChanged[slot];
+        if (!same) {
+            ++mismatches;
+            differences->push_back("baked cone mismatch: head rest or ladder "
+                                   "of " + B.paths[slot].GetString() +
+                                   " differs");
+        }
+    }
+    count += mismatches;
+
+    }
+    // These last-value tables determine whether a later generation is
+    // dirty. Equal current outputs alone do not establish equal memo state.
+    const auto memoBits = [&](const std::string &name, const auto &a, const auto &b) {
+        if (a.size() != b.size()) {
+            Differ(differences, &count, name + " size");
+            return;
+        }
+        for (size_t slot = 0; slot < a.size(); ++slot) {
+            if (std::memcmp(&a[slot], &b[slot], sizeof(a[slot])) != 0)
+                Differ(differences, &count, name + " slot " + std::to_string(slot));
+        }
+    };
+    memoBits("last rest", lastRestM, program.lastRestM);
+    memoBits("last default", lastSelfD, program.lastSelfD);
+    memoBits("last parent default inverse", lastParentDinv, program.lastParentDinv);
+    memoBits("last authored pose", lastPosedAuthoredM, program.lastPosedAuthoredM);
+    CompareVector(differences, &count, "last authored pose presence",
+                  lastPosedAuthored, program.lastPosedAuthored);
+    CompareVector(differences, &count, "last rotation order", lastRotOrder, program.lastRotOrder);
+    CompareVector(differences, &count, "rest moved", restMoved, program.restMoved);
+    CompareVector(differences, &count, "ladder moved", ladderMoved, program.ladderMoved);
+    CompareVector(differences, &count, "ladder moved slots", ladderMovedSlots, program.ladderMovedSlots);
     // The avar table is the prologue's, and the prologue ran once: a
     // difference here is a STEP that wrote it, which is the one thing
     // nothing else in the program is positioned to notice.
@@ -825,6 +1038,7 @@ RigExecBakedRunShadow::Compare(const RigExecBakedProgramImpl &program,
         const std::string where = "step " + step.label;
         CompareVector(differences, &count, where + " diagnostics",
                       steps[k].diagnostics, step.diagnostics);
+        CompareVector(differences,&count,where+" memo lines",steps[k].lines,step.lines);
         if (steps[k].counters.revisionsExecuted !=
                 step.counters.revisionsExecuted ||
             steps[k].counters.revisionsCreated !=
@@ -880,6 +1094,9 @@ RigExecBakedRunStatistics::Restore(RigExecBakedProgramImpl *program) const
         B.steps[k].endUs = steps[k].endUs;
         B.steps[k].runSeq = steps[k].runSeq;
     }
+    uint32_t sequence=0;
+    for (const auto &step:B.steps) sequence=std::max(sequence,step.runSeq);
+    B.runSeqCounter.next.store(sequence,std::memory_order_relaxed);
 }
 
 }  // namespace rigExec

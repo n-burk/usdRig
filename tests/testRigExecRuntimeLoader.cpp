@@ -163,7 +163,7 @@ _TestFileRefusals(const std::vector<uint8_t> &bytes)
         });
     got = _OpenError(version);
     CHECK(got == "unsupported .rigexec format version 4 (this reader reads " +
-                     std::to_string(RigExecFormatVersion) + "); rebake");
+                     std::to_string(RigExecFormatVersion) + "); re-export: S3 head tier");
     if (got.find("format version 4") == std::string::npos) {
         std::printf("version 4: open said '%s'\n", got.c_str());
     }
@@ -194,7 +194,7 @@ _ExpectRefusal(const std::string &name, const char *what,
 
 // Step and cluster graphs playback could not walk, edited into a fixture's
 // bake, each refused by Open with the step-graph check's exact message:
-// the first step with a predecessor names the last step instead; indices
+// the first ordinary step with a predecessor names the last step instead; indices
 // past the end in a step's predecessors, a step's cluster, a cluster's
 // members and a cluster's predecessors, and a clustering that places one
 // step too few; and two clusters joined by an edge given the reverse edge
@@ -214,7 +214,7 @@ _TestStepGraphRefusals(const std::string &name,
     const std::string stepCount = std::to_string(count);
     const std::string clusterCount = std::to_string(clusters.size());
     for (size_t s = 0; s + 1 < count; ++s) {
-        if (steps[s].preds.empty()) {
+        if (steps[s].isHead || steps[s].preds.empty()) {
             continue;
         }
         _ExpectRefusal(name, "flipped predecessor", bytes,
@@ -756,7 +756,7 @@ _TestRetiredRefusals(const std::string &name,
     const std::string want =
         "unsupported .rigexec format version " + std::to_string(previous) +
         " (this reader reads " + std::to_string(RigExecFormatVersion) +
-        "); re-export: array inputs";
+        "); re-export: S3 head tier";
     CHECK(got == want);
     if (got != want) {
         std::printf("%s, previous version: open said '%s', expected '%s'\n",

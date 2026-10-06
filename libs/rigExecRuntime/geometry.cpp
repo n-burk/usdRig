@@ -3376,7 +3376,7 @@ RrGeometrySizeScratch(RrProgram *program, std::string *error)
     }
 
     scratch->chains.resize(geo.chains.size());
-    scratch->epochTopologies.resize(geo.revisionIndex.size());
+    scratch->epochTopologies.resize(geo.revisionIndex.size() + geo.derivedIndex.size());
     scratch->epochPartitionTopologies.resize(geo.revisionIndex.size());
     for (size_t c = 0; c < geo.chains.size(); ++c) {
         const RigExecWireChain &chain = geo.chains[c];
@@ -3474,6 +3474,11 @@ RrGeometrySizeScratch(RrProgram *program, std::string *error)
             wire.pointBindings.size(), nullptr);
         RrGeoResolveReads(program->pathReads, properties, wire,
                           &scratch->derived[d].revision);
+        auto &revision = scratch->derived[d].revision;
+        const size_t layout = geo.revisionIndex.size() + d;
+        if (wire.topologyResolved)
+            scratch->epochTopologies[layout] = RrGeoWireTopology(wire.topology.get());
+        revision.layoutHandle = scratch->epochTopologies[layout];
     }
 
     // The chains' and derived targets' base points, converted once: the
@@ -4930,23 +4935,11 @@ RrGeoRunLayoutOp(const RrProgram *program, const RrGeometryScratch &scratch,
     const int32_t sizeRow = rev->attrRead[0][size_t(RrGeoAttrElementSize)];
     const RrPathRead *size =
         sizeRow < 0 ? nullptr : &(*scratch.pathReads)[size_t(sizeRow)];
-    const std::vector<uint32_t> *sizeWalk =
-        size && size->read && size->read->read ? &size->read->read->walk
-                                               : nullptr;
-    bool changed = RrInputChangedSinceRun(program, indicesSlot) ||
-                   RrInputChangedSinceRun(program, weightsSlot);
     bool atDefault = !RrInputDiffersFromDefault(program, indicesSlot) &&
                      !RrInputDiffersFromDefault(program, weightsSlot);
-    if (sizeWalk) {
-        for (const uint32_t slot : *sizeWalk) {
-            changed = changed || RrInputChangedSinceRun(program, slot);
-            atDefault =
-                atDefault && !RrInputDiffersFromDefault(program, slot);
-        }
-    }
-    if (!changed) {
-        return;
-    }
+    const int elementSize =
+        size && size->value.tag == RrPathValue::Tag::Int ? size->value.i32 : 1;
+    atDefault = atDefault && elementSize == open->elementSize;
     if (atDefault) {
         if (!rev->layoutHandle || !(*rev->layoutHandle == *open)) {
             rev->layoutHandle = open;
@@ -4957,10 +4950,6 @@ RrGeoRunLayoutOp(const RrProgram *program, const RrGeometryScratch &scratch,
         RrInputArray<int32_t>(program, indicesSlot);
     const std::vector<float> *weights =
         RrInputArray<float>(program, weightsSlot);
-    // The leaf's fallback, 1, when the site reads no element size.
-    const int elementSize =
-        size && size->value.tag == RrPathValue::Tag::Int ? size->value.i32
-                                                         : 1;
     auto built = std::make_shared<RrGeoSkinTopology>();
     if (indices) built->indices.assign(indices->begin(), indices->end());
     if (weights) built->weights.assign(weights->begin(), weights->end());
@@ -4980,6 +4969,33 @@ RrGeoRunLayoutOp(const RrProgram *program, const RrGeometryScratch &scratch,
 }
 
 }  // namespace
+
+bool
+RrRunTopologyHead(RrProgram *program, size_t id)
+{
+    auto *scratch = static_cast<RrGeometryScratch *>(program->geo.get());
+    if (!scratch) return false;
+    const auto &geo = *program->geometry;
+    // Layout element size can be a chain-routed scalar; resolve it after
+    // preceding property heads and before building this topology handle.
+    for (const auto row : program->pathReadRows) {
+        auto &entry = program->pathReads[row];
+        RrPathValueFromRead(*entry.read, RrReadPathScalar(program, *entry.read),
+                            &entry.value);
+    }
+    const bool derived = id >= geo.revisionIndex.size();
+    const size_t local = derived ? id - geo.revisionIndex.size() : id;
+    if (derived && local >= geo.derivedIndex.size()) return false;
+    const auto &index = derived ? geo.derivedIndex[local] : geo.revisionIndex[local];
+    auto &revision = derived ? scratch->derived[local].revision
+        : scratch->chains[size_t(index.first)].revisions[size_t(index.second)];
+    const auto &wire = derived ? *geo.chains[size_t(index.first)].derived[size_t(index.second)].revision
+        : geo.chains[size_t(index.first)].revisions[size_t(index.second)];
+    const auto previous = revision.layoutHandle;
+    RrGeoRunLayoutOp(program, *scratch, wire, id, &revision);
+    return previous != revision.layoutHandle &&
+        (!previous || !revision.layoutHandle || !(*previous == *revision.layoutHandle));
+}
 
 bool
 RrGeometrySkinLayoutIsOpenForTesting(const RrProgram *program,
@@ -5105,7 +5121,6 @@ RrPrologueGeometry(RrProgram *program,
             // slots did not move. The partition takes it only when it
             // holds the arrays Build cut the chunk keys from.
             if (wire.skinTopologyFixed && id < scratch->epochTopologies.size()) {
-                RrGeoRunLayoutOp(program, *scratch, wire, id, &rev);
                 rev.topology = rev.layoutHandle;
                 rev.topologyResolved = true;
                 RrGeoAdoptPartition(
@@ -5161,11 +5176,8 @@ RrPrologueGeometry(RrProgram *program,
             const RigExecWireRevision &wire =
                 *wireChain.derived[d].revision;
             if (wire.skinTopologyFixed) {
-                // Derived revisions keep no epoch table of their own;
-                // the resolve answers null, which routes the packet
-                // through the per-frame arrays.
                 rev.topologyResolved = true;
-                rev.topology.reset();
+                rev.topology = rev.layoutHandle;
             }
         }
     }

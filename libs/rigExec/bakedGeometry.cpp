@@ -6,6 +6,7 @@
 // restated as RigExecBakedChainSpec, and the caches the frame path shares
 // with the dynamic walk were captured into RigExecBakedProgramImpl at Build.
 #include "bakedProgramImpl.h"
+#include "bakedSchedule.h"
 
 #include "frameExtraction.h"
 #include "moverGraph.h"
@@ -3320,13 +3321,15 @@ RigExecBakedBuildLayoutSteps(RigExecBakedProgramImpl *program)
         revision.layoutFixedChanged = false;
         revision.layoutRan = false;
         revision.layoutHandle = nullptr;
-        RigExecBakedHeadStep step;
-        step.kind = RigExecBakedHeadKind::SkinTopology;
+        RigExecBakedStep step;
+        step.isHead = true;
+        step.part = 0;
+        step.kind = RigExecBakedStepKind::SkinTopology;
         step.object = int(r);
         step.label = "SkinTopology " + revision.moverPath.GetString();
-        step.writes.push_back(RigExecBakedHeadOne(
-            RigExecBakedHeadDomain::SkinTopology, uint32_t(r)));
-        B.headSteps.push_back(std::move(step));
+        step.writes.push_back(RigExecBakedOne(
+            RigExecBakedSlotDomain::SkinTopology, uint32_t(r)));
+        B.steps.push_back(std::move(step));
     }
 }
 
@@ -3351,8 +3354,8 @@ RigExecBakedDeclareLayoutReads(RigExecBakedProgramImpl *program)
         const RigExecBakedProgramImpl::GeomRevision *revision =
             RigExecBakedLayoutRevision(B, r);
         if (revision && revision->skinTopologyFixed) {
-            step.headReads.push_back(RigExecBakedHeadOne(
-                RigExecBakedHeadDomain::SkinTopology, uint32_t(r)));
+            step.reads.push_back(RigExecBakedOne(
+                RigExecBakedSlotDomain::SkinTopology, uint32_t(r)));
         }
     }
 }
@@ -3450,14 +3453,14 @@ RigExecBakedRunLayoutTier(RigExecBakedProgramImpl *program, UsdTimeCode time,
     // After the property revisions and rest ops this run executed, in the
     // head trace.
     uint32_t seq = 0;
-    for (const RigExecBakedHeadStep &step : B.headSteps) {
-        if (step.kind != RigExecBakedHeadKind::SkinTopology) {
+    for (const RigExecBakedStep &step : B.steps) {
+        if (step.kind != RigExecBakedStepKind::SkinTopology) {
             seq = std::max(seq, step.runSeq);
         }
     }
-    for (const uint32_t index : B.headOrder) {
-        RigExecBakedHeadStep &step = B.headSteps[index];
-        if (step.kind != RigExecBakedHeadKind::SkinTopology) {
+    for (size_t index = 0; index < B.steps.size() && B.steps[index].isHead; ++index) {
+        RigExecBakedStep &step = B.steps[index];
+        if (step.kind != RigExecBakedStepKind::SkinTopology) {
             continue;
         }
         step.runSeq = 0;
@@ -3476,13 +3479,7 @@ RigExecBakedRunLayoutTier(RigExecBakedProgramImpl *program, UsdTimeCode time,
         if (!(force || moved || !revision->layoutRan)) {
             continue;
         }
-        {
-            const RigExecOpBodyScope body(
-                B.purityAudit ? &B.purityViolations.count : nullptr);
-            RigExecBakedRunLayoutOp(revision);
-        }
-        revision->layoutRan = true;
-        step.runSeq = ++seq;
+        RigExecBakedRunStepBodyAndStamp(&B,&step,time);
         ++B.headOpsRun;
     }
     if (!verify || !sample) {
@@ -3491,9 +3488,9 @@ RigExecBakedRunLayoutTier(RigExecBakedProgramImpl *program, UsdTimeCode time,
     // Every handle against the layout the stage and the overlay describe
     // now, read afresh: a leaf route that missed an edit shows here.
     size_t mismatches = 0;
-    for (const uint32_t index : B.headOrder) {
-        const RigExecBakedHeadStep &step = B.headSteps[index];
-        if (step.kind != RigExecBakedHeadKind::SkinTopology) {
+    for (size_t index = 0; index < B.steps.size() && B.steps[index].isHead; ++index) {
+        const RigExecBakedStep &step = B.steps[index];
+        if (step.kind != RigExecBakedStepKind::SkinTopology) {
             continue;
         }
         const RigExecBakedProgramImpl::GeomRevision *revision =

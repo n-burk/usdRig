@@ -78,6 +78,12 @@ RigExecTestForEachSlotId(rigExec::fb::RigExecWireFile *file,
             for (uint32_t &slot : input->walk) {
                 visit(&slot);
             }
+            for (auto *list : {&input->propertyCandidates, &input->doubleCandidates})
+                for (auto &candidate : *list) visit(&candidate.slot);
+            if (input->rawFallbackSlot >= 0) {
+                uint32_t slot = uint32_t(input->rawFallbackSlot);
+                visit(&slot); input->rawFallbackSlot = int32_t(slot);
+            }
         }
     };
     const auto reads =
@@ -94,6 +100,11 @@ RigExecTestForEachSlotId(rigExec::fb::RigExecWireFile *file,
             *slot = int32_t(id);
         }
     };
+    for (auto &step : file->steps) {
+        for (auto &slot : step.headInputSlots) visit(&slot);
+        std::sort(step.headInputSlots.begin(), step.headInputSlots.end());
+        for (auto &input : step.headInputReads) read(&input);
+    }
     fb::RigExecWireDomainPose &pose = *file->pose;
     for (fb::RigExecWireLadder &ladder : pose.ladders) {
         reads({&ladder.restSpace, &ladder.defaultSpace, &ladder.posedSpace,

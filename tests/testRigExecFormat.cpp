@@ -31,6 +31,7 @@
 #include <cstdio>
 #include <cstring>
 #include <functional>
+#include <initializer_list>
 #include <memory>
 #include <string>
 #include <utility>
@@ -371,7 +372,7 @@ _PresentationBytes(const char *identifier = fb::PresentationIdentifier(),
 /// both forms, a presentation. Every floating-point field, value, pool and
 /// struct holds signed zeros, NaN payloads or denormals.
 RigExecWireFile
-_RichFile()
+_RichFileBody()
 {
     RigExecWireFile f = _MinimalFile();
     f.bakeTime = _SD(0);
@@ -809,6 +810,187 @@ _RichFile()
     return f;
 }
 
+// Legacy fixture region indices remain relative to this explicitly declared
+// format-9 head prefix. These helpers do not modify validation inputs.
+size_t
+_RegionBegin(const RigExecWireFile &f)
+{
+    size_t n = 0;
+    while (n < f.steps.size() && f.steps[n].isHead) ++n;
+    return n;
+}
+
+fb::RigExecWireStep &_RegionStep(RigExecWireFile &f, size_t n)
+{ return f.steps[_RegionBegin(f) + n]; }
+const fb::RigExecWireStep &_RegionStep(const RigExecWireFile &f, size_t n)
+{ return f.steps[_RegionBegin(f) + n]; }
+
+std::vector<int32_t>
+_RegionIds(const RigExecWireFile &f, std::initializer_list<int32_t> ids)
+{
+    std::vector<int32_t> result(ids);
+    for (auto &id : result) if (id >= 0) id += int32_t(_RegionBegin(f));
+    return result;
+}
+
+std::string
+_RegionDiagnostic(const RigExecWireFile &f, std::string text)
+{
+    const auto shift = [&](const std::string &marker) {
+        size_t at = 0;
+        while ((at = text.find(marker, at)) != std::string::npos) {
+            const size_t begin = at + marker.size();
+            size_t end = begin;
+            while (end < text.size() && text[end] >= '0' && text[end] <= '9') ++end;
+            if (end == begin) { at = begin; continue; }
+            const std::string number = std::to_string(std::stoul(text.substr(begin, end - begin)) + _RegionBegin(f));
+            text.replace(begin, end - begin, number);
+            at = begin + number.size();
+        }
+    };
+    shift("step "); shift("steps[");
+    return text;
+}
+
+void
+_AddFixtureHeads(RigExecWireFile &f)
+{
+    std::vector<fb::RigExecWireStep> heads;
+    // The rich fixture has exactly one float chain and one record.
+    f.propertyChains[0].versionBase = 0;
+    f.phasedConsumers[0].version = 2;
+    fb::RigExecWireStep base;
+    base.kind = fb::StepKind::PropertyRevision;
+    base.object = 0;
+    base.part = 0;
+    base.isHead = true;
+    base.headInputSlots = {2};
+    base.writes = {fb::SlotRange(fb::SlotDomain::PropertyResult, 0, 1)};
+    heads.push_back(base);
+    fb::RigExecWireStep revision = base;
+    revision.part = 1;
+    revision.headInputSlots = {0, 1, 2};
+    revision.reads = {fb::SlotRange(fb::SlotDomain::PropertyResult, 0, 1)};
+    revision.writes = {fb::SlotRange(fb::SlotDomain::PropertyResult, 1, 3)};
+    revision.preds = {0};
+    heads[0].succs = {1};
+    for (auto *read : {f.propertyChains[0].revisions[0].defaultWeight.get(),
+                       f.propertyChains[0].revisions[0].value.get()}) {
+        for (uint32_t slot : read->walk) {
+            RigExecWirePropertyInputCandidate candidate;
+            candidate.slot = slot;
+            candidate.raw = true;
+            read->propertyCandidates.push_back(candidate);
+        }
+    }
+    heads.push_back(revision);
+    if (!f.pose->composeGroups.empty()) {
+        const auto &group = f.pose->composeGroups[0];
+        fb::RigExecWireStep rest;
+        rest.isHead = true;
+        rest.kind = fb::StepKind::RestCompose;
+        rest.object = 0;
+        rest.part = 0;
+        rest.writes = {fb::SlotRange(fb::SlotDomain::Rest, group.begin, group.end)};
+        fb::RigExecWireStep ladder = rest;
+        ladder.kind = fb::StepKind::LadderCompose;
+        ladder.part = 1;
+        ladder.reads = rest.writes;
+        ladder.writes = {fb::SlotRange(fb::SlotDomain::Ladder, group.begin, group.end)};
+        for (int slot = group.begin; slot < group.end; ++slot) {
+            const auto &body = f.pose->ladders[size_t(slot)];
+            rest.headInputReads.insert(rest.headInputReads.end(), body.restAvars.begin(), body.restAvars.end());
+            rest.headInputReads.push_back(*body.restSpace);
+            ladder.headInputReads.push_back(*body.posedSpace);
+            ladder.headInputReads.push_back(*body.defaultSpace);
+            ladder.headInputReads.insert(ladder.headInputReads.end(), body.defaultAvars.begin(), body.defaultAvars.end());
+            ladder.headInputReads.push_back(*body.rotationOrder);
+        }
+        for (const auto &read : rest.headInputReads)
+            rest.headVaryingLeaves |= bool(read.flags & uint16_t(fb::InputReadFlags::Varying));
+        for (const auto &read : ladder.headInputReads)
+            ladder.headVaryingLeaves |= bool(read.flags & uint16_t(fb::InputReadFlags::Varying));
+        rest.succs = {3}; ladder.preds = {2};
+        heads.push_back(std::move(rest)); heads.push_back(std::move(ladder));
+        for (auto &step : f.steps) {
+            if (step.kind == fb::StepKind::ComposeSubtree)
+                step.reads.push_back(fb::SlotRange(fb::SlotDomain::Ladder, group.begin, group.end));
+            if (step.kind == fb::StepKind::Constraint || step.kind == fb::StepKind::FrameMatrix)
+                step.reads.push_back(fb::SlotRange(fb::SlotDomain::Rest, 0, 1));
+        }
+    }
+    const int32_t h = int32_t(heads.size());
+    for (auto &step : f.steps) {
+        for (auto &id : step.preds) if (id >= 0) id += h;
+        for (auto &id : step.succs) if (id >= 0) id += h;
+    }
+    for (auto &cluster : f.clustering->clusters)
+        for (auto &id : cluster.members) id += h;
+    for (auto &id : f.cones->varyingSteps) id += h;
+    for (auto &id : f.cones->overrideSteps) id += h;
+    for (size_t i = 0; i < heads.size(); ++i) heads[i].cluster = 0;
+    f.clustering->clusters[0].members.insert(f.clustering->clusters[0].members.begin(), heads.size(), 0);
+    for (size_t i = 0; i < heads.size(); ++i) f.clustering->clusters[0].members[i] = int32_t(i);
+    f.clustering->clusterOf.insert(f.clustering->clusterOf.begin(), heads.size(), 0);
+    heads.insert(heads.end(), f.steps.begin(), f.steps.end());
+    f.steps = std::move(heads);
+    const auto crossing = [&](RigExecWireInput *read) {
+        if (!read) return;
+        for (uint32_t slot : read->walk) {
+            if (slot != 1 && slot != 2) continue;
+            RigExecWirePropertyInputCandidate candidate;
+            candidate.slot = slot;
+            candidate.kind = uint8_t(slot == 1 ? fb::PropertyCandidateKind::PhasedRecord : fb::PropertyCandidateKind::ChainFinal);
+            candidate.version = slot == 1 ? 2 : 1;
+            candidate.raw = true;
+            read->propertyCandidates.push_back(candidate);
+        }
+    };
+    crossing(f.geometry->chains[0].revisions[0].defaultWeight.get());
+    crossing(f.geometry->chains[0].revisions[0].blendChannels[0].weightRead.get());
+    crossing(f.geometry->chains[0].revisions[0].blendChannels[0].samples[0].activationRead.get());
+    crossing(f.geometry->pathReads[3].read.get());
+}
+
+// A fixed skin layout is an explicit head producer even in fixture-only
+// exports. Called while constructing the valid fixture, before mutations.
+void
+_AddFixtureTopologyHead(RigExecWireFile &f)
+{
+    const size_t h = _RegionBegin(f);
+    for (auto &step : f.steps) {
+        for (auto &id : step.preds) if (id >= int32_t(h)) ++id;
+        for (auto &id : step.succs) if (id >= int32_t(h)) ++id;
+    }
+    for (auto &cluster : f.clustering->clusters)
+        for (auto &id : cluster.members) if (id >= int32_t(h)) ++id;
+    for (auto &id : f.cones->varyingSteps) if (id >= int32_t(h)) ++id;
+    for (auto &id : f.cones->overrideSteps) if (id >= int32_t(h)) ++id;
+    fb::RigExecWireStep topology;
+    topology.isHead = true;
+    topology.kind = fb::StepKind::SkinTopology;
+    topology.object = 0;
+    topology.part = 0;
+    topology.cluster = 0;
+    topology.writes = {fb::SlotRange(fb::SlotDomain::SkinTopology, 0, 1)};
+    const auto &body = f.geometry->chains[0].revisions[0];
+    for (int32_t slot : {body.jointIndicesSlot, body.jointWeightsSlot})
+        if (slot >= 0) topology.headInputSlots.push_back(uint32_t(slot));
+    std::sort(topology.headInputSlots.begin(), topology.headInputSlots.end());
+    f.steps.insert(f.steps.begin() + std::ptrdiff_t(h), topology);
+    f.clustering->clusterOf.insert(f.clustering->clusterOf.begin() + std::ptrdiff_t(h), 0);
+    auto &members = f.clustering->clusters[0].members;
+    members.insert(std::lower_bound(members.begin(), members.end(), int32_t(h)), int32_t(h));
+}
+
+RigExecWireFile
+_RichFile()
+{
+    RigExecWireFile f = _RichFileBody();
+    _AddFixtureHeads(f);
+    return f;
+}
+
 /// Makes the rich file's revision a plugin mover, with its entry and the
 /// frame bytes of a successful assembly.
 void
@@ -838,6 +1020,12 @@ _AddFailedPlugin(RigExecWireFile &file)
     revision.op = uint8_t(fb::RevisionOp::External);
     revision.binding = _Binding();
     revision.defaultWeight = _In(InputTag::Float, ReadMode::Resolved, {2});
+    RigExecWirePropertyInputCandidate candidate;
+    candidate.slot = 2;
+    candidate.kind = uint8_t(fb::PropertyCandidateKind::ChainFinal);
+    candidate.version = 1;
+    candidate.raw = true;
+    revision.defaultWeight->propertyCandidates.push_back(candidate);
     g.chains[0].revisions.push_back(std::move(revision));
     g.revisionIndex.push_back({0, 1});
     g.chainRevisionEnd[0] = 2;
@@ -958,8 +1146,8 @@ TestBitExactness()
 
     // F64 and F32 table fields.
     CHECK(_Same(o->bakeTime, file.bakeTime));
-    CHECK(_Same(o->steps[0].sizeUnits, file.steps[0].sizeUnits));
-    CHECK(_Same(o->steps[0].cost, file.steps[0].cost));
+    CHECK(_Same(_RegionStep(*o, 0).sizeUnits, _RegionStep(file, 0).sizeUnits));
+    CHECK(_Same(_RegionStep(*o, 0).cost, _RegionStep(file, 0).cost));
     CHECK(_Same(o->clustering->clusters[0].cost,
                 file.clustering->clusters[0].cost));
     CHECK(_Same(o->clustering->grainUs, file.clustering->grainUs));
@@ -1199,32 +1387,24 @@ TestOpenRefusals()
     wildRoot[3] = 0x0f;
     CHECK(!_Open(wildRoot, &why) && _Contains(why, "malformed"));
 
-    // The format version, named before any other table is read: the
-    // previous version, which holds no array inputs, is refused with a
-    // re-export message, every other one with a rebake message, and the
-    // current one opens.
+    // Every prior version lacks the promoted shared head tier and must be
+    // re-exported. Future versions still require a supported exporter.
     RigExecWireFile versioned = _RichFile();
-    for (const uint32_t version :
-         {3u, 4u, 5u, 6u, 7u, RigExecFormatVersion + 1}) {
+    for (uint32_t version = 0; version <= RigExecFormatVersion + 1; ++version) {
+        if (version == RigExecFormatVersion) continue;
         _context = "open refusals: version " + std::to_string(version);
         versioned.formatVersion = version;
-        const bool previous = version == 7u;
-        CHECK(!_Open(_PackUnchecked(versioned), &why) &&
-              _Contains(why, "format version " + std::to_string(version)) &&
-              _Contains(why, previous ? "re-export: array inputs"
-                                      : "rebake"));
-        CHECK(previous || !_Contains(why, "re-export"));
+        const std::string expected = "unsupported .rigexec format version " +
+            std::to_string(version) + " (this reader reads 9); " +
+            (version < RigExecFormatVersion ? "re-export: S3 head tier" : "rebake");
+        CHECK(!_Open(_PackUnchecked(versioned), &why) && why == expected);
     }
     _context = "open refusals";
-    versioned.formatVersion = 7;
-    CHECK(!_Open(_PackUnchecked(versioned), &why) &&
-          why == "unsupported .rigexec format version 7 (this reader reads "
-                 "8); re-export: array inputs");
     versioned.formatVersion = RigExecFormatVersion;
     std::vector<uint8_t> current;
     CHECK(_Write(versioned, &current) && _Open(current, &why) != nullptr);
-    std::printf("format versions: 3, 4, 5, 6 and %u refused with a rebake, "
-                "7 with a re-export message; %u writes and opens\n",
+    std::printf("format versions: 0 through 8 refused with a re-export, "
+                "%u with a rebake; %u writes and opens\n",
                 RigExecFormatVersion + 1, RigExecFormatVersion);
 
     // A verified buffer that breaks a rule.
@@ -1320,8 +1500,8 @@ TestValidationSmoke()
         std::string why;
         const bool ok = RigExecFormatValidate(file, &why);
         CHECK(!ok);
-        CHECK(_Contains(why, part));
-        if (ok || !_Contains(why, part)) {
+        CHECK(_Contains(why, _RegionDiagnostic(file, part)));
+        if (ok || !_Contains(why, _RegionDiagnostic(file, part))) {
             std::printf("  got: %s\n", ok ? "(accepted)" : why.c_str());
         }
         ++cases;
@@ -1434,7 +1614,7 @@ TestValidationSmoke()
            [](F &f) { f.constants->rotationSign = {8}; });
     // Steps, clusters, cones.
     expect("step cluster", "step 0 names cluster 1, which is no cluster",
-           [](F &f) { f.steps[0].cluster = 1; });
+           [](F &f) { _RegionStep(f, 0).cluster = 1; });
     expect("cone list cluster", "chain_base_clusters[0]",
            [](F &f) { f.cones->chainBaseClusters[0].v = {1}; });
     expect("cluster set words", "cones.always",
@@ -1613,7 +1793,11 @@ TestValidationSmoke()
 RigExecWireFile
 _GraphFile()
 {
-    RigExecWireFile f = _RichFile();
+    RigExecWireFile f = _RichFileBody();
+    f.propertyChains.clear();
+    f.phasedConsumers.clear();
+    f.pose->hasPropertyChains = false;
+    for (auto &slot : f.inputs) slot = fb::InputSlot(slot.name(), slot.value(), -1, -1, slot.type(), slot.flags());
     fb::RigExecWireStep later = f.steps[0];
     later.reads.clear();
     later.writes.clear();
@@ -1672,8 +1856,8 @@ TestStepGraph()
         F file = _GraphFile();
         mutate(file);
         const bool ok = RigExecFormatValidate(file, &why);
-        CHECK(!ok && why == text);
-        if (ok || why != text) {
+        CHECK(!ok && why == _RegionDiagnostic(file, text));
+        if (ok || why != _RegionDiagnostic(file, text)) {
             std::printf("  got '%s', expected '%s'\n",
                         ok ? "(accepted)" : why.c_str(), text.c_str());
         }
@@ -1685,15 +1869,15 @@ TestStepGraph()
         F file = _GraphFile();
         mutate(file);
         const bool opened = _Open(_PackUnchecked(file), &why) != nullptr;
-        CHECK(!opened && why == "invalid .rigexec: " + text);
-        if (opened || why != "invalid .rigexec: " + text) {
+        CHECK(!opened && why == "invalid .rigexec: " + _RegionDiagnostic(file, text));
+        if (opened || why != "invalid .rigexec: " + _RegionDiagnostic(file, text)) {
             std::printf("  got '%s', expected 'invalid .rigexec: %s'\n",
                         opened ? "(opened)" : why.c_str(), text.c_str());
         }
     };
     // The two the runtime relies on most: a predecessor flipped to a later
     // step, and a two-cluster cycle.
-    const auto flipped = [](F &f) { f.steps[1].preds = {2}; };
+    const auto flipped = [](F &f) { _RegionStep(f, 1).preds = {2}; };
     const auto cycle = [](F &f) {
         f.clustering->clusters[0].preds = {1};
         f.clustering->clusters[1].succs = {0};
@@ -1707,37 +1891,37 @@ TestStepGraph()
                "the cluster graph has a cycle through cluster 0", cycle);
     // Step edges.
     expect("pred on itself", "step 1 depends on itself",
-           [](F &f) { f.steps[1].preds = {1}; });
+           [](F &f) { _RegionStep(f, 1).preds = {1}; });
     expect("preds unsorted", "step 3 lists its predecessors out of order "
                              "or twice",
-           [](F &f) { f.steps[3].preds = {2, 0}; });
+           [](F &f) { _RegionStep(f, 3).preds = {2, 0}; });
     expect("preds repeated", "step 3 lists its predecessors out of order "
                              "or twice",
-           [](F &f) { f.steps[3].preds = {0, 0}; });
+           [](F &f) { _RegionStep(f, 3).preds = {0, 0}; });
     expect("succ earlier", "step 2 names earlier step 1 as a successor",
-           [](F &f) { f.steps[2].succs = {1, 3}; });
+           [](F &f) { _RegionStep(f, 2).succs = {1, 3}; });
     expect("pred without succ",
            "step 3 names predecessor 0, which does not name it as a "
            "successor",
-           [](F &f) { f.steps[0].succs = {1}; });
+           [](F &f) { _RegionStep(f, 0).succs = {1}; });
     expect("succ without pred",
            "step 1 names successor 3, which does not name it as a "
            "predecessor",
-           [](F &f) { f.steps[1].succs = {2, 3}; });
+           [](F &f) { _RegionStep(f, 1).succs = {2, 3}; });
     expect("source after a step",
            "source step 1 depends on step 0, which is not a source",
-           [](F &f) { f.steps[1].isSource = true; });
+           [](F &f) { _RegionStep(f, 1).isSource = true; });
     // Indices past their tables, refused before they are followed.
     expect("pred past the steps",
            "step 3 names predecessor 4, which is no step",
-           [](F &f) { f.steps[3].preds = {0, 4}; });
+           [](F &f) { _RegionStep(f, 3).preds = {0, 4}; });
     expect("negative pred", "step 1 names predecessor -1, which is no step",
-           [](F &f) { f.steps[1].preds = {-1}; });
+           [](F &f) { _RegionStep(f, 1).preds = {-1}; });
     expect("succ past the steps", "step 2 names successor 4, which is no step",
-           [](F &f) { f.steps[2].succs = {3, 4}; });
+           [](F &f) { _RegionStep(f, 2).succs = {3, 4}; });
     expect("cluster past the clusters",
            "step 2 names cluster 2, which is no cluster",
-           [](F &f) { f.steps[2].cluster = 2; });
+           [](F &f) { _RegionStep(f, 2).cluster = 2; });
     expect("cluster_of short", "the clustering places 3 steps; the file has 4",
            [](F &f) { f.clustering->clusterOf.pop_back(); });
     expect("member past the steps",
@@ -1780,7 +1964,7 @@ TestStepGraph()
            });
     // Producers, in playback order.
     const auto unproduced = [](F &f) {
-        f.steps[3].reads = {fb::SlotRange(fb::SlotDomain::PosedM, 0, 3)};
+        _RegionStep(f, 3).reads = {fb::SlotRange(fb::SlotDomain::PosedM, 0, 3)};
     };
     expect("read nothing writes",
            "step 3 reads PosedM slots [0, 3), which no earlier step writes",
@@ -1792,12 +1976,12 @@ TestStepGraph()
     expect("read before its writer",
            "step 1 reads PosedM slots [1, 2), which no earlier step writes",
            [](F &f) {
-               f.steps[1].reads = {fb::SlotRange(fb::SlotDomain::PosedM, 1, 2)};
+               _RegionStep(f, 1).reads = {fb::SlotRange(fb::SlotDomain::PosedM, 1, 2)};
            });
     expect("aggregate nothing writes",
            "step 3 reads Aggregate slots [0, 1), which no earlier step writes",
            [](F &f) {
-               f.steps[3].reads.push_back(
+               _RegionStep(f, 3).reads.push_back(
                    fb::SlotRange(fb::SlotDomain::Aggregate, 0, 1));
            });
     // Step 2 becomes a source with no predecessor. It still reads step 1's
@@ -1806,18 +1990,18 @@ TestStepGraph()
     expect("source reads a later-running write",
            "step 2 reads PosedM slots [0, 1), which no earlier step writes",
            [](F &f) {
-               f.steps[1].succs.clear();
-               f.steps[2].preds.clear();
-               f.steps[2].isSource = true;
-               f.steps[2].reads = {fb::SlotRange(fb::SlotDomain::PosedM, 0, 1)};
+               _RegionStep(f, 1).succs.clear();
+               _RegionStep(f, 2).preds.clear();
+               _RegionStep(f, 2).isSource = true;
+               _RegionStep(f, 2).reads = {fb::SlotRange(fb::SlotDomain::PosedM, 0, 1)};
            });
     // The domains a run holds before any step writes them need no producer.
     {
         _context = "step graph: unproduced source reads";
         F file = _GraphFile();
-        file.steps[3].reads.push_back(
+        _RegionStep(file, 3).reads.push_back(
             fb::SlotRange(fb::SlotDomain::Avars, 0, 11));
-        file.steps[3].reads.push_back(
+        _RegionStep(file, 3).reads.push_back(
             fb::SlotRange(fb::SlotDomain::ChainBase, 0, 1));
         why.clear();
         CHECK(RigExecFormatValidate(file, &why));
@@ -1828,21 +2012,21 @@ TestStepGraph()
     // The reserved values: the retired snapshot store is no source any
     // more, and neither its domain nor its step may appear at all.
     const auto finals = [](F &f) {
-        f.steps[2].kind = fb::StepKind::SnapshotFinals;
+        _RegionStep(f, 2).kind = fb::StepKind::SnapshotFinals;
     };
     expect("Snapshots read", "step 3 declares the retired Snapshots domain",
            [](F &f) {
-               f.steps[3].reads.push_back(
+               _RegionStep(f, 3).reads.push_back(
                    fb::SlotRange(fb::SlotDomain::Snapshots, 0, 3));
            });
     expect("Snapshots write", "step 1 declares the retired Snapshots domain",
            [](F &f) {
-               f.steps[1].writes.push_back(
+               _RegionStep(f, 1).writes.push_back(
                    fb::SlotRange(fb::SlotDomain::Snapshots, 0, 1));
            });
     expect("empty Snapshots range",
            "step 0 declares the retired Snapshots domain", [](F &f) {
-               f.steps[0].reads.push_back(
+               _RegionStep(f, 0).reads.push_back(
                    fb::SlotRange(fb::SlotDomain::Snapshots, 0, 0));
            });
     expect("SnapshotFinals step", "step 2 is a retired SnapshotFinals step",
@@ -2058,13 +2242,13 @@ TestSwitchOrder()
         F file = _SwitchFile();
         mutate(file);
         const bool ok = RigExecFormatValidate(file, &why);
-        CHECK(!ok && why == text);
-        if (ok || why != text) {
+        CHECK(!ok && why == _RegionDiagnostic(file, text));
+        if (ok || why != _RegionDiagnostic(file, text)) {
             std::printf("  got '%s', expected '%s'\n",
                         ok ? "(accepted)" : why.c_str(), text.c_str());
         }
         const bool opened = _Open(_PackUnchecked(file), &why) != nullptr;
-        CHECK(!opened && why == "invalid .rigexec: " + text);
+        CHECK(!opened && why == "invalid .rigexec: " + _RegionDiagnostic(file, text));
     };
     const std::string later =
         "is switched by pose.space_switches[1], which is not stored before "
@@ -2119,11 +2303,11 @@ _VolumeFile()
     place.cluster = 0;
     place.reads = {fb::SlotRange(fb::SlotDomain::PoseFin, 0, 1)};
     place.writes = {fb::SlotRange(fb::SlotDomain::WeightFrames, 0, 1)};
-    place.preds = {0};
-    f.steps[0].succs = {1};
+    place.preds = _RegionIds(f, {0});
+    _RegionStep(f, 0).succs = _RegionIds(f, {1});
     f.steps.push_back(std::move(place));
-    f.clustering->clusters[0].members = {0, 1};
-    f.clustering->clusterOf = {0, 0};
+    f.clustering->clusters[0].members.push_back(int32_t(f.steps.size() - 1));
+    f.clustering->clusterOf.push_back(0);
     return f;
 }
 
@@ -2158,9 +2342,9 @@ TestVolumePlacementSteps()
     std::vector<uint8_t> bytes;
     CHECK(_Write(valid, &bytes));
     const auto opened = _Open(bytes, &why);
-    CHECK(opened && opened->steps.size() == 2 &&
-          opened->steps[1].kind == fb::StepKind::VolumePlacements &&
-          opened->steps[1].object == 0 && opened->steps[1].part == 1);
+    CHECK(opened && opened->steps.size() == _RegionBegin(*opened) + 2 &&
+          _RegionStep(*opened, 1).kind == fb::StepKind::VolumePlacements &&
+          _RegionStep(*opened, 1).object == 0 && _RegionStep(*opened, 1).part == 1);
     std::vector<uint8_t> again;
     CHECK(opened && _Write(*opened, &again) && again == bytes);
 
@@ -2173,13 +2357,13 @@ TestVolumePlacementSteps()
         F file = _VolumeFile();
         mutate(file);
         const bool ok = RigExecFormatValidate(file, &why);
-        CHECK(!ok && why == text);
-        if (ok || why != text) {
+        CHECK(!ok && why == _RegionDiagnostic(file, text));
+        if (ok || why != _RegionDiagnostic(file, text)) {
             std::printf("  got '%s', expected '%s'\n",
                         ok ? "(accepted)" : why.c_str(), text.c_str());
         }
     };
-    const auto wholeMap = [](F &f) { f.steps[1].part = -1; };
+    const auto wholeMap = [](F &f) { _RegionStep(f, 1).part = -1; };
     const std::string retired = "step 1 (VolumePlacements every volume "
                                 "weight) is the retired whole-map placement "
                                 "(part -1)";
@@ -2190,48 +2374,48 @@ TestVolumePlacementSteps()
         F file = _VolumeFile();
         wholeMap(file);
         CHECK(!_Open(_PackUnchecked(file), &why) &&
-              why == "invalid .rigexec: " + retired);
+              why == "invalid .rigexec: " + _RegionDiagnostic(file, retired));
     }
     expect("another part",
            "step 1 (VolumePlacements every volume weight) has part 0, "
            "which is no VolumePlacements form",
-           [](F &f) { f.steps[1].part = 0; });
+           [](F &f) { _RegionStep(f, 1).part = 0; });
     expect("no volume slot",
            "step 1 (VolumePlacements /Rig/Slot0) places slot 1, which is no "
            "volume slot",
            [](F &f) {
-               f.steps[1].object = 1;
-               f.steps[1].reads = {
+               _RegionStep(f, 1).object = 1;
+               _RegionStep(f, 1).reads = {
                    fb::SlotRange(fb::SlotDomain::PoseFin, 1, 2)};
-               f.steps[1].writes = {
+               _RegionStep(f, 1).writes = {
                    fb::SlotRange(fb::SlotDomain::WeightFrames, 1, 2)};
            });
     expect("slot past the slots",
            "step 1 (VolumePlacements every volume weight) places slot 2, "
            "which is no volume slot",
-           [](F &f) { f.steps[1].object = 2; });
+           [](F &f) { _RegionStep(f, 1).object = 2; });
     expect("another volume's slot",
            "step 1 (VolumePlacements /Rig/Ctl) writes other than "
            "WeightFrames[0]",
            [](F &f) {
-               f.steps[1].writes = {
+               _RegionStep(f, 1).writes = {
                    fb::SlotRange(fb::SlotDomain::WeightFrames, 1, 2)};
            });
     expect("more than its slot",
            "step 1 (VolumePlacements /Rig/Ctl) writes other than "
            "WeightFrames[0]",
            [](F &f) {
-               f.steps[1].writes = {
+               _RegionStep(f, 1).writes = {
                    fb::SlotRange(fb::SlotDomain::WeightFrames, 0, 2)};
            });
     expect("no write",
            "step 1 (VolumePlacements /Rig/Ctl) writes other than "
            "WeightFrames[0]",
-           [](F &f) { f.steps[1].writes.clear(); });
+           [](F &f) { _RegionStep(f, 1).writes.clear(); });
     expect("a second step of one volume",
            "step 2 (VolumePlacements /Rig/Ctl) places volume slot 0 again; "
            "step 1 (VolumePlacements /Rig/Ctl) already does",
-           [](F &f) { _AppendStep(f, f.steps[1]); });
+           [](F &f) { _AppendStep(f, _RegionStep(f, 1)); });
     expect("a volume with no step",
            "volume slot 1 (/Rig/Slot0) has no VolumePlacements step",
            [](F &f) { f.constants->noScaleAvars[1] = 1; });
@@ -2239,7 +2423,7 @@ TestVolumePlacementSteps()
     // write would break.
     expect("a placement step of the retired kind",
            "step 1 is a retired SnapshotFinals step",
-           [](F &f) { f.steps[1].kind = fb::StepKind::SnapshotFinals; });
+           [](F &f) { _RegionStep(f, 1).kind = fb::StepKind::SnapshotFinals; });
     expect("a weight packet writing WeightFrames",
            "step 2 (WeightPacket /Rig/W) writes WeightFrames, which only a "
            "VolumePlacements step writes",
@@ -2277,11 +2461,11 @@ TestVolumePlacementSteps()
                _AppendStep(f, reader);
                // Swap the two last steps: the reader runs before the
                // placement it reads.
-               std::swap(f.steps[1], f.steps[2]);
-               f.steps[0].succs = {2};
-               f.steps[1].cluster = f.steps[2].cluster = 0;
-               f.steps[1].preds.clear();
-               f.steps[2].preds = {0};
+               std::swap(_RegionStep(f, 1), _RegionStep(f, 2));
+               _RegionStep(f, 0).succs = _RegionIds(f, {2});
+               _RegionStep(f, 1).cluster = _RegionStep(f, 2).cluster = 0;
+               _RegionStep(f, 1).preds.clear();
+               _RegionStep(f, 2).preds = _RegionIds(f, {0});
            });
     std::printf("volume placements: the per-volume form accepted, %d "
                 "violations refused\n",
@@ -2296,10 +2480,10 @@ TestStepLabels()
     _context = "step labels";
     // The rich file's compose step names a group the file does not hold.
     const RigExecWireFile rich = _RichFile();
-    CHECK(RigExecFormatStepLabel(rich, 0) == "ComposeSubtree 0");
-    CHECK(RigExecFormatStepLabel(rich, 1) == "1");
+    CHECK(RigExecFormatStepLabel(rich, _RegionBegin(rich)) == "ComposeSubtree 0");
+    CHECK(RigExecFormatStepLabel(rich, _RegionBegin(rich) + 1) == std::to_string(_RegionBegin(rich) + 1));
     const RigExecWireFile volume = _VolumeFile();
-    CHECK(RigExecFormatStepLabel(volume, 1) == "VolumePlacements /Rig/Ctl");
+    CHECK(RigExecFormatStepLabel(volume, _RegionBegin(volume) + 1) == "VolumePlacements /Rig/Ctl");
 
     size_t checked = 3;
     const auto label = [&](const char *want,
@@ -2307,7 +2491,7 @@ TestStepLabels()
                                &mutate) {
         RigExecWireFile file = _Copy(rich);
         mutate(file);
-        const std::string got = RigExecFormatStepLabel(file, 0);
+        const std::string got = RigExecFormatStepLabel(file, _RegionBegin(file));
         ++checked;
         CHECK(got == want);
         if (got != want) {
@@ -2316,8 +2500,8 @@ TestStepLabels()
     };
     using fb::StepKind;
     label("VolumePlacements every volume weight", [](RigExecWireFile &f) {
-        f.steps[0].kind = StepKind::VolumePlacements;
-        f.steps[0].part = -1;
+        _RegionStep(f, 0).kind = StepKind::VolumePlacements;
+        _RegionStep(f, 0).part = -1;
     });
     const auto group = [](RigExecWireFile &f) {
         f.pose->composeGroups.resize(1);
@@ -2327,66 +2511,66 @@ TestStepLabels()
     label("ComposeSubtree /Rig/Ctl", group);
     label("ComposeSubtree 7", [&group](RigExecWireFile &f) {
         group(f);
-        f.steps[0].object = 7;
+        _RegionStep(f, 0).object = 7;
     });
     label("Solve /Rig/Ctl",
-          [](RigExecWireFile &f) { f.steps[0].kind = StepKind::Solve; });
+          [](RigExecWireFile &f) { _RegionStep(f, 0).kind = StepKind::Solve; });
     label("Constraint /Rig/Ctl", [](RigExecWireFile &f) {
-        f.steps[0].kind = StepKind::Constraint;
+        _RegionStep(f, 0).kind = StepKind::Constraint;
     });
     label("CommitApply batch 0", [](RigExecWireFile &f) {
-        f.steps[0].kind = StepKind::CommitApply;
+        _RegionStep(f, 0).kind = StepKind::CommitApply;
         f.pose->commits[0].moverPath = 0;
     });
     label("ProviderMatrix /Rig/Ctl final", [](RigExecWireFile &f) {
-        f.steps[0].kind = StepKind::ProviderMatrix;
-        f.steps[0].part = 1;
+        _RegionStep(f, 0).kind = StepKind::ProviderMatrix;
+        _RegionStep(f, 0).part = 1;
     });
     label("ProviderMatrix /Rig/Ctl base", [](RigExecWireFile &f) {
-        f.steps[0].kind = StepKind::ProviderMatrix;
-        f.steps[0].part = 0;
+        _RegionStep(f, 0).kind = StepKind::ProviderMatrix;
+        _RegionStep(f, 0).part = 0;
     });
     label("SnapshotFinals every provider", [](RigExecWireFile &f) {
-        f.steps[0].kind = StepKind::SnapshotFinals;
+        _RegionStep(f, 0).kind = StepKind::SnapshotFinals;
     });
     label("PoseInterpolator /Rig/Ctl", [](RigExecWireFile &f) {
-        f.steps[0].kind = StepKind::PoseInterpolator;
+        _RegionStep(f, 0).kind = StepKind::PoseInterpolator;
     });
     label("WeightPacket /Rig/W", [](RigExecWireFile &f) {
-        f.steps[0].kind = StepKind::WeightPacket;
+        _RegionStep(f, 0).kind = StepKind::WeightPacket;
     });
     label("RevisionFuse /Rig/Mover", [](RigExecWireFile &f) {
-        f.steps[0].kind = StepKind::RevisionFuse;
+        _RegionStep(f, 0).kind = StepKind::RevisionFuse;
     });
     label("ChainStatus /Rig/Mesh.points", [](RigExecWireFile &f) {
-        f.steps[0].kind = StepKind::ChainStatus;
+        _RegionStep(f, 0).kind = StepKind::ChainStatus;
     });
     label("Derived /Rig/Mesh.points", [](RigExecWireFile &f) {
-        f.steps[0].kind = StepKind::Derived;
+        _RegionStep(f, 0).kind = StepKind::Derived;
     });
     label("InfluenceFold 3", [](RigExecWireFile &f) {
-        f.steps[0].kind = StepKind::InfluenceFold;
-        f.steps[0].object = 3;
+        _RegionStep(f, 0).kind = StepKind::InfluenceFold;
+        _RegionStep(f, 0).object = 3;
     });
     // A frame record names its provider and the writer it records after;
     // an object past the records and a provider past the slots keep their
     // numbers.
     const auto record = [](RigExecWireFile &f) {
-        f.steps[0].kind = StepKind::FrameMatrix;
+        _RegionStep(f, 0).kind = StepKind::FrameMatrix;
         f.pose->frameRecords = {fb::FrameRecord(0, 0, 0, -1, 1, _pMover)};
     };
     label("FrameMatrix /Rig/Ctl after /Rig/Mover", record);
     label("FrameMatrix record 1", [&record](RigExecWireFile &f) {
         record(f);
-        f.steps[0].object = 1;
+        _RegionStep(f, 0).object = 1;
     });
     label("FrameMatrix record -1", [&record](RigExecWireFile &f) {
         record(f);
-        f.steps[0].object = -1;
+        _RegionStep(f, 0).object = -1;
     });
     label("FrameMatrix slot 4 after /Rig/Mover",
           [](RigExecWireFile &f) {
-              f.steps[0].kind = StepKind::FrameMatrix;
+              _RegionStep(f, 0).kind = StepKind::FrameMatrix;
               f.pose->frameRecords = {
                   fb::FrameRecord(4, 0, -1, 0, 1, _pMover)};
           });
@@ -2403,7 +2587,7 @@ TestStepLabels()
 RigExecWireFile
 _RecordFile(bool solver = false)
 {
-    RigExecWireFile f = _RichFile();
+    RigExecWireFile f = _RichFileBody();
     _AddSlots(f, 1);
     f.pose->composeGroups.resize(1);
     f.pose->composeGroups[0].begin = 0;
@@ -2431,6 +2615,7 @@ _RecordFile(bool solver = false)
     _AppendStep(f, std::move(frame));
     f.pose->frameRecords = {
         fb::FrameRecord(0, 0, solver ? -1 : 0, solver ? 0 : -1, 2, _pCtl)};
+    _AddFixtureHeads(f);
     return f;
 }
 
@@ -2438,6 +2623,7 @@ _RecordFile(bool solver = false)
 void
 _DropStep(RigExecWireFile &f, size_t step)
 {
+    step += _RegionBegin(f);
     f.steps.erase(f.steps.begin() + std::ptrdiff_t(step));
     f.clustering->clusterOf.pop_back();
     std::vector<int32_t> &members = f.clustering->clusters[0].members;
@@ -2607,7 +2793,8 @@ TestPhaseTables()
         fb::RigExecWireStep step;
         step.kind = fb::StepKind::Constraint;
         step.object = 1;
-        step.reads = {fb::SlotRange(fb::SlotDomain::PoseFin, 0, 1)};
+        step.reads = {fb::SlotRange(fb::SlotDomain::PoseFin, 0, 1),
+                      fb::SlotRange(fb::SlotDomain::Rest, 0, 1)};
         step.writes = {fb::SlotRange(fb::SlotDomain::CommitTable, 1, 2)};
         _AppendStep(f, std::move(step));
         f.pose->frameRecords[0] = fb::FrameRecord(0, 0, 0, -1, 4, _pCtl);
@@ -2633,7 +2820,7 @@ TestPhaseTables()
         fuse.writes = {fb::SlotRange(fb::SlotDomain::RevisionDone, 0, 1),
                        fb::SlotRange(fb::SlotDomain::ChainDirty, 0, 1)};
         _AppendStep(f, std::move(fuse));
-        fb::RigExecWireStep reader = f.steps[5];
+        fb::RigExecWireStep reader = _RegionStep(f, 5);
         reader.reads.push_back(
             fb::SlotRange(fb::SlotDomain::RevisionDone, 0, 1));
         reader.reads.push_back(
@@ -2680,8 +2867,8 @@ TestPhaseTables()
         ++cases;
         const F file = make();
         const bool ok = RigExecFormatValidate(file, &why);
-        CHECK(!ok && why == text);
-        if (ok || why != text) {
+        CHECK(!ok && why == _RegionDiagnostic(file, text));
+        if (ok || why != _RegionDiagnostic(file, text)) {
             std::printf("  got '%s', expected '%s'\n",
                         ok ? "(accepted)" : why.c_str(), text.c_str());
         }
@@ -2767,10 +2954,10 @@ TestPhaseTables()
     expect("two steps for one record",
            "step 3 (FrameMatrix /Rig/Ctl after /Rig/Ctl) evaluates the same "
            "frame record as " + frame,
-           record([](F &f) { _AppendStep(f, f.steps[2]); }));
+           record([](F &f) { _AppendStep(f, _RegionStep(f, 2)); }));
     expect("object past the records",
            "step 2 (FrameMatrix record 1) names frame record 1 of 1",
-           record([](F &f) { f.steps[2].object = 1; }));
+           record([](F &f) { _RegionStep(f, 2).object = 1; }));
     // A record's own fields out of range: named by its FrameMatrix step,
     // and by the record's row only when no step evaluates it.
     expect("record past the slots",
@@ -2803,12 +2990,12 @@ TestPhaseTables()
            }));
     expect("no CommitTable read",
            frame + " does not declare CommitTable[0]", record([](F &f) {
-               f.steps[2].reads = {
+               _RegionStep(f, 2).reads = {
                    fb::SlotRange(fb::SlotDomain::PoseFin, 0, 1)};
            }));
     expect("no PoseFin read", frame + " does not declare PoseFin[0]",
            record([](F &f) {
-               f.steps[2].reads = {
+               _RegionStep(f, 2).reads = {
                    fb::SlotRange(fb::SlotDomain::CommitTable, 0, 1)};
            }));
     // Ahead of its commit: the version is the compose's, so only the
@@ -2821,7 +3008,7 @@ TestPhaseTables()
            "it",
            record([&](F &f) {
                composeVersion(f);
-               std::swap(f.steps[1], f.steps[2]);
+               std::swap(_RegionStep(f, 1), _RegionStep(f, 2));
            }));
     expect("commit with no step",
            "step 1 (FrameMatrix /Rig/Ctl after /Rig/Ctl) reads the exit of "
@@ -2834,25 +3021,25 @@ TestPhaseTables()
     // commit missing its first step would break.
     expect("a commit step of the retired kind",
            "step 1 is a retired SnapshotFinals step", record([](F &f) {
-               f.steps[1].kind = fb::StepKind::SnapshotFinals;
+               _RegionStep(f, 1).kind = fb::StepKind::SnapshotFinals;
            }));
     expect("another kind writing FrameMatrix",
            "step 1 (Constraint /Rig/Ctl) writes FrameMatrix, which only a "
            "FrameMatrix step writes",
            record([](F &f) {
-               f.steps[1].writes.push_back(
+               _RegionStep(f, 1).writes.push_back(
                    fb::SlotRange(fb::SlotDomain::FrameMatrix, 0, 1));
            }));
     expect("FrameMatrix writing more than its record",
            frame + " writes other than FrameMatrix[0]", record([](F &f) {
-               f.steps[2].writes = {
+               _RegionStep(f, 2).writes = {
                    fb::SlotRange(fb::SlotDomain::FrameMatrix, 0, 2)};
            }));
     expect("two composes of one version",
            "step 3 (ComposeSubtree /Rig/Ctl) writes PoseFin version 0, which "
            "step 0 (ComposeSubtree /Rig/Ctl) writes too",
            record([](F &f) {
-               fb::RigExecWireStep again = f.steps[0];
+               fb::RigExecWireStep again = _RegionStep(f, 0);
                again.overrideInputs.clear();
                _AppendStep(f, std::move(again));
            }));
@@ -2888,11 +3075,11 @@ TestPhaseTables()
            }));
     expect("fold without its FrameMatrix read",
            fold + " does not declare FrameMatrix[0]",
-           phased([](F &f) { f.steps[3].reads.clear(); }));
+           phased([](F &f) { _RegionStep(f, 3).reads.clear(); }));
     expect("records with no fold",
            "geometry.chains[0].revisions[0]: frame records with no "
            "InfluenceFold step to read them",
-           phased([](F &f) { f.steps[3].kind = fb::StepKind::RevisionChunk; }));
+           phased([](F &f) { _RegionStep(f, 3).kind = fb::StepKind::RevisionChunk; }));
 
     // Point bindings.
     expect("candidate chain past the chains",
@@ -2953,7 +3140,7 @@ TestPhaseTables()
     expect("reader without its ChainPoints read",
            reader + " does not declare ChainPoints[0] for /Rig/Mesh.points",
            phased([](F &f) {
-               f.steps[5].reads = {fb::SlotRange(
+               _RegionStep(f, 5).reads = {fb::SlotRange(
                    fb::SlotDomain::RevisionTransforms, 0, 1)};
            }));
     expect("version reader without its ChainDirty read",
@@ -2961,19 +3148,19 @@ TestPhaseTables()
            "ChainDirty[0] for /Rig/Mesh.points",
            phased([&](F &f) {
                version(f);
-               f.steps[6].reads.pop_back();
+               _RegionStep(f, 6).reads.pop_back();
            }));
     expect("derived reader without its ChainPoints read",
            "step 6 (Derived /Rig/Mesh.points) does not declare ChainPoints[0] "
            "for /Rig/Mesh.points",
            phased([&](F &f) {
                derivedReader(f);
-               f.steps[6].reads.clear();
+               _RegionStep(f, 6).reads.clear();
            }));
     expect("bindings with no reader",
            "geometry.chains[0].revisions[0]: point bindings with no "
            "RevisionStatic step to read them",
-           phased([](F &f) { f.steps[5].kind = fb::StepKind::RevisionChunk; }));
+           phased([](F &f) { _RegionStep(f, 5).kind = fb::StepKind::RevisionChunk; }));
     // A blend sample's binding.
     const std::string sample = "blend_channels[0].samples[0]";
     expect("sample binding on a base-phase sample",
@@ -3025,10 +3212,10 @@ TestPhaseTables()
         laterCommit(file);
         file.pose->frameRecords[0] = fb::FrameRecord(0, 0, 0, -1, 2, _pCtl);
         CHECK(!_Open(_PackUnchecked(file), &why) &&
-              why == "invalid .rigexec: " + frame +
+              why == "invalid .rigexec: " + _RegionDiagnostic(file, frame +
                          " is bound to PoseFin version 2 of /Rig/Ctl, which "
                          "step 3 (Constraint /Rig/Mover) writes at or after "
-                         "it");
+                         "it"));
     }
     std::printf("phase tables: records, lists and bindings accepted and "
                 "round-tripped, %d violations refused\n",
@@ -3722,6 +3909,7 @@ TestChunkTables()
         r.partitionIndexCount = 4;
         r.partitionPointCount = 2;
         f.geometry->revisionChunkCount = {2};
+        _AddFixtureTopologyHead(f);
         return f;
     };
     {
@@ -3749,6 +3937,7 @@ TestChunkTables()
         r.partitionTopology =
             std::make_unique<fb::RigExecWireSkinTopology>(raw);
         r.partitionIndexCount = 5;
+        r.chunks[0].key = {0, 1};
         why.clear();
         CHECK(RigExecFormatValidate(f, &why));
         if (!why.empty()) {
@@ -4011,6 +4200,7 @@ _ArrayFile()
     g.pathReads.back().value->array = 1;
     g.pathReads.push_back(read(_pSt, false, InputTag::Vec2fArray,
                                ReadMode::Resolved, _sSt, _vNoVec2fs));
+    _AddFixtureTopologyHead(f);
     return f;
 }
 
@@ -4815,7 +5005,7 @@ TestCorruptionList()
         mutate(file);
         why.clear();
         const bool named =
-            !_Open(_PackUnchecked(file), &why) && _Contains(why, part);
+            !_Open(_PackUnchecked(file), &why) && _Contains(why, _RegionDiagnostic(file, part));
         if (!named) {
             std::printf("  got: %s\n", why.empty() ? "(accepted)" : why.c_str());
         }
@@ -4956,6 +5146,8 @@ TestCorruptions()
                 opened, rounds);
 }
 
+#include "rigExecHeadFormatCases.h"
+
 }  // namespace
 
 int
@@ -4979,6 +5171,12 @@ main()
     TestRawTopology();
     TestChunkTables();
     TestArrayInputs();
+    TestHeadFormatCases();
+    TestHeadComposeFormatCases();
+    TestHeadDoubleFormatCases();
+    TestHeadEnvelopeFormatCases();
+    TestHeadChunkFormatCases();
+    TestHeadTopologyFormatCases();
     TestBoundedOpen();
     TestPathOrder();
     TestDeepPaths();

@@ -15,7 +15,9 @@
 //  * Path ids index File.paths (0 = none). Value ids index File.values
 //    (0 = Double +0.0). Pool ids index the typed array pools (0 = the empty
 //    array). Table indices use -1 for none.
-//  * Input slot ids index File.inputs; only Input.walk,
+//  * Input slot ids index File.inputs: Input.walk, candidate.slot,
+//    Input.raw_fallback_slot, Step.head_input_slots and recursive
+//    Step.head_input_reads bindings,
 //    PropertyChain.target, PhasedConsumer.consumer, PhasedConsumer.hops,
 //    Chain.base_slot, Revision.joint_indices_slot and joint_weights_slot,
 //    and WeightObject.values_slot, indices_slot, oracle_samples_slot and
@@ -44,6 +46,8 @@ enum InputTag : ubyte { Double = 0, Float = 1, Bool = 2, Int = 3,
                         Matrix4d = 4, Token = 5, Vec3d = 6, Vec3f = 7,
                         IntArray = 8, FloatArray = 9, DoubleArray = 10,
                         Vec2fArray = 11, Vec3fArray = 12 }
+
+enum PropertyCandidateKind : ubyte { SlotOnly=0, ChainFinal=1, PhasedRecord=2 }
 
 /// Where an array Value's elements live.
 enum ArraySource : ubyte {
@@ -103,7 +107,7 @@ enum SlotDomain : ubyte { Avars = 0, PoseBase, PoseFin, PosedM, FinalMatrix,
   BaseMatrix, Aggregate, SolverPoints, Candidates, CommitTable, CommitDelta,
   CommitStaging, ConstraintDelta, PropertyResult, ChainBase, RevisionPacket,
   RevisionTransforms, RevisionOut, RevisionDone, ChainDirty, ChainPoints,
-  DerivedOut, WeightPacket, WeightFrames, PoseWeight, Snapshots, FrameMatrix }
+  DerivedOut, WeightPacket, WeightFrames, PoseWeight, Snapshots, FrameMatrix, Rest, Ladder, SkinTopology }
 
 /// RigExecBakedStepKind, in the same order. SnapshotFinals (8) is reserved:
 /// never written, and Open refuses a file that holds one.
@@ -111,7 +115,7 @@ enum StepKind : ubyte { ComposeSubtree = 0, Solve, SolverCommit, Constraint,
   CommitDelta, PropagateChunk, CommitApply, ProviderMatrix, SnapshotFinals,
   PoseInterpolator, VolumePlacements, WeightPacket, InfluenceFold,
   RevisionStatic, RevisionChunk, RevisionFuse, ChainStatus, Derived,
-  FrameMatrix }
+  FrameMatrix, PropertyRevision, RestCompose, LadderCompose, SkinTopology }
 
 /// RigExecBakedSlotKind.
 enum SlotKind : ubyte { FirstFramePose = 0, XformDerived = 1 }
@@ -210,6 +214,11 @@ struct SplineIkParams (native_type: "::rigExec::RigExecWireSplineIkParams",
                        native_type_pack_name: "SplineIkParams") {
   preserve_volume: double; mid_follow_weight: double; roll: double;
   twist: double; min_length_ratio: double; aim_root_tangent: bool; }
+/// One ordered property-reader hop; version -1 for SlotOnly.
+struct PropertyInputCandidate (native_type: "::rigExec::RigExecWirePropertyInputCandidate",
+  native_type_pack_name: "PropertyInputCandidate") {
+  slot: uint; kind: PropertyCandidateKind; version: int; raw: bool;
+}
 /// One half-open run of slots of one domain.
 struct SlotRange { domain: SlotDomain; begin: uint; end: uint; }
 /// One provider frame as one writer of its stack (a constraint or a solver
@@ -313,6 +322,11 @@ table Input {
   /// Baked, Varying and not LongWay: index into `walk` of the attribute the
   /// program's query is pinned to; -1 otherwise.
   selected: short = -1;
+  /// Native walk order; overlays forward, allowed raw leaves backward.
+  property_candidates: [PropertyInputCandidate];
+  /// Separate double recursion of a Float read, narrowed once.
+  double_candidates: [PropertyInputCandidate];
+  raw_fallback_slot: int = -1;
 }
 
 // -------------------------------------------------------------- slot meta
@@ -389,6 +403,14 @@ table Step {
   preds: [int];
   succs: [int];
   is_source: bool;
+  is_head: bool;
+  /// Full internal slot IDs consulted by the head memo.
+  head_input_slots: [uint];
+  head_input_reads: [Input] (native_inline);
+  head_varying_leaves: bool;
+  head_always_runs: bool;
+  /// (PropertyResult version, phased-consumer index), for shadow gating.
+  shadowed_reads: [IntPair];
   external_reads: bool;
   varying_inputs: bool;
   resolved_input_reads: bool;
@@ -1209,6 +1231,7 @@ table PropertyRevision {
 /// mover moving it applies, in order. property_chains is in dependency
 /// order.
 table PropertyChain {
+  version_base: uint;
   /// Slot id of the target; the base is its raw value of the chain's type.
   target: uint;
   value_type: PropertyValueType;
@@ -1220,6 +1243,7 @@ table PropertyChain {
 /// double when the types differ. Grouped by chain, in the evaluator's order
 /// within each chain.
 table PhasedConsumer {
+  version: uint;
   chain: uint;
   /// Slot id of the consuming attribute.
   consumer: uint;

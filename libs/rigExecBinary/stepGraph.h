@@ -1,10 +1,12 @@
 // The step and cluster graph a .rigexec carries, checked once per load.
 // Playback walks the steps in index order (source steps first, in index
-// order) and dirties whole clusters, so a file is refused unless that walk
-// is a topological order of its step graph, every slot a step reads has
-// been written by then, and its cluster graph is an acyclic quotient of
-// the step graph. The file validator (RigExecFormatValidate, which every
-// Open runs) calls RigExecStepGraphError, so the bake's self-check and the
+// order) and dirties whole clusters, so a file is refused unless it names
+// no retired step kind or slot domain, that walk is a topological order of
+// its step graph, every slot a step reads has been written by then, and its
+// cluster graph is an acyclic quotient of the step graph. The file
+// validator (RigExecFormatValidate, which every Open runs) calls
+// RigExecStepGraphReservedError ahead of its step rules and
+// RigExecStepGraphError after them, so the bake's self-check and the
 // runtime refuse a bad graph in the same words. USD-free and header-only.
 // On a valid file it allocates the cluster sort's two count-sized vectors,
 // the walk order, and one map node per run of written slots.
@@ -35,17 +37,14 @@ struct RigExecStepGraphRange {
 /// Whether a domain's slots hold a value before any step of a run writes
 /// them, so a step may read them with no producer: the sources the
 /// prologue fills (avars, property-chain results, chain bases and solver
-/// points; RigExecBakedIsSourceDomain), and the snapshot store, whose read
-/// names every earlier step whether or not it recorded.
+/// points; RigExecBakedIsSourceDomain).
 inline bool
 RigExecStepGraphDomainHoldsValue(uint8_t domain)
 {
     switch (fb::SlotDomain(domain)) {
     case fb::SlotDomain::Avars:
-    case fb::SlotDomain::PropertyResult:
     case fb::SlotDomain::ChainBase:
     case fb::SlotDomain::SolverPoints:
-    case fb::SlotDomain::Snapshots:
         return true;
     default:
         return false;
@@ -91,6 +90,10 @@ DomainName(uint8_t domain)
     case fb::SlotDomain::WeightFrames: return "WeightFrames";
     case fb::SlotDomain::PoseWeight: return "PoseWeight";
     case fb::SlotDomain::Snapshots: return "Snapshots";
+    case fb::SlotDomain::FrameMatrix: return "FrameMatrix";
+    case fb::SlotDomain::Rest: return "Rest";
+    case fb::SlotDomain::Ladder: return "Ladder";
+    case fb::SlotDomain::SkinTopology: return "SkinTopology";
     }
     return "domain " + Text(domain);
 }
@@ -216,10 +219,43 @@ InverseError(const Nodes &nodes, Forward forward, Backward backward,
 
 }  // namespace rigExecStepGraphDetail
 
+/// Empty when no step of \p steps is of the reserved SnapshotFinals kind
+/// or reads or writes the reserved Snapshots domain, whose store is gone;
+/// otherwise the first such step. \p rangeOf as RigExecStepGraphError's.
+/// The file validator runs it straight after its range checks on kinds
+/// and domains, ahead of every rule about what a step of a given kind
+/// reads or writes: nothing such a rule says matters if the file is of a
+/// shape playback no longer has.
+template <class Step, class RangeOf>
+std::string
+RigExecStepGraphReservedError(const std::vector<Step> &steps,
+                              RangeOf rangeOf)
+{
+    const auto stepName = [](size_t s) {
+        return "step " + rigExecStepGraphDetail::Text(int64_t(s));
+    };
+    for (size_t s = 0; s < steps.size(); ++s) {
+        if (uint8_t(steps[s].kind) == uint8_t(fb::StepKind::SnapshotFinals)) {
+            return stepName(s) + " is a retired SnapshotFinals step";
+        }
+        for (const auto *ranges : {&steps[s].reads, &steps[s].writes}) {
+            for (const auto &range : *ranges) {
+                if (rangeOf(range).domain ==
+                    uint8_t(fb::SlotDomain::Snapshots)) {
+                    return stepName(s) +
+                           " declares the retired Snapshots domain";
+                }
+            }
+        }
+    }
+    return std::string();
+}
+
 /// Empty when \p steps and \p clustering form a graph playback may walk;
 /// otherwise the first violation found. Every index is range-checked
 /// before it is followed. \p rangeOf turns a step's read or write range
 /// into a RigExecStepGraphRange. Checked, in order:
+///  - no step names a reserved value (RigExecStepGraphReservedError);
 ///  - each step's preds are increasing, unique and earlier than it, its
 ///    succs increasing, unique and later, and the two are inverses;
 ///  - a step that runs in the source pass depends only on source steps;
@@ -244,6 +280,15 @@ RigExecStepGraphError(const std::vector<Step> &steps,
     using detail::Text;
     const size_t stepCount = steps.size();
     const auto stepName = [](size_t s) { return "step " + Text(int64_t(s)); };
+
+    // The reserved values first: nothing a later rule says about a step
+    // matters if the file is of a shape playback no longer has.
+    {
+        std::string why = RigExecStepGraphReservedError(steps, rangeOf);
+        if (!why.empty()) {
+            return why;
+        }
+    }
 
     // Each step's own lists first, so that an edge pointing the wrong way
     // is named as such rather than as a missing inverse on the step at
@@ -285,7 +330,7 @@ RigExecStepGraphError(const std::vector<Step> &steps,
             continue;
         }
         for (const auto p : steps[s].preds) {
-            if (!steps[size_t(p)].isSource) {
+            if (!steps[size_t(p)].isSource && !steps[size_t(p)].isHead) {
                 return "source " + stepName(s) + " depends on step " +
                        Text(int64_t(p)) + ", which is not a source";
             }
@@ -298,9 +343,11 @@ RigExecStepGraphError(const std::vector<Step> &steps,
     {
         std::vector<size_t> order;
         order.reserve(stepCount);
+        for (size_t s = 0; s < stepCount && steps[s].isHead; ++s)
+            order.push_back(s);
         for (const bool sourcePass : {true, false}) {
             for (size_t s = 0; s < stepCount; ++s) {
-                if (bool(steps[s].isSource) == sourcePass) {
+                if (!steps[s].isHead && bool(steps[s].isSource) == sourcePass) {
                     order.push_back(s);
                 }
             }

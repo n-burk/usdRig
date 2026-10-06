@@ -36,6 +36,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <functional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -54,6 +55,26 @@ static int failures = 0;
     } while (0)
 
 namespace {
+// A full ordinary closure selects every region step, with each occupied
+// region cluster counted once; memo heads never enter closedSteps.
+void CheckWholeOrdinaryClosure(const RigExecRigEvaluator &evaluator)
+{
+    const auto &B = evaluator.GetBakedProgram()->GetStepGraph();
+    std::set<int> clusters;
+    size_t region = 0;
+    for (size_t i = 0; i < B.steps.size(); ++i) {
+        if (B.steps[i].isHead) {
+            CHECK(!B.closedSteps.Test(int(i)));
+        } else {
+            ++region;
+            CHECK(B.closedSteps.Test(int(i)));
+            clusters.insert(B.steps[i].cluster);
+        }
+    }
+    CHECK(region > 0);
+    CHECK(B.lastClosedSteps == region);
+    CHECK(evaluator.GetBakedClustersRunLastGeneration() == clusters.size());
+}
 
 std::string
 SchemaResourceDir(const std::string &examplesDir)
@@ -241,8 +262,7 @@ RunCase(const Case &c)
         CHECK(ran < total);
     }
     if (c.expectWhole) {
-        CHECK(evaluator.GetBakedClustersRunLastGeneration() ==
-              evaluator.GetBakedClusterCount());
+        CheckWholeOrdinaryClosure(evaluator);
     }
     CheckSamePose(c.name + " (edited frame)", FreshPose(stage, c.rig, time),
                   edited);
@@ -613,8 +633,7 @@ TestLayerMetadataRebuilds(const std::string &examplesDir)
     const RigExecRigPose pose = evaluator.Evaluate(UsdTimeCode(50.0));
     CHECK(pose.valid);
     CHECK(pose.bakedParityMismatches == 0);
-    CHECK(evaluator.GetBakedClustersRunLastGeneration() ==
-          evaluator.GetBakedClusterCount());
+    CheckWholeOrdinaryClosure(evaluator);
 }
 
 

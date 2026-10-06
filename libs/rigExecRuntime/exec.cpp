@@ -305,6 +305,8 @@ RigExecRuntimeReader::GetStepRanForTesting(size_t step) const
         return false;
     }
     const RigExecWireStep &wire = (*_program->steps)[step];
+    if (wire.isHead)
+        return std::find(store.runTrace.begin(), store.runTrace.end(), int32_t(step)) != store.runTrace.end();
     if (wire.isSource) {
         return true;
     }
@@ -408,7 +410,7 @@ RigExecRuntimeReader::Execute(std::string *error)
     // lines open the generation and their results are what every later
     // read of a chain target sees.
     std::vector<std::string> poseDiagnostics;
-    if (!RrRunPropertyChains(&program, &poseDiagnostics)) {
+    if (!RrRunHeadSteps(&program, &poseDiagnostics, error)) {
         if (error) {
             *error = "the property chains disagree with the file";
         }

@@ -50,6 +50,8 @@ struct TwoBoneIkParams;
 
 struct SplineIkParams;
 
+struct PropertyInputCandidate;
+
 struct SlotRange;
 
 struct FrameRecord;
@@ -308,6 +310,8 @@ inline const ::flatbuffers::TypeTable *TwoBoneIkParamsTypeTable();
 
 inline const ::flatbuffers::TypeTable *SplineIkParamsTypeTable();
 
+inline const ::flatbuffers::TypeTable *PropertyInputCandidateTypeTable();
+
 inline const ::flatbuffers::TypeTable *SlotRangeTypeTable();
 
 inline const ::flatbuffers::TypeTable *FrameRecordTypeTable();
@@ -489,6 +493,39 @@ inline const char *EnumNameInputTag(InputTag e) {
   if (::flatbuffers::IsOutRange(e, InputTag::Double, InputTag::Vec3fArray)) return "";
   const size_t index = static_cast<size_t>(e);
   return EnumNamesInputTag()[index];
+}
+
+enum class PropertyCandidateKind : uint8_t {
+  SlotOnly = 0,
+  ChainFinal = 1,
+  PhasedRecord = 2,
+  MIN = SlotOnly,
+  MAX = PhasedRecord
+};
+
+inline const PropertyCandidateKind (&EnumValuesPropertyCandidateKind())[3] {
+  static const PropertyCandidateKind values[] = {
+    PropertyCandidateKind::SlotOnly,
+    PropertyCandidateKind::ChainFinal,
+    PropertyCandidateKind::PhasedRecord
+  };
+  return values;
+}
+
+inline const char * const *EnumNamesPropertyCandidateKind() {
+  static const char * const names[4] = {
+    "SlotOnly",
+    "ChainFinal",
+    "PhasedRecord",
+    nullptr
+  };
+  return names;
+}
+
+inline const char *EnumNamePropertyCandidateKind(PropertyCandidateKind e) {
+  if (::flatbuffers::IsOutRange(e, PropertyCandidateKind::SlotOnly, PropertyCandidateKind::PhasedRecord)) return "";
+  const size_t index = static_cast<size_t>(e);
+  return EnumNamesPropertyCandidateKind()[index];
 }
 
 /// Where an array Value's elements live.
@@ -721,11 +758,14 @@ enum class SlotDomain : uint8_t {
   PoseWeight = 24,
   Snapshots = 25,
   FrameMatrix = 26,
+  Rest = 27,
+  Ladder = 28,
+  SkinTopology = 29,
   MIN = Avars,
-  MAX = FrameMatrix
+  MAX = SkinTopology
 };
 
-inline const SlotDomain (&EnumValuesSlotDomain())[27] {
+inline const SlotDomain (&EnumValuesSlotDomain())[30] {
   static const SlotDomain values[] = {
     SlotDomain::Avars,
     SlotDomain::PoseBase,
@@ -753,13 +793,16 @@ inline const SlotDomain (&EnumValuesSlotDomain())[27] {
     SlotDomain::WeightFrames,
     SlotDomain::PoseWeight,
     SlotDomain::Snapshots,
-    SlotDomain::FrameMatrix
+    SlotDomain::FrameMatrix,
+    SlotDomain::Rest,
+    SlotDomain::Ladder,
+    SlotDomain::SkinTopology
   };
   return values;
 }
 
 inline const char * const *EnumNamesSlotDomain() {
-  static const char * const names[28] = {
+  static const char * const names[31] = {
     "Avars",
     "PoseBase",
     "PoseFin",
@@ -787,13 +830,16 @@ inline const char * const *EnumNamesSlotDomain() {
     "PoseWeight",
     "Snapshots",
     "FrameMatrix",
+    "Rest",
+    "Ladder",
+    "SkinTopology",
     nullptr
   };
   return names;
 }
 
 inline const char *EnumNameSlotDomain(SlotDomain e) {
-  if (::flatbuffers::IsOutRange(e, SlotDomain::Avars, SlotDomain::FrameMatrix)) return "";
+  if (::flatbuffers::IsOutRange(e, SlotDomain::Avars, SlotDomain::SkinTopology)) return "";
   const size_t index = static_cast<size_t>(e);
   return EnumNamesSlotDomain()[index];
 }
@@ -820,11 +866,15 @@ enum class StepKind : uint8_t {
   ChainStatus = 16,
   Derived = 17,
   FrameMatrix = 18,
+  PropertyRevision = 19,
+  RestCompose = 20,
+  LadderCompose = 21,
+  SkinTopology = 22,
   MIN = ComposeSubtree,
-  MAX = FrameMatrix
+  MAX = SkinTopology
 };
 
-inline const StepKind (&EnumValuesStepKind())[19] {
+inline const StepKind (&EnumValuesStepKind())[23] {
   static const StepKind values[] = {
     StepKind::ComposeSubtree,
     StepKind::Solve,
@@ -844,13 +894,17 @@ inline const StepKind (&EnumValuesStepKind())[19] {
     StepKind::RevisionFuse,
     StepKind::ChainStatus,
     StepKind::Derived,
-    StepKind::FrameMatrix
+    StepKind::FrameMatrix,
+    StepKind::PropertyRevision,
+    StepKind::RestCompose,
+    StepKind::LadderCompose,
+    StepKind::SkinTopology
   };
   return values;
 }
 
 inline const char * const *EnumNamesStepKind() {
-  static const char * const names[20] = {
+  static const char * const names[24] = {
     "ComposeSubtree",
     "Solve",
     "SolverCommit",
@@ -870,13 +924,17 @@ inline const char * const *EnumNamesStepKind() {
     "ChainStatus",
     "Derived",
     "FrameMatrix",
+    "PropertyRevision",
+    "RestCompose",
+    "LadderCompose",
+    "SkinTopology",
     nullptr
   };
   return names;
 }
 
 inline const char *EnumNameStepKind(StepKind e) {
-  if (::flatbuffers::IsOutRange(e, StepKind::ComposeSubtree, StepKind::FrameMatrix)) return "";
+  if (::flatbuffers::IsOutRange(e, StepKind::ComposeSubtree, StepKind::SkinTopology)) return "";
   const size_t index = static_cast<size_t>(e);
   return EnumNamesStepKind()[index];
 }
@@ -2054,6 +2112,68 @@ struct SplineIkParams::Traits {
   using type = SplineIkParams;
 };
 
+/// One ordered property-reader hop; version -1 for SlotOnly.
+FLATBUFFERS_MANUALLY_ALIGNED_STRUCT(4) PropertyInputCandidate FLATBUFFERS_FINAL_CLASS {
+ private:
+  uint32_t slot_;
+  uint8_t kind_;
+  int8_t padding0__;  int16_t padding1__;
+  int32_t version_;
+  uint8_t raw_;
+  int8_t padding2__;  int16_t padding3__;
+
+ public:
+  struct Traits;
+  static const ::flatbuffers::TypeTable *MiniReflectTypeTable() {
+    return PropertyInputCandidateTypeTable();
+  }
+  PropertyInputCandidate()
+      : slot_(0),
+        kind_(0),
+        padding0__(0),
+        padding1__(0),
+        version_(0),
+        raw_(0),
+        padding2__(0),
+        padding3__(0) {
+    (void)padding0__;
+    (void)padding1__;
+    (void)padding2__;
+    (void)padding3__;
+  }
+  PropertyInputCandidate(uint32_t _slot, rigExec::fb::PropertyCandidateKind _kind, int32_t _version, bool _raw)
+      : slot_(::flatbuffers::EndianScalar(_slot)),
+        kind_(::flatbuffers::EndianScalar(static_cast<uint8_t>(_kind))),
+        padding0__(0),
+        padding1__(0),
+        version_(::flatbuffers::EndianScalar(_version)),
+        raw_(::flatbuffers::EndianScalar(static_cast<uint8_t>(_raw))),
+        padding2__(0),
+        padding3__(0) {
+    (void)padding0__;
+    (void)padding1__;
+    (void)padding2__;
+    (void)padding3__;
+  }
+  uint32_t slot() const {
+    return ::flatbuffers::EndianScalar(slot_);
+  }
+  rigExec::fb::PropertyCandidateKind kind() const {
+    return static_cast<rigExec::fb::PropertyCandidateKind>(::flatbuffers::EndianScalar(kind_));
+  }
+  int32_t version() const {
+    return ::flatbuffers::EndianScalar(version_);
+  }
+  bool raw() const {
+    return ::flatbuffers::EndianScalar(raw_) != 0;
+  }
+};
+FLATBUFFERS_STRUCT_END(PropertyInputCandidate, 16);
+
+struct PropertyInputCandidate::Traits {
+  using type = PropertyInputCandidate;
+};
+
 /// One half-open run of slots of one domain.
 FLATBUFFERS_MANUALLY_ALIGNED_STRUCT(4) SlotRange FLATBUFFERS_FINAL_CLASS {
  private:
@@ -3191,6 +3311,9 @@ struct RigExecWireInput : public ::flatbuffers::NativeTable {
   uint32_t constant = 0;
   std::vector<uint32_t> walk{};
   int16_t selected = -1;
+  std::vector<::rigExec::RigExecWirePropertyInputCandidate> propertyCandidates{};
+  std::vector<::rigExec::RigExecWirePropertyInputCandidate> doubleCandidates{};
+  int32_t rawFallbackSlot = -1;
 };
 
 /// One bound input read: its type, how it resolves, and the slots
@@ -3210,7 +3333,10 @@ struct Input FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
     VT_OVERRIDEINDEX = 10,
     VT_CONSTANT = 12,
     VT_WALK = 14,
-    VT_SELECTED = 16
+    VT_SELECTED = 16,
+    VT_PROPERTYCANDIDATES = 18,
+    VT_DOUBLECANDIDATES = 20,
+    VT_RAWFALLBACKSLOT = 22
   };
   /// The type T of the read.
   rigExec::fb::InputTag tag() const {
@@ -3242,6 +3368,17 @@ struct Input FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   int16_t selected() const {
     return GetField<int16_t>(VT_SELECTED, -1);
   }
+  /// Native walk order; overlays forward, allowed raw leaves backward.
+  const ::flatbuffers::Vector<const rigExec::fb::PropertyInputCandidate *> *propertyCandidates() const {
+    return GetPointer<const ::flatbuffers::Vector<const rigExec::fb::PropertyInputCandidate *> *>(VT_PROPERTYCANDIDATES);
+  }
+  /// Separate double recursion of a Float read, narrowed once.
+  const ::flatbuffers::Vector<const rigExec::fb::PropertyInputCandidate *> *doubleCandidates() const {
+    return GetPointer<const ::flatbuffers::Vector<const rigExec::fb::PropertyInputCandidate *> *>(VT_DOUBLECANDIDATES);
+  }
+  int32_t rawFallbackSlot() const {
+    return GetField<int32_t>(VT_RAWFALLBACKSLOT, -1);
+  }
   template <bool B = false>
   bool Verify(::flatbuffers::VerifierTemplate<B> &verifier) const {
     return VerifyTableStart(verifier) &&
@@ -3253,6 +3390,11 @@ struct Input FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyOffset(verifier, VT_WALK) &&
            verifier.VerifyVector(walk()) &&
            VerifyField<int16_t>(verifier, VT_SELECTED, 2) &&
+           VerifyOffset(verifier, VT_PROPERTYCANDIDATES) &&
+           verifier.VerifyVector(propertyCandidates()) &&
+           VerifyOffset(verifier, VT_DOUBLECANDIDATES) &&
+           verifier.VerifyVector(doubleCandidates()) &&
+           VerifyField<int32_t>(verifier, VT_RAWFALLBACKSLOT, 4) &&
            verifier.EndTable();
   }
   RigExecWireInput *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
@@ -3285,6 +3427,15 @@ struct InputBuilder {
   void add_selected(int16_t selected) {
     fbb_.AddElement<int16_t>(Input::VT_SELECTED, selected, -1);
   }
+  void add_propertyCandidates(::flatbuffers::Offset<::flatbuffers::Vector<const rigExec::fb::PropertyInputCandidate *>> propertyCandidates) {
+    fbb_.AddOffset(Input::VT_PROPERTYCANDIDATES, propertyCandidates);
+  }
+  void add_doubleCandidates(::flatbuffers::Offset<::flatbuffers::Vector<const rigExec::fb::PropertyInputCandidate *>> doubleCandidates) {
+    fbb_.AddOffset(Input::VT_DOUBLECANDIDATES, doubleCandidates);
+  }
+  void add_rawFallbackSlot(int32_t rawFallbackSlot) {
+    fbb_.AddElement<int32_t>(Input::VT_RAWFALLBACKSLOT, rawFallbackSlot, -1);
+  }
   explicit InputBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -3304,8 +3455,14 @@ inline ::flatbuffers::Offset<Input> CreateInput(
     int32_t overrideIndex = -1,
     uint32_t constant = 0,
     ::flatbuffers::Offset<::flatbuffers::Vector<uint32_t>> walk = 0,
-    int16_t selected = -1) {
+    int16_t selected = -1,
+    ::flatbuffers::Offset<::flatbuffers::Vector<const rigExec::fb::PropertyInputCandidate *>> propertyCandidates = 0,
+    ::flatbuffers::Offset<::flatbuffers::Vector<const rigExec::fb::PropertyInputCandidate *>> doubleCandidates = 0,
+    int32_t rawFallbackSlot = -1) {
   InputBuilder builder_(_fbb);
+  builder_.add_rawFallbackSlot(rawFallbackSlot);
+  builder_.add_doubleCandidates(doubleCandidates);
+  builder_.add_propertyCandidates(propertyCandidates);
   builder_.add_walk(walk);
   builder_.add_constant(constant);
   builder_.add_overrideIndex(overrideIndex);
@@ -3329,8 +3486,13 @@ inline ::flatbuffers::Offset<Input> CreateInputDirect(
     int32_t overrideIndex = -1,
     uint32_t constant = 0,
     const std::vector<uint32_t> *walk = nullptr,
-    int16_t selected = -1) {
+    int16_t selected = -1,
+    const std::vector<rigExec::fb::PropertyInputCandidate> *propertyCandidates = nullptr,
+    const std::vector<rigExec::fb::PropertyInputCandidate> *doubleCandidates = nullptr,
+    int32_t rawFallbackSlot = -1) {
   auto walk__ = walk ? _fbb.CreateVector<uint32_t>(*walk) : 0;
+  auto propertyCandidates__ = propertyCandidates ? _fbb.CreateVectorOfStructs<rigExec::fb::PropertyInputCandidate>(*propertyCandidates) : 0;
+  auto doubleCandidates__ = doubleCandidates ? _fbb.CreateVectorOfStructs<rigExec::fb::PropertyInputCandidate>(*doubleCandidates) : 0;
   return rigExec::fb::CreateInput(
       _fbb,
       tag,
@@ -3339,7 +3501,10 @@ inline ::flatbuffers::Offset<Input> CreateInputDirect(
       overrideIndex,
       constant,
       walk__,
-      selected);
+      selected,
+      propertyCandidates__,
+      doubleCandidates__,
+      rawFallbackSlot);
 }
 
 ::flatbuffers::Offset<Input> CreateInput(::flatbuffers::FlatBufferBuilder &_fbb, const RigExecWireInput *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
@@ -3970,6 +4135,12 @@ struct RigExecWireStep : public ::flatbuffers::NativeTable {
   std::vector<int32_t> preds{};
   std::vector<int32_t> succs{};
   bool isSource = false;
+  bool isHead = false;
+  std::vector<uint32_t> headInputSlots{};
+  std::vector<rigExec::fb::RigExecWireInput> headInputReads{};
+  bool headVaryingLeaves = false;
+  bool headAlwaysRuns = false;
+  std::vector<::rigExec::RigExecWireIntPair> shadowedReads{};
   bool externalReads = false;
   bool varyingInputs = false;
   bool resolvedInputReads = false;
@@ -3999,15 +4170,21 @@ struct Step FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
     VT_PREDS = 14,
     VT_SUCCS = 16,
     VT_ISSOURCE = 18,
-    VT_EXTERNALREADS = 20,
-    VT_VARYINGINPUTS = 22,
-    VT_RESOLVEDINPUTREADS = 24,
-    VT_OVERRIDEINPUTS = 26,
-    VT_CLUSTER = 28,
-    VT_LEVEL = 30,
-    VT_SIZEUNITS = 32,
-    VT_COST = 34,
-    VT_MAXDIAGNOSTICS = 36
+    VT_ISHEAD = 20,
+    VT_HEADINPUTSLOTS = 22,
+    VT_HEADINPUTREADS = 24,
+    VT_HEADVARYINGLEAVES = 26,
+    VT_HEADALWAYSRUNS = 28,
+    VT_SHADOWEDREADS = 30,
+    VT_EXTERNALREADS = 32,
+    VT_VARYINGINPUTS = 34,
+    VT_RESOLVEDINPUTREADS = 36,
+    VT_OVERRIDEINPUTS = 38,
+    VT_CLUSTER = 40,
+    VT_LEVEL = 42,
+    VT_SIZEUNITS = 44,
+    VT_COST = 46,
+    VT_MAXDIAGNOSTICS = 48
   };
   rigExec::fb::StepKind kind() const {
     return static_cast<rigExec::fb::StepKind>(GetField<uint8_t>(VT_KIND, 0));
@@ -4039,6 +4216,26 @@ struct Step FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   }
   bool isSource() const {
     return GetField<uint8_t>(VT_ISSOURCE, 0) != 0;
+  }
+  bool isHead() const {
+    return GetField<uint8_t>(VT_ISHEAD, 0) != 0;
+  }
+  /// Full internal slot IDs consulted by the head memo.
+  const ::flatbuffers::Vector<uint32_t> *headInputSlots() const {
+    return GetPointer<const ::flatbuffers::Vector<uint32_t> *>(VT_HEADINPUTSLOTS);
+  }
+  const ::flatbuffers::Vector<::flatbuffers::Offset<rigExec::fb::Input>> *headInputReads() const {
+    return GetPointer<const ::flatbuffers::Vector<::flatbuffers::Offset<rigExec::fb::Input>> *>(VT_HEADINPUTREADS);
+  }
+  bool headVaryingLeaves() const {
+    return GetField<uint8_t>(VT_HEADVARYINGLEAVES, 0) != 0;
+  }
+  bool headAlwaysRuns() const {
+    return GetField<uint8_t>(VT_HEADALWAYSRUNS, 0) != 0;
+  }
+  /// (PropertyResult version, phased-consumer index), for shadow gating.
+  const ::flatbuffers::Vector<const rigExec::fb::IntPair *> *shadowedReads() const {
+    return GetPointer<const ::flatbuffers::Vector<const rigExec::fb::IntPair *> *>(VT_SHADOWEDREADS);
   }
   bool externalReads() const {
     return GetField<uint8_t>(VT_EXTERNALREADS, 0) != 0;
@@ -4083,6 +4280,16 @@ struct Step FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyOffset(verifier, VT_SUCCS) &&
            verifier.VerifyVector(succs()) &&
            VerifyField<uint8_t>(verifier, VT_ISSOURCE, 1) &&
+           VerifyField<uint8_t>(verifier, VT_ISHEAD, 1) &&
+           VerifyOffset(verifier, VT_HEADINPUTSLOTS) &&
+           verifier.VerifyVector(headInputSlots()) &&
+           VerifyOffset(verifier, VT_HEADINPUTREADS) &&
+           verifier.VerifyVector(headInputReads()) &&
+           verifier.VerifyVectorOfTables(headInputReads()) &&
+           VerifyField<uint8_t>(verifier, VT_HEADVARYINGLEAVES, 1) &&
+           VerifyField<uint8_t>(verifier, VT_HEADALWAYSRUNS, 1) &&
+           VerifyOffset(verifier, VT_SHADOWEDREADS) &&
+           verifier.VerifyVector(shadowedReads()) &&
            VerifyField<uint8_t>(verifier, VT_EXTERNALREADS, 1) &&
            VerifyField<uint8_t>(verifier, VT_VARYINGINPUTS, 1) &&
            VerifyField<uint8_t>(verifier, VT_RESOLVEDINPUTREADS, 1) &&
@@ -4127,6 +4334,24 @@ struct StepBuilder {
   }
   void add_isSource(bool isSource) {
     fbb_.AddElement<uint8_t>(Step::VT_ISSOURCE, static_cast<uint8_t>(isSource), 0);
+  }
+  void add_isHead(bool isHead) {
+    fbb_.AddElement<uint8_t>(Step::VT_ISHEAD, static_cast<uint8_t>(isHead), 0);
+  }
+  void add_headInputSlots(::flatbuffers::Offset<::flatbuffers::Vector<uint32_t>> headInputSlots) {
+    fbb_.AddOffset(Step::VT_HEADINPUTSLOTS, headInputSlots);
+  }
+  void add_headInputReads(::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<rigExec::fb::Input>>> headInputReads) {
+    fbb_.AddOffset(Step::VT_HEADINPUTREADS, headInputReads);
+  }
+  void add_headVaryingLeaves(bool headVaryingLeaves) {
+    fbb_.AddElement<uint8_t>(Step::VT_HEADVARYINGLEAVES, static_cast<uint8_t>(headVaryingLeaves), 0);
+  }
+  void add_headAlwaysRuns(bool headAlwaysRuns) {
+    fbb_.AddElement<uint8_t>(Step::VT_HEADALWAYSRUNS, static_cast<uint8_t>(headAlwaysRuns), 0);
+  }
+  void add_shadowedReads(::flatbuffers::Offset<::flatbuffers::Vector<const rigExec::fb::IntPair *>> shadowedReads) {
+    fbb_.AddOffset(Step::VT_SHADOWEDREADS, shadowedReads);
   }
   void add_externalReads(bool externalReads) {
     fbb_.AddElement<uint8_t>(Step::VT_EXTERNALREADS, static_cast<uint8_t>(externalReads), 0);
@@ -4176,6 +4401,12 @@ inline ::flatbuffers::Offset<Step> CreateStep(
     ::flatbuffers::Offset<::flatbuffers::Vector<int32_t>> preds = 0,
     ::flatbuffers::Offset<::flatbuffers::Vector<int32_t>> succs = 0,
     bool isSource = false,
+    bool isHead = false,
+    ::flatbuffers::Offset<::flatbuffers::Vector<uint32_t>> headInputSlots = 0,
+    ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<rigExec::fb::Input>>> headInputReads = 0,
+    bool headVaryingLeaves = false,
+    bool headAlwaysRuns = false,
+    ::flatbuffers::Offset<::flatbuffers::Vector<const rigExec::fb::IntPair *>> shadowedReads = 0,
     bool externalReads = false,
     bool varyingInputs = false,
     bool resolvedInputReads = false,
@@ -4192,6 +4423,9 @@ inline ::flatbuffers::Offset<Step> CreateStep(
   builder_.add_level(level);
   builder_.add_cluster(cluster);
   builder_.add_overrideInputs(overrideInputs);
+  builder_.add_shadowedReads(shadowedReads);
+  builder_.add_headInputReads(headInputReads);
+  builder_.add_headInputSlots(headInputSlots);
   builder_.add_succs(succs);
   builder_.add_preds(preds);
   builder_.add_writes(writes);
@@ -4201,6 +4435,9 @@ inline ::flatbuffers::Offset<Step> CreateStep(
   builder_.add_resolvedInputReads(resolvedInputReads);
   builder_.add_varyingInputs(varyingInputs);
   builder_.add_externalReads(externalReads);
+  builder_.add_headAlwaysRuns(headAlwaysRuns);
+  builder_.add_headVaryingLeaves(headVaryingLeaves);
+  builder_.add_isHead(isHead);
   builder_.add_isSource(isSource);
   builder_.add_kind(kind);
   return builder_.Finish();
@@ -4221,6 +4458,12 @@ inline ::flatbuffers::Offset<Step> CreateStepDirect(
     const std::vector<int32_t> *preds = nullptr,
     const std::vector<int32_t> *succs = nullptr,
     bool isSource = false,
+    bool isHead = false,
+    const std::vector<uint32_t> *headInputSlots = nullptr,
+    const std::vector<::flatbuffers::Offset<rigExec::fb::Input>> *headInputReads = nullptr,
+    bool headVaryingLeaves = false,
+    bool headAlwaysRuns = false,
+    const std::vector<rigExec::fb::IntPair> *shadowedReads = nullptr,
     bool externalReads = false,
     bool varyingInputs = false,
     bool resolvedInputReads = false,
@@ -4234,6 +4477,9 @@ inline ::flatbuffers::Offset<Step> CreateStepDirect(
   auto writes__ = writes ? _fbb.CreateVectorOfStructs<rigExec::fb::SlotRange>(*writes) : 0;
   auto preds__ = preds ? _fbb.CreateVector<int32_t>(*preds) : 0;
   auto succs__ = succs ? _fbb.CreateVector<int32_t>(*succs) : 0;
+  auto headInputSlots__ = headInputSlots ? _fbb.CreateVector<uint32_t>(*headInputSlots) : 0;
+  auto headInputReads__ = headInputReads ? _fbb.CreateVector<::flatbuffers::Offset<rigExec::fb::Input>>(*headInputReads) : 0;
+  auto shadowedReads__ = shadowedReads ? _fbb.CreateVectorOfStructs<rigExec::fb::IntPair>(*shadowedReads) : 0;
   auto overrideInputs__ = overrideInputs ? _fbb.CreateVector<int32_t>(*overrideInputs) : 0;
   return rigExec::fb::CreateStep(
       _fbb,
@@ -4245,6 +4491,12 @@ inline ::flatbuffers::Offset<Step> CreateStepDirect(
       preds__,
       succs__,
       isSource,
+      isHead,
+      headInputSlots__,
+      headInputReads__,
+      headVaryingLeaves,
+      headAlwaysRuns,
+      shadowedReads__,
       externalReads,
       varyingInputs,
       resolvedInputReads,
@@ -13431,6 +13683,7 @@ inline ::flatbuffers::Offset<PropertyRevision> CreatePropertyRevisionDirect(
 
 struct RigExecWirePropertyChain : public ::flatbuffers::NativeTable {
   typedef PropertyChain TableType;
+  uint32_t versionBase = 0;
   uint32_t target = 0;
   rigExec::fb::PropertyValueType valueType = rigExec::fb::PropertyValueType::Float;
   std::vector<rigExec::fb::RigExecWirePropertyRevision> revisions{};
@@ -13447,10 +13700,14 @@ struct PropertyChain FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
     return PropertyChainTypeTable();
   }
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
-    VT_TARGET = 4,
-    VT_VALUETYPE = 6,
-    VT_REVISIONS = 8
+    VT_VERSIONBASE = 4,
+    VT_TARGET = 6,
+    VT_VALUETYPE = 8,
+    VT_REVISIONS = 10
   };
+  uint32_t versionBase() const {
+    return GetField<uint32_t>(VT_VERSIONBASE, 0);
+  }
   /// Slot id of the target; the base is its raw value of the chain's type.
   uint32_t target() const {
     return GetField<uint32_t>(VT_TARGET, 0);
@@ -13464,6 +13721,7 @@ struct PropertyChain FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   template <bool B = false>
   bool Verify(::flatbuffers::VerifierTemplate<B> &verifier) const {
     return VerifyTableStart(verifier) &&
+           VerifyField<uint32_t>(verifier, VT_VERSIONBASE, 4) &&
            VerifyField<uint32_t>(verifier, VT_TARGET, 4) &&
            VerifyField<uint8_t>(verifier, VT_VALUETYPE, 1) &&
            VerifyOffset(verifier, VT_REVISIONS) &&
@@ -13480,6 +13738,9 @@ struct PropertyChainBuilder {
   typedef PropertyChain Table;
   ::flatbuffers::FlatBufferBuilder &fbb_;
   ::flatbuffers::uoffset_t start_;
+  void add_versionBase(uint32_t versionBase) {
+    fbb_.AddElement<uint32_t>(PropertyChain::VT_VERSIONBASE, versionBase, 0);
+  }
   void add_target(uint32_t target) {
     fbb_.AddElement<uint32_t>(PropertyChain::VT_TARGET, target, 0);
   }
@@ -13502,12 +13763,14 @@ struct PropertyChainBuilder {
 
 inline ::flatbuffers::Offset<PropertyChain> CreatePropertyChain(
     ::flatbuffers::FlatBufferBuilder &_fbb,
+    uint32_t versionBase = 0,
     uint32_t target = 0,
     rigExec::fb::PropertyValueType valueType = rigExec::fb::PropertyValueType::Float,
     ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<rigExec::fb::PropertyRevision>>> revisions = 0) {
   PropertyChainBuilder builder_(_fbb);
   builder_.add_revisions(revisions);
   builder_.add_target(target);
+  builder_.add_versionBase(versionBase);
   builder_.add_valueType(valueType);
   return builder_.Finish();
 }
@@ -13519,12 +13782,14 @@ struct PropertyChain::Traits {
 
 inline ::flatbuffers::Offset<PropertyChain> CreatePropertyChainDirect(
     ::flatbuffers::FlatBufferBuilder &_fbb,
+    uint32_t versionBase = 0,
     uint32_t target = 0,
     rigExec::fb::PropertyValueType valueType = rigExec::fb::PropertyValueType::Float,
     const std::vector<::flatbuffers::Offset<rigExec::fb::PropertyRevision>> *revisions = nullptr) {
   auto revisions__ = revisions ? _fbb.CreateVector<::flatbuffers::Offset<rigExec::fb::PropertyRevision>>(*revisions) : 0;
   return rigExec::fb::CreatePropertyChain(
       _fbb,
+      versionBase,
       target,
       valueType,
       revisions__);
@@ -13534,6 +13799,7 @@ inline ::flatbuffers::Offset<PropertyChain> CreatePropertyChainDirect(
 
 struct RigExecWirePhasedConsumer : public ::flatbuffers::NativeTable {
   typedef PhasedConsumer TableType;
+  uint32_t version = 0;
   uint32_t chain = 0;
   uint32_t consumer = 0;
   rigExec::fb::PropertyValueType consumerType = rigExec::fb::PropertyValueType::Float;
@@ -13554,12 +13820,16 @@ struct PhasedConsumer FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
     return PhasedConsumerTypeTable();
   }
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
-    VT_CHAIN = 4,
-    VT_CONSUMER = 6,
-    VT_CONSUMERTYPE = 8,
-    VT_APPLIED = 10,
-    VT_HOPS = 12
+    VT_VERSION = 4,
+    VT_CHAIN = 6,
+    VT_CONSUMER = 8,
+    VT_CONSUMERTYPE = 10,
+    VT_APPLIED = 12,
+    VT_HOPS = 14
   };
+  uint32_t version() const {
+    return GetField<uint32_t>(VT_VERSION, 0);
+  }
   uint32_t chain() const {
     return GetField<uint32_t>(VT_CHAIN, 0);
   }
@@ -13584,6 +13854,7 @@ struct PhasedConsumer FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   template <bool B = false>
   bool Verify(::flatbuffers::VerifierTemplate<B> &verifier) const {
     return VerifyTableStart(verifier) &&
+           VerifyField<uint32_t>(verifier, VT_VERSION, 4) &&
            VerifyField<uint32_t>(verifier, VT_CHAIN, 4) &&
            VerifyField<uint32_t>(verifier, VT_CONSUMER, 4) &&
            VerifyField<uint8_t>(verifier, VT_CONSUMERTYPE, 1) &&
@@ -13601,6 +13872,9 @@ struct PhasedConsumerBuilder {
   typedef PhasedConsumer Table;
   ::flatbuffers::FlatBufferBuilder &fbb_;
   ::flatbuffers::uoffset_t start_;
+  void add_version(uint32_t version) {
+    fbb_.AddElement<uint32_t>(PhasedConsumer::VT_VERSION, version, 0);
+  }
   void add_chain(uint32_t chain) {
     fbb_.AddElement<uint32_t>(PhasedConsumer::VT_CHAIN, chain, 0);
   }
@@ -13629,6 +13903,7 @@ struct PhasedConsumerBuilder {
 
 inline ::flatbuffers::Offset<PhasedConsumer> CreatePhasedConsumer(
     ::flatbuffers::FlatBufferBuilder &_fbb,
+    uint32_t version = 0,
     uint32_t chain = 0,
     uint32_t consumer = 0,
     rigExec::fb::PropertyValueType consumerType = rigExec::fb::PropertyValueType::Float,
@@ -13639,6 +13914,7 @@ inline ::flatbuffers::Offset<PhasedConsumer> CreatePhasedConsumer(
   builder_.add_applied(applied);
   builder_.add_consumer(consumer);
   builder_.add_chain(chain);
+  builder_.add_version(version);
   builder_.add_consumerType(consumerType);
   return builder_.Finish();
 }
@@ -13650,6 +13926,7 @@ struct PhasedConsumer::Traits {
 
 inline ::flatbuffers::Offset<PhasedConsumer> CreatePhasedConsumerDirect(
     ::flatbuffers::FlatBufferBuilder &_fbb,
+    uint32_t version = 0,
     uint32_t chain = 0,
     uint32_t consumer = 0,
     rigExec::fb::PropertyValueType consumerType = rigExec::fb::PropertyValueType::Float,
@@ -13658,6 +13935,7 @@ inline ::flatbuffers::Offset<PhasedConsumer> CreatePhasedConsumerDirect(
   auto hops__ = hops ? _fbb.CreateVector<uint32_t>(*hops) : 0;
   return rigExec::fb::CreatePhasedConsumer(
       _fbb,
+      version,
       chain,
       consumer,
       consumerType,
@@ -14646,6 +14924,9 @@ inline void Input::UnPackTo(RigExecWireInput *_o, const ::flatbuffers::resolver_
   { auto _e = constant(); _o->constant = _e; }
   { auto _e = walk(); if (_e) { _o->walk.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->walk[_i] = _e->Get(_i); } } else { _o->walk.resize(0); } }
   { auto _e = selected(); _o->selected = _e; }
+  { auto _e = propertyCandidates(); if (_e) { _o->propertyCandidates.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->propertyCandidates[_i] = ::flatbuffers::UnPackPropertyInputCandidate(*_e->Get(_i)); } } else { _o->propertyCandidates.resize(0); } }
+  { auto _e = doubleCandidates(); if (_e) { _o->doubleCandidates.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->doubleCandidates[_i] = ::flatbuffers::UnPackPropertyInputCandidate(*_e->Get(_i)); } } else { _o->doubleCandidates.resize(0); } }
+  { auto _e = rawFallbackSlot(); _o->rawFallbackSlot = _e; }
 }
 
 inline ::flatbuffers::Offset<Input> CreateInput(::flatbuffers::FlatBufferBuilder &_fbb, const RigExecWireInput *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
@@ -14663,6 +14944,9 @@ inline ::flatbuffers::Offset<Input> Input::Pack(::flatbuffers::FlatBufferBuilder
   auto _constant = _o->constant;
   auto _walk = _o->walk.size() ? _fbb.CreateVector(_o->walk) : 0;
   auto _selected = _o->selected;
+  auto _propertyCandidates = _o->propertyCandidates.size() ? _fbb.CreateVectorOfNativeStructs<rigExec::fb::PropertyInputCandidate, ::rigExec::RigExecWirePropertyInputCandidate>(_o->propertyCandidates, ::flatbuffers::PackPropertyInputCandidate) : 0;
+  auto _doubleCandidates = _o->doubleCandidates.size() ? _fbb.CreateVectorOfNativeStructs<rigExec::fb::PropertyInputCandidate, ::rigExec::RigExecWirePropertyInputCandidate>(_o->doubleCandidates, ::flatbuffers::PackPropertyInputCandidate) : 0;
+  auto _rawFallbackSlot = _o->rawFallbackSlot;
   return rigExec::fb::CreateInput(
       _fbb,
       _tag,
@@ -14671,7 +14955,10 @@ inline ::flatbuffers::Offset<Input> Input::Pack(::flatbuffers::FlatBufferBuilder
       _overrideIndex,
       _constant,
       _walk,
-      _selected);
+      _selected,
+      _propertyCandidates,
+      _doubleCandidates,
+      _rawFallbackSlot);
 }
 
 inline RigExecWireSlotMeta *SlotMeta::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
@@ -14836,6 +15123,12 @@ inline void Step::UnPackTo(RigExecWireStep *_o, const ::flatbuffers::resolver_fu
   { auto _e = preds(); if (_e) { _o->preds.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->preds[_i] = _e->Get(_i); } } else { _o->preds.resize(0); } }
   { auto _e = succs(); if (_e) { _o->succs.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->succs[_i] = _e->Get(_i); } } else { _o->succs.resize(0); } }
   { auto _e = isSource(); _o->isSource = _e; }
+  { auto _e = isHead(); _o->isHead = _e; }
+  { auto _e = headInputSlots(); if (_e) { _o->headInputSlots.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->headInputSlots[_i] = _e->Get(_i); } } else { _o->headInputSlots.resize(0); } }
+  { auto _e = headInputReads(); if (_e) { _o->headInputReads.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->headInputReads[_i] = *std::unique_ptr<rigExec::fb::RigExecWireInput>(_e->Get(_i)->UnPack(_resolver)); } } else { _o->headInputReads.resize(0); } }
+  { auto _e = headVaryingLeaves(); _o->headVaryingLeaves = _e; }
+  { auto _e = headAlwaysRuns(); _o->headAlwaysRuns = _e; }
+  { auto _e = shadowedReads(); if (_e) { _o->shadowedReads.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->shadowedReads[_i] = ::flatbuffers::UnPackIntPair(*_e->Get(_i)); } } else { _o->shadowedReads.resize(0); } }
   { auto _e = externalReads(); _o->externalReads = _e; }
   { auto _e = varyingInputs(); _o->varyingInputs = _e; }
   { auto _e = resolvedInputReads(); _o->resolvedInputReads = _e; }
@@ -14863,6 +15156,12 @@ inline ::flatbuffers::Offset<Step> Step::Pack(::flatbuffers::FlatBufferBuilder &
   auto _preds = _o->preds.size() ? _fbb.CreateVector(_o->preds) : 0;
   auto _succs = _o->succs.size() ? _fbb.CreateVector(_o->succs) : 0;
   auto _isSource = _o->isSource;
+  auto _isHead = _o->isHead;
+  auto _headInputSlots = _o->headInputSlots.size() ? _fbb.CreateVector(_o->headInputSlots) : 0;
+  auto _headInputReads = _o->headInputReads.size() ? _fbb.CreateVector<::flatbuffers::Offset<rigExec::fb::Input>> (_o->headInputReads.size(), [](size_t i, _VectorArgs *__va) { return CreateInput(*__va->__fbb, &(__va->__o->headInputReads[i]), __va->__rehasher); }, &_va ) : 0;
+  auto _headVaryingLeaves = _o->headVaryingLeaves;
+  auto _headAlwaysRuns = _o->headAlwaysRuns;
+  auto _shadowedReads = _o->shadowedReads.size() ? _fbb.CreateVectorOfNativeStructs<rigExec::fb::IntPair, ::rigExec::RigExecWireIntPair>(_o->shadowedReads, ::flatbuffers::PackIntPair) : 0;
   auto _externalReads = _o->externalReads;
   auto _varyingInputs = _o->varyingInputs;
   auto _resolvedInputReads = _o->resolvedInputReads;
@@ -14882,6 +15181,12 @@ inline ::flatbuffers::Offset<Step> Step::Pack(::flatbuffers::FlatBufferBuilder &
       _preds,
       _succs,
       _isSource,
+      _isHead,
+      _headInputSlots,
+      _headInputReads,
+      _headVaryingLeaves,
+      _headAlwaysRuns,
+      _shadowedReads,
       _externalReads,
       _varyingInputs,
       _resolvedInputReads,
@@ -17896,6 +18201,7 @@ inline RigExecWirePropertyChain *PropertyChain::UnPack(const ::flatbuffers::reso
 inline void PropertyChain::UnPackTo(RigExecWirePropertyChain *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
   (void)_o;
   (void)_resolver;
+  { auto _e = versionBase(); _o->versionBase = _e; }
   { auto _e = target(); _o->target = _e; }
   { auto _e = valueType(); _o->valueType = _e; }
   { auto _e = revisions(); if (_e) { _o->revisions.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->revisions[_i] = *std::unique_ptr<rigExec::fb::RigExecWirePropertyRevision>(_e->Get(_i)->UnPack(_resolver)); } } else { _o->revisions.resize(0); } }
@@ -17909,11 +18215,13 @@ inline ::flatbuffers::Offset<PropertyChain> PropertyChain::Pack(::flatbuffers::F
   (void)_rehasher;
   (void)_o;
   struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const RigExecWirePropertyChain* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
+  auto _versionBase = _o->versionBase;
   auto _target = _o->target;
   auto _valueType = _o->valueType;
   auto _revisions = _o->revisions.size() ? _fbb.CreateVector<::flatbuffers::Offset<rigExec::fb::PropertyRevision>> (_o->revisions.size(), [](size_t i, _VectorArgs *__va) { return CreatePropertyRevision(*__va->__fbb, &(__va->__o->revisions[i]), __va->__rehasher); }, &_va ) : 0;
   return rigExec::fb::CreatePropertyChain(
       _fbb,
+      _versionBase,
       _target,
       _valueType,
       _revisions);
@@ -17928,6 +18236,7 @@ inline RigExecWirePhasedConsumer *PhasedConsumer::UnPack(const ::flatbuffers::re
 inline void PhasedConsumer::UnPackTo(RigExecWirePhasedConsumer *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
   (void)_o;
   (void)_resolver;
+  { auto _e = version(); _o->version = _e; }
   { auto _e = chain(); _o->chain = _e; }
   { auto _e = consumer(); _o->consumer = _e; }
   { auto _e = consumerType(); _o->consumerType = _e; }
@@ -17943,6 +18252,7 @@ inline ::flatbuffers::Offset<PhasedConsumer> PhasedConsumer::Pack(::flatbuffers:
   (void)_rehasher;
   (void)_o;
   struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const RigExecWirePhasedConsumer* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
+  auto _version = _o->version;
   auto _chain = _o->chain;
   auto _consumer = _o->consumer;
   auto _consumerType = _o->consumerType;
@@ -17950,6 +18260,7 @@ inline ::flatbuffers::Offset<PhasedConsumer> PhasedConsumer::Pack(::flatbuffers:
   auto _hops = _o->hops.size() ? _fbb.CreateVector(_o->hops) : 0;
   return rigExec::fb::CreatePhasedConsumer(
       _fbb,
+      _version,
       _chain,
       _consumer,
       _consumerType,
@@ -18186,6 +18497,21 @@ inline const ::flatbuffers::TypeTable *InputTagTypeTable() {
   return &tt;
 }
 
+inline const ::flatbuffers::TypeTable *PropertyCandidateKindTypeTable() {
+  static const ::flatbuffers::TypeCode type_codes[] = {
+    { ::flatbuffers::ET_UCHAR, 0, 0 },
+    { ::flatbuffers::ET_UCHAR, 0, 0 },
+    { ::flatbuffers::ET_UCHAR, 0, 0 }
+  };
+  static const ::flatbuffers::TypeFunction type_refs[] = {
+    rigExec::fb::PropertyCandidateKindTypeTable
+  };
+  static const ::flatbuffers::TypeTable tt = {
+    ::flatbuffers::ST_ENUM, 3, type_codes, type_refs, nullptr, nullptr, nullptr
+  };
+  return &tt;
+}
+
 inline const ::flatbuffers::TypeTable *ArraySourceTypeTable() {
   static const ::flatbuffers::TypeCode type_codes[] = {
     { ::flatbuffers::ET_UCHAR, 0, 0 },
@@ -18293,13 +18619,16 @@ inline const ::flatbuffers::TypeTable *SlotDomainTypeTable() {
     { ::flatbuffers::ET_UCHAR, 0, 0 },
     { ::flatbuffers::ET_UCHAR, 0, 0 },
     { ::flatbuffers::ET_UCHAR, 0, 0 },
+    { ::flatbuffers::ET_UCHAR, 0, 0 },
+    { ::flatbuffers::ET_UCHAR, 0, 0 },
+    { ::flatbuffers::ET_UCHAR, 0, 0 },
     { ::flatbuffers::ET_UCHAR, 0, 0 }
   };
   static const ::flatbuffers::TypeFunction type_refs[] = {
     rigExec::fb::SlotDomainTypeTable
   };
   static const ::flatbuffers::TypeTable tt = {
-    ::flatbuffers::ST_ENUM, 27, type_codes, type_refs, nullptr, nullptr, nullptr
+    ::flatbuffers::ST_ENUM, 30, type_codes, type_refs, nullptr, nullptr, nullptr
   };
   return &tt;
 }
@@ -18324,13 +18653,17 @@ inline const ::flatbuffers::TypeTable *StepKindTypeTable() {
     { ::flatbuffers::ET_UCHAR, 0, 0 },
     { ::flatbuffers::ET_UCHAR, 0, 0 },
     { ::flatbuffers::ET_UCHAR, 0, 0 },
+    { ::flatbuffers::ET_UCHAR, 0, 0 },
+    { ::flatbuffers::ET_UCHAR, 0, 0 },
+    { ::flatbuffers::ET_UCHAR, 0, 0 },
+    { ::flatbuffers::ET_UCHAR, 0, 0 },
     { ::flatbuffers::ET_UCHAR, 0, 0 }
   };
   static const ::flatbuffers::TypeFunction type_refs[] = {
     rigExec::fb::StepKindTypeTable
   };
   static const ::flatbuffers::TypeTable tt = {
-    ::flatbuffers::ST_ENUM, 19, type_codes, type_refs, nullptr, nullptr, nullptr
+    ::flatbuffers::ST_ENUM, 23, type_codes, type_refs, nullptr, nullptr, nullptr
   };
   return &tt;
 }
@@ -18792,6 +19125,23 @@ inline const ::flatbuffers::TypeTable *SplineIkParamsTypeTable() {
   return &tt;
 }
 
+inline const ::flatbuffers::TypeTable *PropertyInputCandidateTypeTable() {
+  static const ::flatbuffers::TypeCode type_codes[] = {
+    { ::flatbuffers::ET_UINT, 0, -1 },
+    { ::flatbuffers::ET_UCHAR, 0, 0 },
+    { ::flatbuffers::ET_INT, 0, -1 },
+    { ::flatbuffers::ET_BOOL, 0, -1 }
+  };
+  static const ::flatbuffers::TypeFunction type_refs[] = {
+    rigExec::fb::PropertyCandidateKindTypeTable
+  };
+  static const int64_t values[] = { 0, 4, 8, 12, 16 };
+  static const ::flatbuffers::TypeTable tt = {
+    ::flatbuffers::ST_STRUCT, 4, type_codes, type_refs, nullptr, values, nullptr
+  };
+  return &tt;
+}
+
 inline const ::flatbuffers::TypeTable *SlotRangeTypeTable() {
   static const ::flatbuffers::TypeCode type_codes[] = {
     { ::flatbuffers::ET_UCHAR, 0, 0 },
@@ -19011,14 +19361,18 @@ inline const ::flatbuffers::TypeTable *InputTypeTable() {
     { ::flatbuffers::ET_INT, 0, -1 },
     { ::flatbuffers::ET_UINT, 0, -1 },
     { ::flatbuffers::ET_UINT, 1, -1 },
-    { ::flatbuffers::ET_SHORT, 0, -1 }
+    { ::flatbuffers::ET_SHORT, 0, -1 },
+    { ::flatbuffers::ET_SEQUENCE, 1, 2 },
+    { ::flatbuffers::ET_SEQUENCE, 1, 2 },
+    { ::flatbuffers::ET_INT, 0, -1 }
   };
   static const ::flatbuffers::TypeFunction type_refs[] = {
     rigExec::fb::InputTagTypeTable,
-    rigExec::fb::ReadModeTypeTable
+    rigExec::fb::ReadModeTypeTable,
+    rigExec::fb::PropertyInputCandidateTypeTable
   };
   static const ::flatbuffers::TypeTable tt = {
-    ::flatbuffers::ST_TABLE, 7, type_codes, type_refs, nullptr, nullptr, nullptr
+    ::flatbuffers::ST_TABLE, 10, type_codes, type_refs, nullptr, nullptr, nullptr
   };
   return &tt;
 }
@@ -19093,22 +19447,30 @@ inline const ::flatbuffers::TypeTable *StepTypeTable() {
     { ::flatbuffers::ET_INT, 1, -1 },
     { ::flatbuffers::ET_BOOL, 0, -1 },
     { ::flatbuffers::ET_BOOL, 0, -1 },
+    { ::flatbuffers::ET_UINT, 1, -1 },
+    { ::flatbuffers::ET_SEQUENCE, 1, 2 },
+    { ::flatbuffers::ET_BOOL, 0, -1 },
+    { ::flatbuffers::ET_BOOL, 0, -1 },
+    { ::flatbuffers::ET_SEQUENCE, 1, 3 },
+    { ::flatbuffers::ET_BOOL, 0, -1 },
     { ::flatbuffers::ET_BOOL, 0, -1 },
     { ::flatbuffers::ET_BOOL, 0, -1 },
     { ::flatbuffers::ET_INT, 1, -1 },
     { ::flatbuffers::ET_INT, 0, -1 },
     { ::flatbuffers::ET_INT, 0, -1 },
-    { ::flatbuffers::ET_SEQUENCE, 0, 2 },
-    { ::flatbuffers::ET_SEQUENCE, 0, 2 },
+    { ::flatbuffers::ET_SEQUENCE, 0, 4 },
+    { ::flatbuffers::ET_SEQUENCE, 0, 4 },
     { ::flatbuffers::ET_UINT, 0, -1 }
   };
   static const ::flatbuffers::TypeFunction type_refs[] = {
     rigExec::fb::StepKindTypeTable,
     rigExec::fb::SlotRangeTypeTable,
+    rigExec::fb::InputTypeTable,
+    rigExec::fb::IntPairTypeTable,
     rigExec::fb::F64TypeTable
   };
   static const ::flatbuffers::TypeTable tt = {
-    ::flatbuffers::ST_TABLE, 17, type_codes, type_refs, nullptr, nullptr, nullptr
+    ::flatbuffers::ST_TABLE, 23, type_codes, type_refs, nullptr, nullptr, nullptr
   };
   return &tt;
 }
@@ -20079,6 +20441,7 @@ inline const ::flatbuffers::TypeTable *PropertyRevisionTypeTable() {
 inline const ::flatbuffers::TypeTable *PropertyChainTypeTable() {
   static const ::flatbuffers::TypeCode type_codes[] = {
     { ::flatbuffers::ET_UINT, 0, -1 },
+    { ::flatbuffers::ET_UINT, 0, -1 },
     { ::flatbuffers::ET_UCHAR, 0, 0 },
     { ::flatbuffers::ET_SEQUENCE, 1, 1 }
   };
@@ -20087,13 +20450,14 @@ inline const ::flatbuffers::TypeTable *PropertyChainTypeTable() {
     rigExec::fb::PropertyRevisionTypeTable
   };
   static const ::flatbuffers::TypeTable tt = {
-    ::flatbuffers::ST_TABLE, 3, type_codes, type_refs, nullptr, nullptr, nullptr
+    ::flatbuffers::ST_TABLE, 4, type_codes, type_refs, nullptr, nullptr, nullptr
   };
   return &tt;
 }
 
 inline const ::flatbuffers::TypeTable *PhasedConsumerTypeTable() {
   static const ::flatbuffers::TypeCode type_codes[] = {
+    { ::flatbuffers::ET_UINT, 0, -1 },
     { ::flatbuffers::ET_UINT, 0, -1 },
     { ::flatbuffers::ET_UINT, 0, -1 },
     { ::flatbuffers::ET_UCHAR, 0, 0 },
@@ -20104,7 +20468,7 @@ inline const ::flatbuffers::TypeTable *PhasedConsumerTypeTable() {
     rigExec::fb::PropertyValueTypeTypeTable
   };
   static const ::flatbuffers::TypeTable tt = {
-    ::flatbuffers::ST_TABLE, 5, type_codes, type_refs, nullptr, nullptr, nullptr
+    ::flatbuffers::ST_TABLE, 6, type_codes, type_refs, nullptr, nullptr, nullptr
   };
   return &tt;
 }

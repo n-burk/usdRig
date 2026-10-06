@@ -123,7 +123,7 @@ void RigExecBakedBuildStepEdges(RigExecBakedProgramImpl *program,
 bool RigExecBakedValidateStepGraph(const RigExecBakedProgramImpl &program,
                                    std::string *error);
 
-/// Orders \p program's head steps into `headOrder` and fills their `preds`
+/// Orders \p program's head steps into the head prefix and fills their `preds`
 /// and `succs` from what they declare.
 ///
 /// One Kahn sort over the declared reads: an edge from the head step that
@@ -140,7 +140,7 @@ bool RigExecBakedSortHeadTier(RigExecBakedProgramImpl *program,
                               std::string *error);
 
 /// Whether \p program's head tier is one RigExecBakedRunHeadTier may trust,
-/// which Build asks before it hands the program out: in `headOrder`, every
+/// which Build asks before it hands the program out: in the head prefix, every
 /// slot a head step reads was written by an earlier head step, every
 /// property revision precedes every rest and ladder op (the two run in
 /// separate passes), no head step reads a region domain, no slot has two
@@ -152,7 +152,7 @@ bool RigExecBakedValidateHeadTier(const RigExecBakedProgramImpl &program,
                                   std::string *error);
 
 /// Runs \p program's head tier at \p time: serially, on the owning thread,
-/// in `headOrder`, before the region.
+/// in the head prefix, before the region.
 ///
 /// An op runs when \p force, on the program's first tier run or after a
 /// moved program stamp, when it always runs, or when a head leaf, an
@@ -169,8 +169,8 @@ void RigExecBakedRunHeadTier(RigExecBakedProgramImpl *program,
                              UsdTimeCode time, RigExecRigPose *pose,
                              bool force, bool verify);
 
-/// Runs \p program's rest and ladder ops (RigExecBakedHeadKind::RestCompose
-/// and LadderCompose), in `headOrder`, after the property revisions and
+/// Runs \p program's rest and ladder ops (RigExecBakedStepKind::RestCompose
+/// and LadderCompose), in the head prefix, after the property revisions and
 /// the chain-routed leaf sample, before the region. Serial, owning thread.
 ///
 /// An op runs when \p force or after a moved program stamp; on the tier's
@@ -290,6 +290,9 @@ void RigExecBakedComputeClosure(RigExecBakedProgramImpl *program,
 /// sequence counter, so the op trace and the profiler replay describe no
 /// step. RigExecBakedRunSteps calls it first; a run that returns before the
 /// region calls it itself.
+void RigExecBakedRunStepBodyAndStamp(RigExecBakedProgramImpl *program,
+    RigExecBakedStep *step, UsdTimeCode time);
+
 void RigExecBakedClearRunStamps(RigExecBakedProgramImpl *program);
 
 /// Runs every step of \p program, returning false when one of them gave the

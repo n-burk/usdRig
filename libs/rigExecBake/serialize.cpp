@@ -42,6 +42,10 @@ _RIGEXEC_BAKE_PIN_STEP(RevisionFuse);
 _RIGEXEC_BAKE_PIN_STEP(ChainStatus);
 _RIGEXEC_BAKE_PIN_STEP(Derived);
 _RIGEXEC_BAKE_PIN_STEP(FrameMatrix);
+_RIGEXEC_BAKE_PIN_STEP(PropertyRevision);
+_RIGEXEC_BAKE_PIN_STEP(RestCompose);
+_RIGEXEC_BAKE_PIN_STEP(LadderCompose);
+_RIGEXEC_BAKE_PIN_STEP(SkinTopology);
 #undef _RIGEXEC_BAKE_PIN_STEP
 
 #define _RIGEXEC_BAKE_PIN_DOMAIN(name)                                     \
@@ -75,10 +79,13 @@ _RIGEXEC_BAKE_PIN_DOMAIN(WeightFrames);
 _RIGEXEC_BAKE_PIN_DOMAIN(PoseWeight);
 _RIGEXEC_BAKE_PIN_DOMAIN(Snapshots);
 _RIGEXEC_BAKE_PIN_DOMAIN(FrameMatrix);
+_RIGEXEC_BAKE_PIN_DOMAIN(Rest);
+_RIGEXEC_BAKE_PIN_DOMAIN(Ladder);
+_RIGEXEC_BAKE_PIN_DOMAIN(SkinTopology);
 #undef _RIGEXEC_BAKE_PIN_DOMAIN
 // The program's last enumerators are the wire's: a program kind or domain
 // appended without its wire value fails the build here.
-static_assert(uint8_t(RigExecBakedStepKind::FrameMatrix) ==
+static_assert(uint8_t(RigExecBakedStepKind::SkinTopology) ==
                   uint8_t(RigExecWireStepKind::MAX),
               "the wire step kinds end before the program's");
 static_assert(RigExecBakedSlotDomainCount ==
@@ -545,6 +552,16 @@ _FileFill::_Steps(std::vector<fb::RigExecWireStep> *steps)
         out.preds = _ToI32s(step.preds);
         out.succs = _ToI32s(step.succs);
         out.isSource = step.isSource;
+        out.isHead = step.isHead;
+        const size_t index = steps->size();
+        if (index < _inputs.headInputSlots.size())
+            out.headInputSlots = _inputs.headInputSlots[index];
+        if (index < _inputs.headInputReads.size())
+            out.headInputReads = _inputs.headInputReads[index];
+        out.headVaryingLeaves = step.varyingLeaves;
+        out.headAlwaysRuns = step.alwaysRuns;
+        for (const auto &[version, record] : step.shadowedReads)
+            out.shadowedReads.emplace_back(int32_t(version), int32_t(record));
         out.externalReads = step.externalReads;
         out.varyingInputs = step.varyingInputs;
         out.resolvedInputReads = step.resolvedInputReads;

@@ -1127,7 +1127,7 @@ _BinaryCheckInputs(const RigExecBakedProgramImpl &program,
         ++baked;
         fileCrossing +=
             (read.flags & uint8_t(fb::InputReadFlags::ViaChain)) ? 1 : 0;
-    });
+    }, false);
     CHECK(registered == baked);
     CHECK(crossing == fileCrossing);
     std::printf("  input list: %zu slots, %zu weight objects (%zu "
@@ -2234,9 +2234,9 @@ TestBakeOptions(const std::string &fixture, const std::string &input)
     std::printf("presentation, bad identifier: %s\n", error.c_str());
 }
 
-// examples/biped/Biped.usda baked at its fixture time (1): 3,212,960 bytes,
-// measured 2026-10-05. The budget is that plus 5%.
-constexpr size_t kBipedBytes = 3212960;
+// Format 9, examples/biped/Biped.usda at fixture time 1: 3,467,672 bytes,
+// measured 2026-10-06 with head steps and memo bindings. Budget: plus 5%.
+constexpr size_t kBipedBytes = 3467672;
 constexpr size_t kBipedBudget = kBipedBytes + kBipedBytes / 20;
 
 static bool sizeBudgetChecked = false;
@@ -2253,7 +2253,7 @@ _BinarySizeBudget(const std::string &fixture, const RigExecBakeResult &result)
     const size_t bytes = result.bytes.size();
     CHECK(bytes <= kBipedBudget);
     std::printf("size budget %s: %zu bytes, budget %zu (measured %zu on "
-                "2026-10-05)\n",
+                "2026-10-06, format 9)\n",
                 fixture.c_str(), bytes, kBipedBudget, kBipedBytes);
     const std::unique_ptr<fb::RigExecWireFile> file =
         RigExecTestUnpack(result.bytes);
@@ -2297,6 +2297,15 @@ _BinarySizeBudget(const std::string &fixture, const RigExecBakeResult &result)
              f.steps.clear();
              f.clustering = std::make_unique<fb::RigExecWireClustering>();
              f.cones = std::make_unique<fb::RigExecWireCones>();
+         }},
+        {"  of which head memo",
+         [](F &f) {
+             for (auto &step : f.steps) {
+                 step.headInputSlots.clear();
+                 step.headInputReads.clear();
+                 step.headVaryingLeaves = false;
+                 step.headAlwaysRuns = false;
+             }
          }},
         {"pose",
          [](F &f) { f.pose = std::make_unique<fb::RigExecWireDomainPose>(); }},

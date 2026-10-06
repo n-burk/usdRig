@@ -1441,8 +1441,13 @@ _RrRunSolveStep(RrProgram *program, size_t step, std::string *error)
             liveFlags[k] = ws.restIsLive[k];
         }
     }
-    if ((scratch->ladderRecomputed && !ws.restSlots.empty()) ||
-        ws.hasLiveRest) {
+    bool restMoved = false;
+    for (const int slot : ws.restSlots) {
+        restMoved = restMoved ||
+            (slot >= 0 && size_t(slot) < store.restChanged.size() &&
+             store.restChanged[size_t(slot)]);
+    }
+    if (restMoved || ws.hasLiveRest) {
         if (!_RrRefreshSolverRests(program, step, size_t(wire.object),
                                    error)) {
             return false;

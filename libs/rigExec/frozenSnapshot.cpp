@@ -256,8 +256,6 @@ _CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst)
     D.headLeaves = src.headLeaves;
     D.headOverrideSlots = src.headOverrideSlots;
     D.headOverrideSlotsByName = src.headOverrideSlotsByName;
-    D.headSteps = src.headSteps;
-    D.headOrder = src.headOrder;
     D.propertyValues = src.propertyValues;
     D.propertyVersionValid = src.propertyVersionValid;
     D.propertyChanged = src.propertyChanged;

@@ -5479,6 +5479,26 @@ TestPolicyRigActivationSurvivesItsOwnDerivation(
 // values.
 
 namespace {
+static std::vector<RigExecOpGraphNode>
+HeadGraphForTesting(const RigExecBakedProgramImpl &B)
+{
+    auto graph = RigExecBakedOpGraph(B);
+    graph.erase(std::remove_if(graph.begin(),graph.end(),
+        [&B](const auto &node) { return !B.steps[node.step].isHead; }),graph.end());
+    return graph;
+}
+
+
+// Head entries are part of the ordinary execution trace.
+static std::vector<RigExecOpTraceEntry>
+ExecutedHeads(const RigExecBakedProgramImpl &B)
+{
+    auto trace = RigExecBakedLastRunTrace(B);
+    trace.erase(std::remove_if(trace.begin(),trace.end(),
+        [&B](const auto &entry) { return !B.steps[entry.step].isHead; }),trace.end());
+    return trace;
+}
+
 
 // Calls into the test sources: how many, how many off a sample time, and
 // how many from a thread other than the one that built the scene index.
@@ -6082,18 +6102,19 @@ _CheckUpstreamCone(const _UpstreamImaging &imaging,
     const std::vector<RigExecOpTraceEntry> region =
         evaluator->GetLastOpTrace();
     const std::vector<RigExecOpTraceEntry> head =
-        RigExecBakedLastHeadTrace(B);
+        ExecutedHeads(B);
     const std::set<size_t> regionClosure =
         regionSeed.empty() ? std::set<size_t>()
                            : _ForwardClosure(evaluator->GetOpGraph(),
                                              regionSeed);
     const std::set<size_t> headClosure =
         headSeed.empty() ? std::set<size_t>()
-                         : _ForwardClosure(RigExecBakedHeadGraph(B),
+                         : _ForwardClosure(HeadGraphForTesting(B),
                                            headSeed);
     size_t outside = 0;
     size_t ran = 0;
     for (const RigExecOpTraceEntry &entry : region) {
+        if (B.steps[entry.step].isHead) continue;
         if (entry.step < B.steps.size() && B.steps[entry.step].isSource) {
             continue;
         }
@@ -6138,7 +6159,7 @@ _UpstreamWork(const _UpstreamImaging &imaging)
         return 0;
     }
     const RigExecBakedProgramImpl &B = program->GetStepGraph();
-    size_t work = RigExecBakedLastHeadTrace(B).size();
+    size_t work = ExecutedHeads(B).size();
     for (const RigExecOpTraceEntry &entry : evaluator->GetLastOpTrace()) {
         if (entry.step >= B.steps.size() || !B.steps[entry.step].isSource) {
             ++work;

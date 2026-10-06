@@ -1723,6 +1723,278 @@ _Float(const _ChainFrame &row, const std::string &path, bool *found)
     return *found ? it->second.f32 : 0.0f;
 }
 
+static UsdStageRefPtr
+_OraclePublicationStage(bool prior)
+{
+    const auto stage = _ChainBaseStage();
+    stage->SetEndTimeCode(2.0);
+    const auto driver = _Channel(stage, prior ? "A_Driver" : "Z_Driver",
+                                 "rigExec:amount", SdfValueTypeNames->Float);
+    driver.Set(0.125f);
+    driver.Set(0.125f, UsdTimeCode(1));
+    driver.Set(0.375f, UsdTimeCode(2));
+    const auto receiver = _Channel(stage, "M_Receiver", "rigExec:amount",
+                                   SdfValueTypeNames->Float);
+    receiver.Set(0.25f);
+    const auto shift = _MathMover(stage, prior ? "A_Driver" : "Z_Driver",
+                                  "RigExecFloatMathMover", "add", driver);
+    _SetInput(shift, "inputs:value", SdfValueTypeNames->Float, 0.5f);
+    const auto blend = _MathMover(stage, "M_Receiver", "RigExecFloatMathMover",
+                                  "add", receiver);
+    _SetInput(blend, "inputs:value", SdfValueTypeNames->Float, 1.0f);
+    const auto envelope = stage->DefinePrim(SdfPath("/Asset/Rig/Weights/Envelope"),
+                                           TfToken("RigExecDynamicWeight"));
+    envelope.CreateRelationship(TfToken("rigExec:weightTarget")).SetTargets({receiver.GetPath()});
+    envelope.CreateAttribute(TfToken("rigExec:representation"), SdfValueTypeNames->Token)
+        .Set(TfToken("constant"));
+    envelope.CreateAttribute(TfToken("rigExec:rangePolicy"), SdfValueTypeNames->Token)
+        .Set(TfToken("clamp"));
+    const auto envelopeDriver = envelope.CreateAttribute(TfToken("inputs:driver"), SdfValueTypeNames->Float);
+    envelopeDriver.AddConnection(driver.GetPath());
+    envelopeDriver.SetMetadata(TfToken("rigExecReadPhase"), std::string("final"));
+    blend.CreateRelationship(TfToken("rigExec:weightObject")).SetTargets({envelope.GetPath()});
+    return stage;
+}
+
+static void
+TestOraclePublicationGeneration()
+{
+    const std::vector<double> frames{1, 2, 2, 1};
+    std::vector<std::vector<_ChainFrame>> variants;
+    for (const bool prior : {true, false}) {
+        const auto stage = _OraclePublicationStage(prior);
+        const std::string label = prior ? "oracle prior finished chain" : "oracle later cached chain";
+        std::vector<uint8_t> bytes;
+        std::string error;
+        RigExecRigEvaluator bake(stage, SdfPath("/Asset/Rig"));
+        bake.SetEvaluationMode(RigExecEvaluationMode::Baked);
+        CHECK(RigExecTestBakeAt(bake, 1, &bytes, &error));
+        const auto file = RigExecTestUnpack(bytes);
+        CHECK(file);
+        if (!file) continue;
+        const std::string driver = std::string("/Asset/Rig/Channels/") +
+            (prior ? "A_Driver" : "Z_Driver") + ".rigExec:amount";
+        const std::string receiver = "/Asset/Rig/Channels/M_Receiver.rigExec:amount";
+        int driverFinal = -1, receiverRevision = -1;
+        for (size_t s = 0; s < file->steps.size(); ++s) {
+            const auto &step = file->steps[s];
+            if (!step.isHead || step.kind != fb::StepKind::PropertyRevision) continue;
+            const auto &chain = file->propertyChains[size_t(step.object)];
+            const auto target = RigExecFormatPathText(*file, file->inputs[chain.target].name());
+            if (target == driver && size_t(step.part) == chain.revisions.size()) driverFinal = int(s);
+            if (target == receiver && step.part == 1) receiverRevision = int(s);
+        }
+        CHECK(driverFinal >= 0 && receiverRevision >= 0);
+        // Native compilation orders every connected envelope producer first.
+        CHECK(driverFinal < receiverRevision);
+        _TestStage(label, stage, frames);
+        std::vector<_ChainFrame> rows;
+        CHECK(_ChainsMatchDynamic(label, stage, frames, &rows));
+        CHECK(rows.size() == frames.size());
+        if (!prior) {
+            // A valid standalone wire schedule can visit the independent
+            // receiver heads before the oracle-only producer. Keep all body,
+            // version and candidate identities; remap only step references.
+            const int receiverChain = file->steps[size_t(receiverRevision)].object;
+            const int driverChain = file->steps[size_t(driverFinal)].object;
+            std::vector<size_t> order;
+            for (const int chain : {receiverChain, driverChain})
+                for (size_t i = 0; i < file->steps.size(); ++i)
+                    if (file->steps[i].isHead && file->steps[i].kind == fb::StepKind::PropertyRevision &&
+                        file->steps[i].object == chain) order.push_back(i);
+            for (size_t i = 0; i < file->steps.size(); ++i)
+                if (std::find(order.begin(), order.end(), i) == order.end()) order.push_back(i);
+            std::vector<int32_t> remap(order.size());
+            for (size_t i = 0; i < order.size(); ++i) remap[order[i]] = int32_t(i);
+            auto oldSteps = std::move(file->steps);
+            auto oldClusters = file->clustering->clusterOf;
+            file->steps.resize(order.size());
+            for (size_t i = 0; i < order.size(); ++i) {
+                file->steps[i] = std::move(oldSteps[order[i]]);
+                file->clustering->clusterOf[i] = oldClusters[order[i]];
+                for (auto &pred : file->steps[i].preds) pred = remap[size_t(pred)];
+                for (auto &succ : file->steps[i].succs) succ = remap[size_t(succ)];
+                std::sort(file->steps[i].preds.begin(), file->steps[i].preds.end());
+                std::sort(file->steps[i].succs.begin(), file->steps[i].succs.end());
+            }
+            for (auto &cluster : file->clustering->clusters) {
+                for (auto &member : cluster.members) member = remap[size_t(member)];
+                std::sort(cluster.members.begin(), cluster.members.end());
+            }
+            for (auto *list : {&file->cones->varyingSteps, &file->cones->overrideSteps}) {
+                for (auto &step : *list) step = remap[size_t(step)];
+                std::sort(list->begin(), list->end());
+            }
+            CHECK(remap[size_t(receiverRevision)] < remap[size_t(driverFinal)]);
+            error.clear();
+            CHECK(RigExecFormatValidate(*file, &error));
+            if (!error.empty()) std::printf("later oracle wire: %s\n", error.c_str());
+            CHECK(RigExecFormatWrite(*file, &bytes, &error));
+            RigExecTestPlayer later;
+            CHECK(later.Open(bytes, stage, &error));
+            rows.clear();
+            for (const double frame : frames) {
+                CHECK(later.Play(frame, &error));
+                _ChainFrame row;
+                for (const auto &value : later->GetPropertyValues()) row.values.emplace(value.path, value.value);
+                row.lines = _ChainLines(later->GetDiagnostics());
+                rows.push_back(std::move(row));
+            }
+        }
+        for (size_t f = 0; f < rows.size() && f < frames.size(); ++f) {
+            const float raw = frames[f] == 1 ? 0.125f : 0.375f;
+            bool found = false;
+            CHECK(_Float(rows[f], driver, &found) == raw + 0.5f && found);
+            const float actual = _Float(rows[f], receiver, &found);
+            const float expected = 0.25f + (prior ? raw + 0.5f : raw);
+            if (!found || actual != expected)
+                std::printf("%s frame %g: raw %.9g driver %.9g receiver %.9g expected %.9g\n",
+                            label.c_str(), frames[f], raw,
+                            _Float(rows[f], driver, &found), actual, expected);
+            CHECK(actual == expected && found);
+        }
+        if (rows.size() == frames.size()) {
+            CHECK(_SameBits(rows[0].values.at(receiver), rows[3].values.at(receiver)));
+            CHECK(_SameBits(rows[1].values.at(receiver), rows[2].values.at(receiver)));
+            CHECK(!_SameBits(rows[0].values.at(receiver), rows[1].values.at(receiver)));
+        }
+        RigExecTestPlayer masked;
+        CHECK(masked.Open(bytes, stage, &error));
+        masked->SetRunMaskForTesting(0x4u);
+        for (size_t f = 0; f < frames.size() && f < rows.size(); ++f) {
+            CHECK(masked.Play(frames[f], &error));
+            std::map<std::string, RrPropertyValue> values;
+            for (const auto &value : masked->GetPropertyValues()) values.emplace(value.path, value.value);
+            CHECK(values.size() == rows[f].values.size());
+            for (const auto &[path, value] : values) {
+                const auto at = rows[f].values.find(path);
+                CHECK(at != rows[f].values.end() && _SameBits(value, at->second));
+            }
+            CHECK(_ChainLines(masked->GetDiagnostics()) == rows[f].lines);
+            const auto trace = masked->GetLastRunTraceForTesting();
+            bool sawHead = false;
+            for (const auto step : trace) {
+                CHECK(step >= 0 && size_t(step) < file->steps.size());
+                if (step >= 0 && size_t(step) < file->steps.size()) {
+                    const auto &body = file->steps[size_t(step)];
+                    sawHead = sawHead || body.isHead;
+                    CHECK(body.isHead || (body.kind >= fb::StepKind::InfluenceFold && body.kind <= fb::StepKind::Derived));
+                }
+            }
+            CHECK(sawHead);
+            for (size_t step = 0; step < file->steps.size(); ++step)
+                if (file->steps[step].isHead)
+                    CHECK(masked->GetStepRanForTesting(step) ==
+                          (std::find(trace.begin(), trace.end(), int32_t(step)) != trace.end()));
+        }
+        variants.push_back(std::move(rows));
+    }
+    CHECK(variants.size() == 2);
+    if (variants.size() == 2 && !variants[0].empty() && !variants[1].empty())
+        CHECK(!_SameBits(variants[0][0].values.at("/Asset/Rig/Channels/M_Receiver.rigExec:amount"),
+                         variants[1][0].values.at("/Asset/Rig/Channels/M_Receiver.rigExec:amount")));
+}
+
+static void
+TestDoubleTailCycle()
+{
+    const auto stage = _ChainBaseStage();
+    stage->SetEndTimeCode(4.0);
+    const auto a = _Channel(stage, "CycleA", "rigExec:amount", SdfValueTypeNames->Float);
+    const auto b = _Channel(stage, "CycleB", "rigExec:amount", SdfValueTypeNames->Double);
+    a.Set(0.125f);
+    b.Set(0.375);
+    b.Set(0.375, UsdTimeCode(1));
+    b.Set(0.625, UsdTimeCode(2));
+    b.Set(SdfValueBlock(), UsdTimeCode(3));
+    b.Set(0.375, UsdTimeCode(4));
+    a.AddConnection(b.GetPath());
+    b.AddConnection(a.GetPath());
+    const auto target = _Channel(stage, "CycleResult", "rigExec:amount", SdfValueTypeNames->Float);
+    target.Set(0.25f);
+    const auto mover = _MathMover(stage, "CycleResult", "RigExecFloatMathMover", "add", target);
+    const auto value = mover.CreateAttribute(TfToken("inputs:value"), SdfValueTypeNames->Float);
+    value.AddConnection(a.GetPath());
+    const std::vector<double> frames{1, 2, 3, 4, 2};
+    _TestStage("double tail fresh cycle", stage, frames);
+    std::vector<_ChainFrame> rows;
+    CHECK(_ChainsMatchDynamic("double tail fresh cycle", stage, frames, &rows));
+    CHECK(rows.size() == frames.size());
+    if (rows.size() == frames.size()) {
+        bool found = false;
+        const std::string path = target.GetPath().GetString();
+        CHECK(_Float(rows[0], path, &found) == 0.625f && found);
+        CHECK(_Float(rows[1], path, &found) == 0.875f && found);
+        CHECK(_SameBits(rows[0].values.at(path), rows[3].values.at(path)));
+        CHECK(_SameBits(rows[1].values.at(path), rows[4].values.at(path)));
+        CHECK(!_SameBits(rows[0].values.at(path), rows[1].values.at(path)));
+    }
+}
+
+static void
+TestScalarRawKindPreservesRecords()
+{
+    const auto stage = _PhasedStage();
+    const std::string path = "/Asset/Rig/Movers/Readouts/early.inputs:value";
+    CHECK(stage->GetAttributeAtPath(SdfPath(path)).Set(0.0f));
+    RigExecRigEvaluator baked(stage, SdfPath("/Asset/Rig"));
+    baked.SetEvaluationMode(RigExecEvaluationMode::Baked);
+    std::vector<uint8_t> bytes;
+    std::string error;
+    CHECK(RigExecTestBakeAt(baked, 1, &bytes, &error));
+    auto reader = RigExecRuntimeReader::Open(bytes.data(), bytes.size(), &error);
+    const auto file = RigExecTestUnpack(bytes);
+    CHECK(reader && file);
+    if (!reader || !file) return;
+    size_t slot = 0;
+    CHECK(reader->FindInput(path, &slot));
+    bool recorded = false;
+    for (const auto &record : file->phasedConsumers)
+        recorded = recorded || RigExecFormatPathText(*file, file->inputs[record.consumer].name()) == path;
+    CHECK(recorded);
+    const auto raw = reader->GetInputValue(slot);
+    CHECK(raw.tag == RrInputTag::Float && raw.f32 == 0.0f);
+    CHECK(reader->Execute(&error));
+    const auto baseline = _Snapshot(*reader);
+    const auto recordValue = [&](const auto &row) {
+        bool present = false;
+        for (const auto &value : row.properties)
+            if (value.path == path) {
+                present = true;
+                CHECK(value.value.tag == RrPropertyValue::Tag::Float && value.value.f32 == 0.2f);
+            }
+        CHECK(present);
+    };
+    recordValue(baseline);
+    CHECK(reader->SetInputAt(slot, raw, &error));
+    CHECK(reader->Execute(&error));
+    recordValue(_Snapshot(*reader));
+    CHECK(_SamePlayed(baseline, _Snapshot(*reader)));
+    CHECK(reader->ResetInput(path, &error));
+    CHECK(reader->Execute(&error));
+    CHECK(_SamePlayed(baseline, _Snapshot(*reader)));
+    CHECK(reader->SetSampledInputAt(slot, raw, &error));
+    CHECK(reader->Execute(&error));
+    CHECK(_SamePlayed(baseline, _Snapshot(*reader)));
+    CHECK(reader->SetInput(path, 0.75, &error));
+    CHECK(reader->Execute(&error));
+    recordValue(_Snapshot(*reader));
+    CHECK(_SamePlayed(baseline, _Snapshot(*reader)));
+    // This authored value is below the computed phased publication, just
+    // as a session-layer edit: it does not suppress or replace the record.
+    CHECK(stage->GetAttributeAtPath(SdfPath(path)).Set(0.75f));
+    std::vector<_ChainFrame> rows;
+    CHECK(_ChainsMatchDynamic("raw authored scalar retains phased record", stage, {1}, &rows));
+    CHECK(rows.size() == 1);
+    if (!rows.empty()) {
+        bool found = false;
+        CHECK(_Float(rows[0], path, &found) == 0.2f && found);
+    }
+    CHECK(reader->ResetInput(path, &error));
+    CHECK(reader->Execute(&error));
+    CHECK(_SamePlayed(baseline, _Snapshot(*reader)));
+}
+
 static bool
 _HasLine(const _ChainFrame &row, const std::string &line)
 {
@@ -5127,12 +5399,14 @@ TestRunTraceOrder()
                           place[size_t(pred)] < place[i];
             }
         }
-        bool sourcesFirst = once;
-        for (size_t k = 1; sourcesFirst && k < trace.size(); ++k) {
-            sourcesFirst = file->steps[size_t(trace[k - 1])].isSource ||
-                           !file->steps[size_t(trace[k])].isSource;
-        }
-        CHECK(listed && ordered && sourcesFirst);
+        const auto phase = [&](int32_t step) {
+            const auto &body = file->steps[size_t(step)];
+            return body.isHead ? 0 : body.isSource ? 1 : 2;
+        };
+        bool phasesOrdered = once;
+        for (size_t k = 1; phasesOrdered && k < trace.size(); ++k)
+            phasesOrdered = phase(trace[k - 1]) <= phase(trace[k]);
+        CHECK(listed && ordered && phasesOrdered);
         CHECK(trace.size() == ran && ran > 0);
         std::printf("%s: %zu of %zu step(s) ran, in order\n", what.c_str(),
                     trace.size(), steps);
@@ -5156,6 +5430,9 @@ main(int argc, char **argv)
     TestDisabledRevision();
     TestEnvelopeRevisions();
     TestPhasedConsumers();
+    TestOraclePublicationGeneration();
+    TestScalarRawKindPreservesRecords();
+    TestDoubleTailCycle();
     TestDefaultReadPhaseRoundTrip();
     TestNonFiniteBase();
     TestSampledInputWithNoValue();

@@ -410,9 +410,18 @@ TestCrossDomainTrace(const std::string &fixturesDir)
         CHECK((domains ==
                std::vector<std::string>{"pose", "weight", "geometry"}));
     }
+    const auto &unifiedSteps = E.GetBakedProgram()->GetStepGraph().steps;
+    size_t headCount = 0;
+    while (headCount < unifiedSteps.size() && unifiedSteps[headCount].isHead) ++headCount;
+    CHECK(headCount > 0);
     for (const RigExecOpGraphNode &node : graph) {
-        CHECK(node.domain == "pose" || node.domain == "weight" ||
-              node.domain == "geometry");
+        CHECK(node.domain == "head" || node.domain == "pose" ||
+              node.domain == "weight" || node.domain == "geometry");
+        const auto &steps = E.GetBakedProgram()->GetStepGraph().steps;
+        CHECK((node.domain == "head") == steps[node.step].isHead);
+        CHECK(steps[node.step].isHead ==
+              (node.step < headCount));
+        if (steps[node.step].isHead) CHECK(!steps[node.step].isSource);
     }
     CHECK(rigExecTest::CountTraceDomain(trace, "property") == 0);
 
@@ -736,24 +745,29 @@ TestPropertyDragCone(const std::string &fixturesDir)
     if (!ChainFound(c)) return;
     const RigExecBakedProgramImpl &B = E.GetBakedProgram()->GetStepGraph();
 
-    // The steps that may read the clamp's result. No slot names it: the
-    // property chain runs in the prologue and its readers carry a per-step
-    // "reads resolved inputs" flag instead -- the blend's solve for its
-    // weight, and the volume's packet for the mesh points it measures (until
-    // S3 adds PropertyRevision ops and PropertyResult reads).
+    // The promoted property head owns the clamp's versions; ordinary
+    // consumers declare the exact PropertyResult ranges they can read.
+    size_t chain = SIZE_MAX;
+    for (size_t k = 0; k < B.propertyChains.size(); ++k) {
+        if (B.propertyChains[k].target == weight) chain = k;
+    }
+    CHECK(chain != SIZE_MAX);
+    if (chain == SIZE_MAX) return;
+    const auto &property = B.propertyChains[chain];
+    const uint32_t begin = property.versionBase;
+    const uint32_t end = begin + uint32_t(property.revisions.size()) + 1;
     std::vector<size_t> readers;
     for (size_t k = 0; k < B.steps.size(); ++k) {
-        if (B.steps[k].resolvedInputReads) readers.push_back(k);
+        if (B.steps[k].isHead) continue;
+        for (const auto &range : B.steps[k].reads) {
+            if (range.domain == RigExecBakedSlotDomain::PropertyResult &&
+                range.begin < end && begin < range.end) {
+                readers.push_back(k); break;
+            }
+        }
     }
-    CHECK((readers == std::vector<size_t>{c.blendSolve, c.volumePacket}));
-    // The packet is downstream of the blend anyway, so the cone below is
-    // the blend's.
-    CHECK(rigExecTest::OpGraphForwardCone(graph, {c.blendSolve})
-              [c.volumePacket]);
-    for (const RigExecOpSlotRange &range : graph[c.blendSolve].reads) {
-        CHECK(range.domain != "PropertyResult");
-    }
-
+    CHECK((readers == std::vector<size_t>{c.blendSolve}));
+    CHECK(rigExecTest::OpGraphForwardCone(graph, readers)[c.volumePacket]);
     // Executed set within the forward cone of the readers, except for the
     // steps that run every generation: the source pass (isSource) and the
     // externally-read steps with their cones -- the same set a repeated time
@@ -770,7 +784,12 @@ TestPropertyDragCone(const std::string &fixturesDir)
     for (const RigExecOpTraceEntry &entry : trace) {
         executed.insert(entry.step);
         domainsRun.insert(entry.domain);
-        if (!cone[entry.step]) {
+        if (B.steps[entry.step].isHead) {
+            CHECK(B.steps[entry.step].kind == RigExecBakedStepKind::PropertyRevision);
+            CHECK(B.steps[entry.step].object == int(chain));
+            CHECK(B.steps[entry.step].runSeq == entry.seq);
+            CHECK(!B.steps[entry.step].isSource);
+        } else if (!cone[entry.step]) {
             CHECK(alwaysRun.count(entry.step) == 1);
             CHECK(B.steps[entry.step].isSource);
         }
@@ -790,7 +809,7 @@ TestPropertyDragCone(const std::string &fixturesDir)
     // The re-run crossed pose, weight and geometry; the two arm solvers
     // feeding the blend are outside the cone and stayed clean.
     CHECK((domainsRun ==
-           std::set<std::string>{"pose", "weight", "geometry"}));
+           std::set<std::string>{"head", "pose", "weight", "geometry"}));
     CHECK(!executed.count(c.armFkSolve));
     CHECK(!executed.count(c.armIkSolve));
     for (const size_t step :

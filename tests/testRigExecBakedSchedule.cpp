@@ -2767,8 +2767,8 @@ HandBuiltHeadTier(RigExecBakedProgramImpl *B)
 uint32_t
 HeadStepOf(const RigExecBakedProgramImpl &B, int chain, int part)
 {
-    for (uint32_t i = 0; i < B.headSteps.size(); ++i) {
-        if (B.headSteps[i].object == chain && B.headSteps[i].part == part) {
+    for (uint32_t i = 0; i < RigExecBakedHeadIndices(B).size(); ++i) {
+        if (B.steps[i].object == chain && B.steps[i].part == part) {
             return i;
         }
     }
@@ -2809,28 +2809,27 @@ TestTheHeadValidatorRejectsAMalformedTier(const BuiltProgram &built)
         HandBuiltHeadTier(&B);
         CHECK(RigExecBakedValidateHeadTier(B, &error));
         // The sort keeps the chain order where the reads allow it.
-        std::vector<uint32_t> identity(B.headSteps.size());
+        std::vector<uint32_t> identity(RigExecBakedHeadIndices(B).size());
         for (uint32_t i = 0; i < identity.size(); ++i) {
             identity[i] = i;
         }
-        CHECK(B.headOrder == identity);
+        CHECK(RigExecBakedHeadIndices(B) == identity);
     }
     {
         RigExecBakedProgramImpl B;
         HandBuiltHeadTier(&B);
         const uint32_t one = HeadStepOf(B, 0, 1);
         const uint32_t two = HeadStepOf(B, 0, 2);
-        std::swap(*std::find(B.headOrder.begin(), B.headOrder.end(), one),
-                  *std::find(B.headOrder.begin(), B.headOrder.end(), two));
+        std::swap(B.steps[one],B.steps[two]);
         ExpectHeadRejected(B, "part 2 before part 1",
                            "head step PropertyRevision /Rig/M0_1 reads "
-                           "PropertyVersion slot 1, which no earlier head "
+                           "PropertyResult slot 1, which no earlier head "
                            "step writes");
     }
     {
         RigExecBakedProgramImpl B;
         HandBuiltHeadTier(&B);
-        B.headSteps[HeadStepOf(B, 0, 1)].regionReads.push_back(
+        B.steps[HeadStepOf(B, 0, 1)].reads.push_back(
             RigExecBakedOne(RigExecBakedSlotDomain::PoseFin, 0));
         ExpectHeadRejected(B, "a property step reading PoseFin",
                            "head step PropertyRevision /Rig/M0_0 reads the "
@@ -2839,11 +2838,11 @@ TestTheHeadValidatorRejectsAMalformedTier(const BuiltProgram &built)
     {
         RigExecBakedProgramImpl B;
         HandBuiltHeadTier(&B);
-        RigExecBakedHeadStep &step = B.headSteps[HeadStepOf(B, 1, 2)];
+        RigExecBakedStep &step = B.steps[HeadStepOf(B, 1, 2)];
         const uint32_t final0 = B.propertyChains[0].versionBase + 2;
         step.reads.erase(
             std::remove_if(step.reads.begin(), step.reads.end(),
-                           [final0](const RigExecBakedHeadRange &range) {
+                           [final0](const RigExecBakedSlotRange &range) {
                                return range.begin <= final0 &&
                                       final0 < range.end;
                            }),
@@ -2852,6 +2851,34 @@ TestTheHeadValidatorRejectsAMalformedTier(const BuiltProgram &built)
                            "walk /Rig/C0.rigExec:x meets chain target "
                            "without declaring it");
     }
+    {
+        RigExecBakedProgramImpl B;
+        HandBuiltHeadTier(&B);
+        B.steps.insert(B.steps.begin()+1,RigExecBakedStep());
+        ExpectHeadRejected(B,"a hole in the head prefix","is outside the head prefix");
+    }
+    {
+        RigExecBakedProgramImpl B;
+        HandBuiltHeadTier(&B);
+        auto &step=B.steps[HeadStepOf(B,0,1)];
+        step.reads.clear();
+        ExpectHeadRejected(B,"a missing predecessor version","omits its predecessor property version");
+    }
+    {
+        RigExecBakedProgramImpl B;
+        HandBuiltHeadTier(&B);
+        auto &step=B.steps[HeadStepOf(B,0,1)];
+        step.writes.clear();
+        ExpectHeadRejected(B,"a missing revision writer","does not write exactly its version and owned records");
+    }
+    {
+        RigExecBakedProgramImpl B;
+        HandBuiltHeadTier(&B);
+        auto &step=B.steps[HeadStepOf(B,0,1)];
+        step.writes.push_back(B.steps[HeadStepOf(B,0,0)].writes.front());
+        ExpectHeadRejected(B,"duplicate version producer","has more than one head producer");
+    }
+
 }
 
 /// The shapes the edge sweep cannot see, each of which the validator must

@@ -23,6 +23,17 @@ using RigExecWireLandmarks = std::array<RigExecWireVec3d, 4>;
 using RigExecWireIntPair = std::pair<int32_t, int32_t>;
 using RigExecWireBool3 = std::array<bool, 3>;
 
+struct RigExecWirePropertyInputCandidate {
+    uint32_t slot = 0;
+    uint8_t kind = 0;
+    int32_t version = -1;
+    bool raw = false;
+    bool operator==(const RigExecWirePropertyInputCandidate &other) const {
+        return slot == other.slot && kind == other.kind &&
+               version == other.version && raw == other.raw;
+    }
+};
+
 struct RigExecWireFrame {
     RigExecWireLandmarks points{};
     uint32_t flags = 0;

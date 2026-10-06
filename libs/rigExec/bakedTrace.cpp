@@ -13,6 +13,11 @@ const char *
 RigExecBakedStepDomainName(RigExecBakedStepKind kind)
 {
     switch (kind) {
+    case RigExecBakedStepKind::PropertyRevision:
+    case RigExecBakedStepKind::RestCompose:
+    case RigExecBakedStepKind::LadderCompose:
+    case RigExecBakedStepKind::SkinTopology:
+        return "head";
     case RigExecBakedStepKind::ComposeSubtree:
     case RigExecBakedStepKind::Solve:
     case RigExecBakedStepKind::SolverCommit:
@@ -100,65 +105,6 @@ RigExecBakedOpGraph(const RigExecBakedProgramImpl &B)
         node.level = step.level;
         node.reads = SlotRanges(step.reads);
         node.writes = SlotRanges(step.writes);
-    }
-    return graph;
-}
-
-std::vector<RigExecOpTraceEntry>
-RigExecBakedLastHeadTrace(const RigExecBakedProgramImpl &B)
-{
-    std::vector<RigExecOpTraceEntry> trace;
-    for (size_t index = 0; index < B.headSteps.size(); ++index) {
-        const RigExecBakedHeadStep &step = B.headSteps[index];
-        if (step.runSeq == 0) {
-            continue;
-        }
-        RigExecOpTraceEntry entry;
-        entry.step = index;
-        entry.kind = RigExecBakedHeadKindName(step.kind);
-        entry.domain = "head";
-        entry.label = step.label;
-        entry.seq = step.runSeq;
-        trace.push_back(std::move(entry));
-    }
-    std::sort(trace.begin(), trace.end(),
-              [](const RigExecOpTraceEntry &a, const RigExecOpTraceEntry &b) {
-                  return a.seq < b.seq;
-              });
-    return trace;
-}
-
-std::vector<RigExecOpGraphNode>
-RigExecBakedHeadGraph(const RigExecBakedProgramImpl &B)
-{
-    const auto ranges = [](const std::vector<RigExecBakedHeadRange> &list) {
-        std::vector<RigExecOpSlotRange> out;
-        for (const RigExecBakedHeadRange &range : list) {
-            if (!range.IsEmpty()) {
-                out.push_back({RigExecBakedHeadDomainName(range.domain),
-                               range.begin, range.end - 1});
-            }
-        }
-        return out;
-    };
-    std::vector<int> level(B.headSteps.size(), 0);
-    std::vector<RigExecOpGraphNode> graph;
-    for (const uint32_t index : B.headOrder) {
-        const RigExecBakedHeadStep &step = B.headSteps[index];
-        for (const uint32_t pred : step.preds) {
-            level[index] = std::max(level[index], level[pred] + 1);
-        }
-        RigExecOpGraphNode node;
-        node.step = index;
-        node.kind = RigExecBakedHeadKindName(step.kind);
-        node.domain = "head";
-        node.label = step.label;
-        node.preds.assign(step.preds.begin(), step.preds.end());
-        node.succs.assign(step.succs.begin(), step.succs.end());
-        node.level = level[index];
-        node.reads = ranges(step.reads);
-        node.writes = ranges(step.writes);
-        graph.push_back(std::move(node));
     }
     return graph;
 }

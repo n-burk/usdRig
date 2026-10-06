@@ -286,6 +286,7 @@ _NewWeightObject()
 struct RigExecBakeComputedCapture::_State {
     RigExecBakePathTable *interner = nullptr;
     UsdStageRefPtr stage;
+    const RigExecBakedProgramImpl *program = nullptr;
     const std::set<SdfPath> *chainTargets = nullptr;
     UsdTimeCode bakeTime;
     RigExecBakeInputs computed;
@@ -490,6 +491,93 @@ struct RigExecBakeComputedCapture::_State {
         return value;
     }
 
+    bool Candidates(const RigExecBakedWalk &walk, fb::RigExecWireInput *out,
+                    std::string *error, int rawLeaf = -1)
+    {
+        const auto capture = [&](const auto &hops, auto *result) {
+            for (const auto &hop : hops) {
+                RigExecWirePropertyInputCandidate candidate;
+                if (!Slot(hop.path, "property input", &candidate.slot, error))
+                    return false;
+                candidate.raw = hop.leaf >= 0;
+                if (hop.chain >= 0) {
+                    const auto &chain = program->propertyChains[size_t(hop.chain)];
+                    candidate.kind = uint8_t(fb::PropertyCandidateKind::ChainFinal);
+                    candidate.version = int32_t(chain.versionBase + chain.revisions.size());
+                } else if (hop.record >= 0) {
+                    candidate.kind = uint8_t(fb::PropertyCandidateKind::PhasedRecord);
+                    candidate.version = int32_t(program->propertyRecords[size_t(hop.record)].id);
+                }
+                result->push_back(candidate);
+            }
+            return true;
+        };
+        if (!capture(walk.hops, &out->propertyCandidates) ||
+            !capture(walk.doubleHops, &out->doubleCandidates)) return false;
+        if (rawLeaf >= 0) {
+            uint32_t slot = 0;
+            if (!Slot(program->headLeaves[size_t(rawLeaf)].path,
+                      "property input fallback", &slot, error)) return false;
+            out->rawFallbackSlot = int32_t(slot);
+        }
+        return true;
+    }
+
+    // Oracle/path reads use GetAttribute's published overlay, not a
+    // patchable binding's phased walk. Freeze that traversal independently;
+    // runtime gates its version candidates by this generation's publication.
+    bool ResolvedCandidates(const UsdAttribute &head, fb::RigExecWireInput *out,
+                            std::string *error)
+    {
+        if (!head || !program) return true;
+        const auto hop = [&](const UsdAttribute &attribute, InputTag type,
+                             bool raw, auto *result) {
+            RigExecWirePropertyInputCandidate candidate;
+            if (!Slot(attribute.GetPath(), "resolved input", &candidate.slot, error))
+                return false;
+            candidate.raw = raw;
+            for (const auto &chain : program->propertyChains) {
+                if (chain.target != attribute.GetPath()) continue;
+                candidate.kind = uint8_t(fb::PropertyCandidateKind::ChainFinal);
+                candidate.version = int32_t(chain.versionBase + chain.revisions.size());
+                break;
+            }
+            if (candidate.version < 0) {
+                for (const auto &record : program->propertyRecords) {
+                    if (record.consumer != attribute.GetPath()) continue;
+                    candidate.kind = uint8_t(fb::PropertyCandidateKind::PhasedRecord);
+                    candidate.version = int32_t(record.id);
+                    break;
+                }
+            }
+            result->push_back(candidate);
+            return true;
+        };
+        const auto next = [&](const UsdAttribute &attribute) {
+            SdfPathVector connections;
+            if (attribute.HasAuthoredConnections()) attribute.GetConnections(&connections);
+            return connections.size() == 1 ? stage->GetAttributeAtPath(connections[0])
+                                           : UsdAttribute();
+        };
+        const auto doubleTail = [&](const UsdAttribute &from) {
+            std::set<SdfPath> visiting;
+            for (UsdAttribute a = from; a && visiting.insert(a.GetPath()).second; a = next(a))
+                if (!hop(a, InputTag::Double, true, &out->doubleCandidates)) return false;
+            return true;
+        };
+        if (out->tag == InputTag::Float && head.GetTypeName() == SdfValueTypeNames->Double)
+            return doubleTail(head);
+        std::set<SdfPath> visiting;
+        for (UsdAttribute a = head; a && visiting.insert(a.GetPath()).second; a = next(a)) {
+            if (!hop(a, out->tag, true, &out->propertyCandidates)) return false;
+            if (out->tag == InputTag::Float && a.GetTypeName() == SdfValueTypeNames->Double) {
+                for (auto &candidate : out->propertyCandidates) candidate.raw = false;
+                return doubleTail(a);
+            }
+        }
+        return true;
+    }
+
     /// A registered program read, as RigExecBakedRead resolves it.
     template <class T>
     bool Baked(const RigExecBakedInput<T> &input, fb::RigExecWireInput *out,
@@ -542,6 +630,10 @@ struct RigExecBakeComputedCapture::_State {
                 return false;
             }
         }
+        if (input.walk >= 0) {
+            const auto &reader = program->readerWalks[size_t(input.walk)];
+            return Candidates(reader.walk, out, error, reader.rawLeaf);
+        }
         return true;
     }
 
@@ -560,7 +652,8 @@ struct RigExecBakeComputedCapture::_State {
             return true;
         }
         SdfPathVector paths;
-        return Walk(head, out, &paths, error);
+        return Walk(head, out, &paths, error) &&
+               ResolvedCandidates(head, out, error);
     }
 
     /// An envelope read, as the oracle's _ResolvedRead resolves it.
@@ -619,6 +712,7 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
     _State &S = *_state;
     S.interner = interner;
     S.stage = B.stage;
+    S.program = &B;
     S.chainTargets = &B.chainTargets;
     S.bakeTime = UsdTimeCode(time);
     RigExecBakeInputs &C = S.computed;
@@ -804,14 +898,73 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
     // chain's target slot, each revision's reads as _PinnedRead resolves
     // them and its envelope's entry, then the phased consumers' slots.
     std::vector<RigExecBakedPropertyChainDesc> chainDescs;
-    if (!RigExecBakedDescribePropertyChains(evaluator, &chainDescs, &why)) {
-        Fail(why);
-        return;
+    using Desc = RigExecBakedPropertyChainDesc;
+    const auto descType = [](const SdfValueTypeName &type) {
+        return type == SdfValueTypeNames->Float ? Desc::ValueType::Float
+            : type == SdfValueTypeNames->Double ? Desc::ValueType::Double
+            : type == SdfValueTypeNames->Matrix4d ? Desc::ValueType::Matrix4d
+            : Desc::ValueType::Vec3f;
+    };
+    const auto headOf = [&](const RigExecBakedWalk &walk) {
+        const auto &hops = walk.hops.empty() ? walk.doubleHops : walk.hops;
+        return hops.empty() ? UsdAttribute()
+                           : B.stage->GetAttributeAtPath(hops.front().path);
+    };
+    for (const auto &bound : B.propertyChains) {
+        Desc desc;
+        desc.target = bound.target;
+        desc.targetAttr = B.stage->GetAttributeAtPath(bound.target);
+        desc.valueType = descType(bound.valueType);
+        for (const auto &r : bound.revisions) {
+            Desc::Revision revision;
+            revision.mover = r.mover;
+            revision.opValid = r.opValid;
+            revision.op = r.op;
+            revision.weightObject = r.weightObject;
+            revision.enabled = headOf(r.enabled);
+            revision.defaultWeight = headOf(r.defaultWeight);
+            revision.value = headOf(r.value);
+            revision.minimum = headOf(r.minimum);
+            revision.maximum = headOf(r.maximum);
+            if (r.opValid && r.op == RigExecPropertyOp::Curve) {
+                VtVec2fArray values;
+                for (const auto &a : {headOf(r.keys), headOf(r.tangents)}) {
+                    if (RigExecBakedAnimatedOrConnected(a)) {
+                        Fail("property mover " + r.mover.GetString() + " reads " +
+                             a.GetPath().GetString() + ", which is animated or connected; "
+                             "a baked curve holds its keys at one time only");
+                        return;
+                    }
+                }
+                if (headOf(r.keys).Get(&values))
+                    revision.keys.assign(values.begin(), values.end());
+                values.clear();
+                if (headOf(r.tangents).Get(&values))
+                    revision.tangents.assign(values.begin(), values.end());
+                revision.hasTangentsAttr = r.hasTangents;
+            }
+            desc.revisions.push_back(std::move(revision));
+        }
+        for (const auto index : bound.records) {
+            const auto &record = B.propertyRecords[index];
+            Desc::Phased phased;
+            phased.consumer = record.consumer;
+            phased.consumerType = descType(record.consumerType);
+            phased.applied = record.applied;
+            for (const int slot : record.hopSlots) {
+                for (const auto &[path, id] : B.headOverrideSlots)
+                    if (int(id) == slot) { phased.hops.push_back(path); break; }
+            }
+            desc.phased.push_back(std::move(phased));
+        }
+        chainDescs.push_back(std::move(desc));
     }
     C.propertyChains.reserve(chainDescs.size());
     for (const RigExecBakedPropertyChainDesc &desc : chainDescs) {
         using ValueType = RigExecBakedPropertyChainDesc::ValueType;
         fb::RigExecWirePropertyChain chain;
+        const auto &boundChain = B.propertyChains[C.propertyChains.size()];
+        chain.versionBase = boundChain.versionBase;
         chain.valueType = _PropertyType(desc.valueType);
         if (!S.Slot(desc.target, "property chain " + desc.target.GetString(),
                     &chain.target, &why)) {
@@ -845,6 +998,14 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
                 Fail(why);
                 return;
             }
+            const auto &bound = boundChain.revisions[chain.revisions.size()];
+            const bool boundOk =
+                S.Candidates(bound.enabled, revision.enabled.get(), &why) &&
+                S.Candidates(bound.defaultWeight, revision.defaultWeight.get(), &why) &&
+                S.Candidates(bound.value, revision.value.get(), &why) &&
+                S.Candidates(bound.minimum, revision.min.get(), &why) &&
+                S.Candidates(bound.maximum, revision.max.get(), &why);
+            if (!boundOk) { Fail(why); return; }
             if (!r.weightObject.IsEmpty()) {
                 const auto baked = B.weightIndex.find(r.weightObject);
                 const auto composed = envelopeIndex.find(r.weightObject);
@@ -876,6 +1037,7 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
              chainDescs[c].phased) {
             fb::RigExecWirePhasedConsumer phased;
             phased.chain = uint32_t(c);
+            phased.version = B.propertyRecords[C.phasedConsumers.size()].id;
             phased.consumerType = _PropertyType(p.consumerType);
             phased.applied = uint32_t(p.applied);
             if (!S.Slot(p.consumer,
@@ -1410,6 +1572,65 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
             break;
         }
     }
+    C.headInputSlots.resize(B.steps.size());
+    C.headInputReads.resize(B.steps.size());
+    for (size_t index = 0; index < B.steps.size(); ++index) {
+        const auto &step = B.steps[index];
+        if (!step.isHead) continue;
+        auto &slots = C.headInputSlots[index];
+        for (const auto leafId : step.leaves) {
+            const auto &leaf = B.headLeaves[leafId];
+            // Curve keys/tangents are immutable Default literals in the
+            // property revision payload; mismatched typed leaves never read.
+            if (!leaf.typeMatches ||
+                leaf.type == RigExecBakedHeadValueType::Vec2fArray) continue;
+            uint32_t slot = 0;
+            if (!S.Slot(leaf.path, "head memo", &slot, &why)) {
+                Fail(why); return;
+            }
+            slots.push_back(slot);
+        }
+        for (const auto id : step.overrideSlots) {
+            for (const auto &[path, overrideId] : B.headOverrideSlots) {
+                if (overrideId != id) continue;
+                const auto attr = B.stage->GetAttributeAtPath(path);
+                if (!attr || attr.GetTypeName().IsArray()) break;
+                uint32_t slot = 0;
+                if (!S.Slot(path, "head override", &slot, &why)) {
+                    Fail(why); return;
+                }
+                slots.push_back(slot); break;
+            }
+        }
+        std::map<uint32_t, fb::RigExecWireInput> bindingReads;
+        frozenDetail::_ForEachPatchableInput(B, [&](const auto &input) {
+            using T = std::decay_t<decltype(input.constant)>;
+            if (input.leaf < 0) return;
+            const uint32_t leaf = B.leaves.Of<T>().id[size_t(input.leaf)];
+            if (std::find(step.bindingLeaves.begin(), step.bindingLeaves.end(), leaf)
+                == step.bindingLeaves.end()) return;
+            fb::RigExecWireInput read;
+            if (!S.Baked(input, &read, &why)) { readsOk = false; return; }
+            bindingReads.emplace(leaf, std::move(read));
+        });
+        for (const auto leaf : step.bindingLeaves) {
+            const auto found = bindingReads.find(leaf);
+            if (found == bindingReads.end()) { Fail("head memo binding is absent"); return; }
+            C.headInputReads[index].push_back(found->second);
+        }
+        if (!readsOk) { Fail(why); return; }
+        if (step.kind == RigExecBakedStepKind::SkinTopology) {
+            const auto *revision = RigExecBakedLayoutRevision(B, size_t(step.object));
+            if (revision) {
+                for (const auto &key : revision->layoutLeaves.decl.keys) {
+                    const auto found = S.slotIds.find(key.path);
+                    if (found != S.slotIds.end()) slots.push_back(found->second);
+                }
+            }
+        }
+        std::sort(slots.begin(), slots.end());
+        slots.erase(std::unique(slots.begin(), slots.end()), slots.end());
+    }
     {
         // The painted arrays are stored once, in their inputs, whose
         // defaults (read at Default) are what Build folded; the oracle's
@@ -1530,10 +1751,20 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
         entry.second = remap[entry.second];
     }
     const auto remapWalk = [&](fb::RigExecWireInput &input) {
-        for (uint32_t &slot : input.walk) {
-            slot = remap[slot];
-        }
+        for (uint32_t &slot : input.walk) slot = remap[slot];
+        for (auto &candidate : input.propertyCandidates)
+            candidate.slot = remap[candidate.slot];
+        for (auto &candidate : input.doubleCandidates)
+            candidate.slot = remap[candidate.slot];
+        if (input.rawFallbackSlot >= 0)
+            input.rawFallbackSlot = int32_t(remap[size_t(input.rawFallbackSlot)]);
     };
+    for (auto &slots : C.headInputSlots) {
+        for (auto &slot : slots) slot = remap[slot];
+        std::sort(slots.begin(), slots.end());
+    }
+    for (auto &reads : C.headInputReads)
+        for (auto &read : reads) remapWalk(read);
     for (fb::RigExecWireWeightObject &object : C.weightObjects) {
         _ForEachReadSlot(object,
                          [&](std::unique_ptr<fb::RigExecWireInput> &input) {

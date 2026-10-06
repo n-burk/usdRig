@@ -247,6 +247,7 @@ struct RrInputState {
     /// HasValue flag, kept in slotDefaultHasValue).
     std::vector<RrWireValue> slotCurrent;
     std::vector<uint8_t> slotHasValue;
+    std::vector<uint8_t> slotAuthored, slotRanAuthored;
     std::vector<uint8_t> slotDefaultHasValue;
     /// Per slot: the value and HasValue the last run read, which a set is
     /// compared with to tell a change from a repeat. Seeded with the

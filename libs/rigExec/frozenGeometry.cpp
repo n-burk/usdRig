@@ -450,6 +450,7 @@ _FrozenStepBody(_FrozenWorker *worker, RigExecBakedStep *step,
                const std::map<SdfPath, size_t> &index,
                const RigExecFrameInputs &inputs, UsdTimeCode time)
 {
+    if (step->isHead) return true;
     RigExecBakedProgramImpl &B = worker->B;
     const RigExecOpBodyScope body(
         B.purityAudit ? &B.purityViolations.count : nullptr);

@@ -642,7 +642,7 @@ enum class RigExecBakedSlotDomain : uint8_t {
     CommitDelta,         ///< one commit's per-candidate hierarchy delta
     CommitStaging,       ///< one propagation pair's staged frame and outcome
     ConstraintDelta,     ///< one geometry-domain constraint's measured delta
-    PropertyResult,      ///< propertyResults[t]; filled by the prologue
+    PropertyResult,      ///< propertyValues[v]; written by PropertyRevision
     ChainBase,           ///< chains[c].lastBase; filled by the prologue
     RevisionPacket,      ///< one revision's assembled packet, status, executed
     RevisionTransforms,  ///< one revision's influence table
@@ -661,12 +661,15 @@ enum class RigExecBakedSlotDomain : uint8_t {
     /// Appended after Snapshots, so every earlier enumerator keeps its
     /// exported value.
     FrameMatrix,
+    Rest = 27,
+    Ladder = 28,
+    SkinTopology = 29,
 };
 /// Derived from the last enumerator rather than written out: an array
 /// indexed by domain is how the edge sweep is written, and a count that
 /// drifted from the enum is an out-of-bounds write with no symptom at Build.
 inline constexpr size_t RigExecBakedSlotDomainCount =
-    size_t(RigExecBakedSlotDomain::FrameMatrix) + 1;
+    size_t(RigExecBakedSlotDomain::SkinTopology) + 1;
 
 /// A slot id: the domain in the top 8 bits, the index in the low 24.
 using RigExecBakedSlot = uint32_t;
@@ -720,111 +723,8 @@ RigExecBakedOne(RigExecBakedSlotDomain domain, int index)
     return RigExecBakedRange(domain, index, index + 1);
 }
 
-// The head tier.
-// Ops the prologue runs serially before the region, in an order derived from
-// what they declare they read (RigExecBakedSortHeadTier), each re-run only
-// when something it reads moved: the property revisions
-// (RigExecBakedRunHeadTier), then the rest and ladder composes
-// (RigExecBakedRunRestTier), which read chain-routed ladder channels sampled
-// after the revisions published, then the skin layouts
-// (RigExecBakedRunLayoutTier). The tier keeps its own step list, kinds
-// and domains until the runtime reads them: RigExecBakedStepKind and
-// RigExecBakedSlotDomain end where the exporter's wire asserts pin them, and
-// nothing here is exported.
-
-/// What one head step computes.
-enum class RigExecBakedHeadKind : uint8_t {
-    /// Revision `part` of property chain `object`; part 0 is the base.
-    PropertyRevision,
-    /// The rest chain of compose group `object` (part 0): `restM`,
-    /// `restPts`, `restFrames` and `restRoundTrip` of its slots.
-    RestCompose,
-    /// The default-space ladder of compose group `object` (part 1):
-    /// `selfD`, `parentDinv`, `defaultRoundTrip`, `posedAuthored`,
-    /// `posedAuthoredM` and `rotOrder` of its slots.
-    LadderCompose,
-    /// The layout handle of fixed skin revision `object`
-    /// (RigExecBakedLayoutRevision), part 0.
-    SkinTopology,
-};
-
-/// The tables head steps read and write.
-enum class RigExecBakedHeadDomain : uint8_t {
-    /// Per chain, RigExecBakedPropertyChain::versionBase + k: the value
-    /// after k revisions, with the chain's valid byte. After every chain's
-    /// versions, one id per phased record (RigExecBakedPropertyRecord::id),
-    /// written by the part that writes the version the record reads.
-    PropertyVersion,
-    /// Per provider slot: what RestCompose writes.
-    Rest,
-    /// Per provider slot: what LadderCompose writes.
-    Ladder,
-    /// Per RigExecBakedLayoutRevision index: the layout handle SkinTopology
-    /// writes, which RevisionStatic and the chunks and fuse read.
-    SkinTopology,
-};
-
-const char *RigExecBakedHeadKindName(RigExecBakedHeadKind kind);
-const char *RigExecBakedHeadDomainName(RigExecBakedHeadDomain domain);
-
-/// A half-open run of one head domain's slots.
-struct RigExecBakedHeadRange {
-    RigExecBakedHeadDomain domain = RigExecBakedHeadDomain::PropertyVersion;
-    uint32_t begin = 0;
-    uint32_t end = 0;
-
-    bool IsEmpty() const { return end <= begin; }
-};
-
-inline RigExecBakedHeadRange
-RigExecBakedHeadOne(RigExecBakedHeadDomain domain, uint32_t index)
-{
-    RigExecBakedHeadRange range;
-    range.domain = domain;
-    range.begin = index;
-    range.end = index + 1;
-    return range;
-}
-
-/// One head step: what it declares, and what its last execution left.
-struct RigExecBakedHeadStep {
-    RigExecBakedHeadKind kind = RigExecBakedHeadKind::PropertyRevision;
-    int object = -1;
-    int part = 0;
-    std::vector<RigExecBakedHeadRange> reads, writes;
-    /// Region slots it reads. Empty for every op built today: no head op reads
-    /// a pose, weight or geometry value, and the validator refuses one that
-    /// declares any.
-    std::vector<RigExecBakedSlotRange> regionReads;
-    /// The head leaves and the override slots its body reads.
-    std::vector<uint32_t> leaves, overrideSlots;
-    /// The binding leaves (RigExecBakedProgramImpl::leafRefs ids) its body
-    /// reads: a rest or ladder op's ladder channels. Filled after Build's
-    /// last RigExecBakedNumberLeaves (RigExecBakedNoteRestLeaves).
-    std::vector<uint32_t> bindingLeaves;
-    /// One of `bindingLeaves` varies with time. Build composed the ladder
-    /// from its capture-time sample, which the leaf pools do not keep, so
-    /// such an op runs on the tier's first run.
-    bool varyingLeaves = false;
-    /// Reads of a chain's final version through a walk that meets one of
-    /// that chain's records first, as (version id, record index). While the
-    /// record does not stand aside it answers the walk (or, with the chain
-    /// skipped, the target holds no version), so a move of that version
-    /// alone does not re-run the op. Also in `reads`, which orders the op.
-    std::vector<std::pair<uint32_t, uint32_t>> shadowedReads;
-    /// Runs on every run: a property revision whose envelope is a weight
-    /// object, which the oracle resolves off the stage (volatile until S4).
-    bool alwaysRuns = false;
-    std::string label;
-    /// The head steps whose writes it reads, and those that read its
-    /// writes, as indices into `headSteps`.
-    std::vector<uint32_t> preds, succs;
-    /// The lines its last execution produced, replayed while it is clean.
-    std::vector<std::string> lines;
-    /// 1-based place among the ops the last run executed; 0 when it did not
-    /// run.
-    uint32_t runSeq = 0;
-};
+// Head operations occupy the shared graph's prefix. Their leaves are sampled
+// before their serial bodies; rest/layout sampling follows chain publication.
 
 /// The type a head leaf holds and a walk reads.
 enum class RigExecBakedHeadValueType : uint8_t {
@@ -934,7 +834,7 @@ struct RigExecBakedReaderWalk {
     /// chain's records, as (version id, record index): while the record
     /// does not stand aside it answers the walk (or, with the chain
     /// skipped, the target holds no version), so a move of the version
-    /// alone moves nothing here (RigExecBakedHeadStep::shadowedReads).
+    /// alone moves nothing here (RigExecBakedStep::shadowedReads).
     std::vector<std::pair<uint32_t, uint32_t>> shadowed;
 };
 
@@ -1076,7 +976,6 @@ inline bool
 RigExecBakedIsSourceDomain(RigExecBakedSlotDomain domain)
 {
     return domain == RigExecBakedSlotDomain::Avars ||
-           domain == RigExecBakedSlotDomain::PropertyResult ||
            domain == RigExecBakedSlotDomain::ChainBase ||
            domain == RigExecBakedSlotDomain::SolverPoints;
 }
@@ -1119,6 +1018,10 @@ enum class RigExecBakedStepKind {
     /// One RigExecBakedFrameRecord. A pose step; appended after Derived so
     /// every earlier enumerator keeps its exported value.
     FrameMatrix,
+    PropertyRevision = 19,
+    RestCompose = 20,
+    LadderCompose = 21,
+    SkinTopology = 22,
 };
 
 /// The name of \p kind, for the schedule report.
@@ -1172,6 +1075,11 @@ struct RigExecBakedStepCounters {
 
 /// One step of the program.
 struct RigExecBakedStep {
+    bool isHead = false;
+    std::vector<uint32_t> leaves, overrideSlots, bindingLeaves;
+    bool varyingLeaves = false;
+    bool alwaysRuns = false;
+    std::vector<std::string> lines;
     RigExecBakedStepKind kind = RigExecBakedStepKind::ComposeSubtree;
     /// What this step is about, by kind:
     ///   ComposeSubtree                              index into composeGroups
@@ -1212,9 +1120,9 @@ struct RigExecBakedStep {
     // A step is a pure function of its declared reads with three exceptions,
     // and every one of them is recorded here so that the dirty set can name
     // it rather than the executor having to guess (§7).
-    /// The step reads nothing but source slots, so it can be -- and is --
+    /// The step reads source slots or completed head outputs, so it can be
     /// run before the dirty set is computed, every run, and compared by
-    /// VALUE. RevisionStatic on a skin revision is the only one today.
+    /// VALUE. Heads themselves never participate in this source pass.
     bool isSource = false;
     /// The step reads outside the program at a point the graph cannot order
     /// -- a packet assembled against the influence table, a derived target's
@@ -1241,8 +1149,7 @@ struct RigExecBakedStep {
     /// moved (`walkReaders`) and a Rest or Ladder slot that moved
     /// (`restReaders`, `ladderReaders`).
     std::vector<int> readerWalks;
-    std::vector<RigExecBakedHeadRange> headReads;
-    /// The `headReads` ids every walk of the step that declares them reads
+    /// The `reads` ids every walk of the step that declares them reads
     /// only past a record (RigExecBakedReaderWalk::shadowed), with those
     /// records: such an id seeds the step only while one of them stands
     /// aside.
@@ -1532,12 +1439,12 @@ struct RigExecBakedCones {
     std::vector<std::vector<int>> constraintArrayClusters;
     /// Steps whose dirtiness depends on time or on a standing override.
     std::vector<int> varyingSteps, overrideSteps;
-    /// PropertyVersion id -> the steps that declare it in `headReads`, and
+    /// PropertyVersion id -> the steps that declare it in `reads`, and
     /// reader walk -> the steps that read it. What a moved version and a
     /// moved walk value dirty.
     std::vector<std::vector<int>> headReaders, walkReaders;
     /// Provider slot -> the steps that declare its Rest, and its Ladder, in
-    /// `headReads`. What a moved rest or ladder output dirties.
+    /// `reads`. What a moved rest or ladder output dirties.
     std::vector<std::vector<int>> restReaders, ladderReaders;
     /// Override index -> what re-reads an input of that number when the
     /// stage value under it moves: a step that lists it in its
@@ -3446,7 +3353,7 @@ struct RigExecBakedProgramImpl {
 
     /// The head tier (RigExecBakedRunHeadTier). Build state: the chains,
     /// records, leaves, override slots and steps. Everything after
-    /// `headOrder` is prologue state, written on the owning thread before
+    /// the head prefix is prologue state, written on the owning thread before
     /// the region.
     std::vector<RigExecBakedPropertyChain> propertyChains;
     std::vector<RigExecBakedPropertyRecord> propertyRecords;
@@ -3460,9 +3367,6 @@ struct RigExecBakedProgramImpl {
     /// attribute), so placement builds no path: the frozen worker runs it
     /// and must not take the path table's lock.
     std::map<std::pair<SdfPath, TfToken>, uint32_t> headOverrideSlotsByName;
-    std::vector<RigExecBakedHeadStep> headSteps;
-    /// `headSteps` in execution order (RigExecBakedSortHeadTier).
-    std::vector<uint32_t> headOrder;
     /// Per version id: its value, and whether its chain was valid when it
     /// was written.
     std::vector<RigExecBakedPropertyValue> propertyValues;
@@ -3515,6 +3419,24 @@ struct RigExecBakedProgramImpl {
     /// validate and re-sample; they seed nothing.
     std::vector<std::vector<uint32_t>> avarHeadReads;
 };
+
+
+inline bool RigExecBakedIsHeadDomain(RigExecBakedSlotDomain domain)
+{
+    return domain == RigExecBakedSlotDomain::PropertyResult ||
+           domain == RigExecBakedSlotDomain::Rest ||
+           domain == RigExecBakedSlotDomain::Ladder ||
+           domain == RigExecBakedSlotDomain::SkinTopology;
+}
+
+inline std::vector<uint32_t>
+RigExecBakedHeadIndices(const RigExecBakedProgramImpl &B)
+{
+    std::vector<uint32_t> indices;
+    for (size_t i = 0; i < B.steps.size(); ++i)
+        if (B.steps[i].isHead) indices.push_back(uint32_t(i));
+    return indices;
+}
 
 /// \p input's sampled leaf, or its constant when it has none.
 template <class T>
@@ -3779,7 +3701,7 @@ bool RigExecBakedHeadLeafVaries(const RigExecBakedHeadLeaf &leaf);
 /// writes. A weight-object envelope is resolved through `resolveWeights`
 /// inside RigExecVolatileRead. Owning thread.
 void RigExecBakedRunPropertyStep(RigExecBakedProgramImpl *program,
-                                 RigExecBakedHeadStep *step,
+                                 RigExecBakedStep *step,
                                  UsdTimeCode time);
 
 /// Publishes chains [\p begin, \p end) as _EvaluatePropertyChains leaves
@@ -3810,7 +3732,7 @@ void RigExecBakedPlaceHeadOverrides(RigExecBakedProgramImpl *program);
 /// moved, the records that read that version (value and `changed` byte)
 /// and, for a chain's last part, the chain's final value.
 void RigExecBakedFinishPropertyStep(RigExecBakedProgramImpl *program,
-                                    const RigExecBakedHeadStep &step);
+                                    const RigExecBakedStep &step);
 
 /// Whether two head values are the same bit for bit (a signed zero or a NaN
 /// payload is a difference); empty equals only empty.
@@ -3884,12 +3806,12 @@ VtValue RigExecBakedSampleWalkedPathLeaf(
     const RigExecBakedProgramImpl &program, const RigExecRevisionLeafKey &key,
     int walk);
 
-/// Fills every step's `headReads` from the reader walks in its
+/// Fills every step's `reads` from the reader walks in its
 /// `readerWalks`, after RigExecBakedDeclareInputDependencies, and
 /// `avarHeadReads`. Build only.
 void RigExecBakedDeclareHeadReads(RigExecBakedProgramImpl *program);
 
-/// Appends to every region step's `headReads` the Rest and Ladder slots its
+/// Appends to every region step's `reads` the Rest and Ladder slots its
 /// body indexes: ComposeSubtree the ladders of its group, of the parents
 /// it composes against and of every switch source, space and recomposed
 /// slot; Solve the rests of its `restSlots`; Constraint the rests of its
@@ -3898,6 +3820,9 @@ void RigExecBakedDeclareHeadReads(RigExecBakedProgramImpl *program);
 /// their slot's rest; PoseInterpolator its driver's and parent's rests;
 /// Derived the rests of its projector slots. Build only, after
 /// RigExecBakedDeclareHeadReads.
+std::vector<RigExecBakedSlotRange> RigExecBakedRequiredRestReads(
+    const RigExecBakedProgramImpl &program, const RigExecBakedStep &step);
+
 void RigExecBakedDeclareRestReads(RigExecBakedProgramImpl *program);
 
 /// The region half of the head tier's validation, once the steps exist:
@@ -4607,7 +4532,7 @@ void RigExecBakedComposeLadderRange(RigExecBakedProgramImpl *program,
                                     int begin, int end, bool trackMoves);
 
 /// One RestCompose (part 0) and one LadderCompose (part 1) head op per
-/// compose group, appended to `headSteps`, with their declared reads: the
+/// compose group, appended to `steps`, with their declared reads: the
 /// parent rests and ladders outside the group, the group's own rests for
 /// the ladder, and the PropertyVersion ids the chain-routed channels'
 /// reader walks declare. The caller sorts and validates the tier.
@@ -4654,7 +4579,7 @@ RigExecBakedLayoutRevision(const RigExecBakedProgramImpl &program, size_t r);
 /// slot `object` and reading only its leaves. Build, owning thread.
 void RigExecBakedBuildLayoutSteps(RigExecBakedProgramImpl *program);
 
-/// Appends SkinTopology[r] to the `headReads` of the RevisionStatic,
+/// Appends SkinTopology[r] to the `reads` of the RevisionStatic,
 /// RevisionChunk and RevisionFuse steps of every revision a SkinTopology op
 /// serves. Build, once the geometry steps exist.
 void RigExecBakedDeclareLayoutReads(RigExecBakedProgramImpl *program);
@@ -4682,7 +4607,7 @@ void RigExecBakedSampleLayoutLeaves(
 /// `layoutHandle` and `layoutCandidate` and nothing else. Pure.
 void RigExecBakedRunLayoutOp(RigExecBakedProgramImpl::GeomRevision *revision);
 
-/// The SkinTopology ops in `headOrder`, after the rest and ladder ops: with
+/// The SkinTopology ops in the head prefix, after the rest and ladder ops: with
 /// \p sample, first samples each op's leaves (RigExecBakedSampleLayoutLeaves;
 /// a frozen job writes them from its vector instead), then runs each op whose
 /// leaves or fixedness moved, on its first run, or when \p force. Under
@@ -4990,16 +4915,9 @@ void RigExecBakedDeclareInputDependencies(RigExecBakedProgramImpl *program);
 ///  * what the PROLOGUE writes: `propertyResults`, `avarsDisturbed`,
 ///    `overridden`/`anyOverridden`/`folded`, the sampled `leaves`,
 ///    `routedOverrides`/`lastRoutedOverrides` and `leafSamples`, and the
-///    geometry prologue's `haveBase`/`baseDirty`/`lastBase`/`created`/
-///    `scheduleDirty`/`topology`/the partition and the path leaves (each
-///    revision's and weight object's, `pathLeafChainResults`/
-///    `pathLeafChainSerial`, `pathLeafSamples`), the head tier's state
-///    (the head leaves, overrides, versions, records and lines, which
-///    RigExecBakedRunHeadTier verifies against a forced run of its own),
-///    and the rest tier's (the ten rest and ladder tables, their `last`
-///    buffers, `restChanged`/`ladderChanged`, `restMoved`/`ladderMoved`,
-///    `ladderMovedSlots`, `restTierEverRan`/`restTierStamp`, which
-///    RigExecBakedRunRestTier verifies the same way).
+///    geometry prologue's sampler pools and routing stamps. Persistent
+///    property versions/validity/records, rest and ladder tables, layout
+///    handles and shared-step memo lines are captured below.
 ///    The prologue runs ONCE per
 ///    generation, before either pass, so both passes see one value of each
 ///    by construction. Several are captured and restored anyway, because
@@ -5039,6 +4957,17 @@ void RigExecBakedDeclareInputDependencies(RigExecBakedProgramImpl *program);
 ///    averages. The counters are stored afresh at the head of every parallel
 ///    run and mean nothing between runs; the averages are a fit over frames,
 ///    which an opt-in calibration reads and this mode does not.
+struct RigExecBakedLadderTables {
+    std::vector<GfMatrix4d> restM;
+    std::vector<std::array<GfVec3d, 4>> restPts;
+    std::vector<RigExecPointFrame> restFrames;
+    std::vector<GfMatrix4d> selfD, parentDinv;
+    std::vector<TfToken> rotOrder;
+    std::vector<GfMatrix4d> restRoundTrip, defaultRoundTrip;
+    std::vector<char> posedAuthored;
+    std::vector<GfMatrix4d> posedAuthoredM;
+};
+
 struct RigExecBakedRunShadow {
     /// Copies everything a step reads or writes out of \p program.
     void Capture(const RigExecBakedProgramImpl &program);
@@ -5049,8 +4978,25 @@ struct RigExecBakedRunShadow {
     size_t Compare(const RigExecBakedProgramImpl &program,
                    std::vector<std::string> *differences) const;
 
+
+    std::vector<RigExecBakedPropertyValue> values;
+    std::vector<char> versionValid, changed, chainValid, recordStoodAside;
+    std::vector<VtValue> chainFinal, recordValues;
+
+
+    RigExecBakedLadderTables tables;
+    std::vector<GfMatrix4d> lastRestM, lastSelfD, lastParentDinv,
+        lastPosedAuthoredM;
+    std::vector<char> lastPosedAuthored;
+    std::vector<TfToken> lastRotOrder;
+    std::vector<char> restChanged, ladderChanged;
+    std::vector<int> restMoved, ladderMoved, ladderMovedSlots;
+    uint64_t opsRun = 0;
+
+    uint32_t sequence = 0;
     struct StepState {
-        std::vector<std::string> diagnostics;
+        std::vector<std::string> diagnostics, lines;
+        uint32_t runSeq = 0;
         RigExecBakedStepCounters counters;
         bool bail = false;
     };
@@ -5061,6 +5007,8 @@ struct RigExecBakedRunShadow {
         bool keyChanged = false, ok = false;
     };
     struct RevisionState {
+        std::shared_ptr<const RigExecSkinTopology> layoutHandle, layoutCandidate;
+        bool layoutFixed = false, layoutRan = false;
         std::vector<GfVec3f> output;
         std::vector<GfMatrix4d> packetInfluences, influences;
         RigExecResolvedInputs revisionInputs;
@@ -5215,16 +5163,7 @@ struct RigExecBakedProgramTesting {
     static RigExecBakedProgramImpl::Solver RefreshedSolverRests(
         const RigExecBakedProgram &program, size_t index);
     /// The ten rest and ladder tables the bake exports.
-    struct LadderTables {
-        std::vector<GfMatrix4d> restM;
-        std::vector<std::array<GfVec3d, 4>> restPts;
-        std::vector<RigExecPointFrame> restFrames;
-        std::vector<GfMatrix4d> selfD, parentDinv;
-        std::vector<TfToken> rotOrder;
-        std::vector<GfMatrix4d> restRoundTrip, defaultRoundTrip;
-        std::vector<char> posedAuthored;
-        std::vector<GfMatrix4d> posedAuthoredM;
-    };
+    using LadderTables = RigExecBakedLadderTables;
     /// \p program's ten tables as they stand.
     static LadderTables LadderTablesOf(const RigExecBakedProgram &program);
     /// The ten tables as the single slot-order loop the rest and ladder ops

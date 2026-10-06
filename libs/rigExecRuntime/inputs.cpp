@@ -51,18 +51,9 @@ _RrFloatValue(float f)
 // The overlay's value at \p path: the chain result published there, when
 // it is exactly \p tag.
 bool
-_RrOverlay(const RrProgram &program, uint32_t path, RigExecWireInputTag tag,
-           RrWireValue *out)
+_RrPropertyWire(const RrPropertyValue &held, RigExecWireInputTag tag,
+                RrWireValue *out)
 {
-    const RrStore &store = program.store;
-    if (store.propertyResults.empty()) {
-        return false;
-    }
-    const auto found = store.propertyResults.find(path);
-    if (found == store.propertyResults.end()) {
-        return false;
-    }
-    const RrPropertyValue &held = found->second;
     using HeldTag = RrPropertyValue::Tag;
     RrWireValue value;
     value.tag = tag;
@@ -100,6 +91,99 @@ _RrOverlay(const RrProgram &program, uint32_t path, RigExecWireInputTag tag,
     }
     *out = value;
     return true;
+}
+
+bool
+_RrSlotOverlay(const RrProgram &program, uint32_t slot, RigExecWireInputTag tag,
+               RrWireValue *out)
+{
+    const int32_t version = program.store.propertyPublishedVersions[slot];
+    if (version >= 0 && program.store.propertyVersionValid[size_t(version)] &&
+        _RrPropertyWire(program.store.propertyVersions[size_t(version)], tag, out)) return true;
+    return false;
+}
+
+bool
+_RrOverlay(const RrProgram &program, uint32_t path, RigExecWireInputTag tag,
+           RrWireValue *out)
+{
+    const auto found = program.store.propertyPathSlots.find(path);
+    return found != program.store.propertyPathSlots.end() &&
+           _RrSlotOverlay(program, found->second, tag, out);
+}
+
+bool
+_RrCandidateOverlay(const RrProgram &program,
+                    const RigExecWirePropertyInputCandidate &candidate,
+                    RigExecWireInputTag tag, RrWireValue *out, bool publishedOnly = false)
+{
+    const auto &store = program.store;
+    const size_t slot = candidate.slot;
+    if (publishedOnly) {
+        const int32_t version = store.propertyPublishedVersions[slot];
+        if (version >= 0 && store.propertyVersionValid[size_t(version)] &&
+            _RrPropertyWire(store.propertyVersions[size_t(version)], tag, out)) return true;
+        return false;
+    }
+    const auto kind = fb::PropertyCandidateKind(candidate.kind);
+    if (kind == fb::PropertyCandidateKind::ChainFinal) {
+        const size_t v = size_t(candidate.version);
+        if (store.propertyVersionValid[v])
+            return _RrPropertyWire(store.propertyVersions[v], tag, out);
+        return false;
+    }
+    if (kind == fb::PropertyCandidateKind::PhasedRecord) {
+        const size_t v = size_t(candidate.version);
+        if (store.propertyVersionValid[v])
+            return _RrPropertyWire(store.propertyVersions[v], tag, out);
+    }
+    return false;
+}
+
+bool
+_RrCandidates(const RrProgram &program, const RigExecWireInput &input,
+              RrWireValue *out, bool publishedOnly = false)
+{
+    const auto &state = program.inputState;
+    const auto overlay = [&](const auto &list, RigExecWireInputTag tag) {
+        for (const auto &candidate : list)
+            if (_RrCandidateOverlay(program, candidate, tag, out, publishedOnly)) return true;
+        return false;
+    };
+    const auto raw = [&](const auto &list, RigExecWireInputTag tag) {
+        for (auto it = list.rbegin(); it != list.rend(); ++it) {
+            if (it->raw && state.slotHasValue[it->slot] &&
+                state.file->inputs[it->slot].type() == tag) {
+                *out = state.slotCurrent[it->slot]; return true;
+            }
+        }
+        return false;
+    };
+    if (input.mode == RigExecWireReadMode::Pinned &&
+        !input.propertyCandidates.empty()) {
+        const auto &candidate = input.propertyCandidates.front();
+        if (_RrCandidateOverlay(program, candidate, input.tag, out, publishedOnly)) return true;
+        if (candidate.raw && state.slotHasValue[candidate.slot] &&
+            state.file->inputs[candidate.slot].type() == input.tag) {
+            *out = state.slotCurrent[candidate.slot]; return true;
+        }
+        return false;
+    }
+    if (overlay(input.propertyCandidates, input.tag)) return true;
+    if (!input.doubleCandidates.empty()) {
+        if (input.tag != RigExecWireInputTag::Float ||
+            !(overlay(input.doubleCandidates, RigExecWireInputTag::Double) ||
+              raw(input.doubleCandidates, RigExecWireInputTag::Double))) return false;
+        *out = _RrFloatValue(float(_RrWireDouble(*out))); return true;
+    }
+    if (raw(input.propertyCandidates, input.tag)) return true;
+    if (input.rawFallbackSlot >= 0) {
+        const size_t slot = size_t(input.rawFallbackSlot);
+        if (state.slotHasValue[slot] && state.file->inputs[slot].type() == input.tag) {
+            *out = state.slotCurrent[slot]; return true;
+        }
+    }
+    return false;
 }
 
 // Slot \p slot's value this run: the one place a read meets the slots.
@@ -143,7 +227,7 @@ _RrLongWay(const RrProgram &program, const std::vector<uint32_t> &walk,
     }
     for (size_t k = from; k < walk.size(); ++k) {
         const RigExecWireInputSlot &slot = slots[walk[k]];
-        if (_RrOverlay(program, slot.name(), tag, &answer->value)) {
+        if (_RrSlotOverlay(program, walk[k], tag, &answer->value)) {
             return true;
         }
         if (tag == RigExecWireInputTag::Float &&
@@ -166,7 +250,9 @@ _RrWalkValue(const RrProgram &program, const RigExecWireInput &input)
 {
     const RrInputState &state = program.inputState;
     _RrWalkAnswer answer;
-    if (!_RrLongWay(program, input.walk, 0, input.tag, &answer)) {
+    const bool bound = !input.propertyCandidates.empty() || !input.doubleCandidates.empty();
+    if (!(bound ? _RrCandidates(program, input, &answer.value)
+                : _RrLongWay(program, input.walk, 0, input.tag, &answer))) {
         return state.values[input.constant];
     }
     return answer.value;
@@ -527,6 +613,8 @@ RrInputsOpen(RrProgram *program, const RigExecWireFile *file,
     const size_t slots = file->inputs.size();
     state.slotCurrent.resize(slots);
     state.slotHasValue.resize(slots);
+    state.slotAuthored.assign(slots, 0);
+    state.slotRanAuthored.assign(slots, 0);
     state.slotDefaultHasValue.resize(slots);
     for (size_t s = 0; s < slots; ++s) {
         const RigExecWireInputSlot &slot = file->inputs[s];
@@ -631,6 +719,10 @@ RrReadInput(const RrProgram *program, const RigExecWireInput &input)
     case RigExecWireReadMode::Resolved:
         return _RrWalkValue(*program, input);
     case RigExecWireReadMode::Pinned: {
+        if (!input.propertyCandidates.empty() || !input.doubleCandidates.empty()) {
+            RrWireValue answer;
+            return _RrCandidates(*program, input, &answer) ? answer : fallback;
+        }
         // _PinnedRead: a connected input reads the long way; otherwise an
         // overlay at the attribute's own path holding exactly the read's
         // type answers before the attribute's own value.
@@ -639,7 +731,7 @@ RrReadInput(const RrProgram *program, const RigExecWireInput &input)
         }
         RrWireValue overlay;
         if (!input.walk.empty() &&
-            _RrOverlay(*program, state.file->inputs[input.walk[0]].name(),
+            _RrSlotOverlay(*program, input.walk[0],
                        input.tag, &overlay)) {
             return overlay;
         }
@@ -662,7 +754,9 @@ RrReadPathScalar(const RrProgram *program, const RigExecWirePathRead &row)
     // moverGraph.cpp's _Read: `if (!GetAttribute) attr.Get`, so a walk
     // that yields nothing still reads the head before the fallback.
     _RrWalkAnswer answer;
-    if (_RrLongWay(*program, read.walk, 0, read.tag, &answer)) {
+    const bool bound = !read.propertyCandidates.empty() || !read.doubleCandidates.empty();
+    if (bound ? _RrCandidates(*program, read, &answer.value)
+              : _RrLongWay(*program, read.walk, 0, read.tag, &answer)) {
         return answer.value;
     }
     return _RrHeadValue(state, read);
@@ -673,8 +767,10 @@ RrReadResolvedFloat(const RrProgram *program, const RigExecWireInput &input,
                     float fallback)
 {
     _RrWalkAnswer answer;
-    if (!_RrLongWay(*program, input.walk, 0, RigExecWireInputTag::Float,
-                    &answer)) {
+    const bool bound = !input.propertyCandidates.empty() || !input.doubleCandidates.empty();
+    if (!(bound ? _RrCandidates(*program, input, &answer.value, true)
+                : _RrLongWay(*program, input.walk, 0, RigExecWireInputTag::Float,
+                             &answer))) {
         return fallback;
     }
     return RrWireValueFloat(answer.value);
@@ -1361,6 +1457,7 @@ RrInputsSet(RrProgram *program, size_t index, const RrInputValue &value,
     default:
         break;
     }
+    state.slotAuthored[index] = acceptNonFinite ? 0 : 1;
     _RrStoreSlot(state, uint32_t(index), wire, true);
     return true;
 }
@@ -1665,6 +1762,7 @@ RrInputsSetToken(RrProgram *program, size_t index, const std::string &text,
     RrWireValue wire;
     wire.tag = RigExecWireInputTag::Token;
     wire.bits = id;
+    state.slotAuthored[index] = 1;
     _RrStoreSlot(state, uint32_t(index), wire, true);
     return true;
 }
@@ -1673,6 +1771,7 @@ void
 RrInputsReset(RrProgram *program, size_t index)
 {
     RrInputState &state = program->inputState;
+    if (index < state.slotAuthored.size()) state.slotAuthored[index] = 0;
     if (index >= state.inputInfo.size()) {
         return;
     }
@@ -1709,6 +1808,7 @@ RrInputsClear(RrProgram *program, size_t index, std::string *error)
     }
     const RigExecWireInputSlot &slot = state.file->inputs[index];
     _RrStoreSlot(state, uint32_t(index), state.values[slot.value()], false);
+    state.slotAuthored[index] = 0;
     return true;
 }
 
@@ -1749,18 +1849,16 @@ RrInputsApplyTouched(RrProgram *program)
             }
             continue;
         }
-        // An animated input is what a time change moves: it never flags a
-        // read, or setting it would dirty what only an edit dirties.
+        const bool kindChanged = state.slotAuthored[s] != state.slotRanAuthored[s];
+        state.slotRanAuthored[s] = state.slotAuthored[s];
         if ((slots[s].flags() & animated) != 0) {
             store.animatedTouched = true;
-            record(s);
-            continue;
         }
         // Compared with what the last run read, not with the default: a
         // set that repeats the value moves nothing, and a reset after a
         // drag is a change like any other.
         const bool changed =
-            state.slotHasValue[s] != state.slotRanHasValue[s] ||
+            kindChanged || state.slotHasValue[s] != state.slotRanHasValue[s] ||
             !_RrSameValueBits(state.slotCurrent[s], state.slotRan[s]);
         if (changed) {
             state.slotRan[s] = state.slotCurrent[s];
@@ -1782,7 +1880,10 @@ RrInputsApplyTouched(RrProgram *program)
             for (uint32_t j = state.overrideSlotBegin[number];
                  j < state.overrideSlotBegin[number + 1] && !differs; ++j) {
                 const uint32_t t = state.overrideSlotList[j];
-                differs = (slots[t].flags() & animated) == 0 &&
+                // Sampled values also enable a static bound walk when
+                // they differ from its captured raw default. Explicit
+                // authored presence retains equal-default upstream routing.
+                differs = (state.slotAuthored[t] && state.slotHasValue[t]) ||
                           _RrSlotDiffersFromDefault(state, t);
             }
             state.valueOverridden[number] = differs ? 1 : 0;

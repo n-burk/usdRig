@@ -1596,6 +1596,7 @@ _TestComputedReadsAndOracle()
         program.nodeText.push_back(RigExecFormatPathText(file, id));
     }
     CHECK(RrInputsOpen(&program, &file, &error));
+    CHECK(RrPropertySizeScratch(&program, &error));
     CHECK(RrWeightSizeScratch(&program, &error));
     program.store.overridden.assign(4, 0);
     program.store.volumePlacement.assign(1, RrMat4d(1.0));
@@ -1651,6 +1652,13 @@ _TestComputedReadsAndOracle()
     // there when it holds exactly the walk's type (GetAttribute's Get<T>).
     std::map<uint32_t, RrPropertyValue> &overlay =
         program.store.propertyResults;
+    program.store.propertyVersions.resize(file.inputs.size());
+    program.store.propertyVersionValid.assign(file.inputs.size(), 0);
+    const auto clearPublication = [&]() {
+        overlay.clear();
+        std::fill(program.store.propertyPublishedVersions.begin(),
+                  program.store.propertyPublishedVersions.end(), -1);
+    };
     const auto publish = [&](size_t slot, RrPropertyValue::Tag tag,
                              double v) {
         RrPropertyValue held;
@@ -1658,6 +1666,9 @@ _TestComputedReadsAndOracle()
         held.f32 = float(v);
         held.f64 = v;
         overlay[slotNames[slot]] = held;
+        program.store.propertyVersions[slot] = held;
+        program.store.propertyVersionValid[slot] = 1;
+        program.store.propertyPublishedVersions[slot] = int32_t(slot);
     };
     publish(0, RrPropertyValue::Tag::Float, 0.125);
     CHECK(f(read(9.0f, ReadMode::Resolved, 0, {0})) == 0.125f);
@@ -1671,17 +1682,17 @@ _TestComputedReadsAndOracle()
     // A result of another type is no answer.
     publish(0, RrPropertyValue::Tag::Double, 0.125);
     CHECK(f(read(9.0f, ReadMode::Resolved, 0, {0, 2})) == 0.25f);
-    overlay.clear();
+    clearPublication();
     // A double hop's own double result, narrowed.
     publish(1, RrPropertyValue::Tag::Double, 0.3);
     CHECK(f(read(9.0f, ReadMode::Resolved, 0, {0, 1})) ==
           static_cast<float>(0.3));
-    overlay.clear();
+    clearPublication();
     // GetAttribute<float> tests its own head for a double before the
     // overlay, so a float result at a double head is not read.
     publish(1, RrPropertyValue::Tag::Float, 0.3);
     CHECK(f(read(9.0f, ReadMode::Resolved, 0, {1})) == narrowed);
-    overlay.clear();
+    clearPublication();
 
     // The oracle.
     const auto resolve = [&](size_t index, size_t count,
@@ -1719,7 +1730,7 @@ _TestComputedReadsAndOracle()
         driven[i] = (sparse[i] * 0.5f) * 0.85f + 0.0f;
     }
     CHECK(resolve(4, 3, nullptr, &w) && w == driven);
-    overlay.clear();
+    clearPublication();
     std::vector<float> combined(3);
     for (size_t i = 0; i < 3; ++i) {
         float acc = (0.0f + sparse[i]) + dynamic[i];
@@ -1816,6 +1827,7 @@ _TestVolumePlacementSkip()
     }
     std::string error;
     CHECK(RrInputsOpen(&program, &file, &error));
+    CHECK(RrPropertySizeScratch(&program, &error));
     CHECK(RrWeightSizeScratch(&program, &error));
     RrStore &store = program.store;
     store.volumePlacement.assign(2, RrMat4d(1.0));

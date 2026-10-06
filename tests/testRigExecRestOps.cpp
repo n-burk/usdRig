@@ -63,6 +63,17 @@ static int failures = 0;
 
 namespace {
 
+// Head entries are part of the ordinary execution trace.
+static std::vector<RigExecOpTraceEntry>
+ExecutedHeads(const RigExecBakedProgramImpl &B)
+{
+    auto trace = RigExecBakedLastRunTrace(B);
+    trace.erase(std::remove_if(trace.begin(),trace.end(),
+        [&B](const auto &entry) { return !B.steps[entry.step].isHead; }),trace.end());
+    return trace;
+}
+
+
 using Tables = RigExecBakedProgramTesting::LadderTables;
 
 template <class T>
@@ -342,10 +353,10 @@ TestTheRestTablesAreTheLadderLoops(const std::string &examples)
 
 // Whether \p step declares head slot \p slot of \p domain.
 bool
-Declares(const RigExecBakedStep &step, RigExecBakedHeadDomain domain,
+Declares(const RigExecBakedStep &step, RigExecBakedSlotDomain domain,
          int slot)
 {
-    for (const RigExecBakedHeadRange &range : step.headReads) {
+    for (const RigExecBakedSlotRange &range : step.reads) {
         if (range.domain == domain && range.begin <= uint32_t(slot) &&
             uint32_t(slot) < range.end) {
             return true;
@@ -405,7 +416,7 @@ TestEveryRestReaderDeclaresIt(const std::string &examples)
                 return;
             }
             ++counts[kind];
-            if (!Declares(step, RigExecBakedHeadDomain::Rest, slot)) {
+            if (!Declares(step, RigExecBakedSlotDomain::Rest, slot)) {
                 ++failures;
                 std::printf("FAIL %s: %s does not declare Rest[%s]\n",
                             name.c_str(), step.label.c_str(),
@@ -418,7 +429,7 @@ TestEveryRestReaderDeclaresIt(const std::string &examples)
                 return;
             }
             ++counts[kind];
-            if (!Declares(step, RigExecBakedHeadDomain::Ladder, slot)) {
+            if (!Declares(step, RigExecBakedSlotDomain::Ladder, slot)) {
                 ++failures;
                 std::printf("FAIL %s: %s does not declare Ladder[%s]\n",
                             name.c_str(), step.label.c_str(),
@@ -585,11 +596,11 @@ SlotOf(const RigExecBakedProgramImpl &B, const SdfPath &path)
 
 // The head step of kind \p kind whose compose group holds \p slot.
 int
-HeadOpOf(const RigExecBakedProgramImpl &B, RigExecBakedHeadKind kind,
+HeadOpOf(const RigExecBakedProgramImpl &B, RigExecBakedStepKind kind,
          int slot)
 {
-    for (size_t i = 0; i < B.headSteps.size(); ++i) {
-        const RigExecBakedHeadStep &step = B.headSteps[i];
+    for (size_t i = 0; i < RigExecBakedHeadIndices(B).size(); ++i) {
+        const RigExecBakedStep &step = B.steps[i];
         if (step.kind == kind) {
             const RigExecBakedComposeGroup &group =
                 B.composeGroups[size_t(step.object)];
@@ -604,7 +615,7 @@ HeadOpOf(const RigExecBakedProgramImpl &B, RigExecBakedHeadKind kind,
 bool
 HeadRan(const RigExecBakedProgramImpl &B, int op)
 {
-    for (const RigExecOpTraceEntry &entry : RigExecBakedLastHeadTrace(B)) {
+    for (const RigExecOpTraceEntry &entry : ExecutedHeads(B)) {
         if (int(entry.step) == op) {
             return true;
         }
@@ -668,9 +679,9 @@ TestARestOnlyMoveSkipsTheCompose()
     if (leaf < 0) {
         return;
     }
-    const int restOp = HeadOpOf(B, RigExecBakedHeadKind::RestCompose, leaf);
+    const int restOp = HeadOpOf(B, RigExecBakedStepKind::RestCompose, leaf);
     const int ladderOp =
-        HeadOpOf(B, RigExecBakedHeadKind::LadderCompose, leaf);
+        HeadOpOf(B, RigExecBakedStepKind::LadderCompose, leaf);
     CHECK(restOp >= 0 && ladderOp >= 0);
     std::vector<size_t> composes, matrices;
     for (size_t s = 0; s < B.steps.size(); ++s) {
@@ -758,23 +769,23 @@ TestTheValidatorRefusesAMisorderedRest(const std::string &examples)
         // The first LadderCompose in head order reads the rest of a slot
         // whose RestCompose comes after it.
         int ladder = -1, laterRest = -1;
-        for (const uint32_t index : B.headOrder) {
-            const RigExecBakedHeadStep &step = B.headSteps[index];
+        for (const uint32_t index : RigExecBakedHeadIndices(B)) {
+            const RigExecBakedStep &step = B.steps[index];
             if (ladder < 0 &&
-                step.kind == RigExecBakedHeadKind::LadderCompose) {
+                step.kind == RigExecBakedStepKind::LadderCompose) {
                 ladder = int(index);
             } else if (ladder >= 0 &&
-                       step.kind == RigExecBakedHeadKind::RestCompose) {
+                       step.kind == RigExecBakedStepKind::RestCompose) {
                 laterRest = int(index);
             }
         }
         CHECK(ladder >= 0 && laterRest >= 0);
         if (ladder >= 0 && laterRest >= 0) {
-            RigExecBakedHeadStep &step = B.headSteps[size_t(ladder)];
+            RigExecBakedStep &step = B.steps[size_t(ladder)];
             const uint32_t slot =
-                B.headSteps[size_t(laterRest)].writes.front().begin;
+                B.steps[size_t(laterRest)].writes.front().begin;
             step.reads.push_back(
-                RigExecBakedHeadOne(RigExecBakedHeadDomain::Rest, slot));
+                RigExecBakedOne(RigExecBakedSlotDomain::Rest, slot));
             error.clear();
             CHECK(!RigExecBakedValidateHeadTier(B, &error));
             const std::string expected =
@@ -791,6 +802,64 @@ TestTheValidatorRefusesAMisorderedRest(const std::string &examples)
         }
     }
     {
+        // Isolate each actual compose-body dependency by removing exactly
+        // one slot, leaving every other read and all writers intact.
+        const auto omit = [&](RigExecBakedStep &step, RigExecBakedSlotDomain domain,
+                              uint32_t slot) {
+            const auto saved = step.reads;
+            std::vector<RigExecBakedSlotRange> kept;
+            bool removed = false;
+            for (const auto &range : saved) {
+                if (range.domain != domain || slot < range.begin || slot >= range.end) {
+                    kept.push_back(range); continue;
+                }
+                removed = true;
+                if (range.begin < slot) kept.push_back({domain, range.begin, slot});
+                if (slot + 1 < range.end) kept.push_back({domain, slot + 1, range.end});
+            }
+            CHECK(removed);
+            step.reads = std::move(kept);
+            error.clear();
+            CHECK(!RigExecBakedValidateHeadTier(B, &error));
+            CHECK(error.find("head step " + step.label + " omits required " +
+                RigExecBakedSlotDomainName(domain) + " slot " + std::to_string(slot))
+                != std::string::npos);
+            step.reads = saved;
+            CHECK(RigExecBakedValidateHeadTier(B, &error));
+        };
+        bool restParent = false, ladderParentRest = false,
+             ladderOwnRest = false, ladderParent = false;
+        for (uint32_t index : RigExecBakedHeadIndices(B)) {
+            auto &step = B.steps[index];
+            const bool rest = step.kind == RigExecBakedStepKind::RestCompose;
+            const bool ladder = step.kind == RigExecBakedStepKind::LadderCompose;
+            if (!rest && !ladder) continue;
+            const auto &group = B.composeGroups[size_t(step.object)];
+            if (ladder && !ladderOwnRest) {
+                omit(step, RigExecBakedSlotDomain::Rest, uint32_t(group.begin));
+                ladderOwnRest = true;
+            }
+            for (int slot = group.begin; slot < group.end; ++slot) {
+                if (B.slotKind[size_t(slot)] != RigExecBakedSlotKind::FirstFramePose) continue;
+                const int parent = B.parent[size_t(slot)];
+                if (parent < 0 || (parent >= group.begin && parent < group.end)) continue;
+                if (rest && !restParent) {
+                    omit(step, RigExecBakedSlotDomain::Rest, uint32_t(parent));
+                    restParent = true;
+                }
+                if (ladder && !ladderParentRest) {
+                    omit(step, RigExecBakedSlotDomain::Rest, uint32_t(parent));
+                    ladderParentRest = true;
+                }
+                if (ladder && !ladderParent) {
+                    omit(step, RigExecBakedSlotDomain::Ladder, uint32_t(parent));
+                    ladderParent = true;
+                }
+            }
+        }
+        CHECK(restParent && ladderParentRest && ladderOwnRest && ladderParent);
+    }
+    {
         // A Solve reading a rest slot no RestCompose writes.
         RigExecBakedStep *solve = nullptr;
         for (RigExecBakedStep &step : B.steps) {
@@ -802,8 +871,8 @@ TestTheValidatorRefusesAMisorderedRest(const std::string &examples)
         CHECK(solve);
         if (solve) {
             const uint32_t slot = uint32_t(B.paths.size()) + 3;
-            solve->headReads.push_back(
-                RigExecBakedHeadOne(RigExecBakedHeadDomain::Rest, slot));
+            solve->reads.push_back(
+                RigExecBakedOne(RigExecBakedSlotDomain::Rest, slot));
             error.clear();
             CHECK(!RigExecBakedValidateHeadReads(B, &error));
             const std::string expected =
@@ -816,7 +885,22 @@ TestTheValidatorRefusesAMisorderedRest(const std::string &examples)
             }
             std::printf("  a solve reading an unwritten rest: %s\n",
                         error.c_str());
-            solve->headReads.pop_back();
+            solve->reads.pop_back();
+            const auto saved=solve->reads;
+            const auto required=RigExecBakedRequiredRestReads(B,*solve);
+            CHECK(!required.empty());
+            if (!required.empty()) {
+                const auto missing=required.front();
+                solve->reads.erase(std::remove_if(solve->reads.begin(),solve->reads.end(),
+                    [&missing](const auto &r) { return r.domain==missing.domain &&
+                        r.begin<=missing.begin && missing.begin<r.end; }),solve->reads.end());
+                error.clear();
+                CHECK(!RigExecBakedValidateHeadReads(B,&error));
+                CHECK(error.find("step "+solve->label+" omits required "+
+                    RigExecBakedSlotDomainName(missing.domain)+" slot "+std::to_string(missing.begin))!=std::string::npos);
+                solve->reads=saved;
+            }
+
         }
     }
     error.clear();
@@ -850,29 +934,28 @@ TestTheValidatorRefusesARestBeforeAProperty(const std::string &examples)
         const_cast<RigExecBakedProgramImpl &>(*program);
     // A rest op that reads nothing, moved to the front of the order, so the
     // first violation is the property revision after it.
-    size_t from = B.headOrder.size();
+    size_t from = RigExecBakedHeadIndices(B).size();
     bool property = false;
-    for (size_t p = 0; p < B.headOrder.size(); ++p) {
-        const RigExecBakedHeadStep &step = B.headSteps[B.headOrder[p]];
+    for (size_t p = 0; p < RigExecBakedHeadIndices(B).size(); ++p) {
+        const RigExecBakedStep &step = B.steps[RigExecBakedHeadIndices(B)[p]];
         property = property ||
-                   step.kind == RigExecBakedHeadKind::PropertyRevision;
-        if (from == B.headOrder.size() &&
-            step.kind == RigExecBakedHeadKind::RestCompose &&
+                   step.kind == RigExecBakedStepKind::PropertyRevision;
+        if (from == RigExecBakedHeadIndices(B).size() &&
+            step.kind == RigExecBakedStepKind::RestCompose &&
             step.reads.empty()) {
             from = p;
         }
     }
-    CHECK(property && from < B.headOrder.size());
-    if (!property || from == B.headOrder.size()) {
+    CHECK(property && from < RigExecBakedHeadIndices(B).size());
+    if (!property || from == RigExecBakedHeadIndices(B).size()) {
         return;
     }
-    const std::vector<uint32_t> order = B.headOrder;
-    std::rotate(B.headOrder.begin(), B.headOrder.begin() + from,
-                B.headOrder.begin() + from + 1);
+    const std::vector<RigExecBakedStep> savedSteps = B.steps;
+    std::rotate(B.steps.begin(),B.steps.begin()+from,B.steps.begin()+from+1);
     std::string error;
     CHECK(!RigExecBakedValidateHeadTier(B, &error));
     const std::string expected =
-        "is ordered after " + B.headSteps[B.headOrder[0]].label +
+        "is ordered after " + B.steps[RigExecBakedHeadIndices(B)[0]].label +
         ", which runs after every property revision";
     if (error.find(expected) == std::string::npos) {
         ++failures;
@@ -881,7 +964,7 @@ TestTheValidatorRefusesARestBeforeAProperty(const std::string &examples)
     }
     std::printf("  a rest op before a property revision: %s\n",
                 error.c_str());
-    B.headOrder = order;
+    B.steps = savedSteps;
     error.clear();
     CHECK(RigExecBakedValidateHeadTier(B, &error));
 }
@@ -947,8 +1030,8 @@ TestARestEditIsSeedable()
     CHECK(childSlot >= 0);
     std::set<int> direct;
     for (const uint32_t op : RigExecBakedHeadOpsReading(B, index)) {
-        for (const RigExecBakedHeadRange &range : B.headSteps[op].writes) {
-            const auto &table = range.domain == RigExecBakedHeadDomain::Rest
+        for (const RigExecBakedSlotRange &range : B.steps[op].writes) {
+            const auto &table = range.domain == RigExecBakedSlotDomain::Rest
                                     ? B.cones.restReaders
                                     : B.cones.ladderReaders;
             for (uint32_t id = range.begin; id < range.end; ++id) {

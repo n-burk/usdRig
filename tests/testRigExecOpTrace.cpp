@@ -128,12 +128,21 @@ CheckTraceMatchesClosure(const RigExecRigEvaluator &E,
     const RigExecBakedProgramImpl &B = program->GetStepGraph();
     std::set<size_t> traced;
     for (const RigExecOpTraceEntry &entry : trace) {
+        CHECK(entry.step < B.steps.size());
+        if (entry.step >= B.steps.size()) continue;
+        CHECK(B.steps[entry.step].runSeq == entry.seq);
         traced.insert(entry.step);
     }
     size_t mismatches = 0;
     for (size_t k = 0; k < B.steps.size(); ++k) {
+        if (B.steps[k].isHead) {
+            CHECK(!B.steps[k].isSource);
+            CHECK(!B.closedSteps.Test(int(k)));
+            CHECK(B.steps[k].startUs == 0 && B.steps[k].endUs == 0);
+        }
         const bool ran =
-            B.steps[k].isSource || B.closedSteps.Test(int(k));
+            B.steps[k].isHead ? B.steps[k].runSeq != 0
+                              : B.steps[k].isSource || B.closedSteps.Test(int(k));
         if (ran != (traced.count(k) != 0)) {
             if (mismatches < 5) {
                 std::printf("    %s: step %zu (%s) %s\n", what.c_str(), k,
@@ -152,7 +161,8 @@ CheckTraceMatchesClosure(const RigExecRigEvaluator &E,
 }
 
 /// Under RIGEXEC_TRACE_ALL_STEPS every timed step that ran is replayed, so
-/// the step events' seq arguments are exactly the trace's non-source seqs.
+/// the step events' seq arguments are exactly the ordinary non-source
+/// seqs. Memo heads share body dispatch and stamps but retain untimed profiling.
 void
 CheckProfilerReplay(const RigExecRigEvaluator &E,
                     const std::vector<RigExecOpTraceEntry> &trace,
@@ -161,7 +171,7 @@ CheckProfilerReplay(const RigExecRigEvaluator &E,
     const RigExecBakedProgramImpl &B = E.GetBakedProgram()->GetStepGraph();
     std::multiset<std::string> expected, recorded;
     for (const RigExecOpTraceEntry &entry : trace) {
-        if (!B.steps[entry.step].isSource) {
+        if (!B.steps[entry.step].isHead && !B.steps[entry.step].isSource) {
             expected.insert(std::to_string(entry.seq));
         }
     }
@@ -215,6 +225,15 @@ TestStage(const std::string &examplesDir, const std::string &file,
     const std::vector<RigExecOpTraceEntry> trace0 = E.GetLastOpTrace();
     CHECK(!graph.empty());
     CHECK(!trace0.empty());
+    const auto &B = E.GetBakedProgram()->GetStepGraph();
+    size_t headCount = 0;
+    while (headCount < B.steps.size() && B.steps[headCount].isHead) ++headCount;
+    CHECK(headCount > 0);
+    for (size_t i = 0; i < graph.size(); ++i) {
+        CHECK(B.steps[i].isHead == (i < headCount));
+        CHECK((graph[i].domain == "head") == B.steps[i].isHead);
+        if (B.steps[i].isHead) CHECK(!B.steps[i].isSource);
+    }
     Report(file + " op graph", rigExecTest::CheckOpGraphIsAcyclic(graph));
     Report(file + " first trace",
            rigExecTest::CheckTraceRespectsEdges(trace0, graph));

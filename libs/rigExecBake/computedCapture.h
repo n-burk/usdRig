@@ -165,6 +165,8 @@ struct RigExecBakeInputs {
     /// Per program constraint, the weight object its envelope arm reads,
     /// or -1.
     std::vector<int32_t> constraintWeightObjectIndex;
+    std::vector<std::vector<uint32_t>> headInputSlots;
+    std::vector<std::vector<fb::RigExecWireInput>> headInputReads;
     std::vector<fb::RigExecWirePropertyChain> propertyChains;
     std::vector<fb::RigExecWirePhasedConsumer> phasedConsumers;
     std::vector<RigExecBakeRegisteredRead> registeredReads;

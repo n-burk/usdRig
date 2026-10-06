@@ -25,6 +25,7 @@
 #include <cstdio>
 #include <limits>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace rigExec;
@@ -69,6 +70,23 @@ MakeInputs(UsdTimeCode time,
     return inputs;
 }
 
+// Constraint envelopes remain genuinely volatile until their oracle
+// becomes graph work. Use its real walk/constraint lookup for the synthetic
+// external reader; Derived now reads declared head-produced values.
+void
+AddVolatileEnvelopeStep(RigExecBakedProgramImpl *program, int cluster)
+{
+    program->walkSteps.emplace_back();
+    program->walkSteps.back().index = int(program->constraints.size());
+    program->constraints.emplace_back();
+    program->constraints.back().weightObject = SdfPath("/Weights/Envelope");
+    RigExecBakedStep step;
+    step.kind = RigExecBakedStepKind::Constraint;
+    step.object = int(program->walkSteps.size() - 1);
+    step.cluster = cluster;
+    program->steps.push_back(std::move(step));
+}
+
 // Diamond plus tail plus isolate, closed by the real BuildCones:
 //   0 -> 1 -> 3 -> 4
 //   0 -> 2 -> 3
@@ -92,15 +110,7 @@ MakeDiamond(bool alwaysStep)
     edge(2, 3);
     edge(3, 4);
     if (alwaysStep) {
-        // Derived is inert in BuildCones' table lookups (empty reads hit no
-        // table, and its kind names no table) and is the kind that reads
-        // outside the graph unconditionally -- the loop resets every other
-        // kind's authored externalReads.
-        RigExecBakedStep step;
-        step.kind = RigExecBakedStepKind::Derived;
-        step.object = -1;
-        step.cluster = 4;
-        program.steps.push_back(step);
+        AddVolatileEnvelopeStep(&program, 4);
     }
     RigExecBakedBuildCones(&program);
     return program;
@@ -1332,8 +1342,9 @@ TestPlannerExecutorParity()
 {
     // The diamond, plus a varying step in cluster 1 and an override step
     // in cluster 2. Solve with empty reads is inert in BuildCones' table
-    // lookups and reads nothing outside the graph, so Always stays {4}
-    // while the two closures land exactly on their cones.
+    // lookups and reads nothing outside the graph. The genuine volatile
+    // Constraint envelope keeps Always at {4}, while the two declared
+    // input closures land exactly on their cones.
     RigExecBakedProgramImpl program{};
     program.clustering.clusters.resize(6);
     const auto edge = [&program](int from, int to) {
@@ -1345,11 +1356,7 @@ TestPlannerExecutorParity()
     edge(1, 3);
     edge(2, 3);
     edge(3, 4);
-    RigExecBakedStep derived;
-    derived.kind = RigExecBakedStepKind::Derived;
-    derived.object = -1;
-    derived.cluster = 4;
-    program.steps.push_back(derived);
+    AddVolatileEnvelopeStep(&program, 4);
     RigExecBakedStep varying;
     varying.kind = RigExecBakedStepKind::Solve;
     varying.object = -1;

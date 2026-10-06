@@ -76,6 +76,17 @@ static int failures = 0;
 
 namespace {
 
+// Head entries are part of the ordinary execution trace.
+static std::vector<RigExecOpTraceEntry>
+ExecutedHeads(const RigExecBakedProgramImpl &B)
+{
+    auto trace = RigExecBakedLastRunTrace(B);
+    trace.erase(std::remove_if(trace.begin(),trace.end(),
+        [&B](const auto &entry) { return !B.steps[entry.step].isHead; }),trace.end());
+    return trace;
+}
+
+
 std::string g_examples;
 
 std::string
@@ -409,6 +420,7 @@ StepsOutsideLive(const RigExecBakedProgramImpl &B, const FrozenJob &job,
     }
     size_t outside = 0;
     for (const RigExecOpTraceEntry &entry : job.report.region) {
+        if (B.steps[entry.step].isHead) continue;
         if (entry.step < B.steps.size() && B.steps[entry.step].isSource) {
             continue;
         }
@@ -417,7 +429,8 @@ StepsOutsideLive(const RigExecBakedProgramImpl &B, const FrozenJob &job,
             ++outside;
         }
     }
-    for (const RigExecOpTraceEntry &entry : job.report.head) {
+    for (const RigExecOpTraceEntry &entry : job.report.region) {
+        if (!B.steps[entry.step].isHead) continue;
         if (!head.count(entry.step)) {
             ++outside;
         }
@@ -431,7 +444,7 @@ WorkSteps(const RigExecBakedProgramImpl &B, const FrozenJob &job)
 {
     std::set<size_t> work;
     for (const RigExecOpTraceEntry &entry : job.report.region) {
-        if (entry.step < B.steps.size() && !B.steps[entry.step].isSource &&
+        if (entry.step < B.steps.size() && !B.steps[entry.step].isHead && !B.steps[entry.step].isSource &&
             !B.cones.alwaysSteps.Test(int(entry.step))) {
             work.insert(entry.step);
         }
@@ -501,7 +514,10 @@ RunFrozenLegs(const std::string &what, const RigExecRigEvaluator &evaluator,
     // reads), and no more.
     CHECK(NonSourceWork(B, again) == NonSourceWork(B, authoredJob));
     CHECK(WorkSteps(B, again) == WorkSteps(B, authoredJob));
-    CHECK(again.report.head.size() == authoredJob.report.head.size());
+    CHECK(std::count_if(again.report.region.begin(),again.report.region.end(),
+        [&B](const auto &entry) { return B.steps[entry.step].isHead; }) ==
+          std::count_if(authoredJob.report.region.begin(),authoredJob.report.region.end(),
+        [&B](const auto &entry) { return B.steps[entry.step].isHead; }));
 
     const FrozenJob lifted =
         RunJob(evaluator, standingSnapshot, time, {}, what + ": lifted");
@@ -568,7 +584,7 @@ RunCase(const std::string &name, const std::string &stagePath,
             RunFrozenLegs(what, *evaluator, authoredSnapshot, authoredJob,
                           inputs, time, authored, standing,
                           evaluator->GetLastOpTrace(),
-                          RigExecBakedLastHeadTrace(
+                          ExecutedHeads(
                               evaluator->GetBakedProgram()->GetStepGraph()));
         }
         // A second generation with the same value standing.

@@ -2141,49 +2141,6 @@ _PrintProgramDigest(const RigExecBakedProgramImpl &B)
         t.count = B.propertyChains.size();
     }
     {
-        // The head steps in head order: kind, object, part, reads, writes,
-        // what they always run on, and their predecessors.
-        _DigestTable &t = table("headSteps");
-        const auto ranges =
-            [&t](const std::vector<RigExecBakedHeadRange> &list) {
-                t.Int(int64_t(list.size()));
-                for (const RigExecBakedHeadRange &range : list) {
-                    t.Int(int64_t(range.domain));
-                    t.Int(int64_t(range.begin));
-                    t.Int(int64_t(range.end));
-                }
-            };
-        for (const uint32_t index : B.headOrder) {
-            const RigExecBakedHeadStep &step = B.headSteps[index];
-            t.Int(int64_t(index));
-            t.Int(int64_t(step.kind));
-            t.Int(step.object);
-            t.Int(step.part);
-            ranges(step.reads);
-            ranges(step.writes);
-            t.Int(step.alwaysRuns ? 1 : 0);
-            for (const uint32_t leaf : step.leaves) {
-                t.Int(int64_t(leaf));
-            }
-            for (const uint32_t slot : step.overrideSlots) {
-                t.Int(int64_t(slot));
-            }
-            for (const uint32_t leaf : step.bindingLeaves) {
-                t.Int(int64_t(leaf));
-            }
-            t.Int(step.varyingLeaves ? 1 : 0);
-            for (const auto &[version, record] : step.shadowedReads) {
-                t.Int(int64_t(version));
-                t.Int(int64_t(record));
-            }
-            for (const uint32_t pred : step.preds) {
-                t.Int(int64_t(pred));
-            }
-            t.Str(step.label);
-        }
-        t.count = B.headSteps.size();
-    }
-    {
         // Per SkinTopology index: whether the revision's layout is fixed at
         // compile and at Build, and its layout leaves' paths (the leaves'
         // hops are in pathLeaves).
@@ -2281,7 +2238,7 @@ _PrintProgramDigest(const RigExecBakedProgramImpl &B)
             for (const int walk : step.readerWalks) {
                 t.Int(walk);
             }
-            for (const RigExecBakedHeadRange &range : step.headReads) {
+            for (const RigExecBakedSlotRange &range : step.reads) {
                 t.Int(int64_t(range.begin));
                 t.Int(int64_t(range.end));
             }
@@ -3689,7 +3646,12 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
             return nullptr;
         }
     }
+    RigExecBakedDeclareInputDependencies(&B);
     RigExecBakedDeclareLayoutReads(&B);
+    // The complete prefix changes every region index. Rebuild all shared
+    // edges, levels, clusters and cones from the final declarations.
+    RigExecBakedEdgeSweep finalSweep;
+    RigExecBakedBuildSchedule(&B,&finalSweep);
     // The edges cannot show a read whose producer is later or missing, so a
     // program with one would run on a stale value; refuse it instead.
     {
@@ -3742,6 +3704,7 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
     RigExecBakedProgramImpl &B = *_impl;
     RigExecRigEvaluator &E = *B.evaluator;
     RIGEXEC_PROFILE_SCOPE_CAT(*B.profiler, "Baked", "baked");
+    RigExecBakedClearRunStamps(&B);
     _lastBail = RigExecBakedBail::None;
     // Consumed by this run whatever becomes of it.
     const bool fullRunRequested = _fullRunRequested;
@@ -3969,9 +3932,8 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
         if (B.programStamp == B.lastProgramStamp) {
             ++B.programStamp;
         }
-        // No step ran, so the last run's stamps must not answer for this
-        // one in GetLastOpTrace or the interval replay.
-        RigExecBakedClearRunStamps(&B);
+        // The prologue's executed heads remain in the ordinary trace;
+        // region stamps were cleared before this generation began.
         _lastBail = RigExecBakedBail::StageFrames;
         return false;
     }

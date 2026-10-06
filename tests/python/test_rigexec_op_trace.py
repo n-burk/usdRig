@@ -72,9 +72,18 @@ def TestTheTraceRespectsTheGraph():
     trace = rig.last_op_trace()
     assert graph, "the arm is expected to bake"
     assert trace, "the first baked generation executed nothing"
+    head_kinds = {"PropertyRevision", "RestCompose", "LadderCompose", "SkinTopology"}
+    seen_region = False
+    assert any(node["domain"] == "head" for node in graph)
     for index, node in enumerate(graph):
         assert node["step"] == index
-        assert node["domain"] in ("pose", "weight", "geometry"), node
+        assert node["domain"] in ("head", "pose", "weight", "geometry"), node
+        is_head = node["domain"] == "head"
+        assert is_head == (node["kind"] in head_kinds), node
+        assert not (is_head and seen_region), "heads must form a prefix"
+        seen_region = seen_region or not is_head
+        if is_head:
+            assert all(graph[p]["domain"] == "head" for p in node["preds"])
         assert set(node) >= {"kind", "label", "preds", "succs", "cluster",
                              "level", "reads", "writes"}
         for pred in node["preds"]:

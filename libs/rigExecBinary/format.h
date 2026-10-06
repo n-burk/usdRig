@@ -32,6 +32,7 @@ struct Bool3;
 struct F64;
 struct F32;
 struct ReadPhase;
+struct PropertyInputCandidate;
 struct AncestorRead;
 struct ConstraintSource;
 struct TwoBoneIkParams;
@@ -72,6 +73,10 @@ inline rigExec::fb::F64 PackF64(const double &value);
 inline double UnPackF64(const rigExec::fb::F64 &value);
 inline rigExec::fb::F32 PackF32(const float &value);
 inline float UnPackF32(const rigExec::fb::F32 &value);
+inline rigExec::fb::PropertyInputCandidate
+PackPropertyInputCandidate(const rigExec::RigExecWirePropertyInputCandidate &value);
+inline rigExec::RigExecWirePropertyInputCandidate
+UnPackPropertyInputCandidate(const rigExec::fb::PropertyInputCandidate &value);
 inline rigExec::fb::ReadPhase
 PackReadPhase(const rigExec::RigExecWireReadPhase &value);
 inline rigExec::RigExecWireReadPhase
@@ -256,6 +261,19 @@ inline float
 UnPackF32(const rigExec::fb::F32 &value)
 {
     return value.v();
+}
+
+inline rigExec::fb::PropertyInputCandidate
+PackPropertyInputCandidate(const rigExec::RigExecWirePropertyInputCandidate &value)
+{
+    return rigExec::fb::PropertyInputCandidate(value.slot,
+        rigExec::fb::PropertyCandidateKind(value.kind), value.version, value.raw);
+}
+
+inline rigExec::RigExecWirePropertyInputCandidate
+UnPackPropertyInputCandidate(const rigExec::fb::PropertyInputCandidate &value)
+{
+    return {value.slot(), uint8_t(value.kind()), value.version(), value.raw()};
 }
 
 inline rigExec::fb::ReadPhase
@@ -469,7 +487,7 @@ inline constexpr uint8_t RigExecWireConstraintRadialBlend =
 /// rigexec.fbs bumps it. Open refuses any other value: the previous
 /// version with a re-export message naming what it lacks, every other one
 /// with a rebake message.
-inline constexpr uint32_t RigExecFormatVersion = 8;
+inline constexpr uint32_t RigExecFormatVersion = 9;
 
 /// Whether \p tag is one of the array tags (IntArray and after).
 inline constexpr bool

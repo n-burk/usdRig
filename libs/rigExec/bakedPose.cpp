@@ -2526,11 +2526,13 @@ RigExecBakedDeclareInputDependencies(RigExecBakedProgramImpl *program)
 {
     RigExecBakedProgramImpl &B = *program;
     for (RigExecBakedStep &step : B.steps) {
+        if (step.isHead) continue;
         step.varyingInputs = false;
         step.resolvedInputReads = false;
         step.overrideInputs.clear();
         step.readerWalks.clear();
-        step.headReads.clear();
+        step.reads.erase(std::remove_if(step.reads.begin(),step.reads.end(),
+            [](const auto &r) { return RigExecBakedIsHeadDomain(r.domain); }),step.reads.end());
         switch (step.kind) {
         case RigExecBakedStepKind::Solve:
             NoteSolverInputs(B.solvers[size_t(step.object)], &step);
@@ -2968,15 +2970,15 @@ void
 RigExecBakedBuildRestSteps(RigExecBakedProgramImpl *program)
 {
     RigExecBakedProgramImpl &B = *program;
-    const auto ranges = [](RigExecBakedHeadDomain domain,
+    const auto ranges = [](RigExecBakedSlotDomain domain,
                            const std::set<uint32_t> &slots,
-                           std::vector<RigExecBakedHeadRange> *out) {
+                           std::vector<RigExecBakedSlotRange> *out) {
         for (const uint32_t slot : slots) {
             if (!out->empty() && out->back().domain == domain &&
                 out->back().end == slot) {
                 ++out->back().end;
             } else {
-                out->push_back(RigExecBakedHeadOne(domain, slot));
+                out->push_back(RigExecBakedOne(domain, slot));
             }
         }
     };
@@ -2984,9 +2986,10 @@ RigExecBakedBuildRestSteps(RigExecBakedProgramImpl *program)
         const RigExecBakedComposeGroup &group = B.composeGroups[g];
         const SdfPath &first = B.paths[size_t(group.begin)];
         for (const bool rest : {true, false}) {
-            RigExecBakedHeadStep step;
-            step.kind = rest ? RigExecBakedHeadKind::RestCompose
-                             : RigExecBakedHeadKind::LadderCompose;
+            RigExecBakedStep step;
+            step.isHead = true;
+            step.kind = rest ? RigExecBakedStepKind::RestCompose
+                             : RigExecBakedStepKind::LadderCompose;
             step.object = int(g);
             step.part = rest ? 0 : 1;
             step.label =
@@ -3022,15 +3025,15 @@ RigExecBakedBuildRestSteps(RigExecBakedProgramImpl *program)
                     rests.insert(uint32_t(i));
                 }
             }
-            ranges(RigExecBakedHeadDomain::PropertyVersion, versions,
+            ranges(RigExecBakedSlotDomain::PropertyResult, versions,
                    &step.reads);
-            ranges(RigExecBakedHeadDomain::Rest, rests, &step.reads);
-            ranges(RigExecBakedHeadDomain::Ladder, ladders, &step.reads);
-            step.writes.push_back(RigExecBakedHeadRange{
-                rest ? RigExecBakedHeadDomain::Rest
-                     : RigExecBakedHeadDomain::Ladder,
+            ranges(RigExecBakedSlotDomain::Rest, rests, &step.reads);
+            ranges(RigExecBakedSlotDomain::Ladder, ladders, &step.reads);
+            step.writes.push_back(RigExecBakedSlotRange{
+                rest ? RigExecBakedSlotDomain::Rest
+                     : RigExecBakedSlotDomain::Ladder,
                 uint32_t(group.begin), uint32_t(group.end)});
-            B.headSteps.push_back(std::move(step));
+            B.steps.push_back(std::move(step));
         }
     }
     const size_t N = B.paths.size();
@@ -3045,16 +3048,16 @@ void
 RigExecBakedNoteRestLeaves(RigExecBakedProgramImpl *program)
 {
     RigExecBakedProgramImpl &B = *program;
-    for (RigExecBakedHeadStep &step : B.headSteps) {
-        if (step.kind != RigExecBakedHeadKind::RestCompose &&
-            step.kind != RigExecBakedHeadKind::LadderCompose) {
+    for (RigExecBakedStep &step : B.steps) {
+        if (step.kind != RigExecBakedStepKind::RestCompose &&
+            step.kind != RigExecBakedStepKind::LadderCompose) {
             continue;
         }
         step.bindingLeaves.clear();
         step.varyingLeaves = false;
         const RigExecBakedComposeGroup &group =
             B.composeGroups[size_t(step.object)];
-        const bool rest = step.kind == RigExecBakedHeadKind::RestCompose;
+        const bool rest = step.kind == RigExecBakedStepKind::RestCompose;
         for (int i = group.begin; i < group.end; ++i) {
             const size_t slot = size_t(i);
             if (B.slotKind[slot] != RigExecBakedSlotKind::FirstFramePose) {
@@ -3076,12 +3079,14 @@ RigExecBakedNoteRestLeaves(RigExecBakedProgramImpl *program)
     B.restTierStamp = B.programStamp;
 }
 
-void
-RigExecBakedDeclareRestReads(RigExecBakedProgramImpl *program)
+std::vector<RigExecBakedSlotRange>
+RigExecBakedRequiredRestReads(const RigExecBakedProgramImpl &B,
+                              const RigExecBakedStep &source)
 {
-    RigExecBakedProgramImpl &B = *program;
+    RigExecBakedStep step = source;
+    step.reads.clear();
     const int N = int(B.paths.size());
-    for (RigExecBakedStep &step : B.steps) {
+    {
         std::set<uint32_t> rests, ladders;
         const auto rest = [&rests, N](int slot) {
             if (slot >= 0 && slot < N) {
@@ -3103,24 +3108,25 @@ RigExecBakedDeclareRestReads(RigExecBakedProgramImpl *program)
             };
         switch (step.kind) {
         case RigExecBakedStepKind::ComposeSubtree: {
+            if (step.object < 0 || size_t(step.object) >= B.composeGroups.size()) break;
             const RigExecBakedComposeGroup &group =
                 B.composeGroups[size_t(step.object)];
-            for (int slot = group.begin; slot < group.end; ++slot) {
+            for (int slot = std::max(0, group.begin); slot < std::min(N, group.end); ++slot) {
                 ladder(slot);
             }
             for (const int parent : group.parentSlots) {
                 ladder(parent);
             }
-            for (int slot = group.begin; slot < group.end; ++slot) {
+            for (int slot = std::max(0, group.begin); slot < std::min(N, group.end); ++slot) {
                 const int switchIndex =
-                    B.spaceSwitchBySlot.empty()
+                    size_t(slot) >= B.spaceSwitchBySlot.size()
                         ? -1 : B.spaceSwitchBySlot[size_t(slot)];
-                if (switchIndex < 0) {
+                if (switchIndex < 0 || size_t(switchIndex) >= B.spaceSwitches.size()) {
                     continue;
                 }
                 const RigExecBakedProgramImpl::SpaceSwitch &sw =
                     B.spaceSwitches[size_t(switchIndex)];
-                ladder(B.parent[size_t(slot)]);
+                if (size_t(slot) < B.parent.size()) ladder(B.parent[size_t(slot)]);
                 ladder(sw.spaceSlot);
                 for (const int source : sw.sourceSlots) {
                     ladder(source);
@@ -3134,14 +3140,16 @@ RigExecBakedDeclareRestReads(RigExecBakedProgramImpl *program)
             break;
         }
         case RigExecBakedStepKind::Solve:
+            if (step.object < 0 || size_t(step.object) >= B.solvers.size()) break;
             for (const int slot : B.solvers[size_t(step.object)].restSlots) {
                 rest(slot);
             }
             break;
         case RigExecBakedStepKind::Constraint: {
+            if (step.object < 0 || size_t(step.object) >= B.walkSteps.size()) break;
             const RigExecBakedProgramImpl::WalkStep &walk =
                 B.walkSteps[size_t(step.object)];
-            if (walk.solverBatch || walk.index < 0) {
+            if (walk.solverBatch || walk.index < 0 || size_t(walk.index) >= B.constraints.size()) {
                 break;
             }
             const RigExecBakedProgramImpl::Constraint &c =
@@ -3163,9 +3171,11 @@ RigExecBakedDeclareRestReads(RigExecBakedProgramImpl *program)
             rest(step.object);
             break;
         case RigExecBakedStepKind::FrameMatrix:
+            if (step.object < 0 || size_t(step.object) >= B.frameRecords.size()) break;
             rest(B.frameRecords[size_t(step.object)].slot);
             break;
         case RigExecBakedStepKind::PoseInterpolator: {
+            if (step.object < 0 || size_t(step.object) >= B.poseInterpolators.size()) break;
             const RigExecBakedProgramImpl::PoseInterpolator &interpolator =
                 B.poseInterpolators[size_t(step.object)];
             if (interpolator.valueInputs.empty()) {
@@ -3175,7 +3185,10 @@ RigExecBakedDeclareRestReads(RigExecBakedProgramImpl *program)
             break;
         }
         case RigExecBakedStepKind::Derived: {
+            if (step.object < 0 || size_t(step.object) >= B.derivedIndex.size()) break;
             const auto &[c, d] = B.derivedIndex[size_t(step.object)];
+            if (c < 0 || size_t(c) >= B.chains.size() ||
+                d < 0 || size_t(d) >= B.chains[size_t(c)].derived.size()) break;
             const RigExecBakedProgramImpl::GeomRevision &revision =
                 B.chains[size_t(c)].derived[size_t(d)].revision;
             rest(revision.transformSlot);
@@ -3187,19 +3200,30 @@ RigExecBakedDeclareRestReads(RigExecBakedProgramImpl *program)
             break;
         }
         for (const auto &[domain, slots] :
-             {std::make_pair(RigExecBakedHeadDomain::Rest, &rests),
-              std::make_pair(RigExecBakedHeadDomain::Ladder, &ladders)}) {
+             {std::make_pair(RigExecBakedSlotDomain::Rest, &rests),
+              std::make_pair(RigExecBakedSlotDomain::Ladder, &ladders)}) {
             for (const uint32_t slot : *slots) {
-                if (!step.headReads.empty() &&
-                    step.headReads.back().domain == domain &&
-                    step.headReads.back().end == slot) {
-                    ++step.headReads.back().end;
+                if (!step.reads.empty() &&
+                    step.reads.back().domain == domain &&
+                    step.reads.back().end == slot) {
+                    ++step.reads.back().end;
                 } else {
-                    step.headReads.push_back(
-                        RigExecBakedHeadOne(domain, slot));
+                    step.reads.push_back(
+                        RigExecBakedOne(domain, slot));
                 }
             }
         }
+    }
+    return step.reads;
+}
+
+void
+RigExecBakedDeclareRestReads(RigExecBakedProgramImpl *program)
+{
+    for (auto &step : program->steps) {
+        if (step.isHead) continue;
+        const auto reads = RigExecBakedRequiredRestReads(*program,step);
+        step.reads.insert(step.reads.end(),reads.begin(),reads.end());
     }
 }
 

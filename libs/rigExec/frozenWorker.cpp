@@ -805,7 +805,7 @@ _FrozenRunSteps(_FrozenWorker *worker,
         step.startUs = step.endUs = 0;
     }
     for (RigExecBakedStep &step : B.steps) {
-        if (step.isSource) {
+        if (!step.isHead && step.isSource) {
             if (!_FrozenStepBody(worker, &step, index, inputs, time)) {
                 return false;
             }
@@ -816,7 +816,7 @@ _FrozenRunSteps(_FrozenWorker *worker,
     }
     RigExecBakedComputeClosure(&B, time, /*force=*/false);
     for (RigExecBakedStep &step : B.steps) {
-        if (step.isSource || B.closed.Test(step.cluster)) {
+        if (step.isHead || step.isSource || B.closed.Test(step.cluster)) {
             continue;
         }
         step.MarkSkipped();
@@ -826,7 +826,7 @@ _FrozenRunSteps(_FrozenWorker *worker,
     }
     B.clustering.lastRunTimed = false;
     for (RigExecBakedStep &step : B.steps) {
-        if (step.isSource || !B.closed.Test(step.cluster)) {
+        if (step.isHead || step.isSource || !B.closed.Test(step.cluster)) {
             continue;
         }
         if (!_FrozenStepBody(worker, &step, index, inputs, time)) {
@@ -838,14 +838,14 @@ _FrozenRunSteps(_FrozenWorker *worker,
     }
     // Execution order for RigExecFrozenRunReport (RigExecBakedLastRunTrace):
     // the sources, then the closed steps, as they ran above.
-    uint32_t seq = 0;
+    uint32_t seq = B.runSeqCounter.next.load(std::memory_order_relaxed);
     for (RigExecBakedStep &step : B.steps) {
-        if (step.isSource) {
+        if (!step.isHead && step.isSource) {
             step.runSeq = ++seq;
         }
     }
     for (RigExecBakedStep &step : B.steps) {
-        if (!step.isSource && B.closed.Test(step.cluster)) {
+        if (!step.isHead && !step.isSource && B.closed.Test(step.cluster)) {
             step.runSeq = ++seq;
         }
     }
@@ -1035,6 +1035,7 @@ _RunFrozen(const RigExecFrozenEvalContext &context,
 
     const UsdTimeCode time = inputs.time;
     RigExecRigPose working;
+    RigExecBakedClearRunStamps(&B);
     if (!_FrozenPrologue(&worker, snapshot, inputs, index, time, &working)) {
         return false;
     }
@@ -1085,7 +1086,6 @@ _RunFrozen(const RigExecFrozenEvalContext &context,
     *pose = working;
     RigExecCapturePartialSlots(B, &_lastFrozenSlots, &_lastFrozenSlotBytes);
     if (RigExecFrozenRunReport *report = _frozenRunReport) {
-        report->head = RigExecBakedLastHeadTrace(B);
         report->region = RigExecBakedLastRunTrace(B);
         report->ran = true;
     }

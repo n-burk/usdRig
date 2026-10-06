@@ -562,17 +562,15 @@ private:
 };
 
 /// What one frozen job executed, for a caller that asks RigExecEvaluateFrozen
-/// for it: the head steps (RigExecBakedLastHeadTrace over the job's clone)
-/// and the region steps, sources included, each in execution order, with
+/// for it: the ordinary trace, heads and sources included, in execution
+/// order, with
 /// steps indexed as in the snapshot's program. Empty when the job declined.
 struct RigExecFrozenRunReport {
-    std::vector<RigExecOpTraceEntry> head;
     std::vector<RigExecOpTraceEntry> region;
     bool ran = false;
 
     void Clear()
     {
-        head.clear();
         region.clear();
         ran = false;
     }
