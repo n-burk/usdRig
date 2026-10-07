@@ -604,6 +604,35 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
             f.ikBlend =
                 readScalar(ac.ikBlendAttribute, 1.0 - ac.constants.ikValue);
             f.amount = readScalar(ac.amountAttribute, 1.0);
+            if (!ac.limbSolver.IsEmpty()) {
+                const auto input = [&](const char *name, double fallback) {
+                    return readScalar(
+                        ac.limbSolver.AppendProperty(TfToken(name)), fallback);
+                };
+                f.hasLimb = true;
+                f.limb.stretch = input("inputs:stretch", 1.0);
+                f.limb.pin = input("inputs:pin", 0.0);
+                f.limb.upperScale = input("inputs:upperScale", 1.0);
+                f.limb.lowerScale = input("inputs:lowerScale", 1.0);
+                f.limb.softDistance = input("inputs:softDistance", 0.0);
+                f.limb.scaleCalibration =
+                    input("rigExec:scaleCalibration", 0.0);
+                f.twistRadians =
+                    input("inputs:twist", 0.0) * std::acos(-1.0) / 180.0;
+                GfMatrix4d rests[3];
+                if (frameOf(ac.limbJointRestTap[0], &rests[0]) &&
+                    frameOf(ac.limbJointRestTap[1], &rests[1]) &&
+                    frameOf(ac.limbJointRestTap[2], &rests[2])) {
+                    f.limbRestUpper = (rests[1].ExtractTranslation() -
+                                       rests[0].ExtractTranslation())
+                                          .GetLength() +
+                                      input("rigExec:upperLengthOffset", 0.0);
+                    f.limbRestLower = (rests[2].ExtractTranslation() -
+                                       rests[1].ExtractTranslation())
+                                          .GetLength() +
+                                      input("rigExec:lowerLengthOffset", 0.0);
+                }
+            }
             double delta[3];
             RigExecAutoClavicleShift(ac.constants, f, delta);
             if (delta[0] == 0.0 && delta[1] == 0.0 && delta[2] == 0.0) {

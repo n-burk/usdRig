@@ -430,6 +430,23 @@ struct RigExecWireAutoClavicle {
     std::vector<double> weights;
 };
 
+/// A solver's limb options (RigExecTwoBoneIk stretchPolicy softDistance and
+/// segmentScale, RigExecFkChain segmentScale): the per-frame limb inputs and
+/// the constants beside them. Memory only on RigExecWireDomainPose: these
+/// travel in the optional LimbSolvers section, and a solver with no record
+/// solves as it did before the section existed.
+struct RigExecWireLimbSolver {
+    int32_t solver = -1;
+    /// bit 0: stretchPolicy softDistance; bit 1: segmentScale toChild.
+    uint8_t flags = 0;
+    double scaleCalibration = 0.0;
+    RigExecWireInput pin;
+    RigExecWireInput upperScale;
+    RigExecWireInput lowerScale;
+    RigExecWireInput softDistance;
+    RigExecWireInput twist;
+};
+
 /// The DomainPose section: every table the pose-half steps index, plus the
 /// publication inputs the epilogue reads.
 struct RigExecWireDomainPose {
@@ -460,6 +477,8 @@ struct RigExecWireDomainPose {
     std::vector<RigExecWireSpaceSwitch> spaceSwitches;
     /// Memory only: the AutoClavicle section carries these.
     std::vector<RigExecWireAutoClavicle> autoClavicles;
+    /// Memory only: the LimbSolvers section carries these.
+    std::vector<RigExecWireLimbSolver> limbSolvers;
 };
 
 void RigExecWirePutInput(std::vector<uint8_t> *out,
@@ -506,6 +525,13 @@ bool RigExecWireDecodePoseNumerics(
 bool RigExecWireEncodeSpaceSwitches(
     const std::vector<RigExecWireSpaceSwitch> &switches,
     std::vector<uint8_t> *out);
+bool RigExecWireEncodeLimbSolvers(
+    const std::vector<RigExecWireLimbSolver> &records,
+    std::vector<uint8_t> *out);
+bool RigExecWireDecodeLimbSolvers(
+    RigExecWireReader *reader,
+    std::vector<RigExecWireLimbSolver> *records, std::string *error);
+
 bool RigExecWireEncodeAutoClavicles(
     const std::vector<RigExecWireAutoClavicle> &records,
     std::vector<uint8_t> *out);

@@ -522,6 +522,13 @@ class RigExecFkChain "RigExecFkChain" (
     rel rigExec:controls (
         doc = "Ordered chain controls (parents resolved via rigExec:parent)."
     )
+    uniform token rigExec:segmentScale = "none" (
+        allowedTokens = ["none", "toChild"]
+        doc = """toChild: a joint whose next element is its child scales
+        along the bone to it by the bone's posed length over its rest
+        length, so a child control pushed outward stretches the joint above
+        it rather than only moving the one below."""
+    )
     uniform token rigExec:controlSpace = "world" (
         allowedTokens = ["world", "parentRelative"]
         doc = """What each control's posed frame already contains, i.e.
@@ -686,7 +693,48 @@ class RigExecTwoBoneIk "RigExecTwoBoneIk" (
         length: the bone itself is always the measured rest distance."""
     )
     uniform token rigExec:stretchPolicy = "uniformSegments" (
-        allowedTokens = ["uniformSegments"]
+        allowedTokens = ["uniformSegments", "softDistance"]
+        doc = """uniformSegments: inputs:stretch is the stretch permitted
+        beyond full reach and inputs:softness a fraction of the chain.
+
+        softDistance: the limb model. Each bone starts at its rest length
+        times inputs:upperScale / inputs:lowerScale; past full reach less
+        inputs:softDistance both bones grow so the reach eases in rather
+        than snapping straight; inputs:stretch blends that growth in; and
+        inputs:pin blends both bones toward the lengths that put the middle
+        joint on the pole (root to pole, pole to goal)."""
+    )
+    float inputs:pin = 0 (
+        doc = """softDistance: how far the middle joint is pinned to the
+        pole, in [0, 1]. One makes the bones exactly root-to-pole and
+        pole-to-goal long, so the elbow or knee sits on the pole control."""
+    )
+    double inputs:upperScale = 1 (
+        doc = "softDistance: multiplier on the upper bone's rest length."
+    )
+    double inputs:lowerScale = 1 (
+        doc = "softDistance: multiplier on the lower bone's rest length."
+    )
+    uniform double rigExec:scaleCalibration = 0 (
+        doc = """softDistance: subtracted from inputs:upperScale and
+        inputs:lowerScale inside the soft stretch only, so a chain that sits
+        inside the soft zone at its bind pose still solves to its rest
+        lengths there. The unstretched lengths use the scales as given."""
+    )
+    float inputs:softDistance = 0 (
+        doc = """softDistance: how far short of full reach the soft ease
+        begins, in the chain's units. Zero stretches the moment the goal is
+        past reach."""
+    )
+    float inputs:twist = 0 (
+        doc = """Degrees the bend plane turns about the root-to-goal axis
+        after the pole has set it."""
+    )
+    uniform token rigExec:segmentScale = "none" (
+        allowedTokens = ["none", "toChild"]
+        doc = """toChild: the root and middle frames scale along their bones
+        by solved length over rest length, so a stretched bone stretches its
+        joint (and the skin bound to it), not only moves the next one."""
     )
     uniform token rigExec:unreachablePolicy = "clampWithSoftness" (
         allowedTokens = ["clampWithSoftness"]

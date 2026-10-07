@@ -82,6 +82,11 @@ _VisitSolverInputs(Obj &solver, Fn &&fn)
     fn(solver.lowerOffset);
     fn(solver.stretch);
     fn(solver.softness);
+    fn(solver.pin);
+    fn(solver.upperScale);
+    fn(solver.lowerScale);
+    fn(solver.softDistance);
+    fn(solver.limbTwist);
     fn(solver.blendWeight);
     fn(solver.preserveVolume);
     fn(solver.midFollowWeight);

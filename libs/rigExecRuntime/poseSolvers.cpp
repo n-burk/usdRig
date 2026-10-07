@@ -118,15 +118,24 @@ _RrSolveTwoBoneIk(
         aim = rootAim.GetNormalized();
     }
 
-    const double soft = std::max(params.softness, 0.0) * chain;
     double reach = dist;
+    double s1 = l1, s2 = l2;
+    if (params.softDistancePolicy) {
+        // RigExecSolveTwoBoneIk's limb model, through the shared kernel.
+        rigExec::RigExecLimbSegmentLengths(
+            l1, l2, dist, (pole - root).GetLength(),
+            (goal - pole).GetLength(), params.limb, &s1, &s2);
+        s1 = std::max(s1, 1e-9);
+        s2 = std::max(s2, 1e-9);
+        reach = std::min(dist, s1 + s2);
+    } else {
+    const double soft = std::max(params.softness, 0.0) * chain;
     if (soft > 1e-12 && dist > chain - soft) {
         reach = chain - soft * std::exp(-(dist - (chain - soft)) / soft);
     } else if (dist > chain) {
         reach = chain;
     }
 
-    double s1 = l1, s2 = l2;
     if (dist > reach && params.stretch > 0.0) {
         const double factor =
             1.0 + (dist / chain - 1.0) *
@@ -136,6 +145,7 @@ _RrSolveTwoBoneIk(
             s2 = l2 * factor;
             reach = std::min(dist, s1 + s2);
         }
+    }
     }
     reach = std::min(reach, s1 + s2);
     reach = std::max(reach, std::abs(s1 - s2) + 1e-12);
@@ -163,6 +173,9 @@ _RrSolveTwoBoneIk(
         bendUp = _RrRotate(candidate.GetNormalized(), aim,
                            params.preferredBendRadians);
     }
+    if (params.twistRadians != 0.0 && std::isfinite(params.twistRadians)) {
+        bendUp = _RrRotate(bendUp, aim, params.twistRadians);
+    }
     RrVec3d bendAxis = RrCross(aim, bendUp);
     if (bendAxis.GetLength() < 1e-12) {
         bendAxis = RrCross(aim, _RrRotate(bendUp, aim, 0.5 * _RrPi));
@@ -182,6 +195,12 @@ _RrSolveTwoBoneIk(
     std::array<RrPointFrame, 3> out;
     out[0] = _RrFrameFromAxes(restPoints[0], root, upperDir, bendUp);
     out[1] = _RrFrameFromAxes(restPoints[1], mid, lowerDir, bendUp);
+    if (params.scaleSegments) {
+        rigExec::RigExecScaleFrameAlong(out[0].points.data(), upperDir,
+                                        s1 / l1);
+        rigExec::RigExecScaleFrameAlong(out[1].points.data(), lowerDir,
+                                        (endPos - mid).GetLength() / l2);
+    }
 
     RrPointFrame end = effectorFrame;
     const RrVec3d offset = endPos - effectorFrame.points[0];
@@ -1449,6 +1468,40 @@ _RrRunSolveStep(RrProgram *program, size_t step, std::string *error)
                 ws.parentRelative ? int(base) - 1 : int(k) + int(base) - 1;
         }
         aggregate.frames = _RrSolveFkChain(s.elements);
+        const int32_t limb =
+            program->limbBySolver.empty()
+                ? -1 : program->limbBySolver[size_t(wire.object)];
+        if (limb >= 0 &&
+            (program->poses->limbSolvers[size_t(limb)].flags & 2) != 0) {
+            // RigExecScaleFkSegments: each element scales along the bone
+            // to the next by posed over rest length.
+            const size_t n = s.elements.size();
+            std::vector<RrVec3d> dirs(n, RrVec3d(0.0));
+            std::vector<double> factors(n, 1.0);
+            for (size_t i = 0; i + 1 < n && i + 1 < aggregate.frames.size();
+                 ++i) {
+                const auto &ri = s.elements[i].hasOutRest
+                                     ? s.elements[i].outRestPoints
+                                     : s.elements[i].restPoints;
+                const auto &rc = s.elements[i + 1].hasOutRest
+                                     ? s.elements[i + 1].outRestPoints
+                                     : s.elements[i + 1].restPoints;
+                const double rest = rigExec::RigExecBoneLengthUnderFrame(
+                    ri.data(), aggregate.frames[i].points.data(),
+                    RrVec3d(rc[0] - ri[0]));
+                const RrVec3d bone = aggregate.frames[i + 1].points[0] -
+                                     aggregate.frames[i].points[0];
+                const double posed = bone.GetLength();
+                if (rest > 1e-12 && posed > 1e-12) {
+                    dirs[i] = bone;
+                    factors[i] = posed / rest;
+                }
+            }
+            for (size_t i = 0; i < n && i < aggregate.frames.size(); ++i) {
+                rigExec::RigExecScaleFrameAlong(
+                    aggregate.frames[i].points.data(), dirs[i], factors[i]);
+            }
+        }
         if (base && !aggregate.frames.empty()) {
             aggregate.frames.erase(aggregate.frames.begin());
         }
@@ -1488,6 +1541,27 @@ _RrRunSolveStep(RrProgram *program, size_t step, std::string *error)
         if (!finAt(ws.rootRead, &root) ||
             !finAt(ws.endRead, &end) || !finAt(ws.poleRead, &pole)) {
             return false;
+        }
+        const int32_t limb =
+            program->limbBySolver.empty()
+                ? -1 : program->limbBySolver[size_t(wire.object)];
+        if (limb >= 0) {
+            const RigExecWireLimbSolver &l =
+                program->poses->limbSolvers[size_t(limb)];
+            const auto value = [&](size_t which) {
+                const RrInputValue v = program->ReadLimb(size_t(limb), which);
+                return v.tag == RigExecWireInput::Tag::Double ? v.f64
+                                                              : double(v.f32);
+            };
+            params.softDistancePolicy = (l.flags & 1) != 0;
+            params.scaleSegments = (l.flags & 2) != 0;
+            params.limb.stretch = params.stretch;
+            params.limb.pin = value(0);
+            params.limb.upperScale = value(1);
+            params.limb.lowerScale = value(2);
+            params.limb.softDistance = value(3);
+            params.limb.scaleCalibration = l.scaleCalibration;
+            params.twistRadians = value(4) * _RrPi / 180.0;
         }
         const std::array<RrPointFrame, 3> frames =
             _RrSolveTwoBoneIk(*root, *end, *pole, s.ikRests, params);

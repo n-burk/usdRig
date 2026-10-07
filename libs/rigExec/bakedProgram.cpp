@@ -2522,7 +2522,20 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
         noteLadderInput(ladder.rotationOrder);
         for (int c = 0; c < 6; ++c) {
             noteLadderInput(ladder.restAvars[c]);
-            noteLadderInput(ladder.defaultAvars[c]);
+            const RigExecBakedInput<double> &d = ladder.defaultAvars[c];
+            if (d.varying && d.resolvedAttr && !d.query.IsValid()) {
+                // Resolved the long way each run (a chain writes it): watch
+                // the value rather than recomposing every frame.
+                RigExecBakedProgramImpl::LadderWatch watch;
+                watch.slot = i;
+                watch.channel = c;
+                B.ladderWatched.push_back(watch);
+                if (d.overrideIndex >= 0) {
+                    B.ladderOverrides.push_back(d.overrideIndex);
+                }
+            } else {
+                noteLadderInput(d);
+            }
         }
     }
     // Per slot, whether the rest chain reaching it can move. A rest is its
@@ -2559,7 +2572,8 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     // composed: the first run dirties every pose cluster outright, so what
     // they hold on it is never read, and a later run that recomposes to the
     // same numbers correctly finds nothing moved.
-    if (B.ladderVarying || !B.ladderOverrides.empty()) {
+    if (B.ladderVarying || !B.ladderOverrides.empty() ||
+        !B.ladderWatched.empty()) {
         B.lastRestM = B.restM;
         B.lastSelfD = B.selfD;
         B.lastParentDinv = B.parentDinv;
@@ -3043,6 +3057,16 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
              &out.ikBlendInput, &out.ikBlendFloat, &out.ikBlendIsFloat);
         bind(ac.amountAttribute, 1.0, &out.amountInput, &out.amountFloat,
              &out.amountIsFloat);
+        for (size_t k = 0; k < B.solvers.size(); ++k) {
+            const RigExecBakedProgramImpl::Solver &s = B.solvers[k];
+            if (s.type == "RigExecTwoBoneIk" &&
+                s.ikParams.softDistancePolicy && s.end >= 0 &&
+                s.end == out.ikTargetSlot && s.pole >= 0 &&
+                s.pole == out.poleSlot) {
+                out.limbSolver = int(k);
+                break;
+            }
+        }
         B.autoClavicleBySlot[size_t(out.slot)] =
             int(B.autoClavicles.size());
         B.autoClavicles.push_back(std::move(out));

@@ -388,6 +388,13 @@ RigExecBakeToBinary(RigExecRigEvaluator &evaluator,
         writer.AddSection(RigExecBinarySection::AutoClavicle, payload);
         payload.clear();
     }
+    if (!wirePose.limbSolvers.empty()) {
+        if (!RigExecWireEncodeLimbSolvers(wirePose.limbSolvers, &payload)) {
+            return Fail("cannot encode the limb solvers");
+        }
+        writer.AddSection(RigExecBinarySection::LimbSolvers, payload);
+        payload.clear();
+    }
     const RigExecWireDomainGeometry wireGeometry =
         RigExecBakeConvertDomainGeometry(program, &writer);
     size_t revisionCount = 0;

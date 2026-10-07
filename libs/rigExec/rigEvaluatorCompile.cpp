@@ -3833,6 +3833,49 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
             if (!record.pole.IsEmpty()) {
                 record.polePosedTap = posed(record.pole);
             }
+            // The limb's IK solver: the two-bone IK whose effector and pole
+            // are this clavicle's IK target and pole.
+            if (!record.ikTarget.IsEmpty() && !record.pole.IsEmpty()) {
+                for (const UsdPrim &candidate : _stage->Traverse()) {
+                    if (candidate.GetTypeName() != "RigExecTwoBoneIk") {
+                        continue;
+                    }
+                    SdfPathVector effector, pole;
+                    if (const UsdRelationship r = candidate.GetRelationship(
+                            TfToken("rigExec:effectorControl"))) {
+                        r.GetTargets(&effector);
+                    }
+                    if (const UsdRelationship r = candidate.GetRelationship(
+                            TfToken("rigExec:poleControl"))) {
+                        r.GetTargets(&pole);
+                    }
+                    TfToken policy;
+                    if (const UsdAttribute a = candidate.GetAttribute(
+                            TfToken("rigExec:stretchPolicy"))) {
+                        a.Get(&policy);
+                    }
+                    if (effector.size() == 1 && pole.size() == 1 &&
+                        effector[0] == record.ikTarget &&
+                        pole[0] == record.pole && policy == "softDistance") {
+                        SdfPathVector joints;
+                        if (const UsdRelationship r = candidate.GetRelationship(
+                                TfToken("rigExec:joints"))) {
+                            r.GetTargets(&joints);
+                        }
+                        if (joints.size() == 3) {
+                            record.limbSolver = candidate.GetPath();
+                            for (int j = 0; j < 3; ++j) {
+                                record.limbJointRestTap[j] =
+                                    newFirstFramePoseTaps->Add(
+                                        RigExecValueAddress::Prim(
+                                            joints[size_t(j)],
+                                            TfToken("computeRestFrame")));
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
             newAutoClavicles.push_back(std::move(record));
         }
     }

@@ -270,6 +270,14 @@ struct RrProgram {
     std::vector<std::array<int32_t, 2>> autoClavicleUid;
     std::vector<RigExecAutoClavicleConstants> autoClavicleConstants;
     std::vector<int32_t> autoClavicleBySlot;
+    // Per limb record: the pin, upper/lower scale, soft distance and twist
+    // uids, and per solver its record's index (empty when the binary
+    // carries no LimbSolvers section).
+    std::vector<std::array<int32_t, 5>> limbUid;
+    std::vector<int32_t> limbBySolver;
+    // Per auto clavicle: the limb record of the two-bone IK whose end and
+    // pole are its IK target and pole, or -1.
+    std::vector<int32_t> autoClavicleLimb;
     std::vector<std::array<int32_t, RrSolverFieldCount>> solverUid;
     std::vector<std::array<int32_t, RrConstraintFieldCount>> constraintUid;
     std::vector<std::array<int32_t, RrWeightFieldCount>> weightUid;
@@ -369,6 +377,14 @@ struct RrProgram {
         const RigExecWireAutoClavicle &ac = poses->autoClavicles[index];
         return ReadUid(which == 0 ? ac.ikBlend : ac.amount,
                        autoClavicleUid[index][which]);
+    }
+    RrInputValue ReadLimb(size_t index, size_t which) const
+    {
+        const RigExecWireLimbSolver &l = poses->limbSolvers[index];
+        const RigExecWireInput *inputs[5] = {&l.pin, &l.upperScale,
+                                             &l.lowerScale, &l.softDistance,
+                                             &l.twist};
+        return ReadUid(*inputs[which], limbUid[index][which]);
     }
     RrInputValue ReadSpaceSwitch(size_t index) const
     {

@@ -42,6 +42,44 @@ RigExecSolveFkChain(const std::vector<RigExecFkChainElement> &elements)
     return result;
 }
 
+void
+RigExecScaleFkSegments(const std::vector<RigExecFkChainElement> &elements,
+                       std::vector<RigExecPointFrame> *frames)
+{
+    if (!frames || frames->size() != elements.size()) {
+        return;
+    }
+    // Directions and factors from the unscaled frames first: scaling one
+    // joint moves none of the origins, so the order would not matter, but
+    // measuring before writing keeps that from being something to check.
+    std::vector<GfVec3d> dirs(elements.size());
+    std::vector<double> factors(elements.size(), 1.0);
+    // Consecutive elements are a bone: the chain is ordered root to tip,
+    // whether its controls compose in world or parent-relative space.
+    for (size_t i = 0; i + 1 < elements.size(); ++i) {
+        const auto &ri = elements[i].hasOutRest ? elements[i].outRestPoints
+                                                : elements[i].restPoints;
+        const auto &rc = elements[i + 1].hasOutRest
+                             ? elements[i + 1].outRestPoints
+                             : elements[i + 1].restPoints;
+        // The bone as the joint's own frame carries it: a scale the frame
+        // already has (a master's) is not the joint's stretch.
+        const double rest = RigExecBoneLengthUnderFrame(
+            ri.data(), (*frames)[i].points.data(), GfVec3d(rc[0] - ri[0]));
+        const GfVec3d bone =
+            (*frames)[i + 1].points[0] - (*frames)[i].points[0];
+        const double posed = bone.GetLength();
+        if (rest > 1e-12 && posed > 1e-12) {
+            dirs[i] = bone;
+            factors[i] = posed / rest;
+        }
+    }
+    for (size_t i = 0; i < elements.size(); ++i) {
+        RigExecScaleFrameAlong((*frames)[i].points.data(), dirs[i],
+                               factors[i]);
+    }
+}
+
 namespace {
 
 // std::acos(-1) rather than M_PI: the latter is not a standard C++ macro
@@ -121,6 +159,38 @@ RigExecTwoBoneIkLengths(
     }
 }
 
+double
+RigExecTwoBoneIkSpaceFactor(
+    const std::array<std::array<GfVec3d, 4>, 3> &restPoints,
+    const GfMatrix4d &space)
+{
+    double rawUpper = 0.0, rawLower = 0.0, upper = 0.0, lower = 0.0;
+    RigExecTwoBoneIkLengths(restPoints, GfMatrix4d(1.0), 0.0, 0.0, &rawUpper,
+                            &rawLower);
+    RigExecTwoBoneIkLengths(restPoints, space, 0.0, 0.0, &upper, &lower);
+    const double raw = rawUpper + rawLower;
+    return raw > 1e-12 ? (upper + lower) / raw : 1.0;
+}
+
+void
+RigExecSetTwoBoneLimbParams(
+    const std::array<std::array<GfVec3d, 4>, 3> &restPoints,
+    const GfMatrix4d &space, double stretch, double pin, double upperScale,
+    double lowerScale, double softDistance, double twistDegrees,
+    RigExecTwoBoneIkParams *params)
+{
+    if (!params) {
+        return;
+    }
+    params->limb.stretch = stretch;
+    params->limb.pin = pin;
+    params->limb.upperScale = upperScale;
+    params->limb.lowerScale = lowerScale;
+    params->limb.softDistance =
+        softDistance * RigExecTwoBoneIkSpaceFactor(restPoints, space);
+    params->twistRadians = twistDegrees * kPi / 180.0;
+}
+
 std::array<RigExecPointFrame, 3>
 RigExecSolveTwoBoneIk(
     const RigExecPointFrame &rootFrame,
@@ -159,11 +229,23 @@ RigExecSolveTwoBoneIk(
         aim = rootAim.GetNormalized();
     }
 
+    double reach = dist;
+    double s1 = l1, s2 = l2;
+    if (params.softDistancePolicy) {
+        // The limb model: lengths from the soft ease, the stretch blend,
+        // the per-bone scales and the pin, then a plain two-bone solve
+        // that reaches as far as those lengths allow.
+        RigExecLimbSegmentLengths(l1, l2, dist, (pole - root).GetLength(),
+                                  (goal - pole).GetLength(), params.limb,
+                                  &s1, &s2);
+        s1 = std::max(s1, 1e-9);
+        s2 = std::max(s2, 1e-9);
+        reach = std::min(dist, s1 + s2);
+    } else {
     // Soft clamp near full reach ("clampWithSoftness"): beyond
     // (chain - softness) the effective distance eases exponentially toward
     // the chain length instead of hard-clamping.
     const double soft = std::max(params.softness, 0.0) * chain;
-    double reach = dist;
     if (soft > 1e-12 && dist > chain - soft) {
         reach = chain - soft * std::exp(-(dist - (chain - soft)) / soft);
     } else if (dist > chain) {
@@ -172,7 +254,6 @@ RigExecSolveTwoBoneIk(
 
     // Uniform-segment stretch: blend segment scaling toward the amount
     // needed to reach the raw goal distance.
-    double s1 = l1, s2 = l2;
     if (dist > reach && params.stretch > 0.0) {
         const double factor = 1.0 + (dist / chain - 1.0) *
             std::min(std::max(params.stretch, 0.0), 1.0);
@@ -181,6 +262,7 @@ RigExecSolveTwoBoneIk(
             s2 = l2 * factor;
             reach = std::min(dist, s1 + s2);
         }
+    }
     }
     reach = std::min(reach, s1 + s2);
     reach = std::max(reach, std::abs(s1 - s2) + 1e-12);
@@ -214,6 +296,9 @@ RigExecSolveTwoBoneIk(
         bendUp = _Rotate(candidate.GetNormalized(),
                          aim, params.preferredBendRadians);
     }
+    if (params.twistRadians != 0.0 && std::isfinite(params.twistRadians)) {
+        bendUp = _Rotate(bendUp, aim, params.twistRadians);
+    }
     GfVec3d bendAxis = GfCross(aim, bendUp);
     if (bendAxis.GetLength() < 1e-12) {
         // bendUp is guaranteed off-aim by construction; guard anyway.
@@ -234,6 +319,13 @@ RigExecSolveTwoBoneIk(
     std::array<RigExecPointFrame, 3> out;
     out[0] = _FrameFromAxes(restPoints[0], root, upperDir, bendUp);
     out[1] = _FrameFromAxes(restPoints[1], mid, lowerDir, bendUp);
+    if (params.scaleSegments) {
+        // Each bone stretched to its solved length: the joint scales along
+        // it, so the skin follows the length (RigExecScaleFrameAlong).
+        RigExecScaleFrameAlong(out[0].points.data(), upperDir, s1 / l1);
+        RigExecScaleFrameAlong(out[1].points.data(), lowerDir,
+                               (endPos - mid).GetLength() / l2);
+    }
 
     // CARRY THE SPACE INTO THE PUBLISHED HANDLES. _FrameFromAxes keeps
     // the rest handle lengths, so the posed/rest ratio the pose ladder

@@ -91,6 +91,9 @@ enum class RigExecBinarySection : uint32_t {
     /// RigExecAutoClavicle records. Absent means no limb root is carried,
     /// which is what every binary written before this section does.
     AutoClavicle = 19,
+    /// RigExecWireLimbSolver records: limb stretch, pin and segment scaling.
+    /// Absent means every solver solves as before this section existed.
+    LimbSolvers = 20,
 };
 
 /// Builds a .rigexec file in memory.

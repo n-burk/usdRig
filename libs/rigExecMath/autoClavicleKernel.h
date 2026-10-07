@@ -9,6 +9,8 @@
 #ifndef RIGEXEC_MATH_AUTO_CLAVICLE_KERNEL_H
 #define RIGEXEC_MATH_AUTO_CLAVICLE_KERNEL_H
 
+#include "limbStretchKernel.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -54,6 +56,18 @@ struct RigExecAutoClavicleFrames {
     const double *polePosed = nullptr;
     double ikBlend = 0.0;
     double amount = 1.0;
+    /// The limb's own IK options (RigExecTwoBoneIk stretchPolicy
+    /// softDistance), so the IK estimate solves with the lengths and bend
+    /// plane the solver will: a stretched or pinned arm turns the clavicle
+    /// as far in IK as it does in FK.
+    bool hasLimb = false;
+    RigExecLimbStretch limb;
+    double twistRadians = 0.0;
+    /// The IK solver's own rest bone lengths. The FK default frames the
+    /// estimate otherwise measures from may already be lengthened by the
+    /// limb's stretch, which the limb inputs would then apply twice.
+    double limbRestUpper = 0.0;
+    double limbRestLower = 0.0;
 };
 
 namespace autoClavicleKernel {
@@ -394,6 +408,17 @@ RigExecAutoClavicleShift(const RigExecAutoClavicleConstants &c,
         double bc[3] = {end0w[0] - mid0w[0], end0w[1] - mid0w[1],
                         end0w[2] - mid0w[2]};
         const double a = std::sqrt(Dot(ab, ab)), b = std::sqrt(Dot(bc, bc));
+        // The limb's rest lengths and soft distance are in the rig's rest
+        // units; the anchor's carry holds any master scale since.
+        double carryScale = 0.0;
+        for (int r = 0; r < 3; ++r) {
+            carryScale += std::sqrt(carry[r * 4 + 0] * carry[r * 4 + 0] +
+                                    carry[r * 4 + 1] * carry[r * 4 + 1] +
+                                    carry[r * 4 + 2] * carry[r * 4 + 2]);
+        }
+        carryScale /= 3.0;
+        RigExecLimbStretch limb = f.limb;
+        limb.softDistance *= carryScale;
         const double *target = f.ikTargetPosed + 12;
         const auto solve = [&](const double *shift, double *out) {
             const double root[3] = {origin[0] + shift[0],
@@ -403,9 +428,36 @@ RigExecAutoClavicleShift(const RigExecAutoClavicleConstants &c,
                            target[2] - root[2]};
             const double dist = Normalize(v);
             if (!(dist > 1e-9 && a > 1e-9 && b > 1e-9)) return false;
-            const double reach = std::clamp(dist, std::abs(a - b), a + b);
+            double la = a, lb = b;
+            if (f.hasLimb) {
+                const double *p = f.polePosed ? f.polePosed + 12 : nullptr;
+                const double poleUpper =
+                    p ? std::sqrt((p[0] - root[0]) * (p[0] - root[0]) +
+                                  (p[1] - root[1]) * (p[1] - root[1]) +
+                                  (p[2] - root[2]) * (p[2] - root[2]))
+                      : a;
+                const double poleLower =
+                    p ? std::sqrt((target[0] - p[0]) * (target[0] - p[0]) +
+                                  (target[1] - p[1]) * (target[1] - p[1]) +
+                                  (target[2] - p[2]) * (target[2] - p[2]))
+                      : b;
+                const double restUpper = f.limbRestUpper > 1e-12
+                                             ? f.limbRestUpper * carryScale
+                                             : a;
+                const double restLower = f.limbRestLower > 1e-12
+                                             ? f.limbRestLower * carryScale
+                                             : b;
+                RigExecLimbSegmentLengths(restUpper, restLower, dist,
+                                          poleUpper, poleLower, limb, &la,
+                                          &lb);
+                la = std::max(la, 1e-9);
+                lb = std::max(lb, 1e-9);
+            }
+            const double reach =
+                std::clamp(dist, std::abs(la - lb), la + lb);
             const double cosA = std::clamp(
-                (a * a + reach * reach - b * b) / (2.0 * a * reach), -1.0, 1.0);
+                (la * la + reach * reach - lb * lb) / (2.0 * la * reach),
+                -1.0, 1.0);
             const double sinA = std::sqrt(std::max(0.0, 1.0 - cosA * cosA));
             double bend[3] = {dFk[0], dFk[1], dFk[2]};
             if (f.polePosed) {
@@ -421,6 +473,15 @@ RigExecAutoClavicleShift(const RigExecAutoClavicleConstants &c,
                 along = Dot(bend, v);
                 for (int k = 0; k < 3; ++k) bend[k] -= v[k] * along;
                 Normalize(bend);
+            }
+            if (f.hasLimb && f.twistRadians != 0.0 &&
+                std::isfinite(f.twistRadians)) {
+                // The solver's twist turns the bend plane about the aim.
+                double vb[3];
+                Cross(v, bend, vb);
+                const double c = std::cos(f.twistRadians);
+                const double s = std::sin(f.twistRadians);
+                for (int k = 0; k < 3; ++k) bend[k] = bend[k] * c + vb[k] * s;
             }
             double dIk[3];
             for (int k = 0; k < 3; ++k) dIk[k] = v[k] * cosA + bend[k] * sinA;

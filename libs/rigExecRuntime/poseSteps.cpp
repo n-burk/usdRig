@@ -830,6 +830,36 @@ RrRunPoseStep(RrProgram *program, size_t step, double time,
                             size_t(clavicleIndex), 0));
                         f.amount = scalar(program->ReadAutoClavicle(
                             size_t(clavicleIndex), 1));
+                        const int32_t limb =
+                            program->autoClavicleLimb.empty()
+                                ? -1
+                                : program->autoClavicleLimb[size_t(
+                                      clavicleIndex)];
+                        if (limb >= 0) {
+                            const RigExecWireLimbSolver &l =
+                                program->poses->limbSolvers[size_t(limb)];
+                            const auto value = [&](size_t which) {
+                                const RrInputValue v = program->ReadLimb(
+                                    size_t(limb), which);
+                                return v.tag == RigExecWireInput::Tag::Double
+                                           ? v.f64
+                                           : double(v.f32);
+                            };
+                            f.hasLimb = true;
+                            f.limb.stretch = double(
+                                program->ReadSolver(size_t(l.solver),
+                                                    RrSolverStretch).f32);
+                            f.limb.pin = value(0);
+                            f.limb.upperScale = value(1);
+                            f.limb.lowerScale = value(2);
+                            f.limb.softDistance = value(3);
+                            f.limb.scaleCalibration = l.scaleCalibration;
+                            f.twistRadians = value(4) * std::acos(-1.0) / 180.0;
+                            const RigExecWireSolver &ws =
+                                program->poses->solvers[size_t(l.solver)];
+                            f.limbRestUpper = ws.ikParams.upperLength;
+                            f.limbRestLower = ws.ikParams.lowerLength;
+                        }
                         double delta[3];
                         RigExecAutoClavicleShift(
                             program->autoClavicleConstants[size_t(clavicleIndex)],

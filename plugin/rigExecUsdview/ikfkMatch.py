@@ -49,13 +49,23 @@ _IDENTITY = {"tx": 0.0, "ty": 0.0, "tz": 0.0, "rx": 0.0, "ry": 0.0,
 # through the ends, as a fraction of the limb's length) has no bend plane
 # to put the pole on.
 _STRAIGHT = 1e-4
+# A limb whose switch control carries these stretches and pins (the
+# solver's stretchPolicy softDistance): a switch carries the bone lengths
+# across in stretchTop / stretchBottom, as the FK chain lengthens by them.
+_STRETCH_TOP = "avars:stretchTop"
+_STRETCH_BOTTOM = "avars:stretchBottom"
+_PIN = "avars:pvPin"
+_TWIST = "avars:twist"
+_STRETCH = "avars:stretch"
+_SOFT = "avars:softStretch"
 
 
 class Limb(object):
     """One switchable limb, found from its blend."""
 
     def __init__(self, blend, switchControl, switchAttr, ikValue, joints,
-                 fkControls, ikControl, effector, pole, rigRoot):
+                 fkControls, ikControl, effector, pole, rigRoot,
+                 ikSolver=None):
         self.blend = blend                  # Sdf.Path
         self.switchControl = switchControl  # Sdf.Path
         self.switchAttr = switchAttr        # "avars:ikfk"
@@ -66,6 +76,7 @@ class Limb(object):
         self.effector = effector            # Sdf.Path, the solver target
         self.pole = pole                    # Sdf.Path or None
         self.rigRoot = rigRoot              # Sdf.Path
+        self.ikSolver = ikSolver            # Sdf.Path of the two-bone IK
 
     @property
     def fkValue(self):
@@ -82,6 +93,16 @@ class Limb(object):
         if self.pole is not None:
             paths.append(self.pole)
         return paths
+
+    def Stretches(self, stage):
+        """Whether this limb stretches and pins: its switch control has
+        the stretch channels the solver reads."""
+        prim = stage.GetPrimAtPath(self.switchControl)
+        return bool(prim and prim.GetAttribute(_STRETCH_TOP) and
+                    prim.GetAttribute(_STRETCH_BOTTOM))
+
+    def Channel(self, name):
+        return self.switchControl.AppendProperty(name)
 
     def IsIk(self, stage, time, current=None):
         """Whether the IK half drives the joints now (the switch is nearer
@@ -164,7 +185,7 @@ def FindLimbs(stage):
         limbs.append(Limb(
             prim.GetPath(), source.GetPrimPath(), source.name, ikValue,
             joints, fkControls, ikControl.GetPath(), effectors[0],
-            poles[0] if poles else None, _RigRoot(prim)))
+            poles[0] if poles else None, _RigRoot(prim), ik.GetPath()))
     return limbs
 
 
@@ -300,10 +321,11 @@ def RigWritten(stage):
 class RestOffsets(object):
     """The limb's fixed relationships, measured at its rest pose."""
 
-    def __init__(self, fk, effector, poleDistance):
+    def __init__(self, fk, effector, poleDistance, lengths=None):
         self.fk = fk                    # [control * joint^-1] x 3
         self.effector = effector        # end joint * effector^-1
         self.poleDistance = poleDistance
+        self.lengths = lengths          # (upper, lower) rest bone lengths
 
 
 def MeasureRest(limb, stage, evaluate, time):
@@ -319,6 +341,13 @@ def MeasureRest(limb, stage, evaluate, time):
             if attr and not attr.HasAuthoredConnections():
                 overrides[attr.GetPath()] = value
     overrides[limb.switchPath] = limb.ikValue
+    if limb.Stretches(stage):
+        # The rest is the unstretched, unpinned limb.
+        overrides[limb.Channel(_STRETCH_TOP)] = 1.0
+        overrides[limb.Channel(_STRETCH_BOTTOM)] = 1.0
+        overrides[limb.Channel(_PIN)] = 0.0
+        if stage.GetAttributeAtPath(limb.Channel(_TWIST)):
+            overrides[limb.Channel(_TWIST)] = 0.0
     pose = evaluate(overrides, time)
     fkOverrides = dict(overrides)
     fkOverrides[limb.switchPath] = limb.fkValue
@@ -332,7 +361,67 @@ def MeasureRest(limb, stage, evaluate, time):
         middle = JointFrame(pose, limb.joints[1]).ExtractTranslation()
         poleDistance = (ControlFrame(pose, limb.pole).ExtractTranslation() -
                         middle).GetLength()
-    return RestOffsets(fk, effector, poleDistance)
+    points = [JointFrame(fkPose, j).ExtractTranslation() for j in limb.joints]
+    lengths = ((points[1] - points[0]).GetLength(),
+               (points[2] - points[1]).GetLength())
+    return RestOffsets(fk, effector, poleDistance, lengths)
+
+
+# -- limb lengths ---------------------------------------------------------
+
+def LimbLengths(rest, dist, poleUpper, poleLower, stretch, soft, top,
+                bottom, pin, calibration=0.0):
+    """The two bone lengths the IK solves with: RigExecLimbSegmentLengths
+    (rigExecMath/limbStretchKernel.h), the arithmetic it shares with the
+    evaluator, restated so a switch can solve for the stretch that gives
+    lengths it wants without evaluating the rig."""
+    stretch = min(max(stretch, 0.0), 1.0)
+    pin = min(max(pin, 0.0), 1.0)
+    a = rest[0] * (top - calibration)
+    b = rest[1] * (bottom - calibration)
+    chain = a + b
+    k = 1.0
+    soft = max(soft, 0.0)
+    if chain > 1e-12:
+        if soft > 1e-12 and dist > chain - soft:
+            eased = chain - soft * math.exp(-(dist - (chain - soft)) / soft)
+            if eased > 1e-12:
+                k = dist / eased
+        elif soft <= 1e-12 and dist > chain:
+            k = dist / chain
+    sa = stretch * k * a + (1.0 - stretch) * a
+    sb = stretch * k * b + (1.0 - stretch) * b
+    ua = stretch * sa + (1.0 - stretch) * rest[0] * top
+    ub = stretch * sb + (1.0 - stretch) * rest[1] * bottom
+    return (pin * poleUpper + (1.0 - pin) * ua,
+            pin * poleLower + (1.0 - pin) * ub)
+
+
+def SolveStretch(rest, dist, poleUpper, poleLower, stretch, soft, pin,
+                 calibration, want, start=(1.0, 1.0)):
+    """stretchTop / stretchBottom whose LimbLengths are `want`: Newton's
+    method on the two scales, with a finite-difference Jacobian. The map is
+    smooth and nearly diagonal, so it converges in a few steps; a pinned
+    limb, whose lengths ignore the scales, keeps `start`."""
+    top, bottom = start
+    for _ in range(30):
+        u, l = LimbLengths(rest, dist, poleUpper, poleLower, stretch, soft,
+                           top, bottom, pin, calibration)
+        eu, el = u - want[0], l - want[1]
+        if abs(eu) < 1e-10 and abs(el) < 1e-10:
+            break
+        h = 1e-6
+        u1, l1 = LimbLengths(rest, dist, poleUpper, poleLower, stretch,
+                             soft, top + h, bottom, pin, calibration)
+        u2, l2 = LimbLengths(rest, dist, poleUpper, poleLower, stretch,
+                             soft, top, bottom + h, pin, calibration)
+        j = ((u1 - u) / h, (u2 - u) / h, (l1 - l) / h, (l2 - l) / h)
+        det = j[0] * j[3] - j[1] * j[2]
+        if abs(det) < 1e-14:
+            break
+        top -= (j[3] * eu - j[1] * el) / det
+        bottom -= (-j[2] * eu + j[0] * el) / det
+    return top, bottom
 
 
 # -- the two actions ------------------------------------------------------
@@ -376,6 +465,7 @@ def Match(limb, stage, evaluate, time, toIk, rest=None, written=None,
     pose = evaluate({}, time)
     joints = [JointFrame(pose, j) for j in limb.joints]
     values = {}
+    stretches = limb.Stretches(stage) and rest.lengths is not None
     if toIk:
         control = _Channels(stage, limb.ikControl, time, current)
         controlFrame = ControlFrame(pose, limb.ikControl)
@@ -407,24 +497,88 @@ def Match(limb, stage, evaluate, time, toIk, rest=None, written=None,
             for name in _Writable(stage, limb.pole, _TRANSLATE, written):
                 values[limb.pole.AppendProperty("avars:" + name)] = \
                     solvedPole[name]
+        if stretches:
+            # The FK bones' lengths, kept: solve the stretch scales that make
+            # the IK solve with exactly these lengths, so the middle joint
+            # lands where FK had it.
+            points = [m.ExtractTranslation() for m in joints]
+            want = ((points[1] - points[0]).GetLength(),
+                    (points[2] - points[1]).GetLength())
+            if limb.pole is not None and rest.poleDistance:
+                polePoint = where
+            else:
+                polePoint = points[1]
+
+            def channel(name, fallback):
+                path = limb.Channel(name)
+                if current and path in current:
+                    return float(current[path])
+                return _Get(stage, path, time, fallback)
+            solver = stage.GetPrimAtPath(limb.ikSolver) \
+                if limb.ikSolver is not None else None
+            calibration = 0.0
+            if solver:
+                attr = solver.GetAttribute("rigExec:scaleCalibration")
+                if attr and attr.Get() is not None:
+                    calibration = float(attr.Get())
+            top, bottom = SolveStretch(
+                rest.lengths, (points[2] - points[0]).GetLength(),
+                (polePoint - points[0]).GetLength(),
+                (points[2] - polePoint).GetLength(),
+                channel(_STRETCH, 1.0), channel(_SOFT, 0.0),
+                channel(_PIN, 0.0), calibration, want,
+                (channel(_STRETCH_TOP, 1.0), channel(_STRETCH_BOTTOM, 1.0)))
+            values[limb.Channel(_STRETCH_TOP)] = top
+            values[limb.Channel(_STRETCH_BOTTOM)] = bottom
     else:
-        # Root to end: each control's parent frame moves with the control
-        # above it, so carry the change down rather than re-evaluating.
-        previousOld = previousNew = None
-        for control, joint, offset in zip(limb.fkControls, joints, rest.fk):
-            channels = _Channels(stage, control, time, current)
-            old = ControlFrame(pose, control)
-            parent = channels.Matrix().GetInverse() * old
-            if previousOld is not None:
-                parent = parent * previousOld.GetInverse() * previousNew
-            target = offset * joint
-            solved = channels.Solve(target, parent)
-            for name in _Writable(stage, control, _TRANSLATE + _ROTATE,
-                                  written):
-                values[control.AppendProperty("avars:" + name)] = \
-                    solved[name]
-            new = channels.Matrix(solved) * parent
-            previousOld, previousNew = old, new
+        if stretches:
+            # The IK bones' lengths carried into FK, whose chain lengthens
+            # by stretchTop / stretchBottom; the pin and twist are IK's own
+            # and go back to zero, as the FK pose has neither.
+            points = [m.ExtractTranslation() for m in joints]
+            values[limb.Channel(_STRETCH_TOP)] = \
+                (points[1] - points[0]).GetLength() / rest.lengths[0]
+            values[limb.Channel(_STRETCH_BOTTOM)] = \
+                (points[2] - points[1]).GetLength() / rest.lengths[1]
+            values[limb.Channel(_PIN)] = 0.0
+            if stage.GetAttributeAtPath(limb.Channel(_TWIST)):
+                values[limb.Channel(_TWIST)] = 0.0
+            # The FK controls' parent frames move with the new lengths.
+            pose = evaluate(values, time)
+
+        def place(pose, base):
+            # Root to end: each control's parent frame moves with the
+            # control above it, so carry the change down rather than
+            # re-evaluating. `base` holds the values `pose` was evaluated
+            # with, so a control already moved there is solved from them.
+            previousOld = previousNew = None
+            for control, joint, offset in zip(limb.fkControls, joints,
+                                              rest.fk):
+                channels = _Channels(stage, control, time, base)
+                old = ControlFrame(pose, control)
+                parent = channels.Matrix().GetInverse() * old
+                if previousOld is not None:
+                    parent = parent * previousOld.GetInverse() * previousNew
+                target = offset * joint
+                solved = channels.Solve(target, parent)
+                for name in _Writable(stage, control, _TRANSLATE + _ROTATE,
+                                      written):
+                    values[control.AppendProperty("avars:" + name)] = \
+                        solved[name]
+                new = channels.Matrix(solved) * parent
+                previousOld, previousNew = old, new
+
+        place(pose, current)
+        if stretches:
+            # The new lengths change the IK limb the pose above was taken
+            # from, and with it anything that estimates that limb (an auto
+            # clavicle turning the limb's root). Settle against the FK
+            # limb itself: there the placed controls, not the IK, decide.
+            for _ in range(2):
+                trial = dict(current or {})
+                trial.update(values)
+                trial[limb.switchPath] = limb.fkValue
+                place(evaluate(trial, time), trial)
     return values
 
 

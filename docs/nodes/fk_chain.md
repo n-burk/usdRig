@@ -89,6 +89,17 @@ rig's interaction surface, not a diagnostic -- and authoring
 
 Ordered chain controls (parents resolved via rigExec:parent).
 
+#### `rigExec:segmentScale`
+
+*Type:* `uniform token`. *Default:* `"none"`.
+
+Valid values: `none`, `toChild`.
+
+toChild: a joint whose next element is its child scales
+along the bone to it by the bone's posed length over its rest
+length, so a child control pushed outward stretches the joint above
+it rather than only moving the one below.
+
 #### `rigExec:controlSpace`
 
 *Type:* `uniform token`. *Default:* `"world"`.

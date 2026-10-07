@@ -393,6 +393,16 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
             return fail("malformed auto-clavicle section");
         }
     }
+    // Optional: absent means every solver solves as before the section.
+    if (section(RigExecBinarySection::LimbSolvers, "limb solvers", &data,
+                &bytesOut)) {
+        RigExecWireReader cursor(data, bytesOut);
+        if (!RigExecWireDecodeLimbSolvers(&cursor, &self->_poses.limbSolvers,
+                                          error) ||
+            !cursor.Exhausted()) {
+            return fail("malformed limb-solver section");
+        }
+    }
     if (section(RigExecBinarySection::DomainGeometry, "geometry domain",
                 &data, &bytesOut)) {
         RigExecWireReader cursor(data, bytesOut);
@@ -619,6 +629,46 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
             }
         }
     }
+    // The limb inputs route after every solver field, in solver order: the
+    // order the bake captures them in.
+    const size_t limbs = self->_poses.limbSolvers.size();
+    program.limbUid.assign(limbs, {-1, -1, -1, -1, -1});
+    if (limbs != 0) {
+        program.limbBySolver.assign(self->_poses.solvers.size(), -1);
+    }
+    for (size_t i = 0; i < limbs; ++i) {
+        const RigExecWireLimbSolver &l = self->_poses.limbSolvers[i];
+        if (l.solver < 0 ||
+            size_t(l.solver) >= self->_poses.solvers.size()) {
+            return fail("limb record names no solver");
+        }
+        program.limbBySolver[size_t(l.solver)] = int32_t(i);
+        const RigExecWireInput *inputs[5] = {&l.pin, &l.upperScale,
+                                             &l.lowerScale, &l.softDistance,
+                                             &l.twist};
+        for (size_t f = 0; f < 5; ++f) {
+            if (!_RouteField(*inputs[f], directory, &nextUid,
+                             &program.limbUid[i][f], error)) {
+                return fail(*error);
+            }
+        }
+    }
+    // Each auto clavicle's limb: the stretching two-bone IK it estimates.
+    program.autoClavicleLimb.assign(self->_poses.autoClavicles.size(), -1);
+    for (size_t c = 0; c < self->_poses.autoClavicles.size(); ++c) {
+        const RigExecWireAutoClavicle &ac = self->_poses.autoClavicles[c];
+        for (size_t i = 0; i < limbs; ++i) {
+            const RigExecWireLimbSolver &l = self->_poses.limbSolvers[i];
+            const RigExecWireSolver &s =
+                self->_poses.solvers[size_t(l.solver)];
+            if ((l.flags & 1) != 0 && s.end >= 0 &&
+                s.end == ac.ikTargetSlot && s.pole >= 0 &&
+                s.pole == ac.poleSlot) {
+                program.autoClavicleLimb[c] = int32_t(i);
+                break;
+            }
+        }
+    }
     program.constraintUid.resize(self->_poses.constraints.size());
     for (size_t i = 0; i < self->_poses.constraints.size(); ++i) {
         for (int f = 0; f < RrConstraintFieldCount; ++f) {
@@ -700,6 +750,19 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
             if (uid >= 0) {
                 store.inputHolders[size_t(uid)] =
                     RrWireInputConstant(program.SolverInput(i, f));
+            }
+        }
+    }
+    for (size_t i = 0; i < program.limbUid.size(); ++i) {
+        const RigExecWireLimbSolver &l = self->_poses.limbSolvers[i];
+        const RigExecWireInput *inputs[5] = {&l.pin, &l.upperScale,
+                                             &l.lowerScale, &l.softDistance,
+                                             &l.twist};
+        for (size_t f = 0; f < 5; ++f) {
+            const int32_t uid = program.limbUid[i][f];
+            if (uid >= 0) {
+                store.inputHolders[size_t(uid)] =
+                    RrWireInputConstant(*inputs[f]);
             }
         }
     }

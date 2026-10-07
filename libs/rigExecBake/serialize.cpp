@@ -894,6 +894,25 @@ RigExecBakeConvertDomainPose(const RigExecBakedProgramImpl &program,
         out.weights = c.weights;
         pose.autoClavicles.push_back(std::move(out));
     }
+    // Memory only: the LimbSolvers section carries these (see bake.cpp).
+    for (size_t i = 0; i < program.solvers.size(); ++i) {
+        const RigExecBakedProgramImpl::Solver &solver = program.solvers[i];
+        if (!solver.HasLimbOptions()) {
+            continue;
+        }
+        RigExecWireLimbSolver out;
+        out.solver = int32_t(i);
+        out.flags = uint8_t((solver.ikParams.softDistancePolicy ? 1 : 0) |
+                            ((solver.ikParams.scaleSegments ||
+                              solver.fkScaleSegments) ? 2 : 0));
+        out.scaleCalibration = solver.ikParams.limb.scaleCalibration;
+        out.pin = _ToInput(solver.pin, writer);
+        out.upperScale = _ToInput(solver.upperScale, writer);
+        out.lowerScale = _ToInput(solver.lowerScale, writer);
+        out.softDistance = _ToInput(solver.softDistance, writer);
+        out.twist = _ToInput(solver.limbTwist, writer);
+        pose.limbSolvers.push_back(std::move(out));
+    }
     pose.commits.reserve(program.commits.size());
     for (const RigExecBakedCommit &commit : program.commits) {
         RigExecWireCommit out;

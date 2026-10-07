@@ -105,7 +105,71 @@ length: the bone itself is always the measured rest distance.
 
 *Type:* `uniform token`. *Default:* `"uniformSegments"`.
 
-Valid values: `uniformSegments`.
+Valid values: `uniformSegments`, `softDistance`.
+
+uniformSegments: inputs:stretch is the stretch permitted
+beyond full reach and inputs:softness a fraction of the chain.
+
+softDistance: the limb model. Each bone starts at its rest length
+times inputs:upperScale / inputs:lowerScale; past full reach less
+inputs:softDistance both bones grow so the reach eases in rather
+than snapping straight; inputs:stretch blends that growth in; and
+inputs:pin blends both bones toward the lengths that put the middle
+joint on the pole (root to pole, pole to goal).
+
+#### `inputs:pin`
+
+*Type:* `float`. *Default:* `0`.
+
+softDistance: how far the middle joint is pinned to the
+pole, in [0, 1]. One makes the bones exactly root-to-pole and
+pole-to-goal long, so the elbow or knee sits on the pole control.
+
+#### `inputs:upperScale`
+
+*Type:* `double`. *Default:* `1`.
+
+softDistance: multiplier on the upper bone's rest length.
+
+#### `inputs:lowerScale`
+
+*Type:* `double`. *Default:* `1`.
+
+softDistance: multiplier on the lower bone's rest length.
+
+#### `rigExec:scaleCalibration`
+
+*Type:* `uniform double`. *Default:* `0`.
+
+softDistance: subtracted from inputs:upperScale and
+inputs:lowerScale inside the soft stretch only, so a chain that sits
+inside the soft zone at its bind pose still solves to its rest
+lengths there. The unstretched lengths use the scales as given.
+
+#### `inputs:softDistance`
+
+*Type:* `float`. *Default:* `0`.
+
+softDistance: how far short of full reach the soft ease
+begins, in the chain's units. Zero stretches the moment the goal is
+past reach.
+
+#### `inputs:twist`
+
+*Type:* `float`. *Default:* `0`.
+
+Degrees the bend plane turns about the root-to-goal axis
+after the pole has set it.
+
+#### `rigExec:segmentScale`
+
+*Type:* `uniform token`. *Default:* `"none"`.
+
+Valid values: `none`, `toChild`.
+
+toChild: the root and middle frames scale along their bones
+by solved length over rest length, so a stretched bone stretches its
+joint (and the skin bound to it), not only moves the next one.
 
 #### `rigExec:unreachablePolicy`
 

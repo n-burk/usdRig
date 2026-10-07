@@ -1472,6 +1472,54 @@ RigExecWireDecodeSpaceSwitches(
 }
 
 bool
+RigExecWireEncodeLimbSolvers(
+    const std::vector<RigExecWireLimbSolver> &records,
+    std::vector<uint8_t> *out)
+{
+    RigExecWirePutU32(out, uint32_t(records.size()));
+    for (const RigExecWireLimbSolver &r : records) {
+        RigExecWirePutI32(out, r.solver);
+        RigExecWirePutU8(out, r.flags);
+        RigExecWirePutF64(out, r.scaleCalibration);
+        _PutInput(out, r.pin);
+        _PutInput(out, r.upperScale);
+        _PutInput(out, r.lowerScale);
+        _PutInput(out, r.softDistance);
+        _PutInput(out, r.twist);
+    }
+    return true;
+}
+
+bool
+RigExecWireDecodeLimbSolvers(
+    RigExecWireReader *reader,
+    std::vector<RigExecWireLimbSolver> *records, std::string *error)
+{
+    uint32_t count = 0;
+    if (!reader->ReadU32(&count)) {
+        return _Fail(error);
+    }
+    records->resize(count);
+    for (uint32_t i = 0; i < count; ++i) {
+        RigExecWireLimbSolver &r = (*records)[i];
+        if (!reader->ReadI32(&r.solver) || !reader->ReadU8(&r.flags) ||
+            r.flags > 3 || !reader->ReadF64(&r.scaleCalibration) ||
+            !_ReadInput(reader, &r.pin) ||
+            !_ReadInput(reader, &r.upperScale) ||
+            !_ReadInput(reader, &r.lowerScale) ||
+            !_ReadInput(reader, &r.softDistance) ||
+            !_ReadInput(reader, &r.twist)) {
+            return _Fail(error);
+        }
+    }
+    if (!reader->Exhausted()) {
+        if (error) *error = "trailing bytes after the limb solvers";
+        return false;
+    }
+    return true;
+}
+
+bool
 RigExecWireEncodeAutoClavicles(
     const std::vector<RigExecWireAutoClavicle> &records,
     std::vector<uint8_t> *out)

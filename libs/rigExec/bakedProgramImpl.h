@@ -51,6 +51,7 @@
 #include <cmath>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <map>
 #include <memory>
 #include <set>
@@ -1326,6 +1327,16 @@ struct RigExecBakedProgramImpl {
     /// default space moved has to recompose, and so does everything reading
     /// the rest -> pose matrices below it.
     std::vector<int> ladderMovedSlots;
+    /// default:t/r channels a property chain writes. They are read and
+    /// compared every run, and only a slot whose value moved -- with the
+    /// slots below it -- recomposes, so a chain-driven offset costs the
+    /// frame nothing until it changes and then only its own subtree.
+    struct LadderWatch {
+        int slot = -1;
+        int channel = 0;  // index into Ladder::defaultAvars
+        double last = std::numeric_limits<double>::quiet_NaN();
+    };
+    std::vector<LadderWatch> ladderWatched;
     /// True on a run whose prologue recomposed the ladder. A solver rest
     /// description is rebuilt from the rests, so it is rebuilt exactly on
     /// these runs -- including the one after a drag is released, which is
@@ -1576,6 +1587,18 @@ struct RigExecBakedProgramImpl {
         RigExecTwoBoneIkParams ikParams;
         RigExecBakedInput<double> bend, upperOffset, lowerOffset;
         RigExecBakedInput<float> stretch, softness;
+        /// stretchPolicy softDistance: the limb inputs (inputs:pin,
+        /// upperScale, lowerScale, softDistance) and inputs:twist, degrees.
+        RigExecBakedInput<float> pin, softDistance, limbTwist;
+        RigExecBakedInput<double> upperScale, lowerScale;
+        /// rigExec:segmentScale "toChild" on an FK chain.
+        bool fkScaleSegments = false;
+        /// What the LimbSolvers binary section carries for this solver.
+        bool HasLimbOptions() const
+        {
+            return ikParams.softDistancePolicy || ikParams.scaleSegments ||
+                   fkScaleSegments;
+        }
         double upperLengthBase = 0, lowerLengthBase = 0;
         /// rigExec:spaceMatrix: an explicit factor, composed after the
         /// space prim below.
@@ -1865,6 +1888,10 @@ struct RigExecBakedProgramImpl {
         RigExecBakedInput<double> amountInput;
         RigExecBakedInput<float> amountFloat;
         bool amountIsFloat = false;
+        /// Index into solvers of the two-bone IK whose effector and pole are
+        /// this clavicle's IK target and pole, when that IK stretches and
+        /// pins; -1 otherwise. Its limb inputs shape the IK estimate.
+        int limbSolver = -1;
     };
     std::vector<AutoClavicle> autoClavicles;
     /// Per provider slot: its auto clavicle's index, or -1.
@@ -3214,8 +3241,19 @@ void RigExecBakedSkipGeometryStep(RigExecBakedProgramImpl *program,
 /// comparing what it composes against what the run before composed, which
 /// is what dirties the compose of a provider whose rest moved. Build passes
 /// false: there is no run before, and the first run dirties everything.
+///
+/// \p only, when given, limits the compose to the slots it marks and every
+/// slot below one of them (slots are in namespace pre-order).
 void RigExecBakedComposeLadder(RigExecBakedProgramImpl *program,
-                               UsdTimeCode time, bool trackMoves);
+                               UsdTimeCode time, bool trackMoves,
+                               const std::vector<char> *only = nullptr);
+
+/// Reads every watched chain-driven ladder channel; marks the slots whose
+/// value differs from the last run's in \p moved (sized to the slots) and
+/// updates the remembered values unless \p peek. True when any moved.
+bool RigExecBakedLadderWatchMoved(RigExecBakedProgramImpl *program,
+                                  UsdTimeCode time, std::vector<char> *moved,
+                                  bool peek = false);
 
 /// The pose half of the prologue: the bound inputs, once per run.
 void RigExecBakedRunInputs(RigExecBakedProgramImpl *program, UsdTimeCode time);

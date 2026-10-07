@@ -176,6 +176,18 @@ RigExecBakeCapture::RigExecBakeCapture(RigExecRigEvaluator &evaluator,
         Add(solver.twistTurns, RigExecWireInput::Tag::Double);
         Add(solver.ribbonSampleCount, RigExecWireInput::Tag::Int);
     }
+    // After every solver, and only for one with limb options, so a rig
+    // without them keeps every uid it had.
+    for (const RigExecBakedProgramImpl::Solver &solver : program.solvers) {
+        if (!solver.HasLimbOptions()) {
+            continue;
+        }
+        Add(solver.pin, RigExecWireInput::Tag::Float);
+        Add(solver.upperScale, RigExecWireInput::Tag::Double);
+        Add(solver.lowerScale, RigExecWireInput::Tag::Double);
+        Add(solver.softDistance, RigExecWireInput::Tag::Float);
+        Add(solver.limbTwist, RigExecWireInput::Tag::Float);
+    }
     for (const RigExecBakedProgramImpl::Constraint &constraint :
          program.constraints) {
         Add(constraint.enabled, RigExecWireInput::Tag::Bool);

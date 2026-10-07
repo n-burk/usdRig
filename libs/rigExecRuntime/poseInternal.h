@@ -4,6 +4,7 @@
 #define RIGEXEC_RUNTIME_POSE_INTERNAL_H
 
 #include "store.h"
+#include "rigExecMath/limbStretchKernel.h"
 #include <array>
 #include <cmath>
 #include <string>
@@ -212,6 +213,11 @@ struct RrPoseTwoBoneIkParams {
     double stretch = 1;
     double softness = 0;
     double preferredBendRadians = 0;
+    // RigExecTwoBoneIkParams' limb fields, field for field.
+    bool softDistancePolicy = false;
+    rigExec::RigExecLimbStretch limb;
+    double twistRadians = 0;
+    bool scaleSegments = false;
 };
 
 // RigExecSplineIkRest, field for field.

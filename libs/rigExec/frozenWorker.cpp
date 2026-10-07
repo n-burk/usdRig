@@ -215,6 +215,12 @@ _FrozenPrologue(_FrozenWorker *worker, const RigExecFrozenProgram &snapshot,
     if (B.ladderRecomputed) {
         return false;
     }
+    // A chain-driven ladder offset that differs from the snapshot's would
+    // recompose; the worker declines that frame rather than compose.
+    if (!B.ladderWatched.empty() &&
+        RigExecBakedLadderWatchMoved(&B, time, nullptr, /* peek = */ true)) {
+        return false;
+    }
     if (!B.ladderMovedSlots.empty()) {
         B.ladderMovedSlots.clear();
     }

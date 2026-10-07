@@ -204,6 +204,8 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
             s.parentRelative =
                 readToken(prim, "rigExec:controlSpace", "") ==
                 "parentRelative";
+            s.fkScaleSegments =
+                readToken(prim, "rigExec:segmentScale", "") == "toChild";
             // The chain is the FILTERED list. The computation reads its
             // controls through a read iterator over the relationship's
             // targeted objects, so a target that publishes no frame
@@ -280,14 +282,44 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
             s.lowerOffset = bind(prim, "rigExec:lowerLengthOffset", 0.0);
             s.stretch = bind(prim, "inputs:stretch", 1.0f);
             s.softness = bind(prim, "inputs:softness", 0.0f);
+            s.pin = bind(prim, "inputs:pin", 0.0f);
+            s.upperScale = bind(prim, "inputs:upperScale", 1.0);
+            s.lowerScale = bind(prim, "inputs:lowerScale", 1.0);
+            s.softDistance = bind(prim, "inputs:softDistance", 0.0f);
+            s.limbTwist = bind(prim, "inputs:twist", 0.0f);
             s.ikParams.preferredBendRadians = s.bend.constant;
             s.ikParams.stretch = s.stretch.constant;
             s.ikParams.softness = s.softness.constant;
+            {
+                TfToken policy, segmentScale;
+                if (const UsdAttribute a =
+                        prim.GetAttribute(TfToken("rigExec:stretchPolicy"))) {
+                    a.Get(&policy);
+                }
+                if (const UsdAttribute a =
+                        prim.GetAttribute(TfToken("rigExec:segmentScale"))) {
+                    a.Get(&segmentScale);
+                }
+                s.ikParams.softDistancePolicy = policy == "softDistance";
+                double calibration = 0.0;
+                if (const UsdAttribute a = prim.GetAttribute(
+                        TfToken("rigExec:scaleCalibration"))) {
+                    a.Get(&calibration);
+                }
+                s.ikParams.limb.scaleCalibration = calibration;
+                s.ikParams.scaleSegments = segmentScale == "toChild";
+            }
             RigExecTwoBoneIkLengths(s.ikRests, s.ikSpace.constant,
                                   s.upperOffset.constant,
                                   s.lowerOffset.constant,
                                   &s.ikParams.upperLength,
                                   &s.ikParams.lowerLength);
+            RigExecSetTwoBoneLimbParams(s.ikRests, s.ikSpace.constant,
+                                      s.stretch.constant, s.pin.constant,
+                                      s.upperScale.constant,
+                                      s.lowerScale.constant,
+                                      s.softDistance.constant,
+                                      s.limbTwist.constant, &s.ikParams);
         } else if (s.type == "RigExecBlendPointFrames") {
             auto solverSlot = [&](const SdfPathVector &v) {
                 if (v.empty()) return -1;
@@ -1505,6 +1537,16 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
                 RigExecBakedNoteInput(ac.ikBlendFloat, &step);
                 RigExecBakedNoteInput(ac.amountInput, &step);
                 RigExecBakedNoteInput(ac.amountFloat, &step);
+                if (ac.limbSolver >= 0) {
+                    const RigExecBakedProgramImpl::Solver &s =
+                        B.solvers[size_t(ac.limbSolver)];
+                    RigExecBakedNoteInput(s.stretch, &step);
+                    RigExecBakedNoteInput(s.pin, &step);
+                    RigExecBakedNoteInput(s.upperScale, &step);
+                    RigExecBakedNoteInput(s.lowerScale, &step);
+                    RigExecBakedNoteInput(s.softDistance, &step);
+                    RigExecBakedNoteInput(s.limbTwist, &step);
+                }
             }
             const int switchIndex =
                 B.spaceSwitchBySlot.empty()
@@ -2128,6 +2170,11 @@ NoteSolverInputs(const RigExecBakedProgramImpl::Solver &solver,
     NoteInput(solver.lowerOffset, step);
     NoteInput(solver.stretch, step);
     NoteInput(solver.softness, step);
+    NoteInput(solver.pin, step);
+    NoteInput(solver.upperScale, step);
+    NoteInput(solver.lowerScale, step);
+    NoteInput(solver.softDistance, step);
+    NoteInput(solver.limbTwist, step);
     NoteInput(solver.blendWeight, step);
     NoteInput(solver.preserveVolume, step);
     NoteInput(solver.midFollowWeight, step);
@@ -2233,6 +2280,17 @@ RigExecBakedDeclareInputDependencies(RigExecBakedProgramImpl *program)
                     NoteInput(ac.ikBlendFloat, &step);
                     NoteInput(ac.amountInput, &step);
                     NoteInput(ac.amountFloat, &step);
+                    if (ac.limbSolver >= 0) {
+                        // The limb's IK inputs shape the clavicle's estimate.
+                        const RigExecBakedProgramImpl::Solver &s =
+                            B.solvers[size_t(ac.limbSolver)];
+                        NoteInput(s.stretch, &step);
+                        NoteInput(s.pin, &step);
+                        NoteInput(s.upperScale, &step);
+                        NoteInput(s.lowerScale, &step);
+                        NoteInput(s.softDistance, &step);
+                        NoteInput(s.limbTwist, &step);
+                    }
                 }
             }
             break;
@@ -2260,9 +2318,39 @@ RigExecBakedDeclareInputDependencies(RigExecBakedProgramImpl *program)
     }
 }
 
+bool
+RigExecBakedLadderWatchMoved(RigExecBakedProgramImpl *program,
+                             UsdTimeCode time, std::vector<char> *moved,
+                             bool peek)
+{
+    RigExecBakedProgramImpl &B = *program;
+    const RigExecResolvedInputs &R = *B.resolvedInputs;
+    bool any = false;
+    for (RigExecBakedProgramImpl::LadderWatch &watch : B.ladderWatched) {
+        const double value = RigExecBakedRead(
+            B.ladders[size_t(watch.slot)].defaultAvars[watch.channel], R,
+            time, &B.overridden);
+        // NaN never equals: the first run after Build always recomposes.
+        if (value == watch.last) {
+            continue;
+        }
+        any = true;
+        if (moved) {
+            if (moved->size() != B.paths.size()) {
+                moved->assign(B.paths.size(), 0);
+            }
+            (*moved)[size_t(watch.slot)] = 1;
+        }
+        if (!peek) {
+            watch.last = value;
+        }
+    }
+    return any;
+}
+
 void
 RigExecBakedComposeLadder(RigExecBakedProgramImpl *program, UsdTimeCode time,
-                          bool trackMoves)
+                          bool trackMoves, const std::vector<char> *only)
 {
     RigExecBakedProgramImpl &B = *program;
     const RigExecResolvedInputs &R = *B.resolvedInputs;
@@ -2274,8 +2362,24 @@ RigExecBakedComposeLadder(RigExecBakedProgramImpl *program, UsdTimeCode time,
     const auto rd = [&](const auto &input) {
         return RigExecBakedRead(input, R, time, &B.overridden);
     };
+    // A partial compose: the marked slots and everything below them, which
+    // one forward pass settles because a parent's slot is always lower.
+    std::vector<char> redo;
+    if (only) {
+        redo.assign(size_t(N), 0);
+    }
     for (int i = 0; i < N; ++i) {
         const size_t slot = size_t(i);
+        if (only) {
+            const int up = B.parent[slot];
+            redo[slot] = (slot < only->size() && (*only)[slot]) ||
+                                 (up >= 0 && redo[size_t(up)])
+                             ? 1
+                             : 0;
+            if (!redo[slot]) {
+                continue;
+            }
+        }
         if (B.slotKind[slot] != RigExecBakedSlotKind::FirstFramePose) {
             // An xform-derived slot has no rest chain and no default-space
             // ladder: the dynamic path gives it the identity rest frame
@@ -2377,9 +2481,17 @@ RigExecBakedRunInputs(RigExecBakedProgramImpl *program, UsdTimeCode time)
     }
     B.ladderRecomputed = B.ladderVarying || ladderDragged ||
                          B.ladderDisturbed;
+    std::vector<char> watchMoved;
     if (B.ladderRecomputed) {
         RigExecBakedComposeLadder(&B, time, /* trackMoves = */ true);
         B.ladderDisturbed = ladderDragged;
+        RigExecBakedLadderWatchMoved(&B, time, nullptr);
+    } else if (!B.ladderWatched.empty() &&
+               RigExecBakedLadderWatchMoved(&B, time, &watchMoved)) {
+        // A chain-driven offset moved: its subtree only.
+        RigExecBakedComposeLadder(&B, time, /* trackMoves = */ true,
+                                  &watchMoved);
+        B.ladderRecomputed = true;
     } else if (!B.ladderMovedSlots.empty()) {
         // Nothing recomputed, so nothing moved -- and last run's list would
         // otherwise dirty a compose this run has no reason to run.
@@ -2720,7 +2832,10 @@ FinishCommit(RigExecBakedProgramImpl *program, RigExecBakedStep *step,
 void
 ApplyAutoClavicle(RigExecBakedProgramImpl &B,
                   const RigExecBakedProgramImpl::AutoClavicle &ac,
-                  double ikBlend, double amount, int slot)
+                  double ikBlend, double amount, int slot,
+                  const RigExecLimbStretch *limb = nullptr,
+                  double twistRadians = 0.0, double restUpper = 0.0,
+                  double restLower = 0.0)
 {
     GfMatrix4d target;
     if (!B.base[size_t(slot)].IsValid() || B.base[size_t(slot)].IsDegenerate() ||
@@ -2769,6 +2884,13 @@ ApplyAutoClavicle(RigExecBakedProgramImpl &B,
     if (ac.poleSlot >= 0) f.polePosed = B.posedM[size_t(ac.poleSlot)].data();
     f.ikBlend = ikBlend;
     f.amount = amount;
+    if (limb) {
+        f.hasLimb = true;
+        f.limb = *limb;
+        f.twistRadians = twistRadians;
+        f.limbRestUpper = restUpper;
+        f.limbRestLower = restLower;
+    }
     double delta[3];
     RigExecAutoClavicleShift(ac.constants, f, delta);
     if (delta[0] == 0.0 && delta[1] == 0.0 && delta[2] == 0.0) return;
@@ -3084,13 +3206,29 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
                 clavicleIndex >= 0) {
                 const RigExecBakedProgramImpl::AutoClavicle &ac =
                     B.autoClavicles[size_t(clavicleIndex)];
+                RigExecLimbStretch limb;
+                double twist = 0.0, restUpper = 0.0, restLower = 0.0;
+                if (ac.limbSolver >= 0) {
+                    const RigExecBakedProgramImpl::Solver &s =
+                        B.solvers[size_t(ac.limbSolver)];
+                    limb.stretch = rd(s.stretch);
+                    limb.pin = rd(s.pin);
+                    limb.upperScale = rd(s.upperScale);
+                    limb.lowerScale = rd(s.lowerScale);
+                    limb.softDistance = rd(s.softDistance);
+                    limb.scaleCalibration = s.ikParams.limb.scaleCalibration;
+                    twist = rd(s.limbTwist) * std::acos(-1.0) / 180.0;
+                    restUpper = s.ikParams.upperLength;
+                    restLower = s.ikParams.lowerLength;
+                }
                 ApplyAutoClavicle(
                     B, ac,
                     ac.ikBlendIsFloat ? double(rd(ac.ikBlendFloat))
                                       : rd(ac.ikBlendInput),
                     ac.amountIsFloat ? double(rd(ac.amountFloat))
                                      : rd(ac.amountInput),
-                    i);
+                    i, ac.limbSolver >= 0 ? &limb : nullptr, twist,
+                    restUpper, restLower);
             }
             B.fin[size_t(i)] = B.base[size_t(i)];
             // _SpaceFromFrame: an unusable frame selects the NaN sentinel, so
@@ -3187,6 +3325,9 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
                     s.parentRelative ? base - 1 : int(k) + base - 1;
             }
             aggregate.frames = RigExecSolveFkChain(s.elements);
+            if (s.fkScaleSegments) {
+                RigExecScaleFkSegments(s.elements, &aggregate.frames);
+            }
             if (base && !aggregate.frames.empty()) {
                 aggregate.frames.erase(aggregate.frames.begin());
             }
@@ -3209,7 +3350,9 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
             }
             if (live(s.bend) || live(s.stretch) || live(s.softness) ||
                 live(s.upperOffset) || live(s.lowerOffset) ||
-                live(s.ikSpace) || spaceMoved) {
+                live(s.ikSpace) || spaceMoved || live(s.pin) ||
+                live(s.upperScale) || live(s.lowerScale) ||
+                live(s.softDistance) || live(s.limbTwist)) {
                 params.preferredBendRadians = rd(s.bend);
                 params.stretch = rd(s.stretch);
                 params.softness = rd(s.softness);
@@ -3218,6 +3361,11 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
                                         rd(s.upperOffset), rd(s.lowerOffset),
                                         &params.upperLength,
                                         &params.lowerLength);
+                RigExecSetTwoBoneLimbParams(s.ikRests, ikSpace, rd(s.stretch),
+                                          rd(s.pin), rd(s.upperScale),
+                                          rd(s.lowerScale),
+                                          rd(s.softDistance),
+                                          rd(s.limbTwist), &params);
             }
             const auto frames = RigExecSolveTwoBoneIk(
                 B.fin[size_t(s.rootRead)], B.fin[size_t(s.endRead)],

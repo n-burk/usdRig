@@ -1549,6 +1549,16 @@ _BinaryCollectOracle(const rigExec::RigExecBakedProgramImpl &program)
         _BinaryCollectOne(solver.twistTurns, Tag::Double, &oracle);
         _BinaryCollectOne(solver.ribbonSampleCount, Tag::Int, &oracle);
     }
+    for (const auto &solver : program.solvers) {
+        if (!solver.HasLimbOptions()) {
+            continue;
+        }
+        _BinaryCollectOne(solver.pin, Tag::Float, &oracle);
+        _BinaryCollectOne(solver.upperScale, Tag::Double, &oracle);
+        _BinaryCollectOne(solver.lowerScale, Tag::Double, &oracle);
+        _BinaryCollectOne(solver.softDistance, Tag::Float, &oracle);
+        _BinaryCollectOne(solver.limbTwist, Tag::Float, &oracle);
+    }
     for (const auto &constraint : program.constraints) {
         _BinaryCollectOne(constraint.enabled, Tag::Bool, &oracle);
         _BinaryCollectOne(constraint.defaultWeight, Tag::Float, &oracle);

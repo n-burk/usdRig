@@ -103,6 +103,15 @@ TF_DEFINE_PRIVATE_TOKENS(
     ((inputsWeight, "inputs:weight"))
     ((inputsStretch, "inputs:stretch"))
     ((inputsSoftness, "inputs:softness"))
+    ((inputsPin, "inputs:pin"))
+    ((inputsUpperScale, "inputs:upperScale"))
+    ((inputsLowerScale, "inputs:lowerScale"))
+    ((inputsSoftDistance, "inputs:softDistance"))
+    ((scaleCalibration, "rigExec:scaleCalibration"))
+    ((stretchPolicy, "rigExec:stretchPolicy"))
+    ((segmentScale, "rigExec:segmentScale"))
+    ((softDistance, "softDistance"))
+    ((toChild, "toChild"))
     ((midControl, "rigExec:midControl"))
     ((endControl, "rigExec:endControl"))
     ((volumeWeights, "rigExec:volumeWeights"))
@@ -733,6 +742,11 @@ _ComputeFkChain(const VdfContext &ctx)
 
     RigExecPointFrameArray result;
     result.frames = rigExec::RigExecSolveFkChain(elements);
+    const TfToken *segmentScale =
+        ctx.GetInputValuePtr<TfToken>(_tokens->segmentScale);
+    if (segmentScale && *segmentScale == _tokens->toChild) {
+        rigExec::RigExecScaleFkSegments(elements, &result.frames);
+    }
     // Discard the synthetic base: it is a solve input, not an output, and
     // publishing it would shift every joint's element index by one.
     if (hasStart && !result.frames.empty()) {
@@ -777,7 +791,8 @@ EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(RigExecFkChain)
             Relationship(_tokens->joints)
                 .TargetedObjects<RigExecPointFrame>(_tokens->computeRestFrame)
                 .InputName(_tokens->jointRests),
-            AttributeValue<TfToken>(_tokens->controlSpace));
+            AttributeValue<TfToken>(_tokens->controlSpace),
+            AttributeValue<TfToken>(_tokens->segmentScale));
 }
 
 // RigExecTwoBoneIk: analytic solve publishing [root, mid, end] frames.
@@ -812,6 +827,22 @@ _ComputeTwoBoneIk(const VdfContext &ctx)
     params.preferredBendRadians = bend ? *bend : 0.0;
     params.stretch = stretch ? *stretch : 1.0;
     params.softness = softness ? *softness : 0.0;
+    const auto scalar = [&](const TfToken &name, double fallback) {
+        const float *v = ctx.GetInputValuePtr<float>(name);
+        return v ? double(*v) : fallback;
+    };
+    const auto scalarDouble = [&](const TfToken &name, double fallback) {
+        const double *v = ctx.GetInputValuePtr<double>(name);
+        return v ? *v : fallback;
+    };
+    const TfToken *policy = ctx.GetInputValuePtr<TfToken>(_tokens->stretchPolicy);
+    const TfToken *segmentScale =
+        ctx.GetInputValuePtr<TfToken>(_tokens->segmentScale);
+    params.softDistancePolicy = policy && *policy == _tokens->softDistance;
+    const double *calibration =
+        ctx.GetInputValuePtr<double>(_tokens->scaleCalibration);
+    params.limb.scaleCalibration = calibration ? *calibration : 0.0;
+    params.scaleSegments = segmentScale && *segmentScale == _tokens->toChild;
 
     // Controls supply rest fallbacks while the solver is being wired. Once
     // a joint is bound, its live rest frame is the reference for that output.
@@ -906,6 +937,12 @@ _ComputeTwoBoneIk(const VdfContext &ctx)
     rigExec::RigExecTwoBoneIkLengths(rests, space, upperOffset, lowerOffset,
                                      &params.upperLength,
                                      &params.lowerLength);
+    rigExec::RigExecSetTwoBoneLimbParams(
+        rests, space, params.stretch, scalar(_tokens->inputsPin, 0.0),
+        scalarDouble(_tokens->inputsUpperScale, 1.0),
+        scalarDouble(_tokens->inputsLowerScale, 1.0),
+        scalar(_tokens->inputsSoftDistance, 0.0),
+        scalar(_tokens->inputsTwist, 0.0), &params);
 
     const auto frames = rigExec::RigExecSolveTwoBoneIk(
         *root, *effector, *pole, rests, params);
@@ -952,7 +989,15 @@ EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(RigExecTwoBoneIk)
             AttributeValue<double>(_tokens->lowerLengthOffset),
             AttributeValue<double>(_tokens->preferredBendRadians),
             AttributeValue<float>(_tokens->inputsStretch),
-            AttributeValue<float>(_tokens->inputsSoftness));
+            AttributeValue<float>(_tokens->inputsSoftness),
+            AttributeValue<float>(_tokens->inputsPin),
+            AttributeValue<double>(_tokens->inputsUpperScale),
+            AttributeValue<double>(_tokens->inputsLowerScale),
+            AttributeValue<float>(_tokens->inputsSoftDistance),
+            AttributeValue<float>(_tokens->inputsTwist),
+            AttributeValue<TfToken>(_tokens->stretchPolicy),
+            AttributeValue<TfToken>(_tokens->segmentScale),
+            AttributeValue<double>(_tokens->scaleCalibration));
 }
 
 // RigExecBlendPointFrames: element-wise blend of two aggregates.

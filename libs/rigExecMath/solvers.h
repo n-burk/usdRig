@@ -5,6 +5,7 @@
 #define RIGEXEC_MATH_SOLVERS_H
 
 #include "dualQuat.h"
+#include "limbStretchKernel.h"
 #include "pointFrame.h"
 
 #include <optional>
@@ -39,6 +40,14 @@ struct RigExecFkChainElement {
 std::vector<RigExecPointFrame> RigExecSolveFkChain(
     const std::vector<RigExecFkChainElement> &elements);
 
+/// rigExec:segmentScale "toChild" for an FK chain: each element is scaled
+/// along the bone to the next element by the bone's posed length over its
+/// rest length (RigExecScaleFrameAlong). A
+/// child control pushed outward -- a limb's top/bottom stretch -- then
+/// stretches the joint above it, not only moves the one below.
+void RigExecScaleFkSegments(const std::vector<RigExecFkChainElement> &elements,
+                            std::vector<RigExecPointFrame> *frames);
+
 /// Two-bone IK parameters (RigExecTwoBoneIk, spec §4.5 example).
 struct RigExecTwoBoneIkParams {
     double upperLength = 1.0;
@@ -48,6 +57,17 @@ struct RigExecTwoBoneIkParams {
     double softness = 0.0;       ///< inputs:softness: soft-reach distance
     double preferredBendRadians = 0.0;  ///< fallback bend plane when the
                                         ///< pole degenerates
+    /// stretchPolicy "softDistance": segment lengths come from
+    /// RigExecLimbSegmentLengths with \p limb instead of the
+    /// uniformSegments stretch and fractional softness above.
+    bool softDistancePolicy = false;
+    RigExecLimbStretch limb;
+    /// inputs:twist, radians: turns the bend plane about the root-to-goal
+    /// axis after the pole has set it.
+    double twistRadians = 0.0;
+    /// rigExec:segmentScale "toChild": the root and middle frames scale
+    /// along their bones by solved length over rest length.
+    bool scaleSegments = false;
     /// rigExec:space composed with rigExec:spaceMatrix: the space the
     /// chain is measured in. It sets the bone lengths AND the length of
     /// the published frames' axis handles, which is how a child that is
@@ -79,6 +99,23 @@ void RigExecTwoBoneIkLengths(
     const std::array<std::array<GfVec3d, 4>, 3> &restPoints,
     const GfMatrix4d &space, double upperOffset, double lowerOffset,
     double *upperLength, double *lowerLength);
+
+/// How much \p space lengthens the rest chain: spaced over raw length of
+/// both bones. Carries rest-unit distances (inputs:softDistance) into the
+/// space the solve runs in; 1 for an identity space.
+double RigExecTwoBoneIkSpaceFactor(
+    const std::array<std::array<GfVec3d, 4>, 3> &restPoints,
+    const GfMatrix4d &space);
+
+/// Fills \p params' limb inputs from the solver's per-frame scalars: the
+/// stretch blend, pin, per-bone scales, the soft distance carried into
+/// \p space (RigExecTwoBoneIkSpaceFactor) and the twist in degrees. One
+/// place, so the dynamic computation and the baked program read them alike.
+void RigExecSetTwoBoneLimbParams(
+    const std::array<std::array<GfVec3d, 4>, 3> &restPoints,
+    const GfMatrix4d &space, double stretch, double pin, double upperScale,
+    double lowerScale, double softDistance, double twistDegrees,
+    RigExecTwoBoneIkParams *params);
 
 /// Analytic two-bone IK with pole vector (RigExecTwoBoneIk).
 ///

@@ -612,6 +612,15 @@ class RigExecFkChain "RigExecFkChain" (
         extraction, user-directed 2026-07-25)."""
         }
     )
+    uniform token rigExec:segmentScale = "none" (
+        allowedTokens = ["none", "toChild"]
+        customData = {
+            string userDocBrief = """toChild: a joint whose next element is its child scales
+        along the bone to it by the bone's posed length over its rest
+        length, so a child control pushed outward stretches the joint above
+        it rather than only moving the one below."""
+        }
+    )
     rel rigExec:startFrame (
         customData = {
             string userDocBrief = """Optional single provider (joint or control) whose POSED
@@ -667,6 +676,23 @@ class RigExecTwoBoneIk "RigExecTwoBoneIk" (
         which is how a solver's diagnostics are turned off."""
         }
     )
+    double inputs:lowerScale = 1 (
+        customData = {
+            string userDocBrief = "softDistance: multiplier on the lower bone's rest length."
+        }
+    )
+    float inputs:pin = 0 (
+        customData = {
+            string userDocBrief = """softDistance: how far the middle joint is pinned to the
+        pole, in [0, 1]."""
+        }
+    )
+    float inputs:softDistance = 0 (
+        customData = {
+            string userDocBrief = """softDistance: how far short of full reach the soft ease
+        begins, in the chain's units."""
+        }
+    )
     float inputs:softness = 0 (
         customData = {
             string userDocBrief = "Soft-reach fraction of the chain length."
@@ -675,6 +701,17 @@ class RigExecTwoBoneIk "RigExecTwoBoneIk" (
     float inputs:stretch = 1 (
         customData = {
             string userDocBrief = "Permitted stretch beyond full reach, in [0, 1]."
+        }
+    )
+    float inputs:twist = 0 (
+        customData = {
+            string userDocBrief = """Degrees the bend plane turns about the root-to-goal axis
+        after the pole has set it."""
+        }
+    )
+    double inputs:upperScale = 1 (
+        customData = {
+            string userDocBrief = "softDistance: multiplier on the upper bone's rest length."
         }
     )
     rel proxyPrim (
@@ -707,6 +744,22 @@ class RigExecTwoBoneIk "RigExecTwoBoneIk" (
     rel rigExec:poleControl
     double rigExec:preferredBendRadians = 0
     rel rigExec:rootControl
+    uniform double rigExec:scaleCalibration = 0 (
+        customData = {
+            string userDocBrief = """softDistance: subtracted from inputs:upperScale and
+        inputs:lowerScale inside the soft stretch only, so a chain that sits
+        inside the soft zone at its bind pose still solves to its rest
+        lengths there."""
+        }
+    )
+    uniform token rigExec:segmentScale = "none" (
+        allowedTokens = ["none", "toChild"]
+        customData = {
+            string userDocBrief = """toChild: the root and middle frames scale along their bones
+        by solved length over rest length, so a stretched bone stretches its
+        joint (and the skin bound to it), not only moves the next one."""
+        }
+    )
     rel rigExec:space (
         customData = {
             string userDocBrief = """The prim whose movement away from its rest defines the
@@ -720,7 +773,11 @@ class RigExecTwoBoneIk "RigExecTwoBoneIk" (
         }
     )
     uniform token rigExec:stretchPolicy = "uniformSegments" (
-        allowedTokens = ["uniformSegments"]
+        allowedTokens = ["uniformSegments", "softDistance"]
+        customData = {
+            string userDocBrief = """uniformSegments: inputs:stretch is the stretch permitted
+        beyond full reach and inputs:softness a fraction of the chain."""
+        }
     )
     uniform token rigExec:unreachablePolicy = "clampWithSoftness" (
         allowedTokens = ["clampWithSoftness"]

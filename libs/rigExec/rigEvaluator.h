@@ -1835,6 +1835,11 @@ private:
         SdfPath fk[3];
         SdfPath ikTarget, pole;
         SdfPath ikBlendAttribute, amountAttribute;
+        /// The two-bone IK this limb's IK target and pole drive, when it
+        /// stretches and pins (stretchPolicy softDistance); empty otherwise.
+        SdfPath limbSolver;
+        /// Rest frames of that solver's three joints, for its bone lengths.
+        RigExecTapId limbJointRestTap[3] = {-1, -1, -1};
         RigExecAutoClavicleConstants constants;
         RigExecTapId targetPosedTap = -1;
         RigExecTapId pivotPosedTap = -1;
