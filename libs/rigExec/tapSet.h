@@ -123,6 +123,7 @@ public:
 
 private:
     friend class RigExecTapSet;
+    friend class RigExecRigEvaluator;
     std::vector<VtValue> _values;
     UsdTimeCode _time = UsdTimeCode::Default();
     bool _valid = false;
@@ -136,6 +137,9 @@ private:
 class RigExecTapSet {
 public:
     explicit RigExecTapSet(const UsdStageRefPtr &stage);
+    /// Zero shares the stage executor. Nonzero partitions share only with
+    /// requests in that partition, limiting override invalidation fan-out.
+    RigExecTapSet(const UsdStageRefPtr &stage, size_t partition);
     ~RigExecTapSet();
 
     RigExecTapSet(const RigExecTapSet &) = delete;
@@ -183,6 +187,15 @@ public:
     RigExecSnapshot Evaluate(
         UsdTimeCode time, const std::vector<RigExecValueOverride> &overrides);
 
+    /// Extract results already computed by the caller's pose walk, evaluating
+    /// only empty slots through Exec. Supplied values must be the exact
+    /// results of these taps under the same overrides, not new input pins.
+    RigExecSnapshot EvaluateWithSuppliedResults(
+        UsdTimeCode time, const std::vector<RigExecValueOverride> &overrides,
+        std::vector<VtValue> supplied);
+
+    size_t GetTapCount() const { return _addresses.size(); }
+
     /// Returns and clears the dirty flag raised by invalidation callbacks.
     bool ConsumeDirty() { return _dirty.exchange(false); }
 
@@ -202,8 +215,11 @@ private:
     /// Compiler-private resolutions parallel to _addresses; an empty path
     /// means the public address resolves directly.
     std::vector<SdfPath> _resolutions;
+    std::unique_ptr<RigExecTapSet> _residualTaps;
+    std::vector<size_t> _residualIndices;
     std::atomic<bool> _dirty{false};
     bool _prepared = false;
+    size_t _partition = 0;
     /// Diagnostic only (TF_DEBUG=RIGEXEC_TAP_TIMING): how many times this
     /// tap set has rebuilt its request.
     size_t _prepareCount = 0;

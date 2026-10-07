@@ -250,6 +250,16 @@ def _AssertWarmingCommitDeferred():
         if container._lib.commits != 0:
             raise AssertionError("re-schedule committed synchronously")
 
+        from types import SimpleNamespace
+        view = SimpleNamespace(_dragActive=True)
+        container._api = SimpleNamespace(
+            _UsdviewApi__appController=SimpleNamespace(_stageView=view))
+        container._FlushWarmingCommit()
+        if container._lib.commits or not container._warmingCommitPending:
+            raise AssertionError("camera drag consumed the pending warming commit")
+        if not timer.isActive():
+            raise AssertionError("deferred warming commit did not rearm")
+        view._dragActive = False
         # The flush itself still commits exactly once and disarms.
         container._FlushWarmingCommit()
         if container._lib.commits != 1:
@@ -309,6 +319,14 @@ def _AssertWarmRangeRepushOnRangeChange():
         # the next tick: states come back cached, so the tick sleeps
         # after re-pushing exactly once.
         stage.SetEndTimeCode(6.0)
+        from types import SimpleNamespace
+        view = SimpleNamespace(_dragActive=True)
+        container._api = SimpleNamespace(
+            _UsdviewApi__appController=SimpleNamespace(_stageView=view))
+        container._TickWarmingDriver()
+        if len(container._lib.warmCalls) != 1 or not timer.isActive():
+            raise AssertionError("camera drag must defer warming and keep its timer armed")
+        view._dragActive = False
         container._TickWarmingDriver()
         if len(container._lib.warmCalls) != 2:
             raise AssertionError("tick did not re-push the edited range")

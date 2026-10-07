@@ -261,7 +261,7 @@ authored it is authoritative and inputs:activeSpace is ignored.
 
 *Type:* `uniform token[]`. *Default:* `[]`.
 
-Valid values: `all`, `twist`, `swing`.
+Valid values: `all`, `twist`, `swing`, `orient`.
 
 Optional per-source rotation filter, parallel to
 rigExec:sources. Empty, or "all", passes the source's rotation
@@ -280,6 +280,12 @@ thing it aims is a pole that fights the animator.
 
 Translation and scale are unaffected: the pole still follows the
 hand's position.
+
+"orient" makes the source a rotation-only space: the target takes
+the source's whole rotation, and its position stays where its
+namespace parent carries it, as if the space were not switched. A
+shoulder, neck or head held to the world turns with the world and
+still rides on the body.
 
 #### `rigExec:twistAxis`
 

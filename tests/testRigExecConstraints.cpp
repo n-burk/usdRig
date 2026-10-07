@@ -1,6 +1,7 @@
 // FBX-equivalent constraint schema and evaluator conformance.
 #include "rigExec/rigEvaluator.h"
 #include "rigExec/frameExtraction.h"
+#include "rigExec/frozenContext.h"
 #include "rigExecMath/pointFrame.h"
 #include "rigExecMath/splineIk.h"
 
@@ -175,6 +176,7 @@ TestSchemaSurface()
         {"RigExecSingleChainIkConstraint", "rigExec:endJoint"},
         {"RigExecSingleChainIkConstraint", "rigExec:effector"},
         {"RigExecSingleChainIkConstraint", "rigExec:solverMode"},
+        {"RigExecSingleChainIkConstraint", "inputs:stretch"},
         {"RigExecSingleChainIkConstraint", "rigExec:poleVectorMode"},
         {"RigExecSingleChainIkConstraint", "rigExec:evaluationMode"},
     };
@@ -3383,12 +3385,16 @@ TestConnectedRefreshAfterInterveningWrite()
     const auto second = MakeXform(stage, SdfPath("/Asset/Second"), Matrix(GfVec3d(6,0,0)));
     MakeXform(stage, SdfPath("/Asset/RecordedA"), Matrix());
     MakeXform(stage, SdfPath("/Asset/RecordedB"), Matrix());
-    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"))
+        .SetCustomDataByKey(TfToken("rigExec:connectedPoseSeedReuse"), VtValue(true));
     const auto source = stage->DefinePrim(SdfPath("/Asset/Rig/Source"), TfToken("RigExecControl"));
     source.GetAttribute(TfToken("rest:tx")).Set(1.0);
     const auto relay = stage->DefinePrim(SdfPath("/Asset/Rig/Source/Relay"), TfToken("RigExecControl"));
     const auto bridge = stage->DefinePrim(SdfPath("/Asset/Rig/Bridge"), TfToken("RigExecControl"));
     bridge.GetAttribute(TfToken("default:space"))
+        .SetConnections({relay.GetPath().AppendProperty(TfToken("parent:space"))});
+    const auto bridgeB = stage->DefinePrim(SdfPath("/Asset/Rig/BridgeB"), TfToken("RigExecControl"));
+    bridgeB.GetAttribute(TfToken("default:space"))
         .SetConnections({relay.GetPath().AppendProperty(TfToken("parent:space"))});
     const auto writeA = MakeConstraint(stage,"WriteA","RigExecPositionConstraint",{source.GetPath()});
     writeA.GetRelationship(TfToken("rigExec:sources")).SetTargets({first.GetPath()});
@@ -3397,17 +3403,23 @@ TestConnectedRefreshAfterInterveningWrite()
     const auto writeB = MakeConstraint(stage,"WriteB","RigExecPositionConstraint",{source.GetPath()});
     writeB.GetRelationship(TfToken("rigExec:sources")).SetTargets({second.GetPath()});
     const auto readB = MakeConstraint(stage,"ReadB","RigExecPositionConstraint",{SdfPath("/Asset/RecordedB")});
-    readB.GetRelationship(TfToken("rigExec:sources")).SetTargets({bridge.GetPath()});
+    readB.GetRelationship(TfToken("rigExec:sources")).SetTargets({bridgeB.GetPath()});
     stage->GetPrimAtPath(SdfPath("/Asset/Rig/Movers"))
         .SetChildrenReorder({TfToken("ReadB"),TfToken("WriteB"),TfToken("ReadA"),TfToken("WriteA")});
     RigExecRigEvaluator evaluator(stage,SdfPath("/Asset/Rig"));
     std::vector<std::string> errors;CHECK(evaluator.Compile(&errors));CHECK(errors.empty());
     for(double x : {6.0,7.0}) {
         second.GetAttribute(TfToken("xformOp:transform")).Set(Matrix(GfVec3d(x,0,0)));
+        // Equal pose dependencies may share a request, but each output keeps
+        // its own channel override and reads the source at its stack position.
+        evaluator.SetInteractiveOverrides({{bridgeB.GetPath(), TfToken(), TfToken("avars:ty"), VtValue(x)}});
         const auto pose = evaluator.Evaluate(UsdTimeCode::Default());CHECK(pose.valid);
         CHECK(Near(pose.providerXforms.at(SdfPath("/Asset/RecordedA")).ExtractTranslation(),GfVec3d(4,0,0)));
-        CHECK(Near(pose.providerXforms.at(SdfPath("/Asset/RecordedB")).ExtractTranslation(),GfVec3d(x,0,0)));
+        CHECK(Near(pose.providerXforms.at(SdfPath("/Asset/RecordedB")).ExtractTranslation(),GfVec3d(x,x,0)));
     }
+    evaluator.ClearInteractiveOverrides();
+    const auto released = evaluator.Evaluate(UsdTimeCode::Default());CHECK(released.valid);
+    CHECK(Near(released.providerXforms.at(SdfPath("/Asset/RecordedB")).ExtractTranslation(),GfVec3d(7,0,0)));
 }
 
 static void
@@ -4381,6 +4393,60 @@ TestSingleChainIkOwnInputsMoveOverTimeAndUnderDrag()
     }
 }
 
+// Computed float connections and preview overrides must reach IK through
+// the dynamic, baked and frozen routes, including release at the same time.
+static void
+TestSingleChainIkComputedStretch()
+{
+    const SdfPath rigPath("/Asset/Rig");
+    const SdfPath ikPath("/Asset/Rig/Movers/IK");
+    const SdfPath endPath("/Asset/Rig/Joints/Root/Mid/End");
+    const SdfPath valuePath("/Asset/Rig/Driver.value");
+    const UsdStageRefPtr stage = BuildConstraintStage(nullptr);
+    stage->GetPrimAtPath(SdfPath("/Asset/Sources/Effector"))
+        .GetAttribute(TfToken("xformOp:transform")).Set(Matrix(GfVec3d(6, 0, 0)));
+    const UsdPrim driver = stage->DefinePrim(valuePath.GetPrimPath(), TfToken("Scope"));
+    driver.CreateAttribute(TfToken("value"), SdfValueTypeNames->Float).Set(0.0f);
+    const UsdPrim add = MakeConstraint(stage, "Growth", "RigExecFloatMathMover", {valuePath});
+    add.GetAttribute(TfToken("rigExec:operation")).Set(TfToken("add"));
+    add.GetAttribute(TfToken("inputs:value")).Set(0.0f, UsdTimeCode(1));
+    add.GetAttribute(TfToken("inputs:value")).Set(1.0f, UsdTimeCode(2));
+    stage->GetPrimAtPath(ikPath).GetAttribute(TfToken("inputs:stretch"))
+        .SetConnections({valuePath});
+    const auto check = [&](const RigExecRigPose &pose, double reach) {
+        CHECK(pose.valid);
+        const auto end = pose.jointFramesFinal.find(endPath);
+        CHECK(end != pose.jointFramesFinal.end());
+        if (end != pose.jointFramesFinal.end()) CHECK(Near(end->second.Origin(), GfVec3d(reach, 0, 0)));
+        CHECK(pose.bakedParityMismatches == 0);
+    };
+    for (const auto mode : {RigExecEvaluationMode::ExecReference, RigExecEvaluationMode::BakedWithParityCheck}) {
+        RigExecRigEvaluator evaluator(stage, rigPath);
+        evaluator.SetEvaluationMode(mode);
+        CHECK(evaluator.Compile());
+        check(evaluator.Evaluate(UsdTimeCode(1)), 4);
+        check(evaluator.Evaluate(UsdTimeCode(2)), 6);
+        RigExecValueOverride drag{add.GetPath(), TfToken(), TfToken("inputs:value"), VtValue(0.5f)};
+        evaluator.SetInteractiveOverrides({drag});
+        check(evaluator.Evaluate(UsdTimeCode(1)), 5);
+        if (mode == RigExecEvaluationMode::BakedWithParityCheck) {
+            std::shared_ptr<const RigExecFrozenProgram> frozen;
+            std::string error;
+            CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
+            RigExecFrameInputs inputs;
+            CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(1), {drag}, &inputs, &error));
+            RigExecFrozenEvalContext context;
+            context.epochDigest = evaluator.GetBindingEpochDigest();
+            context.slotCount = evaluator.GetBakedProgram()->GetProviderCount();
+            context.varyingInputCount = inputs.values.size();
+            context.frozen = frozen.get();
+            check(RigExecEvaluateFrozen(context, inputs, RigExecMakeProductionStepRunner()), 5);
+        }
+        evaluator.ClearInteractiveOverrides();
+        check(evaluator.Evaluate(UsdTimeCode(1)), 4);
+    }
+}
+
 // An AUTHORED posed:space is the pose: exec returns its frame and reads
 // neither the avars nor the parent, so the baked program says the same and
 // the epoch bakes. An ANIMATED one bakes too, now that the provider ladder
@@ -4574,6 +4640,7 @@ main()
     TestSolverBatchLevelAudit();
     TestAuthoredPosedSpaceBakesAndAnimatedOneFollows();
     TestSingleChainIkOwnInputsMoveOverTimeAndUnderDrag();
+    TestSingleChainIkComputedStretch();
 
     if (failures) {
         std::printf("%d FAILURE(S)\n", failures);

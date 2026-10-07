@@ -566,6 +566,29 @@ main()
         auto legacy = RigExecSolveSingleChainIk(chain, chain.back(), params);
         CHECK(Near(UnitX(legacy[0]), GfVec3d(0, 1, 0)));
     }
+    {
+        std::vector<RigExecPointFrame> chain = {MakeFrame(GfVec3d(0)),
+            MakeFrame(GfVec3d(0, 2, 0)),MakeFrame(GfVec3d(0, 3, 0))};
+        RigExecSingleChainIkParams p;
+        p.preserveJointOrientation = true;
+        p.stretch = 1;
+        const auto goal=MakeFrame(GfVec3d(0,6,0));
+        auto solved=RigExecSolveSingleChainIk(chain,goal,p);
+        CHECK(Near(solved[1].Origin(),GfVec3d(0,4,0)));
+        CHECK(Near(solved.back().Origin(),goal.Origin()));
+        CHECK(Near((solved[0].points[2]-solved[0].Origin()).GetLength(),
+                   2*(chain[0].points[2]-chain[0].Origin()).GetLength()));
+        p.stretch=0.5;
+        solved=RigExecSolveSingleChainIk(chain,goal,p);
+        CHECK(Near(solved.back().Origin(),GfVec3d(0,4.5,0)));
+        p.weight=0.5;
+        solved=RigExecSolveSingleChainIk(chain,goal,p);
+        CHECK(Near(solved.back().Origin(),GfVec3d(0,3.75,0)));
+        p.stretch=std::numeric_limits<double>::quiet_NaN();
+        CHECK(RigExecSolveSingleChainIk(chain,goal,p)[0].IsDegenerate());
+        p.weight=0;
+        CHECK(Near(RigExecSolveSingleChainIk(chain,goal,p)[1].Origin(),chain[1].Origin()));
+    }
     TestTwoJointReachableAndEndOrientation();
     TestLongerReachableRotatePlane();
     TestUnreachableGoal();

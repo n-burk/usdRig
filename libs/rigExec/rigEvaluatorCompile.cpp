@@ -14,6 +14,7 @@
 #include "pxr/base/work/dispatcher.h"
 #include "pxr/base/work/loops.h"
 #include "pxr/base/tf/diagnostic.h"
+#include "pxr/base/tf/getenv.h"
 #include "pxr/base/tf/pyLock.h"
 #include "pxr/base/tf/scoped.h"
 #include "pxr/base/tf/stringUtils.h"
@@ -402,7 +403,7 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
     // A deferred epoch (deferExecPrep) warms nothing. The warm-up only pays
     // for itself through the preparations behind it, and a deferred epoch
     // leaves the big three to _RealizeDeferredExecPrep; what it still
-    // prepares -- the guides, a connected-pose provider, the epoch rests --
+    // prepares -- the guides and the epoch rests --
     // asks for a few providers, each compiling what it needs. Warming the
     // whole rig for those made the warm-up the compile's critical path. Its
     // cost moves to the first frame that realizes the deferral (the
@@ -434,10 +435,9 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
     // compiling-thread work as it can. Both kinds of epoch run the solver
     // schedule, the provider seed and closure, the solver-input index and the
     // rest-channel scan beside the lane task. A dynamic epoch then joins for
-    // its solver-request and connected-pose preparations
+    // its solver-request preparations
     // (PrepareRequests.SolverBatches). A baked epoch defers the solver
-    // requests (deferExecPrep) and needs the lane back there only for a
-    // connected-pose prepare, or failing that just ahead of the commit,
+    // requests (deferExecPrep) and rejoins the lane ahead of the commit,
     // which publishes the guides the lane prepared.
     // Every object a lane task touches is declared here, ahead of both
     // dispatchers, so that it outlives them: a dispatcher's destructor waits,
@@ -3395,7 +3395,7 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
     // keys from here on -- and no other pass adds to newFirstFramePoseTaps
     // before the connected-pose and rest passes, which still follow, so
     // every tap id comes out as it did.
-    auto newFirstFramePoseTaps = std::make_unique<RigExecTapSet>(_stage);
+    auto newFirstFramePoseTaps = std::make_unique<RigExecTapSet>(_stage, 1);
     std::map<SdfPath, RigExecTapId> newFirstFramePoseFrames, newFirstFramePoseRests;
     // What used to be one PrepareRequests.ProviderTaps block, 22.5 ms with
     // nothing inside it to say which of its three quite different passes was
@@ -4392,11 +4392,16 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
     compileBlocks.Close();
     stampCompileRegion("Compile.SolverSchedule");
     compileBlocks.Next("PrepareRequests.ConnectedPoseTaps");
-    // Built here and prepared below, with the solver requests, once there is
-    // no stage work left to do beside the exec lane.
+    // Prepare refresh requests on demand. Bound their stock execution graphs
+    // to 16 partitions: overrides invalidate downstream nodes outside the
+    // request, while an executor per output duplicates too much upstream state.
+    // Partition 1 holds the complete seed; partition 0 serves other requests.
     std::map<SdfPath, std::set<SdfPath>> newPoseProviderInputs;
     std::map<SdfPath, std::unique_ptr<RigExecTapSet>> newConnectedPoseTaps;
     std::map<SdfPath, std::vector<SdfPath>> newConnectedPoseOverrideInputs;
+    std::map<SdfPath, std::vector<SdfPath>> newConnectedPoseLocalOverrideInputs;
+    std::vector<_ConnectedPoseBatch> newConnectedPoseBatches;
+    std::map<SdfPath, size_t> newConnectedPoseBatchIndex;
     std::vector<SdfPath> connectedProviders;
     for (const auto &[provider, info] : newPoseInputInfo) {
         if (info.connectedPose && !newJointBinding.count(provider))
@@ -4413,17 +4418,39 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
     for (const auto &[provider, info] : newPoseInputInfo) {
         seedProvider(provider);
         newPoseProviderInputs[provider] = info.providers;
+        newConnectedPoseLocalOverrideInputs[provider] = info.attributes;
+        auto &localAttributes = newConnectedPoseLocalOverrideInputs[provider];
+        std::sort(localAttributes.begin(), localAttributes.end());
+        std::set<SdfPath> attributes;
+        for (const SdfPath &input : poseProviderClosure(provider)) {
+            const auto &paths = newPoseInputInfo.at(input).attributes;
+            attributes.insert(paths.begin(), paths.end());
+        }
+        newConnectedPoseOverrideInputs[provider].assign(
+            attributes.begin(), attributes.end());
         if (info.connectedPose && !newJointBinding.count(provider)) {
-            auto taps = std::make_unique<RigExecTapSet>(_stage);
+            auto taps = std::make_unique<RigExecTapSet>(_stage, 2 + newConnectedPoseTaps.size() % 16);
             taps->Add(RigExecValueAddress::Prim(provider, _computePointFrame));
             newConnectedPoseTaps[provider] = std::move(taps);
-            std::set<SdfPath> attributes;
-            for (const SdfPath &input : poseProviderClosure(provider)) {
-                const auto &paths = newPoseInputInfo.at(input).attributes;
-                attributes.insert(paths.begin(), paths.end());
+        }
+    }
+    if (TfGetenv("RIGEXEC_CONNECTED_POSE_BATCH", "1") != "0") {
+        std::map<std::set<SdfPath>, std::vector<SdfPath>> groups;
+        for (const auto &[path, taps] : newConnectedPoseTaps)
+            groups[newPoseProviderInputs.at(path)].push_back(path);
+        for (const auto &[inputs, paths] : groups) {
+            if (paths.size() < 2) continue;
+            for (size_t start = 0; start < paths.size(); start += 64) {
+                _ConnectedPoseBatch batch;
+                batch.taps = std::make_unique<RigExecTapSet>(_stage, 2 + newConnectedPoseBatches.size() % 16);
+                const size_t index = newConnectedPoseBatches.size();
+                for (size_t i = start; i < std::min(start + 64, paths.size()); ++i) {
+                    batch.outputs[paths[i]] = batch.taps->Add(
+                        RigExecValueAddress::Prim(paths[i], _computePointFrame));
+                    newConnectedPoseBatchIndex[paths[i]] = index;
+                }
+                newConnectedPoseBatches.push_back(std::move(batch));
             }
-            newConnectedPoseOverrideInputs[provider].assign(
-                attributes.begin(), attributes.end());
         }
     }
     compileBlocks.Next("PrepareRequests.RestTaps");
@@ -4502,13 +4529,11 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
     // compiling thread in front of it. Now it runs beside the warm-up, and
     // the join waits only for what is left of it.
     // The preparations themselves are the ones the loop used to make as it
-    // went, in the order it made them: the solver requests in closing
-    // order, then the connected providers in path order, exactly as before.
+    // went, in the order it made them: the solver requests in closing order.
     // The one thing the move changes is precedence between two failures: a
     // rig whose pose steps close a cycle AND whose requests would not
     // prepare now reports the cycle, which the schedule finds first.
-    // A baked epoch prepares no solver request, and needs the lane here only
-    // for a connected provider.
+    // A deferred epoch prepares no solver request here.
     if (!deferExecPrep || !newConnectedPoseTaps.empty()) {
         joinExecLane();
     }
@@ -4522,16 +4547,11 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
             return fail("failed to prepare solver dependency level");
         }
     }
-    for (const auto &[provider, taps] : newConnectedPoseTaps) {
-        const bool connectedPrepared = execCall([&]() {
-            RIGEXEC_PROFILE_SCOPE_CAT(
-                _profiler, "TapPrepare connected", "compile");
-            return taps->Prepare();
-        });
-        if (!connectedPrepared) {
-            return fail("failed to prepare connected pose provider " + provider.GetString());
-        }
-    }
+    // Every connected provider is already on the shared seed request below.
+    // Individual requests are only needed when a later mover changes an
+    // expression's inputs within a generation. Evaluate prepares those on
+    // first use. Preparing all of them here retains a separate Exec schedule
+    // per provider even when the seed remains authoritative for every frame.
 
     compileBlocks.Next("PrepareRequests.ExecPrepare");
     if (newFirstFramePoseFrames.empty()) {
@@ -4742,7 +4762,11 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
         retireTaps(taps);
     }
     _connectedPoseTaps = std::move(newConnectedPoseTaps);
+    for (auto &batch : _connectedPoseBatches) retireTaps(batch.taps);
+    _connectedPoseBatches = std::move(newConnectedPoseBatches);
+    _connectedPoseBatchIndex = std::move(newConnectedPoseBatchIndex);
     _connectedPoseOverrideInputs = std::move(newConnectedPoseOverrideInputs);
+    _connectedPoseLocalOverrideInputs = std::move(newConnectedPoseLocalOverrideInputs);
     _connectedPoseCache.clear();
     _namespaceInheritsCache.clear();
     _nearestBlockingCache.clear();

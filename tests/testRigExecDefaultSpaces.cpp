@@ -242,6 +242,45 @@ static void TestMutualDefaultSpaceCycleClosure()
     }));
 }
 
+static void TestSuppliedSnapshotResults(size_t partition)
+{
+    const auto stage = UsdStage::CreateInMemory();
+    const SdfPath path("/Control");
+    auto control = stage->DefinePrim(path, TfToken("RigExecControl"));
+    RigExecTapSet taps(stage, partition);
+    const auto frame = taps.Add(RigExecValueAddress::Prim(path, TfToken("computePointFrame")));
+    const auto matrix = taps.Add(RigExecValueAddress::Prim(path, TfToken("computeMatrix")));
+    CHECK(taps.Prepare());
+    std::string authored;
+    stage->GetRootLayer()->ExportToString(&authored);
+    for (int pass = 0; pass < 4; ++pass) {
+        std::vector<RigExecValueOverride> overrides{
+            {path, TfToken(), TfToken("avars:tx"), VtValue(double(pass + 1))}};
+        const auto full = taps.Evaluate(UsdTimeCode(pass), overrides);
+        CHECK(full.IsComplete());
+        std::vector<VtValue> supplied(taps.GetTapCount());
+        supplied[pass % 2 ? matrix : frame] = full.Get(pass % 2 ? matrix : frame);
+        const auto partial = taps.EvaluateWithSuppliedResults(UsdTimeCode(pass), overrides, supplied);
+        CHECK(partial.IsComplete());
+        CHECK(partial.Get(frame) == full.Get(frame));
+        CHECK(partial.Get(matrix) == full.Get(matrix));
+    }
+    std::string after;
+    stage->GetRootLayer()->ExportToString(&after);
+    CHECK(after == authored);
+    // Both the full and residual requests must survive structural retirement.
+    CHECK(stage->RemovePrim(path));
+    control = stage->DefinePrim(path, TfToken("RigExecControl"));
+    CHECK(control.GetAttribute(TfToken("rest:tx")).Set(7.0));
+    const auto full = taps.Evaluate(UsdTimeCode::Default());
+    std::vector<VtValue> supplied(taps.GetTapCount());
+    supplied[frame] = full.Get(frame);
+    const auto partial = taps.EvaluateWithSuppliedResults(UsdTimeCode::Default(), {}, supplied);
+    CHECK(partial.IsComplete());
+    CHECK(partial.Get(matrix) == full.Get(matrix));
+    CHECK(!taps.EvaluateWithSuppliedResults(UsdTimeCode::Default(), {}, {}).IsValid());
+}
+
 int main()
 {
     // Before the first compile: the verifier reads its switch once.
@@ -252,6 +291,9 @@ int main()
     TestDefaultHierarchyAndOverrides();
     TestInvalidSpacesPropagate();
     TestAnimatedTwistTurns();
+    TestSuppliedSnapshotResults(0);
+    TestSuppliedSnapshotResults(1);
+    TestSuppliedSnapshotResults(2);
     std::printf("testRigExecDefaultSpaces: %d failure(s)\n", failures);
     return failures ? 1 : 0;
 }

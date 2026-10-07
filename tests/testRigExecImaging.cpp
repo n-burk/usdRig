@@ -4624,6 +4624,32 @@ TestGuideBoundsExport()
 }
 
 static void
+TestControlGuideSource()
+{
+    const auto stage=UsdStage::CreateInMemory();
+    stage->DefinePrim(SdfPath("/Rig"),TfToken("RigExecRoot"));
+    const auto control=stage->DefinePrim(SdfPath("/Rig/Control"),TfToken("RigExecControl"));
+    const auto source=stage->DefinePrim(SdfPath("/Rig/Source"),TfToken("RigExecJoint"));
+    CHECK(control.GetAttribute(TfToken("guide:shape")).Set(TfToken("custom")));
+    CHECK(control.GetAttribute(TfToken("guide:points")).Set(VtVec3fArray{{0,0,0},{1,0,0}}));
+    CHECK(control.GetAttribute(TfToken("guide:curveVertexCounts")).Set(VtIntArray{2}));
+    CHECK(control.GetRelationship(TfToken("guide:source")).SetTargets({source.GetPath()}));
+    RigExecImagingBridge bridge(stage,SdfPath("/Rig"));
+    std::vector<std::string> errors; CHECK(bridge.Compile(&errors));
+    for(double x:{2.0,5.0,-1.0}) {
+        CHECK(source.GetAttribute(TfToken("avars:tx")).Set(x));
+        CHECK(bridge.EvaluateAndPublish(UsdTimeCode::Default()));
+        const auto snapshot=bridge.GetStore()->Get();
+        const auto &published=snapshot->prims.at(control.GetPath());
+        CHECK(published.hasControlGuide);
+        CHECK(published.controlGuideFrame.ExtractTranslation()==GfVec3d(x,0,0));
+        CHECK(published.controlFrame.ExtractTranslation()==GfVec3d(0));
+        // The guide stays under the editable owner in the scene index.
+        CHECK(snapshot->prims.count(control.GetPath())==1);
+    }
+}
+
+static void
 TestCustomControlRestExtent()
 {
     const UsdStageRefPtr stage = UsdStage::CreateInMemory();
@@ -5430,6 +5456,7 @@ main(int argc, char **argv)
     TestBridgeOverShotStage(examplesDir);
     TestStandaloneControlGuide();
     TestCustomControlRestExtent();
+    TestControlGuideSource();
     TestJointHierarchyGuides(examplesDir);
     TestSimpleRigControlAndDeformation(examplesDir);
     TestControlGuides(examplesDir);

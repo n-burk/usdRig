@@ -809,6 +809,7 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
                 c.poleObjects.push_back(slot);
                 c.poleObjectNatives.push_back(native);
             }
+            c.ikStretch = bind(prim, "inputs:stretch", 0.0f);
             // Bound only in RotatePlane mode, which is the only mode the
             // dynamic walk reads them in: binding them everywhere would let
             // an override on one place itself on a solve that ignores it.
@@ -2219,6 +2220,7 @@ NoteConstraintInputs(const RigExecBakedProgramImpl::Constraint &constraint,
     // deal harder to forget.
     NoteInput(constraint.poleVector, step);
     NoteInput(constraint.twistDegrees, step);
+    NoteInput(constraint.ikStretch, step);
     // The authored source-weight, offset and pole-weight tables are NOT
     // noted here: they are not inputs the step reads at all. The prologue
     // re-reads them off the stage each run and compares them by value, and
@@ -3707,6 +3709,7 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
             params.mode = c.ikMode;
             params.preserveJointOrientation = c.preserveJointOrientation;
             params.weight = weight;
+            params.stretch = rd(c.ikStretch);
             // Read BEFORE the pole mode is consulted, and only in
             // RotatePlane mode, which is where the dynamic walk reads them:
             // object mode then overwrites params.pole. A different read

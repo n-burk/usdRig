@@ -1360,9 +1360,19 @@ private:
     /// write invalidates only refreshes that can read that frame.
     std::vector<std::vector<int>> _poseRefreshDependents;
     std::map<SdfPath, std::unique_ptr<RigExecTapSet>> _connectedPoseTaps;
+    // Providers with the same direct frame inputs share an override-bearing
+    // request. Schedules remain lazy; compiling a large rig does not prepare
+    // every individual or grouped request.
+    struct _ConnectedPoseBatch {
+        std::unique_ptr<RigExecTapSet> taps;
+        std::map<SdfPath, RigExecTapId> outputs;
+    };
+    std::vector<_ConnectedPoseBatch> _connectedPoseBatches;
+    std::map<SdfPath, size_t> _connectedPoseBatchIndex;
     /// Sorted attribute closures for connected-pose cache fingerprints.
     /// An unrelated dragged channel cannot change that provider's result.
     std::map<SdfPath, std::vector<SdfPath>> _connectedPoseOverrideInputs;
+    std::map<SdfPath, std::vector<SdfPath>> _connectedPoseLocalOverrideInputs;
     struct _ConnectedPoseResult {
         std::vector<RigExecValueOverride> inputs;
         UsdTimeCode time = UsdTimeCode::Default();

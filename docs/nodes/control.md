@@ -270,18 +270,31 @@ Local Z scale applied before rotation and translation; finite magnitudes below 1
 
 *Type:* `uniform token`. *Default:* `"circle"`.
 
-Valid values: `sphere`, `circle`, `box`, `cube`, `diamond`, `pyramid`.
+Valid values: `sphere`, `circle`, `box`, `cube`, `diamond`, `pyramid`, `custom`.
 
 Guide primitive synthesized at the control's posed frame
 origin (spec section 10.3 extension), exactly parallel to the
-RigExecJoint sphere/cone guides. Every shape is unit-sized and
+RigExecJoint sphere/cone guides. The built-in shapes are unit-sized and
 centered at the origin: sphere and circle have radius 1, box and
 cube span +-1, diamond (octahedron) has vertices at +-1 on each
 axis, and pyramid has base corners (+-1, -1, +-1) with apex
 (0, 1, 0). circle and box are the planar shapes -- normal +Y,
 drawn in the local XZ plane -- while cube is the 3D box; this is
 the conventional rigging distinction between the two box-ish
-tokens.
+tokens. custom uses arbitrary local polylines from guide:points and
+guide:curveVertexCounts, preserving the evaluated affine frame.
+
+#### `guide:points`
+
+*Type:* `point3f[]`. *Default:* `[]`.
+
+Local vertices of a custom wire guide, placed by the evaluated control frame.
+
+#### `guide:curveVertexCounts`
+
+*Type:* `int[]`. *Default:* `[]`.
+
+Consecutive polyline sizes for guide:shape=custom. Each is at least two; their sum must equal guide:points size.
 
 #### `guide:planeNormal`
 
@@ -362,6 +375,16 @@ lets a control whose pivot is buried inside a character (the upper
 face turns about the base of the skull) be drawn somewhere it can
 be seen and picked. Scaled by the evaluated control-frame scale, so
 a scaled control carries its shape with it.
+
+#### `guide:orient`
+
+*Type:* `quatf`. *Default:* `(1, 0, 0, 0)`.
+
+Rotation of the drawn shape in the control's LOCAL frame,
+applied after guide:scaleX/Y/Z and guide:planeNormal and before
+guide:offset. Lets a shape keep its placement when the control's
+own axes are re-oriented: the shape stays where it was drawn while
+the axes the animator rotates about change. Identity by default.
 
 #### `guide:displayColor`
 

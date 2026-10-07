@@ -570,6 +570,7 @@ private:
         GfVec3d offset = GfVec3d(0.0);
         /// guide:orient -- the shape's rotation in the control's frame.
         GfQuatf orient = GfQuatf(1.0f);
+        SdfPath guideSource;
         VtVec3fArray customPoints;
         VtIntArray customCounts;
         bool radiusReady = false;

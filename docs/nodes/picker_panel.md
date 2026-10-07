@@ -79,6 +79,12 @@ Panel extent in picker units, before the view's fit scale.
 
 Panel fill behind every button.
 
+#### `ui:backgroundImage`
+
+*Type:* `uniform asset`. *Default:* `@@`.
+
+Optional image stretched to the panel extent behind buttons; resolved relative to its authoring layer and packaged with USDZ.
+
 ## Example
 
 `picker.usda` carries a single `Body` panel, 200 by 260 picker units on

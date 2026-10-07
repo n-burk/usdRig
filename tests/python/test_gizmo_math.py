@@ -3191,9 +3191,56 @@ def TestSpaceSwitchTargetsAreClaimed():
         gizmoMath.SetPublishedControlFrameReader(previous)
 
 
+def TestSplitChannelSpaces():
+    stage = Usd.Stage.CreateInMemory()
+    stage.DefinePrim('/Rig', 'RigExecRoot')
+    control = stage.DefinePrim('/Rig/Control', 'RigExecControl')
+    rotation = stage.DefinePrim('/Rig/Rotation', 'RigExecControl')
+    translation = stage.DefinePrim('/Rig/Translation', 'RigExecControl')
+    control.GetRelationship('rigExec:channelSpaces').SetTargets([rotation.GetPath(), translation.GetPath()])
+    control.GetAttribute('posed:space').SetConnections(['/Rig/Compute.outputs:matrix'])
+    for name in gizmoMath.AVAR_T + gizmoMath.AVAR_R:
+        control.GetAttribute(name).Set(0.0)
+    control.GetAttribute('avars:sx').Set(1.0)
+    control.GetAttribute('avars:sy').Set(1.0)
+    control.GetAttribute('avars:sz').Set(1.0)
+    spaces = {control.GetPath(): Gf.Matrix4d(1),
+              rotation.GetPath(): _Rot(Gf.Vec3d(0,0,1), 35),
+              translation.GetPath(): Gf.Matrix4d(1).SetScale(Gf.Vec3d(2,3,4))}
+    old = gizmoMath._keylessControlFrameReader
+    gizmoMath.SetPublishedControlFrameReader(lambda st, path, time: spaces.get(path) if st == stage else None)
+    try:
+        writer = gizmoMath.Writer(stage, Usd.TimeCode.Default(), gizmoMath.WRITE_DEFAULT)
+        target, reason = gizmoMath.MakeTarget(stage, control, gizmoMath.CHANNELS_POSE, writer)
+        _Check(target is not None, reason)
+        target.BeginDrag()
+        target.ApplyTranslate(Gf.Vec3d(2,6,12))
+        writer.CommitToStage()
+        for name, expected in zip(gizmoMath.AVAR_T, (1,2,3)):
+            _Check(_Close(control.GetAttribute(name).Get(), expected), 'translation used rotation basis')
+        target.BeginDrag()
+        target.ApplyRotate(Gf.Vec3d(1,0,0), 15)
+        writer.CommitToStage()
+        angles = [control.GetAttribute(name).Get() for name in gizmoMath.AVAR_R]
+        actual = gizmoMath.RotationFromEuler('XYZ', *angles) * spaces[rotation.GetPath()]
+        expected = spaces[rotation.GetPath()] * _Rot(Gf.Vec3d(1,0,0), 15)
+        _Check(_MatClose(actual, expected), 'rotation used translation basis')
+        control.GetAttribute('rigExec:translationEnabled').Set(False)
+        target.Refresh()
+        _Check(not target.supportsTranslate, 'connected bone translation remained editable')
+        # Malformed / missing publication must never authorize editing an
+        # arbitrary connected frame, nor fall back to an identity basis.
+        del spaces[translation.GetPath()]
+        refused, reason = gizmoMath.MakeTarget(stage, control, gizmoMath.CHANNELS_POSE, writer)
+        _Check(refused is None and bool(reason), 'missing published basis accepted')
+    finally:
+        gizmoMath.SetPublishedControlFrameReader(old)
+
+
 def main():
     _RegisterSchema()
     groups = [
+        ("split channel spaces", TestSplitChannelSpaces),
         ("euler round trip", TestEulerRoundTrip),
         ("compose avars", TestComposeAvarMatrix),
         ("rig frames replica", TestRigFramesReplica),

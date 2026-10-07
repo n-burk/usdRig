@@ -176,6 +176,24 @@ class RigExecControl "RigExecControl" (
     same synthesis-only style as the RigExecJoint guides."""
 )
 {
+    rel rigExec:channelSpaces (
+        doc = """Optional ordered pair of control providers publishing the
+        rotation and translation channel bases in asset space. This is an
+        explicit editing contract for a connected posed:space computation
+        that consumes this control's unconnected TRS avars: rotation is
+        S * R * rotationSpace, and position is translationSpace.Transform(T).
+        A channel-independent scale multiplier before R is allowed. Hosts
+        must read all three frames from the same evaluated publication and
+        refuse editing if the providers are missing or singular. The pair
+        does not replace evaluation or authorize editing an arbitrary solver
+        output. Pivot edits are unavailable for this contract."""
+    )
+    uniform bool rigExec:translationEnabled = true (
+        doc = "Whether a channelSpaces control accepts translation edits. Rotation and scale remain editable when false."
+    )
+    rel guide:source (
+        doc = "Optional single rig control or joint whose evaluated frame places the guide. Picking still selects the owning control."
+    )
     double avars:sx = 1 (
         doc = "Local X scale applied before rotation and translation; finite magnitudes below 1e-4 resolve to signed 1e-4, strict authoring rejects non-finite values, and raw non-finite USD resolves to identity on this axis."
     )
@@ -1455,6 +1473,11 @@ class RigExecSingleChainIkConstraint "RigExecSingleChainIkConstraint" (
         doc = "Absolute asset-space pole point used in vector mode."
     )
     double inputs:twistDegrees = 0
+    float inputs:stretch = 0 (
+        doc = """Uniform segment growth beyond full reach in [0, 1].
+        Zero keeps original lengths; one reaches an out-of-reach goal.
+        Joint frames scale along their bones so native skin follows."""
+    )
     uniform token rigExec:solverMode = "rotatePlane" (
         allowedTokens = ["rotatePlane", "singleChain"]
     )

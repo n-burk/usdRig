@@ -1,5 +1,6 @@
 // RigExec arbitrary-length single-chain IK kernel.
 #include "singleChainIk.h"
+#include "limbStretchKernel.h"
 
 #include <algorithm>
 #include <cmath>
@@ -529,8 +530,17 @@ RigExecSolveSingleChainIk(
         }
     }
 
+    if (!std::isfinite(params.stretch) || params.stretch < 0 || params.stretch > 1)
+        return _Degenerate(currentFrames);
+    double totalLength = 0;
+    for (double length : lengths) totalLength += length;
+    const double goalDistance = (effectorFrame.Origin()-original.front()).GetLength();
+    const double growth = 1 + params.stretch * std::max(0.0, goalDistance/totalLength-1);
+    std::vector<double> solveLengths = lengths;
+    if (growth != 1) for (double &length : solveLengths) length *= growth;
+
     const std::vector<GfVec3d> solved = _SolvePositions(
-        original, lengths, bases, effectorBasis, effectorFrame.Origin(),
+        original, solveLengths, bases, effectorBasis, effectorFrame.Origin(),
         params, positionEpsilon, angularEpsilon);
     if (solved.size() != currentFrames.size()) {
         return _Degenerate(currentFrames);
@@ -590,12 +600,20 @@ RigExecSolveSingleChainIk(
             const GfVec3d direction = _BlendDirection(
                 currentDirection, solvedDirection, weight, bases[i].up,
                 angularEpsilon);
-            blended[i + 1] = blended[i] + direction * lengths[i];
+            blended[i + 1] = blended[i] + direction * lengths[i] * (1+weight*(growth-1));
         }
         for (size_t i = 0; i < result.size(); ++i) {
             result[i] = _BlendEndFrame(
                 bases[i], solvedBases[i], blended[i], weight,
                 angularEpsilon);
+        }
+    }
+
+    if (growth != 1) {
+        for (size_t i=0; i+1<result.size(); ++i) {
+            const auto segment=result[i+1].Origin()-result[i].Origin();
+            RigExecScaleFrameAlong(result[i].points.data(),segment.GetNormalized(),
+                                   segment.GetLength()/lengths[i]);
         }
     }
 

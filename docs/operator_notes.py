@@ -107,6 +107,12 @@ under `IkAsset` because that parent is what bounds the rig's write set.""",
             "`rigExec:baked` has to be *authored* to be heard (the check is "
             "`HasAuthoredValue`), it is only a request, and it is the weakest of "
             "the three ways the mode is chosen.",
+            "An importer that has validated its connected frame and attribute "
+            "input closures may set boolean custom data "
+            "`rigExec:connectedPoseSeedReuse` on the root. This lets refresh "
+            "requests pin dependency frames and omit upstream overrides. "
+            "Other rigs retain complete override reads; "
+            "`RIGEXEC_CONNECTED_POSE_SEED_REUSE=0` disables the optimization.",
         ],
         "see_also": [
             ("control", "Control"),
@@ -1203,7 +1209,7 @@ whatever the last solver in each joint's stack committed.
 Name the two endpoints — `rigExec:firstJoint` and `rigExec:endJoint` — and the
 chain between them is inferred from namespace nesting, so the same node drives
 a two-joint chain or a ten-joint one. The first joint's origin stays planted,
-every segment keeps its length, and the end joint lands on the effector
+segments keep their lengths by default, and the end joint lands on the effector
 whenever the goal is in reach.""",
         "how_it_works": """The constraint runs in the pose phase, ordered BELOW the
 geometry movers in the Movers stack — the hierarchy runs bottom-up, so the
@@ -1219,7 +1225,9 @@ aimed at the next solved joint and writes the whole chain back atomically — a
 failed solve passes every joint through untouched rather than half-posing the
 limb. `rigExec:evaluationMode` decides whether the segment lengths come from
 the joints' rests (`neverTS`, the default) or from their animated translation
-and scale.""",
+and scale. `inputs:stretch` blends uniform extension from zero (rigid lengths)
+to one (full extension to a goal beyond the chain's reach). It never shortens
+the chain, and the common mover envelope also blends that extension.""",
         "wiring": [
             # rigEvaluator.cpp:5384-5392 -- exactly one prim target, or compile fails.
             ("`rigExec:firstJoint`", "Joint that anchors the chain; its origin never moves.", "yes"),
@@ -1261,9 +1269,10 @@ at the elbow ring.""",
             "entirely — the effector's orientation picks the bend plane — and the "
             "pole relationships are not even bound in that mode, so leftover pole "
             "wiring cannot break the compile.",
-            "There is no stretch or softness dial: segment lengths are preserved "
-            "exactly, and a goal past full reach returns the chain straightened "
-            "down the root-to-goal ray. Reach for Two-Bone IK when you want stretch.",
+            "`inputs:stretch` defaults to zero: a goal past full reach returns "
+            "the chain straightened down the root-to-goal ray at its original "
+            "length. Set it within [0, 1] to blend uniform extension. Connected "
+            "float inputs and interactive property overrides are supported.",
             "The chain, the effector and the pole are named by their own "
             "relationships: this operator does not read the generic "
             "`rigExec:sources` list at all.",

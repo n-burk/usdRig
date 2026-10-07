@@ -1456,6 +1456,9 @@ class RigExecUsdviewContainer(PluginContainer):
             return
         if getattr(self, "_previewWarmingPaused", False):
             return
+        if self._IsNavigating():
+            self._ScheduleWarmingFlush()
+            return
         self._warmingCommitPending = False
         try:
             self._Imaging().OnEditCommitted()
@@ -1661,9 +1664,9 @@ class RigExecUsdviewContainer(PluginContainer):
                 or getattr(self, "_previewWarmingPaused", False)):
             self._SleepWarmingDriver()
             return
-        if self._IsPlaying():
+        if self._IsPlaying() or self._IsNavigating():
             # Keep the timer armed: RootDataModel has no playingChanged
-            # signal, so the next idle tick resumes after playback stops.
+            # signal, so the next idle tick resumes after playback or navigation.
             return
         # A range edit that lands mid-warm re-centers the sweep from
         # here, so the tick below queries the timeline the stage has,
@@ -1736,6 +1739,14 @@ class RigExecUsdviewContainer(PluginContainer):
         api = getattr(self, "_api", None)
         return bool(getattr(getattr(api, "dataModel", None),
                             "playing", False))
+
+    def _IsNavigating(self):
+        # Dynamic warming may evaluate a whole pose on the calling thread.
+        # A recurring timer is not idle time while the viewport is dragging.
+        api = getattr(self, "_api", None)
+        controller = getattr(api, "_UsdviewApi__appController", None)
+        view = getattr(controller, "_stageView", None)
+        return bool(getattr(view, "_dragActive", False))
 
     def _OnFrameChanged(self, frame):
         # The SIGNAL's frame, never dataModel.currentFrame -- see

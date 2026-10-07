@@ -143,6 +143,7 @@ bin\launch_usdview.bat docs\examples\two_bone_ik.usda
 - Keep the deformed geometry inside the same asset prim as the rig: a mover whose target is outside the rig root's parent fails compile with "targets outside the rig asset".
 - Order two movers that write the same target — or a solver against a constraint, or two solvers against each other, which are all steps of ONE pose stack — by arranging them in namespace: nesting, or `reorder nameChildren` on their parent. The bottom composed sibling executes first, the compiler reads the final composed order and nothing about how it arose, and nothing else breaks a tie. Put `Solvers` at the bottom of the rig root for the classic "solve, then revise" shape.
 - `rigExec:baked` has to be *authored* to be heard (the check is `HasAuthoredValue`), it is only a request, and it is the weakest of the three ways the mode is chosen.
+- An importer that has validated its connected frame and attribute input closures may set boolean custom data `rigExec:connectedPoseSeedReuse` on the root. This lets refresh requests pin dependency frames and omit upstream overrides. Other rigs retain complete override reads; `RIGEXEC_CONNECTED_POSE_SEED_REUSE=0` disables the optimization.
 
 ## See also
 

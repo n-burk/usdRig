@@ -12,6 +12,7 @@
 #include "pxr/base/gf/rotation.h"
 #include "pxr/base/work/dispatcher.h"
 #include "pxr/base/tf/pyLock.h"
+#include "pxr/base/tf/getenv.h"
 #include "pxr/usd/usd/attribute.h"
 #include "pxr/usd/usd/prim.h"
 #include "pxr/usd/usd/relationship.h"
@@ -77,6 +78,7 @@ const TfToken _kDynWorldUpObjectRotationUp("objectRotationUp");
 const TfToken _kDynParentConstraint("RigExecParentConstraint");
 const TfToken _kDynSingleChainIkConstraint("RigExecSingleChainIkConstraint");
 const TfToken _kDynParentSpace("parent:space");
+const TfToken _kDynComputeMatrix("computeMatrix");
 
 } // namespace
 
@@ -228,10 +230,9 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     bool seedFromCache = false;
     if (_firstFramePoseTaps) {
         RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "FirstFramePose", "pose");
-        // Warm the shared executor before anything else: every override
-        // pull in this evaluator runs in a throwaway sub-executor seeded
-        // from the main one, and a cold main cache makes each such pull
-        // recompute the whole upstream network behind it.
+        // Warm the seed executor: override pulls use a throwaway sub-executor
+        // seeded from its main cache. Each connected-request partition warms
+        // its own cache in Evaluate; a cold cache repeats upstream work.
         _firstFramePoseTaps->Warm(time);
         // The tap-level dirty flag is drained, never consulted: exec's
         // time/value callbacks fire across sibling frames sharing this
@@ -522,8 +523,44 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                 seedSnapshot = _spaceSwitchSnapshot;
                 continue;
             }
-            const RigExecSnapshot switched =
-                _firstFramePoseTaps->Evaluate(time, baseOverrides);
+            // A switched leaf with no pose consumers cannot affect any
+            // other seed value. Replace its direct frame taps in a copy;
+            // keep all overrides for subsequent requests as usual.
+            std::unordered_map<SdfPath, VtValue, SdfPath::Hash> leafValues;
+            bool leavesOnly = true;
+            for (const auto &value : switchOverrides) {
+                const auto provider = _providerIndex.find(value.prim);
+                if (provider == _providerIndex.end() ||
+                    !_poseRefreshDependents[provider->second].empty() ||
+                    !_hierDescendants[provider->second].empty()) {
+                    leavesOnly = false;
+                    break;
+                }
+                leafValues[value.prim] = value.value;
+            }
+            if (leavesOnly) {
+                for (size_t tap = 0; tap < seedSnapshot._values.size(); ++tap) {
+                    const auto &address = _firstFramePoseTaps->GetAddress(tap);
+                    if (leafValues.count(address.target.GetPrimPath()) &&
+                        (address.target.IsPropertyPath() ||
+                         address.publicComputation != _computePointFrame)) {
+                        leavesOnly = false;
+                        break;
+                    }
+                }
+            }
+            RigExecSnapshot switched;
+            if (leavesOnly) {
+                RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "SpaceSwitches.LeafSnapshot", "pose");
+                switched = seedSnapshot;
+                for (size_t tap = 0; tap < switched._values.size(); ++tap) {
+                    const auto &address = _firstFramePoseTaps->GetAddress(tap);
+                    const auto value = leafValues.find(address.target);
+                    if (value != leafValues.end()) switched._values[tap] = value->second;
+                }
+            } else {
+                switched = _firstFramePoseTaps->Evaluate(time, baseOverrides);
+            }
             if (!switched.IsValid() || !switched.IsComplete()) {
                 pose.diagnostics.push_back(
                     "space switch evaluation incomplete");
@@ -789,6 +826,8 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     // At evaluation, from the stage, into the frames in memory. Nothing is
     // authored: the rig follows the Xform the author wrote, wherever they
     // wrote it, and no layer is rewritten.
+    const auto authRestFrames = restFrames;
+    const auto authRestLive = restLive;
     if (!_ComposeInterveningXforms(assetRoot, &constraintXformCache,
                                    &restFrames, &restLive, &baseFrames,
                                    &finalFrames, &finalLive, &pose)) {
@@ -1038,6 +1077,9 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     // in one generation. Keep a completed refresh until an intervening frame
     // write reaches it through the compiled expression dependencies.
     std::vector<unsigned char> refreshComplete(_providerPaths.size(), 0);
+    // Bits: known, base equals seed, final equals seed. Every pose write
+    // invalidates the affected dependency closure below.
+    std::vector<unsigned char> seedMatches(_providerPaths.size(), 0);
     std::vector<uint64_t> refreshInvalidated(_providerPaths.size(), 0);
     uint64_t refreshWrite = 0;
     const auto invalidateRefreshes = [&](std::vector<int> pending) {
@@ -1047,6 +1089,7 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
             if (refreshInvalidated[index] == refreshWrite) continue;
             refreshInvalidated[index] = refreshWrite;
             refreshComplete[index] = 0;
+            seedMatches[index] = 0;
             const auto &dependents = _poseRefreshDependents[index];
             pending.insert(pending.end(), dependents.begin(), dependents.end());
         }
@@ -1252,6 +1295,34 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     // reads them. Within a generation an unchanged input tuple reuses the
     // previous refresh, even when many operators consume the same control.
     std::map<SdfPath, std::vector<RigExecValueOverride>> connectedInputCache;
+    struct ConnectedBatchResult {
+        std::vector<RigExecValueOverride> baseInputs, finalInputs;
+        RigExecSnapshot base, final;
+        bool ready = false;
+    };
+    std::map<size_t, ConnectedBatchResult> connectedBatchResults;
+    // Importers may opt in after validating their declared frame and
+    // attribute input closures. Other rigs retain complete override reads.
+    const VtValue seedReuse = _stage->GetPrimAtPath(_rigPath).GetCustomDataByKey(
+        TfToken("rigExec:connectedPoseSeedReuse"));
+    const bool seedReuseDefault = seedReuse.IsHolding<bool>() && seedReuse.UncheckedGet<bool>();
+    const bool reuseConnectedSeeds = TfGetenv("RIGEXEC_CONNECTED_POSE_SEED_REUSE",
+        seedReuseDefault ? "1" : "0") != "0";
+    // baseOverrides is complete for this generation. Index its frame pins once
+    // instead of rebuilding the complement of each provider's direct inputs.
+    // Keep original indices so duplicate overrides retain their precedence.
+    std::unordered_map<SdfPath, std::vector<size_t>, SdfPath::Hash> frameOverrideIndices;
+    std::vector<size_t> otherOverrideIndices;
+    if (reuseConnectedSeeds) {
+        for (size_t i = 0; i < baseOverrides.size(); ++i) {
+            const auto &input = baseOverrides[i];
+            if (input.attribute.IsEmpty() && input.computation == _computePointFrame) {
+                frameOverrideIndices[input.prim].push_back(i);
+            } else {
+                otherOverrideIndices.push_back(i);
+            }
+        }
+    }
     const auto sameOverrides = [](const auto &a, const auto &b) {
         return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin(),
             [](const RigExecValueOverride &x, const RigExecValueOverride &y) {
@@ -1259,6 +1330,24 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                     x.attribute == y.attribute && x.value == y.value;
             });
     };
+    const auto seedMatch = [&](const SdfPath &input) -> unsigned char {
+        const auto index = _providerIndex.find(input);
+        if (index == _providerIndex.end()) return 4;
+        auto &match = seedMatches[index->second];
+        if (match) return match;
+        match = 4;
+        const auto seed = _firstFramePoseFrames.find(input);
+        const auto base = baseFrames.find(input);
+        if (seed == _firstFramePoseFrames.end() || base == baseFrames.end() ||
+            !finalLive[index->second]) return match;
+        const auto &value = seedSnapshot.Get(seed->second);
+        if (!value.IsHolding<RigExecPointFrame>()) return match;
+        const auto &original = value.UncheckedGet<RigExecPointFrame>();
+        if (base->second.points == original.points) match |= 1;
+        if (finalFrames[index->second].points == original.points) match |= 2;
+        return match;
+    };
+    std::unordered_map<SdfPath, std::vector<SdfPath>, SdfPath::Hash> seedClosures;
     refreshPoseProvider = [&](const SdfPath &requested) {
         // Nothing to refresh when no provider has a connected tap: the walk
         // below would visit the whole pose DAG to discover that at every
@@ -1268,9 +1357,11 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
             return true;
         }
         std::vector<std::pair<SdfPath, bool>> pending{{requested, false}};
-        std::set<SdfPath> active, complete;
+        // These sets only test membership; traversal order comes from pending.
+        std::unordered_set<SdfPath, SdfPath::Hash> active, complete;
         while (!pending.empty()) {
-            const auto [path, ready] = pending.back();
+            const SdfPath path = pending.back().first;
+            const bool ready = pending.back().second;
             pending.pop_back();
             if (path.IsEmpty() || complete.count(path) ||
                 _jointSolverBinding.count(path) || constrainedProviders.count(path)) continue;
@@ -1304,14 +1395,7 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
             // Leave the individual tap's dirty/cache state intact: a later
             // phase revision must still invalidate a previous-generation hit.
             const auto unchangedFromSeed = [&](const SdfPath &input) {
-                const auto seed = _firstFramePoseFrames.find(input);
-                const auto base = baseFrames.find(input);
-                const auto index = _providerIndex.find(input);
-                if (seed == _firstFramePoseFrames.end() || base == baseFrames.end() ||
-                    index == _providerIndex.end() || !finalLive[index->second]) return false;
-                const auto original = seedSnapshot.Get<RigExecPointFrame>(seed->second);
-                return base->second.points == original.points &&
-                    finalFrames[index->second].points == original.points;
+                return seedMatch(input) == 7;
             };
             if (unchangedFromSeed(path) &&
                 (dependencies == _poseProviderInputs.end() ||
@@ -1319,24 +1403,94 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                 refreshComplete[provider->second] = 1;
                 continue;
             }
-            std::vector<RigExecValueOverride> baseInputs = baseOverrides;
-            std::vector<RigExecValueOverride> finalInputs = baseOverrides;
+            const auto &attributes = _connectedPoseOverrideInputs.at(path);
+            const auto &localAttributes = _connectedPoseLocalOverrideInputs.at(path);
+            std::vector<RigExecValueOverride> baseInputs;
+            std::vector<SdfPath> removedAttributes;
+            if (!reuseConnectedSeeds) {
+                baseInputs = baseOverrides;
+            } else {
+                std::vector<size_t> included;
+                for (size_t i : otherOverrideIndices) {
+                    const auto &input = baseOverrides[i];
+                    if (input.attribute.IsEmpty()) {
+                        included.push_back(i);
+                    } else {
+                        const SdfPath attribute = input.prim.AppendProperty(input.attribute);
+                        if (std::binary_search(localAttributes.begin(), localAttributes.end(), attribute))
+                            included.push_back(i);
+                        else removedAttributes.push_back(attribute);
+                    }
+                }
+                const auto includeFrames = [&](const SdfPath &input) {
+                    const auto found = frameOverrideIndices.find(input);
+                    if (found != frameOverrideIndices.end())
+                        included.insert(included.end(), found->second.begin(), found->second.end());
+                };
+                includeFrames(path);
+                if (dependencies != _poseProviderInputs.end()) {
+                    for (const SdfPath &input : dependencies->second)
+                        if (input != path) includeFrames(input);
+                }
+                std::sort(included.begin(), included.end());
+                baseInputs.reserve(included.size());
+                for (size_t i : included) baseInputs.push_back(baseOverrides[i]);
+            }
+            std::vector<RigExecValueOverride> finalInputs = baseInputs;
+            // An override invalidates the whole downstream Exec network,
+            // even outside this request. The shared seed already provides
+            // unchanged inputs. Keep a pin when any dependency has changed:
+            // recomputing an unchanged child against a revised ancestor would
+            // otherwise change the pose phase that this request must read.
+            const auto unchangedSeedClosure = [&](const SdfPath &input) -> unsigned char {
+                const auto closure = _connectedPoseOverrideInputs.find(input);
+                if (closure == _connectedPoseOverrideInputs.end()) return 0;
+                for (const auto &attribute : removedAttributes) {
+                    if (std::binary_search(closure->second.begin(), closure->second.end(), attribute))
+                        return 0;
+                }
+                auto cachedClosure = seedClosures.find(input);
+                if (cachedClosure == seedClosures.end()) {
+                    std::vector<SdfPath> pending{input}, paths;
+                    std::unordered_set<SdfPath, SdfPath::Hash> seen;
+                    while (!pending.empty()) {
+                        const auto current = pending.back();
+                        pending.pop_back();
+                        if (!seen.insert(current).second) continue;
+                        paths.push_back(current);
+                        const auto upstream = _poseProviderInputs.find(current);
+                        if (upstream != _poseProviderInputs.end())
+                            pending.insert(pending.end(), upstream->second.begin(), upstream->second.end());
+                    }
+                    cachedClosure = seedClosures.emplace(input, std::move(paths)).first;
+                }
+                unsigned char match = 3;
+                for (const SdfPath &current : cachedClosure->second) {
+                    if (frameOverrideIndices.count(current) && current != path &&
+                        (dependencies == _poseProviderInputs.end() || !dependencies->second.count(current)))
+                        return 0;
+                    match &= seedMatch(current);
+                    if (!match) return 0;
+                }
+                return match;
+            };
             if (dependencies != _poseProviderInputs.end()) {
                 for (const SdfPath &input : dependencies->second) {
                     const auto base = baseFrames.find(input);
                     const auto currentIt = _providerIndex.find(input);
                     if (base == baseFrames.end() || currentIt == _providerIndex.end() ||
                         !finalLive[currentIt->second]) continue;
-                    baseInputs.push_back({input, _computePointFrame, TfToken(), VtValue(base->second)});
-                    finalInputs.push_back({input, _computePointFrame, TfToken(), VtValue(finalFrames[currentIt->second])});
+                    const unsigned char seedPhases = reuseConnectedSeeds ? unchangedSeedClosure(input) : 0;
+                    if (!(seedPhases & 1))
+                        baseInputs.push_back({input, _computePointFrame, TfToken(), VtValue(base->second)});
+                    if (!(seedPhases & 2))
+                        finalInputs.push_back({input, _computePointFrame, TfToken(), VtValue(finalFrames[currentIt->second])});
                 }
             }
-            // Exec still receives the complete override set. The fingerprint
-            // only includes attributes this expression's compiled closure can
-            // read, so dragging one control preserves unrelated pose caches.
-            // Computation overrides are retained conservatively.
+            // Direct attribute inputs and pinned dependency frames replace
+            // upstream overrides. The fingerprint covers the requested
+            // expression's inputs in both pose phases.
             std::vector<RigExecValueOverride> identity;
-            const auto &attributes = _connectedPoseOverrideInputs.at(path);
             for (const auto &inputs : {&baseInputs, &finalInputs}) {
                 for (const auto &input : *inputs) {
                     if (input.attribute.IsEmpty() || std::binary_search(
@@ -1352,15 +1506,41 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                 continue;
             }
             auto &stored = _connectedPoseCache[path];
+            const auto batchIndex = _connectedPoseBatchIndex.find(path);
+            // A batch changes how a miss is computed, not the identity of
+            // this output. Authored edits retire _connectedPoseCache, and
+            // the key below includes time and both phases' relevant inputs.
             const bool reuseStored =
                 stored.cached && stored.time == time &&
-                !taps->second->ConsumeDirty() &&
+                (batchIndex != _connectedPoseBatchIndex.end() ||
+                 !taps->second->ConsumeDirty()) &&
                 sameOverrides(stored.inputs, identity);
             RigExecPointFrame raw;
             RigExecPointFrame current;
             if (reuseStored) {
                 raw = stored.base;
                 current = stored.current;
+            } else if (batchIndex != _connectedPoseBatchIndex.end()) {
+                auto &batch = _connectedPoseBatches[batchIndex->second];
+                auto &result = connectedBatchResults[batchIndex->second];
+                if (!result.ready || !sameOverrides(result.baseInputs, baseInputs) ||
+                    !sameOverrides(result.finalInputs, finalInputs)) {
+                    RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "ConnectedPose.Batch", "pose");
+                    result.base = batch.taps->Evaluate(time, baseInputs);
+                    result.final = sameOverrides(baseInputs, finalInputs)
+                        ? result.base : batch.taps->Evaluate(time, finalInputs);
+                    result.ready = result.base.IsValid() && result.base.IsComplete() &&
+                        result.final.IsValid() && result.final.IsComplete();
+                    result.baseInputs = baseInputs;
+                    result.finalInputs = finalInputs;
+                }
+                if (!result.ready) {
+                    stored.cached = false;
+                    pose.diagnostics.push_back("connected pose batch incomplete: " + path.GetString());
+                    return false;
+                }
+                raw = result.base.Get<RigExecPointFrame>(batch.outputs.at(path));
+                current = result.final.Get<RigExecPointFrame>(batch.outputs.at(path));
             } else {
                 const RigExecSnapshot base = taps->second->Evaluate(time, baseInputs);
                 if (!base.IsValid() || !base.IsComplete()) {
@@ -1528,6 +1708,49 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                               _falloffLutOverrides.begin(),
                               _falloffLutOverrides.end());
         return jointOverrides;
+    };
+    const auto evaluateAuthSnapshot = [&](const std::vector<RigExecValueOverride> &overrides) {
+        std::vector<VtValue> supplied(_taps->GetTapCount());
+        std::unordered_set<SdfPath, SdfPath::Hash> matrixProviders(
+            _jointPaths.begin(), _jointPaths.end());
+        matrixProviders.insert(_controlPaths.begin(), _controlPaths.end());
+        std::unordered_map<SdfPath, VtValue, SdfPath::Hash> matrices;
+        std::unordered_map<SdfPath, const VtValue *, SdfPath::Hash> matrixOverrides;
+        for (const auto &value : overrides)
+            if (value.attribute.IsEmpty() && value.computation == _kDynComputeMatrix)
+                matrixOverrides[value.prim] = &value.value;
+        for (size_t tap = 0; tap < supplied.size(); ++tap) {
+            const auto &address = _taps->GetAddress(tap);
+            if (address.target.IsPropertyPath()) continue;
+            const auto base = baseFrames.find(address.target);
+            if (base == baseFrames.end() || !_firstFramePoseFrames.count(address.target)) continue;
+            if (address.publicComputation == _computePointFrame) {
+                // assembleAuthOverrides pins exactly this frame.
+                supplied[tap] = VtValue(base->second);
+            } else if (address.publicComputation == _kDynComputeMatrix &&
+                       matrixProviders.count(address.target)) {
+                const auto explicitValue = matrixOverrides.find(address.target);
+                if (explicitValue != matrixOverrides.end()) {
+                    if (explicitValue->second->IsHolding<GfMatrix4d>())
+                        supplied[tap] = *explicitValue->second;
+                    continue;
+                }
+                const int index = _providerIndex.at(address.target);
+                if (!authRestLive[index] || !authRestFrames[index].IsValid() ||
+                    !base->second.IsValid()) continue;
+                auto found = matrices.find(address.target);
+                if (found == matrices.end()) {
+                    // The same operation as the native computeMatrix kernel.
+                    // Use the Exec rest frame, before plain Xform ancestors
+                    // are composed into the pose walk's world-space frame.
+                    GfMatrix4d matrix(1.0);
+                    RigExecPointsToMatrix(authRestFrames[index].points, base->second.points, &matrix);
+                    found = matrices.emplace(address.target, VtValue(matrix)).first;
+                }
+                supplied[tap] = found->second;
+            }
+        }
+        return _taps->EvaluateWithSuppliedResults(time, overrides, std::move(supplied));
     };
     const bool authCacheHit = !_authSnapshotDirty &&
                               _interactiveOverrides.empty() &&
@@ -1949,6 +2172,7 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                 a.Get(&poleMode);
             }
             params.weight = weight;
+            params.stretch = _ResolvedRead(_resolvedInputs, prim, TfToken("inputs:stretch"), 0.0f, time);
             if (params.mode == RigExecSingleChainIkMode::RotatePlane) {
                 params.pole = _ResolvedRead(
                     _resolvedInputs, prim, _kDynPoleVector,
@@ -2500,7 +2724,7 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
             }
         }
         if (!authResolved) {
-            snapshot = _taps->Evaluate(time, assembleAuthOverrides());
+            snapshot = evaluateAuthSnapshot(assembleAuthOverrides());
             storeAuthSnapshot();
         }
     }

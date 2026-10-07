@@ -1293,6 +1293,7 @@ RigExecImagingBridge::_FillControlGuides(
             inputs.wireWidth = 0.05;
             inputs.offset = GfVec3d(0.0);
             inputs.orient = GfQuatf(1.0f);
+            inputs.guideSource = SdfPath();
             inputs.customPoints.clear();
             inputs.customCounts.clear();
             bool live = false;
@@ -1348,8 +1349,22 @@ RigExecImagingBridge::_FillControlGuides(
                     }
                 }
             }
+            if(prim) {
+                SdfPathVector targets;
+                prim.GetRelationship(TfToken("guide:source")).GetTargets(&targets);
+                if(targets.size()==1) inputs.guideSource=targets.front();
+            }
             inputs.controlLive = live;
             inputs.controlReady = true;
+        }
+        if(!inputs.guideSource.IsEmpty()) {
+            const RigExecPointFrame *source=nullptr;
+            const auto control=pose.controlFrames.find(inputs.guideSource);
+            const auto joint=pose.jointFramesFinal.find(inputs.guideSource);
+            if(control!=pose.controlFrames.end()) source=&control->second;
+            else if(joint!=pose.jointFramesFinal.end()) source=&joint->second;
+            if(!source || !RigExecPointsToMatrix(identity.points,source->points,&evaluated) ||
+               !_RigidGuideMatrix(*source,&placement,&evaluatedScale)) continue;
         }
         TfToken shape = inputs.shape;
         TfToken drawMode = inputs.drawMode;

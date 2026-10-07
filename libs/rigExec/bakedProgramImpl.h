@@ -1802,6 +1802,7 @@ struct RigExecBakedProgramImpl {
         /// reads them.
         RigExecBakedInput<GfVec3d> poleVector;
         RigExecBakedInput<double> twistDegrees;
+        RigExecBakedInput<float> ikStretch;
     };
     std::vector<Constraint> constraints;
 

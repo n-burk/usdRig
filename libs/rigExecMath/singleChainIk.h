@@ -32,17 +32,23 @@ struct RigExecSingleChainIkParams {
 
     /// Global normalized constraint weight. Finite values are clamped to
     /// [0, 1]. Segment directions are blended on the unit sphere and then
-    /// accumulated, so authored segment lengths remain exact at every weight.
+    /// accumulated, preserving rigid lengths when stretch is zero and
+    /// blending permitted length growth when stretch is positive.
     double weight = 1.0;
     /// Preserve the input frame's orientation relative to its bone instead
     /// of replacing its aim axis with local X. Useful for imported skeletons.
     bool preserveJointOrientation = false;
+    /// Permitted uniform segment growth beyond full reach, in [0, 1].
+    /// Zero preserves the rigid-chain contract. Frames scale along each bone.
+    double stretch = 0.0;
 };
 
 /// Solves an ordered joint chain [firstJoint, ..., endJoint].
 ///
 /// The first joint origin remains fixed. Every distance between consecutive
-/// joint origins is measured from currentFrames and preserved. A reachable
+/// joint origins is measured from currentFrames and preserved at zero stretch.
+/// Positive stretch permits uniform length growth beyond full reach, with
+/// matching frame scaling along each bone. A reachable
 /// effector origin is reached by deterministic FABRIK; a goal beyond full
 /// extension returns the chain aimed at the goal at its maximum reach.
 /// RotatePlane solves in the plane spanned by the root-to-goal direction and

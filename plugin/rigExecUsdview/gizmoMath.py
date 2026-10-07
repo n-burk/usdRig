@@ -1129,6 +1129,8 @@ class RigFrames(object):
         self.rest = Gf.Matrix4d(1.0)
         self.posed = Gf.Matrix4d(1.0)
         self.P = Gf.Matrix4d(1.0)
+        self.translationP = None
+        self.translationEnabled = True
         self.Q = Gf.Matrix4d(1.0)
         self.Qrest = Gf.Matrix4d(1.0)
         self.restLocal = Gf.Matrix4d(1.0)
@@ -1305,6 +1307,37 @@ def _PreferPublishedFrame(stage, prim, time, solverPosed, frames, ctx):
     return frames
 
 
+def _ApplyChannelSpaces(stage, prim, time, frames):
+    rel = prim.GetRelationship("rigExec:channelSpaces")
+    paths = rel.GetTargets() if rel else []
+    if not paths:
+        return
+    frames.reason = "channel spaces require valid published control frames"
+    frames.pivotReason = "channel-space controls do not support pivot editing"
+    if (len(paths) != 2 or prim.GetTypeName() != 'RigExecControl'
+            or not math.isfinite(frames.unitScale) or abs(frames.unitScale) < 1e-12):
+        return
+    if any(prim.GetAttribute(n).HasAuthoredConnections() for n in AVAR_T + AVAR_R + AVAR_S):
+        return
+    matrices = []
+    for path in [prim.GetPath()] + paths:
+        source = stage.GetPrimAtPath(path)
+        if not source or source.GetTypeName() != 'RigExecControl' or FindRigRoot(source) != frames.rigRoot:
+            return
+        value = _ReadPublishedControlFrame(stage, path, time)
+        if value is None:
+            return
+        matrix = Gf.Matrix4d(value)
+        if not all(math.isfinite(matrix[r][c]) for r in range(4) for c in range(4)) or abs(matrix.GetDeterminant()) < 1e-12:
+            return
+        matrices.append(matrix)
+    frames.posed, frames.P, frames.translationP = matrices
+    enabled = prim.GetAttribute('rigExec:translationEnabled')
+    frames.translationEnabled = not enabled or enabled.Get(time) is not False
+    frames.published = True
+    frames.reason = ""
+
+
 def _ComputeRigFrames(stage, prim, time, solverPosed, ctx):
     frames = RigFrames(prim)
     frames.rigRoot = FindRigRoot(prim, ctx)
@@ -1433,6 +1466,8 @@ def _ComputeRigFrames(stage, prim, time, solverPosed, ctx):
     frames.posed = AvarsMatrix(prim, time, ctx) * frames.P
     frames = _PreferPublishedFrame(stage, prim, time, solverPosed, frames,
                                    ctx)
+
+    _ApplyChannelSpaces(stage, prim, time, frames)
 
     assetRoot = frames.rigRoot.GetParent()
     if assetRoot and not assetRoot.IsPseudoRoot():
@@ -2099,6 +2134,11 @@ class RigPoseTarget(_RigTarget):
 
     kind = "rig-pose"
 
+    def Refresh(self, frameCache=None):
+        super().Refresh(frameCache)
+        if self.frames.translationP is not None:
+            self.supportsTranslate = self.frames.translationEnabled
+
     def _ScalarChannels(self):
         return ([(n, 0.0) for n in AVAR_T] + [(n, 0.0) for n in AVAR_R]
                 + [(n, 1.0) for n in AVAR_S] + [(AVAR_RSPIN, 0.0)])
@@ -2142,7 +2182,10 @@ class RigPoseTarget(_RigTarget):
 
     def ApplyTranslate(self, worldDelta, *, snapStep=None,
                        snapAbsolute=False):
-        local = _Linear(self._Pw()).GetInverse().TransformDir(
+        if not self.supportsTranslate:
+            return
+        translation = self.frames.translationP if self.frames.translationP is not None else self.frames.P
+        local = _Linear(translation * self.frames.assetToWorld).GetInverse().TransformDir(
             Gf.Vec3d(worldDelta)) / self.frames.unitScale
         base = [self._base[n] for n in AVAR_T]
         self._WriteVector(AVAR_T, _SnapTranslation(

@@ -28,7 +28,7 @@ whatever the last solver in each joint's stack committed.
 Name the two endpoints — `rigExec:firstJoint` and `rigExec:endJoint` — and the
 chain between them is inferred from namespace nesting, so the same node drives
 a two-joint chain or a ten-joint one. The first joint's origin stays planted,
-every segment keeps its length, and the end joint lands on the effector
+segments keep their lengths by default, and the end joint lands on the effector
 whenever the goal is in reach.
 
 FBX-style single-chain IK constraint. The first and end joints
@@ -53,7 +53,9 @@ aimed at the next solved joint and writes the whole chain back atomically — a
 failed solve passes every joint through untouched rather than half-posing the
 limb. `rigExec:evaluationMode` decides whether the segment lengths come from
 the joints' rests (`neverTS`, the default) or from their animated translation
-and scale.
+and scale. `inputs:stretch` blends uniform extension from zero (rigid lengths)
+to one (full extension to a goal beyond the chain's reach). It never shortens
+the chain, and the common mover envelope also blends that extension.
 
 ## Wiring
 
@@ -232,6 +234,14 @@ Absolute asset-space pole point used in vector mode.
 
 *Type:* `double`. *Default:* `0`.
 
+#### `inputs:stretch`
+
+*Type:* `float`. *Default:* `0`.
+
+Uniform segment growth beyond full reach in [0, 1].
+Zero keeps original lengths; one reaches an out-of-reach goal.
+Joint frames scale along their bones so native skin follows.
+
 #### `rigExec:solverMode`
 
 *Type:* `uniform token`. *Default:* `"rotatePlane"`.
@@ -287,7 +297,7 @@ python docs/render_media.py --page single_chain_ik_constraint
 ## Tips
 
 - `solverMode = "singleChain"` ignores the pole and `inputs:twistDegrees` entirely — the effector's orientation picks the bend plane — and the pole relationships are not even bound in that mode, so leftover pole wiring cannot break the compile.
-- There is no stretch or softness dial: segment lengths are preserved exactly, and a goal past full reach returns the chain straightened down the root-to-goal ray. Reach for Two-Bone IK when you want stretch.
+- `inputs:stretch` defaults to zero: a goal past full reach returns the chain straightened down the root-to-goal ray at its original length. Set it within [0, 1] to blend uniform extension. Connected float inputs and interactive property overrides are supported.
 - The chain, the effector and the pole are named by their own relationships: this operator does not read the generic `rigExec:sources` list at all.
 - Do not author the inherited `inputs:affect*` masks or the `inputs:translationOffset`/`rotationOffset`/`scaleOffset` values here, and do not author `rigExec:rotationOrder`: this operator honors no channel group, and any authored opinion — even one equal to the default — is a compile error.
 

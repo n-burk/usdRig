@@ -124,6 +124,7 @@ _VisitConstraintInputs(
     fn(constraint.worldUpVector);
     fn(constraint.poleVector);
     fn(constraint.twistDegrees);
+    fn(constraint.ikStretch);
 }
 
 template <class Obj, class Fn>
