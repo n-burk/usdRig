@@ -67,6 +67,12 @@ _EPS = 1e-3
 # exemption. _test_look_at_drives_the_lids below covers the other half.
 _LOOK = _CTL + "/M_Look"
 
+# The limbs' stretch is switched off for the same reason. A body move pulls
+# the planted IK legs past their soft reach and they stretch: the joints
+# lengthen and the bendy wires riding them follow, which is the stretch
+# working rather than a wire adding anything of its own.
+_LIMBS = [_CTL + "/" + name for name in ("L_Arm", "R_Arm", "L_Leg", "R_Leg")]
+
 def _open(mode, carrier):
     """One stage, one compile, per carrier.
 
@@ -96,6 +102,12 @@ def _open(mode, carrier):
     if not at or not at.IsValid():
         at = look.CreateAttribute("avars:lookAt", Sdf.ValueTypeNames.Float)
     at.Set(0.0)
+    for path in _LIMBS:
+        limb = stage.GetPrimAtPath(path)
+        assert limb, path
+        stretch = limb.GetAttribute("avars:stretch")
+        if stretch and stretch.IsValid():
+            stretch.Set(0.0)
 
     _, control, avar, value = carrier
     prim = stage.GetPrimAtPath(control)

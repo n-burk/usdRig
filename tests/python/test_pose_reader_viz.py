@@ -82,6 +82,12 @@ def TestDefaults():
 def TestRestFrames():
     stage = _Biped()
     rig = _Evaluate(stage)
+    # The limbs in FK: a neutral is the bind pose, and an IK limb at rest
+    # reaches through its soft stretch to sit a fraction of a degree off it.
+    controls = "/Biped/Rig/Main/Shot/Aux/Controls/"
+    rig.set_interactive_overrides(
+        [(controls + limb, "avars:ikfk", 0.0)
+         for limb in ("L_Arm", "R_Arm", "L_Leg", "R_Leg")])
     readers = _Readers(stage, rig.evaluate(0))
     rotation = [r for r in readers if r.kind == "rotation"]
     translation = [r for r in readers if r.kind == "translation"]

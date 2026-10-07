@@ -117,9 +117,9 @@ main(int argc, char **argv)
     std::string error;
     Check(RigExecBakeToBinary(live, options, &result, &error),
           "poseable bake: " + error);
-    Check(result.manifestJson.find("\"propertyChains\": 313") !=
+    Check(result.manifestJson.find("\"propertyChains\": 335") !=
               std::string::npos,
-          "all 313 property chains bake");
+          "all 335 property chains bake");
     Check(result.manifestJson.find("\"propertyChainsSkipped\": []") !=
               std::string::npos,
           "no property chain is skipped");

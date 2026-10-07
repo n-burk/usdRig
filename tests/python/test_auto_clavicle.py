@@ -2,7 +2,10 @@
 
 Headless test for RigExecAutoClavicle on examples/biped/Biped_autoclav.usda:
 
-  1. At rest nothing moves, in FK and in IK.
+  1. At rest nothing moves, in FK and in an IK arm that matches it: no
+     soft stretch and unit segment scales. The biped's defaults (soft
+     stretch 0.2, scales a hair over 1) give an IK arm at rest that is not
+     the FK one, and the clavicle follows the arm it gets.
   2. Raising the arm in FK lifts the shoulder swing control and the shoulder
      joint with it; twisting the arm about its own axis moves nothing.
   3. avars:autoClav scales the effect: 0 moves nothing, 0.5 moves less.
@@ -71,7 +74,11 @@ def _Moved(a, b, path, joint=False):
 def TestBehaviour(session):
     rest = session.Pose({})
     ik = {(C + "/L_Arm", "avars:ikfk"): 1.0}
-    _Check(_Moved(session.Pose(ik), rest, SWING).GetLength() < 1e-9,
+    matched = dict(ik)
+    matched[(C + "/L_Arm", "avars:softStretch")] = 0.0
+    matched[(C + "/L_Arm", "avars:stretchTop")] = 1.0
+    matched[(C + "/L_Arm", "avars:stretchBottom")] = 1.0
+    _Check(_Moved(session.Pose(matched), rest, SWING).GetLength() < 1e-6,
            "the IK arm at rest moves nothing")
 
     raised = {(UPARM, "avars:ry"): -80.0}

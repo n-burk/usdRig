@@ -2008,7 +2008,7 @@ TestPurityAuditNamesEveryUnit()
 void
 TestBipedWarmsBitIdentical(const std::string &examplesDir,
                            const std::string &stageFile = "Biped_anim.usda",
-                           size_t expectChains = 16)
+                           size_t expectChains = 38)
 {
     const std::string stagePath = examplesDir + "/biped/" + stageFile;
     UsdStageRefPtr stage = UsdStage::Open(stagePath);
@@ -2229,7 +2229,7 @@ void
 TestStackAnimWarmsBitIdentical(const std::string &examplesDir)
 {
     TestBipedWarmsBitIdentical(examplesDir, "Biped_stack_anim.usda",
-                               /*expectChains=*/313);
+                               /*expectChains=*/335);
 }
 
 // The blend face (examples/04_BlendShapeFace.usda) warms bit-identically:

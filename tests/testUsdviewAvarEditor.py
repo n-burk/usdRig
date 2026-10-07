@@ -44,8 +44,9 @@ ELBOW_L = SHOULDER_L + "/elbow_l_def"
 WRIST_R = SPINE + "/clavicle_r_def/shoulder_r_def/elbow_r_def/wrist_r_def"
 
 # The FK shoulder control's pivot is the shoulder joint; a 30 degree
-# rotation about its local Z carries the elbow, 25.5068 cm away, along a
-# chord of 2 r sin(15 deg).
+# rotation about its local Z carries the elbow, about 25.5068 cm away (the
+# limb's stretchTop default lengthens it by a hair), along a chord of
+# 2 r sin(15 deg), r measured at rest.
 ELBOW_RADIUS = 25.5068
 ROTATE_DEGREES = 30.0
 EXPECTED_CHORD = 2.0 * ELBOW_RADIUS * math.sin(math.radians(
@@ -327,9 +328,11 @@ def testUsdviewInputFunction(appController):
     shoulder1 = evaluator.Origin(SHOULDER_L, 1)
     elbow1 = evaluator.Origin(ELBOW_L, 1)
     chord = (elbow1 - elbow0).GetLength()
-    _Check(abs(chord - EXPECTED_CHORD) < 1e-6,
+    expected = (EXPECTED_CHORD * (elbow0 - shoulder0).GetLength() /
+                ELBOW_RADIUS)
+    _Check(abs(chord - expected) < 1e-6,
            "the elbow moved along a %.6f chord (expected %.6f)"
-           % (chord, EXPECTED_CHORD))
+           % (chord, expected))
     _Check((shoulder1 - shoulder0).GetLength() < 1e-9,
            "the shoulder itself stayed put")
 

@@ -310,12 +310,12 @@ over "Biped"
                     prepend references = @./Biped_body_left.usda@</Biped/Rig/Movers/ball_l_bind_scAim/ball_l_def_aim>
                 )
                 {
-                    uniform bool rigExec:worldUpRotationOnly = 1
                     double3 inputs:aimVector = (-0.23189309080662804, -0.9727412782626985, 8.879605041259261e-17)
                     float inputs:defaultWeight.connect = </Biped/Rig/Solvers/leg_r_ikfk.inputs:weight>
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Joints/hips_def/pelvis_r_def/thigh_r_def/knee_r_def/ankle_r_def/ball_r_def>
                     rel rigExec:sources = </Biped/Rig/Main/Shot/Aux/Controls/R_LegIK/ankle_r_pivot/bankIn_r_pivot/bankOut_r_pivot/heel_r_roll/R_Heel/ball_r_pivot/toe_r_roll/R_Toe/toeBend_r/toeBend_r_fk/toe_r_ikTarget>
                     rel rigExec:worldUpObject = </Biped/Rig/Main/Shot/Aux/Controls/R_LegIK/ankle_r_pivot/bankIn_r_pivot/bankOut_r_pivot/heel_r_roll/R_Heel/ball_r_pivot/toe_r_roll/R_Toe/toeBend_r/toeBend_r_fk/toe_r_ikTarget>
+                    uniform bool rigExec:worldUpRotationOnly = 1
                     uniform float2 ui:nodegraph:node:pos = (6.76, 13.09)
                 }
             }
@@ -326,12 +326,12 @@ over "Biped"
                     prepend references = @./Biped_body_left.usda@</Biped/Rig/Movers/ankle_l_bind_scAim/ankle_l_def_aim>
                 )
                 {
-                    uniform bool rigExec:worldUpRotationOnly = 1
                     double3 inputs:aimVector = (-0.45116147412328517, -0.8924423366620973, -5.661771601785919e-17)
                     float inputs:defaultWeight.connect = </Biped/Rig/Solvers/leg_r_ikfk.inputs:weight>
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Joints/hips_def/pelvis_r_def/thigh_r_def/knee_r_def/ankle_r_def>
                     rel rigExec:sources = </Biped/Rig/Main/Shot/Aux/Controls/R_LegIK/ankle_r_pivot/bankIn_r_pivot/bankOut_r_pivot/heel_r_roll/R_Heel/ball_r_pivot/toe_r_roll/R_Toe/ballRoll_r_up/ballRoll_r_down/R_BallRoll/ball_r_ikTarget>
                     rel rigExec:worldUpObject = </Biped/Rig/Main/Shot/Aux/Controls/R_LegIK/ankle_r_pivot/bankIn_r_pivot/bankOut_r_pivot/heel_r_roll/R_Heel/ball_r_pivot/toe_r_roll/R_Toe/ballRoll_r_up/ballRoll_r_down/R_BallRoll/ball_r_ikTarget>
+                    uniform bool rigExec:worldUpRotationOnly = 1
                     uniform float2 ui:nodegraph:node:pos = (6.76, 13.2)
                 }
             }
@@ -816,6 +816,289 @@ over "Biped"
                     uniform token rigExec:operation = "add"
                 }
             }
+
+            def Scope "limb_r_drivers"
+            {
+                reorder nameChildren = ["R_Arm_limb_pinWeight_1_multiply", "R_Arm_limb_pinWeight_0_blend", "R_LoArm_default_tx_2_multiply", "R_LoArm_default_tx_1_add", "R_LoArm_default_tx_0_blend", "R_LoArm_default_ty_2_multiply", "R_LoArm_default_ty_1_add", "R_LoArm_default_ty_0_blend", "R_Hand_default_tx_2_multiply", "R_Hand_default_tx_1_add", "R_Hand_default_tx_0_blend", "R_Hand_default_ty_2_multiply", "R_Hand_default_ty_1_add", "R_Hand_default_ty_0_blend", "R_Hand_default_tz_2_multiply", "R_Hand_default_tz_1_add", "R_Hand_default_tz_0_blend", "R_Leg_limb_pinWeight_1_multiply", "R_Leg_limb_pinWeight_0_blend", "R_LoLeg_default_tx_2_multiply", "R_LoLeg_default_tx_1_add", "R_LoLeg_default_tx_0_blend", "R_LoLeg_default_ty_2_multiply", "R_LoLeg_default_ty_1_add", "R_LoLeg_default_ty_0_blend", "R_Foot_default_tx_2_multiply", "R_Foot_default_tx_1_add", "R_Foot_default_tx_0_blend", "R_Foot_default_ty_2_multiply", "R_Foot_default_ty_1_add", "R_Foot_default_ty_0_blend"]
+                def RigExecFloatMathMover "R_Arm_limb_pinWeight_0_blend" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/R_Arm.avars:pvPin>
+                    rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/R_Arm.limb:pinWeight>
+                    uniform token rigExec:operation = "blend"
+                }
+
+                def RigExecFloatMathMover "R_Arm_limb_pinWeight_1_multiply" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/R_Arm.avars:ikfk>
+                    rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/R_Arm.limb:pinWeight>
+                    uniform token rigExec:operation = "multiply"
+                }
+
+                def RigExecFloatMathMover "R_LoArm_default_tx_0_blend" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/R_Arm.avars:stretchTop>
+                    rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/R_Shldr/R_UpArmSwing/R_UpArm/R_LoArm.default:tx>
+                    uniform token rigExec:operation = "blend"
+                }
+
+                def RigExecFloatMathMover "R_LoArm_default_tx_1_add" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    float inputs:value = -1
+                    rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/R_Shldr/R_UpArmSwing/R_UpArm/R_LoArm.default:tx>
+                    uniform token rigExec:operation = "add"
+                }
+
+                def RigExecFloatMathMover "R_LoArm_default_tx_2_multiply" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    float inputs:value = 25.42159
+                    rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/R_Shldr/R_UpArmSwing/R_UpArm/R_LoArm.default:tx>
+                    uniform token rigExec:operation = "multiply"
+                }
+
+                def RigExecFloatMathMover "R_LoArm_default_ty_0_blend" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/R_Arm.avars:stretchTop>
+                    rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/R_Shldr/R_UpArmSwing/R_UpArm/R_LoArm.default:ty>
+                    uniform token rigExec:operation = "blend"
+                }
+
+                def RigExecFloatMathMover "R_LoArm_default_ty_1_add" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    float inputs:value = -1
+                    rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/R_Shldr/R_UpArmSwing/R_UpArm/R_LoArm.default:ty>
+                    uniform token rigExec:operation = "add"
+                }
+
+                def RigExecFloatMathMover "R_LoArm_default_ty_2_multiply" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    float inputs:value = 2.0831563
+                    rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/R_Shldr/R_UpArmSwing/R_UpArm/R_LoArm.default:ty>
+                    uniform token rigExec:operation = "multiply"
+                }
+
+                def RigExecFloatMathMover "R_Hand_default_tx_0_blend" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/R_Arm.avars:stretchBottom>
+                    rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/R_Shldr/R_UpArmSwing/R_UpArm/R_LoArm/R_Hand.default:tx>
+                    uniform token rigExec:operation = "blend"
+                }
+
+                def RigExecFloatMathMover "R_Hand_default_tx_1_add" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    float inputs:value = -1
+                    rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/R_Shldr/R_UpArmSwing/R_UpArm/R_LoArm/R_Hand.default:tx>
+                    uniform token rigExec:operation = "add"
+                }
+
+                def RigExecFloatMathMover "R_Hand_default_tx_2_multiply" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    float inputs:value = -24.451248
+                    rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/R_Shldr/R_UpArmSwing/R_UpArm/R_LoArm/R_Hand.default:tx>
+                    uniform token rigExec:operation = "multiply"
+                }
+
+                def RigExecFloatMathMover "R_Hand_default_ty_0_blend" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/R_Arm.avars:stretchBottom>
+                    rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/R_Shldr/R_UpArmSwing/R_UpArm/R_LoArm/R_Hand.default:ty>
+                    uniform token rigExec:operation = "blend"
+                }
+
+                def RigExecFloatMathMover "R_Hand_default_ty_1_add" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    float inputs:value = -1
+                    rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/R_Shldr/R_UpArmSwing/R_UpArm/R_LoArm/R_Hand.default:ty>
+                    uniform token rigExec:operation = "add"
+                }
+
+                def RigExecFloatMathMover "R_Hand_default_ty_2_multiply" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    float inputs:value = 0.050830636
+                    rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/R_Shldr/R_UpArmSwing/R_UpArm/R_LoArm/R_Hand.default:ty>
+                    uniform token rigExec:operation = "multiply"
+                }
+
+                def RigExecFloatMathMover "R_Hand_default_tz_0_blend" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/R_Arm.avars:stretchBottom>
+                    rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/R_Shldr/R_UpArmSwing/R_UpArm/R_LoArm/R_Hand.default:tz>
+                    uniform token rigExec:operation = "blend"
+                }
+
+                def RigExecFloatMathMover "R_Hand_default_tz_1_add" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    float inputs:value = -1
+                    rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/R_Shldr/R_UpArmSwing/R_UpArm/R_LoArm/R_Hand.default:tz>
+                    uniform token rigExec:operation = "add"
+                }
+
+                def RigExecFloatMathMover "R_Hand_default_tz_2_multiply" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    float inputs:value = -4.3114147
+                    rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/R_Shldr/R_UpArmSwing/R_UpArm/R_LoArm/R_Hand.default:tz>
+                    uniform token rigExec:operation = "multiply"
+                }
+
+                def RigExecFloatMathMover "R_Leg_limb_pinWeight_0_blend" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/R_Leg.avars:pvPin>
+                    rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/R_Leg.limb:pinWeight>
+                    uniform token rigExec:operation = "blend"
+                }
+
+                def RigExecFloatMathMover "R_Leg_limb_pinWeight_1_multiply" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/R_Leg.avars:ikfk>
+                    rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/R_Leg.limb:pinWeight>
+                    uniform token rigExec:operation = "multiply"
+                }
+
+                def RigExecFloatMathMover "R_LoLeg_default_tx_0_blend" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/R_Leg.avars:stretchTop>
+                    rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_HipSwivel/M_BodyGimbal/R_Hip/R_UpLegSwing/R_UpLeg/R_LoLeg.default:tx>
+                    uniform token rigExec:operation = "blend"
+                }
+
+                def RigExecFloatMathMover "R_LoLeg_default_tx_1_add" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    float inputs:value = -1
+                    rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_HipSwivel/M_BodyGimbal/R_Hip/R_UpLegSwing/R_UpLeg/R_LoLeg.default:tx>
+                    uniform token rigExec:operation = "add"
+                }
+
+                def RigExecFloatMathMover "R_LoLeg_default_tx_2_multiply" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    float inputs:value = 44.028824
+                    rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_HipSwivel/M_BodyGimbal/R_Hip/R_UpLegSwing/R_UpLeg/R_LoLeg.default:tx>
+                    uniform token rigExec:operation = "multiply"
+                }
+
+                def RigExecFloatMathMover "R_LoLeg_default_ty_0_blend" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/R_Leg.avars:stretchTop>
+                    rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_HipSwivel/M_BodyGimbal/R_Hip/R_UpLegSwing/R_UpLeg/R_LoLeg.default:ty>
+                    uniform token rigExec:operation = "blend"
+                }
+
+                def RigExecFloatMathMover "R_LoLeg_default_ty_1_add" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    float inputs:value = -1
+                    rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_HipSwivel/M_BodyGimbal/R_Hip/R_UpLegSwing/R_UpLeg/R_LoLeg.default:ty>
+                    uniform token rigExec:operation = "add"
+                }
+
+                def RigExecFloatMathMover "R_LoLeg_default_ty_2_multiply" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    float inputs:value = 2.5739996
+                    rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_HipSwivel/M_BodyGimbal/R_Hip/R_UpLegSwing/R_UpLeg/R_LoLeg.default:ty>
+                    uniform token rigExec:operation = "multiply"
+                }
+
+                def RigExecFloatMathMover "R_Foot_default_tx_0_blend" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/R_Leg.avars:stretchBottom>
+                    rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_HipSwivel/M_BodyGimbal/R_Hip/R_UpLegSwing/R_UpLeg/R_LoLeg/R_Foot.default:tx>
+                    uniform token rigExec:operation = "blend"
+                }
+
+                def RigExecFloatMathMover "R_Foot_default_tx_1_add" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    float inputs:value = -1
+                    rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_HipSwivel/M_BodyGimbal/R_Hip/R_UpLegSwing/R_UpLeg/R_LoLeg/R_Foot.default:tx>
+                    uniform token rigExec:operation = "add"
+                }
+
+                def RigExecFloatMathMover "R_Foot_default_tx_2_multiply" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    float inputs:value = -42.754414
+                    rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_HipSwivel/M_BodyGimbal/R_Hip/R_UpLegSwing/R_UpLeg/R_LoLeg/R_Foot.default:tx>
+                    uniform token rigExec:operation = "multiply"
+                }
+
+                def RigExecFloatMathMover "R_Foot_default_ty_0_blend" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/R_Leg.avars:stretchBottom>
+                    rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_HipSwivel/M_BodyGimbal/R_Hip/R_UpLegSwing/R_UpLeg/R_LoLeg/R_Foot.default:ty>
+                    uniform token rigExec:operation = "blend"
+                }
+
+                def RigExecFloatMathMover "R_Foot_default_ty_1_add" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    float inputs:value = -1
+                    rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_HipSwivel/M_BodyGimbal/R_Hip/R_UpLegSwing/R_UpLeg/R_LoLeg/R_Foot.default:ty>
+                    uniform token rigExec:operation = "add"
+                }
+
+                def RigExecFloatMathMover "R_Foot_default_ty_2_multiply" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    float inputs:value = 2.7018664
+                    rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_HipSwivel/M_BodyGimbal/R_Hip/R_UpLegSwing/R_UpLeg/R_LoLeg/R_Foot.default:ty>
+                    uniform token rigExec:operation = "multiply"
+                }
+            }
         }
 
         over "Solvers"
@@ -824,6 +1107,12 @@ over "Biped"
                 prepend references = @./Biped_body_left.usda@</Biped/Rig/Solvers/arm_l_twoBoneIk>
             )
             {
+                double inputs:lowerScale.connect = </Biped/Rig/Main/Shot/Aux/Controls/R_Arm.avars:stretchBottom>
+                float inputs:pin.connect = </Biped/Rig/Main/Shot/Aux/Controls/R_Arm.limb:pinWeight>
+                float inputs:softDistance.connect = </Biped/Rig/Main/Shot/Aux/Controls/R_Arm.avars:softStretch>
+                float inputs:stretch.connect = </Biped/Rig/Main/Shot/Aux/Controls/R_Arm.avars:stretch>
+                float inputs:twist.connect = </Biped/Rig/Main/Shot/Aux/Controls/R_Arm.avars:twist>
+                double inputs:upperScale.connect = </Biped/Rig/Main/Shot/Aux/Controls/R_Arm.avars:stretchTop>
                 rel rigExec:effectorControl = </Biped/Rig/Main/Shot/Aux/Controls/R_ArmIK/wrist_r_ikOrient>
                 rel rigExec:joints = [
                     </Biped/Rig/Main/Shot/Aux/Joints/hips_def/spine_0_def/spine_1_def/spine_2_def/spine_3_def/spine_4_def/spine_5_def/chest_def/clavicle_r_def/shoulder_r_def>,
@@ -832,8 +1121,10 @@ over "Biped"
                 ]
                 rel rigExec:poleControl = </Biped/Rig/Main/Shot/Aux/Controls/R_ArmPV>
                 rel rigExec:rootControl = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/R_Shldr/R_UpArmSwing>
+                uniform token rigExec:segmentScale = "toChild"
                 rel rigExec:space = </Biped/Rig/Main/Shot/Aux>
                 matrix4d rigExec:spaceMatrix
+                uniform token rigExec:stretchPolicy = "softDistance"
                 uniform float2 ui:nodegraph:node:pos = (1.78, 0.55)
             }
 
@@ -851,6 +1142,7 @@ over "Biped"
                     </Biped/Rig/Main/Shot/Aux/Joints/hips_def/spine_0_def/spine_1_def/spine_2_def/spine_3_def/spine_4_def/spine_5_def/chest_def/clavicle_r_def/shoulder_r_def/elbow_r_def>,
                     </Biped/Rig/Main/Shot/Aux/Joints/hips_def/spine_0_def/spine_1_def/spine_2_def/spine_3_def/spine_4_def/spine_5_def/chest_def/clavicle_r_def/shoulder_r_def/elbow_r_def/wrist_r_def>,
                 ]
+                uniform token rigExec:segmentScale = "toChild"
                 uniform float2 ui:nodegraph:node:pos = (1.78, 0.66)
             }
 
@@ -874,6 +1166,12 @@ over "Biped"
                 prepend references = @./Biped_body_left.usda@</Biped/Rig/Solvers/leg_l_twoBoneIk>
             )
             {
+                double inputs:lowerScale.connect = </Biped/Rig/Main/Shot/Aux/Controls/R_Leg.avars:stretchBottom>
+                float inputs:pin.connect = </Biped/Rig/Main/Shot/Aux/Controls/R_Leg.limb:pinWeight>
+                float inputs:softDistance.connect = </Biped/Rig/Main/Shot/Aux/Controls/R_Leg.avars:softStretch>
+                float inputs:stretch.connect = </Biped/Rig/Main/Shot/Aux/Controls/R_Leg.avars:stretch>
+                float inputs:twist.connect = </Biped/Rig/Main/Shot/Aux/Controls/R_Leg.avars:twist>
+                double inputs:upperScale.connect = </Biped/Rig/Main/Shot/Aux/Controls/R_Leg.avars:stretchTop>
                 rel rigExec:effectorControl = </Biped/Rig/Main/Shot/Aux/Controls/R_LegIK/ankle_r_pivot/bankIn_r_pivot/bankOut_r_pivot/heel_r_roll/R_Heel/ball_r_pivot/toe_r_roll/R_Toe/ballRoll_r_up/ballRoll_r_down/R_BallRoll/ankle_r_ikTarget>
                 rel rigExec:joints = [
                     </Biped/Rig/Main/Shot/Aux/Joints/hips_def/pelvis_r_def/thigh_r_def>,
@@ -882,8 +1180,11 @@ over "Biped"
                 ]
                 rel rigExec:poleControl = </Biped/Rig/Main/Shot/Aux/Controls/R_LegPV>
                 rel rigExec:rootControl = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_HipSwivel/M_BodyGimbal/R_Hip/R_UpLegSwing>
+                uniform double rigExec:scaleCalibration = 0.001970703015103936
+                uniform token rigExec:segmentScale = "toChild"
                 rel rigExec:space = </Biped/Rig/Main/Shot/Aux>
                 matrix4d rigExec:spaceMatrix
+                uniform token rigExec:stretchPolicy = "softDistance"
                 uniform float2 ui:nodegraph:node:pos = (1.78, 1.21)
             }
 
@@ -901,6 +1202,7 @@ over "Biped"
                     </Biped/Rig/Main/Shot/Aux/Joints/hips_def/pelvis_r_def/thigh_r_def/knee_r_def>,
                     </Biped/Rig/Main/Shot/Aux/Joints/hips_def/pelvis_r_def/thigh_r_def/knee_r_def/ankle_r_def>,
                 ]
+                uniform token rigExec:segmentScale = "toChild"
                 uniform float2 ui:nodegraph:node:pos = (1.78, 1.32)
             }
 
@@ -1895,7 +2197,7 @@ over "Biped"
                             double3 guide:offset = (0, 0.0038000000000000256, 0)
                             double guide:scaleX = 3.3642999999438783
                             double guide:scaleY = 3.377400030699868
-                            matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (-7.752599999999994, 50.88391073393221, 35.59461132016058, 1) )
+                            matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (-7.752601604397592, 52.240305051373966, 33.87689305365614, 1) )
                             uniform float2 ui:nodegraph:node:pos = (0.18, 9.35)
                         }
 
@@ -1908,7 +2210,7 @@ over "Biped"
                             color3f guide:displayColor = (1, 0, 0)
                             float guide:displayOpacity.connect = </Biped/Rig/Main/Shot/Aux/Controls/R_Arm.avars:ikfk>
                             double3 guide:offset = (0, 0.0039000000000000146, 0)
-                            matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (-40.12033185440321, 118.08297525404247, -47.683567637267615, 1) )
+                            matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (-38.609105372071625, 119.160717625862, -39.598498365156814, 1) )
                             uniform float2 ui:nodegraph:node:pos = (0.18, 3.85)
                         }
 
@@ -1916,10 +2218,95 @@ over "Biped"
                             prepend references = @./Biped_body_left.usda@</Biped/Rig/Main/Shot/Aux/Controls/L_Arm>
                         )
                         {
+                            custom float avars:pvPin = 0 (
+                                customData = {
+                                    dictionary limits = {
+                                        dictionary hard = {
+                                            double maximum = 1
+                                            double minimum = 0
+                                        }
+                                        dictionary soft = {
+                                            double maximum = 1
+                                            double minimum = 0
+                                        }
+                                    }
+                                }
+                            )
+                            custom float avars:softStretch = 0.2 (
+                                customData = {
+                                    dictionary limits = {
+                                        dictionary hard = {
+                                            double maximum = 1000
+                                            double minimum = 0.0001
+                                        }
+                                        dictionary soft = {
+                                            double maximum = 2
+                                            double minimum = 0.0001
+                                        }
+                                    }
+                                }
+                            )
+                            custom float avars:stretch = 1 (
+                                customData = {
+                                    dictionary limits = {
+                                        dictionary hard = {
+                                            double maximum = 1
+                                            double minimum = 0
+                                        }
+                                        dictionary soft = {
+                                            double maximum = 1
+                                            double minimum = 0
+                                        }
+                                    }
+                                }
+                            )
+                            custom double avars:stretchBottom = 1.0000001 (
+                                customData = {
+                                    dictionary limits = {
+                                        dictionary hard = {
+                                            double maximum = 1000
+                                            double minimum = 0
+                                        }
+                                        dictionary soft = {
+                                            double maximum = 2
+                                            double minimum = 0
+                                        }
+                                    }
+                                }
+                            )
+                            custom double avars:stretchTop = 1.0000001 (
+                                customData = {
+                                    dictionary limits = {
+                                        dictionary hard = {
+                                            double maximum = 1000
+                                            double minimum = 0
+                                        }
+                                        dictionary soft = {
+                                            double maximum = 2
+                                            double minimum = 0
+                                        }
+                                    }
+                                }
+                            )
+                            custom float avars:twist = 0 (
+                                customData = {
+                                    dictionary limits = {
+                                        dictionary hard = {
+                                            double maximum = 100000
+                                            double minimum = -100000
+                                        }
+                                        dictionary soft = {
+                                            double maximum = 180
+                                            double minimum = -180
+                                        }
+                                    }
+                                }
+                            )
                             double3 guide:offset = (-0.17959999999999998, 0, -14.8885)
                             double guide:scaleX = 1.6182
                             double guide:scaleY = 1.6182
                             double guide:scaleZ = 1.618199999999999
+                            custom float limb:pinWeight = 0
                             matrix4d rest:space = ( (0.562738580373978, 0.8211536606460625, -0.09503660224488393, 0), (0.10041521335763663, 0.04621143704541768, 0.9938718669992311, 0), (0.8205132997612054, -0.5688331641999871, -0.05645136155319884, 0), (-54.48077659401702, 109.20418828837204, -5.1804291321847415, 1) )
                         }
 
@@ -1929,10 +2316,95 @@ over "Biped"
                         {
                             custom double avars:footRockTotal = 0
                             custom double avars:footRollTotal = 0
+                            custom float avars:pvPin = 0 (
+                                customData = {
+                                    dictionary limits = {
+                                        dictionary hard = {
+                                            double maximum = 1
+                                            double minimum = 0
+                                        }
+                                        dictionary soft = {
+                                            double maximum = 1
+                                            double minimum = 0
+                                        }
+                                    }
+                                }
+                            )
+                            custom float avars:softStretch = 0.2 (
+                                customData = {
+                                    dictionary limits = {
+                                        dictionary hard = {
+                                            double maximum = 1000
+                                            double minimum = 0.0001
+                                        }
+                                        dictionary soft = {
+                                            double maximum = 2
+                                            double minimum = 0.0001
+                                        }
+                                    }
+                                }
+                            )
+                            custom float avars:stretch = 1 (
+                                customData = {
+                                    dictionary limits = {
+                                        dictionary hard = {
+                                            double maximum = 1
+                                            double minimum = 0
+                                        }
+                                        dictionary soft = {
+                                            double maximum = 1
+                                            double minimum = 0
+                                        }
+                                    }
+                                }
+                            )
+                            custom double avars:stretchBottom = 1.0000196 (
+                                customData = {
+                                    dictionary limits = {
+                                        dictionary hard = {
+                                            double maximum = 1000
+                                            double minimum = 0
+                                        }
+                                        dictionary soft = {
+                                            double maximum = 2
+                                            double minimum = 0
+                                        }
+                                    }
+                                }
+                            )
+                            custom double avars:stretchTop = 1.0000196 (
+                                customData = {
+                                    dictionary limits = {
+                                        dictionary hard = {
+                                            double maximum = 1000
+                                            double minimum = 0
+                                        }
+                                        dictionary soft = {
+                                            double maximum = 2
+                                            double minimum = 0
+                                        }
+                                    }
+                                }
+                            )
+                            custom float avars:twist = 0 (
+                                customData = {
+                                    dictionary limits = {
+                                        dictionary hard = {
+                                            double maximum = 100000
+                                            double minimum = -100000
+                                        }
+                                        dictionary soft = {
+                                            double maximum = 180
+                                            double minimum = -180
+                                        }
+                                    }
+                                }
+                            )
                             double3 guide:offset = (2.85035, 0, 15.38615)
                             double guide:scaleX = 1.6252499999999999
                             double guide:scaleY = 1.6355
                             double guide:scaleZ = 1.2127499999999998
+                            custom float limb:pinWeight = 0
                             matrix4d rest:space = ( (-2.2204460492503126e-16, 1, 2.9490299091605727e-17, 0), (2.2204460492503136e-16, 2.341876692568695e-17, -1, 0), (-1.0000000000000004, -2.220446049250313e-16, -2.2204460492503128e-16, 0), (-19.752599999999983, 9.485777623542617, -7.08425479370813, 1) )
                         }
 

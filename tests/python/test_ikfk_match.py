@@ -181,9 +181,14 @@ def TestStretch(session, limbs):
     scales = [p for p in values if p.name in ("avars:sx", "avars:sy",
                                               "avars:sz")]
     _Check(not scales, "a match never writes scale: %r" % scales)
-    stretched = values.get(limb.fkControls[1].AppendProperty("avars:tx"), 0)
-    _Check(abs(stretched) > 1.0,
-           "the stretch lands on the FK translation (tx %.3f)" % stretched)
+    # The limb stretches by its own channels, which lengthen the FK chain
+    # as they do the IK: the stretch lands there, not on a translation.
+    top = values.get(limb.switchControl.AppendProperty("avars:stretchTop"),
+                     1.0)
+    _Check(top > 1.01, "the stretch lands on stretchTop (%.4f)" % top)
+    moved = values.get(limb.fkControls[1].AppendProperty("avars:tx"), 0.0)
+    _Check(abs(moved) < 1e-4,
+           "the FK translation stays put (tx %.3g)" % moved)
 
 
 def TestFootRollKept(session, limbs):
