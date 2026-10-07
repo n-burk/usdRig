@@ -50,7 +50,11 @@ Build target: OpenUSD PR #4156 (usdNoodles branch), installed to the
   is a single physical pixel, so an unwidthed hairline is effectively
   unpickable — the default width is what makes wire controls selectable.
   Zero/negative wireWidth authors no widths (hairline fallback); geometry
-  mode ignores it.
+  mode ignores it. The usdview viewport tools also search a nine-logical-pixel
+  window when the exact pick misses a wire control. They select the nearest
+  visible control hit inside a circular tolerance, retaining depth occlusion
+  and the viewer's purpose filters. This makes exported hairline controls
+  selectable without changing their authored width or displayed geometry.
 - **The width alone is not enough**: Storm honours a curve's width only once
   the curve is refined (`HdStBasisCurves::_SupportsRefinement` is
   `refineLevel > 0`), and usdview's default complexity ("low") is

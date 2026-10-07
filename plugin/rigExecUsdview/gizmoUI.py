@@ -1469,6 +1469,8 @@ class GizmoController(QtCore.QObject):
 
         view = StageView(usdviewApi)
         self._view = view
+        from controlPicking import ControlPicking
+        self._controlPicking = ControlPicking(view) if view is not None else None
         self.overlay = GizmoOverlay(self, view) if view is not None else None
         self.statusBar = ViewportStatusBar()
         self.toolbar = ViewportToolbar(self, self.statusBar)
@@ -1564,6 +1566,9 @@ class GizmoController(QtCore.QObject):
         after usdview has destroyed the stage view would keep answering
         keys on behalf of a gizmo that no longer has a viewport.
         """
+        if self._controlPicking is not None:
+            self._controlPicking.Detach()
+            self._controlPicking = None
         if self._hotkeys is None:
             return
         application = QtWidgets.QApplication.instance()
