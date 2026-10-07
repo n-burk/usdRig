@@ -2566,9 +2566,9 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
                     meshPath.GetText());
             continue;
         }
-        // The mesh's own transform places the ray when the source names no
-        // sibling space. It is a stage transform the rig does not own, so
-        // it is captured here and must not vary over time.
+        // Provider frames are asset-space, while the ray and surface points
+        // are mesh-local. Capture the asset-to-mesh map, excluding the asset
+        // root's world placement. This stage transform must be static.
         for (UsdPrim p = mesh; p && !p.IsPseudoRoot(); p = p.GetParent()) {
             if (const UsdGeomXformable xformable{p}) {
                 if (xformable.TransformMightBeTimeVarying()) {
@@ -2581,7 +2581,12 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
             }
         }
         UsdGeomXformCache meshXforms(UsdTimeCode::Default());
-        const GfMatrix4d meshWorldInverse =
+        const UsdPrim assetRoot =
+            _stage->GetPrimAtPath(_rigPath.GetParentPath());
+        const GfMatrix4d assetWorld = assetRoot && !assetRoot.IsPseudoRoot()
+            ? meshXforms.GetLocalToWorldTransform(assetRoot)
+            : GfMatrix4d(1.0);
+        const GfMatrix4d assetToMesh = assetWorld *
             meshXforms.GetLocalToWorldTransform(mesh).GetInverse();
         // Source, its sibling space and the rig's space, each at most one
         // frame provider: bound as the transform, transformSpace and carry
@@ -2612,7 +2617,7 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
             meshPath.AppendProperty(TfToken("faceVertexCounts"));
         base.binding.topologyIndices =
             meshPath.AppendProperty(TfToken("faceVertexIndices"));
-        base.binding.meshWorldInverse = meshWorldInverse;
+        base.binding.meshWorldInverse = assetToMesh;
         if (!oneProvider("rigExec:sources", &base.binding.transform) ||
             !oneProvider("rigExec:sourceSpace",
                          &base.binding.transformSpace) ||
@@ -2684,6 +2689,34 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
                 derived.binding.shaderDials.push_back(dial);
             }
             newGraphDerivedChains[projector.target].push_back(derived);
+        }
+    }
+
+    // One output cannot be both a spatial frame and packed scalar dials.
+    // Same-semantic overwrites retain their existing ordered behavior.
+    std::map<SdfPath, std::pair<RigExecRevisionOp, SdfPath>> matrixOutputs;
+    for (const auto &[pointsTarget, revisions] : newGraphDerivedChains) {
+        for (const _GraphRevision &revision : revisions) {
+            if (revision.op != RigExecRevisionOp::SurfaceProjector &&
+                revision.op != RigExecRevisionOp::ShaderDials) {
+                continue;
+            }
+            const auto [found, inserted] = matrixOutputs.emplace(
+                revision.target, std::make_pair(revision.op, revision.moverPath));
+            if (!inserted && found->second.first != revision.op) {
+                const SdfPath spatial =
+                    revision.op == RigExecRevisionOp::SurfaceProjector
+                        ? revision.moverPath : found->second.second;
+                const SdfPath dials =
+                    revision.op == RigExecRevisionOp::ShaderDials
+                        ? revision.moverPath : found->second.second;
+                return fail("shader matrix output " + revision.target.GetString() +
+                            " is a spatial SurfaceProjector frame from " +
+                            spatial.GetString() + " and packed ShaderDials from " +
+                            dials.GetString() + "; choose different "
+                            "rigExec:shaderPrimvar and "
+                            "rigExec:shaderDialPrimvar names", {spatial, dials});
+            }
         }
     }
 
@@ -4363,6 +4396,20 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
     // no stage work left to do beside the exec lane.
     std::map<SdfPath, std::set<SdfPath>> newPoseProviderInputs;
     std::map<SdfPath, std::unique_ptr<RigExecTapSet>> newConnectedPoseTaps;
+    std::map<SdfPath, std::vector<SdfPath>> newConnectedPoseOverrideInputs;
+    std::vector<SdfPath> connectedProviders;
+    for (const auto &[provider, info] : newPoseInputInfo) {
+        if (info.connectedPose && !newJointBinding.count(provider))
+            connectedProviders.push_back(provider);
+    }
+    // Discover every closure before materializing its attributes, including
+    // namespace providers reached only through a connected expression.
+    for (const SdfPath &provider : connectedProviders)
+        poseProviderClosure(provider);
+    if (!connectedProviders.empty()) {
+        poseInputGraph->MaterializeAttributes(
+            &newPoseInputInfo, RigExecParallelEvaluationEnabled());
+    }
     for (const auto &[provider, info] : newPoseInputInfo) {
         seedProvider(provider);
         newPoseProviderInputs[provider] = info.providers;
@@ -4370,6 +4417,13 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
             auto taps = std::make_unique<RigExecTapSet>(_stage);
             taps->Add(RigExecValueAddress::Prim(provider, _computePointFrame));
             newConnectedPoseTaps[provider] = std::move(taps);
+            std::set<SdfPath> attributes;
+            for (const SdfPath &input : poseProviderClosure(provider)) {
+                const auto &paths = newPoseInputInfo.at(input).attributes;
+                attributes.insert(paths.begin(), paths.end());
+            }
+            newConnectedPoseOverrideInputs[provider].assign(
+                attributes.begin(), attributes.end());
         }
     }
     compileBlocks.Next("PrepareRequests.RestTaps");
@@ -4688,6 +4742,7 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
         retireTaps(taps);
     }
     _connectedPoseTaps = std::move(newConnectedPoseTaps);
+    _connectedPoseOverrideInputs = std::move(newConnectedPoseOverrideInputs);
     _connectedPoseCache.clear();
     _namespaceInheritsCache.clear();
     _nearestBlockingCache.clear();
@@ -4857,6 +4912,12 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
         _providerIndex.reserve(_providerPaths.size());
         for (std::size_t i = 0; i < _providerPaths.size(); ++i)
             _providerIndex.emplace(_providerPaths[i], static_cast<int>(i));
+        _poseRefreshDependents.assign(_providerPaths.size(), {});
+        for (const auto &[provider, inputs] : _poseProviderInputs) {
+            const int consumer = _providerIndex.at(provider);
+            for (const SdfPath &input : inputs)
+                _poseRefreshDependents[_providerIndex.at(input)].push_back(consumer);
+        }
         _hierDescendants.assign(_providerPaths.size(), {});
         for (std::size_t i = 0; i < _providerPaths.size(); ++i) {
             if (_firstFramePoseFrames.count(_providerPaths[i]) == 0) continue;

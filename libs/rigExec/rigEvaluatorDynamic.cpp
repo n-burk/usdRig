@@ -1034,6 +1034,23 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     };
 
     std::set<SdfPath> constrainedProviders;
+    // A consumer may ask for the same connected hierarchy hundreds of times
+    // in one generation. Keep a completed refresh until an intervening frame
+    // write reaches it through the compiled expression dependencies.
+    std::vector<unsigned char> refreshComplete(_providerPaths.size(), 0);
+    std::vector<uint64_t> refreshInvalidated(_providerPaths.size(), 0);
+    uint64_t refreshWrite = 0;
+    const auto invalidateRefreshes = [&](std::vector<int> pending) {
+        ++refreshWrite;
+        while (!pending.empty()) {
+            const int index = pending.back();pending.pop_back();
+            if (refreshInvalidated[index] == refreshWrite) continue;
+            refreshInvalidated[index] = refreshWrite;
+            refreshComplete[index] = 0;
+            const auto &dependents = _poseRefreshDependents[index];
+            pending.insert(pending.end(), dependents.begin(), dependents.end());
+        }
+    };
     // Validate and commit one constraint's complete write bundle. Descendant
     // RigExec providers are updated from the nearest changed ancestor in the
     // same transaction; native Xform descendants ride the published ancestor
@@ -1206,18 +1223,24 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
 
         {
             RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "ccfFinal", "pose");
+        std::vector<int> changed;
         for (const auto &[path, frame] : candidates) {
             const int fi = _providerIndex.at(path);
+            if (!finalLive[fi] || finalFrames[fi].points != frame.points ||
+                (solverOutput && baseFrames[path].points != frame.points)) changed.push_back(fi);
             finalFrames[fi] = frame;
             finalLive[fi] = 1;
             if (!solverOutput && !derivedRefresh) constrainedProviders.insert(path);
             if (solverOutput) baseFrames[path] = frame;
         }
         for (const auto &[idx, frame] : propagated) {
+            if (!finalLive[idx] || finalFrames[idx].points != frame.points ||
+                (solverOutput && baseFrames[_providerPaths[idx]].points != frame.points)) changed.push_back(idx);
             finalFrames[idx] = frame;
             finalLive[idx] = 1;
             if (solverOutput) baseFrames[_providerPaths[idx]] = frame;
         }
+        if (!changed.empty()) invalidateRefreshes(std::move(changed));
         updateVolumePlacements();
         }
         return true;
@@ -1251,6 +1274,8 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
             pending.pop_back();
             if (path.IsEmpty() || complete.count(path) ||
                 _jointSolverBinding.count(path) || constrainedProviders.count(path)) continue;
+            const auto provider = _providerIndex.find(path);
+            if (provider != _providerIndex.end() && refreshComplete[provider->second]) continue;
             const auto dependencies = _poseProviderInputs.find(path);
             if (!ready) {
                 if (!active.insert(path).second) {
@@ -1268,7 +1293,32 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
             active.erase(path);
             complete.insert(path);
             const auto taps = _connectedPoseTaps.find(path);
-            if (taps == _connectedPoseTaps.end()) continue;
+            if (taps == _connectedPoseTaps.end()) {
+                if (provider != _providerIndex.end()) refreshComplete[provider->second] = 1;
+                continue;
+            }
+            // The initial batch already evaluated every connected expression
+            // with this generation's authored and interactive overrides. Its
+            // answer remains authoritative until a dependency (or the output
+            // itself, through namespace propagation) changes in either phase.
+            // Leave the individual tap's dirty/cache state intact: a later
+            // phase revision must still invalidate a previous-generation hit.
+            const auto unchangedFromSeed = [&](const SdfPath &input) {
+                const auto seed = _firstFramePoseFrames.find(input);
+                const auto base = baseFrames.find(input);
+                const auto index = _providerIndex.find(input);
+                if (seed == _firstFramePoseFrames.end() || base == baseFrames.end() ||
+                    index == _providerIndex.end() || !finalLive[index->second]) return false;
+                const auto original = seedSnapshot.Get<RigExecPointFrame>(seed->second);
+                return base->second.points == original.points &&
+                    finalFrames[index->second].points == original.points;
+            };
+            if (unchangedFromSeed(path) &&
+                (dependencies == _poseProviderInputs.end() ||
+                 std::all_of(dependencies->second.begin(), dependencies->second.end(), unchangedFromSeed))) {
+                refreshComplete[provider->second] = 1;
+                continue;
+            }
             std::vector<RigExecValueOverride> baseInputs = baseOverrides;
             std::vector<RigExecValueOverride> finalInputs = baseOverrides;
             if (dependencies != _poseProviderInputs.end()) {
@@ -1281,10 +1331,26 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                     finalInputs.push_back({input, _computePointFrame, TfToken(), VtValue(finalFrames[currentIt->second])});
                 }
             }
-            std::vector<RigExecValueOverride> identity = baseInputs;
-            identity.insert(identity.end(), finalInputs.begin(), finalInputs.end());
+            // Exec still receives the complete override set. The fingerprint
+            // only includes attributes this expression's compiled closure can
+            // read, so dragging one control preserves unrelated pose caches.
+            // Computation overrides are retained conservatively.
+            std::vector<RigExecValueOverride> identity;
+            const auto &attributes = _connectedPoseOverrideInputs.at(path);
+            for (const auto &inputs : {&baseInputs, &finalInputs}) {
+                for (const auto &input : *inputs) {
+                    if (input.attribute.IsEmpty() || std::binary_search(
+                            attributes.begin(), attributes.end(),
+                            input.prim.AppendProperty(input.attribute))) {
+                        identity.push_back(input);
+                    }
+                }
+            }
             const auto cached = connectedInputCache.find(path);
-            if (cached != connectedInputCache.end() && sameOverrides(cached->second, identity)) continue;
+            if (cached != connectedInputCache.end() && sameOverrides(cached->second, identity)) {
+                if (provider != _providerIndex.end()) refreshComplete[provider->second] = 1;
+                continue;
+            }
             auto &stored = _connectedPoseCache[path];
             const bool reuseStored =
                 stored.cached && stored.time == time &&
@@ -1318,6 +1384,9 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
             // from the current constraint phase. Solver-provided sources are
             // already present in baseFrames; constraint revisions are not.
             const auto previous = baseFrames.find(path);
+            std::vector<int> baseChanged;
+            if (provider != _providerIndex.end() &&
+                (previous == baseFrames.end() || previous->second.points != raw.points)) baseChanged.push_back(provider->second);
             GfMatrix4d delta(1.0);
             if (previous != baseFrames.end() && _IsUsableConstraintFrame(raw) &&
                 RigExecPointsToMatrix(previous->second.points, raw.points, &delta)) {
@@ -1327,10 +1396,15 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                     const SdfPath blocker = nearestBlocking(it->first);
                     const bool blocked = !blocker.IsEmpty() &&
                         blocker != path && blocker.HasPrefix(path);
-                    if (!blocked) it->second = RigExecMatrixToPoints(it->second.points, delta);
+                    if (!blocked) {
+                        const auto revised = RigExecMatrixToPoints(it->second.points, delta);
+                        if (it->second.points != revised.points) baseChanged.push_back(_providerIndex.at(it->first));
+                        it->second = revised;
+                    }
                 }
             }
             baseFrames[path] = raw;
+            if (!baseChanged.empty()) invalidateRefreshes(std::move(baseChanged));
             if (!commitConstraintFrames(path, {{path, current}}, false, true)) {
                 stored.cached = false;
                 return false;
@@ -1341,6 +1415,7 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
             stored.current = current;
             stored.cached = true;
             connectedInputCache[path] = std::move(identity);
+            if (provider != _providerIndex.end()) refreshComplete[provider->second] = 1;
         }
         return true;
     };

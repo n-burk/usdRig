@@ -3768,6 +3768,27 @@ using rigExec::RigExecImagingRegistry;
 
 namespace {
 
+PXR_NS::GfRange3d
+_CustomControlRange(const PXR_NS::VtVec3fArray &points,
+                    const PXR_NS::VtIntArray &counts)
+{
+    PXR_NS::GfRange3d range;
+    size_t total = 0;
+    if (counts.empty()) return range;
+    for (int count : counts) {
+        if (count < 2 || size_t(count) > points.size() - total) return range;
+        total += size_t(count);
+    }
+    if (total != points.size()) return range;
+    for (const PXR_NS::GfVec3f &p : points) {
+        for (int axis = 0; axis < 3; ++axis) {
+            if (!std::isfinite(p[axis])) return PXR_NS::GfRange3d();
+        }
+        range.UnionWith(PXR_NS::GfVec3d(p));
+    }
+    return range;
+}
+
 // Grows \p range to cover everything one published prim draws, in ASSET
 // space. Returns whether it contributed anything at all.
 bool
@@ -3799,7 +3820,7 @@ _AccumulateGuideBounds(
         any = true;
     }
 
-    // The control guide: every shape is documented as unit-sized and
+    // Built-in control guides are documented as unit-sized and
     // centred on the frame origin with half-extent 1 (spec §10.3
     // extension), so the unit cube bounds all six of them. Deliberately
     // NOT the exact per-shape extent: that table lives in the scene index,
@@ -3810,7 +3831,7 @@ _AccumulateGuideBounds(
     // index's own predicate whether anything is: an unrecognized
     // shape/drawMode pair synthesizes no prim, and reporting a box for it
     // would frame a host's camera on empty space.
-    if (published.hasControlGuide &&
+    if (published.hasControlGuide && published.guideOpacity > 0.0f &&
         rigExec::RigExecControlGuideIsDrawn(published.controlGuideShape,
                                             published.controlGuideDrawMode)) {
         // Wire curves are drawn with a width, in the guide's own local
@@ -3822,16 +3843,21 @@ _AccumulateGuideBounds(
             published.controlGuideWireWidth > 0.0) {
             halfWidth = published.controlGuideWireWidth * 0.5;
         }
-        const PXR_NS::GfVec3d &scale = published.controlGuideScale;
-        const PXR_NS::GfVec3d half(scale[0] * (1.0 + halfWidth),
-                                   scale[1] * (1.0 + halfWidth),
-                                   scale[2] * (1.0 + halfWidth));
-        // The frame is rigid, so aligning the transformed box is exact.
-        range->UnionWith(
-            PXR_NS::GfBBox3d(PXR_NS::GfRange3d(-half, half),
-                             published.controlGuideFrame)
-                .ComputeAlignedRange());
-        any = true;
+        PXR_NS::GfRange3d local = published.controlGuideShape ==
+            PXR_NS::TfToken("custom")
+            ? _CustomControlRange(published.controlGuidePoints,
+                                  published.controlGuideCounts)
+            : PXR_NS::GfRange3d(PXR_NS::GfVec3d(-1), PXR_NS::GfVec3d(1));
+        if (!local.IsEmpty()) {
+            const PXR_NS::GfVec3d pad(halfWidth);
+            local = PXR_NS::GfRange3d(local.GetMin() - pad,
+                                      local.GetMax() + pad);
+            PXR_NS::GfMatrix4d scale(1.0);
+            scale.SetScale(published.controlGuideScale);
+            range->UnionWith(PXR_NS::GfBBox3d(
+                local, scale * published.controlGuideFrame).ComputeAlignedRange());
+            any = true;
+        }
     }
 
     // Volume weight iso-surfaces. Their points are already the drawn
@@ -4034,6 +4060,7 @@ _AccumulateRestGuideBounds(
     const PXR_NS::TfToken type = prim.GetTypeName();
 
     if (type == "RigExecControl") {
+        if (floatNumber("guide:displayOpacity", 0.5) <= 0.0) return false;
         // Same predicate the scene index draws through: an unrecognized
         // shape/drawMode pair synthesizes nothing and must bound nothing.
         const PXR_NS::TfToken shape = token("guide:shape", "circle");
@@ -4069,6 +4096,31 @@ _AccumulateRestGuideBounds(
             if (std::isfinite(width) && width > 0.0) {
                 halfWidth = width * 0.5;
             }
+        }
+        if (shape == PXR_NS::TfToken("custom")) {
+            PXR_NS::VtVec3fArray points;
+            PXR_NS::VtIntArray counts;
+            prim.GetAttribute(PXR_NS::TfToken("guide:points")).Get(&points, time);
+            prim.GetAttribute(PXR_NS::TfToken("guide:curveVertexCounts")).Get(&counts, time);
+            PXR_NS::GfRange3d local = _CustomControlRange(points, counts);
+            if (local.IsEmpty()) return false;
+            const PXR_NS::GfVec3d pad(halfWidth);
+            local = PXR_NS::GfRange3d(local.GetMin() - pad, local.GetMax() + pad);
+            PXR_NS::GfVec3d signedScale;
+            for (int axis = 0; axis < 3; ++axis) {
+                signedScale[axis] = rigExec::RigExecNormalizeAvarScale(
+                    number(avarScaleNames[axis], 1.0));
+            }
+            PXR_NS::GfVec3d offset(0.0);
+            prim.GetAttribute(PXR_NS::TfToken("guide:offset")).Get(&offset, time);
+            PXR_NS::GfMatrix4d scaleMatrix(1.0);
+            scaleMatrix.SetScale(signedScale);
+            PXR_NS::GfMatrix4d shapeScale(1.0);
+            shapeScale.SetScale(authoredScale);
+            const PXR_NS::GfMatrix4d placement =
+                shapeScale * PXR_NS::GfMatrix4d(1.0).SetTranslate(offset) * scaleMatrix * rest;
+            range->UnionWith(PXR_NS::GfBBox3d(local, placement).ComputeAlignedRange());
+            return true;
         }
         // The unit shape, for the same reason the snapshot path uses it:
         // every guide shape is documented as unit-sized with half-extent 1.

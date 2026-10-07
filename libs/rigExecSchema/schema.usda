@@ -186,17 +186,24 @@ class RigExecControl "RigExecControl" (
         doc = "Local Z scale applied before rotation and translation; finite magnitudes below 1e-4 resolve to signed 1e-4, strict authoring rejects non-finite values, and raw non-finite USD resolves to identity on this axis."
     )
     uniform token guide:shape = "circle" (
-        allowedTokens = ["sphere", "circle", "box", "cube", "diamond", "pyramid"]
+        allowedTokens = ["sphere", "circle", "box", "cube", "diamond", "pyramid", "custom"]
         doc = """Guide primitive synthesized at the control's posed frame
         origin (spec section 10.3 extension), exactly parallel to the
-        RigExecJoint sphere/cone guides. Every shape is unit-sized and
+        RigExecJoint sphere/cone guides. The built-in shapes are unit-sized and
         centered at the origin: sphere and circle have radius 1, box and
         cube span +-1, diamond (octahedron) has vertices at +-1 on each
         axis, and pyramid has base corners (+-1, -1, +-1) with apex
         (0, 1, 0). circle and box are the planar shapes -- normal +Y,
         drawn in the local XZ plane -- while cube is the 3D box; this is
         the conventional rigging distinction between the two box-ish
-        tokens."""
+        tokens. custom uses arbitrary local polylines from guide:points and
+        guide:curveVertexCounts, preserving the evaluated affine frame."""
+    )
+    point3f[] guide:points = [] (
+        doc = "Local vertices of a custom wire guide, placed by the evaluated control frame."
+    )
+    int[] guide:curveVertexCounts = [] (
+        doc = "Consecutive polyline sizes for guide:shape=custom. Each is at least two; their sum must equal guide:points size."
     )
     uniform token guide:planeNormal = "Y" (
         allowedTokens = ["X", "Y", "Z"]
@@ -3326,6 +3333,9 @@ class RigExecPickerPanel "RigExecPickerPanel" (
     )
     uniform color4f ui:background = (0.16, 0.16, 0.16, 1) (
         doc = "Panel fill behind every button."
+    )
+    uniform asset ui:backgroundImage = @@ (
+        doc = "Optional image stretched to the panel extent behind buttons; resolved relative to its authoring layer and packaged with USDZ."
     )
 }
 

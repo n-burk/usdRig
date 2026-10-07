@@ -288,6 +288,32 @@ with Usd.EditContext(stage, session):
 
 stage.GetSessionLayer().Clear()
 
+# Panel images are layer-relative assets, including when inside USDZ.
+import tempfile, pathlib
+from pxr import UsdUtils
+with tempfile.TemporaryDirectory() as directory:
+    image = (pathlib.Path(__file__).resolve().parents[2] / "plugin/rigExecUsdview/icons/refresh.png").read_bytes()
+    temp = pathlib.Path(directory)
+    (temp / "background.png").write_bytes(image)
+    imageStage = Usd.Stage.CreateNew(str(temp / "picker.usda"))
+    imageStage.DefinePrim("/Picker", "RigExecPicker")
+    panel = imageStage.DefinePrim("/Picker/Body", "RigExecPickerPanel")
+    panel.GetAttribute("ui:backgroundImage").Set(Sdf.AssetPath("background.png"))
+    button = imageStage.DefinePrim("/Picker/Body/Button", "RigExecPickerButton")
+    button.GetAttribute("ui:position").Set((10,20))
+    button.GetAttribute("ui:size").Set((20,30))
+    box = pickerScene.pickerModel.content_box(pickerScene.load_all(imageStage)[0], pickerScene.load_all(imageStage)[0].panels[0])
+    Check(box == ((-12.0,-12.0),(424.0,624.0)), "background image extent participates in panel fitting")
+    imageStage.GetRootLayer().Save()
+    Check(pickerScene.load_all(imageStage)[0].panels[0].backgroundImage == image,
+          "panel background resolves relative to its authoring layer")
+    package = temp / "picker.usdz"
+    Check(UsdUtils.CreateNewUsdzPackage(Sdf.AssetPath(str(temp / "picker.usda")), str(package)),
+          "panel background packages as a native USD asset")
+    reopened = Usd.Stage.Open(str(package))
+    Check(pickerScene.load_all(reopened)[0].panels[0].backgroundImage == image,
+          "panel background bytes reopen inside USDZ")
+
 print("")
 if FAILURES:
     print("FAILED (%d)" % len(FAILURES))

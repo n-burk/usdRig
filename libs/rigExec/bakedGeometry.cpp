@@ -2701,7 +2701,7 @@ RigExecSurfaceProjectorFrames
 RigExecBakedProjectorFrames(const RigExecBakedProgramImpl &B,
                             const RigExecBakedProgramImpl::GeomRevision &revision)
 {
-    // World frames: each provider's rest times its base and final
+    // Asset frames: each provider's rest times its base and final
     // computeMatrix, the tables every geometry revision reads.
     RigExecSurfaceProjectorFrames frames;
     const SdfPath providers[3] = {revision.binding.transform,

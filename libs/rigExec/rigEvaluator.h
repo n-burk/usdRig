@@ -510,6 +510,11 @@ public:
     /// report on the bake (a bake manifest names its rig).
     const SdfPath &GetRigPath() const { return _rigPath; }
 
+    /// Target-local spatial matrix primvars produced by SurfaceProjector
+    /// revisions in the compiled epoch. ShaderDials and property matrices
+    /// are not spatial frames and are excluded.
+    std::vector<SdfPath> GetSurfaceProjectorTargets() const;
+
     /// Composed mover-stack applications: descendants before their mover
     /// parent, sibling branches in reverse composed child order (the bottom
     /// usdview row executes first; spec §4.2).
@@ -1351,7 +1356,13 @@ private:
     /// Direct posed providers read by transform expressions, including
     /// parent:space reached through connected default-space expressions.
     std::map<SdfPath, std::set<SdfPath>> _poseProviderInputs;
+    /// Reverse expression dependencies in the dense provider index. A frame
+    /// write invalidates only refreshes that can read that frame.
+    std::vector<std::vector<int>> _poseRefreshDependents;
     std::map<SdfPath, std::unique_ptr<RigExecTapSet>> _connectedPoseTaps;
+    /// Sorted attribute closures for connected-pose cache fingerprints.
+    /// An unrelated dragged channel cannot change that provider's result.
+    std::map<SdfPath, std::vector<SdfPath>> _connectedPoseOverrideInputs;
     struct _ConnectedPoseResult {
         std::vector<RigExecValueOverride> inputs;
         UsdTimeCode time = UsdTimeCode::Default();

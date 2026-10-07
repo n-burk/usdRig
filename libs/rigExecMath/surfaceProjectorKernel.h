@@ -223,7 +223,7 @@ bool RigExecSurfaceFrameAtHitT(const std::vector<Vec3f> &points,
 
 /// Everything a RigExecSurfaceProjector reads, resolved by the evaluator.
 ///
-/// The provider frames are WORLD frames: `Base` before pose constraints,
+/// The provider frames share the evaluator's ASSET space: `Base` before pose constraints,
 /// `Final` after them. A flag says whether the relationship named a provider
 /// that resolved; an unnamed one leaves its frames unread.
 template <class Mat4, class Vec3d>
@@ -249,12 +249,12 @@ struct RigExecSurfaceProjectorInputs {
     bool spaceNamed = false;
     bool hasSpace = false;
     Mat4 spaceFinal;
-    /// Inverse of the mesh's own local-to-world transform: where a source
-    /// with no sourceSpace is expressed in the mesh's space.
+    /// Asset-to-mesh transform: where a source with no sourceSpace is
+    /// expressed in the mesh's space. The field retains its historical name.
     Mat4 worldToMesh;
 };
 
-/// The projector's shader matrix: rigExec:shaderOffset carried by the look
+/// The projector's target-local shader matrix: rigExec:shaderOffset carried by the look
 /// of its source and by how the material point under its ray moved from the
 /// rest points to the posed points, scaled with the rig. False when no frame
 /// could be measured; \p diagnostics then says which step failed, prefixed

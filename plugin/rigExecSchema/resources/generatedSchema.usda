@@ -157,6 +157,11 @@ class RigExecControl "RigExecControl" (
         extent of the authored gprim in its own local space (i.e."""
         }
     )
+    int[] guide:curveVertexCounts = [] (
+        customData = {
+            string userDocBrief = "Consecutive polyline sizes for guide:shape=custom."
+        }
+    )
     color3f guide:displayColor = (1, 0.85, 0.2) (
         customData = {
             string userDocBrief = "Constant colour of the synthesized guide."
@@ -206,6 +211,11 @@ class RigExecControl "RigExecControl" (
         for circle and box."""
         }
     )
+    point3f[] guide:points = [] (
+        customData = {
+            string userDocBrief = "Local vertices of a custom wire guide, placed by the evaluated control frame."
+        }
+    )
     double guide:scaleX = 1 (
         customData = {
             string userDocBrief = """Positive per-axis draw multiplier of the guide shape whose
@@ -224,7 +234,7 @@ class RigExecControl "RigExecControl" (
         }
     )
     uniform token guide:shape = "circle" (
-        allowedTokens = ["sphere", "circle", "box", "cube", "diamond", "pyramid"]
+        allowedTokens = ["sphere", "circle", "box", "cube", "diamond", "pyramid", "custom"]
         customData = {
             string userDocBrief = """Guide primitive synthesized at the control's posed frame
         origin (spec section 10.3 extension), exactly parallel to the
@@ -3710,6 +3720,11 @@ class RigExecPickerPanel "RigExecPickerPanel" (
     uniform color4f ui:background = (0.16, 0.16, 0.16, 1) (
         customData = {
             string userDocBrief = "Panel fill behind every button."
+        }
+    )
+    uniform asset ui:backgroundImage = @@ (
+        customData = {
+            string userDocBrief = "Optional image stretched to the panel extent behind buttons; resolved relative to its authoring layer and packaged with USDZ."
         }
     )
     uniform string ui:label = "" (

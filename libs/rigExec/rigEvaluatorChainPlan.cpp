@@ -12,6 +12,20 @@ namespace rigExec {
 using namespace evaluatorDetail;
 
 std::vector<SdfPath>
+RigExecRigEvaluator::GetSurfaceProjectorTargets() const
+{
+    std::set<SdfPath> targets;
+    for (const auto &[points, revisions] : _graphDerivedChains) {
+        for (const _GraphRevision &revision : revisions) {
+            if (revision.op == RigExecRevisionOp::SurfaceProjector) {
+                targets.insert(revision.target);
+            }
+        }
+    }
+    return std::vector<SdfPath>(targets.begin(), targets.end());
+}
+
+std::vector<SdfPath>
 RigExecRigEvaluator::GetChainLevelTargets(size_t level) const
 {
     return level < _chainPlan.levels.size() ? _chainPlan.levels[level].targets

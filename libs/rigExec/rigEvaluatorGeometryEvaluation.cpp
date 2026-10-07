@@ -690,7 +690,7 @@ RigExecRigEvaluator::_EvaluateGeometry(
             _profiler, "Derived " + target.GetString(), "geometry");
         for (const _GraphRevision &derived : derivedIt->second) {
             if (RigExecIsDerivedMatrixOp(derived.op)) {
-                // A surface projector's matrix primvar: its providers' world
+                // A surface projector's matrix primvar: its providers' asset
                 // frames (rest times computeMatrix, base and final), the
                 // chain's authored and final points, and the shared kernel.
                 RigExecSurfaceProjectorFrames frames;

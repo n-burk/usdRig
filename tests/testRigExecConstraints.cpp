@@ -3375,6 +3375,88 @@ TestConnectedParentSpaceSolverInputs()
 }
 
 static void
+TestConnectedRefreshAfterInterveningWrite()
+{
+    const auto stage = UsdStage::CreateInMemory();
+    MakeXform(stage, SdfPath("/Asset"), Matrix());
+    const auto first = MakeXform(stage, SdfPath("/Asset/First"), Matrix(GfVec3d(4,0,0)));
+    const auto second = MakeXform(stage, SdfPath("/Asset/Second"), Matrix(GfVec3d(6,0,0)));
+    MakeXform(stage, SdfPath("/Asset/RecordedA"), Matrix());
+    MakeXform(stage, SdfPath("/Asset/RecordedB"), Matrix());
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    const auto source = stage->DefinePrim(SdfPath("/Asset/Rig/Source"), TfToken("RigExecControl"));
+    source.GetAttribute(TfToken("rest:tx")).Set(1.0);
+    const auto relay = stage->DefinePrim(SdfPath("/Asset/Rig/Source/Relay"), TfToken("RigExecControl"));
+    const auto bridge = stage->DefinePrim(SdfPath("/Asset/Rig/Bridge"), TfToken("RigExecControl"));
+    bridge.GetAttribute(TfToken("default:space"))
+        .SetConnections({relay.GetPath().AppendProperty(TfToken("parent:space"))});
+    const auto writeA = MakeConstraint(stage,"WriteA","RigExecPositionConstraint",{source.GetPath()});
+    writeA.GetRelationship(TfToken("rigExec:sources")).SetTargets({first.GetPath()});
+    const auto readA = MakeConstraint(stage,"ReadA","RigExecPositionConstraint",{SdfPath("/Asset/RecordedA")});
+    readA.GetRelationship(TfToken("rigExec:sources")).SetTargets({bridge.GetPath()});
+    const auto writeB = MakeConstraint(stage,"WriteB","RigExecPositionConstraint",{source.GetPath()});
+    writeB.GetRelationship(TfToken("rigExec:sources")).SetTargets({second.GetPath()});
+    const auto readB = MakeConstraint(stage,"ReadB","RigExecPositionConstraint",{SdfPath("/Asset/RecordedB")});
+    readB.GetRelationship(TfToken("rigExec:sources")).SetTargets({bridge.GetPath()});
+    stage->GetPrimAtPath(SdfPath("/Asset/Rig/Movers"))
+        .SetChildrenReorder({TfToken("ReadB"),TfToken("WriteB"),TfToken("ReadA"),TfToken("WriteA")});
+    RigExecRigEvaluator evaluator(stage,SdfPath("/Asset/Rig"));
+    std::vector<std::string> errors;CHECK(evaluator.Compile(&errors));CHECK(errors.empty());
+    for(double x : {6.0,7.0}) {
+        second.GetAttribute(TfToken("xformOp:transform")).Set(Matrix(GfVec3d(x,0,0)));
+        const auto pose = evaluator.Evaluate(UsdTimeCode::Default());CHECK(pose.valid);
+        CHECK(Near(pose.providerXforms.at(SdfPath("/Asset/RecordedA")).ExtractTranslation(),GfVec3d(4,0,0)));
+        CHECK(Near(pose.providerXforms.at(SdfPath("/Asset/RecordedB")).ExtractTranslation(),GfVec3d(x,0,0)));
+    }
+}
+
+static void
+TestConnectedInteractiveBranches()
+{
+    const auto stage = UsdStage::CreateInMemory();
+    MakeXform(stage, SdfPath("/Asset"), Matrix());
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    const auto bias = stage->DefinePrim(SdfPath("/Asset/Bias"), TfToken("Scope"));
+    bias.CreateAttribute(TfToken("value"), SdfValueTypeNames->Double).Set(0.0);
+    for (const char *name : {"A", "B"}) {
+        const SdfPath sourcePath(std::string("/Asset/Rig/") + name);
+        const auto source = stage->DefinePrim(sourcePath, TfToken("RigExecControl"));
+        source.GetAttribute(TfToken("rest:tx")).Set(name[0] == 'A' ? 2.0 : 5.0);
+        const auto child = stage->DefinePrim(sourcePath.AppendChild(TfToken("Child")), TfToken("RigExecControl"));
+        const auto link = stage->DefinePrim(SdfPath(std::string("/Asset/Rig/Link") + name), TfToken("RigExecControl"));
+        link.GetAttribute(TfToken("default:space")).SetConnections(
+            {child.GetPath().AppendProperty(TfToken("parent:space"))});
+        if (name[0] == 'B') link.GetAttribute(TfToken("avars:ty")).SetConnections(
+            {bias.GetPath().AppendProperty(TfToken("value"))});
+        const SdfPath target(std::string("/Asset/Recorded") + name);
+        MakeXform(stage, target, Matrix());
+        const std::string constraintName = std::string("Read") + name;
+        const auto read = MakeConstraint(stage, constraintName.c_str(),
+            "RigExecPositionConstraint", {target});
+        read.GetRelationship(TfToken("rigExec:sources")).SetTargets({link.GetPath()});
+    }
+    RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+    CHECK(evaluator.Compile());
+    auto check = [&](const SdfPath &source, const TfToken &channel, double value,
+                     const GfVec3d &a, const GfVec3d &b) {
+        evaluator.SetInteractiveOverrides({{source, TfToken(), channel, VtValue(value)}});
+        const auto pose = evaluator.Evaluate(UsdTimeCode(0));
+        CHECK(pose.valid);
+        CHECK(Near(pose.providerXforms.at(SdfPath("/Asset/RecordedA")).ExtractTranslation(), a));
+        CHECK(Near(pose.providerXforms.at(SdfPath("/Asset/RecordedB")).ExtractTranslation(), b));
+    };
+    check(SdfPath("/Asset/Rig/A"), TfToken("avars:tx"), 4, GfVec3d(6,0,0), GfVec3d(5,0,0));
+    check(SdfPath("/Asset/Rig/A"), TfToken("avars:tx"), 7, GfVec3d(9,0,0), GfVec3d(5,0,0));
+    check(SdfPath("/Asset/Rig/B"), TfToken("avars:tx"), 3, GfVec3d(2,0,0), GfVec3d(8,0,0));
+    check(bias.GetPath(), TfToken("value"), 6, GfVec3d(2,0,0), GfVec3d(5,6,0));
+    evaluator.ClearInteractiveOverrides();
+    const auto rest = evaluator.Evaluate(UsdTimeCode(0));
+    CHECK(rest.valid);
+    CHECK(Near(rest.providerXforms.at(SdfPath("/Asset/RecordedA")).ExtractTranslation(), GfVec3d(2,0,0)));
+    CHECK(Near(rest.providerXforms.at(SdfPath("/Asset/RecordedB")).ExtractTranslation(), GfVec3d(5,0,0)));
+}
+
+static void
 TestSolverGuidesGate()
 {
     const auto stage = UsdStage::CreateInMemory();
@@ -4486,6 +4568,8 @@ main()
     TestConstrainedSolverInputAncestor();
     TestSolverOwnedJointBlocksNamespacePropagation();
     TestConnectedParentSpaceSolverInputs();
+    TestConnectedRefreshAfterInterveningWrite();
+    TestConnectedInteractiveBranches();
     TestSolverGuidesGate();
     TestSolverBatchLevelAudit();
     TestAuthoredPosedSpaceBakesAndAnimatedOneFollows();

@@ -3,6 +3,7 @@
 
 #include "registry.h"
 
+#include "pxr/base/gf/matrix4f.h"
 #include "pxr/base/gf/rotation.h"
 #include "pxr/base/gf/range3d.h"
 #include "pxr/imaging/hd/basisCurvesSchema.h"
@@ -985,6 +986,16 @@ _BuildControlGuideShapes()
 const _ControlGuideShape *
 _FindControlGuideShape(const TfToken &shape, const TfToken &drawMode)
 {
+    if (shape == TfToken("custom") && drawMode == TfToken("wire")) {
+        static const _ControlGuideShape custom = [] {
+            _ControlGuideShape result;
+            result.shape = TfToken("custom");
+            result.drawMode = TfToken("wire");
+            result.primType = HdPrimTypeTokens->basisCurves;
+            return result;
+        }();
+        return &custom;
+    }
     static const std::vector<_ControlGuideShape> shapes =
         _BuildControlGuideShapes();
     for (const _ControlGuideShape &entry : shapes) {
@@ -997,10 +1008,24 @@ _FindControlGuideShape(const TfToken &shape, const TfToken &drawMode)
 
 HdContainerDataSourceHandle
 _BuildControlGuidePrim(
-    const RigExecPublishedPrim &published, const _ControlGuideShape &shape,
+    const RigExecPublishedPrim &published, const _ControlGuideShape &templateShape,
     const HdContainerDataSourceHandle &parentDataSource,
     const GfMatrix4d &assetRootWorld)
 {
+    _ControlGuideShape custom;
+    if (published.controlGuideShape == TfToken("custom")) {
+        custom = templateShape;
+        custom.points = published.controlGuidePoints;
+        custom.counts = published.controlGuideCounts;
+        if (!custom.points.empty()) {
+            custom.extentMin = custom.extentMax = GfVec3d(custom.points.front());
+            for (const GfVec3f &p : custom.points) for (int a = 0; a < 3; ++a) {
+                custom.extentMin[a] = std::min(custom.extentMin[a], double(p[a]));
+                custom.extentMax[a] = std::max(custom.extentMax[a], double(p[a]));
+            }
+        }
+    }
+    const _ControlGuideShape &shape = published.controlGuideShape == TfToken("custom") ? custom : templateShape;
     // S(effectiveScale) * rigid frame * asset root placement.
     // USD is row-vector, so the leftmost factor applies first: the effective
     // per-axis scale sizes the unit shape in ITS own axes, and only
@@ -1428,10 +1453,58 @@ _ReadXform(const HdContainerDataSourceHandle &dataSource, float shutterOffset = 
     return matrix ? matrix->GetTypedValue(shutterOffset) : GfMatrix4d(1.0);
 }
 
+// Surface-projector evaluation returns a target-local frame. Shaders consume
+// world-space points, so only those spatial matrices are composed with the
+// target's already-resolved world transform at the imaging boundary. Packed
+// shader dials are matrices for storage, not coordinate frames.
+class _WorldShaderMatrixDataSource final
+    : public HdTypedSampledDataSource<GfMatrix4f> {
+public:
+    HD_DECLARE_DATASOURCE(_WorldShaderMatrixDataSource);
+
+    GfMatrix4f GetTypedValue(Time offset) override {
+        return GfMatrix4f(_local * _world->GetTypedValue(offset));
+    }
+    VtValue GetValue(Time offset) override {
+        return VtValue(GetTypedValue(offset));
+    }
+    bool GetContributingSampleTimesForInterval(
+        Time start, Time end, std::vector<Time> *times) override {
+        return _world->GetContributingSampleTimesForInterval(start, end, times);
+    }
+
+private:
+    _WorldShaderMatrixDataSource(GfMatrix4d local,
+                               HdMatrixDataSourceHandle world)
+        : _local(std::move(local)), _world(std::move(world)) {}
+    const GfMatrix4d _local;
+    const HdMatrixDataSourceHandle _world;
+};
+
+// Changing a target's world transform also changes its spatial shader
+// primvars, even when evaluation returned an identical local projector.
+HdDataSourceLocatorSet
+_ShaderMatrixXformLocators(const RigExecImagingSnapshot &snapshot,
+                          const SdfPath &path,
+                          const HdDataSourceLocatorSet &locators)
+{
+    const auto it = snapshot.prims.find(path);
+    if (it == snapshot.prims.end() ||
+        it->second.targetLocalShaderMatrices.empty() ||
+        !locators.Intersects(HdXformSchema::GetDefaultLocator())) {
+        return locators;
+    }
+    HdDataSourceLocatorSet result(locators);
+    result.insert(HdContainerDataSourceEditor::ComputeDirtyLocators(
+        HdDataSourceLocatorSet{HdPrimvarsSchema::GetDefaultLocator()}));
+    return result;
+}
+
 // Builds the sparse stronger root container for one published prim
 // (spec §10.3.1): standard schemas only.
 HdContainerDataSourceHandle
-_BuildStrongRoot(const RigExecPublishedPrim &published)
+_BuildStrongRoot(const RigExecPublishedPrim &published,
+                 const HdContainerDataSourceHandle &resolvedTarget)
 {
     TfTokenVector names;
     std::vector<HdDataSourceBaseHandle> values;
@@ -1469,12 +1542,25 @@ _BuildStrongRoot(const RigExecPublishedPrim &published)
     // A glslfx sourceAsset only ever SEES one of these if its own
     // "attributes" configuration block names it: Storm filters primvars
     // down to the builtins plus that list before the shader is reached.
+    // This is the GPU boundary: preserve the evaluator's double matrices
+    // in the snapshot, but publish float4x4 values matching the shader's
+    // mat4 contract. Metal has no shader double precision; exposing a
+    // double4x4 primvar can otherwise allocate 128 bytes while its generated
+    // float4x4 getter consumes 64. Float publication is also valid on the
+    // double-capable backends and leaves authored matrix4d properties alone.
     for (const auto &[name, matrix] : published.shaderMatrices) {
+        HdSampledDataSourceHandle value =
+            HdRetainedTypedSampledDataSource<GfMatrix4f>::New(GfMatrix4f(matrix));
+        if (published.targetLocalShaderMatrices.count(name)) {
+            if (const HdMatrixDataSourceHandle world =
+                    HdXformSchema::GetFromParent(resolvedTarget).GetMatrix()) {
+                value = _WorldShaderMatrixDataSource::New(matrix, world);
+            }
+        }
         primvarNames.push_back(name);
         primvarValues.push_back(
             HdPrimvarSchema::Builder()
-                .SetPrimvarValue(
-                    HdRetainedTypedSampledDataSource<GfMatrix4d>::New(matrix))
+                .SetPrimvarValue(value)
                 .SetInterpolation(_Token(HdPrimvarSchemaTokens->constant))
                 .Build());
     }
@@ -1847,7 +1933,7 @@ RigExecResultsSceneIndex::GetPrim(const SdfPath &primPath) const
         return prim;
     }
     if (HdContainerDataSourceHandle strongRoot =
-            _BuildStrongRoot(it->second)) {
+            _BuildStrongRoot(it->second, prim.dataSource)) {
         // Container-on-container overlap composes recursively: owned
         // value leaves win while topology, descriptors, and unrelated
         // schemas continue to come from upstream (spec §10.3.1).
@@ -2250,10 +2336,14 @@ RigExecResultsSceneIndex::_DirtySubtree(
     const HdDataSourceLocatorSet &locators,
     HdSceneIndexObserver::DirtiedPrimEntries *entries) const
 {
+    const RigExecImagingSnapshotConstPtr snapshot = _CurrentSnapshot();
     _DirtyAnnouncedGuideChildren(path, locators, entries);
     for (const SdfPath &child :
              _GetInputSceneIndex()->GetChildPrimPaths(path)) {
-        entries->emplace_back(child, locators);
+        entries->emplace_back(
+            child, snapshot
+                       ? _ShaderMatrixXformLocators(*snapshot, child, locators)
+                       : locators);
         _DirtySubtree(child, locators, entries);
     }
 }
@@ -2492,11 +2582,14 @@ RigExecResultsSceneIndex::NotifyGenerationPublished(
             }
             continue;
         }
-        if (entry.changes & RigExecChangeGuides) {
+        if (entry.changes &
+            (RigExecChangeGuides | RigExecChangeControlGuideXform)) {
             // The control guide keeps its prim type across a value change
-            // (shape and drawMode edits report structural), so this is the
-            // frame/scale/styling case: dirty the child that already exists,
-            // or announce it if this consumer never heard about it.
+            // (shape and drawMode edits report structural). Pose and scale
+            // live exclusively in its xform; keep unchanged points,
+            // topology, styling and local extent cached during a drag.
+            // Styling/width/purpose changes still invalidate the whole
+            // child, including when they coincide with a pose change.
             const SdfPath controlGuidePath =
                 entry.path.AppendChild(_controlGuideName);
             if (_announcedControlGuides.count(entry.path) == 0) {
@@ -2505,11 +2598,18 @@ RigExecResultsSceneIndex::NotifyGenerationPublished(
             } else if (!_GetInputSceneIndex()
                             ->GetPrim(controlGuidePath)
                             .dataSource) {
-                entries.emplace_back(
-                    controlGuidePath,
-                    HdDataSourceLocatorSet::UniversalSet());
+                static const HdDataSourceLocatorSet controlGuideXform =
+                    HdContainerDataSourceEditor::ComputeDirtyLocators(
+                        HdDataSourceLocatorSet{HdDataSourceLocator(
+                            HdXformSchemaTokens->xform,
+                            HdXformSchemaTokens->matrix)});
+                entries.emplace_back(controlGuidePath,
+                    entry.changes & RigExecChangeGuides
+                        ? HdDataSourceLocatorSet::UniversalSet()
+                        : controlGuideXform);
             }
-
+        }
+        if (entry.changes & RigExecChangeGuides) {
             // Reconcile even when the element count is unchanged: a joint
             // length crossing zero adds or removes its cone while its sphere
             // and frame survive.
@@ -2582,6 +2682,13 @@ RigExecResultsSceneIndex::NotifyGenerationPublished(
         if (entry.changes & RigExecChangeXform) {
             leaves.insert(HdDataSourceLocator(
                 HdXformSchemaTokens->xform, HdXformSchemaTokens->matrix));
+            if (const RigExecImagingSnapshotConstPtr snapshot = _CurrentSnapshot()) {
+                const auto prim = snapshot->prims.find(entry.path);
+                if (prim != snapshot->prims.end() &&
+                    !prim->second.targetLocalShaderMatrices.empty()) {
+                    leaves.insert(HdPrimvarsSchema::GetDefaultLocator());
+                }
+            }
 
             // ...and every descendant, by hand.
             // No flattening scene index sits downstream of us to propagate
@@ -2706,7 +2813,7 @@ RigExecResultsSceneIndex::SetStore(std::shared_ptr<RigExecSnapshotStore> store)
     // swap: the two stores describe different stages, so nothing about a
     // prim's previous overlay can be assumed to survive. Reset boundaries
     // ride along exactly as a publication diffs them.
-    std::map<SdfPath, uint8_t> changes;
+    std::map<SdfPath, uint16_t> changes;
     for (const RigExecImagingSnapshotConstPtr &snapshot : {before, after}) {
         if (!snapshot) {
             continue;
@@ -3000,6 +3107,13 @@ RigExecResultsSceneIndex::_PrimsDirtied(
     // drag its guide children along -- they are invisible to the flattener
     // upstream and to every observer downstream, so nothing else will.
     HdSceneIndexObserver::DirtiedPrimEntries forwarded(entries);
+    const RigExecImagingSnapshotConstPtr snapshot = _CurrentSnapshot();
+    if (snapshot) {
+        for (auto &entry : forwarded) {
+            entry.dirtyLocators = _ShaderMatrixXformLocators(
+                *snapshot, entry.primPath, entry.dirtyLocators);
+        }
+    }
     static const HdDataSourceLocatorSet inheritedLocators =
         HdContainerDataSourceEditor::ComputeDirtyLocators(
             HdDataSourceLocatorSet{HdVisibilitySchema::GetDefaultLocator(),

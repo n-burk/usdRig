@@ -180,6 +180,7 @@ class Panel(object):
         self.w = float(record.get("w") or 400.0)
         self.h = float(record.get("h") or 600.0)
         self.fill = tuple(record.get("fill") or (68, 68, 68, 255))
+        self.backgroundImage = record.get("backgroundImage") or b""
 
 
 class Picker(object):
@@ -386,6 +387,10 @@ def content_box(picker, panel, margin=12.0):
     Returns ((origin x, y), (width, height)) in panel units.
     """
     boxes = [b for b in picker.buttons if b.parent == panel.id]
+    if panel.backgroundImage:
+        # An imported image defines a canvas too, including empty margins
+        # around the buttons. Keep it in the fit and hit-test transform.
+        boxes.append(panel)
     if not boxes:
         return (0.0, 0.0), (max(panel.w, 1.0), max(panel.h, 1.0))
     ox = min(b.x for b in boxes) - margin

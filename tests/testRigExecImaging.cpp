@@ -19,11 +19,13 @@
 #include "pxr/usd/usd/references.h"
 
 #include "pxr/base/gf/rotation.h"
+#include "pxr/base/gf/matrix4f.h"
 #include "pxr/base/plug/registry.h"
 #include "pxr/base/tf/pathUtils.h"
 #include "pxr/imaging/hd/basisCurvesSchema.h"
 #include "pxr/imaging/hd/basisCurvesTopologySchema.h"
 #include "pxr/imaging/hd/coneSchema.h"
+#include "pxr/imaging/hd/containerDataSourceEditor.h"
 #include "pxr/imaging/hd/cubeSchema.h"
 #include "pxr/imaging/hd/dataSourceLocator.h"
 #include "pxr/imaging/hd/extentSchema.h"
@@ -41,6 +43,7 @@
 #include "pxr/imaging/hd/retainedSceneIndex.h"
 #include "pxr/imaging/hd/sceneIndexObserver.h"
 #include "pxr/imaging/hd/tokens.h"
+#include "pxr/imaging/hd/types.h"
 #include "pxr/imaging/hd/unitTestNullRenderDelegate.h"
 #include "pxr/imaging/hd/primOriginSchema.h"
 #include "pxr/imaging/hd/visibilitySchema.h"
@@ -51,6 +54,7 @@
 #include "pxr/usd/usdGeom/boundable.h"
 #include "pxr/usd/usdGeom/tokens.h"
 #include "pxr/usd/usdGeom/imageable.h"
+#include "pxr/usd/usdGeom/primvarsAPI.h"
 #include "pxr/usd/usdGeom/xformable.h"
 #include "pxr/usd/usdGeom/xformCache.h"
 #include "pxr/usd/usdUtils/stageCache.h"
@@ -1907,6 +1911,67 @@ TestStandaloneControlGuide()
     CHECK(published->second.controlGuideDrawMode == TfToken("wire"));
     CHECK(published->second.controlGuideScale == GfVec3d(1.0));
 
+    // Imported controls carry local wire shapes without authored geometry.
+    {
+        const VtVec3fArray vertices{{1,2,3},{4,2,3},{0,0,0},{0,5,0}};
+        CHECK(controlPrim.GetAttribute(TfToken("guide:shape")).Set(TfToken("custom")));
+        CHECK(controlPrim.GetAttribute(TfToken("guide:points")).Set(vertices));
+        CHECK(controlPrim.GetAttribute(TfToken("guide:curveVertexCounts")).Set(VtIntArray{2,2}));
+        auto upstream = HdRetainedSceneIndex::New();
+        upstream->AddPrims({{control, TfToken(), HdRetainedContainerDataSource::New(
+            HdPrimOriginSchema::GetSchemaToken(), HdRetainedContainerDataSource::New(
+                HdPrimOriginSchemaTokens->scenePath,
+                HdRetainedTypedSampledDataSource<HdPrimOriginSchema::OriginPath>::New(control)))}});
+        auto binding = RigExecBindingResolvingSceneIndex::New(upstream);
+        auto results = RigExecResultsSceneIndex::New(binding, bridge.GetStore());
+        bridge.SetSceneIndices(binding, results);
+        CHECK(bridge.EvaluateAndPublish(UsdTimeCode::Default()));
+        const SdfPath child=control.AppendChild(TfToken("rigGuideCtrl"));
+        auto guide = results->GetPrim(child);
+        CHECK(guide.primType == HdPrimTypeTokens->basisCurves);
+        CHECK(HdBasisCurvesSchema::GetFromParent(guide.dataSource).GetTopology()
+            .GetCurveVertexCounts()->GetTypedValue(0) == VtIntArray({2,2}));
+        CHECK(HdPrimvarsSchema::GetFromParent(guide.dataSource).GetPrimvar(TfToken("points"))
+            .GetPrimvarValue()->GetValue(0).Get<VtVec3fArray>() == vertices);
+        CHECK(controlPrim.GetAttribute(TfToken("avars:tx")).Set(7.0));
+        CHECK(bridge.EvaluateAndPublish(UsdTimeCode::Default()));
+        guide = results->GetPrim(child);
+        CHECK(HdXformSchema::GetFromParent(guide.dataSource).GetMatrix()
+            ->GetTypedValue(0).ExtractTranslation() == GfVec3d(7,0,0));
+        CHECK(controlPrim.GetAttribute(TfToken("avars:sx")).Set(-2.0));
+        CHECK(bridge.EvaluateAndPublish(UsdTimeCode::Default()));
+        guide = results->GetPrim(child);
+        CHECK(HdXformSchema::GetFromParent(guide.dataSource).GetMatrix()
+            ->GetTypedValue(0).Transform(GfVec3d(1,2,3)) == GfVec3d(5,2,3));
+        CHECK(controlPrim.GetAttribute(TfToken("guide:orient")).Set(
+            GfQuatf(GfRotation(GfVec3d(0,0,1),90).GetQuat())));
+        CHECK(bridge.EvaluateAndPublish(UsdTimeCode::Default()));
+        guide = results->GetPrim(child);
+        CHECK(GfIsClose(HdXformSchema::GetFromParent(guide.dataSource).GetMatrix()
+            ->GetTypedValue(0).Transform(GfVec3d(1,2,3)),GfVec3d(11,1,3),1e-5));
+        CHECK(controlPrim.GetAttribute(TfToken("guide:orient")).Clear());
+        CHECK(controlPrim.GetAttribute(TfToken("guide:points")).Set(VtVec3fArray{{0,0,0},{2,0,0}}));
+        CHECK(controlPrim.GetAttribute(TfToken("guide:curveVertexCounts")).Set(VtIntArray{2}));
+        CHECK(bridge.EvaluateAndPublish(UsdTimeCode::Default()));
+        guide = results->GetPrim(child);
+        CHECK(HdBasisCurvesSchema::GetFromParent(guide.dataSource).GetTopology()
+            .GetCurveVertexCounts()->GetTypedValue(0) == VtIntArray({2}));
+        CHECK(controlPrim.GetAttribute(TfToken("guide:curveVertexCounts")).Set(VtIntArray{3}));
+        CHECK(bridge.EvaluateAndPublish(UsdTimeCode::Default()));
+        CHECK(!results->GetPrim(child).dataSource);
+        CHECK(controlPrim.GetAttribute(TfToken("guide:curveVertexCounts")).Set(VtIntArray{2}));
+        CHECK(controlPrim.GetAttribute(TfToken("guide:displayOpacity")).Set(0.0f));
+        CHECK(bridge.EvaluateAndPublish(UsdTimeCode::Default()));
+        CHECK(!results->GetPrim(child).dataSource);
+        CHECK(controlPrim.GetAttribute(TfToken("guide:displayOpacity")).Clear());
+        CHECK(bridge.EvaluateAndPublish(UsdTimeCode::Default()));
+        CHECK(results->GetPrim(child).dataSource);
+        CHECK(controlPrim.GetAttribute(TfToken("guide:shape")).Clear());
+        CHECK(controlPrim.GetAttribute(TfToken("avars:tx")).Clear());
+        CHECK(controlPrim.GetAttribute(TfToken("avars:sx")).Clear());
+        CHECK(bridge.EvaluateAndPublish(UsdTimeCode::Default()));
+    }
+
     // guide:offset moves the drawn shape in the control's local frame and
     // leaves the control itself where it is.
     {
@@ -2303,6 +2368,254 @@ TestSimpleRigControlAndDeformation(const std::string &examplesDir)
             (GfVec3d(posedPoints[i]) - GfVec3d(restPoints[i])).GetLength());
     }
     CHECK(maxDisplacement > 1e-4);
+}
+
+// Derived shader matrices cross the GPU boundary as float4x4, while the
+// evaluated and authored matrices retain their double-precision contract.
+static void
+TestShaderMatrixPrimvars()
+{
+    const SdfPath eyePath("/Eye");
+    const TfToken projector("projectorFrame");
+    const TfToken dials("packedDials");
+    const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    const UsdPrim eye = stage->DefinePrim(eyePath, TfToken("Mesh"));
+    UsdGeomPrimvarsAPI primvars(eye);
+    GfMatrix4d authored(1.0);
+    authored.SetTranslateOnly(GfVec3d(3.125, 164.301019281, -2.75));
+    const UsdGeomPrimvar projectorAttr = primvars.CreatePrimvar(
+        projector, SdfValueTypeNames->Matrix4d, UsdGeomTokens->constant);
+    const UsdGeomPrimvar dialsAttr = primvars.CreatePrimvar(
+        dials, SdfValueTypeNames->Matrix4d, UsdGeomTokens->constant);
+    CHECK(projectorAttr.Set(authored));
+    CHECK(dialsAttr.Set(GfMatrix4d(0.0)));
+    std::string sourceBefore, sessionBefore;
+    CHECK(stage->GetRootLayer()->ExportToString(&sourceBefore));
+    CHECK(stage->GetSessionLayer()->ExportToString(&sessionBefore));
+
+    auto upstream = UsdImagingStageSceneIndex::New();
+    upstream->SetStage(stage);
+    upstream->ApplyPendingUpdates();
+    auto store = std::make_shared<RigExecSnapshotStore>();
+    auto results = RigExecResultsSceneIndex::New(upstream, store);
+    _RecordingObserver observer;
+    results->AddObserver(HdSceneIndexObserverPtr(&observer));
+
+    RigExecPublishedPrim published;
+    published.shaderMatrices[projector] = authored;
+    // Distinct values in all sixteen positions catch accidental transpose
+    // or dial-slot repacking as well as the float/double storage mismatch.
+    GfMatrix4d packed(0.0);
+    for (size_t row = 0; row < 4; ++row) {
+        for (size_t col = 0; col < 4; ++col) {
+            packed[row][col] = 100.0 * row + 10.0 * col + 0.1234567890123;
+        }
+    }
+    published.shaderMatrices[dials] = packed;
+    auto generation = [&]() {
+        auto snapshot = std::make_shared<RigExecImagingSnapshot>();
+        snapshot->stage = stage;
+        snapshot->prims[eyePath] = published;
+        return snapshot;
+    };
+    auto checkMatrices = [&]() {
+        const HdPrimvarsSchema drawn = HdPrimvarsSchema::GetFromParent(
+            results->GetPrim(eyePath).dataSource);
+        for (const auto &[name, matrix] : published.shaderMatrices) {
+            const HdPrimvarSchema pv = drawn.GetPrimvar(name);
+            CHECK(pv.GetInterpolation() &&
+                  pv.GetInterpolation()->GetTypedValue(0.0f) ==
+                      HdPrimvarSchemaTokens->constant);
+            const HdSampledDataSourceHandle value = pv.GetPrimvarValue();
+            CHECK(value);
+            if (!value) continue;
+            const VtValue v = value->GetValue(0.0f);
+            CHECK(v.IsHolding<GfMatrix4f>());
+            CHECK(!v.IsHolding<GfMatrix4d>());
+            const HdTupleType type = HdGetValueTupleType(v);
+            CHECK(type.type == HdTypeFloatMat4 && type.count == 1);
+            CHECK(HdDataSizeOfTupleType(type) == 16 * sizeof(float));
+            if (v.IsHolding<GfMatrix4f>()) {
+                CHECK(v.UncheckedGet<GfMatrix4f>() == GfMatrix4f(matrix));
+            }
+            // Only the GPU-facing value is narrowed. The authoritative
+            // evaluated snapshot and the upstream authored value stay double.
+            CHECK(store->Get()->prims.at(eyePath).shaderMatrices.at(name) == matrix);
+            const VtValue upstreamValue = HdPrimvarsSchema::GetFromParent(
+                upstream->GetPrim(eyePath).dataSource).GetPrimvar(name)
+                    .GetPrimvarValue()->GetValue(0.0f);
+            CHECK(upstreamValue.IsHolding<GfMatrix4d>());
+        }
+    };
+    results->NotifyGenerationPublished(store->Publish(generation()));
+    checkMatrices();
+
+    observer.added.clear();
+    observer.removed.clear();
+    observer.dirtied.clear();
+    observer.dirtiedLocators.clear();
+    published.shaderMatrices[projector].SetRotateOnly(
+        GfRotation(GfVec3d(0, 1, 0), 27.0));
+    const RigExecPublishedDirtyVector dirty = store->Publish(generation());
+    CHECK(dirty.size() == 1);
+    if (dirty.size() == 1) {
+        CHECK(dirty[0].path == eyePath);
+        CHECK(dirty[0].changes == RigExecChangeShaderMatrix);
+    }
+    results->NotifyGenerationPublished(dirty);
+    checkMatrices();
+    CHECK(observer.added.empty() && observer.removed.empty());
+    CHECK(observer.dirtied.size() == 1);
+    if (observer.dirtied.size() == 1) {
+        CHECK(observer.dirtied[0] == eyePath);
+        CHECK(observer.dirtiedLocators[0] ==
+              HdContainerDataSourceEditor::ComputeDirtyLocators(
+                  HdDataSourceLocatorSet{HdPrimvarsSchema::GetDefaultLocator()}));
+    }
+    CHECK(store->Publish(generation()).empty());
+    GfMatrix4d authoredAfter(0.0);
+    CHECK(projectorAttr.Get(&authoredAfter));
+    CHECK(authoredAfter == authored);
+    CHECK(projectorAttr.GetTypeName() == SdfValueTypeNames->Matrix4d);
+    std::string sourceAfter, sessionAfter;
+    CHECK(stage->GetRootLayer()->ExportToString(&sourceAfter));
+    CHECK(stage->GetSessionLayer()->ExportToString(&sessionAfter));
+    CHECK(sourceAfter == sourceBefore && sessionAfter == sessionBefore);
+    results->RemoveObserver(HdSceneIndexObserverPtr(&observer));
+}
+
+// A control drag changes the final transform of a cached unit shape, not
+// its geometry. Rebuilding that geometry on every sample is unnecessary
+// and can force a renderer through curve topology/material preparation.
+static void
+TestControlGuidePoseDirtiness()
+{
+    const SdfPath assetRoot("/Asset");
+    const SdfPath control("/Asset/Ctrl");
+    const SdfPath guide = control.AppendChild(TfToken("rigGuideCtrl"));
+    auto upstream = HdRetainedSceneIndex::New();
+    upstream->AddPrims(
+        {{assetRoot, TfToken(), HdRetainedContainerDataSource::New()},
+         {control, TfToken(), HdRetainedContainerDataSource::New()}});
+    auto store = std::make_shared<RigExecSnapshotStore>();
+    auto results = RigExecResultsSceneIndex::New(upstream, store);
+    _RecordingObserver observer;
+    results->AddObserver(HdSceneIndexObserverPtr(&observer));
+
+    RigExecPublishedPrim published;
+    published.assetRoot = assetRoot;
+    published.hasControlGuide = true;
+    published.hasControlFrame = true;
+    published.controlGuideShape = TfToken("circle");
+    published.controlGuideDrawMode = TfToken("wire");
+    published.controlGuidePlaneNormal = TfToken("Y");
+    auto generation = [&]() {
+        auto snapshot = std::make_shared<RigExecImagingSnapshot>();
+        snapshot->assetRoot = assetRoot;
+        snapshot->prims[control] = published;
+        return snapshot;
+    };
+    results->NotifyGenerationPublished(store->Publish(generation()));
+    const HdSceneIndexPrim initial = results->GetPrim(guide);
+    CHECK(initial.dataSource);
+    const VtVec3fArray initialPoints = _GetPointsPrimvar(initial);
+    const VtIntArray initialCounts = _GuideTopologyCounts(initial);
+    const auto initialExtent = HdExtentSchema::GetFromParent(initial.dataSource);
+    CHECK(initialExtent.GetMin() && initialExtent.GetMax());
+    const GfVec3d extentMin = initialExtent.GetMin()->GetTypedValue(0.0f);
+    const GfVec3d extentMax = initialExtent.GetMax()->GetTypedValue(0.0f);
+    const HdDataSourceLocatorSet xformLocators =
+        HdContainerDataSourceEditor::ComputeDirtyLocators(
+            HdDataSourceLocatorSet{HdDataSourceLocator(
+                HdXformSchemaTokens->xform, HdXformSchemaTokens->matrix)});
+
+    auto publish = [&](uint16_t expectedChanges, bool universal) {
+        observer.added.clear();
+        observer.removed.clear();
+        observer.dirtied.clear();
+        observer.dirtiedLocators.clear();
+        const RigExecPublishedDirtyVector dirty = store->Publish(generation());
+        CHECK(dirty.size() == 1);
+        if (dirty.size() == 1) {
+            CHECK(dirty[0].path == control);
+            CHECK(dirty[0].changes == expectedChanges);
+        }
+        results->NotifyGenerationPublished(dirty);
+        CHECK(observer.added.empty());
+        CHECK(observer.removed.empty());
+        size_t guideDirties = 0;
+        for (size_t i = 0; i < observer.dirtied.size(); ++i) {
+            if (observer.dirtied[i] != guide) continue;
+            ++guideDirties;
+            const HdDataSourceLocatorSet &locators = observer.dirtiedLocators[i];
+            CHECK(locators == (universal
+                ? HdDataSourceLocatorSet::UniversalSet() : xformLocators));
+            if (!universal) {
+                CHECK(locators.Intersects(HdXformSchema::GetDefaultLocator()));
+                CHECK(!locators.Intersects(HdPrimvarsSchema::GetDefaultLocator()));
+                CHECK(!locators.Intersects(HdBasisCurvesSchema::GetDefaultLocator()));
+                CHECK(!locators.Intersects(HdExtentSchema::GetDefaultLocator()));
+                CHECK(!locators.Intersects(HdDataSourceLocator(TfToken("materialBindings"))));
+                CHECK(!locators.Intersects(HdLegacyDisplayStyleSchema::GetDefaultLocator()));
+                const HdSceneIndexPrim current = results->GetPrim(guide);
+                CHECK(_GetPointsPrimvar(current) == initialPoints);
+                CHECK(_GuideTopologyCounts(current) == initialCounts);
+                const auto extent = HdExtentSchema::GetFromParent(current.dataSource);
+                CHECK(extent.GetMin()->GetTypedValue(0.0f) == extentMin);
+                CHECK(extent.GetMax()->GetTypedValue(0.0f) == extentMax);
+            }
+        }
+        CHECK(guideDirties == 1);
+    };
+    auto guideMatrix = [&]() {
+        return HdXformSchema::GetFromParent(results->GetPrim(guide).dataSource)
+            .GetMatrix()->GetTypedValue(0.0f);
+    };
+
+    published.controlFrame.SetTranslate(GfVec3d(3, 0, 0));
+    published.controlGuideFrame = published.controlFrame;
+    publish(RigExecChangeControlGuideXform, false);
+    CHECK(guideMatrix() == published.controlGuideFrame);
+
+    published.controlGuideFrame.SetRotateOnly(
+        GfRotation(GfVec3d(0, 0, 1), 30.0));
+    publish(RigExecChangeControlGuideXform, false);
+    CHECK(guideMatrix() == published.controlGuideFrame);
+
+    published.controlGuideScale = GfVec3d(2, 3, 4);
+    publish(RigExecChangeControlGuideXform, false);
+    GfMatrix4d scale(1.0);
+    scale.SetScale(published.controlGuideScale);
+    CHECK(guideMatrix() == scale * published.controlGuideFrame);
+
+    // The native manipulator frame is published separately from the
+    // rigidized drawing frame. Its change must not revive universal
+    // curve dirtiness when the drawing frame itself stays unchanged.
+    published.controlFrame.SetTranslate(GfVec3d(4, 0, 0));
+    publish(RigExecChangeControlGuideXform, false);
+    CHECK(store->Get()->prims.at(control).controlFrame == published.controlFrame);
+    CHECK(guideMatrix() == scale * published.controlGuideFrame);
+
+    published.guideOpacity = 0.25f;
+    publish(RigExecChangeGuides, true);
+    published.controlGuideFrame.SetTranslateOnly(GfVec3d(5, 0, 0));
+    published.guideColor = GfVec3f(0, 1, 0);
+    publish(RigExecChangeControlGuideXform | RigExecChangeGuides, true);
+    published.guidePurpose = TfToken("guide");
+    publish(RigExecChangeGuides, true);
+    published.controlGuideWireWidth = 0.2;
+    publish(RigExecChangeGuides, true);
+    published.controlGuideWireWidth = 0.0;
+    publish(RigExecChangeGuides, true);
+    CHECK(!HdPrimvarsSchema::GetFromParent(results->GetPrim(guide).dataSource)
+        .GetPrimvar(HdTokens->widths));
+
+    // A same-type shape change is still structural: its points and local
+    // extent differ, even though the existing child needs no add/remove.
+    published.controlGuideShape = TfToken("box");
+    publish(RigExecChangeStructural, true);
+    CHECK(store->Publish(generation()).empty());
+    results->RemoveObserver(HdSceneIndexObserverPtr(&observer));
 }
 
 // A constraint-driven ASSET ROOT carries the synthesized guides with it,
@@ -2897,6 +3210,217 @@ private:
     GfMatrix4d _a, _b;
 };
 
+// Spatial projector matrices are target-local in the snapshot, world-space
+// at the shader boundary. Packed dial matrices must never be transformed.
+static void
+TestShaderMatrixWorldSpace()
+{
+    const SdfPath assetPath("/Asset");
+    const SdfPath eyePath("/Asset/Eye");
+    const TfToken projector("spatialFrame");
+    const TfToken dials("packedParameters");
+    const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    const UsdPrim asset = stage->DefinePrim(assetPath, TfToken("Xform"));
+    const UsdPrim eye = stage->DefinePrim(eyePath, TfToken("Mesh"));
+    const UsdGeomXformOp assetOp = UsdGeomXformable(asset).AddTransformOp();
+    const UsdGeomXformOp eyeOp = UsdGeomXformable(eye).AddTransformOp();
+    GfMatrix4d scale(1), rotate(1), translate(1);
+    scale.SetScale(GfVec3d(2.0, 1.5, 0.75));
+    rotate.SetRotate(GfRotation(GfVec3d(0, 1, 0), 31));
+    translate.SetTranslate(GfVec3d(20, -3, 5));
+    GfMatrix4d assetWorld = scale * rotate * translate;
+    GfMatrix4d eyeLocal(1);
+    eyeLocal.SetRotate(GfRotation(GfVec3d(1, 0, 0), 13));
+    eyeLocal.SetTranslateOnly(GfVec3d(1, 4, 2));
+    CHECK(assetOp.Set(assetWorld));
+    CHECK(eyeOp.Set(eyeLocal));
+    UsdGeomPrimvarsAPI primvars(eye);
+    CHECK(primvars.CreatePrimvar(projector, SdfValueTypeNames->Matrix4d,
+                                UsdGeomTokens->constant).Set(GfMatrix4d(1)));
+    CHECK(primvars.CreatePrimvar(dials, SdfValueTypeNames->Matrix4d,
+                                UsdGeomTokens->constant).Set(GfMatrix4d(0.0)));
+
+    auto stageIndex = UsdImagingStageSceneIndex::New();
+    stageIndex->SetStage(stage);
+    stageIndex->ApplyPendingUpdates();
+    auto flattened = HdFlatteningSceneIndex::New(
+        stageIndex, HdFlattenedDataSourceProviders());
+    auto store = std::make_shared<RigExecSnapshotStore>();
+    auto results = RigExecResultsSceneIndex::New(flattened, store);
+    _RecordingObserver observer;
+    results->AddObserver(HdSceneIndexObserverPtr(&observer));
+
+    RigExecPublishedPrim published;
+    GfMatrix4d localProjector(1);
+    localProjector.SetRotate(GfRotation(GfVec3d(0, 0, 1), -17));
+    localProjector.SetTranslateOnly(GfVec3d(0.25, 0.5, -0.75));
+    const GfMatrix4d packed(0.375, 0.51, 0.73, 1.1,
+                            2.2, 3.3, 4.4, 5.5,
+                            6.6, 7.7, 8.8, 9.9,
+                            10.1, 11.2, 12.3, 13.4);
+    published.shaderMatrices[projector] = localProjector;
+    published.shaderMatrices[dials] = packed;
+    published.targetLocalShaderMatrices.insert(projector);
+    RigExecPublishedPrim drivenAsset;
+    bool publishAsset = false;
+    bool resetEyeStack = false;
+    auto generation = [&]() {
+        auto snapshot = std::make_shared<RigExecImagingSnapshot>();
+        snapshot->stage = stage;
+        snapshot->prims[eyePath] = published;
+        if (publishAsset) snapshot->prims[assetPath] = drivenAsset;
+        if (resetEyeStack) snapshot->xformResetPaths.insert(eyePath);
+        return snapshot;
+    };
+    auto clearNotices = [&]() {
+        observer.added.clear();
+        observer.removed.clear();
+        observer.dirtied.clear();
+        observer.dirtiedLocators.clear();
+    };
+    auto checkDrawn = [&](const GfMatrix4d &targetWorld) {
+        const HdPrimvarsSchema drawn = HdPrimvarsSchema::GetFromParent(
+            results->GetPrim(eyePath).dataSource);
+        const VtValue value = drawn.GetPrimvar(projector).GetPrimvarValue()->GetValue(0);
+        CHECK(value.IsHolding<GfMatrix4f>());
+        if (value.IsHolding<GfMatrix4f>()) {
+            CHECK(GfIsClose(GfMatrix4d(value.UncheckedGet<GfMatrix4f>()),
+                            GfMatrix4d(GfMatrix4f(localProjector * targetWorld)),
+                            1e-5));
+        }
+        CHECK(drawn.GetPrimvar(dials).GetPrimvarValue()->GetValue(0) ==
+              VtValue(GfMatrix4f(packed)));
+        CHECK(store->Get()->prims.at(eyePath).shaderMatrices.at(projector) ==
+              localProjector);
+    };
+    auto checkSpatialDirty = [&]() {
+        bool primvarsDirty = false, xformDirty = false;
+        for (size_t i = 0; i < observer.dirtied.size(); ++i) {
+            if (observer.dirtied[i] != eyePath) continue;
+            primvarsDirty |= observer.dirtiedLocators[i].Intersects(
+                HdPrimvarsSchema::GetDefaultLocator());
+            xformDirty |= observer.dirtiedLocators[i].Intersects(
+                HdXformSchema::GetDefaultLocator());
+        }
+        CHECK(primvarsDirty && xformDirty);
+        CHECK(observer.added.empty() && observer.removed.empty());
+    };
+    std::string sourceBefore, sessionBefore;
+    CHECK(stage->GetRootLayer()->ExportToString(&sourceBefore));
+    CHECK(stage->GetSessionLayer()->ExportToString(&sessionBefore));
+    results->NotifyGenerationPublished(store->Publish(generation()));
+    checkDrawn(eyeLocal * assetWorld);
+    std::string sourceInitialAfter, sessionInitialAfter;
+    CHECK(stage->GetRootLayer()->ExportToString(&sourceInitialAfter));
+    CHECK(stage->GetSessionLayer()->ExportToString(&sessionInitialAfter));
+    CHECK(sourceInitialAfter == sourceBefore && sessionInitialAfter == sessionBefore);
+
+    // An ordinary authored ancestor edit changes the world frame, while the
+    // rig's local projector and its snapshot generation stay identical.
+    clearNotices();
+    rotate.SetRotate(GfRotation(GfVec3d(0, 0, 1), -29));
+    translate.SetTranslate(GfVec3d(-8, 12, 4));
+    assetWorld = scale * rotate * translate;
+    CHECK(assetOp.Set(assetWorld));
+    stageIndex->ApplyPendingUpdates();
+    checkDrawn(eyeLocal * assetWorld);
+    checkSpatialDirty();
+    CHECK(store->Publish(generation()).empty());
+    // Save the intentionally edited source, then verify all subsequent
+    // derived publication and pulls leave both USD layers byte-identical.
+    CHECK(stage->GetRootLayer()->ExportToString(&sourceBefore));
+    CHECK(stage->GetSessionLayer()->ExportToString(&sessionBefore));
+
+    published.hasXform = true;
+    published.xformBase = eyeLocal;
+    published.xform = eyeLocal;
+    results->NotifyGenerationPublished(store->Publish(generation()));
+    clearNotices();
+    published.xform.SetTranslateOnly(GfVec3d(3, 6, -2));
+    results->NotifyGenerationPublished(store->Publish(generation()));
+    checkDrawn(published.xform * assetWorld);
+    checkSpatialDirty();
+
+    publishAsset = true;
+    drivenAsset.hasXform = true;
+    drivenAsset.xformBase = assetWorld;
+    drivenAsset.xform = assetWorld;
+    results->NotifyGenerationPublished(store->Publish(generation()));
+    clearNotices();
+    drivenAsset.xform.SetTranslateOnly(GfVec3d(9, -2, 7));
+    results->NotifyGenerationPublished(store->Publish(generation()));
+    checkDrawn(published.xform * drivenAsset.xform);
+    checkSpatialDirty();
+
+    std::string sourceAfter, sessionAfter;
+    CHECK(stage->GetRootLayer()->ExportToString(&sourceAfter));
+    CHECK(stage->GetSessionLayer()->ExportToString(&sessionAfter));
+    CHECK(sourceAfter == sourceBefore && sessionAfter == sessionBefore);
+
+    // A target that resets its authored stack must not gain the driven
+    // ancestor's placement through the shader-only composition path.
+    CHECK(UsdGeomXformable(eye).SetResetXformStack(true));
+    stageIndex->ApplyPendingUpdates();
+    resetEyeStack = true;
+    CHECK(stage->GetRootLayer()->ExportToString(&sourceBefore));
+    CHECK(stage->GetSessionLayer()->ExportToString(&sessionBefore));
+    results->NotifyGenerationPublished(store->Publish(generation()));
+    checkDrawn(published.xform);
+    drivenAsset.xform.SetTranslateOnly(GfVec3d(100, 200, 300));
+    results->NotifyGenerationPublished(store->Publish(generation()));
+    checkDrawn(published.xform);
+    CHECK(stage->GetRootLayer()->ExportToString(&sourceAfter));
+    CHECK(stage->GetSessionLayer()->ExportToString(&sessionAfter));
+    CHECK(sourceAfter == sourceBefore && sessionAfter == sessionBefore);
+    results->RemoveObserver(HdSceneIndexObserverPtr(&observer));
+
+    // Preserve supported upstream and driven-world motion samples at the
+    // same float shader boundary, without applying them to packed dials.
+    auto motionInput = HdRetainedSceneIndex::New();
+    GfMatrix4d worldA(1), worldB(1);
+    worldA.SetTranslate(GfVec3d(2, 3, 4));
+    worldB.SetTranslate(GfVec3d(-5, 6, 7));
+    const TfToken xformName = HdXformSchemaTokens->xform;
+    const HdDataSourceBaseHandle xformSource = HdXformSchema::Builder()
+        .SetMatrix(_TestMotionMatrix::New(worldA, worldB))
+        .SetResetXformStack(HdRetainedTypedSampledDataSource<bool>::New(true))
+        .Build();
+    motionInput->AddPrims({{eyePath, HdPrimTypeTokens->mesh,
+        HdRetainedContainerDataSource::New(1, &xformName, &xformSource)}});
+    auto motionStore = std::make_shared<RigExecSnapshotStore>();
+    auto motionResults = RigExecResultsSceneIndex::New(motionInput, motionStore);
+    auto motionSnapshot = std::make_shared<RigExecImagingSnapshot>();
+    published.hasXform = false;
+    motionSnapshot->prims[eyePath] = published;
+    motionStore->Publish(motionSnapshot);
+    auto checkMotion = [&](const GfMatrix4d &a, const GfMatrix4d &b) {
+        const HdPrimvarsSchema drawn = HdPrimvarsSchema::GetFromParent(
+            motionResults->GetPrim(eyePath).dataSource);
+        const auto value = drawn.GetPrimvar(projector).GetPrimvarValue();
+        std::vector<float> samples;
+        CHECK(value->GetContributingSampleTimesForInterval(-11.5f, 11.5f, &samples));
+        CHECK(samples == std::vector<float>({-11.5f, 11.5f}));
+        CHECK(value->GetValue(-11.5f) == VtValue(GfMatrix4f(localProjector * a)));
+        CHECK(value->GetValue(11.5f) == VtValue(GfMatrix4f(localProjector * b)));
+        const auto packedValue = drawn.GetPrimvar(dials).GetPrimvarValue();
+        CHECK(!packedValue->GetContributingSampleTimesForInterval(-11.5f, 11.5f, &samples));
+        CHECK(packedValue->GetValue(-11.5f) == VtValue(GfMatrix4f(packed)));
+        CHECK(packedValue->GetValue(11.5f) == VtValue(GfMatrix4f(packed)));
+    };
+    checkMotion(worldA, worldB);
+    auto drivenMotion = std::make_shared<RigExecImagingSnapshot>(*motionStore->Get());
+    auto &motionPrim = drivenMotion->prims[eyePath];
+    motionPrim.hasXform = true;
+    motionPrim.xformBase = worldB;
+    motionPrim.xform = GfMatrix4d(1).SetTranslate(GfVec3d(11, 12, 13));
+    motionPrim.sampleOffsets = {-11.5f, 11.5f};
+    motionPrim.xformBaseSamples = {worldA, worldB};
+    motionPrim.xformSamples = {
+        GfMatrix4d(1).SetTranslate(GfVec3d(8, 9, 10)), motionPrim.xform};
+    motionStore->Publish(drivenMotion);
+    checkMotion(motionPrim.xformSamples[0], motionPrim.xformSamples[1]);
+}
+
 static void
 TestCompleteMotionPublication(const std::string &examplesDir)
 {
@@ -3447,10 +3971,11 @@ TestConstraintDrivenXformPublishes(const std::string &examplesDir)
         bridge.EvaluateAndPublishResult(UsdTimeCode(1024));
     CHECK(second.ok);
     snap = store->Get();
-    const auto it2 = snap ? snap->prims.find(turret)
-                          : RigExecImagingSnapshot().prims.end();
-    CHECK(snap && it2 != snap->prims.end());
-    if (!snap || it2 == snap->prims.end()) return;
+    CHECK(snap);
+    if (!snap) return;
+    const auto it2 = snap->prims.find(turret);
+    CHECK(it2 != snap->prims.end());
+    if (it2 == snap->prims.end()) return;
     CHECK(it2->second.hasXform);
     if (it2->second.xform == first) {
         std::printf("  turret xform identical at 1001 and 1024 -- "
@@ -4069,10 +4594,70 @@ TestGuideBoundsExport()
     CHECK(RigExecImaging_GetAllGuideBoundsAssetSpace(b) == 1);
     CHECK(matches(GfVec3d(-3, -2, -4), GfVec3d(16, 8, 4)));
 
+    // Imported shapes have arbitrary local vertices, including asymmetric
+    // shapes mirrored by the full evaluated control matrix.
+    RigExecPublishedPrim &custom = snapshot->prims[SdfPath("/R/Custom")];
+    custom.hasControlGuide = true;
+    custom.controlGuideShape = TfToken("custom");
+    custom.controlGuideDrawMode = TfToken("wire");
+    custom.controlGuideWireWidth = 0.0;
+    custom.controlGuidePoints = VtVec3fArray{{2,3,-1},{4,5,1}};
+    custom.controlGuideCounts = VtIntArray{2};
+    custom.controlGuideScale = GfVec3d(2,1,1);
+    custom.controlGuideFrame = GfMatrix4d(1.0).SetScale(GfVec3d(-1,1,1));
+    custom.controlGuideFrame.SetTranslateOnly(GfVec3d(10,0,0));
+    store->Publish(snapshot);
+    CHECK(bounds(SdfPath("/R/Custom")) == 1);
+    CHECK(matches(GfVec3d(2,3,-1), GfVec3d(6,5,1)));
+    custom.guideOpacity = 0.0f;
+    store->Publish(snapshot);
+    CHECK(bounds(SdfPath("/R/Custom")) == 0);
+    custom.guideOpacity = 0.5f;
+    custom.controlGuideCounts = VtIntArray{3};
+    store->Publish(snapshot);
+    CHECK(bounds(SdfPath("/R/Custom")) == 0);
+
     // An empty generation draws nothing at all.
     store->Publish(nullptr);
     CHECK(RigExecImaging_GetAllGuideBoundsAssetSpace(b) == 0);
     CHECK(bounds(joint) == 0);
+}
+
+static void
+TestCustomControlRestExtent()
+{
+    const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    stage->DefinePrim(SdfPath("/Rig"), TfToken("RigExecRoot"));
+    const UsdPrim control = stage->DefinePrim(SdfPath("/Rig/Ctrl"), TfToken("RigExecControl"));
+    CHECK(control.GetAttribute(TfToken("guide:shape")).Set(TfToken("custom")));
+    CHECK(control.GetAttribute(TfToken("guide:points")).Set(VtVec3fArray{{2,3,-1},{4,5,1}}));
+    CHECK(control.GetAttribute(TfToken("guide:curveVertexCounts")).Set(VtIntArray{2}));
+    CHECK(control.GetAttribute(TfToken("guide:wireWidth")).Set(0.0));
+    GfMatrix4d rest(1.0);
+    rest.SetScale(GfVec3d(-2,1,1));
+    rest.SetTranslateOnly(GfVec3d(10,0,0));
+    CHECK(control.GetAttribute(TfToken("rest:space")).Set(rest));
+    VtVec3fArray extent;
+    const UsdGeomBoundable boundable(control);
+    CHECK(UsdGeomBoundable::ComputeExtentFromPlugins(boundable, UsdTimeCode::Default(), &extent));
+    // Rest spaces are rigidized by evaluation, preserving the reflection.
+    CHECK(extent == VtVec3fArray({GfVec3f(6,3,-1),GfVec3f(8,5,1)}));
+    RigExecImagingBridge bridge(stage, SdfPath("/Rig"));
+    std::vector<std::string> errors;
+    CHECK(bridge.Compile(&errors));
+    CHECK(bridge.EvaluateAndPublish(UsdTimeCode::Default()));
+    const auto published = bridge.GetStore()->Get();
+    CHECK(published->prims.at(control.GetPath()).controlGuideFrame.Transform(GfVec3d(2,3,-1)) == GfVec3d(8,3,-1));
+    CHECK(control.GetAttribute(TfToken("guide:offset")).Set(GfVec3d(1,0,0)));
+    CHECK(control.GetAttribute(TfToken("guide:scaleX")).Set(3.0));
+    CHECK(control.GetAttribute(TfToken("avars:sx")).Set(2.0));
+    CHECK(UsdGeomBoundable::ComputeExtentFromPlugins(boundable, UsdTimeCode::Default(), &extent));
+    CHECK(extent == VtVec3fArray({GfVec3f(-16,3,-1),GfVec3f(-4,5,1)}));
+    CHECK(control.GetAttribute(TfToken("guide:displayOpacity")).Set(0.0f));
+    CHECK(!UsdGeomBoundable::ComputeExtentFromPlugins(boundable, UsdTimeCode::Default(), &extent));
+    CHECK(control.GetAttribute(TfToken("guide:displayOpacity")).Set(0.5f));
+    CHECK(control.GetAttribute(TfToken("guide:curveVertexCounts")).Set(VtIntArray{3}));
+    CHECK(!UsdGeomBoundable::ComputeExtentFromPlugins(boundable, UsdTimeCode::Default(), &extent));
 }
 
 // The codeless schema's resource directory.
@@ -4844,9 +5429,13 @@ main(int argc, char **argv)
     TestFilterChainOverRetainedScene();
     TestBridgeOverShotStage(examplesDir);
     TestStandaloneControlGuide();
+    TestCustomControlRestExtent();
     TestJointHierarchyGuides(examplesDir);
     TestSimpleRigControlAndDeformation(examplesDir);
     TestControlGuides(examplesDir);
+    TestShaderMatrixPrimvars();
+    TestShaderMatrixWorldSpace();
+    TestControlGuidePoseDirtiness();
     TestGuidesFollowDrivenAssetRoot();
     TestSolverGuideRadius(examplesDir);
     TestExampleControlGuides(examplesDir);

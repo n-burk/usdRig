@@ -113,6 +113,10 @@ struct RigExecPublishedPrim {
     /// Matrix-valued `primvars:<name>` the rig moved on this prim, by
     /// name: a shader's only per-evaluation channel into Storm.
     std::map<TfToken, GfMatrix4d> shaderMatrices;
+    /// Spatial SurfaceProjector outputs, kept target-local in the pose.
+    /// Only these matrices compose with the target's imaging transform;
+    /// packed ShaderDials and ordinary matrix properties remain unchanged.
+    std::set<TfToken> targetLocalShaderMatrices;
 
     bool hasPoints = false;
     VtVec3fArray points;
@@ -184,6 +188,8 @@ struct RigExecPublishedPrim {
     GfMatrix4d controlGuideFrame{1.0};
     /// sphere|circle|box|cube|diamond|pyramid.
     TfToken controlGuideShape;
+    VtVec3fArray controlGuidePoints;
+    VtIntArray controlGuideCounts;
     /// wire|geometry.
     TfToken controlGuideDrawMode;
     /// X|Y|Z: which LOCAL axis the planar guides' normal points along.
@@ -331,7 +337,7 @@ using RigExecImagingSnapshotConstPtr =
 /// the newly published generation (spec §10.4: value changes start from
 /// the narrowest logical leaves; structural/output-set changes use
 /// universal dirtiness).
-enum RigExecPublishedChange : uint8_t {
+enum RigExecPublishedChange : uint16_t {
     RigExecChangeNone = 0,
     RigExecChangeXform = 1 << 0,
     RigExecChangePoints = 1 << 1,
@@ -356,11 +362,17 @@ enum RigExecPublishedChange : uint8_t {
     /// reports no change is never dirtied, so the shader would keep
     /// reading the first frame's matrix forever.
     RigExecChangeShaderMatrix = 1 << 7,
+
+    /// A control's evaluated frame or guide pose/scale changed without
+    /// changing the synthesized shape, points, styling or local extent.
+    /// Its guide needs only a transform refresh, not the full guide
+    /// payload invalidation represented by RigExecChangeGuides.
+    RigExecChangeControlGuideXform = 1 << 8,
 };
 
 struct RigExecPublishedDirty {
     SdfPath path;
-    uint8_t changes = RigExecChangeNone;
+    uint16_t changes = RigExecChangeNone;
 };
 
 using RigExecPublishedDirtyVector = std::vector<RigExecPublishedDirty>;
@@ -404,7 +416,7 @@ public:
                         before = &it->second;
                     }
                 }
-                const uint8_t changes = _Diff(before, prim);
+                const uint16_t changes = _Diff(before, prim);
                 if (changes != RigExecChangeNone) {
                     dirtied.push_back({path, changes});
                 }
@@ -448,7 +460,7 @@ private:
     /// the previous generation, or whose owned leaf set changed
     /// (ownership begins/ends: the derivative blocks appear/disappear
     /// with points ownership, spec §10.3.1), is structural.
-    static uint8_t _Diff(
+    static uint16_t _Diff(
         const RigExecPublishedPrim *before,
         const RigExecPublishedPrim &after) {
         if (!before) {
@@ -469,6 +481,7 @@ private:
             // immediately: universal dirtiness re-pulls the container and
             // the new primvar is simply there.
             before->shaderMatrices.size() != after.shaderMatrices.size() ||
+            before->targetLocalShaderMatrices != after.targetLocalShaderMatrices ||
             before->hasWeightOverlay != after.hasWeightOverlay ||
             before->hasVolumeGuides != after.hasVolumeGuides ||
             before->volumeGuides.size() != after.volumeGuides.size()) {
@@ -502,16 +515,17 @@ private:
         if (after.hasControlGuide &&
             (before->controlGuideShape != after.controlGuideShape ||
              before->controlGuideDrawMode != after.controlGuideDrawMode ||
+             before->controlGuideCounts != after.controlGuideCounts ||
              before->controlGuidePlaneNormal !=
                  after.controlGuidePlaneNormal)) {
             return RigExecChangeStructural;
         }
-        uint8_t changes = RigExecChangeNone;
+        uint16_t changes = RigExecChangeNone;
         if (before->shaderMatrices != after.shaderMatrices) {
             changes |= RigExecChangeShaderMatrix;
         }
         if (after.hasControlFrame && before->controlFrame != after.controlFrame) {
-            changes |= RigExecChangeGuides;
+            changes |= RigExecChangeControlGuideXform;
         }
         // Styling is shared by both guide payloads (one prim never carries
         // both), so it is compared once here and folded into whichever one
@@ -553,15 +567,24 @@ private:
              before->guidePurpose != after.guidePurpose || styleChanged)) {
             changes |= RigExecChangeGuides;
         }
+        // A control's unit shape points and LOCAL extent do not change
+        // when its pose or effective draw scale changes: both are carried
+        // by the synthesized child's xform. Invalidating the full guide
+        // would make a renderer rebuild unchanged curve geometry on every
+        // drag sample.
+        if (after.hasControlGuide &&
+            (before->controlGuideFrame != after.controlGuideFrame ||
+             before->controlGuideScale != after.controlGuideScale)) {
+            changes |= RigExecChangeControlGuideXform;
+        }
         // Width rides the value arm rather than the structural one even
         // though crossing zero adds or drops the widths primvar outright:
         // RigExecChangeGuides dirties the synthesized child with the
         // universal locator set, so the consumer re-pulls the whole
         // container and sees the primvar appear or disappear either way.
         if (after.hasControlGuide &&
-            (before->controlGuideFrame != after.controlGuideFrame ||
-             before->controlGuideScale != after.controlGuideScale ||
-             before->controlGuideWireWidth != after.controlGuideWireWidth ||
+            (before->controlGuideWireWidth != after.controlGuideWireWidth ||
+             before->controlGuidePoints != after.controlGuidePoints ||
              before->guidePurpose != after.guidePurpose ||
              styleChanged)) {
             changes |= RigExecChangeGuides;

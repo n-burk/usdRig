@@ -189,6 +189,9 @@ class PickerView(QtWidgets.QWidget):
         (self._ox, self._oy), (self._cw, self._ch) =             pickerModel.content_box(picker, panel)
         self.setMinimumSize(int(self._cw), int(self._ch))
         self._font = _load_font()
+        self._backgroundImage = QtGui.QPixmap()
+        if panel.backgroundImage:
+            self._backgroundImage.loadFromData(panel.backgroundImage)
 
     # -- painting --------------------------------------------------------
 
@@ -213,6 +216,11 @@ class PickerView(QtWidgets.QWidget):
         painter.setPen(QtGui.QPen(QtGui.QColor(0, 0, 0, 200)))
         painter.drawRect(QtCore.QRectF(self._ox, self._oy,
                                        self._cw, self._ch))
+        if not self._backgroundImage.isNull():
+            painter.drawPixmap(QtCore.QRectF(self._panel.x, self._panel.y,
+                                              self._panel.w, self._panel.h),
+                               self._backgroundImage,
+                               QtCore.QRectF(self._backgroundImage.rect()))
 
         for button in self._picker.visible(
                 self._panel.id,

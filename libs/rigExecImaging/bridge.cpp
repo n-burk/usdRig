@@ -1293,6 +1293,8 @@ RigExecImagingBridge::_FillControlGuides(
             inputs.wireWidth = 0.05;
             inputs.offset = GfVec3d(0.0);
             inputs.orient = GfQuatf(1.0f);
+            inputs.customPoints.clear();
+            inputs.customCounts.clear();
             bool live = false;
             if (prim) {
                 if (UsdAttribute a =
@@ -1334,6 +1336,16 @@ RigExecImagingBridge::_FillControlGuides(
                         prim.GetAttribute(TfToken("guide:orient"))) {
                     a.Get(&inputs.orient, pose.time);
                     live = live || _GuideAttrIsLive(a);
+                }
+                if (inputs.shape == TfToken("custom")) {
+                    if (UsdAttribute a = prim.GetAttribute(TfToken("guide:points"))) {
+                        a.Get(&inputs.customPoints, pose.time);
+                        live = live || _GuideAttrIsLive(a);
+                    }
+                    if (UsdAttribute a = prim.GetAttribute(TfToken("guide:curveVertexCounts"))) {
+                        a.Get(&inputs.customCounts, pose.time);
+                        live = live || _GuideAttrIsLive(a);
+                    }
                 }
             }
             inputs.controlLive = live;
@@ -1377,6 +1389,21 @@ RigExecImagingBridge::_FillControlGuides(
         }
         RigExecPublishedPrim &published = snapshot->prims[controlPath];
         published.assetRoot = _rigPath.GetParentPath();
+        if (shape == TfToken("custom")) {
+            size_t count = 0;
+            bool valid = !inputs.customCounts.empty();
+            for (int n : inputs.customCounts) {
+                valid = valid && n >= 2;
+                if (n > 0) count += size_t(n);
+            }
+            valid = valid && count == inputs.customPoints.size();
+            for (const GfVec3f &p : inputs.customPoints) {
+                for (int axis = 0; axis < 3; ++axis) valid = valid && std::isfinite(p[axis]);
+            }
+            if (!valid) continue;
+            published.controlGuidePoints = inputs.customPoints;
+            published.controlGuideCounts = inputs.customCounts;
+        }
         published.hasControlGuide = true;
         // guide:offset moves the drawn shape in the control's local frame,
         // carried by the evaluated scale; the pivot stays where it is.
@@ -1390,8 +1417,16 @@ RigExecImagingBridge::_FillControlGuides(
                                 inputs.offset[2] * evaluatedScale[2]);
             guideFrame = GfMatrix4d(1.0).SetTranslate(local) * placement;
         }
-        // guide:orient turns the shape in that same local frame, after it
-        // is sized and before it is offset: S * R * T(offset) * placement.
+        if (shape == TfToken("custom")) {
+            // Custom shapes may be asymmetric. Preserve reflections and
+            // affine axes instead of rebuilding them from axis magnitudes.
+            const GfVec3d offset = std::isfinite(inputs.offset[0]) &&
+                std::isfinite(inputs.offset[1]) && std::isfinite(inputs.offset[2])
+                ? inputs.offset : GfVec3d(0.0);
+            guideFrame = GfMatrix4d(1.0).SetTranslate(offset) * evaluated;
+            effectiveScale = authoredScale;
+        }
+        // Shape scale precedes local orientation, offset and full placement.
         const GfQuatd orient(inputs.orient);
         if (orient != GfQuatd(1.0) && std::isfinite(orient.GetReal()) &&
             orient.GetLength() > 1e-12) {
@@ -1406,6 +1441,9 @@ RigExecImagingBridge::_FillControlGuides(
         published.controlGuideScale = effectiveScale;
         published.controlGuideWireWidth = wireWidth;
         _ReadGuideStyleCached(inputs, pose, &published);
+        // Static hidden helpers need no synthetic geometry. Keep live opacity
+        // guides present so an animated/connected fade can update in place.
+        published.hasControlGuide = published.guideOpacity > 0.0f || inputs.opacityLive;
     }
 
     // The evaluated frames of the PIVOTS nested in a control hierarchy
@@ -2665,6 +2703,8 @@ RigExecImagingBridge::_PublishPoseSnapshot(
     // authors them; indexed before the geometry loop so a prim carrying
     // only a matrix primvar still gets published.
     static const std::string primvarsPrefix("primvars:");
+    const std::vector<SdfPath> projectorTargets =
+        _evaluator->GetSurfaceProjectorTargets();
     for (const auto &[propertyPath, value] : pose.movedProperties) {
         if (!value.IsHolding<GfMatrix4d>()) {
             continue;
@@ -2673,9 +2713,13 @@ RigExecImagingBridge::_PublishPoseSnapshot(
         if (name.compare(0, primvarsPrefix.size(), primvarsPrefix) != 0) {
             continue;
         }
-        snapshot->prims[propertyPath.GetPrimPath()]
-            .shaderMatrices[TfToken(name.substr(primvarsPrefix.size()))] =
-            value.UncheckedGet<GfMatrix4d>();
+        auto &published = snapshot->prims[propertyPath.GetPrimPath()];
+        const TfToken primvar(name.substr(primvarsPrefix.size()));
+        published.shaderMatrices[primvar] = value.UncheckedGet<GfMatrix4d>();
+        if (std::binary_search(projectorTargets.begin(), projectorTargets.end(),
+                               propertyPath)) {
+            published.targetLocalShaderMatrices.insert(primvar);
+        }
     }
     for (const auto &[propertyPath, value] : pose.movedProperties) {
         const SdfPath primPath = propertyPath.GetPrimPath();

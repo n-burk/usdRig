@@ -148,7 +148,7 @@ struct RigExecWireRevision {
     RigExecWireSkinTopology topology;
     bool topologyResolved = false;
     /// A surface projector target (ops 17 and 18): its shader dial
-    /// properties and the projected mesh's static world inverse. A third
+    /// properties and the projected mesh's static asset-to-local map. A third
     /// trailing block of the geometry section, written for derived
     /// entries only; absent decodes as no dials and identity.
     std::vector<uint32_t> shaderDials;

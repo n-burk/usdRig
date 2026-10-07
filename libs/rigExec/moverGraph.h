@@ -681,8 +681,8 @@ struct RigExecRevisionBinding {
     SdfPath driverFrames;     ///< aggregate frame provider
     SdfPath widths;           ///< authored widths (extent maintenance)
     /// Surface projector: rigExec:shaderDialSources, in order, at most
-    /// sixteen, and the inverse of the projected mesh's local-to-world,
-    /// which compile requires to be static.
+    /// sixteen, and the static asset-to-mesh map. The historical field name
+    /// is retained on the C++/binary binding; provider frames are asset-space.
     std::vector<SdfPath> shaderDials;
     GfMatrix4d meshWorldInverse{1.0};
     std::vector<SdfPath> blendInputs;  ///< sorted blend channels
@@ -1499,7 +1499,7 @@ struct RigExecProviderValues {
     const RigExecResolvedInputs *resolved = nullptr;
 };
 
-/// The provider frames a surface projector reads, as WORLD frames: each
+/// The provider frames a surface projector reads, as ASSET frames: each
 /// provider's rest frame times its base or final computeMatrix. Index 0 is
 /// binding.transform (the source), 1 binding.transformSpace (the source's
 /// sibling space), 2 binding.carrySpace (the rig's space). `named` says the
@@ -1511,8 +1511,8 @@ struct RigExecSurfaceProjectorFrames {
     GfMatrix4d final[3] = {GfMatrix4d(1.0), GfMatrix4d(1.0), GfMatrix4d(1.0)};
 };
 
-/// A provider's world frame from its rest landmarks and a rest->pose map:
-/// row-vector world = rest * M. Identity rest landmarks give M itself.
+/// A provider's asset frame from its rest landmarks and a rest->pose map:
+/// row-vector frame = rest * M. Identity rest landmarks give M itself.
 GfMatrix4d RigExecWorldFromRest(const std::array<GfVec3d, 4> &restPoints,
                                 const GfMatrix4d &restToPose);
 

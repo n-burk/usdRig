@@ -17,7 +17,7 @@ This module turns those prims into the same `Panel` and `Button` objects
 `pickerModel` already builds from JSON, so the drawing, hit-testing and
 selection code has exactly one path through it.
 """
-from pxr import Sdf, Tf, Usd
+from pxr import Ar, Sdf, Tf, Usd
 
 import pickerModel
 
@@ -64,6 +64,13 @@ def _rgba(value, default=(128, 128, 128, 255)):
 
 def _pairs(value):
     return [(float(p[0]), float(p[1])) for p in (value or [])]
+
+def _background_image(panel):
+    asset = _v(panel, "ui:backgroundImage")
+    if not isinstance(asset, Sdf.AssetPath) or not asset.resolvedPath:
+        return b""
+    opened = Ar.GetResolver().OpenAsset(Ar.ResolvedPath(asset.resolvedPath))
+    return opened.GetBuffer() if opened else b""
 
 
 def _button_record(prim, panel_id):
@@ -182,6 +189,7 @@ def read(picker_prim, live_paths=None):
             "x": 0.0, "y": 0.0,
             "w": float(size[0]), "h": float(size[1]),
             "fill": _rgba(_v(panel, "ui:background"), (41, 41, 41, 255)),
+            "backgroundImage": _background_image(panel),
         })
         items.extend(
             _button_record(b, panel_id) for b in panel.GetChildren()

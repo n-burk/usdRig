@@ -4923,7 +4923,7 @@ RrPrologueGeometry(RrProgram *program, double time,
 namespace {
 
 // A surface projector target, as RigExecRunProjectorTarget runs it on the
-// USD side: the providers' world frames out of the rest frames and the
+// USD side: the providers' asset frames out of the rest frames and the
 // base and final matrix tables, the recorded settings and dials, and the
 // shared kernel on the chain's authored and final points.
 bool
@@ -4987,7 +4987,7 @@ RrGeoRunProjectorTarget(RrProgram *program, RrGeometryScratch *scratch,
             in.worldToMesh[i][j] = wire.meshWorldInverse[size_t(i * 4 + j)];
         }
     }
-    // Providers: transform, transformSpace and carry slots, each a world
+    // Providers: transform, transformSpace and carry slots, each an asset
     // frame as rest * computeMatrix at base and at final.
     const RrPoseScratch *pose = runtimePoseDetail::_RrScratch(program);
     const int32_t slots[3] = {wire.transformSlot, wire.transformSpaceSlot,

@@ -170,6 +170,7 @@ add_library(rigExecImaging SHARED
     libs/rigExecImaging/touchPoseApi.cpp
     # The 1.4 warm-frame index: shared-owned per-frame completions.
     libs/rigExecImaging/warmIndex.cpp
+    libs/rigExecImaging/profilerApi.cpp
 )
 target_include_directories(rigExecImaging PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs>
@@ -494,6 +495,17 @@ foreach(_schedule serial parallel)
         "RIGEXEC_BAKED_GRAIN_US=0")
 endforeach()
 
+add_executable(testRigExecSurfaceProjector
+    tests/testRigExecSurfaceProjector.cpp)
+target_link_libraries(testRigExecSurfaceProjector PRIVATE rigExec)
+target_compile_definitions(testRigExecSurfaceProjector PRIVATE
+    ${_rigexec_schema_resource_define})
+add_test(NAME testRigExecSurfaceProjector
+    COMMAND testRigExecSurfaceProjector "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+set_tests_properties(testRigExecSurfaceProjector PROPERTIES
+    ENVIRONMENT "RIGEXEC_BAKE_REQUIRED=1;RIGEXEC_DYNAMIC_RUNS_PROGRAM=0"
+    FAIL_REGULAR_EXPRESSION "baked parity mismatch")
+
 add_executable(testRigExecGeometryOpsBakedParity
     tests/testRigExecGeometryOpsBakedParity.cpp)
 target_link_libraries(testRigExecGeometryOpsBakedParity PRIVATE rigExec)
@@ -733,6 +745,12 @@ target_link_libraries(testRigExecImaging PRIVATE rigExecImaging)
 target_compile_definitions(testRigExecImaging PRIVATE
     ${_rigexec_schema_resource_define} ${_rigexec_imaging_resource_define})
 add_test(NAME testRigExecImaging COMMAND testRigExecImaging
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+
+add_executable(testRigExecProfilerApi tests/testRigExecProfilerApi.cpp)
+target_link_libraries(testRigExecProfilerApi PRIVATE rigExecImaging js)
+target_compile_definitions(testRigExecProfilerApi PRIVATE ${_rigexec_schema_resource_define})
+add_test(NAME testRigExecProfilerApi COMMAND testRigExecProfilerApi
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
 
 add_executable(testRigExecImagingMultiStage
