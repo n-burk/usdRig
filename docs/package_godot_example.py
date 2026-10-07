@@ -46,8 +46,7 @@ def main():
                          json.dumps(manifest, indent=2) + "\n")
         archive.writestr("godot_rigExec/START_HERE.txt", """Godot rolling-ball tutorial
 Windows x86-64 binaries, Godot 4.7+. Open demo/project.godot and press F5.
-The prebuilt game does not need USD. Full walkthrough:
-usdRig docs/concepts/tutorial-godot-baked-rig.md (or generated HTML).
+The prebuilt game does not need USD.
 
 For rebuilds, extract godot_rigExec beside usdRig and usd-install.
 Close the Godot editor before running python demo/setup_rolling.py.
