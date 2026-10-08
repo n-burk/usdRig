@@ -2906,6 +2906,8 @@ RigExecImagingRegistry::_RetireAffectedTimesLocked(
         return;
     }
     const SdfPath &rig = session->rigPath;
+    RigExecProfileScope retireScope(session->bridge->MutableProfiler(),
+                                    "Notice.RetireAffectedTimes", "notice");
     _warmIndex->InvalidateRequest(rig);
     RigExecImagingBridge *bridge = session->bridge.get();
     // Snapshot in-flight work before completions: a first-fill job that
@@ -2913,7 +2915,11 @@ RigExecImagingRegistry::_RetireAffectedTimesLocked(
     const std::vector<UsdTimeCode> inFlight = _scheduler->InFlightTimes(rig);
     const RigExecBakedProgram *program =
         bridge->GetEvaluator().GetBakedProgram();
-    const RigExecOutputAffectedIndex *index = bridge->GetAffectedIndex();
+    const RigExecOutputAffectedIndex *index = [&]() {
+        RigExecProfileScope scope(bridge->MutableProfiler(),
+                                  "Notice.AffectedIndex", "notice");
+        return bridge->GetAffectedIndex();
+    }();
     if (!program || !index || index->Empty()) {
         // No oracle: every completed time is affected, as before. In-flight
         // times retire (their provenance publishes later); proofs retire
@@ -2988,7 +2994,11 @@ RigExecImagingRegistry::_RetireAffectedTimesLocked(
          notice.GetResolvedAssetPathsResyncedPaths()) {
         noticePaths.push_back(path);
     }
-    const uint64_t newConstants = RigExecEpochConstantDigest(*program);
+    const uint64_t newConstants = [&]() {
+        RigExecProfileScope scope(bridge->MutableProfiler(),
+                                  "Notice.ConstantDigest", "notice");
+        return RigExecEpochConstantDigest(*program);
+    }();
     const std::shared_ptr<RigExecFrameCache> cache =
         bridge->GetFrameCache();
     const std::vector<std::pair<UsdTimeCode, RigExecFrameCacheKey>> done =
@@ -2999,6 +3009,8 @@ RigExecImagingRegistry::_RetireAffectedTimesLocked(
         rewarm.push_back(time.GetValue());
     }
     for (const auto &entry : done) {
+        RigExecProfileScope entryScope(bridge->MutableProfiler(),
+                                       "Notice.RetireEntry", "notice");
         const UsdTimeCode time = entry.first;
         const RigExecFrameCacheKey &oldKey = entry.second;
         const double stamped =
@@ -3085,6 +3097,8 @@ RigExecImagingRegistry::_RetireAffectedTimesLocked(
     // published yet, so it cannot safely be classified as unaffected.
     _scheduler->CancelGenerationTimes(rig, purge);
     _NotePendingRewarm(session, rewarm);
+    RigExecProfileScope proofScope(bridge->MutableProfiler(),
+                                   "Notice.RetireProofs", "notice");
     bridge->RetireProofsForControls(controls);
 }
 
@@ -3838,8 +3852,13 @@ RigExecImagingRegistry::_NoticeSettlesPreview(
         }
         stashed.insert(entry.prim.AppendProperty(entry.attribute));
     }
-    // Every edit is a value (or the spec its first value creates) on one
-    // of the withdrawn attributes.
+    // First opinions create inert ancestor overs, reported without fields.
+    // Metadata edits and prim resyncs still require evaluation.
+    const auto inertAncestor = [&](const SdfPath &path) {
+        return path.IsPrimPath() && notice.GetChangedFields(path).empty() &&
+            std::any_of(stashed.begin(), stashed.end(),
+                [&](const SdfPath &property) { return property.HasPrefix(path); });
+    };
     const auto valueEdit = [&](const SdfPath &path) {
         if (!stashed.count(path)) {
             return false;
@@ -3858,7 +3877,7 @@ RigExecImagingRegistry::_NoticeSettlesPreview(
         }
     }
     for (const SdfPath &path : notice.GetChangedInfoOnlyPaths()) {
-        if (!valueEdit(path)) {
+        if (!inertAncestor(path) && !valueEdit(path)) {
             return false;
         }
     }
@@ -4032,6 +4051,8 @@ RigExecImagingRegistry::_OnObjectsChanged(
                 // a new asset (or a new file behind it) needs a
                 // re-activation.
                 if (affected && !session.playback) {
+                    RigExecProfileScope noticeScope(session.bridge->MutableProfiler(),
+                                                    "Notice.Imaging", "notice");
                     // A commit of the pose on screen: the published
                     // generation is already the stage's answer.
                     const bool settled =

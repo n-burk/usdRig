@@ -1029,7 +1029,16 @@ TestARestEditIsSeedable()
     std::sort(admitted.begin(), admitted.end());
     admitted.erase(std::unique(admitted.begin(), admitted.end()),
                    admitted.end());
-    CHECK(admitted == seeds);
+    // Seeds name the leaf-reading operations in the unified graph. Their
+    // existing cones must reach every downstream reader the reference
+    // expansion identifies, including the child's provider matrices.
+    const auto closure = affected.AffectedByControls({control});
+    CHECK(!admitted.empty());
+    for (const int seed : seeds) CHECK(closure.Test(seed));
+    for (const uint32_t op : RigExecBakedHeadOpsReading(B, index)) {
+        CHECK(std::binary_search(admitted.begin(), admitted.end(),
+                                 B.steps[op].cluster));
+    }
     // The child's ProviderMatrix clusters, and whether the ops that read
     // the leaf reach them without the closure.
     const int childSlot = SlotOf(B, child);

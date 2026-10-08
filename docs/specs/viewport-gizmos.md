@@ -21,9 +21,11 @@ channel sets; the toolbar reports unavailable operations.
 
 A live drag sends in-memory overrides to the evaluator or Hydra transform
 overlay. The stage keeps its committed values during preview. Releasing the
-drag authors one edit; Escape cancels it. Stage-dependent panels therefore
-show committed values until the gesture ends, while the viewport shows the
-preview. Undo records the committed operation.
+drag queues one edit for the next UI event-loop turn; Escape during the drag
+cancels it. The preview remains visible until the queued commit completes.
+Undo, another edit, frame changes, and save input flush a pending commit first.
+Stage-dependent panels show committed values, and undo records the whole
+operation. Stage authoring stays on the stage's owner thread.
 
 **Write: Animation** writes a spline knot for supported scalar attributes and
 a time sample for other attributes. **Write: Default** writes a default value.

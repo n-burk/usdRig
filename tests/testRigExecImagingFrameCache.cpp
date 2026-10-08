@@ -1281,10 +1281,124 @@ TestCommitOfPreviewedPoseSkipsEvaluation()
     registry.Deactivate();
 }
 
-// SETTLE, on a property a chain revises. A drag there is the chain's base,
-// as the committed value is, so the previewed pose is already the stage's
-// answer: the commit evaluates nothing, and the kept generation matches a
-// fresh evaluation of the edited stage.
+// First-session ancestor overs do not invalidate an exact preview commit.
+void
+TestFirstSessionCommitOfPreviewedPose()
+{
+    std::printf("progress: TestFirstSessionCommitOfPreviewedPose\n");
+    SetEnv("RIGEXEC_FRAME_CACHE", "off");
+    const SdfPath rig("/Asset/Rig");
+    RigExecImagingRegistry &registry = RigExecImagingRegistry::GetInstance();
+    for (int variant = 0; variant != 7; ++variant) {
+        UsdStageRefPtr stage = MakeTinyRig();
+        const UsdAttribute shape = stage->GetPrimAtPath(SdfPath("/Asset/Rig/AlongX"))
+            .CreateAttribute(TfToken("guide:shape"), SdfValueTypeNames->Token);
+        shape.Set(TfToken("cube"));
+        stage->SetEditTarget(stage->GetSessionLayer());
+        std::vector<std::string> errors;
+        CHECK(registry.Activate(stage, rig, UsdTimeCode(2.0), &errors));
+        const UsdAttribute tx = stage->GetAttributeAtPath(
+            SdfPath("/Asset/Rig/AlongX.avars:tx"));
+        CHECK(registry.BeginPreview("/Asset/Rig/AlongX.avars:tx") == 1);
+        const double sample = 11.0;
+        CHECK(registry.UpdatePreview(&sample, 1));
+        const _GenerationGeometry previewed =
+            _CaptureGeometry(registry.GetStore()->Get());
+        const size_t pulls = registry.GetSessionEvaluationCount(rig);
+        CHECK(registry.EndPreview(/*publish=*/false));
+        {
+            SdfChangeBlock changes;
+            TsSpline spline(tx.GetTypeName().GetType());
+            TsKnot knot(tx.GetTypeName().GetType());
+            knot.SetTime(2.0);
+            knot.SetValue(variant == 4 ? 12.0 : sample);
+            spline.SetKnot(knot);
+            CHECK(tx.SetSpline(spline));
+            if (variant == 1) {
+                stage->GetPrimAtPath(rig).SetMetadata(TfToken("kind"),
+                                                     TfToken("assembly"));
+            } else if (variant == 2) {
+                tx.SetCustom(true);
+            } else if (variant == 3) {
+                stage->GetAttributeAtPath(SdfPath("/Asset/Rig/AlongY.avars:ty"))
+                    .Set(25.0, UsdTimeCode(2.0));
+            } else if (variant == 5) {
+                shape.Set(TfToken("sphere"));
+            } else if (variant == 6) {
+                const SdfPrimSpecHandle other = SdfCreatePrimInLayer(
+                    stage->GetSessionLayer(), SdfPath("/Asset/Rig/Other"));
+                other->SetSpecifier(SdfSpecifierDef);
+                other->SetTypeName("Scope");
+            }
+        }
+        const size_t committedPulls = registry.GetSessionEvaluationCount(rig);
+        if (committedPulls != pulls + (variant == 0 ? 0 : 1)) {
+            std::fprintf(stderr, "settlement variant %d: pulls %zu -> %zu\n",
+                         variant, pulls, committedPulls);
+        }
+        CHECK(committedPulls == pulls + (variant == 0 ? 0 : 1));
+        double authoredValue = 0.0;
+        CHECK(tx.Get(&authoredValue, UsdTimeCode(2.0)));
+        CHECK(authoredValue == (variant == 4 ? 12.0 : sample));
+        const _GenerationGeometry committed =
+            _CaptureGeometry(registry.GetStore()->Get());
+        RigExecImagingBridge fresh(stage, rig);
+        CHECK(fresh.Compile());
+        CHECK(fresh.EvaluateAndPublishResult(UsdTimeCode(2.0)).ok);
+        const _GenerationGeometry expected = _CaptureGeometry(fresh.GetStore()->Get());
+        if (!_SameGeometry(committed, expected)) {
+            std::fprintf(stderr, "settlement geometry variant %d\n", variant);
+            for (const auto &[path, points] : committed.points) {
+                const auto &reference = expected.points.at(path);
+                std::fprintf(stderr, "point0 live %.9g %.9g %.9g fresh %.9g %.9g %.9g\n",
+                    points[0][0], points[0][1], points[0][2],
+                    reference[0][0], reference[0][1], reference[0][2]);
+            }
+        }
+        CHECK(_SameGeometry(committed, expected));
+        if (variant == 0) {
+            CHECK(_SameGeometry(previewed, committed));
+            // Settlement is consumed once. An ordinary authored edit after
+            // it must not be mistaken for another released preview.
+            const size_t ordinaryPulls = registry.GetSessionEvaluationCount(rig);
+            tx.Set(12.0, UsdTimeCode(2.0));
+            CHECK(registry.GetSessionEvaluationCount(rig) == ordinaryPulls + 1);
+        } else if (variant == 3 || variant == 4) {
+            CHECK(!_SameGeometry(previewed, committed));
+        }
+        if (variant == 4) {
+            // A rebuilt baked program can be used again. A subsequent
+            // exact release still settles, and removing the session opinions
+            // (the undo of a first write) restores the original authored pose.
+            CHECK(registry.BeginPreview("/Asset/Rig/AlongX.avars:tx") == 1);
+            const double next = 13.0;
+            CHECK(registry.UpdatePreview(&next, 1));
+            const size_t nextPulls = registry.GetSessionEvaluationCount(rig);
+            CHECK(registry.EndPreview(/*publish=*/false));
+            TsSpline spline(tx.GetTypeName().GetType());
+            TsKnot knot(tx.GetTypeName().GetType());
+            knot.SetTime(2.0);
+            knot.SetValue(next);
+            spline.SetKnot(knot);
+            CHECK(tx.SetSpline(spline));
+            CHECK(registry.GetSessionEvaluationCount(rig) == nextPulls);
+            stage->GetSessionLayer()->Clear();
+            CHECK(registry.GetSessionEvaluationCount(rig) == nextPulls + 1);
+            CHECK(tx.Get(&authoredValue, UsdTimeCode(2.0)));
+            CHECK(authoredValue == 10.2);
+            RigExecImagingBridge restored(stage, rig);
+            CHECK(restored.Compile());
+            CHECK(restored.EvaluateAndPublishResult(UsdTimeCode(2.0)).ok);
+            CHECK(_SameGeometry(_CaptureGeometry(registry.GetStore()->Get()),
+                                _CaptureGeometry(restored.GetStore()->Get())));
+        }
+        registry.ClearFrameCache(rig);
+        registry.Deactivate();
+    }
+    SetEnv("RIGEXEC_FRAME_CACHE", "on");
+}
+
+// A chain revises the preview and authored value as its base in both cases.
 void
 TestCommitOfAChainTargetSettles()
 {
@@ -4422,6 +4536,7 @@ main(int argc, char **argv)
     TestWarmRangeProgress();
     TestCommitDuringPreviewExcludesPlayhead();
     TestCommitOfPreviewedPoseSkipsEvaluation();
+    TestFirstSessionCommitOfPreviewedPose();
     TestCommitOfAChainTargetSettles();
     TestProductionTriggerPathEnqueuesAndFences();
     TestWarmedCompletionServesWithoutEvaluating();

@@ -904,10 +904,13 @@ class ViewportToolbar(QtWidgets.QToolBar):
         # are application shortcuts and would otherwise fire with a
         # mouse button down (see GizmoController.Undo).
         dragging = controller.IsDragging()
-        self.undoAction.setEnabled(stack.CanUndo() and not dragging)
+        releasedLabel = controller.ReleasedEditLabel()
+        self.undoAction.setEnabled((stack.CanUndo() or releasedLabel is not None)
+                                   and not dragging)
         self.redoAction.setEnabled(stack.CanRedo() and not dragging)
         self.undoAction.setToolTip(
-            "Undo %s (Ctrl+Z)" % stack.UndoText() if stack.CanUndo()
+            "Undo %s (Ctrl+Z)" % (releasedLabel or stack.UndoText())
+            if releasedLabel is not None or stack.CanUndo()
             else "Nothing to undo (Ctrl+Z)")
         self.redoAction.setToolTip(
             "Redo %s (Ctrl+Shift+Z, Shift+Z, Ctrl+Y)" % stack.RedoText()
@@ -1352,6 +1355,10 @@ class ViewportHotkeyFilter(QtCore.QObject):
     def eventFilter(self, obj, event):
         try:
             kind = event.type()
+            if kind in (QtCore.QEvent.MouseButtonPress, QtCore.QEvent.KeyPress,
+                        QtCore.QEvent.ShortcutOverride, QtCore.QEvent.Close):
+                if self._controller.OwnsWindowEvent(obj):
+                    self._controller.FlushReleasedEdit()
             if kind == QtCore.QEvent.WindowDeactivate:
                 # Every session in the process has one of these filters
                 # on the one QApplication. Another session's window
@@ -1416,6 +1423,7 @@ class GizmoController(QtCore.QObject):
         self._warnings = []
         self._handles = []
         self._drag = None
+        self._releasedEdit = None
         # (target, {path: value}) while a release authors its drag's values:
         # see _IsOwnCommit.
         self._committing = None
@@ -1469,6 +1477,7 @@ class GizmoController(QtCore.QObject):
 
         view = StageView(usdviewApi)
         self._view = view
+        self._viewDestroyed = False
         from controlPicking import ControlPicking
         self._controlPicking = ControlPicking(view) if view is not None else None
         self.overlay = GizmoOverlay(self, view) if view is not None else None
@@ -1486,6 +1495,7 @@ class GizmoController(QtCore.QObject):
             # that fires in neither window. See _ScopeShortcuts.
             application.focusWindowChanged.connect(
                 self._onFocusWindowChanged)
+            application.aboutToQuit.connect(self.FlushReleasedEdit)
         if view is not None:
             # The stage view keeps the MOUSE filter; keys go through the
             # application filter above (see ViewportHotkeyFilter).
@@ -1566,6 +1576,7 @@ class GizmoController(QtCore.QObject):
         after usdview has destroyed the stage view would keep answering
         keys on behalf of a gizmo that no longer has a viewport.
         """
+        self.FlushReleasedEdit()
         if self._controlPicking is not None:
             self._controlPicking.Detach()
             self._controlPicking = None
@@ -1577,6 +1588,7 @@ class GizmoController(QtCore.QObject):
             try:
                 application.focusWindowChanged.disconnect(
                     self._onFocusWindowChanged)
+                application.aboutToQuit.disconnect(self.FlushReleasedEdit)
             except (RuntimeError, TypeError):
                 pass
         self._hotkeys = None
@@ -1627,6 +1639,7 @@ class GizmoController(QtCore.QObject):
                 continue
 
     def _onViewDestroyed(self, *args):
+        self._viewDestroyed = True
         self._view = None
         self.overlay = None
         # The rubber band is a CHILD of the view Qt has just destroyed;
@@ -1877,6 +1890,9 @@ class GizmoController(QtCore.QObject):
         everything below here (handles, drag, preview, undo) is unaware
         of which one it is holding.
         """
+        self.FlushReleasedEdit()
+        if self._viewDestroyed:
+            return
         stage = self.usdviewApi.stage
         prims = self._SelectedPrims() if stage else []
         prim = prims[-1] if prims else None
@@ -2387,6 +2403,7 @@ class GizmoController(QtCore.QObject):
     # -- undo -----------------------------------------------------------
 
     def Undo(self):
+        self.FlushReleasedEdit()
         # Undo is ignored while a manipulator is held. Running it here
         # would restore an earlier edit that the drag's next event then
         # overwrites from its own base, and the release would push over
@@ -2398,6 +2415,7 @@ class GizmoController(QtCore.QObject):
         return True
 
     def Redo(self):
+        self.FlushReleasedEdit()
         if self._drag is not None or not self.undoStack.Redo():
             return False
         self._AfterUndoRedo()
@@ -2416,6 +2434,7 @@ class GizmoController(QtCore.QObject):
         re-reads in full. Ignored while a manipulator drag of our own is
         in flight, which already refreshes on every mouse move.
         """
+        self.FlushReleasedEdit()
         if self._drag is not None:
             return
         if self._target is None:
@@ -2481,6 +2500,7 @@ class GizmoController(QtCore.QObject):
         did not, and keeps this module importable without Qt's graph
         editor present.
         """
+        self.FlushReleasedEdit()
         if self._openGraphEditor is not None:
             return self._openGraphEditor()
         try:
@@ -2499,6 +2519,7 @@ class GizmoController(QtCore.QObject):
     # -- signals --------------------------------------------------------
 
     def _onSettingsChanged(self):
+        self.FlushReleasedEdit()
         self._PrimePreserveChildren()
         self._PrimeGroupPivot()
         self._RebuildHandles()
@@ -2514,7 +2535,8 @@ class GizmoController(QtCore.QObject):
             self._panel.Sync()
 
     def _onUndoStackChanged(self):
-        self.toolbar.Sync()
+        if not self._viewDestroyed:
+            self.toolbar.Sync()
 
     def _onFrustumChanged(self):
         self._RebuildHandles()
@@ -2528,6 +2550,7 @@ class GizmoController(QtCore.QObject):
         self.RefreshTarget()
 
     def _onFrameChanged(self, frame):
+        self.FlushReleasedEdit()
         # The SIGNAL's frame, never dataModel.currentFrame: the setter
         # emits before it assigns, so re-reading the property here would
         # author one frame behind (rigExecUsdview._FrameValue).
@@ -2562,6 +2585,13 @@ class GizmoController(QtCore.QObject):
         plus a reprojection of the whole manipulator, so the filter has
         to come BEFORE any of that, not inside it.
         """
+        if self._viewDestroyed:
+            return
+        resynced = notice.GetResyncedPaths()
+        changed = notice.GetChangedInfoOnlyPaths()
+        target = self._target
+        ownCommit = target is not None and self._IsOwnCommit(
+            target, resynced, changed, notice)
         # The hover preview's rig-written sets are only as fresh as
         # the last authoring notice: editor panels author rigExec:moves
         # and rigExec:weightTarget in this session, and a stale set makes
@@ -2577,20 +2607,19 @@ class GizmoController(QtCore.QObject):
         if self._snapGeom:
             self._DropSnapGeom(notice.GetResyncedPaths(),
                                notice.GetChangedInfoOnlyPaths())
+        if ownCommit:
+            return
         # Inside a drag the target is already being refreshed by the
         # drag itself, and re-resolving it here would throw away the
         # base values every Apply* is computed from.
         if self._drag is not None:
             return
-        resynced = notice.GetResyncedPaths()
-        changed = notice.GetChangedInfoOnlyPaths()
         # Both kinds: a new or cleared joints relationship resyncs, but
         # RE-targeting an existing one is info-only (SolverPosedCache).
         if resynced:
             self._solverPosed.InvalidateResynced(resynced)
         if changed:
             self._solverPosed.InvalidateChanged(changed)
-        target = self._target
         # A missing target may be exactly what this notice creates, and a
         # SELECTION that no longer matches needs the full re-resolve --
         # compared as the whole set, not just the focus prim, because a
@@ -2604,8 +2633,6 @@ class GizmoController(QtCore.QObject):
                 resynced, changed, path, target.RigRootPath())
                 for path in self._TargetPrimPaths(target)):
             return
-        if self._IsOwnCommit(target, resynced, changed):
-            return
         try:
             target.Refresh()
         except Exception:
@@ -2613,7 +2640,7 @@ class GizmoController(QtCore.QObject):
             return
         self._RebuildHandles()
 
-    def _IsOwnCommit(self, target, resynced, changed):
+    def _IsOwnCommit(self, target, resynced, changed, notice=None):
         """
         Whether this notice is a release authoring exactly the values its
         drag last previewed, and nothing else. The drag's last tick posed
@@ -2625,13 +2652,25 @@ class GizmoController(QtCore.QObject):
         if self._committing is None or self._committing[0] is not target:
             return False
         values = self._committing[1]
-        for paths in (resynced, changed):
-            for path in paths:
-                if path not in values:
+        for path in resynced:
+            if not path.IsPropertyPath() or path not in values:
+                return False
+            if notice and set(notice.GetChangedFields(path)) - {
+                    "default", "timeSamples", "spline", "typeName"}:
+                return False
+        for path in changed:
+            fields = set(notice.GetChangedFields(path)) if notice else set()
+            if path in values:
+                if fields - {"default", "timeSamples", "spline", "typeName"}:
                     return False
+            elif (notice is None or not path.IsPrimPath() or fields or
+                  not any(valuePath != path and valuePath.HasPrefix(path)
+                          for valuePath in values)):
+                return False
         for path, value in values.items():
             attr = target.stage.GetAttributeAtPath(path)
-            if not attr or attr.Get(target.time) != value:
+            if (not attr or attr.HasAuthoredConnections() or
+                    attr.Get(target.time) != value):
                 return False
         return True
 
@@ -3937,6 +3976,7 @@ class GizmoController(QtCore.QObject):
         Bracket a drag: snapshot the attributes, record the base values,
         and build the Qt-free DragState the maths runs on.
         """
+        self.FlushReleasedEdit()
         target = self._target
         if target is None or not handle.grabbable:
             return False
@@ -4040,6 +4080,37 @@ class GizmoController(QtCore.QObject):
         self._ClearHolds()
         if drag is None:
             return
+        # Keep the last preview visible until the next owner-thread turn.
+        # The detached drag retains its original writer, time and recorder.
+        self._releasedEdit = drag
+        QtCore.QTimer.singleShot(0, lambda: self._FlushReleasedToken(drag))
+        self.toolbar.Sync()
+        self._Repaint()
+
+    def ReleasedEditLabel(self):
+        drag = self._releasedEdit
+        if drag is None or not drag.target.writer.HasPending():
+            return None
+        return "%s %s" % (_EDIT_VERBS.get(drag.tool, drag.tool), drag.target.label)
+
+    def _FlushReleasedToken(self, drag):
+        if self._releasedEdit is drag:
+            try:
+                self.FlushReleasedEdit()
+            except Exception as error:
+                Tf.Warn("rigExecUsdview: queued gizmo edit failed: %s" % error)
+
+    def FlushReleasedEdit(self):
+        drag = self._releasedEdit
+        if drag is None:
+            return
+        # Clear before authoring: synchronous stage notices may call back.
+        self._releasedEdit = None
+        if _WriterStage(drag) != self.usdviewApi.stage:
+            gizmoPreview.End(session=self.usdviewApi,
+                             stage=_WriterStage(drag), publish=False)
+            drag.target.writer.Clear()
+            return
         label = "%s %s" % (_EDIT_VERBS.get(drag.tool, drag.tool),
                            drag.target.label)
         # With values to commit, the preview ends FIRST and WITHOUT a
@@ -4076,11 +4147,13 @@ class GizmoController(QtCore.QObject):
         if edit is not None:
             self.undoStack.Push(edit)
         self._warnings = drag.target.writer.Warnings()
-        self._RebuildHandles()
-        self.toolbar.Sync()
-        self._Repaint()
+        if not self._viewDestroyed:
+            self._RebuildHandles()
+            self.toolbar.Sync()
+            self._Repaint()
 
     def _AbortDrag(self):
+        self.FlushReleasedEdit()
         drag = self._drag
         self._drag = None
         self._ClearHolds()

@@ -1949,6 +1949,13 @@ if (RIGEXEC_BUILD_PYTHON AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
     add_test(NAME testGizmoPreview
         COMMAND ${Python3_EXECUTABLE}
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_gizmo_preview.py")
+    foreach(_release_test deferred_release own_commit)
+        add_test(NAME testGizmo_${_release_test}
+            COMMAND ${Python3_EXECUTABLE}
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_gizmo_${_release_test}.py")
+        set_tests_properties(testGizmo_${_release_test} PROPERTIES
+            SKIP_RETURN_CODE 77)
+    endforeach()
     add_test(NAME testGizmoScreen
         COMMAND ${Python3_EXECUTABLE}
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_gizmo_screen.py")
@@ -2022,7 +2029,7 @@ if (RIGEXEC_BUILD_PYTHON AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
                          testMoverChainOrder testIkFkMatch testSpaceMatch
                          testAutoClavicle
                          testAvarEditorModel
-                         testGizmoPreview
+                         testGizmoPreview testGizmo_deferred_release testGizmo_own_commit
                          testGizmoSettings testGizmoDrag testGizmoSnap
                          testViewCubeMath testRigExecStageEdits
                          testGraphModel testGraphScreen testCacheStripModel

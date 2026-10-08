@@ -480,8 +480,9 @@ namespace {
 // its cluster), the compose cluster of the avar binding behind it (the
 // input block writes an overridden avar into the dense table, and the
 // per-provider value comparison dirties its compose cluster), and for a
-// ladder channel the readers of every rest and ladder op its leaf can move
-// (RigExecBakedHeadSeeds). Matched by index, not by head path, so an
+// ladder channel the operations reading its leaf. The compiled cluster
+// cones already carry those operations to every downstream reader.
+// Matched by index, not by head path, so an
 // override standing on a walk hop resolves to the same provider as one on
 // the head. Flat slot / 11, as in Build; a seedless provider contributes
 // nothing.
@@ -538,15 +539,9 @@ _IndexSeeds(const RigExecBakedProgramImpl &program)
         }
     }
     if (!program.ladderOverrides.empty()) {
-        // Per head op once, and per leaf the ops reading it once: a rig
-        // registers a ladder index per authored channel.
-        const std::vector<RigExecBakedClusterSet> opSeeds =
-            RigExecBakedHeadOpSeeds(program);
-        std::vector<std::vector<int>> opClusters(opSeeds.size());
-        for (size_t i = 0; i < opSeeds.size(); ++i) {
-            opClusters[i] = RigExecBakedHeadSeedsFrom(program, opSeeds,
-                                                      {uint32_t(i)});
-        }
+        // Seed the shared graph directly. Expanding a transitive set for
+        // every operation here duplicates the cluster cones and makes the
+        // first edit pay an all-operations/all-clusters traversal.
         std::vector<std::vector<uint32_t>> opsOfLeaf(program.leafRefs.size());
         for (size_t i = 0; i < program.steps.size(); ++i) {
             for (const uint32_t leaf : program.steps[i].bindingLeaves) {
@@ -565,10 +560,9 @@ _IndexSeeds(const RigExecBakedProgramImpl &program)
                 continue;
             }
             for (const uint32_t op : opsOfLeaf[leaf]) {
-                for (const int cluster : opClusters[op]) {
-                    if (size_t(cluster) < clusters) {
-                        add(index, cluster);
-                    }
+                const int cluster = program.steps[op].cluster;
+                if (cluster >= 0 && size_t(cluster) < clusters) {
+                    add(index, cluster);
                 }
             }
         }

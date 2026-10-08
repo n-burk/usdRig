@@ -505,6 +505,7 @@ void
 RigExecRigEvaluator::_OnObjectsChanged(
     const UsdNotice::ObjectsChanged &notice, const UsdStageWeakPtr &)
 {
+    RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "Notice.Evaluator", "notice");
     ++_stageEditSerial;
     // Never evaluate in a notice callback: ExecUsd must finish invalidating
     // its own caches before the next pull. External inputs can live anywhere

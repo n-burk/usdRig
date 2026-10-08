@@ -289,6 +289,7 @@ class _FilterController(QtCore.QObject):
         super(_FilterController, self).__init__()
         self.usdviewApi = usdviewApi
         self.cleared = 0
+        self.flushed = 0
         self.acted = []
         self._visible = True
         self._view = QtWidgets.QWidget(usdviewApi.qMainWindow)
@@ -298,6 +299,9 @@ class _FilterController(QtCore.QObject):
 
     def Sync(self):
         pass
+
+    def FlushReleasedEdit(self):
+        self.flushed += 1
 
     def _ClearHolds(self):
         self.cleared += 1
@@ -352,11 +356,25 @@ def TestHotkeyRouting():
         _Check(ctrlB.acted == [],
                "without acting on them, not even a hold release: %r"
                % ctrlB.acted)
+        _Check(ctrlB.flushed == 0,
+               "B's filter does not drain B's edit for A's input")
         filterA.eventFilter(widgetA, press)
         filterA.eventFilter(widgetA, release)
         _Check(("act", QtCore.Qt.Key_W) in ctrlA.acted and
                ("release", QtCore.Qt.Key_W) in ctrlA.acted,
                "A's filter does act on them: %r" % ctrlA.acted)
+        _Check(ctrlA.flushed == 1 and ctrlB.flushed == 0,
+               "the owning filter drains before key press, not key release")
+        for kind in (QtCore.QEvent.ShortcutOverride,
+                     QtCore.QEvent.MouseButtonPress, QtCore.QEvent.Close):
+            event = (QtGui.QKeyEvent(kind, QtCore.Qt.Key_W,
+                                    QtCore.Qt.NoModifier)
+                     if kind == QtCore.QEvent.ShortcutOverride
+                     else QtCore.QEvent(kind))
+            for event_filter in (filterA, filterB):
+                event_filter.eventFilter(panelB, event)
+        _Check(ctrlA.flushed == 1 and ctrlB.flushed == 3,
+               "B's shortcut, mouse press and close drain only B's edit")
     finally:
         _Destroy(windowA)
         _Destroy(windowB)

@@ -261,6 +261,30 @@ TestOutputAffectedIndex()
     CHECK(refused.Empty());
 }
 
+void
+TestLadderLeafUsesUnifiedCone()
+{
+    auto program = MakeDiamond(false);
+    const SdfPath path("/Ctl.rest:tx");
+    program.overridden.resize(1);
+    program.overridableInputs[path] = {0};
+    program.ladderOverrides = {0};
+    program.leafOfOverride = {0};
+    program.leafRefs.resize(1);
+    RigExecBakedStep reader;
+    reader.kind = RigExecBakedStepKind::RestCompose;
+    reader.cluster = 1;
+    reader.bindingLeaves = {0};
+    program.steps.push_back(std::move(reader));
+    program.cones.editRoute = {kEditRouteHead};
+    RigExecOutputAffectedIndex index;
+    index.Build(program, 7);
+    // Includes the source operation and its joined downstream branch, but
+    // neither the other branch nor the disconnected operation.
+    CHECK(SetIs(index.AffectedByControls({path.GetString()}), {1, 3, 4}));
+    CHECK(index.SeedsForControl(path.GetString()) == std::vector<int>{1});
+}
+
 // The task list memoizes one closed set per (control, epoch): repeats hit,
 // epochs are isolated, and invalidation drops exactly one epoch.
 void
@@ -1170,6 +1194,7 @@ main()
 
     TestGoNoGo();
     TestOutputAffectedIndex();
+    TestLadderLeafUsesUnifiedCone();
     TestTaskListCache();
     TestChangedControls();
     TestPlanSparseReuse();
