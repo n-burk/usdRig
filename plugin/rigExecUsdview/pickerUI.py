@@ -165,6 +165,136 @@ def _polygon(path, points, roundness):
     path.closeSubpath()
 
 
+def DrawButton(painter, button, fontFamily, hover, selectedPaths):
+    """Paint one button in its panel's coordinates.
+
+    Shared by the docked panel and the hover picker, so a button looks
+    the same wherever it is drawn. `hover` is the hovered button's id
+    and `selectedPaths` the selected prim paths, as strings.
+    """
+    painter.save()
+    painter.translate(button.x, button.y)
+    if button.rotation:
+        painter.translate(button.w * 0.5, button.h * 0.5)
+        painter.rotate(button.rotation)
+        painter.translate(-button.w * 0.5, -button.h * 0.5)
+
+    fill = QtGui.QColor(*button.fill)
+    if not button.decoration and not button.live:
+        fill.setAlpha(int(fill.alpha() * _DIM))
+    if button.id == hover and button.live:
+        fill = fill.lighter(125)
+
+    path = _path_for(button)
+    painter.setBrush(QtGui.QBrush(fill))
+    selected = bool(button.targets) and selectedPaths.issuperset(
+        button.targets)
+    if selected:
+        pen = QtGui.QPen(QtGui.QColor(255, 255, 255))
+        pen.setWidthF(2.0)
+    else:
+        pen = QtGui.QPen(QtGui.QColor(*button.stroke))
+        pen.setWidthF(max(button.stroke_width, 0.5))
+    painter.setPen(pen)
+    painter.drawPath(path)
+
+    if button.checkbox:
+        side = min(button.h - 4.0, 11.0)
+        top = (button.h - side) * 0.5
+        left = 3.0 if button.h_align != "right" else button.w - side - 3.0
+        painter.setBrush(QtGui.QBrush(QtGui.QColor(58, 58, 58)))
+        painter.setPen(QtGui.QPen(QtGui.QColor(18, 18, 18)))
+        painter.drawRect(QtCore.QRectF(left, top, side, side))
+        if button.checked:
+            tick = QtGui.QPen(QtGui.QColor(120, 200, 255))
+            tick.setWidthF(1.8)
+            painter.setPen(tick)
+            painter.drawPolyline([
+                QtCore.QPointF(left + side * 0.20, top + side * 0.52),
+                QtCore.QPointF(left + side * 0.44, top + side * 0.76),
+                QtCore.QPointF(left + side * 0.82, top + side * 0.24)])
+
+    # A SWITCH WITH NO STATIC LABEL STILL HAS A VALUE. The value used
+    # to be drawn inside `if button.text:`, so the six switches the
+    # studio left unlabelled -- head, neck, both FK arms, both arm
+    # IKs -- painted as empty boxes: they carry no `ui:text`, and the
+    # live space never got a chance to draw. The gate is now "is
+    # there anything to say", and the label and the value are placed
+    # separately so either can stand alone.
+    if button.text or button.value:
+        font = QtGui.QFont(fontFamily or "Sans")
+        font.setPixelSize(max(int(round(button.font_size)), 5))
+        font.setBold(button.bold)
+        box = QtCore.QRectF(2, 0, button.w - 4, button.h)
+        # Fit the PAIR, not just the label. Shrinking to fit "Foot"
+        # and then drawing "world" beside it is how "worldFoot" and
+        # "fooPV" happened.
+        both = " ".join(x for x in (button.text, button.value) if x)
+        for _ in range(6):
+            if (QtGui.QFontMetricsF(font).horizontalAdvance(both)
+                    <= box.width() - (14.0 if button.value else 0.0)
+                    or font.pixelSize() <= 5):
+                break
+            font.setPixelSize(font.pixelSize() - 1)
+        painter.setFont(font)
+        align = {"left": QtCore.Qt.AlignLeft,
+                 "right": QtCore.Qt.AlignRight}.get(
+                     button.h_align, QtCore.Qt.AlignHCenter)
+        if button.checkbox:
+            box.setLeft(box.left() + min(button.h - 4.0, 11.0) + 5.0)
+            align = QtCore.Qt.AlignLeft
+
+        # THE TWO HALVES DO NOT OVERLAP. Both used to be drawn into
+        # the same rect with opposite alignments, which reads fine
+        # only while they happen not to meet in the middle -- and on
+        # this rig they met on every leg.
+        label_box, value_box, value_align, caret_x = box, None, None, 0.0
+        if button.value:
+            metrics = QtGui.QFontMetricsF(font)
+            want = min(metrics.horizontalAdvance(button.value) + 14.0,
+                       box.width())
+            if not button.text:
+                want = box.width()          # nothing to share with
+                label_box = None
+            if align == QtCore.Qt.AlignRight:
+                value_box = QtCore.QRectF(box.left() + 12, box.top(),
+                                          want - 12, box.height())
+                value_align = QtCore.Qt.AlignLeft
+                caret_x = box.left() + 5
+                if label_box is not None:
+                    label_box = QtCore.QRectF(box)
+                    label_box.setLeft(box.left() + want)
+            else:
+                value_box = QtCore.QRectF(box.right() - want, box.top(),
+                                          want - 12, box.height())
+                value_align = QtCore.Qt.AlignRight
+                caret_x = box.right() - 7
+                if label_box is not None:
+                    label_box = QtCore.QRectF(box)
+                    label_box.setRight(box.right() - want)
+
+        if button.text and label_box is not None:
+            painter.setPen(QtGui.QColor(*button.text_color))
+            painter.drawText(label_box, align | QtCore.Qt.AlignVCenter,
+                             button.text)
+        if button.value:
+            painter.setPen(QtGui.QColor(*button.value_color))
+            painter.drawText(value_box,
+                             value_align | QtCore.Qt.AlignVCenter,
+                             button.value)
+            mid = box.center().y()
+            caret = QtGui.QPainterPath()
+            caret.moveTo(caret_x - 3.2, mid - 1.6)
+            caret.lineTo(caret_x + 3.2, mid - 1.6)
+            caret.lineTo(caret_x, mid + 2.2)
+            caret.closeSubpath()
+            painter.setBrush(QtGui.QBrush(
+                QtGui.QColor(*button.value_color)))
+            painter.setPen(QtCore.Qt.NoPen)
+            painter.drawPath(caret)
+    painter.restore()
+
+
 class PickerView(QtWidgets.QWidget):
     """One panel, drawn and clickable."""
 
@@ -239,127 +369,7 @@ class PickerView(QtWidgets.QWidget):
         painter.end()
 
     def _draw(self, painter, button):
-        painter.save()
-        painter.translate(button.x, button.y)
-        if button.rotation:
-            painter.translate(button.w * 0.5, button.h * 0.5)
-            painter.rotate(button.rotation)
-            painter.translate(-button.w * 0.5, -button.h * 0.5)
-
-        fill = QtGui.QColor(*button.fill)
-        if not button.decoration and not button.live:
-            fill.setAlpha(int(fill.alpha() * _DIM))
-        if button.id == self._hover and button.live:
-            fill = fill.lighter(125)
-
-        path = _path_for(button)
-        painter.setBrush(QtGui.QBrush(fill))
-        selected = bool(button.targets) and self._selected.issuperset(
-            button.targets)
-        if selected:
-            pen = QtGui.QPen(QtGui.QColor(255, 255, 255))
-            pen.setWidthF(2.0)
-        else:
-            pen = QtGui.QPen(QtGui.QColor(*button.stroke))
-            pen.setWidthF(max(button.stroke_width, 0.5))
-        painter.setPen(pen)
-        painter.drawPath(path)
-
-        if button.checkbox:
-            side = min(button.h - 4.0, 11.0)
-            top = (button.h - side) * 0.5
-            left = 3.0 if button.h_align != "right" else button.w - side - 3.0
-            painter.setBrush(QtGui.QBrush(QtGui.QColor(58, 58, 58)))
-            painter.setPen(QtGui.QPen(QtGui.QColor(18, 18, 18)))
-            painter.drawRect(QtCore.QRectF(left, top, side, side))
-            if button.checked:
-                tick = QtGui.QPen(QtGui.QColor(120, 200, 255))
-                tick.setWidthF(1.8)
-                painter.setPen(tick)
-                painter.drawPolyline([
-                    QtCore.QPointF(left + side * 0.20, top + side * 0.52),
-                    QtCore.QPointF(left + side * 0.44, top + side * 0.76),
-                    QtCore.QPointF(left + side * 0.82, top + side * 0.24)])
-
-        # A SWITCH WITH NO STATIC LABEL STILL HAS A VALUE. The value used
-        # to be drawn inside `if button.text:`, so the six switches the
-        # studio left unlabelled -- head, neck, both FK arms, both arm
-        # IKs -- painted as empty boxes: they carry no `ui:text`, and the
-        # live space never got a chance to draw. The gate is now "is
-        # there anything to say", and the label and the value are placed
-        # separately so either can stand alone.
-        if button.text or button.value:
-            font = QtGui.QFont(self._font or "Sans")
-            font.setPixelSize(max(int(round(button.font_size)), 5))
-            font.setBold(button.bold)
-            box = QtCore.QRectF(2, 0, button.w - 4, button.h)
-            # Fit the PAIR, not just the label. Shrinking to fit "Foot"
-            # and then drawing "world" beside it is how "worldFoot" and
-            # "fooPV" happened.
-            both = " ".join(x for x in (button.text, button.value) if x)
-            for _ in range(6):
-                if (QtGui.QFontMetricsF(font).horizontalAdvance(both)
-                        <= box.width() - (14.0 if button.value else 0.0)
-                        or font.pixelSize() <= 5):
-                    break
-                font.setPixelSize(font.pixelSize() - 1)
-            painter.setFont(font)
-            align = {"left": QtCore.Qt.AlignLeft,
-                     "right": QtCore.Qt.AlignRight}.get(
-                         button.h_align, QtCore.Qt.AlignHCenter)
-            if button.checkbox:
-                box.setLeft(box.left() + min(button.h - 4.0, 11.0) + 5.0)
-                align = QtCore.Qt.AlignLeft
-
-            # THE TWO HALVES DO NOT OVERLAP. Both used to be drawn into
-            # the same rect with opposite alignments, which reads fine
-            # only while they happen not to meet in the middle -- and on
-            # this rig they met on every leg.
-            label_box, value_box, value_align, caret_x = box, None, None, 0.0
-            if button.value:
-                metrics = QtGui.QFontMetricsF(font)
-                want = min(metrics.horizontalAdvance(button.value) + 14.0,
-                           box.width())
-                if not button.text:
-                    want = box.width()          # nothing to share with
-                    label_box = None
-                if align == QtCore.Qt.AlignRight:
-                    value_box = QtCore.QRectF(box.left() + 12, box.top(),
-                                              want - 12, box.height())
-                    value_align = QtCore.Qt.AlignLeft
-                    caret_x = box.left() + 5
-                    if label_box is not None:
-                        label_box = QtCore.QRectF(box)
-                        label_box.setLeft(box.left() + want)
-                else:
-                    value_box = QtCore.QRectF(box.right() - want, box.top(),
-                                              want - 12, box.height())
-                    value_align = QtCore.Qt.AlignRight
-                    caret_x = box.right() - 7
-                    if label_box is not None:
-                        label_box = QtCore.QRectF(box)
-                        label_box.setRight(box.right() - want)
-
-            if button.text and label_box is not None:
-                painter.setPen(QtGui.QColor(*button.text_color))
-                painter.drawText(label_box, align | QtCore.Qt.AlignVCenter,
-                                 button.text)
-            if button.value:
-                painter.setPen(QtGui.QColor(*button.value_color))
-                painter.drawText(value_box,
-                                 value_align | QtCore.Qt.AlignVCenter,
-                                 button.value)
-                mid = box.center().y()
-                caret = QtGui.QPainterPath()
-                caret.moveTo(caret_x - 3.2, mid - 1.6)
-                caret.lineTo(caret_x + 3.2, mid - 1.6)
-                caret.lineTo(caret_x, mid + 2.2)
-                caret.closeSubpath()
-                painter.setBrush(QtGui.QBrush(
-                    QtGui.QColor(*button.value_color)))
-                painter.setPen(QtCore.Qt.NoPen)
-                painter.drawPath(caret)
-        painter.restore()
+        DrawButton(painter, button, self._font, self._hover, self._selected)
 
     # -- mouse -----------------------------------------------------------
 
@@ -573,6 +583,13 @@ class PickerPanel(QtWidgets.QDialog):
         # them is an edit to the picker, and the panel rebuilds; an edit
         # anywhere else on the stage is the rig moving and is ignored.
         self._pickerRoots = []
+        # Callables told when what the buttons show changes: "reload"
+        # after the pickers are re-read, "update" for anything else (a
+        # limb's IK/FK half, a switch label, a toggle's tick, the
+        # selection). The hover picker draws the same buttons and follows
+        # through these.
+        self._listeners = []
+        self._modes = {}
         self.setWindowTitle("Control Picker")
         self.resize(460, 720)
 
@@ -650,6 +667,34 @@ class PickerPanel(QtWidgets.QDialog):
         self._Subscribe()
 
     # -- wiring ----------------------------------------------------------
+
+    def AddListener(self, listener):
+        if listener not in self._listeners:
+            self._listeners.append(listener)
+
+    def RemoveListener(self, listener):
+        if listener in self._listeners:
+            self._listeners.remove(listener)
+
+    def _Notify(self, what):
+        for listener in list(self._listeners):
+            try:
+                listener(what)
+            except Exception:
+                pass
+
+    def Pickers(self):
+        """Every picker on the stage, as the panel read them."""
+        return list(self._pickers)
+
+    def Modes(self):
+        """Each limb's showing IK/FK half, keyed by its dial path."""
+        return dict(self._modes)
+
+    def Pick(self, buttons, mode):
+        """Apply a pick made somewhere other than the panel's own views:
+        the same selection, command and switch rules as a click here."""
+        self._OnPicked(buttons, mode)
 
     def _stage(self):
         return getattr(self._api, "stage", None)
@@ -831,6 +876,7 @@ class PickerPanel(QtWidgets.QDialog):
         self._SyncToggles()
         self._Status()
         self._OnSelectionChanged()
+        self._Notify("reload")
 
     def _OnCharacterChanged(self, index):
         """Follow the visible character tab.
@@ -938,6 +984,7 @@ class PickerPanel(QtWidgets.QDialog):
                     button.checked = shown
         for view in self._views:
             view.update()
+        self._Notify("update")
 
     def _ZeroControls(self):
         """Zero the selected controls, or the whole rig if none are.
@@ -1005,6 +1052,7 @@ class PickerPanel(QtWidgets.QDialog):
         self._RefreshModes()
         for view in self._views:
             view.update()
+        self._Notify("update")
         self._status.setText(
             "Zeroed %d control%s (%d authored avars cleared)%s"
             % (len(prims), "" if len(prims) == 1 else "s", cleared,
@@ -1211,10 +1259,12 @@ class PickerPanel(QtWidgets.QDialog):
                 button.value = label
                 relabelled = True
 
+        self._modes = dict(modes)
         for view in self._views:
             view.set_modes(modes)
             if relabelled:
                 view.update()
+        self._Notify("update")
         return modes
 
     def _ShowPanel(self, index):
@@ -1321,6 +1371,7 @@ class PickerPanel(QtWidgets.QDialog):
         self._RefreshModes()
         for view in self._views:
             view.update()
+        self._Notify("update")
         self._status.setText("%s -> %s, matched (%d channels)" % (
             limb.switchControl.name, "IK" if toIk else "FK", channels))
         return True
@@ -1389,6 +1440,7 @@ class PickerPanel(QtWidgets.QDialog):
         # both panels, and the label is what the animator reads back.
         for view in self._views:
             view.update()
+        self._Notify("update")
         self._status.setText("%s -> %s (%s = %g)%s"
                              % (target.get("source") or button.id, label,
                                 target["attr"], value,

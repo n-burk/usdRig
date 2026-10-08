@@ -374,6 +374,13 @@ class RigExecUsdviewContainer(PluginContainer):
             "Control Picker",
             lambda api: self._OpenPickerPanel(api))
 
+        # The same picker drawn into the viewport, one floating group of
+        # buttons per tab. A toggle, like the view cube.
+        self._hoverPicker = plugRegistry.registerCommandPlugin(
+            "RigExecUsdviewContainer.hoverPicker",
+            "Hover Picker",
+            lambda api: self._ToggleHoverPicker(api))
+
         # The viewport manipulator toolbar. Same lazy-import reasoning
         # again; the menu item toggles it rather than opening a window,
         # because the toolbar lives inside the viewport frame.
@@ -451,6 +458,8 @@ class RigExecUsdviewContainer(PluginContainer):
         # plugin containers and slot in between by rank.
         AddToRigExecMenu(plugUIBuilder, "Animation Editors",
                          self._picker, 30)
+        AddToRigExecMenu(plugUIBuilder, "Animation Editors",
+                         self._hoverPicker, 31)
         AddToRigExecMenu(plugUIBuilder, "Animation Editors",
                          self._volumeWeights, 50)
         self._InstallOutlinerArcMenu()
@@ -754,6 +763,36 @@ class RigExecUsdviewContainer(PluginContainer):
 
         return pickerUI.OpenPickerPanel(
             usdviewApi or self._api, self._UndoStack())
+
+    def _ImportHoverPicker(self):
+        # Same lazy sibling import as the panels: Qt stays out of a
+        # headless load of this container.
+        try:
+            import pickerHoverUI
+        except ImportError:
+            sys.path.insert(
+                0, os.path.dirname(os.path.abspath(__file__)))
+            import pickerHoverUI
+        return pickerHoverUI
+
+    def _ToggleHoverPicker(self, usdviewApi=None):
+        """Menu item: show or hide the hover picker."""
+        return self._ImportHoverPicker().ToggleHoverPicker(
+            usdviewApi or self._api, self._UndoStack())
+
+    def _RestoreHoverPicker(self):
+        """Install the P hotkey, and bring the hover picker back if it
+        was on last session."""
+        if getattr(self, "_hoverPickerRestored", False):
+            return
+        self._hoverPickerRestored = True
+        try:
+            module = self._ImportHoverPicker()
+            module.InstallHotkey(self._api, self._UndoStack())
+            if module.WasEnabled() and module.StageView(self._api):
+                module.InstallHoverPicker(self._api, self._UndoStack())
+        except Exception as error:
+            Tf.Warn("rigExecUsdview: hover picker unavailable: %s" % error)
 
     def _OpenGraphEditor(self, usdviewApi=None):
         """
@@ -1289,6 +1328,7 @@ class RigExecUsdviewContainer(PluginContainer):
         self._EnsureViewportTools()
         self._EnsureViewCube()
         self._EnsureViewAxis()
+        self._RestoreHoverPicker()
 
     def _ActivateCurrentStage(self):
         stage = self._api.dataModel.stage

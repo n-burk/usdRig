@@ -18,7 +18,7 @@ set "PYTHONPATH=%RIG%\build-python\python;%PYTHONPATH%"
 set "SCHEMA=%RIG%\build\usd\rigExecSchema\resources"
 
 set "TESTS=%*"
-if not defined TESTS set "TESTS=test_rigexec_undo test_gizmo_math test_gizmo_screen test_gizmo_settings test_gizmo_drag test_gizmo_snap test_viewcube_math test_rigexec_stage_edits test_graph_model test_graph_screen test_layer_opinions_model test_path_spelling test_composition_arcs_model test_gizmo_preview test_touchpose_model test_gizmo_marquee test_picker_scene test_imaging_handle test_session_state"
+if not defined TESTS set "TESTS=test_rigexec_undo test_gizmo_math test_gizmo_screen test_gizmo_settings test_gizmo_drag test_gizmo_snap test_viewcube_math test_rigexec_stage_edits test_graph_model test_graph_screen test_layer_opinions_model test_path_spelling test_composition_arcs_model test_gizmo_preview test_touchpose_model test_gizmo_marquee test_picker_scene test_picker_hover_model test_imaging_handle test_session_state"
 
 rem Only the tests listed here read argv[1], to Plug-register the generated
 rem schema. The rest never touch sys.argv -- they need neither a schema nor a

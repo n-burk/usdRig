@@ -24,7 +24,12 @@ select the rig's controls, flip its switches, and zero its pose. A picker
 is not a sidecar file beside the rig — it is `RigExecPicker` prims in the
 rig's own layer stack, so it composes, it layers, and an animator can
 override one button with an `over` instead of re-authoring anything.
-Open it from usdview's **RigExec ▸ Control Picker** menu.
+Open it from usdview's **RigExec ▸ Control Picker** menu, or press P
+(**RigExec ▸ Animation Editors ▸ Hover Picker**) to draw its tabs straight
+into the viewport: drag a tab's round handle to move it, Shift-drag the
+handle to scale it, double-click the handle to collapse it, and
+middle-drag its buttons to fade it. The knob at the bottom right fades
+every tab at once. The hover layout is saved per user, never on the stage.
 
 A character's control picker: one tab in the picker panel,
 holding one RigExecPickerPanel per sub-tab.
@@ -40,7 +45,7 @@ for the single-character case and wrong the moment there are two.
 
 ## How it works
 
-Nothing here is evaluated and nothing here is drawn in the viewport:
+Nothing here is evaluated and nothing here is rendered by Hydra:
 the picker runs in no rig phase, the compiler never reads it, and the
 schema classes are not imageable. The usdview panel finds pickers BY TYPE
 — `Usd.PrimRange` over the stage, `IsA(RigExecPicker)`, pruning any prim
