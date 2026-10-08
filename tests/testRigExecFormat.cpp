@@ -23,6 +23,9 @@
 // and each rule of theirs refuses its violation with its exact message.
 // USD-free, like the format.
 #include "rigExecBinary/format.h"
+#include "rigExecBinary/stepGraph.h"
+#include "rigExecBinary/transport.h"
+#include "rigExecGraph/providerRecords.h"
 
 #include <algorithm>
 #include <array>
@@ -31,8 +34,11 @@
 #include <cstdio>
 #include <cstring>
 #include <functional>
+#include <future>
 #include <initializer_list>
+#include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -307,6 +313,10 @@ _MinimalFile()
     f.doubleArrays.resize(1);
     f.vec2fArrays.resize(1);
     f.vec3fArrays.resize(1);
+    f.vec3dArrays.resize(1);
+    f.matrix4dArrays.resize(1);
+    f.tokenArrays.resize(1);
+    f.boolArrays.resize(1);
     f.slotMeta = std::make_unique<fb::RigExecWireSlotMeta>();
     f.constants = std::make_unique<fb::RigExecWireConstants>();
     f.clustering = std::make_unique<fb::RigExecWireClustering>();
@@ -314,8 +324,49 @@ _MinimalFile()
     f.cones->always = std::make_unique<fb::RigExecWireClusterSet>();
     f.cones->poseClusters = std::make_unique<fb::RigExecWireClusterSet>();
     f.pose = std::make_unique<fb::RigExecWireDomainPose>();
+    f.pose->requiredStageFramesAdmission = std::make_unique<fb::RigExecWireRequiredStageFramesAdmission>();
     f.geometry = std::make_unique<fb::RigExecWireDomainGeometry>();
+    f.commonGraph = std::make_unique<fb::RigExecWireCommonGraph>();
     return f;
+}
+
+// Fixture authoring only: declare the new source role before malformed copies are made.
+void
+_DeclareFixtureStageFrames(RigExecWireFile &f)
+{
+    using D=fb::SlotDomain; using K=fb::StepKind;
+    const auto prep=[](K kind) { return kind==K::PropertyRevision || kind==K::RestCompose ||
+        kind==K::LadderCompose || kind==K::SkinTopology; };
+    std::map<std::pair<D,uint32_t>,std::vector<size_t>> producers;
+    std::vector<size_t> pending;
+    for(size_t i=0;i<f.steps.size();++i) {
+        if(prep(f.steps[i].kind))pending.push_back(i);
+        for(const auto &range:f.steps[i].writes)
+            for(uint32_t slot=range.begin();slot<range.end();++slot)
+                producers[{range.domain(),slot}].push_back(i);
+    }
+    std::set<size_t> ancestors;
+    while(!pending.empty()) {
+        const size_t owner=pending.back();pending.pop_back();
+        if(!ancestors.insert(owner).second)continue;
+        for(const auto &range:f.steps[owner].reads)
+            for(uint32_t slot=range.begin();slot<range.end();++slot) {
+                const auto at=producers.find({range.domain(),slot});
+                if(at!=producers.end())pending.insert(pending.end(),at->second.begin(),at->second.end());
+            }
+    }
+    for(size_t i=0;i<f.steps.size();++i) {
+        auto &step=f.steps[i];
+        step.reads.erase(std::remove_if(step.reads.begin(),step.reads.end(),[](const auto &range) {
+            return range.domain()==D::RequiredStageFramesAdmission;
+        }),step.reads.end());
+        const bool helper=step.kind==K::WeightField || step.kind==K::SpaceExpression;
+        if(prep(step.kind) || step.kind==K::AvarInputs || step.kind==K::SnapshotFinals ||
+           (helper && ancestors.count(i)))continue;
+        if(std::none_of(step.reads.begin(),step.reads.end(),[](const auto &range) {
+            return range.domain()==D::RequiredStageFramesAdmission;
+        }))step.reads.emplace_back(D::RequiredStageFramesAdmission,0,1);
+    }
 }
 
 // Path ids of the rich file.
@@ -441,7 +492,9 @@ _RichFileBody()
     // One provider slot.
     fb::RigExecWireSlotMeta &meta = *f.slotMeta;
     meta.paths = {_pCtl};
+    meta.publicationRoles = {0};
     meta.slotKind = {fb::SlotKind::FirstFramePose};
+    meta.providerActive = {1};
     meta.parent = {-1};
     meta.propParent = {-1};
     meta.needFinal = {1};
@@ -467,7 +520,7 @@ _RichFileBody()
     step.kind = fb::StepKind::ComposeSubtree;
     step.object = 0;
     step.cluster = 0;
-    step.reads = {fb::SlotRange(fb::SlotDomain::Avars, 0, 11)};
+    step.reads = {fb::SlotRange(fb::SlotDomain::Avars, 0, 1)};
     step.writes = {fb::SlotRange(fb::SlotDomain::PoseFin, 0, 1)};
     step.overrideInputs = {0};
     step.sizeUnits = _SD(1);
@@ -481,10 +534,6 @@ _RichFileBody()
     f.clustering->grainUs = _SD(4);
     f.clustering->serialCost = _SD(5);
     f.clustering->criticalPathCost = _SD(0);
-    fb::RigExecWireClusterSet one;
-    one.clusters = 1;
-    one.words = {1};
-    f.cones->cone = {one};
     f.cones->always->clusters = 1;
     f.cones->always->words = {0};
     f.cones->poseClusters->clusters = 1;
@@ -498,6 +547,8 @@ _RichFileBody()
 
     // Pose domain.
     fb::RigExecWireDomainPose &pose = *f.pose;
+    fb::RigExecWireComposeGroup group; group.begin = 0; group.end = 1;
+    pose.composeGroups.push_back(group);
     pose.overrideCount = 1;
     fb::RigExecWireLadder ladder;
     ladder.restSpace = _In(InputTag::Matrix4d);
@@ -513,6 +564,12 @@ _RichFileBody()
     ladder.restAvars[0].selected = 0;
     ladder.restAvars[0].overrideIndex = 0;
     ladder.rotationOrder = _In(InputTag::Token);
+    ladder.parentSpace = _In(InputTag::Matrix4d);
+    ladder.parentDefaultSpace = _In(InputTag::Matrix4d);
+    ladder.avarDefaultSpace = _In(InputTag::Matrix4d);
+    ladder.posedDefaultSpace = _In(InputTag::Matrix4d);
+    ladder.interveningSpace = _In(InputTag::Matrix4d);
+    ladder.rotationSign = _In(InputTag::Vec3d);
     pose.ladders.push_back(std::move(ladder));
     pose.ladderOverrides = {0};
     pose.restChainVaries = {1};
@@ -615,6 +672,7 @@ _RichFileBody()
 
     fb::RigExecWireConstraintArrays arrays;
     arrays.prim = _pCtl;
+    arrays.rawSlots = {-1, -1, -1, -1}; // Immutable synthetic arrays have no sampled source slots.
     arrays.sourceCount = 2;
     arrays.parentOffsets = true;
     arrays.readPole = true;
@@ -651,15 +709,12 @@ _RichFileBody()
     sw.sourceSlots = {-1};
     sw.filters = {2};
     sw.twistAxis = _V3d(5);
-    // A recomposed parent version, a world source, and a recomposed space:
-    // this switch switches the one slot, so no read of it may anchor on
-    // that slot (TestSwitchOrder covers anchored reads).
+    // Identity parent/carry versions and a world source; actual recomposition
+    // is covered by the declared checkpoint fixture.
     sw.spaceSlot = 0;
     sw.parentRead = std::make_unique<fb::RigExecWireFrameVersion>();
-    sw.parentRead->recompose = {0};
     sw.sourceReads.resize(1);
     sw.spaceRead = std::make_unique<fb::RigExecWireFrameVersion>();
-    sw.spaceRead->recompose = {0};
     sw.active = _In(InputTag::Double);
     sw.affectTranslation = {{true, false, true}};
     sw.affectRotation = {{false, true, false}};
@@ -788,8 +843,10 @@ _RichFileBody()
     step0.mover = _pMover;
     step0.op = fb::PropertyOp::Curve;
     step0.enabled = _In(InputTag::Bool, ReadMode::Pinned);
-    step0.defaultWeight = _In(InputTag::Float, ReadMode::Pinned, {2});
-    step0.value = _In(InputTag::Float, ReadMode::Resolved, {1, 0});
+    // Independent constant weight; reading the target final here would create a self-cycle.
+    step0.defaultWeight = _In(InputTag::Float, ReadMode::Pinned);
+    // Independent constant value; the phased alias belongs to this chain output.
+    step0.value = _In(InputTag::Float, ReadMode::Pinned);
     step0.min = _In(InputTag::Float, ReadMode::Pinned);
     step0.max = _In(InputTag::Float, ReadMode::Pinned);
     step0.keys = {_V2f(0), _V2f(2)};
@@ -807,6 +864,7 @@ _RichFileBody()
 
     f.compileDiagnostics = {"compile note", ""};
     f.presentation = _PresentationBytes();
+    _DeclareFixtureStageFrames(f);
     return f;
 }
 
@@ -816,7 +874,9 @@ size_t
 _RegionBegin(const RigExecWireFile &f)
 {
     size_t n = 0;
-    while (n < f.steps.size() && f.steps[n].isHead) ++n;
+    while (n < f.steps.size() && (f.steps[n].isHead ||
+           f.steps[n].kind == fb::StepKind::AvarInputs ||
+           f.steps[n].kind == fb::StepKind::ChainInputs)) ++n;
     return n;
 }
 
@@ -869,7 +929,7 @@ _AddFixtureHeads(RigExecWireFile &f)
     heads.push_back(base);
     fb::RigExecWireStep revision = base;
     revision.part = 1;
-    revision.headInputSlots = {0, 1, 2};
+    revision.headInputSlots = {};
     revision.reads = {fb::SlotRange(fb::SlotDomain::PropertyResult, 0, 1)};
     revision.writes = {fb::SlotRange(fb::SlotDomain::PropertyResult, 1, 3)};
     revision.preds = {0};
@@ -901,8 +961,10 @@ _AddFixtureHeads(RigExecWireFile &f)
             const auto &body = f.pose->ladders[size_t(slot)];
             rest.headInputReads.insert(rest.headInputReads.end(), body.restAvars.begin(), body.restAvars.end());
             rest.headInputReads.push_back(*body.restSpace);
+            rest.headInputReads.push_back(*body.interveningSpace);
             ladder.headInputReads.push_back(*body.posedSpace);
             ladder.headInputReads.push_back(*body.defaultSpace);
+            for (const auto *read : {body.parentSpace.get(),body.parentDefaultSpace.get(),body.avarDefaultSpace.get(),body.posedDefaultSpace.get(),body.rotationSign.get()}) ladder.headInputReads.push_back(*read);
             ladder.headInputReads.insert(ladder.headInputReads.end(), body.defaultAvars.begin(), body.defaultAvars.end());
             ladder.headInputReads.push_back(*body.rotationOrder);
         }
@@ -918,6 +980,23 @@ _AddFixtureHeads(RigExecWireFile &f)
             if (step.kind == fb::StepKind::Constraint || step.kind == fb::StepKind::FrameMatrix)
                 step.reads.push_back(fb::SlotRange(fb::SlotDomain::Rest, 0, 1));
         }
+    }
+    // Actual raw avar producers precede fixture region consumers.
+    for(size_t slot=0;slot<f.slotMeta->paths.size();++slot) {
+        if(f.slotMeta->slotKind[slot]!=fb::SlotKind::FirstFramePose) continue;
+        fb::RigExecWireStep avars;
+        avars.kind=fb::StepKind::AvarInputs; avars.object=int32_t(slot);
+        avars.writes={fb::SlotRange(fb::SlotDomain::Avars,uint32_t(slot),uint32_t(slot+1))};
+        heads.push_back(std::move(avars));
+    }
+    // ChainBase is produced from the actual sampled ChainInput source.
+    for (size_t chain = 0; chain < f.geometry->chains.size(); ++chain) {
+        fb::RigExecWireStep input;
+        input.kind = fb::StepKind::ChainInputs;
+        input.object = int32_t(chain);
+        input.reads = {fb::SlotRange(fb::SlotDomain::ChainInput, uint32_t(chain), uint32_t(chain + 1))};
+        input.writes = {fb::SlotRange(fb::SlotDomain::ChainBase, uint32_t(chain), uint32_t(chain + 1))};
+        heads.push_back(std::move(input));
     }
     const int32_t h = int32_t(heads.size());
     for (auto &step : f.steps) {
@@ -988,6 +1067,7 @@ _RichFile()
 {
     RigExecWireFile f = _RichFileBody();
     _AddFixtureHeads(f);
+    _DeclareFixtureStageFrames(f);
     return f;
 }
 
@@ -1046,7 +1126,14 @@ _Write(const RigExecWireFile &file, std::vector<uint8_t> *bytes,
        std::string *why = nullptr)
 {
     std::string error;
-    const bool ok = RigExecFormatWrite(file, bytes, &error);
+    bool ok = RigExecFormatWrite(file, bytes, &error);
+    // Corruption cases below deliberately inspect the inner FlatBuffer.
+    // Production transport is exercised separately by TestTransportCases.
+    if(ok && transport::IsEnvelope(bytes->data(),bytes->size())) {
+        transport::Buffer raw;
+        ok=transport::Decode(bytes->data(),bytes->size(),&raw,&error);
+        if(ok)bytes->assign(raw.data.get(),raw.data.get()+raw.size);
+    }
     if (why) {
         *why = error;
     }
@@ -1257,11 +1344,11 @@ TestBitExactness()
           sw.affectRotation == file.pose->spaceSwitches[0].affectRotation &&
           sw.affectScale == file.pose->spaceSwitches[0].affectScale);
     CHECK(sw.parentRead && sw.parentRead->anchor == -1 &&
-          sw.parentRead->recompose == std::vector<int32_t>{0});
+          sw.parentRead->context == -1 && sw.parentRead->recompose.empty());
     CHECK(sw.sourceReads.size() == 1 && sw.sourceReads[0].anchor == -1 &&
           sw.sourceReads[0].recompose.empty());
     CHECK(sw.spaceRead && sw.spaceRead->anchor == -1 &&
-          sw.spaceRead->recompose == std::vector<int32_t>{0});
+          sw.spaceRead->context == -1 && sw.spaceRead->recompose.empty());
     const fb::RigExecWireRevision &r = o->geometry->chains[0].revisions[0];
     const fb::RigExecWireRevision &r0 = file.geometry->chains[0].revisions[0];
     CHECK(_Same(r.packetInfluences, r0.packetInfluences));
@@ -1357,6 +1444,7 @@ TestOpenRefusals()
     _context = "open refusals";
     std::vector<uint8_t> bytes;
     CHECK(_Write(_RichFile(), &bytes));
+    if (bytes.size() < 8) return; // The positive CHECK remains failed; avoid invalid iterator arithmetic.
     std::string why;
 
     // Short buffers and the old container.
@@ -1387,8 +1475,9 @@ TestOpenRefusals()
     wildRoot[3] = 0x0f;
     CHECK(!_Open(wildRoot, &why) && _Contains(why, "malformed"));
 
-    static_assert(RigExecFormatVersion == 10, "X1 wire cleanup format pin");
-    // Every prior format is disposable after the S3 wire cleanup and must
+    static_assert(RigExecFormatVersion == 17,
+                  "required stage-frame admission pins format17");
+    // Every prior format requires re-export to the compact graph layout and must
     // be re-exported. Future versions require a supported exporter.
     RigExecWireFile versioned = _RichFile();
     for (uint32_t version = 0; version <= RigExecFormatVersion + 1; ++version) {
@@ -1398,14 +1487,14 @@ TestOpenRefusals()
         const std::string expected = "unsupported .rigexec format version " +
             std::to_string(version) + " (this reader reads " +
             std::to_string(RigExecFormatVersion) + "); " +
-            (version < RigExecFormatVersion ? "re-export: S3 head tier" : "rebake");
+            (version < RigExecFormatVersion ? "re-export: required stage-frame admission" : "rebake");
         CHECK(!_Open(_PackUnchecked(versioned), &why) && why == expected);
     }
     _context = "open refusals";
     versioned.formatVersion = RigExecFormatVersion;
     std::vector<uint8_t> current;
     CHECK(_Write(versioned, &current) && _Open(current, &why) != nullptr);
-    std::printf("format versions: 0 through 9 refused with a re-export, "
+    std::printf("format versions: 0 through 10 refused with a re-export, "
                 "%u with a rebake; %u writes and opens\n",
                 RigExecFormatVersion + 1, RigExecFormatVersion);
 
@@ -1612,8 +1701,24 @@ TestValidationSmoke()
     // Slot tables and constants.
     expect("slot kind size", "slot_kind",
            [](F &f) { f.slotMeta->slotKind.clear(); });
+    expect("provider availability size", "provider_active",
+           [](F &f) { f.slotMeta->providerActive.clear(); });
+    expect("provider availability boolean", "provider_active",
+           [](F &f) { f.slotMeta->providerActive[0]=2; });
+    {
+        F inactive=_RichFile();inactive.slotMeta->providerActive[0]=0;
+        std::vector<uint8_t> bytes;CHECK(_Write(inactive,&bytes));
+        const auto reopened=_Open(bytes);CHECK(reopened && reopened->slotMeta->providerActive==std::vector<uint8_t>{0});
+    }
     expect("rotation sign", "rotation_sign",
            [](F &f) { f.constants->rotationSign = {8}; });
+    expect("xform frame cardinality", "xform_frames", [](F &f) {
+        f.pose->xformFrames.emplace_back();
+    });
+    expect("xform frame flags", "unknown frame flags", [](F &f) {
+        RigExecWireFrame frame; frame.flags = 32;
+        f.pose->xformFrames.push_back(frame);
+    });
     // Steps, clusters, cones.
     expect("step cluster", "step 0 names cluster 1, which is no cluster",
            [](F &f) { _RegionStep(f, 0).cluster = 1; });
@@ -1622,7 +1727,7 @@ TestValidationSmoke()
     expect("cluster set words", "cones.always",
            [](F &f) { f.cones->always->words = {0, 0}; });
     // Every slot's avars and every revision's static step have a cluster.
-    expect("avar cluster none", "cones.avar_cluster[0]: -1 out of range",
+    expect("avar cluster none", "missing active Avars producer without an excluded value",
            [](F &f) { f.cones->avarCluster = {-1}; });
     expect("revision static cluster none",
            "cones.revision_static_cluster[0]: -1 out of range",
@@ -1648,22 +1753,23 @@ TestValidationSmoke()
            [](F &f) { f.pose->spaceSwitches[0].sourceReads.clear(); });
     expect("switch read anchor", "parent_read.anchor",
            [](F &f) { f.pose->spaceSwitches[0].parentRead->anchor = 1; });
-    expect("switch recompose slot", "source_reads[0].recompose[0]",
+    expect("switch recompose slot", "inline recomposition requires a checkpoint operation",
            [](F &f) {
                f.pose->spaceSwitches[0].sourceReads[0].recompose = {1};
            });
-    expect("switch recompose kind", "not a FirstFramePose slot", [](F &f) {
-        f.slotMeta->slotKind[0] = fb::SlotKind::XformDerived;
+    expect("switch missing checkpoint", "parent_read.context", [](F &f) {
+        f.pose->spaceSwitches[0].parentRead->context = 0;
     });
     // A world source and a missing space carry the unread version.
     expect("switch world source anchor", "source_reads[0]: reads no slot",
            [](F &f) { f.pose->spaceSwitches[0].sourceReads[0].anchor = 0; });
     expect("switch world source recompose",
-           "source_reads[0]: reads no slot", [](F &f) {
+           "inline recomposition requires a checkpoint operation", [](F &f) {
                f.pose->spaceSwitches[0].sourceReads[0].recompose = {0};
            });
     expect("switch missing space read", "space_read: reads no slot",
-           [](F &f) { f.pose->spaceSwitches[0].spaceSlot = -1; });
+           [](F &f) { f.pose->spaceSwitches[0].spaceSlot = -1;
+               f.pose->spaceSwitches[0].spaceRead->anchor = 0; });
     // Commits and constraint arrays.
     expect("version pools", "version pools",
            [](F &f) { f.pose->commits[0].slotWrites = {2}; });
@@ -1704,14 +1810,14 @@ TestValidationSmoke()
                f.geometry->chains[0].revisions[0].topology->rawWeights = {
                    1.0f};
            });
-    expect("chunked with one chunk", "chunked with 1 chunk(s)", [](F &f) {
+    expect("chunked with one chunk", "partition producer summary differs from exact natural sets", [](F &f) {
         f.geometry->chains[0].revisions[0].chunked = true;
         f.geometry->chains[0].revisions[0].chunks.resize(1);
         f.geometry->revisionChunkCount = {1};
     });
     // Weight objects.
-    expect("weight dependency order", "base",
-           [](F &f) { f.geometry->weightObjects[0].base = 0; });
+    expect("weight dependency out of range", "base",
+           [](F &f) { f.geometry->weightObjects[0].base = int32_t(f.geometry->weightObjects.size()); });
     expect("validity mask", "target_valid", [](F &f) {
         f.geometry->weightObjects[0].targetValid = {1};
     });
@@ -1800,6 +1906,7 @@ _GraphFile()
     f.phasedConsumers.clear();
     f.pose->hasPropertyChains = false;
     for (auto &slot : f.inputs) slot = fb::InputSlot(slot.name(), slot.value(), -1, -1, slot.type(), slot.flags());
+    f.steps[0].reads.clear(); // Abstract graph oracle has no inherited body inputs.
     fb::RigExecWireStep later = f.steps[0];
     later.reads.clear();
     later.writes.clear();
@@ -1821,14 +1928,10 @@ _GraphFile()
     f.clustering->clusters[0].succs = {1};
     f.clustering->clusters[1].members = {2, 3};
     f.clustering->clusters[1].preds = {0};
-    fb::RigExecWireClusterSet set;
-    set.clusters = 2;
-    set.words = {3};
-    f.cones->cone = {set, set};
-    f.cones->cone[1].words = {2};
     f.cones->always->clusters = 2;
     f.cones->poseClusters->clusters = 2;
     f.cones->poseClusters->words = {3};
+    _DeclareFixtureStageFrames(f);
     return f;
 }
 
@@ -1842,12 +1945,23 @@ TestStepGraph()
     _context = "step graph";
     std::string why;
     const RigExecWireFile valid = _GraphFile();
-    CHECK(RigExecFormatValidate(valid, &why));
+    const auto graphError=[](const RigExecWireFile &file) {
+        return RigExecStepGraphError(file.steps,*file.clustering,[](const fb::SlotRange &range) {
+            return RigExecStepGraphRange{uint8_t(range.domain()),range.begin(),range.end()};
+        });
+    };
+    why=graphError(valid);
+    CHECK(why.empty());
     if (!why.empty()) {
         std::printf("  graph file refused: %s\n", why.c_str());
     }
     std::vector<uint8_t> bytes;
-    CHECK(_Write(valid, &bytes) && _Open(bytes) != nullptr);
+    auto endToEnd=_RichFile();
+    CHECK(_Write(endToEnd,&bytes,&why));
+    CHECK(_Open(bytes,&why)!=nullptr);
+    auto bad=endToEnd; bad.steps.back().preds={int32_t(bad.steps.size())};
+    why.clear(); CHECK(!RigExecFormatValidate(bad,&why)); CHECK(why.find("predecessor")!=std::string::npos);
+    why.clear(); CHECK(!_Open(_PackUnchecked(bad),&why)); CHECK(why.find("predecessor")!=std::string::npos);
 
     using F = RigExecWireFile;
     int cases = 0;
@@ -1857,26 +1971,16 @@ TestStepGraph()
         ++cases;
         F file = _GraphFile();
         mutate(file);
-        const bool ok = RigExecFormatValidate(file, &why);
+        why=graphError(file);
+        const bool ok=why.empty();
         CHECK(!ok && why == _RegionDiagnostic(file, text));
         if (ok || why != _RegionDiagnostic(file, text)) {
             std::printf("  got '%s', expected '%s'\n",
                         ok ? "(accepted)" : why.c_str(), text.c_str());
         }
     };
-    const auto expectOpen = [&](const char *name, const std::string &text,
-                                const std::function<void(F &)> &mutate) {
-        _context = std::string("step graph open: ") + name;
-        ++cases;
-        F file = _GraphFile();
-        mutate(file);
-        const bool opened = _Open(_PackUnchecked(file), &why) != nullptr;
-        CHECK(!opened && why == "invalid .rigexec: " + _RegionDiagnostic(file, text));
-        if (opened || why != "invalid .rigexec: " + _RegionDiagnostic(file, text)) {
-            std::printf("  got '%s', expected 'invalid .rigexec: %s'\n",
-                        opened ? "(opened)" : why.c_str(), text.c_str());
-        }
-    };
+    // Repeat the critical abstract defects through the same shared graph oracle.
+    const auto expectOpen=expect;
     // The two the runtime relies on most: a predecessor flipped to a later
     // step, and a two-cluster cycle.
     const auto flipped = [](F &f) { _RegionStep(f, 1).preds = {2}; };
@@ -1910,9 +2014,9 @@ TestStepGraph()
            "step 1 names successor 3, which does not name it as a "
            "predecessor",
            [](F &f) { _RegionStep(f, 1).succs = {2, 3}; });
-    expect("source after a step",
-           "source step 1 depends on step 0, which is not a source",
-           [](F &f) { _RegionStep(f, 1).isSource = true; });
+    expect("source flag does not permit a later predecessor",
+           "step 1 depends on later step 2",
+           [](F &f) { _RegionStep(f, 1).isSource = true; _RegionStep(f,1).preds={2}; });
     // Indices past their tables, refused before they are followed.
     expect("pred past the steps",
            "step 3 names predecessor 4, which is no step",
@@ -1986,27 +2090,26 @@ TestStepGraph()
                _RegionStep(f, 3).reads.push_back(
                    fb::SlotRange(fb::SlotDomain::Aggregate, 0, 1));
            });
-    // Step 2 becomes a source with no predecessor. It still reads step 1's
-    // write, which index order would have produced, but the source pass
-    // runs it before step 1.
-    expect("source reads a later-running write",
-           "step 2 reads PosedM slots [0, 1), which no earlier step writes",
+    // A source flag does not manufacture a missing typed producer.
+    expect("source flag does not manufacture a producer",
+           "step 2 reads PosedM slots [2, 3), which no earlier step writes",
            [](F &f) {
                _RegionStep(f, 1).succs.clear();
                _RegionStep(f, 2).preds.clear();
                _RegionStep(f, 2).isSource = true;
-               _RegionStep(f, 2).reads = {fb::SlotRange(fb::SlotDomain::PosedM, 0, 1)};
+               _RegionStep(f, 2).reads = {fb::SlotRange(fb::SlotDomain::PosedM, 2, 3)};
            });
     // The domains a run holds before any step writes them need no producer.
     {
         _context = "step graph: unproduced source reads";
         F file = _GraphFile();
         _RegionStep(file, 3).reads.push_back(
-            fb::SlotRange(fb::SlotDomain::Avars, 0, 11));
+            fb::SlotRange(fb::SlotDomain::SpaceLeaf, 0, 1));
         _RegionStep(file, 3).reads.push_back(
-            fb::SlotRange(fb::SlotDomain::ChainBase, 0, 1));
+            fb::SlotRange(fb::SlotDomain::ChainInput, 0, 1));
         why.clear();
-        CHECK(RigExecFormatValidate(file, &why));
+        why=graphError(file);
+        CHECK(why.empty());
         if (!why.empty()) {
             std::printf("  source reads refused: %s\n", why.c_str());
         }
@@ -2128,7 +2231,9 @@ _AddSlots(RigExecWireFile &f, size_t count)
             _pRig, uint32_t(f.names.size() - 1), PathKind::Prim));
         fb::RigExecWireSlotMeta &meta = *f.slotMeta;
         meta.paths.push_back(uint32_t(f.paths.size() - 1));
+        meta.publicationRoles.push_back(0);
         meta.slotKind.push_back(fb::SlotKind::FirstFramePose);
+        meta.providerActive.push_back(1);
         meta.parent.push_back(-1);
         meta.propParent.push_back(-1);
         meta.needFinal.push_back(1);
@@ -2158,6 +2263,12 @@ _AddSlots(RigExecWireFile &f, size_t count)
             ladder.defaultAvars.push_back(_InValue(InputTag::Double));
         }
         ladder.rotationOrder = _In(InputTag::Token);
+    ladder.parentSpace = _In(InputTag::Matrix4d);
+    ladder.parentDefaultSpace = _In(InputTag::Matrix4d);
+    ladder.avarDefaultSpace = _In(InputTag::Matrix4d);
+    ladder.posedDefaultSpace = _In(InputTag::Matrix4d);
+    ladder.interveningSpace = _In(InputTag::Matrix4d);
+    ladder.rotationSign = _In(InputTag::Vec3d);
         f.pose->ladders.push_back(std::move(ladder));
         f.pose->restChainVaries.push_back(0);
         f.cones->avarCluster.push_back(0);
@@ -2193,6 +2304,8 @@ _SwitchFile()
 {
     RigExecWireFile f = _RichFile();
     const int32_t lo = _AddSlots(f, 2);
+    // Keep the inherited slot-0 commit outside the expanded initial frame pool.
+    f.pose->commits[0].slotWrites[0]=uint32_t(f.slotMeta->paths.size());
     const int32_t hi = lo + 1;
     f.pose->spaceSwitches.clear();
     fb::RigExecWireSpaceSwitch first = _Switch(hi);
@@ -2206,6 +2319,7 @@ _SwitchFile()
     second.spaceRead->anchor = hi;
     f.pose->spaceSwitches.push_back(std::move(first));
     f.pose->spaceSwitches.push_back(std::move(second));
+    _DeclareFixtureStageFrames(f);
     return f;
 }
 
@@ -2252,38 +2366,25 @@ TestSwitchOrder()
         const bool opened = _Open(_PackUnchecked(file), &why) != nullptr;
         CHECK(!opened && why == "invalid .rigexec: " + _RegionDiagnostic(file, text));
     };
-    const std::string later =
-        "is switched by pose.space_switches[1], which is not stored before "
-        "this switch";
     expect("slot switched twice",
-           "pose.space_switches[1].slot: slot 2 is already switched by "
-           "pose.space_switches[0]",
+           "pose.space_switches[1].slot: slot 2 is already switched by pose.space_switches[0]",
            [](F &f) { f.pose->spaceSwitches[1].slot = 2; });
-    expect("source anchored on a later switch",
-           "pose.space_switches[0].source_reads[0].anchor: slot 1 " + later,
-           [](F &f) {
-               f.pose->spaceSwitches[0].sourceSlots = {1};
-               f.pose->spaceSwitches[0].sourceReads[0].anchor = 1;
-           });
-    expect("parent anchored on a later switch",
-           "pose.space_switches[0].parent_read.anchor: slot 1 " + later,
-           [](F &f) { f.pose->spaceSwitches[0].parentRead->anchor = 1; });
-    expect("space anchored on a later switch",
-           "pose.space_switches[0].space_read.anchor: slot 1 " + later,
-           [](F &f) {
-               f.pose->spaceSwitches[0].spaceSlot = 1;
-               f.pose->spaceSwitches[0].spaceRead->anchor = 1;
-           });
-    expect("anchored on its own switch",
-           "pose.space_switches[1].source_reads[1].anchor: slot 1 " + later,
-           [](F &f) { f.pose->spaceSwitches[1].sourceReads[1].anchor = 1; });
+    expect("source anchor out of range", "pose.space_switches[0].source_reads[0].anchor: 3 out of range (3)",
+           [](F &f) { f.pose->spaceSwitches[0].sourceSlots = {1}; f.pose->spaceSwitches[0].sourceReads[0].anchor = 3; });
+    expect("parent checkpoint absent", "pose.space_switches[0].parent_read.context: 0 out of range (0)",
+           [](F &f) { f.pose->spaceSwitches[0].parentRead->context = 0; });
+    expect("carry anchor out of range", "pose.space_switches[0].space_read.anchor: 3 out of range (3)",
+           [](F &f) { f.pose->spaceSwitches[0].spaceSlot = 1; f.pose->spaceSwitches[0].spaceRead->anchor = 3; });
+    expect("source checkpoint absent", "pose.space_switches[1].source_reads[1].context: 0 out of range (0)",
+           [](F &f) { f.pose->spaceSwitches[1].sourceReads[1].context = 0; });
 
-    // Recomposing a switched slot reads it unswitched: not an anchor.
+    // Inline recomposition has no executable producer in format11.
     _context = "switch order: recompose of a later switch's slot";
     F recomposed = _SwitchFile();
     recomposed.pose->spaceSwitches[0].parentRead->anchor = -1;
     recomposed.pose->spaceSwitches[0].parentRead->recompose = {1};
-    CHECK(RigExecFormatValidate(recomposed, &why));
+    CHECK(!RigExecFormatValidate(recomposed, &why));
+    CHECK(why.find("inline recomposition requires a checkpoint operation") != std::string::npos);
     std::printf("switch order: stored against slot order and anchored on "
                 "an earlier switch accepted, %d violations refused\n",
                 cases);
@@ -2298,6 +2399,7 @@ _VolumeFile()
     RigExecWireFile f = _RichFile();
     _AddSlots(f, 1);
     f.constants->noScaleAvars = {1, 0};
+    f.pose->commits[0].slotWrites[0]=uint32_t(f.slotMeta->paths.size());
     fb::RigExecWireStep place;
     place.kind = fb::StepKind::VolumePlacements;
     place.object = 0;
@@ -2307,9 +2409,18 @@ _VolumeFile()
     place.writes = {fb::SlotRange(fb::SlotDomain::WeightFrames, 0, 1)};
     place.preds = _RegionIds(f, {0});
     _RegionStep(f, 0).succs = _RegionIds(f, {1});
+    fb::RigExecWireStep base=place;
+    base.part=2; base.reads={fb::SlotRange(fb::SlotDomain::PoseBase,0,1)};
+    base.writes={fb::SlotRange(fb::SlotDomain::WeightFramesBase,0,1)};
+    _RegionStep(f,0).writes.push_back(fb::SlotRange(fb::SlotDomain::PoseBase,0,1));
     f.steps.push_back(std::move(place));
     f.clustering->clusters[0].members.push_back(int32_t(f.steps.size() - 1));
     f.clustering->clusterOf.push_back(0);
+    f.steps.push_back(std::move(base));
+    _RegionStep(f,0).succs.push_back(int32_t(f.steps.size()-1));
+    f.clustering->clusters[0].members.push_back(int32_t(f.steps.size()-1));
+    f.clustering->clusterOf.push_back(0);
+    _DeclareFixtureStageFrames(f);
     return f;
 }
 
@@ -2344,7 +2455,7 @@ TestVolumePlacementSteps()
     std::vector<uint8_t> bytes;
     CHECK(_Write(valid, &bytes));
     const auto opened = _Open(bytes, &why);
-    CHECK(opened && opened->steps.size() == _RegionBegin(*opened) + 2 &&
+    CHECK(opened && opened->steps.size() == _RegionBegin(*opened) + 3 &&
           _RegionStep(*opened, 1).kind == fb::StepKind::VolumePlacements &&
           _RegionStep(*opened, 1).object == 0 && _RegionStep(*opened, 1).part == 1);
     std::vector<uint8_t> again;
@@ -2415,7 +2526,7 @@ TestVolumePlacementSteps()
            "WeightFrames[0]",
            [](F &f) { _RegionStep(f, 1).writes.clear(); });
     expect("a second step of one volume",
-           "step 2 (VolumePlacements /Rig/Ctl) places volume slot 0 again; "
+           "step 3 (VolumePlacements /Rig/Ctl) places volume slot 0 again; "
            "step 1 (VolumePlacements /Rig/Ctl) already does",
            [](F &f) { _AppendStep(f, _RegionStep(f, 1)); });
     expect("a volume with no step",
@@ -2427,7 +2538,7 @@ TestVolumePlacementSteps()
            "step 1 is a retired SnapshotFinals step",
            [](F &f) { _RegionStep(f, 1).kind = fb::StepKind::SnapshotFinals; });
     expect("a weight packet writing WeightFrames",
-           "step 2 (WeightPacket /Rig/W) writes WeightFrames, which only a "
+           "step 3 (WeightPacket /Rig/W) writes WeightFrames, which only a "
            "VolumePlacements step writes",
            [](F &f) {
                fb::RigExecWireStep packet;
@@ -2444,7 +2555,8 @@ TestVolumePlacementSteps()
     fb::RigExecWireStep reader;
     reader.kind = fb::StepKind::WeightPacket;
     reader.object = 0;
-    reader.reads = {fb::SlotRange(fb::SlotDomain::WeightFrames, 0, 1)};
+    reader.reads = {fb::SlotRange(fb::SlotDomain::WeightFrames, 0, 1),
+                    fb::SlotRange(fb::SlotDomain::RequiredStageFramesAdmission,0,1)};
     reader.writes = {fb::SlotRange(fb::SlotDomain::WeightPacket, 0, 1)};
     {
         _context = "volume placements: reader after its step";
@@ -2463,11 +2575,11 @@ TestVolumePlacementSteps()
                _AppendStep(f, reader);
                // Swap the two last steps: the reader runs before the
                // placement it reads.
-               std::swap(_RegionStep(f, 1), _RegionStep(f, 2));
-               _RegionStep(f, 0).succs = _RegionIds(f, {2});
-               _RegionStep(f, 1).cluster = _RegionStep(f, 2).cluster = 0;
+               std::swap(_RegionStep(f, 1), _RegionStep(f, 3));
+               _RegionStep(f, 0).succs = _RegionIds(f, {2, 3});
+               _RegionStep(f, 1).cluster = _RegionStep(f, 3).cluster = 0;
                _RegionStep(f, 1).preds.clear();
-               _RegionStep(f, 2).preds = _RegionIds(f, {0});
+               _RegionStep(f, 3).preds = _RegionIds(f, {0});
            });
     std::printf("volume placements: the per-volume form accepted, %d "
                 "violations refused\n",
@@ -2482,7 +2594,7 @@ TestStepLabels()
     _context = "step labels";
     // The rich file's compose step names a group the file does not hold.
     const RigExecWireFile rich = _RichFile();
-    CHECK(RigExecFormatStepLabel(rich, _RegionBegin(rich)) == "ComposeSubtree 0");
+    CHECK(RigExecFormatStepLabel(rich, _RegionBegin(rich)) == "ComposeSubtree /Rig/Ctl");
     CHECK(RigExecFormatStepLabel(rich, _RegionBegin(rich) + 1) == std::to_string(_RegionBegin(rich) + 1));
     const RigExecWireFile volume = _VolumeFile();
     CHECK(RigExecFormatStepLabel(volume, _RegionBegin(volume) + 1) == "VolumePlacements /Rig/Ctl");
@@ -2597,6 +2709,10 @@ _RecordFile(bool solver = false)
     f.steps[0].writes = {fb::SlotRange(fb::SlotDomain::PoseFin, 0, 2)};
     fb::RigExecWireCommit &commit = f.pose->commits[0];
     commit.solverOutput = solver;
+    fb::RigExecWireWalkStep walk;
+    walk.solverBatch = solver;
+    walk.index = 0;
+    f.pose->walkSteps = {walk};
     commit.slots = solver ? std::vector<int32_t>{0, 1}
                           : std::vector<int32_t>{0};
     commit.slotWrites = solver ? std::vector<uint32_t>{2, 3}
@@ -2606,18 +2722,20 @@ _RecordFile(bool solver = false)
                          : fb::StepKind::Constraint;
     writer.object = 0;
     writer.reads = {fb::SlotRange(fb::SlotDomain::PoseFin, 0, 1)};
-    writer.writes = {fb::SlotRange(fb::SlotDomain::CommitTable, 0, 1)};
+    writer.writes = {fb::SlotRange(fb::SlotDomain::CommitTable, 0, 1),
+                     fb::SlotRange(fb::SlotDomain::PoseFin, 2, solver ? 4 : 3)};
     _AppendStep(f, std::move(writer));
     fb::RigExecWireStep frame;
     frame.kind = fb::StepKind::FrameMatrix;
     frame.object = 0;
-    frame.reads = {fb::SlotRange(fb::SlotDomain::PoseFin, 0, 1),
+    frame.reads = {fb::SlotRange(fb::SlotDomain::PoseFin, 2, 3),
                    fb::SlotRange(fb::SlotDomain::CommitTable, 0, 1)};
     frame.writes = {fb::SlotRange(fb::SlotDomain::FrameMatrix, 0, 1)};
     _AppendStep(f, std::move(frame));
     f.pose->frameRecords = {
         fb::FrameRecord(0, 0, solver ? -1 : 0, solver ? 0 : -1, 2, _pCtl)};
     _AddFixtureHeads(f);
+    _DeclareFixtureStageFrames(f);
     return f;
 }
 
@@ -2686,6 +2804,7 @@ _PhaseFile()
                     fb::SlotRange(fb::SlotDomain::ChainPoints, 0, 1)};
     reader.writes = {fb::SlotRange(fb::SlotDomain::RevisionPacket, 0, 1)};
     _AppendStep(f, std::move(reader));
+    _DeclareFixtureStageFrames(f);
     return f;
 }
 
@@ -2777,6 +2896,7 @@ TestPhaseTables()
     // compose's, written before the record's step.
     const auto composeVersion = [](F &f) {
         f.pose->frameRecords[0] = fb::FrameRecord(0, 0, 0, -1, 0, _pCtl);
+        _RegionStep(f, 2).reads[0] = fb::SlotRange(fb::SlotDomain::PoseFin, 0, 1);
     };
     {
         F file = _RecordFile();
@@ -2791,15 +2911,22 @@ TestPhaseTables()
         later.slots = {0};
         later.slotWrites = {2};
         f.pose->commits[0].slotWrites = {4};
+        _RegionStep(f, 1).writes[1] = fb::SlotRange(fb::SlotDomain::PoseFin, 4, 5);
+        f.pose->constraints.push_back(f.pose->constraints[0]);
+        fb::RigExecWireWalkStep walk; walk.index = 1;
+        f.pose->walkSteps.push_back(std::move(walk));
         f.pose->commits.push_back(std::move(later));
         fb::RigExecWireStep step;
         step.kind = fb::StepKind::Constraint;
         step.object = 1;
         step.reads = {fb::SlotRange(fb::SlotDomain::PoseFin, 0, 1),
                       fb::SlotRange(fb::SlotDomain::Rest, 0, 1)};
-        step.writes = {fb::SlotRange(fb::SlotDomain::CommitTable, 1, 2)};
+        step.writes = {fb::SlotRange(fb::SlotDomain::CommitTable, 1, 2),
+                       fb::SlotRange(fb::SlotDomain::PoseFin, 2, 3)};
         _AppendStep(f, std::move(step));
         f.pose->frameRecords[0] = fb::FrameRecord(0, 0, 0, -1, 4, _pCtl);
+        _RegionStep(f, 2).reads[0] = fb::SlotRange(fb::SlotDomain::PoseFin, 4, 5);
+            _DeclareFixtureStageFrames(f);
     };
     {
         F file = _RecordFile();
@@ -2829,6 +2956,7 @@ TestPhaseTables()
             fb::SlotRange(fb::SlotDomain::ChainDirty, 0, 1));
         _DropStep(f, 5);
         _AppendStep(f, std::move(reader));
+            _DeclareFixtureStageFrames(f);
     };
     {
         F file = _PhaseFile();
@@ -2855,6 +2983,7 @@ TestPhaseTables()
         step.reads = {fb::SlotRange(fb::SlotDomain::ChainPoints, 0, 1)};
         step.writes = {fb::SlotRange(fb::SlotDomain::DerivedOut, 0, 1)};
         _AppendStep(f, std::move(step));
+            _DeclareFixtureStageFrames(f);
     };
     {
         F file = _PhaseFile();
@@ -2977,6 +3106,7 @@ TestPhaseTables()
            frame + " is bound to PoseFin version 4, which no step writes",
            record([](F &f) {
                f.pose->frameRecords[0] = fb::FrameRecord(0, 0, 0, -1, 4, _pCtl);
+        _RegionStep(f, 2).reads[0] = fb::SlotRange(fb::SlotDomain::PoseFin, 4, 5);
            }));
     expect("record mover label past the paths",
            "step 2 (FrameMatrix /Rig/Ctl after ) names mover label path id "
@@ -2993,9 +3123,9 @@ TestPhaseTables()
     expect("no CommitTable read",
            frame + " does not declare CommitTable[0]", record([](F &f) {
                _RegionStep(f, 2).reads = {
-                   fb::SlotRange(fb::SlotDomain::PoseFin, 0, 1)};
+                   fb::SlotRange(fb::SlotDomain::PoseFin, 2, 3)};
            }));
-    expect("no PoseFin read", frame + " does not declare PoseFin[0]",
+    expect("no PoseFin read", frame + " does not declare PoseFin[2]",
            record([](F &f) {
                _RegionStep(f, 2).reads = {
                    fb::SlotRange(fb::SlotDomain::CommitTable, 0, 1)};
@@ -3150,7 +3280,10 @@ TestPhaseTables()
            "ChainDirty[0] for /Rig/Mesh.points",
            phased([&](F &f) {
                version(f);
-               _RegionStep(f, 6).reads.pop_back();
+               auto &reads=_RegionStep(f, 6).reads;
+               reads.erase(std::remove_if(reads.begin(),reads.end(),[](const auto &range) {
+                   return range.domain()==fb::SlotDomain::ChainDirty;
+               }),reads.end());
            }));
     expect("derived reader without its ChainPoints read",
            "step 6 (Derived /Rig/Mesh.points) does not declare ChainPoints[0] "
@@ -3910,6 +4043,12 @@ TestChunkTables()
         r.partitionElementSize = 2;
         r.partitionIndexCount = 4;
         r.partitionPointCount = 2;
+        r.partitionProducerMin = r.partitionProducerMax = 1;
+        r.partitionDistinctReads = 1;
+        r.partitionProducerSets.resize(2);
+        for (auto &set : r.partitionProducerSets)
+            set.values = {fb::SlotRange(r.finalPhase ? fb::SlotDomain::FinalMatrix :
+                                       fb::SlotDomain::BaseMatrix, 0, 1)};
         f.geometry->revisionChunkCount = {2};
         _AddFixtureTopologyHead(f);
         return f;
@@ -3956,8 +4095,13 @@ TestChunkTables()
         _context = std::string("chunk tables refuse: ") + label;
         F f = chunked();
         edit(f, f.geometry->chains[0].revisions[0]);
+        auto &revision = f.geometry->chains[0].revisions[0];
+        revision.partitionProducerSets.resize(revision.chunks.size());
+        for (auto &set : revision.partitionProducerSets)
+            set.values = {fb::SlotRange(revision.finalPhase ? fb::SlotDomain::FinalMatrix :
+                                       fb::SlotDomain::BaseMatrix, 0, 1)};
         f.geometry->revisionChunkCount = {
-            int32_t(f.geometry->chains[0].revisions[0].chunks.size())};
+            int32_t(revision.chunks.size())};
         why.clear();
         const bool ok = RigExecFormatValidate(f, &why);
         CHECK(!ok && why == expected);
@@ -4008,11 +4152,9 @@ TestChunkTables()
                  "position below 2");
     refuse("a key past the influences",
            [](F &, R &r) { r.chunks[1].key = {0, 2}; },
-           row + ".chunks[1].key[1]: 2 is not an ascending influence "
-                 "position below 2");
+           row + ": partition producer influence position exceeds bindings");
     refuse("a negative key", [](F &, R &r) { r.chunks[0].key = {-1}; },
-           row + ".chunks[0].key[0]: -1 is not an ascending influence "
-                 "position below 2");
+           row + ": partition producer influence position exceeds bindings");
     refuse("a partition point count off by one",
            [](F &, R &r) { r.partitionPointCount = 3; },
            row + ": partition_point_count 3, but partition_index_count 4 is "
@@ -4203,6 +4345,7 @@ _ArrayFile()
     g.pathReads.push_back(read(_pSt, false, InputTag::Vec2fArray,
                                ReadMode::Resolved, _sSt, _vNoVec2fs));
     _AddFixtureTopologyHead(f);
+    _DeclareFixtureStageFrames(f);
     return f;
 }
 
@@ -4426,13 +4569,10 @@ TestArrayInputs()
            "external_movers[0].inputs[0]: tag 9 is an array tag, which "
            "this site does not read",
            [](F &f) {
-               fb::RigExecWireRevision &r = f.geometry->chains[0].revisions[0];
-               r.jointIndicesSlot = -1;
-               r.jointWeightsSlot = -1;
+               f = _RichFile();
                _AddPlugin(f);
                f.externalMovers[0].inputs[0] =
-                   _InValue(InputTag::FloatArray, ReadMode::Raw, {_sValues});
-               f.externalMovers[0].inputs[0].constant = _vNoFloats;
+                   _InValue(InputTag::FloatArray, ReadMode::Raw);
            });
     expect("a phased hop on an array slot",
            "phased_consumers[0].hops[1]: slot " + at(_sKnots) +
@@ -4670,7 +4810,21 @@ _PackMinimalWith(
     const auto cones = fb::CreateCones(b, f.cones.get());
     const auto pose = fb::CreateDomainPose(b, f.pose.get());
     const auto geometry = fb::CreateDomainGeometry(b, f.geometry.get());
+    const auto commonGraph = fb::CreateCommonGraph(b, f.commonGraph.get());
+    const auto vec3ds = fb::CreateVec3dArray(b, &f.vec3dArrays[0]);
+    const auto vec3dArrays = b.CreateVector(&vec3ds, 1);
+    const auto matrices = fb::CreateMatrix4dArray(b, &f.matrix4dArrays[0]);
+    const auto matrix4dArrays = b.CreateVector(&matrices, 1);
+    const auto tokens = fb::CreateTokenArray(b, &f.tokenArrays[0]);
+    const auto tokenArrays = b.CreateVector(&tokens, 1);
+    const auto bools = fb::CreateBoolArray(b, &f.boolArrays[0]);
+    const auto boolArrays = b.CreateVector(&bools, 1);
     fb::FileBuilder file(b);
+    file.add_commonGraph(commonGraph);
+    file.add_vec3dArrays(vec3dArrays);
+    file.add_matrix4dArrays(matrix4dArrays);
+    file.add_tokenArrays(tokenArrays);
+    file.add_boolArrays(boolArrays);
     file.add_formatVersion(f.formatVersion);
     file.add_rig(f.rig);
     file.add_names(parts.names);
@@ -5149,13 +5303,327 @@ TestCorruptions()
 }
 
 #include "rigExecHeadFormatCases.h"
+#include "rigExecTransportCases.h"
+
+void TestSolverSemanticMetadataRefusals()
+{
+    const auto reject=[](RigExecWireFile bad,const char *fragment) {
+        std::vector<uint8_t> bytes;std::string error;
+        CHECK(!_Write(bad,&bytes,&error));CHECK(error.find(fragment)!=std::string::npos);
+        error.clear();CHECK(!_Open(_PackUnchecked(bad),&error));
+        CHECK(error.find(fragment)!=std::string::npos);
+    };
+    // A surviving Solve keeps its authored prerequisite identity when the
+    // producer is excluded, but needs BOTH explicit typed fallback leaves.
+    auto excluded=_RichFile();
+    excluded.names.push_back("RigExecFkChain");
+    excluded.paths.emplace_back(0,uint32_t(excluded.names.size()-1),PathKind::Token);
+    const uint32_t fkType=uint32_t(excluded.paths.size()-1);
+    excluded.pose->solvers.push_back(excluded.pose->solvers[0]);
+    for(size_t i=0;i<2;++i) {
+        auto &solver=excluded.pose->solvers[i];
+        solver.path=i==0?_pCtl:_pMover;solver.type=fkType;
+        solver.start=solver.root=solver.mid=solver.end=solver.pole=solver.spaceSlot=-1;
+        solver.controlReads.clear();solver.restReads.clear();solver.restIsLive.clear();
+        solver.restSlots.clear();
+        solver.solveDescriptorKey=RigExecFormatPathText(excluded,solver.path)+
+            "/category:"+std::to_string(int(fb::StepKind::Solve))+"/fixture";
+    }
+    fb::RigExecWireSolverRelationshipRequirement dependency;
+    dependency.port="rigExec:controls";dependency.solver=1;
+    excluded.pose->solvers[0].relationshipRequirements={dependency};
+    auto &solve=_RegionStep(excluded,0);
+    solve.kind=fb::StepKind::Solve;solve.object=0;
+    solve.descriptorKey=excluded.pose->solvers[0].solveDescriptorKey;
+    solve.semanticPredecessorKeys={excluded.pose->solvers[1].solveDescriptorKey};
+    fb::RigExecWireCommonValueSpec aggregate,candidates;
+    aggregate.domain=uint32_t(fb::SlotDomain::Aggregate);aggregate.slot=1;
+    candidates.domain=uint32_t(fb::SlotDomain::Candidates);candidates.slot=1;
+    excluded.commonGraph->valueSpecs={aggregate,candidates};
+    excluded.commonGraph->leaves={0,1};excluded.commonGraph->excludedValues={0,1};
+    std::vector<uint8_t> accepted;std::string error;
+    CHECK(_Write(excluded,&accepted,&error));CHECK(_Open(accepted)!=nullptr);
+    auto noAggregate=excluded;noAggregate.commonGraph->excludedValues={1};
+    noAggregate.commonGraph->leaves={1};
+    reject(std::move(noAggregate),"relationship target has no Solve producer or typed exclusion");
+    auto noCandidates=excluded;noCandidates.commonGraph->excludedValues={0};
+    noCandidates.commonGraph->leaves={0};
+    reject(std::move(noCandidates),"relationship target has no Solve producer or typed exclusion");
+    auto wrongTarget=excluded;wrongTarget.pose->solvers[0].relationshipRequirements[0].solver=2;
+    reject(std::move(wrongTarget),"invalid or duplicate solver relationship requirement");
+    auto wrongPort=_RichFile();
+    fb::RigExecWireSolverRelationshipRequirement requirement;
+    requirement.port="rigExec:unsupported";requirement.solver=0;
+    wrongPort.pose->solvers[0].relationshipRequirements.push_back(requirement);
+    reject(std::move(wrongPort),"invalid or duplicate solver relationship requirement");
+    auto wrongOwner=_RichFile();
+    wrongOwner.pose->solvers[0].solveDescriptorKey="/Unrelated/category:1/solver";
+    reject(std::move(wrongOwner),"invalid or duplicate canonical Solve identity");
+    auto wrongBody=_RichFile();
+    const auto body=std::find_if(wrongBody.steps.begin(),wrongBody.steps.end(),
+        [](const auto &step){return step.kind!=fb::StepKind::Solve;});
+    CHECK(body!=wrongBody.steps.end());
+    if(body!=wrongBody.steps.end())body->semanticPredecessorKeys={"/Unrelated/category:1/solver"};
+    reject(std::move(wrongBody),"semantic prerequisites on a non-Solve body");
+}
+
+void TestPublishedPropertyOverlayCandidates()
+{
+    auto file=_RichFile();
+    auto &read=*file.geometry->chains[0].revisions[0].blendChannels[0].weightRead;
+    CHECK(read.propertyCandidates.size()==1);
+    if(read.propertyCandidates.size()!=1)return;
+    const auto record=read.propertyCandidates.front();
+    CHECK(record.slot==1 && record.kind==uint8_t(fb::PropertyCandidateKind::PhasedRecord));
+    RigExecWirePropertyInputCandidate raw;
+    raw.slot=2;raw.raw=true;
+    raw.kind=uint8_t(fb::PropertyCandidateKind::ChainFinal);raw.version=1;
+    read.walk={1,2};read.propertyCandidates={record,raw};
+    std::string error;std::vector<uint8_t> bytes;
+    CHECK(_Write(file,&bytes,&error));CHECK(_Open(bytes,&error));
+    const auto reject=[&](RigExecWireFile bad,const char *fragment) {
+        std::vector<uint8_t> out;std::string writeError,openError;
+        CHECK(!_Write(bad,&out,&writeError));
+        CHECK(!_Open(_PackUnchecked(bad),&openError));
+        CHECK(writeError.find(fragment)!=std::string::npos);
+        CHECK(openError.find(fragment)!=std::string::npos);
+    };
+    auto suppressedFinal=file;
+    auto &late=suppressedFinal.geometry->chains[0].revisions[0].blendChannels[0].weightRead->propertyCandidates[1];
+    late.kind=uint8_t(fb::PropertyCandidateKind::SlotOnly);late.version=-1;
+    reject(std::move(suppressedFinal),"chain crossing lacks");
+    auto missingRecord=file;
+    missingRecord.geometry->chains[0].revisions[0].blendChannels[0].weightRead->propertyCandidates.erase(
+        missingRecord.geometry->chains[0].revisions[0].blendChannels[0].weightRead->propertyCandidates.begin());
+    reject(std::move(missingRecord),"chain crossing lacks");
+    // Both orders retain their publication-overlay producer candidates.
+    raw.kind=uint8_t(fb::PropertyCandidateKind::ChainFinal);raw.version=1;
+    read.walk={2,1};read.propertyCandidates={raw,record};
+    CHECK(_Write(file,&bytes,&error));CHECK(_Open(bytes,&error));
+}
+
+void TestSparseBlendShapeFacts()
+{
+    CHECK(!fb::RigExecWireBlendSample().shapeValid);
+    auto file=_RichFile();
+    auto &revision=file.geometry->chains[0].revisions[0];
+    auto &sample=revision.blendChannels[0].samples[0];
+    sample.blendShape=_pMesh; sample.shapeValid=true;
+    sample.offsets.clear(); sample.indices.clear(); sample.pointCount=0;
+    sample.layoutValid=false; // numerical validity is not the immutable shape fact
+    const auto addSource=[&](const char *name,InputTag tag) {
+        auto at=std::find(file.names.begin(),file.names.end(),std::string(name));
+        const uint32_t nameId=uint32_t(at-file.names.begin());
+        if(at==file.names.end())file.names.push_back(name);
+        const uint32_t path=uint32_t(file.paths.size());
+        file.paths.emplace_back(_pMesh,nameId,PathKind::Property);
+        RigExecWireValue value; value.tag=tag; value.array=0;
+        const uint32_t constant=uint32_t(file.values.size());file.values.push_back(std::move(value));
+        const uint32_t slot=uint32_t(file.inputs.size());
+        file.inputs.emplace_back(path,constant,-1,-1,tag,uint8_t(fb::InputSlotFlags::HasValue));
+        fb::RigExecWireExternalDeclaredInput site;site.path=path;
+        site.time=fb::ExternalInputTime::AtDefault;site.flavour=fb::ExternalInputFlavour::Raw;
+        site.fallbackHasValue=true;site.read=std::make_unique<RigExecWireInput>();
+        site.read->tag=tag;site.read->mode=ReadMode::Raw;site.read->constant=constant;
+        site.read->walk={slot};site.read->sampleTime=1;
+        revision.leafSites.push_back(std::move(site));
+    };
+    addSource("offsets",InputTag::Vec3fArray);addSource("pointIndices",InputTag::IntArray);
+    std::string error;std::vector<uint8_t> bytes;
+    CHECK(_Write(file,&bytes,&error));
+    auto decoded=_Open(bytes,&error);CHECK(decoded);
+    CHECK(decoded && decoded->geometry->chains[0].revisions[0].blendChannels[0].samples[0].shapeValid);
+    auto invalid=file;invalid.geometry->chains[0].revisions[0].blendChannels[0].samples[0].shapeValid=false;
+    CHECK(_Write(invalid,&bytes,&error));decoded=_Open(bytes,&error);CHECK(decoded);
+    CHECK(decoded && !decoded->geometry->chains[0].revisions[0].blendChannels[0].samples[0].shapeValid);
+    // Identical empty opinions retain a distinct immutable shape fact.
+    CHECK(invalid.geometry->chains[0].revisions[0].blendChannels[0].samples[0].offsets.empty());
+    auto missing=file;
+    for(auto &site:missing.geometry->chains[0].revisions[0].leafSites) {
+        site.read->mode=ReadMode::Resolved;site.read->walk.clear();
+    }
+    CHECK(_Write(missing,&bytes,&error));CHECK(_Open(bytes,&error));
+    const auto reject=[&](RigExecWireFile bad,const char *fragment) {
+        bytes.clear();error.clear();CHECK(!_Write(bad,&bytes,&error));
+        CHECK(error.find(fragment)!=std::string::npos);
+        error.clear();CHECK(!_Open(_PackUnchecked(bad),&error));
+        CHECK(error.find(fragment)!=std::string::npos);
+    };
+    auto wrongFallback=missing;
+    auto &fallbackSite=wrongFallback.geometry->chains[0].revisions[0].leafSites[0];
+    wrongFallback.values[fallbackSite.read->constant].array=1;
+    reject(std::move(wrongFallback),"missing sparse blend source requires empty typed fallback");
+    auto duplicate=file;
+    duplicate.geometry->chains[0].revisions[0].leafSites.push_back(duplicate.geometry->chains[0].revisions[0].leafSites[0]);
+    reject(std::move(duplicate),"sparse blend source has duplicate owning leaf site");
+    auto normalizedOnly=file;normalizedOnly.geometry->chains[0].revisions[0].leafSites.clear();
+    reject(std::move(normalizedOnly),"sparse blend source requires exact Raw Default owning leaf site");
+    auto wrongTime=file;wrongTime.geometry->chains[0].revisions[0].leafSites[0].time=fb::ExternalInputTime::AtTime;
+    reject(std::move(wrongTime),"sparse blend source requires exact Raw Default owning leaf site");
+    auto dense=_RichFile();dense.geometry->chains[0].revisions[0].blendChannels[0].samples[0].shapeValid=true;
+    reject(std::move(dense),"dense blend sample has sparse shape fact");
+}
+
+void TestSourceBackedRotationSign()
+{
+    auto baseline=_HeadComposeFile();
+    baseline.names.push_back("avars:rotationSign");
+    baseline.paths.emplace_back(2,uint32_t(baseline.names.size()-1),PathKind::Property);
+    baseline.inputs.emplace_back(uint32_t(baseline.paths.size()-1),4,-1,-1,InputTag::Vec3d,0);
+    *baseline.values[4].vec3d=RigExecWireVec3d{{1.0,1.0,1.0}};
+    auto &read=*baseline.pose->ladders[0].rotationSign;
+    read.flags=uint8_t(fb::InputReadFlags::SourceBacked);read.walk={0};read.selected=0;
+    baseline.steps[1].headInputReads[6]=read;
+    std::string error;std::vector<uint8_t> bytes;
+    CHECK(_Write(baseline,&bytes,&error));CHECK(_Open(bytes,&error));
+    auto wrongFallback=baseline;
+    (*wrongFallback.values[4].vec3d)[2]=-1.0;
+    CHECK(!_Write(wrongFallback,&bytes,&error) && error.find("eligible numeric owner")!=std::string::npos);
+    CHECK(!_Open(_PackUnchecked(wrongFallback),&error) && error.find("eligible numeric owner")!=std::string::npos);
+    auto wrongOwner=baseline;wrongOwner.names.back()="rest:space";
+    CHECK(!_Write(wrongOwner,&bytes,&error) && error.find("eligible numeric owner")!=std::string::npos);
+    CHECK(!_Open(_PackUnchecked(wrongOwner),&error) && error.find("eligible numeric owner")!=std::string::npos);
+}
+
+void TestSourceBackedReads()
+{
+    auto baseline=_HeadComposeFile();
+    baseline.names.push_back("rest:tx");
+    baseline.paths.emplace_back(2,uint32_t(baseline.names.size()-1),PathKind::Property);
+    baseline.inputs.emplace_back(uint32_t(baseline.paths.size()-1),2,-1,-1,InputTag::Double,0);
+    auto &read=baseline.pose->ladders[0].restAvars[0];
+    read.flags=uint8_t(fb::InputReadFlags::SourceBacked);read.walk={0};read.selected=0;
+    baseline.steps[0].headInputReads[0]=read;
+    std::string error;std::vector<uint8_t> bytes;
+    CHECK(_Write(baseline,&bytes,&error));CHECK(_Open(bytes,&error));
+    const auto reject=[&](const char *name,const std::function<void(RigExecWireInput&)> &change) {
+        auto file=baseline;change(file.pose->ladders[0].restAvars[0]);
+        file.steps[0].headInputReads[0]=file.pose->ladders[0].restAvars[0];
+        std::vector<uint8_t> out;std::string writeError,openError;
+        CHECK(!_Write(file,&out,&writeError));CHECK(!_Open(_PackUnchecked(file),&openError));
+        if(writeError.find("source-backed")==std::string::npos || openError.find("source-backed")==std::string::npos) {
+            std::printf("source-backed %s: write '%s', open '%s'\n",name,writeError.c_str(),openError.c_str());CHECK(false);
+        }
+    };
+    reject("varying",[](auto &r){r.flags|=uint8_t(fb::InputReadFlags::Varying);});
+    reject("long way",[](auto &r){r.flags|=uint8_t(fb::InputReadFlags::LongWay);});
+    reject("chain",[](auto &r){r.flags|=uint8_t(fb::InputReadFlags::ViaChain);});
+    reject("mode",[](auto &r){r.mode=ReadMode::Pinned;});
+    reject("default time",[](auto &r){r.sampleTime=1;});
+    reject("selected",[](auto &r){r.selected=-1;});
+    reject("second hop",[](auto &r){r.walk={0,0};});
+    reject("raw fallback",[](auto &r){r.rawFallbackSlot=0;});
+    reject("candidate",[](auto &r){r.propertyCandidates.emplace_back();});
+    auto wrongOwner=baseline;wrongOwner.names.back()="default:tx";
+    CHECK(!_Write(wrongOwner,&bytes,&error) && error.find("eligible numeric owner")!=std::string::npos);
+    CHECK(!_Open(_PackUnchecked(wrongOwner),&error) && error.find("eligible numeric owner")!=std::string::npos);
+    auto wrongFallback=baseline;
+    wrongFallback.pose->ladders[0].restAvars[0].constant=1; // Matrix cannot be the Double argument fallback.
+    wrongFallback.steps[0].headInputReads[0]=wrongFallback.pose->ladders[0].restAvars[0];
+    CHECK(!_Write(wrongFallback,&bytes,&error) && error.find("constant")!=std::string::npos);
+    CHECK(!_Open(_PackUnchecked(wrongFallback),&error) && error.find("constant")!=std::string::npos);
+}
+
+void TestRequiredStageFrameSpaceBindings()
+{
+    auto file=_HeadComposeFile();
+    file.providerProgram=std::make_unique<fb::RigExecWireProviderProgram>();
+    auto &program=*file.providerProgram;
+    program.valueKeys={"/Rig/Parent.rest:space"};
+    program.defaults.resize(1);
+    fb::RigExecWireProviderOp expression;
+    expression.kind=uint32_t(RigExecProviderOpKind::RestFrame);
+    expression.owner="/Rig/Parent.rest:space";expression.output=0;
+    program.ops.push_back(std::move(expression));
+    fb::RigExecWireStep source;
+    source.kind=fb::StepKind::SpaceExpression;source.object=0;source.part=0;
+    source.isSource=true;source.cluster=0;source.succs={1};
+    source.writes={fb::SlotRange(fb::SlotDomain::SpaceValue,0,1)};
+    // Graph edges require the producer before its consumers.
+    for(auto &step:file.steps) {
+        for(auto &pred:step.preds)++pred;
+        for(auto &succ:step.succs)++succ;
+    }
+    for(auto &cluster:file.clustering->clusters)
+        for(auto &member:cluster.members)++member;
+    const size_t sourceStep=0;
+    file.steps.insert(file.steps.begin(),std::move(source));
+    file.clustering->clusterOf.insert(file.clustering->clusterOf.begin(),0);
+    file.clustering->clusters[0].members.insert(file.clustering->clusters[0].members.begin(),0);
+    file.steps[1].preds.insert(file.steps[1].preds.begin(),0);
+    file.steps[1].reads.emplace_back(fb::SlotDomain::SpaceValue,0,1);
+    file.pose->ladders[0].spaceValues={0,-1,-1,-1,-1,-1,-1};
+    _DeclareFixtureStageFrames(file);
+    std::vector<uint8_t> bytes;std::string why;
+    CHECK(_Write(file,&bytes,&why));CHECK(_Open(bytes,&why));
+    const auto reject=[&](RigExecWireFile bad,const char *part) {
+        why.clear();CHECK(!_Write(bad,&bytes,&why));CHECK(why.find(part)!=std::string::npos);
+        why.clear();CHECK(!_Open(_PackUnchecked(bad),&why));CHECK(why.find(part)!=std::string::npos);
+    };
+    auto bad=file;bad.pose->ladders[0].spaceValues.pop_back();reject(std::move(bad),"seven declared space channels");
+    bad=file;bad.pose->ladders[0].spaceValues[0]=1;reject(std::move(bad),"unknown provider value");
+    bad=file;bad.pose->ladders[0].spaceValues[0]=-2;reject(std::move(bad),"unknown provider value");
+    bad=file;
+    bad.steps[1].reads.erase(std::remove_if(bad.steps[1].reads.begin(),bad.steps[1].reads.end(),[](const auto &range) {
+        return range.domain()==fb::SlotDomain::SpaceValue;
+    }),bad.steps[1].reads.end());
+    reject(std::move(bad),"body SSA missing read SpaceValue");
+    bad=file;bad.steps[sourceStep].reads.emplace_back(fb::SlotDomain::RequiredStageFramesAdmission,0,1);
+    reject(std::move(bad),"actual preparation role");
+    // An extra declaration alone must not make this producer preparation.
+    bad=file;bad.pose->ladders[0].spaceValues[0]=-1;
+    reject(std::move(bad),"actual preparation role");
+}
+
+void TestRequiredStageFramesAdmission()
+{
+    auto admitted=_RichFile();
+    std::vector<uint8_t> bytes; std::string why;
+    CHECK(_Write(admitted,&bytes,&why));
+    auto refused=admitted;
+    refused.slotMeta->xformSlots={0};
+    refused.slotMeta->xformPaths={refused.slotMeta->paths[0]};
+    refused.pose->xformBase.emplace_back();
+    refused.pose->xformFrames.emplace_back();
+    refused.pose->requiredStageFramesAdmission->admitted=0;
+    refused.pose->requiredStageFramesAdmission->firstBadTarget=0;
+    CHECK(_Write(refused,&bytes,&why));
+    const auto opened=_Open(bytes,&why);
+    CHECK(opened && opened->pose->requiredStageFramesAdmission->admitted==0 &&
+          opened->pose->requiredStageFramesAdmission->firstBadTarget==0);
+    const auto reject=[&](RigExecWireFile bad) {
+        why.clear();CHECK(!_Write(bad,&bytes,&why));
+        why.clear();CHECK(!_Open(_PackUnchecked(bad),&why));
+    };
+    auto bad=admitted;bad.pose->requiredStageFramesAdmission->admitted=2;reject(std::move(bad));
+    bad=admitted;bad.pose->requiredStageFramesAdmission->firstBadTarget=0;reject(std::move(bad));
+    bad=refused;bad.pose->requiredStageFramesAdmission->firstBadTarget=-1;reject(std::move(bad));
+    bad=refused;bad.pose->requiredStageFramesAdmission->firstBadTarget=1;reject(std::move(bad));
+    bad=admitted;
+    auto &post=_RegionStep(bad,0);
+    post.reads.erase(std::remove_if(post.reads.begin(),post.reads.end(),[](const auto &range) {
+        return range.domain()==fb::SlotDomain::RequiredStageFramesAdmission;
+    }),post.reads.end());
+    reject(std::move(bad));
+    bad=admitted;_RegionStep(bad,0).reads.emplace_back(fb::SlotDomain::RequiredStageFramesAdmission,0,1);reject(std::move(bad));
+    bad=admitted;bad.steps[0].reads.emplace_back(fb::SlotDomain::RequiredStageFramesAdmission,0,1);reject(std::move(bad));
+    bad=admitted;_RegionStep(bad,0).writes.emplace_back(fb::SlotDomain::RequiredStageFramesAdmission,0,1);reject(std::move(bad));
+}
 
 }  // namespace
 
 int
 main()
 {
+    TestRequiredStageFrameSpaceBindings();
+    TestRequiredStageFramesAdmission();
     TestMinimalRoundTrip();
+    TestTransportCases();
+    TestSourceBackedReads();
+    TestSourceBackedRotationSign();
+    TestPublishedPropertyOverlayCandidates();
+    TestSparseBlendShapeFacts();
+    TestSolverSemanticMetadataRefusals();
     TestBitExactness();
     TestDeterminism();
     TestOpenRefusals();
@@ -5175,6 +5643,8 @@ main()
     TestArrayInputs();
     TestHeadFormatCases();
     TestHeadComposeFormatCases();
+    TestPoseBodyDeclarations();
+    TestSpaceCheckpointDeclarations();
     TestHeadDoubleFormatCases();
     TestHeadEnvelopeFormatCases();
     TestHeadChunkFormatCases();

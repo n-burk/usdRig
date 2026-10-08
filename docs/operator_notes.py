@@ -61,11 +61,10 @@ part of the rig and changing that is a structural (epoch-rebuilding) edit
 rather than a value edit. A rig that finds no controls, joints, volume weights,
 and no movers at all is a compile error ("Rig publishes no outputs"), and every
 mover target is checked against the root's *parent* prim, which is the rig
-asset and the boundary of what the rig may write. `uniform bool rigExec:baked`
-is re-read at the tail of each compile and only asks for the baked program: an
-explicit `SetEvaluationMode` call or a non-empty `RIGEXEC_EVALUATION_MODE`
-outranks it, an epoch the program cannot express falls back to the dynamic path
-with a note on the published pose, and both paths publish the same values.""",
+asset and the boundary of what the rig may write. The evaluator compiles one
+production operation graph. Scene sampling, detached frozen jobs, and binary
+playback execute typed declarations through that graph; reference checks are
+optional judges and do not choose an evaluation path.""",
         "wiring": [
             # Type-based discovery over the whole subtree: rigEvaluator.cpp:1014
             # (_DiscoverControls), :939 (_DiscoverJointOutputs), :986 (pose
@@ -104,15 +103,7 @@ under `IkAsset` because that parent is what bounds the rig's write set.""",
             "nothing about how it arose, and nothing else breaks a tie. Put "
             "`Solvers` at the bottom of the rig root for the classic \"solve, "
             "then revise\" shape.",
-            "`rigExec:baked` has to be *authored* to be heard (the check is "
-            "`HasAuthoredValue`), it is only a request, and it is the weakest of "
-            "the three ways the mode is chosen.",
-            "An importer that has validated its connected frame and attribute "
-            "input closures may set boolean custom data "
-            "`rigExec:connectedPoseSeedReuse` on the root. This lets refresh "
-            "requests pin dependency frames and omit upstream overrides. "
-            "Other rigs retain complete override reads; "
-            "`RIGEXEC_CONNECTED_POSE_SEED_REUSE=0` disables the optimization.",
+
         ],
         "see_also": [
             ("control", "Control"),
@@ -319,7 +310,7 @@ act on the delta the space contributes, expressed in the target's own
 default frame, and `rigExec:rotationFilters` can pass only the twist of a
 source's rotation about `rigExec:twistAxis`, or only the swing, by an
 exact swing-twist decomposition. The index is an ordinary per-frame input:
-the dynamic path, the baked program, the frame cache and a `.rigexec`
+the native program, frozen jobs, the frame cache and a `.rigexec`
 binary all re-read it every frame, and keying it re-runs only the compose
 of the switched control's subtree.""",
         "wiring": [
@@ -625,7 +616,7 @@ displacement through the blend rather than losing it.""",
             # (libs/rigExec/computations.cpp:950-959), but nothing enforces
             # either one: a stage with inputB deleted, and one with BOTH
             # deleted, compiles and evaluates (verify_examples.py ok in both
-            # dynamic and baked modes). A missing target is the computation's
+            # native and frozen execution). A missing target is the computation's
             # null pointer, and a null pointer returns the OTHER input by
             # value (libs/rigExec/computations.cpp:876-881,
             # libs/rigExec/bakedPose.cpp:2514-2523); with neither wired the
@@ -2849,7 +2840,7 @@ points, and `rigExec:projectionMode` chooses whether the posed frame
 follows that material point or re-casts at the posed surface. The
 published matrix is `rigExec:shaderOffset * look * delta`. Up to sixteen
 scalar `rigExec:shaderDialSources` are packed into a second matrix primvar
-for the same material. The dynamic path, the baked program, the frame
+for the same material. The native program, frozen jobs, the frame
 cache and the `.rigexec` runtime all run one header-only kernel.""",
         "wiring": [
             ("`rigExec:moves`", "The surface's `points` property; the primvars are "

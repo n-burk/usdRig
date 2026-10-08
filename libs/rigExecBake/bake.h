@@ -60,11 +60,9 @@ struct RigExecBakeResult {
 /// list, or a program the FlatBuffer file cannot hold or whose file does
 /// not open again.
 ///
-/// The caller sets the evaluation mode BEFORE calling -- Baked, the way
-/// rigExecPose honors --mode -- and this compiles, checks bakeability,
-/// evaluates once at the bake time with every step forced to run, and
-/// serializes with upstream inputs suspended. The complete requested list
-/// is restored on every return. The evaluator stays in the caller's mode.
+/// Compiles, checks export admission, evaluates once at the bake time with
+/// every operation forced to run, and serializes with upstream inputs
+/// suspended. The complete requested input list is restored on every return.
 bool RigExecBakeToBinary(RigExecRigEvaluator &evaluator,
                          const RigExecBakeOpts &opts,
                          RigExecBakeResult *result, std::string *error);

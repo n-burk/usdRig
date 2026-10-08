@@ -3,7 +3,7 @@ include(CMakeParseArguments)
 
 # Must equal RigExecMoverPluginApiVersion in rigExec/movers/moverRegistry.h:
 # the loader refuses a library whose metadata names another version.
-set(RIGEXEC_MOVER_PLUGIN_API_VERSION 3)
+set(RIGEXEC_MOVER_PLUGIN_API_VERSION 4)
 
 # Available both inside the usdRig build and from find_package(rigExec).
 function(rigexec_add_mover_plugin name)

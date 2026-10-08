@@ -174,11 +174,17 @@ _BinaryArrayBytes(const _BinaryFile &file,
         return true;
     };
     if (value.arraySource != Source::Pool) {
+        if ((value.arraySource != Source::SkinIndices || value.tag != Tag::IntArray) &&
+            (value.arraySource != Source::SkinWeights || value.tag != Tag::FloatArray))
+            return false;
         if (!file.geometry ||
             value.array >= file.geometry->revisionIndex.size()) {
             return false;
         }
         const auto &at = file.geometry->revisionIndex[value.array];
+        if (at.first < 0 || size_t(at.first) >= file.geometry->chains.size() ||
+            at.second < 0 || size_t(at.second) >= file.geometry->chains[size_t(at.first)].revisions.size())
+            return false;
         const rigExec::fb::RigExecWireRevision &revision =
             file.geometry->chains[size_t(at.first)]
                 .revisions[size_t(at.second)];
@@ -217,6 +223,25 @@ _BinaryArrayBytes(const _BinaryFile &file,
                take(file.vec3fArrays[id].v.data(),
                     file.vec3fArrays[id].v.size() *
                         sizeof(rigExec::RigExecWireVec3f));
+    case Tag::Vec3dArray:
+        return id < file.vec3dArrays.size() &&
+               take(file.vec3dArrays[id].v.data(),
+                    file.vec3dArrays[id].v.size() * sizeof(rigExec::RigExecWireVec3d));
+    case Tag::Matrix4dArray:
+        return id < file.matrix4dArrays.size() &&
+               take(file.matrix4dArrays[id].v.data(),
+                    file.matrix4dArrays[id].v.size() * sizeof(rigExec::RigExecWireMatrix4d));
+    case Tag::TokenArray:
+        if (id >= file.tokenArrays.size()) return false;
+        for (const auto &token : file.tokenArrays[id].v) {
+            const uint64_t size = token.size();
+            bytes->append(reinterpret_cast<const char *>(&size), sizeof(size));
+            bytes->append(token);
+        }
+        return true;
+    case Tag::BoolArray:
+        return id < file.boolArrays.size() &&
+               take(file.boolArrays[id].v.data(), file.boolArrays[id].v.size());
     default:
         return false;
     }
@@ -252,6 +277,10 @@ _BinaryHoldsArray(const UsdAttribute &a, rigExec::fb::InputTag tag)
         return type == TfType::Find<VtVec2fArray>();
     case Tag::Vec3fArray:
         return type == TfType::Find<VtVec3fArray>();
+    case Tag::Vec3dArray: return type == TfType::Find<VtVec3dArray>();
+    case Tag::Matrix4dArray: return type == TfType::Find<VtMatrix4dArray>();
+    case Tag::TokenArray: return type == TfType::Find<VtTokenArray>();
+    case Tag::BoolArray: return type == TfType::Find<VtBoolArray>();
     default:
         return false;
     }
@@ -295,6 +324,37 @@ _BinaryStageArray(const UsdAttribute &a, rigExec::fb::InputTag tag,
     case Tag::Vec3fArray: {
         VtVec3fArray v;
         return read(&v);
+    }
+    case Tag::Vec3dArray: {
+        VtVec3dArray v;
+        if (!a || !a.Get(&v, time)) return false;
+        for (const auto &point : v) for (int axis = 0; axis < 3; ++axis)
+            bytes->append(reinterpret_cast<const char *>(&point[axis]), sizeof(double));
+        return true;
+    }
+    case Tag::Matrix4dArray: {
+        VtMatrix4dArray v;
+        if (!a || !a.Get(&v, time)) return false;
+        for (const auto &matrix : v) for (int r = 0; r < 4; ++r) for (int c = 0; c < 4; ++c)
+            bytes->append(reinterpret_cast<const char *>(&matrix[r][c]), sizeof(double));
+        return true;
+    }
+    case Tag::TokenArray: {
+        VtTokenArray v;
+        if (!a || !a.Get(&v, time)) return false;
+        for (const auto &token : v) {
+            const auto &text = token.GetString();
+            const uint64_t size = text.size();
+            bytes->append(reinterpret_cast<const char *>(&size), sizeof(size));
+            bytes->append(text);
+        }
+        return true;
+    }
+    case Tag::BoolArray: {
+        VtBoolArray v;
+        if (!a || !a.Get(&v, time)) return false;
+        for (bool bit : v) bytes->push_back(bit ? char(1) : char(0));
+        return true;
     }
     default:
         return false;
@@ -378,6 +438,7 @@ _BinaryCompareBoundWalk(const rigExec::RigExecBakedWalk &live,
             CHECK(candidate.kind == kind);
             CHECK(candidate.version == version);
             CHECK(candidate.raw == (hop.leaf >= 0));
+            CHECK(candidate.crossDomain == hop.crossDomain);
         }
     };
     compare(live.hops, wire.propertyCandidates);
@@ -482,8 +543,18 @@ _BinaryCompareRoute(const rigExec::RigExecBakedInput<T> &live,
     const bool varying = (wire.flags & uint8_t(Flags::Varying)) != 0;
     const bool longWay = (wire.flags & uint8_t(Flags::LongWay)) != 0;
     const bool viaChain = (wire.flags & uint8_t(Flags::ViaChain)) != 0;
+    const bool sourceBacked = (wire.flags & uint8_t(Flags::SourceBacked)) != 0;
     CHECK(varying == live.varying);
     CHECK(longWay == bool(live.resolvedAttr));
+    CHECK(sourceBacked == live.sourceBacked);
+    if (sourceBacked) {
+        CHECK(!varying && !longWay && !viaChain && live.walk < 0);
+        CHECK(wire.walk.size() == 1 && wire.sampleTime == 0);
+        CHECK(wire.propertyCandidates.empty() && wire.doubleCandidates.empty());
+        CHECK(wire.rawFallbackSlot == -1);
+        if (wire.walk.size() == 1 && wire.walk[0] < file.inputs.size())
+            CHECK(file.inputs[wire.walk[0]].type() == wire.tag);
+    }
     if (live.head) {
         CHECK(!wire.walk.empty() &&
               _BinarySlotName(file, wire.walk[0]) ==
@@ -497,7 +568,7 @@ _BinaryCompareRoute(const rigExec::RigExecBakedInput<T> &live,
                   (slot < file.inputs.size() && file.inputs[slot].chain() >= 0);
     }
     CHECK(viaChain == crosses);
-    int selected = -1;
+    int selected = sourceBacked ? 0 : -1;
     if (live.varying && !live.resolvedAttr && live.query.IsValid()) {
         const std::string pinned =
             live.query.GetAttribute().GetPath().GetString();
@@ -651,7 +722,8 @@ _BinaryCompareInput(const rigExec::RigExecBakedInput<T> &live,
     const rigExec::fb::RigExecWireValue *constant =
         _BinaryConstant(file, *wire, _BinaryTagOf<T>());
     if (constant) {
-        CHECK(_BinaryConstantIs(*constant, live.constant, file));
+        CHECK(_BinaryConstantIs(*constant,
+              live.sourceBacked ? live.sourceFallback : live.constant, file));
     }
     _BinaryCompareRoute(live, *wire, file);
 }
@@ -721,6 +793,12 @@ _BinaryCompareSlotMeta(const rigExec::RigExecBakedProgramImpl &program,
     for (size_t i = 0; i < meta.slotKind.size() && i < program.slotKind.size();
          ++i) {
         CHECK(uint8_t(program.slotKind[i]) == uint8_t(meta.slotKind[i]));
+    }
+    CHECK(program.providerActive.size() == program.paths.size());
+    CHECK(meta.providerActive.size() == program.providerActive.size());
+    for (size_t i = 0; i < meta.providerActive.size() &&
+                       i < program.providerActive.size(); ++i) {
+        CHECK(meta.providerActive[i] == (program.providerActive[i] ? uint8_t(1) : uint8_t(0)));
     }
     _BinaryCheckEqual(program.parent, meta.parent);
     _BinaryCheckEqual(program.propParent, meta.propParent);
@@ -848,20 +926,204 @@ _BinaryCompareRanges(const std::vector<rigExec::RigExecBakedSlotRange> &live,
     }
 }
 
+rigExec::fb::InputTag
+_BinaryLeafTag(const rigExec::RigExecRevisionLeafKey &key,
+               const rigExec::RigExecBakedProgramImpl &program)
+{
+    using Type = rigExec::RigExecRevisionLeafType;
+    using Tag = rigExec::fb::InputTag;
+    switch (key.type) {
+    case Type::Bool: return Tag::Bool;
+    case Type::Int: return Tag::Int;
+    case Type::Float: return Tag::Float;
+    case Type::Double: return Tag::Double;
+    case Type::Dial: {
+        const auto a = program.stage->GetAttributeAtPath(key.path);
+        return a && a.GetTypeName().GetType() == TfType::Find<float>()
+            ? Tag::Float : Tag::Double;
+    }
+    case Type::Token: return Tag::Token;
+    case Type::Matrix4d: return Tag::Matrix4d;
+    case Type::Vec3d: return Tag::Vec3d;
+    case Type::Vec3f: return Tag::Vec3f;
+    case Type::Vec3i: return Tag::Vec3i;
+    case Type::IntArray: return Tag::IntArray;
+    case Type::FloatArray: return Tag::FloatArray;
+    case Type::DoubleArray: return Tag::DoubleArray;
+    case Type::Vec2fArray: return Tag::Vec2fArray;
+    case Type::Vec3fArray: return Tag::Vec3fArray;
+    }
+    CHECK(false); // An unknown native declaration must not disappear from the judge.
+    return Tag::Float;
+}
+
+// Compare the declared fallback independently of the consuming run. A raw
+// static int3 declaration is an explicit compile literal, rather than a slot.
+void
+_BinaryCompareKeyRead(const rigExec::RigExecRevisionLeafKey &key,
+                      const _BinaryRead &read, const _BinaryFile &file)
+{
+    CHECK(_binaryProgram);
+    if (!_binaryProgram) return;
+    const auto &program = *_binaryProgram;
+    const auto tag = _BinaryLeafTag(key, program);
+    const auto *value = _BinaryConstant(file, read, tag);
+    CHECK(read.sampleTime == uint8_t(key.time));
+    CHECK(read.overrideIndex == -1 && read.selected == -1);
+    if (!value) return;
+    VtValue fallback = key.fallback;
+    if (key.type == rigExec::RigExecRevisionLeafType::Vec3i &&
+        key.flavour == rigExec::RigExecRevisionLeafFlavour::Raw &&
+        read.mode == rigExec::fb::ReadMode::Pinned) {
+        GfVec3i literal;
+        const auto a = program.stage->GetAttributeAtPath(key.path);
+        if (a && a.Get(&literal, key.time == rigExec::RigExecRevisionLeafTime::AtDefault
+                ? UsdTimeCode::Default() : UsdTimeCode(file.bakeTime)))
+            fallback = VtValue(literal);
+    }
+    using Tag = rigExec::fb::InputTag;
+    switch (tag) {
+    case Tag::Bool: CHECK(_BinaryConstantIs(*value, fallback.IsHolding<bool>() ? fallback.UncheckedGet<bool>() : false, file)); break;
+    case Tag::Int: CHECK(_BinaryConstantIs(*value, fallback.IsHolding<int>() ? fallback.UncheckedGet<int>() : 0, file)); break;
+    case Tag::Float: CHECK(_BinaryConstantIs(*value, fallback.IsHolding<float>() ? fallback.UncheckedGet<float>() : fallback.IsHolding<double>() ? float(fallback.UncheckedGet<double>()) : 0.0f, file)); break;
+    case Tag::Double: CHECK(_BinaryConstantIs(*value, fallback.IsHolding<double>() ? fallback.UncheckedGet<double>() : 0.0, file)); break;
+    case Tag::Token: CHECK(_BinaryConstantIs(*value, fallback.IsHolding<TfToken>() ? fallback.UncheckedGet<TfToken>() : TfToken(), file)); break;
+    case Tag::Matrix4d: CHECK(_BinaryConstantIs(*value, fallback.IsHolding<GfMatrix4d>() ? fallback.UncheckedGet<GfMatrix4d>() : GfMatrix4d(0.0), file)); break;
+    case Tag::Vec3d: CHECK(_BinaryConstantIs(*value, fallback.IsHolding<GfVec3d>() ? fallback.UncheckedGet<GfVec3d>() : GfVec3d(0.0), file)); break;
+    case Tag::Vec3f: {
+        const auto v = fallback.IsHolding<GfVec3f>() ? fallback.UncheckedGet<GfVec3f>() : GfVec3f(0.0f);
+        CHECK(value->vec3f && _BinaryEq(v[0], (*value->vec3f)[0]) && _BinaryEq(v[1], (*value->vec3f)[1]) && _BinaryEq(v[2], (*value->vec3f)[2]));
+        break;
+    }
+    case Tag::Vec3i: {
+        const auto v = fallback.IsHolding<GfVec3i>() ? fallback.UncheckedGet<GfVec3i>() : GfVec3i(0);
+        CHECK(value->vec3i && v[0] == (*value->vec3i)[0] && v[1] == (*value->vec3i)[1] && v[2] == (*value->vec3i)[2]);
+        break;
+    }
+    default: {
+        std::string bytes;
+        CHECK(_BinaryArrayBytes(file, *value, &bytes));
+        // All supported declaration array fallbacks are empty. A future
+        // nonempty fallback needs a typed comparison, never a silent skip.
+        CHECK(fallback.IsEmpty() ||
+              (fallback.IsHolding<VtIntArray>() && fallback.UncheckedGet<VtIntArray>().empty()) ||
+              (fallback.IsHolding<VtFloatArray>() && fallback.UncheckedGet<VtFloatArray>().empty()) ||
+              (fallback.IsHolding<VtDoubleArray>() && fallback.UncheckedGet<VtDoubleArray>().empty()) ||
+              (fallback.IsHolding<VtVec2fArray>() && fallback.UncheckedGet<VtVec2fArray>().empty()) ||
+              (fallback.IsHolding<VtVec3fArray>() && fallback.UncheckedGet<VtVec3fArray>().empty()));
+        CHECK(bytes.empty());
+        break;
+    }
+    }
+    if (!read.walk.empty())
+        CHECK(_BinarySlotName(file, read.walk.front()) == key.path.GetString());
+    const bool raw = key.flavour == rigExec::RigExecRevisionLeafFlavour::Raw ||
+        key.flavour == rigExec::RigExecRevisionLeafFlavour::OverlayThenRaw ||
+        key.flavour == rigExec::RigExecRevisionLeafFlavour::Present;
+    if (raw && !read.walk.empty()) {
+        CHECK(read.mode == rigExec::fb::ReadMode::Raw);
+        CHECK(read.walk.size() == 1);
+    }
+}
+
+void
+_BinaryCompareLeafSites(const rigExec::RigExecBakedPathLeaves &leaves,
+                        const std::vector<rigExec::fb::RigExecWireExternalDeclaredInput> &sites,
+                        const _BinaryFile &file)
+{
+    CHECK(sites.size() == leaves.decl.keys.size());
+    for (size_t k = 0; k < sites.size() && k < leaves.decl.keys.size(); ++k) {
+        const auto &key = leaves.decl.keys[k];
+        const auto &site = sites[k];
+        CHECK(_BinaryText(file, site.path) == key.path.GetString());
+        CHECK(uint8_t(site.time) == uint8_t(key.time));
+        CHECK(uint8_t(site.flavour) == uint8_t(key.flavour));
+        CHECK(site.read);
+        if (!site.read) continue;
+        _BinaryCompareKeyRead(key, *site.read, file);
+        const bool literal = key.type == rigExec::RigExecRevisionLeafType::Vec3i &&
+            key.flavour == rigExec::RigExecRevisionLeafFlavour::Raw &&
+            site.read->mode == rigExec::fb::ReadMode::Pinned;
+        if (literal) {
+            GfVec3i held;
+            const auto a = _binaryProgram->stage->GetAttributeAtPath(key.path);
+            const bool has = a && a.Get(&held, key.time == rigExec::RigExecRevisionLeafTime::AtDefault
+                ? UsdTimeCode::Default() : UsdTimeCode(file.bakeTime));
+            CHECK(site.fallbackHasValue == (has || !key.fallback.IsEmpty()));
+        } else CHECK(site.fallbackHasValue == !key.fallback.IsEmpty());
+        CHECK(site.allowFloatToDouble == (key.type == rigExec::RigExecRevisionLeafType::Dial && site.read->tag == rigExec::fb::InputTag::Double));
+        CHECK(site.exactVersion == (k < leaves.exactVersions.size() ? leaves.exactVersions[k] : -1));
+        CHECK(site.exactRecord == (k < leaves.exactRecordIndices.size() ? leaves.exactRecordIndices[k] : -1));
+        CHECK(site.exactValueType == (k < leaves.exactValueTypes.size() ? leaves.exactValueTypes[k] : -1));
+        for (const auto *segment : {&site.read->propertyCandidates, &site.read->doubleCandidates})
+            for (const auto &hop : *segment)
+                CHECK(hop.kind == 0 && hop.version == -1 && hop.crossDomain == -1 && hop.poseWeight == -1);
+        const bool body = (site.exactVersion < 0 || key.type == rigExec::RigExecRevisionLeafType::Double) &&
+            k < leaves.walks.size() && leaves.walks[k] >= 0;
+        CHECK(bool(site.bodyWalk) == body);
+        if (body && site.bodyWalk) {
+            _BinaryCompareKeyRead(key, *site.bodyWalk, file);
+            const auto &reader = _binaryProgram->readerWalks[size_t(leaves.walks[k])];
+            _BinaryCompareBoundWalk(reader.walk, reader.rawLeaf, *site.bodyWalk, file);
+        }
+    }
+}
+
+struct _BinaryMemoInventory {
+    std::map<uint32_t, std::function<void(const _BinaryRead &)>> bindings;
+    std::map<uint32_t, std::vector<SdfPath>> overridePaths;
+};
+
+// Native visitation order chooses the same first binding for each typed
+// leaf as the per-step scan. Keep every path alias of an override ID.
+static _BinaryMemoInventory
+_BinaryBuildMemoInventory(const rigExec::RigExecBakedProgramImpl &program,
+                          const _BinaryFile &file)
+{
+    _BinaryMemoInventory inventory;
+    rigExec::frozenDetail::_ForEachPatchableInput(program, [&](const auto &input) {
+        using T = std::decay_t<decltype(input.constant)>;
+        if (input.leaf < 0) return;
+        const uint32_t leaf = program.leaves.Of<T>().id[size_t(input.leaf)];
+        inventory.bindings.emplace(leaf, [&file, input](const _BinaryRead &read) {
+            const auto *constant = _BinaryConstant(file, read, _BinaryTagOf<T>());
+            if (constant) CHECK(_BinaryConstantIs(*constant,
+                input.sourceBacked ? input.sourceFallback : input.constant, file));
+            _BinaryCompareRoute(input, read, file);
+        });
+    });
+    for (const auto &[path, id] : program.headOverrideSlots) {
+        inventory.overridePaths[id].push_back(path);
+    }
+    return inventory;
+}
+
 void
 _BinaryCompareHeadMemo(const rigExec::RigExecBakedProgramImpl &program,
                        const rigExec::RigExecBakedStep &live,
                        const rigExec::fb::RigExecWireStep &wire,
-                       const _BinaryFile &file)
+                       const _BinaryFile &file,
+                       const _BinaryMemoInventory &inventory)
 {
     CHECK(wire.headAlwaysRuns == live.alwaysRuns);
     CHECK(wire.headVaryingLeaves == live.varyingLeaves);
-    if (!live.isHead) {
-        CHECK(wire.headInputSlots.empty());
-        CHECK(wire.headInputReads.empty());
-        return;
-    }
     std::set<std::string> expected;
+    const auto painted = [&](int object) {
+        CHECK(object >= 0 && size_t(object) < program.weightObjects.size());
+        if (object < 0 || size_t(object) >= program.weightObjects.size()) return;
+        const auto &path = program.weightObjects[size_t(object)].path;
+        for (const auto &entry : {std::make_pair("rigExec:values", rigExec::fb::InputTag::FloatArray),
+                                 std::make_pair("rigExec:indices", rigExec::fb::InputTag::IntArray)}) {
+            const auto p = path.AppendProperty(TfToken(entry.first));
+            if (_BinaryHoldsArray(program.stage->GetAttributeAtPath(p), entry.second)) expected.insert(p.GetString());
+        }
+    };
+    if (live.kind == rigExec::RigExecBakedStepKind::WeightPacket) painted(live.object);
+    if (live.kind == rigExec::RigExecBakedStepKind::WeightField) {
+        CHECK(live.object >= 0 && size_t(live.object) < program.weightFields.size());
+        if (live.object >= 0 && size_t(live.object) < program.weightFields.size())
+            for (int object : program.weightFields[size_t(live.object)].objects) painted(object);
+    }
     for (uint32_t id : live.leaves) {
         const auto &leaf = program.headLeaves[id];
         if (leaf.typeMatches &&
@@ -869,12 +1131,14 @@ _BinaryCompareHeadMemo(const rigExec::RigExecBakedProgramImpl &program,
             expected.insert(leaf.path.GetString());
         }
     }
-    for (const auto &[path, id] : program.headOverrideSlots) {
-        if (std::find(live.overrideSlots.begin(), live.overrideSlots.end(), id)
-            == live.overrideSlots.end()) continue;
-        const auto attribute = program.stage->GetAttributeAtPath(path);
-        if (attribute && !attribute.GetTypeName().IsArray()) {
-            expected.insert(path.GetString());
+    for (uint32_t id : live.overrideSlots) {
+        const auto paths = inventory.overridePaths.find(id);
+        if (paths == inventory.overridePaths.end()) continue;
+        for (const auto &path : paths->second) {
+            const auto attribute = program.stage->GetAttributeAtPath(path);
+            if (attribute && !attribute.GetTypeName().IsArray()) {
+                expected.insert(path.GetString());
+            }
         }
     }
     if (live.kind == rigExec::RigExecBakedStepKind::SkinTopology) {
@@ -889,31 +1153,50 @@ _BinaryCompareHeadMemo(const rigExec::RigExecBakedProgramImpl &program,
             }
         }
     }
+    size_t at = 0;
+    for (uint32_t id : live.bindingLeaves) {
+        if (live.kind == rigExec::RigExecBakedStepKind::SkinTopology) continue;
+        if (id >= program.leafRefs.size()) {
+            const size_t index = size_t(id) - program.leafRefs.size();
+            CHECK(index < program.pathLeafRefs.size());
+            if (index >= program.pathLeafRefs.size()) continue;
+            const auto &ref = program.pathLeafRefs[index];
+            const auto *leaves = rigExec::RigExecBakedPathLeavesOf(program, ref);
+            CHECK(leaves && ref.key < leaves->decl.keys.size());
+            if (!leaves || ref.key >= leaves->decl.keys.size()) continue;
+            const auto &key = leaves->decl.keys[ref.key];
+            if (ref.owner == rigExec::RigExecBakedPathLeafOwner::WeightOracle) {
+                const auto a = program.stage->GetAttributeAtPath(key.path);
+                if (a) expected.insert(key.path.GetString());
+                continue;
+            }
+            CHECK(at < wire.headInputReads.size());
+            if (at >= wire.headInputReads.size()) continue;
+            const auto &read = wire.headInputReads[at++];
+            _BinaryCompareKeyRead(key, read, file);
+            if (ref.key < leaves->walks.size() && leaves->walks[ref.key] >= 0) {
+                const auto &reader = program.readerWalks[size_t(leaves->walks[ref.key])];
+                _BinaryCompareBoundWalk(reader.walk, reader.rawLeaf, read, file);
+            } else {
+                for (const auto *segment : {&read.propertyCandidates, &read.doubleCandidates})
+                    for (const auto &hop : *segment)
+                        CHECK(hop.kind == 0 && hop.version == -1 && hop.crossDomain == -1 && hop.poseWeight == -1);
+            }
+            continue;
+        }
+        const auto binding = inventory.bindings.find(id);
+        CHECK(binding != inventory.bindings.end());
+        CHECK(at < wire.headInputReads.size());
+        if (at < wire.headInputReads.size()) {
+            if (binding != inventory.bindings.end()) binding->second(wire.headInputReads[at]);
+            ++at;
+        }
+    }
+    CHECK(at == wire.headInputReads.size());
     std::set<std::string> actual;
-    for (uint32_t slot : wire.headInputSlots) {
-        CHECK(actual.insert(_BinarySlotName(file, slot)).second);
-    }
+    CHECK(std::is_sorted(wire.headInputSlots.begin(), wire.headInputSlots.end()));
+    for (uint32_t slot : wire.headInputSlots) CHECK(actual.insert(_BinarySlotName(file, slot)).second);
     CHECK(actual == expected);
-    std::map<uint32_t, std::function<void(const _BinaryRead &)>> bindings;
-    rigExec::frozenDetail::_ForEachPatchableInput(program, [&](const auto &input) {
-        using T = std::decay_t<decltype(input.constant)>;
-        if (input.leaf < 0) return;
-        const uint32_t leaf = program.leaves.Of<T>().id[size_t(input.leaf)];
-        if (std::find(live.bindingLeaves.begin(), live.bindingLeaves.end(), leaf)
-            == live.bindingLeaves.end()) return;
-        bindings.emplace(leaf, [&, input](const _BinaryRead &read) {
-            const auto *constant = _BinaryConstant(file, read, _BinaryTagOf<T>());
-            if (constant) CHECK(_BinaryConstantIs(*constant, input.constant, file));
-            _BinaryCompareRoute(input, read, file);
-        });
-    });
-    CHECK(live.bindingLeaves.size() == wire.headInputReads.size());
-    for (size_t at = 0; at < live.bindingLeaves.size() &&
-                        at < wire.headInputReads.size(); ++at) {
-        const auto binding = bindings.find(live.bindingLeaves[at]);
-        CHECK(binding != bindings.end());
-        if (binding != bindings.end()) binding->second(wire.headInputReads[at]);
-    }
 }
 
 /// Labels are not stored: the runtime rebuilds them from these tables, and
@@ -922,12 +1205,15 @@ void
 _BinaryCompareSteps(const rigExec::RigExecBakedProgramImpl &program,
                     const _BinaryFile &file)
 {
+    const auto inventory = _BinaryBuildMemoInventory(program, file);
     const auto &steps = file.steps;
     CHECK(program.steps.size() == steps.size());
     for (size_t i = 0; i < steps.size() && i < program.steps.size(); ++i) {
         const rigExec::RigExecBakedStep &live = program.steps[i];
         const rigExec::fb::RigExecWireStep &wire = steps[i];
         CHECK(uint8_t(live.kind) == uint8_t(wire.kind));
+        CHECK(live.descriptorKey == wire.descriptorKey);
+        CHECK(live.semanticPredecessorKeys == wire.semanticPredecessorKeys);
         CHECK(int64_t(live.object) == int64_t(wire.object));
         CHECK(int64_t(live.part) == int64_t(wire.part));
         _BinaryCompareRanges(live.reads, wire.reads);
@@ -936,7 +1222,7 @@ _BinaryCompareSteps(const rigExec::RigExecBakedProgramImpl &program,
         _BinaryCheckEqual(live.succs, wire.succs);
         CHECK(live.isSource == wire.isSource);
         CHECK(live.isHead == wire.isHead);
-        _BinaryCompareHeadMemo(program, live, wire, file);
+        _BinaryCompareHeadMemo(program, live, wire, file, inventory);
         CHECK(live.shadowedReads.size() == wire.shadowedReads.size());
         for (size_t k = 0; k < live.shadowedReads.size() &&
                            k < wire.shadowedReads.size(); ++k) {
@@ -962,6 +1248,11 @@ _BinaryCompareClustering(
     const rigExec::fb::RigExecWireClustering &clustering)
 {
     const auto &live = program.clustering;
+    CHECK(program.opGraph.ops.size()==program.steps.size());
+    std::string artifactError;
+    CHECK(rigExec::RigExecValidateOpClusters(program.opGraph,&artifactError));
+    CHECK(program.opGraph.clusters.size()==clustering.clusters.size());
+    _BinaryCheckEqual(program.opGraph.opClusters,clustering.clusterOf);
     CHECK(live.clusters.size() == clustering.clusters.size());
     for (size_t i = 0;
          i < clustering.clusters.size() && i < live.clusters.size(); ++i) {
@@ -971,6 +1262,11 @@ _BinaryCompareClustering(
                           clustering.clusters[i].preds);
         _BinaryCheckEqual(live.clusters[i].succs,
                           clustering.clusters[i].succs);
+        if(i<program.opGraph.clusters.size()) {
+            _BinaryCheckEqual(program.opGraph.clusters[i].members,clustering.clusters[i].members);
+            _BinaryCheckEqual(program.opGraph.clusters[i].predecessors,clustering.clusters[i].preds);
+            _BinaryCheckEqual(program.opGraph.clusters[i].successors,clustering.clusters[i].succs);
+        }
         CHECK(_BinaryEq(live.clusters[i].cost, clustering.clusters[i].cost));
         CHECK(int64_t(live.clusters[i].level) ==
               int64_t(clustering.clusters[i].level));
@@ -1005,18 +1301,13 @@ _BinaryCompareLists(const Rows &live,
     }
 }
 
-/// The nine cone lists the file keeps.
+/// The source lookup lists retained beside the common graph. Dense native
+/// cone closures are query state, not serialized execution state.
 void
 _BinaryCompareCones(const rigExec::RigExecBakedProgramImpl &program,
                     const rigExec::fb::RigExecWireCones &cones)
 {
     const size_t clusters = program.clustering.clusters.size();
-    CHECK(program.cones.cone.size() == cones.cone.size());
-    for (size_t i = 0; i < cones.cone.size() && i < program.cones.cone.size();
-         ++i) {
-        _BinaryCompareClusterSet(program.cones.cone[i], &cones.cone[i],
-                                 clusters);
-    }
     _BinaryCompareClusterSet(program.cones.always, cones.always.get(),
                              clusters);
     _BinaryCompareClusterSet(program.cones.poseClusters,
@@ -1147,6 +1438,14 @@ _BinaryCompareSolver(const rigExec::RigExecBakedProgramImpl::Solver &live,
     CHECK(wire.spaceRead == uint32_t(std::max(live.spaceRead, 0)));
     CHECK(int64_t(live.inA) == int64_t(wire.inA));
     CHECK(int64_t(live.inB) == int64_t(wire.inB));
+    CHECK(live.solveDescriptorKey == wire.solveDescriptorKey);
+    CHECK(live.relationshipRequirements.size() == wire.relationshipRequirements.size());
+    for (size_t i = 0; i < live.relationshipRequirements.size() &&
+                       i < wire.relationshipRequirements.size(); ++i) {
+        CHECK(live.relationshipRequirements[i].first == wire.relationshipRequirements[i].port);
+        CHECK(int64_t(live.relationshipRequirements[i].second) ==
+              int64_t(wire.relationshipRequirements[i].solver));
+    }
     _BinaryCompareInput(live.blendWeight, wire.blendWeight, file);
     CHECK(uint8_t(live.scaleMode) == wire.scaleMode);
     CHECK(live.blendRotationRejected == wire.blendRotationRejected);
@@ -1448,7 +1747,12 @@ _BinaryCompareSpaceSwitches(
              ++k) {
             same(live.sourceReads[k], &wire.sourceReads[k]);
         }
-        _BinaryCompareInput(live.activeInput, wire.active, file);
+        CHECK(live.tokenIndex == wire.tokenIndex);
+        CHECK(live.labels.size() == wire.labels.size());
+        for (size_t k = 0; k < live.labels.size() && k < wire.labels.size(); ++k)
+            CHECK(live.labels[k].GetString() == wire.labels[k]);
+        if (live.tokenIndex) _BinaryCompareInput(live.activeTokenInput, wire.active, file);
+        else _BinaryCompareInput(live.activeInput, wire.active, file);
         for (size_t axis = 0; axis < 3; ++axis) {
             CHECK(live.affectTranslation[axis] ==
                   wire.affectTranslation[axis]);
@@ -1496,6 +1800,22 @@ _BinaryCompareDomainPose(const rigExec::RigExecBakedProgramImpl &program,
         _BinaryCompareInput(live.restSpace, wire.restSpace, file);
         _BinaryCompareInput(live.defaultSpace, wire.defaultSpace, file);
         _BinaryCompareInput(live.posedSpace, wire.posedSpace, file);
+        _BinaryCompareInput(live.parentSpace, wire.parentSpace, file);
+        _BinaryCompareInput(live.parentDefaultSpace, wire.parentDefaultSpace, file);
+        _BinaryCompareInput(live.avarDefaultSpace, wire.avarDefaultSpace, file);
+        _BinaryCompareInput(live.posedDefaultSpace, wire.posedDefaultSpace, file);
+        _BinaryCompareInput(live.rotationSign, wire.rotationSign, file);
+        _BinaryCompareInput(live.interveningSpace, wire.interveningSpace, file);
+        CHECK(live.posedSpaceConnected == wire.posedSpaceConnected);
+        CHECK(live.defaultSpaceConnected == wire.defaultSpaceConnected);
+        CHECK(live.parentSpaceConnected == wire.parentSpaceConnected);
+        CHECK(live.parentDefaultSpaceConnected == wire.parentDefaultSpaceConnected);
+        CHECK(live.avarDefaultSpaceConnected == wire.avarDefaultSpaceConnected);
+        CHECK(live.posedDefaultSpaceConnected == wire.posedDefaultSpaceConnected);
+        CHECK(live.interveningReset == wire.interveningReset);
+        CHECK(live.spaceValues.size() == wire.spaceValues.size());
+        for (size_t k = 0; k < live.spaceValues.size() && k < wire.spaceValues.size(); ++k)
+            CHECK(live.spaceValues[k] == wire.spaceValues[k]);
         CHECK(wire.restAvars.size() == 6 && wire.defaultAvars.size() == 6);
         for (size_t a = 0;
              a < 6 && a < wire.restAvars.size() && a < wire.defaultAvars.size();
@@ -1507,6 +1827,29 @@ _BinaryCompareDomainPose(const rigExec::RigExecBakedProgramImpl &program,
         _BinaryCompareInput(live.rotationOrder, wire.rotationOrder, file);
     }
     CHECK(program.ladderVarying == pose.ladderVarying);
+    CHECK(program.providerFrameInputs.size() == pose.providerFrameInputs.size());
+    for (size_t i = 0; i < program.providerFrameInputs.size() && i < pose.providerFrameInputs.size(); ++i) {
+        const auto &live = program.providerFrameInputs[i]; const auto &wire = pose.providerFrameInputs[i];
+        CHECK(live.value == wire.value && live.slot == wire.slot && live.base == wire.base && live.version == wire.version);
+        CHECK(live.reader.GetString() == _BinaryText(file, wire.reader));
+    }
+    CHECK(program.providerRefreshes.size() == pose.providerRefreshes.size());
+    for (size_t i = 0; i < program.providerRefreshes.size() && i < pose.providerRefreshes.size(); ++i) {
+        const auto &live = program.providerRefreshes[i]; const auto &wire = pose.providerRefreshes[i];
+        CHECK(live.key == wire.key && live.reader.GetString() == _BinaryText(file, wire.reader));
+        CHECK(live.slot == wire.slot && live.checkpoint == wire.checkpoint);
+        CHECK(live.baseValue == wire.baseValue && live.currentValue == wire.currentValue);
+        CHECK(live.baseRead == wire.baseRead && live.finRead == wire.finRead && live.baseWrite == wire.baseWrite && live.finWrite == wire.finWrite);
+        CHECK(live.carries.size() == wire.carries.size());
+        for (size_t k = 0; k < live.carries.size() && k < wire.carries.size(); ++k) {
+            const auto &a = live.carries[k]; const auto &b = wire.carries[k];
+            CHECK(a.slot == b.slot && a.baseRead == b.baseRead && a.finRead == b.finRead && a.baseWrite == b.baseWrite && a.finWrite == b.finWrite);
+            _BinaryCheckEqual(a.blockingSlots, b.blockingSlots);
+        }
+        CHECK(live.priorConstraints.size() == wire.priorConstraints.size());
+        for (size_t k = 0; k < live.priorConstraints.size() && k < wire.priorConstraints.size(); ++k)
+            CHECK(live.priorConstraints[k].first == wire.priorConstraints[k].first && live.priorConstraints[k].second == wire.priorConstraints[k].second);
+    }
     _BinaryCheckEqual(program.ladderOverrides, pose.ladderOverrides);
     _BinaryCompareFlags(program.restChainVaries, pose.restChainVaries);
     CHECK(program.poseInterpolators.size() == pose.poseInterpolators.size());
@@ -1589,6 +1932,13 @@ _BinaryCompareDomainPose(const rigExec::RigExecBakedProgramImpl &program,
         CHECK(live.poleOk == wire.poleOk);
         CHECK(live.diagnostics == wire.diagnostics);
         CHECK(live.poleDiagnostics == wire.poleDiagnostics);
+        CHECK(wire.rawSlots.size() == 4);
+        const char *names[] = {"inputs:sourceWeights", "inputs:translationOffsets", "inputs:rotationOffsets", "inputs:poleVectorWeights"};
+        for (size_t k = 0; k < 4 && k < wire.rawSlots.size(); ++k) {
+            const auto a = live.prim ? live.prim.GetAttribute(TfToken(names[k])) : UsdAttribute();
+            CHECK((wire.rawSlots[k] >= 0) == bool(a));
+            if (wire.rawSlots[k] >= 0 && a) CHECK(_BinarySlotName(file, uint32_t(wire.rawSlots[k])) == a.GetPath().GetString());
+        }
     }
     // The native sources, and the frame the run's prologue read for each.
     CHECK(program.nativeSources.size() == pose.nativeSources.size());
@@ -1897,6 +2247,9 @@ _BinaryCompareRevision(
           _BinaryText(file, wire.moverPrim));
     CHECK(uint8_t(live.op) == wire.op);
     _BinaryCompareBinding(live.binding, wire.binding.get(), file);
+    CHECK(live.weightField == wire.weightField);
+    _BinaryCompareLeafSites(live.leaves, wire.leafSites, file);
+    _BinaryCompareLeafSites(live.layoutLeaves, wire.layoutLeafSites, file);
     CHECK(live.blendChannels.size() == wire.blendChannels.size());
     for (size_t i = 0; i < wire.blendChannels.size() &&
                        i < live.blendChannels.size();
@@ -1933,8 +2286,8 @@ _BinaryCompareRevision(
             _BinaryComparePhase(sample.phase, wireSample.phase, file);
             CHECK(sample.blendShape.GetString() ==
                   _BinaryText(file, wireSample.blendShape));
-            // The layout the run's prologue resolved, a cache-refused one
-            // included.
+            CHECK(sample.shapeValid == wireSample.shapeValid);
+            // The layout the body normalized, including a refused layout.
             CHECK(bool(sample.layout) == wireSample.hasLayout);
             if (sample.layout) {
                 CHECK(_BinarySamePoints(sample.layout->offsets,
@@ -2118,10 +2471,21 @@ _BinaryCompareRevision(
     CHECK(uint64_t(live.partitionPointCount) == wire.partitionPointCount);
     CHECK(live.chunked == wire.chunked);
     CHECK(uint64_t(live.partitionCandidates) == wire.partitionCandidates);
-    CHECK(int64_t(live.partitionReadyMin) ==
-          int64_t(wire.partitionReadyMin));
-    CHECK(int64_t(live.partitionReadyMax) ==
-          int64_t(wire.partitionReadyMax));
+    CHECK(int64_t(live.partitionProducerMin) == int64_t(wire.partitionProducerMin));
+    CHECK(int64_t(live.partitionProducerMax) == int64_t(wire.partitionProducerMax));
+    CHECK(uint64_t(live.partitionDistinctReads) == wire.partitionDistinctReads);
+    CHECK(live.partitionProducerSets.size() == wire.partitionProducerSets.size());
+    for (size_t set = 0; set < live.partitionProducerSets.size() &&
+                         set < wire.partitionProducerSets.size(); ++set) {
+        const auto &native = live.partitionProducerSets[set];
+        const auto &stored = wire.partitionProducerSets[set].values;
+        CHECK(native.size() == stored.size());
+        for (size_t key = 0; key < native.size() && key < stored.size(); ++key) {
+            CHECK(native[key].first == uint8_t(stored[key].domain()));
+            CHECK(native[key].second == int(stored[key].begin()));
+            CHECK(stored[key].end() == stored[key].begin() + 1);
+        }
+    }
     CHECK(int64_t(live.weightObject) == int64_t(wire.weightObject));
     CHECK(live.weightOperationDomain == wire.weightOperationDomain);
     CHECK(live.weightFieldTarget.GetString() ==
@@ -2431,6 +2795,11 @@ _BinaryCompareDomainGeometry(const rigExec::RigExecRigEvaluator &evaluator,
                   _BinaryText(file, wire.derived[d].target));
             base(derived.haveBase, derived.lastBase, wire.derived[d].haveBase,
                  wire.derived[d].base);
+            const auto a = derived.baseQuery.IsValid() ? derived.baseQuery.GetAttribute() : UsdAttribute();
+            const bool rawBase = !derived.matrixTarget && _BinaryHoldsArray(a, rigExec::fb::InputTag::Vec3fArray);
+            CHECK((wire.derived[d].baseSlot >= 0) == rawBase);
+            if (wire.derived[d].baseSlot >= 0 && a)
+                CHECK(_BinarySlotName(file, uint32_t(wire.derived[d].baseSlot)) == a.GetPath().GetString());
             CHECK(wire.derived[d].revision);
             if (wire.derived[d].revision) {
                 _BinaryCompareRevision(program, derived.revision,
@@ -2465,25 +2834,17 @@ _BinaryCompareDomainGeometry(const rigExec::RigExecRigEvaluator &evaluator,
                       geometry.revisionChunkCount);
     _BinaryCheckEqual(program.chainChunkBegin, geometry.chainChunkBegin);
     _BinaryCheckEqual(program.chainChunkEnd, geometry.chainChunkEnd);
-    // The step-backed objects in the program's order, then the envelope-
-    // only ones; every entry's oracle facts.
-    CHECK(geometry.weightObjects.size() >= program.weightObjects.size());
+    // Every admitted object has one real packet producer, including roots
+    // used only by scalar/frame envelopes. Each consuming field has its own
+    // oracle-origin reads and immutable publication context.
+    CHECK(geometry.weightObjects.size() == program.weightObjects.size());
     const std::vector<char> resolved = _BinaryOracleResolved(file);
     for (size_t i = 0; i < geometry.weightObjects.size(); ++i) {
         const rigExec::fb::RigExecWireWeightObject &wire =
             geometry.weightObjects[i];
-        if (i < program.weightObjects.size()) {
-            _BinaryCompareWeightObject(program.weightObjects[i], wire, file, program.stage);
-        } else {
-            CHECK(wire.envelopeOnly);
-            const std::string path = _BinaryText(file, wire.path);
-            CHECK(wire.valuesSlot < 0 ||
-                  _BinarySlotName(file, uint32_t(wire.valuesSlot)) ==
-                      path + ".rigExec:values");
-            CHECK(wire.indicesSlot < 0 ||
-                  _BinarySlotName(file, uint32_t(wire.indicesSlot)) ==
-                      path + ".rigExec:indices");
-        }
+        CHECK(i < program.weightObjects.size());
+        if (i >= program.weightObjects.size()) continue;
+        _BinaryCompareWeightObject(program.weightObjects[i], wire, file, program.stage);
         if (_binaryStats) {
             _binaryStats->arrayPainted += (wire.valuesSlot >= 0 ? 1 : 0) +
                                           (wire.indicesSlot >= 0 ? 1 : 0);
@@ -2491,6 +2852,76 @@ _BinaryCompareDomainGeometry(const rigExec::RigExecRigEvaluator &evaluator,
         _BinaryCompareOracleFacts(evaluator, wire, file.bakeTime,
                                   i < resolved.size() && resolved[i] != 0,
                                   file);
+    }
+    CHECK(geometry.weightFields.size() == program.weightFields.size());
+    for (size_t f = 0; f < geometry.weightFields.size() && f < program.weightFields.size(); ++f) {
+        const auto &live = program.weightFields[f];
+        const auto &wire = geometry.weightFields[f];
+        CHECK(uint8_t(live.form) == uint8_t(wire.form));
+        CHECK(live.object == wire.object && live.consumer == wire.consumer && live.part == wire.part);
+        CHECK(uint8_t(live.placementPhase) == uint8_t(wire.placementPhase));
+        _BinaryCheckEqual(live.volumes, wire.volumes);
+        _BinaryCheckEqual(live.availableChains, wire.availableChains);
+        _BinaryCheckEqual(live.scalarObjects, wire.scalarObjects);
+        CHECK(live.scalarMembers.size() == wire.scalarMembers.size());
+        for (size_t k = 0; k < live.scalarMembers.size() && k < wire.scalarMembers.size(); ++k)
+            CHECK(live.scalarMembers[k] == int(wire.scalarMembers[k]));
+        CHECK(live.scalarReads.size() == wire.scalarReads.size());
+        for (size_t r = 0; r < live.scalarReads.size() && r < wire.scalarReads.size(); ++r) {
+            const auto &reader = live.scalarReads[r];
+            const auto &read = wire.scalarReads[r];
+            CHECK(read.tag == rigExec::fb::InputTag::Float && read.mode == rigExec::fb::ReadMode::Resolved);
+            CHECK(read.overrideIndex == -1 && read.selected == -1 && read.flags == 0 && read.sampleTime == 0);
+            CHECK(r < live.scalarMembers.size());
+            const int member = r < live.scalarMembers.size() ? live.scalarMembers[r] : -1;
+            // The independent weight oracle's authored fallback contract.
+            const float fallback = member == 0 || member == 3 || member == 5 || member == 6 ? 0.0f : 1.0f;
+            const auto *constant = _BinaryConstant(file, read, rigExec::fb::InputTag::Float);
+            if (constant) CHECK(_BinaryConstantIs(*constant, fallback, file));
+            std::vector<std::string> walked;
+            const auto segment = [&](const auto &hops, const auto &candidates) {
+                CHECK(hops.size() == candidates.size());
+                for (size_t h = 0; h < hops.size() && h < candidates.size(); ++h) {
+                    const auto &hop = hops[h]; const auto &candidate = candidates[h];
+                    const std::string path = hop.path.GetString();
+                    if (std::find(walked.begin(), walked.end(), path) == walked.end()) walked.push_back(path);
+                    CHECK(_BinarySlotName(file, candidate.slot) == path);
+                    int kind = 0, version = -1;
+                    // The last eligible writer owns the published opinion.
+                    // Excluded own/later chains stay raw, not chain-final.
+                    for (int c : live.availableChains) {
+                        CHECK(c >= 0 && size_t(c) < program.propertyChains.size());
+                        if (c < 0 || size_t(c) >= program.propertyChains.size()) continue;
+                        const auto &chain = program.propertyChains[size_t(c)];
+                        if (chain.target == hop.path) {kind = 1; version = int(chain.versionBase + chain.revisions.size());}
+                        for (uint32_t record : chain.records) {
+                            CHECK(record < program.propertyRecords.size());
+                            if (record < program.propertyRecords.size() && program.propertyRecords[record].consumer == hop.path) {
+                                kind = 2; version = int(program.propertyRecords[record].id);
+                            }
+                        }
+                    }
+                    CHECK(candidate.kind == kind && candidate.version == version);
+                    CHECK(candidate.raw == (hop.leaf >= 0));
+                    CHECK(candidate.poseWeight == hop.poseWeight && candidate.crossDomain == -1);
+                }
+            };
+            segment(reader.walk.hops, read.propertyCandidates);
+            segment(reader.walk.doubleHops, read.doubleCandidates);
+            CHECK(walked.size() == read.walk.size());
+            for (size_t h = 0; h < walked.size() && h < read.walk.size(); ++h)
+                CHECK(walked[h] == _BinarySlotName(file, read.walk[h]));
+            if (reader.rawLeaf >= 0) {
+                CHECK(read.rawFallbackSlot >= 0);
+                if (read.rawFallbackSlot >= 0) CHECK(_BinarySlotName(file, uint32_t(read.rawFallbackSlot)) == program.headLeaves[size_t(reader.rawLeaf)].path.GetString());
+            } else CHECK(read.rawFallbackSlot == -1);
+        }
+        CHECK(live.pointReads.size() == wire.pointReads.size());
+        for (size_t p = 0; p < live.pointReads.size() && p < wire.pointReads.size(); ++p) {
+            CHECK(live.pointReads[p].object == wire.pointReads[p].object && live.pointReads[p].leaf == wire.pointReads[p].leaf);
+            CHECK(wire.pointReads[p].binding);
+            if (wire.pointReads[p].binding) _BinaryComparePointsBinding(live.pointReads[p].binding, *wire.pointReads[p].binding, file);
+        }
     }
     CHECK(program.falloffLuts.size() == geometry.falloffPaths.size());
     CHECK(program.falloffLuts.size() == geometry.falloffLuts.size());
@@ -3026,6 +3457,12 @@ _BinaryForEachRead(const _BinaryFile &file,
             one(ladder.restSpace);
             one(ladder.defaultSpace);
             one(ladder.posedSpace);
+            one(ladder.parentSpace);
+            one(ladder.parentDefaultSpace);
+            one(ladder.avarDefaultSpace);
+            one(ladder.posedDefaultSpace);
+            one(ladder.rotationSign);
+            one(ladder.interveningSpace);
             for (const auto &read : ladder.restAvars) {
                 visit(read);
             }
@@ -3069,6 +3506,8 @@ _BinaryForEachRead(const _BinaryFile &file,
     if (file.geometry) {
         const auto revision = [&](const rigExec::fb::RigExecWireRevision &r) {
             one(r.defaultWeight);
+            if (includeHeadMemo) for (const auto *sites : {&r.leafSites, &r.layoutLeafSites})
+                for (const auto &site : *sites) { one(site.read); one(site.bodyWalk); }
             for (const auto &channel : r.blendChannels) {
                 one(channel.weightRead);
                 for (const auto &sample : channel.samples) {
@@ -3100,6 +3539,8 @@ _BinaryForEachRead(const _BinaryFile &file,
         for (const auto &row : file.geometry->pathReads) {
             one(row.read);
         }
+        for (const auto &field : file.geometry->weightFields)
+            for (const auto &read : field.scalarReads) visit(read);
     }
     for (const auto &chain : file.propertyChains) {
         for (const auto &r : chain.revisions) {
@@ -3113,7 +3554,22 @@ _BinaryForEachRead(const _BinaryFile &file,
         for (const auto &read : mover.inputs) {
             visit(read);
         }
+        if (includeHeadMemo) for (const auto &site : mover.declaredInputs) { one(site.read); one(site.bodyWalk); }
     }
+    if (includeHeadMemo && file.providerProgram) {
+        for (const auto &leaf : file.providerProgram->sampled) one(leaf.interveningRead);
+        for (const auto &leaf : file.providerProgram->externalInputs) one(leaf.interveningRead);
+    }
+}
+
+bool
+_BinarySameRead(const _BinaryRead &a, const _BinaryRead &b)
+{
+    return a.tag == b.tag && a.mode == b.mode && a.flags == b.flags &&
+        a.overrideIndex == b.overrideIndex && a.constant == b.constant &&
+        a.walk == b.walk && a.selected == b.selected &&
+        a.propertyCandidates == b.propertyCandidates && a.doubleCandidates == b.doubleCandidates &&
+        a.rawFallbackSlot == b.rawFallbackSlot && a.sampleTime == b.sampleTime;
 }
 
 /// Every override number the program registered lies on exactly one Baked
@@ -3146,6 +3602,14 @@ _BinaryCheckOverrides(const rigExec::RigExecBakedProgramImpl &program,
         once += held[n] == 1 ? 1 : 0;
     }
     CHECK(once == count);
+    // Memo copies retain the complete owning route. They are not additional
+    // registrations and cannot substitute another version or time policy.
+    _BinaryForEachRead(file, [&](const _BinaryRead &read) {
+        if (read.overrideIndex < 0) return;
+        CHECK(size_t(read.overrideIndex) < count);
+        if (size_t(read.overrideIndex) < count && holder[size_t(read.overrideIndex)])
+            CHECK(_BinarySameRead(read, *holder[size_t(read.overrideIndex)]));
+    });
     for (const auto &entry : program.overridableInputs) {
         const std::string path = entry.first.GetString();
         for (const int number : entry.second) {
@@ -3167,56 +3631,151 @@ _BinaryCheckOverrides(const rigExec::RigExecBakedProgramImpl &program,
     }
 }
 
-/// The array slots a site reads at the evaluation time: every hop of a
-/// live array row or a blend sample's points read, every chain base,
-/// layout array and oracle point input. The others are read at Default.
-std::set<uint32_t>
-_BinaryLiveArraySlots(const _BinaryFile &file)
+struct _BinaryArrayOwner {
+    rigExec::fb::InputTag tag = rigExec::fb::InputTag::FloatArray;
+    bool atTime = false;
+    std::set<std::string> owners;
+};
+
+// Build this inventory from the native epoch and source attributes, never
+// from the serialized array/live table being judged. Multiple sites may
+// share storage; a current reader wins over Default readers. Public upstream
+// admission then supplies the evaluator's explicit physical-slot policy.
+std::map<std::string, _BinaryArrayOwner>
+_BinaryArrayOwners(const rigExec::RigExecRigEvaluator &evaluator,
+                    const rigExec::RigExecBakedProgramImpl &program,
+                    const _BinaryFile &file)
 {
-    std::set<uint32_t> live;
-    if (!file.geometry) {
-        return live;
+    using Tag = rigExec::fb::InputTag;
+    std::map<std::string, _BinaryArrayOwner> owners;
+    std::map<std::string, uint32_t> slots;
+    for (size_t s = 0; s < file.inputs.size(); ++s) {
+        CHECK(slots.emplace(_BinarySlotName(file, uint32_t(s)), uint32_t(s)).second);
     }
-    const auto walk = [&](const _BinaryRead *read) {
-        if (read && rigExec::RigExecFormatIsArrayTag(read->tag)) {
-            live.insert(read->walk.begin(), read->walk.end());
+    const auto add = [&](const SdfPath &path, bool atTime, const std::string &owner,
+                         bool required = true) {
+        const auto attribute = program.stage->GetAttributeAtPath(path);
+        if (!attribute || !attribute.GetTypeName().IsArray()) return;
+        bool known = false;
+        Tag tag = Tag::FloatArray;
+        for (Tag candidate : {Tag::IntArray, Tag::FloatArray, Tag::DoubleArray,
+                              Tag::Vec2fArray, Tag::Vec3fArray, Tag::Vec3dArray,
+                              Tag::Matrix4dArray, Tag::TokenArray, Tag::BoolArray}) {
+            if (_BinaryHoldsArray(attribute, candidate)) { tag = candidate; known = true; break; }
         }
+        CHECK(known);
+        if (!known) return;
+        auto [it, inserted] = owners.emplace(path.GetString(), _BinaryArrayOwner{});
+        if (!inserted) CHECK(it->second.tag == tag);
+        it->second.tag = tag;
+        it->second.atTime = it->second.atTime || atTime;
+        it->second.owners.insert(owner);
+        const auto found = slots.find(path.GetString());
+        if (required) CHECK(found != slots.end());
+        if (found != slots.end()) CHECK(file.inputs[found->second].type() == tag);
     };
-    const auto field = [&](int32_t slot) {
-        if (slot >= 0) {
-            live.insert(uint32_t(slot));
-        }
-    };
-    for (const auto &row : file.geometry->pathReads) {
-        if (!row.rest) {
-            walk(row.read.get());
-        }
-    }
-    const auto revision = [&](const rigExec::fb::RigExecWireRevision &r) {
-        field(r.jointIndicesSlot);
-        field(r.jointWeightsSlot);
-        for (const auto &channel : r.blendChannels) {
-            for (const auto &sample : channel.samples) {
-                walk(sample.pointsRead.get());
+    const auto keys = [&](const rigExec::RigExecBakedPathLeaves &leaves,
+                          const std::string &owner) {
+        for (const auto &key : leaves.decl.keys) {
+            if (!rigExec::RigExecFormatIsArrayTag(_BinaryLeafTag(key, program))) continue;
+            std::set<SdfPath> visited;
+            auto a = program.stage->GetAttributeAtPath(key.path);
+            while (a && visited.insert(a.GetPath()).second) {
+                add(a.GetPath(), key.time == rigExec::RigExecRevisionLeafTime::AtTime, owner);
+                if (key.flavour != rigExec::RigExecRevisionLeafFlavour::Resolved &&
+                    key.flavour != rigExec::RigExecRevisionLeafFlavour::ResolvedOnly) break;
+                SdfPathVector targets;
+                a.GetConnections(&targets);
+                a = targets.size() == 1 ? program.stage->GetAttributeAtPath(targets.front()) : UsdAttribute();
             }
         }
     };
-    for (const auto &chain : file.geometry->chains) {
-        field(chain.baseSlot);
-        for (const auto &r : chain.revisions) {
-            revision(r);
+    for (size_t c = 0; c < program.chains.size(); ++c) {
+        const auto &chain = program.chains[c];
+        VtVec3fArray points;
+        if (chain.baseQuery.IsValid() && chain.baseQuery.Get(&points, UsdTimeCode(file.bakeTime)))
+            add(chain.baseQuery.GetAttribute().GetPath(), true, "chain base");
+        for (const auto &revision : chain.revisions) {
+            keys(revision.leaves, "revision " + revision.moverPath.GetString());
+            keys(revision.layoutLeaves, "skin layout " + revision.moverPath.GetString());
         }
-        for (const auto &d : chain.derived) {
-            if (d.revision) {
-                revision(*d.revision);
+        for (const auto &derived : chain.derived) {
+            keys(derived.revision.leaves, "derived " + derived.target.GetString());
+            keys(derived.revision.layoutLeaves, "derived layout " + derived.target.GetString());
+            if (!derived.matrixTarget && derived.baseQuery.IsValid())
+                add(derived.baseQuery.GetAttribute().GetPath(), true, "derived base");
+        }
+    }
+    std::set<uint32_t> oracleRefs;
+    for (const auto &step : program.steps) for (uint32_t id : step.bindingLeaves) {
+        if (id < program.leafRefs.size()) continue;
+        const size_t index = size_t(id) - program.leafRefs.size();
+        CHECK(index < program.pathLeafRefs.size());
+        if (index < program.pathLeafRefs.size() && program.pathLeafRefs[index].owner == rigExec::RigExecBakedPathLeafOwner::WeightOracle)
+            oracleRefs.insert(uint32_t(index));
+    }
+    for (uint32_t index : oracleRefs) {
+        const auto &ref = program.pathLeafRefs[index];
+        const auto *leaves = rigExec::RigExecBakedPathLeavesOf(program, ref);
+        CHECK(leaves && ref.key < leaves->decl.keys.size());
+        if (leaves && ref.key < leaves->decl.keys.size()) {
+            const auto &key = leaves->decl.keys[ref.key];
+            add(key.path, key.time == rigExec::RigExecRevisionLeafTime::AtTime, "oracle raw declaration");
+        }
+    }
+    std::set<int> oracleObjects;
+    for (const auto &field : program.weightFields)
+        oracleObjects.insert(field.objects.begin(), field.objects.end());
+    for (size_t index = 0; index < program.weightObjects.size(); ++index) {
+        const auto &object = program.weightObjects[index];
+        keys(object.pointLeaves, "packet points " + object.path.GetString());
+        for (const char *name : {"rigExec:values", "rigExec:indices"})
+            add(object.path.AppendProperty(TfToken(name)), false, "painted " + object.path.GetString());
+        // The reference oracle canonicalizes singleton prim targets to .points.
+        const auto &facts = object.oracleFacts;
+        const auto prim = program.stage->GetPrimAtPath(object.path);
+        if (oracleObjects.count(int(index)) && facts.phaseError.empty() &&
+            (object.type == "RigExecSphereWeight" || object.type == "RigExecPlaneWeight" || object.type == "RigExecCurveWeight")) {
+            for (const char *name : {"rigExec:sampleSource", "rigExec:weightTarget", "rigExec:curve"}) {
+                if (std::string(name) == "rigExec:curve" && object.type != "RigExecCurveWeight") continue;
+                if (std::string(name) != "rigExec:curve" && facts.samplesInFlight) continue;
+                SdfPathVector targets;
+                if (prim) {
+                    const auto relation = prim.GetRelationship(TfToken(name));
+                    if (relation) relation.GetTargets(&targets);
+                }
+                if (targets.size() == 1) {
+                    const auto p = rigExec::evaluatorDetail::_ResolveGeometryInput(program.stage, targets.front());
+                    if (_BinaryHoldsArray(program.stage->GetAttributeAtPath(p), Tag::Vec3fArray))
+                        add(p, true, "oracle relationship " + object.path.GetString());
+                }
             }
         }
     }
-    for (const auto &w : file.geometry->weightObjects) {
-        field(w.oracleSamplesSlot);
-        field(w.oracleCurveSlot);
+    for (const auto &arrays : program.constraintArrays) {
+        if (!arrays.prim) continue;
+        for (const char *name : {"inputs:sourceWeights", "inputs:translationOffsets", "inputs:rotationOffsets", "inputs:poleVectorWeights"})
+            add(arrays.prim.GetPath().AppendProperty(TfToken(name)), true, "constraint raw arrays");
     }
-    return live;
+    for (const auto &leaf : program.providerProgram.sampled) add(leaf.attribute, true, "provider raw leaf");
+    for (const auto &read : program.crossDomainReads) {
+        if (read.rawLeaf >= 0) add(program.headLeaves[size_t(read.rawLeaf)].path, true, "cross-domain raw fallback");
+    }
+    for (const auto &step : program.steps) {
+        for (uint32_t id : step.leaves) {
+            CHECK(id < program.headLeaves.size());
+            if (id >= program.headLeaves.size()) continue;
+            const auto &leaf = program.headLeaves[id];
+            if (leaf.typeMatches && leaf.type != rigExec::RigExecBakedHeadValueType::Vec2fArray)
+                add(leaf.path, true, "raw op memo");
+        }
+    }
+    for (const auto &row : rigExec::RigExecBakedUpstreamAdmissibleArrays(evaluator)) {
+        add(row.path, row.time != rigExec::RigExecUpstreamArrayRow::Time::AtDefault, "public upstream array");
+        const auto found = owners.find(row.path.GetString());
+        if (found != owners.end()) found->second.atTime = row.time != rigExec::RigExecUpstreamArrayRow::Time::AtDefault;
+    }
+    return owners;
 }
 
 /// Every slot is listed, typed as its attribute, flagged as its attribute
@@ -3225,13 +3784,16 @@ _BinaryLiveArraySlots(const _BinaryFile &file)
 /// holds its attribute's array at the bake time where a site reads it at
 /// the time, else at Default, an empty one where the Get fails.
 void
-_BinaryCheckDefaults(const UsdStageRefPtr &stage, const _BinaryFile &file)
+_BinaryCheckDefaults(const rigExec::RigExecRigEvaluator &evaluator,
+                      const rigExec::RigExecBakedProgramImpl &program,
+                      const _BinaryFile &file)
 {
     using Tag = rigExec::fb::InputTag;
     using Flags = rigExec::fb::InputSlotFlags;
     const UsdTimeCode time(file.bakeTime);
     CHECK(file.listedInputs <= file.inputs.size());
-    const std::set<uint32_t> live = _BinaryLiveArraySlots(file);
+    const auto owners = _BinaryArrayOwners(evaluator, program, file);
+    const auto &stage = program.stage;
     for (size_t s = 0; s < file.inputs.size(); ++s) {
         const rigExec::fb::InputSlot &slot = file.inputs[s];
         const std::string name = _BinaryText(file, slot.name());
@@ -3252,10 +3814,14 @@ _BinaryCheckDefaults(const UsdStageRefPtr &stage, const _BinaryFile &file)
         bool has = false, same = false;
         if (rigExec::RigExecFormatIsArrayTag(slot.type())) {
             CHECK(_BinaryHoldsArray(a, slot.type()));
+            const auto owner = owners.find(name);
+            if (owner == owners.end()) std::printf("  array input has no native owner: %s\n", name.c_str());
+            CHECK(owner != owners.end());
+            if (owner != owners.end()) CHECK(owner->second.tag == slot.type() && !owner->second.owners.empty());
             std::string want, got;
             has = _BinaryStageArray(
                 a, slot.type(),
-                live.count(uint32_t(s)) ? time : UsdTimeCode::Default(),
+                owner != owners.end() && owner->second.atTime ? time : UsdTimeCode::Default(),
                 &want);
             same = _BinaryArrayBytes(file, value, &got) && got == want;
             if (_binaryStats) {
@@ -3333,6 +3899,15 @@ _BinaryCheckDefaults(const UsdStageRefPtr &stage, const _BinaryFile &file)
                         : *value.vec3f == rigExec::RigExecWireVec3f{});
             break;
         }
+        case Tag::Vec3i: {
+            GfVec3i v(0);
+            CHECK(type == TfType::Find<GfVec3i>());
+            has = a.Get(&v, time);
+            same = value.vec3i && (has
+                ? v[0] == (*value.vec3i)[0] && v[1] == (*value.vec3i)[1] && v[2] == (*value.vec3i)[2]
+                : *value.vec3i == rigExec::RigExecWireVec3i{});
+            break;
+        }
         default:
             break;
         }
@@ -3401,10 +3976,63 @@ _BinaryCompareProgram(rigExec::RigExecRigEvaluator &evaluator,
         _BinaryCompareDomainGeometry(evaluator, program, *file.geometry,
                                      file);
     }
+    CHECK(file.providerProgram);
+    if (file.providerProgram) {
+        CHECK(program.providerProgram.sampled.size() == file.providerProgram->sampled.size());
+        for (size_t i = 0; i < program.providerProgram.sampled.size() && i < file.providerProgram->sampled.size(); ++i) {
+            const auto &live = program.providerProgram.sampled[i];
+            const auto &wire = file.providerProgram->sampled[i];
+            CHECK(live.attribute.GetString() == wire.path && wire.computation.empty() && live.value == wire.value);
+            const auto a = program.stage->GetAttributeAtPath(live.attribute);
+            CHECK((wire.inputSlot >= 0) == bool(a));
+            if (wire.inputSlot >= 0 && a) CHECK(_BinarySlotName(file, uint32_t(wire.inputSlot)) == a.GetPath().GetString());
+        }
+    }
+    CHECK(program.crossDomainReads.size() == file.crossDomainReads.size());
+    for (size_t i = 0; i < program.crossDomainReads.size() && i < file.crossDomainReads.size(); ++i) {
+        const auto &live = program.crossDomainReads[i]; const auto &wire = file.crossDomainReads[i];
+        CHECK(uint8_t(live.kind) == uint8_t(wire.kind));
+        CHECK(live.consumer.GetString() == _BinaryText(file, wire.consumer));
+        CHECK(live.source.GetString() == _BinaryText(file, wire.source));
+        CHECK(live.reader.GetString() == _BinaryText(file, wire.reader));
+        _BinaryComparePhase(live.phase, wire.phase, file);
+        CHECK(live.element == wire.element && live.provider == wire.provider && live.spaceValue == wire.spaceValue);
+        CHECK(live.propertyChain == wire.propertyChain && live.propertyVersion == wire.propertyVersion);
+        CHECK(live.baseFrame == wire.baseFrame && live.finalPoints == wire.finalPoints && live.unavailable == wire.unavailable);
+        _BinaryCheckEqual(live.frames, wire.frames);
+        CHECK(live.points.size() == wire.points.size());
+        for (size_t p = 0; p < live.points.size() && p < wire.points.size(); ++p)
+            CHECK(live.points[p].chain == wire.points[p].first && live.points[p].version == wire.points[p].second);
+        CHECK((wire.rawSlot >= 0) == (live.rawLeaf >= 0));
+        if (live.rawLeaf >= 0 && wire.rawSlot >= 0)
+            CHECK(_BinarySlotName(file, uint32_t(wire.rawSlot)) == program.headLeaves[size_t(live.rawLeaf)].path.GetString());
+    }
+    if (file.geometry) for (const auto &external : file.externalMovers) {
+        CHECK(external.chain < program.chains.size() && external.chain < file.geometry->chains.size());
+        if (external.chain >= program.chains.size() || external.chain >= file.geometry->chains.size()) continue;
+        const auto &chain = program.chains[external.chain]; const auto &wireChain = file.geometry->chains[external.chain];
+        CHECK(external.revision < chain.revisions.size() && external.revision < wireChain.revisions.size());
+        if (external.revision >= chain.revisions.size() || external.revision >= wireChain.revisions.size()) continue;
+        const auto &native = chain.revisions[external.revision]; const auto &revision = wireChain.revisions[external.revision];
+        CHECK(external.declaredInputs.size() == native.binding.externalInputs.size());
+        const int begin = native.leaves.decl.externalBegin;
+        CHECK(begin >= 0);
+        if (begin < 0) continue;
+        for (size_t i = 0; i < external.declaredInputs.size(); ++i) {
+            CHECK(size_t(begin) + i < revision.leafSites.size());
+            if (size_t(begin) + i >= revision.leafSites.size()) continue;
+            const auto &a = external.declaredInputs[i]; const auto &b = revision.leafSites[size_t(begin) + i];
+            CHECK(a.path == b.path && a.time == b.time && a.flavour == b.flavour && a.fallbackHasValue == b.fallbackHasValue);
+            CHECK(a.exactVersion == b.exactVersion && a.exactRecord == b.exactRecord && a.exactValueType == b.exactValueType && a.allowFloatToDouble == b.allowFloatToDouble);
+            CHECK(a.read && b.read); if (a.read && b.read) CHECK(_BinarySameRead(*a.read, *b.read));
+            CHECK(bool(a.bodyWalk) == bool(b.bodyWalk));
+            if (a.bodyWalk && b.bodyWalk) CHECK(_BinarySameRead(*a.bodyWalk, *b.bodyWalk));
+        }
+    }
     _BinaryComparePathReads(program, file, fixture);
     _BinaryComparePropertyChains(evaluator, program, file);
     _BinaryCheckOverrides(program, file);
-    _BinaryCheckDefaults(program.stage, file);
+    _BinaryCheckDefaults(evaluator, program, file);
     _binaryStats = nullptr;
     _binaryProgram = nullptr;
     return opened;

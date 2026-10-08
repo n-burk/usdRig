@@ -2,6 +2,7 @@
 
 #include "rigEvaluatorInternal.h"
 #include "rigEvaluatorPropertyBindings.h"
+#include "inputReplay.h"
 #include "movers/moverRegistry.h"
 
 #include "pxr/usd/usd/attribute.h"
@@ -333,11 +334,9 @@ RigExecRigEvaluator::_ClearValueCachesWholesale(bool avarValuesOnly)
     // Dropped as answers and kept as candidates (see the caches' Clear), so
     // a re-read that finds the same arrays keeps the same pointer.
     _skinTopologies.Clear();
+    _skinTopologyObservationPending = true;
     _blendSampleShapes.Clear();
     _skinLayoutInputsValid = false;
-    for (auto &[target, live] : _liveGraphs) {
-        if (live) live->basePointsPushed = false;
-    }
 }
 
 void
@@ -421,7 +420,7 @@ RigExecRigEvaluator::_ClearValueCaches(const UsdNotice::ObjectsChanged &notice,
     // stage as the notice left it: a layout attribute itself is a member
     // whatever its connections say, and a connection edit is a notice on the
     // member that carries it.
-    if (_skinLayoutInputsValid || _skinTopologies.GetSize() > 0) {
+    if (_skinLayoutInputsValid || GetSkinTopologyCacheSize() > 0) {
         if (!_skinLayoutInputsValid) {
             _ResolveSkinLayoutInputs();
         }
@@ -439,6 +438,7 @@ RigExecRigEvaluator::_ClearValueCaches(const UsdNotice::ObjectsChanged &notice,
         }
         if (hit) {
             _skinTopologies.Clear();
+            _skinTopologyObservationPending = true;
             _skinLayoutInputsValid = false;
         }
     }
@@ -476,19 +476,14 @@ RigExecRigEvaluator::_ClearValueCaches(const UsdNotice::ObjectsChanged &notice,
             }
         }
     }
-    // The base points a live graph pushed and will not re-read while they
-    // cannot vary: re-read once the notice reaches that target's points.
-    for (auto &[target, live] : _liveGraphs) {
-        if (live && live->basePointsPushed && reach.Reaches(target)) {
-            live->basePointsPushed = false;
-        }
-    }
+
 }
 
 void
 RigExecRigEvaluator::SetInteractiveOverrides(
     std::vector<RigExecValueOverride> overrides)
 {
+    if (_inputReplayObserver) _inputReplayObserver->Interactive(overrides);
     if (_scopedClearShadow) {
         _scopedClearShadow->SetInteractiveOverrides(overrides);
     }
@@ -550,6 +545,7 @@ RigExecRigEvaluator::SetInteractiveOverrides(
     // the re-read and not the deformation.
     if (touchesLayout) {
         _skinTopologies.Clear();
+        _skinTopologyObservationPending = true;
     }
     // The same rule for the blend sample shapes, which are the other cache a
     // drag must not pay to rebuild: see _OverridesReachBlendShapes.
@@ -566,6 +562,7 @@ RigExecRigEvaluator::SetInteractiveOverrides(
 void
 RigExecRigEvaluator::ClearInteractiveOverrides()
 {
+    if (_inputReplayObserver) _inputReplayObserver->ClearInteractive();
     if (_scopedClearShadow) {
         _scopedClearShadow->ClearInteractiveOverrides();
     }
@@ -581,6 +578,7 @@ RigExecRigEvaluator::ClearInteractiveOverrides()
     // there is nothing of the drag's in it to forget.
     if (touchesLayout) {
         _skinTopologies.Clear();
+        _skinTopologyObservationPending = true;
     }
     // The same rule for the blend sample shapes, which are the other cache a
     // drag must not pay to rebuild: see _OverridesReachBlendShapes.
@@ -623,6 +621,7 @@ void
 RigExecRigEvaluator::SetUpstreamInputs(
     std::vector<RigExecValueOverride> inputs)
 {
+    if (_inputReplayObserver) _inputReplayObserver->Upstream(inputs);
     if (_scopedClearShadow) {
         _scopedClearShadow->SetUpstreamInputs(inputs);
     }
@@ -740,14 +739,9 @@ RigExecRigEvaluator::_SetUpstreamAdmitted(
     for (const RigExecValueOverride &o : _upstreamAdmitted) {
         _upstreamValues[o.prim.AppendProperty(o.attribute)] = o.value;
     }
-    for (const RigExecValueOverride &o : moved) {
-        const auto live = _liveGraphs.find(o.prim.AppendProperty(o.attribute));
-        if (live != _liveGraphs.end() && live->second) {
-            live->second->basePointsPushed = false;
-        }
-    }
     if (_OverridesReachSkinLayout(moved)) {
         _skinTopologies.Clear();
+        _skinTopologyObservationPending = true;
     }
     if (_OverridesReachBlendShapes(moved)) {
         _blendSampleShapes.Clear();

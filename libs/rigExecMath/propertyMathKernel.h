@@ -105,7 +105,8 @@ RigExecEvaluateHermiteKeysKernel(const Key *keys, const Key *tangents,
     if (x <= keys[0][0]) {
         return keys[0][1] + (x - keys[0][0]) * tangents[0][0];
     }
-    if (x >= keys[last][0]) {
+    // A singleton has no interior segment, including unordered x.
+    if (keyCount == 1 || x >= keys[last][0]) {
         return keys[last][1] + (x - keys[last][0]) * tangents[last][1];
     }
     size_t hi = 1;

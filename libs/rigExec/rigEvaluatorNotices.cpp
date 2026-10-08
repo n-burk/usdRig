@@ -1,6 +1,7 @@
 // USD notice classification and epoch invalidation.
 
 #include "rigEvaluatorInternal.h"
+#include "projectorCaptureNotice.h"
 #include "rigEvaluatorPropertyBindings.h"
 #include "rigEvaluatorDependencies.h"
 #include "rigEvaluatorConstraints.h"
@@ -611,6 +612,14 @@ RigExecRigEvaluator::_OnObjectsChanged(
     // writes because of its type, a relationship whose targets it writes, a
     // connection inside a pose-input closure. When one of them has changed,
     // the digest has moved, and the settle compiles without computing it.
+    // Rebuild the immutable raw Default meshWorldInverse capture, not
+    // unrelated sampled provider xforms. The new compile also rechecks the
+    // static-transform admission when time samples are added or removed.
+    bool projectorCaptureChanged=false;
+    for(const auto &entry:_graphDerivedChains)for(const auto &revision:entry.second)
+        if((revision.op==RigExecRevisionOp::SurfaceProjector || revision.op==RigExecRevisionOp::ShaderDials) &&
+           RigExecProjectorMeshCaptureAffected(notice,revision.binding.base))projectorCaptureChanged=true;
+    if(projectorCaptureChanged) { _compiled=false; _structureDirty=true; }
     const bool avarValuesOnly = _NoticeIsAvarValuesOnly(notice);
     // ... unless the avar the notice names is one a property chain READS.
     //
@@ -709,7 +718,7 @@ RigExecRigEvaluator::_OnObjectsChanged(
             // otherwise answer for a stage that has since changed.
             _bakeRefused = false;
             _bakeRefusalReasons.clear();
-            _bakeBail = _BakeBailMemo();
+
         } else {
             // The other half of the same index, and the reason the program
             // may skip work at all. A notice that misses the index and that
@@ -726,86 +735,7 @@ RigExecRigEvaluator::_OnObjectsChanged(
         _lastNoticeDisposition = RigExecNoticeDisposition::None;
         _lastNoticePatchedPaths.clear();
     }
-    // rigExec:baked is a VALUE on the rig root, so the epoch digest is blind
-    // to it and _SettleEpoch will not recompile for it: this is the only
-    // place a flip can be seen. Nothing is BUILT here -- never evaluate in a
-    // notice callback -- and nothing needs to be. Dropping the program is
-    // the whole of true -> false, and false -> true is built by the lazy
-    // build in Evaluate, which is the same path SetEvaluationMode leaves
-    // behind when it is asked on an epoch that has not settled.
-    if (_NoticeNamesTheBakedAttribute(notice) &&
-        _RefreshAttributeEvaluationMode() && !_ModeRunsProgram()) {
-        _bakedProgram.reset();
-        _bakedProgramPublished = false;
-        _lastGenerationRanProgram = false;
-        _bakedProgramStale = false;
-    }
-    // The seed, connected, and guide requests read authored values straight
-    // off the stage; an edit that leaves the override tuple unchanged (a
-    // rest attribute, a weight, a goal transform) still changes what they
-    // compute. Any stage edit therefore retires their cached snapshots, the
-    // same way it retires the affected solver batches below.
-    // Retire means CLEAR, not just flagging: the seed and batch caches
-    // are time-keyed LRUs, and the dirty flag only forces the FIRST
-    // post-edit call to recompute. Once it clears, the other times would
-    // hit pre-edit entries whose override tuple still matches -- the edit
-    // changed the stage beneath an identical key.
-    _firstFramePoseDirty = true;
-    _firstFramePoseCache.Clear();
-    _authSnapshotDirty = true;
-    _authSnapTimeKeyed.clear();
-    _guideDirty = true;
-    _connectedPoseCache.clear();
-    for (auto &[target, derived] : _derivedCache) {
-        derived.cached = false;
-    }
-    const auto dirty = [this](const std::set<size_t> &batches) {
-        for (size_t index : batches) {
-            _SolverBatch &batch = _solverBatches[index];
-            batch.dirty = true;
-            // Beside the flag: the per-batch cache is a time-keyed LRU,
-            // and the flag alone only forces the first post-edit call to
-            // recompute -- the other times would hit pre-edit entries.
-            batch.cache.Clear();
-            // And the request it evaluates in, when that is shared: the
-            // merged entries for other times hold this solver's pre-edit
-            // answer too. (The walk vetoes the request's own lookup while
-            // any member is dirty, so the flag needs no copy there.)
-            _solverBatches[batch.leader].requestCache.Clear();
-        }
-    };
-    if (_solverInputIndexAbsent) {
-        // A deferred epoch has no index to route through until its first
-        // dynamic generation builds one, so every batch is taken to have
-        // been reached. Nothing is lost by it: no batch has computed, and so
-        // cached, anything before that same generation.
-        for (_SolverBatch &batch : _solverBatches) {
-            batch.dirty = true;
-            batch.cache.Clear();
-            batch.requestCache.Clear();
-        }
-        return;
-    }
-    for (const SdfPath &property : notice.GetChangedInfoOnlyPaths()) {
-        const auto input = _solverInputBatches.find(property.GetPrimPath());
-        if (input != _solverInputBatches.end()) {
-            dirty(input->second);
-        }
-    }
-    const auto dirtySubtree = [this, &dirty](const SdfPath &path) {
-        const SdfPath primPath = path.GetPrimPath();
-        for (auto input = _solverInputBatches.lower_bound(primPath);
-             input != _solverInputBatches.end() &&
-             input->first.HasPrefix(primPath); ++input) {
-            dirty(input->second);
-        }
-    };
-    for (const SdfPath &path : notice.GetResyncedPaths()) {
-        dirtySubtree(path);
-    }
-    for (const SdfPath &path : notice.GetResolvedAssetPathsResyncedPaths()) {
-        dirtySubtree(path);
-    }
+
 }
 
 } // namespace rigExec

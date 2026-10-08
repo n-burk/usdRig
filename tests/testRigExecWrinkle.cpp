@@ -94,8 +94,8 @@ std::string LayerText(const SdfLayerHandle &layer) {
 
 Points Published(const RigExecRigPose &pose) {
     CHECK(pose.valid);
-    CHECK(pose.bakedParityMismatches == 0);
-    CHECK(pose.moverGraphParityMismatches == 0);
+    CHECK(pose.comparisonMismatches == 0);
+    CHECK(pose.referenceMismatches == 0);
     CHECK(pose.movedProperties.count(kTarget) == 1);
     const auto &value = pose.movedProperties.at(kTarget).Get<VtVec3fArray>();
     return {value.begin(), value.end()};
@@ -203,26 +203,23 @@ void TestEvaluationAndInvalidation(const Grid &grid) {
     const auto rootBefore = LayerText(stage->GetRootLayer());
     const auto sessionBefore = LayerText(stage->GetSessionLayer());
     RigExecRigEvaluator evaluator(stage, kRig);
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::BakedWithParityCheck);
     Compile(evaluator);
     std::vector<std::string> diagnostics;
     CHECK(evaluator.IsBakeable(&diagnostics));
     auto evaluate = [&]() { return Published(evaluator.Evaluate(UsdTimeCode::Default())); };
     CHECK(Near(evaluate(), full));
-    CHECK(evaluator.GetBakedGenerationCount() > 0);
+    CHECK(evaluator.GetBakedProgram() != nullptr);
     CHECK(Near(evaluate(), full));
     CHECK(LayerText(stage->GetRootLayer()) == rootBefore);
     CHECK(LayerText(stage->GetSessionLayer()) == sessionBefore);
 
-    for (const auto mode : {RigExecEvaluationMode::Dynamic,
-                            RigExecEvaluationMode::ExecReference}) {
+    {
         RigExecRigEvaluator reference(stage, kRig);
-        reference.SetEvaluationMode(mode);
-        reference.cpuParityMode = true;
+        reference.cpuReference = true;
         Compile(reference);
         const auto pose = reference.Evaluate(UsdTimeCode::Default());
         CHECK(Near(Published(pose), full));
-        CHECK(pose.moverGraphParityAgreements > 0);
+        CHECK(pose.referenceAgreements > 0);
     }
 
     wrinkle.SetDefaultWeight(0.5f);
@@ -315,7 +312,6 @@ void TestEvaluationAndInvalidation(const Grid &grid) {
     CHECK(layer->ImportFromString(text));
     const auto reopened = UsdStage::Open(layer);
     RigExecRigEvaluator reloaded(reopened, kRig);
-    reloaded.SetEvaluationMode(RigExecEvaluationMode::BakedWithParityCheck);
     Compile(reloaded);
     CHECK(Near(Published(reloaded.Evaluate(UsdTimeCode::Default())), revised));
 
@@ -423,7 +419,6 @@ void TestAnimatedBinary(const Grid &grid) {
     sample("inputs:enabled", true, 1); sample("inputs:enabled", false, 4);
     sample("inputs:enabled", true, 5);
     RigExecRigEvaluator evaluator(stage, kRig);
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::BakedWithParityCheck);
     Compile(evaluator);
     CheckBinaryParity(evaluator, stage, {1, 2, 3, 4, 5});
 
@@ -476,7 +471,6 @@ void TestUpstreamCompression(const Grid &grid, const char *binaryPath) {
     // Add order is reverse application order; the empty rest uses authored points.
     chain.AddMatrixMover("Compress", control.GetPath());
     RigExecRigEvaluator evaluator(stage, kRig);
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::BakedWithParityCheck);
     Compile(evaluator);
     RigExecBakeOpts options;
     options.time = 1;
@@ -554,11 +548,9 @@ void TestUpstreamCompression(const Grid &grid, const char *binaryPath) {
     CHECK(maxOffsetStep < 0.01);
     const auto rootBefore = LayerText(stage->GetRootLayer());
     const auto sessionBefore = LayerText(stage->GetSessionLayer());
-    for (const auto mode : {RigExecEvaluationMode::Dynamic,
-                            RigExecEvaluationMode::ExecReference}) {
+    {
         RigExecRigEvaluator reference(stage, kRig);
-        reference.SetEvaluationMode(mode);
-        reference.cpuParityMode = true;
+        reference.cpuReference = true;
         Compile(reference);
         const auto order = PlaybackOrder(frames.size());
         // Start at a compressed subframe without evaluating preceding poses.

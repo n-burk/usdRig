@@ -1,21 +1,8 @@
-// Independent geometry chains are walked one task per chain, which is only
-// worth doing if the rig cannot tell. Three things have to hold, and each is
-// asserted here against the same rig:
-//  - the same numbers. A chain's points must come out bit for bit as they do
-//    when the whole walk is serial -- not close, identical -- whether the
-//    walk is spread over the machine, pinned to one thread, or taken down the
-//    serial branch entirely by the kill switch (ctest runs this suite a
-//    second time with RIGEXEC_ENABLE_PARALLEL_EVAL=0).
-//  - the same order. Diagnostics are merged in chain order, not completion
-//    order, so a rig that reports two failures reports them in the same
-//    sequence on every run. A mutex around the diagnostics vector would make
-//    the walk safe and still fail this.
-//  - the same classification. A level is spread out only when Compile said
-//    it may be: too few chains to pay for the dispatch, a weight object two
-//    chains share, or a phased read one of them makes, and the level is
-//    walked in order like it always was.
+// Common producer graph tests: independent geometry branches, exact serial/parallel
+// values, stable held results and causal phased reads.
 #include "rigExec/parallel.h"
 #include "rigExec/rigEvaluator.h"
+#include "rigExecGraphDependencyCheck.h"
 
 #include "pxr/base/plug/registry.h"
 #include "pxr/base/tf/stringUtils.h"
@@ -138,14 +125,20 @@ MakeMultiMeshRig(size_t meshCount)
 }
 
 bool
-CompileOrReport(RigExecRigEvaluator *evaluator, const char *what)
+CompileOrReport(RigExecRigEvaluator *evaluator, const char *what,
+                RigExecRigPose *firstPose=nullptr)
 {
     std::vector<std::string> errors;
     if (evaluator->Compile(&errors)) {
-        return true;
+        auto pose=evaluator->Evaluate(UsdTimeCode::Default());
+        if(pose.valid && evaluator->GetBakedProgram()) {
+            if(firstPose)*firstPose=std::move(pose);
+            return true;
+        }
+        errors.insert(errors.end(),pose.diagnostics.begin(),pose.diagnostics.end());
     }
     ++failures;
-    std::printf("FAIL: %s did not compile\n", what);
+    std::printf("FAIL: %s has no executable compiled program\n", what);
     for (const std::string &error : errors) {
         std::printf("  %s\n", error.c_str());
     }
@@ -235,28 +228,24 @@ CheckExpectedDeformation(const RigExecRigPose &pose, size_t mesh,
     }
 }
 
-// Six independent chains are one level, and that level is the one the walk
-// may spread out.
+// Independent chain outputs have no causal paths between them.
 void
-TestIndependentChainsAreOneParallelLevel()
+TestIndependentChainsHaveNoCausalEdges()
 {
     UsdStageRefPtr stage = MakeMultiMeshRig(6);
     RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
     if (!CompileOrReport(&evaluator, "six independent meshes")) {
         return;
     }
-    CHECK(evaluator.GetChainLevelCount() == 1);
-    CHECK(evaluator.IsChainLevelParallel(0));
-    // Out of range is not parallel, and does not crash.
-    CHECK(!evaluator.IsChainLevelParallel(1));
-    CHECK(evaluator.GetChainLevelTargets(1).empty());
-
-    const std::vector<SdfPath> targets = evaluator.GetChainLevelTargets(0);
-    CHECK(targets.size() == 6);
-    for (size_t mesh = 0; mesh < targets.size() && mesh < 6; ++mesh) {
-        // Chain order is the compiled order, which for independent chains is
-        // path order -- Mesh_0 .. Mesh_5.
-        CHECK(targets[mesh] == TargetPath(mesh));
+    const auto graph=evaluator.GetOpGraph();
+    std::vector<size_t> outputs;
+    for(size_t mesh=0;mesh<6;++mesh) {
+        const auto id=rigExecTest::FindOperation(graph,TargetPath(mesh),"ChainStatus");
+        CHECK(id<graph.size());outputs.push_back(id);
+    }
+    for(size_t a=0;a<outputs.size();++a)for(size_t b=a+1;b<outputs.size();++b) {
+        CHECK(!rigExecTest::HasDependencyPath(graph,outputs[a],outputs[b]));
+        CHECK(!rigExecTest::HasDependencyPath(graph,outputs[b],outputs[a]));
     }
 }
 
@@ -271,7 +260,7 @@ TestSerialAndParallelWalksAgreeExactly()
     if (!CompileOrReport(&parallel, "six independent meshes")) {
         return;
     }
-    CHECK(parallel.IsChainLevelParallel(0));
+    CHECK(!parallel.GetOpGraph().empty());
     const RigExecRigPose spread = parallel.Evaluate(UsdTimeCode::Default());
     CHECK(spread.valid);
 
@@ -280,8 +269,7 @@ TestSerialAndParallelWalksAgreeExactly()
     if (!CompileOrReport(&serial, "two independent meshes")) {
         return;
     }
-    CHECK(serial.GetChainLevelCount() == 1);
-    CHECK(!serial.IsChainLevelParallel(0));
+    CHECK(!serial.GetOpGraph().empty());
     const RigExecRigPose inOrder = serial.Evaluate(UsdTimeCode::Default());
     CHECK(inOrder.valid);
 
@@ -353,17 +341,17 @@ TestRepeatedWalksAreIdentical()
     // parallel walk -- an insertion into a map a sibling task is reading --
     // is probabilistic per generation, and one generation is about the
     // smallest window this rig can offer it. The deterministic half of the
-    // same invariant is TestTheParallelWalkCreatesNoGraphNode below; this is
+    // same invariant is TestHeldExecutionKeepsCompiledGraph below; this is
     // the half that catches the ones an invariant cannot name.
-    const size_t graphNodes = evaluator.GetLiveGraphCount();
+    const size_t graphNodes = evaluator.GetOpGraph().size();
     for (int run = 0; run < 60; ++run) {
         const RigExecRigPose again = evaluator.Evaluate(UsdTimeCode::Default());
         CHECK(again.valid);
         CHECK(again.diagnostics == first.diagnostics);
         CHECK(again.movedProperties.size() == first.movedProperties.size());
-        CHECK(again.moverGraphRevisionsExecuted ==
-              first.moverGraphRevisionsExecuted);
-        CHECK(evaluator.GetLiveGraphCount() == graphNodes);
+        CHECK(again.executedOpCount ==
+              first.executedOpCount);
+        CHECK(evaluator.GetOpGraph().size() == graphNodes);
         for (size_t mesh = 0; mesh < 6; ++mesh) {
             if (!Identical(MovedPoints(again, mesh), MovedPoints(first, mesh),
                            "repeated walk")) {
@@ -373,29 +361,24 @@ TestRepeatedWalksAreIdentical()
     }
 }
 
-// The invariant that makes the parallel walk memory-safe, asserted instead
-// of hoped for.
-// Chains in one level run concurrently and each indexes _liveGraphs by its
-// own target; Compile pre-creates every node so that indexing is a lookup
-// and never an insertion. Delete the pre-creation and the walk inserts into
-// a std::map that sibling tasks are reading -- which crashes in a quarter of
-// runs and passes in the rest, so a single pass of the suite is not evidence.
-// The node count not moving across a parallel generation is evidence.
+// Held runs use the same compiled graph and retain valid published outputs.
 void
-TestTheParallelWalkCreatesNoGraphNode()
+TestHeldExecutionKeepsCompiledGraph()
 {
     UsdStageRefPtr stage = MakeMultiMeshRig(6);
     RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
     if (!CompileOrReport(&evaluator, "six independent meshes")) {
         return;
     }
-    CHECK(evaluator.IsChainLevelParallel(0));
-    // One per chain target, created at Compile and before any Evaluate.
-    const size_t nodes = evaluator.GetLiveGraphCount();
+    CHECK(!evaluator.GetOpGraph().empty());
+    // The full graph is compiled before any Evaluate.
+    const size_t nodes = evaluator.GetOpGraph().size();
     CHECK(nodes >= 6);
     for (int run = 0; run < 8; ++run) {
-        CHECK(evaluator.Evaluate(UsdTimeCode::Default()).valid);
-        CHECK(evaluator.GetLiveGraphCount() == nodes);
+        const auto pose=evaluator.Evaluate(UsdTimeCode::Default());
+        CHECK(pose.valid);
+        if(run>0)CHECK(pose.executedOpCount==0);
+        CHECK(evaluator.GetOpGraph().size() == nodes);
     }
 }
 
@@ -407,19 +390,22 @@ TestOneThreadAndManyAgree()
 {
     UsdStageRefPtr stage = MakeMultiMeshRig(6);
     RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
-    if (!CompileOrReport(&evaluator, "six independent meshes")) {
+    RigExecRigPose many;
+    if (!CompileOrReport(&evaluator, "six independent meshes",&many)) {
         return;
     }
-    CHECK(evaluator.Evaluate(UsdTimeCode::Default()).valid);
-    const RigExecRigPose many = evaluator.Evaluate(UsdTimeCode::Default());
     CHECK(many.valid);
+    CHECK(many.executedOpCount>0);
 
     const unsigned limit = WorkGetConcurrencyLimit();
     WorkSetConcurrencyLimit(1);
-    const RigExecRigPose one = evaluator.Evaluate(UsdTimeCode::Default());
+    RigExecRigEvaluator single(stage,SdfPath("/Asset/Rig"));
+    CHECK(single.Compile());
+    const RigExecRigPose one = single.Evaluate(UsdTimeCode::Default());
     WorkSetConcurrencyLimit(limit);
 
     CHECK(one.valid);
+    CHECK(one.executedOpCount>0);
     CHECK(one.diagnostics == many.diagnostics);
     for (size_t mesh = 0; mesh < 6; ++mesh) {
         Identical(MovedPoints(one, mesh), MovedPoints(many, mesh),
@@ -427,13 +413,8 @@ TestOneThreadAndManyAgree()
     }
 }
 
-// Weight objects in a parallel level: each chain publishes its own resolved
+// Independent weight fields: each chain publishes its own resolved
 // field, and the fields are merged in chain order like everything else.
-// (A weight object BOUND BY TWO CHAINS would keep the level in order --
-// Compile checks for that -- but the schema validation reaches it first: a
-// weight object's target has to be the mover's own target, so two chains
-// cannot name one today. The classification does not rely on that staying
-// true.)
 void
 TestWeightObjectsInAParallelLevel()
 {
@@ -457,8 +438,7 @@ TestWeightObjectsInAParallelLevel()
     if (!CompileOrReport(&evaluator, "per-chain weight objects")) {
         return;
     }
-    CHECK(evaluator.GetChainLevelCount() == 1);
-    CHECK(evaluator.IsChainLevelParallel(0));
+    CHECK(!evaluator.GetOpGraph().empty());
 
     const RigExecRigPose pose = evaluator.Evaluate(UsdTimeCode::Default());
     CHECK(pose.valid);
@@ -487,11 +467,10 @@ TestWeightObjectsInAParallelLevel()
     CheckExpectedDeformation(pose, 2, "full-strength chain beside halved ones");
 }
 
-// One chain reading another at a phase is a dependency: the two cannot be in
-// the same level, and the level that holds the reader is walked in order
-// because what it would read is recorded by the walk itself.
+// A phased read depends on its selected producer and leaves unrelated
+// branches independent in the actual common graph.
 void
-TestPhasedReadSplitsAndSerializesLevels()
+TestPhasedReadHasOnlyCausalDependencies()
 {
     UsdStageRefPtr stage = MakeMultiMeshRig(6);
     // Mesh_5 is also deformed by a lattice whose cage is Mesh_0 as Mesh_0's
@@ -511,17 +490,16 @@ TestPhasedReadSplitsAndSerializesLevels()
     if (!CompileOrReport(&evaluator, "phased cage read")) {
         return;
     }
-    CHECK(evaluator.GetChainLevelCount() == 2);
-    // The five chains nothing reads are still one parallel level; the reader
-    // is what had to move out of it.
-    CHECK(evaluator.IsChainLevelParallel(0));
-    CHECK(evaluator.GetChainLevelTargets(0).size() == 5);
-    CHECK(!evaluator.IsChainLevelParallel(1));
-    // The reader is alone in the second level, after the chain it reads.
-    const std::vector<SdfPath> second = evaluator.GetChainLevelTargets(1);
-    CHECK(second.size() == 1);
-    if (second.size() == 1) {
-        CHECK(second[0] == TargetPath(5));
+    const auto graph=evaluator.GetOpGraph();
+    const size_t source=rigExecTest::FindOperation(graph,TargetPath(0),"ChainStatus");
+    const size_t consumer=rigExecTest::FindOperation(graph,SdfPath("/Asset/Rig/Movers/Lattice_5"),"RevisionStatic");
+    CHECK(source<graph.size() && consumer<graph.size());
+    CHECK(rigExecTest::HasDependencyPath(graph,source,consumer));
+    for(size_t mesh=1;mesh<5;++mesh) {
+        const size_t unrelated=rigExecTest::FindOperation(graph,TargetPath(mesh),"ChainStatus");
+        CHECK(unrelated<graph.size());
+        CHECK(!rigExecTest::HasDependencyPath(graph,unrelated,consumer));
+        CHECK(!rigExecTest::HasDependencyPath(graph,consumer,unrelated));
     }
     const RigExecRigPose pose = evaluator.Evaluate(UsdTimeCode::Default());
     CHECK(pose.valid);
@@ -545,13 +523,13 @@ main(int argc, char **argv)
 
     const int rounds = argc > 1 ? std::max(1, std::atoi(argv[1])) : 1;
     for (int round = 0; round < rounds && !failures; ++round) {
-        TestIndependentChainsAreOneParallelLevel();
+        TestIndependentChainsHaveNoCausalEdges();
         TestSerialAndParallelWalksAgreeExactly();
         TestRepeatedWalksAreIdentical();
-        TestTheParallelWalkCreatesNoGraphNode();
+        TestHeldExecutionKeepsCompiledGraph();
         TestOneThreadAndManyAgree();
         TestWeightObjectsInAParallelLevel();
-        TestPhasedReadSplitsAndSerializesLevels();
+        TestPhasedReadHasOnlyCausalDependencies();
     }
 
     if (failures) {

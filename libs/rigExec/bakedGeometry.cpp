@@ -1,3 +1,6 @@
+#include "rigExecGraph/geometryProgram.h"
+#include "rigExecGraph/blendLayout.h"
+#include "rigExec/weightField.h"
 // The baked program's geometry half: the chain/revision bake and the frame
 // path that runs those revisions and the derived maintenance behind them.
 // Split out of bakedProgram.cpp for the reason bakedPose.cpp was: a domain's
@@ -10,6 +13,7 @@
 
 #include "frameExtraction.h"
 #include "moverGraph.h"
+#include "movers/moverRegistry.h"
 #include "parallel.h"
 #include "rigEvaluator.h"
 #include "types.h"
@@ -20,6 +24,7 @@
 #include "rigExecMath/simdKernels.h"
 
 #include "pxr/base/gf/matrix4d.h"
+#include "pxr/usd/usdSkel/blendShape.h"
 #include "pxr/base/tf/diagnostic.h"
 #include "pxr/base/tf/getenv.h"
 #include "pxr/base/tf/staticTokens.h"
@@ -81,77 +86,12 @@ void
 BindPointReads(RigExecBakedProgramImpl *program)
 {
     RigExecBakedProgramImpl &B = *program;
-    std::map<SdfPath, int> chainOf;
-    for (size_t c = 0; c < B.chains.size(); ++c) {
-        chainOf.emplace(B.chains[c].target, int(c));
-    }
+    RigExecBakedCaptureCrossDomainOrder(&B);
     int nextId = 0;
-    // `before` revisions of the reader's own chain precede it, and
-    // `afterStatus` says its status step does too.
     const auto bind = [&](const SdfPath &input, const RigExecReadPhase &phase,
-                          const SdfPath &reader, size_t readerChain,
-                          size_t before, bool afterStatus) {
-        RigExecBakedPointsBinding out;
-        out.input = input;
-        out.phase = phase;
+                          const SdfPath &reader, size_t, size_t, bool) {
+        auto out = RigExecBakedBindPointInput(B,input,phase,reader);
         out.id = nextId++;
-        const auto found = chainOf.find(input);
-        if (found == chainOf.end()) {
-            return out;
-        }
-        const size_t c = size_t(found->second);
-        const std::vector<RigExecBakedProgramImpl::GeomRevision> &revisions =
-            B.chains[c].revisions;
-        const size_t recorded = c < readerChain    ? revisions.size()
-                                : c == readerChain ? before
-                                                   : 0;
-        switch (phase.kind) {
-        case RigExecReadPhaseKind::Base:
-            break;
-        case RigExecReadPhaseKind::Final:
-            if (c < readerChain || (c == readerChain && afterStatus)) {
-                out.finalRead = true;
-                out.candidates.push_back({int(c), int(revisions.size())});
-            }
-            break;
-        case RigExecReadPhaseKind::Preceding: {
-            if (c == readerChain && !afterStatus) {
-                // The reader's own chain: the points entering it, version
-                // `before`. A first revision reads the resolved input, as
-                // the walk does.
-                if (before > 0) {
-                    out.candidates.push_back({int(c), int(before)});
-                }
-                break;
-            }
-            // Another chain the reader writes: the record before the
-            // reader's own, among the records made so far; none when the
-            // reader's own is not among them yet.
-            int previous = -1;
-            for (size_t r = 0; r < recorded; ++r) {
-                if (!revisions[r].snapshotAfter) {
-                    continue;
-                }
-                if (revisions[r].moverPath == reader) {
-                    if (previous >= 0) {
-                        out.candidates.push_back({int(c), previous + 1});
-                    }
-                    break;
-                }
-                previous = int(r);
-            }
-            break;
-        }
-        case RigExecReadPhaseKind::AtPrim:
-            for (size_t r = recorded; r-- > 0;) {
-                const SdfPath &mover = revisions[r].moverPath;
-                if (revisions[r].snapshotAfter &&
-                    (mover == phase.prim || mover.HasPrefix(phase.prim))) {
-                    out.candidates.push_back({int(c), int(r) + 1});
-                }
-            }
-            break;
-        }
         return out;
     };
     const auto bindRevision =
@@ -240,6 +180,10 @@ RigExecBakedBuildGeometry(RigExecBakedBuildContext *ctx,
         // reaches the next generation through the re-read rather than
         // through a rebuild of this program.
         B.prims.insert(r.moverPath);
+        for (const SdfPath &structural : r.binding.externalStructure) {
+            if (structural.IsPropertyPath()) B.named.insert(structural);
+            B.prims.insert(structural.GetPrimPath());
+        }
         B.resolvedRoutedPrims.insert(r.moverPath);
         for (const char *name : {"rigExec:jointIndices", "rigExec:jointWeights",
                                  "rigExec:elementSize",
@@ -341,6 +285,13 @@ RigExecBakedBuildGeometry(RigExecBakedBuildContext *ctx,
                     sample.pointsPath = binding.points;
                     sample.phase = binding.phase;
                     sample.blendShape = binding.blendShape;
+                    if (!sample.blendShape.IsEmpty()) {
+                        const UsdSkelBlendShape shape(B.stage->GetPrimAtPath(sample.blendShape.GetPrimPath()));
+                        sample.shapeValid = bool(shape);
+                        sample.layoutRefused = shape &&
+                            (shape.GetOffsetsAttr().HasAuthoredConnections() ||
+                             shape.GetPointIndicesAttr().HasAuthoredConnections());
+                    }
                     if (binding.blendShape.IsEmpty()) {
                         name(binding.points);
                         sample.points =
@@ -390,7 +341,10 @@ RigExecBakedBuildGeometry(RigExecBakedBuildContext *ctx,
             B.prims.insert(r.binding.driverFrames);
             const auto solver = B.solverIndex.find(r.binding.driverFrames);
             if (solver == B.solverIndex.end()) {
-                refuse("driver frames solver was not baked",
+                // Compile admitted this revision against its aggregate
+                // batch. A miss here is a lowering correspondence failure,
+                // not the optional-driver admission policy.
+                refuse("admitted driver frames solver is absent from the native table",
                        r.binding.driverFrames);
             } else {
                 out.driverFramesSolver = solver->second;
@@ -431,20 +385,6 @@ RigExecBakedBuildGeometry(RigExecBakedBuildContext *ctx,
         RigExecRevisionLeafDecl &decl = out.leaves.decl;
         RigExecDeclareRevisionLeaves(out.op, out.moverPath, out.binding,
                                      &decl);
-        // A plugin mover is handed every provider value; the prologue holds
-        // them only for one that binds none the region computes (no phase,
-        // weight object, transform, carry, influence, driver frames,
-        // constraint delta or blend channel). Any other keeps its plugin
-        // call in RevisionStatic, through the stage assembler.
-        if (out.op == RigExecRevisionOp::External &&
-            !(out.binding.phases.empty() && out.weightObject < 0 &&
-              out.binding.transform.IsEmpty() &&
-              out.binding.carrySpace.IsEmpty() &&
-              out.binding.influences.empty() &&
-              out.binding.driverFrames.IsEmpty() &&
-              out.constraintDelta < 0 && out.blendChannels.empty())) {
-            decl = RigExecRevisionLeafDecl();
-        }
         if (decl.assembles) {
             using Type = RigExecRevisionLeafType;
             using Flavour = RigExecRevisionLeafFlavour;
@@ -469,9 +409,30 @@ RigExecBakedBuildGeometry(RigExecBakedBuildContext *ctx,
                             decl.Add({sample.pointsPath, Type::Vec3fArray, at,
                                       Flavour::ResolvedOnly,
                                       VtValue(VtVec3fArray())});
+                    } else {
+                        // Sparse layouts are sampled at Default in the prologue;
+                        // their exact source arrays must also reach readiness.
+                        const SdfPath shape = sample.blendShape.GetPrimPath();
+                        sample.offsetsLeaf = decl.Add({shape.AppendProperty(TfToken("offsets")),
+                                  Type::Vec3fArray, RigExecRevisionLeafTime::AtDefault,
+                                  Flavour::Raw, VtValue(VtVec3fArray())});
+                        sample.indicesLeaf = decl.Add({shape.AppendProperty(TfToken("pointIndices")),
+                                  Type::IntArray, RigExecRevisionLeafTime::AtDefault,
+                                  Flavour::Raw, VtValue(VtIntArray())});
                     }
                 }
             }
+        }
+        out.kernelRecord.op=out.op;
+        out.kernelRecord.binding=out.binding;
+        out.kernelRecord.leaves=decl;
+        // Detached lowering consumes the already captured scene facts. USD
+        // handles above remain confined to the native sampling adapter.
+        if(B.sceneDescriptors) {
+            std::string error;
+            if(!RigExecLowerSceneGeometry(*B.sceneDescriptors,out.moverPath,out.target,
+                    &out.sceneGeometry,&error,&out.kernelRecord))
+                refuse(error,out.moverPath);
         }
         return out;
     };
@@ -543,81 +504,27 @@ RigExecBakedBuildGeometry(RigExecBakedBuildContext *ctx,
 
 namespace {
 
-/// The level at which every provider's matrix is final, indexed by slot:
-/// [1] the rest -> final matrices, [0] the rest -> base ones. A slot no
-/// ProviderMatrix step writes stays at -1, which reads as "not scheduled"
-/// rather than "ready at level 0".
-struct ProviderLevels {
-    std::vector<int> byPhase[2];
-    int maxLevel = 0;
+// Natural chunk producer identities are independent of any scheduling order.
+using SkinProducerSet = std::vector<std::pair<uint8_t, int>>;
 
-    int Of(int slot, bool finalPhase) const
-    {
-        const std::vector<int> &levels = byPhase[finalPhase ? 1 : 0];
-        return slot >= 0 && size_t(slot) < levels.size()
-                   ? levels[size_t(slot)]
-                   : -1;
-    }
-};
-
-ProviderLevels
-GatherProviderLevels(const RigExecBakedProgramImpl &B)
+SkinProducerSet
+ChunkProducers(const RigExecBakedProgramImpl::GeomRevision &revision,
+               const RigExecBakedProgramImpl::GeomChunk &chunk, bool chunked)
 {
-    ProviderLevels levels;
-    levels.byPhase[0].assign(B.paths.size(), -1);
-    levels.byPhase[1].assign(B.paths.size(), -1);
-    for (const RigExecBakedStep &step : B.steps) {
-        levels.maxLevel = std::max(levels.maxLevel, step.level);
-        if (step.kind != RigExecBakedStepKind::ProviderMatrix) {
-            continue;
-        }
-        // part 1 is the final-phase matrix, part 0 the base one; object is
-        // the provider slot.
-        if (step.object >= 0 && size_t(step.object) < B.paths.size() &&
-            (step.part == 0 || step.part == 1)) {
-            levels.byPhase[size_t(step.part)][size_t(step.object)] =
-                step.level;
-        }
+    SkinProducerSet producers;
+    const uint8_t domain = uint8_t(RigExecBakedOwnMatrixDomain(revision));
+    const size_t count = chunked ? chunk.key.size() : revision.influenceSlots.size();
+    for (size_t k = 0; k < count; ++k) {
+        const size_t position = chunked ? size_t(chunk.key[k]) : k;
+        if (position < revision.influenceSlots.size() &&
+            revision.influenceSlots[position] >= 0)
+            producers.emplace_back(domain, revision.influenceSlots[position]);
     }
-    return levels;
+    std::sort(producers.begin(), producers.end());
+    producers.erase(std::unique(producers.begin(), producers.end()), producers.end());
+    return producers;
 }
 
-/// The level at which chunk \p k of \p revision has every joint it reads.
-///
-/// The one number the cut is decided on, and the one the report prints, so
-/// that the decision and the record of it cannot drift apart. An
-/// unpartitioned revision is one chunk over every influence, which is the
-/// degenerate case of the same maximum.
-int
-ChunkReadyLevel(const RigExecBakedProgramImpl::GeomRevision &revision,
-                const RigExecBakedProgramImpl::GeomChunk &chunk,
-                bool chunked, const ProviderLevels &levels)
-{
-    const size_t influences = revision.influenceSlots.size();
-    const size_t keySize = chunked ? chunk.key.size() : influences;
-    int ready = 0;
-    for (size_t e = 0; e < keySize; ++e) {
-        const size_t position = chunked ? size_t(chunk.key[e]) : e;
-        if (position >= influences) {
-            continue;
-        }
-        ready = std::max(
-            ready,
-            levels.Of(revision.influenceSlots[position],
-                      revision.finalPhase));
-    }
-    return ready;
-}
-
-/// Whether a skin revision is cut whatever its chunks' ready levels say.
-///
-/// RIGEXEC_BAKED_CHUNK_ALWAYS=1. The escape hatch for the rules' own
-/// fixtures: the chunked path has to be exercised on a real rig, and the
-/// rigs that bake today all pose every joint of a mesh at the same level, so
-/// with the rule ON nothing would cut and every assertion about a chunk would
-/// pass vacuously. Read on each call rather than cached in a static, so one
-/// process can build a program both ways -- which is exactly what the
-/// decision test does.
 bool
 ChunkAlways()
 {
@@ -839,17 +746,7 @@ DeclarePointVersionRead(const RigExecBakedProgramImpl &B,
                         RigExecBakedPointVersion version,
                         std::vector<RigExecBakedSlotRange> *reads)
 {
-    if (version.version == 0) {
-        reads->push_back(RigExecBakedOne(RigExecBakedSlotDomain::ChainBase,
-                                         version.chain));
-        return;
-    }
-    const int revision =
-        B.chainRevisionBegin[size_t(version.chain)] + version.version - 1;
-    reads->push_back(
-        RigExecBakedOne(RigExecBakedSlotDomain::RevisionDone, revision));
-    reads->push_back(
-        RigExecBakedOne(RigExecBakedSlotDomain::ChainDirty, revision));
+    RigExecBakedDeclarePointVersion(B,version.chain,version.version,reads);
 }
 
 /// Declares what \p binding can read: each candidate version, or the
@@ -860,14 +757,7 @@ DeclarePointBindingReads(const RigExecBakedProgramImpl &B,
                          const RigExecBakedPointsBinding &binding,
                          std::vector<RigExecBakedSlotRange> *reads)
 {
-    for (const RigExecBakedPointVersion &candidate : binding.candidates) {
-        if (binding.finalRead) {
-            reads->push_back(RigExecBakedOne(
-                RigExecBakedSlotDomain::ChainPoints, candidate.chain));
-        } else {
-            DeclarePointVersionRead(B, candidate, reads);
-        }
-    }
+    RigExecBakedDeclarePointInput(B,binding,reads);
 }
 
 /// The frame records an AtPrim transform phase of \p revision can read,
@@ -923,14 +813,16 @@ namespace {
 /// -- is one chunk over the whole array, which is the degenerate case of the
 /// same step.
 void
-PartitionAtBuild(const RigExecBakedProgramImpl &B, const ProviderLevels &levels,
+PartitionAtBuild(const RigExecBakedProgramImpl &B,
                  RigExecBakedProgramImpl::GeomRevision *revision)
 {
     revision->chunks.assign(1, RigExecBakedProgramImpl::GeomChunk());
     revision->chunked = false;
     revision->partitionCandidates = 0;
-    revision->partitionReadyMin = 0;
-    revision->partitionReadyMax = 0;
+    revision->partitionProducerMin = 0;
+    revision->partitionProducerMax = 0;
+    revision->partitionDistinctReads = 0;
+    revision->partitionProducerSets.clear();
     if (revision->op != RigExecRevisionOp::Skin ||
         !revision->skinTopologyFixed || !revision->moverPrim) {
         return;
@@ -957,33 +849,23 @@ PartitionAtBuild(const RigExecBakedProgramImpl &B, const ProviderLevels &levels,
     RigExecBakedPartitionRevision(B, revision, indices, elementSize);
     revision->partitionCandidates = revision->chunks.size();
 
-    // Whether the cut pays, which is a question about LEVELS and not about
-    // vertex counts.
-    // A chunk body is a serial loop over its range; an uncut revision is one
-    // call to RigExecApplySkinKernel over the whole array, and that kernel
-    // spreads itself over the arena. So cutting a revision into seven ranges
-    // that all become runnable at the same level does not overlap anything
-    // -- it replaces one data-parallel call with seven serial ones, measured
-    // at 47us serial and 92us parallel of the biped's frame. What the cut is
-    // FOR is the range whose own joints land early: it may start while the
-    // rest of the rig is still being posed, and that is only possible when
-    // the candidate ranges become ready at different levels.
-    // Equivalently, and this is how the rule reads in §6: the whole revision
-    // is ready when its LAST joint is, which is the maximum below, so a
-    // range readier than that maximum is exactly a range that can start
-    // earlier than the revision could.
-    int readyMin = -1, readyMax = -1;
-    for (const RigExecBakedProgramImpl::GeomChunk &chunk : revision->chunks) {
-        const int ready = ChunkReadyLevel(*revision, chunk,
-                                          /*chunked=*/true, levels);
-        readyMin = readyMin < 0 ? ready : std::min(readyMin, ready);
-        readyMax = std::max(readyMax, ready);
+    // The vertex target and cap bound the work per operation. Distinct exact
+    // producer sets let the common graph release independent ranges; no pose
+    // scheduling information is needed to make the cut.
+    std::set<SkinProducerSet> distinct;
+    int producerMin = -1, producerMax = 0;
+    for (const auto &chunk : revision->chunks) {
+        auto producers = ChunkProducers(*revision, chunk, revision->chunked);
+        const int count = int(producers.size());
+        producerMin = producerMin < 0 ? count : std::min(producerMin, count);
+        producerMax = std::max(producerMax, count);
+        distinct.insert(producers);
+        revision->partitionProducerSets.push_back(std::move(producers));
     }
-    revision->partitionReadyMin = readyMin < 0 ? 0 : readyMin;
-    revision->partitionReadyMax = readyMax < 0 ? 0 : readyMax;
-    if (revision->chunked && revision->partitionReadyMin >=
-                                 revision->partitionReadyMax &&
-        !ChunkAlways()) {
+    revision->partitionProducerMin = std::max(0, producerMin);
+    revision->partitionProducerMax = producerMax;
+    revision->partitionDistinctReads = distinct.size();
+    if (revision->chunked && distinct.size() < 2 && !ChunkAlways()) {
         // Back to the degenerate cut, which is the shape every other
         // operation already has: one range over the whole array, no keys and
         // no per-chunk tables, so the fuse's whole-array path runs the
@@ -1057,30 +939,23 @@ void
 RigExecBakedBuildGeometrySteps(RigExecBakedProgramImpl *program)
 {
     RigExecBakedProgramImpl &B = *program;
-    // The pose half's levels, swept in Build before this function is called.
-    // Every ProviderMatrix step exists and carries its final level, because a
-    // geometry step never precedes a pose step -- so the partition can ask
-    // when a chunk's joints land without the geometry steps being in the
-    // graph yet.
-    const ProviderLevels levels = GatherProviderLevels(B);
-    B.chainRevisionBegin.assign(B.chains.size(), 0);
-    B.chainRevisionEnd.assign(B.chains.size(), 0);
     B.chainChunkBegin.assign(B.chains.size(), 0);
     B.chainChunkEnd.assign(B.chains.size(), 0);
     int nextChunk = 0;
     for (size_t c = 0; c < B.chains.size(); ++c) {
         RigExecBakedProgramImpl::GeomChain &chain = B.chains[c];
+        RigExecBakedStep &input = AddGeometryStep(&B,RigExecBakedStepKind::ChainInputs,int(c));
+        input.maxDiagnostics = 0;
+        input.reads.push_back(RigExecBakedOne(RigExecBakedSlotDomain::ChainInput,int(c)));
+        input.writes.push_back(RigExecBakedOne(RigExecBakedSlotDomain::ChainBase,int(c)));
         // Revision ids are handed out chain by chain, so one chain's
         // revisions are a contiguous RANGE: point version v of the chain is
         // revision first + v - 1's, and the status sweep reads the whole
         // chain as one declared range. The chunk ids inside them are
         // contiguous for the same reason and at the same grain.
-        B.chainRevisionBegin[c] = int(B.revisionIndex.size());
+        // Build preindexed every revision before WeightField capture;
+        // all readers and operations consume those same immutable ids.
         B.chainChunkBegin[c] = nextChunk;
-        for (size_t r = 0; r < chain.revisions.size(); ++r) {
-            B.revisionIndex.emplace_back(int(c), int(r));
-        }
-        B.chainRevisionEnd[c] = int(B.revisionIndex.size());
         const int first = B.chainRevisionBegin[c];
         const int last = B.chainRevisionEnd[c];
         B.revisionFuseStep.resize(size_t(last), -1);
@@ -1106,7 +981,7 @@ RigExecBakedBuildGeometrySteps(RigExecBakedProgramImpl *program)
             // in exactly where the assembler's would have landed.
             revision.packetInfluences.assign(revision.influenceSlots.size(),
                                              GfMatrix4d(1.0));
-            PartitionAtBuild(B, levels, &revision);
+            PartitionAtBuild(B, &revision);
             revision.chunkBase = nextChunk;
             nextChunk += int(revision.chunks.size());
             B.revisionChunkBase.push_back(revision.chunkBase);
@@ -1120,6 +995,9 @@ RigExecBakedBuildGeometrySteps(RigExecBakedProgramImpl *program)
             const auto addFold = [&] {
                 RigExecBakedStep &fold = AddGeometryStep(
                     &B, RigExecBakedStepKind::InfluenceFold, id);
+                // The body gates folding on this chain's current base availability.
+                fold.reads.push_back(RigExecBakedOne(
+                    RigExecBakedSlotDomain::ChainBase, int(c)));
                 DeclareMatrixReads(revision, &fold);
                 // The delta a geometry-domain constraint measured for this
                 // mover IS this revision's transform, so the fold waits for
@@ -1139,6 +1017,12 @@ RigExecBakedBuildGeometrySteps(RigExecBakedProgramImpl *program)
                 fold.writes.push_back(RigExecBakedOne(
                     RigExecBakedSlotDomain::RevisionTransforms, id));
             };
+            if (revision.weightField >= 0) {
+                RigExecBakedStep &field = AddGeometryStep(
+                    &B,RigExecBakedStepKind::WeightField,revision.weightField);
+                field.maxDiagnostics = 0;
+                RigExecBakedDeclareWeightField(&B,&field);
+            }
             const auto addStatic = [&] {
                 RigExecBakedStep &assemble = AddGeometryStep(
                     &B, RigExecBakedStepKind::RevisionStatic, id);
@@ -1157,18 +1041,10 @@ RigExecBakedBuildGeometrySteps(RigExecBakedProgramImpl *program)
                         RigExecBakedOne(RigExecBakedSlotDomain::WeightPacket,
                                         revision.weightObject));
                 }
-                if (revision.weightCurrentPhase) {
-                    // A current-phase field is measured against the points
-                    // ENTERING this revision, so the assemble reads that
-                    // version exactly as a chunk does. The oracle places
-                    // each volume of the field from the program's
-                    // volumePlacement table, so it waits for the
-                    // VolumePlacements step of each of those volumes.
-                    assemble.maxDiagnostics += 1;
-                    DeclarePlacementReads(B, revision.weightObject,
-                                          &assemble.reads);
-                    DeclarePointVersionRead(B, entering, &assemble.reads);
-                }
+                if (revision.weightField >= 0)
+                    assemble.reads.push_back(RigExecBakedOne(
+                        RigExecBakedSlotDomain::WeightField,revision.weightField));
+                if (revision.weightCurrentPhase) assemble.maxDiagnostics += 1;
                 if (revision.driverFramesSolver >= 0) {
                     assemble.reads.push_back(
                         RigExecBakedOne(RigExecBakedSlotDomain::Aggregate,
@@ -1190,12 +1066,6 @@ RigExecBakedBuildGeometrySteps(RigExecBakedProgramImpl *program)
                 DeclareRevisionPointReads(B, revision, &assemble.reads);
                 assemble.writes.push_back(RigExecBakedOne(
                     RigExecBakedSlotDomain::RevisionPacket, id));
-                // It sizes the buffer the chunks write into, which is a write
-                // to every one of their slots even though it fills none of
-                // them.
-                assemble.writes.push_back(RigExecBakedRange(
-                    RigExecBakedSlotDomain::RevisionOut, revision.chunkBase,
-                    revision.chunkBase + int(revision.chunks.size())));
             };
             if (skin) {
                 addStatic();
@@ -1274,12 +1144,6 @@ RigExecBakedBuildGeometrySteps(RigExecBakedProgramImpl *program)
                     RigExecBakedSlotDomain::RevisionDone, id));
                 fuse.writes.push_back(RigExecBakedOne(
                     RigExecBakedSlotDomain::ChainDirty, id));
-                // Only on the path where the partition no longer describes
-                // the layout: the fuse then runs the revision whole rather
-                // than let a chunk deform a vertex against an identity.
-                fuse.writes.push_back(RigExecBakedRange(
-                    RigExecBakedSlotDomain::RevisionOut, revision.chunkBase,
-                    revision.chunkBase + int(revision.chunks.size())));
                 B.revisionFuseStep[size_t(id)] = int(B.steps.size()) - 1;
             }
         }
@@ -1318,6 +1182,7 @@ RigExecBakedBuildGeometrySteps(RigExecBakedProgramImpl *program)
             // chain's.
             step.reads.push_back(
                 RigExecBakedOne(RigExecBakedSlotDomain::ChainPoints, int(c)));
+            step.reads.push_back(RigExecBakedOne(RigExecBakedSlotDomain::DerivedBase,id));
             step.reads.push_back(
                 RigExecBakedOne(RigExecBakedSlotDomain::ChainBase, int(c)));
             // A derived revision's binding carries phases like any other, so
@@ -1452,27 +1317,19 @@ FoldInfluences(const RigExecBakedProgramImpl &B,
         const size_t slot = size_t(revision->influenceSlots[index]);
         return revision->finalPhase ? B.finalMatrix[slot] : B.baseMatrix[slot];
     };
-    if (revision->haveTransform && hasReference) {
-        revision->transform = RigExecMeasureFromReference(revision->transform, referenceMatrix(0));
-    }
-    if (revision->haveTransform && revision->transformSpaceSlot >= 0) {
-        GfMatrix4d space =
-            revision->finalPhase
-                ? B.finalMatrix[size_t(revision->transformSpaceSlot)]
-                : B.baseMatrix[size_t(revision->transformSpaceSlot)];
-        // The reference refines the SPACE first, then the carry
-        // consumes it: the two are sequential, not alternatives.
-        if (hasReference && revision->influenceSlots.size() > 1) {
-            space = RigExecMeasureFromReference(space, referenceMatrix(1));
-        }
-        // rigExec:space, as read above. A POINTER, because a revision
-        // naming no carry must take the untouched branch and not one
-        // multiplied by an identity: see RigExecClusterInPointFrame.
-        const GfMatrix4d *carry =
-            revision->haveCarry ? &revision->carry : nullptr;
-        revision->transform = RigExecClusterInPointFrame(
-            RigExecMeasureInSpace(revision->transform, space), space,
-            revision->posedPoints, carry);
+    if (revision->haveTransform) {
+        GfMatrix4d space(1.0), reference(1.0), referenceSpace(1.0);
+        const bool hasSpace=revision->transformSpaceSlot>=0;
+        if(hasSpace)space=revision->finalPhase
+            ? B.finalMatrix[size_t(revision->transformSpaceSlot)]
+            : B.baseMatrix[size_t(revision->transformSpaceSlot)];
+        if(hasReference)reference=referenceMatrix(0);
+        const bool hasReferenceSpace=hasReference && revision->influenceSlots.size()>1;
+        if(hasSpace && hasReferenceSpace)referenceSpace=referenceMatrix(1);
+        revision->transform=RigExecGeometryMatrixInPointFrame(revision->transform,
+            hasSpace?&space:nullptr,hasReference?&reference:nullptr,
+            hasReferenceSpace?&referenceSpace:nullptr,revision->posedPoints,
+            revision->haveCarry?&revision->carry:nullptr);
     }
     for (size_t k = 0; k < revision->influenceSlots.size(); ++k) {
         const size_t slot = size_t(revision->influenceSlots[k]);
@@ -1636,9 +1493,10 @@ ChunkTransformsView(const RigExecBakedProgramImpl::GeomChunk &chunk,
 bool
 SkinRange(RigExecBakedProgramImpl::GeomRevision *revision,
           const GfVec3f *preceding, const RigExecSkinTransformsView &view,
-          size_t begin, size_t end, bool whole, bool useSimd)
+          size_t begin, size_t end, bool whole, bool useSimd,
+          bool staging = true)
 {
-    std::vector<GfVec3f> &out = revision->output;
+    std::vector<GfVec3f> &out = staging ? revision->stagingOutput : revision->output;
     std::copy(preceding + begin, preceding + end, out.begin() + long(begin));
     if (whole) {
         if (!RigExecApplySkinKernelWithTransforms(revision->parameters, view,
@@ -1697,13 +1555,12 @@ RigExecBakedResolvePoints(const RigExecBakedProgramImpl &B,
     for (const RigExecBakedPointVersion &candidate : binding.candidates) {
         const RigExecBakedProgramImpl::GeomChain &chain =
             B.chains[size_t(candidate.chain)];
-        if (!chain.haveBase) {
-            continue;
-        }
         if (binding.finalRead) {
+            if(!chain.haveResult)continue;
             *points = chain.result.cdata();
             *count = chain.result.size();
         } else {
+            if(!chain.haveBase)continue;
             PointsAt(chain, size_t(candidate.version), points, count);
         }
         return true;
@@ -1721,7 +1578,7 @@ RigExecBakedOverlayPointReads(RigExecBakedProgramImpl *program,
         return;
     }
     RigExecBakedProgramImpl &B = *program;
-    revision->revisionInputs = resolved;
+    revision->revisionInputs.SetChainedBase(&resolved);
     for (const RigExecBakedPointsBinding &binding : revision->pointBindings) {
         const GfVec3f *points = nullptr;
         size_t count = 0;
@@ -1818,7 +1675,14 @@ RevisionValues(RigExecBakedProgramImpl &B,
     if (revision->op != RigExecRevisionOp::Matrix &&
         revision->op != RigExecRevisionOp::Skin &&
         revision->op != RigExecRevisionOp::Wire) {
-        values.basePoints.assign(basePoints, basePoints + basePointCount);
+        if (revision->op == RigExecRevisionOp::External) {
+            // API4 currently exposes an owning vector view to plugin code.
+            if (basePointCount) values.basePoints.assign(basePoints,basePoints+basePointCount);
+        } else {
+            values.borrowsBasePoints = true;
+            values.borrowedBasePoints = basePoints;
+            values.borrowedBaseCount = basePointCount;
+        }
     }
     // The driver solver's aggregate, which is what the dynamic path's
     // per-revision tap resolves to: exec computes one and the pose walk then
@@ -1902,13 +1766,27 @@ GatherBlendChannels(RigExecBakedProgramImpl &B,
                 CapturePointRead(&B, boundSample.pointBinding, phased,
                                  phasedCount, answered);
             }
-            if (answered) {
-                sample.points.assign(phased, phased + phasedCount);
-            } else {
-                read.Points(boundSample, &sample.points);
-            }
             if (record) {
-                boundSample.lastPoints = sample.points;
+                // The consumer needs an immutable view; export retention
+                // changes only when the actual sample bytes/count changed.
+                if (answered) {
+                    const bool same = boundSample.lastPoints.size() == phasedCount &&
+                        (!phasedCount || !std::memcmp(boundSample.lastPoints.data(),
+                            phased,phasedCount*sizeof(GfVec3f)));
+                    if (!same) {
+                        if (phasedCount) boundSample.lastPoints.assign(phased,phased+phasedCount);
+                        else boundSample.lastPoints.clear();
+                    }
+                } else {
+                    read.Points(boundSample,&boundSample.lastPoints);
+                }
+                sample.borrowsPoints = true;
+                sample.borrowedPoints = boundSample.lastPoints.data();
+                sample.borrowedCount = boundSample.lastPoints.size();
+            } else if (answered) {
+                if (phasedCount) sample.points.assign(phased,phased+phasedCount);
+            } else {
+                read.Points(boundSample,&sample.points);
             }
             channel.samples.push_back(std::move(sample));
         }
@@ -1922,7 +1800,7 @@ GatherBlendChannels(RigExecBakedProgramImpl &B,
     // A structural failure leaves blendDeltas empty, which is what makes
     // the assembled packet invalid -- the same atomic MoverFailed
     // pass-through the kernel produces.
-    if (!RigExecSumBlendChannels(channels, values->basePoints,
+    if (!RigExecGeometryBlendDeltas(channels, values->BasePointData(),values->BasePointCount(),
                                  &values->blendDeltas)) {
         values->blendDeltas.clear();
     }
@@ -1956,26 +1834,36 @@ struct _StageBlendReads {
 
 // The same reads, from the revision's path leaves.
 struct _LeafBlendReads {
-    const RigExecBakedPathLeaves &leaves;
+    const std::vector<VtValue> &values;
+    template<class T> T Value(int key,const T &fallback) const {
+        return key >= 0 && size_t(key) < values.size() && values[size_t(key)].IsHolding<T>()
+            ? values[size_t(key)].UncheckedGet<T>() : fallback;
+    }
 
     bool WeightHeld(
         const RigExecBakedProgramImpl::GeomBlendChannel &bound) const {
-        return leaves.Value<bool>(bound.weightHeldLeaf, false);
+        return Value<bool>(bound.weightHeldLeaf, false);
     }
     void Weight(const RigExecBakedProgramImpl::GeomBlendChannel &bound,
                 float *out) const {
-        *out = leaves.Value<float>(bound.weightLeaf, *out);
+        *out = Value<float>(bound.weightLeaf, *out);
     }
     void Activation(
         const RigExecBakedProgramImpl::GeomBlendChannel::Sample &sample,
         float *out) const {
-        *out = leaves.Value<float>(sample.activationLeaf, *out);
+        *out = Value<float>(sample.activationLeaf, *out);
     }
     void Points(const RigExecBakedProgramImpl::GeomBlendChannel::Sample &sample,
                 std::vector<GfVec3f> *out) const {
         const VtVec3fArray points =
-            leaves.Value<VtVec3fArray>(sample.pointsLeaf, VtVec3fArray());
-        out->assign(points.begin(), points.end());
+            Value<VtVec3fArray>(sample.pointsLeaf, VtVec3fArray());
+        const bool same = out->size() == points.size() &&
+            (points.empty() || !std::memcmp(out->data(),points.cdata(),
+                                           points.size()*sizeof(GfVec3f)));
+        if (!same) {
+            if (points.empty()) out->clear();
+            else out->assign(points.cbegin(),points.cend());
+        }
     }
 };
 
@@ -1992,6 +1880,10 @@ AssembleRevisionFromStage(RigExecBakedProgramImpl &B,
 {
     RigExecProviderValues values =
         RevisionValues(B, revision, basePoints, basePointCount);
+    if (values.borrowsBasePoints) {
+        values.CopyBasePoints(&values.basePoints);
+        values.borrowsBasePoints = false;
+    }
     values.resolved = &R;
     // One overlay per REVISION: the generation-wide resolved inputs, plus
     // whatever this revision's declared phases resolve to through their
@@ -2002,6 +1894,14 @@ AssembleRevisionFromStage(RigExecBakedProgramImpl &B,
     if (!revision->binding.phases.empty()) {
         RigExecBakedOverlayPointReads(&B, revision, R, diagnostics);
         values.resolved = &revision->revisionInputs;
+    }
+    // Independent host-side reference keeps the original stage Get route;
+    // it must not reuse the production leaf-built layout handle.
+    for (auto &channel : revision->blendChannels) for (auto &sample : channel.samples) {
+        if (sample.blendShape.IsEmpty()) continue;
+        auto layout = std::make_shared<RigExecBlendSampleLayout>();
+        RigExecResolveBlendSampleLayout(B.stage,sample.blendShape,basePointCount,layout.get());
+        sample.layout = std::move(layout);
     }
     GatherBlendChannels(B, revision, _StageBlendReads{R, time}, record,
                         &values);
@@ -2016,14 +1916,16 @@ RigExecBakedAssembleFromLeaves(
     RigExecBakedProgramImpl *program,
     RigExecBakedProgramImpl::GeomRevision *revision,
     const GfVec3f *basePoints, size_t basePointCount,
-    std::vector<std::string> *diagnostics, std::vector<std::string> *missing)
+    std::vector<std::string> *diagnostics, std::vector<std::string> *missing,
+    size_t layoutPointCount)
 {
     RigExecBakedProgramImpl &B = *program;
+    if (layoutPointCount == size_t(-1)) layoutPointCount = basePointCount;
     RigExecProviderValues values =
         RevisionValues(B, revision, basePoints, basePointCount);
     RigExecRevisionLeafView view;
     view.decl = &revision->leaves.decl;
-    view.values = &revision->leaves.values;
+    view.values = &RigExecBakedResolvePathLeaves(B,revision->leaves);
     view.missing = missing;
     if (revision->op == RigExecRevisionOp::External) {
         view.external = &revision->externalPayload;
@@ -2035,9 +1937,27 @@ RigExecBakedAssembleFromLeaves(
                                       diagnostics);
         view.phased = &revision->revisionInputs;
     }
-    GatherBlendChannels(B, revision, _LeafBlendReads{revision->leaves},
+    // Derived normalization consumes only the declared sparse RawDefault
+    // leaves and this target's raw base cardinality, inside the selected body.
+    for (auto &channel : revision->blendChannels) for (auto &sample : channel.samples) {
+        if (sample.blendShape.IsEmpty()) continue;
+        const auto &raw = *view.values;
+        const VtVec3fArray offsets = sample.offsetsLeaf >= 0 && size_t(sample.offsetsLeaf) < raw.size() &&
+            raw[size_t(sample.offsetsLeaf)].IsHolding<VtVec3fArray>() ?
+            raw[size_t(sample.offsetsLeaf)].UncheckedGet<VtVec3fArray>() : VtVec3fArray();
+        const VtIntArray indices = sample.indicesLeaf >= 0 && size_t(sample.indicesLeaf) < raw.size() &&
+            raw[size_t(sample.indicesLeaf)].IsHolding<VtIntArray>() ?
+            raw[size_t(sample.indicesLeaf)].UncheckedGet<VtIntArray>() : VtIntArray();
+        auto layout = std::make_shared<RigExecBlendSampleLayout>();
+        layout->pointCount = layoutPointCount;
+        if (sample.shapeValid)
+            RigExecBuildGeometryBlendLayout(offsets,indices,layoutPointCount,layout.get());
+        if (!sample.layout || !RigExecSameBlendLayout(*sample.layout,*layout))
+            sample.layout = std::move(layout);
+    }
+    GatherBlendChannels(B, revision, _LeafBlendReads{*view.values},
                         /*record=*/true, &values);
-    return RigExecAssembleFromLeaves(revision->op, revision->binding, view,
+    return RigExecAssembleGeometry(revision->kernelRecord.op, revision->kernelRecord.binding, view,
                                      values);
 }
 
@@ -2049,19 +1969,18 @@ RigExecMoverParameters
 AssembleRevision(RigExecBakedProgramImpl &B,
                  RigExecBakedProgramImpl::GeomRevision *revision,
                  const GfVec3f *basePoints, size_t basePointCount,
-                 UsdTimeCode time, RigExecBakedStep *step)
+                 UsdTimeCode time, RigExecBakedStep *step, size_t layoutPointCount)
 {
     if (revision->leaves.decl.assembles) {
         return RigExecBakedAssembleFromLeaves(&B, revision, basePoints,
                                               basePointCount,
-                                              &step->diagnostics);
+                                              &step->diagnostics,nullptr,layoutPointCount);
     }
-    // Volatile until plugin API v3 (bodyPurity.h): the plugin is handed
-    // values the region computes, so it cannot run in the prologue.
-    const RigExecVolatileRead volatileRead;
-    return AssembleRevisionFromStage(B, *B.resolvedInputs, revision,
-                                     basePoints, basePointCount, time,
-                                     &step->diagnostics, /*record=*/true);
+    RigExecMoverParameters invalid;
+    invalid.valid = false;
+    step->diagnostics.push_back(revision->moverPath.GetString() +
+        ": mover has no declared stage-free API4 assembly");
+    return invalid;
 }
 
 /// The skin revision over its whole array, out of the fuse.
@@ -2083,258 +2002,115 @@ FuseWholeRevision(const RigExecBakedProgramImpl::GeomChain &chain,
     PointsAt(chain, revisionIndex, &points, &count);
     if (!revision->layoutUsable || !revision->envelopeOk ||
         count != revision->precedingCount ||
-        revision->output.size() != count) {
+        revision->stagingOutput.size() != count) {
         return false;
     }
     // Against the forms the FOLD wrote -- this step reads RevisionTransforms
     // and writes none of it, so the table it skins against is the one that
     // slot already holds.
+    revision->output.resize(count);
     return SkinRange(revision, points, WholeTransformsView(revision), 0, count,
-                     /*whole=*/true, useSimd);
+                     /*whole=*/true, useSimd, /*staging=*/false);
 }
 
 }  // namespace
 
-void
-RigExecBakedRunGeometryPrologue(RigExecBakedProgramImpl *program,
-                                UsdTimeCode time, RigExecRigPose *pose,
-                                bool all)
+namespace {
+void ResetGeometryRevision(RigExecBakedProgramImpl::GeomRevision *revision)
 {
-    RigExecBakedProgramImpl &B = *program;
-    RIGEXEC_PROFILE_SCOPE_CAT(*B.profiler, "BakedChainBase", "geometry");
-    // The path leaves' chain rule: the results every leaf read through
-    // moved since the serial a leaf last saw.
-    if (B.hasPropertyChains &&
-        B.propertyResults != B.pathLeafChainResults) {
-        B.pathLeafChainResults = B.propertyResults;
-        ++B.pathLeafChainSerial;
+    revision->created = true; revision->ran = false; revision->output.clear();
+    revision->currentSource = -1; revision->lastParameters = RigExecMoverParameters();
+    revision->lastAuxPoints = VtVec3fArray(); revision->lastStatus = RigExecMoverStatus();
+}
+}
+void RigExecBakedAdoptRevisionLayout(RigExecBakedProgramImpl::GeomRevision *revision)
+{
+    if (revision->op != RigExecRevisionOp::Skin) return;
+    revision->topology = revision->layoutHandle;
+    revision->topologyResolved = true;
+    RigExecBakedAdoptPartition(revision);
+}
+void RigExecBakedRunChainInputs(RigExecBakedProgramImpl *program,RigExecBakedStep *step)
+{
+    auto &chain = program->chains[size_t(step->object)];
+    chain.haveBase = chain.sampledHaveBase;
+    if (!chain.haveBase) { chain.baseDirty = false; return; }
+    if (chain.haveResult && chain.sampledBase.size() != chain.lastBase.size()) {
+        chain.haveResult = false; chain.result = VtVec3fArray(); chain.scheduleDirty = true;
+        for (auto &revision : chain.revisions) ResetGeometryRevision(&revision);
     }
-    // The weight objects' point gathers, read by WeightPacket steps.
-    for (RigExecBakedProgramImpl::WeightObject &object : B.weightObjects) {
-        RigExecBakedSamplePathLeaves(&B, &object.pointLeaves, time, all);
+    for (auto &revision : chain.revisions) if (revision.created) {
+        ++step->counters.revisionsCreated; revision.created = false;
     }
-    // Everything a frame reads off the stage for a chain, plus the one lock a
-    // frame takes. Building the geometry state is reported once per node and
-    // once per schedule, not once per program: a program rebuilt over state
-    // that survived (AdoptGeometryStateFrom) has nothing to report, which is
-    // what the dynamic path says about the same edit. Counted here, because a
-    // chain can lose its state at the head of a frame -- a point count that
-    // moved with time -- and that is a node the dynamic path adds again too.
-    const auto resetRevision =
-        [](RigExecBakedProgramImpl::GeomRevision *revision) {
-        revision->created = true;
-        revision->ran = false;
-        revision->output.clear();
-        revision->currentSource = -1;
-        revision->lastParameters = RigExecMoverParameters();
-        revision->lastAuxPoints = VtVec3fArray();
-        revision->lastStatus = RigExecMoverStatus();
-    };
-    // The SkinTopology op's handle, adopted here and only here: topology,
-    // topologyResolved and the partition are exported, so they are set
-    // only for a revision whose base reads, on a generation that reaches
-    // this prologue, however often the op itself runs.
-    const auto resolveTopology =
-        [](RigExecBakedProgramImpl::GeomRevision *revision) {
-        if (!revision->skinTopologyFixed) {
-            return;
-        }
-        revision->topology = revision->layoutHandle;
-        revision->topologyResolved = true;
-        // The op hands back the SAME handle for a layout that did not move,
-        // so only a different one costs the comparison with Build's arrays.
-        // Here rather than in a step because it reads the arrays.
-        RigExecBakedAdoptPartition(revision);
-    };
-    // A sparse blend sample's shape, resolved HERE and never in a step: the
-    // cache takes a lock, and a refusal means the shape is read off the stage
-    // per frame. Both are the prologue's. The dynamic walk resolves through
-    // the same cache at its own assembly, so the two paths hold the same
-    // pointer for a shape that did not move.
-    const auto resolveBlendLayouts =
-        [&B](RigExecBakedProgramImpl::GeomRevision *revision,
-             size_t pointCount) {
-        for (RigExecBakedProgramImpl::GeomBlendChannel &channel :
-                 revision->blendChannels) {
-            for (RigExecBakedProgramImpl::GeomBlendChannel::Sample &sample :
-                     channel.samples) {
-                if (sample.blendShape.IsEmpty()) {
-                    continue;
-                }
-                sample.layout = B.blendSampleShapes->Resolve(
-                    sample.samplePath,
-                    [&](RigExecBlendSampleLayout *layout) {
-                        return B.resolveBlendSample(sample.blendShape,
-                                                    pointCount, layout);
-                    });
-                sample.layoutRefused = !sample.layout;
-                if (!sample.layout) {
-                    // Refused the cache: something about the shape can move
-                    // inside this epoch, so it is read per frame instead.
-                    auto perFrame = std::make_shared<RigExecBlendSampleLayout>();
-                    B.resolveBlendSample(sample.blendShape, pointCount,
-                                         perFrame.get());
-                    sample.layout = perFrame;
-                }
-            }
-        }
-    };
-    // A revision's leaves, once its layout is resolved: a skin revision
-    // holding an epoch layout reads no per-frame layout arrays, so those
-    // keys wait until a run reads them.
-    std::vector<int> skip;
-    const auto sampleRevision =
-        [&B, time, all, &skip](RigExecBakedProgramImpl::GeomRevision *revision) {
-            skip.clear();
-            if (revision->topologyResolved && revision->topology) {
-                const RigExecRevisionLeafDecl &decl = revision->leaves.decl;
-                for (const RigExecRevisionLeafRole role :
-                     {RigExecRevisionLeafRole::JointIndices,
-                      RigExecRevisionLeafRole::JointWeights,
-                      RigExecRevisionLeafRole::ElementSize}) {
-                    if (decl.Role(role) >= 0) {
-                        skip.push_back(decl.Role(role));
-                    }
-                }
-            }
-            RigExecBakedSamplePathLeaves(&B, &revision->leaves, time, all,
-                                         skip);
-        };
-    // An external revision's payload leaf, after its enable and envelope
-    // leaves: the plugin's answer at this time, over the provider values the
-    // body would hand it (the chain's authored base, the generation's
-    // resolved inputs; it binds nothing the region computes), and only past
-    // the gates at which the stage assembler calls it.
-    const auto sampleExternal =
-        [&B, time](RigExecBakedProgramImpl::GeomRevision *revision,
-                   const VtVec3fArray &base) {
-            if (revision->op != RigExecRevisionOp::External ||
-                !revision->leaves.decl.assembles) {
-                return;
-            }
-            RigExecProviderValues values =
-                RevisionValues(B, revision, base.cdata(), base.size());
-            values.resolved = B.resolvedInputs;
-            RigExecRevisionLeafView view;
-            view.decl = &revision->leaves.decl;
-            view.values = &revision->leaves.values;
-            RigExecExternalPayload payload;
-            if (RigExecExternalPayloadIsRead(view, values)) {
-                RigExecAssembleExternalPayload(revision->moverPrim,
-                                               revision->binding, values, time,
-                                               &payload);
-            }
-            revision->externalPayloadChanged =
-                !(payload == revision->externalPayload);
-            revision->externalPayload = std::move(payload);
-        };
-    for (RigExecBakedProgramImpl::GeomChain &chain : B.chains) {
-        // The chain base: an upstream value on the target, else the stage,
-        // never the interactive overlay (as the dynamic walk reads it).
-        VtVec3fArray basePoints;
+    if (chain.scheduleDirty && !chain.revisions.empty()) ++step->counters.schedulesBuilt;
+    chain.scheduleDirty = false;
+    chain.baseDirty = !chain.haveResult || !RigExecBakedHeadValueSame(
+        VtValue(chain.sampledBase),VtValue(chain.lastBase));
+    chain.lastBase = chain.sampledBase;
+}
+void RigExecBakedPrepareDerivedBase(RigExecBakedProgramImpl::GeomChain::Derived *derived,
+                                    RigExecBakedStep *step)
+{
+    if (derived->matrixTarget) {
+        derived->haveBase = true; derived->baseDirty = true;
+        derived->revision.created = false; return;
+    }
+    derived->haveBase = derived->sampledHaveBase;
+    if (!derived->haveBase) { derived->baseDirty = false; return; }
+    if (derived->haveResult && derived->sampledBase.size() != derived->lastBase.size()) {
+        derived->haveResult = false; derived->result = VtVec3fArray();
+        ResetGeometryRevision(&derived->revision);
+    }
+    if (derived->revision.created) {
+        ++step->counters.revisionsCreated; ++step->counters.schedulesBuilt;
+        derived->revision.created = false;
+    }
+    derived->baseDirty = !derived->haveResult || !RigExecBakedHeadValueSame(
+        VtValue(derived->sampledBase),VtValue(derived->lastBase));
+    derived->lastBase = derived->sampledBase;
+}
+void RigExecBakedRunGeometryPrologue(RigExecBakedProgramImpl *program,
+                                    UsdTimeCode time,RigExecRigPose *,bool all)
+{
+    auto &B = *program;
+    // Source capture only. No head output, topology adoption, node reset or
+    // generation accounting is consumed before the declared graph operations.
+    for (auto &object : B.weightObjects) {
+        RigExecBakedSamplePathLeaves(&B,&object.pointLeaves,time,all);
+        RigExecBakedSamplePathLeaves(&B,&object.oracleLeaves,time,all);
+    }
+    for (auto &chain : B.chains) {
+        chain.sampledBase = VtVec3fArray();
         const auto upstream = B.upstream.find(chain.target);
-        if (upstream != B.upstream.end() &&
-            upstream->second.IsHolding<VtVec3fArray>()) {
-            basePoints = upstream->second.UncheckedGet<VtVec3fArray>();
-            chain.haveBase = true;
+        if (upstream != B.upstream.end() && upstream->second.IsHolding<VtVec3fArray>()) {
+            chain.sampledBase = upstream->second.UncheckedGet<VtVec3fArray>();
+            chain.sampledHaveBase = true;
         } else {
-            chain.haveBase = chain.baseQuery.IsValid() &&
-                             chain.baseQuery.Get(&basePoints, time);
+            chain.sampledHaveBase = chain.baseQuery.IsValid() && chain.baseQuery.Get(&chain.sampledBase,time);
         }
-        if (!chain.haveBase) {
-            // The target's points do not read at this time at all; the
-            // dynamic path drives nothing for it and neither does the
-            // program, counters included.
-            for (RigExecBakedProgramImpl::GeomChain::Derived &derived :
-                     chain.derived) {
-                derived.haveBase = false;
-            }
-            continue;
+        for (auto &revision : chain.revisions) {
+            RigExecBakedSamplePathLeaves(&B,&revision.leaves,time,all);
         }
-        if (chain.haveResult && basePoints.size() != chain.lastBase.size()) {
-            // A time-varying point count replaces THIS target's graph in the
-            // dynamic path and leaves every other target's standing. Same
-            // here: the cached run describes a different mesh, so it is
-            // dropped and the chain's nodes are reported as created -- which
-            // is what the dynamic walk reports for the nodes it has to add
-            // again. Handing the whole generation back instead would degrade
-            // every other chain of the rig for one mesh whose vertex count is
-            // keyed.
-            chain.haveResult = false;
-            chain.result = VtVec3fArray();
-            chain.scheduleDirty = true;
-            for (RigExecBakedProgramImpl::GeomRevision &revision :
-                     chain.revisions) {
-                resetRevision(&revision);
-            }
-        }
-        for (RigExecBakedProgramImpl::GeomRevision &revision :
-                 chain.revisions) {
-            if (revision.created) {
-                ++pose->moverGraphRevisionsCreated;
-                revision.created = false;
-            }
-        }
-        if (chain.scheduleDirty && !chain.revisions.empty()) {
-            ++pose->moverGraphSchedulesBuilt;
-        }
-        chain.scheduleDirty = false;
-        chain.baseDirty = !chain.haveResult || basePoints != chain.lastBase;
-        chain.lastBase = basePoints;
-        for (RigExecBakedProgramImpl::GeomRevision &revision :
-                 chain.revisions) {
-            resolveTopology(&revision);
-            resolveBlendLayouts(&revision, basePoints.size());
-            sampleRevision(&revision);
-            sampleExternal(&revision, chain.lastBase);
-        }
-        for (RigExecBakedProgramImpl::GeomChain::Derived &derived :
-                 chain.derived) {
-            if (derived.matrixTarget) {
-                // No base and no graph node: the dynamic walk evaluates a
-                // projector target directly every generation. Its reads are
-                // leaves like any revision's.
-                derived.haveBase = true;
-                derived.baseDirty = true;
-                derived.revision.created = false;
-                sampleRevision(&derived.revision);
-                continue;
-            }
-            VtVec3fArray derivedBase;
-            derived.haveBase = derived.baseQuery.IsValid() &&
-                               derived.baseQuery.Get(&derivedBase, time);
-            if (!derived.haveBase) {
-                continue;
-            }
-            if (derived.haveResult &&
-                derivedBase.size() != derived.lastBase.size()) {
-                // As above, and for the same reason: the dynamic walk
-                // replaces this derived target's graph alone.
-                derived.haveResult = false;
-                derived.result = VtVec3fArray();
-                resetRevision(&derived.revision);
-            }
-            // A derived target is one node with one schedule of its own,
-            // created together, exactly as the dynamic walk creates them.
-            if (derived.revision.created) {
-                ++pose->moverGraphRevisionsCreated;
-                ++pose->moverGraphSchedulesBuilt;
-                derived.revision.created = false;
-            }
-            derived.baseDirty =
-                !derived.haveResult || derivedBase != derived.lastBase;
-            derived.lastBase = derivedBase;
-            resolveTopology(&derived.revision);
-            sampleRevision(&derived.revision);
+        for (auto &derived : chain.derived) {
+            derived.sampledBase = VtVec3fArray();
+            derived.sampledHaveBase = derived.matrixTarget ||
+                (derived.baseQuery.IsValid() && derived.baseQuery.Get(&derived.sampledBase,time));
+            RigExecBakedSamplePathLeaves(&B,&derived.revision.leaves,time,all);
         }
     }
 }
-
 void
 RigExecBakedSkipGeometryStep(RigExecBakedProgramImpl *program,
                              RigExecBakedStep *step)
 {
     RigExecBakedProgramImpl &B = *program;
+    if (step->kind == RigExecBakedStepKind::WeightField) {
+        // Field IDs are not revision IDs; a clean skip preserves the field.
+        return;
+    }
+    if (step->kind == RigExecBakedStepKind::ChainInputs) {
+        B.chains[size_t(step->object)].baseDirty = false; return;
+    }
     if (step->kind == RigExecBakedStepKind::Derived) {
         RigExecBakedProgramImpl::GeomRevision &revision =
             B.chains[size_t(B.derivedIndex[size_t(step->object)].first)]
@@ -2360,16 +2136,8 @@ RigExecBakedSkipGeometryStep(RigExecBakedProgramImpl *program,
         return;
     case RigExecBakedStepKind::RevisionChunk:
         revision.chunks[size_t(step->part)].keyChanged = false;
-        if (!revision.chunked) {
-            // A whole-array chunk opens every run saying it has produced
-            // nothing, and says otherwise only where the revision executed;
-            // a run that skipped it produced nothing either. The
-            // SPECULATIVE form's `ok` is the opposite kind of flag -- it
-            // describes what its range of the buffer holds, across runs,
-            // and the step reads it back to decide whether it may keep it
-            // -- so that one is left exactly where the chunk left it.
-            revision.chunks[size_t(step->part)].ok = false;
-        }
+        // A skipped body retains its published output validity and bytes.
+        // Current-generation execution is reported by portable ran metadata.
         return;
     case RigExecBakedStepKind::RevisionFuse:
         // The chain's sticky dirty bit as the NEXT revision reads it: this
@@ -2388,6 +2156,9 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
                             RigExecBakedStep *step, UsdTimeCode time)
 {
     RigExecBakedProgramImpl &B = *program;
+    if (step->kind == RigExecBakedStepKind::ChainInputs) {
+        RigExecBakedRunChainInputs(&B,step); return;
+    }
     const RigExecResolvedInputs &R = *B.resolvedInputs;
     if (step->kind == RigExecBakedStepKind::Derived) {
         const auto &[chainIndex, derivedIndex] =
@@ -2396,10 +2167,12 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
             B.chains[size_t(chainIndex)];
         RigExecBakedProgramImpl::GeomChain::Derived &derived =
             chain.derived[size_t(derivedIndex)];
+        RigExecBakedPrepareDerivedBase(&derived,step);
         if (!chain.haveBase || !derived.haveBase) {
             return;
         }
         RigExecBakedProgramImpl::GeomRevision &revision = derived.revision;
+        RigExecBakedAdoptRevisionLayout(&revision);
         if (derived.matrixTarget) {
             step->counters.revisionsBuilt = 1;
             derived.haveMatrix = RigExecBakedRunProjectorTarget(
@@ -2411,41 +2184,19 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
         FoldInfluences(B, &revision);
         RigExecMoverParameters parameters = AssembleRevision(
             B, &revision, chain.result.cdata(), chain.result.size(), time,
-            step);
+            step,chain.lastBase.size());
         const RigExecMoverStatus status =
             RigExecStatusForParameters(parameters, revision.moverPath);
         step->counters.revisionsBuilt = 1;
-        // The 26k-point input is remembered by HANDLE, not by copy.
-        // A derived revision's auxPoints IS the chain's own published
-        // buffer, and nothing else in the packet is that size -- so the run
-        // remembers the packet with that one field emptied and the points
-        // beside it as the VtArray the chain published, which costs a
-        // refcount. `chain.result != lastAuxPoints` is then the same test
-        // `parameters != lastParameters` performed over the same values:
-        // VtArray's operator== is `IsIdentical(other) || (shape equal &&
-        // std::equal(...))`, so it is the elementwise walk with the identity
-        // case taken first. The identity case is the rarer one here, because
-        // the status sweep publishes into a double buffer and so hands out a
-        // different array whenever it runs; what this removes for certain is
-        // the pass that was never a comparison at all -- copying 315KB into
-        // lastParameters every time the extent was recomputed, for a
-        // bounding box that reads the points once. Measured on the biped:
-        // the Derived step from 95-107us to 74-76us.
-        std::vector<GfVec3f> aux;
-        aux.swap(parameters.auxPoints);
-        const bool moved = chain.result != revision.lastAuxPoints ||
-                           parameters != revision.lastParameters;
-        parameters.auxPoints.swap(aux);
-        if (derived.baseDirty || !revision.ran || moved ||
-            status != revision.lastStatus) {
+        // A selected derived operation computes its declared typed result.
+        {
             step->counters.revisionsExecuted = 1;
             // The derived target's own authored array, which is what the
             // recomputation writes over: two vectors for an extent, the
             // whole mesh for normals. Built once and re-assigned on the
             // failure arm rather than copied into a `preceding` that exists
             // only to be copied again.
-            std::vector<GfVec3f> values(derived.lastBase.begin(),
-                                        derived.lastBase.end());
+            std::vector<GfVec3f> values;
             // The same function the revision node calls, and not a second
             // arrangement of the same rules: the kind check, the empty and
             // size-2 guards, the derived property keeping its authored
@@ -2456,8 +2207,8 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
             // about and the status is what the graph decided.
             const bool applied =
                 status.AllowsApply() &&
-                RigExecRunRevisionKernel(revision.op, parameters, &values,
-                                         B.useSimd, &revision.wireBasis);
+                RigExecRunGeometryDerived(revision.op, parameters,
+                    derived.lastBase.cdata(),derived.lastBase.size(),&values);
             revision.resultStatus = status.state;
             if (!applied) {
                 values.assign(derived.lastBase.begin(),
@@ -2498,6 +2249,9 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
         RigExecBakedProgramImpl::GeomChain &chain =
             B.chains[size_t(step->object)];
         if (!chain.haveBase) {
+            // ChainPoints owns current availability. Retain cached numerical
+            // storage, but no Final read may consume a previous valid frame.
+            chain.haveResult = false;
             return;
         }
         // The per-chain status sweep, over the status each revision LAST
@@ -2537,17 +2291,6 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
     RigExecBakedProgramImpl::GeomRevision &revision =
         chain.revisions[size_t(revisionIndex)];
     const bool skin = revision.op == RigExecRevisionOp::Skin;
-    // The chain's sticky dirty bit as of the PRECEDING revision: once a
-    // revision executed, every later one does, and the chain's own base is
-    // where it starts. Only the chunk and the fuse read it. The fold, and an
-    // assemble that neither measures a current-phase field nor reads its own
-    // chain at `preceding`, do not declare version r, so they may run beside
-    // the fuse that writes it.
-    const auto chainDirtyBefore = [&chain, revisionIndex = revisionIndex] {
-        return revisionIndex == 0
-                   ? chain.baseDirty
-                   : chain.revisions[size_t(revisionIndex) - 1].executed;
-    };
     switch (step->kind) {
     case RigExecBakedStepKind::InfluenceFold: {
         revision.influencesChanged = FoldInfluences(B, &revision);
@@ -2570,44 +2313,20 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
     }
 
     case RigExecBakedStepKind::RevisionStatic: {
-        // A volume weight reading `preceding` on rigExec:weightTarget: the
-        // field is measured against the
-        // points AS THEY STAND HERE, not the authored base, so the volume
-        // grabs whatever is inside it right now.
-        // This one copies the ORACLE and not exec (see bakedWeights.cpp):
-        // the dynamic path cannot get it from exec either -- a revision
-        // node's parameters are a VDF constant, so nothing in the packet can
-        // depend on a value the graph has not computed yet -- and it patches
-        // the tapped packet with what _ResolveWeights measured. So the patch
-        // starts from the SAME packet and touches the SAME fields:
-        // representation, values, indices, defaultWeight and valid, and not
-        // rangePolicy, which the dynamic path leaves at whatever the tapped
-        // packet had. A freshly constructed packet would differ there, and
-        // the difference would move moverGraphRevisionsExecuted through the
-        // parameters comparison below rather than move a point.
+        RigExecBakedAdoptRevisionLayout(&revision);
+        // The field consumes the declared preceding point version. Preserve
+        // the source packet's range policy when adopting its dense values.
         if (revision.weightCurrentPhase && revision.weightObject >= 0) {
             revision.currentPhasePacket =
                 B.weightPackets[size_t(revision.weightObject)];
-            const GfVec3f *entering = nullptr;
-            size_t enteringCount = 0;
-            PointsAt(chain, size_t(revisionIndex), &entering,
-                     &enteringCount);
-            const std::vector<GfVec3f> current(entering,
-                                               entering + enteringCount);
-            std::vector<float> field;
-            std::string error;
-            bool resolved = false;
-            {
-                // The weight oracle: volatile until S4 (bodyPurity.h).
-                const RigExecVolatileRead volatileRead;
-                resolved = B.resolveWeights(
-                    B.weightObjects[size_t(revision.weightObject)].path,
-                    current.size(), time, &field, &error, &current);
-            }
+            const auto &weightField = B.weightFields[size_t(revision.weightField)];
+            const auto &field = weightField.values;
+            const auto &error = weightField.error;
+            const bool resolved = weightField.ok;
             if (resolved) {
                 revision.currentPhasePacket.representation =
                     _tokens->denseRepresentation;
-                revision.currentPhasePacket.values = std::move(field);
+                revision.currentPhasePacket.values = field;
                 revision.currentPhasePacket.indices.clear();
                 revision.currentPhasePacket.defaultWeight = 0.0f;
                 revision.currentPhasePacket.valid = true;
@@ -2623,7 +2342,7 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
         }
         revision.parameters =
             AssembleRevision(B, &revision, chain.lastBase.cdata(),
-                             chain.lastBase.size(), time, step);
+                             chain.lastBase.size(), time, step,chain.lastBase.size());
         // The status of the PACKET. For a skin revision that is half of the
         // answer -- the packet carries identities where the matrices would
         // be -- and the fold's `influencesValid` is the other half; the fuse
@@ -2643,13 +2362,15 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
         // like every other source value: two different out-of-range weights
         // can leave the packet identical, and the line the fuse emits is
         // about the weight rather than about the packet.
-        revision.defaultWeight =
-            revision.leaves.Value<float>(revision.defaultWeightLeaf, 1.0f);
-        revision.staticDirty = !revision.ran ||
-                               revision.parameters != revision.lastParameters ||
-                               revision.status != revision.lastStatus ||
-                               revision.defaultWeight !=
-                                   revision.lastDefaultWeight;
+        // Read the same declared resolved source the effective memo compares.
+        const VtValue diagnosticWeight = RigExecBakedResolvePathLeaf(
+            B, revision.leaves, size_t(revision.defaultWeightLeaf));
+        revision.defaultWeight = diagnosticWeight.IsHolding<float>()
+            ? diagnosticWeight.UncheckedGet<float>() : 1.0f;
+        // Selection already compares the exact declared packet inputs.
+        // This flag records actual current-generation assembly only; it is
+        // not a second cache authority or a deep-copy packet fingerprint.
+        revision.staticDirty = true;
         revision.lastDefaultWeight = revision.defaultWeight;
         // The field an authoring tool paints as an influence overlay, taken
         // from the packet the mover is about to consume so that what a
@@ -2675,11 +2396,11 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
                 // to find a few hundred weights. An unresolvable packet
                 // publishes what the per-point loop did: zero wherever
                 // Resolve() answered out of range.
-                if (!packet.ResolveAll(logicalCount, &revision.weightField)) {
-                    revision.weightField.assign(logicalCount, 0.0f);
+                if (!packet.ResolveAll(logicalCount, &revision.publishedWeightValues)) {
+                    revision.publishedWeightValues.assign(logicalCount, 0.0f);
                     for (size_t i = 0; i < logicalCount; ++i) {
                         const float w = packet.Resolve(i, logicalCount);
-                        revision.weightField[i] = w < 0.0f ? 0.0f : w;
+                        revision.publishedWeightValues[i] = w < 0.0f ? 0.0f : w;
                     }
                 }
                 revision.weightFieldPublished = true;
@@ -2691,8 +2412,8 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
         // output here rather than in a chunk is what lets the chunks write
         // disjoint ranges of it without one of them owning its length.
         const size_t count = chain.lastBase.size();
-        if (revision.output.size() != count) {
-            revision.output.resize(count);
+        if (revision.stagingOutput.size() != count) {
+            revision.stagingOutput.resize(count);
             // A resized buffer holds no answers, so every chunk of it has to
             // produce one again.
             revision.staticDirty = true;
@@ -2753,34 +2474,32 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
         const GfVec3f *points = nullptr;
         size_t count = 0;
         PointsAt(chain, size_t(revisionIndex), &points, &count);
-        const bool chainDirty = chainDirtyBefore();
         const bool sized = count == revision.precedingCount &&
-                           revision.output.size() == count;
+                           revision.stagingOutput.size() == count;
 
         if (!revision.chunked) {
             // One chunk is the whole array, so there is nothing to speculate
             // about: it knows everything the fuse knows.
             chunk.ok = false;
-            const bool executed = chainDirty || revision.staticDirty ||
-                                  (skin && revision.influencesChanged);
-            if (!executed || !revision.status.AllowsApply()) {
+            if (!revision.status.AllowsApply()) {
                 return;
             }
             if (!skin) {
                 // The revision's OWN buffer, seeded from the preceding one:
                 // there is no `scratch = current` and no
-                // `revision.output = current` afterwards -- the fuse decides
+                // `revision.stagingOutput = current` afterwards -- the fuse decides
                 // which buffer the chain's running value is in rather than
                 // copying one into another.
-                revision.output.assign(points, points + count);
+                revision.stagingOutput.assign(points, points + count);
                 // Not a second dispatch that mirrors _RevisionNode::Compute
                 // -- the same function the node calls. The packet check, the
                 // full-strength fast path, the kernel and the "apply once"
                 // blend all live in RigExecRunRevisionKernel, so an
                 // operation cannot mean one thing here and another there.
-                chunk.ok = RigExecRunRevisionKernel(
-                    revision.op, revision.parameters, &revision.output,
-                    B.useSimd, &revision.wireBasis);
+                // This unpublished buffer is discarded by Fuse on failure.
+                chunk.ok = geometryDetail::RunDiscardableGeometry(
+                    revision.op, revision.parameters, &revision.stagingOutput,
+                    B.useSimd, &revision.wireBasis,&revision.surfaceCache);
                 return;
             }
             if (!revision.parameters.valid ||
@@ -2808,20 +2527,6 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
             return;
         }
         GatherChunkTransforms(B, revision, &chunk);
-        if (!(chainDirty || revision.staticDirty || chunk.keyChanged) &&
-            chunk.ok) {
-            // Its own joints stood still over points that stood still and a
-            // packet that stood still, so its range of the buffer already
-            // holds this run's answer -- and its `ok` still describes it.
-            // Another chunk's joints moving makes the REVISION execute; it
-            // does not make this range's vertices land anywhere else.
-            // `ok` is part of the gate rather than a consequence of it: a
-            // chunk whose last answer was a failure, or one the partition
-            // reset without the packet moving, has nothing in its range to
-            // keep, and reading that off its own flag keeps the invariant
-            // local to this step.
-            return;
-        }
         chunk.ok = SkinRange(&revision, points,
                              ChunkTransformsView(chunk, B.useSimd),
                              size_t(chunk.begin), size_t(chunk.end),
@@ -2863,8 +2568,8 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
                 ": rigExec:weightObject produced an invalid common "
                 "envelope; revision passed through");
         }
-        revision.executed = chainDirtyBefore() || revision.staticDirty ||
-                            (skin && revision.influencesChanged);
+        // Selection by the common graph is the sole execution authority.
+        revision.executed = true;
         step->counters.revisionsExecuted = revision.executed ? 1 : 0;
         if (revision.executed) {
             revision.resultStatus = revision.status.state;
@@ -2882,6 +2587,8 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
                 }
             }
             if (applied) {
+                if (!(skin && revision.partitionStale))
+                    revision.output.assign(revision.stagingOutput.begin(), revision.stagingOutput.end());
                 revision.currentSource = int(revisionIndex);
             } else {
                 // Nothing was applied, so the chain's running value stays
@@ -2896,7 +2603,9 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
                     revision.resultStatus = _tokens->moverFailed;
                 }
             }
-            revision.lastParameters = revision.parameters;
+            // Keep the published RevisionPacket intact. Ordinary revisions
+            // have no duplicate last-parameters snapshot; exact value keys
+            // retain the previous semantic opinion in the common workspace.
             revision.lastStatus = revision.status;
             revision.ran = true;
         }
@@ -2978,7 +2687,6 @@ RigExecBakedGeometryReport(const RigExecBakedProgramImpl &B)
 {
     std::string out;
     char line[256];
-    const ProviderLevels levels = GatherProviderLevels(B);
     for (size_t c = 0; c < B.chains.size(); ++c) {
         const RigExecBakedProgramImpl::GeomChain &chain = B.chains[c];
         for (size_t r = 0; r < chain.revisions.size(); ++r) {
@@ -3043,34 +2751,21 @@ RigExecBakedGeometryReport(const RigExecBakedProgramImpl &B)
                                  "x)").c_str()
                               : "");
             out += line;
-            // A chunk is ready when the last of ITS influences is, so its
-            // ready level against the frame's deepest level is the whole
-            // speculation in one number: a chunk ready far below the maximum
-            // is one the arena can start long before the rig is posed.
-            int readyMin = -1, readyMax = -1;
             for (size_t k = 0; k < chunks; ++k) {
-                const RigExecBakedProgramImpl::GeomChunk &chunk =
-                    revision.chunks[k];
-                const int ready = ChunkReadyLevel(revision, chunk,
-                                                  revision.chunked, levels);
-                readyMin = readyMin < 0 ? ready : std::min(readyMin, ready);
-                readyMax = std::max(readyMax, ready);
+                const auto &chunk = revision.chunks[k];
+                const auto producers = ChunkProducers(revision,chunk,revision.chunked);
                 std::snprintf(line, sizeof(line),
-                              "    [%zu] %d..%d ready level %d/%d key", k,
-                              chunk.begin, chunk.end, ready, levels.maxLevel);
+                              "    [%zu] %d..%d producers", k, chunk.begin, chunk.end);
                 out += line;
-                if (!revision.chunked) {
-                    out += " (every influence)";
-                }
-                for (const int position : chunk.key) {
-                    out += " " + std::to_string(position);
-                }
+                for (const auto &producer : producers)
+                    out += " " + std::to_string(producer.first) + ":" +
+                           std::to_string(producer.second);
                 out += "\n";
             }
             std::snprintf(line, sizeof(line),
-                          "    ready level min %d max %d of %d\n",
-                          readyMin < 0 ? 0 : readyMin,
-                          readyMax < 0 ? 0 : readyMax, levels.maxLevel);
+                          "    natural producer count min %d max %d distinct sets %zu\n",
+                          revision.partitionProducerMin, revision.partitionProducerMax,
+                          revision.partitionDistinctReads);
             out += line;
         }
     }
@@ -3108,12 +2803,13 @@ RigExecBakedPublishGeometry(RigExecBakedProgramImpl *program,
             // is then last FRAME's, and publishing that is the one shape of
             // staleness a value comparison cannot catch -- the dynamic path
             // publishes no field at all for such a chain.
-            if (chain.haveBase && revision.weightFieldPublished) {
+            if (B.publishWeightFields && chain.haveBase && revision.weightFieldPublished) {
                 RigExecResolvedWeightField &field =
                     pose->weightFields[
                         B.weightObjects[size_t(revision.weightObject)].path];
                 field.target = revision.weightFieldTarget;
-                field.weights = revision.weightField;
+                field.weights.assign(revision.publishedWeightValues.cbegin(),
+                                     revision.publishedWeightValues.cend());
             }
         } else if (step.kind == RigExecBakedStepKind::ChainStatus) {
             RigExecBakedProgramImpl::GeomChain &chain =
@@ -3178,16 +2874,16 @@ RigExecBakedRunProjectorTarget(
 {
     RigExecRevisionLeafView view;
     view.decl = &revision.leaves.decl;
-    view.values = &revision.leaves.values;
+    view.values = &RigExecBakedResolvePathLeaves(B,revision.leaves);
     RigExecProjectorReads reads;
     RigExecReadProjectorTargetFromLeaves(revision.op, revision.binding, view,
                                          &reads);
-    return RigExecRunProjectorTarget(
+    return RigExecRunGeometryMatrix(
         revision.op, revision.binding,
         RigExecBakedProjectorFrames(B, revision), reads,
-        std::vector<GfVec3f>(chain.lastBase.begin(), chain.lastBase.end()),
-        std::vector<GfVec3f>(chain.result.begin(), chain.result.end()),
-        matrix, diagnostics);
+        revision.surfaceCache.PointSamples(false,chain.lastBase.cdata(),chain.lastBase.size()),
+        revision.surfaceCache.PointSamples(true,chain.result.cdata(),chain.result.size()),
+        matrix, diagnostics,&revision.surfaceCache);
 }
 
 void
@@ -3216,6 +2912,137 @@ RigExecBakedBindPathLeaves(const UsdStageRefPtr &stage,
     leaves->sampled = false;
 }
 
+bool
+RigExecBakedHasExternalInputRoute(const RigExecBakedProgramImpl &B,
+                                const SdfPath &path)
+{
+    const auto hasRoute=[&](const auto &revision) {
+        if(revision.op!=RigExecRevisionOp::External)return false;
+        const auto &binding=revision.binding;
+        const auto &leaves=revision.leaves;
+        for(size_t i=0;i<binding.externalInputs.size();++i) {
+            const auto &key=binding.externalInputs[i];
+            using Flavour=RigExecRevisionLeafFlavour;
+            if(key.time!=RigExecRevisionLeafTime::AtTime ||
+               (key.flavour!=Flavour::Resolved && key.flavour!=Flavour::ResolvedOnly &&
+                key.flavour!=Flavour::OverlayThenRaw))continue;
+            if(key.path==path)return true;
+            if(leaves.decl.externalBegin<0)continue;
+            const size_t slot=size_t(leaves.decl.externalBegin)+i;
+            if(slot<leaves.hops.size() &&
+               std::find(leaves.hops[slot].begin(),leaves.hops[slot].end(),path)!=leaves.hops[slot].end())
+                return true;
+        }
+        return false;
+    };
+    for(const auto &chain:B.chains) {
+        for(const auto &revision:chain.revisions)if(hasRoute(revision))return true;
+        for(const auto &derived:chain.derived)if(hasRoute(derived.revision))return true;
+    }
+    return false;
+}
+
+VtValue
+RigExecBakedResolvePathLeaf(const RigExecBakedProgramImpl &B,
+                           const RigExecBakedPathLeaves &leaves,size_t k)
+{
+    if(k>=leaves.decl.keys.size()) return VtValue();
+    VtValue value=k<leaves.values.size()?leaves.values[k]:VtValue();
+    const auto &key = leaves.decl.keys[k];
+    // The compiled typed walk owns overlay selection and the original
+    // tail-first authored fallback. A direct version shortcut must not
+    // discard that fallback when a produced opinion is absent or mistyped.
+    if(key.flavour!=RigExecRevisionLeafFlavour::Present &&
+       k<leaves.walks.size() && leaves.walks[k]>=0)
+        return RigExecBakedSampleWalkedPathLeaf(B,key,leaves.walks[k]);
+    const int version = k < leaves.exactVersions.size() ? leaves.exactVersions[k] : -1;
+    const int recordIndex = k < leaves.exactRecordIndices.size()
+        ? leaves.exactRecordIndices[k] : -1;
+    const auto exactDoubleFallback=[&]() {
+        if(k<leaves.walks.size() && leaves.walks[k]>=0)
+            return RigExecBakedSampleWalkedPathLeaf(B,key,leaves.walks[k]);
+        return value.IsHolding<double>()?value:key.fallback;
+    };
+    if (recordIndex >= 0 && size_t(recordIndex) < B.propertyRecords.size()) {
+        const size_t r = size_t(recordIndex);
+        const auto &record = B.propertyRecords[r];
+        const auto &chain = B.propertyChains[record.chain];
+        const size_t source = chain.versionBase + std::min(record.applied,chain.revisions.size());
+        const bool present = !B.recordStoodAside[r] &&
+            source < B.propertyVersionValid.size() && B.propertyVersionValid[source];
+        if (key.flavour == RigExecRevisionLeafFlavour::Present) {
+            const bool rawPresent = k < leaves.values.size() &&
+                leaves.values[k].IsHolding<bool>() && leaves.values[k].UncheckedGet<bool>();
+            value = VtValue(rawPresent || present);
+        } else if (present) {
+            if(key.type==RigExecRevisionLeafType::Double && !B.recordValues[r].IsHolding<double>())
+                return exactDoubleFallback();
+            value = B.recordValues[r];
+            if (key.type == RigExecRevisionLeafType::Dial &&
+                value.IsHolding<float>())
+                value = VtValue(double(value.UncheckedGet<float>()));
+            else if (key.type == RigExecRevisionLeafType::Float &&
+                     value.IsHolding<double>())
+                value = VtValue(float(value.UncheckedGet<double>()));
+        } else if (key.flavour == RigExecRevisionLeafFlavour::ResolvedOnly) {
+            value = key.fallback;
+        }
+        return value;
+    }
+    if (version >= 0 && size_t(version) < B.propertyVersionValid.size()) {
+        const bool present = B.propertyVersionValid[size_t(version)] != 0;
+        if (key.flavour == RigExecRevisionLeafFlavour::Present) {
+            const bool rawPresent = k < leaves.values.size() &&
+                leaves.values[k].IsHolding<bool>() && leaves.values[k].UncheckedGet<bool>();
+            value = VtValue(rawPresent || present);
+        } else if (present) {
+            const auto &v = B.propertyValues[size_t(version)];
+            using Arm = RigExecBakedPropertyChain::Arm;
+            const int type = k < leaves.exactValueTypes.size() ? leaves.exactValueTypes[k] : -1;
+            const bool asFloat = type == int(Arm::Float);
+            const bool numeric = asFloat || type == int(Arm::Double);
+            const bool compatible =
+                ((key.type == RigExecRevisionLeafType::Float ||
+                  key.type == RigExecRevisionLeafType::Dial) && numeric) ||
+                (key.type == RigExecRevisionLeafType::Double && type == int(Arm::Double)) ||
+                (key.type == RigExecRevisionLeafType::Matrix4d && type == int(Arm::Matrix4d)) ||
+                (key.type == RigExecRevisionLeafType::Vec3f && type == int(Arm::Vec3f));
+            if (!compatible) {
+                if(key.type==RigExecRevisionLeafType::Double)return exactDoubleFallback();
+                if (key.flavour == RigExecRevisionLeafFlavour::ResolvedOnly)
+                    value = key.fallback;
+                return value;
+            }
+            switch (key.type) {
+            case RigExecRevisionLeafType::Float: value = VtValue(asFloat ? v.f : float(v.d)); break;
+            case RigExecRevisionLeafType::Double: value = VtValue(v.d); break;
+            case RigExecRevisionLeafType::Dial: {
+                value = VtValue(asFloat ? double(v.f) : v.d);
+                break;
+            }
+            case RigExecRevisionLeafType::Matrix4d: value = VtValue(v.m); break;
+            case RigExecRevisionLeafType::Vec3f: value = VtValue(v.v); break;
+            default: break;
+            }
+        } else if (key.flavour == RigExecRevisionLeafFlavour::ResolvedOnly) {
+            value = key.fallback;
+        }
+    } else if (k < leaves.walks.size() && leaves.walks[k] >= 0) {
+        value = RigExecBakedSampleWalkedPathLeaf(B,key,leaves.walks[k]);
+    }
+    return value;
+}
+
+const std::vector<VtValue> &
+RigExecBakedResolvePathLeaves(const RigExecBakedProgramImpl &B,
+                             const RigExecBakedPathLeaves &leaves)
+{
+    leaves.consumedValues.resize(leaves.decl.keys.size());
+    for(size_t k=0;k<leaves.decl.keys.size();++k)
+        leaves.consumedValues[k]=RigExecBakedResolvePathLeaf(B,leaves,k);
+    return leaves.consumedValues;
+}
+
 void
 RigExecBakedSamplePathLeaves(RigExecBakedProgramImpl *program,
                              RigExecBakedPathLeaves *leaves, UsdTimeCode time,
@@ -3232,6 +3059,15 @@ RigExecBakedSamplePathLeaves(RigExecBakedProgramImpl *program,
     // that holds both, whatever its variance.
     const bool defaultMoved =
         timeMoved && (time.IsDefault() || leaves->time.IsDefault());
+    RigExecResolvedInputs sourceOnly;
+    if (B.interactiveOverrides) {
+        for (const auto &overrideValue : *B.interactiveOverrides) {
+            const SdfPath path = overrideValue.attribute.IsEmpty()
+                ? overrideValue.prim.AppendProperty(overrideValue.computation)
+                : overrideValue.prim.AppendProperty(overrideValue.attribute);
+            sourceOnly.SetProperty(path,overrideValue.value);
+        }
+    }
     std::vector<SdfPath> hops;
     for (size_t k = 0; k < leaves->decl.keys.size(); ++k) {
         leaves->changed[k] = 0;
@@ -3255,14 +3091,24 @@ RigExecBakedSamplePathLeaves(RigExecBakedProgramImpl *program,
         }
         leaves->mustSample[k] = 0;
         ++B.pathLeafSamples;
-        // A read a chain or record can answer goes through its walk.
+        // Sampling publishes source opinions only. Produced values are resolved
+        // by the owning body after its graph dependencies complete.
         const int walk = k < leaves->walks.size() ? leaves->walks[k] : -1;
-        VtValue value =
-            walk >= 0 ? RigExecBakedSampleWalkedPathLeaf(B, key, walk)
-                      : RigExecSampleRevisionLeaf(key, leaves->attributes[k],
-                                                  B.resolvedInputs, time,
-                                                  &B.upstream);
-        leaves->changed[k] = value == leaves->values[k] ? 0 : 1;
+        VtValue value = RigExecSampleRevisionLeaf(key, leaves->attributes[k],
+                                                &sourceOnly, time, &B.upstream);
+        if (key.flavour == RigExecRevisionLeafFlavour::Present) {
+            bool present = false;
+            if (B.interactiveOverrides) {
+                for (const auto &overrideValue : *B.interactiveOverrides) {
+                    const SdfPath path = overrideValue.attribute.IsEmpty()
+                        ? overrideValue.prim.AppendProperty(overrideValue.computation)
+                        : overrideValue.prim.AppendProperty(overrideValue.attribute);
+                    if (path == key.path && !overrideValue.value.IsEmpty()) present = true;
+                }
+            }
+            value = VtValue(present);
+        }
+        leaves->changed[k] = RigExecBakedHeadValueSame(value,leaves->values[k]) ? 0 : 1;
         leaves->values[k] = std::move(value);
         if (walk >= 0 && leaves->changed[k]) {
             B.readerWalkChanged[size_t(walk)] = 1;
@@ -3308,7 +3154,7 @@ RigExecBakedBuildLayoutSteps(RigExecBakedProgramImpl *program)
     for (size_t r = 0; r < count; ++r) {
         RigExecBakedProgramImpl::GeomRevision &revision =
             *RigExecBakedLayoutRevision(&B, r);
-        if (!revision.skinTopologyFixed) {
+        if (revision.op != RigExecRevisionOp::Skin) {
             continue;
         }
         revision.layoutLeaves = RigExecBakedPathLeaves();
@@ -3353,7 +3199,7 @@ RigExecBakedDeclareLayoutReads(RigExecBakedProgramImpl *program)
         }
         const RigExecBakedProgramImpl::GeomRevision *revision =
             RigExecBakedLayoutRevision(B, r);
-        if (revision && revision->skinTopologyFixed) {
+        if (revision && revision->op == RigExecRevisionOp::Skin) {
             step.reads.push_back(RigExecBakedOne(
                 RigExecBakedSlotDomain::SkinTopology, uint32_t(r)));
         }
@@ -3367,68 +3213,38 @@ RigExecBakedSampleLayoutLeaves(RigExecBakedProgramImpl *program,
 {
     RigExecBakedProgramImpl &B = *program;
     RigExecBakedPathLeaves &leaves = revision->layoutLeaves;
-    const size_t n = leaves.decl.keys.size();
     revision->layoutFixedChanged = false;
-    std::fill(leaves.changed.begin(), leaves.changed.end(), 0);
-    bool rebind = all || !leaves.sampled || leaves.stamp != B.programStamp;
-    bool overlayMoved = false;
-    for (size_t k = 0; k < n; ++k) {
-        rebind = rebind || leaves.mustSample[k];
-        // What the read consults before the stage, compared by value: an
-        // absent entry is held as an empty value.
-        const VtValue *entry =
-            B.resolvedInputs ? B.resolvedInputs->Find(leaves.decl.keys[k].path)
-                             : nullptr;
-        const bool same = entry ? revision->layoutOverlay[k] == *entry
-                                : revision->layoutOverlay[k].IsEmpty();
-        if (!same) {
-            overlayMoved = true;
-            revision->layoutOverlay[k] = entry ? *entry : VtValue();
-        }
+    // Variance can change on a retained program after an authored layout edit.
+    // Capture source metadata only when its owning-thread bindings refresh.
+    if (all || !leaves.sampled || leaves.stamp != B.programStamp ||
+        std::any_of(leaves.mustSample.begin(), leaves.mustSample.end(),
+                    [](char marked) { return marked != 0; })) {
+        revision->layoutFixed = RigExecSkinLayoutIsFixed(revision->moverPrim);
     }
-    if (!rebind && !overlayMoved) {
-        return;
-    }
-    if (rebind) {
-        // An edit can author time samples or a connection, which the
-        // evaluator's cache would refuse on its next refill.
-        const bool fixed = RigExecSkinLayoutIsFixed(revision->moverPrim);
-        revision->layoutFixedChanged = fixed != revision->layoutFixed;
-        revision->layoutFixed = fixed;
-        std::fill(leaves.mustSample.begin(), leaves.mustSample.end(), 0);
-    }
-    if (revision->layoutFixed) {
-        for (size_t k = 0; k < n; ++k) {
-            ++B.pathLeafSamples;
-            VtValue value = RigExecSampleRevisionLeaf(
-                leaves.decl.keys[k], leaves.attributes[k], B.resolvedInputs,
-                time, &B.upstream);
-            leaves.changed[k] = value == leaves.values[k] ? 0 : 1;
-            leaves.values[k] = std::move(value);
-        }
-    }
-    leaves.sampled = true;
-    leaves.time = time;
-    leaves.stamp = B.programStamp;
+    RigExecBakedSamplePathLeaves(&B, &leaves, time, all);
+
 }
 
 void
-RigExecBakedRunLayoutOp(RigExecBakedProgramImpl::GeomRevision *revision)
+RigExecBakedRunLayoutOp(const RigExecBakedProgramImpl &B,
+                       RigExecBakedProgramImpl::GeomRevision *revision)
 {
-    if (!revision->layoutFixed) {
-        // The cache's refusal: the packet reads the arrays per frame. The
-        // candidate stays, so the layout comes back as the same object.
-        revision->layoutHandle = nullptr;
-        return;
-    }
     using Role = RigExecRevisionLeafRole;
     const RigExecBakedPathLeaves &leaves = revision->layoutLeaves;
-    const VtIntArray indices = leaves.Value<VtIntArray>(
-        leaves.decl.Role(Role::JointIndices), VtIntArray());
-    const VtFloatArray weights = leaves.Value<VtFloatArray>(
-        leaves.decl.Role(Role::JointWeights), VtFloatArray());
-    const int elementSize =
-        leaves.Value<int>(leaves.decl.Role(Role::ElementSize), 1);
+    const auto &values = RigExecBakedResolvePathLeaves(B,leaves);
+    const auto value = [&](Role role) -> const VtValue * {
+        const int key = leaves.decl.Role(role);
+        return key >= 0 && size_t(key) < values.size() ? &values[size_t(key)] : nullptr;
+    };
+    const VtValue *indicesValue = value(Role::JointIndices);
+    const VtValue *weightsValue = value(Role::JointWeights);
+    const VtValue *sizeValue = value(Role::ElementSize);
+    const VtIntArray indices = indicesValue && indicesValue->IsHolding<VtIntArray>()
+        ? indicesValue->UncheckedGet<VtIntArray>() : VtIntArray();
+    const VtFloatArray weights = weightsValue && weightsValue->IsHolding<VtFloatArray>()
+        ? weightsValue->UncheckedGet<VtFloatArray>() : VtFloatArray();
+    const int elementSize = sizeValue && sizeValue->IsHolding<int>()
+        ? sizeValue->UncheckedGet<int>() : 1;
     auto built = std::make_shared<RigExecSkinTopology>();
     RigExecBuildSkinTopology(
         TfSpan<const int>(indices.cdata(), indices.size()),
@@ -3442,93 +3258,6 @@ RigExecBakedRunLayoutOp(RigExecBakedProgramImpl::GeomRevision *revision)
     }
     revision->layoutHandle = std::move(built);
     revision->layoutCandidate = revision->layoutHandle;
-}
-
-void
-RigExecBakedRunLayoutTier(RigExecBakedProgramImpl *program, UsdTimeCode time,
-                          RigExecRigPose *pose, bool force, bool sample,
-                          bool verify)
-{
-    RigExecBakedProgramImpl &B = *program;
-    // After the property revisions and rest ops this run executed, in the
-    // head trace.
-    uint32_t seq = 0;
-    for (const RigExecBakedStep &step : B.steps) {
-        if (step.kind != RigExecBakedStepKind::SkinTopology) {
-            seq = std::max(seq, step.runSeq);
-        }
-    }
-    for (size_t index = 0; index < B.steps.size() && B.steps[index].isHead; ++index) {
-        RigExecBakedStep &step = B.steps[index];
-        if (step.kind != RigExecBakedStepKind::SkinTopology) {
-            continue;
-        }
-        step.runSeq = 0;
-        RigExecBakedProgramImpl::GeomRevision *revision =
-            RigExecBakedLayoutRevision(&B, size_t(step.object));
-        if (!revision) {
-            continue;
-        }
-        if (sample) {
-            RigExecBakedSampleLayoutLeaves(&B, revision, time, force);
-        }
-        bool moved = revision->layoutFixedChanged;
-        for (const char changed : revision->layoutLeaves.changed) {
-            moved = moved || changed;
-        }
-        if (!(force || moved || !revision->layoutRan)) {
-            continue;
-        }
-        RigExecBakedRunStepBodyAndStamp(&B,&step,time);
-        ++B.headOpsRun;
-    }
-    if (!verify || !sample) {
-        return;
-    }
-    // Every handle against the layout the stage and the overlay describe
-    // now, read afresh: a leaf route that missed an edit shows here.
-    size_t mismatches = 0;
-    for (size_t index = 0; index < B.steps.size() && B.steps[index].isHead; ++index) {
-        const RigExecBakedStep &step = B.steps[index];
-        if (step.kind != RigExecBakedStepKind::SkinTopology) {
-            continue;
-        }
-        const RigExecBakedProgramImpl::GeomRevision *revision =
-            RigExecBakedLayoutRevision(&B, size_t(step.object));
-        if (!revision) {
-            continue;
-        }
-        RigExecBakedProgramImpl::GeomRevision fresh;
-        fresh.moverPrim = revision->moverPrim;
-        fresh.influenceSlots = revision->influenceSlots;
-        fresh.layoutLeaves.decl = revision->layoutLeaves.decl;
-        fresh.layoutLeaves.attributes = revision->layoutLeaves.attributes;
-        fresh.layoutFixed = RigExecSkinLayoutIsFixed(revision->moverPrim);
-        fresh.layoutLeaves.values.clear();
-        for (size_t k = 0; k < fresh.layoutLeaves.decl.keys.size(); ++k) {
-            fresh.layoutLeaves.values.push_back(RigExecSampleRevisionLeaf(
-                fresh.layoutLeaves.decl.keys[k],
-                fresh.layoutLeaves.attributes[k], B.resolvedInputs, time,
-                &B.upstream));
-        }
-        RigExecBakedRunLayoutOp(&fresh);
-        const auto &held = revision->layoutHandle;
-        const auto &want = fresh.layoutHandle;
-        if ((!held && !want) || (held && want && *held == *want)) {
-            continue;
-        }
-        ++mismatches;
-        pose->diagnostics.push_back("baked cone mismatch: head skin topology "
-                                    "of " +
-                                    revision->moverPath.GetString() +
-                                    " differs");
-    }
-    if (mismatches > 0) {
-        pose->bakedParityMismatches += mismatches;
-        TF_WARN("rigExec: baked parity mismatch: %zu skin layout(s) the "
-                "SkinTopology ops hold differ from the stage's",
-                mismatches);
-    }
 }
 
 namespace {
@@ -3680,4 +3409,85 @@ RigExecBakedProgramTesting::ShadowAssembly(
     return report;
 }
 
+void RigExecBakedResetSetAsideGeometryValue(
+    RigExecBakedProgramImpl *program, RigExecBakedSlotDomain domain, uint32_t slot)
+{
+    auto &B = *program;
+    if (domain == RigExecBakedSlotDomain::ChainBase ||
+        domain == RigExecBakedSlotDomain::ChainPoints) {
+        if (slot >= B.chains.size()) return;
+        auto &chain = B.chains[slot];
+        if (domain == RigExecBakedSlotDomain::ChainBase) {
+            chain.haveBase = false;
+            chain.lastBase.clear();
+        } else {
+            chain.haveResult = false;
+            chain.result.clear();
+        }
+        return;
+    }
+    if (domain == RigExecBakedSlotDomain::DerivedOut) {
+        if (slot >= B.derivedIndex.size()) return;
+        const auto [chain, part] = B.derivedIndex[slot];
+        auto &derived = B.chains[size_t(chain)].derived[size_t(part)];
+        derived.haveResult = false;
+        derived.haveMatrix = false;
+        derived.result.clear();
+        derived.revision.output.clear();
+        derived.revision.ran = false;
+        return;
+    }
+    if (domain == RigExecBakedSlotDomain::SkinTopology && slot >= B.revisionIndex.size()) {
+        const size_t derivedSlot = slot - B.revisionIndex.size();
+        if (derivedSlot >= B.derivedIndex.size()) return;
+        const auto [chain, part] = B.derivedIndex[derivedSlot];
+        auto &revision = B.chains[size_t(chain)].derived[size_t(part)].revision;
+        revision.layoutHandle.reset();
+        revision.topology.reset();
+        revision.topologyResolved = false;
+        revision.layoutUsable = false;
+        return;
+    }    if (domain == RigExecBakedSlotDomain::RevisionOut) {
+        for (size_t revisionIndex = 0; revisionIndex < B.revisionIndex.size(); ++revisionIndex) {
+            const int first = B.revisionChunkBase[revisionIndex];
+            const int count = B.revisionChunkCount[revisionIndex];
+            if (slot < uint32_t(first) || slot >= uint32_t(first + count)) continue;
+            const auto [chain, part] = B.revisionIndex[revisionIndex];
+            auto &revision = B.chains[size_t(chain)].revisions[size_t(part)];
+            revision.stagingOutput.clear();
+            // The excluded writer owns the full retained staging output;
+            // invalidate every chunk opinion along with its cleared bytes.
+            for (auto &chunk : revision.chunks) chunk.ok = false;
+            return;
+        }
+        return;
+    }    if (slot >= B.revisionIndex.size()) return;
+    const auto [chain, part] = B.revisionIndex[slot];
+    auto &revision = B.chains[size_t(chain)].revisions[size_t(part)];
+    switch (domain) {
+    case RigExecBakedSlotDomain::RevisionPacket:
+        revision.parameters.valid = false;
+        break;
+    case RigExecBakedSlotDomain::RevisionTransforms:
+        revision.influencesValid = false;
+        break;
+    case RigExecBakedSlotDomain::RevisionOut:
+        revision.output.clear();
+        break;
+    case RigExecBakedSlotDomain::RevisionDone:
+    case RigExecBakedSlotDomain::ChainDirty:
+        revision.ran = false;
+        revision.executed = false;
+        revision.resultStatus = TfToken("operation cycle");
+        revision.currentSource = -1;
+        break;
+    case RigExecBakedSlotDomain::SkinTopology:
+        revision.layoutHandle.reset();
+        revision.topology.reset();
+        revision.topologyResolved = false;
+        revision.layoutUsable = false;
+        break;
+    default: break;
+    }
+}
 }  // namespace rigExec

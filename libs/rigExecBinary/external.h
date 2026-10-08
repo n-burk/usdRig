@@ -37,6 +37,30 @@ struct RigExecExternalPhasedPoints {
     size_t count = 0;
 };
 
+// Plain API4 type IDs, pinned to the wire InputTag inventory.
+enum class RigExecExternalInputType : uint8_t {
+    Double = 0, Float = 1, Bool = 2, Int = 3, Matrix4d = 4, Token = 5,
+    Vec3d = 6, Vec3f = 7, IntArray = 8, FloatArray = 9,
+    DoubleArray = 10, Vec2fArray = 11, Vec3fArray = 12,
+    Vec3dArray = 13, Matrix4dArray = 14, TokenArray = 15, BoolArray = 16, Vec3i = 17
+};
+
+/// One declared external input, in the plugin's declaration order. Type
+/// uses the format's InputTag numeric IDs. Scalars have count one; arrays
+/// have their actual count, including zero. A failed read has hasValue
+/// false and null data. Storage remains valid only for the apply call.
+/// Matrix4d is sixteen row-major doubles; Vec3d/Vec3f are three contiguous
+/// components. Bool is uint8_t and Int is int32_t. Token data is a direct
+/// null-terminated UTF-8 string (not a pointer to a string pointer), with
+/// count one even for a successfully read empty token. Array counts are
+/// element counts; successful empty arrays retain hasValue true.
+struct RigExecExternalInputValue {
+    uint8_t type = 0;
+    bool hasValue = false;
+    size_t count = 0;
+    const void *data = nullptr;
+};
+
 /// A plugin mover's playback kernel.
 struct RigExecExternalKernel {
     /// Decodes one revision's epoch bytes into immutable state, once per
@@ -51,7 +75,9 @@ struct RigExecExternalKernel {
     /// the preceding points stand.
     bool (*apply)(const void *state, const uint8_t *frame, size_t frameSize,
                   const RigExecExternalPhasedPoints *phased,
-                  size_t phasedCount, float *xyz, size_t pointCount) = nullptr;
+                  size_t phasedCount,
+                  const RigExecExternalInputValue *inputs, size_t inputCount,
+                  float *xyz, size_t pointCount) = nullptr;
 
     bool IsSet() const { return prepare && apply; }
 };

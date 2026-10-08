@@ -16,6 +16,7 @@
 #include "pxr/usd/usd/stage.h"
 #include "pxr/usd/usd/timeCode.h"
 
+#include <map>
 #include <set>
 #include <utility>
 
@@ -136,9 +137,17 @@ struct _Lister {
             }
         }
         std::set<int> blendPoints;
+        std::map<SdfPath, RigExecRevisionLeafType> sparseSources;
         for (const auto &channel : revision.blendChannels) {
             for (const auto &sample : channel.samples) {
                 blendPoints.insert(sample.pointsLeaf);
+                if (!sample.blendShape.IsEmpty()) {
+                    const auto shape = sample.blendShape.GetPrimPath();
+                    sparseSources.emplace(shape.AppendProperty(TfToken("offsets")),
+                        RigExecRevisionLeafType::Vec3fArray);
+                    sparseSources.emplace(shape.AppendProperty(TfToken("pointIndices")),
+                        RigExecRevisionLeafType::IntArray);
+                }
             }
         }
         // The points inputs a read phase answers: live takes the phase
@@ -165,6 +174,31 @@ struct _Lister {
             }
             const int role = roleOf[k];
             if (role < 0) {
+                // API4 declarations have no builtin role. Their immutable
+                // owning leaf site carries the read; list its typed storage
+                // hops here so Default/current array transport is complete.
+                if (decl.externalBegin >= 0 && k >= size_t(decl.externalBegin) &&
+                    k - size_t(decl.externalBegin) < revision.binding.externalInputs.size()) {
+                    RigExecBakeArrayRead read;
+                    if (Hops(key, tag, &read)) {
+                        read.consumer = Consumer::Declared;
+                        read.chain = chain; read.revision = index; read.derived = derived;
+                        reads->push_back(std::move(read));
+                    }
+                    continue;
+                }
+                const auto sparse = sparseSources.find(key.path);
+                if (sparse != sparseSources.end() && sparse->second == key.type &&
+                    key.time == RigExecRevisionLeafTime::AtDefault &&
+                    key.flavour == RigExecRevisionLeafFlavour::Raw) {
+                    RigExecBakeArrayRead read;
+                    if (Hops(key, tag, &read)) {
+                        read.consumer = Consumer::Declared;
+                        read.chain = chain; read.revision = index; read.derived = derived;
+                        reads->push_back(std::move(read));
+                    }
+                    continue;
+                }
                 if (blendPoints.count(int(k))) {
                     continue;
                 }

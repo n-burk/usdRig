@@ -9,19 +9,12 @@
 // REXP buffer whose controls name listed inputs. --report-static lists, after
 // the bake, every static datum whose source the stage animates, which the
 // binary holds at T only; it never changes the exit status.
-// A bake is of the PROGRAM, so the tool pins the Baked mode and treats
-// anything else as a failure -- the --require-baked rigExecPose opts into,
-// here unconditional, because baking dynamic numbers into a file whose
-// reader promises program semantics would be a binary no parity check can
-// hold to account. Exit status is 2 on usage errors and 1 when the rig fails
-// to compile, to bake, or to write, so it can gate a build the way
-// rigExecPose does.
+// Exit status is 2 on usage errors and 1 on compile, export or write failure.
 #include "rigExecBake/bake.h"
 #include "rigExecBake/staticReport.h"
 #include "rigExec/bakedProgramImpl.h"
 #include "rigExec/rigEvaluator.h"
 
-#include "pxr/base/arch/env.h"
 #include "pxr/base/plug/registry.h"
 #include "pxr/base/tf/pathUtils.h"
 #include "pxr/usd/usd/prim.h"
@@ -135,11 +128,6 @@ main(int argc, char **argv)
         }
     }
 
-    // Before the first evaluator exists: the evaluator reads
-    // RIGEXEC_BAKE_REQUIRED once, into a function-local static. Baking IS
-    // the point of this tool, so a fallback is always a failure here.
-    ArchSetEnv("RIGEXEC_BAKE_REQUIRED", "1", /* overwrite = */ true);
-
     const std::string resources = SchemaResourceDir();
     if (!resources.empty() &&
         PlugRegistry::GetInstance().RegisterPlugins(resources).empty()) {
@@ -162,9 +150,6 @@ main(int argc, char **argv)
                 rigPath.GetText());
 
     rigExec::RigExecRigEvaluator evaluator(stage, rigPath);
-    // Pinned, not requested: this tool has no dynamic mode. Set before
-    // Compile so the program builds inside it rather than on first use.
-    evaluator.SetEvaluationMode(rigExec::RigExecEvaluationMode::Baked);
     rigExec::RigExecBakeOpts opts;
     opts.time = haveTime ? time
                          : rigExec::RigExecBakedProbeTime(stage).GetValue();

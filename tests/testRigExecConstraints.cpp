@@ -1,7 +1,13 @@
 // FBX-equivalent constraint schema and evaluator conformance.
 #include "rigExecPoseCompare.h"
+#include "rigExecGraphDependencyCheck.h"
+#include "rigExecRuntimeDrive.h"
+#include "rigExec/frozenContext.h"
+#include "rigExecSampler/runtimePoseProjection.h"
+#include "rigExecRuntime/stageArrayInputs.h"
 
 #include "rigExec/rigEvaluator.h"
+#include "rigExec/bakedTrace.h"
 #include "rigExec/frameExtraction.h"
 #include "rigExec/frozenContext.h"
 #include "rigExecMath/pointFrame.h"
@@ -453,9 +459,9 @@ TestEvaluatorSemantics()
     }
 
     // A LIVE constraint with a malformed table says so and passes through,
-    // in the dynamic walk's own order: the cardinality line the raw read
+    // in declared operation order: the cardinality line the raw read
     // owns, then the mover's "unusable constraint inputs". Both arrays are
-    // read per frame on both paths, so this is also what proves the program
+    // read per frame on the canonical graph, so this is also what proves the program
     // reproduces the diagnostic from THIS run's numbers rather than from
     // something captured at bake.
     position.GetAttribute(TfToken("inputs:defaultWeight")).Set(1.0f);
@@ -616,7 +622,7 @@ TestDynamicWeightDenseBaseFormulaAndParity()
         .SetTargets({dynamic.GetPath()});
 
     RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
-    evaluator.cpuParityMode = true;
+    evaluator.cpuReference = true;
     std::vector<std::string> errors;
     const bool compiled = evaluator.Compile(&errors);
     CHECK(compiled);
@@ -632,8 +638,8 @@ TestDynamicWeightDenseBaseFormulaAndParity()
 
     const RigExecRigPose pose = evaluator.Evaluate(UsdTimeCode::Default());
     CHECK(pose.valid);
-    CHECK(pose.moverGraphParityMismatches == 0);
-    CHECK(pose.moverGraphParityAgreements > 0);
+    CHECK(pose.referenceMismatches == 0);
+    CHECK(pose.referenceAgreements > 0);
 
     // (base * 0.5) * 1.5 + 0.125 gives {0.125, 0.3125, 0.5}.
     const VtVec3fArray expected = {
@@ -1747,15 +1753,13 @@ TestGeometryConstraintsOnOneTargetShareALevel()
         RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
         std::vector<std::string> errors;
         CHECK(evaluator.Compile(&errors));
-        const std::map<SdfPath, size_t> levels =
-            evaluator.GetPoseStepLevels();
-        CHECK(levels.count(posA) && levels.count(posB) && levels.count(posC));
-        if (!levels.count(posA) || !levels.count(posB) ||
-            !levels.count(posC)) {
-            continue;
-        }
-        CHECK(levels.at(posA) == levels.at(posB));
-        CHECK(levels.at(posC) == levels.at(posA));
+        const auto graph=evaluator.GetOpGraph();
+        const size_t a=rigExecTest::FindOperation(graph,posA,"Constraint");
+        const size_t b=rigExecTest::FindOperation(graph,posB,"Constraint");
+        const size_t c=rigExecTest::FindOperation(graph,posC,"Constraint");
+        CHECK(a<graph.size() && b<graph.size() && c<graph.size());
+        for(size_t first:{a,b,c})for(size_t second:{a,b,c})if(first!=second)
+            CHECK(!rigExecTest::HasDependencyPath(graph,first,second));
         const RigExecRigPose pose = evaluator.Evaluate(UsdTimeCode::Default());
         CHECK(pose.valid);
         // Both translations reach M; only one reaches N.
@@ -1890,7 +1894,7 @@ TestGeometryEnvelopeIsChordLerp()
     rot.GetAttribute(TfToken("inputs:defaultWeight")).Set(0.5f);
 
     RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
-    evaluator.cpuParityMode = true;
+    evaluator.cpuReference = true;
     std::vector<std::string> errors;
     CHECK(evaluator.Compile(&errors));
     const RigExecRigPose pose = evaluator.Evaluate(UsdTimeCode::Default());
@@ -1913,8 +1917,8 @@ TestGeometryEnvelopeIsChordLerp()
     // The constraint now participates in the ordinary point revision graph,
     // with a scalar application oracle and the same envelope contract.
     CHECK(pose.movedPropertiesCpu.count(pointsPath) == 1);
-    CHECK(pose.moverGraphParityAgreements == 1);
-    CHECK(pose.moverGraphParityMismatches == 0);
+    CHECK(pose.referenceAgreements == 1);
+    CHECK(pose.referenceMismatches == 0);
 }
 
 // Competing writers are keyed by the exact target, and that is correct.
@@ -2575,12 +2579,8 @@ TestTwoBoneIkImpliedLengths(bool throughBlend)
                 SdfPath("/Asset/Rig/Solvers/Blend")) == 1);
         }
         const RigExecRigPose rejectedPose = rejecting.Evaluate(UsdTimeCode::Default());
-        CHECK(rejectedPose.valid && rejectedPose.bakedParityMismatches == 0);
-        if (rejectedPose.bakedParityMismatches) {
-            for (const auto &diagnostic : rejectedPose.diagnostics) {
-                std::printf("skipped solver: %s\n", diagnostic.c_str());
-            }
-        }
+        CHECK(rejectedPose.valid);
+
         CHECK(std::any_of(
             rejected.begin(), rejected.end(),
             [](const std::string &error) {
@@ -2727,20 +2727,14 @@ TestAggregateSolverValueUpdates()
     CHECK(Near(middle(), GfVec3d(2, 1, 0)));
 }
 
-// Moves \p evaluator to the exec oracle when the session left it at Dynamic.
-// The suites that call this count solverEvaluations in the WALK's meaning:
-// the batches this generation re-evaluated, so an unchanged pull reads zero.
-// In the program it is a Build-time constant (unified-program spec rule D4),
-// so their assertions hold only where the walk publishes. Dynamic may run the
-// program (RIGEXEC_DYNAMIC_RUNS_PROGRAM), so it is pinned; the parity check
-// publishes the oracle's generation and is left alone, so its entries keep
-// comparing the program against these rigs.
-static void
-PinSolverEvaluationsToTheWalk(RigExecRigEvaluator &evaluator)
+// Deep producer chains use exact version dependencies and sparse invalidation.
+static size_t
+SolveOpsRan(const RigExecRigEvaluator &evaluator)
 {
-    if (evaluator.GetEvaluationMode() == RigExecEvaluationMode::Dynamic) {
-        evaluator.SetEvaluationMode(RigExecEvaluationMode::ExecReference);
-    }
+    size_t count = 0;
+    for (const auto &entry : evaluator.GetLastOpTrace())
+        if (entry.kind == "Solve") ++count;
+    return count;
 }
 
 static void
@@ -2805,7 +2799,7 @@ TestDeepSolverDependencySchedule()
             .SetChildrenReorder(order);
     }
     RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
-    PinSolverEvaluationsToTheWalk(evaluator);
+
     std::vector<std::string> errors;
     CHECK(evaluator.Compile(&errors));
     CHECK(errors.empty());
@@ -2813,9 +2807,9 @@ TestDeepSolverDependencySchedule()
     const auto evaluate = [&](double sourceX) {
         source.GetAttribute(TfToken("avars:tx")).Set(sourceX);
         const RigExecRigPose pose = evaluator.Evaluate(UsdTimeCode::Default());
-        CHECK(pose.valid && pose.solverOverridesConverged);
-        CHECK(pose.solverEvaluations == size_t(depth));
-        CHECK(pose.solverOverrideRounds == size_t(depth));
+        CHECK(pose.valid);
+        CHECK(SolveOpsRan(evaluator) == size_t(depth));
+
         CHECK(evaluator.GetBindingEpochDigest() == epoch);
         const auto joint = pose.jointFramesFinal.find(previousJoint);
         CHECK(joint != pose.jointFramesFinal.end());
@@ -2835,12 +2829,12 @@ TestDeepSolverDependencySchedule()
     // An unchanged pull reuses every solver result. Editing a rest input
     // halfway along the graph dirties only the downstream dependency levels.
     const RigExecRigPose unchanged = evaluator.Evaluate(UsdTimeCode::Default());
-    CHECK(unchanged.valid && unchanged.solverEvaluations == 0);
+    CHECK(unchanged.valid && SolveOpsRan(evaluator) == 0);
     stage->GetAttributeAtPath(SdfPath("/Asset/Rig/Joints/J46/Input.rest:tx"))
         .Set(2.0);
     const RigExecRigPose tail = evaluator.Evaluate(UsdTimeCode::Default());
     CHECK(tail.valid);
-    CHECK(tail.solverEvaluations == size_t(depth - 47));
+    CHECK(SolveOpsRan(evaluator) == size_t(depth - 47));
     CHECK(evaluator.GetBindingEpochDigest() == epoch);
     const auto tailJoint = tail.jointFramesFinal.find(previousJoint);
     CHECK(tailJoint != tail.jointFramesFinal.end());
@@ -2850,7 +2844,7 @@ TestDeepSolverDependencySchedule()
     stage->GetAttributeAtPath(SdfPath("/Asset/Rig/Joints/J95/Input.rest:tx"))
         .Set(11.0);
     const RigExecRigPose unrelated = evaluator.Evaluate(UsdTimeCode::Default());
-    CHECK(unrelated.valid && unrelated.solverEvaluations == 0);
+    CHECK(unrelated.valid && SolveOpsRan(evaluator) == 0);
 
     // Rewire an existing endpoint attribute without changing output count.
     // The same evaluator must rebuild its DAG and remove upstream levels
@@ -2863,7 +2857,7 @@ TestDeepSolverDependencySchedule()
     const RigExecRigPose afterRewire = evaluator.Evaluate(UsdTimeCode::Default());
     CHECK(afterRewire.valid);
     CHECK(evaluator.GetBindingEpochDigest() != epoch);
-    CHECK(afterRewire.solverOverrideRounds < size_t(depth));
+
     const auto rewiredJoint = afterRewire.jointFramesFinal.find(
         SdfPath("/Asset/Rig/Joints/J47"));
     CHECK(rewiredJoint != afterRewire.jointFramesFinal.end());
@@ -2941,7 +2935,7 @@ TestSolverTransitiveConnectionInvalidation()
     const UsdAttribute stretch = ik.GetAttribute(TfToken("inputs:stretch"));
     stretch.SetConnections({relay.GetPath()});
     RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
-    PinSolverEvaluationsToTheWalk(evaluator);
+
     std::vector<std::string> errors;
     CHECK(evaluator.Compile(&errors));
     CHECK(errors.empty());
@@ -2960,7 +2954,7 @@ TestSolverTransitiveConnectionInvalidation()
     a.Set(1.0f);
     evaluate(8);
     a.Set(0.5f);
-    CHECK(evaluate(6).solverEvaluations == 1);
+    CHECK((evaluate(6), SolveOpsRan(evaluator)) == 1);
     CHECK(evaluator.GetBindingEpochDigest() == epoch);
 
     // Same-valued rewires must update the watch set even when the output
@@ -2970,19 +2964,19 @@ TestSolverTransitiveConnectionInvalidation()
     evaluate(6);
     CHECK(evaluator.GetBindingEpochDigest() != epoch);
     a.Set(0.0f);
-    CHECK(evaluate(6).solverEvaluations == 0);
+    CHECK((evaluate(6), SolveOpsRan(evaluator)) == 0);
     b.Set(0.25f);
-    CHECK(evaluate(5).solverEvaluations == 1);
+    CHECK((evaluate(5), SolveOpsRan(evaluator)) == 1);
     const size_t relayEpoch = evaluator.GetBindingEpochDigest();
     stretch.SetConnections({c.GetPath()});
     evaluate(5);
     CHECK(evaluator.GetBindingEpochDigest() != relayEpoch);
     b.Set(0.0f);
-    CHECK(evaluate(5).solverEvaluations == 0);
+    CHECK((evaluate(5), SolveOpsRan(evaluator)) == 0);
     c.Set(0.75f);
-    CHECK(evaluate(7).solverEvaluations == 1);
+    CHECK((evaluate(7), SolveOpsRan(evaluator)) == 1);
     c.Set(0.5f);
-    CHECK(evaluate(6).solverEvaluations == 1);
+    CHECK((evaluate(6), SolveOpsRan(evaluator)) == 1);
 }
 
 static void
@@ -3059,7 +3053,7 @@ TestConstraintSolverDependencySchedule()
                              TfToken("FollowEnd"), TfToken("IK"),
                              TfToken("DriveGoal"), TfToken("Source")});
     RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
-    PinSolverEvaluationsToTheWalk(evaluator);
+
     std::vector<std::string> errors;
     CHECK(evaluator.Compile(&errors));
     const size_t epoch = evaluator.GetBindingEpochDigest();
@@ -3069,7 +3063,7 @@ TestConstraintSolverDependencySchedule()
             for (const auto &error : pose.diagnostics) std::printf("pose: %s\n", error.c_str());
         }
         CHECK(pose.valid);
-        CHECK(pose.solverEvaluations == solverCount);
+        CHECK(SolveOpsRan(evaluator) == solverCount);
         for (const SdfPath &path : {endJoint.GetPath(), finalJoint.GetPath()}) {
             const auto frame = pose.jointFramesFinal.find(path);
             CHECK(frame != pose.jointFramesFinal.end());
@@ -3278,113 +3272,26 @@ TestSolverOwnedJointBlocksNamespacePropagation()
     check(2.0, 5.0, false);
 }
 
+#include "rigExecConnectedBridgeFixture.h"
+
 static void
 TestConnectedParentSpaceSolverInputs()
 {
-    const auto stage = UsdStage::CreateInMemory();
-    MakeXform(stage, SdfPath("/Asset"), Matrix());
-    MakeXform(stage, SdfPath("/Asset/DriverTarget"), Matrix(GfVec3d(4, 0, 0)));
-    const UsdPrim target = MakeXform(stage, SdfPath("/Asset/JointTarget"), Matrix(GfVec3d(5, 0, 0)));
-    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
-    const auto control = [&](const char *path, double x, double y = 0) {
-        const UsdPrim prim = stage->DefinePrim(SdfPath(path), TfToken("RigExecControl"));
-        prim.GetAttribute(TfToken("rest:tx")).Set(x);
-        prim.GetAttribute(TfToken("rest:ty")).Set(y);
-        prim.GetAttribute(TfToken("purpose")).Set(TfToken("guide"));
-        return prim;
-    };
-    const UsdPrim driver = control("/Asset/Rig/Controls/Driver", 1);
-    const UsdPrim altDriver = control("/Asset/Rig/Controls/AltDriver", 2);
-    const UsdPrim source = stage->DefinePrim(SdfPath("/Asset/Rig/Joints/Source"), TfToken("RigExecJoint"));
-    const UsdPrim altSource = stage->DefinePrim(SdfPath("/Asset/Rig/Joints/AltSource"), TfToken("RigExecJoint"));
-    for (const auto &binding : {std::make_pair(driver, source), std::make_pair(altDriver, altSource)}) {
-        // Every solver in this fixture lives in the SAME SCOPE as the
-        // constraints, because the IK has to read a control whose space
-        // resolves through a joint a CONSTRAINT revises -- and under the
-        // unified pose stack (spec 4.2) the only thing that can put the IK
-        // after that constraint is the composed namespace. Solvers are
-        // discovered by type anywhere beneath the rig, so one scope and one
-        // `reorder nameChildren` spells the whole order.
-        const UsdPrim fk = stage->DefinePrim(
-            SdfPath("/Asset/Rig/Movers").AppendChild(binding.first.GetName()), TfToken("RigExecFkChain"));
-        fk.GetRelationship(TfToken("rigExec:controls")).SetTargets({binding.first.GetPath()});
-        fk.GetRelationship(TfToken("rigExec:joints")).SetTargets({binding.second.GetPath()});
-    }
-    const UsdPrim relay = control("/Asset/Rig/Joints/Source/Relay", 0);
-    const UsdPrim altRelay = control("/Asset/Rig/Joints/AltSource/Relay", 0);
-    const UsdPrim bridge = control("/Asset/Rig/Controls/Bridge", 0);
-    bridge.GetAttribute(TfToken("default:space"))
-        .SetConnections({relay.GetPath().AppendProperty(TfToken("parent:space"))});
-    // Bridge's own namespace descendants: the connected refresh has to carry
-    // the BASE phase of a descendant with its connected ancestor, and has to
-    // honour the same ownership boundary the constraint walk honours. Rider
-    // inherits its pose and must follow; Owner is written by a solver of its
-    // own and must not. Owner has to be solver-bound for the boundary to be
-    // observable at all: a descendant the refresh walk visits in its own
-    // right recomputes its base frame from its own tap straight afterwards,
-    // while a solver-bound joint is skipped, so what the carry leaves on it
-    // is what the pose publishes.
-    const UsdPrim rider = stage->DefinePrim(
-        SdfPath("/Asset/Rig/Controls/Bridge/Rider"), TfToken("RigExecJoint"));
-    rider.GetAttribute(TfToken("rest:tx")).Set(1.0);
-    rider.GetAttribute(TfToken("purpose")).Set(TfToken("guide"));
-    const UsdPrim owner = stage->DefinePrim(
-        SdfPath("/Asset/Rig/Controls/Bridge/Owner"), TfToken("RigExecJoint"));
-    owner.GetAttribute(TfToken("rest:tx")).Set(1.0);
-    owner.GetAttribute(TfToken("purpose")).Set(TfToken("guide"));
-    // A descendant a constraint owns is skipped by the refresh walk too, so
-    // its base phase is exactly what the loop leaves behind.
-    const UsdPrim held = stage->DefinePrim(
-        SdfPath("/Asset/Rig/Controls/Bridge/Held"), TfToken("RigExecJoint"));
-    held.GetAttribute(TfToken("rest:tx")).Set(2.0);
-    held.GetAttribute(TfToken("purpose")).Set(TfToken("guide"));
-    MakeXform(stage, SdfPath("/Asset/HeldTarget"), Matrix(GfVec3d(9, 0, 0)));
-    MakeConstraint(stage, "MoveHeld", "RigExecPositionConstraint", {held.GetPath()})
-        .GetRelationship(TfToken("rigExec:sources"))
-        .SetTargets({SdfPath("/Asset/HeldTarget")});
-    const UsdPrim ownerDriver = control("/Asset/Rig/Controls/OwnerDriver", 7);
-    {
-        const UsdPrim fk = stage->DefinePrim(
-            SdfPath("/Asset/Rig/Movers/Owner"), TfToken("RigExecFkChain"));
-        fk.GetRelationship(TfToken("rigExec:controls"))
-            .SetTargets({ownerDriver.GetPath()});
-        fk.GetRelationship(TfToken("rigExec:joints")).SetTargets({owner.GetPath()});
-    }
-    const UsdPrim goal = control("/Asset/Rig/Controls/Goal", 2);
-    goal.GetAttribute(TfToken("parent:space"))
-        .SetConnections({bridge.GetPath().AppendProperty(TfToken("posed:defaultSpace"))});
-    const UsdPrim root = control("/Asset/Rig/Controls/Root", 0);
-    const UsdPrim pole = control("/Asset/Rig/Controls/Pole", 0, 5);
-    // rest:tx 0/5/10 so the IK's bones MEASURE 5 and 5. These tests
-    // used to author absolute lengths, which Compile now rejects.
-    SdfPathVector joints;
-    {
-        double tx = 0.0;
-        for (const char *name : {"J0", "J1", "J2"}) {
-            const SdfPath path =
-                SdfPath("/Asset/Rig/Joints").AppendChild(TfToken(name));
-            stage->DefinePrim(path, TfToken("RigExecJoint"))
-                .GetAttribute(TfToken("rest:tx")).Set(tx);
-            tx += 5.0;
-            joints.push_back(path);
-        }
-    }
-    const UsdPrim ik = stage->DefinePrim(SdfPath("/Asset/Rig/Movers/IK"), TfToken("RigExecTwoBoneIk"));
-    ik.GetRelationship(TfToken("rigExec:rootControl")).SetTargets({root.GetPath()});
-    ik.GetRelationship(TfToken("rigExec:effectorControl")).SetTargets({goal.GetPath()});
-    ik.GetRelationship(TfToken("rigExec:poleControl")).SetTargets({pole.GetPath()});
-    ik.GetRelationship(TfToken("rigExec:joints")).SetTargets(joints);
-    const UsdPrim moveJoint = MakeConstraint(stage, "MoveJoint", "RigExecPositionConstraint", {source.GetPath()});
-    moveJoint.GetRelationship(TfToken("rigExec:sources")).SetTargets({target.GetPath()});
-    const UsdPrim moveDriver = MakeConstraint(stage, "MoveDriver", "RigExecPositionConstraint", {driver.GetPath()});
-    moveDriver.GetRelationship(TfToken("rigExec:sources")).SetTargets({SdfPath("/Asset/DriverTarget")});
-    // Bottom sibling first, so this list is the execution order REVERSED:
-    // MoveDriver, Driver FK, AltDriver FK, MoveJoint, Owner FK, IK, MoveHeld.
-    stage->GetPrimAtPath(SdfPath("/Asset/Rig/Movers"))
-        .SetChildrenReorder({TfToken("MoveHeld"), TfToken("IK"),
-                             TfToken("Owner"), TfToken("MoveJoint"),
-                             TfToken("AltDriver"), TfToken("Driver"),
-                             TfToken("MoveDriver")});
+    const auto fixture=RigExecMakeConnectedBridgeFixture(MakeXform,MakeConstraint);
+    const auto &stage=fixture.stage;
+    const auto &driver=fixture.driver;
+    const auto &altDriver=fixture.altDriver;
+    const auto &target=fixture.target;
+    const auto &source=fixture.source;
+    const auto &relay=fixture.relay;
+    const auto &altRelay=fixture.altRelay;
+    const auto &bridge=fixture.bridge;
+    const auto &rider=fixture.rider;
+    const auto &owner=fixture.owner;
+    const auto &held=fixture.held;
+    const auto &goal=fixture.goal;
+    const auto &moveDriver=fixture.moveDriver;
+    const auto &joints=fixture.joints;
     RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
     std::vector<std::string> errors;
     CHECK(evaluator.Compile(&errors));
@@ -3395,7 +3302,7 @@ TestConnectedParentSpaceSolverInputs()
     auto check = [&](double expected, size_t evaluations, double riderBase) {
         const auto pose = evaluator.Evaluate(UsdTimeCode::Default());
         CHECK(pose.valid);
-        CHECK(pose.solverEvaluations == evaluations);
+        CHECK(SolveOpsRan(evaluator) == evaluations);
         if (pose.valid) {
             CHECK(Near(pose.controlFrames.at(goal.GetPath()).Origin(), GfVec3d(expected, 0, 0)));
             CHECK(Near(pose.jointFramesFinal.at(joints[2]).Origin(), GfVec3d(expected, 0, 0)));
@@ -3521,14 +3428,14 @@ TestConnectedAncestorRefreshIgnoresUnrelatedReaders()
         RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
         std::vector<std::string> errors;
         CHECK(evaluator.Compile(&errors));
-        const std::map<SdfPath, size_t> levels =
-            evaluator.GetPoseStepLevels();
-        const SdfPath fPath("/Asset/Rig/Movers/F");
-        const SdfPath ePath("/Asset/Rig/Movers/E");
-        CHECK(levels.count(fPath) && levels.count(ePath));
-        if (delayF && levels.count(fPath) && levels.count(ePath)) {
-            // The shape under test: F runs at a later level than E.
-            CHECK(levels.at(fPath) > levels.at(ePath));
+        const auto graph=evaluator.GetOpGraph();
+        const size_t f=rigExecTest::FindOperation(graph,SdfPath("/Asset/Rig/Movers/F"),"Constraint");
+        const size_t e=rigExecTest::FindOperation(graph,SdfPath("/Asset/Rig/Movers/E"),"Constraint");
+        CHECK(f<graph.size() && e<graph.size());
+        if(delayF) {
+            const size_t c8=rigExecTest::FindOperation(graph,SdfPath("/Asset/Rig/Movers/C8"),"Constraint");
+            CHECK(c8<graph.size());
+            CHECK(rigExecTest::HasDependencyPath(graph,c8,f));
         }
         const RigExecRigPose pose = evaluator.Evaluate(UsdTimeCode::Default());
         CHECK(pose.valid);
@@ -3762,10 +3669,9 @@ MakeSolverDiamondStage()
 }
 
 static void
-TestSolverBatchLevelAudit()
+TestSolverDiamondDependencies()
 {
-    // Minimal longest-path layering puts A at 0, B and C together at 1, and
-    // D at 2 -- dense, with no wave wasted on schedule order.
+    // The actual producer graph preserves the diamond and keeps its middle branches independent.
     const UsdStageRefPtr stage = MakeSolverDiamondStage();
     const SdfPath solverA("/Asset/Rig/Solvers/A");
     const SdfPath solverB("/Asset/Rig/Solvers/B");
@@ -3775,24 +3681,27 @@ TestSolverBatchLevelAudit()
     std::vector<std::string> errors;
     CHECK(evaluator.Compile(&errors));
     CHECK(errors.empty());
-    const std::map<SdfPath, size_t> levels = evaluator.GetSolverBatchLevels();
-    CHECK(levels.size() == 4);
-    CHECK(levels.at(solverA) == 0);
-    CHECK(levels.at(solverB) == 1);
-    CHECK(levels.at(solverC) == 1);
-    CHECK(levels.at(solverD) == 2);
-    std::set<size_t> dense;
-    for (const auto &[solver, level] : levels) dense.insert(level);
-    CHECK((dense == std::set<size_t>{0, 1, 2}));
+    const auto graph=evaluator.GetOpGraph();
+    const size_t a=rigExecTest::FindOperation(graph,solverA,"Solve");
+    const size_t b=rigExecTest::FindOperation(graph,solverB,"Solve");
+    const size_t c=rigExecTest::FindOperation(graph,solverC,"Solve");
+    const size_t d=rigExecTest::FindOperation(graph,solverD,"Solve");
+    CHECK(a<graph.size() && b<graph.size() && c<graph.size() && d<graph.size());
+    CHECK(rigExecTest::HasDependencyPath(graph,a,b));
+    CHECK(rigExecTest::HasDependencyPath(graph,a,c));
+    CHECK(rigExecTest::HasDependencyPath(graph,b,d));
+    CHECK(rigExecTest::HasDependencyPath(graph,c,d));
+    CHECK(!rigExecTest::HasDependencyPath(graph,b,c));
+    CHECK(!rigExecTest::HasDependencyPath(graph,c,b));
     const auto pose = evaluator.Evaluate(UsdTimeCode::Default());
-    CHECK(pose.valid && pose.solverOverridesConverged);
-    CHECK(pose.solverEvaluations == 4);
-    CHECK(pose.solverOverrideRounds == 3);
+    CHECK(pose.valid);
+    CHECK(SolveOpsRan(evaluator) == 4);
+
 }
 
 // The diamond's blend reads B's and C's aggregates from the generation it
 // answers: after a drag on the source, the released rig publishes what a
-// fresh evaluator does, on the walk and on the program.
+// fresh canonical evaluator does.
 static void
 TestSolverBatchDiamondIsHistoryIndependent()
 {
@@ -3801,12 +3710,10 @@ TestSolverBatchDiamondIsHistoryIndependent()
         {RigExecValueOverride{SdfPath("/Asset/Rig/Controls/Source"), TfToken(),
                               TfToken("avars:tx"), VtValue(5.0)}}};
     const rigExecTest::EvaluationState released{UsdTimeCode::Default(), {}};
-    for (const RigExecEvaluationMode mode :
-             {RigExecEvaluationMode::ExecReference,
-              RigExecEvaluationMode::Baked}) {
+    {
         rigExecTest::CheckHistoryIndependent(
             &failures, "solver diamond after a drag on its source",
-            MakeSolverDiamondStage, SdfPath("/Asset/Rig"), mode, dragged,
+            MakeSolverDiamondStage, SdfPath("/Asset/Rig"), dragged,
             released);
     }
 }
@@ -4466,7 +4373,7 @@ TestSplineIkEvaluatorBinding()
 // Each has to move the solve when TIME moves and when an interactive drag
 // holds it, and that is what is checked here -- but the reason this test
 // exists is what it does under RIGEXEC_EVALUATION_MODE=parity, where every
-// Evaluate below compares the baked program against the dynamic walk. No
+// Evaluate below checks cached canonical generations against numeric fixtures. No
 // other rig or fixture in the tree animates or drags one of these, so
 // nothing else can tell whether the baked constraint step is dirtied when
 // one of them moves: an input the step never declared, or a source table
@@ -4660,6 +4567,236 @@ TestSingleChainIkComputedStretch()
 // once, at Default, would call it static and compose through the ladder
 // while exec used the authored matrix at every numeric frame. So the
 // assertion is not that it refuses but that it FOLLOWS, frame by frame.
+
+// Exercise the exact stage source channel in all three execution adapters.
+struct ConstraintsSourcePlayback {
+    std::shared_ptr<const RigExecFrozenProgram> snapshot;
+    std::unique_ptr<RigExecFrozenWorkspace> workspace;
+    RigExecTestPlayer player;
+    RigExecFrozenEvalContext context;
+    bool Open(RigExecRigEvaluator &evaluator,const UsdStageRefPtr &stage) {
+        std::string error; std::vector<uint8_t> bytes;
+        const bool baked=RigExecTestBakeAt(evaluator,1,&bytes,&error);
+        CHECK(baked); if(!baked){std::printf("source bake: %s\n",error.c_str());return false;}
+        const bool opened=player.Open(bytes,stage,&error);
+        CHECK(opened);if(!opened){std::printf("source open: %s\n",error.c_str());return false;}
+        const bool frozen=RigExecFreezeProgram(evaluator,&snapshot,&error);
+        CHECK(frozen);if(!frozen){std::printf("source freeze: %s\n",error.c_str());return false;}
+        workspace=RigExecCreateFrozenWorkspace(snapshot);CHECK(workspace);if(!workspace)return false;
+        context.epochDigest=evaluator.GetBindingEpochDigest();context.programDigest=1;
+        context.slotCount=evaluator.GetBakedProgram()->GetProviderCount();
+        context.frozen=snapshot.get();context.workspace=workspace.get();
+        if(evaluator.GetSolverGuidesEnabled())context.flags|=kRigExecFrozenSolverGuidesEnabled;
+        if(evaluator.GetPublishWeightFields())context.flags|=kRigExecFrozenPublishWeightFields;
+        return true;
+    }
+    void Check(RigExecRigEvaluator &evaluator,const UsdStageRefPtr &stage,
+               const SdfPath &target,double expected,bool edited,bool held=false,
+               UsdTimeCode time=UsdTimeCode(1)) {
+        std::string before,after;stage->GetRootLayer()->ExportToString(&before);
+        const auto native=evaluator.Evaluate(time);CHECK(native.valid);
+        const auto found=native.jointFramesFinal.find(target);CHECK(found!=native.jointFramesFinal.end());
+        if(found!=native.jointFramesFinal.end())CHECK(Near(found->second.Origin(),GfVec3d(expected,0,0)));
+        if(held)CHECK(evaluator.GetLastOpTrace().empty());
+        RigExecFrameInputs inputs;std::string error;
+        const bool sampled=RigExecSampleFrameInputs(evaluator,time,{},&inputs,&error);
+        CHECK(sampled);if(!sampled){std::printf("source sample: %s\n",error.c_str());return;}
+        context.varyingInputCount=inputs.values.size();
+        RigExecFrozenRunReport report;
+        const auto detached=RigExecEvaluateFrozen(context,inputs,RigExecMakeProductionStepRunner(),nullptr,SdfPath(),&report);
+        CHECK(detached.valid);rigExecTest::CompareEveryMap(&failures,"source frozen",native,detached);
+        if(held)CHECK(report.ran && report.region.empty());
+        if(edited)player.ReleaseAll(); // Notify the normal sampler of a stage value edit.
+        bool played;
+        if (time.IsDefault()) {
+            RigExecInputSampler defaultSampler;
+            played=defaultSampler.Bind(stage,player.Reader(),&error) &&
+                defaultSampler.Apply(time,&player.Reader(),&error) && player->Execute(&error);
+        } else {
+            played=player.Play(time.GetValue(),&error);
+        }
+        CHECK(played);if(!played){std::printf("source playback: %s\n",error.c_str());return;}
+        RigExecRigPose runtime;CHECK(RigExecProjectRuntimePose(player.Reader(),time,true,&runtime,&error));
+        rigExecTest::CompareEveryMap(&failures,"source runtime",native,runtime);
+        if(held)CHECK(player->GetLastRunTraceForTesting().empty());
+        stage->GetRootLayer()->ExportToString(&after);CHECK(before==after);
+    }
+};
+
+// The typed binding boundary distinguishes live source absence from a
+// detached source fact that already includes its override or upstream layer.
+static void TestDirectNumericSourceReadBoundary()
+{
+    const auto stage=UsdStage::CreateInMemory();
+    const auto prim=stage->DefinePrim(SdfPath("/Source"),TfToken("Xform"));
+    auto scalar=prim.CreateAttribute(TfToken("rest:tx"),SdfValueTypeNames->Double);
+    scalar.Set(17.0);
+    RigExecBakedBuildContext context;SdfPathVector walk;
+    auto input=context.ResolveBind(prim,"rest:tx",4.0,&walk,true);
+    CHECK(input.sourceBacked && !input.varying);
+    RigExecResolvedInputs resolved;
+    CHECK(RigExecBakedRead(input,resolved,UsdTimeCode(1))==17.0);
+    input.query=UsdAttributeQuery();
+    CHECK(RigExecBakedRead(input,resolved,UsdTimeCode(1))==4.0);
+    input.head=UsdAttribute();input.constant=23.0;input.overrideIndex=0;
+    const std::vector<char> flags{1};
+    CHECK(RigExecBakedRead(input,resolved,UsdTimeCode(1),&flags)==23.0);
+    CHECK(RigExecBakedRead(input,resolved,UsdTimeCode(1),nullptr,nullptr,&flags)==23.0);
+    CHECK(RigExecBakedRead(input,resolved,UsdTimeCode(1))==23.0);
+    const auto bad=stage->DefinePrim(SdfPath("/WrongType"),TfToken("Xform"));
+    bad.CreateAttribute(TfToken("rest:tx"),SdfValueTypeNames->Token).Set(TfToken("wrong"));
+    bad.CreateAttribute(TfToken("inputs:translationOffset"),SdfValueTypeNames->Token).Set(TfToken("wrong"));
+    walk.clear();const auto wrongScalar=context.ResolveBind(bad,"rest:tx",4.0,&walk,true);
+    CHECK(!wrongScalar.sourceBacked && wrongScalar.constant==4.0);
+    walk.clear();const auto wrongVector=context.ResolveBind(bad,"inputs:translationOffset",GfVec3d(2),&walk,true);
+    CHECK(!wrongVector.sourceBacked && wrongVector.constant==GfVec3d(2));
+}
+
+static void TestDirectStaticNumericSources()
+{
+    const auto stage=UsdStage::CreateInMemory();
+    stage->DefinePrim(SdfPath("/Asset"),TfToken("Xform"));
+    stage->DefinePrim(SdfPath("/Asset/Rig"),TfToken("RigExecRoot"));
+    const auto source=stage->DefinePrim(SdfPath("/Asset/Rig/Controls/Source"),TfToken("RigExecControl"));
+    const auto target=stage->DefinePrim(SdfPath("/Asset/Rig/Joints/Target"),TfToken("RigExecJoint"));
+    const auto rest=source.GetAttribute(TfToken("rest:tx"));rest.Set(2.0);
+    const auto move=MakeConstraint(stage,"Move","RigExecPositionConstraint",{target.GetPath()});
+    move.GetRelationship(TfToken("rigExec:sources")).SetTargets({source.GetPath()});
+    const auto offset=move.GetAttribute(TfToken("inputs:translationOffset"));offset.Set(GfVec3d(1,0,0));
+    RigExecRigEvaluator evaluator(stage,SdfPath("/Asset/Rig"));std::vector<std::string> errors;
+    CHECK(evaluator.Compile(&errors));CHECK(errors.empty());
+    CHECK(evaluator.Evaluate(UsdTimeCode(1)).valid);
+    const auto &initial=evaluator.GetBakedProgram()->GetStepGraph();
+    const size_t sourceSlot=size_t(initial.index.at(source.GetPath()));
+    CHECK(initial.ladders[sourceSlot].restAvars[0].sourceBacked);
+    CHECK(!initial.ladders[sourceSlot].restAvars[0].varying);
+    CHECK(initial.ladders[sourceSlot].restAvars[0].sourceFallback==0.0);
+    const auto c=std::find_if(initial.constraints.begin(),initial.constraints.end(),[&](const auto &value){return value.path==move.GetPath();});
+    CHECK(c!=initial.constraints.end());if(c!=initial.constraints.end()){CHECK(c->offset.sourceBacked);CHECK(c->offset.sourceFallback==GfVec3d(0));CHECK(!c->offset.varying);}
+    ConstraintsSourcePlayback playback;if(!playback.Open(evaluator,stage))return;
+    const auto samples=RigExecRuntimeStageArrayInputs::EnumerateProviderValues(playback.player.Reader());
+    CHECK(std::any_of(samples.begin(),samples.end(),[&](const auto &sample){return sample.name==rest.GetPath().GetString();}));
+    CHECK(std::any_of(samples.begin(),samples.end(),[&](const auto &sample){return sample.name==offset.GetPath().GetString();}));
+    CHECK(std::all_of(samples.begin(),samples.end(),[](const auto &sample){return !sample.animated;}));
+    CHECK(playback.player.Sampler().GetAnimatedCount()==0);
+    CHECK(playback.player.Sampler().GetWarnings().empty());
+    const size_t epoch=evaluator.GetBindingEpochDigest(),builds=evaluator.GetBakedProgramBuildCount(),staticRests=evaluator.GetEpochRestFrameCount();
+    const auto check=[&](double expected,bool edited){playback.Check(evaluator,stage,target.GetPath(),expected,edited);playback.Check(evaluator,stage,target.GetPath(),expected,false,true);CHECK(evaluator.GetBindingEpochDigest()==epoch);CHECK(evaluator.GetBakedProgramBuildCount()==builds);CHECK(evaluator.GetEpochRestFrameCount()==staticRests);};
+    check(3,false);
+    const auto overrideVisit=[&](const std::vector<RigExecValueOverride> &drag,
+        const std::vector<RigExecValueOverride> &upstream,double expected) {
+        std::string before,after;stage->GetRootLayer()->ExportToString(&before);
+        evaluator.SetUpstreamInputs(upstream);evaluator.SetInteractiveOverrides(drag);
+        std::vector<RigExecUpstreamValue> source;
+        for (const auto &value : upstream)
+            source.push_back({value.prim.AppendProperty(value.attribute),value.value,0});
+        for (int held=0;held<2;++held) {
+            const auto native=evaluator.Evaluate(UsdTimeCode(1));CHECK(native.valid);
+            const auto targetFrame=native.jointFramesFinal.find(target.GetPath());CHECK(targetFrame!=native.jointFramesFinal.end());
+            if(targetFrame!=native.jointFramesFinal.end())CHECK(Near(targetFrame->second.Origin(),GfVec3d(expected,0,0)));
+            RigExecFrameInputs inputs;std::string error;
+            CHECK(RigExecSampleFrameInputs(evaluator,UsdTimeCode(1),drag,source,&inputs,&error));
+            playback.context.varyingInputCount=inputs.values.size();RigExecFrozenRunReport report;
+            const auto frozen=RigExecEvaluateFrozen(playback.context,inputs,RigExecMakeProductionStepRunner(),nullptr,SdfPath(),&report);
+            CHECK(frozen.valid);rigExecTest::CompareEveryMap(&failures,"source override frozen",native,frozen);
+            if(held){CHECK(evaluator.GetLastOpTrace().empty());CHECK(report.ran && report.region.empty());}
+        }
+        stage->GetRootLayer()->ExportToString(&after);CHECK(before==after);
+    };
+    overrideVisit({{source.GetPath(),TfToken(),TfToken("rest:tx"),VtValue(6.0)}},{},7);
+    overrideVisit({},{{source.GetPath(),TfToken(),TfToken("rest:tx"),VtValue(5.0)}},6);
+    overrideVisit({}, {},3); // Both layers lifted, with the same persistent lane.
+    check(3,false);
+    rest.Set(3.0);check(4,true);rest.Clear();check(1,true);rest.Block();check(1,true);
+    // Reset restores the file's actual raw source default and its availability,
+    // including the captured unblocked state; it does not restore argument 0.
+    playback.player->ResetInputs();std::string resetError;
+    CHECK(playback.player->Execute(&resetError));RigExecRigPose resetPose;
+    CHECK(RigExecProjectRuntimePose(playback.player.Reader(),UsdTimeCode(1),true,&resetPose,&resetError));
+    const auto resetTarget=resetPose.jointFramesFinal.find(target.GetPath());CHECK(resetTarget!=resetPose.jointFramesFinal.end());
+    if(resetTarget!=resetPose.jointFramesFinal.end())CHECK(Near(resetTarget->second.Origin(),GfVec3d(3,0,0)));
+    playback.Check(evaluator,stage,target.GetPath(),1,true);
+    rest.Set(2.0);check(3,true);
+    offset.Clear();check(2,true);offset.Block();check(2,true);offset.Set(GfVec3d(1,0,0));check(3,true);
+    // A single numeric sample is animated even when USD reports no varying
+    // interpolation. Keep Default and Time identities distinct after rebinding.
+    rest.Set(9.0,UsdTimeCode(1));const auto animated=evaluator.Evaluate(UsdTimeCode(1));CHECK(animated.valid);
+    const auto &rebound=evaluator.GetBakedProgram()->GetStepGraph();
+    const auto &input=rebound.ladders[size_t(rebound.index.at(source.GetPath()))].restAvars[0];
+    CHECK(!input.sourceBacked);CHECK(input.varying);CHECK(evaluator.GetBakedProgramBuildCount()>builds);
+    ConstraintsSourcePlayback sampled;if(!sampled.Open(evaluator,stage))return;
+    sampled.Check(evaluator,stage,target.GetPath(),10,false);
+    const auto defaults=evaluator.Evaluate(UsdTimeCode::Default());CHECK(defaults.valid);
+    const auto defaultTarget=defaults.jointFramesFinal.find(target.GetPath());CHECK(defaultTarget!=defaults.jointFramesFinal.end());
+    if(defaultTarget!=defaults.jointFramesFinal.end())CHECK(Near(defaultTarget->second.Origin(),GfVec3d(3,0,0)));
+    std::string defaultError;RigExecFrameInputs defaultInputs;
+    CHECK(RigExecSampleFrameInputs(evaluator,UsdTimeCode::Default(),{},&defaultInputs,&defaultError));
+    sampled.context.varyingInputCount=defaultInputs.values.size();
+    const auto defaultFrozen=RigExecEvaluateFrozen(sampled.context,defaultInputs,RigExecMakeProductionStepRunner());
+    CHECK(defaultFrozen.valid);rigExecTest::CompareEveryMap(&failures,"Default frozen source",defaults,defaultFrozen);
+    RigExecInputSampler defaultSampler;
+    CHECK(defaultSampler.Bind(stage,sampled.player.Reader(),&defaultError));
+    CHECK(defaultSampler.Apply(UsdTimeCode::Default(),&sampled.player.Reader(),&defaultError));
+    CHECK(sampled.player->Execute(&defaultError));RigExecRigPose defaultRuntime;
+    CHECK(RigExecProjectRuntimePose(sampled.player.Reader(),UsdTimeCode::Default(),true,&defaultRuntime,&defaultError));
+    rigExecTest::CompareEveryMap(&failures,"Default runtime source",defaults,defaultRuntime);
+}
+
+static void TestDirectStaticRotationSignSource()
+{
+    const auto stage=UsdStage::CreateInMemory();
+    stage->DefinePrim(SdfPath("/Asset"),TfToken("Xform"));
+    stage->DefinePrim(SdfPath("/Asset/Rig"),TfToken("RigExecRoot"));
+    const auto source=stage->DefinePrim(SdfPath("/Asset/Rig/Controls/Source"),TfToken("RigExecControl"));
+    const auto target=stage->DefinePrim(source.GetPath().AppendChild(TfToken("Tip")),TfToken("RigExecJoint"));
+    CHECK(source.GetAttribute(TfToken("avars:rz")).Set(90.0));
+    CHECK(target.GetAttribute(TfToken("rest:ty")).Set(2.0));
+    const auto sign=source.GetAttribute(TfToken("avars:rotationSign"));
+    CHECK(target.GetAttribute(TfToken("purpose")).Set(TfToken("default")));
+    CHECK(sign.Set(GfVec3d(1,1,-1)));
+    RigExecRigEvaluator evaluator(stage,SdfPath("/Asset/Rig"));std::vector<std::string> errors;
+    CHECK(evaluator.Compile(&errors));CHECK(errors.empty());
+    const auto canonical=evaluator.Evaluate(UsdTimeCode(1));CHECK(canonical.valid);
+    const auto *program=evaluator.GetBakedProgram();CHECK(program);if(!program)return;
+    const auto &B=program->GetStepGraph();const auto slot=B.index.find(source.GetPath());
+    CHECK(slot!=B.index.end());if(slot==B.index.end())return;
+    const auto &binding=B.ladders[size_t(slot->second)].rotationSign;
+    CHECK(binding.sourceBacked && !binding.varying);
+    CHECK(binding.sourceFallback==GfVec3d(1));
+    ConstraintsSourcePlayback playback;if(!playback.Open(evaluator,stage))return;
+    const auto samples=RigExecRuntimeStageArrayInputs::EnumerateProviderValues(playback.player.Reader());
+    CHECK(std::any_of(samples.begin(),samples.end(),[&](const auto &sample){return sample.name==sign.GetPath().GetString() && !sample.animated;}));
+    CHECK(playback.player.Sampler().GetAnimatedCount()==0);
+    const size_t epoch=evaluator.GetBindingEpochDigest(),builds=evaluator.GetBakedProgramBuildCount(),rests=evaluator.GetEpochRestFrameCount();
+    const auto check=[&](double expected,bool edited){
+        playback.Check(evaluator,stage,target.GetPath(),expected,edited);
+        playback.Check(evaluator,stage,target.GetPath(),expected,false,true);
+        CHECK(evaluator.GetBindingEpochDigest()==epoch);
+        CHECK(evaluator.GetBakedProgramBuildCount()==builds);
+        CHECK(evaluator.GetEpochRestFrameCount()==rests);
+    };
+    check(2,false);
+    CHECK(sign.Set(GfVec3d(1)));check(-2,true);
+    CHECK(sign.Clear());check(-2,true);
+    sign.Block();check(-2,true);
+    playback.player->ResetInputs();std::string error;CHECK(playback.player->Execute(&error));
+    RigExecRigPose reset;CHECK(RigExecProjectRuntimePose(playback.player.Reader(),UsdTimeCode(1),true,&reset,&error));
+    rigExecTest::CompareEveryMap(&failures,"canonical sign reset",canonical,reset);
+    playback.Check(evaluator,stage,target.GetPath(),-2,true);
+    CHECK(sign.Set(GfVec3d(1,1,-1)));check(2,true);
+    CHECK(sign.Set(GfVec3d(1)));
+    CHECK(sign.Set(GfVec3d(1,1,-1),UsdTimeCode(1)));
+    const auto keyed=evaluator.Evaluate(UsdTimeCode(1));CHECK(keyed.valid);
+    const auto *rebound=evaluator.GetBakedProgram();CHECK(rebound);if(!rebound)return;
+    const auto &R=rebound->GetStepGraph();const auto at=R.index.find(source.GetPath());CHECK(at!=R.index.end());if(at==R.index.end())return;
+    CHECK(!R.ladders[size_t(at->second)].rotationSign.sourceBacked);
+    CHECK(R.ladders[size_t(at->second)].rotationSign.varying);
+    CHECK(evaluator.GetBakedProgramBuildCount()>builds);
+    ConstraintsSourcePlayback sampled;if(!sampled.Open(evaluator,stage))return;
+    sampled.Check(evaluator,stage,target.GetPath(),2,false);
+    sampled.Check(evaluator,stage,target.GetPath(),-2,false,false,UsdTimeCode::Default());
+}
+
 static void
 TestAuthoredPosedSpaceBakesAndAnimatedOneFollows()
 {
@@ -4725,27 +4862,45 @@ TestAuthoredPosedSpaceBakesAndAnimatedOneFollows()
             CHECK(Near(child->second.Origin(), GfVec3d(x, 0, 0)));
         }
     }
-    // And the connected case, which is the one the program still hands
-    // back: exec reads the connection's computeValue, which can be any
-    // computation at all, and no per-frame read off the stage is that.
+    // A connected matrix is an explicit Attribute producer read by the ladder.
     const UsdStageRefPtr connected = build(/* animate = */ false);
-    const UsdPrim child =
-        connected->GetPrimAtPath(SdfPath("/Asset/Rig/Joints/Root/Child"));
-    const UsdAttribute driver = child.CreateAttribute(
-        TfToken("inputs:posedDriver"), SdfValueTypeNames->Matrix4d);
-    driver.Set(Matrix(GfVec3d(4, 0, 0)));
-    child.GetAttribute(TfToken("posed:space"))
-        .SetConnections({driver.GetPath()});
-    RigExecRigEvaluator wired(connected, SdfPath("/Asset/Rig"));
-    CHECK(wired.Compile(&errors));
-    reasons.clear();
-    CHECK(!wired.IsBakeable(&reasons));
-    bool named = false;
-    for (const std::string &reason : reasons) {
-        named = named ||
-                reason.find("connected posed:space") != std::string::npos;
+    const UsdPrim child = connected->GetPrimAtPath(SdfPath("/Asset/Rig/Joints/Root/Child"));
+    const UsdAttribute driver = child.CreateAttribute(TfToken("inputs:posedDriver"),SdfValueTypeNames->Matrix4d);
+    driver.Set(Matrix(GfVec3d(4,0,0)));
+    child.GetAttribute(TfToken("posed:space")).SetConnections({driver.GetPath()});
+    RigExecRigEvaluator wired(connected,SdfPath("/Asset/Rig"));CHECK(wired.Compile(&errors));
+    reasons.clear();CHECK(wired.IsBakeable(&reasons));CHECK(reasons.empty());
+    const auto graph=wired.GetOpGraph();
+    const auto &binding=wired.GetBakedProgram()->GetStepGraph();
+    const int childSlot=binding.index.at(child.GetPath());
+    const int posedValue=binding.ladders[size_t(childSlot)].spaceValues[2];
+    CHECK(posedValue>=0);
+    const auto attr=std::find_if(graph.begin(),graph.end(),[&](const auto &node){
+        if(node.kind!="SpaceExpression")return false;
+        const auto &body=binding.steps[binding.opGraph.ops[node.step].originalIndex];
+        if(body.part!=0)return false;
+        const auto &op=binding.providerProgram.ops[size_t(body.object)];
+        return op.kind==RigExecProviderOpKind::Attribute &&
+            op.owner==child.GetPath().AppendProperty(TfToken("posed:space")) &&
+            op.output==RigExecValueId(posedValue) &&
+            std::any_of(node.writes.begin(),node.writes.end(),[&](const auto &write){
+                return write.domain=="SpaceValue" && write.first<=uint32_t(posedValue) && write.last>=uint32_t(posedValue);
+            });
+    });
+    const auto ladder=rigExecTest::FindOperation(graph,child.GetPath(),"LadderCompose");
+    CHECK(attr!=graph.end());if(attr!=graph.end())CHECK(rigExecTest::HasDependencyPath(graph,attr->step,ladder));
+    ConstraintsSourcePlayback connectedPlayback;if(!connectedPlayback.Open(wired,connected))return;
+    connectedPlayback.Check(wired,connected,child.GetPath(),4,false);
+    connectedPlayback.Check(wired,connected,child.GetPath(),4,false,true);
+    for(double x:{6.0,4.0}) {
+        driver.Set(Matrix(GfVec3d(x,0,0)));
+        // Matrix connection captures may replace the immutable program. Each
+        // fresh snapshot then retains held work in its own execution lane.
+        CHECK(wired.Evaluate(UsdTimeCode(1)).valid);
+        ConstraintsSourcePlayback updated;if(!updated.Open(wired,connected))return;
+        updated.Check(wired,connected,child.GetPath(),x,true);
+        updated.Check(wired,connected,child.GetPath(),x,false,true);
     }
-    CHECK(named);
 }
 
 // A diagnostic can name another operation without making it responsible.
@@ -4844,8 +4999,11 @@ main()
     TestConnectedInteractiveBranches();
     TestConnectedAncestorRefreshIgnoresUnrelatedReaders();
     TestSolverGuidesGate();
-    TestSolverBatchLevelAudit();
+    TestSolverDiamondDependencies();
     TestSolverBatchDiamondIsHistoryIndependent();
+    TestDirectNumericSourceReadBoundary();
+    TestDirectStaticNumericSources();
+    TestDirectStaticRotationSignSource();
     TestAuthoredPosedSpaceBakesAndAnimatedOneFollows();
     TestSingleChainIkOwnInputsMoveOverTimeAndUnderDrag();
     TestSingleChainIkComputedStretch();

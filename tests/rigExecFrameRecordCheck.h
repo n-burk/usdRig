@@ -1,16 +1,9 @@
-// AtPrim transform reads held to the dynamic walk's phased-read store, for
-// the tests. The baked program answers an AtPrim read phase on
-// rigExec:transform (and on a matrix mover's reference influences) from a
-// list of frame records bound at Build and keeps no store of its own. In a
-// BakedWithParityCheck generation the dynamic walk runs after the program
-// over the same evaluator, so the evaluator's store (the program's
-// `chainSnapshots`) then holds the walk's records. It holds every pose
-// record before any geometry reader runs, so each list's first valid record
-// must equal the store's answer, in presence and bit for bit.
-// Reports through a caller-owned failure counter, like rigExecPoseCompare.h.
+// AtPrim typed producer provenance and optional literal checkpoint facts.
+// This helper checks binding/storage conformance, not an independent math oracle.
 #ifndef RIGEXEC_TESTS_FRAME_RECORD_CHECK_H
 #define RIGEXEC_TESTS_FRAME_RECORD_CHECK_H
 
+#include "rigExecPhaseQueryObserver.h"
 #include "rigExec/bakedProgram.h"
 #include "rigExec/bakedProgramImpl.h"
 #include "rigExec/rigEvaluator.h"
@@ -19,6 +12,7 @@
 #include "pxr/usd/sdf/path.h"
 
 #include <cstdio>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -47,7 +41,7 @@ RecordMovers(const rigExec::RigExecBakedProgramImpl &B,
 {
     std::vector<SdfPath> movers;
     for (const int record : records) {
-        movers.push_back(size_t(record) < B.frameRecords.size()
+        movers.push_back(record >= 0 && size_t(record) < B.frameRecords.size()
                              ? B.frameRecords[size_t(record)].mover
                              : SdfPath());
     }
@@ -60,7 +54,8 @@ FirstValidRecord(const rigExec::RigExecBakedProgramImpl &B,
                  const std::vector<int> &records, GfMatrix4d *matrix)
 {
     for (const int record : records) {
-        if (B.frameMatrixValid[size_t(record)]) {
+        if (record >= 0 && size_t(record) < B.frameMatrixValid.size() &&
+            size_t(record) < B.frameMatrix.size() && B.frameMatrixValid[size_t(record)]) {
             *matrix = B.frameMatrix[size_t(record)];
             return true;
         }
@@ -68,12 +63,19 @@ FirstValidRecord(const rigExec::RigExecBakedProgramImpl &B,
     return false;
 }
 
-/// Holds every AtPrim transform reader of \p evaluator's program to the
-/// dynamic walk's store after a BakedWithParityCheck generation, and every
-/// other reader to an empty list. Returns the readers a record answered.
+struct LiteralFrameFact {
+    rigExec::RigExecPointFrame frame;
+    GfMatrix4d matrix{1.0};
+    bool hasValue = false;
+};
+
+/// Checks exact provider/version provenance and every caller-supplied literal
+/// fact. Literal expectations must come from fixture arithmetic or independent
+/// reference capture, never this program's output tables.
 inline size_t
 CheckFrameRecords(int *failures, const std::string &where,
-                  const rigExec::RigExecRigEvaluator &evaluator)
+                  const rigExec::RigExecRigEvaluator &evaluator,
+                  const std::map<int,LiteralFrameFact> *literalFacts = nullptr)
 {
     const auto expect = [failures](const std::string &at, bool ok,
                                    const char *what) {
@@ -89,15 +91,6 @@ CheckFrameRecords(int *failures, const std::string &where,
         return answered;
     }
     const rigExec::RigExecBakedProgramImpl &B = program->GetStepGraph();
-    expect(where,
-           evaluator.GetEvaluationMode() ==
-               rigExec::RigExecEvaluationMode::BakedWithParityCheck,
-           "the walk ran beside the program");
-    expect(where, B.chainSnapshots != nullptr, "the evaluator's store");
-    if (!B.chainSnapshots) {
-        return answered;
-    }
-    const rigExec::RigExecChainSnapshots &walk = *B.chainSnapshots;
     expect(where, B.frameMatrix.size() == B.frameRecords.size(),
            "one frameMatrix per record");
     expect(where, B.frameMatrixValid.size() == B.frameRecords.size(),
@@ -106,18 +99,46 @@ CheckFrameRecords(int *failures, const std::string &where,
         [&](const std::string &at, int slot,
             const rigExec::RigExecBakedProgramImpl::GeomRevision &r,
             const std::vector<int> &records) {
-        const VtValue *stored =
-            slot >= 0 ? walk.Lookup(B.paths[size_t(slot)],
-                                    r.binding.transformPhase, r.moverPath)
-                      : nullptr;
-        const bool storeAnswered = stored && stored->IsHolding<GfMatrix4d>();
+        expect(at, slot >= 0 && size_t(slot) < B.paths.size(), "valid provider slot");
+        for (const int id : records) {
+            const bool validId = id >= 0 && size_t(id) < B.frameRecords.size();
+            expect(at,validId,"record index is in range");
+            if (!validId) continue;
+            if (size_t(id) >= B.frameMatrixValid.size() || size_t(id) >= B.frameMatrix.size()) continue;
+            const auto &record = B.frameRecords[size_t(id)];
+            expect(at,record.slot == slot,"record belongs to the requested provider");
+            expect(at,record.version < B.fin.size(),"record names a typed final-frame version");
+            size_t producers = 0;
+            for (const auto &step : B.steps) {
+                if (step.kind != rigExec::RigExecBakedStepKind::FrameMatrix || step.object != id) continue;
+                ++producers;
+                bool readsVersion = false;
+                for (const auto &range : step.reads)
+                    readsVersion = readsVersion ||
+                        (range.domain == rigExec::RigExecBakedSlotDomain::PoseFin &&
+                         record.version >= range.begin && record.version < range.end);
+                expect(at,readsVersion,"checkpoint producer reads the exact frame version");
+            }
+            expect(at,producers == 1,"checkpoint has exactly one declared producer");
+            if (literalFacts) {
+                const auto fact = literalFacts->find(id);
+                if (fact != literalFacts->end() && record.version < B.fin.size()) {
+                    expect(at,B.fin[record.version] == fact->second.frame,"literal checkpoint frame");
+                    expect(at,bool(B.frameMatrixValid[size_t(id)]) == fact->second.hasValue,
+                           "literal checkpoint presence");
+                    if (fact->second.hasValue)
+                        expect(at,B.frameMatrix[size_t(id)] == fact->second.matrix,"literal checkpoint matrix");
+                }
+            }
+        }
         GfMatrix4d bound(1.0);
-        const bool recordAnswered = FirstValidRecord(B, records, &bound);
-        expect(at, storeAnswered == recordAnswered,
-               "the store and the records answer alike");
-        if (storeAnswered && recordAnswered) {
-            expect(at, stored->UncheckedGet<GfMatrix4d>() == bound,
-                   "the store's matrix is the record's");
+        const bool recordAnswered = FirstValidRecord(B,records,&bound);
+        if (rigExecOriginalQuery::configuration.check && !literalFacts) {
+            const VtValue value = recordAnswered ? VtValue(bound) : VtValue();
+            rigExecOriginalQuery::Emit(at,r.moverPath.GetString(),
+                slot >= 0 && size_t(slot) < B.paths.size() ? B.paths[size_t(slot)].GetString() : std::string(),
+                r.binding.transformPhase.GetAsString(),B.lastTime.IsDefault(),
+                B.lastTime.GetValue(),recordAnswered ? &value : nullptr);
         }
         return recordAnswered;
     };

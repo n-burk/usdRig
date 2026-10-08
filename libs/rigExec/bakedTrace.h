@@ -21,7 +21,7 @@ const char *RigExecBakedStepDomainName(RigExecBakedStepKind kind);
 
 /// One step the last run executed.
 struct RigExecOpTraceEntry {
-    /// Program index of the step.
+    /// Canonical operation index.
     size_t step = 0;
     /// RigExecBakedStepKindName of the step.
     std::string kind;
@@ -29,7 +29,7 @@ struct RigExecOpTraceEntry {
     std::string domain;
     /// The step's report label.
     std::string label;
-    /// 1-based completion order within the run.
+    /// 1-based completion order; skipped operations can leave gaps.
     uint32_t seq = 0;
     /// The cluster the step belongs to, -1 when unclustered.
     int cluster = -1;
@@ -48,11 +48,9 @@ struct RigExecOpGraphNode {
     std::string kind;
     std::string domain;
     std::string label;
-    /// Program indices; every pred is smaller than `step`.
+    /// Canonical predecessor/successor operation indices.
     std::vector<size_t> preds, succs;
     int cluster = -1;
-    /// Longest-path level from the clustering pass.
-    int level = 0;
     /// Declared reads and writes, empty ranges omitted.
     std::vector<RigExecOpSlotRange> reads, writes;
 };

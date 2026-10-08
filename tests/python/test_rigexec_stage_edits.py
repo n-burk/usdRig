@@ -62,15 +62,11 @@ def TestRemovePrimWithCompiledEvaluator():
 
 
 def TestDeactivateReactivateRecovers():
-    """A request invalidated by a structural edit is rebuilt, not abandoned.
+    """An unavailable required joint refuses the pose and later recovers.
 
-    Deactivating a prim the compiled exec requests read expires those
-    requests. Reactivating it restores the composed stage, but an evaluator
-    that only rebuilds a request when it thinks it is unprepared never
-    notices, and every later evaluate returns an empty pose for the rest of
-    the session. RigExecTapSet::Evaluate therefore rebuilds on expiry as
-    well, and this asserts the recovery -- including at a later time code,
-    which is what a scrub after the edit looks like.
+    The authored solver and frame reads require this Shoulder hierarchy.
+    Refusal publishes no stale pose; reactivation restores each joint frame,
+    including at a later scrub time.
     """
     import _rigexec
     stage = Usd.Stage.Open(_EXAMPLE)
@@ -82,13 +78,34 @@ def TestDeactivateReactivateRecovers():
            "baseline evaluate: valid=%s joints=%d"
            % (before.valid, len(before.joint_paths())))
 
+    expected = {1001.0: before, 1024.0: rig.evaluate(1024.0)}
+    _Check(expected[1024.0].valid, "later baseline evaluate is valid")
+    control = "/Shot/HeroArm/Rig/Controls/HandIK"
+    _Check(control in before.control_paths(), "unaffected control is published")
+
     joint = stage.GetPrimAtPath("/Shot/HeroArm/Rig/Joints/Shoulder")
     _Check(joint, "shoulder joint exists")
     joint.SetActive(False)
-    # Deactivated, the rig cannot pose: that is the expected, reported state.
     down = rig.evaluate(1001.0)
     _Check(not down.valid and not down.joint_paths(),
-           "evaluate with the joint deactivated reports an empty pose")
+           "an unavailable required joint refuses the pose")
+    _Check(not down.control_paths() and not down.provider_paths() and
+           not down.moved_properties(),
+           "required-provider refusal publishes no stale controls, providers, or geometry")
+    _Check(any("failed to prepare pose provider inputs" in message
+               for message in down.diagnostics),
+           "required-provider refusal is reported")
+    diagnostics = list(down.diagnostics)
+    _Check(
+        "Mover /Shot/HeroArm/Rig/Movers/Pose/WristAim targets missing prim "
+        "/Shot/HeroArm/Rig/Joints/Shoulder/Elbow/Wrist" in diagnostics and
+        "RigExecTwoBoneIk /Shot/HeroArm/Rig/Solvers/IK rigExec:joints "
+        "targets missing prim /Shot/HeroArm/Rig/Joints/Shoulder/Elbow"
+        in diagnostics and
+        "/Shot/HeroArm/Rig/Solvers/IKFKBlend reads skipped operation "
+        "/Shot/HeroArm/Rig/Solvers/IK" in diagnostics,
+        "unavailable mover and solver inputs, and their dependent skip, "
+        "are identified: %r" % diagnostics)
 
     joint.SetActive(True)
     for time in (1001.0, 1024.0):
@@ -96,6 +113,12 @@ def TestDeactivateReactivateRecovers():
         _Check(after.valid and len(after.joint_paths()) == 3,
                "evaluate at %g after reactivating: valid=%s joints=%d"
                % (time, after.valid, len(after.joint_paths())))
+        _Check(after.joint_paths() == expected[time].joint_paths() and
+               all(after.joint_frame(path).to_matrix4() ==
+                   expected[time].joint_frame(path).to_matrix4()
+                   for path in after.joint_paths()),
+               "reactivated joint frames exactly match the pre-edit pose at %g"
+               % time)
 
 
 def TestBrokenStageIsNotRecompiledEveryFrame():
@@ -104,16 +127,15 @@ def TestBrokenStageIsNotRecompiledEveryFrame():
     A structural edit with no operation to skip -- here authored mesh normals
     on a Points prim -- used to recompile on every frame of the
     scrub that followed: a full compile per frame for the same answer. The
-    failure is now remembered against the stage-edit serial and the mode,
-    so every later frame reports the same diagnostics without compiling,
-    and the two things that can change the answer both get a real compile:
-    switching the evaluation mode, and a stage edit (here, the repair).
+    failure is remembered against the stage-edit serial, so later frames
+    report the same diagnostics without compiling. Independent reference
+    checking does not change compilation; a repairing stage edit does.
     """
     import _rigexec
     stage = Usd.Stage.Open(_EXAMPLE)
     _Check(stage, "example stage opens")
     rig = _rigexec.Rig(stage, "/Shot/HeroArm/Rig")
-    rig.evaluation_mode = "baked"
+    rig.cpu_reference = True
     rig.compile()
     rig.profiling_enabled = True
     _Check(rig.evaluate(1001.0).valid, "baseline evaluate is valid")
@@ -151,16 +173,19 @@ def TestBrokenStageIsNotRecompiledEveryFrame():
                "frame %g repeats the compile's diagnostics: %r"
                % (time, list(pose.diagnostics)))
 
-    # The mode decides what a compile prepares, and so what can fail; it
-    # moves with no stage notice, so switching it has to compile again.
-    rig.evaluation_mode = "dynamic"
+    # Reference checking is an observer option, not a compilation mode.
+    rig.cpu_reference = False
     pose, compiles, remembered = Frame(1005.0)
-    _Check(not pose.valid and compiles == 1 and remembered == 0,
-           "a mode switch while broken compiles again: valid=%s "
-           "compiles=%d" % (pose.valid, compiles))
+    _Check(not pose.valid and compiles == 0 and remembered == 1 and
+           list(pose.diagnostics) == diagnostics,
+           "changing the reference observer preserves the compile failure: "
+           "valid=%s compiles=%d" % (pose.valid, compiles))
+    rig.cpu_reference = False
     pose, compiles, remembered = Frame(1006.0)
-    _Check(not pose.valid and compiles == 0 and remembered == 1,
-           "and the frame after it is remembered: compiles=%d" % compiles)
+    _Check(not pose.valid and compiles == 0 and remembered == 1 and
+           list(pose.diagnostics) == diagnostics,
+           "repeating the observer option also preserves the failure: "
+           "compiles=%d" % compiles)
 
     # The repair is a stage edit: the memo no longer answers for it.
     geometry.SetTypeName(original_type)
@@ -185,7 +210,7 @@ def TestEditsTheDigestNeverReadSkipIt():
     stage = Usd.Stage.Open(_EXAMPLE)
     _Check(stage, "example stage opens")
     rig = _rigexec.Rig(stage, "/Shot/HeroArm/Rig")
-    rig.evaluation_mode = "baked"
+    rig.cpu_reference = True
     rig.compile()
     rig.profiling_enabled = True
     _Check(rig.evaluate(1001.0).valid, "baseline evaluate is valid")

@@ -1,10 +1,7 @@
-// Property revisions as head-tier ops: the binding at Build,
-// the head leaves, the walk resolver, the op bodies and the publication.
-// Each body is the revision-loop body of
-// RigExecRigEvaluator::_EvaluatePropertyChains (rigEvaluatorProperties.cpp)
-// it replaces, with every stage read and overlay walk restated over values
-// the prologue sampled. The dynamic path keeps its own function as the
-// reference.
+// Property revisions: immutable compile bindings, sampled typed inputs,
+// canonical graph bodies and publication. Native and detached SceneDb
+// revisions use the same numerical property runner.
+#include "rigExecGraph/propertyProgram.h"
 #include "bakedProgram.h"
 #include "bakedProgramImpl.h"
 #include "bodyPurity.h"
@@ -45,6 +42,7 @@ const TfToken kMax("inputs:max");
 const TfToken kKeys("inputs:keys");
 const TfToken kTangents("inputs:tangents");
 const TfToken kWeightObject("rigExec:weightObject");
+const TfToken kInputElement(RigExecInputElementMetadataName);
 
 using HeadType = RigExecBakedHeadValueType;
 using Chain = RigExecBakedPropertyChain;
@@ -103,6 +101,7 @@ TypeOf(HeadType type)
     case HeadType::Int: return TfType::Find<int>();
     case HeadType::Token: return TfType::Find<TfToken>();
     case HeadType::Vec3d: return TfType::Find<GfVec3d>();
+    case HeadType::Vec3fArray: return TfType::Find<VtVec3fArray>();
     }
     return TfType();
 }
@@ -138,6 +137,7 @@ SampleHead(const RigExecBakedHeadLeaf &leaf, UsdTimeCode time)
     case HeadType::Int: return TypedGet<int>(leaf.attribute, time);
     case HeadType::Token: return TypedGet<TfToken>(leaf.attribute, time);
     case HeadType::Vec3d: return TypedGet<GfVec3d>(leaf.attribute, time);
+    case HeadType::Vec3fArray: return TypedGet<VtVec3fArray>(leaf.attribute, time);
     }
     return VtValue();
 }
@@ -166,6 +166,10 @@ ArmType(Chain::Arm arm)
 // What Build binds a program's chains with.
 struct BindState {
     RigExecBakedProgramImpl *program = nullptr;
+    UsdAttribute consumer;
+    HeadType consumerType = HeadType::Float;
+    RigExecReadPhase consumerPhase;
+    int consumerElement = -1;
     std::map<std::pair<SdfPath, int>, uint32_t> leafOf;
     std::unordered_map<SdfPath, int, SdfPath::Hash> chainOfTarget;
     std::unordered_map<SdfPath, int, SdfPath::Hash> recordOfConsumer;
@@ -200,30 +204,101 @@ struct BindState {
         return int(index);
     }
 
-    // A hop read by chain \p reader: a chain target or a record consumer
-    // only counts when its chain runs first, which is the only way the
-    // overlay can hold its value when the reader runs.
+    // Discovery indices identify producers; they never decide availability.
+    // An unconnected input revised by its own chain retains its entering/raw
+    // binding. Connected sources retain their exact phase producer identities.
     RigExecBakedWalkHop Hop(const UsdAttribute &attribute, int reader)
     {
         RigExecBakedWalkHop hop;
         hop.path = attribute.GetPath();
         hop.overrideSlot = Slot(hop.path);
+        RigExecBakedProgramImpl &B = *program;
+        if (consumer && hop.path != consumer.GetPath()) {
+            RigExecCrossDomainRead read;
+            read.consumer = consumer.GetPath();
+            read.source = hop.path;
+            read.reader = consumer.GetPrim().GetPath();
+            read.phase = consumerPhase;
+            bool cross = false;
+            if (consumerType == HeadType::Vec3f && consumerElement >= 0 &&
+                attribute.GetTypeName().GetType() == TfType::Find<VtVec3fArray>()) {
+                read.kind = RigExecCrossDomainRead::Kind::PointElement;
+                read.element = consumerElement;
+                // A source with no mover chain is an ordinary sampled array.
+                bool chain = false;
+                for (const auto &candidate : B.chains) chain = chain || candidate.target == hop.path;
+                if (!chain) read.rawLeaf = Leaf(attribute,HeadType::Vec3fArray);
+                cross = true;
+            } else if (consumerType == HeadType::Vec3fArray &&
+                       attribute.GetTypeName().GetType() == TfType::Find<VtVec3fArray>()) {
+                cross = RigExecBakedBindConnectionValue(B,consumer.GetPath(),hop.path,consumerPhase,&read);
+            } else if (consumerType == HeadType::Matrix4d &&
+                       attribute.GetTypeName() == SdfValueTypeNames->Matrix4d &&
+                       !chainOfTarget.count(hop.path)) {
+                const auto provider = B.index.find(hop.path.GetPrimPath());
+                if (provider != B.index.end() && hop.path.GetName() == "posed:space") {
+                    read.kind = RigExecCrossDomainRead::Kind::PoseFrame;
+                    read.provider = provider->second;
+                    cross = true;
+                } else {
+                    const auto space = B.providerProgram.attributeValues.find(hop.path);
+                    if (space != B.providerProgram.attributeValues.end()) {
+                        read.kind = RigExecCrossDomainRead::Kind::SpaceValue;
+                        read.spaceValue = int(space->second);
+                        cross = true;
+                    }
+                }
+            }
+            if (cross) {
+                read.unavailable = "diag " + read.consumer.GetString() +
+                    ": cross-domain input " + read.source.GetString() +
+                    (read.element >= 0 ? " element " + std::to_string(read.element) : std::string()) +
+                    " is unavailable; using the typed fallback";
+                hop.crossDomain = int(B.crossDomainReads.size());
+                B.crossDomainReads.push_back(std::move(read));
+            }
+        }
         const auto chain = chainOfTarget.find(hop.path);
-        if (chain != chainOfTarget.end() && chain->second < reader) {
+        const bool ownEnteringHead = chain != chainOfTarget.end() &&
+            chain->second == reader && consumer &&
+            hop.path == consumer.GetPath() && !consumer.HasAuthoredConnections();
+        if (chain != chainOfTarget.end() && !ownEnteringHead) {
             hop.chain = chain->second;
         }
         const auto record = recordOfConsumer.find(hop.path);
-        if (record != recordOfConsumer.end() &&
-            int(program->propertyRecords[size_t(record->second)].chain) <
-                reader) {
+        if (record != recordOfConsumer.end()) {
             hop.record = record->second;
         }
         return hop;
     }
 
+    // A typed phased record owns the source phase for this read. A later
+    // target hop cannot replace Base/AtPrim with that target's Final. Keep
+    // raw and override hops, and preserve mismatched double-tail records.
+    std::set<uint32_t> SelectPhasedSources(
+        std::vector<RigExecBakedWalkHop> *hops, HeadType readAs, int reader,
+        std::set<uint32_t> selected = {})
+    {
+        // Ordinary readers retain conditional Final fallbacks and typed shadows.
+        // Only a property revision owns an entering phase for its source walk.
+        if (reader == std::numeric_limits<int>::max()) return selected;
+        const RigExecBakedProgramImpl &B = *program;
+        for (auto &hop : *hops) {
+            if (hop.chain >= 0 && selected.count(uint32_t(hop.chain)))
+                hop.chain = -1;
+            if (hop.record >= 0) {
+                const auto &record = B.propertyRecords[size_t(hop.record)];
+                if (record.consumerType.GetType() == TypeOf(readAs))
+                    selected.insert(record.chain);
+            }
+        }
+        return selected;
+    }
+
     // GetAttribute<double>'s walk from \p from, with its own cycle guard.
     void DoubleTail(const UsdAttribute &from, int reader,
-                    std::vector<RigExecBakedWalkHop> *out)
+                    std::vector<RigExecBakedWalkHop> *out,
+                    std::set<uint32_t> selected = {})
     {
         std::set<SdfPath> visiting;
         UsdAttribute a = from;
@@ -240,6 +315,7 @@ struct BindState {
             }
             a = a.GetPrim().GetStage()->GetAttributeAtPath(connections[0]);
         }
+        SelectPhasedSources(out, HeadType::Double, reader, std::move(selected));
     }
 
     // _PinnedRead's arms as a walk: no attribute, an unconnected one (the
@@ -250,6 +326,23 @@ struct BindState {
     RigExecBakedWalk Walk(const UsdAttribute &attribute, HeadType type,
                           int reader, bool pinned = true)
     {
+        consumer = attribute;
+        consumerType = type;
+        consumerPhase = RigExecReadPhase();
+        consumerElement = -1;
+        if (attribute) {
+            std::string error;
+            if (!RigExecResolveReadPhase(attribute,&consumerPhase,&error))
+                program->crossDomainErrors.push_back(error);
+            if (attribute.HasAuthoredMetadata(kInputElement)) {
+                VtValue element;
+                attribute.GetMetadata(kInputElement,&element);
+                if (type != HeadType::Vec3f || !element.IsHolding<int>() || element.UncheckedGet<int>() < 0)
+                    program->crossDomainErrors.push_back(attribute.GetPath().GetString()+
+                        ": rigExecInputElement requires a nonnegative int on a Vec3f input");
+                else consumerElement = element.UncheckedGet<int>();
+            }
+        }
         RigExecBakedWalk walk;
         walk.type = type;
         if (!attribute) {
@@ -280,7 +373,8 @@ struct BindState {
             walk.hops.push_back(Hop(a, reader));
             attributes.push_back(a);
             if (isFloat && a.GetTypeName() == SdfValueTypeNames->Double) {
-                DoubleTail(a, reader, &walk.doubleHops);
+                auto selected = SelectPhasedSources(&walk.hops, type, reader);
+                DoubleTail(a, reader, &walk.doubleHops, std::move(selected));
                 // The fallback over these hops is never reached.
                 return walk;
             }
@@ -296,6 +390,7 @@ struct BindState {
         for (size_t i = 0; i < walk.hops.size(); ++i) {
             walk.hops[i].leaf = Leaf(attributes[i], type);
         }
+        SelectPhasedSources(&walk.hops, type, reader);
         return walk;
     }
 
@@ -324,7 +419,7 @@ struct BindState {
         for (const std::vector<RigExecBakedWalkHop> *hops :
              {&reader.walk.hops, &reader.walk.doubleHops}) {
             for (const RigExecBakedWalkHop &hop : *hops) {
-                meets = meets || hop.chain >= 0 || hop.record >= 0;
+                meets = meets || hop.chain >= 0 || hop.record >= 0 || hop.crossDomain >= 0;
                 if (hop.leaf >= 0) {
                     leaves.insert(uint32_t(hop.leaf));
                 }
@@ -410,7 +505,7 @@ HeadTypeOf<GfVec3f>()
 }
 
 // The head type a path-leaf key reads through the resolved inputs as, or
-// false for a read no chain or record value can answer (arrays) or one at
+// false for a read no compiled producer can answer, or one at
 // Default (head leaves hold the run's time).
 bool
 PathLeafHeadType(const RigExecRevisionLeafKey &key,
@@ -427,6 +522,9 @@ PathLeafHeadType(const RigExecRevisionLeafKey &key,
     case Type::Bool: *type = HeadType::Bool; return true;
     case Type::Int: *type = HeadType::Int; return true;
     case Type::Float: *type = HeadType::Float; return true;
+    case Type::Double: *type = HeadType::Double; return true;
+    case Type::Vec3f: *type = HeadType::Vec3f; return true;
+    case Type::Vec3fArray: *type = HeadType::Vec3fArray; return true;
     case Type::Token: *type = HeadType::Token; return true;
     case Type::Vec3d: *type = HeadType::Vec3d; return true;
     case Type::Matrix4d: *type = HeadType::Matrix4d; return true;
@@ -455,9 +553,10 @@ Overlay(const RigExecBakedProgramImpl &B, const RigExecBakedWalkHop &hop)
             : nullptr;
     if (hop.chain >= 0) {
         // publishTarget replaces the override with the result.
-        return B.chainValid[size_t(hop.chain)]
-                   ? &B.chainFinal[size_t(hop.chain)]
-                   : standing;
+        const Chain &chain = B.propertyChains[size_t(hop.chain)];
+        const uint32_t final = chain.versionBase + uint32_t(chain.revisions.size());
+        return B.propertyVersionValid[final]
+                   ? &B.chainFinal[size_t(hop.chain)] : standing;
     }
     if (hop.record >= 0) {
         // An override on any hop of the record stands the reader aside.
@@ -466,8 +565,11 @@ Overlay(const RigExecBakedProgramImpl &B, const RigExecBakedWalkHop &hop)
         }
         const RigExecBakedPropertyRecord &record =
             B.propertyRecords[size_t(hop.record)];
+        const Chain &chain = B.propertyChains[record.chain];
+        const uint32_t source = chain.versionBase + uint32_t(
+            std::min(record.applied, chain.revisions.size()));
         if (B.recordStoodAside[size_t(hop.record)] ||
-            !B.chainValid[record.chain]) {
+            !B.propertyVersionValid[source]) {
             return nullptr;
         }
         return &B.recordValues[size_t(hop.record)];
@@ -525,6 +627,11 @@ RigExecBakedResolveWalk(const RigExecBakedProgramImpl &B,
             *out = v->UncheckedGet<T>();
             return true;
         }
+        VtValue cross;
+        if (RigExecBakedReadCrossDomain(B,hop.crossDomain,&cross) && cross.IsHolding<T>()) {
+            *out = cross.UncheckedGet<T>();
+            return true;
+        }
         v = LeafValue(B, hop);
         if (v && v->IsHolding<T>()) {
             *out = v->UncheckedGet<T>();
@@ -540,6 +647,13 @@ RigExecBakedResolveWalk(const RigExecBakedProgramImpl &B,
                 return true;
             }
         }
+        for (const RigExecBakedWalkHop &hop : walk.hops) {
+            VtValue cross;
+            if (RigExecBakedReadCrossDomain(B,hop.crossDomain,&cross) && cross.IsHolding<T>()) {
+                *out = cross.UncheckedGet<T>();
+                return true;
+            }
+        }
         if (!walk.doubleHops.empty()) {
             if constexpr (std::is_same_v<T, float>) {
                 return ResolveDouble(B, walk, out);
@@ -549,6 +663,11 @@ RigExecBakedResolveWalk(const RigExecBakedProgramImpl &B,
         }
         // The nearest readable upstream value, deepest first.
         for (auto it = walk.hops.rbegin(); it != walk.hops.rend(); ++it) {
+            if constexpr (std::is_same_v<T,VtVec3fArray>) {
+                if (it->crossDomain >= 0 && size_t(it->crossDomain) < B.crossDomainReads.size() &&
+                    B.crossDomainReads[size_t(it->crossDomain)].kind == RigExecCrossDomainRead::Kind::Points)
+                    continue; // a missing selected producer cannot become its authored source
+            }
             const VtValue *v = LeafValue(B, *it);
             if (v && v->IsHolding<T>()) {
                 *out = v->UncheckedGet<T>();
@@ -591,6 +710,12 @@ RigExecBakedHeadValueSame(const VtValue &a, const VtValue &b)
     if (a.IsHolding<GfMatrix4d>()) {
         return BitSame(a.UncheckedGet<GfMatrix4d>(),
                        b.UncheckedGet<GfMatrix4d>());
+    }
+    if (a.IsHolding<VtVec3fArray>()) {
+        const auto &x = a.UncheckedGet<VtVec3fArray>();
+        const auto &y = b.UncheckedGet<VtVec3fArray>();
+        return x.size() == y.size() && (x.empty() ||
+            std::memcmp(x.cdata(),y.cdata(),x.size() * sizeof(GfVec3f)) == 0);
     }
     if (a.IsHolding<VtArray<GfVec2f>>()) {
         const VtArray<GfVec2f> &x = a.UncheckedGet<VtArray<GfVec2f>>();
@@ -670,6 +795,43 @@ RigExecBakedResolveReaderWalk(const RigExecBakedProgramImpl &B, int walk,
                               GfVec3f *out)
 {
     return ResolveReader(B, walk, out);
+}
+
+bool
+RigExecBakedResolveReaderWalk(const RigExecBakedProgramImpl &B,int walk,VtVec3fArray *out)
+{
+    return ResolveReader(B,walk,out);
+}
+
+bool
+RigExecBakedResolveReaderWalk(const RigExecBakedProgramImpl &B,int walk,VtArray<GfVec2f> *out)
+{
+    return ResolveReader(B,walk,out);
+}
+
+bool
+RigExecBakedResolveWalkValue(const RigExecBakedProgramImpl &B,
+                            const RigExecBakedWalk &walk,VtValue *out)
+{
+    if(!out) return false;
+    *out=VtValue();
+    const auto resolve=[&](auto value) {
+        if(!RigExecBakedResolveWalk(B,walk,&value)) return false;
+        *out=VtValue(value); return true;
+    };
+    switch(walk.type) {
+    case RigExecBakedHeadValueType::Bool: return resolve(false);
+    case RigExecBakedHeadValueType::Float: return resolve(float(0));
+    case RigExecBakedHeadValueType::Double: return resolve(double(0));
+    case RigExecBakedHeadValueType::Int: return resolve(int(0));
+    case RigExecBakedHeadValueType::Token: return resolve(TfToken());
+    case RigExecBakedHeadValueType::Matrix4d: return resolve(GfMatrix4d(1));
+    case RigExecBakedHeadValueType::Vec3d: return resolve(GfVec3d(0));
+    case RigExecBakedHeadValueType::Vec3f: return resolve(GfVec3f(0));
+    case RigExecBakedHeadValueType::Vec3fArray: return resolve(VtVec3fArray());
+    case RigExecBakedHeadValueType::Vec2fArray: return resolve(VtArray<GfVec2f>());
+    }
+    return false;
 }
 
 bool
@@ -755,6 +917,18 @@ RigExecBakedSampleWalkedPathLeaf(const RigExecBakedProgramImpl &B,
     case Type::Bool: return WalkedPathSample<bool>(B, key, walk);
     case Type::Int: return WalkedPathSample<int>(B, key, walk);
     case Type::Float: return WalkedPathSample<float>(B, key, walk);
+    case Type::Double: return WalkedPathSample<double>(B, key, walk);
+    case Type::Vec3f: return WalkedPathSample<GfVec3f>(B, key, walk);
+    case Type::Vec3fArray: {
+        VtVec3fArray value;
+        if (RigExecBakedResolveReaderWalk(B,walk,&value)) return VtValue(value);
+        if (key.flavour == RigExecRevisionLeafFlavour::Resolved) {
+            const int leaf=B.readerWalks[size_t(walk)].rawLeaf;
+            if (leaf >= 0 && B.headLeaves[size_t(leaf)].value.IsHolding<VtVec3fArray>())
+                return B.headLeaves[size_t(leaf)].value;
+        }
+        return key.fallback;
+    }
     case Type::Token: return WalkedPathSample<TfToken>(B, key, walk);
     case Type::Vec3d: return WalkedPathSample<GfVec3d>(B, key, walk);
     case Type::Matrix4d: return WalkedPathSample<GfMatrix4d>(B, key, walk);
@@ -770,6 +944,116 @@ RigExecBakedSampleWalkedPathLeaf(const RigExecBakedProgramImpl &B,
     return key.fallback;
 }
 
+RigExecBakedReaderWalk
+RigExecBakedBuildOracleRead(RigExecBakedProgramImpl *program,
+                           const UsdAttribute &attribute,
+                           const std::vector<int> &available)
+{
+    BindState state;
+    state.program = program;
+    for (size_t i = 0; i < program->headLeaves.size(); ++i) {
+        const auto &leaf = program->headLeaves[i];
+        state.leafOf.emplace(std::make_pair(leaf.path, int(leaf.type)), uint32_t(i));
+    }
+    RigExecBakedReaderWalk read;
+    read.head = attribute ? attribute.GetPath() : SdfPath();
+    read.walk = state.Walk(attribute, HeadType::Float,
+                          std::numeric_limits<int>::max(), false);
+    std::set<uint32_t> leaves, slots, versions;
+    for (const auto *hops : {&read.walk.hops, &read.walk.doubleHops}) {
+        for (const auto &hop : *hops) {
+            if (hop.leaf >= 0) leaves.insert(uint32_t(hop.leaf));
+            if (hop.overrideSlot >= 0) slots.insert(uint32_t(hop.overrideSlot));
+            for (int c : available) {
+                const auto &chain = program->propertyChains[size_t(c)];
+                if (chain.target == hop.path)
+                    versions.insert(chain.versionBase + uint32_t(chain.revisions.size()));
+                for (uint32_t r : chain.records)
+                    if (program->propertyRecords[r].consumer == hop.path)
+                        versions.insert(program->propertyRecords[r].id);
+            }
+        }
+    }
+    read.leaves.assign(leaves.begin(), leaves.end());
+    read.slots.assign(slots.begin(), slots.end());
+    read.versions.assign(versions.begin(), versions.end());
+    for (auto &leaf : program->headLeaves) {
+        if (leaf.typeMatches && leaf.frozenKey.IsEmpty() && leaf.path.IsPropertyPath())
+            leaf.frozenKey = leaf.path.GetPrimPath().AppendProperty(
+                TfToken("frozenOracleHop:" + leaf.path.GetName()));
+    }
+    for (const auto &[path, slot] : program->headOverrideSlots)
+        if (path.IsPrimPropertyPath())
+            program->headOverrideSlotsByName.emplace(
+                std::make_pair(path.GetParentPath(), path.GetNameToken()), slot);
+    return read;
+}
+
+float
+RigExecBakedReadOracleScalar(const RigExecBakedProgramImpl &B,
+                            const RigExecBakedReaderWalk &read,
+                            const std::vector<int> &available, float fallback)
+{
+    const auto overlay = [&](const RigExecBakedWalkHop &hop) -> const VtValue * {
+        const VtValue *value = hop.overrideSlot >= 0 &&
+            size_t(hop.overrideSlot) < B.headOverrides.size() &&
+            !B.headOverrides[size_t(hop.overrideSlot)].IsEmpty()
+                ? &B.headOverrides[size_t(hop.overrideSlot)] : nullptr;
+        // Publication is target then records, chain by chain. Later writers
+        // replace earlier ones even when an input path also names a target.
+        for (int c : available) {
+            const auto &chain = B.propertyChains[size_t(c)];
+            bool relevant=chain.target==hop.path;
+            if(!relevant)for(uint32_t r:chain.records)
+                if(B.propertyRecords[r].consumer==hop.path){relevant=true;break;}
+            if(!relevant)continue;
+            const uint32_t final = chain.versionBase + uint32_t(chain.revisions.size());
+            if (chain.target == hop.path && B.propertyVersionValid[final])
+                value = &B.chainFinal[size_t(c)];
+            for (uint32_t r : chain.records) {
+                const auto &record = B.propertyRecords[r];
+                const uint32_t source = chain.versionBase + uint32_t(
+                    std::min(record.applied, chain.revisions.size()));
+                if (record.consumer == hop.path && !B.recordStoodAside[r] &&
+                    B.propertyVersionValid[source]) value = &B.recordValues[r];
+            }
+        }
+        return value;
+    };
+    const auto resolve = [&](const std::vector<RigExecBakedWalkHop> &hops,
+                             bool asDouble, double *out) {
+        const auto convert = [&](const VtValue *v) {
+            if (!v) return false;
+            if (asDouble && v->IsHolding<double>()) { *out = v->UncheckedGet<double>(); return true; }
+            if (!asDouble && v->IsHolding<float>()) { *out = v->UncheckedGet<float>(); return true; }
+            return false;
+        };
+        for (const auto &hop : hops) {
+            // Interpolator publications are Float values; a fresh Double
+            // traversal keeps its original typed policy and does not widen them.
+            if (!asDouble && hop.poseWeight >= 0) {
+                *out = B.poseWeights[size_t(hop.poseWeight)];
+                return true;
+            }
+            if (convert(overlay(hop))) return true;
+        }
+        for (auto h = hops.rbegin(); h != hops.rend(); ++h)
+            if (h->leaf >= 0 && convert(&B.headLeaves[size_t(h->leaf)].value)) return true;
+        return false;
+    };
+    double value = fallback;
+    // Float overlays precede a fresh Double traversal; raw float fallbacks
+    // are unreachable once GetAttribute recurses to Double.
+    if (!read.walk.doubleHops.empty()) {
+        for (const auto &hop : read.walk.hops) {
+            if (hop.poseWeight >= 0) return B.poseWeights[size_t(hop.poseWeight)];
+            const VtValue *v = overlay(hop);
+            if (v && v->IsHolding<float>()) return v->UncheckedGet<float>();
+        }
+        return resolve(read.walk.doubleHops, true, &value) ? float(value) : fallback;
+    }
+    return resolve(read.walk.hops, false, &value) ? float(value) : fallback;
+}
 // Build.
 
 void
@@ -779,6 +1063,8 @@ RigExecBakedProgram::_BindPropertyChains(const RigExecRigEvaluator &E,
     RigExecBakedProgramImpl &B = *program;
     B.propertyChains.clear();
     B.propertyRecords.clear();
+    B.crossDomainReads.clear();
+    RigExecBakedCaptureCrossDomainOrder(&B);
     B.headLeaves.clear();
     B.headOverrideSlots.clear();
     B.headOverrideSlotsByName.clear();
@@ -1101,6 +1387,9 @@ RigExecBakedBuildPropertySteps(RigExecBakedProgramImpl *program)
         record.id = id++;
     }
     B.propertyVersionCount = id;
+    B.propertyRecordById.assign(id,-1);
+    for(size_t r=0;r<B.propertyRecords.size();++r)
+        B.propertyRecordById[B.propertyRecords[r].id]=int(r);
     B.steps.clear();
     for (size_t c = 0; c < B.propertyChains.size(); ++c) {
         const Chain &chain = B.propertyChains[c];
@@ -1319,6 +1608,7 @@ RigExecBakedHeadLeafHolds(const RigExecBakedHeadLeaf &leaf,
     case HeadType::Int: return value.IsHolding<int>();
     case HeadType::Token: return value.IsHolding<TfToken>();
     case HeadType::Vec3d: return value.IsHolding<GfVec3d>();
+    case HeadType::Vec3fArray: return value.IsHolding<VtVec3fArray>();
     }
     return false;
 }
@@ -1351,6 +1641,7 @@ RigExecBakedPlaceHeadOverrides(RigExecBakedProgramImpl *program)
                                      : 1;
     }
     std::fill(B.propertyChanged.begin(), B.propertyChanged.end(), char(0));
+    for (auto &field : B.weightFields) field.changed = false;
     for (size_t r = 0; r < B.propertyRecords.size(); ++r) {
         const RigExecBakedPropertyRecord &record = B.propertyRecords[r];
         bool standing = false, moved = false;
@@ -1456,57 +1747,22 @@ Read(const RigExecBakedProgramImpl &B, const RigExecBakedWalk &walk,
     return RigExecBakedResolveWalk(B, walk, &value) ? value : fallback;
 }
 
-// _ReadPinnedPropertyMathParams' value, min and max over the walks.
-template <class T>
-bool
-MathParams(const RigExecBakedProgramImpl &B, const Chain::Revision &r,
-           RigExecPropertyMathParams<T> *params)
-{
-    if (!r.opValid) {
-        return false;
-    }
-    params->op = r.op;
-    params->value = Read(B, r.value, params->value);
-    params->min = Read(B, r.minimum, params->min);
-    params->max = Read(B, r.maximum, params->max);
-    return true;
-}
-
 // applyFloat.
 bool
 ApplyFloat(const RigExecBakedProgramImpl &B, const Chain::Revision &r,
            float in, float envelope, float *out)
 {
-    RigExecPropertyMathParams<float> params;
-    if (!MathParams(B, r, &params) || !IsFinite(params.value) ||
-        !IsFinite(params.min) || !IsFinite(params.max)) {
-        return false;
-    }
-    // Held here so the borrowed key pointer outlives the apply.
-    VtArray<GfVec2f> keys;
-    VtArray<GfVec2f> tangents;
-    if (params.op == RigExecPropertyOp::Curve) {
-        keys = Read(B, r.keys, keys);
-        if (keys.empty() ||
-            !RigExecValidateLinearKeys(keys.cdata(), keys.size())) {
-            return false;
-        }
-        params.keys = keys.cdata();
-        params.keyCount = keys.size();
-        if (r.hasTangents) {
-            tangents = Read(B, r.tangents, tangents);
-        }
-        if (!tangents.empty()) {
-            if (tangents.size() != keys.size()) {
-                return false;
-            }
-            params.tangents = tangents.cdata();
-            params.tangentCount = tangents.size();
+    RigExecFloatPropertyRecord record;
+    record.op=r.op;record.opValid=r.opValid;record.hasTangents=r.hasTangents;
+    record.value=Read(B,r.value,0.0f);record.minimum=Read(B,r.minimum,0.0f);record.maximum=Read(B,r.maximum,0.0f);
+    VtArray<GfVec2f> keys,tangents;
+    if(record.op==RigExecPropertyOp::Curve) {
+        keys=Read(B,r.keys,keys);record.keyData=keys.cdata();record.keyCount=keys.size();
+        if(r.hasTangents) {
+            tangents=Read(B,r.tangents,tangents);record.tangentData=tangents.cdata();record.tangentCount=tangents.size();
         }
     }
-    params.weight = envelope;
-    *out = RigExecApplyFloatMath(in, params);
-    return true;
+    return RigExecRunProperty(record,in,envelope,out);
 }
 
 bool
@@ -1533,28 +1789,19 @@ bool
 Apply(const RigExecBakedProgramImpl &B, const Chain::Revision &r,
       const GfMatrix4d &in, float envelope, GfMatrix4d *out)
 {
-    if (!r.opValid) {
-        return false;
-    }
-    const GfMatrix4d opValue = Read(B, r.value, GfMatrix4d(1.0));
-    if (!IsFinite(opValue)) {
-        return false;
-    }
-    return RigExecApplyMatrixMath(in, r.op, opValue, envelope, out);
+    RigExecMatrixPropertyRecord record;
+    record.op=r.op;record.opValid=r.opValid;record.value=Read(B,r.value,GfMatrix4d(1.0));
+    return RigExecRunProperty(record,in,envelope,out);
 }
 
 bool
 Apply(const RigExecBakedProgramImpl &B, const Chain::Revision &r,
       const GfVec3f &in, float envelope, GfVec3f *out)
 {
-    RigExecPropertyMathParams<GfVec3f> params;
-    if (!MathParams(B, r, &params) || !IsFinite(params.value) ||
-        !IsFinite(params.min) || !IsFinite(params.max)) {
-        return false;
-    }
-    params.weight = envelope;
-    *out = RigExecApplyVec3fMath(in, params);
-    return true;
+    RigExecVec3PropertyRecord record;
+    record.op=r.op;record.opValid=r.opValid;record.value=Read(B,r.value,GfVec3f(0));
+    record.minimum=Read(B,r.minimum,GfVec3f(0));record.maximum=Read(B,r.maximum,GfVec3f(0));
+    return RigExecRunProperty(record,in,envelope,out);
 }
 
 // One revision of runChain's loop: \p out is \p in where the revision
@@ -1575,17 +1822,10 @@ Revise(const RigExecBakedProgramImpl &B, const Chain::Revision &r,
     }
     float envelope = 1.0f;
     if (!r.weightObject.IsEmpty()) {
-        std::vector<float> weights;
-        std::string error;
-        bool resolved = false;
-        {
-            // Volatile until S4: the oracle reads the weight object off the
-            // stage and through the generation's resolved inputs.
-            const RigExecVolatileRead oracle;
-            resolved = B.resolveWeights &&
-                       B.resolveWeights(r.weightObject, 1, time, &weights,
-                                        &error, nullptr);
-        }
+        const auto &field = B.weightFields[size_t(r.weightField)];
+        const auto &weights = field.values;
+        const auto &error = field.error;
+        const bool resolved = field.ok;
         if (!resolved || weights.size() != 1) {
             lines->push_back(r.linePrefix + ": " + error +
                              "; revision passed through");
@@ -1626,6 +1866,8 @@ RunPart(RigExecBakedProgramImpl *program, RigExecBakedStep *step,
     const Chain &chain = B.propertyChains[c];
     const uint32_t id = chain.versionBase + uint32_t(step->part);
     std::vector<std::string> *lines = &step->lines;
+    // Recompute memo diagnostics only when this body actually executes.
+    lines->clear();
     ValueT value{};
     bool valid = false;
     if (step->part == 0) {
@@ -1636,9 +1878,19 @@ RunPart(RigExecBakedProgramImpl *program, RigExecBakedStep *step,
         } else {
             valid = Base(B, chain, lines, &value);
         }
-    } else if (B.chainValid[c]) {
+    } else if (B.propertyVersionValid[id - 1]) {
         // A skipped chain runs no revision and says nothing about them.
         const ValueT in = Member<ValueT>(B.propertyValues[id - 1]);
+        const auto &revision = chain.revisions[size_t(step->part)-1];
+        ForEachWalk(revision,[&](const RigExecBakedWalk &walk) {
+            for (const auto *hops : {&walk.hops,&walk.doubleHops})
+                for (const auto &hop : *hops) if (hop.crossDomain >= 0) {
+                    VtValue value;
+                    std::string diagnostic;
+                    if (!RigExecBakedReadCrossDomain(B,hop.crossDomain,&value,&diagnostic) &&
+                        !diagnostic.empty()) lines->push_back(diagnostic);
+                }
+        });
         Revise(B, chain.revisions[size_t(step->part) - 1], in, time, lines,
                &value);
         valid = true;
@@ -1680,25 +1932,37 @@ RigExecBakedFinishPropertyStep(RigExecBakedProgramImpl *program,
     const Chain &chain = B.propertyChains[size_t(step.object)];
     const size_t n = chain.revisions.size();
     const uint32_t id = chain.versionBase + uint32_t(step.part);
-    if (!B.propertyChanged[id]) {
-        return;
-    }
-    // What the version feeds, refreshed only when it moved: the records
-    // reading it and, for the last part, the chain's final value.
-    for (const uint32_t r : chain.records) {
-        RigExecBakedPropertyRecord &record = B.propertyRecords[r];
-        if (std::min(record.applied, n) != size_t(step.part)) {
-            continue;
+    if (B.propertyChanged[id]) {
+        // What the version feeds, refreshed only when it moved: the records
+        // reading it and, for the last part, the chain's final value.
+        for (const uint32_t r : chain.records) {
+            RigExecBakedPropertyRecord &record = B.propertyRecords[r];
+            if (std::min(record.applied, n) != size_t(step.part)) {
+                continue;
+            }
+            B.propertyChanged[record.id] = 1;
+            if (B.propertyVersionValid[id]) {
+                B.recordValues[r] = RigExecPhasedConsumerValue(
+                    VersionValue(B, chain, id), record.consumerType);
+            }
         }
-        B.propertyChanged[record.id] = 1;
+        if (size_t(step.part) == n && B.propertyVersionValid[id]) {
+            B.chainFinal[size_t(step.object)] = VersionValue(B, chain, id);
+        }
+    }
+    if (size_t(step.part) == n && B.oraclePublications) {
+        RigExecOraclePublicationContext::Writes writes;
         if (B.propertyVersionValid[id]) {
-            B.recordValues[r] = RigExecPhasedConsumerValue(
-                VersionValue(B, chain, id), record.consumerType);
+            writes.emplace_back(chain.target,VersionValue(B,chain,id));
+            for (const uint32_t record : chain.records)
+                if (!B.recordStoodAside[record]) {
+                    writes.emplace_back(B.propertyRecords[record].consumer,
+                                        B.recordValues[record]);
+                }
         }
+        B.oraclePublications->Finish(size_t(step.object),writes);
     }
-    if (size_t(step.part) == n && B.propertyVersionValid[id]) {
-        B.chainFinal[size_t(step.object)] = VersionValue(B, chain, id);
-    }
+
 }
 
 void
@@ -1708,70 +1972,22 @@ RigExecBakedPublishPropertyChains(RigExecBakedProgramImpl *program,
     RigExecBakedProgramImpl &B = *program;
     end = std::min(end, B.propertyChains.size());
     for (size_t c = begin; c < end; ++c) {
-        if (!B.chainValid[c]) {
-            continue;
-        }
         const Chain &chain = B.propertyChains[c];
-        const VtValue &result = B.chainFinal[c];
-        if (results) {
-            B.propertyResults[chain.target] = result;
+        const uint32_t final = chain.versionBase + uint32_t(chain.revisions.size());
+        if (B.propertyVersionValid[final]) {
+            const VtValue &result = B.chainFinal[c];
+            if (results) B.propertyResults[chain.target] = result;
+            B.resolvedInputs->SetProperty(chain.target, result);
         }
-        B.resolvedInputs->SetProperty(chain.target, result);
         for (const uint32_t r : chain.records) {
-            if (B.recordStoodAside[r]) {
-                continue;
-            }
             const RigExecBakedPropertyRecord &record = B.propertyRecords[r];
-            if (results) {
-                B.propertyResults[record.consumer] = B.recordValues[r];
-            }
-            B.resolvedInputs->SetProperty(record.consumer,
-                                          B.recordValues[r]);
+            const uint32_t source = chain.versionBase + uint32_t(
+                std::min(record.applied, chain.revisions.size()));
+            if (B.recordStoodAside[r] || !B.propertyVersionValid[source]) continue;
+            if (results) B.propertyResults[record.consumer] = B.recordValues[r];
+            B.resolvedInputs->SetProperty(record.consumer, B.recordValues[r]);
         }
     }
-}
-
-// The test hook.
-
-bool
-RigExecBakedProgram::_EvaluateChainsDetached(
-    RigExecRigEvaluator *evaluator, UsdTimeCode time,
-    std::map<SdfPath, VtValue> *results, std::vector<std::string> *lines)
-{
-    RigExecRigEvaluator &E = *evaluator;
-    const void *memo = E._propertyChainBindings.get();
-    // Swapped by value: the program points at the member, and keeps
-    // pointing at the live object once it is swapped back.
-    RigExecResolvedInputs live;
-    std::swap(E._resolvedInputs, live);
-    E._ApplyValueInputsToResolved(&E._resolvedInputs);
-    std::unique_ptr<RigExecPropertyChainBindings> saved =
-        std::move(E._propertyChainBindings);
-    E._EvaluatePropertyChains(time, results, nullptr, lines);
-    E._propertyChainBindings = std::move(saved);
-    std::swap(E._resolvedInputs, live);
-    return E._propertyChainBindings.get() == memo;
-}
-
-const void *
-RigExecBakedProgram::_ChainMemo(const RigExecRigEvaluator &evaluator)
-{
-    return evaluator._propertyChainBindings.get();
-}
-
-bool
-RigExecBakedProgramTesting::EvaluateChainsDetached(
-    RigExecRigEvaluator *evaluator, UsdTimeCode time,
-    std::map<SdfPath, VtValue> *results, std::vector<std::string> *lines)
-{
-    return RigExecBakedProgram::_EvaluateChainsDetached(evaluator, time,
-                                                        results, lines);
-}
-
-const void *
-RigExecBakedProgramTesting::ChainMemo(const RigExecRigEvaluator &evaluator)
-{
-    return RigExecBakedProgram::_ChainMemo(evaluator);
 }
 
 }  // namespace rigExec

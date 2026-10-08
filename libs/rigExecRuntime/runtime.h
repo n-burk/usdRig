@@ -38,6 +38,22 @@ struct RigExecRuntimeJointMatrix {
     RrMat4d matrix;
 };
 
+// One provider's current Base/Final SSA frames and stable path metadata.
+struct RigExecRuntimeProviderFrames {
+    std::string path;
+    uint8_t kind=0;
+    // Exact publication membership: Other=0, Joint=1, Control=2, Both=3.
+    uint8_t publicationRole=0;
+    uint32_t baseVersion=0,finalVersion=0;
+    RrPointFrame base,final;
+};
+
+struct RigExecRuntimeSolverFrames {
+    std::string path;
+    uint32_t aggregate=0;
+    std::vector<RrPointFrame> frames;
+};
+
 // A deformed-points output: the moved property's path plus its points.
 struct RigExecRuntimePoints {
     std::string path;
@@ -82,19 +98,15 @@ struct RigExecRuntimePropertyValue {
     RrPropertyValue value;
 };
 
-// The generation's work counters, summed over steps like the epilogue.
+// The generation's actual kernel invocations in the shared executor.
 struct RigExecRuntimeCounters {
-    uint32_t revisionsExecuted = 0;
-    uint32_t revisionsCreated = 0;
-    uint32_t schedulesBuilt = 0;
-    uint32_t chainsBuilt = 0;
-    uint32_t revisionsBuilt = 0;
+    uint64_t executedOpCount = 0;
 };
 
 // Plays a .rigexec file: a static graph whose inputs are the attributes the
 // rig reads. Open decodes the file, and the inputs start at their
 // bake-time defaults; each input set takes effect as an authored value at
-// the next Execute; Execute replays the cluster DAG over the inputs; the
+// the next Execute; Execute runs the serialized common producer graph over the inputs; the
 // getters publish its outputs. A fresh reader executes its defaults, which
 // reproduce the rig at the bake time. Any failure returns false with a
 // reason; the reader keeps its last good state.
@@ -222,7 +234,6 @@ public:
     // Test-only family mask (bit 0 pose, 1 weights, 2 geometry, all set
     // by default). A masked family's steps are skipped, which is how
     // one family's outputs are compared while another is still landing.
-    void SetRunMaskForTesting(unsigned mask);
 
     // Test-only: the label error text names step \p step by, as the baked
     // program spells it; the step's number past the steps.
@@ -316,6 +327,9 @@ public:
     // rest -> pose matrices, and the weight packets.
     const std::vector<RrPointFrame> &GetFinFrames() const;
     const std::vector<RrPointFrame> &GetBaseFrames() const;
+    std::vector<RigExecRuntimeProviderFrames> GetProviderFramePublications() const;
+    // Empty when solver guides were disabled in the captured export context.
+    std::vector<RigExecRuntimeSolverFrames> GetSolverFramePublications() const;
     const std::vector<RrMat4d> &GetFinalMatrices() const;
     const std::vector<RrMat4d> &GetBaseMatrices() const;
     const std::vector<RrWeightPacket> &GetWeightPackets() const;

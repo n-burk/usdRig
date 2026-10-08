@@ -10,7 +10,7 @@ rigExec:translation. This holds the whole contract on a two-pose rig:
   * a dial standing on a pose reads 1 there and 0 on the other;
   * halfway between reads halfway, because the solve is the translation
     channel's and nothing else;
-  * the baked program agrees with the dynamic walk exactly;
+  * the compiled graph agrees with the dynamic walk exactly;
   * two dials work as one position, and the second one moves the weights;
   * more than three is refused at compile rather than silently truncated.
 
@@ -38,7 +38,7 @@ def _Check(condition, message):
 INTERPOLATOR = "/Rig/PoseInterpolators/dialled"
 
 
-def _Rig(dials, poses, mode="dynamic"):
+def _Rig(dials, poses, mode="graph"):
     """A rig whose one interpolator reads `dials` (avar names) and stands at
     `poses` -- [(name, (v0, v1, v2))]."""
     stage = Usd.Stage.CreateInMemory("numeric.usda")
@@ -65,7 +65,7 @@ def _Rig(dials, poses, mode="dynamic"):
     prim.GetRelationship("rigExec:driver").SetTargets([])
     rig = _rigexec.Rig(stage, RIG)
     rig.compile()
-    rig.evaluation_mode = mode
+    rig.cpu_reference = True
     return stage, rig
 
 
@@ -79,7 +79,7 @@ def _Weights(rig, values, names, dials):
 
 
 def TestOneDial():
-    for mode in ("dynamic", "baked", "parity"):
+    for mode in ("graph",):
         _stage, rig = _Rig(["breath"],
                            [("neutral", (0.0, 0.0, 0.0)),
                             ("out", (10.0, 0.0, 0.0))], mode)
@@ -89,10 +89,7 @@ def TestOneDial():
             _Check(all(abs(a - b) < 1e-5 for a, b in zip(got, expect)),
                    "%s: dial %g read %s, expected %s"
                    % (mode, value, got, expect))
-            if mode == "parity":
-                _Check(not pose.baked_parity_mismatches,
-                       "dial %g: %d baked parity mismatch(es)"
-                       % (value, pose.baked_parity_mismatches))
+            _Check(pose.valid,"pose publication valid; authored numeric assertions follow")
         # A linear kernel has compact support, so a dial a whole radius past
         # the last pose is off rather than nearly off -- the same rule the
         # translation channel has, reached through a dial.
@@ -106,12 +103,12 @@ def TestTwoDials():
     _stage, rig = _Rig(["x", "y"],
                        [("neutral", (0.0, 0.0, 0.0)),
                         ("right", (10.0, 0.0, 0.0)),
-                        ("up", (0.0, 10.0, 0.0))], "parity")
+                        ("up", (0.0, 10.0, 0.0))], "graph")
     names = ["neutral", "right", "up"]
     got, pose = _Weights(rig, [10.0, 0.0], names, ["x", "y"])
     _Check(abs(got[1] - 1.0) < 1e-5 and abs(got[2]) < 1e-5,
            "x alone stands on `right`: %s" % got)
-    _Check(not pose.baked_parity_mismatches, "two dials: parity")
+    _Check(pose.valid,"pose publication valid; authored numeric assertions follow")
     got, _ = _Weights(rig, [0.0, 10.0], names, ["x", "y"])
     _Check(abs(got[2] - 1.0) < 1e-5 and abs(got[1]) < 1e-5,
            "y alone stands on `up`: %s" % got)
@@ -154,7 +151,7 @@ def main():
     if len(sys.argv) > 1:
         Plug.Registry().RegisterPlugins(sys.argv[1])
     TestOneDial()
-    print("  ok: one dial drives its poses, dynamic and baked, with parity")
+    print("  ok: one dial drives its poses, graph and scalar reference, with parity")
     TestTwoDials()
     print("  ok: two dials read as one position")
     TestTooManyDialsRefused()

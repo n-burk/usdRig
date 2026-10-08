@@ -260,34 +260,6 @@ _DiscoverAggregateSolvers(
     return solvers;
 }
 
-// Deterministic, iterative topological ordering shared by compile passes.
-_DependencyOrder
-_OrderDependencies(const _PathDependencies &dependencies)
-{
-    _DependencyOrder result;
-    result.ordered.reserve(dependencies.size());
-    std::map<SdfPath, size_t> pending;
-    std::map<SdfPath, SdfPathVector> consumers;
-    std::set<SdfPath> ready;
-    for (const auto &[node, inputs] : dependencies) {
-        pending[node] = inputs.size();
-        if (inputs.empty()) ready.insert(node);
-        for (const SdfPath &input : inputs) consumers[input].push_back(node);
-    }
-    while (!ready.empty()) {
-        const SdfPath node = *ready.begin();
-        ready.erase(ready.begin());
-        result.ordered.push_back(node);
-        for (const SdfPath &consumer : consumers[node]) {
-            if (--pending[consumer] == 0) ready.insert(consumer);
-        }
-    }
-    for (const auto &[node, count] : pending) {
-        if (count) result.blocked.push_back(node);
-    }
-    return result;
-}
-
 UsdPrim
 _NamespaceFrameProvider(UsdPrim prim)
 {

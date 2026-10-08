@@ -1,4 +1,4 @@
-// rigExecRuntime weight-family parity (M2): baked program vs runtime over
+// rigExecRuntime weight outputs: native program vs runtime over
 // every baking fixture, comparing weight packets bit for bit, plus
 // synthetic builder checks against the real baked builders.
 // Fixture strategy per fixture: bake in-process at the first frame, then
@@ -16,10 +16,14 @@
 #include "rigExec/types.h"
 #include "rigExec/weightPackets.h"
 #include "rigExecBinary/format.h"
+#include "rigExecGraph/opValues.h"
 #include "rigExecMath/pointFrame.h"
 #include "rigExecMath/weightFields.h"
 #include "rigExecRuntime/runtime.h"
 #include "rigExecRuntime/store.h"
+#include "rigExecRuntime/stageArrayInputs.h"
+#include "rigExecSampler/inputSampler.h"
+#include "pxr/usd/sdf/types.h"
 #include "rigExecExampleFixtures.h"
 
 #include "pxr/base/plug/registry.h"
@@ -33,7 +37,9 @@
 #include <cstdio>
 #include <cstring>
 #include <map>
+#include <limits>
 #include <memory>
+#include <set>
 #include <string>
 #include <tuple>
 #include <vector>
@@ -222,7 +228,6 @@ _RunFixture(const UsdStageRefPtr &stage, const std::vector<double> &frames,
 {
     const size_t objects = _StepBackedObjects(file);
     RigExecRigEvaluator evaluator(stage, _FindRig(stage));
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     std::string error;
     RigExecTestPlayer runtime;
     if (!runtime.Open(bytes, stage, &error)) {
@@ -243,6 +248,9 @@ _RunFixture(const UsdStageRefPtr &stage, const std::vector<double> &frames,
             std::printf("  Execute @ %g: %s\n", frame, error.c_str());
             return false;
         }
+        const auto &trace = runtime->GetLastRunTraceForTesting();
+        CHECK(runtime->GetCounters().executedOpCount == trace.size());
+        CHECK(std::set<int32_t>(trace.begin(), trace.end()).size() == trace.size());
         const std::vector<RigExecWeightPacket> &bakedPackets =
             program->GetStepGraph().weightPackets;
         const std::vector<RrWeightPacket> &actualPackets =
@@ -293,7 +301,6 @@ _TestFixture(const std::string &name, const std::string &stagePath,
     std::string error;
     {
         RigExecRigEvaluator evaluator(stage, rigPath);
-        evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
         CHECK(RigExecTestBakeAt(evaluator, frames.front(), &bytes, &error));
         if (!error.empty()) {
             std::printf("bake diagnostic: %s\n", error.c_str());
@@ -344,6 +351,10 @@ public:
         file->doubleArrays.emplace_back();
         file->vec2fArrays.emplace_back();
         file->vec3fArrays.emplace_back();
+        file->vec3dArrays.emplace_back();
+        file->matrix4dArrays.emplace_back();
+        file->tokenArrays.emplace_back();
+        file->boolArrays.emplace_back();
     }
 
     // "/A/B" as a prim node, "/A/B.c" as a property node of "/A/B".
@@ -614,6 +625,157 @@ _SynthCompare(const char *name, const RigExecWeightPacket &expected,
     return ok;
 }
 
+// Compile the fixture's typed operations with the production compiler. The
+// identity volume frames are explicit sampled Xform seeds; every numerical
+// packet and chained points publication has an ordinary producer.
+static bool
+_SynthCompileGraph(fb::RigExecWireFile *file, std::string *error)
+{
+    using D = fb::SlotDomain;
+    using K = fb::StepKind;
+    const auto one = [](D domain, uint32_t slot) {
+        return fb::SlotRange(domain, slot, slot + 1);
+    };
+    file->pose->requiredStageFramesAdmission =
+        std::make_unique<fb::RigExecWireRequiredStageFramesAdmission>();
+    file->steps.clear();
+    const auto add = [&](K kind, int object, int part, const std::string &owner) {
+        fb::RigExecWireStep step;
+        step.kind = kind; step.object = object; step.part = part;
+        step.descriptorKey = owner + "/category:" + std::to_string(uint32_t(kind)) +
+                             "/object:" + std::to_string(object) +
+                             "/part:" + std::to_string(part);
+        file->steps.push_back(std::move(step));
+    };
+    for (size_t slot = 0; slot < file->slotMeta->paths.size(); ++slot) {
+        const auto owner = RigExecFormatPathText(*file, file->slotMeta->paths[slot]);
+        add(K::AvarInputs, int(slot), -1, owner);
+        file->steps.back().writes = {one(D::Avars, uint32_t(slot))};
+        for (const int part : {1, 2}) {
+            add(K::VolumePlacements, int(slot), part, owner);
+            auto &step = file->steps.back();
+            step.reads = {one(part == 2 ? D::PoseBase : D::PoseFin, uint32_t(slot))};
+            step.writes = {one(part == 2 ? D::WeightFramesBase : D::WeightFrames,
+                               uint32_t(slot))};
+        }
+    }
+    for (size_t c = 0; c < file->geometry->chains.size(); ++c) {
+        const auto owner = RigExecFormatPathText(*file, file->geometry->chains[c].target);
+        add(K::ChainInputs, int(c), -1, owner);
+        file->steps.back().reads = {one(D::ChainInput, uint32_t(c))};
+        file->steps.back().writes = {one(D::ChainBase, uint32_t(c))};
+        add(K::ChainStatus, int(c), -1, owner);
+        file->steps.back().reads = {one(D::ChainBase, uint32_t(c))};
+        file->steps.back().writes = {one(D::ChainPoints, uint32_t(c))};
+    }
+    for (size_t i = 0; i < file->geometry->weightObjects.size(); ++i) {
+        const auto &object = file->geometry->weightObjects[i];
+        add(K::WeightPacket, int(i), -1, RigExecFormatPathText(*file, object.path));
+        auto &step = file->steps.back();
+        step.writes = {one(D::WeightPacket, uint32_t(i))};
+        if (object.base >= 0) step.reads.push_back(one(D::WeightPacket, uint32_t(object.base)));
+        for (int input : object.inputs) step.reads.push_back(one(D::WeightPacket, uint32_t(input)));
+        if (object.providerSlot >= 0)
+            step.reads.push_back(one(D::WeightFrames, uint32_t(object.providerSlot)));
+        for (size_t c = 0; c < file->geometry->chains.size(); ++c)
+            for (uint32_t target : object.targetPoints)
+                if (target == file->geometry->chains[c].target)
+                    step.reads.push_back(one(D::ChainPoints, uint32_t(c)));
+        for (const auto *read : {object.defaultWeight.get(), object.driver.get(),
+             object.scale.get(), object.bias.get(), object.strength.get(), object.invert.get(),
+             object.falloffMin.get(), object.falloffMax.get(), object.scaleXPos.get(),
+             object.scaleYPos.get(), object.scaleZPos.get(), object.scaleXNeg.get(),
+             object.scaleYNeg.get(), object.scaleZNeg.get(), object.scaleX.get(),
+             object.scaleY.get(), object.scaleZ.get(), object.extentU.get(), object.extentV.get()})
+            if (read) step.headInputReads.push_back(*read);
+        for (int slot : {object.valuesSlot, object.indicesSlot})
+            if (slot >= 0) step.headInputSlots.push_back(uint32_t(slot));
+        std::sort(step.headInputSlots.begin(), step.headInputSlots.end());
+        step.headInputSlots.erase(std::unique(step.headInputSlots.begin(),
+            step.headInputSlots.end()), step.headInputSlots.end());
+    }
+    // This fixture has only input preparation and post-admission weight/geometry bodies.
+    for (auto &step : file->steps)
+        if (step.kind != K::AvarInputs)
+            step.reads.push_back(one(D::RequiredStageFramesAdmission, 0));
+    RigExecCompiledGraph graph;
+    RigExecOpAdapterState values;
+    if (!RigExecOpCompileAdapter(file->steps,
+            [](const auto &r) { return uint32_t(r.domain()); },
+            [](const auto &r) { return r.begin(); }, [](const auto &r) { return r.end(); },
+            [](const auto &s) { return s.descriptorKey; },
+            [&](uint32_t domain, uint32_t slot) {
+                return (domain == uint32_t(D::RequiredStageFramesAdmission) && slot == 0) ||
+                    (domain == uint32_t(D::ChainInput) && slot < file->geometry->chains.size()) ||
+                    ((domain == uint32_t(D::PoseBase) || domain == uint32_t(D::PoseFin)) &&
+                     std::find(file->slotMeta->xformSlots.begin(), file->slotMeta->xformSlots.end(),
+                               int32_t(slot)) != file->slotMeta->xformSlots.end());
+            }, &graph, &values, error)) return false;
+    auto original = std::move(file->steps);
+    for (size_t i = 0; i < graph.ops.size(); ++i) {
+        auto &op = graph.ops[i];
+        file->steps.push_back(std::move(original[op.originalIndex]));
+        auto &step = file->steps.back();
+        step.preds.assign(op.predecessors.begin(), op.predecessors.end());
+        step.succs.assign(op.successors.begin(), op.successors.end());
+        op.originalIndex = uint32_t(i);
+        graph.canonicalIndex[i] = int32_t(i);
+    }
+    if (!RigExecLowerOpClusters(&graph, {}, 0.0, error)) return false;
+    file->commonGraph = std::make_unique<fb::RigExecWireCommonGraph>();
+    auto &common = *file->commonGraph;
+    for (const auto &value : values.values) {
+        fb::RigExecWireCommonValueSpec row;
+        row.domain = value.domain; row.slot = value.slot;
+        common.valueSpecs.push_back(row);
+    }
+    common.leaves = values.leaves; common.canonicalIndex = graph.canonicalIndex;
+    common.longestPath = graph.longestPath; common.opClusters = graph.opClusters;
+    file->clustering = std::make_unique<fb::RigExecWireClustering>();
+    file->clustering->clusterOf.assign(graph.opClusters.begin(), graph.opClusters.end());
+    for (size_t i = 0; i < graph.clusters.size(); ++i) {
+        const auto &cluster = graph.clusters[i];
+        fb::RigExecWireCommonCluster row;
+        row.members = cluster.members; row.predecessors = cluster.predecessors;
+        row.successors = cluster.successors; common.clusters.push_back(std::move(row));
+        fb::RigExecWireCluster legacy;
+        legacy.members.assign(cluster.members.begin(), cluster.members.end());
+        legacy.preds.assign(cluster.predecessors.begin(), cluster.predecessors.end());
+        legacy.succs.assign(cluster.successors.begin(), cluster.successors.end());
+        file->clustering->clusters.push_back(std::move(legacy));
+    }
+    for (size_t i = 0; i < graph.ops.size(); ++i) {
+        const auto &op = graph.ops[i];
+        fb::RigExecWireCommonOp row;
+        row.key = op.descriptor.key; row.kind = op.descriptor.kind;
+        row.originalIndex = op.originalIndex; row.reads = op.descriptor.reads;
+        row.writes = op.descriptor.writes; row.descriptorPredecessors = op.descriptor.predecessors;
+        row.predecessors = op.predecessors; row.successors = op.successors;
+        common.ops.push_back(std::move(row));
+        file->steps[i].cluster = int32_t(graph.opClusters[i]);
+    }
+    std::map<RigExecValueId, std::vector<uint32_t>> readers(graph.readers.begin(), graph.readers.end());
+    for (const auto &entry : readers) {
+        fb::RigExecWireCommonReaders row; row.value = entry.first; row.ops = entry.second;
+        common.readers.push_back(std::move(row));
+    }
+    file->cones = std::make_unique<fb::RigExecWireCones>();
+    auto &cones = *file->cones;
+    const auto set = [&] { fb::RigExecWireClusterSet s; s.clusters = graph.clusters.size();
+        s.words.assign((s.clusters + 63) / 64, 0); return s; };
+    cones.always = std::make_unique<fb::RigExecWireClusterSet>(set());
+    cones.poseClusters = std::make_unique<fb::RigExecWireClusterSet>(set());
+    cones.avarCluster.assign(file->slotMeta->paths.size(), -1);
+    cones.chainBaseClusters.resize(file->geometry->chains.size());
+    for (size_t i = 0; i < graph.ops.size(); ++i) {
+        const auto &step = file->steps[i];
+        if (step.kind == K::AvarInputs) cones.avarCluster[size_t(step.object)] = step.cluster;
+        if (step.kind == K::ChainInputs)
+            cones.chainBaseClusters[size_t(step.object)].v.push_back(step.cluster);
+    }
+    return true;
+}
+
 static void
 _TestSyntheticBuilders()
 {
@@ -639,11 +801,13 @@ _TestSyntheticBuilders()
     for (const char *path : volumeSlots) {
         slotMeta.paths.push_back(synth.Path(path));
     }
-    slotMeta.slotKind.assign(slotCount, fb::SlotKind::FirstFramePose);
+    slotMeta.slotKind.assign(slotCount, fb::SlotKind::XformDerived);
+    slotMeta.providerActive.assign(slotCount, 1);
     slotMeta.parent.assign(slotCount, -1);
     slotMeta.propParent.assign(slotCount, -1);
     slotMeta.needFinal.assign(slotCount, 0);
     slotMeta.needBase.assign(slotCount, 0);
+    slotMeta.publicationRoles.assign(slotCount, 0);
     constants.avarConstants.assign(11 * slotCount, 0.0);
     RigExecWireMatrix4d identity{};
     identity[0] = identity[5] = identity[10] = identity[15] = 1.0;
@@ -652,6 +816,9 @@ _TestSyntheticBuilders()
         constants.rotationSign.push_back(0);
         constants.restM.push_back(identity);
         constants.selfD.push_back(identity);
+        constants.posedD.push_back(identity);
+        constants.parentSpaceM.push_back(identity);
+        constants.parentSpaceAuthored.push_back(0);
         constants.parentDinv.push_back(identity);
         constants.restRoundTrip.push_back(identity);
         constants.defaultRoundTrip.push_back(identity);
@@ -667,6 +834,10 @@ _TestSyntheticBuilders()
         constants.restFrames.push_back(restFrame);
         constants.rotOrder.push_back(0);
         constants.posedAuthored.push_back(0);
+        slotMeta.xformSlots.push_back(int32_t(slot));
+        slotMeta.xformPaths.push_back(slotMeta.paths[slot]);
+        file.pose->xformBase.push_back(identity);
+        file.pose->xformFrames.push_back(restFrame);
     }
     // Each slot's ladder: every field a fixed read of its constant.
     {
@@ -677,6 +848,10 @@ _TestSyntheticBuilders()
         fb::RigExecWireValue token;
         token.tag = fb::InputTag::Token;
         const uint32_t tokenValue = synth.Value(std::move(token));
+        fb::RigExecWireValue sign;
+        sign.tag = fb::InputTag::Vec3d;
+        sign.vec3d = std::make_unique<RigExecWireVec3d>(RigExecWireVec3d{1.0, 1.0, 1.0});
+        const uint32_t signValue = synth.Value(std::move(sign));
         const auto fixed = [](fb::InputTag tag, uint32_t constant) {
             fb::RigExecWireInput input;
             input.tag = tag;
@@ -694,6 +869,12 @@ _TestSyntheticBuilders()
                 _SynthOwn(fixed(fb::InputTag::Matrix4d, identityValue));
             ladder.rotationOrder =
                 _SynthOwn(fixed(fb::InputTag::Token, tokenValue));
+            ladder.parentSpace = _SynthOwn(fixed(fb::InputTag::Matrix4d, identityValue));
+            ladder.parentDefaultSpace = _SynthOwn(fixed(fb::InputTag::Matrix4d, identityValue));
+            ladder.avarDefaultSpace = _SynthOwn(fixed(fb::InputTag::Matrix4d, identityValue));
+            ladder.posedDefaultSpace = _SynthOwn(fixed(fb::InputTag::Matrix4d, identityValue));
+            ladder.interveningSpace = _SynthOwn(fixed(fb::InputTag::Matrix4d, identityValue));
+            ladder.rotationSign = _SynthOwn(fixed(fb::InputTag::Vec3d, signValue));
             for (int k = 0; k < 6; ++k) {
                 ladder.restAvars.push_back(fixed(fb::InputTag::Double, 0));
                 ladder.defaultAvars.push_back(
@@ -1215,52 +1396,6 @@ _TestSyntheticBuilders()
         geometry.pathReads = std::move(reads);
     }
 
-    for (size_t i = 0; i < geometry.weightObjects.size(); ++i) {
-        fb::RigExecWireStep step;
-        step.kind = fb::StepKind::WeightPacket;
-        step.object = int32_t(i);
-        step.cluster = 0;
-        step.isSource = true;
-        file.steps.push_back(std::move(step));
-    }
-    // Each volume's own step: part 1 places the one slot it names.
-    for (size_t slot = 0; slot < slotCount; ++slot) {
-        fb::RigExecWireStep step;
-        step.kind = fb::StepKind::VolumePlacements;
-        step.object = int32_t(slot);
-        step.part = 1;
-        step.writes = {fb::SlotRange(fb::SlotDomain::WeightFrames,
-                                     uint32_t(slot), uint32_t(slot + 1))};
-        step.cluster = 0;
-        step.isSource = true;
-        file.steps.push_back(std::move(step));
-    }
-
-    file.clustering = std::make_unique<fb::RigExecWireClustering>();
-    {
-        fb::RigExecWireCluster cluster;
-        for (size_t i = 0; i < file.steps.size(); ++i) {
-            cluster.members.push_back(int32_t(i));
-        }
-        file.clustering->clusters.push_back(std::move(cluster));
-        file.clustering->clusterOf.assign(file.steps.size(), 0);
-    }
-    file.cones = std::make_unique<fb::RigExecWireCones>();
-    {
-        fb::RigExecWireClusterSet all;
-        all.clusters = 1;
-        all.words = {1};
-        fb::RigExecWireClusterSet none;
-        none.clusters = 1;
-        none.words = {0};
-        file.cones->cone.push_back(all);
-        file.cones->always = std::make_unique<fb::RigExecWireClusterSet>(all);
-        file.cones->poseClusters =
-            std::make_unique<fb::RigExecWireClusterSet>(none);
-        file.cones->avarCluster.assign(slotCount, 0);
-        file.cones->chainBaseClusters.emplace_back();
-    }
-
     // Every weight object field is read as a bake writes it: three
     // through slots of their own, each holding the value the capture
     // visits it with (object 2's default, then object 11's signed scale
@@ -1273,6 +1408,7 @@ _TestSyntheticBuilders()
     CHECK(file.inputs.size() == 3 + 7);
     std::vector<uint8_t> bytes;
     std::string error;
+    CHECK(_SynthCompileGraph(&file, &error));
     CHECK(RigExecFormatWrite(file, &bytes, &error));
     if (bytes.empty()) {
         std::printf("synthetic write diagnostic: %s\n", error.c_str());
@@ -1285,9 +1421,9 @@ _TestSyntheticBuilders()
         std::printf("synthetic open diagnostic: %s\n", error.c_str());
         return;
     }
-    // Pose and geometry prologues are siblings' work; the weight walk
-    // runs under its own bit. A fresh reader plays the slots' defaults.
-    runtime->SetRunMaskForTesting(0x2u);
+    // A fresh reader executes the compiled typed producers with the
+    // captured defaults of the explicit source slots.
+
     CHECK(runtime->Execute(&error));
     if (!error.empty()) {
         std::printf("synthetic execute diagnostic: %s\n",
@@ -1335,8 +1471,12 @@ _TestSyntheticBuilders()
     // The whole-map form (part -1) is retired: Open refuses it by name.
     if (const std::unique_ptr<fb::RigExecWireFile> wholeMap =
             RigExecTestUnpack(bytes)) {
-        const size_t place = wholeMap->steps.size() - 1;
-        CHECK(wholeMap->steps[place].kind == fb::StepKind::VolumePlacements);
+        const auto placement = std::find_if(wholeMap->steps.begin(), wholeMap->steps.end(),
+            [](const auto &step) { return step.kind == fb::StepKind::VolumePlacements &&
+                step.part == 1 && step.object == 1; });
+        CHECK(placement != wholeMap->steps.end());
+        if (placement == wholeMap->steps.end()) return;
+        const size_t place = size_t(placement - wholeMap->steps.begin());
         wholeMap->steps[place].part = -1;
         const std::vector<uint8_t> packed =
             RigExecTestPackUnchecked(*wholeMap);
@@ -1571,6 +1711,12 @@ _TestComputedReadsAndOracle()
                                     : std::vector<int32_t>{11, 3};
     }
 
+    // Retained fields exercise independent producer scratch across repeated
+    // sparse resolves, failure/count changes and nested composition.
+    for(int objectIndex:{3,5}) {
+        fb::RigExecWireWeightField field;field.object=objectIndex;
+        file.geometry->weightFields.push_back(std::move(field));
+    }
     // The constant every read below falls back to.
     floatValue(9.0f);
     // The painted arrays, as inputs.
@@ -1714,6 +1860,20 @@ _TestComputedReadsAndOracle()
     CHECK(resolve(3, 3, nullptr, &w) && w == sparse);
     CHECK(!resolve(3, 2, nullptr, &w) &&
           error == "sparse index out of range on /W3");
+    CHECK(w.empty());
+    CHECK(RrResolveDeclaredWeightField(&program,0,3,nullptr));
+    CHECK(program.store.weightFieldResults[0].values==sparse);
+    CHECK(RrResolveDeclaredWeightField(&program,0,3,nullptr));
+    CHECK(program.store.weightFieldResults[0].values==sparse);
+    CHECK(!RrResolveDeclaredWeightField(&program,0,2,nullptr));
+    CHECK(program.store.weightFieldResults[0].values.empty() && program.store.weightFieldResults[0].count==2 &&
+        program.store.weightFieldResults[0].error=="sparse index out of range on /W3");
+    CHECK(RrResolveDeclaredWeightField(&program,0,3,nullptr));
+    CHECK(program.store.weightFieldResults[0].values==sparse);
+    CHECK(RrResolveDeclaredWeightField(&program,1,3,nullptr));
+    CHECK(program.store.weightFieldResults[1].values==(std::vector<float>{.2f,0.0f,.4f}));
+    CHECK(RrResolveDeclaredWeightField(&program,1,3,nullptr));
+    CHECK(program.store.weightFieldResults[1].values==(std::vector<float>{.2f,0.0f,.4f}));
     std::vector<float> dynamic(3);
     size_t reassociated = 0;
     for (size_t i = 0; i < 3; ++i) {
@@ -1785,8 +1945,7 @@ _TestComputedReadsAndOracle()
 // A VolumePlacements step the closure skips keeps its slot's placement and
 // placed byte bit for bit, the oracle reads that kept placement, and only
 // the slot's own step moves it. White-box over a hand-assembled program:
-// at the default grain every VolumePlacements step of a baked rig shares
-// one cluster, so playback runs them together.
+// Production scheduling independence is checked on the real bake below.
 static void
 _TestVolumePlacementSkip()
 {
@@ -1814,6 +1973,17 @@ _TestVolumePlacementSkip()
         step.writes = {
             fb::SlotRange(fb::SlotDomain::WeightFrames, slot, slot + 1)};
         file.steps.push_back(std::move(step));
+    }
+    // Per-consumer envelope descriptors select independent placement tables.
+    // This white-box failure test complements the actual exported S9 rig below.
+    for (const auto phase : {fb::WeightFieldPlacementPhase::Base,
+                             fb::WeightFieldPlacementPhase::Final}) {
+        fb::RigExecWireWeightField field;
+        field.form = fb::WeightFieldForm::EnvelopeConstraint;
+        field.object = 1;
+        field.placementPhase = phase;
+        field.volumes = {1};
+        file.geometry->weightFields.push_back(std::move(field));
     }
     RrProgram program;
     program.steps = &file.steps;
@@ -1896,6 +2066,30 @@ _TestVolumePlacementSkip()
     run(1);
     CHECK(store.volumePlaced == std::vector<char>({1, 1}));
     CHECK(placedAt(0, first) && placedAt(1, second));
+    store.volumePlacementBase = store.volumePlacement;
+    store.volumePlacedBase = store.volumePlaced;
+    const std::vector<RrVec3f> singleton{RrVec3f(0.0f)};
+    for (size_t field = 0; field < 2; ++field) {
+        CHECK(RrResolveDeclaredWeightField(&program, field, 1, &singleton));
+        const auto standing = store.weightFieldResults[field].values;
+        auto &selected = field == 0 ? store.volumePlacedBase : store.volumePlaced;
+        auto &matrix = field == 0 ? store.volumePlacementBase : store.volumePlacement;
+        selected[1] = 0;
+        CHECK(!RrResolveDeclaredWeightField(&program, field, 1, &singleton));
+        CHECK(store.weightFieldResults[field].values.empty() &&
+              store.weightFieldResults[field].error ==
+                  "/Volume2: no resolved placement for this volume weight");
+        CHECK(RrResolveDeclaredWeightField(&program, 1 - field, 1, &singleton));
+        selected[1] = 1;
+        matrix[1][3][0] = std::numeric_limits<double>::quiet_NaN();
+        CHECK(!RrResolveDeclaredWeightField(&program, field, 1, &singleton));
+        CHECK(store.weightFieldResults[field].values.empty() &&
+              store.weightFieldResults[field].error ==
+                  "/Volume2: degenerate volume placement");
+        matrix[1] = field == 0 ? store.volumePlacement[1] : store.volumePlacementBase[1];
+        CHECK(RrResolveDeclaredWeightField(&program, field, 1, &singleton));
+        CHECK(store.weightFieldResults[field].values == standing);
+    }
     std::vector<float> placedWeights;
     CHECK(resolve(&placedWeights) && placedWeights.size() == samples.size());
     const RrMat4d kept = store.volumePlacement[1];
@@ -1936,15 +2130,9 @@ _TestVolumePlacementSkip()
                 "moved it\n");
 }
 
-// tests/fixtures/volume_placements.usda, baked at frame 1 and held at frame
-// 5 while one volume's control is dragged, against live baked with the same
-// value authored in the session layer: every output, bit for bit, and the
-// other volume's weight frame unmoved. Baked with every step in its own
-// cluster (RIGEXEC_BAKED_GRAIN_US=0), a drag reruns its own volume's
-// VolumePlacements step and not the other's, which the run reports, so the
-// other volume's frame is the placement its skipped step kept. At the
-// default grain both steps share a cluster and the drag checks values
-// alone; _TestVolumePlacementSkip pins the kept placement there.
+// Hold one volume's control at frame 5 and compare with the value authored
+// before native compilation. Production clustering preserves the unrelated
+// volume's placement and skips its operation at every grain.
 static void
 _TestVolumePlacementDrags(const std::string &stagePath)
 {
@@ -1959,7 +2147,6 @@ _TestVolumePlacementDrags(const std::string &stagePath)
     std::string error;
     {
         RigExecRigEvaluator evaluator(stage, rigPath);
-        evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
         CHECK(RigExecTestBakeAt(evaluator, 1.0, &bytes, &error));
     }
     RigExecTestPlayer player;
@@ -1970,8 +2157,7 @@ _TestVolumePlacementDrags(const std::string &stagePath)
     }
     const double frame = 5.0;
     std::vector<RigExecRigPose> plain;
-    CHECK(RigExecTestEditedPoses(stage, rigPath,
-                                 RigExecEvaluationMode::Baked, {},
+    CHECK(RigExecTestEditedPoses(stage, rigPath, {},
                                  {1.0, frame}, &plain, &error));
     if (plain.size() != 2) {
         std::printf("%s: reference: %s\n", name, error.c_str());
@@ -2032,7 +2218,6 @@ _TestVolumePlacementDrags(const std::string &stagePath)
         }
     }
     CHECK(placer[0] >= 0 && placer[1] >= 0);
-    const bool fine = TfGetenv("RIGEXEC_BAKED_GRAIN_US", "") == "0";
     size_t skipped = 0;
     const std::string controls = "/PlacementAsset/Rig/Controls/";
     const std::string drags[] = {controls + "ACtl.avars:rz",
@@ -2042,7 +2227,7 @@ _TestVolumePlacementDrags(const std::string &stagePath)
     for (size_t d = 0; d < 2; ++d) {
         std::vector<RigExecRigPose> dragged;
         CHECK(RigExecTestEditedPoses(
-            stage, rigPath, RigExecEvaluationMode::Baked,
+            stage, rigPath,
             {{SdfPath(drags[d]), VtValue(value)}}, {frame}, &dragged,
             &error));
         CHECK(player.Hold(drags[d], value, &error));
@@ -2062,9 +2247,8 @@ _TestVolumePlacementDrags(const std::string &stagePath)
                  std::memcmp(&kept->matrix, &undragged[1 - d],
                              sizeof(RrMat4d)) == 0;
         }
-        // One step per cluster: the dragged volume's step ran and the
-        // other's did not.
-        if (fine && placer[0] >= 0 && placer[1] >= 0) {
+        // Shared production clusters preserve the independent volume branch.
+        if (placer[0] >= 0 && placer[1] >= 0) {
             const bool own = player->GetStepRanForTesting(size_t(placer[d]));
             const bool other =
                 player->GetStepRanForTesting(size_t(placer[1 - d]));
@@ -2084,16 +2268,10 @@ _TestVolumePlacementDrags(const std::string &stagePath)
         CHECK(released);
         matched += ok && released ? 1 : 0;
     }
-    if (fine) {
-        CHECK(skipped == 2);
-    }
-    const std::string steps =
-        fine ? std::to_string(skipped) +
-                   " of 2 skipped the other volume's step"
-             : std::string("both steps share a cluster at this grain");
-    std::printf("%s: %zu of 2 drag(s) match live baked, the other volume's "
-                "frame kept; %s\n",
-                name, matched, steps.c_str());
+    CHECK(skipped == 2);
+    std::printf("%s: %zu of 2 drags match authored native values; "
+                "%zu skip the unrelated volume operation at production grain\n",
+                name, matched, skipped);
 }
 
 // A constraint's envelope painted as a dense static weight of one value,
@@ -2154,7 +2332,6 @@ _TestPaintedEnvelopeSet()
     std::string error;
     {
         RigExecRigEvaluator evaluator(stage, rigPath);
-        evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
         CHECK(RigExecTestBakeAt(evaluator, 1.0, &bytes, &error));
     }
     // The envelope entry names its painted input.
@@ -2167,7 +2344,12 @@ _TestPaintedEnvelopeSet()
             }
             const fb::RigExecWireWeightObject &object =
                 file->geometry->weightObjects[size_t(c.weightObjectIndex)];
-            listed = object.envelopeOnly &&
+            const auto packet = std::find_if(file->steps.begin(), file->steps.end(),
+                [&](const auto &step) { return step.kind == fb::StepKind::WeightPacket &&
+                    step.object == c.weightObjectIndex; });
+            listed = packet != file->steps.end() && c.weightField >= 0 &&
+                     size_t(c.weightField) < file->geometry->weightFields.size() &&
+                     file->geometry->weightFields[size_t(c.weightField)].object == c.weightObjectIndex &&
                      object.valuesSlot == RigExecTestSlotOf(*file, values) &&
                      object.valuesSlot >= 0;
         }
@@ -2187,10 +2369,9 @@ _TestPaintedEnvelopeSet()
     CHECK(RigExecTestApplyArraySets(reader.get(), sets, &error) &&
           reader->Execute(&error));
     bool same = true;
-    for (const auto mode :
-         {RigExecEvaluationMode::Dynamic, RigExecEvaluationMode::Baked}) {
+    {
         RigExecRigPose pose;
-        CHECK(RigExecTestArrayReference(stage, rigPath, mode, sets, 1.0,
+        CHECK(RigExecTestArrayReference(stage, rigPath, sets, 1.0,
                                         &pose, &error));
         std::vector<std::string> diffs;
         if (!RigExecCompareRuntimeRun(pose, *reader, &diffs)) {
@@ -2213,11 +2394,191 @@ _TestPaintedEnvelopeSet()
                 name, values.c_str(), same ? "==" : "differs from");
 }
 
+// S9 NoEquivalent: the original walk refused volume envelopes. This case
+// checks the newly supported count-one graph without inventing a baseline.
+static void
+_TestS9VolumeEnvelope()
+{
+    for(const char *phase:{"base","final"}) {
+        auto stage=UsdStage::CreateInMemory();
+        stage->DefinePrim(SdfPath("/Asset/Rig"),TfToken("RigExecRoot"));
+        const auto joint=stage->DefinePrim(SdfPath("/Asset/Rig/Joints/J"),TfToken("RigExecJoint"));
+        const auto source=stage->DefinePrim(SdfPath("/Asset/Source"),TfToken("Xform"));
+        source.CreateAttribute(TfToken("xformOp:translate"),SdfValueTypeNames->Double3).Set(GfVec3d(10,0,0));
+        source.CreateAttribute(TfToken("xformOpOrder"),SdfValueTypeNames->TokenArray).Set(VtTokenArray{TfToken("xformOp:translate")});
+        const auto samples=stage->DefinePrim(SdfPath("/Asset/Samples"),TfToken("Points"));
+        auto points=samples.CreateAttribute(TfToken("points"),SdfValueTypeNames->Point3fArray);
+        points.Set(VtVec3fArray{GfVec3f(.5f,0,0)});
+        points.Set(VtVec3fArray{GfVec3f(.5f,0,0)},UsdTimeCode(1));
+        points.Set(VtVec3fArray{GfVec3f(.5f,0,0),GfVec3f(.25f,0,0)},UsdTimeCode(2));
+        points.Set(VtVec3fArray{},UsdTimeCode(3));
+        points.Set(SdfValueBlock(),UsdTimeCode(4));
+        points.Set(VtVec3fArray{GfVec3f(.25f,0,0)},UsdTimeCode(5));
+        const auto plane=stage->DefinePrim(SdfPath("/Asset/Rig/Weights/Plane"),TfToken("RigExecPlaneWeight"));
+        plane.CreateRelationship(TfToken("rigExec:weightTarget")).SetTargets({joint.GetPath()});
+        plane.CreateRelationship(TfToken("rigExec:sampleSource")).SetTargets({points.GetPath()});
+        plane.CreateAttribute(TfToken("rigExec:planeAxis"),SdfValueTypeNames->Token).Set(TfToken("x"));
+        plane.CreateAttribute(TfToken("rigExec:planeBounds"),SdfValueTypeNames->Token).Set(TfToken("unbounded"));
+        plane.CreateAttribute(TfToken("rigExec:falloffMin"),SdfValueTypeNames->Float).Set(0.0f);
+        plane.CreateAttribute(TfToken("rigExec:falloffMax"),SdfValueTypeNames->Float).Set(1.0f);
+        plane.CreateAttribute(TfToken("rigExec:rangePolicy"),SdfValueTypeNames->Token).Set(TfToken("clamp"));
+        const auto pull=stage->DefinePrim(SdfPath("/Asset/Rig/Movers/Pull"),TfToken("RigExecPositionConstraint"));
+        CHECK(pull.ApplyAPI(TfToken("RigExecMoverAPI")));
+        pull.CreateRelationship(TfToken("rigExec:moves")).SetTargets({joint.GetPath()});
+        pull.CreateRelationship(TfToken("rigExec:sources")).SetTargets({source.GetPath()});
+        pull.CreateRelationship(TfToken("rigExec:weightObject")).SetTargets({plane.GetPath()});
+        pull.GetRelationship(TfToken("rigExec:weightObject")).SetMetadata(TfToken("rigExecReadPhase"),std::string(phase));
+        RigExecRigEvaluator native(stage,SdfPath("/Asset/Rig"));
+        std::vector<uint8_t> bytes;std::string why;
+        CHECK(RigExecTestBakeAt(native,1,&bytes,&why));
+        auto wire=RigExecTestUnpack(bytes);CHECK(wire);
+        if(!wire) continue;
+        int field=-1;
+        for(size_t i=0;i<wire->geometry->weightFields.size();++i)
+            if(wire->geometry->weightFields[i].form==fb::WeightFieldForm::EnvelopeConstraint) field=int(i);
+        CHECK(field>=0);if(field<0) continue;
+        CHECK(wire->geometry->weightFields[size_t(field)].placementPhase==
+            (std::string(phase)=="base"?fb::WeightFieldPlacementPhase::Base:fb::WeightFieldPlacementPhase::Final));
+        const int slot=RigExecTestSlotOf(*wire,points.GetPath().GetString());
+        CHECK(slot>=0);if(slot<0) continue;
+        auto reader=RigExecRuntimeReader::Open(bytes.data(),bytes.size(),&why);CHECK(reader);
+        if(!reader) continue;
+        CHECK(RigExecRuntimeStageArrayInputs::CanSample(*reader,size_t(slot)));
+        const std::vector<std::vector<RrVec3f>> values={{RrVec3f(.5f,0,0)},
+            {RrVec3f(.5f,0,0),RrVec3f(.25f,0,0)},{},{},{RrVec3f(.25f,0,0)}};
+        std::vector<RrMat4d> published;
+        for(size_t frame=0;frame<values.size();++frame) {
+            if(frame==3) CHECK(RigExecRuntimeStageArrayInputs::ClearSample(*reader,size_t(slot),&why));
+            else CHECK(RigExecRuntimeStageArrayInputs::SetSample(*reader,size_t(slot),
+                RigExecRuntimeArray{RrInputTag::Vec3fArray,values[frame].data(),values[frame].size()},&why));
+            CHECK(reader->Execute(&why));
+            const RigExecRigPose expected=native.Evaluate(UsdTimeCode(double(frame+1)));
+            std::vector<std::string> diffs;
+            const bool same=RigExecCompareRuntimeRun(expected,*reader,&diffs);CHECK(same);
+            for(const auto &line:diffs) std::printf("S9 %s frame %zu: %s\n",phase,frame+1,line.c_str());
+            const auto found=std::find_if(reader->GetJointMatrices().begin(),reader->GetJointMatrices().end(),
+                [&](const auto &value){return value.path==joint.GetPath().GetString();});
+            CHECK(found!=reader->GetJointMatrices().end());
+            if(found==reader->GetJointMatrices().end()) continue;
+            const RrMat4d standing=found->matrix;
+            published.push_back(standing);
+            if(frame==0 || frame==4) CHECK(found->matrix[3][0]!=(0.0));
+            else CHECK(found->matrix[3][0]==0.0);
+            if(frame==1 || frame==2) CHECK(std::any_of(reader->GetDiagnostics().begin(),reader->GetDiagnostics().end(),
+                [](const auto &line){return line.find("sampled point count does not match")!=std::string::npos;}));
+            if(frame==3) CHECK(std::any_of(reader->GetDiagnostics().begin(),reader->GetDiagnostics().end(),
+                [](const auto &line){return line.find("could not read the points to sample")!=std::string::npos;}));
+            CHECK(reader->Execute(&why));
+            CHECK(reader->GetLastRunTraceForTesting().empty());
+            const auto held=std::find_if(reader->GetJointMatrices().begin(),reader->GetJointMatrices().end(),
+                [&](const auto &value){return value.path==joint.GetPath().GetString();});
+            CHECK(held!=reader->GetJointMatrices().end() && held->matrix==standing);
+        }
+        CHECK(published.size()==5 && published.front()!=published.back());
+        std::printf("S9 NoEquivalent: %s volume envelope count loss/missing/empty/recovery + held exact playback\n",phase);
+    }
+}
+
+// Original native lowering supplies the SCC/exclusion artifact; runtime never
+// receives a manually edited graph or a manufactured invalid publication.
+static void
+_TestS9ExportedPlacementCycle(const std::string &fixture)
+{
+    {
+        GfMatrix4d native(1.0);
+        RrMat4d runtime(1.0);
+        native[3][0] = runtime[3][0] = std::numeric_limits<double>::quiet_NaN();
+        CHECK(rigExecTestDrive::SameMatrix(native, runtime));
+        uint64_t different = 0;
+        const double sentinel = runtime[3][0];
+        std::memcpy(&different, &sentinel, sizeof(different));
+        different ^= uint64_t(1);
+        std::memcpy(&runtime[3][0], &different, sizeof(different));
+        CHECK(!rigExecTestDrive::SameMatrix(native, runtime));
+        native[3][0] = runtime[3][0] = 0.0;
+        runtime[0][0] = 2.0;
+        CHECK(!rigExecTestDrive::SameMatrix(native, runtime));
+    }
+    auto stage=UsdStage::Open(fixture); CHECK(stage); if(!stage) return;
+    const SdfPath rig("/EnvelopeAsset/Rig");
+    const auto sphere=stage->DefinePrim(rig.AppendPath(SdfPath("Weights/Self")),TfToken("RigExecSphereWeight"));
+    CHECK(sphere.CreateRelationship(TfToken("rigExec:weightTarget")).SetTargets({sphere.GetPath()}));
+    CHECK(sphere.CreateRelationship(TfToken("rigExec:sampleSource")).SetTargets({SdfPath("/EnvelopeAsset/Geom/Samples.points")}));
+    const auto mover=stage->DefinePrim(rig.AppendPath(SdfPath("Constraints/Self")),TfToken("RigExecPositionConstraint"));
+    CHECK(mover.ApplyAPI(TfToken("RigExecMoverAPI")));
+    CHECK(mover.CreateRelationship(TfToken("rigExec:moves")).SetTargets({sphere.GetPath()}));
+    CHECK(mover.CreateRelationship(TfToken("rigExec:sources")).SetTargets({rig.AppendPath(SdfPath("Controls/VolumeMove"))}));
+    const auto relation=mover.CreateRelationship(TfToken("rigExec:weightObject"));
+    CHECK(relation.SetTargets({sphere.GetPath()}));
+    CHECK(relation.SetMetadata(TfToken("rigExecReadPhase"),VtValue(std::string("final"))));
+    RigExecRigEvaluator evaluator(stage,rig);
+    std::vector<uint8_t> bytes; std::string error;
+    CHECK(RigExecTestBakeAt(evaluator,1,&bytes,&error));
+    if(!evaluator.GetBakedProgram()) return;
+    const auto &native=evaluator.GetBakedProgram()->GetStepGraph();
+    const auto cycleContains=[](const auto &cycles) {
+        for(const auto &cycle:cycles) {
+            bool field=false,consumer=false;
+            for(const auto &key:cycle) {
+                field|=key.find("Weights/Self")!=std::string::npos;
+                consumer|=key.find("Constraints/Self")!=std::string::npos;
+            }
+            if(field && consumer) return true;
+        }
+        return false;
+    };
+    CHECK(cycleContains(native.opGraph.cycles));
+    CHECK(!native.opAdapter.excludedValues.empty());
+    auto wire=RigExecTestUnpack(bytes); CHECK(wire && wire->commonGraph);
+    if(!wire || !wire->commonGraph) return;
+    std::vector<std::vector<std::string>> cycles;
+    for(const auto &cycle:wire->commonGraph->cycles) cycles.push_back(cycle.keys);
+    CHECK(cycleContains(cycles));
+    CHECK(!wire->commonGraph->excludedValues.empty());
+    auto reader=RigExecRuntimeReader::Open(bytes.data(),bytes.size(),&error);
+    CHECK(reader); if(!reader) return;
+    // Match the newly opened reader's first-generation compile notices.
+    RigExecRigEvaluator expectedEvaluator(stage,rig);
+    RigExecInputSampler sampler; CHECK(sampler.Bind(stage,*reader,&error));
+    size_t cycleFrame=0;std::string canonicalCycleDiagnostic;
+    for(double time:{1.0,3.0,3.0,1.0}) {
+        CHECK(sampler.Apply(UsdTimeCode(time),reader.get(),&error));
+        CHECK(reader->Execute(&error));
+        const auto expected=expectedEvaluator.Evaluate(UsdTimeCode(time));
+        CHECK(expected.diagnostics.size()==(cycleFrame==0?3:1));
+        if(cycleFrame==0 && expected.diagnostics.size()==3) {
+            CHECK(expected.diagnostics[0].find("warning: Skipped operation /EnvelopeAsset/Rig/Constraints/Self -- operation cycle") == 0);
+            CHECK(expected.diagnostics[1].find("warning: Skipped operation /EnvelopeAsset/Rig/Weights/Self -- operation cycle") == 0);
+            canonicalCycleDiagnostic=expected.diagnostics[2];
+            CHECK(canonicalCycleDiagnostic.find("operation cycle: ")==0);
+        } else if(cycleFrame>0 && expected.diagnostics.size()==1) {
+            CHECK(expected.diagnostics[0]==canonicalCycleDiagnostic);
+        }
+        ++cycleFrame;
+        std::vector<std::string> differences;
+        CHECK(RigExecCompareRuntimeRun(expected,*reader,&differences));
+        for(const auto &line:differences) std::printf("S9 cycle %.0f: %s\n",time,line.c_str());
+        const auto &frames=reader->GetWeightFrames();
+        const auto frame=std::find_if(frames.begin(),frames.end(),[&](const auto &value){return value.path==sphere.GetPath().GetString();});
+        CHECK(frame!=frames.end());
+        if(frame!=frames.end()) CHECK(std::isnan(frame->matrix[3][0]));
+        const auto nativeFrame=expected.weightFrames.find(sphere.GetPath());
+        CHECK(nativeFrame!=expected.weightFrames.end());
+        if(nativeFrame!=expected.weightFrames.end()) CHECK(std::isnan(nativeFrame->second[3][0]));
+        const auto properties=reader->GetPropertyValues();
+        const auto base=std::find_if(properties.begin(),properties.end(),[](const auto &value){return value.path=="/EnvelopeAsset/Rig/Channels.base";});
+        CHECK(base!=properties.end());
+        if(base!=properties.end()) CHECK(base->value.tag==RrPropertyValue::Tag::Float && base->value.f32==10.0f);
+    }
+    std::printf("S9 NoEquivalent: original exported Final placement SCC, invalid publication and independent Base property\n");
+}
+
 int
 main(int argc, char **argv)
 {
     PlugRegistry::GetInstance().RegisterPlugins(
         RIGEXEC_SCHEMA_RESOURCE_DIR);
+    _TestS9VolumeEnvelope();
     _TestSyntheticBuilders();
     _TestComputedReadsAndOracle();
     _TestPaintedEnvelopeSet();
@@ -2245,6 +2606,7 @@ main(int argc, char **argv)
         _TestFixture(fixture.stage, examplesDir + "/" + fixture.stage,
                      frames, std::string(fixture.animation) == "static");
     }
+    _TestS9ExportedPlacementCycle(examplesDir + "/../tests/fixtures/oneloop_s9_envelope_volumes.usda");
     CHECK(sawBaking);
 
     if (failures == 0) {

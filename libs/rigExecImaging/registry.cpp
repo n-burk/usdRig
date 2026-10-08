@@ -26,6 +26,8 @@
 #include "pxr/usd/usdUtils/stageCache.h"
 
 #include <algorithm>
+#include <array>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -33,6 +35,27 @@
 #include <limits>
 
 namespace rigExec {
+
+// A snapshot and its epoch own independent worker lanes. A lease protects
+// both lazy construction and the mutable retained execution state.
+struct RigExecWarmWorkspacePool {
+    struct Lane {
+        std::atomic<bool> busy{false};
+        std::unique_ptr<RigExecFrozenWorkspace> workspace;
+    };
+    std::shared_ptr<const RigExecFrozenProgram> snapshot;
+    uint64_t epoch = 0;
+    uint64_t programDigest = 0;
+    std::array<Lane, kRigExecBackgroundSchedulerMaxWorkers> lanes;
+
+    Lane *Acquire() {
+        for (Lane &lane : lanes) {
+            bool expected = false;
+            if (lane.busy.compare_exchange_strong(expected, true)) return &lane;
+        }
+        return nullptr;
+    }
+};
 
 namespace {
 
@@ -2151,6 +2174,15 @@ RigExecImagingRegistry::BuildWarmWork(
                         ? "freeze refused"
                         : session->frozenError);
     }
+    RigExecProfiler *warmProfiler = session->bridge->MutableProfiler();
+    uint64_t warmPhaseStart = warmProfiler->IsEnabled() ? RigExecProfiler::NowUs() : 0;
+    const auto warmPhase = [&](const char *name) {
+        if (warmProfiler->IsEnabled()) {
+            const uint64_t end = RigExecProfiler::NowUs();
+            warmProfiler->Record(name, "imagingWarm", warmPhaseStart, end);
+            warmPhaseStart = end;
+        }
+    };
     RigExecFrameInputs inputs;
     if (cached) {
         if (!RigExecSampleFrameInputsWithBurstCache(
@@ -2170,6 +2202,7 @@ RigExecImagingRegistry::BuildWarmWork(
                         "chain-sample");
         }
     }
+    warmPhase("Warm.SampleInputs");
     // A vector carrying a sample marked stale (viaChain) builds no job; the
     // frame evaluates live when asked and still memoizes through the live
     // path. The samplers mark none: chain reads resolve on the worker.
@@ -2200,6 +2233,17 @@ RigExecImagingRegistry::BuildWarmWork(
     // before sampling above (the lock never dropped between, so the
     // session cannot have swapped it out from under this build).
     context.frozen = session->frozen.get();
+    if (!session->warmWorkspaces ||
+        session->warmWorkspaces->snapshot != session->frozen ||
+        session->warmWorkspaces->epoch != context.epochDigest ||
+        session->warmWorkspaces->programDigest != context.programDigest) {
+        auto pool = std::make_shared<RigExecWarmWorkspacePool>();
+        pool->snapshot = session->frozen;
+        pool->epoch = context.epochDigest;
+        pool->programDigest = context.programDigest;
+        session->warmWorkspaces = std::move(pool);
+    }
+    auto workspaces = session->warmWorkspaces;
     RigExecFrameCacheKey key;
     // The same epoch half the bridge's lookup computes (epoch structure +
     // build count), so a completion lands where the UI thread will look.
@@ -2226,6 +2270,7 @@ RigExecImagingRegistry::BuildWarmWork(
         key.controlDigest =
             RigExecFoldConstantDigest(unfoldedDigest, constantDigest);
     }
+    warmPhase("Warm.DigestContext");
     // Recorded at enqueue, on this thread: a warmed entry with no proof is
     // unreachable (lookups serve only under one), and the worker cannot
     // record it -- the bridge is UI-thread state. Every sample is fresh at
@@ -2242,6 +2287,11 @@ RigExecImagingRegistry::BuildWarmWork(
         session->bridge->GetFrameCache();
     RigExecBackgroundScheduler *scheduler = _scheduler.get();
     std::shared_ptr<RigExecWarmFrameIndex> warmIndex = _warmIndex;
+    const auto progressPublication = warmIndex->RequestPublicationFor(
+        rig, time.GetValue(), generation, key.epochDigest);
+    // Null unless explicitly opted in; no worker registry access or lock.
+    const WarmPublishObserver publishObserver = production
+        ? _warmPublishObserver : WarmPublishObserver();
     // Only sampled values cross the thread boundary, plus the snapshot the
     // context points at: the job's own shared_ptr keeps it alive past a
     // deactivation or a refresh that swaps the session's entry out. The
@@ -2250,27 +2300,48 @@ RigExecImagingRegistry::BuildWarmWork(
     // and its destructor (Deactivate stopping the context's pool) joins
     // the workers before it goes.
     std::shared_ptr<const RigExecFrozenProgram> frozen = session->frozen;
-    // Retained-state publish (plan 2.0): the source snapshot and the
-    // dependency record ride with the pose. Built here, on the UI thread:
-    // only values cross into the closure. The wider half -- the pose-domain
-    // slots a partial cone re-runs against -- is taken from the worker's
-    // thread-local after the run, inside the closure below.
+    // The source snapshot and dependency record travel with the pose.
     RigExecRetainedFrameState retainedState = RigExecCaptureRetainedState(
         inputs, overrides, key.epochDigest,
         program->GetStepGraph().clustering.clusters.size(),
         constantDigest);
+    warmPhase("Warm.EnqueueProofRetained");
     auto retained = std::make_shared<RigExecRetainedFrameState>(
         std::move(retainedState));
     const size_t retainedBytes = retained->RetainedBytes();
     RigExecEntryProvenance provenance =
         RigExecFullEvalProvenance(program->GetStepGraph(), time);
     provenance.unfoldedControlDigest = unfoldedDigest;
+    warmPhase("Warm.Provenance");
     RigExecWarmWork work = [inputs, context, key, cache, scheduler, rig,
-                              runner, frozen, warmIndex, retained,
-                              retainedBytes, provenance](
+                              runner, frozen, workspaces, warmIndex, retained,
+                              retainedBytes, provenance, progressPublication, publishObserver](
                                  const RigExecWarmRequest &request) {
+        RigExecProfiler *workerProfiler = scheduler ? scheduler->MutableProfiler() : nullptr;
+        uint64_t workerStart = workerProfiler && workerProfiler->IsEnabled() ? RigExecProfiler::NowUs() : 0;
+        const auto workerPhase = [&](const char *name) {
+            if (workerProfiler && workerProfiler->IsEnabled()) {
+                const uint64_t end = RigExecProfiler::NowUs();
+                workerProfiler->Record(name, "imagingWarm", workerStart, end);
+                workerStart = end;
+            }
+        };
+        RigExecFrozenEvalContext laneContext = context;
+        RigExecWarmWorkspacePool::Lane *lane = workspaces->Acquire();
+        struct Lease {
+            RigExecWarmWorkspacePool::Lane *lane;
+            ~Lease() { if (lane) lane->busy.store(false); }
+        } lease{lane};
+        if (lane) {
+            if (!lane->workspace) {
+                lane->workspace = RigExecCreateFrozenWorkspace(frozen);
+            }
+            laneContext.workspace = lane->workspace.get();
+        }
+        workerPhase("Warm.WorkerLane");
         const RigExecRigPose pose = RigExecEvaluateFrozen(
-            context, inputs, runner, scheduler, rig);
+            laneContext, inputs, runner, scheduler, rig);
+        workerPhase("Warm.WorkerEvaluate");
         // Stale at publish means an edit landed mid-run -- a generation
         // bump or a scoped purge that moved this time's fence token (the
         // frame requeues under the live generation); anything else that
@@ -2287,37 +2358,35 @@ RigExecImagingRegistry::BuildWarmWork(
             return stale() ? RigExecWarmOutcome::DeclinedGeneration
                            : RigExecWarmOutcome::DeclinedInvalid;
         }
-        // The wider retained half (plan 2.0): the production run captured
-        // its pose-domain slots into this worker's thread-local; take them
-        // here, on the same worker, and publish a copy of the retained
-        // state carrying both halves. An injected test kernel captures
-        // nothing, so the take fails and the sources-only handle publishes
-        // exactly as before.
-        std::shared_ptr<const void> retainedHandle = retained;
-        size_t publishBytes = retainedBytes;
-        std::shared_ptr<RigExecRetainedFrameState> slotted;
-        std::shared_ptr<const void> slots;
-        size_t slotBytes = 0;
-        if (RigExecTakeLastFrozenSlots(&slots, &slotBytes) && slots &&
-            slotBytes > 0) {
-            slotted =
-                std::make_shared<RigExecRetainedFrameState>(*retained);
-            slotted->slots = std::move(slots);
-            slotted->slotBytes = slotBytes;
-            publishBytes = slotted->RetainedBytes();
-            retainedHandle = slotted;
-        }
         const bool pubOk = RigExecPublishBackgroundCompletion(
             cache, key, request.time, pose, request.generation,
-            scheduler, rig, request.fenceToken, retainedHandle,
-            publishBytes, &provenance, warmIndex.get());
+            scheduler, rig, request.fenceToken, retained,
+            retainedBytes, &provenance, warmIndex.get());
+        workerPhase("Warm.WorkerPublish");
         if (!pubOk) {
             return stale() ? RigExecWarmOutcome::DeclinedGeneration
                            : RigExecWarmOutcome::DeclinedInvalid;
         }
+        // No new worker mutex: publication is fenced above; this immutable
+        // captured cell only marks its own request, never owner request maps.
+        progressPublication.Publish(key, request.generation);
+        if (publishObserver) publishObserver(rig, request.time, key,
+            request.generation, pose, cache);
         return RigExecWarmOutcome::Published;
     };
+    warmPhase("Warm.WorkConstruction");
     return RigExecWarmFactoryResult{std::move(work)};
+}
+
+
+void RigExecImagingRegistry::SetWarmPublishObserverForTesting(
+    WarmPublishObserver observer)
+{
+    if (const Ptr routed = _Routed()) {
+        routed->SetWarmPublishObserverForTesting(std::move(observer));
+        return;
+    }
+    _warmPublishObserver = std::move(observer);
 }
 
 RigExecProfiler *
@@ -2365,7 +2434,7 @@ RigExecImagingRegistry::_CursorSweepTimes(const RigSession &session,
         if (time == center) {
             continue;
         }
-        if (!_warmIndex->IsVisitable(session.rigPath, time, generation,
+        if (!_warmIndex->IsCursorVisitable(session.rigPath, time, generation,
                                      epoch)) {
             continue;
         }
@@ -2516,6 +2585,10 @@ RigExecImagingRegistry::_WarmOneFallbackFrame(
     bool found = false;
     for (size_t i = 0; i < session->warmRange.size(); ++i) {
         const double time = session->warmRange[i];
+        if (_warmIndex->HasRequestPublished(session->rigPath, time,
+                _scheduler->CurrentGeneration(session->rigPath),
+                RigExecFrameCacheEpochDigest(session->bridge->GetEvaluator())))
+            continue;
         if (states[i] == RigExecWarmFrameState::Cached ||
             states[i] == RigExecWarmFrameState::Warming ||
             session->fallbackDeclined.count(time)) {
@@ -2533,8 +2606,18 @@ RigExecImagingRegistry::_WarmOneFallbackFrame(
     }
     ++session->fallbackAttempts;
     ++session->evaluationCount;
+    const uint64_t token = _warmIndex->RequestToken(session->rigPath);
     if (!session->bridge->WarmFrameOnCallingThread(UsdTimeCode(candidate))) {
         session->fallbackDeclined.insert(candidate);
+    } else {
+        RigExecFrameCacheKey key;
+        const auto generation = _scheduler->CurrentGeneration(session->rigPath);
+        const uint64_t epoch = RigExecFrameCacheEpochDigest(
+            session->bridge->GetEvaluator());
+        if (_warmIndex->FindCachedKey(session->rigPath, candidate,
+                generation, epoch, &key))
+            _warmIndex->NoteRequestPublished(session->rigPath, candidate,
+                key, generation, token);
     }
     return true;
 }
@@ -2711,6 +2794,7 @@ RigExecImagingRegistry::_CancelGenerationTimesLocked(const SdfPath &rig)
     if (!_scheduler) {
         return;
     }
+    _warmIndex->InvalidateRequest(rig);
     // The unpartitioned affected set: completions the warm index holds
     // plus queued and running times the scheduler holds. No generation
     // bump or index generation push: unaffected times keep their tokens and
@@ -2822,6 +2906,7 @@ RigExecImagingRegistry::_RetireAffectedTimesLocked(
         return;
     }
     const SdfPath &rig = session->rigPath;
+    _warmIndex->InvalidateRequest(rig);
     RigExecImagingBridge *bridge = session->bridge.get();
     // Snapshot in-flight work before completions: a first-fill job that
     // finishes between the reads must be covered by at least one set.
@@ -3096,6 +3181,12 @@ RigExecImagingRegistry::ClearFrameCache(const SdfPath &rig)
         }
         _warmIndex->ResetRig(rig);
         for (RigSession &session : _sessions) {
+            if (session.rigPath == rig && session.warmRangeActive && session.bridge)
+                _warmIndex->SetRequest(rig, session.warmRange,
+                    _scheduler ? _scheduler->CurrentGeneration(rig) : 0,
+                    RigExecFrameCacheEpochDigest(session.bridge->GetEvaluator()));
+        }
+        for (RigSession &session : _sessions) {
             if (session.rigPath == rig) {
                 session.fallbackDeclined.clear();
             }
@@ -3143,6 +3234,9 @@ RigExecImagingRegistry::SetWarmRange(const SdfPath &rig,
                                 session.warmRange.end()),
                     session.warmRange.end());
                 session.warmRangeActive = true;
+                _warmIndex->SetRequest(rig, session.warmRange,
+                    _scheduler ? _scheduler->CurrentGeneration(rig) : 0,
+                    RigExecFrameCacheEpochDigest(session.bridge->GetEvaluator()));
                 session.fallbackDeclined.clear();
                 found = true;
                 break;
@@ -3669,28 +3763,19 @@ RigExecImagingRegistry::WriteProfileSummary(const std::string &path)
     if (!out) {
         return false;
     }
-    out << "rig\tname\tcategory\tcount\ttotal_ms\tmax_ms\tmode\n";
+    out << "rig\tname\tcategory\tcount\ttotal_ms\tmax_ms\n";
     for (const RigSession &session : _sessions) {
         // Playback records no phases, so it contributes no rows.
         if (session.playback) {
             continue;
         }
         const RigExecRigEvaluator &evaluator = session.bridge->GetEvaluator();
-        // The mode ASKED for. Whether the baked program actually answered is
-        // in the rows themselves: a generation it served records `Baked`.
-        const RigExecEvaluationMode requested = evaluator.GetEvaluationMode();
-        const std::string mode =
-            requested == RigExecEvaluationMode::Dynamic ? "dynamic"
-            : requested == RigExecEvaluationMode::Baked ? "baked"
-            : requested == RigExecEvaluationMode::ExecReference
-                ? "reference"
-                : "parity";
         for (const RigExecProfileSummaryRow &row :
              session.bridge->GetProfiler().Summarize()) {
             out << session.rigPath.GetString() << '\t' << row.name << '\t'
                 << row.category << '\t' << row.count << '\t'
                 << (row.totalUs / 1000.0) << '\t' << (row.maxUs / 1000.0)
-                << '\t' << mode << '\n';
+                << '\n';
         }
         session.bridge->MutableProfiler()->Clear();
     }
@@ -5438,7 +5523,7 @@ RigExecImaging_WriteProfileSummaryForStage(long long stageCacheId,
         if (!out) {
             return 1;
         }
-        out << "rig\tname\tcategory\tcount\ttotal_ms\tmax_ms\tmode\n";
+        out << "rig\tname\tcategory\tcount\ttotal_ms\tmax_ms\n";
         return 0;
     }
     return context->WriteProfileSummary(

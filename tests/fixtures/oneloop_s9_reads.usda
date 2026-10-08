@@ -1,0 +1,154 @@
+#usda 1.0
+(
+    doc = "S9 new capability: explicit geometry-to-property/pose reads. The sublayer also supplies the property-pose-geometry-weight-geometry acceptance chain."
+    subLayers = [@oneloop_cross_domain.usda@]
+    defaultPrim = "S9Asset"
+)
+def Xform "S9Asset"
+{
+    def RigExecRoot "Rig"
+    {
+        uniform token rigExec:partition = "S9Asset"
+        def Scope "Controls"
+        {
+            def RigExecControl "Lift" (prepend apiSchemas = ["RigExecControlAPI"])
+            {
+                double avars:ty = 2
+                matrix4d rest:space = ((1,0,0,0),(0,1,0,0),(0,0,1,0),(0,0,0,1))
+            }
+        }
+        def Scope "Joints"
+        {
+            def RigExecJoint "Lift"
+            {
+                matrix4d rest:space = ((1,0,0,0),(0,1,0,0),(0,0,1,0),(0,0,0,1))
+            }
+            def RigExecJoint "RibbonA"
+            {
+                matrix4d rest:space = ((1,0,0,0),(0,1,0,0),(0,0,1,0),(0,0,0,1))
+            }
+            def RigExecJoint "RibbonB"
+            {
+                matrix4d rest:space = ((1,0,0,0),(0,1,0,0),(0,0,1,0),(2,0,0,1))
+            }
+        }
+        def Scope "Solvers"
+        {
+            def RigExecFkChain "Lift"
+            {
+                rel rigExec:controls = </S9Asset/Rig/Controls/Lift>
+                rel rigExec:joints = </S9Asset/Rig/Joints/Lift>
+            }
+            def RigExecRibbon "Ribbon"
+            {
+                rel rigExec:driverCurve = </S9Asset/Geom/Curve> (rigExecReadPhase = "final")
+                rel rigExec:joints = [</S9Asset/Rig/Joints/RibbonA>, </S9Asset/Rig/Joints/RibbonB>]
+                uniform int rigExec:sampleCount = 2
+            }
+        }
+        def Scope "Geometry"
+        {
+            def RigExecMatrixMover "Lift" (prepend apiSchemas = ["RigExecMoverAPI"])
+            {
+                rel rigExec:moves = </S9Asset/Geom/Curve.points>
+                rel rigExec:transform = </S9Asset/Rig/Joints/Lift> (rigExecReadPhase = "final")
+            }
+        }
+        def Scope "Channels"
+        {
+            custom float3 selected = (0,0,0)
+            custom float3 base = (0,0,0)
+            custom float3 checkpoint = (0,0,0)
+            custom float3 preceding = (0,0,0)
+            custom float3 rawSelected = (0,0,0)
+            custom float3 downstream = (0,0,0)
+            custom matrix4d pose = ((1,0,0,0),(0,1,0,0),(0,0,1,0),(0,0,0,1))
+        }
+        def Scope "Properties"
+        {
+            def RigExecVec3fMathMover "Selected" (prepend apiSchemas = ["RigExecMoverAPI"])
+            {
+                float3 inputs:value = (99,99,99) (
+                    rigExecInputElement = 1
+                    rigExecReadPhase = "final"
+                )
+                float3 inputs:value.connect = </S9Asset/Geom/Curve.points>
+                rel rigExec:moves = </S9Asset/Rig/Channels.selected>
+                uniform token rigExec:operation = "add"
+            }
+            def RigExecVec3fMathMover "Base" (prepend apiSchemas = ["RigExecMoverAPI"])
+            {
+                float3 inputs:value = (99,99,99) (rigExecInputElement = 1)
+                float3 inputs:value.connect = </S9Asset/Geom/Curve.points>
+                rel rigExec:moves = </S9Asset/Rig/Channels.base>
+                uniform token rigExec:operation = "add"
+            }
+            def RigExecVec3fMathMover "Checkpoint" (prepend apiSchemas = ["RigExecMoverAPI"])
+            {
+                float3 inputs:value = (99,99,99) (
+                    rigExecInputElement = 1
+                    rigExecReadPhase = "/S9Asset/Rig/Geometry/Lift"
+                )
+                float3 inputs:value.connect = </S9Asset/Geom/Curve.points>
+                rel rigExec:moves = </S9Asset/Rig/Channels.checkpoint>
+                uniform token rigExec:operation = "add"
+            }
+            def RigExecVec3fMathMover "RawSelected" (prepend apiSchemas = ["RigExecMoverAPI"])
+            {
+                float3 inputs:value = (99,99,99) (rigExecInputElement = 1)
+                float3 inputs:value.connect = </S9Asset/Geom/Raw.points>
+                rel rigExec:moves = </S9Asset/Rig/Channels.rawSelected>
+                uniform token rigExec:operation = "add"
+            }
+            def RigExecVec3fMathMover "Preceding" (prepend apiSchemas = ["RigExecMoverAPI"])
+            {
+                float3 inputs:value = (99,99,99) (
+                    rigExecInputElement = 1
+                    rigExecReadPhase = "preceding"
+                )
+                float3 inputs:value.connect = </S9Asset/Geom/Curve.points>
+                rel rigExec:moves = </S9Asset/Rig/Channels.preceding>
+                uniform token rigExec:operation = "add"
+            }
+            def RigExecVec3fMathMover "Downstream" (prepend apiSchemas = ["RigExecMoverAPI"])
+            {
+                float3 inputs:value (
+                    rigExecReadPhase = "final"
+                )
+                float3 inputs:value.connect = </S9Asset/Rig/Channels.rawSelected>
+                rel rigExec:moves = </S9Asset/Rig/Channels.downstream>
+                uniform token rigExec:operation = "add"
+            }
+            def RigExecMatrixMathMover "Pose" (prepend apiSchemas = ["RigExecMoverAPI"])
+            {
+                matrix4d inputs:value (
+                    rigExecReadPhase = "final"
+                )
+                matrix4d inputs:value.connect = </S9Asset/Rig/Joints/Lift.posed:space>
+                rel rigExec:moves = </S9Asset/Rig/Channels.pose>
+                uniform token rigExec:operation = "multiply"
+            }
+        }
+    }
+    def Scope "Geom"
+    {
+        def BasisCurves "Curve"
+        {
+            point3f[] points = [(0,0,0),(1,0,0),(2,0,0)]
+            int[] curveVertexCounts = [3]
+            uniform token type = "linear"
+            uniform token wrap = "nonperiodic"
+        }
+        def Points "Raw"
+        {
+            point3f[] points = [(5,0,0),(6,0,0),(7,0,0)]
+            point3f[] points.timeSamples = {
+                1: [(5,0,0),(6,0,0),(7,0,0)],
+                2: [(50,0,0),(6,0,0),(70,0,0)],
+                3: [(50,0,0),(8,0,0),(70,0,0)],
+                4: [(50,0,0)],
+                5: [(50,0,0),(9,0,0),(70,0,0)],
+            }
+        }
+    }
+}

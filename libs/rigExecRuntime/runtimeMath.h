@@ -2380,17 +2380,14 @@ RrLookAtRotation(const RrVec3d &forward, const RrVec3d &up)
 // agree bit for bit, so this is a transcription of it and not a second
 // derivation. See that function for why the pivot has to be recovered from
 // the screw axis rather than taken from the translation.
-inline RrMat4d
-RrPartialTransform(const RrMat4d &transform, double weight)
+struct RrPartialDecomposition {
+    RrMat4d original;
+    RrVec3d scale,axis,translation;
+    double angle=0;
+};
+inline RrPartialDecomposition
+RrDecomposePartialTransform(const RrMat4d &transform)
 {
-    const double w = RrClamp(weight, 0.0, 1.0);
-    if (w <= 0.0) {
-        return RrMat4d(1.0);
-    }
-    if (w >= 1.0) {
-        return transform;
-    }
-
     // Row lengths are the scale; dividing them out leaves the rotation.
     RrMat4d basis = transform;
     basis.SetTranslateOnly(RrVec3d(0.0, 0.0, 0.0));
@@ -2412,6 +2409,16 @@ RrPartialTransform(const RrMat4d &transform, double weight)
     const double angle = rotation.GetAngle();
     const RrVec3d translation = transform.ExtractTranslation();
 
+    return {transform,scale,axis,translation,angle};
+}
+inline RrMat4d
+RrApplyPartialDecomposition(const RrPartialDecomposition &d,double weight)
+{
+    const double w=RrClamp(weight,0.0,1.0);
+    if(w<=0.0)return RrMat4d(1.0);
+    if(w>=1.0)return d.original;
+    const auto &scale=d.scale;const auto &axis=d.axis;const auto &translation=d.translation;
+    const double angle=d.angle;
     RrMat4d scaled(1.0);
     scaled.SetScale(RrVec3d(1.0 + (scale[0] - 1.0) * w,
                             1.0 + (scale[1] - 1.0) * w,
@@ -2441,6 +2448,14 @@ RrPartialTransform(const RrMat4d &transform, double weight)
     out.SetTranslateOnly(pivot - partial.TransformDir(pivot) +
                          axis * (along * w));
     return out;
+}
+inline RrMat4d
+RrPartialTransform(const RrMat4d &transform,double weight)
+{
+    const double w=RrClamp(weight,0.0,1.0);
+    if(w<=0.0)return RrMat4d(1.0);
+    if(w>=1.0)return transform;
+    return RrApplyPartialDecomposition(RrDecomposePartialTransform(transform),w);
 }
 
 // M(transform) * inverse(M(space)) with the projective column set exactly.

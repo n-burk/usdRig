@@ -1,6 +1,6 @@
 // RIGEXEC_FRAME_CACHE_VERIFY shadow suite (Stream D): every cache hit also
 // live-evaluates and diffs through RigExecComparePoses, the same judge as
-// BakedWithParityCheck.
+// scalar reference checks.
 // A match serves the cached pose; a mismatch reports in the comparator's
 // words and serves the live pose instead -- a plausible wrong pose is never
 // served. A live runner that fails (or is absent) leaves the hit unverified
@@ -163,12 +163,10 @@ MakeAnimated9MeshRig()
     return stage;
 }
 
-// The bake-refusal rig (testRigExecImagingFrameCache.cpp, MakeRefusalRig):
-// the joint's posed:space reads the control's animated posed:space, so the
-// value the bake would capture is an exec answer instead. Frames genuinely
-// differ, so per-time memos cannot cross-serve undetected.
+// A joint reads an animated control space through an authored connection.
+// Frames differ across time, so per-time memos cannot cross-serve.
 UsdStageRefPtr
-MakeRefusalRig()
+MakeConnectedSpaceRig()
 {
     UsdStageRefPtr stage = UsdStage::CreateInMemory();
     stage->DefinePrim(SdfPath("/Asset"), TfToken("Scope"));
@@ -421,7 +419,6 @@ TestShadowOnBiped(const std::string &examplesDir)
     RigExecRigEvaluator evaluator(stage, rig);
     std::vector<std::string> errors;
     CHECK(evaluator.Compile(&errors));
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     CheckShadowOnLiveRig("biped", &evaluator, {1.0, 2.0}, {3.0, 4.0});
 }
 
@@ -433,7 +430,6 @@ TestShadowOn9Mesh()
     UsdStageRefPtr stage = MakeAnimated9MeshRig();
     const SdfPath rig("/Asset/Rig");
     RigExecRigEvaluator evaluator(stage, rig);
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     std::vector<std::string> errors;
     CHECK(evaluator.Compile(&errors));
     std::vector<std::string> reasons;
@@ -446,26 +442,24 @@ TestShadowOn9Mesh()
                          {3.0, 4.0, 39.0, 40.0});
 }
 
-// A bake-refusal rig under the shadow: refusal keys (no sampling), dynamic
-// live runs, same publish/verify loop. The rig genuinely animates, so the
-// per-time memos cannot cross-serve undetected.
+// Connected spaces compile into the same graph and remain visible to the
+// cache shadow at every sampled time.
 void
-TestShadowOnRefusalRig()
+TestShadowOnConnectedSpaceRig()
 {
-    UsdStageRefPtr stage = MakeRefusalRig();
+    UsdStageRefPtr stage = MakeConnectedSpaceRig();
     const SdfPath rig("/Asset/Rig");
     RigExecRigEvaluator evaluator(stage, rig);
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     std::vector<std::string> errors;
     CHECK(evaluator.Compile(&errors));
     std::vector<std::string> reasons;
-    if (evaluator.IsBakeable(&reasons) ||
-        evaluator.GetBakedProgram() != nullptr) {
+    if (!evaluator.IsBakeable(&reasons) ||
+        evaluator.GetBakedProgram() == nullptr) {
         ++failures;
-        std::printf("FAIL: the refusal rig baked\n");
+        std::printf("FAIL: connected spaces did not compile\n");
         return;
     }
-    CheckShadowOnLiveRig("refusal", &evaluator, {1.0, 2.0}, {3.0, 4.0});
+    CheckShadowOnLiveRig("connected spaces", &evaluator, {1.0, 2.0}, {3.0, 4.0});
 }
 
 int
@@ -483,7 +477,7 @@ main(int argc, char **argv)
         std::printf("skipping the biped shadow (no examples directory)\n");
     }
     TestShadowOn9Mesh();
-    TestShadowOnRefusalRig();
+    TestShadowOnConnectedSpaceRig();
     TfSetenv("RIGEXEC_FRAME_CACHE_VERIFY", "");
     if (failures == 0) {
         std::printf("PASS testRigExecFrameCacheCones_Verify\n");

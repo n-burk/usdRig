@@ -1,23 +1,13 @@
-// The rest chain and the default-space ladder as head-tier ops.
-// The baked prologue composes them per compose group (RestCompose writes
-// the rests, LadderCompose the default-space ladder), each op re-run only
-// when a ladder channel it reads, or a rest or ladder it reads, moved; the
-// region steps that index a rest or a ladder declare it and are re-run by
-// its move. These cases hold the ten exported tables to the single
-// slot-order loop the ops were split from, bit for bit, on every example
-// and fixture rig, the biped and the epoch-rest stages, under no override,
-// a rest drag and a default drag; check that every rest reader declares
-// what it indexes; pin that a rest that moves alone, under an authored
-// default:space, re-runs its matrices and not its compose; refuse a tier
-// that reads a rest before it is written and a step that reads a rest no op
-// writes, and a rest op ordered before a property revision; and seed a
-// rest edit through the head tier's closure, so the output-affected index
-// reaches a child that only the closure reaches.
-// Registered plain and under the parity entries; under
-// RIGEXEC_BAKED_VERIFY_CONES the rest tier is also checked against a forced
-// run of itself.
+// Rest and default-space composition participate in the ordinary value graph.
+// These cases compare retained memo state with a fresh program, bit for bit,
+// across examples, fixtures, biped and epoch edits. That comparison verifies
+// invalidation; independent numeric and scalar-reference checks remain below.
+// They also require every actual rest/ladder body input and reject missing
+// producers, while allowing descriptor enumeration across domain boundaries.
+// Cone verification compares incremental work with a forced common-graph run.
 // argv[1] = path to the examples directory.
 #include "rigExec/bakedProgram.h"
+#include "rigExec/bakedOpValues.h"
 #include "rigExec/bakedProgramImpl.h"
 #include "rigExec/bakedSchedule.h"
 #include "rigExec/bakedTrace.h"
@@ -203,7 +193,6 @@ CheckTablesOfRig(const std::string &name, const UsdStageRefPtr &stage,
     if (!evaluator.Compile(&errors) || !evaluator.IsBakeable()) {
         return 0;
     }
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     const double start = StartOf(stage);
     const double frames[] = {start, start + 2.0, start + 6.0};
     size_t compared = 0;
@@ -217,7 +206,6 @@ CheckTablesOfRig(const std::string &name, const UsdStageRefPtr &stage,
         }
         RigExecRigEvaluator fresh(stage, rig);
         CHECK(fresh.Compile());
-        fresh.SetEvaluationMode(RigExecEvaluationMode::Baked);
         fresh.SetInteractiveOverrides(currentDrags);
         CHECK(fresh.Evaluate(UsdTimeCode(currentTime)).valid);
         const auto *freshProgram = fresh.GetBakedProgram();
@@ -412,7 +400,6 @@ TestEveryRestReaderDeclaresIt(const std::string &examples)
             !evaluator.IsBakeable()) {
             continue;
         }
-        evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
         CHECK(evaluator.Evaluate(UsdTimeCode(StartOf(stage))).valid);
         const RigExecBakedProgramImpl *program = Program(evaluator);
         CHECK(program);
@@ -612,7 +599,7 @@ int
 HeadOpOf(const RigExecBakedProgramImpl &B, RigExecBakedStepKind kind,
          int slot)
 {
-    for (size_t i = 0; i < RigExecBakedHeadIndices(B).size(); ++i) {
+    for (const uint32_t i : RigExecBakedHeadIndices(B)) {
         const RigExecBakedStep &step = B.steps[i];
         if (step.kind == kind) {
             const RigExecBakedComposeGroup &group =
@@ -647,6 +634,64 @@ RegionRan(const RigExecBakedProgramImpl &B, size_t step)
     return false;
 }
 
+// Effective composition inputs retain every declared pose/default field,
+// while a changed rest round trip remains visible to other Ladder readers.
+void
+TestComposeKeysTrackConsumedLadderFields()
+{
+    RigExecBakedProgramImpl B;
+    B.paths = {SdfPath("/Root"), SdfPath("/Source")};
+    const GfMatrix4d identity(1.0);
+    B.restRoundTrip.assign(2, identity); B.defaultRoundTrip.assign(2, identity);
+    B.selfD.assign(2, identity); B.parentDinv.assign(2, identity);
+    B.posedAuthored.assign(2, 0); B.posedAuthoredM.assign(2, identity);
+    B.rotOrder.assign(2, TfToken("XYZ")); B.posedD.assign(2, identity);
+    B.parentSpaceM.assign(2, identity); B.parentSpaceAuthored.assign(2, 0);
+    B.rotationSign.assign(2, 0);
+    RigExecBakedStep step;
+    step.kind = RigExecBakedStepKind::ComposeSubtree;
+    step.reads.push_back(RigExecBakedRange(RigExecBakedSlotDomain::Ladder, 0, 2));
+    std::vector<uint32_t> properties;
+    std::vector<std::pair<uint32_t, uint32_t>> covered;
+    const auto key = [&]() {
+        std::string result;
+        CHECK(RigExecBakedOpEffectiveInputKey(B, step, &result, &properties, &covered));
+        CHECK(covered.size() == 2);
+        for (uint32_t slot = 0; slot < 2; ++slot)
+            CHECK((covered[slot] == std::make_pair(
+                uint32_t(RigExecBakedSlotDomain::Ladder), slot)));
+        return result;
+    };
+    const auto baseline = key();
+    std::string fullBefore, fullAfter;
+    RigExecBakedOpValueKey(B, RigExecBakedSlotDomain::Ladder, 0, &fullBefore);
+    B.restRoundTrip[0][3][0] = 2.0;
+    RigExecBakedOpValueKey(B, RigExecBakedSlotDomain::Ladder, 0, &fullAfter);
+    CHECK(fullBefore != fullAfter);
+    CHECK(key() == baseline);
+    B.restRoundTrip[0] = identity;
+    for (auto *table : {&B.defaultRoundTrip, &B.selfD, &B.parentDinv,
+                       &B.posedAuthoredM, &B.posedD, &B.parentSpaceM}) {
+        (*table)[0][3][0] = -0.0;
+        CHECK(key() != baseline);
+        (*table)[0] = identity;
+    }
+    B.posedAuthored[0] = 1; CHECK(key() != baseline); B.posedAuthored[0] = 0;
+    B.parentSpaceAuthored[0] = 1; CHECK(key() != baseline); B.parentSpaceAuthored[0] = 0;
+    B.rotationSign[0] = 1; CHECK(key() != baseline); B.rotationSign[0] = 0;
+    B.rotOrder[0] = TfToken("ZYX"); CHECK(key() != baseline); B.rotOrder[0] = TfToken("XYZ");
+    // A switch source/carry's default table is consumed independently of
+    // the target's own authored-pose branch and must stay in the key.
+    B.defaultRoundTrip[1][3][1] = 3.0;
+    CHECK(key() != baseline);
+    B.defaultRoundTrip[1] = identity;
+    CHECK(key() == baseline);
+    B.posedD.pop_back();
+    std::string invalid;
+    CHECK(!RigExecBakedOpEffectiveInputKey(B, step, &invalid, &properties, &covered));
+    CHECK(covered.empty());
+}
+
 // A leaf joint with an animated rest:tx and an authored non-identity
 // default:space: between frames its RestCompose runs and its ProviderMatrix
 // steps run, and the published matrix moves; its LadderCompose answers the
@@ -676,8 +721,7 @@ TestARestOnlyMoveSkipsTheCompose()
     for (const std::string &reason : reasons) {
         std::printf("    unexpected refusal: %s\n", reason.c_str());
     }
-    baked.SetEvaluationMode(RigExecEvaluationMode::Baked);
-    reference.SetEvaluationMode(RigExecEvaluationMode::ExecReference);
+    reference.cpuReference = true;
     RigExecRigPose last = baked.Evaluate(UsdTimeCode(1.0));
     CompareWithReference("rest-only frame 1", last,
                          reference.Evaluate(UsdTimeCode(1.0)));
@@ -752,10 +796,9 @@ TestARestOnlyMoveSkipsTheCompose()
     CHECK(!HeadRan(B, ladderOp));
 }
 
-// The validator refuses a LadderCompose that reads a rest a later head step
-// writes, and a Solve whose rest slot no RestCompose writes.
+// Validate the actual compose-body reads and refuse absent rest producers.
 void
-TestTheValidatorRefusesAMisorderedRest(const std::string &examples)
+TestTheValidatorRequiresComposeInputs(const std::string &examples)
 {
     UsdStageRefPtr stage = UsdStage::Open(examples + "/02_TwoBoneIkLeg.usda");
     CHECK(stage);
@@ -765,7 +808,6 @@ TestTheValidatorRefusesAMisorderedRest(const std::string &examples)
     RigExecRigEvaluator evaluator(stage, FindRig(stage));
     std::vector<std::string> errors;
     CHECK(evaluator.Compile(&errors));
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     CHECK(evaluator.Evaluate(UsdTimeCode(StartOf(stage))).valid);
     const RigExecBakedProgramImpl *program = Program(evaluator);
     CHECK(program);
@@ -778,42 +820,6 @@ TestTheValidatorRefusesAMisorderedRest(const std::string &examples)
     std::string error;
     CHECK(RigExecBakedValidateHeadTier(B, &error));
     CHECK(RigExecBakedValidateHeadReads(B, &error));
-    {
-        // The first LadderCompose in head order reads the rest of a slot
-        // whose RestCompose comes after it.
-        int ladder = -1, laterRest = -1;
-        for (const uint32_t index : RigExecBakedHeadIndices(B)) {
-            const RigExecBakedStep &step = B.steps[index];
-            if (ladder < 0 &&
-                step.kind == RigExecBakedStepKind::LadderCompose) {
-                ladder = int(index);
-            } else if (ladder >= 0 &&
-                       step.kind == RigExecBakedStepKind::RestCompose) {
-                laterRest = int(index);
-            }
-        }
-        CHECK(ladder >= 0 && laterRest >= 0);
-        if (ladder >= 0 && laterRest >= 0) {
-            RigExecBakedStep &step = B.steps[size_t(ladder)];
-            const uint32_t slot =
-                B.steps[size_t(laterRest)].writes.front().begin;
-            step.reads.push_back(
-                RigExecBakedOne(RigExecBakedSlotDomain::Rest, slot));
-            error.clear();
-            CHECK(!RigExecBakedValidateHeadTier(B, &error));
-            const std::string expected =
-                "head step " + step.label + " reads Rest slot " +
-                std::to_string(slot) + ", which no earlier head step writes";
-            if (error.find(expected) == std::string::npos) {
-                ++failures;
-                std::printf("FAIL \"%s\" is not in \"%s\"\n",
-                            expected.c_str(), error.c_str());
-            }
-            std::printf("  a ladder reading a later rest: %s\n",
-                        error.c_str());
-            step.reads.pop_back();
-        }
-    }
     {
         // Isolate each actual compose-body dependency by removing exactly
         // one slot, leaving every other read and all writers intact.
@@ -921,10 +927,10 @@ TestTheValidatorRefusesAMisorderedRest(const std::string &examples)
     CHECK(RigExecBakedValidateHeadReads(B, &error));
 }
 
-// The property revisions run in a pass before the rest and ladder ops, so
-// the validator refuses a head order that puts a rest op before one.
+// Descriptor enumeration does not impose a property-before-rest barrier.
+// The final value graph supplies dependency order.
 void
-TestTheValidatorRefusesARestBeforeAProperty(const std::string &examples)
+TestTheValidatorAcceptsDomainEnumerationOrder(const std::string &examples)
 {
     UsdStageRefPtr stage =
         UsdStage::Open(examples + "/09_PropertyMathMovers.usda");
@@ -935,7 +941,6 @@ TestTheValidatorRefusesARestBeforeAProperty(const std::string &examples)
     RigExecRigEvaluator evaluator(stage, FindRig(stage));
     std::vector<std::string> errors;
     CHECK(evaluator.Compile(&errors));
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     CHECK(evaluator.Evaluate(UsdTimeCode(StartOf(stage))).valid);
     const RigExecBakedProgramImpl *program = Program(evaluator);
     CHECK(program);
@@ -945,8 +950,8 @@ TestTheValidatorRefusesARestBeforeAProperty(const std::string &examples)
     // Edited in place and put back: the program is the evaluator's.
     RigExecBakedProgramImpl &B =
         const_cast<RigExecBakedProgramImpl &>(*program);
-    // A rest op that reads nothing, moved to the front of the order, so the
-    // first violation is the property revision after it.
+    // Move a complete rest descriptor before the property descriptors, retaining
+    // all semantic reads and writes. This checks validation, not arithmetic.
     size_t from = RigExecBakedHeadIndices(B).size();
     bool property = false;
     for (size_t p = 0; p < RigExecBakedHeadIndices(B).size(); ++p) {
@@ -954,8 +959,7 @@ TestTheValidatorRefusesARestBeforeAProperty(const std::string &examples)
         property = property ||
                    step.kind == RigExecBakedStepKind::PropertyRevision;
         if (from == RigExecBakedHeadIndices(B).size() &&
-            step.kind == RigExecBakedStepKind::RestCompose &&
-            step.reads.empty()) {
+            step.kind == RigExecBakedStepKind::RestCompose) {
             from = p;
         }
     }
@@ -966,17 +970,7 @@ TestTheValidatorRefusesARestBeforeAProperty(const std::string &examples)
     const std::vector<RigExecBakedStep> savedSteps = B.steps;
     std::rotate(B.steps.begin(),B.steps.begin()+from,B.steps.begin()+from+1);
     std::string error;
-    CHECK(!RigExecBakedValidateHeadTier(B, &error));
-    const std::string expected =
-        "is ordered after " + B.steps[RigExecBakedHeadIndices(B)[0]].label +
-        ", which runs after every property revision";
-    if (error.find(expected) == std::string::npos) {
-        ++failures;
-        std::printf("FAIL \"%s\" is not in \"%s\"\n", expected.c_str(),
-                    error.c_str());
-    }
-    std::printf("  a rest op before a property revision: %s\n",
-                error.c_str());
+    CHECK(RigExecBakedValidateHeadTier(B, &error));
     B.steps = savedSteps;
     error.clear();
     CHECK(RigExecBakedValidateHeadTier(B, &error));
@@ -1011,7 +1005,6 @@ TestARestEditIsSeedable()
     std::vector<std::string> errors;
     CHECK(baked.Compile(&errors));
     CHECK(baked.IsBakeable());
-    baked.SetEvaluationMode(RigExecEvaluationMode::Baked);
     CHECK(baked.Evaluate(UsdTimeCode(1.0)).valid);
     CHECK(baked.Evaluate(UsdTimeCode(2.0)).valid);
     const RigExecBakedProgram *standing = baked.GetBakedProgram();
@@ -1078,12 +1071,11 @@ TestARestEditIsSeedable()
     CHECK(baked.GetBakedProgram() == standing);
     RigExecRigEvaluator reference(stage, SdfPath("/Asset/Rig"));
     CHECK(reference.Compile(&errors));
-    reference.SetEvaluationMode(RigExecEvaluationMode::ExecReference);
+    reference.cpuReference = true;
     CompareWithReference("rest edit, reference", edited,
                          reference.Evaluate(UsdTimeCode(1.0)));
     RigExecRigEvaluator fresh(stage, SdfPath("/Asset/Rig"));
     CHECK(fresh.Compile(&errors));
-    fresh.SetEvaluationMode(RigExecEvaluationMode::Baked);
     CompareWithReference("rest edit, fresh program", edited,
                          fresh.Evaluate(UsdTimeCode(1.0)));
 }
@@ -1100,10 +1092,11 @@ main(int argc, char **argv)
     PlugRegistry::GetInstance().RegisterPlugins(
         TfAbsPath(RIGEXEC_SCHEMA_RESOURCE_DIR));
     const std::string examples = argv[1];
+    TestComposeKeysTrackConsumedLadderFields();
     TestARestOnlyMoveSkipsTheCompose();
     TestARestEditIsSeedable();
-    TestTheValidatorRefusesAMisorderedRest(examples);
-    TestTheValidatorRefusesARestBeforeAProperty(examples);
+    TestTheValidatorRequiresComposeInputs(examples);
+    TestTheValidatorAcceptsDomainEnumerationOrder(examples);
     TestEveryRestReaderDeclaresIt(examples);
     TestTheRestTablesMatchFreshEpochs(examples);
     std::printf("testRigExecRestOps: %d failure(s)\n", failures);

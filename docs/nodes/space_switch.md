@@ -79,7 +79,7 @@ act on the delta the space contributes, expressed in the target's own
 default frame, and `rigExec:rotationFilters` can pass only the twist of a
 source's rotation about `rigExec:twistAxis`, or only the swing, by an
 exact swing-twist decomposition. The index is an ordinary per-frame input:
-the dynamic path, the baked program, the frame cache and a `.rigexec`
+the native program, frozen jobs, the frame cache and a `.rigexec`
 binary all re-read it every frame, and keying it re-runs only the compose
 of the switched control's subtree.
 

@@ -64,13 +64,13 @@ rigExec::RigExecOracleResult
 _OracleVolumeCorrectMover(const rigExec::RigExecMoverOracleContext &ctx)
 {
     using rigExec::RigExecOracleResult;
-    const UsdStageRefPtr &stage = ctx.stage;
+    const rigExec::RigExecOracleScene &stage = ctx.stage;
     const SdfPath &target = ctx.target;
     const UsdTimeCode time = ctx.time;
     VtVec3fArray &points = *ctx.points;
     std::vector<GfVec3f> scratch(points.begin(), points.end());
     VtVec3fArray base;
-    if (UsdAttribute a = stage->GetAttributeAtPath(target)) {
+    if (rigExec::RigExecOracleAttribute a = stage->GetAttributeAtPath(target)) {
         a.Get(&base, time);
     }
     const double reference = rigExec::RigExecBoundVolume(

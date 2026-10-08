@@ -12,6 +12,9 @@ TF_DEFINE_PRIVATE_TOKENS(_mush,
     ((step,"inputs:step")) ((pin,"inputs:pinBorders"))
     ((distance,"inputs:distanceWeight")) ((detail,"inputs:displacement")));
 namespace {
+const TfToken _oracleToken0("faceVertexCounts");
+const TfToken _oracleToken1("faceVertexIndices");
+
 template<class T> T Input(const VdfContext &ctx,const TfToken &name,T fallback) {
     const auto *value=ctx.GetInputValuePtr<T>(name);return value ? *value : fallback;
 }
@@ -48,8 +51,8 @@ RigExecOracleResult Oracle(const RigExecMoverOracleContext &ctx) {
     VtVec3fArray rest;ctx.prim.GetAttribute(_mush->rest).Get(&rest);
     if(rest.empty())rest=ctx.basePoints;
     VtIntArray counts,indices;auto owner=ctx.stage->GetPrimAtPath(ctx.target.GetPrimPath());
-    owner.GetAttribute(TfToken("faceVertexCounts")).Get(&counts,ctx.time);
-    owner.GetAttribute(TfToken("faceVertexIndices")).Get(&indices,ctx.time);
+    owner.GetAttribute(_oracleToken0).Get(&counts,ctx.time);
+    owner.GetAttribute(_oracleToken1).Get(&indices,ctx.time);
     int iterations=10;float step=0.5f,distance=0,detail=1;bool pin=true;
     ctx.resolved.GetAttribute(ctx.prim.GetAttribute(_mush->iterations),ctx.time,&iterations);
     ctx.resolved.GetAttribute(ctx.prim.GetAttribute(_mush->step),ctx.time,&step);

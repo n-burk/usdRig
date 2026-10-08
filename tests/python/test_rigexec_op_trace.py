@@ -44,14 +44,14 @@ def _Open(mode):
     stage = Usd.Stage.Open(_ARM)
     rig = rigexec.Rig(stage, _RIG)
     rig.compile()
-    rig.evaluation_mode = mode
+    rig.cpu_reference = True
     return stage, rig
 
 
 def _CheckTrace(trace, graph):
     """Every executed pred finished before its executed succ; seqs 1..N."""
     seqs = sorted(entry["seq"] for entry in trace)
-    assert seqs == list(range(1, len(trace) + 1)), seqs
+    assert len(set(seqs)) == len(seqs) and all(seq > 0 for seq in seqs), seqs
     steps = [entry["step"] for entry in trace]
     assert len(set(steps)) == len(steps), "a step is traced twice"
     seq_of = {entry["step"]: entry["seq"] for entry in trace}
@@ -66,58 +66,42 @@ def _CheckTrace(trace, graph):
 
 
 def TestTheTraceRespectsTheGraph():
-    _, rig = _Open("baked")
+    _, rig = _Open("graph")
     rig.evaluate(1001.0)
     graph = rig.op_graph()
     trace = rig.last_op_trace()
     assert graph, "the arm is expected to bake"
     assert trace, "the first baked generation executed nothing"
-    head_kinds = {"PropertyRevision", "RestCompose", "LadderCompose", "SkinTopology"}
-    seen_region = False
-    assert any(node["domain"] == "head" for node in graph)
-    for index, node in enumerate(graph):
-        assert node["step"] == index
-        assert node["domain"] in ("head", "pose", "weight", "geometry"), node
-        is_head = node["domain"] == "head"
-        assert is_head == (node["kind"] in head_kinds), node
-        assert not (is_head and seen_region), "heads must form a prefix"
-        seen_region = seen_region or not is_head
-        if is_head:
-            assert all(graph[p]["domain"] == "head" for p in node["preds"])
-        assert set(node) >= {"kind", "label", "preds", "succs", "cluster",
-                             "level", "reads", "writes"}
+    by_id={node["step"]:node for node in graph}
+    assert len(by_id)==len(graph)
+    for node in graph:
+        assert set(node) >= {"kind","domain","label","preds","succs","cluster","reads","writes"}
+        assert "level" not in node
         for pred in node["preds"]:
-            assert pred < index and index in graph[pred]["succs"]
-        for domain, first, last in node["reads"] + node["writes"]:
-            assert isinstance(domain, str) and first <= last
+            assert pred in by_id and node["step"] in by_id[pred]["succs"]
+        for domain,first,last in node["reads"]+node["writes"]:
+            assert isinstance(domain,str) and first<=last
     for entry in trace:
         assert set(entry) == {"step", "kind", "domain", "label", "seq",
                               "cluster"}, entry
-        assert entry["kind"] == graph[entry["step"]]["kind"]
-        assert entry["domain"] == graph[entry["step"]]["domain"]
+        assert entry["kind"] == by_id[entry["step"]]["kind"]
+        assert entry["domain"] == by_id[entry["step"]]["domain"]
     _CheckTrace(trace, graph)
     rig.evaluate(1024.0)
     _CheckTrace(rig.last_op_trace(), graph)
 
 
-def TestAWalkGenerationHasNoTrace():
-    _, rig = _Open("reference")
+def TestReferenceKeepsTheProductionGraph():
+    _,rig=_Open("graph")
+    rig.cpu_reference=False
     rig.evaluate(1001.0)
-    assert rig.last_op_trace() == []
-    assert rig.op_graph() == []
-
-
-def TestARebuiltProgramHasNoTraceUntilItRuns():
-    # Switching a clean epoch to the parity mode rebuilds the program; the
-    # rebuilt one has answered no generation yet.
-    _, rig = _Open("baked")
-    rig.evaluate(1001.0)
-    assert rig.last_op_trace() and rig.op_graph()
-    rig.evaluation_mode = "parity"
-    assert rig.last_op_trace() == []
-    assert rig.op_graph() == []
-    rig.evaluate(1024.0)
-    assert rig.last_op_trace() and rig.op_graph()
+    graph=rig.op_graph()
+    assert rig.last_op_trace() and graph
+    rig.cpu_reference=True
+    pose=rig.evaluate(1024.0)
+    assert pose.reference_agreements>0 and pose.reference_mismatches==0
+    assert rig.op_graph()==graph
+    _CheckTrace(rig.last_op_trace(),graph)
 
 
 def main():
@@ -125,9 +109,7 @@ def main():
     _RequireEngine()
     groups = [
         ("the trace respects the graph", TestTheTraceRespectsTheGraph),
-        ("a walk generation has no trace", TestAWalkGenerationHasNoTrace),
-        ("a rebuilt program has no trace until it runs",
-         TestARebuiltProgramHasNoTraceUntilItRuns),
+        ("reference keeps the production graph", TestReferenceKeepsTheProductionGraph),
     ]
     for name, fn in groups:
         fn()

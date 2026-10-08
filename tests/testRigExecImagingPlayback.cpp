@@ -211,7 +211,7 @@ _TestFixture(const std::string &stagePath, const std::string &frameText,
     }
 
     RigExecRigEvaluator evaluator(stage, rigPath);
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+
     RigExecBakeOpts opts;
     opts.time = frames.front();
     RigExecBakeResult baked;
@@ -363,7 +363,7 @@ _TestSelection(const std::string &stagePath, const std::string &frameText,
         return;
     }
     RigExecRigEvaluator evaluator(stage, rigPath);
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+
     RigExecBakeOpts opts;
     opts.time = frames.front();
     RigExecBakeResult baked;

@@ -47,6 +47,10 @@ public:
     uint32_t Ints(const int32_t *data, size_t count);
     uint32_t Floats(const float *data, size_t count);
     uint32_t Doubles(const double *data, size_t count);
+    uint32_t Vec3ds(const double *data, size_t count);
+    uint32_t Matrices(const double *data, size_t count);
+    uint32_t Tokens(const std::vector<std::string> &data);
+    uint32_t Bools(const uint8_t *data, size_t count);
     /// \p xy holds \p count pairs.
     uint32_t Vec2fs(const float *xy, size_t count);
     /// \p xyz holds \p count triples.
@@ -62,6 +66,11 @@ private:
     std::vector<fb::RigExecWireDoubleArray> _doubles;
     std::vector<fb::RigExecWireVec2fArray> _vec2fs;
     std::vector<fb::RigExecWireVec3fArray> _vec3fs;
+    std::vector<fb::RigExecWireVec3dArray> _vec3ds;
+    std::vector<fb::RigExecWireMatrix4dArray> _matrices;
+    std::vector<fb::RigExecWireTokenArray> _tokens;
+    std::vector<fb::RigExecWireBoolArray> _bools;
+    std::map<std::string,uint32_t> _extraIds;
     // Content bytes -> id; lookups only.
     std::map<std::string, uint32_t> _valueIds, _intIds, _floatIds,
         _doubleIds, _vec2fIds, _vec3fIds;

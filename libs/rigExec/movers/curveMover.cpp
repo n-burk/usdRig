@@ -16,6 +16,9 @@
 #include "pxr/exec/vdf/context.h"
 #include "pxr/exec/vdf/readIterator.h"
 
+#include <algorithm>
+#include <cmath>
+
 using rigExec::RigExecMoverParameters;
 using rigExec::RigExecMoverExecTokens;
 using rigExec::RigExecPointFrameArray;
@@ -23,6 +26,30 @@ using rigExec::RigExecPointFrameArray;
 PXR_NAMESPACE_USING_DIRECTIVE
 
 namespace {
+const TfToken _oracleLocalFrame("local");
+const TfToken _oracleToken0("rigExec:mode");
+const TfToken _oracleToken1("rigExec:driverCurve");
+const TfToken _oracleToken2("rigExec:bindCoordinates");
+const TfToken _oracleToken3("rigExec:driverTransforms");
+const TfToken _oracleToken4("rigExec:driverTransformSpaces");
+const TfToken _oracleToken5("points");
+const TfToken _oracleToken6("order");
+const TfToken _oracleToken7("knots");
+const TfToken _oracleToken8("inputs:dropoffDistance");
+const TfToken _oracleToken9("inputs:driverWeights");
+const TfToken _oracleToken10("inputs:driverBaseWeights");
+const TfToken _oracleToken11("rigExec:driverBaseTransforms");
+const TfToken _oracleToken12("rigExec:driverBaseTransformSpaces");
+const TfToken _oracleToken13("rigExec:pointFrame");
+const TfToken _oracleToken14("rigExec:driverDeltaFrame");
+const TfToken _oracleToken15("rigExec:space");
+const TfToken _oracleToken16("rigExec:weightObject");
+const TfToken _oracleToken17("rigExec:indices");
+const TfToken _oracleToken18("rigExec:driverFrames");
+const TfToken _oracleToken19("rigExec:sampleCount");
+const TfToken _oracleToken20("ribbon");
+const TfToken _oracleToken21("rest");
+
 
 RigExecMoverParameters
 _BuildCurveMoverParameters(const VdfContext &ctx)
@@ -171,14 +198,14 @@ rigExec::RigExecOracleResult
 _OracleCurveMover(const rigExec::RigExecMoverOracleContext &ctx)
 {
     using rigExec::RigExecOracleResult;
-    const UsdStageRefPtr &stage = ctx.stage;
-    const UsdPrim &prim = ctx.prim;
+    const rigExec::RigExecOracleScene &stage = ctx.stage;
+    const rigExec::RigExecOraclePrim &prim = ctx.prim;
     const SdfPath &moverPath = ctx.moverPath;
     const UsdTimeCode time = ctx.time;
     std::vector<std::string> *diagnostics = ctx.diagnostics;
     VtVec3fArray &points = *ctx.points;
-    TfToken mode("ribbon");
-    if (UsdAttribute a = prim.GetAttribute(TfToken("rigExec:mode"))) {
+    TfToken mode = _oracleToken20;
+    if (rigExec::RigExecOracleAttribute a = prim.GetAttribute(_oracleToken0)) {
         a.Get(&mode, time);
     }
     if (mode == "wire") {
@@ -186,12 +213,12 @@ _OracleCurveMover(const rigExec::RigExecMoverOracleContext &ctx)
         // points at the declared phase, rest control points, order
         // and knots as authored, and the authored bind coordinates.
         SdfPathVector curves, binds;
-        if (UsdRelationship rel = prim.GetRelationship(
-                TfToken("rigExec:driverCurve"))) {
+        if (rigExec::RigExecOracleRelationship rel = prim.GetRelationship(
+                _oracleToken1)) {
             rel.GetTargets(&curves);
         }
-        if (UsdRelationship rel = prim.GetRelationship(
-                TfToken("rigExec:bindCoordinates"))) {
+        if (rigExec::RigExecOracleRelationship rel = prim.GetRelationship(
+                _oracleToken2)) {
             rel.GetTargets(&binds);
         }
         if (curves.empty() || binds.empty()) {
@@ -204,63 +231,65 @@ _OracleCurveMover(const rigExec::RigExecMoverOracleContext &ctx)
         const SdfPath curvePrim = curves[0].GetPrimPath();
         VtVec3fArray posedCvs, restCvs;
         SdfPathVector driverTransforms, driverSpaces;
-        if (UsdRelationship rel = prim.GetRelationship(
-                TfToken("rigExec:driverTransforms"))) {
+        if (rigExec::RigExecOracleRelationship rel = prim.GetRelationship(
+                _oracleToken3)) {
             rel.GetTargets(&driverTransforms);
         }
-        if (UsdRelationship rel = prim.GetRelationship(
-                TfToken("rigExec:driverTransformSpaces"))) {
+        if (rigExec::RigExecOracleRelationship rel = prim.GetRelationship(
+                _oracleToken4)) {
             rel.GetTargets(&driverSpaces);
         }
         if (driverTransforms.empty()) {
             rigExec::RigExecReadPhasedPoints(
                 ctx, "rigExec:driverCurve",
-                curvePrim.AppendProperty(TfToken("points")), &posedCvs);
+                curvePrim.AppendProperty(_oracleToken5), &posedCvs);
         }
         VtIntArray order;
         VtDoubleArray knots;
         VtVec2fArray sts;
         float dropoff = 0.0f;
-        if (const UsdPrim curve = stage->GetPrimAtPath(curvePrim)) {
-            curve.GetAttribute(TfToken("points"))
+        if (const rigExec::RigExecOraclePrim curve = stage->GetPrimAtPath(curvePrim)) {
+            curve.GetAttribute(_oracleToken5)
                 .Get(&restCvs, UsdTimeCode::Default());
-            curve.GetAttribute(TfToken("order"))
+            curve.GetAttribute(_oracleToken6)
                 .Get(&order, UsdTimeCode::Default());
-            curve.GetAttribute(TfToken("knots"))
+            curve.GetAttribute(_oracleToken7)
                 .Get(&knots, UsdTimeCode::Default());
         }
-        if (UsdAttribute a = stage->GetAttributeAtPath(binds[0])) {
+        if (rigExec::RigExecOracleAttribute a = stage->GetAttributeAtPath(binds[0])) {
             a.Get(&sts, time);
         }
-        if (UsdAttribute a =
-                prim.GetAttribute(TfToken("inputs:dropoffDistance"))) {
+        if (rigExec::RigExecOracleAttribute a =
+                prim.GetAttribute(_oracleToken8)) {
             a.Get(&dropoff, time);
         }
         if (!driverTransforms.empty()) {
             // Independently of the assembler: the providers' own
             // matrices, measured and weighted per control point.
-            const bool final =
-                rigExec::RigExecPhaseForInput(
-                    prim, "rigExec:driverTransforms").kind ==
-                rigExec::RigExecReadPhaseKind::Final;
-            const auto &matrices = final ? ctx.finalProviderMatrices
-                                         : ctx.baseProviderMatrices;
+            const auto phase = rigExec::RigExecPhaseForInput(prim, "rigExec:driverTransforms");
+            std::unordered_map<SdfPath,GfMatrix4d,SdfPath::Hash> matrices;
+            for (const char *name : {"rigExec:driverTransforms", "rigExec:driverTransformSpaces", "rigExec:driverBaseTransforms", "rigExec:driverBaseTransformSpaces", "rigExec:space"}) {
+                for (const auto &path : rigExec::RigExecRelationshipTargets(prim,name)) {
+                    const auto *value = ctx.phasedMatrix ? ctx.phasedMatrix(path,phase,moverPath) : nullptr;
+                    if (value) matrices[path] = *value;
+                }
+            }
             VtFloatArray weights, baseWeights;
-            if (const UsdAttribute a = prim.GetAttribute(
-                    TfToken("inputs:driverWeights"))) {
+            if (const rigExec::RigExecOracleAttribute a = prim.GetAttribute(
+                    _oracleToken9)) {
                 a.Get(&weights, time);
             }
-            if (const UsdAttribute a = prim.GetAttribute(
-                    TfToken("inputs:driverBaseWeights"))) {
+            if (const rigExec::RigExecOracleAttribute a = prim.GetAttribute(
+                    _oracleToken10)) {
                 a.Get(&baseWeights, time);
             }
             SdfPathVector baseTransforms, baseSpaces;
-            if (UsdRelationship rel = prim.GetRelationship(
-                    TfToken("rigExec:driverBaseTransforms"))) {
+            if (rigExec::RigExecOracleRelationship rel = prim.GetRelationship(
+                    _oracleToken11)) {
                 rel.GetTargets(&baseTransforms);
             }
-            if (UsdRelationship rel = prim.GetRelationship(
-                    TfToken("rigExec:driverBaseTransformSpaces"))) {
+            if (rigExec::RigExecOracleRelationship rel = prim.GetRelationship(
+                    _oracleToken12)) {
                 rel.GetTargets(&baseSpaces);
             }
             const auto pick = [](size_t count, size_t j) {
@@ -270,20 +299,20 @@ _OracleCurveMover(const rigExec::RigExecMoverOracleContext &ctx)
             // The frame options and the carry, read independently of the
             // assembler; the arithmetic is the shared per-driver measure.
             rigExec::RigExecWireDriverFrame frame;
-            TfToken pointFrame("rest"), deltaFrame("local");
-            if (const UsdAttribute a =
-                    prim.GetAttribute(TfToken("rigExec:pointFrame"))) {
+            TfToken pointFrame = _oracleToken21, deltaFrame = _oracleLocalFrame;
+            if (const rigExec::RigExecOracleAttribute a =
+                    prim.GetAttribute(_oracleToken13)) {
                 a.Get(&pointFrame, time);
             }
-            if (const UsdAttribute a = prim.GetAttribute(
-                    TfToken("rigExec:driverDeltaFrame"))) {
+            if (const rigExec::RigExecOracleAttribute a = prim.GetAttribute(
+                    _oracleToken14)) {
                 a.Get(&deltaFrame, time);
             }
             frame.posedPoints = pointFrame == "posed";
             frame.posedDelta = deltaFrame == "posed";
             SdfPathVector carries;
-            if (UsdRelationship rel =
-                    prim.GetRelationship(TfToken("rigExec:space"))) {
+            if (rigExec::RigExecOracleRelationship rel =
+                    prim.GetRelationship(_oracleToken15)) {
                 rel.GetTargets(&carries);
             }
             GfMatrix4d carry(1.0);
@@ -373,15 +402,15 @@ _OracleCurveMover(const rigExec::RigExecMoverOracleContext &ctx)
         std::vector<GfVec2f> bindAll(sts.begin(), sts.end());
         if (sts.size() != scratch.size()) {
             SdfPathVector weightTargets;
-            if (UsdRelationship rel = prim.GetRelationship(
-                    TfToken("rigExec:weightObject"))) {
+            if (rigExec::RigExecOracleRelationship rel = prim.GetRelationship(
+                    _oracleToken16)) {
                 rel.GetTargets(&weightTargets);
             }
             VtIntArray indices;
             if (!weightTargets.empty()) {
-                if (const UsdPrim w =
+                if (const rigExec::RigExecOraclePrim w =
                         stage->GetPrimAtPath(weightTargets[0])) {
-                    w.GetAttribute(TfToken("rigExec:indices"))
+                    w.GetAttribute(_oracleToken17)
                         .Get(&indices);
                 }
             }
@@ -410,38 +439,116 @@ _OracleCurveMover(const rigExec::RigExecMoverOracleContext &ctx)
         std::copy(scratch.begin(), scratch.end(), points.begin());
         return RigExecOracleResult::Blend;
     }
-    // Parity path samples the driver curve directly: rest from
-    // the bind-time authored value, posed from the timed value.
+    // The bound frame input can come from any solver kind. A source-only
+    // oracle without that adapter retains the raw Ribbon sampling path.
     SdfPathVector frameTargets;
-    if (UsdRelationship rel = prim.GetRelationship(
-            TfToken("rigExec:driverFrames"))) {
+    if (rigExec::RigExecOracleRelationship rel = prim.GetRelationship(
+            _oracleToken18)) {
         rel.GetTargets(&frameTargets);
+    }
+    if (ctx.boundFrames) {
+        const auto *input = frameTargets.size() == 1
+            ? ctx.boundFrames(moverPath, frameTargets[0], time) : nullptr;
+        if (!input || !input->available || !input->generation ||
+            input->owner != frameTargets[0] || input->time != time) {
+            diagnostics->push_back("MoverFailed " + moverPath.GetString() +
+                                   ": driver frame input unavailable");
+            return RigExecOracleResult::PassThrough;
+        }
+        const auto &frames = input->value;
+        const size_t count = frames.GetSize();
+        if (!count || frames.rests.size() != count) {
+            diagnostics->push_back("MoverFailed " + moverPath.GetString() +
+                                   ": driver frame cardinality mismatch");
+            return RigExecOracleResult::PassThrough;
+        }
+        if (mode == "emitGuidePoints") {
+            if (count != points.size()) {
+                diagnostics->push_back("MoverFailed " + moverPath.GetString() +
+                                       ": guide cardinality mismatch");
+                return RigExecOracleResult::PassThrough;
+            }
+            for (size_t i = 0; i < count; ++i)
+                points[i] = GfVec3f(frames.frames[i].points[0]);
+        } else {
+            SdfPathVector binds;
+            if (const auto rel = prim.GetRelationship(_oracleToken2))
+                rel.GetTargets(&binds);
+            VtVec2fArray coordinates;
+            if (binds.size() == 1)
+                stage->GetAttributeAtPath(binds[0]).Get(&coordinates, time);
+            if (count < 2 || coordinates.size() != points.size()) {
+                diagnostics->push_back("MoverFailed " + moverPath.GetString() +
+                                       ": ribbon bind cardinality mismatch");
+                return RigExecOracleResult::PassThrough;
+            }
+            // Evaluate each affine landmark map by scalar coordinates in
+            // its rest basis. This does not call the production geometry
+            // kernel or its matrix-map builder.
+            const auto transport = [&](size_t sample, const GfVec3d &point) {
+                const auto &rest = frames.rests[sample];
+                const auto &posed = frames.frames[sample].points;
+                const GfVec3d x = rest[1] - rest[0];
+                const GfVec3d y = rest[2] - rest[0];
+                const GfVec3d z = rest[3] - rest[0];
+                const double determinant = GfDot(x, GfCross(y, z));
+                const double epsilon = 1e-10 * std::max(
+                    {1.0, x.GetLength(), y.GetLength(), z.GetLength()});
+                if (std::abs(determinant) < epsilon * epsilon * epsilon)
+                    return point;
+                const GfVec3d delta = point - rest[0];
+                const double a = GfDot(delta, GfCross(y, z)) / determinant;
+                const double b = GfDot(x, GfCross(delta, z)) / determinant;
+                const double c = GfDot(x, GfCross(y, delta)) / determinant;
+                return posed[0] + (posed[1] - posed[0]) * a +
+                    (posed[2] - posed[0]) * b + (posed[3] - posed[0]) * c;
+            };
+            for (size_t i = 0; i < points.size(); ++i) {
+                const float u = std::min(1.0f, std::max(0.0f, coordinates[i][0]));
+                const float position = u * float(count - 1);
+                const size_t sample = std::min(count - 2, size_t(position));
+                const float fraction = position - float(sample);
+                const GfVec3d point(points[i]);
+                const GfVec3d a = transport(sample, point);
+                const GfVec3d b = transport(sample + 1, point);
+                points[i] = GfVec3f(a + (b - a) * double(fraction));
+            }
+        }
+        return RigExecOracleResult::Blend;
     }
     SdfPath curvePoints;
     int sampleCount = 5;
     if (!frameTargets.empty()) {
-        if (const UsdPrim ribbon =
+        if (const rigExec::RigExecOraclePrim ribbon =
                 stage->GetPrimAtPath(frameTargets[0])) {
             SdfPathVector curves;
-            if (UsdRelationship rel = ribbon.GetRelationship(
-                    TfToken("rigExec:driverCurve"))) {
+            if (rigExec::RigExecOracleRelationship rel = ribbon.GetRelationship(
+                    _oracleToken1)) {
                 rel.GetTargets(&curves);
             }
             if (!curves.empty()) {
                 curvePoints = curves[0].IsPrimPath()
-                    ? curves[0].AppendProperty(TfToken("points"))
+                    ? curves[0].AppendProperty(_oracleToken5)
                     : curves[0];
             }
-            if (UsdAttribute a = ribbon.GetAttribute(
-                    TfToken("rigExec:sampleCount"))) {
+            if (rigExec::RigExecOracleAttribute a = ribbon.GetAttribute(
+                    _oracleToken19)) {
                 a.Get(&sampleCount, time);
             }
         }
     }
     VtVec3fArray posedCvs, restCvs;
-    if (UsdAttribute a = stage->GetAttributeAtPath(curvePoints)) {
+    if (rigExec::RigExecOracleAttribute a = stage->GetAttributeAtPath(curvePoints)) {
         a.Get(&posedCvs, time);
         a.Get(&restCvs, UsdTimeCode::Default());
+    }
+    if (!frameTargets.empty()) {
+        const auto ribbon = stage->GetPrimAtPath(frameTargets[0]);
+        const auto phase = rigExec::RigExecPhaseForInput(ribbon,"rigExec:driverCurve");
+        if (!phase.IsBase() && ctx.phasedPoints) {
+            const auto *value = ctx.phasedPoints(curvePoints,phase,moverPath);
+            if (value && value->IsHolding<VtVec3fArray>()) posedCvs = value->UncheckedGet<VtVec3fArray>();
+        }
     }
     const auto posedSamples = rigExec::RigExecSampleCurveRMF(
         std::vector<GfVec3f>(posedCvs.begin(), posedCvs.end()),
@@ -461,13 +568,13 @@ _OracleCurveMover(const rigExec::RigExecMoverOracleContext &ctx)
         }
     } else {
         SdfPathVector binds;
-        if (UsdRelationship rel = prim.GetRelationship(
-                TfToken("rigExec:bindCoordinates"))) {
+        if (rigExec::RigExecOracleRelationship rel = prim.GetRelationship(
+                _oracleToken2)) {
             rel.GetTargets(&binds);
         }
         VtVec2fArray sts;
         if (!binds.empty()) {
-            if (UsdAttribute a =
+            if (rigExec::RigExecOracleAttribute a =
                     stage->GetAttributeAtPath(binds[0])) {
                 a.Get(&sts, time);
             }

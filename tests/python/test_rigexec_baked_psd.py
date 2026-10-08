@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """
 The stacked biped -- the rig, its pose interpolators and its sparse blend
-shapes composed together -- through the baked program, held to parity.
+shapes composed together -- through the compiled graph, held to parity.
 
 Two things the biped branch built on the dynamic path are steps of the
 program here: a RigExecPoseInterpolator is a PoseInterpolator step that reads
@@ -52,7 +52,7 @@ def _Open(mode):
     stage = Usd.Stage.Open(_STACK)
     rig = rigexec.Rig(stage, _RIG)
     rig.compile()
-    rig.evaluation_mode = mode
+    rig.cpu_reference = True
     controls = {p.GetName(): p.GetPath().pathString
                 for p in stage.Traverse()
                 if p.GetTypeName() == "RigExecControl"}
@@ -63,16 +63,14 @@ def _Open(mode):
 
 
 def TestTheStackBakesWithParity():
-    stage, rig, controls, weights = _Open("parity")
+    stage, rig, controls, weights = _Open("graph")
     assert weights, "the stacked biped is expected to carry poses"
-    assert rig.is_bakeable(), (
-        "the stacked biped does not bake; the correctives would run on the "
-        "dynamic path while the rig runs on the program")
+    pass # Compile/evaluate validates the single graph.
     rest = rig.evaluate(1.0)
     assert rest.valid
-    assert rig.baked_cluster_count > 0, "parity ran with no program"
-    assert not rest.baked_parity_mismatches, (
-        "at rest: %d baked parity mismatch(es)" % rest.baked_parity_mismatches)
+    assert len(rig.op_graph()) > 0, "parity ran with no program"
+    assert (rest.reference_agreements > 0 and not rest.reference_mismatches), (
+        "at rest: %d scalar reference mismatch(es)" % rest.reference_mismatches)
     published = [w for w in weights if w in rest.moved_properties()]
     assert len(published) == len(weights), (
         "%d of %d pose weights were not published" %
@@ -84,16 +82,16 @@ def TestTheStackBakesWithParity():
         for value in _VALUES:
             rig.set_interactive_overrides([(controls[name], "avars:rz", value)])
             pose = rig.evaluate(1.0)
-            assert not pose.baked_parity_mismatches, (
-                "%s rz=%g: %d baked parity mismatch(es)"
-                % (name, value, pose.baked_parity_mismatches))
+            assert (pose.reference_agreements > 0 and not pose.reference_mismatches), (
+                "%s rz=%g: %d scalar reference mismatch(es)"
+                % (name, value, pose.reference_mismatches))
             moved += sum(1 for w in weights
                          if abs(pose.moved_property(w) - atRest[w]) > 1e-6)
     assert moved > 0, "posing the rig moved no pose weight at all"
     rig.clear_interactive_overrides()
     pose = rig.evaluate(1.0)
-    assert not pose.baked_parity_mismatches, (
-        "release: %d baked parity mismatch(es)" % pose.baked_parity_mismatches)
+    assert (pose.reference_agreements > 0 and not pose.reference_mismatches), (
+        "release: %d scalar reference mismatch(es)" % pose.reference_mismatches)
 
 
 def TestTranslationDriversBakeWithParity():
@@ -107,21 +105,21 @@ def TestTranslationDriversBakeWithParity():
     stage = Usd.Stage.Open(_FACE_STACK)
     rig = rigexec.Rig(stage, _RIG)
     rig.compile()
-    rig.evaluation_mode = "parity"
+    rig.cpu_reference = True
     corner = [p.GetPath().pathString for p in stage.Traverse()
               if p.GetName() == "L_Mouth"][0]
     wide = _FACE_POSE + "/mouth_l_wide.outputs:weight"
     neutral = _FACE_POSE + "/neutral.outputs:weight"
     rest = rig.evaluate(1.0)
-    assert not rest.baked_parity_mismatches, rest.baked_parity_mismatches
+    assert (rest.reference_agreements > 0 and not rest.reference_mismatches), rest.reference_mismatches
     assert abs(rest.moved_property(neutral) - 1.0) < 1e-5, (
         "neutral at rest %g" % rest.moved_property(neutral))
     for value, expect_wide in ((3.0, 1.0), (1.5, None), (0.0, 0.0)):
         rig.set_interactive_overrides([(corner, "avars:tx", value)])
         pose = rig.evaluate(1.0)
-        assert not pose.baked_parity_mismatches, (
-            "corner tx=%g: %d baked parity mismatch(es)"
-            % (value, pose.baked_parity_mismatches))
+        assert (pose.reference_agreements > 0 and not pose.reference_mismatches), (
+            "corner tx=%g: %d scalar reference mismatch(es)"
+            % (value, pose.reference_mismatches))
         got = pose.moved_property(wide)
         if expect_wide is not None:
             assert abs(got - expect_wide) < 1e-5, (

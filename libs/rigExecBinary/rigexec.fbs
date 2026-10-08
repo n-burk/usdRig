@@ -45,7 +45,7 @@ namespace rigExec.fb;
 enum InputTag : ubyte { Double = 0, Float = 1, Bool = 2, Int = 3,
                         Matrix4d = 4, Token = 5, Vec3d = 6, Vec3f = 7,
                         IntArray = 8, FloatArray = 9, DoubleArray = 10,
-                        Vec2fArray = 11, Vec3fArray = 12 }
+                        Vec2fArray = 11, Vec3fArray = 12, Vec3dArray = 13, Matrix4dArray = 14, TokenArray = 15, BoolArray = 16, Vec3i = 17 }
 
 enum PropertyCandidateKind : ubyte { SlotOnly=0, ChainFinal=1, PhasedRecord=2 }
 
@@ -82,7 +82,9 @@ enum InputReadFlags : ubyte (bit_flags) {
   /// Baked: the program reads the long way (RigExecBakedInput::resolvedAttr).
   LongWay,
   /// A property-chain target lies on the walk.
-  ViaChain
+  ViaChain,
+  /// Direct fixed numeric source; read current raw opinion with argument fallback.
+  SourceBacked
 }
 
 /// Bits of InputSlot.flags.
@@ -93,7 +95,9 @@ enum InputSlotFlags : ubyte (bit_flags) {
   Animated,
   /// The typed Get the default comes from succeeded: at bake_time, or at
   /// Default for an array input read only at Default.
-  HasValue
+  HasValue,
+  /// Exact raw provider source block, independent of failed/missing Get.
+  SourceBlocked
 }
 
 /// Kind of a PathNode.
@@ -107,7 +111,7 @@ enum SlotDomain : ubyte { Avars = 0, PoseBase, PoseFin, PosedM, FinalMatrix,
   BaseMatrix, Aggregate, SolverPoints, Candidates, CommitTable, CommitDelta,
   CommitStaging, ConstraintDelta, PropertyResult, ChainBase, RevisionPacket,
   RevisionTransforms, RevisionOut, RevisionDone, ChainDirty, ChainPoints,
-  DerivedOut, WeightPacket, WeightFrames, PoseWeight, Snapshots, FrameMatrix, Rest, Ladder, SkinTopology }
+  DerivedOut, WeightPacket, WeightFrames, PoseWeight, Snapshots, FrameMatrix, Rest, Ladder, SkinTopology, WeightField, WeightFramesBase, SpaceValue, SpaceLeaf, DerivedBase, ChainInput, ConstraintInputs, SwitchFrame, RequiredStageFramesAdmission }
 
 /// RigExecBakedStepKind, in the same order. SnapshotFinals (8) is reserved:
 /// never written, and Open refuses a file that holds one.
@@ -115,7 +119,7 @@ enum StepKind : ubyte { ComposeSubtree = 0, Solve, SolverCommit, Constraint,
   CommitDelta, PropagateChunk, CommitApply, ProviderMatrix, SnapshotFinals,
   PoseInterpolator, VolumePlacements, WeightPacket, InfluenceFold,
   RevisionStatic, RevisionChunk, RevisionFuse, ChainStatus, Derived,
-  FrameMatrix, PropertyRevision, RestCompose, LadderCompose, SkinTopology }
+  FrameMatrix, PropertyRevision, RestCompose, LadderCompose, SkinTopology, WeightField, SpaceExpression, ChainInputs, AvarInputs, SpaceCheckpoint, ProviderRefresh }
 
 /// RigExecBakedSlotKind.
 enum SlotKind : ubyte { FirstFramePose = 0, XformDerived = 1 }
@@ -217,7 +221,7 @@ struct SplineIkParams (native_type: "::rigExec::RigExecWireSplineIkParams",
 /// One ordered property-reader hop; version -1 for SlotOnly.
 struct PropertyInputCandidate (native_type: "::rigExec::RigExecWirePropertyInputCandidate",
   native_type_pack_name: "PropertyInputCandidate") {
-  slot: uint; kind: PropertyCandidateKind; version: int; raw: bool;
+  slot: uint; kind: PropertyCandidateKind; version: int; raw: bool; pose_weight: int; cross_domain: int;
 }
 /// One half-open run of slots of one domain.
 struct SlotRange { domain: SlotDomain; begin: uint; end: uint; }
@@ -283,6 +287,8 @@ table Value {
   vec3d: Vec3d;
   /// Present iff tag is Vec3f.
   vec3f: Vec3f;
+  /// Private exact integer-vector leaf transport.
+  vec3i: Vec3i;
   /// Array tags only: where the elements live, and the pool id or flat
   /// revision id there. A scalar leaves both at their defaults.
   array_source: ArraySource = Pool;
@@ -298,6 +304,10 @@ table IntList { v: [int]; }
 table UintList { v: [uint]; }
 table FloatList { v: [float]; }
 table DoubleList { v: [double]; }
+table Vec3dArray { v: [Vec3d]; }
+table Matrix4dArray { v: [Matrix4d]; }
+table TokenArray { v: [string]; }
+table BoolArray { v: [ubyte]; }
 table AncestorReadList { v: [AncestorRead]; }
 
 // ----------------------------------------------------------------- inputs
@@ -327,6 +337,8 @@ table Input {
   /// Separate double recursion of a Float read, narrowed once.
   double_candidates: [PropertyInputCandidate];
   raw_fallback_slot: int = -1;
+  /// Raw memo/sample time: AtTime=0, AtDefault=1.
+  sample_time: ubyte;
 }
 
 // -------------------------------------------------------------- slot meta
@@ -337,6 +349,8 @@ table SlotMeta {
   /// Path id (Prim) per provider slot.
   paths: [uint];
   slot_kind: [SlotKind];
+  /// Exact captured prim activity per slot; absent attributes do not deactivate it.
+  provider_active: [ubyte];
   parent: [int];
   prop_parent: [int];
   xform_slots: [int];
@@ -357,6 +371,10 @@ table SlotMeta {
   need_final: [ubyte];
   /// 0/1 per slot.
   need_base: [ubyte];
+  /// Exact publication membership: Other=0, Joint=1, Control=2, JointAndControl=3.
+  publication_roles: [ubyte];
+  /// The actual consumer toggle at export, independent of aggregate existence.
+  solver_guides_enabled: bool;
 }
 
 /// The Build-time answers the pose path reads: rest chain, default-space
@@ -381,6 +399,9 @@ table Constants {
   avar_constants: [double];
   /// avars:rotationSign packed into three bits (RigExecRotationSignMask).
   rotation_sign: [ubyte];
+  posed_d: [Matrix4d];
+  parent_space_m: [Matrix4d];
+  parent_space_authored: [ubyte];
 }
 
 // ------------------------------------------------- steps, clusters, cones
@@ -422,6 +443,9 @@ table Step {
   size_units: F64 (native_inline);
   cost: F64 (native_inline);
   max_diagnostics: uint;
+  descriptor_key: string (required);
+  /// Declared solver relationship prerequisites, separate from generated graph edges.
+  semantic_predecessor_keys: [string];
 }
 /// One cluster: members in increasing step index, edges, cost, level.
 table Cluster {
@@ -440,9 +464,8 @@ table Clustering {
 }
 /// A bitset over clusters: the cluster count plus ceil(count / 64) words.
 table ClusterSet { clusters: uint; words: [ulong]; }
-/// Build-time cone closures and dirty-source lookup tables.
+/// Dirty-source lookup tables; graph closures are computed on demand.
 table Cones {
-  cone: [ClusterSet] (native_inline);
   always: ClusterSet (required);
   pose_clusters: ClusterSet (required);
   avar_cluster: [int];
@@ -465,6 +488,20 @@ table Ladder {
   /// Exactly 6.
   default_avars: [Input] (native_inline, required);
   rotation_order: Input (required);
+  parent_space: Input (required);
+  parent_default_space: Input (required);
+  avar_default_space: Input (required);
+  posed_default_space: Input (required);
+  rotation_sign: Input (required);
+  posed_space_connected: bool;
+  default_space_connected: bool;
+  parent_space_connected: bool;
+  parent_default_space_connected: bool;
+  avar_default_space_connected: bool;
+  posed_default_space_connected: bool;
+  intervening_space: Input (required);
+  intervening_reset: bool;
+  space_values: [int];
 }
 /// A solved RBF table: the solved widths and inverted matrix travel
 /// explicitly (painted widths have no falloff vector that reproduces them).
@@ -513,6 +550,10 @@ table SplineIkRest {
   segment_lengths: [double];
   rest_arc_length: F64 (native_inline);
   volume_weights: [double];
+}
+table SolverRelationshipRequirement {
+  port: string (required);
+  solver: int = -1;
 }
 /// One solver's epoch description. *_read fields are fin versions.
 table Solver {
@@ -603,6 +644,10 @@ table Solver {
   mid_read: uint;
   end_read: uint;
   pole_read: uint;
+  /// Exact supported schema relationship requirements captured at compile.
+  relationship_requirements: [SolverRelationshipRequirement] (native_inline);
+  /// Canonical Solve identity, retained even when common SCC excludes its body.
+  solve_descriptor_key: string;
 }
 table Constraint {
   path: uint;
@@ -671,6 +716,7 @@ table Constraint {
   pole_object_natives: [int];
   pole_vector: Input (required);
   twist_degrees: Input (required);
+  weight_field: int = -1;
 }
 table WalkStep {
   solver_batch: bool;
@@ -722,6 +768,8 @@ table Commit {
 /// A constraint's array reads: the shape and the values at bake_time.
 table ConstraintArrays {
   prim: uint;
+  /// Exact raw samples, declaration order: weights/translation/rotation/pole. -1 absent.
+  raw_slots: [int];
   source_count: ulong;
   parent_offsets: bool;
   read_pole: bool;
@@ -757,6 +805,45 @@ table ComposeGroup { begin: int; end: int; parent_slots: [int]; }
 table FrameVersion {
   anchor: int = -1;
   recompose: [int];
+  context: int = -1;
+}
+table SpaceCheckpoint {
+  key: string (required);
+  anchor: int = -1;
+  recompose: [int];
+}
+/// A contextual provider frame transformed to the SpaceValue channel.
+table ProviderFrameInput {
+  value: ulong;
+  slot: int = -1;
+  base: bool;
+  version: uint;
+  reader: uint;
+}
+table ProviderRefreshCarry {
+  slot: int = -1;
+  base_read: uint;
+  fin_read: uint;
+  base_write: uint;
+  fin_write: uint;
+  blocking_slots: [int];
+}
+struct UIntPair (native_type: "::rigExec::RigExecWireUIntPair",
+                 native_type_pack_name: "UIntPair") { first: uint; second: uint; }
+/// A contextual provider recompose owns fresh PoseBase/PoseFin SSA values.
+table ProviderRefresh {
+  key: string (required);
+  reader: uint;
+  slot: int = -1;
+  checkpoint: ulong;
+  base_value: ulong;
+  current_value: ulong;
+  base_read: uint;
+  fin_read: uint;
+  base_write: uint;
+  fin_write: uint;
+  carries: [ProviderRefreshCarry] (native_inline);
+  prior_constraints: [UIntPair];
 }
 /// One RigExecSpaceSwitch: the switched provider slot, its labelled sources
 /// (-1 is world), and the channels the resulting delta may reach.
@@ -777,6 +864,8 @@ table SpaceSwitch {
   space_read: FrameVersion (required);
   /// The fractional selector.
   active: Input (required);
+  token_index: bool;
+  labels: [string];
   affect_translation: Bool3 (native_inline);
   affect_rotation: Bool3 (native_inline);
   affect_scale: Bool3 (native_inline);
@@ -789,7 +878,15 @@ table AvarBinding {
 }
 /// Every table the pose-half steps index, plus the publication inputs the
 /// epilogue reads.
+/// Exact owner-captured required stage-frame Get result; no Stage handles.
+/// admitted iff first_bad_target == -1; otherwise indexes slot_meta.xform_slots.
+table RequiredStageFramesAdmission {
+  admitted: ubyte = 1;
+  first_bad_target: int = -1;
+}
+
 table DomainPose {
+  required_stage_frames_admission: RequiredStageFramesAdmission (required);
   /// One per slot.
   ladders: [Ladder] (native_inline);
   ladder_varying: bool;
@@ -827,6 +924,11 @@ table DomainPose {
   /// Every frame record an AtPrim transform phase can read, in walk order;
   /// FrameMatrix steps evaluate them.
   frame_records: [FrameRecord];
+  /// Exact sampled version-zero frames, including unavailable flags, parallel to xform_base.
+  xform_frames: [Frame];
+  space_checkpoints: [SpaceCheckpoint] (native_inline);
+  provider_frame_inputs: [ProviderFrameInput] (native_inline);
+  provider_refreshes: [ProviderRefresh] (native_inline);
 }
 
 // -------------------------------------------------------- geometry domain
@@ -915,6 +1017,8 @@ table BlendSample {
   /// Raw over points_path or Resolved over its connection walk), read in
   /// place of points_value; absent where they are static.
   points_read: Input;
+  /// Immutable UsdSkelBlendShape type/existence fact; distinct from layout validity.
+  shape_valid: bool;
 }
 /// One blend channel, in accumulation order.
 table BlendChannel {
@@ -1007,6 +1111,10 @@ table PathRead {
   head_fallback: bool;
 }
 /// One geometry revision's epoch decisions.
+table PartitionProducerSet {
+  values: [SlotRange];
+}
+
 table Revision {
   mover_path: uint;
   target: uint;
@@ -1037,8 +1145,10 @@ table Revision {
   partition_point_count: ulong;
   chunked: bool;
   partition_candidates: ulong;
-  partition_ready_min: int;
-  partition_ready_max: int;
+  partition_producer_min: int;
+  partition_producer_max: int;
+  partition_distinct_reads: ulong;
+  partition_producer_sets: [PartitionProducerSet] (native_inline);
   weight_object: int = -1;
   weight_operation_domain: bool;
   weight_field_target: uint;
@@ -1067,6 +1177,10 @@ table Revision {
   /// -1 for none. With a stored layout their defaults are its expansion.
   joint_indices_slot: int = -1;
   joint_weights_slot: int = -1;
+  weight_field: int = -1;
+  /// Declaration-order owning consumer leaves; sampled raw fallback and exact typed route.
+  leaf_sites: [ExternalDeclaredInput] (native_inline);
+  layout_leaf_sites: [ExternalDeclaredInput] (native_inline);
 }
 table Derived {
   target: uint;
@@ -1074,6 +1188,7 @@ table Derived {
   have_base: bool;
   /// vec3f_arrays[]: the base points at bake_time; 0 when !have_base.
   base: uint;
+  base_slot: int = -1;
 }
 table Chain {
   target: uint;
@@ -1173,7 +1288,34 @@ table WeightObject {
   indices_slot: int = -1;
   oracle_samples_slot: int = -1;
   oracle_curve_slot: int = -1;
+  /// Raw token transport; -1 distinguishes an absent attribute's default
+  /// from an existing attribute whose sampled Get fails.
+  oracle_plane_axis_slot: int = -1;
+  oracle_plane_bounds_slot: int = -1;
 }
+enum WeightFieldScalarMember : ubyte {
+  DefaultWeight = 0, Driver, Scale, Bias, Strength, Invert, FalloffMin, FalloffMax,
+  ScaleX, ScaleY, ScaleZ, ScaleXPos, ScaleYPos, ScaleZPos,
+  ScaleXNeg, ScaleYNeg, ScaleZNeg, ExtentU, ExtentV
+}
+enum WeightFieldForm : ubyte { EnvelopeProperty = 0, EnvelopeConstraint, Revision }
+enum WeightFieldPlacementPhase : ubyte { Final = 0, Base }
+/// One actual native per-consumer oracle context; never shared by object alone.
+table WeightFieldPointRead { object: int; leaf: int; binding: PointsBinding (required); }
+table WeightField {
+  form: WeightFieldForm;
+  object: int = -1;
+  consumer: int = -1;
+  part: int;
+  placement_phase: WeightFieldPlacementPhase;
+  volumes: [int];
+  scalar_reads: [Input] (native_inline);
+  available_chains: [int];
+  scalar_objects: [int];
+  scalar_members: [WeightFieldScalarMember];
+  point_reads: [WeightFieldPointRead] (native_inline);
+}
+
 table DomainGeometry {
   chains: [Chain] (native_inline);
   revision_index: [IntPair];
@@ -1196,6 +1338,7 @@ table DomainGeometry {
   delta_base_ok: [ubyte];
   /// Sorted strictly by (path, rest).
   path_reads: [PathRead] (native_inline);
+  weight_fields: [WeightField] (native_inline);
 }
 
 // ------------------------------------------------------- property chains
@@ -1227,6 +1370,7 @@ table PropertyRevision {
   keys: [Vec2f];
   has_tangents_attr: bool;
   tangents: [Vec2f];
+  weight_field: int = -1;
 }
 /// One property chain: a target attribute and the revisions every property
 /// mover moving it applies, in order. property_chains is in dependency
@@ -1260,6 +1404,25 @@ table PhasedConsumer {
 
 // --------------------------------------------------------- external movers
 
+enum ExternalInputTime : ubyte { AtTime = 0, AtDefault }
+enum ExternalInputFlavour : ubyte { Raw = 0, Resolved, ResolvedOnly, OverlayThenRaw, Present }
+/// Exact API4 declaration; the fallback value is read.constant.
+table ExternalDeclaredInput {
+  read: Input (required);
+  time: ExternalInputTime;
+  flavour: ExternalInputFlavour;
+  fallback_has_value: bool;
+  /// Actual owning native leaf site, independent of publication-map reads.
+  path: uint;
+  exact_version: int = -1;
+  exact_record: int = -1;
+  exact_value_type: int = -1;
+  /// The actual retained ordinary bound walk when no exact producer route exists.
+  body_walk: Input;
+  /// Legacy Dial reads may widen float producers; exact Double reads may not.
+  allow_float_to_double: bool;
+}
+
 /// One plugin mover revision (op External).
 table ExternalMover {
   chain: uint;
@@ -1280,6 +1443,100 @@ table ExternalMover {
   /// False when the assembly at bake_time failed: playback then fails the
   /// mover, and v2_frame is empty.
   v2_frame_valid: bool;
+  declared_inputs: [ExternalDeclaredInput] (native_inline);
+}
+
+// The actual common compiler artifact. Value IDs index value_specs; mutable
+// value keys, revision stamps and execution workspace are never serialized.
+table CommonValueSpec { domain: uint; slot: uint; }
+table CommonOp {
+  key: string (required);
+  kind: uint;
+  original_index: uint;
+  reads: [ulong];
+  writes: [ulong];
+  descriptor_predecessors: [uint];
+  predecessors: [uint];
+  successors: [uint];
+  volatile_input: bool;
+}
+table CommonReaders { value: ulong; ops: [uint]; }
+table CommonCycle { keys: [string]; }
+table CommonCluster { members: [uint]; predecessors: [uint]; successors: [uint]; }
+table CommonGraph {
+  value_specs: [CommonValueSpec] (native_inline);
+  leaves: [ulong];
+  ops: [CommonOp] (native_inline);
+  canonical_index: [int];
+  readers: [CommonReaders] (native_inline);
+  cycles: [CommonCycle] (native_inline);
+  longest_path: ulong;
+  clusters: [CommonCluster] (native_inline);
+  op_clusters: [uint];
+  excluded_values: [ulong];
+}
+
+// Portable provider records; mutable revisions/workspace are not persisted.
+enum ProviderValueKind : ubyte { Empty = 0, Double, Float, Vector, Matrix, Token, Frame,
+  Vec3f, Bool, Int, FloatArray, DoubleArray, Vec3fArray, Vec3dArray, IntArray,
+  MatrixArray, TokenArray, BoolArray, Vec2f, Vec2fArray, Vec3i }
+table ProviderValue {
+  kind: ProviderValueKind;
+  scalar_double: F64;
+  scalar_float: F32;
+  vector: Vec3d;
+  matrix: Matrix4d;
+  token: string;
+  frame_points: [Vec3d];
+  frame_flags: uint;
+  vec3f: Vec3f;
+  vec2f: Vec2f;
+  vec3i: Vec3i;
+  boolean: bool;
+  integer: int;
+  floats: [float]; doubles: [double];
+  vec3fs: [Vec3f]; vec3ds: [Vec3d]; ints: [int];
+  matrices: [Matrix4d]; tokens: [string]; bools: [ubyte]; vec2fs: [Vec2f];
+  initialized: bool;
+  blocked: bool;
+  authoritative: bool;
+  count: ulong;
+  error: string;
+}
+table ProviderOp {
+  kind: uint;
+  owner: string (required);
+  output: ulong;
+  inputs: [ulong];
+  scale_avars: bool = true;
+}
+table ProviderLeaf {
+  value: ulong; path: string (required); computation: string;
+  input_slot: int = -1;
+  property_version: int = -1;
+  provider_slot: int = -1;
+  intervening_read: Input;
+  frame_version: int = -1;
+}
+enum CrossDomainReadKind : ubyte { PointElement = 0, PoseFrame, SpaceValue, PropertyResult, Points }
+table CrossDomainRead {
+  kind: CrossDomainReadKind;
+  consumer: uint; source: uint; reader: uint;
+  phase: ReadPhase (native_inline);
+  element: int = -1; provider: int = -1; raw_slot: int = -1;
+  space_value: int = -1; property_chain: int = -1; property_version: uint;
+  base_frame: bool; final_points: bool;
+  points: [IntPair]; frames: [uint]; unavailable: string;
+}
+table ProviderRoutedInput { value: ulong; consumer: string; source: string; read_phase: string; cross_read: int = -1; }
+table ProviderProgram {
+  value_keys: [string];
+  defaults: [ProviderValue] (native_inline);
+  ops: [ProviderOp] (native_inline);
+  sampled: [ProviderLeaf] (native_inline);
+  external_inputs: [ProviderLeaf] (native_inline);
+  routed_inputs: [ProviderRoutedInput] (native_inline);
+  leaves: [ulong];
 }
 
 // -------------------------------------------------------------------- root
@@ -1318,6 +1575,13 @@ table File {
   compile_diagnostics: [string];
   /// A nested Presentation buffer (file identifier REXP), or empty.
   presentation: [ubyte] (nested_flatbuffer: "Presentation", force_align: 16);
+  common_graph: CommonGraph (required);
+  provider_program: ProviderProgram;
+  cross_domain_reads: [CrossDomainRead] (native_inline);
+  vec3d_arrays: [Vec3dArray] (native_inline);
+  matrix4d_arrays: [Matrix4dArray] (native_inline);
+  token_arrays: [TokenArray] (native_inline);
+  bool_arrays: [BoolArray] (native_inline);
 }
 
 root_type File;

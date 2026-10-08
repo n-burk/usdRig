@@ -282,7 +282,7 @@ public:
     /// at no entry, which reads as a miss, never as a wrong pose.
     ///
     /// No-op when the frame cache is off (nothing is served, so nothing is
-    /// proven). Applies the same epoch/mode scope discipline as the live
+    /// proven). Applies the same epoch scope discipline as the live
     /// memoization: a moved scope clears every proof, this one included.
     /// \p unfoldedDigest is the pre-constant-fold digest and \p inputs the
     /// sampled vector, recorded into the proof's dependency set (plan 2.3).
@@ -529,8 +529,7 @@ public:
     {
         return const_cast<RigExecProfiler *>(&_evaluator->GetProfiler());
     }
-    /// The evaluation mode actually answering this rig (baked, dynamic...),
-    /// for diagnostics a viewer shows. See RigExecRigEvaluator.
+    /// The evaluator owning the compiled operation graph.
     const RigExecRigEvaluator &GetEvaluator() const { return *_evaluator; }
 
     /// Forgets every cached guide input. Called for any stage notice that
@@ -652,7 +651,7 @@ private:
     /// chain inputs sampled for a time the evaluator has not run come from
     /// the standing (stale) resolved state, and without the proof a scrub
     /// forth and back over animated chains could alias one frame's pose
-    /// onto another's. Scoped by _freshEpoch and by the evaluation mode:
+    /// onto another's. Scoped by _freshEpoch:
     /// either moving clears the map (entries stay in the cache,
     /// unreachable, for LRU). Bounded: past _kFreshDigestCap entries the
     /// map clears wholesale, which only costs misses, never correctness.
@@ -672,8 +671,6 @@ private:
     uint64_t _freshEpoch = 0;
     bool _freshEpochValid = false;
     uint64_t _cacheEditSerial = 0;
-    RigExecEvaluationMode _cacheMode = RigExecEvaluationMode::Baked;
-    bool _cacheModeValid = false;
     const RigExecBakedProgram *_sampleSupportProgram = nullptr;
     uint64_t _sampleSupportEpoch = 0;
     uint64_t _sampleSupportSerial = 0;

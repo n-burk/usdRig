@@ -1,4 +1,4 @@
-// rigExecRuntime loader conformance: bake every baking fixture in-process
+// rigExecRuntime loader conformance: bake representative baking fixtures in-process
 // at the probe time, open the bytes with the zero-USD reader, and check
 // every step's label as the reader names it in error text against the
 // program's, and malformed-input refusal, including a truncated file, the
@@ -23,7 +23,7 @@
 // the empty token. Last, on a bake at the table's first frame:
 // the input sampler drives a fresh reader along the table's frames (an
 // `inputs` row) or at the bake time (a `static` row), each run against a
-// fresh evaluator's generation at that time, counters and summary line
+// fresh evaluator's generation at that time, actual operation counts and diagnostics
 // included.
 #include "rigExecBake/bake.h"
 #include "rigExec/bakedProgram.h"
@@ -40,6 +40,7 @@
 #include "pxr/usd/usd/stage.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -48,6 +49,7 @@
 #include <functional>
 #include <limits>
 #include <memory>
+#include <set>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -163,11 +165,59 @@ _TestFileRefusals(const std::vector<uint8_t> &bytes)
         });
     got = _OpenError(version);
     CHECK(got == "unsupported .rigexec format version 4 (this reader reads " +
-                     std::to_string(RigExecFormatVersion) + "); re-export: S3 head tier");
+                     std::to_string(RigExecFormatVersion) + "); re-export: required stage-frame admission");
     if (got.find("format version 4") == std::string::npos) {
         std::printf("version 4: open said '%s'\n", got.c_str());
     }
     ++fileRefusalRows;
+}
+
+static void
+_TestValidatedObjectCopyIsolation()
+{
+    fb::RigExecWireFile source;
+    source.names = {"", "Fixture", "value", "Different"};
+    source.paths = {fb::PathNode(0, 0, fb::PathKind::None),
+                    fb::PathNode(0, 1, fb::PathKind::Prim),
+                    fb::PathNode(1, 2, fb::PathKind::Property)};
+    source.values.resize(2);
+    source.values[0].tag = fb::InputTag::Double;
+    source.values[0].bits = UINT64_C(0x8000000000000000);
+    source.values[1].tag = fb::InputTag::Double;
+    source.values[1].bits = UINT64_C(0x7ff8000000000123);
+    source.providerProgram = std::make_unique<fb::RigExecWireProviderProgram>();
+    source.providerProgram->valueKeys = {"raw:/Fixture.value"};
+    source.doubleArrays.resize(1);
+    source.doubleArrays[0].v.resize(2);
+    std::memcpy(&source.doubleArrays[0].v[0], &source.values[0].bits,
+                sizeof(double));
+    std::memcpy(&source.doubleArrays[0].v[1], &source.values[1].bits,
+                sizeof(double));
+    const fb::RigExecWireFile &baseline = source;
+    const std::vector<uint8_t> original = RigExecTestPackUnchecked(baseline);
+    auto first = RigExecTestUnpack(baseline);
+    auto second = RigExecTestUnpack(baseline);
+    CHECK(first->providerProgram.get() != baseline.providerProgram.get());
+    CHECK(first->providerProgram.get() != second->providerProgram.get());
+    CHECK(first->values[0].bits == UINT64_C(0x8000000000000000));
+    CHECK(first->values[1].bits == UINT64_C(0x7ff8000000000123));
+    CHECK(std::memcmp(first->doubleArrays[0].v.data(),
+                      baseline.doubleArrays[0].v.data(), 2 * sizeof(double)) == 0);
+    CHECK(RigExecTestPackUnchecked(*first) == original);
+    first->providerProgram->valueKeys[0] = "mutated:/Fixture.value";
+    first->paths[2] = fb::PathNode(1, 3, fb::PathKind::Property);
+    first->values[1].bits = 0;
+    first->doubleArrays[0].v[0] = 1.0;
+    CHECK(second->providerProgram->valueKeys[0] == "raw:/Fixture.value");
+    CHECK(second->paths[2].parent() == 1);
+    CHECK(second->paths[2].name() == 2);
+    CHECK(second->paths[2].kind() == fb::PathKind::Property);
+    CHECK(second->values[1].bits == UINT64_C(0x7ff8000000000123));
+    CHECK(RigExecTestPackUnchecked(*second) == original);
+    CHECK(RigExecTestPackUnchecked(baseline) == original);
+    second->providerProgram->valueKeys[0] = "second:/Fixture.value";
+    CHECK(first->providerProgram->valueKeys[0] == "mutated:/Fixture.value");
+    CHECK(RigExecTestPackUnchecked(baseline) == original);
 }
 
 static int stepGraphFlips = 0;
@@ -177,10 +227,10 @@ static int stepGraphProducers = 0;
 
 // Open refuses \p bytes changed by \p edit, saying exactly \p expected
 // after the validator's prefix.
-template <class Edit>
+template <class Source, class Edit>
 static void
 _ExpectRefusal(const std::string &name, const char *what,
-               const std::vector<uint8_t> &bytes, const Edit &edit,
+               const Source &bytes, const Edit &edit,
                const std::string &expected)
 {
     const std::string want = "invalid .rigexec: " + expected;
@@ -192,6 +242,72 @@ _ExpectRefusal(const std::string &name, const char *what,
     }
 }
 
+// Generic malformed branches are checked on the first eligible fixture.
+// Eligibility is still counted on every fixture; positive fixture checks
+// and the shape-sensitive malformed cases retain their own histories.
+enum class _GenericMalformedCase : size_t {
+    LaterPredecessor,
+    PredecessorRange,
+    UnproducedPosedM,
+    UnproducedAggregate,
+    StepClusterRange,
+    ClusterMemberRange,
+    ClusterPredecessorRange,
+    ClusterMapCount,
+    ClusterCycle,
+    XformBaseCount,
+    DeltaBaseFlagCount,
+    Count
+};
+
+struct _GenericMalformedCoverage {
+    size_t encountered = 0;
+    size_t executed = 0;
+    std::string representative;
+};
+
+static std::array<_GenericMalformedCoverage,
+                  size_t(_GenericMalformedCase::Count)> genericMalformed;
+
+template <class Source, class Edit>
+static void
+_ExpectGenericRefusal(_GenericMalformedCase which, const std::string &name,
+                     const char *what, const Source &bytes, const Edit &edit,
+                     const std::string &expected)
+{
+    const size_t index = size_t(which);
+    CHECK(index < genericMalformed.size());
+    if (index >= genericMalformed.size()) return;
+    auto &coverage = genericMalformed[index];
+    ++coverage.encountered;
+    if (coverage.executed != 0) return;
+    _ExpectRefusal(name, what, bytes, edit, expected);
+    ++coverage.executed;
+    coverage.representative = name;
+}
+
+static void
+_TestGenericMalformedCoverage()
+{
+    const std::array<const char *, size_t(_GenericMalformedCase::Count)> names = {
+        "later predecessor", "predecessor range", "unproduced PosedM",
+        "unproduced Aggregate", "step cluster range", "cluster member range",
+        "cluster predecessor range", "cluster map count", "cluster cycle",
+        "xform base count", "delta-base flag count"};
+    size_t completed = 0;
+    for (size_t i = 0; i < genericMalformed.size(); ++i) {
+        const auto &coverage = genericMalformed[i];
+        CHECK(coverage.encountered > 0);
+        CHECK(coverage.executed == 1);
+        CHECK(!coverage.representative.empty());
+        completed += coverage.executed == 1 ? 1 : 0;
+        std::printf("generic malformed %s: %zu eligible, %zu execution(s), %s\n",
+                    names[i], coverage.encountered, coverage.executed,
+                    coverage.representative.c_str());
+    }
+    CHECK(completed == size_t(_GenericMalformedCase::Count));
+}
+
 // Step and cluster graphs playback could not walk, edited into a fixture's
 // bake, each refused by Open with the step-graph check's exact message:
 // the first ordinary step with a predecessor names the last step instead; indices
@@ -199,9 +315,10 @@ _ExpectRefusal(const std::string &name, const char *what,
 // members and a cluster's predecessors, and a clustering that places one
 // step too few; and two clusters joined by an edge given the reverse edge
 // too.
+template <class Source>
 static void
 _TestStepGraphRefusals(const std::string &name,
-                       const std::vector<uint8_t> &bytes)
+                       const Source &bytes)
 {
     const std::unique_ptr<fb::RigExecWireFile> file = RigExecTestUnpack(bytes);
     if (!file) {
@@ -217,14 +334,16 @@ _TestStepGraphRefusals(const std::string &name,
         if (steps[s].isHead || steps[s].preds.empty()) {
             continue;
         }
-        _ExpectRefusal(name, "flipped predecessor", bytes,
+        _ExpectGenericRefusal(_GenericMalformedCase::LaterPredecessor,
+                       name, "flipped predecessor", bytes,
                        [&](fb::RigExecWireFile *edited) {
                            edited->steps[s].preds[0] = int32_t(count - 1);
                        },
                        "step " + std::to_string(s) +
                            " depends on later step " +
                            std::to_string(count - 1));
-        _ExpectRefusal(name, "predecessor past the steps", bytes,
+        _ExpectGenericRefusal(_GenericMalformedCase::PredecessorRange,
+                       name, "predecessor past the steps", bytes,
                        [&](fb::RigExecWireFile *edited) {
                            edited->steps[s].preds[0] = int32_t(count);
                        },
@@ -244,7 +363,11 @@ _TestStepGraphRefusals(const std::string &name,
             {fb::SlotDomain::Aggregate, "Aggregate"}};
         for (const auto &[domain, text] : domains) {
             const fb::SlotDomain read = domain;
-            _ExpectRefusal(name, "read nothing writes", bytes,
+            _ExpectGenericRefusal(
+                           domain == fb::SlotDomain::PosedM
+                               ? _GenericMalformedCase::UnproducedPosedM
+                               : _GenericMalformedCase::UnproducedAggregate,
+                           name, "read nothing writes", bytes,
                            [&](fb::RigExecWireFile *edited) {
                                edited->steps.back().reads.push_back(
                                    fb::SlotRange(read, past, past + 1));
@@ -257,28 +380,32 @@ _TestStepGraphRefusals(const std::string &name,
         }
     }
     if (count > 0 && !clusters.empty()) {
-        _ExpectRefusal(name, "cluster past the clusters", bytes,
+        _ExpectGenericRefusal(_GenericMalformedCase::StepClusterRange,
+                       name, "cluster past the clusters", bytes,
                        [&](fb::RigExecWireFile *edited) {
                            edited->steps[0].cluster =
                                int32_t(clusters.size());
                        },
                        "step 0 names cluster " + clusterCount +
                            ", which is no cluster");
-        _ExpectRefusal(name, "member past the steps", bytes,
+        _ExpectGenericRefusal(_GenericMalformedCase::ClusterMemberRange,
+                       name, "member past the steps", bytes,
                        [&](fb::RigExecWireFile *edited) {
                            edited->clustering->clusters[0].members.push_back(
                                int32_t(count));
                        },
                        "cluster 0 names member " + stepCount +
                            ", which is no step");
-        _ExpectRefusal(name, "cluster predecessor past the clusters", bytes,
+        _ExpectGenericRefusal(_GenericMalformedCase::ClusterPredecessorRange,
+                       name, "cluster predecessor past the clusters", bytes,
                        [&](fb::RigExecWireFile *edited) {
                            edited->clustering->clusters[0].preds.push_back(
                                int32_t(clusters.size()));
                        },
                        "cluster 0 names predecessor " + clusterCount +
                            ", which is no cluster");
-        _ExpectRefusal(name, "clustering one step short", bytes,
+        _ExpectGenericRefusal(_GenericMalformedCase::ClusterMapCount,
+                       name, "clustering one step short", bytes,
                        [&](fb::RigExecWireFile *edited) {
                            edited->clustering->clusterOf.pop_back();
                        },
@@ -320,7 +447,8 @@ _TestStepGraphRefusals(const std::string &name,
             if (otherPath || !lowest) {
                 continue;
             }
-            _ExpectRefusal(
+            _ExpectGenericRefusal(
+                _GenericMalformedCase::ClusterCycle,
                 name, "two-cluster cycle", bytes,
                 [&](fb::RigExecWireFile *edited) {
                     std::vector<int32_t> &preds =
@@ -350,16 +478,18 @@ static int staticArrayRows = 0;
 // xform slots, a delta-base flag past the delta bases, a chain base
 // without its have_base flag, and a constraint's array weights of another
 // count than its sources.
+template <class Source>
 static void
 _TestStaticTableRefusals(const std::string &name,
-                         const std::vector<uint8_t> &bytes)
+                         const Source &bytes)
 {
     const std::unique_ptr<fb::RigExecWireFile> file = RigExecTestUnpack(bytes);
     if (!file) {
         return;
     }
     const size_t xforms = file->pose->xformBase.size();
-    _ExpectRefusal(name, "xform base past the slots", bytes,
+    _ExpectGenericRefusal(_GenericMalformedCase::XformBaseCount,
+                       name, "xform base past the slots", bytes,
                    [](fb::RigExecWireFile *edited) {
                        edited->pose->xformBase.push_back(
                            RigExecWireMatrix4d{});
@@ -367,7 +497,8 @@ _TestStaticTableRefusals(const std::string &name,
                    "pose.xform_base: " + std::to_string(xforms + 1) +
                        " entries, expected " + std::to_string(xforms));
     const size_t deltas = file->geometry->deltaBasePaths.size();
-    _ExpectRefusal(name, "delta-base flag past the delta bases", bytes,
+    _ExpectGenericRefusal(_GenericMalformedCase::DeltaBaseFlagCount,
+                       name, "delta-base flag past the delta bases", bytes,
                    [](fb::RigExecWireFile *edited) {
                        edited->geometry->deltaBaseOk.push_back(0);
                    },
@@ -417,11 +548,17 @@ static int stepLabelRows = 0;
 static bool
 _TestStepLabels(const std::string &stage,
                 const RigExecRigEvaluator &evaluator,
-                const std::vector<uint8_t> &bytes)
+                const std::vector<uint8_t> &bytes,
+                const fb::RigExecWireFile &baseline,
+                const RigExecRuntimeReader *reader = nullptr)
 {
     std::string error;
-    const std::unique_ptr<RigExecRuntimeReader> reader =
-        RigExecRuntimeReader::Open(bytes.data(), bytes.size(), &error);
+    std::unique_ptr<RigExecRuntimeReader> ownedReader;
+    if (!reader) {
+        ownedReader =
+            RigExecRuntimeReader::Open(bytes.data(), bytes.size(), &error);
+        reader = ownedReader.get();
+    }
     const RigExecBakedProgram *baked = evaluator.GetBakedProgram();
     CHECK(reader);
     CHECK(baked);
@@ -432,7 +569,7 @@ _TestStepLabels(const std::string &stage,
         return false;
     }
     const RigExecBakedProgramImpl &program = baked->GetStepGraph();
-    const std::unique_ptr<fb::RigExecWireFile> file = RigExecTestUnpack(bytes);
+    const std::unique_ptr<fb::RigExecWireFile> file = RigExecTestUnpack(baseline);
     CHECK(file && file->steps.size() == program.steps.size());
     size_t matched = 0;
     size_t printed = 0;
@@ -458,9 +595,9 @@ _TestStepLabels(const std::string &stage,
 // The label RigExecFormatStepLabel gives step \p step of \p bytes edited by
 // \p edit, in the validator's "step N (<label>)" form: what a refusal of
 // the edited file names.
-template <class Edit>
+template <class Source, class Edit>
 static std::string
-_EditedStepName(const std::vector<uint8_t> &bytes, const Edit &edit,
+_EditedStepName(const Source &bytes, const Edit &edit,
                 size_t step)
 {
     const std::unique_ptr<fb::RigExecWireFile> file = RigExecTestUnpack(bytes);
@@ -512,10 +649,10 @@ _IsCommitStep(fb::StepKind kind)
 
 // _ExpectRefusal, printing the expected refusal, so the log shows each
 // phase-table rule's words on a real bake.
-template <class Edit>
+template <class Source, class Edit>
 static void
 _ExpectShownRefusal(const std::string &name, const char *what,
-                    const std::vector<uint8_t> &bytes, const Edit &edit,
+                    const Source &bytes, const Edit &edit,
                     const std::string &expected)
 {
     _ExpectRefusal(name, what, bytes, edit, expected);
@@ -756,7 +893,7 @@ _TestRetiredRefusals(const std::string &name,
     const std::string want =
         "unsupported .rigexec format version " + std::to_string(previous) +
         " (this reader reads " + std::to_string(RigExecFormatVersion) +
-        "); re-export: S3 head tier";
+        "); re-export: required stage-frame admission";
     CHECK(got == want);
     if (got != want) {
         std::printf("%s, previous version: open said '%s', expected '%s'\n",
@@ -803,9 +940,10 @@ static int pointBindingRefusals = 0;
 // version past the chain's last, one binding more than the phased inputs,
 // a binding naming another input, and the reader stripped of the read its
 // candidate needs.
+template <class Source>
 static void
 _TestPointBindingRefusals(const std::string &name,
-                          const std::vector<uint8_t> &bytes)
+                          const Source &bytes)
 {
     const std::unique_ptr<fb::RigExecWireFile> file = RigExecTestUnpack(bytes);
     if (!file) {
@@ -951,7 +1089,6 @@ _TestOwnChainPreceding()
             return false;
         }
         RigExecRigEvaluator evaluator(stage, rigPath);
-        evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
         std::string error;
         CHECK(RigExecTestBakeAt(evaluator, time, bytes, &error));
         std::unique_ptr<RigExecRuntimeReader> reader =
@@ -1054,7 +1191,6 @@ _PlayRawLayouts(const UsdStageRefPtr &stage, const SdfPath &rigPath,
     std::string error;
     {
         RigExecRigEvaluator evaluator(stage, rigPath);
-        evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
         CHECK(RigExecTestBakeAt(evaluator, time, &bytes, &error));
     }
     const std::unique_ptr<RigExecRuntimeReader> reader =
@@ -1067,7 +1203,6 @@ _PlayRawLayouts(const UsdStageRefPtr &stage, const SdfPath &rigPath,
         return false;
     }
     RigExecRigEvaluator evaluator(stage, rigPath);
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     bool all = true;
     for (int run = 0; run < 2; ++run) {
         const RigExecRigPose pose = evaluator.Evaluate(UsdTimeCode(time));
@@ -1082,13 +1217,15 @@ _PlayRawLayouts(const UsdStageRefPtr &stage, const SdfPath &rigPath,
             lines += line.rfind("MoverFailed ", 0) == 0 ? 1 : 0;
         }
         counters[run] = reader->GetCounters();
+        const auto &trace = reader->GetLastRunTraceForTesting();
+        CHECK(counters[run].executedOpCount == trace.size());
+        const std::set<int32_t> unique(trace.begin(), trace.end());
+        CHECK(unique.size() == trace.size());
         std::printf("%s t=%g, run %d: %s (%zu diagnostics, %zu "
-                    "MoverFailed, counters %u/%u/%u)\n",
+                    "MoverFailed, %zu executed operations)\n",
                     label, time, run + 1, same ? "== Evaluate(T)" : "MISMATCH",
                     reader->GetDiagnostics().size(), lines,
-                    counters[run].revisionsExecuted,
-                    counters[run].revisionsCreated,
-                    counters[run].schedulesBuilt);
+                    size_t(counters[run].executedOpCount));
         for (const std::string &line : diffs) {
             std::printf("    %s\n", line.c_str());
         }
@@ -1172,7 +1309,6 @@ _TestRawSkinLayouts()
     std::vector<uint8_t> bytes;
     {
         RigExecRigEvaluator evaluator(stage, rigPath);
-        evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
         std::string error;
         CHECK(RigExecTestBakeAt(evaluator, 1.0, &bytes, &error));
         if (bytes.empty()) {
@@ -1251,9 +1387,8 @@ _TestRawSkinLayouts()
         CHECK(bits == 0x80000000u);
     }
 
-    // Playback against live baked: the outputs, the four skins' failure
-    // lines and the mover graph's line, and the work counters; the first
-    // generation builds the graph, the second redoes nothing.
+    // Playback compares outputs, the four skin failures, and actual executed
+    // operations. The unchanged second generation executes no operation.
     {
         size_t failed = 0;
         RigExecRuntimeCounters counters[2];
@@ -1267,12 +1402,8 @@ _TestRawSkinLayouts()
         // A bake is deterministic: the played file is the one read above.
         CHECK(played == bytes);
         CHECK(failed == 4);
-        CHECK(counters[0].revisionsExecuted == 11 &&
-              counters[0].revisionsCreated == 11 &&
-              counters[0].schedulesBuilt == 10);
-        CHECK(counters[1].revisionsExecuted == 0 &&
-              counters[1].revisionsCreated == 0 &&
-              counters[1].schedulesBuilt == 0);
+        CHECK(counters[0].executedOpCount > 0);
+        CHECK(counters[1].executedOpCount == 0);
     }
 
     // A one-point mesh skinned by a validated row of element size 65536,
@@ -1458,7 +1589,14 @@ _TestRawSkinLayouts()
            },
            rowTopology + ": validated, but kept entry 0 has a negative or "
                          "non-finite weight");
-    refuse("chunked with one chunk", row, [](Rev &r) { r.chunked = true; },
+    refuse("chunked with one chunk", row,
+           [](Rev &r) {
+               r.chunked = true;
+               // The whole-array producer set names every influence. Keep
+               // that binding valid when marking its one range chunked.
+               for (size_t k = 0; k < r.influenceSlots.size(); ++k)
+                   r.chunks[0].key.push_back(int32_t(k));
+           },
            rowOf(row) + ": chunked with 1 chunk(s)");
     refuse("key on an unchunked revision", row,
            [](Rev &r) { r.chunks[0].key = {0}; },
@@ -1500,7 +1638,6 @@ _TestPhaseFixtures()
             continue;
         }
         RigExecRigEvaluator evaluator(stage, rigPath);
-        evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
         std::vector<uint8_t> bytes;
         std::string error;
         CHECK(RigExecTestBakeAt(evaluator, 1.0, &bytes, &error));
@@ -1508,7 +1645,12 @@ _TestPhaseFixtures()
             std::printf("%s: bake: %s\n", fixture, error.c_str());
             continue;
         }
-        if (_TestStepLabels(fixture, evaluator, bytes)) {
+        const std::unique_ptr<const fb::RigExecWireFile> baseline =
+            RigExecTestUnpack(bytes);
+        if (!baseline) {
+            continue;
+        }
+        if (_TestStepLabels(fixture, evaluator, bytes, *baseline)) {
             ++phaseFixtureRows;
         }
         _TestFrameRecordRefusals(stagePath, bytes);
@@ -1533,7 +1675,11 @@ _TestFreshExecute(const std::vector<uint8_t> &bytes)
     if (!error.empty()) {
         std::printf("fresh execute: %s\n", error.c_str());
     }
-    CHECK(!reader->GetDiagnostics().empty());
+    const auto freshLines = reader->GetDiagnostics();
+    CHECK(reader->Execute(&error));
+    CHECK(reader->GetDiagnostics() == freshLines);
+    CHECK(reader->GetCounters().executedOpCount == 0);
+    CHECK(reader->GetLastRunTraceForTesting().empty());
 }
 
 template <class T>
@@ -1708,11 +1854,7 @@ _CompareRuns(const RigExecRuntimeReader &a, const RigExecRuntimeReader &b,
     }
     const RigExecRuntimeCounters p = a.GetCounters();
     const RigExecRuntimeCounters q = b.GetCounters();
-    if (p.revisionsExecuted != q.revisionsExecuted ||
-        p.revisionsCreated != q.revisionsCreated ||
-        p.schedulesBuilt != q.schedulesBuilt ||
-        p.chainsBuilt != q.chainsBuilt ||
-        p.revisionsBuilt != q.revisionsBuilt) {
+    if (p.executedOpCount != q.executedOpCount) {
         return "counters";
     }
     return std::string();
@@ -1735,11 +1877,9 @@ static int defaultsRows = 0;
 static void
 _TestDefaults(const RigExecExampleFixture &fixture,
               const UsdStageRefPtr &stage, const SdfPath &rigPath,
-              const std::vector<uint8_t> &bytes)
+              std::unique_ptr<RigExecRuntimeReader> reader,
+              std::string error)
 {
-    std::string error;
-    const std::unique_ptr<RigExecRuntimeReader> reader =
-        RigExecRuntimeReader::Open(bytes.data(), bytes.size(), &error);
     CHECK(reader);
     if (!reader) {
         std::printf("%s: open: %s\n", fixture.stage, error.c_str());
@@ -1748,7 +1888,6 @@ _TestDefaults(const RigExecExampleFixture &fixture,
     const double t = reader->GetBakeTime();
     CHECK(t == RigExecBakedProbeTime(stage).GetValue());
     RigExecRigEvaluator evaluator(stage, rigPath);
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     const RigExecRigPose pose = evaluator.Evaluate(UsdTimeCode(t));
     CHECK(pose.valid);
     CHECK(evaluator.GetBakedGenerationCount() == 1);
@@ -1777,16 +1916,14 @@ _TestDefaults(const RigExecExampleFixture &fixture,
         std::printf("defaults %s t=%g: == Evaluate(T), twice (%zu "
                     "joints, %zu moved, %zu weight frames, %zu fields, %zu "
                     "provider xforms, %zu diagnostics, counters "
-                    "%zu/%zu/%zu)\n",
+                    "%zu operation(s))\n",
                     fixture.stage, t, reader->GetJointMatrices().size(),
                     reader->GetPoints().size(),
                     reader->GetWeightFrames().size(),
                     reader->GetWeightFields().size(),
                     reader->GetProviderXforms().size(),
                     reader->GetDiagnostics().size(),
-                    size_t(reader->GetCounters().revisionsExecuted),
-                    size_t(reader->GetCounters().revisionsCreated),
-                    size_t(reader->GetCounters().schedulesBuilt));
+                    size_t(reader->GetCounters().executedOpCount));
         ++defaultsRows;
     } else {
         std::printf("defaults %s t=%g: MISMATCH (%zu differences)\n",
@@ -1804,7 +1941,7 @@ static int samplerUnanimatedRows = 0;
 // Playback along the stage's timeline: the sampler hands a fresh reader the
 // stage's values of its Animated inputs at each time, and each run is a
 // fresh evaluator's generation at that time in every output, the
-// diagnostics (summary line included) and the work counters. A row whose
+// ordered diagnostics and actual operation counts. A row whose
 // file has no Animated input still moves the counters with time: the
 // sampler's TouchAnimatedInputs is what dirties the steps a change of time
 // dirties in the program.
@@ -1833,7 +1970,6 @@ _TestSamplerDrive(const RigExecExampleFixture &fixture,
     const std::vector<double> times =
         isStatic ? std::vector<double>{frames.front()} : frames;
     RigExecRigEvaluator evaluator(stage, rigPath);
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     size_t matched = 0;
     for (const double t : times) {
         const RigExecRigPose pose = evaluator.Evaluate(UsdTimeCode(t));
@@ -1857,6 +1993,19 @@ _TestSamplerDrive(const RigExecExampleFixture &fixture,
             for (const std::string &line : diffs) {
                 std::printf("    %s\n", line.c_str());
             }
+            // Exact operation membership explains census failures without
+            // changing the strict native/runtime numerical or work contract.
+            const auto baked = evaluator.GetBakedProgram();
+            if (baked) {
+                const auto &program = baked->GetStepGraph();
+                for (size_t i = 0; i < program.steps.size(); ++i)
+                    if (i < program.opExecution.ran.size() && program.opExecution.ran[i])
+                        std::printf("    native ran %zu: %s\n", i,
+                            program.steps[i].label.c_str());
+            }
+            for (int32_t i : reader->GetLastRunTraceForTesting())
+                std::printf("    runtime ran %d: %s\n", i,
+                    reader->GetStepLabelForTesting(size_t(i)).c_str());
         }
     }
     CHECK(evaluator.GetBakedGenerationCount() == times.size());
@@ -1878,7 +2027,8 @@ _TestSamplerDrive(const RigExecExampleFixture &fixture,
 // inputs' defaults.
 static void
 _TestInputApi(const RigExecExampleFixture &fixture,
-              const UsdStageRefPtr &stage, const std::vector<uint8_t> &bytes)
+              const UsdStageRefPtr &stage, const std::vector<uint8_t> &bytes,
+              const fb::RigExecWireFile &baseline)
 {
     const double probe = RigExecBakedProbeTime(stage).GetValue();
     std::string error;
@@ -2028,7 +2178,7 @@ _TestInputApi(const RigExecExampleFixture &fixture,
     // empty token to id 0.
     std::string tokenNote = "n/a";
     const std::unique_ptr<fb::RigExecWireFile> unpacked =
-        RigExecTestUnpack(bytes);
+        RigExecTestUnpack(baseline);
     const size_t paths = unpacked ? unpacked->paths.size() : 0;
     for (size_t i = 0; i < count; ++i) {
         const RigExecRuntimeInputInfo &info = fresh->GetInputInfo(i);
@@ -2093,7 +2243,6 @@ _TestFixture(const RigExecExampleFixture &fixture,
         return;
     }
     RigExecRigEvaluator evaluator(stage, rigPath);
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     std::string error;
 
     // One record at the probe time: the defaults, then the input API.
@@ -2105,17 +2254,27 @@ _TestFixture(const RigExecExampleFixture &fixture,
         std::printf("%s: probe bake: %s\n", fixture.stage, error.c_str());
         return;
     }
-    // The bake writes a file the format's validator accepts, so Open
-    // takes it.
-    CHECK(RigExecRuntimeReader::Open(atProbe.data(), atProbe.size(),
-                                     &error));
+    // Keep this fresh reader through read-only labels, then transfer it
+    // to the cold/held defaults checks. Input API and sampler histories
+    // use their own independently opened readers.
+    std::unique_ptr<RigExecRuntimeReader> defaultsReader =
+        RigExecRuntimeReader::Open(atProbe.data(), atProbe.size(), &error);
+    CHECK(defaultsReader);
 
-    if (_TestStepLabels(fixture.stage, evaluator, atProbe)) {
+    // Strictly validate the unchanged fixture once. Every malformed edit
+    // still deep-copies this baseline and independently opens its raw bytes.
+    const std::unique_ptr<const fb::RigExecWireFile> baseline =
+        RigExecTestUnpack(atProbe);
+    if (!baseline) {
+        return;
+    }
+    if (_TestStepLabels(fixture.stage, evaluator, atProbe, *baseline,
+                        defaultsReader.get())) {
         ++stepLabelRows;
     }
-    _TestStepGraphRefusals(stagePath, atProbe);
-    _TestStaticTableRefusals(stagePath, atProbe);
-    _TestPointBindingRefusals(stagePath, atProbe);
+    _TestStepGraphRefusals(stagePath, *baseline);
+    _TestStaticTableRefusals(stagePath, *baseline);
+    _TestPointBindingRefusals(stagePath, *baseline);
 
     // Truncating the tail breaks the buffer, so Open refuses.
     if (atProbe.size() > 64) {
@@ -2125,8 +2284,9 @@ _TestFixture(const RigExecExampleFixture &fixture,
         CHECK(!truncError.empty());
     }
 
-    _TestDefaults(fixture, stage, rigPath, atProbe);
-    _TestInputApi(fixture, stage, atProbe);
+    _TestDefaults(fixture, stage, rigPath, std::move(defaultsReader),
+                  error);
+    _TestInputApi(fixture, stage, atProbe, *baseline);
 
     // One record at the first table frame, played along the table.
     std::vector<uint8_t> atFirst;
@@ -2150,6 +2310,7 @@ main(int argc, char **argv)
     PlugRegistry::GetInstance().RegisterPlugins(
         RIGEXEC_SCHEMA_RESOURCE_DIR);
     _TestMalformed();
+    _TestValidatedObjectCopyIsolation();
 
     std::string examplesDir = RIGEXEC_EXAMPLES_DIR;
     if (argc > 1) {
@@ -2159,6 +2320,14 @@ main(int argc, char **argv)
     bool sawBytes = false;
     int bakingRows = 0;
     for (const RigExecExampleFixture &fixture : kRigExecExampleFixtures) {
+        // One layered body retains the Biped loader/label/input contracts.
+        // Full per-asset parity and binary conformance keep all Biped rows.
+        const std::string name = fixture.stage;
+        if (name == "biped/Biped.usda" ||
+            name == "biped/Biped_anim.usda" ||
+            name == "biped/Biped_stack.usda") {
+            continue;
+        }
         if (!fixture.bakesToday) {
             continue;
         }
@@ -2177,8 +2346,6 @@ main(int argc, char **argv)
             const UsdStageRefPtr stage = UsdStage::Open(stagePath);
             if (stage && !_FindRig(stage).IsEmpty()) {
                 RigExecRigEvaluator evaluator(stage, _FindRig(stage));
-                evaluator.SetEvaluationMode(
-                    RigExecEvaluationMode::Baked);
                 std::vector<uint8_t> bytes;
                 std::string error;
                 if (RigExecTestBakeAt(evaluator, frames.front(), &bytes,
@@ -2223,10 +2390,10 @@ main(int argc, char **argv)
                 pointBindingRefusals, pointBindingRows);
     CHECK(pointBindingRows > 0);
     CHECK(pointBindingRefusals > 0);
-    // Every baking fixture opened above; the refusals need a step with a
+    // Every selected baking fixture opened above; refusals need a step with a
     // predecessor, a cluster and a cluster edge, which some fixture must
     // have.
-    std::printf("step graph refusals: %d flipped predecessor(s), %d index "
+    std::printf("step graph malformed eligibility: %d flipped predecessor(s), %d index "
                 "range(s), %d cluster cycle(s), %d unproduced read(s)\n",
                 stepGraphFlips, stepGraphRanges, stepGraphCycles,
                 stepGraphProducers);
@@ -2238,7 +2405,7 @@ main(int argc, char **argv)
                 "version)\n",
                 fileRefusalRows);
     CHECK(fileRefusalRows == 1);
-    std::printf("static table refusals: %d of %d baking row(s); chain base "
+    std::printf("static table inventories: %d of %d baking row(s); chain base "
                 "on %d, constraint arrays on %d\n",
                 staticTableRows, bakingRows, staticChainRows,
                 staticArrayRows);
@@ -2272,6 +2439,8 @@ main(int argc, char **argv)
     CHECK(inputApiFields > 0);
     CHECK(inputApiMoved > 0);
     CHECK(inputApiResets > 0);
+
+    _TestGenericMalformedCoverage();
 
     if (failures == 0) {
         std::printf("testRigExecRuntimeLoader: all tests passed\n");

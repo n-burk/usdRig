@@ -112,7 +112,7 @@ def main():
     # 3. and nothing runs away over the arms' range.
     stage.SetEditTarget(Usd.EditTarget(stage.GetSessionLayer()))
     rig = rigexec.Rig(stage, _RIG)
-    rig.evaluation_mode = "baked"
+    rig.cpu_reference = True
 
     def ctl(name):
         for p in stage.Traverse():

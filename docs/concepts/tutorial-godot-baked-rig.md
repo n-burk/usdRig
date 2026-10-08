@@ -402,5 +402,5 @@ setup and reopen the project. Rebuilding replaces the single asset file.
 ## Where to go next
 
 * [Source rolling-ball lesson](../concepts/tutorial-rolling-ball.md)
-* [Baked and dynamic evaluation](../concepts/baked-vs-dynamic.md)
+* [Evaluation and independent checks](../concepts/baked-vs-dynamic.md)
 * [Embedded presentation format](../specs/rigexec-presentation.md)

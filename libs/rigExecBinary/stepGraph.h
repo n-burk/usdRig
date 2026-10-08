@@ -1,6 +1,6 @@
 // The step and cluster graph a .rigexec carries, checked once per load.
-// Playback walks the steps in index order (source steps first, in index
-// order) and dirties whole clusters, so a file is refused unless it names
+// Playback preserves graph order and selects exact successor steps;
+// clusters describe the scheduling quotient. A file is refused unless it names
 // no retired step kind or slot domain, that walk is a topological order of
 // its step graph, every slot a step reads has been written by then, and its
 // cluster graph is an acyclic quotient of the step graph. The file
@@ -42,9 +42,12 @@ inline bool
 RigExecStepGraphDomainHoldsValue(uint8_t domain)
 {
     switch (fb::SlotDomain(domain)) {
-    case fb::SlotDomain::Avars:
-    case fb::SlotDomain::ChainBase:
     case fb::SlotDomain::SolverPoints:
+    case fb::SlotDomain::SpaceLeaf:
+    case fb::SlotDomain::DerivedBase:
+    case fb::SlotDomain::ChainInput:
+    case fb::SlotDomain::ConstraintInputs:
+    case fb::SlotDomain::RequiredStageFramesAdmission:
         return true;
     default:
         return false;
@@ -94,6 +97,15 @@ DomainName(uint8_t domain)
     case fb::SlotDomain::Rest: return "Rest";
     case fb::SlotDomain::Ladder: return "Ladder";
     case fb::SlotDomain::SkinTopology: return "SkinTopology";
+    case fb::SlotDomain::WeightField: return "WeightField";
+    case fb::SlotDomain::WeightFramesBase: return "WeightFramesBase";
+    case fb::SlotDomain::SpaceValue: return "SpaceValue";
+    case fb::SlotDomain::SpaceLeaf: return "SpaceLeaf";
+    case fb::SlotDomain::DerivedBase: return "DerivedBase";
+    case fb::SlotDomain::ChainInput: return "ChainInput";
+    case fb::SlotDomain::ConstraintInputs: return "ConstraintInputs";
+    case fb::SlotDomain::SwitchFrame: return "SwitchFrame";
+    case fb::SlotDomain::RequiredStageFramesAdmission: return "RequiredStageFramesAdmission";
     }
     return "domain " + Text(domain);
 }
@@ -272,7 +284,8 @@ RigExecStepGraphReservedError(const std::vector<Step> &steps,
 template <class Step, class Clustering, class RangeOf>
 std::string
 RigExecStepGraphError(const std::vector<Step> &steps,
-                      const Clustering &clustering, RangeOf rangeOf)
+                      const Clustering &clustering, RangeOf rangeOf,
+                      const std::vector<RigExecStepGraphRange> &excluded = {})
 {
     namespace detail = rigExecStepGraphDetail;
     using detail::Contains;
@@ -323,36 +336,21 @@ RigExecStepGraphError(const std::vector<Step> &steps,
             return why;
         }
     }
-    // The source pass runs ahead of every other step, so a source step's
-    // predecessors must run in it too.
-    for (size_t s = 0; s < stepCount; ++s) {
-        if (!steps[s].isSource) {
-            continue;
-        }
-        for (const auto p : steps[s].preds) {
-            if (!steps[size_t(p)].isSource && !steps[size_t(p)].isHead) {
-                return "source " + stepName(s) + " depends on step " +
-                       Text(int64_t(p)) + ", which is not a source";
-            }
-        }
-    }
-
-    // Producers, in playback order: the source pass in index order, then
-    // every other step in index order. A step's reads see the writes of
-    // the steps before it, not its own.
+    // The common compiler serializes one canonical topological order.
+    // Head and source flags categorize bodies; neither creates another pass.
     {
         std::vector<size_t> order;
         order.reserve(stepCount);
-        for (size_t s = 0; s < stepCount && steps[s].isHead; ++s)
+        for (size_t s = 0; s < stepCount; ++s) {
             order.push_back(s);
-        for (const bool sourcePass : {true, false}) {
-            for (size_t s = 0; s < stepCount; ++s) {
-                if (!steps[s].isHead && bool(steps[s].isSource) == sourcePass) {
-                    order.push_back(s);
+            for (const auto predecessor : steps[s].preds) {
+                if (size_t(predecessor) >= s) {
+                    return stepName(s) + " has a predecessor outside canonical order";
                 }
             }
         }
         detail::WrittenRuns written;
+        for(const auto &range:excluded) written.Add(range);
         for (const size_t s : order) {
             for (const auto &read : steps[s].reads) {
                 const RigExecStepGraphRange range = rangeOf(read);

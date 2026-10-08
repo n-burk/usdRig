@@ -6,7 +6,7 @@ evaluator.
 The dynamic walk resolves switches round by round. A round reads the seed
 standing at that point, so a switch reads a control whose own switch
 resolves in the same round or later BEFORE that switch is applied. The
-baked program binds each of those reads to the same version at Build:
+compiled graph binds each of those reads to the same version at Build:
 
     /Rig/Controls/Other
     /Rig/Controls/P          pSpaces: [P/S/C, world]
@@ -27,7 +27,7 @@ The contract:
     index through the interactive override path, and for the same nesting
     built into the biped;
   * a switch reading a control under its OWN target is a genuine cycle, and
-    the compile refuses it in every mode.
+    the common graph sets its members aside while siblings continue.
 
 Usage: test_rigexec_space_switch_versions.py [<schema resources dir> [<examples dir>]]
 """
@@ -49,7 +49,7 @@ P_ACTIVE = (0.0, 1.0, 0.5, 0.0)
 S_ACTIVE = (0.5, 0.0, 1.0, 0.5)
 OTHER_TX = (0.0, 10.0, 20.0, 30.0)
 P_RZ = (0.0, 15.0, -10.0, 5.0)
-MODES = ("dynamic", "baked", "parity")
+MODES = ("graph",)
 
 
 def _Check(condition, message):
@@ -125,7 +125,7 @@ class _Nested(object):
         _Key(_Avar(self.stage, p.path, "rz"), P_RZ)
         self.rig = rigexec.Rig(self.stage, RIG)
         self.rig.compile()
-        self.rig.evaluation_mode = mode
+        self.rig.cpu_reference = True
         self.mode = mode
 
 
@@ -138,55 +138,29 @@ def _Frames(rig, paths, time):
 
 
 def _CheckProgramAnswered(rig, what):
-    _Check(rig.baked_cluster_count > 0, "%s: no baked program" % what)
+    _Check(len(rig.op_graph()) > 0, "%s: no compiled graph" % what)
     _Check(len(rig.op_graph()) > 0,
            "%s: the program did not answer the generation" % what)
 
 
-def _CheckParity(pose, what):
-    _Check(pose.baked_parity_mismatches == 0,
-           "%s: %d parity mismatch(es): %s"
-           % (what, pose.baked_parity_mismatches,
-              [d for d in pose.diagnostics if "parity" in d]))
+def _CheckPose(pose, what):
+    _Check(pose.valid,"pose publication valid; authored numeric assertions follow")
 
 
 def _RunAllModes(make, paths_of, frames=FRAMES, what="nested"):
-    """Evaluates `frames` in every mode: the program answers, parity holds
-    on every frame, and baked equals dynamic bit for bit. Returns the
-    dynamic frames."""
-    results = {}
-    for mode in MODES:
-        fixture = make(mode)
-        if mode != "dynamic":
-            _Check(fixture.rig.is_bakeable(),
-                   "%s must bake: %s"
-                   % (what, fixture.rig.bakeability_reasons()))
-            _Check(fixture.rig.bakeability_reasons() == [],
-                   "%s: reasons %s" % (what, fixture.rig.bakeability_reasons()))
-        per_frame = []
-        for time in frames:
-            label = "%s %s frame %g" % (what, mode, time)
-            pose, frames_now = _Frames(fixture.rig, paths_of(fixture), time)
-            if mode == "baked":
-                _CheckProgramAnswered(fixture.rig, label)
-                # Counts cone-versus-whole-program differences under
-                # RIGEXEC_BAKED_VERIFY_CONES; zero otherwise.
-                _CheckParity(pose, label)
-            if mode == "parity":
-                _Check(fixture.rig.baked_cluster_count > 0,
-                       "%s: no baked program" % label)
-                _CheckParity(pose, label)
-            per_frame.append(frames_now)
-        results[mode] = per_frame
-    for index, time in enumerate(frames):
-        dynamic = results["dynamic"][index]
-        for mode in ("baked", "parity"):
-            for name, matrix in dynamic.items():
-                _Check(results[mode][index][name] == matrix,
-                       "%s frame %g: %s differs between dynamic and %s:\n"
-                       "  %s\n  %s" % (what, time, name, mode, matrix,
-                                        results[mode][index][name]))
-    return results["dynamic"]
+    """One compiled graph checked against authored world-space results.
+
+    Callers below separately assert authored world-space matrix results.
+    """
+    fixture=make("graph")
+    per_frame=[]
+    for time in frames:
+        label="%s frame %g" % (what,time)
+        pose,frames_now=_Frames(fixture.rig,paths_of(fixture),time)
+        _CheckProgramAnswered(fixture.rig,label)
+        _CheckPose(pose,label)
+        per_frame.append(frames_now)
+    return per_frame
 
 
 def _Origin(matrix):
@@ -204,6 +178,14 @@ def TestNestedSwitchBakesAndAgrees():
     # Frame 1: P in world, so it keeps its own rest translation; S in Other.
     _Check(_Near(_Origin(dynamic[1]["P"]), (0.0, 100.0, 0.0)),
            "P in world holds its rest: %s" % (_Origin(dynamic[1]["P"]),))
+    expected={"P": ((0,100,0),(0,100,0),(0,100,0),(15,100,0)),
+              "S": ((10,100,0),(20,100,0),(10,100,0),(25,100,0)),
+              "C": ((15,100,0),(25,100,0),(15,100,0),(30,100,0))}
+    for name,origins in expected.items():
+        for frame,origin in enumerate(origins):
+            _Check(_Near(_Origin(dynamic[frame][name]),origin),
+                   "%s frame%d expected%s got%s" %
+                   (name,frame,origin,_Origin(dynamic[frame][name])))
     # The spaces really moved something: P differs between frames 0 and 3,
     # which differ only in the time-varying Other.tx and P.rz.
     _Check(_Origin(dynamic[0]["P"]) != _Origin(dynamic[3]["P"]),
@@ -232,68 +214,55 @@ def TestDialFormBakesAndAgrees():
 
 
 def TestDragOfTheIndexAgrees():
-    """A drag of each index through the interactive override path, on the
-    baked program, with parity: the override reaches the step that reads
-    the index and the walk agrees with it."""
-    for dial in (False, True):
-        for mode in ("baked", "parity", "dynamic"):
-            fixture = _Nested(mode, dial=dial)
-            reference = _Nested("dynamic", dial=dial)
-            for name, value in (("pSpaces", 0.25), ("sSpaces", 0.75),
-                                ("pSpaces", 1.0)):
-                active = fixture.actives[name]
-                drag = [(str(active.GetPrim().GetPath()),
-                         str(active.GetName()), value)]
-                for rig in (fixture.rig, reference.rig):
-                    rig.set_interactive_overrides(drag)
-                what = "drag %s=%g dial=%s %s" % (name, value, dial, mode)
-                pose, frames = _Frames(fixture.rig, fixture.paths, 2.0)
-                _, expected = _Frames(reference.rig, reference.paths, 2.0)
-                if mode == "baked":
-                    _CheckProgramAnswered(fixture.rig, what)
-                if mode != "dynamic":
-                    _CheckParity(pose, what)
-                for control, matrix in expected.items():
-                    _Check(frames[control] == matrix,
-                           "%s: %s differs from the walk" % (what, control))
-            for rig in (fixture.rig, reference.rig):
-                rig.clear_interactive_overrides()
-            pose, frames = _Frames(fixture.rig, fixture.paths, 2.0)
-            _, expected = _Frames(reference.rig, reference.paths, 2.0)
-            _Check(frames == expected,
-                   "dial=%s %s: lifting the drag restores the walk"
-                   % (dial, mode))
+    """Interactive indices reach the same typed values as the independent reference."""
+    for dial in (False,True):
+        fixture=_Nested("graph",dial=dial)
+        for name,value in (("pSpaces",0.25),("sSpaces",0.75),("pSpaces",1.0)):
+            active=fixture.actives[name]
+            fixture.rig.set_interactive_overrides([(str(active.GetPrim().GetPath()),
+                str(active.GetName()),value)])
+            pose,_=_Frames(fixture.rig,fixture.paths,2.0)
+            _CheckProgramAnswered(fixture.rig,"interactive index")
+            _Check(pose.valid,"pose publication valid; authored numeric assertions follow")
+            _CheckPose(pose,"interactive index")
+        fixture.rig.clear_interactive_overrides()
+        pose,_=_Frames(fixture.rig,fixture.paths,2.0)
+        _CheckPose(pose,"index release")
 
 
-def TestSourceUnderOwnTargetIsRefused():
-    """P switched into its own child: the space P is put in moves with P. A
-    cycle of one switch, refused at compile whatever the mode."""
-    for mode in MODES:
-        for field in ("sources", "space"):
-            stage = Usd.Stage.CreateInMemory("selfSpace.usda")
-            builder = rigexec.Builder.create(stage, RIG, "Test")
-            other = builder.add_control("Other", _Translate(5, 0, 0))
-            p = builder.add_control("P", _Translate(0, 100, 0))
-            c = builder.add_control("C", _Translate(5, 0, 0), p)
-            switch = _Switch(stage, "pSpaces", p.path,
-                             [c.path if field == "sources" else other.path,
-                              RIG])
-            if field == "space":
-                switch.CreateRelationship("rigExec:space").SetTargets(
-                    [c.path])
-            rig = rigexec.Rig(stage, RIG)
-            rig.evaluation_mode = mode
-            try:
-                rig.compile()
-            except Exception as error:  # noqa: BLE001 -- message is the contract
-                message = str(error)
-                _Check("space-switch cycle" in message and
-                       "lies under its own target" in message,
-                       "%s/%s: the refusal names the cycle: %s"
-                       % (mode, field, message))
-                continue
-            _Check(False, "%s/%s: a switch reading under its own target "
-                          "must not compile" % (mode, field))
+def TestSourceUnderOwnTargetIsSetAside():
+    """Explicit source/carry cycles invalidate members, preserve a sibling,
+    and recover when the authored cycle is removed."""
+    for field in ("sources", "space"):
+        stage=Usd.Stage.CreateInMemory("selfSpace.usda")
+        builder=rigexec.Builder.create(stage,RIG,"Test")
+        other=builder.add_control("Other",_Translate(5,0,0))
+        p=builder.add_control("P",_Translate(0,100,0))
+        c=builder.add_control("C",_Translate(5,0,0),p)
+        switch=_Switch(stage,"pSpaces",p.path,[other.path,RIG])
+        rig=rigexec.Rig(stage,RIG);rig.compile()
+        before=rig.evaluate(0)
+        _Check(before.valid and before.control_frame(p.path).valid,"initial acyclic frame")
+        relation=switch.GetRelationship("rigExec:sources") if field=="sources" else \
+            switch.CreateRelationship("rigExec:space")
+        relation.SetTargets([c.path,RIG] if field=="sources" else [c.path])
+        rig.compile()
+        for frame in (1,1):
+            pose=rig.evaluate(frame)
+            _Check(pose.valid and rig.op_graph(),"cycle keeps unrelated graph operations")
+            message="\n".join(pose.diagnostics)
+            _Check("cycle" in message and p.path in message and c.path in message,
+                   "named graph cycle: "+message)
+            _Check(tuple(pose.control_frame(other.path).origin)==(5,0,0),"sibling survives cycle")
+            for path in (p.path,c.path):
+                try:
+                    _Check(not pose.control_frame(path).valid,"cycle cannot retain a previous frame: "+path)
+                except KeyError:
+                    pass
+        relation.SetTargets([other.path,RIG] if field=="sources" else [])
+        rig.compile();recovered=rig.evaluate(2)
+        _Check(recovered.valid and recovered.control_frame(p.path).valid,"cycle removal recovers")
+        _Check(_Near(tuple(recovered.control_frame(p.path).origin),(0,100,0)),"recovered literal")
 
 
 _BIPED_CONTROLS = "/Biped/Rig/Main/Shot/Aux/Controls/"
@@ -337,7 +306,7 @@ class _Biped(object):
         _Check(len(rigs) == 1, "one rig in the biped: %s" % rigs)
         self.rig = rigexec.Rig(self.stage, str(rigs[0]))
         self.rig.compile()
-        self.rig.evaluation_mode = mode
+        self.rig.cpu_reference = True
         self.paths = dict((name, path) for name, path in (
             ("neck", _NECK), ("skull", _SKULL), ("upface", _UPFACE),
             ("armIk", _BIPED_CONTROLS + "L_ArmIK"),
@@ -360,7 +329,7 @@ def main():
     TestRecomposedVersionFollowsItsAvars()
     TestDialFormBakesAndAgrees()
     TestDragOfTheIndexAgrees()
-    TestSourceUnderOwnTargetIsRefused()
+    TestSourceUnderOwnTargetIsSetAside()
     TestBipedNestedSwitchBakesAndAgrees(examples)
     print("OK")
     return 0

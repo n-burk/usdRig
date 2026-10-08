@@ -6,30 +6,10 @@ Headless: no Qt, so the CLI (`tools/rigexec_schedule.py`) and the usdview
 panel (`profilerUI.py`) share one measurement and cannot drift into two
 different answers.
 
-A baseline you can run before and after a change and diff. It answers four
-questions that are otherwise guesswork:
-
-  1. WHAT IS THE SHAPE of the schedule -- how deep is the pose walk, how
-     wide is each level, and which solvers sit where. Depth is the thing
-     that cannot be parallelised: a level is a barrier.
-  2. WHICH REGIONS ARE ALLOWED TO RUN IN PARALLEL, and for the ones that
-     are not, WHY not. RigExec's geometry chain levels carry an explicit
-     `parallel` flag and it is usually false for a reason worth knowing.
-  3. WHICH ONES ACTUALLY DID. The profiler records the index of the thread
-     that ran every scope, so "ran on four threads" is measured rather
-     than assumed -- within the limit the docstring on `_threads` states.
-  4. WHAT IT COSTS, split by the three workloads that behave completely
-     differently:
-
-       compile  the epoch: digest, bake, tap preparation
-       replay   evaluate again with nothing changed
-       drag     interactive overrides, which is what a manipulator does
-       author   set an avar on the stage and evaluate
-
-     `author` is usually dominated by RE-COMPILATION rather than by posing,
-     because an authored edit invalidates the compiled program. Timing a rig
-     that way and calling the number "evaluation" is the most common way to
-     measure this wrong, so it is reported separately and labelled.
+The report describes the compiled operation graph and measures compile,
+unchanged replay, interactive drag, and authored-edit workloads. Operations
+become ready after their predecessors finish; dependency depth is a graph
+property, not a dispatch barrier. Thread counts cover recorded scopes only.
 """
 import json
 import os
@@ -68,59 +48,38 @@ def _percentiles(values):
 # Structure
 
 def schedule_shape(stage, rig, rig_root):
-    """Levels, widths and depth: the part no thread count can change."""
-    levels = rig.solver_batch_levels()
-    by_level = {}
-    for path, level in levels.items():
-        by_level.setdefault(level, []).append(_name(path))
-
-    # The engine's own answers -- the movers it discovered, wherever they sit
-    # under the rig, and the geometry chains it built from them (one per
-    # written target) -- rather than a count of whatever scope they happen
-    # to be grouped under.
-    constraints, math_movers = 0, 0
-    for mover in rig.mover_order():
-        t = mover["type"]
-        if t.endswith("Constraint"):
-            constraints += 1
-        elif t == "RigExecFloatMathMover":
-            math_movers += 1
-    chains = sum(len(level["targets"]) for level in rig.chain_levels())
-
-    return {
-        "solver_count": len(levels),
-        "deepest_solver_level": max(levels.values()) if levels else 0,
-        "solver_levels": {str(k): sorted(v)
-                          for k, v in sorted(by_level.items())},
-        "widest_solver_level": max((len(v) for v in by_level.values()),
-                                   default=0),
-        "frame_constraints": constraints,
-        "mover_chains": chains,
-        "float_math_movers": math_movers,
-    }
-
-
-def chain_shape(rig):
-    """Geometry chain levels and whether each may run its chains in parallel.
-
-    A level is refused parallelism for a reason, and the common one on a
-    character is simply that it has fewer than three chains: one deformed
-    mesh is one chain, and dispatching one task to wait on it costs more
-    than it saves. Said out loud here so that "parallel: false" does not
-    read as a defect.
-    """
-    out = []
-    for level in rig.chain_levels():
-        targets = list(level["targets"])
-        why = ""
-        if not level["parallel"]:
-            why = ("fewer than 3 chains in the level"
-                   if len(targets) < 3
-                   else "chains in this level share a weight object or "
-                        "are otherwise not independent")
-        out.append({"targets": targets, "parallel": bool(level["parallel"]),
-                    "why_not": why})
-    return out
+    """Actual operation count, longest dependency path and cluster count."""
+    nodes = rig.op_graph()
+    by_id = {node["step"]: node for node in nodes}
+    if len(by_id) != len(nodes):
+        raise ValueError("duplicate operation ids")
+    remaining = {i: set(n["preds"]) for i, n in by_id.items()}
+    successors = {i: [] for i in by_id}
+    for i, preds in remaining.items():
+        for predecessor in preds:
+            if predecessor not in by_id:
+                raise ValueError("missing predecessor %s" % predecessor)
+            successors[predecessor].append(i)
+    ready = sorted(i for i, preds in remaining.items() if not preds)
+    depths = {i: 1 for i in ready}
+    completed = 0
+    while ready:
+        i = ready.pop()
+        completed += 1
+        for successor in successors[i]:
+            depths[successor] = max(depths.get(successor, 1), depths[i] + 1)
+            remaining[successor].remove(i)
+            if not remaining[successor]:
+                ready.append(successor)
+    if completed != len(nodes):
+        raise ValueError("compiled operation graph contains a cycle")
+    domains = {}
+    for node in nodes:
+        domains[node["domain"]] = domains.get(node["domain"], 0) + 1
+    return {"op_count": len(nodes),
+            "longest_path": max(depths.values(), default=0),
+            "cluster_count": len({n["cluster"] for n in nodes if n["cluster"] >= 0}),
+            "domains": dict(sorted(domains.items()))}
 
 
 # Cost
@@ -196,10 +155,10 @@ def _threads(events):
     thread here.
 
     What the number does tell you is whether the regions that ARE scoped
-    ran concurrently: the chain-level dispatch, the compile-time digest
+    ran concurrently: ready operation dispatch, the compile-time digest
     and the exec warm-up. One thread across the whole of `drag` means no
     scoped region ran in parallel -- which is the true and interesting
-    statement about the pose walk.
+    statement about the recorded scopes.
     """
     per_thread = {}
     per_category = {}
@@ -229,10 +188,6 @@ def render(report, top):
     add("=" * 62)
     add("  stage            : %s" % s["path"])
     add("  rig root         : %s" % s["rig_root"])
-    add("  evaluation mode  : %s (%s)" % (s["mode"], s["mode_source"]))
-    add("  bakeable         : %s%s" % (
-        s["bakeable"], "" if s["bakeable"] else
-        "   refusals: %s" % (s["bakeability_reasons"][:2],)))
     add("  parallel eval    : %s   logical cores: %s"
         % (s["parallel_enabled"], s["cores"]))
     if s["thread_limit"]:
@@ -242,36 +197,10 @@ def render(report, top):
     add("")
     add("Schedule shape -- depth is the part threads cannot fix")
     add("-" * 62)
-    add("  frame constraints: %d" % shape["frame_constraints"])
-    add("  mover chains     : %d" % shape["mover_chains"])
-    add("  float math movers: %d" % shape["float_math_movers"])
-    add("  solvers          : %d, deepest level %d, widest level %d"
-        % (shape["solver_count"], shape["deepest_solver_level"],
-           shape["widest_solver_level"]))
-    wide = [(int(k), v) for k, v in shape["solver_levels"].items()
-            if len(v) > 1]
-    if wide:
-        add("  levels with more than one solver (these can share a level):")
-        for level, names in sorted(wide):
-            add("    %3d  %s" % (level, ", ".join(names)))
-    alone = sorted(int(k) for k, v in shape["solver_levels"].items()
-                   if len(v) == 1)
-    if alone:
-        add("  %d solvers sit alone on their own level%s"
-            % (len(alone), ": %s" % alone[:12] if len(alone) <= 12
-               else " (levels %d..%d)" % (alone[0], alone[-1])))
-
-    add("")
-    add("Geometry chain levels")
-    add("-" * 62)
-    for level in report["chains"]:
-        add("  %-46s parallel=%s%s"
-            % (", ".join(_name(t) for t in level["targets"])[:46],
-               level["parallel"],
-               "" if not level["why_not"] else "  (%s)" % level["why_not"]))
-    if not report["chains"]:
-        add("  none -- this rig deforms no geometry")
-
+    add("  operations       : %d" % shape["op_count"])
+    add("  longest path     : %d operations" % shape["longest_path"])
+    add("  clusters         : %d" % shape["cluster_count"])
+    add("  domains          : %s" % shape["domains"])
     add("")
     add("Cost per workload")
     add("-" * 62)
@@ -357,10 +286,6 @@ def build_report(stage, rig_root="/Biped/Rig", samples=40, control=None,
         "stage": {
             "path": stage.GetRootLayer().identifier,
             "rig_root": rig_root,
-            "mode": rig.evaluation_mode,
-            "mode_source": rig.evaluation_mode_source,
-            "bakeable": rig.is_bakeable(),
-            "bakeability_reasons": list(rig.bakeability_reasons()),
             "parallel_enabled": os.environ.get(
                 "RIGEXEC_ENABLE_PARALLEL_EVAL", "true (default)"),
             "thread_limit": os.environ.get("PXR_WORK_THREAD_LIMIT"),
@@ -370,7 +295,6 @@ def build_report(stage, rig_root="/Biped/Rig", samples=40, control=None,
         "compile": {"ms": compile_ms, "scopes": compile_scopes,
                     "threads": compile_threads},
         "shape": schedule_shape(stage, rig, rig_root),
-        "chains": chain_shape(rig),
         "driven": {"control": controls[control], "avar": avar},
     }
     report["cost"] = measure(stage, rig, controls[control], avar, samples)

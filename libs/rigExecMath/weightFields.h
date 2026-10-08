@@ -59,6 +59,11 @@ std::vector<float> RigExecBuildFalloffLut(
 /// falloffMax < falloffMin is legal and simply flips the band; only the
 /// exactly-degenerate band is special-cased, to a hard step at that
 /// distance.
+struct RigExecWeightPointView {
+    const GfVec3f *data = nullptr;
+    size_t count = 0;
+};
+
 struct RigExecFalloffParams {
     float falloffMin = 0.0f;
     float falloffMax = 1.0f;
@@ -68,6 +73,9 @@ struct RigExecFalloffParams {
     /// linear. Built by RigExecBuildFalloffLut or resampled from an
     /// authored spline by the caller -- this layer never knows about Ts.
     std::vector<float> curve;
+    /// Optional call-scoped immutable LUT; when set it replaces curve.
+    const float *curveData = nullptr;
+    size_t curveCount = 0;
 };
 
 /// Evaluates the remap above for one raw distance. The result is NOT
@@ -80,6 +88,7 @@ float RigExecEvaluateFalloff(float distance, const RigExecFalloffParams &p);
 /// interpolation, clamping r into range. An empty or single-entry table
 /// is the identity.
 float RigExecSampleFalloffLut(const std::vector<float> &curve, float r);
+float RigExecSampleFalloffLut(const float *curve, size_t count, float r);
 
 // Distance functions. Each takes a point already in the volume's local
 // space; the field builders below do the transform.
@@ -169,6 +178,20 @@ void RigExecCurveWeightField(
     const RigExecFalloffParams &params,
     std::vector<float> *weights);
 
+/// Borrowed input overloads. Views remain immutable through the call;
+/// localCurve is producer-owned retained transform scratch.
+void RigExecSphereWeightField(RigExecWeightPointView points,
+    const GfMatrix4d &, const RigExecFalloffParams &, std::vector<float> *,
+    const GfVec3f &positiveScales = GfVec3f(1.0f),
+    const GfVec3f &negativeScales = GfVec3f(1.0f));
+void RigExecPlaneWeightField(RigExecWeightPointView points,
+    const GfMatrix4d &, int axis, const RigExecFalloffParams &,
+    std::vector<float> *, const RigExecPlaneBounds *bounds = nullptr);
+void RigExecCurveWeightField(RigExecWeightPointView points,
+    RigExecWeightPointView curvePoints, const GfMatrix4d &,
+    const RigExecFalloffParams &, std::vector<float> *,
+    std::vector<GfVec3f> *localCurve);
+
 // Composition (spec §4.1 volumetric extension: weight objects compose).
 
 /// How one weight field folds into the accumulated result.
@@ -193,7 +216,7 @@ enum class RigExecWeightCombine {
 float RigExecWeightCombineIdentity(RigExecWeightCombine mode);
 
 /// Folds one value into an accumulator. Average is NOT expressible
-/// pairwise and is handled only by RigExecCombineWeightFields.
+/// pairwise and is handled only by the combine-field folds below.
 float RigExecFoldWeight(RigExecWeightCombine mode, float acc, float value);
 
 /// Ordered fold of \p inputs (each the same length) into \p out.
@@ -203,6 +226,65 @@ float RigExecFoldWeight(RigExecWeightCombine mode, float acc, float value);
 /// short input would silently mean "identity" for the missing tail.
 /// Zero inputs fills \p out with the mode's identity at length
 /// \p elementCount.
+/// Streaming fold behind RigExecCombineWeightFields: each input is
+/// published on demand through \p resolve instead of retained, so
+/// temporary storage is O(points) however many inputs a combine
+/// lists. \p resolve(k, data, size) returns false on failure; on
+/// success it sets *data/*size to input k's dense read-only view,
+/// which must stay alive until the next resolve call. A view whose
+/// size differs from \p elementCount is the same structural error as
+/// before: \p out is cleared and false is returned. Seeding
+/// (subtract/overlay from the first input), authored fold order,
+/// and average normalization match RigExecCombineWeightFields
+/// exactly, so the two answer bitwise identically input for input.
+template <typename Resolve>
+bool RigExecCombineWeightFieldsStreamed(
+    RigExecWeightCombine mode, size_t inputCount, size_t elementCount,
+    Resolve &&resolve, std::vector<float> *out)
+{
+    const bool seedFromFirst = mode == RigExecWeightCombine::Subtract ||
+                               mode == RigExecWeightCombine::Overlay;
+    if (inputCount == 0) {
+        out->assign(elementCount, RigExecWeightCombineIdentity(mode));
+        return true;
+    }
+    const float *data = nullptr;
+    size_t size = 0;
+    size_t first = 0;
+    if (seedFromFirst) {
+        if (!resolve(0, &data, &size) || size != elementCount) {
+            out->clear();
+            return false;
+        }
+        // The empty seed clears rather than assigning a possibly
+        // null range: data() on an empty input is not a range.
+        if (elementCount == 0) {
+            out->clear();
+        } else {
+            out->assign(data, data + elementCount);
+        }
+        first = 1;
+    } else {
+        out->assign(elementCount, RigExecWeightCombineIdentity(mode));
+    }
+    for (size_t k = first; k < inputCount; ++k) {
+        if (!resolve(k, &data, &size) || size != elementCount) {
+            out->clear();
+            return false;
+        }
+        for (size_t i = 0; i < elementCount; ++i) {
+            (*out)[i] = RigExecFoldWeight(mode, (*out)[i], data[i]);
+        }
+    }
+    if (mode == RigExecWeightCombine::Average) {
+        const float inv = 1.0f / float(inputCount);
+        for (float &w : *out) {
+            w *= inv;
+        }
+    }
+    return true;
+}
+
 bool RigExecCombineWeightFields(
     RigExecWeightCombine mode,
     const std::vector<std::vector<float>> &inputs,

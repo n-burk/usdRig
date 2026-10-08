@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """
-Cone re-execution on the shipped biped, from Python: the baked program runs
+Cone re-execution on the shipped biped, from Python: the compiled graph runs
 the CLOSURE of what a drag moved and nothing else (docs/specs/baked-step-graph.md
 §7), and asking for it can never change an answer.
 
@@ -60,8 +60,7 @@ def _RequireEngine():
     to do. The suite has to be green for someone who did not write it, in a
     build they did not configure -- so when it cannot be, it has to say why.
     """
-    missing = [n for n in ("baked_cluster_count",
-                           "baked_clusters_run_last_generation")
+    missing = [n for n in ("op_graph", "last_op_trace", "cpu_reference")
                if not hasattr(rigexec.Rig, n)]
     if missing:
         raise AssertionError(
@@ -80,7 +79,7 @@ def _Open(mode):
     stage = Usd.Stage.Open(_BIPED)
     rig = rigexec.Rig(stage, _RIG)
     rig.compile()
-    rig.evaluation_mode = mode
+    rig.cpu_reference = True
     controls = {p.GetName(): p.GetPath().pathString
                 for p in stage.Traverse()
                 if p.GetTypeName() == "RigExecControl"}
@@ -102,28 +101,28 @@ def _Snapshot(pose):
 
 def TestParityReportsNoMismatch():
     """The program and the dynamic walk, in one generation, agree exactly."""
-    _, rig, controls = _Open("parity")
-    assert rig.is_bakeable(), "the shipped biped is expected to bake"
+    _, rig, controls = _Open("graph")
+    pass # Compile/evaluate validates the single graph.
     rig.evaluate(1.0)
-    assert rig.baked_cluster_count > 0, (
+    assert len(rig.op_graph()) > 0, (
         "parity ran with no program to compare; the check is vacuous")
     for name in _PROBES:
         for value in _VALUES:
             rig.set_interactive_overrides([(controls[name], "avars:rz", value)])
             pose = rig.evaluate(1.0)
-            assert not pose.baked_parity_mismatches, (
-                "%s rz=%g: %d baked parity mismatch(es)"
-                % (name, value, pose.baked_parity_mismatches))
+            assert pose.reference_agreements > 0 and not pose.reference_mismatches, (
+                "%s rz=%g: %d scalar reference mismatch(es)"
+                % (name, value, pose.reference_mismatches))
     # The release edge, where a one-sided invalidation would show up.
     rig.clear_interactive_overrides()
     pose = rig.evaluate(1.0)
-    assert not pose.baked_parity_mismatches, (
-        "release: %d baked parity mismatch(es)" % pose.baked_parity_mismatches)
+    assert pose.reference_agreements > 0 and not pose.reference_mismatches, (
+        "release: %d scalar reference mismatch(es)" % pose.reference_mismatches)
 
 
 def TestABakedDragIsBitIdenticalToAFreshRig():
-    """A long baked drag must answer as a dynamic rig that never saw one."""
-    _, dragged, controls = _Open("baked")
+    """Retained drag history matches a freshly compiled graph with scalar checks."""
+    _, dragged, controls = _Open("graph")
     dragged.evaluate(1.0)
     for name in _PROBES:
         for value in _VALUES:
@@ -131,7 +130,7 @@ def TestABakedDragIsBitIdenticalToAFreshRig():
                 [(controls[name], "avars:rz", value)])
             baked = _Snapshot(dragged.evaluate(1.0))
 
-            _, fresh, freshControls = _Open("dynamic")
+            _, fresh, freshControls = _Open("graph")
             fresh.set_interactive_overrides(
                 [(freshControls[name], "avars:rz", value)])
             full = _Snapshot(fresh.evaluate(1.0))
@@ -139,7 +138,7 @@ def TestABakedDragIsBitIdenticalToAFreshRig():
             label = "%s rz=%g" % (name, value)
             differing = sum(1 for k in baked[0] if baked[0][k] != full[0][k])
             assert not differing, (
-                "%s: %d joint frame(s) differ from the dynamic walk"
+                "%s: %d joint frame(s) differ from a fresh graph"
                 % (label, differing))
             differing = sum(1 for k in baked[1] if baked[1][k] != full[1][k])
             assert not differing, (
@@ -152,7 +151,7 @@ def TestABakedDragIsBitIdenticalToAFreshRig():
 
 
 def TestTheConeSkipsAndKnowsHowMuch():
-    """A leaf drag runs a fraction of the clusters; the root runs more.
+    """A leaf drag runs a fraction of the operations; the root runs more.
 
     The half that matters: a generation that skipped nothing agrees with the
     full program trivially and proves only that the comparison runs. And a
@@ -161,9 +160,9 @@ def TestTheConeSkipsAndKnowsHowMuch():
     a fingertip does -- a cone that is too small is the failure that puts a
     limb in the wrong place.
     """
-    _, rig, controls = _Open("baked")
+    _, rig, controls = _Open("graph")
     rig.evaluate(1.0)
-    total = rig.baked_cluster_count
+    total = len(rig.op_graph())
     assert total > 0, "the shipped biped is expected to bake"
 
     def _Drag(name):
@@ -174,22 +173,22 @@ def TestTheConeSkipsAndKnowsHowMuch():
         rig.evaluate(1.0)
         rig.set_interactive_overrides([(controls[name], "avars:rz", 11.0)])
         rig.evaluate(1.0)
-        return rig.baked_clusters_run_last_generation
+        return len(rig.last_op_trace())
 
     leaf = _Drag("L_IndexTip")
     assert 0 < leaf < total, (
-        "a fingertip drag ran %d of %d cluster(s); the cone skipped nothing"
+        "a fingertip drag ran %d of %d operation(s); the cone skipped nothing"
         % (leaf, total))
     root = _Drag("M_Body")
     assert root > leaf, (
-        "a root drag ran %d cluster(s) against a fingertip's %d; the root "
+        "a root drag ran %d operation(s) against a fingertip's %d; the root "
         "reaches every joint and the cone is too small" % (root, leaf))
 
     # And a frame in which nothing moved at all runs no more than the leaf.
     rig.evaluate(1.0)
-    still = rig.baked_clusters_run_last_generation
+    still = len(rig.last_op_trace())
     assert still <= leaf, (
-        "a frame with nothing changed ran %d cluster(s), more than a "
+        "a frame with nothing changed ran %d operation(s), more than a "
         "fingertip drag's %d" % (still, leaf))
 
 

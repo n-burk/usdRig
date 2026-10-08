@@ -15,6 +15,7 @@
 #include "pxr/base/tf/getenv.h"
 
 #include <cmath>
+#include <cstring>
 #include <cstdio>
 #include <map>
 #include <string>
@@ -184,13 +185,43 @@ Same(const RigExecWeightPacket &a, const RigExecWeightPacket &b)
            Same(a.defaultWeight, b.defaultWeight) && a.valid == b.valid;
 }
 
+// A replay may allocate a distinct immutable handle for the same layout.
+// Compare its complete typed content, including signed zero and NaN bits.
+bool
+SameSkinTopology(const std::shared_ptr<const RigExecSkinTopology> &a,
+                 const std::shared_ptr<const RigExecSkinTopology> &b)
+{
+    if (a == b) return true;
+    if (!a || !b) return false;
+    return a->elementSize == b->elementSize &&
+           a->pointCount == b->pointCount &&
+           a->influenceCount == b->influenceCount &&
+           a->validated == b->validated && a->indices == b->indices &&
+           a->weights.size() == b->weights.size() &&
+           (a->weights.empty() ||
+            std::memcmp(a->weights.data(), b->weights.data(),
+                        a->weights.size() * sizeof(float)) == 0);
+}
+
+bool
+SameBlendLayout(const std::shared_ptr<const RigExecBlendSampleLayout> &a,
+                const std::shared_ptr<const RigExecBlendSampleLayout> &b)
+{
+    if (a == b) return true;
+    if (!a || !b || a->valid != b->valid ||
+        a->pointCount != b->pointCount || a->indices != b->indices ||
+        a->offsets.size() != b->offsets.size()) return false;
+    for (size_t i = 0; i < a->offsets.size(); ++i)
+        if (std::memcmp(&a->offsets[i][0], &b->offsets[i][0],
+                        3 * sizeof(float)) != 0) return false;
+    return true;
+}
+
 inline bool
 Same(const RigExecMoverParameters &a, const RigExecMoverParameters &b)
 {
-    // Mirrors RigExecMoverParameters::operator== field for field. It has to
-    // be kept beside it: a field added there and not here is a field this
-    // mode stops looking at. Shared layouts are compared by identity,
-    // exactly as operator== compares them.
+    // Mirror the packet fields, comparing immutable layout content rather
+    // than allocations made independently by the two verifier passes.
     return a.kind == b.kind && a.enabled == b.enabled && a.valid == b.valid &&
            a.radialWeight == b.radialWeight &&
            Same(a.transform, b.transform) && Same(a.weights, b.weights) &&
@@ -211,7 +242,7 @@ Same(const RigExecMoverParameters &a, const RigExecMoverParameters &b)
            Same(a.skinTransforms, b.skinTransforms) &&
            a.skinIndices == b.skinIndices &&
            Same(a.skinWeights, b.skinWeights) &&
-           a.skinTopology == b.skinTopology &&
+           SameSkinTopology(a.skinTopology, b.skinTopology) &&
            a.skinElementSize == b.skinElementSize &&
            a.skinningMethod == b.skinningMethod &&
            a.externalSchema == b.externalSchema &&
@@ -337,9 +368,10 @@ CaptureRevision(const RigExecBakedProgramImpl::GeomRevision &revision,
                 RigExecBakedRunShadow::RevisionState *state)
 {
     state->output = revision.output;
+    state->stagingOutput = revision.stagingOutput;
     state->packetInfluences = revision.packetInfluences;
     state->influences = revision.influences;
-    state->revisionInputs = revision.revisionInputs;
+    state->revisionInputs = revision.revisionInputs.DetachedCopy();
     state->rows = revision.rows;
     state->envelope = revision.envelope;
     state->palette = revision.palette;
@@ -357,14 +389,29 @@ CaptureRevision(const RigExecBakedProgramImpl::GeomRevision &revision,
     state->haveTransform = revision.haveTransform;
     state->ran = revision.ran;
     state->executed = revision.executed;
+    state->created = revision.created;
     state->influencesValid = revision.influencesValid;
     state->influencesChanged = revision.influencesChanged;
     state->staticDirty = revision.staticDirty;
     state->partitionStale = revision.partitionStale;
-    state->weightField = revision.weightField;
+    state->publishedWeightValues = revision.publishedWeightValues;
     state->currentPhasePacket = revision.currentPhasePacket;
     state->weightFieldPublished = revision.weightFieldPublished;
     state->layoutUsable = revision.layoutUsable;
+    state->topology = revision.topology;
+    state->partitionTopology = revision.partitionTopology;
+    state->topologyResolved = revision.topologyResolved;
+    state->blendSamples.resize(revision.blendChannels.size());
+    for (size_t c = 0; c < revision.blendChannels.size(); ++c) {
+        const auto &samples = revision.blendChannels[c].samples;
+        auto &saved = state->blendSamples[c];
+        saved.resize(samples.size());
+        for (size_t s = 0; s < samples.size(); ++s) {
+            saved[s].layout = samples[s].layout;
+            saved[s].lastPoints = samples[s].lastPoints;
+            saved[s].layoutRefused = samples[s].layoutRefused;
+        }
+    }
     state->layoutHandle = revision.layoutHandle;
     state->layoutCandidate = revision.layoutCandidate;
     state->layoutFixed = revision.layoutFixed;
@@ -386,6 +433,7 @@ RestoreRevision(const RigExecBakedRunShadow::RevisionState &state,
                 RigExecBakedProgramImpl::GeomRevision *revision)
 {
     revision->output = state.output;
+    revision->stagingOutput = state.stagingOutput;
     revision->packetInfluences = state.packetInfluences;
     revision->influences = state.influences;
     revision->revisionInputs = state.revisionInputs;
@@ -406,14 +454,28 @@ RestoreRevision(const RigExecBakedRunShadow::RevisionState &state,
     revision->haveTransform = state.haveTransform;
     revision->ran = state.ran;
     revision->executed = state.executed;
+    revision->created = state.created;
     revision->influencesValid = state.influencesValid;
     revision->influencesChanged = state.influencesChanged;
     revision->staticDirty = state.staticDirty;
     revision->partitionStale = state.partitionStale;
-    revision->weightField = state.weightField;
+    revision->publishedWeightValues = state.publishedWeightValues;
     revision->currentPhasePacket = state.currentPhasePacket;
     revision->weightFieldPublished = state.weightFieldPublished;
     revision->layoutUsable = state.layoutUsable;
+    revision->topology = state.topology;
+    revision->partitionTopology = state.partitionTopology;
+    revision->topologyResolved = state.topologyResolved;
+    for (size_t c = 0; c < revision->blendChannels.size() &&
+                       c < state.blendSamples.size(); ++c) {
+        auto &samples = revision->blendChannels[c].samples;
+        const auto &saved = state.blendSamples[c];
+        for (size_t s = 0; s < samples.size() && s < saved.size(); ++s) {
+            samples[s].layout = saved[s].layout;
+            samples[s].lastPoints = saved[s].lastPoints;
+            samples[s].layoutRefused = saved[s].layoutRefused;
+        }
+    }
     revision->layoutHandle = state.layoutHandle;
     revision->layoutCandidate = state.layoutCandidate;
     revision->layoutFixed = state.layoutFixed;
@@ -434,19 +496,39 @@ void
 CompareRevision(std::vector<std::string> *differences, size_t *count,
                 const std::string &where,
                 const RigExecBakedRunShadow::RevisionState &shadow,
-                const RigExecBakedProgramImpl::GeomRevision &revision)
+                const RigExecBakedProgramImpl::GeomRevision &revision,
+                bool staticSelected = true, bool fuseSelected = true)
 {
-    const auto sameLayout=[](const auto &a,const auto &b) {
-        return bool(a)==bool(b) && (!a || *a==*b);
-    };
-    if (!sameLayout(shadow.layoutHandle,revision.layoutHandle) ||
-        !sameLayout(shadow.layoutCandidate,revision.layoutCandidate))
+    if (!SameSkinTopology(shadow.layoutHandle,revision.layoutHandle) ||
+        !SameSkinTopology(shadow.layoutCandidate,revision.layoutCandidate))
         Differ(differences,count,where+" layout handle");
+    if (!SameSkinTopology(shadow.topology, revision.topology) ||
+        !SameSkinTopology(shadow.partitionTopology, revision.partitionTopology))
+        Differ(differences, count, where + " adopted topology");
+    CompareValue(differences, count, where + " topologyResolved",
+                 shadow.topologyResolved, revision.topologyResolved);
+    if (shadow.blendSamples.size() != revision.blendChannels.size()) {
+        Differ(differences, count, where + " blend channels size");
+    } else for (size_t c = 0; c < shadow.blendSamples.size(); ++c) {
+        const auto &saved = shadow.blendSamples[c];
+        const auto &samples = revision.blendChannels[c].samples;
+        if (saved.size() != samples.size()) {
+            Differ(differences, count, where + " blend samples size");
+            continue;
+        }
+        for (size_t s = 0; s < saved.size(); ++s) {
+            if (!SameBlendLayout(saved[s].layout, samples[s].layout) ||
+                !Same(saved[s].lastPoints, samples[s].lastPoints) ||
+                saved[s].layoutRefused != samples[s].layoutRefused)
+                Differ(differences, count, where + " blend sample state");
+        }
+    }
     CompareValue(differences,count,where+" layoutFixed",shadow.layoutFixed,revision.layoutFixed);
     CompareValue(differences,count,where+" layoutRan",shadow.layoutRan,revision.layoutRan);
     // The values.
     CompareVector(differences, count, where + " output", shadow.output,
                   revision.output);
+    CompareVector(differences, count, where + " staging output", shadow.stagingOutput, revision.stagingOutput);
     CompareVector(differences, count, where + " packetInfluences",
                   shadow.packetInfluences, revision.packetInfluences);
     CompareVector(differences, count, where + " influences", shadow.influences,
@@ -498,23 +580,23 @@ CompareRevision(std::vector<std::string> *differences, size_t *count,
     // of a revision whose packet moved would publish last generation's field
     // beside this generation's points.
     CompareVector(differences, count, where + " weightField",
-                  shadow.weightField, revision.weightField);
+                  shadow.publishedWeightValues, revision.publishedWeightValues);
     CompareValue(differences, count, where + " currentPhasePacket",
                  shadow.currentPhasePacket, revision.currentPhasePacket);
     CompareValue(differences, count, where + " weightFieldPublished",
                  shadow.weightFieldPublished, revision.weightFieldPublished);
     CompareValue(differences, count, where + " influencesValid",
                  shadow.influencesValid, revision.influencesValid);
-    // The per-run DELTAS. These are the fields a skip resets
-    // (RigExecBakedSkipGeometryStep) and the ones a cone can most easily get
-    // wrong: a step that skipped says "nothing moved", and this is where
-    // that claim is held against a run that recomputed the comparison.
+    // Work flags follow the cone's own selected bodies. Value-based fold
+    // changes still agree exactly against the shared starting state.
+    // An unselected static/fuse body resets its flag under MarkSkipped;
+    // the forced pass deliberately executes those same bodies.
     CompareValue(differences, count, where + " executed", shadow.executed,
-                 revision.executed);
+                 fuseSelected && revision.executed);
     CompareValue(differences, count, where + " influencesChanged",
                  shadow.influencesChanged, revision.influencesChanged);
     CompareValue(differences, count, where + " staticDirty",
-                 shadow.staticDirty, revision.staticDirty);
+                 shadow.staticDirty, staticSelected && revision.staticDirty);
     for (size_t k = 0;
          k < shadow.chunks.size() && k < revision.chunks.size(); ++k) {
         const std::string what =
@@ -540,7 +622,6 @@ void
 RigExecBakedRunShadow::Capture(const RigExecBakedProgramImpl &program)
 {
     const auto &B=program;
-    sequence=B.runSeqCounter.next.load(std::memory_order_relaxed);
 
     values = B.propertyValues;
     versionValid = B.propertyVersionValid;
@@ -549,6 +630,15 @@ RigExecBakedRunShadow::Capture(const RigExecBakedProgramImpl &program)
     recordStoodAside = B.recordStoodAside;
     chainFinal = B.chainFinal;
     recordValues = B.recordValues;
+    propertyResults = B.propertyResults;
+    hasResolvedInputs = B.resolvedInputs != nullptr;
+    if (hasResolvedInputs) resolvedInputs = B.resolvedInputs->DetachedCopy();
+    headOverrides = B.headOverrides;
+    lastHeadOverrides = B.lastHeadOverrides;
+    headOverrideMoved = B.headOverrideMoved;
+    readerWalkMoved = B.readerWalkMoved;
+    readerWalkChanged = B.readerWalkChanged;
+
 
 
     tables.restM = B.restM;
@@ -556,6 +646,11 @@ RigExecBakedRunShadow::Capture(const RigExecBakedProgramImpl &program)
     tables.restFrames = B.restFrames;
     tables.selfD = B.selfD;
     tables.parentDinv = B.parentDinv;
+    tables.posedD = B.posedD;
+    tables.parentSpaceM = B.parentSpaceM;
+    tables.parentSpaceAuthored = B.parentSpaceAuthored;
+    tables.rotationSign = B.rotationSign;
+
     tables.rotOrder = B.rotOrder;
     tables.restRoundTrip = B.restRoundTrip;
     tables.defaultRoundTrip = B.defaultRoundTrip;
@@ -567,6 +662,11 @@ RigExecBakedRunShadow::Capture(const RigExecBakedProgramImpl &program)
     lastPosedAuthoredM = B.lastPosedAuthoredM;
     lastPosedAuthored = B.lastPosedAuthored;
     lastRotOrder = B.lastRotOrder;
+    lastPosedD = B.lastPosedD;
+    lastParentSpaceM = B.lastParentSpaceM;
+    lastParentSpaceAuthored = B.lastParentSpaceAuthored;
+    lastRotationSign = B.lastRotationSign;
+
     restChanged = B.restChanged;
     ladderChanged = B.ladderChanged;
     restMoved = B.restMoved;
@@ -577,6 +677,12 @@ RigExecBakedRunShadow::Capture(const RigExecBakedProgramImpl &program)
     avars = program.avars;
     poseWeights = program.poseWeights;
     weightPackets = program.weightPackets;
+    providerValues = program.providerValues;
+    switchFrames = program.switchFrames;
+    opAdapter = program.opAdapter;
+    opExecution = program.opExecution;
+    oraclePublications = program.oraclePublications;
+    oracleWeightInputs = program.oracleWeightInputs;
     posedM = program.posedM;
     finalMatrix = program.finalMatrix;
     baseMatrix = program.baseMatrix;
@@ -586,6 +692,8 @@ RigExecBakedRunShadow::Capture(const RigExecBakedProgramImpl &program)
     deltaValues = program.deltaValues;
     deltaPresent = program.deltaPresent;
     volumePlacement = program.volumePlacement;
+    volumePlacementBase = program.volumePlacementBase;
+    weightFields = program.weightFields;
     frameMatrix = program.frameMatrix;
     frameMatrixValid = program.frameMatrixValid;
     avarsDisturbed = program.avarsDisturbed;
@@ -618,6 +726,7 @@ RigExecBakedRunShadow::Capture(const RigExecBakedProgramImpl &program)
         chains[c].haveResult = chain.haveResult;
         chains[c].haveBase = chain.haveBase;
         chains[c].baseDirty = chain.baseDirty;
+        chains[c].scheduleDirty = chain.scheduleDirty;
         chains[c].revisions.resize(chain.revisions.size());
         for (size_t r = 0; r < chain.revisions.size(); ++r) {
             CaptureRevision(chain.revisions[r], &chains[c].revisions[r]);
@@ -640,9 +749,7 @@ RigExecBakedRunShadow::Capture(const RigExecBakedProgramImpl &program)
     for (size_t k = 0; k < program.steps.size(); ++k) {
         steps[k].diagnostics = program.steps[k].diagnostics;
         steps[k].lines = program.steps[k].lines;
-        steps[k].runSeq = program.steps[k].runSeq;
         steps[k].counters = program.steps[k].counters;
-        steps[k].bail = program.steps[k].bail;
     }
 }
 
@@ -650,7 +757,6 @@ void
 RigExecBakedRunShadow::Restore(RigExecBakedProgramImpl *program) const
 {
     RigExecBakedProgramImpl &B = *program;
-    B.runSeqCounter.next.store(sequence,std::memory_order_relaxed);
 
     B.propertyValues = values;
     B.propertyVersionValid = versionValid;
@@ -659,6 +765,14 @@ RigExecBakedRunShadow::Restore(RigExecBakedProgramImpl *program) const
     B.recordStoodAside = recordStoodAside;
     B.chainFinal = chainFinal;
     B.recordValues = recordValues;
+    B.propertyResults = propertyResults;
+    if (hasResolvedInputs && B.resolvedInputs) *B.resolvedInputs = resolvedInputs;
+    B.headOverrides = headOverrides;
+    B.lastHeadOverrides = lastHeadOverrides;
+    B.headOverrideMoved = headOverrideMoved;
+    B.readerWalkMoved = readerWalkMoved;
+    B.readerWalkChanged = readerWalkChanged;
+
 
 
     B.restM = tables.restM;
@@ -666,6 +780,11 @@ RigExecBakedRunShadow::Restore(RigExecBakedProgramImpl *program) const
     B.restFrames = tables.restFrames;
     B.selfD = tables.selfD;
     B.parentDinv = tables.parentDinv;
+    B.posedD = tables.posedD;
+    B.parentSpaceM = tables.parentSpaceM;
+    B.parentSpaceAuthored = tables.parentSpaceAuthored;
+    B.rotationSign = tables.rotationSign;
+
     B.rotOrder = tables.rotOrder;
     B.restRoundTrip = tables.restRoundTrip;
     B.defaultRoundTrip = tables.defaultRoundTrip;
@@ -677,6 +796,11 @@ RigExecBakedRunShadow::Restore(RigExecBakedProgramImpl *program) const
     B.lastPosedAuthoredM = lastPosedAuthoredM;
     B.lastPosedAuthored = lastPosedAuthored;
     B.lastRotOrder = lastRotOrder;
+    B.lastPosedD = lastPosedD;
+    B.lastParentSpaceM = lastParentSpaceM;
+    B.lastParentSpaceAuthored = lastParentSpaceAuthored;
+    B.lastRotationSign = lastRotationSign;
+
     B.restChanged = restChanged;
     B.ladderChanged = ladderChanged;
     B.restMoved = restMoved;
@@ -687,6 +811,12 @@ RigExecBakedRunShadow::Restore(RigExecBakedProgramImpl *program) const
     B.avars = avars;
     B.poseWeights = poseWeights;
     B.weightPackets = weightPackets;
+    B.providerValues = providerValues;
+    B.switchFrames = switchFrames;
+    B.opAdapter = opAdapter;
+    B.opExecution = opExecution;
+    B.oraclePublications = oraclePublications;
+    B.oracleWeightInputs = oracleWeightInputs;
     B.posedM = posedM;
     B.finalMatrix = finalMatrix;
     B.baseMatrix = baseMatrix;
@@ -696,6 +826,8 @@ RigExecBakedRunShadow::Restore(RigExecBakedProgramImpl *program) const
     B.deltaValues = deltaValues;
     B.deltaPresent = deltaPresent;
     B.volumePlacement = volumePlacement;
+    B.volumePlacementBase = volumePlacementBase;
+    B.weightFields = weightFields;
     B.frameMatrix = frameMatrix;
     B.frameMatrixValid = frameMatrixValid;
     B.avarsDisturbed = avarsDisturbed;
@@ -725,6 +857,7 @@ RigExecBakedRunShadow::Restore(RigExecBakedProgramImpl *program) const
         chain.haveResult = chains[c].haveResult;
         chain.haveBase = chains[c].haveBase;
         chain.baseDirty = chains[c].baseDirty;
+        chain.scheduleDirty = chains[c].scheduleDirty;
         for (size_t r = 0;
              r < chain.revisions.size() && r < chains[c].revisions.size();
              ++r) {
@@ -747,9 +880,7 @@ RigExecBakedRunShadow::Restore(RigExecBakedProgramImpl *program) const
     for (size_t k = 0; k < B.steps.size() && k < steps.size(); ++k) {
         B.steps[k].diagnostics = steps[k].diagnostics;
         B.steps[k].lines = steps[k].lines;
-        B.steps[k].runSeq = steps[k].runSeq;
         B.steps[k].counters = steps[k].counters;
-        B.steps[k].bail = steps[k].bail;
     }
 }
 
@@ -758,6 +889,35 @@ RigExecBakedRunShadow::Compare(const RigExecBakedProgramImpl &program,
                                std::vector<std::string> *differences) const
 {
     size_t count = 0;
+    // Project work observations through the cone's actual body selection.
+    // A forced run computes identical values while deliberately doing more work.
+    std::vector<char> selected(program.steps.size(), 1);
+    if (!program.opGraph.ops.empty()) {
+        if (opExecution.ran.size() != program.opGraph.ops.size())
+            Differ(differences, &count, "operation selection size");
+        for (size_t c = 0; c < program.opGraph.ops.size(); ++c) {
+            const size_t step = program.opGraph.ops[c].originalIndex;
+            if (step >= selected.size() || c >= opExecution.ran.size()) {
+                Differ(differences, &count, "operation selection binding");
+                continue;
+            }
+            selected[step] = opExecution.ran[c];
+        }
+    }
+    std::vector<std::vector<char>> staticSelected(program.chains.size()), fuseSelected(program.chains.size());
+    for (size_t c = 0; c < program.chains.size(); ++c) {
+        staticSelected[c].assign(program.chains[c].revisions.size(), 1);
+        fuseSelected[c].assign(program.chains[c].revisions.size(), 1);
+    }
+    for (size_t s = 0; s < program.steps.size(); ++s) {
+        const auto &step = program.steps[s];
+        if (step.kind != RigExecBakedStepKind::RevisionStatic &&
+            step.kind != RigExecBakedStepKind::RevisionFuse) continue;
+        if (step.object < 0 || size_t(step.object) >= program.revisionIndex.size()) continue;
+        const auto [c,r] = program.revisionIndex[size_t(step.object)];
+        (step.kind == RigExecBakedStepKind::RevisionStatic ? staticSelected : fuseSelected)
+            [size_t(c)][size_t(r)] = selected[s];
+    }
     CompareVector(differences,&count,"property version validity",versionValid,program.propertyVersionValid);
     CompareVector(differences,&count,"property chain validity",chainValid,program.chainValid);
     CompareVector(differences,&count,"property changed",changed,program.propertyChanged);
@@ -842,6 +1002,10 @@ RigExecBakedRunShadow::Compare(const RigExecBakedProgramImpl &program,
             bits(T.restRoundTrip[slot], B.restRoundTrip[slot]) &&
             bits(T.selfD[slot], B.selfD[slot]) &&
             bits(T.parentDinv[slot], B.parentDinv[slot]) &&
+            bits(T.posedD[slot], B.posedD[slot]) &&
+            bits(T.parentSpaceM[slot], B.parentSpaceM[slot]) &&
+            T.parentSpaceAuthored[slot] == B.parentSpaceAuthored[slot] &&
+            T.rotationSign[slot] == B.rotationSign[slot] &&
             bits(T.defaultRoundTrip[slot], B.defaultRoundTrip[slot]) &&
             T.posedAuthored[slot] == B.posedAuthored[slot] &&
             bits(T.posedAuthoredM[slot], B.posedAuthoredM[slot]) &&
@@ -874,6 +1038,10 @@ RigExecBakedRunShadow::Compare(const RigExecBakedProgramImpl &program,
     memoBits("last default", lastSelfD, program.lastSelfD);
     memoBits("last parent default inverse", lastParentDinv, program.lastParentDinv);
     memoBits("last authored pose", lastPosedAuthoredM, program.lastPosedAuthoredM);
+    memoBits("last posed default", lastPosedD, program.lastPosedD);
+    memoBits("last parent space", lastParentSpaceM, program.lastParentSpaceM);
+    CompareVector(differences, &count, "last parent space presence", lastParentSpaceAuthored, program.lastParentSpaceAuthored);
+    CompareVector(differences, &count, "last rotation sign", lastRotationSign, program.lastRotationSign);
     CompareVector(differences, &count, "last authored pose presence",
                   lastPosedAuthored, program.lastPosedAuthored);
     CompareVector(differences, &count, "last rotation order", lastRotOrder, program.lastRotOrder);
@@ -893,6 +1061,22 @@ RigExecBakedRunShadow::Compare(const RigExecBakedProgramImpl &program,
     CompareVector(differences, &count, "posedM", posedM, program.posedM);
     CompareVector(differences, &count, "base", base, program.base);
     CompareVector(differences, &count, "fin", fin, program.fin);
+    CompareVector(differences, &count, "switchFrames", switchFrames, program.switchFrames);
+    CompareValue(differences, &count, "provider value count", providerValues.values.size(), program.providerValues.values.size());
+    for (size_t i = 0; i < std::min(providerValues.values.size(), program.providerValues.values.size()); ++i) {
+        const auto &a = providerValues.values[i]; const auto &b = program.providerValues.values[i];
+        const std::string where = "provider value " + std::to_string(i) +
+            (i < program.providerProgram.valueKeys.size() ? " (" + program.providerProgram.valueKeys[i] + ")" : "");
+        bool same = a.value.index() == b.value.index();
+        if (same) std::visit([&](const auto &value) {
+            using T = std::decay_t<decltype(value)>;
+            same = RigExecTypedSame(value, std::get<T>(b.value));
+        }, a.value);
+        if (!same || !RigExecTypedSame(a.raw,b.raw) || a.initialized != b.initialized ||
+            a.blocked != b.blocked || a.authoritative != b.authoritative ||
+            a.count != b.count || a.error != b.error)
+            Differ(differences, &count, where);
+    }
     CompareVector(differences, &count, "finalMatrix", finalMatrix,
                   program.finalMatrix);
     CompareVector(differences, &count, "baseMatrix", baseMatrix,
@@ -912,6 +1096,25 @@ RigExecBakedRunShadow::Compare(const RigExecBakedProgramImpl &program,
     // placement from the last run.
     CompareVector(differences, &count, "volumePlacement", volumePlacement,
                   program.volumePlacement);
+    CompareVector(differences, &count, "volumePlacementBase", volumePlacementBase,
+                  program.volumePlacementBase);
+    CompareValue(differences,&count,"weightField count",weightFields.size(),program.weightFields.size());
+    for (size_t i = 0; i < weightFields.size() && i < program.weightFields.size(); ++i) {
+        const auto &before = weightFields[i];
+        const auto &after = program.weightFields[i];
+        if (before.values.size() != after.values.size() ||
+            (!before.values.empty() && std::memcmp(before.values.data(),after.values.data(),
+                                                    before.values.size() * sizeof(float)) != 0))
+            Differ(differences,&count,"weightField values " + std::to_string(i));
+        CompareValue(differences, &count, "weightField changed " + std::to_string(i),
+                     before.changed, after.changed);
+        CompareValue(differences, &count, "weightField sample count " + std::to_string(i),
+                     before.count, after.count);
+        CompareValue(differences, &count, "weightField validity " + std::to_string(i),
+                     before.ok, after.ok);
+        CompareValue(differences, &count, "weightField error " + std::to_string(i),
+                     before.error, after.error);
+    }
     // What an AtPrim transform phase reads: a cone that skipped a
     // FrameMatrix step kept the record it would write again.
     CompareVector(differences, &count, "frameMatrix", frameMatrix,
@@ -997,7 +1200,8 @@ RigExecBakedRunShadow::Compare(const RigExecBakedProgramImpl &program,
             CompareRevision(differences, &count,
                             where + " revision " +
                                 chain.revisions[r].moverPath.GetString(),
-                            chains[c].revisions[r], chain.revisions[r]);
+                            chains[c].revisions[r], chain.revisions[r],
+                            staticSelected[c][r], fuseSelected[c][r]);
         }
         for (size_t d = 0;
              d < chain.derived.size() && d < chains[c].derived.size(); ++d) {
@@ -1036,18 +1240,20 @@ RigExecBakedRunShadow::Compare(const RigExecBakedProgramImpl &program,
         CompareVector(differences, &count, where + " diagnostics",
                       steps[k].diagnostics, step.diagnostics);
         CompareVector(differences,&count,where+" memo lines",steps[k].lines,step.lines);
-        if (steps[k].counters.revisionsExecuted !=
-                step.counters.revisionsExecuted ||
-            steps[k].counters.revisionsCreated !=
-                step.counters.revisionsCreated ||
-            steps[k].counters.schedulesBuilt !=
-                step.counters.schedulesBuilt ||
-            steps[k].counters.chainsBuilt != step.counters.chainsBuilt ||
-            steps[k].counters.revisionsBuilt != step.counters.revisionsBuilt) {
+        auto expected = step.counters;
+        if (!selected[k]) {
+            // Exactly the MarkSkipped contract; program-size facts persist.
+            expected.revisionsExecuted = 0;
+            expected.revisionsCreated = 0;
+            expected.schedulesBuilt = 0;
+        }
+        if (steps[k].counters.revisionsExecuted != expected.revisionsExecuted ||
+            steps[k].counters.revisionsCreated != expected.revisionsCreated ||
+            steps[k].counters.schedulesBuilt != expected.schedulesBuilt ||
+            steps[k].counters.chainsBuilt != expected.chainsBuilt ||
+            steps[k].counters.revisionsBuilt != expected.revisionsBuilt) {
             Differ(differences, &count, where + " counters");
         }
-        CompareValue(differences, &count, where + " bail", steps[k].bail,
-                     step.bail);
     }
     return count;
 }
@@ -1055,6 +1261,10 @@ RigExecBakedRunShadow::Compare(const RigExecBakedProgramImpl &program,
 RigExecBakedRunStatistics::RigExecBakedRunStatistics(
     const RigExecBakedProgramImpl &program)
 {
+    opExecution = program.opExecution;
+    selectedClusters = program.closed;
+    selectedSteps = program.closedSteps;
+    closureFull = program.closureFull;
     closedClusters = program.lastClosedClusters;
     closedSteps = program.lastClosedSteps;
     timed = program.clustering.lastRunTimed;
@@ -1064,12 +1274,13 @@ RigExecBakedRunStatistics::RigExecBakedRunStatistics(
         clusters[c].readyUs = cluster.readyUs;
         clusters[c].startUs = cluster.startUs;
         clusters[c].endUs = cluster.endUs;
+        clusters[c].runner = cluster.runner;
     }
     steps.resize(program.steps.size());
     for (size_t k = 0; k < steps.size(); ++k) {
         steps[k].startUs = program.steps[k].startUs;
         steps[k].endUs = program.steps[k].endUs;
-        steps[k].runSeq = program.steps[k].runSeq;
+        steps[k].runner = program.steps[k].runner;
     }
 }
 
@@ -1077,6 +1288,10 @@ void
 RigExecBakedRunStatistics::Restore(RigExecBakedProgramImpl *program) const
 {
     RigExecBakedProgramImpl &B = *program;
+    B.opExecution = opExecution;
+    B.closed = selectedClusters;
+    B.closedSteps = selectedSteps;
+    B.closureFull = closureFull;
     B.lastClosedClusters = closedClusters;
     B.lastClosedSteps = closedSteps;
     B.clustering.lastRunTimed = timed;
@@ -1085,15 +1300,13 @@ RigExecBakedRunStatistics::Restore(RigExecBakedProgramImpl *program) const
         B.clustering.clusters[c].readyUs = clusters[c].readyUs;
         B.clustering.clusters[c].startUs = clusters[c].startUs;
         B.clustering.clusters[c].endUs = clusters[c].endUs;
+        B.clustering.clusters[c].runner = clusters[c].runner;
     }
     for (size_t k = 0; k < B.steps.size() && k < steps.size(); ++k) {
         B.steps[k].startUs = steps[k].startUs;
         B.steps[k].endUs = steps[k].endUs;
-        B.steps[k].runSeq = steps[k].runSeq;
+        B.steps[k].runner = steps[k].runner;
     }
-    uint32_t sequence=0;
-    for (const auto &step:B.steps) sequence=std::max(sequence,step.runSeq);
-    B.runSeqCounter.next.store(sequence,std::memory_order_relaxed);
 }
 
 }  // namespace rigExec

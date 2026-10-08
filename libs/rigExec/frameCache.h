@@ -46,10 +46,7 @@ struct RigExecSampledInput;
 struct RigExecBurstSampleCache;
 struct RigExecUpstreamValue;
 
-/// Default per-rig byte cap: holds the 200-frame stack full range
-/// (slot-backed retained state, measured at 5.4 MB/frame, 1.08 GB in all)
-/// with headroom. A cap below the full range never converges to cached: the
-/// LRU keeps evicting the frame the warmer just filled.
+/// Default per-rig byte cap for published poses and retained source snapshots.
 constexpr size_t kRigExecFrameCacheDefaultByteCap = size_t(1280) * 1024 * 1024;
 
 /// What a cached pose is a function of. Time is deliberately absent: see the
@@ -275,8 +272,7 @@ using RigExecFrameCacheEvictionCallback =
 /// on, recorded at publish so a later edit retires and re-runs only the
 /// entries that touched what moved. A full evaluation depends on every
 /// cluster, every weight object, and every constant region of its program
-/// (see RigExecFullEvalProvenance); a partial cone re-run (plan 2.2)
-/// records the subset it ran against retained state. Aliases name every
+/// (see RigExecFullEvalProvenance). Aliases name every
 /// frame served under the key, starting with the publishing time.
 struct RigExecEntryProvenance {
     /// Clusters whose computation produced the entry, sorted and unique.
@@ -313,7 +309,7 @@ constexpr size_t kRigExecProvenanceAliasCap = 1024;
 /// map, by the same counting reports/frame-cache-measurements.md measures
 /// (SdfPath keys at sizeof(SdfPath), path strings interned and excluded, map
 /// node overhead excluded). Publish counts this per entry; Stream D adds the
-/// retained arena beside it.
+/// retained source snapshot beside it.
 size_t RigExecFrameCachePoseBytes(const RigExecRigPose &pose);
 
 /// The (epochDigest, controlDigest) store. See the file header for the key
@@ -345,8 +341,7 @@ public:
                  const RigExecRigPose &pose,
                  const RigExecEntryProvenance *provenance = nullptr);
     /// The sparse-reuse (Stream D) Publish: stores \p pose plus the retained
-    /// cross-frame state -- the source snapshot and slot arena a partial
-    /// cone re-runs against -- accounted at \p retainedBytes beside the
+    /// source snapshot, accounted at \p retainedBytes beside the
     /// pose's own bytes. \p retained is opaque here (a
     /// RigExecRetainedFrameState to frameCacheSparsity.h); a null handle
     /// with nonzero bytes is declined, like an invalid pose. Otherwise the

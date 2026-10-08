@@ -20,6 +20,11 @@ using rigExec::RigExecMoverExecTokens;
 PXR_NAMESPACE_USING_DIRECTIVE
 
 namespace {
+const TfToken _oracleToken0("rigExec:surface");
+const TfToken _oracleToken1("points");
+const TfToken _oracleToken2("faceVertexCounts");
+const TfToken _oracleToken3("faceVertexIndices");
+
 
 RigExecMoverParameters
 _BuildSurfaceMoverParameters(const VdfContext &ctx)
@@ -75,15 +80,15 @@ rigExec::RigExecOracleResult
 _OracleSurfaceMover(const rigExec::RigExecMoverOracleContext &ctx)
 {
     using rigExec::RigExecOracleResult;
-    const UsdStageRefPtr &stage = ctx.stage;
-    const UsdPrim &prim = ctx.prim;
+    const rigExec::RigExecOracleScene &stage = ctx.stage;
+    const rigExec::RigExecOraclePrim &prim = ctx.prim;
     const SdfPath &moverPath = ctx.moverPath;
     const UsdTimeCode time = ctx.time;
     std::vector<std::string> *diagnostics = ctx.diagnostics;
     VtVec3fArray &points = *ctx.points;
     SdfPathVector surfaces;
-    if (UsdRelationship rel =
-            prim.GetRelationship(TfToken("rigExec:surface"))) {
+    if (rigExec::RigExecOracleRelationship rel =
+            prim.GetRelationship(_oracleToken0)) {
         rel.GetTargets(&surfaces);
     }
     if (surfaces.empty()) {
@@ -94,10 +99,10 @@ _OracleSurfaceMover(const rigExec::RigExecMoverOracleContext &ctx)
     VtIntArray counts, indices;
     rigExec::RigExecReadPhasedPoints(
         ctx, "rigExec:surface",
-        surfacePrim.AppendProperty(TfToken("points")), &surfacePoints);
-    if (const UsdPrim s = stage->GetPrimAtPath(surfacePrim)) {
-        s.GetAttribute(TfToken("faceVertexCounts")).Get(&counts, time);
-        s.GetAttribute(TfToken("faceVertexIndices"))
+        surfacePrim.AppendProperty(_oracleToken1), &surfacePoints);
+    if (const rigExec::RigExecOraclePrim s = stage->GetPrimAtPath(surfacePrim)) {
+        s.GetAttribute(_oracleToken2).Get(&counts, time);
+        s.GetAttribute(_oracleToken3)
             .Get(&indices, time);
     }
     if (surfacePoints.empty() || counts.empty()) {

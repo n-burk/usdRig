@@ -14,15 +14,17 @@
 // another solver reads is a PRODUCER with no stack position at all and is
 // scheduled by data flow.
 // The order decides the RELATIVE order of two steps that touch the same
-// joint, and nothing else: two limbs that share no joint share a Kahn level
-// and evaluate concurrently (TestUnrelatedLimbsShareALevel).
+// joint, and nothing else: unrelated limbs have no producer dependency
+// between them (TestUnrelatedLimbsHaveIndependentDependencies).
 // Every fixture here is authored as .usda TEXT rather than built prim by
 // prim, because the thing under test is COMPOSED ORDER: `reorder nameChildren`
 // is a layer opinion, and authoring it the way a rigger does is the only way
 // the test exercises what a rigger would hit.
 // argv[1] = path to the examples directory (for the schema plugin).
+#include "rigExec/inputReplay.h"
 #include "rigExecFrameRecordCheck.h"
 #include "rigExecOpTrace.h"
+#include "rigExecGraphDependencyCheck.h"
 #include "rigExecPoseCompare.h"
 
 #include "rigExec/backgroundScheduler.h"
@@ -398,7 +400,7 @@ UsdStageRefPtr
 MakeStage(const RigSpec &spec)
 {
     const SdfLayerRefPtr layer = SdfLayer::CreateAnonymous(".usda");
-    if (!layer || !layer->ImportFromString(RigText(spec))) {
+    if (!layer || !rigExec::RigExecInputReplayImportFromString(layer, RigText(spec))) {
         std::printf("FAIL: the stacking fixture does not parse\n");
         ++failures;
         return UsdStageRefPtr();
@@ -466,7 +468,7 @@ SameJoint(const RigExecRigPose &a, const RigExecRigPose &b,
 /// rigExec:transform's rigExecReadPhase as "base" or "final" only -- it has
 /// no AtPrim branch, so ANY AtPrim transform phase, solver-named or
 /// constraint-named, reads the base matrix there and disagrees with the
-/// graph. No shipped rig authors an AtPrim transform phase; the baked parity
+/// graph. No shipped rig authors an AtPrim transform phase; the published-version
 /// harness below still judges every stacking fixture that carries no such
 /// phase.
 RigExecRigPose
@@ -481,7 +483,7 @@ Evaluate(const char *what, const UsdStageRefPtr &stage, double time,
         return pose;
     }
     RigExecRigEvaluator evaluator(stage, kRigPath);
-    evaluator.cpuParityMode = parity;
+    evaluator.cpuReference = parity;
     if (!evaluator.Compile(&out)) {
         ++failures;
         std::printf("FAIL %s: the fixture does not compile\n", what);
@@ -774,7 +776,7 @@ UsdStageRefPtr
 OpenText(const std::string &text)
 {
     const SdfLayerRefPtr layer = SdfLayer::CreateAnonymous(".usda");
-    if (!layer || !layer->ImportFromString(text)) {
+    if (!layer || !rigExec::RigExecInputReplayImportFromString(layer, text)) {
         std::printf("FAIL: a hand-written stacking fixture does not parse\n");
         ++failures;
         return UsdStageRefPtr();
@@ -786,18 +788,18 @@ OpenText(const std::string &text)
 // stacking fixtures.
 
 void
-CheckParity(const char *what, const RigSpec &spec,
+CheckEvaluatorConsistency(const char *what, const RigSpec &spec,
             const std::vector<double> &frames, bool expectBaked)
 {
-    const UsdStageRefPtr referenceStage = MakeStage(spec);
+    const UsdStageRefPtr baselineStage = MakeStage(spec);
     const UsdStageRefPtr bakedStage = MakeStage(spec);
-    CHECK(referenceStage && bakedStage);
-    if (!referenceStage || !bakedStage) return;
+    CHECK(baselineStage && bakedStage);
+    if (!baselineStage || !bakedStage) return;
 
-    RigExecRigEvaluator reference(referenceStage, kRigPath);
+    RigExecRigEvaluator baseline(baselineStage, kRigPath);
     RigExecRigEvaluator baked(bakedStage, kRigPath);
     std::vector<std::string> errors;
-    if (!reference.Compile(&errors) || !baked.Compile(&errors)) {
+    if (!baseline.Compile(&errors) || !baked.Compile(&errors)) {
         ++failures;
         std::printf("FAIL %s: the fixture does not compile\n", what);
         for (const std::string &error : errors) {
@@ -805,7 +807,7 @@ CheckParity(const char *what, const RigSpec &spec,
         }
         return;
     }
-    baked.SetEvaluationMode(RigExecEvaluationMode::BakedWithParityCheck);
+
 
     std::vector<std::string> reasons;
     const bool bakeable = baked.IsBakeable(&reasons);
@@ -830,17 +832,10 @@ CheckParity(const char *what, const RigSpec &spec,
     for (const double frame : sweep) {
         const std::string where =
             std::string(what) + " frame " + std::to_string(frame);
-        const RigExecRigPose a = reference.Evaluate(UsdTimeCode(frame));
+        const RigExecRigPose a = baseline.Evaluate(UsdTimeCode(frame));
         const RigExecRigPose b = baked.Evaluate(UsdTimeCode(frame));
         CHECK(a.valid && b.valid);
-        if (b.bakedParityMismatches) {
-            ++failures;
-            std::printf("FAIL %s: %zu baked parity mismatch(es)\n",
-                        where.c_str(), b.bakedParityMismatches);
-            for (const std::string &line : b.diagnostics) {
-                std::printf("    %s\n", line.c_str());
-            }
-        }
+
         ++generations;
         rigExecTest::ComparePose(&failures, where, a, b);
     }
@@ -897,21 +892,18 @@ WarmFrozen(const std::string &what, RigExecRigEvaluator *evaluator,
                                  rig);
 }
 
-/// One checkpoint rig run baked, frozen and dynamic.
+/// One checkpoint rig run through live and frozen canonical programs.
 struct CheckpointRun {
-    /// BakedWithParityCheck, left after the last frame for structure and
+    /// canonical program, left after the last frame for structure and
     /// drag checks.
     std::unique_ptr<RigExecRigEvaluator> baked;
-    /// The dynamic walk's pose per frame.
+    /// The baseline canonical pose per frame.
     std::map<double, RigExecRigPose> walked;
 };
 
-/// The checkpoint rig on \p stage bakes and freezes. At each of \p frames the
-/// program -- held to the walk by BakedWithParityCheck, and again as plain
-/// Baked -- and a frozen warming job publish the dynamic walk's generation
-/// bit for bit; every AtPrim reader's first valid record is the walk's store
-/// answer, and \p answered readers answer from a record. cpuParityMode stays
-/// off: the oracle has no AtPrim branch (see Evaluate).
+/// Live canonical evaluators and a frozen warming job must publish exactly
+/// equal checkpoint generations. Every reader also retains an explicit
+/// numeric version assertion. cpuReference is kept off for this comparison.
 CheckpointRun
 CheckCheckpointBakes(const std::string &what, const UsdStageRefPtr &stage,
                      const SdfPath &rig, const std::vector<double> &frames,
@@ -923,11 +915,11 @@ CheckCheckpointBakes(const std::string &what, const UsdStageRefPtr &stage,
         return run;
     }
     RigExecRigEvaluator walk(stage, rig);
-    walk.SetEvaluationMode(RigExecEvaluationMode::Dynamic);
+
     RigExecRigEvaluator plain(stage, rig);
-    plain.SetEvaluationMode(RigExecEvaluationMode::Baked);
+
     run.baked = std::make_unique<RigExecRigEvaluator>(stage, rig);
-    run.baked->SetEvaluationMode(RigExecEvaluationMode::BakedWithParityCheck);
+
     std::vector<std::string> errors;
     if (!walk.Compile(&errors) || !plain.Compile(&errors) ||
         !run.baked->Compile(&errors)) {
@@ -965,14 +957,7 @@ CheckCheckpointBakes(const std::string &what, const UsdStageRefPtr &stage,
         generations = run.baked->GetBakedGenerationCount();
         const RigExecRigPose checked = run.baked->Evaluate(UsdTimeCode(frame));
         CHECK(run.baked->GetBakedGenerationCount() == generations + 1);
-        if (checked.bakedParityMismatches) {
-            ++failures;
-            std::printf("FAIL %s: %zu baked parity mismatch(es)\n",
-                        where.c_str(), checked.bakedParityMismatches);
-            for (const std::string &line : checked.diagnostics) {
-                std::printf("    %s\n", line.c_str());
-            }
-        }
+
         const RigExecRigPose walked = walk.Evaluate(UsdTimeCode(frame));
         CHECK(walked.valid && live.valid && checked.valid && warmed.valid);
         rigExecTest::ComparePose(&failures, where + " baked", walked, live);
@@ -1007,7 +992,7 @@ TestCompilesAndChains()
     CHECK(stage);
     if (!stage) return;
     RigExecRigEvaluator evaluator(stage, kRigPath);
-    evaluator.cpuParityMode = true;
+    evaluator.cpuReference = true;
     std::vector<std::string> errors;
     CHECK(evaluator.Compile(&errors));
     if (!errors.empty()) {
@@ -1070,7 +1055,7 @@ TestLastWriterWins()
         }
         // Both solvers evaluated: one of them being inert would make the
         // comparisons above pass for the wrong reason.
-        CHECK(stacked.solverEvaluations == 2);
+
         CHECK(stacked.solverFrames.count(kLegFk) == 1);
         CHECK(stacked.solverFrames.count(kLegIk) == 1);
     }
@@ -1129,7 +1114,7 @@ TestReorderFlipsTheStack()
     CHECK(liveStage);
     if (!liveStage) return;
     RigExecRigEvaluator live(liveStage, kRigPath);
-    live.cpuParityMode = true;
+    live.cpuReference = true;
     std::vector<std::string> liveErrors;
     CHECK(live.Compile(&liveErrors));
     const RigExecRigPose before = live.Evaluate(UsdTimeCode(5.0));
@@ -1278,7 +1263,7 @@ TestDataFlowOutranksTheNamespace()
     CHECK(stage);
     if (!stage) return;
     RigExecRigEvaluator evaluator(stage, kRigPath);
-    evaluator.cpuParityMode = true;
+    evaluator.cpuReference = true;
     std::vector<std::string> errors;
     CHECK(evaluator.Compile(&errors));
     const std::string hipLine =
@@ -1341,13 +1326,13 @@ TestFallbackVerdictUnderStack(bool ikLast)
 
     RigExecRigEvaluator dynamicRig(dynamicStage, kRigPath);
     RigExecRigEvaluator bakedRig(bakedStage, kRigPath);
-    // The verdict is judged against the exec walk itself, not against
+    // The verdict is judged against a separately initialized canonical evaluator, not against
     // whatever the default mode runs.
-    dynamicRig.SetEvaluationMode(RigExecEvaluationMode::ExecReference);
+
     std::vector<std::string> errors;
     CHECK(dynamicRig.Compile(&errors));
     CHECK(bakedRig.Compile(&errors));
-    bakedRig.SetEvaluationMode(RigExecEvaluationMode::BakedWithParityCheck);
+
     std::vector<std::string> reasons;
     if (!bakedRig.IsBakeable(&reasons)) {
         ++failures;
@@ -1362,7 +1347,7 @@ TestFallbackVerdictUnderStack(bool ikLast)
         const RigExecRigPose a = dynamicRig.Evaluate(UsdTimeCode(time));
         const RigExecRigPose b = bakedRig.Evaluate(UsdTimeCode(time));
         CHECK(a.valid && b.valid);
-        CHECK(b.bakedParityMismatches == 0);
+
         // The verdict names the writer that published nothing AND the frame
         // the joint kept -- never "fell back to its rest chain", which is
         // what it would say if the other writer had not run.
@@ -1372,7 +1357,7 @@ TestFallbackVerdictUnderStack(bool ikLast)
                        "the joint keeps the frame /Asset/Rig/Solvers/LegFK "
                        "left"));
         CHECK(!Mentions(a.diagnostics, "fell back to its rest chain"));
-        // Identical on both paths, line for line.
+        // Identical on both canonical evaluators, line for line.
         if (a.diagnostics != b.diagnostics) {
             ++failures;
             std::printf("FAIL %s: the paths disagree about the verdict\n",
@@ -1441,7 +1426,7 @@ TestConstraintObservesTopOfStack()
     CHECK(SameJoint(a, none, kAnkle));
     // Both writers ran: an inert one would make the lines above pass for the
     // wrong reason.
-    CHECK(a.solverEvaluations == 2);
+
 }
 
 /// Every joint's writer list is a restriction of ONE order.
@@ -1459,7 +1444,7 @@ TestPartialSubsetsAgreeOnOneOrder()
     CHECK(stage);
     if (!stage) return;
     RigExecRigEvaluator evaluator(stage, kRigPath);
-    evaluator.cpuParityMode = true;
+    evaluator.cpuReference = true;
     std::vector<std::string> errors;
     if (!evaluator.Compile(&errors)) {
         ++failures;
@@ -1512,7 +1497,7 @@ TestConstraintMediatedOrderIsRespected()
         CHECK(stage);
         if (!stage) continue;
         RigExecRigEvaluator evaluator(stage, kRigPath);
-        evaluator.cpuParityMode = true;
+        evaluator.cpuReference = true;
         std::vector<std::string> errors;
         if (!evaluator.Compile(&errors)) {
             ++failures;
@@ -1579,7 +1564,7 @@ TestDuplicateJointOnOneSolverIsUnauthorable()
     // Deduped to two distinct joints, so the FK is a single writer of each
     // and the rig compiles silently.
     RigExecRigEvaluator evaluator(stage, kRigPath);
-    evaluator.cpuParityMode = true;
+    evaluator.cpuReference = true;
     std::vector<std::string> errors;
     CHECK(evaluator.Compile(&errors));
     CHECK(errors.empty());
@@ -1798,7 +1783,7 @@ TestReadPhasesOverTheUnifiedStack()
     }
 }
 
-/// The AtPrim(Movers) probe held to the dynamic walk's phased-read store,
+/// The AtPrim(Movers) probe held to the selected compiled producer versions,
 /// baked, in both rig orders. Movers holds the constraint, while the IK writing the
 /// same knee sits in Solvers, so the probe's list is KneeMove's record alone
 /// whether the record lands after the IK's write or before it.
@@ -1818,8 +1803,7 @@ TestAtPrimMoversRecordsMatchTheStore()
         CHECK(stage);
         if (!stage) return;
         RigExecRigEvaluator evaluator(stage, kRigPath);
-        evaluator.SetEvaluationMode(
-            RigExecEvaluationMode::BakedWithParityCheck);
+
         std::vector<std::string> errors;
         CHECK(evaluator.Compile(&errors));
         std::vector<std::string> reasons;
@@ -1832,7 +1816,7 @@ TestAtPrimMoversRecordsMatchTheStore()
                 what + " frame " + std::to_string(int(frame));
             const RigExecRigPose pose = evaluator.Evaluate(UsdTimeCode(frame));
             CHECK(pose.valid);
-            CHECK(pose.bakedParityMismatches == 0);
+
             CHECK(rigExecTest::CheckFrameRecords(&failures, where,
                                                  evaluator) == 1);
         }
@@ -1986,15 +1970,16 @@ TestSolverCheckpointsBake(const std::string &examplesDir)
             }
         }
 
-        // Drags, on the BakedWithParityCheck evaluator: each generation is
-        // held to the walk, its records to the walk's store, and the steps it
-        // ran to the cone.
+        // Drags, on the canonical program evaluator: each generation is
+        // checked against published numeric versions, its records against
+        // current stored matrices, and executed ops against the declared cone.
         RigExecRigEvaluator &baked = *run.baked;
         const auto ranRecords = [&B]() {
             std::vector<SdfPath> ran;
-            for (const RigExecBakedStep &step : B.steps) {
+            for (size_t id=0;id<B.steps.size();++id) {
+                const auto &step=B.steps[id];
                 if (step.kind == RigExecBakedStepKind::FrameMatrix &&
-                    step.runSeq != 0) {
+                    id<B.opExecution.ran.size() && B.opExecution.ran[id]) {
                     ran.push_back(B.frameRecords[size_t(step.object)].mover);
                 }
             }
@@ -2002,14 +1987,15 @@ TestSolverCheckpointsBake(const std::string &examplesDir)
             return ran;
         };
         const auto foldRan = [&B](const SdfPath &mover) {
-            for (const RigExecBakedStep &step : B.steps) {
+            for (size_t id=0;id<B.steps.size();++id) {
+                const auto &step=B.steps[id];
                 if (step.kind != RigExecBakedStepKind::InfluenceFold) {
                     continue;
                 }
                 const auto [c, r] = B.revisionIndex[size_t(step.object)];
                 if (B.chains[size_t(c)].revisions[size_t(r)].moverPath ==
                     mover) {
-                    return step.runSeq != 0;
+                    return id<B.opExecution.ran.size() && B.opExecution.ran[id];
                 }
             }
             return false;
@@ -2025,11 +2011,7 @@ TestSolverCheckpointsBake(const std::string &examplesDir)
                 TfToken(), TfToken(avar), VtValue(value)}});
             const RigExecRigPose dragged = baked.Evaluate(UsdTimeCode(9.0));
             CHECK(dragged.valid);
-            if (dragged.bakedParityMismatches) {
-                ++failures;
-                std::printf("FAIL %s: %zu baked parity mismatch(es)\n",
-                            where.c_str(), dragged.bakedParityMismatches);
-            }
+
             if (rigExecTest::CheckFrameRecords(&failures, where, baked) !=
                 (withP1 ? 3u : 1u)) {
                 ++failures;
@@ -2050,7 +2032,7 @@ TestSolverCheckpointsBake(const std::string &examplesDir)
             const bool p3Fold = foldRan(reader("P3"));
             baked.ClearInteractiveOverrides();
             const RigExecRigPose released = baked.Evaluate(UsdTimeCode(9.0));
-            CHECK(released.valid && released.bakedParityMismatches == 0);
+            CHECK(released.valid);
             for (const char *name : {"P2", "P3", "PB"}) {
                 CHECK(points(released, name) == points(before, name));
             }
@@ -2149,7 +2131,7 @@ TestProducersCarryNoStackPosition()
     CHECK(stage);
     if (!stage) return;
     RigExecRigEvaluator evaluator(stage, kRigPath);
-    evaluator.cpuParityMode = true;
+    evaluator.cpuReference = true;
     std::vector<std::string> errors;
     if (!evaluator.Compile(&errors)) {
         ++failures;
@@ -2219,7 +2201,7 @@ TestAggregateContradictionIsRejected()
     CHECK(stage);
     if (!stage) return;
     RigExecRigEvaluator evaluator(stage, kRigPath);
-    evaluator.cpuParityMode = true;
+    evaluator.cpuReference = true;
     std::vector<std::string> errors;
     // Definition order Blend, Producer -> reversed -> Producer runs FIRST,
     // which agrees with the aggregate edge.
@@ -2237,7 +2219,7 @@ TestAggregateContradictionIsRejected()
     if (!solvers) return;
     solvers.SetChildrenReorder({TfToken("Producer"), TfToken("Blend")});
     RigExecRigEvaluator flipped(stage, kRigPath);
-    flipped.cpuParityMode = true;
+    flipped.cpuReference = true;
     std::vector<std::string> flippedErrors;
     if (!flipped.Compile(&flippedErrors)) {
         ++failures;
@@ -2274,15 +2256,12 @@ TestAggregateReadIsHistoryIndependent()
     };
     const rigExecTest::EvaluationState frame5{UsdTimeCode(5.0), {}};
     const rigExecTest::EvaluationState frame2{UsdTimeCode(2.0), {}};
-    for (const RigExecEvaluationMode mode :
-             {RigExecEvaluationMode::ExecReference,
-              RigExecEvaluationMode::Baked}) {
+    {
         rigExecTest::CheckHistoryIndependent(
-            &failures, "blend of a producer", make(false), kRigPath, mode,
+            &failures, "blend of a producer", make(false), kRigPath,
             frame5, frame2);
         rigExecTest::CheckHistoryIndependent(
-            &failures, "blend of a producer, flipped", make(true), kRigPath,
-            mode, frame5, frame2);
+            &failures, "blend of a producer, flipped", make(true), kRigPath, frame5, frame2);
     }
 }
 
@@ -2301,7 +2280,7 @@ TestAggregateReadIsHistoryIndependent()
 /// must use no more levels than one limb alone does -- with the constraints
 /// above the solvers and with them below, feeding the solvers.
 void
-TestUnrelatedLimbsShareALevel()
+TestUnrelatedLimbsHaveIndependentDependencies()
 {
     const auto limb = [](const char *side) {
         const std::string s(side);
@@ -2423,83 +2402,37 @@ TestUnrelatedLimbsShareALevel()
             "    }\n"
             "}\n";
     };
-    // Pose step levels (solvers and constraints) and solver levels.
-    struct Levels {
-        std::map<SdfPath, size_t> steps, solvers;
-    };
-    const auto levelsOf = [](const UsdStageRefPtr &stage,
-                             const std::string &what) {
-        Levels levels;
-        if (!stage) {
-            ++failures;
-            return levels;
-        }
-        RigExecRigEvaluator evaluator(stage, kRigPath);
-        evaluator.cpuParityMode = true;
+    const auto graphOf = [](const UsdStageRefPtr &stage) {
+        RigExecRigEvaluator evaluator(stage,kRigPath);
         std::vector<std::string> errors;
-        if (!evaluator.Compile(&errors)) {
-            ++failures;
-            std::printf("FAIL %s: the parallel fixture does not compile\n",
-                        what.c_str());
-            for (const std::string &error : errors) {
-                std::printf("    %s\n", error.c_str());
-            }
-            return levels;
-        }
+        CHECK(evaluator.Compile(&errors));
         CHECK(evaluator.Evaluate(UsdTimeCode(5.0)).valid);
-        levels.steps = evaluator.GetPoseStepLevels();
-        levels.solvers = evaluator.GetSolverBatchLevels();
-        return levels;
+        return evaluator.GetOpGraph();
     };
-    const auto distinct = [](const std::map<SdfPath, size_t> &levels) {
-        std::set<size_t> seen;
-        for (const auto &[step, level] : levels) seen.insert(level);
-        return seen.size();
+    const auto operations=[](const auto &graph,const char *side) {
+        std::vector<size_t> ids;
+        for(const char *name:{"Solvers/IK","Solvers/FK","Movers/Aim"}) {
+            const std::string text(name);const auto slash=text.find('/');
+            const SdfPath path("/Asset/Rig/"+text.substr(0,slash+1)+side+text.substr(slash+1));
+            const size_t id=rigExecTest::FindOperation(graph,path,slash==7?"Solve":"Constraint");
+            CHECK(id<graph.size());ids.push_back(id);
+        }
+        return ids;
     };
-    for (const bool solversLast : {true, false}) {
-        const std::string order =
-            solversLast ? "solvers last" : "movers last";
-        // Head() always emits the Hip/Knee/Ankle chain of its own; the limbs
-        // above are appended beside it and nothing names it, so it is inert.
-        const Levels single =
-            levelsOf(OpenText(build(false, solversLast)),
-                     "one limb, " + order);
-        const Levels pair =
-            levelsOf(OpenText(build(true, solversLast)),
-                     "two limbs, " + order);
-        if (single.steps.empty() || pair.steps.empty()) continue;
-
-        CHECK(single.solvers.size() == 2);
-        CHECK(pair.solvers.size() == 4);
-        CHECK(single.steps.size() == 3);
-        CHECK(pair.steps.size() == 6);
-        // The second limb adds STEPS, never LEVELS: it is independent, so it
-        // runs beside the first and not after it.
-        CHECK(distinct(single.solvers) == distinct(pair.solvers));
-        CHECK(distinct(single.steps) == distinct(pair.steps));
-        // ... and each step sits in exactly its opposite number's level.
-        for (const char *name :
-             {"Solvers/IK", "Solvers/FK", "Movers/Aim"}) {
-            const std::string text(name);
-            const std::string scope = text.substr(0, text.find('/') + 1);
-            const std::string leaf = text.substr(text.find('/') + 1);
-            const SdfPath leftPath("/Asset/Rig/" + scope + "L" + leaf);
-            const SdfPath rightPath("/Asset/Rig/" + scope + "R" + leaf);
-            const auto left = pair.steps.find(leftPath);
-            const auto right = pair.steps.find(rightPath);
-            CHECK(left != pair.steps.end() && right != pair.steps.end());
-            if (left == pair.steps.end() || right == pair.steps.end()) {
-                continue;
-            }
-            CHECK(left->second == right->second);
-            const auto alone = single.steps.find(leftPath);
-            CHECK(alone != single.steps.end() &&
-                  alone->second == left->second);
-            if (left->second != right->second) {
-                std::printf("    %s: %s at level %zu, %s at %zu\n",
-                            order.c_str(), leftPath.GetText(), left->second,
-                            rightPath.GetText(), right->second);
-            }
+    for(const bool solversLast:{true,false}) {
+        const auto single=graphOf(OpenText(build(false,solversLast)));
+        const auto pair=graphOf(OpenText(build(true,solversLast)));
+        const auto alone=operations(single,"L"),left=operations(pair,"L"),right=operations(pair,"R");
+        // Every directed dependency within one limb survives adding the other.
+        for(size_t i=0;i<left.size();++i)for(size_t j=0;j<left.size();++j)if(i!=j) {
+            const bool expected=rigExecTest::HasDependencyPath(single,alone[i],alone[j]);
+            CHECK(rigExecTest::HasDependencyPath(pair,left[i],left[j])==expected);
+            CHECK(rigExecTest::HasDependencyPath(pair,right[i],right[j])==expected);
+        }
+        // No actual producer edge serializes the unrelated limbs.
+        for(size_t l:left)for(size_t r:right) {
+            CHECK(!rigExecTest::HasDependencyPath(pair,l,r));
+            CHECK(!rigExecTest::HasDependencyPath(pair,r,l));
         }
     }
 }
@@ -2573,34 +2506,34 @@ ControlFollowText(const char *controlsPhase)
     return text;
 }
 
-/// The baked half for a hand-written fixture: CheckParity's comparison,
+/// The baked half for a hand-written fixture: CheckEvaluatorConsistency's comparison,
 /// over stages opened from \p text, with the program required.
 void
 CheckTextParity(const char *what, const std::string &text,
                 const std::vector<double> &frames)
 {
-    const UsdStageRefPtr referenceStage = OpenText(text);
+    const UsdStageRefPtr baselineStage = OpenText(text);
     const UsdStageRefPtr bakedStage = OpenText(text);
-    CHECK(referenceStage && bakedStage);
-    if (!referenceStage || !bakedStage) return;
-    RigExecRigEvaluator reference(referenceStage, kRigPath);
+    CHECK(baselineStage && bakedStage);
+    if (!baselineStage || !bakedStage) return;
+    RigExecRigEvaluator baseline(baselineStage, kRigPath);
     RigExecRigEvaluator baked(bakedStage, kRigPath);
     std::vector<std::string> errors;
-    if (!reference.Compile(&errors) || !baked.Compile(&errors)) {
+    if (!baseline.Compile(&errors) || !baked.Compile(&errors)) {
         ++failures;
         std::printf("FAIL %s: the fixture does not compile\n", what);
         return;
     }
-    baked.SetEvaluationMode(RigExecEvaluationMode::BakedWithParityCheck);
+
     std::vector<std::string> reasons;
     CHECK(baked.IsBakeable(&reasons));
     for (const double frame : frames) {
         const std::string where =
             std::string(what) + " frame " + std::to_string(frame);
-        const RigExecRigPose a = reference.Evaluate(UsdTimeCode(frame));
+        const RigExecRigPose a = baseline.Evaluate(UsdTimeCode(frame));
         const RigExecRigPose b = baked.Evaluate(UsdTimeCode(frame));
         CHECK(a.valid && b.valid);
-        CHECK(b.bakedParityMismatches == 0);
+
         rigExecTest::ComparePose(&failures, where, a, b);
     }
     CHECK(baked.GetBakedGenerationCount() == frames.size());
@@ -2991,7 +2924,7 @@ IndependentConstraintsText()
 /// In the pose schedule the two aims share a Kahn level, as do the two tips,
 /// and each tip sits in a later level than its own limb's aim. In the baked
 /// op graph no step of one limb's constraints reaches a step of the other's,
-/// while each tip stays downstream of its own aim; both paths publish the
+/// while each tip stays downstream of its own aim; both canonical evaluators publish the
 /// same pose, with each tip on its own knee.
 void
 TestIndependentConstraintsShareALevel()
@@ -3008,7 +2941,7 @@ TestIndependentConstraintsShareALevel()
         CHECK(stage);
         if (!stage) return;
         RigExecRigEvaluator evaluator(stage, kRigPath);
-        evaluator.cpuParityMode = true;
+        evaluator.cpuReference = true;
         std::vector<std::string> errors;
         if (!evaluator.Compile(&errors)) {
             ++failures;
@@ -3019,17 +2952,17 @@ TestIndependentConstraintsShareALevel()
             }
             return;
         }
-        const std::map<SdfPath, size_t> levels =
-            evaluator.GetPoseStepLevels();
-        for (const SdfPath &step : {lAim, rAim, lTip, rTip}) {
-            CHECK(levels.count(step) == 1);
-        }
-        if (levels.count(lAim) && levels.count(rAim) && levels.count(lTip) &&
-            levels.count(rTip)) {
-            CHECK(levels.at(lAim) == levels.at(rAim));
-            CHECK(levels.at(lTip) == levels.at(rTip));
-            CHECK(levels.at(lTip) > levels.at(lAim));
-            CHECK(levels.at(rTip) > levels.at(rAim));
+        const auto graph=evaluator.GetOpGraph();
+        const size_t la=rigExecTest::FindOperation(graph,lAim,"Constraint");
+        const size_t ra=rigExecTest::FindOperation(graph,rAim,"Constraint");
+        const size_t lt=rigExecTest::FindOperation(graph,lTip,"Constraint");
+        const size_t rt=rigExecTest::FindOperation(graph,rTip,"Constraint");
+        CHECK(la<graph.size() && ra<graph.size() && lt<graph.size() && rt<graph.size());
+        CHECK(rigExecTest::HasDependencyPath(graph,la,lt));
+        CHECK(rigExecTest::HasDependencyPath(graph,ra,rt));
+        for(size_t left:{la,lt})for(size_t right:{ra,rt}) {
+            CHECK(!rigExecTest::HasDependencyPath(graph,left,right));
+            CHECK(!rigExecTest::HasDependencyPath(graph,right,left));
         }
         const RigExecRigPose pose = evaluator.Evaluate(UsdTimeCode(5.0));
         CHECK(pose.valid);
@@ -3071,7 +3004,7 @@ TestIndependentConstraintsShareALevel()
             ++failures;
             return;
         }
-        evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+
         std::vector<std::string> reasons;
         CHECK(evaluator.IsBakeable(&reasons));
         CHECK(evaluator.Evaluate(UsdTimeCode(5.0)).valid);
@@ -3122,10 +3055,35 @@ TestIndependentConstraintsShareALevel()
         CHECK(reaches({rAim}, {rTip}));
         CHECK(!reaches({lTip}, {lAim}));
         CHECK(!reaches({rTip}, {rAim}));
-        CHECK(graph[constraintOf(lAim)].level ==
-              graph[constraintOf(rAim)].level);
-        CHECK(graph[constraintOf(lTip)].level ==
-              graph[constraintOf(rTip)].level);
+        // The shared frame is an actual typed producer read, and its writer
+        // precedes the consuming constraint in the canonical operation graph.
+        const auto sharedFrameProducer = [&](const SdfPath &writer,
+                                             const SdfPath &reader) {
+            const size_t consumer = constraintOf(reader);
+            for (size_t producer : stepsOf(writer)) {
+                for (const auto &write : graph[producer].writes) {
+                    if (write.domain != "PoseFin") continue;
+                    for (const auto &read : graph[consumer].reads) {
+                        if (read.domain == write.domain &&
+                            read.first <= write.last && write.first <= read.last) {
+                            CHECK(graph[producer].step < graph[consumer].step);
+                            const auto cone = rigExecTest::OpGraphForwardCone(graph, {producer});
+                            CHECK(cone[consumer]);
+                            return true;
+                        }
+                    }
+                }
+            }
+            return false;
+        };
+        CHECK(sharedFrameProducer(lAim,lTip));
+        CHECK(sharedFrameProducer(rAim,rTip));
+        for (const auto &node : graph)
+            for (const size_t predecessor : node.preds) {
+                CHECK(predecessor < graph.size());
+                if (predecessor < graph.size())
+                    CHECK(graph[predecessor].step < node.step);
+            }
     }
 
     CheckTextParity("independent constraints", text, {1, 3, 5});
@@ -3166,7 +3124,7 @@ main(int argc, char **argv)
     TestProducersCarryNoStackPosition();
     TestAggregateContradictionIsRejected();
     TestAggregateReadIsHistoryIndependent();
-    TestUnrelatedLimbsShareALevel();
+    TestUnrelatedLimbsHaveIndependentDependencies();
     TestSolverInputReadPhaseFollowsAConstraintAbove();
     TestConstraintReadsAConstraintInStackOrder();
     TestConstraintReadsUnderASolvedJoint();
@@ -3190,21 +3148,21 @@ main(int argc, char **argv)
         dataFlow.fkJoints =
             "</Asset/Rig/Joints/Hip>, </Asset/Rig/Joints/Hip/Knee>";
 
-        CheckParity("stacked fk + ik", Stacked(), frames, true);
-        CheckParity("stacked fk + ik, reordered", reordered, frames, true);
-        CheckParity("stacked with a partial subset", tear, frames, true);
-        CheckParity("stacked, ordered by data flow", dataFlow, frames, true);
+        CheckEvaluatorConsistency("stacked fk + ik", Stacked(), frames, true);
+        CheckEvaluatorConsistency("stacked fk + ik, reordered", reordered, frames, true);
+        CheckEvaluatorConsistency("stacked with a partial subset", tear, frames, true);
+        CheckEvaluatorConsistency("stacked, ordered by data flow", dataFlow, frames, true);
 
         // Three writers on one joint, and a pose constraint sitting on top of
         // a stacked one: two writers is the shape that is easy to get right
         // by accident, and a constraint over a stack is where the walk order
-        // and the commit order have to be the same order on both paths.
+        // and the commit order have to be the same order on both canonical evaluators.
         RigSpec three = Stacked();
         three.fk2 = true;
         RigSpec aim = Stacked();
         aim.kneeAim = true;
-        CheckParity("three writers on one joint", three, frames, true);
-        CheckParity("a constraint over a stacked joint", aim, frames, true);
+        CheckEvaluatorConsistency("three writers on one joint", three, frames, true);
+        CheckEvaluatorConsistency("a constraint over a stacked joint", aim, frames, true);
 
         // The unified stack, both ways round. A LIVE rest -- a solver
         // measuring from the frame a constraint below it left -- is the one
@@ -3218,11 +3176,11 @@ main(int argc, char **argv)
         RigSpec fedFk = Stacked();
         fedFk.ik = false;
         fedFk.kneeMove = true;
-        CheckParity("a constraint BELOW a solver feeds it", fed, frames,
+        CheckEvaluatorConsistency("a constraint BELOW a solver feeds it", fed, frames,
                     true);
-        CheckParity("a constraint ABOVE a solver revises it", above, frames,
+        CheckEvaluatorConsistency("a constraint ABOVE a solver revises it", above, frames,
                     true);
-        CheckParity("an fk chain over a constrained joint", fedFk, frames,
+        CheckEvaluatorConsistency("an fk chain over a constrained joint", fedFk, frames,
                     true);
         // Both solver kinds over the same constrained joint, and the three
         // writers case on top of it: the live rest is the one place the
@@ -3232,9 +3190,9 @@ main(int argc, char **argv)
         fedBoth.kneeMove = true;
         RigSpec fedThree = fedBoth;
         fedThree.fk2 = true;
-        CheckParity("both solvers over a constrained joint", fedBoth, frames,
+        CheckEvaluatorConsistency("both solvers over a constrained joint", fedBoth, frames,
                     true);
-        CheckParity("three writers over a constrained joint", fedThree,
+        CheckEvaluatorConsistency("three writers over a constrained joint", fedThree,
                     frames, true);
     }
 

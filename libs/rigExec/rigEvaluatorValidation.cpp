@@ -100,24 +100,18 @@ _ValidateWeightObjectDomain(
                  weightPath.GetString();
         return false;
     }
-    if (!visiting->insert(weightPath).second) {
-        *error = weightPath.GetString() +
-                 ": weight object composition contains a cycle";
-        return false;
-    }
+    // This object is already being validated on the current closure path.
+    // Keep the authored back-edge for the common operation SCC; every unique
+    // object still receives the domain, type and target checks below.
+    if (!visiting->insert(weightPath).second) return true;
     struct _EraseOnReturn {
         std::set<SdfPath> *paths;
         SdfPath path;
         ~_EraseOnReturn() { paths->erase(path); }
     } erase{visiting, weightPath};
 
-    if (!pointDomain && _IsVolumeWeightType(weightPrim.GetTypeName())) {
-        *error = weightPath.GetString() +
-                 ": volumetric weights require a point domain";
-        return false;
-    }
-
     const TfToken typeName = weightPrim.GetTypeName();
+    const bool volumeEnvelope = !pointDomain && _IsVolumeWeightType(typeName);
     auto readToken = [&weightPrim](const char *name, const char *fallback) {
         TfToken value(fallback);
         if (const UsdAttribute attr =
@@ -323,7 +317,7 @@ _ValidateWeightObjectDomain(
             return false;
         }
     }
-    if (operationDomain) {
+    if (operationDomain && !volumeEnvelope) {
         if (representation != "constant") {
             *error = weightPath.GetString() +
                      ": an atomic multi-target mover requires a constant "
@@ -496,6 +490,7 @@ RigExecRigEvaluator::_DiscoverMovers(
             RigExecMoverRecord record;
             record.moverPath = prim.GetPath();
             record.schemaType = prim.GetTypeName();
+            record.handler = RigExecFindMoverHandler(record.schemaType);
             record.ordinal = ordinal++;
 
             // Structural/topology properties are never writable move

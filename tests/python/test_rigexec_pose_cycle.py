@@ -19,7 +19,7 @@ So this asserts three things on a minimal leg with a reverse foot:
 
   1. the follower at the BOTTOM of the stack compiles with no pose cycle,
      and its pose matches the follower-on-top arrangement at ikfk 0 and 1,
-     dynamic and baked;
+     graph and scalar reference;
   2. the follower at the TOP compiles, the blend still reads the scalar
      the constraint's target carries, and the param control tracks the
      ankle in FK and in IK;
@@ -207,16 +207,15 @@ def _pose_values(pose):
 def _poses_by_dial(rig, stage, mode):
     """The rig's pose values at ikfk 0 and 1 in the given evaluation
     mode."""
-    rig.evaluation_mode = mode
+    rig.cpu_reference = True
     dial = stage.GetPrimAtPath(PARAMS).GetAttribute("avars:ikfk")
     out = {}
     for value in (0.0, 1.0):
         dial.Set(value)
         pose = rig.evaluate(1.0)
         assert pose.valid, "%s, ikfk = %g: invalid pose" % (mode, value)
-        if mode == "baked":
-            assert rig.op_graph(), (
-                "ikfk = %g: the baked program did not answer" % value)
+        assert rig.op_graph(), (
+            "ikfk = %g: the compiled graph did not answer" % value)
         gap = _distance(_origin(pose.joint_frame(ANKLE)),
                         _origin(pose.control_frame(PARAMS)))
         assert gap < 1e-6, (
@@ -253,9 +252,8 @@ def main():
                             effector_constrained=False)
     message, skipped = _cycle_report(top)
     assert message is None and not skipped, message
-    assert bottom.is_bakeable() and top.is_bakeable(), (
-        bottom.bakeability_reasons(), top.bakeability_reasons())
-    for mode in ("dynamic", "baked"):
+    pass # Compile/evaluate validates the single graph.
+    for mode in ("graph",):
         below = _poses_by_dial(bottom, bottom_stage, mode)
         above = _poses_by_dial(top, top_stage, mode)
         for value in (0.0, 1.0):
@@ -268,7 +266,7 @@ def main():
                     "%s, ikfk = %g: %s differs by %g between the follower "
                     "at the bottom and at the top" % (mode, value, key,
                                                       worst))
-    print("bottom of the stack: compiles; dynamic and baked poses match "
+    print("bottom of the stack: compiles; graph and scalar reference poses match "
           "the follower on top at ikfk 0 and 1")
 
     # --- 2. follower at the top: compiles, reads the scalar, tracks -------
@@ -298,7 +296,7 @@ def main():
     print("top of the stack: compiles; gap FK %.6f, IK %.6f; the ankle "
           "moved %.4f between the two" % (gaps[0.0], gaps[1.0], moved))
 
-    # --- 3. a genuine loop fails in either order, and is named ------------
+    # --- 3. a genuine loop is set aside in either order, and is named ------------
     follower = RIG + "/Movers/param_follow/params_to_ankle"
     for on_top in (False, True):
         stage, rig = _build(rigexec, Usd, Sdf, follower_on_top=on_top,
@@ -315,7 +313,11 @@ def main():
             "the tail constraint waits on the loop but is not on it: %s"
             % message)
         assert FK not in message, "the FK chain has no wait: %s" % message
-        assert "2 further pose steps wait on the loop" in message, message
+        # D3 keeps dependents outside the SCC. Their exact authored identities
+        # remain in the common graph instead of a retired pose-level wait count.
+        live_owners = {node["label"] for node in rig.op_graph()}
+        for kept in (TAIL_CONSTRAINT, follower, FK):
+            assert kept in live_owners, "live dependent missing: %s" % kept
         # The loop's members, exactly, are what was set aside: the tail
         # constraint and the follower wait on the loop but are not on it,
         # so they keep running.
@@ -324,7 +326,14 @@ def main():
         for kept in (TAIL_CONSTRAINT, follower, FK):
             assert kept not in skipped, (
                 "%s was set aside: %s" % (kept, sorted(skipped)))
-    print("genuine loop: rejected in both orders; %s" % loop.strip())
+        authored = stage.GetRootLayer().ExportToString()
+        pose = rig.evaluate(1.0)
+        assert pose.valid, "one local SCC does not reject independent work"
+        held = rig.evaluate(1.0)
+        assert held.valid and rig.skipped_operations() == skipped
+        assert stage.GetRootLayer().ExportToString() == authored, (
+            "cycle reporting/evaluation must not author the stage")
+    print("genuine loop: locally excluded in both orders; %s" % loop.strip())
     print("OK")
 
 

@@ -1,7 +1,7 @@
 # RigExec architecture
 
 RigExec separates scene authoring, evaluation, and display. It targets an
-unchanged OpenUSD 26.08 installation and uses OpenExec for typed dependency
+unchanged OpenUSD 26.08 installation and uses one shared operation graph for typed dependency
 evaluation. See the [public references](../references.md) for upstream design
 documentation and the published numerical methods used by the project.
 
@@ -26,11 +26,13 @@ invalidate affected downstream work while unchanged branches reuse results.
 Topology and binding changes require structural validation and may rebuild
 affected graphs. Normals and bounds follow the final evaluated geometry.
 
-The baked program stores compiled operations and dependency schedules in
-dense runtime structures. Its results are checked against the dynamic path.
-Background warming evaluates snapshots; edits must invalidate incompatible
-cached results before they can reach the viewport. See [evaluation modes](../concepts/baked-vs-dynamic.md)
-and [frame warming](../concepts/frame-cache-warming.md).
+The compiled program stores typed operation declarations and dense values.
+Native, frozen, and binary runtime execution use the shared graph compiler,
+readiness rules, and kernels. Independent source references and exact golden
+checks are optional judges. Background warming evaluates detached snapshots;
+edits invalidate incompatible cached results before they reach the viewport.
+See [evaluation and checks](../concepts/baked-vs-dynamic.md) and
+[frame warming](../concepts/frame-cache-warming.md).
 
 ## Display
 

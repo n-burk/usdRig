@@ -211,8 +211,7 @@ RigExecBakeStaticReport(RigExecRigEvaluator &evaluator,
     }
     const RigExecBakedProgram *baked = evaluator.GetBakedProgram();
     if (!baked) {
-        return Fail("no baked program stands: the evaluator is not in a "
-                    "baked mode, or the epoch does not bake");
+        return Fail("no compiled program stands for this epoch");
     }
     const RigExecBakedProgramImpl &B = baked->GetStepGraph();
     const UsdStageRefPtr &stage = B.stage;

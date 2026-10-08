@@ -100,6 +100,7 @@
 namespace rigExec {
 
 class RigExecImagingDirectory;
+struct RigExecWarmWorkspacePool;
 
 /// The span an upstream pull reconstructs (RigExecImagingRegistry::
 /// GetUpstreamPullWindow).
@@ -262,6 +263,15 @@ public:
     /// to the plain per-frame route, which re-derives everything exactly
     /// as before -- including a null cache, which is what the direct
     /// test drivers pass.
+    /// Instance-only testing observer of an actual valid default-worker
+    /// publication. Copied when building work; called after all publication
+    /// locks are released. Install/remove on the owner thread with no factory
+    /// construction in progress and all background work drained.
+    using WarmPublishObserver = std::function<void(const SdfPath &,
+        UsdTimeCode, const RigExecFrameCacheKey &, RigExecFrameGeneration,
+        const RigExecRigPose &, const std::shared_ptr<RigExecFrameCache> &)>;
+    void SetWarmPublishObserverForTesting(WarmPublishObserver observer);
+
     RigExecWarmFactoryResult BuildWarmWork(
         const SdfPath &rig, UsdTimeCode time,
         RigExecFrameGeneration generation, RigExecFrozenStepRunner runner,
@@ -678,6 +688,7 @@ private:
         /// Impossible until the first refresh verifies one.
         uint64_t frozenSerial = ~uint64_t(0);
         std::shared_ptr<const RigExecFrozenProgram> frozen;
+        std::shared_ptr<RigExecWarmWorkspacePool> warmWorkspaces;
         /// The named cause of the standing snapshot's freeze refusal, empty
         /// when the last refresh froze (or had no program to freeze): a
         /// refusal parks a validly empty entry AND says why, so the
@@ -1018,6 +1029,8 @@ private:
     /// transitions (scheduler hook) record here; the strip queries it.
     /// A leaf under both _mutex and the scheduler mutex.
     std::shared_ptr<RigExecWarmFrameIndex> _warmIndex;
+    /// Owner-thread state; workers receive a copy during factory construction.
+    WarmPublishObserver _warmPublishObserver;
     /// The triggers' sampling budget (see SetWarmSamplingBudget).
     size_t _warmSamplingMaxInvocations = 16;
     double _warmSamplingMaxMs = 8.0;

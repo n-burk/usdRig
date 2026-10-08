@@ -127,9 +127,10 @@ def _points(rig, stage):
     """The skinned body's deformed points, or () if this file has none."""
     pose = rig.evaluate(0)
     assert pose.valid, [d for d in pose.diagnostics if "error" in d]
-    if _BODY not in pose.moved_properties():
+    properties = pose.moved_properties()
+    if _BODY not in properties:
         return ()
-    return [tuple(p) for p in pose.moved_property(_BODY)]
+    return [tuple(p) for p in properties[_BODY]]
 
 
 def _all_points(rig):
@@ -142,8 +143,9 @@ def _all_points(rig):
     """
     pose = rig.evaluate(0)
     assert pose.valid, [d for d in pose.diagnostics if "error" in d]
-    return {m: [tuple(v) for v in pose.moved_property(m)]
-            for m in sorted(pose.moved_properties()) if m.endswith(".points")}
+    properties = pose.moved_properties()
+    return {m: [tuple(v) for v in properties[m]]
+            for m in sorted(properties) if m.endswith(".points")}
 
 
 def _rides(before, after, s, label, eps):
@@ -203,7 +205,7 @@ def _check_file(path, mode):
     # The session layer, so the sequence below never touches the asset.
     stage.SetEditTarget(Usd.EditTarget(stage.GetSessionLayer()))
     rig = rigexec.Rig(stage, _RIG)
-    rig.evaluation_mode = mode
+    rig.cpu_reference = True
 
     def _frames():
         pose = rig.evaluate(0)
@@ -369,7 +371,7 @@ def main():
     import rigexec
     rigexec.load_schema_plugin(sys.argv[1] if len(sys.argv) > 1 else None)
     for path in _FILES:
-        for mode in ("dynamic", "baked"):
+        for mode in ("graph",):
             _check_file(path, mode)
     print("OK: the TRS masters carry the rig and never deform it")
 

@@ -39,9 +39,8 @@ struct RigExecBakeStaticEntry {
 /// (time samples, a spline, or a value that might vary) or connected.
 ///
 /// Compiles when no program stands; never evaluates. False with the reason
-/// when the rig does not compile, has no baked program (the evaluator is
-/// not in a baked mode, or the epoch does not bake), or holds interactive
-/// overrides.
+/// when the rig does not compile, has no compiled program for the epoch,
+/// or holds interactive overrides.
 bool RigExecBakeStaticReport(RigExecRigEvaluator &evaluator,
                              std::vector<RigExecBakeStaticEntry> *entries,
                              std::string *error);

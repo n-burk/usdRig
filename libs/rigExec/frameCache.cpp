@@ -170,6 +170,12 @@ _FoldStageSeeds(uint64_t hash, const RigExecStageFrameSeeds &seeds)
     for (const RigExecPointFrame &frame : seeds.nativeFrames) {
         hash = _FoldPointFrame(hash, frame);
     }
+    hash = _FoldU64(hash, static_cast<uint64_t>(seeds.intervening.size()));
+    for (const GfMatrix4d &matrix : seeds.intervening)
+        for (int row = 0; row < 4; ++row)
+            for (int column = 0; column < 4; ++column)
+                hash = _FoldScalar(hash, matrix[row][column]);
+    for (char reset : seeds.interveningReset) hash = _FoldScalar(hash, reset);
     return hash;
 }
 
@@ -482,6 +488,7 @@ RigExecSampleDigest(const RigExecSampledInput &sample)
     hash = _FoldBytes(hash, "src\x1f", 4);
     hash = _FoldString(hash, sample.path.GetString());
     hash = _FoldBytes(hash, sample.hasValue ? "\x01" : "\x00", 1);
+    hash = _FoldBytes(hash, sample.valueBlocked ? "\x01" : "\x00", 1);
     if (sample.hasValue) {
         hash = _FoldVtValue(hash, sample.value);
     } else {

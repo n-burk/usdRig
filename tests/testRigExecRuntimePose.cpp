@@ -8,6 +8,7 @@
 #include "rigExecBake/bake.h"
 #include "rigExec/bakedProgramImpl.h"
 #include "rigExec/rigEvaluator.h"
+#include "rigExec/weightReference.h"
 #include "rigExecBinary/format.h"
 #include "rigExecMath/propertyMath.h"
 #include "rigExecRuntime/runtime.h"
@@ -42,6 +43,7 @@ PXR_NAMESPACE_USING_DIRECTIVE
 static int failures = 0;
 static int comparedFixtures = 0;
 static int comparedFrames = 0;
+static bool checkedRefreshRecords=false,checkedRefreshCarries=false,checkedRefreshGuards=false;
 
 #define CHECK(cond)                                                     \
     do {                                                                \
@@ -208,6 +210,135 @@ _CheckFramesDiffer(const char *name, const std::vector<_PlayedFrame> &rows)
 // the diagnostics, bit for bit. A `static` stage holds an animated source
 // in static data at the bake time, so it plays that time alone. \p played,
 // when given, receives each frame's outputs.
+static bool checkedSolverSemanticRequirements=false;
+static void _TestSolverSemanticRefusals(const std::vector<uint8_t> &bytes)
+{
+    if(checkedSolverSemanticRequirements)return;
+    auto baseline=RigExecTestUnpack(bytes);if(!baseline)return;
+    size_t owner=baseline->steps.size();
+    for(size_t i=0;i<baseline->steps.size();++i)
+        if(baseline->steps[i].kind==fb::StepKind::Solve && !baseline->steps[i].semanticPredecessorKeys.empty()){owner=i;break;}
+    if(owner==baseline->steps.size())return;
+    CHECK(!baseline->pose->solvers[size_t(baseline->steps[owner].object)].relationshipRequirements.empty());
+    std::vector<uint8_t> valid;std::string error;
+    CHECK(RigExecFormatWrite(*baseline,&valid,&error));
+    std::unique_ptr<fb::RigExecWireFile> opened;
+    CHECK(RigExecFormatOpen(valid.data(),valid.size(),&opened,&error));
+    const auto reject=[&](fb::RigExecWireFile bad,const char *reason){
+        std::vector<uint8_t> rejected;std::string writeError,openError;
+        CHECK(!RigExecFormatWrite(bad,&rejected,&writeError));
+        const auto malformed=RigExecTestPackUnchecked(bad);
+        CHECK(!RigExecFormatOpen(malformed.data(),malformed.size(),&opened,&openError));
+        CHECK(writeError.find(reason)!=std::string::npos);CHECK(openError.find(reason)!=std::string::npos);
+    };
+    auto missing=*baseline;missing.steps[owner].semanticPredecessorKeys.clear();
+    reject(std::move(missing),"semantic prerequisites differ from supported solver relationships");
+    size_t after=baseline->commonGraph->ops.size();
+    for(size_t i=0;i<baseline->commonGraph->ops.size();++i)
+        if(baseline->commonGraph->ops[i].key==baseline->steps[owner].descriptorKey)after=i;
+    CHECK(after<baseline->commonGraph->ops.size());
+    if(after>=baseline->commonGraph->ops.size())return;
+    auto omitted=*baseline;
+    const auto requiredKey=omitted.steps[owner].semanticPredecessorKeys.front();
+    size_t requiredOp=omitted.commonGraph->ops.size(),requiredBody=omitted.steps.size();
+    for(size_t i=0;i<omitted.commonGraph->ops.size();++i)if(omitted.commonGraph->ops[i].key==requiredKey)requiredOp=i;
+    for(size_t i=0;i<omitted.steps.size();++i)if(omitted.steps[i].descriptorKey==requiredKey)requiredBody=i;
+    CHECK(requiredOp<omitted.commonGraph->ops.size() && requiredBody<omitted.steps.size());
+    if(requiredOp>=omitted.commonGraph->ops.size() || requiredBody>=omitted.steps.size())return;
+    const auto erase=[](auto &values,auto value){values.erase(std::remove(values.begin(),values.end(),value),values.end());};
+    erase(omitted.steps[owner].preds,int32_t(requiredBody));erase(omitted.steps[requiredBody].succs,int32_t(owner));
+    erase(omitted.commonGraph->ops[after].predecessors,uint32_t(requiredOp));erase(omitted.commonGraph->ops[requiredOp].successors,uint32_t(after));
+    reject(std::move(omitted),"generated graph omitted semantic solver prerequisite");
+    size_t before=baseline->commonGraph->ops.size();
+    for(size_t i=0;i<after;++i) {
+        size_t candidateBody=baseline->steps.size();
+        for(size_t b=0;b<baseline->steps.size();++b)if(baseline->steps[b].descriptorKey==baseline->commonGraph->ops[i].key)candidateBody=b;
+        if(candidateBody>=owner)continue;
+        const auto from=baseline->clustering->clusterOf[candidateBody],to=baseline->clustering->clusterOf[owner];
+        // The extra edge must preserve cluster order; it need not exist yet.
+        // The mutation below inserts both reciprocal cluster endpoints.
+        if(from>to)continue;
+        if(std::find(baseline->commonGraph->ops[after].predecessors.begin(),baseline->commonGraph->ops[after].predecessors.end(),uint32_t(i))==baseline->commonGraph->ops[after].predecessors.end()){before=i;break;}
+    }
+    CHECK(before<after);if(before>=after)return;
+    size_t beforeBody=baseline->steps.size();
+    for(size_t i=0;i<baseline->steps.size();++i)
+        if(baseline->steps[i].descriptorKey==baseline->commonGraph->ops[before].key)beforeBody=i;
+    CHECK(beforeBody<baseline->steps.size());if(beforeBody>=baseline->steps.size())return;
+    auto extra=*baseline;
+    extra.steps[owner].preds.push_back(int32_t(beforeBody));std::sort(extra.steps[owner].preds.begin(),extra.steps[owner].preds.end());
+    extra.steps[beforeBody].succs.push_back(int32_t(owner));std::sort(extra.steps[beforeBody].succs.begin(),extra.steps[beforeBody].succs.end());
+    const auto fromCluster=extra.clustering->clusterOf[beforeBody],toCluster=extra.clustering->clusterOf[owner];
+    if(fromCluster!=toCluster) {
+        auto &preds=extra.clustering->clusters[size_t(toCluster)].preds;
+        auto &succs=extra.clustering->clusters[size_t(fromCluster)].succs;
+        if(std::find(preds.begin(),preds.end(),fromCluster)==preds.end())preds.push_back(fromCluster);
+        if(std::find(succs.begin(),succs.end(),toCluster)==succs.end())succs.push_back(toCluster);
+        std::sort(preds.begin(),preds.end());std::sort(succs.begin(),succs.end());
+    }
+    extra.commonGraph->ops[after].predecessors.push_back(uint32_t(before));
+    std::sort(extra.commonGraph->ops[after].predecessors.begin(),extra.commonGraph->ops[after].predecessors.end());
+    extra.commonGraph->ops[before].successors.push_back(uint32_t(after));
+    std::sort(extra.commonGraph->ops[before].successors.begin(),extra.commonGraph->ops[before].successors.end());
+    reject(std::move(extra),"predecessors differ from typed and semantic producers");
+    auto imported=*baseline;imported.commonGraph->ops[after].descriptorPredecessors.push_back(uint32_t(before));
+    reject(std::move(imported),"imported predecessor is not a typed or semantic requirement");
+    checkedSolverSemanticRequirements=true;
+}
+static void _TestProviderRefreshRefusals(const std::vector<uint8_t> &bytes)
+{
+    auto baseline=RigExecTestUnpack(bytes);
+    if(!baseline || !baseline->pose || baseline->pose->providerRefreshes.empty())return;
+    const auto expect=[&](const char *name,const std::function<void(fb::RigExecWireFile&)> &edit,const char *reason) {
+        auto file=RigExecTestUnpack(bytes);if(!file)return;
+        edit(*file);std::vector<uint8_t> rejected;std::string writeError,openError;
+        CHECK(!RigExecFormatWrite(*file,&rejected,&writeError));
+        const auto malformed=RigExecTestPackUnchecked(*file);
+        std::unique_ptr<fb::RigExecWireFile> opened;
+        CHECK(!RigExecFormatOpen(malformed.data(),malformed.size(),&opened,&openError));
+        if(writeError.find(reason)==std::string::npos || openError.find(reason)==std::string::npos) {
+            std::printf("ProviderRefresh %s: write '%s', open '%s'; wanted '%s'\n",name,writeError.c_str(),openError.c_str(),reason);CHECK(false);
+        }
+    };
+    if(!checkedRefreshRecords) {
+        std::vector<uint8_t> valid;std::string error;CHECK(RigExecFormatWrite(*baseline,&valid,&error));
+        expect("checkpoint",[](auto &f){f.pose->providerRefreshes[0].checkpoint=f.pose->walkSteps.size()+1;},"invalid or duplicate provider refresh context");
+        expect("canonical key",[](auto &f){f.pose->providerRefreshes[0].key+="wrong";},"key or reader differs from canonical context");
+        expect("entering bound",[](auto &f){f.pose->providerRefreshes[0].finRead=UINT32_MAX;},"entering frame belongs to another provider");
+        expect("fresh write",[](auto &f){auto &r=f.pose->providerRefreshes[0];r.baseWrite=r.baseRead;},"lacks fresh owned frame versions");
+        expect("body read",[](auto &f){const auto value=f.pose->providerRefreshes[0].baseRead;for(auto &s:f.steps)if(s.kind==fb::StepKind::ProviderRefresh && s.object==0)s.reads.erase(std::remove_if(s.reads.begin(),s.reads.end(),[&](const auto &r){return r.domain()==fb::SlotDomain::PoseBase && r.begin()<=value && value<r.end();}),s.reads.end());},"body SSA missing read PoseBase");
+        expect("body write",[](auto &f){for(auto &s:f.steps)if(s.kind==fb::StepKind::ProviderRefresh && s.object==0)s.writes.clear();},"refresh write ownership differs");
+        checkedRefreshRecords=true;
+    }
+    for(size_t i=0;i<baseline->pose->providerRefreshes.size();++i) {
+        const auto &record=baseline->pose->providerRefreshes[i];
+        if(!checkedRefreshCarries && !record.carries.empty()) {
+            expect("carry target",[i](auto &f){f.pose->providerRefreshes[i].carries[0].slot=-1;},"invalid or duplicate refresh carry");
+            expect("carry blocker",[i](auto &f){f.pose->providerRefreshes[i].carries[0].blockingSlots.push_back(-1);},"invalid or duplicate carry blocker");
+            expect("carry ancestry",[i](auto &f){f.pose->providerRefreshes[i].carries[0].blockingSlots.clear();},"carry blocker ancestry differs");
+            const auto &blockers=record.carries[0].blockingSlots;
+            CHECK(!blockers.empty());
+            if(!blockers.empty()) {
+                const std::string path=RigExecFormatPathText(*baseline,baseline->slotMeta->paths[size_t(blockers[0])])+".parent:space";
+                size_t rawRow=baseline->providerProgram->sampled.size();
+                for(size_t row=0;row<baseline->providerProgram->sampled.size();++row)
+                    if(baseline->providerProgram->sampled[row].path==path)rawRow=row;
+                CHECK(rawRow<baseline->providerProgram->sampled.size());
+                if(rawRow<baseline->providerProgram->sampled.size()) {
+                    expect("blocker raw declaration",[i,rawRow](auto &f){for(auto &s:f.steps)if(s.kind==fb::StepKind::ProviderRefresh && s.object==int(i))s.reads.erase(std::remove_if(s.reads.begin(),s.reads.end(),[&](const auto &r){return r.domain()==fb::SlotDomain::SpaceLeaf && r.begin()<=rawRow && rawRow<r.end();}),s.reads.end());},"body SSA missing read SpaceLeaf");
+                    expect("blocker raw identity",[rawRow](auto &f){f.providerProgram->sampled[rawRow].inputSlot=-1;},"blocker raw source type or identity differs");
+                    expect("blocker produced promotion",[rawRow](auto &f){f.providerProgram->sampled[rawRow].propertyVersion=0;},"raw provider source cannot select a property version");
+                }
+            }
+            checkedRefreshCarries=true;
+        }
+        if(!checkedRefreshGuards && !record.priorConstraints.empty()) {
+            expect("guard commit",[i](auto &f){f.pose->providerRefreshes[i].priorConstraints[0].first=UINT32_MAX;},"invalid or duplicate prior constraint guard");
+            expect("guard candidate",[i](auto &f){f.pose->providerRefreshes[i].priorConstraints[0].second=UINT32_MAX;},"invalid or duplicate prior constraint guard");
+            checkedRefreshGuards=true;
+        }
+    }
+}
 static void
 _TestStage(const std::string &name, const UsdStageRefPtr &stage,
            const std::vector<double> &frames,
@@ -226,7 +357,6 @@ _TestStage(const std::string &name, const UsdStageRefPtr &stage,
     std::string error;
     {
         RigExecRigEvaluator evaluator(stage, rigPath);
-        evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
         if (!RigExecTestBakeAt(evaluator, frames.front(), &bytes, &error)) {
             std::printf("%s: FAILED (bake: %s)\n", name.c_str(),
                         error.c_str());
@@ -235,6 +365,8 @@ _TestStage(const std::string &name, const UsdStageRefPtr &stage,
         }
     }
     RigExecTestPlayer player;
+    _TestProviderRefreshRefusals(bytes);
+    _TestSolverSemanticRefusals(bytes);
     if (!player.Open(bytes, stage, &error)) {
         std::printf("%s: FAILED (open: %s)\n", name.c_str(), error.c_str());
         CHECK(false);
@@ -243,7 +375,6 @@ _TestStage(const std::string &name, const UsdStageRefPtr &stage,
     // A fresh evaluator beside a fresh reader: both start at the bake
     // time's generation, the compile notices in it.
     RigExecRigEvaluator measured(stage, rigPath);
-    measured.SetEvaluationMode(RigExecEvaluationMode::Baked);
 
     bool failed = false;
     int compared = 0;
@@ -570,23 +701,18 @@ _FindProviderXform(const RigExecRuntimeReader &reader, const char *path)
     return nullptr;
 }
 
-// Plays \p stage's bake at the first frame through its inputs beside the
-// dynamic path: an ExecReference evaluator (the exec-authoritative walk
-// every evaluator is held to) and the dynamic weight oracle itself
-// (RigExecRigEvaluator::_ResolveWeights, which the baked program holds as
-// resolveWeights). At every frame each probe's revised transform must
-// equal the dynamic evaluator's bit for bit and imply exactly the envelope
-// the oracle resolves. \p envelopes receives the oracle's envelopes, one
-// row per frame in probe order. False on any difference.
+// Compare the binary to live native transforms and, independently, to the
+// original weight arithmetic over captured authored scalar inputs. The
+// optional clamped fixture input is computed literally from its raw avar.
 static bool
-_EnvelopesMatchDynamic(const std::string &name, const UsdStageRefPtr &stage,
+_EnvelopesMatchOriginalReference(const std::string &name, const UsdStageRefPtr &stage,
                        const std::vector<double> &frames,
                        const std::vector<_EnvelopeProbe> &probes,
-                       std::vector<std::vector<float>> *envelopes)
+                       std::vector<std::vector<float>> *envelopes,
+                       bool clampDial=false)
 {
     const SdfPath rigPath = _FindRig(stage);
     RigExecRigEvaluator baked(stage, rigPath);
-    baked.SetEvaluationMode(RigExecEvaluationMode::Baked);
     std::vector<uint8_t> bytes;
     std::string error;
     if (!RigExecTestBakeAt(baked, frames.front(), &bytes, &error)) {
@@ -598,18 +724,13 @@ _EnvelopesMatchDynamic(const std::string &name, const UsdStageRefPtr &stage,
         std::printf("%s: open failed: %s\n", name.c_str(), error.c_str());
         return false;
     }
-    RigExecRigEvaluator dynamic(stage, rigPath);
-    dynamic.SetEvaluationMode(RigExecEvaluationMode::ExecReference);
+
 
     bool same = true;
     for (double frame : frames) {
-        const RigExecRigPose want = dynamic.Evaluate(UsdTimeCode(frame));
-        // The oracle reads the stage at the generation its evaluator last
-        // ran, so the host evaluates the frame first.
-        const RigExecRigPose host = baked.Evaluate(UsdTimeCode(frame));
-        const RigExecBakedProgram *program = baked.GetBakedProgram();
-        if (!want.valid || !host.valid || !program) {
-            std::printf("%s frame %g: no dynamic pose or no program\n",
+        const RigExecRigPose want = baked.Evaluate(UsdTimeCode(frame));
+        if (!want.valid) {
+            std::printf("%s frame %g: no native pose\n",
                         name.c_str(), frame);
             return false;
         }
@@ -619,14 +740,21 @@ _EnvelopesMatchDynamic(const std::string &name, const UsdStageRefPtr &stage,
             return false;
         }
         std::vector<float> row;
+        RigExecResolvedInputs original;
+        if(clampDial) {
+            const SdfPath path("/Asset/Rig/Controls/Dial.avars:tx");
+            double raw=0.0;
+            CHECK(stage->GetAttributeAtPath(path).Get(&raw,UsdTimeCode(frame)));
+            original.SetProperty(path,VtValue(double(std::min(std::max(float(raw),0.0f),1.0f))));
+        }
         for (const _EnvelopeProbe &probe : probes) {
             std::vector<float> w;
             std::string why;
-            if (!program->GetStepGraph().resolveWeights(
-                    SdfPath(probe.weightObject), 1, UsdTimeCode(frame), &w,
-                    &why, nullptr) ||
+            const auto reference=RigExecCaptureWeightReference(stage,SdfPath(probe.weightObject),original,{},UsdTimeCode(frame),
+                [](const SdfPath &)->const GfMatrix4d *{return nullptr;});
+            if (!RigExecResolveWeightReference(reference,SdfPath(probe.weightObject),1,&w,&why) ||
                 w.size() != 1) {
-                std::printf("%s frame %g: the dynamic oracle failed on %s: "
+                std::printf("%s frame %g: the original oracle failed on %s: "
                             "%s\n", name.c_str(), frame, probe.weightObject,
                             why.c_str());
                 same = false;
@@ -657,7 +785,7 @@ _EnvelopesMatchDynamic(const std::string &name, const UsdStageRefPtr &stage,
                 static_cast<float>(got->matrix[3][0] / probe.sourceX);
             if (std::memcmp(&applied, &w[0], sizeof(float)) != 0) {
                 std::printf("%s frame %g: %s applied envelope %.9g, the "
-                            "dynamic oracle resolves %.9g\n", name.c_str(),
+                            "original oracle resolves %.9g\n", name.c_str(),
                             frame, probe.target, double(applied),
                             double(w[0]));
                 same = false;
@@ -717,7 +845,7 @@ TestStaticWeightEnvelope()
     const std::vector<double> frames = {1.0, 2.0, 3.0};
     _TestStage(name, _StaticWeightConstraintStage(), frames);
     std::vector<std::vector<float>> envelopes;
-    CHECK(_EnvelopesMatchDynamic(
+    CHECK(_EnvelopesMatchOriginalReference(
         name, _StaticWeightConstraintStage(), frames,
         {{"/Asset/Target", "/Asset/Rig/Weights/W", 10.0}}, &envelopes));
     // The applied envelope is the weight object's at every frame.
@@ -888,7 +1016,6 @@ _TestAvarInputMatchesSessionEdit()
     std::string error;
     {
         RigExecRigEvaluator evaluator(stage, rigPath);
-        evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
         CHECK(RigExecTestBakeAt(evaluator, bakeTime, &bytes, &error));
     }
     RigExecTestPlayer player;
@@ -912,10 +1039,9 @@ _TestAvarInputMatchesSessionEdit()
         CHECK(moved->matrix[3][0] == 10.0 * double(driven));
         CHECK(moved->matrix[3][0] != defaultX);
     }
-    for (const RigExecEvaluationMode mode :
-         {RigExecEvaluationMode::Dynamic, RigExecEvaluationMode::Baked}) {
+    {
         std::vector<RigExecRigPose> poses;
-        CHECK(RigExecTestEditedPoses(stage, rigPath, mode,
+        CHECK(RigExecTestEditedPoses(stage, rigPath,
                                      {{SdfPath(tx), VtValue(value)}},
                                      {bakeTime}, &poses, &error));
         std::vector<std::string> diffs;
@@ -923,9 +1049,7 @@ _TestAvarInputMatchesSessionEdit()
             poses.size() == 1 &&
             RigExecCompareRuntimeOutputs(poses[0], player.Reader(), &diffs);
         CHECK(same);
-        std::printf("%s, %s: %s\n", name,
-                    mode == RigExecEvaluationMode::Dynamic ? "dynamic"
-                                                           : "baked",
+        std::printf("%s, native: %s\n", name,
                     same ? "binary == session edit" : "MISMATCH");
         for (const std::string &line : diffs) {
             std::printf("    %s\n", line.c_str());
@@ -942,7 +1066,7 @@ TestAvarDrivenDynamicEnvelope()
     _TestStage(name, _AvarDrivenStage(), frames, &rows);
     _CheckFramesDiffer(name, rows);
     std::vector<std::vector<float>> envelopes;
-    CHECK(_EnvelopesMatchDynamic(
+    CHECK(_EnvelopesMatchOriginalReference(
         name, _AvarDrivenStage(), frames,
         {{"/Asset/TargetA", "/Asset/Rig/Weights/Driven", 10.0},
          {"/Asset/TargetB", "/Asset/Rig/Weights/Modulated", 10.0},
@@ -991,7 +1115,7 @@ TestAvarDrivenDynamicEnvelope()
 // reads the chain's double result through the generation's overlay, not
 // the authored avar. The parity path compares the runtime against the
 // baked program, the dynamic comparison against ExecReference and the
-// dynamic oracle, and the envelopes must be the oracle's arithmetic over
+// original oracle, and the envelopes must be the oracle's arithmetic over
 // the clamped value: from frame 7 on that differs from the authored
 // value's.
 static void
@@ -1003,12 +1127,12 @@ TestChainDrivenEnvelope()
     _TestStage(name, _AvarDrivenStage(true), frames, &rows);
     _CheckFramesDiffer(name, rows);
     std::vector<std::vector<float>> envelopes;
-    CHECK(_EnvelopesMatchDynamic(
+    CHECK(_EnvelopesMatchOriginalReference(
         name, _AvarDrivenStage(true), frames,
         {{"/Asset/TargetA", "/Asset/Rig/Weights/Driven", 10.0},
          {"/Asset/TargetB", "/Asset/Rig/Weights/Modulated", 10.0},
          {"/Asset/TargetC", "/Asset/Rig/Weights/Blend", 10.0}},
-        &envelopes));
+        &envelopes,true));
     const UsdStageRefPtr stage = _AvarDrivenStage(true);
     const UsdAttribute tx = stage->GetAttributeAtPath(
         SdfPath("/Asset/Rig/Controls/Dial.avars:tx"));
@@ -1054,7 +1178,6 @@ TestComputedOpenRefusals()
 {
     const UsdStageRefPtr stage = _EnvelopeStage();
     RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     RigExecBakeOpts opts;
     opts.time = 1.0;
     RigExecBakeResult result;
@@ -1123,7 +1246,7 @@ TestComputedOpenRefusals()
     std::printf("computed open refusals: checked\n");
 }
 
-// The runtime's property results against the dynamic evaluator's
+// The runtime's property results against the native evaluator's
 // published values (RigExecRigPose::movedProperties): same type, same bits.
 static bool
 _SamePropertyValue(const VtValue &want, const RrPropertyValue &got)
@@ -1195,18 +1318,17 @@ struct _ChainFrame {
 // Plays \p stage's bake at the first frame through its inputs beside an
 // ExecReference evaluator (the exec-authoritative walk every evaluator is
 // held to). At every frame each property result the runtime computed must
-// equal the dynamic evaluator's published value bit for bit, the two must
+// equal the native evaluator's published value bit for bit, the two must
 // publish the same set, and the chains' diagnostic lines must agree
 // verbatim. \p rows receives the runtime's results and lines per frame.
 // False on any difference.
 static bool
-_ChainsMatchDynamic(const std::string &name, const UsdStageRefPtr &stage,
+_ChainsMatchLive(const std::string &name, const UsdStageRefPtr &stage,
                     const std::vector<double> &frames,
                     std::vector<_ChainFrame> *rows)
 {
     const SdfPath rigPath = _FindRig(stage);
     RigExecRigEvaluator baked(stage, rigPath);
-    baked.SetEvaluationMode(RigExecEvaluationMode::Baked);
     std::vector<uint8_t> bytes;
     std::string error;
     if (!RigExecTestBakeAt(baked, frames.front(), &bytes, &error)) {
@@ -1218,14 +1340,13 @@ _ChainsMatchDynamic(const std::string &name, const UsdStageRefPtr &stage,
         std::printf("%s: open failed: %s\n", name.c_str(), error.c_str());
         return false;
     }
-    RigExecRigEvaluator dynamic(stage, rigPath);
-    dynamic.SetEvaluationMode(RigExecEvaluationMode::ExecReference);
+
 
     bool same = true;
     for (double frame : frames) {
-        const RigExecRigPose want = dynamic.Evaluate(UsdTimeCode(frame));
+        const RigExecRigPose want = baked.Evaluate(UsdTimeCode(frame));
         if (!want.valid) {
-            std::printf("%s frame %g: no dynamic pose\n", name.c_str(),
+            std::printf("%s frame %g: no live pose\n", name.c_str(),
                         frame);
             return false;
         }
@@ -1767,7 +1888,6 @@ TestOraclePublicationGeneration()
         std::vector<uint8_t> bytes;
         std::string error;
         RigExecRigEvaluator bake(stage, SdfPath("/Asset/Rig"));
-        bake.SetEvaluationMode(RigExecEvaluationMode::Baked);
         CHECK(RigExecTestBakeAt(bake, 1, &bytes, &error));
         const auto file = RigExecTestUnpack(bytes);
         CHECK(file);
@@ -1785,62 +1905,13 @@ TestOraclePublicationGeneration()
             if (target == receiver && step.part == 1) receiverRevision = int(s);
         }
         CHECK(driverFinal >= 0 && receiverRevision >= 0);
-        // Native compilation orders every connected envelope producer first.
-        CHECK(driverFinal < receiverRevision);
+        // Only chains available to the original receiver oracle contribute
+        // producer dependencies. Later chains retain the raw-source answer.
+        if (prior) CHECK(driverFinal < receiverRevision);
         _TestStage(label, stage, frames);
         std::vector<_ChainFrame> rows;
-        CHECK(_ChainsMatchDynamic(label, stage, frames, &rows));
+        CHECK(_ChainsMatchLive(label, stage, frames, &rows));
         CHECK(rows.size() == frames.size());
-        if (!prior) {
-            // A valid standalone wire schedule can visit the independent
-            // receiver heads before the oracle-only producer. Keep all body,
-            // version and candidate identities; remap only step references.
-            const int receiverChain = file->steps[size_t(receiverRevision)].object;
-            const int driverChain = file->steps[size_t(driverFinal)].object;
-            std::vector<size_t> order;
-            for (const int chain : {receiverChain, driverChain})
-                for (size_t i = 0; i < file->steps.size(); ++i)
-                    if (file->steps[i].isHead && file->steps[i].kind == fb::StepKind::PropertyRevision &&
-                        file->steps[i].object == chain) order.push_back(i);
-            for (size_t i = 0; i < file->steps.size(); ++i)
-                if (std::find(order.begin(), order.end(), i) == order.end()) order.push_back(i);
-            std::vector<int32_t> remap(order.size());
-            for (size_t i = 0; i < order.size(); ++i) remap[order[i]] = int32_t(i);
-            auto oldSteps = std::move(file->steps);
-            auto oldClusters = file->clustering->clusterOf;
-            file->steps.resize(order.size());
-            for (size_t i = 0; i < order.size(); ++i) {
-                file->steps[i] = std::move(oldSteps[order[i]]);
-                file->clustering->clusterOf[i] = oldClusters[order[i]];
-                for (auto &pred : file->steps[i].preds) pred = remap[size_t(pred)];
-                for (auto &succ : file->steps[i].succs) succ = remap[size_t(succ)];
-                std::sort(file->steps[i].preds.begin(), file->steps[i].preds.end());
-                std::sort(file->steps[i].succs.begin(), file->steps[i].succs.end());
-            }
-            for (auto &cluster : file->clustering->clusters) {
-                for (auto &member : cluster.members) member = remap[size_t(member)];
-                std::sort(cluster.members.begin(), cluster.members.end());
-            }
-            for (auto *list : {&file->cones->varyingSteps, &file->cones->overrideSteps}) {
-                for (auto &step : *list) step = remap[size_t(step)];
-                std::sort(list->begin(), list->end());
-            }
-            CHECK(remap[size_t(receiverRevision)] < remap[size_t(driverFinal)]);
-            error.clear();
-            CHECK(RigExecFormatValidate(*file, &error));
-            if (!error.empty()) std::printf("later oracle wire: %s\n", error.c_str());
-            CHECK(RigExecFormatWrite(*file, &bytes, &error));
-            RigExecTestPlayer later;
-            CHECK(later.Open(bytes, stage, &error));
-            rows.clear();
-            for (const double frame : frames) {
-                CHECK(later.Play(frame, &error));
-                _ChainFrame row;
-                for (const auto &value : later->GetPropertyValues()) row.values.emplace(value.path, value.value);
-                row.lines = _ChainLines(later->GetDiagnostics());
-                rows.push_back(std::move(row));
-            }
-        }
         for (size_t f = 0; f < rows.size() && f < frames.size(); ++f) {
             const float raw = frames[f] == 1 ? 0.125f : 0.375f;
             bool found = false;
@@ -1857,35 +1928,6 @@ TestOraclePublicationGeneration()
             CHECK(_SameBits(rows[0].values.at(receiver), rows[3].values.at(receiver)));
             CHECK(_SameBits(rows[1].values.at(receiver), rows[2].values.at(receiver)));
             CHECK(!_SameBits(rows[0].values.at(receiver), rows[1].values.at(receiver)));
-        }
-        RigExecTestPlayer masked;
-        CHECK(masked.Open(bytes, stage, &error));
-        masked->SetRunMaskForTesting(0x4u);
-        for (size_t f = 0; f < frames.size() && f < rows.size(); ++f) {
-            CHECK(masked.Play(frames[f], &error));
-            std::map<std::string, RrPropertyValue> values;
-            for (const auto &value : masked->GetPropertyValues()) values.emplace(value.path, value.value);
-            CHECK(values.size() == rows[f].values.size());
-            for (const auto &[path, value] : values) {
-                const auto at = rows[f].values.find(path);
-                CHECK(at != rows[f].values.end() && _SameBits(value, at->second));
-            }
-            CHECK(_ChainLines(masked->GetDiagnostics()) == rows[f].lines);
-            const auto trace = masked->GetLastRunTraceForTesting();
-            bool sawHead = false;
-            for (const auto step : trace) {
-                CHECK(step >= 0 && size_t(step) < file->steps.size());
-                if (step >= 0 && size_t(step) < file->steps.size()) {
-                    const auto &body = file->steps[size_t(step)];
-                    sawHead = sawHead || body.isHead;
-                    CHECK(body.isHead || (body.kind >= fb::StepKind::InfluenceFold && body.kind <= fb::StepKind::Derived));
-                }
-            }
-            CHECK(sawHead);
-            for (size_t step = 0; step < file->steps.size(); ++step)
-                if (file->steps[step].isHead)
-                    CHECK(masked->GetStepRanForTesting(step) ==
-                          (std::find(trace.begin(), trace.end(), int32_t(step)) != trace.end()));
         }
         variants.push_back(std::move(rows));
     }
@@ -1918,7 +1960,7 @@ TestDoubleTailCycle()
     const std::vector<double> frames{1, 2, 3, 4, 2};
     _TestStage("double tail fresh cycle", stage, frames);
     std::vector<_ChainFrame> rows;
-    CHECK(_ChainsMatchDynamic("double tail fresh cycle", stage, frames, &rows));
+    CHECK(_ChainsMatchLive("double tail fresh cycle", stage, frames, &rows));
     CHECK(rows.size() == frames.size());
     if (rows.size() == frames.size()) {
         bool found = false;
@@ -1938,7 +1980,6 @@ TestScalarRawKindPreservesRecords()
     const std::string path = "/Asset/Rig/Movers/Readouts/early.inputs:value";
     CHECK(stage->GetAttributeAtPath(SdfPath(path)).Set(0.0f));
     RigExecRigEvaluator baked(stage, SdfPath("/Asset/Rig"));
-    baked.SetEvaluationMode(RigExecEvaluationMode::Baked);
     std::vector<uint8_t> bytes;
     std::string error;
     CHECK(RigExecTestBakeAt(baked, 1, &bytes, &error));
@@ -1984,7 +2025,7 @@ TestScalarRawKindPreservesRecords()
     // as a session-layer edit: it does not suppress or replace the record.
     CHECK(stage->GetAttributeAtPath(SdfPath(path)).Set(0.75f));
     std::vector<_ChainFrame> rows;
-    CHECK(_ChainsMatchDynamic("raw authored scalar retains phased record", stage, {1}, &rows));
+    CHECK(_ChainsMatchLive("raw authored scalar retains phased record", stage, {1}, &rows));
     CHECK(rows.size() == 1);
     if (!rows.empty()) {
         bool found = false;
@@ -2004,7 +2045,7 @@ _HasLine(const _ChainFrame &row, const std::string &line)
 
 // One chain case: the binary baked at the first frame and played through
 // its inputs against the baked program (verbatim diagnostics), its first
-// and last frames apart, then against the dynamic evaluator, which must
+// and last frames apart, then against the native evaluator, which must
 // see exactly \p expected property values published over the frames.
 static bool
 _RunChainCase(const char *name, UsdStageRefPtr (*build)(),
@@ -2017,7 +2058,7 @@ _RunChainCase(const char *name, UsdStageRefPtr (*build)(),
     if (frames.size() > 1) {
         _CheckFramesDiffer(name, played);
     }
-    CHECK(_ChainsMatchDynamic(name, build(), frames, rows));
+    CHECK(_ChainsMatchLive(name, build(), frames, rows));
     // These rigs compute nothing but property chains.
     size_t published = 0;
     for (const _ChainFrame &row : *rows) {
@@ -2026,7 +2067,7 @@ _RunChainCase(const char *name, UsdStageRefPtr (*build)(),
     CHECK(published == expected);
     CHECK(published > 0);
     CHECK(rows->size() == frames.size());
-    std::printf("%s: %zu property value(s) equal the dynamic evaluator's\n",
+    std::printf("%s: %zu property value(s) equal the native evaluator's\n",
                 name, published);
     return failures == failuresBefore && rows->size() == frames.size();
 }
@@ -2308,7 +2349,7 @@ TestPhasedConsumers()
 
 // The default read phase through the .rigexec: the runtime replays each
 // reader at its own phase, bit for bit with the baked program and the
-// dynamic evaluator, and the file's phased_consumers carry an entry per
+// native evaluator, and the file's phased_consumers carry an entry per
 // reader the overlay walk alone would answer differently -- applied 0 for
 // the undeclared ones, every revision for the `final` behind a recorded
 // hop.
@@ -2367,7 +2408,6 @@ TestDefaultReadPhaseRoundTrip()
 
     // The round trip: the records the file carries.
     RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     RigExecBakeOpts opts;
     opts.time = frames.front();
     RigExecBakeResult result;
@@ -2427,7 +2467,6 @@ TestNonFiniteBase()
         // the reader through the sampler alone.
         const UsdStageRefPtr stage = _NonFiniteStage();
         RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
-        evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
         std::vector<uint8_t> bytes;
         std::string error;
         CHECK(RigExecTestBakeAt(evaluator, 1.0, &bytes, &error));
@@ -2482,7 +2521,7 @@ TestNonFiniteBase()
 // with tangents, envelopes on property revisions, double, vec3f and matrix
 // chains, the chains' diagnostics, phased consumers) played through the
 // inputs of a bake at the first frame, against the baked program and the
-// dynamic evaluator, 10 values per frame, the constraint weight Follow
+// native evaluator, 10 values per frame, the constraint weight Follow
 // reads through the dial's chain at its declared `final` included.
 static void
 TestComputedChainsFixture()
@@ -2502,7 +2541,7 @@ TestComputedChainsFixture()
     _TestStage(name, stage, frames, &played);
     _CheckFramesDiffer(name, played);
     std::vector<_ChainFrame> rows;
-    CHECK(_ChainsMatchDynamic(name, stage, frames, &rows));
+    CHECK(_ChainsMatchLive(name, stage, frames, &rows));
     size_t published = 0;
     for (const _ChainFrame &row : rows) {
         published += row.values.size();
@@ -2535,7 +2574,6 @@ TestIkSpaceFixture()
     _CheckFramesDiffer(name, played);
 
     RigExecRigEvaluator evaluator(stage, SdfPath("/IkSpaceAsset/Rig"));
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     std::vector<uint8_t> bytes;
     std::string error;
     CHECK(RigExecTestBakeAt(evaluator, frames.front(), &bytes, &error));
@@ -2852,11 +2890,11 @@ struct _Reference {
     std::vector<RigExecPointFrame> fin, base;
 };
 
-// A fresh BakedWithParityCheck evaluator compiled on \p stage, handed
+// A fresh native evaluator compiled on \p stage, handed
 // \p edits in the session layer and evaluated at each of \p frames
 // (RigExecTestEditedPoses, compiled after the edits with
 // \p compileAfterEdits), with its version pools after each. The parity
-// check holds the baked program to the dynamic evaluator.
+// check holds the baked program to the native evaluator.
 static std::vector<_Reference>
 _References(const UsdStageRefPtr &stage, const SdfPath &rigPath,
             const std::vector<RigExecTestEdit> &edits,
@@ -2867,7 +2905,7 @@ _References(const UsdStageRefPtr &stage, const SdfPath &rigPath,
     std::vector<_Reference> out(frames.size());
     std::string error;
     const bool ok = RigExecTestEditedPoses(
-        stage, rigPath, RigExecEvaluationMode::BakedWithParityCheck, edits,
+        stage, rigPath, edits,
         frames, &poses, &error,
         [&](const RigExecRigEvaluator &evaluator, size_t i) {
             const RigExecBakedProgram *program = evaluator.GetBakedProgram();
@@ -2976,7 +3014,6 @@ TestSetInputOnPhasedReader()
     const SdfPath rigPath("/Asset/Rig");
     const std::vector<double> frames = {1.0, 4.0};
     RigExecRigEvaluator evaluator(stage, rigPath);
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     std::vector<uint8_t> bytes;
     std::string error;
     CHECK(RigExecTestBakeAt(evaluator, frames.front(), &bytes, &error));
@@ -3011,7 +3048,7 @@ TestSetInputOnPhasedReader()
 // Set on Pin's tx, it reaches Reach. Before, while and after the sets
 // stand, every version-pool frame equals the baked program's under the
 // same values authored in the session layer, bit for bit, and the baked
-// program agrees with the dynamic evaluator.
+// program agrees with the native evaluator.
 static void
 TestSetInputOnHop()
 {
@@ -3045,7 +3082,6 @@ TestSetInputOnHop()
     const SdfPath rigPath("/Asset/Rig");
     const std::vector<double> frames = {1.0, 4.0};
     RigExecRigEvaluator evaluator(stage, rigPath);
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     std::vector<uint8_t> bytes;
     std::string error;
     CHECK(RigExecTestBakeAt(evaluator, frames.front(), &bytes, &error));
@@ -3147,7 +3183,6 @@ TestSetInputOnLadderInput()
     const SdfPath rigPath("/Asset/Rig");
     const std::vector<double> frames = {1.0, 4.0};
     RigExecRigEvaluator evaluator(stage, rigPath);
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     std::vector<uint8_t> bytes;
     std::string error;
     CHECK(RigExecTestBakeAt(evaluator, frames.front(), &bytes, &error));
@@ -3189,7 +3224,7 @@ TestSetInputOnLadderInput()
     CHECK(player.Hold(pinPath, -0.75, &error));
     // Compiled with the value authored: a value edit of an avar a ladder
     // reads through a connection, taken by an evaluator compiled before
-    // it, breaks the baked program's parity with the dynamic evaluator.
+    // it, breaks the baked program's parity with the native evaluator.
     CHECK(pass("dragged",
                _References(stage, rigPath, {_Edit(stage, pinPath, -0.75)},
                            frames, true),
@@ -3256,7 +3291,6 @@ _SetChainInput(const std::string &name, const UsdStageRefPtr &stage,
     const SdfPath rigPath("/Asset/Rig");
     const std::vector<double> frames = {1.0, 5.0};
     RigExecRigEvaluator evaluator(stage, rigPath);
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     std::vector<uint8_t> bytes;
     std::string error;
     CHECK(RigExecTestBakeAt(evaluator, frames.front(), &bytes, &error));
@@ -3509,7 +3543,7 @@ _PlayedDiffer(const _PlayedPose &a, const _PlayedPose &b)
 // base readers read 1.4, Offset's checkpoint 1.5 and the final readers and
 // the dial itself 1.0. At frames 1 and 4 every version-pool frame equals
 // the baked program's under 1.4 authored in the session layer (which the
-// parity check holds to the dynamic evaluator), and the played pose --
+// parity check holds to the native evaluator), and the played pose --
 // pools, property results and diagnostics -- equals bit for bit what a
 // file baked with 1.4 authored on the dial plays. The same holds as the
 // held value moves to 1.5 (the final holds at 1.0) and then to 0.5 without
@@ -3525,7 +3559,6 @@ TestSetInputOnChainTarget()
     const auto bake = [&](const UsdStageRefPtr &stage,
                           std::vector<uint8_t> *bytes) {
         RigExecRigEvaluator evaluator(stage, rigPath);
-        evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
         std::string error;
         const bool ok =
             RigExecTestBakeAt(evaluator, frames.front(), bytes, &error);
@@ -3661,7 +3694,6 @@ TestRegisteredReadRefusals()
         return;
     }
     RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     RigExecBakeOpts opts;
     opts.time = 1.0;
     RigExecBakeResult result;
@@ -3876,7 +3908,17 @@ static bool
 _SameVersion(const fb::RigExecWireFrameVersion &read, int anchor,
              const std::vector<int32_t> &recompose)
 {
-    return read.anchor == anchor && read.recompose == recompose;
+    return read.context == -1 && read.anchor == anchor && read.recompose == recompose;
+}
+
+static bool
+_SameCheckpoint(const fb::RigExecWireFile &file,const fb::RigExecWireFrameVersion &read,
+                int anchor,const std::vector<int32_t> &recompose)
+{
+    if(read.context<0 || size_t(read.context)>=file.pose->spaceCheckpoints.size() ||
+       read.anchor!=-1 || !read.recompose.empty())return false;
+    const auto &checkpoint=file.pose->spaceCheckpoints[size_t(read.context)];
+    return checkpoint.anchor==anchor && checkpoint.recompose==recompose;
 }
 
 // Space switches nested under switched controls, read at the versions the
@@ -3884,11 +3926,56 @@ _SameVersion(const fb::RigExecWireFrameVersion &read, int anchor,
 // diagnostics equal the baked program's bit for bit at every frame, played
 // through the inputs of a bake at the first frame. In the nested fixture S
 // reads P recomposed from its avars before P's switch, so its parent
-// version is {-1, {P}}. In the carry fixture P hangs under G and S's space
+// checkpoint has {-1, {P}}. In the carry fixture P hangs under G and S's space
 // Q under P, so S reads {G, {P}} for its parent and {G, {P, Q}} for its
 // space. The dial fixture's indices are keyed with no default: each is an
 // Animated input whose default is its key at the bake time, which its
 // switch reads per run.
+#include "rigExecConnectedBridgeFixture.h"
+static void TestConnectedBridgeRefreshExport()
+{
+    const auto fixture=RigExecMakeConnectedBridgeFixture(
+        [](const UsdStageRefPtr &stage,const SdfPath &path,const GfMatrix4d &matrix) {
+            const auto x=UsdGeomXform::Define(stage,path);x.MakeMatrixXform().Set(matrix);return x.GetPrim();
+        },
+        [](const UsdStageRefPtr &stage,const char *name,const char *type,const SdfPathVector &targets) {
+            const auto p=stage->DefinePrim(SdfPath(std::string("/Asset/Rig/Movers/")+name),TfToken(type));
+            CHECK(p.ApplyAPI(TfToken("RigExecMoverAPI")));CHECK(p.CreateRelationship(TfToken("rigExec:moves")).SetTargets(targets));return p;
+        });
+    const auto value=fixture.stage->DefinePrim(SdfPath("/Asset/Rig/Channels/Independent"),TfToken("Scope"))
+        .CreateAttribute(TfToken("value"),SdfValueTypeNames->Float);
+    CHECK(value.Set(2.0f));
+    const auto add=_MathMover(fixture.stage,"IndependentAdd","RigExecFloatMathMover","add",value);
+    CHECK(add.CreateAttribute(TfToken("inputs:value"),SdfValueTypeNames->Float).Set(3.0f));
+    _TestStage("connected Bridge refresh",fixture.stage,{1.0,1.0});
+    RigExecRigEvaluator evaluator(fixture.stage,SdfPath("/Asset/Rig"));
+    RigExecTestPlayer player;std::vector<uint8_t> bytes;std::string error;
+    CHECK(RigExecTestBakeAt(evaluator,1,&bytes,&error));
+    const bool opened=player.Open(bytes,fixture.stage,&error);CHECK(opened);
+    if(!opened)return;
+    CHECK(player.Play(1,&error));
+    bool sawIndependent=false;
+    for(const auto &published:player.Reader().GetPropertyValues())if(published.path==value.GetPath().GetString()) {
+        sawIndependent=true;CHECK(published.value.tag==RrPropertyValue::Tag::Float && published.value.f32==5.0f);
+    }
+    CHECK(sawIndependent);
+    const auto file=RigExecTestUnpack(bytes);CHECK(file);
+    if(!file)return;
+    const auto literal=[&](const UsdPrim &prim,double base,double final) {
+        int slot=-1;for(size_t i=0;i<file->slotMeta->paths.size();++i)if(RigExecFormatPathText(*file,file->slotMeta->paths[i])==prim.GetPath().GetString())slot=int(i);
+        CHECK(slot>=0);if(slot<0)return;
+        // Every checked provider has a writer in both domains; the final
+        // canonical SSA version is distinct from its initial slot seed.
+        const size_t version=file->slotMeta->paths.size()+size_t(slot);
+        CHECK(version<player.Reader().GetBaseFrames().size() && version<player.Reader().GetFinFrames().size());
+        if(version>=player.Reader().GetBaseFrames().size() || version>=player.Reader().GetFinFrames().size())return;
+        const auto &b=player.Reader().GetBaseFrames()[version],&f=player.Reader().GetFinFrames()[version];
+        CHECK(std::abs(b.points[0][0]-base)<1e-9 && std::abs(b.points[0][1])<1e-9 && std::abs(b.points[0][2])<1e-9);
+        CHECK(std::abs(f.points[0][0]-final)<1e-9 && std::abs(f.points[0][1])<1e-9 && std::abs(f.points[0][2])<1e-9);
+    };
+    literal(fixture.source,4,5);literal(fixture.rider,5,6);literal(fixture.held,6,9);literal(fixture.owner,7,7);
+}
+
 static void
 TestSpaceSwitchVersionFixtures()
 {
@@ -3906,7 +3993,6 @@ TestSpaceSwitchVersionFixtures()
             return false;
         }
         RigExecRigEvaluator evaluator(stage, SdfPath("/Rig"));
-        evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
         RigExecBakeOpts opts;
         opts.time = frames.front();
         std::string error;
@@ -3931,7 +4017,7 @@ TestSpaceSwitchVersionFixtures()
         for (const fb::RigExecWireSpaceSwitch &sw : switches) {
             if (sw.slot == s) {
                 // P resolves after S: S reads it before its switch.
-                CHECK(_SameVersion(*sw.parentRead, -1, {p}));
+                CHECK(_SameCheckpoint(*nestedFile,*sw.parentRead,-1,{p}));
             } else {
                 // C, under S, resolves before P: its last version.
                 CHECK(sw.slot == p && sw.sourceReads.size() == 2 &&
@@ -3967,9 +4053,9 @@ TestSpaceSwitchVersionFixtures()
             }
             if (sw.slot == s) {
                 // P resolves after S: P recomposed on G, then Q on that.
-                CHECK(_SameVersion(*sw.parentRead, g, {p}));
+                CHECK(_SameCheckpoint(*carryFile,*sw.parentRead,g,{p}));
                 CHECK(sw.spaceSlot == q &&
-                      _SameVersion(*sw.spaceRead, g, {p, q}));
+                      _SameCheckpoint(*carryFile,*sw.spaceRead,g,{p,q}));
                 CHECK(_SameVersion(sw.sourceReads[0], other, {}));
                 CHECK(_SameVersion(sw.sourceReads[1], -1, {}));
             } else {
@@ -4027,20 +4113,9 @@ TestSpaceSwitchVersionFixtures()
     std::printf("space switch version fixtures: checked\n");
 }
 
-// Switch reads set by hand. S, under P under G, switches between Arm
-// (under G) and world; the program binds its parent read to P's last
-// version and its source read to Arm's. The SpaceSwitch section is
-// rewritten so S reads its parent as {anchor -1, recompose {P}} -- P
-// composed from its avars against identity instead of G's frame -- and
-// then also Arm as {-1, {Arm}}. No binding of this rig produces either.
-// The runtime playing the rewritten section through its inputs and the
-// program with the same versions on its switch, its compose steps run through
-// RigExecBakedRunPoseStep, agree bit for bit on every version-pool frame.
-// The parent enters a switched compose only through the round trip of
-// `local`, so it moves S in the last digits; the source moves S outright.
-// A third rewrite anchors the parent read on G, {G, {P}}: what a switch on
-// P resolving in S's round or later binds. P has no switch here, so the
-// recompose reproduces P's last version and S does not move at all.
+// An ordinary switch fixture keeps its natural numerical parity across all
+// frames. Inserting an inline recomposition into its serialized metadata is
+// malformed: only a declared checkpoint operation may perform that math.
 static void
 TestHandBuiltSwitchReads()
 {
@@ -4097,7 +4172,6 @@ TestHandBuiltSwitchReads()
     const SdfPath rigPath("/Asset/Rig");
     const std::vector<double> frames = {1.0, 2.0, 3.0};
     RigExecRigEvaluator evaluator(stage, rigPath);
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     RigExecBakeOpts opts;
     opts.time = frames.front();
     RigExecBakeResult result;
@@ -4128,97 +4202,27 @@ TestHandBuiltSwitchReads()
     CHECK(_SameVersion(*switches[0].parentRead, pSlot, {}));
     CHECK(_SameVersion(switches[0].sourceReads[0], armSlot, {}));
 
-    enum class Rewrite { Parent, ParentAndSource, AnchoredParent };
-    for (const Rewrite rewrite :
-         {Rewrite::Parent, Rewrite::ParentAndSource,
-          Rewrite::AnchoredParent}) {
-        const bool rewriteSource = rewrite == Rewrite::ParentAndSource;
-        const int anchor = rewrite == Rewrite::AnchoredParent ? gSlot : -1;
-        const char *const what =
-            rewrite == Rewrite::Parent            ? "parent read"
-            : rewrite == Rewrite::ParentAndSource ? "parent and source read"
-                                                  : "anchored parent read";
-        const std::vector<uint8_t> bytes = RigExecTestEdited(
-            result.bytes, [&](fb::RigExecWireFile *edited) {
-                fb::RigExecWireSpaceSwitch &handBuilt =
-                    edited->pose->spaceSwitches[0];
-                handBuilt.parentRead->anchor = anchor;
-                handBuilt.parentRead->recompose = {pSlot};
-                if (rewriteSource) {
-                    handBuilt.sourceReads[0].anchor = -1;
-                    handBuilt.sourceReads[0].recompose = {armSlot};
-                }
-            });
-        size_t movedFrames = 0;
-        double largest = 0.0;
-        for (const double frame : frames) {
-            // A fresh program and reader per frame: every compose step
-            // runs.
-            RigExecRigEvaluator program(stage, rigPath);
-            program.SetEvaluationMode(RigExecEvaluationMode::Baked);
-            const RigExecRigPose pose = program.Evaluate(UsdTimeCode(frame));
-            const RigExecBakedProgram *baked = program.GetBakedProgram();
-            CHECK(pose.valid && baked);
-            if (!pose.valid || !baked) {
-                return;
+    _TestStage(name,stage,frames);
+    enum class Rewrite { Parent, Source, AnchoredParent };
+    for(const Rewrite rewrite:{Rewrite::Parent,Rewrite::Source,Rewrite::AnchoredParent}) {
+        const bool source=rewrite==Rewrite::Source;
+        const int anchor=rewrite==Rewrite::AnchoredParent?gSlot:-1;
+        const auto bytes=RigExecTestEdited(result.bytes,[&](fb::RigExecWireFile *edited) {
+            auto &sw=edited->pose->spaceSwitches[0];
+            if(source) {
+                sw.sourceReads[0].anchor=-1;
+                sw.sourceReads[0].recompose={armSlot};
+            } else {
+                sw.parentRead->anchor=anchor;
+                sw.parentRead->recompose={pSlot};
             }
-            RigExecBakedProgramImpl &B =
-                const_cast<RigExecBakedProgramImpl &>(baked->GetStepGraph());
-            CHECK(B.paths.size() == slotCount &&
-                  B.paths[size_t(pSlot)] == p.GetPath() &&
-                  B.paths[size_t(armSlot)] == arm.GetPath() &&
-                  B.spaceSwitches.size() == 1 &&
-                  B.spaceSwitches[0].slot == sSlot);
-            if (B.spaceSwitches.size() != 1 ||
-                B.spaceSwitches[0].sourceReads.size() != 2) {
-                return;
-            }
-            const std::vector<RigExecPointFrame> natural = B.fin;
-            RigExecBakedProgramImpl::SpaceSwitch &bakedSwitch =
-                B.spaceSwitches[0];
-            bakedSwitch.parentRead.anchor = anchor;
-            bakedSwitch.parentRead.recompose = {pSlot};
-            if (rewriteSource) {
-                bakedSwitch.sourceReads[0].anchor = -1;
-                bakedSwitch.sourceReads[0].recompose = {armSlot};
-            }
-            for (RigExecBakedStep &step : B.steps) {
-                if (step.kind == RigExecBakedStepKind::ComposeSubtree) {
-                    RigExecBakedRunPoseStep(&B, &step, UsdTimeCode(frame));
-                }
-            }
-            RigExecTestPlayer player;
-            if (!player.Open(bytes, stage, &error) ||
-                !player.Play(frame, &error)) {
-                std::printf("%s, %s frame %.17g: %s\n", name, what, frame,
-                            error.c_str());
-                CHECK(false);
-                return;
-            }
-            CHECK(_SamePools(what, frame, player.Reader(), B));
-            const RrPointFrame &got = player->GetFinFrames()[size_t(sSlot)];
-            const RigExecPointFrame &bound = natural[size_t(sSlot)];
-            if (!_FramesEqual(bound, got)) {
-                ++movedFrames;
-            }
-            for (size_t k = 0; k < 4; ++k) {
-                for (size_t c = 0; c < 3; ++c) {
-                    largest = std::max(largest,
-                                       std::abs(bound.points[k][c] -
-                                                got.points[k][c]));
-                }
-            }
-        }
-        std::printf("%s, %s: S differs from the bound read at %zu of %zu "
-                    "frames, by up to %.17g\n",
-                    name, what, movedFrames, frames.size(), largest);
-        if (rewrite == Rewrite::ParentAndSource) {
-            CHECK(movedFrames == frames.size() && largest > 1e-3);
-        } else if (rewrite == Rewrite::Parent) {
-            CHECK(movedFrames > 0 && largest < 1e-9);
-        } else {
-            CHECK(movedFrames == 0);
-        }
+        });
+        const std::string where=source?"source_reads[0]":"parent_read";
+        const std::string expected="invalid .rigexec: pose.space_switches[0]."+where+
+            ": inline recomposition requires a checkpoint operation";
+        const std::string actual=_OpenError(bytes);
+        if(actual!=expected)std::printf("%s: %s expected %s\n",name,actual.c_str(),expected.c_str());
+        CHECK(actual==expected);
     }
     std::printf("%s: checked\n", name);
 }
@@ -4246,7 +4250,6 @@ TestSpaceSwitchIndexDrag()
     const SdfPath rigPath("/Rig");
     const std::vector<double> frames = {0.0, 1.0, 2.0, 3.0};
     RigExecRigEvaluator evaluator(stage, rigPath);
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     std::vector<uint8_t> bytes;
     std::string error;
     CHECK(RigExecTestBakeAt(evaluator, frames.front(), &bytes, &error));
@@ -4344,8 +4347,18 @@ TestSpaceSwitchOpenRefusals()
     if (!stage) {
         return;
     }
+    // A real native Xform source supplies an otherwise-valid non-provider
+    // slot for the checkpoint wrong-kind negative below.
+    const auto checkpointSource=UsdGeomXform::Define(stage,SdfPath("/CheckpointSource"));
+    CHECK(checkpointSource.MakeMatrixXform().Set(GfMatrix4d(1.0)));
+    const auto checkpointTargetXform=UsdGeomXform::Define(stage,SdfPath("/Rig/Controls/CheckpointTarget"));
+    CHECK(checkpointTargetXform.MakeMatrixXform().Set(GfMatrix4d(1.0)));
+    const auto checkpointTarget=checkpointTargetXform.GetPrim();
+    const auto checkpointProbe=stage->DefinePrim(SdfPath("/Rig/Movers/CheckpointProbe"),TfToken("RigExecPositionConstraint"));
+    CHECK(checkpointProbe.ApplyAPI(TfToken("RigExecMoverAPI")));
+    CHECK(checkpointProbe.CreateRelationship(TfToken("rigExec:moves")).SetTargets({checkpointTarget.GetPath()}));
+    CHECK(checkpointProbe.GetRelationship(TfToken("rigExec:sources")).SetTargets({checkpointSource.GetPath()}));
     RigExecRigEvaluator evaluator(stage, SdfPath("/Rig"));
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     RigExecBakeOpts opts;
     opts.time = 0.0;
     RigExecBakeResult result;
@@ -4401,23 +4414,24 @@ TestSpaceSwitchOpenRefusals()
     const std::string range =
         " out of range (" + std::to_string(slots) + ")";
     const std::string unread = ": reads no slot, so its version is {-1, []}";
-    expect("parent anchor past the slots",
+    const int32_t contextCount=int32_t(file->pose->spaceCheckpoints.size());
+    expect("parent checkpoint past the contexts",
            withSwitch([&](fb::RigExecWireSpaceSwitch &sw) {
-               sw.parentRead->anchor = slots;
+               sw.parentRead->context=contextCount;
            }),
-           row + ".parent_read.anchor: " + std::to_string(slots) + range);
+           row+".parent_read.context: "+std::to_string(contextCount)+
+               " out of range ("+std::to_string(contextCount)+")");
     expect("source anchor past the slots",
            withSwitch([&](fb::RigExecWireSpaceSwitch &sw) {
                sw.sourceReads[0].anchor = slots;
            }),
            row + ".source_reads[0].anchor: " + std::to_string(slots) + range);
-    const size_t recomposed = switches[at].spaceRead->recompose.size();
-    expect("space recompose past the slots",
+    expect("space checkpoint past the contexts",
            withSwitch([&](fb::RigExecWireSpaceSwitch &sw) {
-               sw.spaceRead->recompose.push_back(slots);
+               sw.spaceRead->context=contextCount;
            }),
-           row + ".space_read.recompose[" + std::to_string(recomposed) +
-               "]: " + std::to_string(slots) + range);
+           row+".space_read.context: "+std::to_string(contextCount)+
+               " out of range ("+std::to_string(contextCount)+")");
     expect("space slot past the slots",
            withSwitch([&](fb::RigExecWireSpaceSwitch &sw) {
                sw.spaceSlot = slots;
@@ -4434,22 +4448,35 @@ TestSpaceSwitchOpenRefusals()
                sw.sourceReads[1].anchor = -1;
                sw.sourceReads[1].recompose = {p};
            }),
-           row + ".source_reads[1]" + unread);
+           row+".source_reads[1]: inline recomposition requires a checkpoint operation");
     expect("missing space with a version",
            withSwitch([&](fb::RigExecWireSpaceSwitch &sw) {
                sw.spaceSlot = -1;
            }),
            row + ".space_read" + unread);
-    // P, which both of S's versions recompose, without the avars and
-    // ladder a recompose composes from.
+    const int32_t parentContext=switches[at].parentRead->context;
+    CHECK(parentContext>=0 && parentContext<contextCount);
+    if(parentContext<0 || parentContext>=contextCount)return;
+    expect("checkpoint recompose past the slots",
+           RigExecTestEdited(result.bytes,[&](fb::RigExecWireFile *edited) {
+               edited->pose->spaceCheckpoints[size_t(parentContext)].recompose={slots};
+           }),
+           "pose.space_checkpoints["+std::to_string(parentContext)+"].recompose[0]: "+
+               std::to_string(slots)+range);
+    expect("checkpoint anchor past the slots",
+           RigExecTestEdited(result.bytes,[&](fb::RigExecWireFile *edited) {
+               edited->pose->spaceCheckpoints[size_t(parentContext)].anchor=slots;
+           }),
+           "pose.space_checkpoints["+std::to_string(parentContext)+"].anchor: "+
+               std::to_string(slots)+range);
+    const auto nonProvider=std::find(file->slotMeta->slotKind.begin(),file->slotMeta->slotKind.end(),fb::SlotKind::XformDerived);
+    CHECK(nonProvider!=file->slotMeta->slotKind.end());
     expect("recompose of a slot that is not FirstFramePose",
-           RigExecTestEdited(result.bytes,
-                             [&](fb::RigExecWireFile *edited) {
-                                 edited->slotMeta->slotKind[size_t(p)] =
-                                     fb::SlotKind::XformDerived;
-                             }),
-           row + ".parent_read.recompose[0]: not a FirstFramePose slot");
-    const int32_t clusters = int32_t(cones.cone.size());
+           RigExecTestEdited(result.bytes,[&](fb::RigExecWireFile *edited) {
+               edited->pose->spaceCheckpoints[size_t(parentContext)].recompose={int32_t(nonProvider-file->slotMeta->slotKind.begin())};
+           }),
+           "pose.space_checkpoints["+std::to_string(parentContext)+"]: recompose is not a provider");
+    const int32_t clusters = int32_t(file->clustering->clusters.size());
     for (const int32_t cluster : {int32_t(-1), clusters}) {
         expect(cluster < 0 ? "avar cluster -1" : "avar cluster past the end",
                RigExecTestEdited(result.bytes,
@@ -4457,9 +4484,10 @@ TestSpaceSwitchOpenRefusals()
                                      edited->cones->avarCluster[size_t(s)] =
                                          cluster;
                                  }),
-               "cones.avar_cluster[" + std::to_string(s) + "]: " +
-                   std::to_string(cluster) + " out of range (" +
-                   std::to_string(clusters) + ")");
+               cluster<0?"cones.avar_cluster["+std::to_string(s)+
+                   "]: missing active Avars producer without an excluded value":
+                   "cones.avar_cluster["+std::to_string(s)+"]: "+
+                   std::to_string(cluster)+" out of range ("+std::to_string(clusters)+")");
     }
     std::printf("%s: checked\n", name);
 }
@@ -4484,7 +4512,6 @@ TestSpaceSwitchCarryDrag()
     }
     const SdfPath rigPath("/Rig");
     RigExecRigEvaluator evaluator(stage, rigPath);
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     std::vector<uint8_t> bytes;
     std::string error;
     CHECK(RigExecTestBakeAt(evaluator, 0.0, &bytes, &error));
@@ -4611,7 +4638,6 @@ TestPhasedRigsRunCones(const std::string &examplesDir)
         std::string error;
         {
             RigExecRigEvaluator evaluator(stage, rigPath);
-            evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
             if (!RigExecTestBakeAt(evaluator, row.time, &bytes, &error)) {
                 std::printf("%s: FAILED (bake: %s)\n", name.c_str(),
                             error.c_str());
@@ -4643,7 +4669,7 @@ TestPhasedRigsRunCones(const std::string &examplesDir)
 
         std::vector<RigExecRigPose> still;
         if (!RigExecTestEditedPoses(stage, rigPath,
-                                    RigExecEvaluationMode::Baked, {},
+                                    {},
                                     {row.time}, &still, &error) ||
             still.size() != 1) {
             std::printf("%s: FAILED (reference: %s)\n", name.c_str(),
@@ -4687,7 +4713,6 @@ TestPhasedRigsRunCones(const std::string &examplesDir)
                 path + " = " + std::to_string(value);
             std::vector<RigExecRigPose> dragged;
             if (!RigExecTestEditedPoses(stage, rigPath,
-                                        RigExecEvaluationMode::Baked,
                                         {_Edit(stage, path, value)},
                                         {row.time}, &dragged, &error) ||
                 dragged.size() != 1) {
@@ -4737,6 +4762,9 @@ TestFrameMatrixGates()
     constants.restPts.resize(1);
     constants.restFrames.resize(1);
     constants.selfD.resize(1);
+    constants.posedD.resize(1);
+    constants.parentSpaceM.resize(1);
+    constants.parentSpaceAuthored.resize(1);
     constants.parentDinv.resize(1);
     constants.rotOrder.resize(1);
     constants.restRoundTrip.resize(1);
@@ -4907,13 +4935,11 @@ TestFrameMatrixGates()
                 cases, recorded);
 }
 
-// A joint whose composed rest goes non-finite at frame 2 while its final
-// frame stays usable: a non-identity default:space makes the final frame
-// independent of the rest. Baked tests the composed rest before it
-// publishes and hands that generation back, so the binary refuses the
-// frame too; both publish frame 1, before and after.
+// A non-finite composed rest keeps its typed invalid state while a usable
+// final frame publishes ORIGINAL's local matrix fallback. Independent limb
+// output continues, held failure retains its value, and frame 1 recovers.
 static void
-TestUnusableComposedRestRefusesPublish()
+TestUnusableComposedRestUsesLocalMatrixFallback()
 {
     const char *const name = "unusable composed rest";
     const UsdStageRefPtr stage =
@@ -4942,7 +4968,6 @@ TestUnusableComposedRestRefusesPublish()
         tx.Set(std::numeric_limits<double>::quiet_NaN(), UsdTimeCode(2.0));
     }
     RigExecRigEvaluator evaluator(stage, SdfPath("/LimbsAsset/Rig"));
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     std::vector<uint8_t> bytes;
     std::string error;
     CHECK(RigExecTestBakeAt(evaluator, 1.0, &bytes, &error));
@@ -4958,30 +4983,166 @@ TestUnusableComposedRestRefusesPublish()
     CHECK(player->FindInput(restTx.GetString(), &index) &&
           player->GetInputInfo(index).animated);
 
-    const auto publishes = [&](double frame) {
-        const RigExecRigPose live = evaluator.Evaluate(UsdTimeCode(frame));
-        std::string why;
-        CHECK(player.Play(frame, &why));
-        std::vector<std::string> diffs;
-        CHECK(RigExecCompareRuntimeOutputs(live, player.Reader(), &diffs));
-        for (const std::string &diff : diffs) {
-            std::printf("  %s frame %g: %s\n", name, frame, diff.c_str());
+    // Captured independently from ORIGINAL's baked fallback and reference
+    // evaluator for this exact 1 -> NaN 2 -> held 2 -> recovery 1 history.
+    const std::array<std::array<uint64_t,16>,2> targetBits{{
+        {{0x3ff0000000000000ULL,0x0000000000000000ULL,0x0000000000000000ULL,0x0000000000000000ULL,0x0000000000000000ULL,0x3ff0000000000000ULL,0x0000000000000000ULL,0x0000000000000000ULL,0x0000000000000000ULL,0x0000000000000000ULL,0x3ff0000000000000ULL,0x0000000000000000ULL,0xc000000000000000ULL,0x0000000000000000ULL,0x0000000000000000ULL,0x3ff0000000000000ULL}},
+        {{0x3fefffffffffffffULL,0x0000000000000000ULL,0x0000000000000000ULL,0x0000000000000000ULL,0x0000000000000000ULL,0x3fefffffffffffffULL,0x0000000000000000ULL,0x0000000000000000ULL,0x0000000000000000ULL,0x0000000000000000ULL,0x3ff0000000000000ULL,0x0000000000000000ULL,0x3cb0000000000000ULL,0x3c70000000000000ULL,0x0000000000000000ULL,0x3ff0000000000000ULL}}
+    }};
+    const std::array<std::array<uint64_t,16>,2> unrelatedBits{{
+        {{0x3fefd7583bc82e2aULL,0x3fb9791363068af7ULL,0x0000000000000000ULL,0x0000000000000000ULL,0xbfb9791363068af7ULL,0x3fefd7583bc82e2aULL,0x0000000000000000ULL,0x0000000000000000ULL,0x0000000000000000ULL,0x0000000000000000ULL,0x3ff0000000000000ULL,0x0000000000000000ULL,0x0000000000000000ULL,0x0000000000000000ULL,0x0000000000000000ULL,0x3ff0000000000000ULL}},
+        {{0x3fee588e2d6fa817ULL,0x3fd44f639083e0d2ULL,0x0000000000000000ULL,0x0000000000000000ULL,0xbfd44f639083e0d3ULL,0x3fee588e2d6fa817ULL,0x0000000000000000ULL,0x0000000000000000ULL,0x0000000000000000ULL,0x0000000000000000ULL,0x3ff0000000000000ULL,0x0000000000000000ULL,0x0000000000000000ULL,0x0000000000000000ULL,0x0000000000000000ULL,0x3ff0000000000000ULL}}
+    }};
+
+    const SdfPath unrelated("/LimbsAsset/Rig/Joints/LimbB0");
+    const auto checkBits = [&](const GfMatrix4d &matrix,
+                               const std::array<uint64_t,16> &expected) {
+        for (size_t r=0;r<4;++r) for (size_t c=0;c<4;++c) {
+            uint64_t bits=0;
+            const double value=matrix[r][c];
+            std::memcpy(&bits,&value,sizeof(bits));
+            CHECK(bits==expected[r*4+c]);
         }
     };
-    publishes(1.0);
+    const auto publishes = [&](double frame) {
+        const size_t generations=evaluator.GetBakedGenerationCount();
+        const RigExecRigPose live=evaluator.Evaluate(UsdTimeCode(frame));
+        CHECK(live.valid);
+        CHECK(evaluator.GetBakedGenerationCount()==generations+1);
+        CHECK(live.jointMatricesFinal.size()==6);
+        CHECK(live.diagnostics.empty());
+        const auto final=live.jointFramesFinal.find(joint);
+        CHECK(final!=live.jointFramesFinal.end() &&
+              RigExecBakedUsable(final->second));
+        const auto target=live.jointMatricesFinal.find(joint);
+        const auto other=live.jointMatricesFinal.find(unrelated);
+        CHECK(target!=live.jointMatricesFinal.end());
+        CHECK(other!=live.jointMatricesFinal.end());
+        const size_t expected=frame==2.0?1:0;
+        if(target!=live.jointMatricesFinal.end())checkBits(target->second,targetBits[expected]);
+        if(other!=live.jointMatricesFinal.end())checkBits(other->second,unrelatedBits[expected]);
 
-    const size_t generations = evaluator.GetBakedGenerationCount();
-    const RigExecRigPose fallback = evaluator.Evaluate(UsdTimeCode(2.0));
-    CHECK(evaluator.GetBakedGenerationCount() == generations);
-    const auto final = fallback.jointFramesFinal.find(joint);
-    CHECK(final != fallback.jointFramesFinal.end() &&
-          RigExecBakedUsable(final->second));
-    error.clear();
-    CHECK(!player.Play(2.0, &error));
-    CHECK(error == "joint " + joint.GetString() +
-                       " has an unusable rest or final frame");
-
+        double raw=0.0;
+        CHECK(stage->GetAttributeAtPath(restTx).Get(&raw,UsdTimeCode(frame)));
+        CHECK(frame==2.0?std::isnan(raw):raw==0.0);
+        const auto *program=evaluator.GetBakedProgram();
+        CHECK(program);
+        if(program) {
+            const auto &graph=program->GetStepGraph();
+            const auto slot=graph.index.find(joint);
+            CHECK(slot!=graph.index.end());
+            if(slot!=graph.index.end()) {
+                const auto &rest=graph.restFrames[size_t(slot->second)];
+                CHECK(frame==2.0?!RigExecBakedUsable(rest):RigExecBakedUsable(rest));
+            }
+        }
+        std::string why;
+        CHECK(player.Play(frame,&why));
+        CHECK(why.empty());
+        CHECK(frame==2.0?std::isnan(player->GetInputValue(index).f64):
+                          player->GetInputValue(index).f64==0.0);
+        std::vector<std::string> diffs;
+        CHECK(RigExecCompareRuntimeOutputs(live,player.Reader(),&diffs));
+        for(const std::string &diff:diffs)
+            std::printf("  %s frame %g: %s\n",name,frame,diff.c_str());
+    };
     publishes(1.0);
+    publishes(2.0);
+    publishes(2.0);
+    publishes(1.0);
+}
+
+// computed_ik_space with Master's rest:ry and rest:tx keyed over 1..10 in
+// a root layer above the fixture, so a drag authored in the session layer
+// overrides them. Master is the space of both the arm's TwoBoneIk and the
+// tail's SplineIk, so a moved Master rest moves the frame both solve in:
+// playback refreshes it with the solvers' other rests, as baked does.
+// Baked at frame 1, played at 1, 5 and 10, then dragged at a held 5.
+static void
+TestSpaceRestMovesWithItsRests()
+{
+    const char *const name = "space rest moves with its rests";
+    const SdfLayerRefPtr root = SdfLayer::CreateAnonymous(".usda");
+    root->SetSubLayerPaths({_FixturePath("computed_ik_space.usda")});
+    const UsdStageRefPtr stage = UsdStage::Open(root);
+    CHECK(stage);
+    if (!stage) {
+        return;
+    }
+    const SdfPath master("/IkSpaceAsset/Rig/Controls/Master");
+    const UsdPrim prim = stage->GetPrimAtPath(master);
+    const UsdAttribute ry = prim.GetAttribute(TfToken("rest:ry"));
+    const UsdAttribute tx = prim.GetAttribute(TfToken("rest:tx"));
+    CHECK(ry && tx);
+    if (!ry || !tx) {
+        return;
+    }
+    {
+        const UsdEditContext context(stage, root);
+        ry.Set(0.0, UsdTimeCode(1.0));
+        ry.Set(20.0, UsdTimeCode(10.0));
+        tx.Set(0.0, UsdTimeCode(1.0));
+        tx.Set(3.0, UsdTimeCode(10.0));
+    }
+    const SdfPath rigPath("/IkSpaceAsset/Rig");
+    RigExecRigEvaluator evaluator(stage, rigPath);
+    std::vector<uint8_t> bytes;
+    std::string error;
+    CHECK(RigExecTestBakeAt(evaluator, 1.0, &bytes, &error));
+    const std::unique_ptr<RigExecRuntimeReader> reader =
+        RigExecRuntimeReader::Open(bytes.data(), bytes.size(), &error);
+    RigExecInputSampler sampler;
+    if (!reader || !sampler.Bind(stage, *reader, &error)) {
+        std::printf("FAILED: %s: %s\n", name, error.c_str());
+        ++failures;
+        return;
+    }
+    // Both rests reach the binary per frame only as Animated inputs.
+    for (const UsdAttribute &a : {ry, tx}) {
+        size_t index = 0;
+        CHECK(reader->FindInput(a.GetPath().GetString(), &index) &&
+              reader->GetInputInfo(index).animated);
+    }
+
+    int compared = 0;
+    const auto same = [&](const RigExecRigPose &live, const char *what,
+                          double frame) {
+        std::vector<std::string> diffs;
+        const bool equal =
+            RigExecCompareRuntimeOutputs(live, *reader, &diffs);
+        CHECK(equal);
+        for (const std::string &diff : diffs) {
+            std::printf("  %s, %s %g: %s\n", name, what, frame,
+                        diff.c_str());
+        }
+        ++compared;
+    };
+    for (const double frame : {1.0, 5.0, 10.0}) {
+        CHECK(sampler.Apply(UsdTimeCode(frame), reader.get(), &error) &&
+              reader->Execute(&error));
+        same(evaluator.Evaluate(UsdTimeCode(frame)), "frame", frame);
+    }
+
+    // At a held 5: Master's rest:ry set to 15, then 25, against the value
+    // authored in the session layer of a reference compiled before it.
+    const double held = 5.0;
+    CHECK(sampler.Apply(UsdTimeCode(held), reader.get(), &error));
+    for (const double value : {15.0, 25.0}) {
+        RigExecRigEvaluator reference(stage, rigPath);
+        CHECK(reference.Compile());
+        const RigExecTestSessionEdit edit(ry, value);
+        CHECK(edit.IsSet());
+        CHECK(reader->SetInput(ry.GetPath().GetString(), value, &error) &&
+              reader->Execute(&error));
+        same(reference.Evaluate(UsdTimeCode(held)), "drag", value);
+    }
+    // Released: the input takes the stage's value at the held frame again.
+    CHECK(reader->ResetInput(ry.GetPath().GetString(), &error));
+    sampler.Invalidate();
+    CHECK(sampler.Apply(UsdTimeCode(held), reader.get(), &error) &&
+          reader->Execute(&error));
+    same(evaluator.Evaluate(UsdTimeCode(held)), "released at", held);
+    std::printf("%s: %d comparison(s)\n", name, compared);
 }
 
 // Bakes the rig at \p rigPath of \p stage at \p time and opens the file's
@@ -4995,7 +5156,6 @@ _BakeAndOpen(const std::string &what, const UsdStageRefPtr &stage,
     std::string error;
     {
         RigExecRigEvaluator evaluator(stage, rigPath);
-        evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
         if (!RigExecTestBakeAt(evaluator, time, bytes, &error)) {
             std::printf("FAILED: %s: bake: %s\n", what.c_str(),
                         error.c_str());
@@ -5011,72 +5171,6 @@ _BakeAndOpen(const std::string &what, const UsdStageRefPtr &stage,
     return true;
 }
 
-// How many steps of \p trace are not source steps of \p file.
-static size_t
-_NonSourceSteps(const fb::RigExecWireFile &file,
-                const std::vector<int32_t> &trace)
-{
-    size_t count = 0;
-    for (const int32_t step : trace) {
-        if (size_t(step) < file.steps.size() &&
-            !file.steps[size_t(step)].isSource) {
-            ++count;
-        }
-    }
-    return count;
-}
-
-// The steps a run owes when no input changed, in the order it runs them:
-// the source steps, then every step in the forward cone of a cluster the
-// file marks always dirty (a step that reads outside the program, such as
-// a Derived extent).
-static std::vector<int32_t>
-_AlwaysRunSteps(const fb::RigExecWireFile &file)
-{
-    const fb::RigExecWireCones &cones = *file.cones;
-    const size_t clusters = file.clustering->clusters.size();
-    std::vector<uint64_t> closed((clusters + 63) / 64, 0);
-    const std::vector<uint64_t> &always = cones.always->words;
-    for (size_t c = 0; c < clusters && c < cones.cone.size(); ++c) {
-        const bool dirty = c / 64 < always.size() &&
-                           ((always[c / 64] >> (c % 64)) & 1u) != 0;
-        if (!dirty) {
-            continue;
-        }
-        const std::vector<uint64_t> &cone = cones.cone[c].words;
-        for (size_t w = 0; w < closed.size() && w < cone.size(); ++w) {
-            closed[w] |= cone[w];
-        }
-    }
-    std::vector<int32_t> steps;
-    for (size_t i = 0; i < file.steps.size(); ++i) {
-        if (file.steps[i].isSource) {
-            steps.push_back(int32_t(i));
-        }
-    }
-    for (size_t i = 0; i < file.steps.size(); ++i) {
-        const size_t c = size_t(file.steps[i].cluster);
-        if (!file.steps[i].isSource && c / 64 < closed.size() &&
-            ((closed[c / 64] >> (c % 64)) & 1u) != 0) {
-            steps.push_back(int32_t(i));
-        }
-    }
-    return steps;
-}
-
-// An input set is an authored value, so a set that repeats the value the
-// last run read changes nothing and runs nothing. Each rig is baked at
-// frame 1. Set once, the input's readers run, and the outputs move to
-// live baked's under the same session edit. Set again to the same value,
-// and then run with nothing set, the run is what a run owes with no input
-// changed: the source steps and the steps the file marks always dirty
-// (none on these supported rigs), and no head or non-source step runs.
-// Reset, the readers
-// run once and the outputs are the bake time's again; the run after that
-// owes nothing either. The IK softness inputs are Solve steps' declared
-// inputs, which an override number names; A0's rz is the limb's keyed
-// avar, an Animated input whose readers the avar table's comparison
-// dirties.
 static void
 TestRepeatedSetRunsNothing()
 {
@@ -5087,7 +5181,8 @@ TestRepeatedSetRunsNothing()
         const char *input;
         double value;
         bool animated;
-        // The label of a step among the input's readers.
+        // Stable operation kind and semantic owner among the input readers.
+        fb::StepKind readerKind;
         const char *reader;
         // Matrix rest-space coverage uses the original static upstream fixture.
         bool matrix = false;
@@ -5095,16 +5190,16 @@ TestRepeatedSetRunsNothing()
     const Row rows[] = {
         {"oneloop_two_limbs.usda", "/LimbsAsset/Rig",
          "/LimbsAsset/Rig/Solvers/LimbBIK.inputs:softness", 0.5, false,
-         "Solve /LimbsAsset/Rig/Solvers/LimbBIK", false},
+         fb::StepKind::Solve, "/LimbsAsset/Rig/Solvers/LimbBIK", false},
         {"oneloop_two_limbs.usda", "/LimbsAsset/Rig",
          "/LimbsAsset/Rig/Controls/A0.avars:rz", 15.0, true,
-         "ComposeSubtree /LimbsAsset/Rig/Controls/A0", false},
+         fb::StepKind::ComposeSubtree, "/LimbsAsset/Rig/Controls/A0", false},
         {"computed_ik_space.usda", "/IkSpaceAsset/Rig",
          "/IkSpaceAsset/Rig/Solvers/ArmIK.inputs:softness", 0.35, false,
-         "Solve /IkSpaceAsset/Rig/Solvers/ArmIK", false},
+         fb::StepKind::Solve, "/IkSpaceAsset/Rig/Solvers/ArmIK", false},
         {"upstream_inputs.usda", "/LimbsAsset/Rig",
          "/LimbsAsset/Upstream.inputs:space", 0.0, false,
-         "RestCompose /LimbsAsset/Rig/Controls/BRoot", true},
+         fb::StepKind::RestCompose, "/LimbsAsset/Rig/Controls/BRoot", true},
     };
     const double frame = 1.0;
     for (const Row &row : rows) {
@@ -5121,8 +5216,6 @@ TestRepeatedSetRunsNothing()
         if (!_BakeAndOpen(what, stage, rigPath, frame, &bytes, &file)) {
             continue;
         }
-        const std::vector<int32_t> owed = _AlwaysRunSteps(*file);
-        CHECK(_NonSourceSteps(*file, owed) == 0);
         GfMatrix4d matrix(1.0); matrix.SetTranslateOnly(GfVec3d(1,0,10));
         const VtValue inputValue = row.matrix ? VtValue(matrix) :
             RigExecTestTypedValue(stage->GetAttributeAtPath(SdfPath(row.input)),row.value);
@@ -5130,10 +5223,9 @@ TestRepeatedSetRunsNothing()
         std::vector<RigExecRigPose> still;
         std::vector<RigExecRigPose> dragged;
         if (!RigExecTestEditedPoses(stage, rigPath,
-                                    RigExecEvaluationMode::Baked, {},
+                                    {},
                                     {frame}, &still, &error) ||
             !RigExecTestEditedPoses(stage, rigPath,
-                                    RigExecEvaluationMode::Baked,
                                     {{SdfPath(row.input),inputValue}},
                                     {frame}, &dragged, &error) ||
             still.size() != 1 || dragged.size() != 1) {
@@ -5156,29 +5248,21 @@ TestRepeatedSetRunsNothing()
         RrInputValue runtimeValue;
         CHECK(RigExecInputValueFrom(inputValue,player->GetInputInfo(index).type,&runtimeValue));
 
-        // The last run's non-source steps, and whether it ran only what a
-        // run owes with no input changed and executed no revision.
+        // An unchanged supported fixture executes literally zero op bodies.
         const auto idle = [&](const char *leg) {
             const std::vector<int32_t> trace =
                 player->GetLastRunTraceForTesting();
-            const uint32_t revisions =
-                player->GetCounters().revisionsExecuted;
-            std::printf("%s, %s: %zu non-source step(s) of %zu run, %u "
-                        "revision(s) executed\n",
-                        what.c_str(), leg, _NonSourceSteps(*file, trace),
-                        trace.size(), unsigned(revisions));
-            const bool idleRun = trace == owed && revisions == 0;
-            if (idleRun) for (int32_t step : trace) {
-                CHECK(step >= 0 && size_t(step) < file->steps.size());
-                if (step >= 0 && size_t(step) < file->steps.size())
-                    CHECK(!file->steps[size_t(step)].isHead && file->steps[size_t(step)].isSource);
-            }
-            return idleRun;
+            const auto operations=player->GetCounters().executedOpCount;
+            std::printf("%s, %s: %zu traced, %llu executed op bodies\n",what.c_str(),leg,
+                trace.size(),static_cast<unsigned long long>(operations));
+            CHECK(operations==trace.size());
+            return trace.empty() && operations==0;
         };
         const auto ranReader = [&] {
             for (const int32_t step : player->GetLastRunTraceForTesting()) {
-                if (player->GetStepLabelForTesting(size_t(step)) ==
-                    row.reader) {
+                if (step >= 0 && size_t(step) < file->steps.size() &&
+                    file->steps[size_t(step)].kind == row.readerKind &&
+                    player->GetStepLabelForTesting(size_t(step)) == row.reader) {
                     return true;
                 }
             }
@@ -5222,8 +5306,6 @@ TestRepeatedSetRunsNothing()
         CHECK(player->Execute(&error));
         CHECK(idle("after reset"));
         CHECK(matches(still[0], "after reset"));
-        std::printf("%s: %zu non-source step(s) owed by every run\n",
-                    what.c_str(), _NonSourceSteps(*file, owed));
     }
     std::printf("%s: checked\n", name);
 }
@@ -5277,6 +5359,7 @@ TestHeldDragCountsValueEditWork()
         // Per generation: the clusters baked's closure ran, and how many
         // generations its program had answered.
         std::vector<std::pair<size_t, size_t>> bakedRuns;
+        std::vector<size_t> liveOps;
         const auto each = [&](const RigExecRigEvaluator &evaluator,
                               size_t) {
             const RigExecBakedProgram *program =
@@ -5285,9 +5368,9 @@ TestHeldDragCountsValueEditWork()
                 program ? program->GetStepGraph().lastClosedClusters
                         : size_t(0),
                 evaluator.GetBakedGenerationCount());
+            liveOps.push_back(evaluator.GetLastOpTrace().size());
         };
         if (!RigExecTestEditedPoses(stage, rigPath,
-                                    RigExecEvaluationMode::Baked,
                                     {_Edit(stage, row.input, row.value)},
                                     {row.time, row.time}, &poses, &error,
                                     each) ||
@@ -5308,25 +5391,15 @@ TestHeldDragCountsValueEditWork()
         for (size_t g = 0; g < poses.size(); ++g) {
             const RigExecRigPose &pose = poses[g];
             CHECK(player.Play(row.time, &error));
-            const RigExecRuntimeCounters counters = player->GetCounters();
-            std::printf("%s, run %zu: executed %u/%u, created %u/%u, "
-                        "schedules %u/%u, clusters %zu/%zu, generations "
+            const auto runtimeOps=player->GetLastRunTraceForTesting().size();
+            std::printf("%s, run %zu: operations %zu/%zu, clusters %zu/%zu, generations "
                         "%zu (baked/binary)\n",
                         what.c_str(), g + 1,
-                        unsigned(pose.moverGraphRevisionsExecuted),
-                        unsigned(counters.revisionsExecuted),
-                        unsigned(pose.moverGraphRevisionsCreated),
-                        unsigned(counters.revisionsCreated),
-                        unsigned(pose.moverGraphSchedulesBuilt),
-                        unsigned(counters.schedulesBuilt),
+                        liveOps[g],runtimeOps,
                         bakedRuns[g].first,
                         player->GetClosedClusterCountForTesting(),
                         bakedRuns[g].second);
-            CHECK(pose.moverGraphRevisionsExecuted ==
-                      counters.revisionsExecuted &&
-                  pose.moverGraphRevisionsCreated ==
-                      counters.revisionsCreated &&
-                  pose.moverGraphSchedulesBuilt == counters.schedulesBuilt);
+            CHECK(liveOps[g]==runtimeOps);
             CHECK(bakedRuns[g].second == g + 1 &&
                   bakedRuns[g].first ==
                       player->GetClosedClusterCountForTesting());
@@ -5339,14 +5412,14 @@ TestHeldDragCountsValueEditWork()
             }
         }
         // The first run executes the revisions; the second executes none.
-        CHECK(poses[0].moverGraphRevisionsExecuted > 0);
-        CHECK(poses[1].moverGraphRevisionsExecuted == 0);
+        CHECK(liveOps[0]>0);
+        CHECK(liveOps[1]==0);
     }
     std::printf("%s: checked\n", name);
 }
 
 // GetLastRunTraceForTesting on a fresh reader's first Execute: every step
-// GetStepRanForTesting reports, each once, the sources first, and each
+// GetStepRanForTesting reports, each once, and each
 // step after every predecessor the run also ran.
 static void
 TestRunTraceOrder()
@@ -5413,14 +5486,7 @@ TestRunTraceOrder()
                           place[size_t(pred)] < place[i];
             }
         }
-        const auto phase = [&](int32_t step) {
-            const auto &body = file->steps[size_t(step)];
-            return body.isHead ? 0 : body.isSource ? 1 : 2;
-        };
-        bool phasesOrdered = once;
-        for (size_t k = 1; phasesOrdered && k < trace.size(); ++k)
-            phasesOrdered = phase(trace[k - 1]) <= phase(trace[k]);
-        CHECK(listed && ordered && phasesOrdered);
+        CHECK(listed && ordered);
         CHECK(trace.size() == ran && ran > 0);
         std::printf("%s: %zu of %zu step(s) ran, in order\n", what.c_str(),
                     trace.size(), steps);
@@ -5453,7 +5519,8 @@ main(int argc, char **argv)
     TestComputedChainsFixture();
     TestIkSpaceFixture();
     TestFrameMatrixGates();
-    TestUnusableComposedRestRefusesPublish();
+    TestUnusableComposedRestUsesLocalMatrixFallback();
+    TestSpaceRestMovesWithItsRests();
     TestRepeatedSetRunsNothing();
     TestHeldDragCountsValueEditWork();
     TestRunTraceOrder();
@@ -5470,6 +5537,7 @@ main(int argc, char **argv)
     TestSetInputOnChainInput();
     TestSetInputOnChainTarget();
     TestRegisteredReadRefusals();
+    TestConnectedBridgeRefreshExport();
     TestSpaceSwitchVersionFixtures();
     TestHandBuiltSwitchReads();
     TestSpaceSwitchIndexDrag();
@@ -5495,6 +5563,8 @@ main(int argc, char **argv)
                      std::string(fixture.animation) == "static");
     }
     CHECK(sawBaking);
+    CHECK(checkedSolverSemanticRequirements);
+    CHECK(checkedRefreshRecords && checkedRefreshCarries && checkedRefreshGuards);
 
     if (failures == 0) {
         std::printf("testRigExecRuntimePose: all tests passed "

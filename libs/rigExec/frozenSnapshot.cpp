@@ -1,6 +1,8 @@
 // Stage-side program snapshot construction and constant patching.
 
 #include "frozenContextInternal.h"
+#include "inputReplay.h"
+#include "bakedOpValues.h"
 #include <algorithm>
 #include <cmath>
 #include <set>
@@ -29,18 +31,18 @@ _CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst)
     D.stage = UsdStageRefPtr();
     D.assetRootPath = src.assetRootPath;
     D.resolvedInputs = nullptr;
-    D.chainSnapshots = nullptr;
-    D.blendSampleShapes = nullptr;
-    D.resolveBlendSample = {};
     D.profiler = nullptr;
     D.interactiveOverrides = nullptr;
     D.jointSolverBinding = nullptr;
-    D.guideTaps = nullptr;
+    D.ownedJointSolverBinding = src.ownedJointSolverBinding;
+    D.cycleExclusionProof = src.cycleExclusionProof;
+    D.cycleSkipReasons = src.cycleSkipReasons;
     D.solverGuidesEnabled = nullptr;
     D.hasPropertyChains = src.hasPropertyChains;
     D.paths = src.paths;
     D.index = src.index;
     D.slotKind = src.slotKind;
+    D.providerActive = src.providerActive;
     D.parent = src.parent;
     D.propParent = src.propParent;
     D.xformSlots = src.xformSlots;
@@ -55,6 +57,8 @@ _CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst)
     D.nativeFrameOk = src.nativeFrameOk;
     D.lastNativeFrameOk = src.lastNativeFrameOk;
     D.ladders = src.ladders;
+    D.interveningSlots = src.interveningSlots;
+    D.interveningAnchors = src.interveningAnchors;
     D.ladderVarying = src.ladderVarying;
     D.ladderOverrides = src.ladderOverrides;
     D.restChainVaries = src.restChainVaries;
@@ -64,6 +68,13 @@ _CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst)
     D.restPts = src.restPts;
     D.restFrames = src.restFrames;
     D.selfD = src.selfD;
+    D.posedD = src.posedD;
+    D.parentSpaceM = src.parentSpaceM;
+    D.parentSpaceAuthored = src.parentSpaceAuthored;
+    D.lastPosedD = src.lastPosedD;
+    D.lastParentSpaceM = src.lastParentSpaceM;
+    D.lastParentSpaceAuthored = src.lastParentSpaceAuthored;
+    D.lastRotationSign = src.lastRotationSign;
     D.parentDinv = src.parentDinv;
     D.rotOrder = src.rotOrder;
     D.restRoundTrip = src.restRoundTrip;
@@ -78,8 +89,6 @@ _CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst)
     D.ladderChanged = src.ladderChanged;
     D.restMoved = src.restMoved;
     D.ladderMoved = src.ladderMoved;
-    D.restTierEverRan = src.restTierEverRan;
-    D.restTierStamp = src.restTierStamp;
     D.xyzToken = src.xyzToken;
     D.noScaleAvars = src.noScaleAvars;
     D.rotationSign = src.rotationSign;
@@ -115,6 +124,9 @@ _CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst)
     D.constraints = src.constraints;
     D.walkSteps = src.walkSteps;
     D.steps = src.steps;
+    D.excludedSteps = src.excludedSteps;
+    D.opGraph = src.opGraph;
+    D.opAdapter = src.opAdapter;
     D.composeGroups = src.composeGroups;
     // The space switches, and the per-slot index the compose step
     // asks before it takes the switched branch. Left out, the
@@ -123,6 +135,8 @@ _CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst)
     // under it, and reads as a parity mismatch on 1509 control
     // frames of a rig that is standing in the same place.
     D.spaceSwitches = src.spaceSwitches;
+    D.switchFrameContexts = src.switchFrameContexts;
+    D.switchFrames = src.switchFrames;
     D.spaceSwitchBySlot = src.spaceSwitchBySlot;
     D.autoClavicles = src.autoClavicles;
     D.autoClavicleBySlot = src.autoClavicleBySlot;
@@ -138,7 +152,6 @@ _CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst)
     D.revisionFuseStep = src.revisionFuseStep;
     D.clustering = src.clustering;
     D.clusterCounters.reset();
-    D.runSeqCounter.next.store(0, std::memory_order_relaxed);
     // Build's settings: the clone's partition settings and the worker's
     // kernels are the live program's choices, and its bodies count into
     // their own audit counter.
@@ -167,8 +180,6 @@ _CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst)
     D.editSerial = src.editSerial;
     D.lastClosedClusters = src.lastClosedClusters;
     D.lastClosedSteps = src.lastClosedSteps;
-    D.solverOverrideRounds = src.solverOverrideRounds;
-    D.solverEvaluations = src.solverEvaluations;
     D.jointSlots = src.jointSlots;
     D.jointPaths = src.jointPaths;
     D.controlSlots = src.controlSlots;
@@ -187,6 +198,12 @@ _CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst)
     D.measurementSuspended = false;
     D.jointMatrixPublished = src.jointMatrixPublished;
     D.chains = src.chains;
+    // Per-consumer overlays borrow the live source layer only during a body.
+    // A frozen clone rebases them on its own source layer when consumed.
+    for (auto &chain : D.chains) {
+        for (auto &revision : chain.revisions) revision.revisionInputs.Clear();
+        for (auto &derived : chain.derived) derived.revision.revisionInputs.Clear();
+    }
     D.deltaValues = src.deltaValues;
     D.deltaPresent = src.deltaPresent;
     D.deltaBasePaths = src.deltaBasePaths;
@@ -195,8 +212,11 @@ _CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst)
     D.deltaBaseOk = src.deltaBaseOk;
     D.lastDeltaBaseOk = src.lastDeltaBaseOk;
     D.weightObjects = src.weightObjects;
+    D.weightProgram = src.weightProgram;
+    D.weightCycleBlocked = src.weightCycleBlocked;
+    D.weightFields = src.weightFields;
+    D.volumePlacementBase = src.volumePlacementBase;
     D.weightIndex = src.weightIndex;
-    D.resolveWeights = {};
     D.volumePlacement = src.volumePlacement;
     D.placedVolumes = src.placedVolumes;
     D.currentPhaseWeights = src.currentPhaseWeights;
@@ -204,9 +224,10 @@ _CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst)
     // Sized but empty: every packet is rebuilt by its step during the run
     // (reads always follow writes in program order, as live), so copying
     // the previous run's dense fields per job would be pure waste.
-    D.weightPackets.clear();
-    D.weightPackets.resize(src.weightPackets.size());
+    // Completed signatures require their owned packet payloads.
+    D.weightPackets = src.weightPackets;
     D.rebuild = src.rebuild;
+    D.sourceBackedPaths = src.sourceBackedPaths;
     D.named = src.named;
     D.prims = src.prims;
     D.xformPrims = src.xformPrims;
@@ -244,11 +265,29 @@ _CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst)
     D.folded = src.folded;
     D.anyOverridden = src.anyOverridden;
     D.publishWeightFields = src.publishWeightFields;
-    // The head tier, as live left it: a frozen job runs it from its own
-    // head-leaf samples (the leaves' attribute handles are dead there), and
-    // re-runs what differs from this state.
+    // Retained property values and bindings. Frozen jobs sample source facts
+    // and execute the same compiled graph with no attribute reads in workers.
     D.propertyChains = src.propertyChains;
+    D.oraclePublications = src.oraclePublications;
+    D.oracleWeightInputs = src.oracleWeightInputs;
     D.propertyRecords = src.propertyRecords;
+    D.propertyRecordById = src.propertyRecordById;
+    D.poseDependencyPaths = src.poseDependencyPaths;
+    D.providerProgram = src.providerProgram;
+    D.providerValues = src.providerValues;
+    D.providerLeaves = src.providerLeaves;
+    D.providerLeafBlocked = src.providerLeafBlocked;
+    D.providerLeafValues = src.providerLeafValues;
+    D.providerLeafChains = src.providerLeafChains;
+    D.providerRoutedReads = src.providerRoutedReads;
+    D.providerFrozenKeys = src.providerFrozenKeys;
+    D.providerExternalSlots = src.providerExternalSlots;
+    D.providerFrameInputs = src.providerFrameInputs;
+    D.poseProviderInputs = src.poseProviderInputs;
+    D.connectedPoseProviders = src.connectedPoseProviders;
+    D.providerParentRawLeaves = src.providerParentRawLeaves;
+    D.providerRefreshes = src.providerRefreshes;
+    D.providerRefreshBefore = src.providerRefreshBefore;
     D.propertyVersionCount = src.propertyVersionCount;
     D.headLeaves = src.headLeaves;
     D.headOverrideSlots = src.headOverrideSlots;
@@ -270,12 +309,34 @@ _CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst)
     D.headStamp = src.headStamp;
     D.headLeafSamples = src.headLeafSamples;
     D.headOpsRun = src.headOpsRun;
-    // The reads after the tier that resolve walks: a frozen job resolves
-    // them from its own head-leaf samples and the tier it runs.
+    // Reader bindings resolve captured source facts and current typed outputs.
     D.readerWalks = src.readerWalks;
+    D.crossDomainReads = src.crossDomainReads;
+    D.crossDomainErrors = src.crossDomainErrors;
+    D.crossDomainOrdinals = src.crossDomainOrdinals;
     D.readerWalkMoved = src.readerWalkMoved;
     D.readerWalkChanged = src.readerWalkChanged;
     D.avarHeadReads = src.avarHeadReads;
+    // Adopt only a completed snapshot whose owned outputs still match the
+    // signatures copied from that completion. A patched or poisoned payload
+    // must run cold rather than borrowing a signature for a different value.
+    bool retainedComplete = src.everRan && src.opAdapter.compiled &&
+        src.opAdapter.everRan && src.opAdapter.inputKeys.size()==src.steps.size() &&
+        src.opAdapter.sourceKeys.size()==src.steps.size() &&
+        src.opAdapter.inputExact.size()==src.steps.size();
+    for(const auto &op:src.opGraph.ops)for(const auto id:op.descriptor.writes) {
+        if(id>=D.opAdapter.values.size()) { retainedComplete=false; continue; }
+        const auto &value=D.opAdapter.values[size_t(id)];
+        const auto domain=RigExecBakedSlotDomain(value.domain);
+        if(!value.initialized || !RigExecBakedOpValueKeyIsExact(D,domain,value.slot)) {
+            retainedComplete=false; continue;
+        }
+        std::string actual;
+        RigExecBakedOpValueKey(D,domain,value.slot,&actual);
+        if(actual!=value.key)retainedComplete=false;
+    }
+    D.opAdapter.everRan=retainedComplete;
+    if(!retainedComplete)D.opAdapter.retainedFirst.clear();
 }
 
 } // namespace frozenDetail
@@ -290,23 +351,14 @@ RigExecCanFreezeProgram(const RigExecRigEvaluator &evaluator,
         }
         return false;
     };
-    if (evaluator.cpuParityMode) {
-        return fail("CPU parity mode runs the dynamic path, which no "
-                    "snapshot can reproduce");
-    }
     const RigExecBakedProgram *program = evaluator.GetBakedProgram();
     if (!program) {
-        return fail("no baked program: dynamic/refusal rigs take the D7 "
-                    "UI-thread memo path, never a background job");
+        return fail("no compiled program is available to freeze");
     }
     const RigExecBakedProgramImpl &B = program->GetStepGraph();
-    // Property chains are supported: the worker runs the head tier from
-    // sampled head leaves and resolves every read a chain or record can
-    // answer through its reader walk -- except a revision whose envelope is
-    // a weight object, which the oracle resolves off the live stage. The
-    // discovery must also agree with the program: a mismatch means the
-    // mover order and the epoch disagree, and no snapshot is taken from a
-    // confused epoch.
+    // Property chains and weight envelopes run as declared graph operations.
+    // Source discovery must match the compiled epoch and every envelope
+    // must name its compiled field producer.
     {
         RigExecChainSampleBindings bound;
         std::string bindError;
@@ -321,11 +373,10 @@ RigExecCanFreezeProgram(const RigExecRigEvaluator &evaluator,
         for (const RigExecBakedPropertyChain &chain : B.propertyChains) {
             for (const RigExecBakedPropertyChain::Revision &revision :
                  chain.revisions) {
-                if (!revision.weightObject.IsEmpty()) {
+                if (!revision.weightObject.IsEmpty() && revision.weightField < 0) {
                     return fail(
                         "diag " + revision.mover.GetString() +
-                        " binds a weight object: a property chain envelope "
-                        "resolves weights from the live stage");
+                        " has no compiled weight field for its property envelope");
                 }
             }
         }
@@ -334,22 +385,14 @@ RigExecCanFreezeProgram(const RigExecRigEvaluator &evaluator,
     // geometry-domain constraints: the seeds sample per frame through the
     // program's hook, and the constraint steps are the shared bodies, so a
     // frozen run reproduces them from the transported seeds.
-    // Weight objects and their steps run frozen now (sampled arrays +
-    // patched scalars into the shared packet kernels); the remaining
-    // oracle-dependent refusals are pose-domain constraints binding weight
-    // objects, current-phase revisions, and property-chain diagnostics
-    // binding weight objects, each gated where they are found. A
-    // geometry-domain constraint never resolves its object -- weight stays
-    // 1.0 and the revision's own weight packet scales per point
-    // (bakedPose.cpp, the dynamic walk's gate alike) -- so the refusal
-    // names exactly the step's oracle-call condition.
+    // Pose constraint envelopes require compiled field bindings. Geometry
+    // constraints consume the revision's per-point packet instead.
     for (const RigExecBakedProgramImpl::Constraint &constraint :
          B.constraints) {
         if (!constraint.weightObject.IsEmpty() &&
-            constraint.pointsTarget.IsEmpty()) {
+            constraint.pointsTarget.IsEmpty() && constraint.weightField < 0) {
             return fail("constraint " + constraint.path.GetString() +
-                        " binds a weight object, whose oracle resolves from "
-                        "the live stage");
+                        " has no compiled weight field for its envelope");
         }
     }
     for (const RigExecBakedProgramImpl::GeomChain &chain : B.chains) {
@@ -368,7 +411,8 @@ RigExecCanFreezeProgram(const RigExecRigEvaluator &evaluator,
                 revision.op != RigExecRevisionOp::Lattice &&
                 revision.op != RigExecRevisionOp::SurfaceProject &&
                 revision.op != RigExecRevisionOp::Ribbon &&
-                revision.op != RigExecRevisionOp::EmitGuidePoints) {
+                revision.op != RigExecRevisionOp::EmitGuidePoints &&
+                revision.op != RigExecRevisionOp::External) {
                 return fail("revision " +
                             revision.moverPath.GetString() + " runs op '" +
                             RigExecRevisionKindToken(revision.op)
@@ -376,30 +420,18 @@ RigExecCanFreezeProgram(const RigExecRigEvaluator &evaluator,
                             "', which the frozen executor does not "
                             "implement");
             }
-            for (const RigExecBakedProgramImpl::GeomBlendChannel &channel :
-                 revision.blendChannels) {
-                for (const RigExecBakedProgramImpl::GeomBlendChannel::Sample
-                         &sample : channel.samples) {
-                    if (!sample.phase.IsBase()) {
-                        return fail(
-                            "revision " +
-                            revision.moverPath.GetString() +
-                            " reads a blend sample through a run snapshot, "
-                            "which the frozen executor does not implement");
-                    }
-                }
-            }
-            // Read phases, snapshot-recording revisions and snapshot readers
-            // all run frozen: a point phase resolves through its binding
-            // over the worker's own chains, an AtPrim transform phase out
-            // of the worker's own FrameMatrix records, and the static
-            // assembly builds the same per-revision overlay live builds.
-            // (Blend-sample phases keep their own refusal above.)
-            if (revision.weightCurrentPhase) {
+            if (revision.op == RigExecRevisionOp::External &&
+                (!revision.binding.handler || !revision.leaves.decl.assembles))
+                return fail("external revision " + revision.moverPath.GetString() +
+                            " has no compiled stage-free handler declaration");
+            // Phase reads consume the worker's current typed point/frame
+            // versions. Revision assembly uses captured source facts.
+            // Dense blend samples use those bindings; sparse blend-shape
+            // offsets are authored layout data, without point-chain phases.
+            if (revision.weightCurrentPhase && revision.weightField < 0) {
                 return fail("revision " +
                             revision.moverPath.GetString() +
-                            " measures its weight field against the current "
-                            "phase, which resolves through the live oracle");
+                            " has no compiled field for its current-phase weight");
             }
             // Driver frames and the geometry-delta hand-off use the
             // worker's own Solve-step aggregate, read in program order,
@@ -408,25 +440,8 @@ RigExecCanFreezeProgram(const RigExecRigEvaluator &evaluator,
             // constraint step measures against, the step stashes the delta,
             // and FoldInfluences reads the stash, all shared bodies in
             // program order.
-            // A skin whose packet reads a chain or record result does not
-            // freeze.
-            if (revision.op == RigExecRevisionOp::Skin &&
-                std::any_of(revision.leaves.walks.begin(),
-                            revision.leaves.walks.end(),
-                            [](int walk) { return walk >= 0; })) {
-                return fail("revision " +
-                            revision.moverPath.GetString() +
-                            " reads a property chain result into a skin "
-                            "packet, which the frozen executor does not "
-                            "admit");
-            }
-            if (revision.op == RigExecRevisionOp::Skin &&
-                !revision.skinTopologyFixed) {
-                return fail("revision " +
-                            revision.moverPath.GetString() +
-                            " has an unfixed skin layout, which the packet "
-                            "assembly reads per frame off the stage");
-            }
+            // Skin packet walks resolve the worker's current property
+            // versions through the same declared reads as live assembly.
         }
         for (const RigExecBakedProgramImpl::GeomChain::Derived &derived :
              chain.derived) {
@@ -438,12 +453,8 @@ RigExecCanFreezeProgram(const RigExecRigEvaluator &evaluator,
                             " runs an op the frozen executor does not "
                             "implement");
             }
-            if (!derived.revision.binding.phases.empty()) {
-                return fail("derived target " +
-                            derived.target.GetString() +
-                            " declares a read phase, which the frozen "
-                            "executor does not implement");
-            }
+            // Derived phases are copied typed point/frame bindings; their
+            // shared body resolves them after the declared producers join.
         }
     }
 
@@ -455,6 +466,7 @@ RigExecFreezeProgram(const RigExecRigEvaluator &evaluator,
                      std::shared_ptr<const RigExecFrozenProgram> *frozen,
                      std::string *error)
 {
+    RigExecInputReplayComparisonScope replayComparison("RigExecFreezeProgram");
     if (!frozen) {
         if (error) {
             *error = "no snapshot to freeze into";
@@ -468,18 +480,36 @@ RigExecFreezeProgram(const RigExecRigEvaluator &evaluator,
         evaluator.GetBakedProgram()->GetStepGraph();
     auto snapshot = std::make_shared<RigExecFrozenProgram>();
     _CloneImpl(B, &snapshot->program);
+    if (evaluator.cpuReference) {
+        // Freeze is an owning-thread source boundary. Enabling the judge
+        // after Evaluate must capture its independent inputs here, rather
+        // than require another production generation or retain old facts.
+        auto &reference = snapshot->program;
+        struct SourceCaptureScope {
+            RigExecBakedProgramImpl &program;
+            ~SourceCaptureScope() {
+                program.stage = UsdStageRefPtr();
+                program.resolvedInputs = nullptr;
+            }
+        } sourceScope{reference};
+        reference.stage = B.stage;
+        reference.resolvedInputs = B.resolvedInputs;
+        reference.oraclePublications.emplace();
+        RigExecBakedBeginOracleReference(&reference, 0, B.lastTime);
+    }
     if (B.jointSolverBinding) {
         snapshot->jointSolverBinding = *B.jointSolverBinding;
     }
-    snapshot->guideTapsPresent =
-        B.guideTaps != nullptr && B.guideTaps->get() != nullptr;
+    snapshot->solverGuidesPresent = !B.solverArrays.empty();
     // Handle identities, captured here (UI thread) as plain data: the
     // worker must not even ask a handle whether it is valid.
     _ForEachPatchableInput(
         B, [&snapshot](const auto &input) {
             snapshot->inputHeadPaths.push_back(
                 input.head ? input.head.GetPath() : SdfPath());
-        });
+            snapshot->inputConstants.push_back(VtValue(
+                input.sourceBacked ? input.sourceFallback : input.constant));
+        }, /*includeIntervening=*/false);
     for (const RigExecBakedProgramImpl::ConstraintArrays &arrays :
          B.constraintArrays) {
         const SdfPath primPath =

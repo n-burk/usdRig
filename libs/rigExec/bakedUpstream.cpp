@@ -3,6 +3,7 @@
 // (the attributes a bake lists as inputs, and those the weight oracle reads).
 
 #include "bakedProgram.h"
+#include "inputReplay.h"
 #include "bakedProgramImpl.h"
 #include "frozenContextInternal.h"
 #include "moverGraph.h"
@@ -54,6 +55,7 @@ std::atomic<bool> _upstreamArrays{false};
 void
 RigExecSetUpstreamArrayAdmissionForTesting(bool on)
 {
+    RigExecInputReplayObserver::ArrayAdmission(on);
     _upstreamArrays.store(on, std::memory_order_relaxed);
 }
 
@@ -473,6 +475,48 @@ _BuildUpstreamSets(RigExecBakedProgramImpl *program)
                 op != RigExecRevisionOp::RecomputeExtent &&
                 !RigExecIsDerivedMatrixOp(op)) {
                 _AddWalk(B, attr("inputs:enabled"), &paths);
+            }
+            if (op == RigExecRevisionOp::External) {
+                const auto numeric = [](RigExecRevisionLeafType type) {
+                    using Type = RigExecRevisionLeafType;
+                    return type == Type::Double || type == Type::Dial ||
+                           type == Type::Float || type == Type::Bool ||
+                           type == Type::Int || type == Type::Matrix4d ||
+                           type == Type::Vec3d || type == Type::Vec3f;
+                };
+                const auto addSource = [&](const SdfPath &path, RigExecRevisionLeafType requested) {
+                    const auto attribute = B.stage->GetAttributeAtPath(path);
+                    if (!attribute || !attribute.HasValue() ||
+                        !RigExecUpstreamSlotType(attribute.GetTypeName()) ||
+                        attribute.GetTypeName().GetType() == TfType::Find<TfToken>()) return;
+                    const auto actual = attribute.GetTypeName().GetType();
+                    using Type = RigExecRevisionLeafType;
+                    const bool compatible =
+                        ((requested == Type::Float || requested == Type::Dial) &&
+                         (actual == TfType::Find<float>() || actual == TfType::Find<double>())) ||
+                        (requested == Type::Double && actual == TfType::Find<double>()) ||
+                        (requested == Type::Bool && actual == TfType::Find<bool>()) ||
+                        (requested == Type::Int && actual == TfType::Find<int>()) ||
+                        (requested == Type::Matrix4d && actual == TfType::Find<GfMatrix4d>()) ||
+                        (requested == Type::Vec3d && actual == TfType::Find<GfVec3d>()) ||
+                        (requested == Type::Vec3f && actual == TfType::Find<GfVec3f>());
+                    if (!compatible) return;
+                    SdfPathVector connections;
+                    if (attribute.HasAuthoredConnections()) attribute.GetConnections(&connections);
+                    if (connections.empty()) paths.insert(path);
+                };
+                for (size_t k = 0; k < revision.binding.externalInputs.size(); ++k) {
+                    const auto &key = revision.binding.externalInputs[k];
+                    using Flavour = RigExecRevisionLeafFlavour;
+                    if (key.time != RigExecRevisionLeafTime::AtTime || !numeric(key.type) ||
+                        (key.flavour != Flavour::Resolved && key.flavour != Flavour::ResolvedOnly &&
+                         key.flavour != Flavour::OverlayThenRaw)) continue;
+                    addSource(key.path, key.type);
+                    if (revision.leaves.decl.externalBegin < 0) continue;
+                    const size_t leaf = size_t(revision.leaves.decl.externalBegin) + k;
+                    if (leaf < revision.leaves.hops.size())
+                        for (const auto &path : revision.leaves.hops[leaf]) addSource(path, key.type);
+                }
             }
             if (op == RigExecRevisionOp::Skin) {
                 _AddWalk(B, attr("rigExec:elementSize"), &paths);

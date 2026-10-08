@@ -48,15 +48,14 @@ int main(int argc,char **argv) {
     auto mush=rig.NewMoverChain("deform",mesh.GetPointsAttr().GetPath()).AddDeltaMushMover("mush");
     mush.SetRestPoints(rest);mush.SetIterations(3);
     RigExecRigEvaluator evaluator(stage,SdfPath("/Rig"));std::vector<std::string> diagnostics;
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::BakedWithParityCheck);
     CHECK(evaluator.Compile(&diagnostics));
     if(!evaluator.IsBakeable(&diagnostics)) {
         for(const auto &d:diagnostics)std::cerr<<d<<'\n';
         CHECK(false);
     }
-    auto evaluate=[&](){auto count=evaluator.GetBakedGenerationCount();auto p=evaluator.Evaluate(UsdTimeCode::Default());CHECK(p.valid);
-        CHECK(p.bakedParityMismatches==0);CHECK(p.moverGraphParityMismatches==0);
-        CHECK(evaluator.GetBakedGenerationCount()==count+1);
+    auto evaluate=[&](){auto p=evaluator.Evaluate(UsdTimeCode::Default());CHECK(p.valid);
+        CHECK(p.comparisonMismatches==0);CHECK(p.referenceMismatches==0);
+        CHECK(evaluator.GetBakedProgram()!=nullptr);
         auto v=p.movedProperties.at(mesh.GetPointsAttr().GetPath()).Get<VtVec3fArray>();
         return std::vector<GfVec3f>(v.begin(),v.end());};
     CHECK(Near(evaluate(),full));
@@ -81,9 +80,9 @@ int main(int argc,char **argv) {
     std::string text;stage->GetRootLayer()->ExportToString(&text);
     auto layer=SdfLayer::CreateAnonymous("roundtrip.usda");CHECK(layer->ImportFromString(text));
     auto reopened=UsdStage::Open(layer);RigExecRigEvaluator e2(reopened,SdfPath("/Rig"));
-    e2.cpuParityMode=true;CHECK(e2.Compile(&diagnostics));
+    e2.cpuReference=true;CHECK(e2.Compile(&diagnostics));
     auto p=e2.Evaluate(UsdTimeCode::Default());CHECK(p.valid);
-    CHECK(p.moverGraphParityMismatches==0);CHECK(p.moverGraphParityAgreements==1);
+    CHECK(p.referenceMismatches==0);CHECK(p.referenceAgreements==1);
     auto value=p.movedProperties.at(mesh.GetPointsAttr().GetPath()).Get<VtVec3fArray>();CHECK(Near({value.begin(),value.end()},smooth));
     // Binary playback must run the shared kernel, take every parameter from
     // its inputs and publish bitwise-identical points, including revisiting
@@ -98,7 +97,7 @@ int main(int argc,char **argv) {
         auto playback=frames;playback.insert(playback.end(),frames.rbegin(),frames.rend());
         for(double frame:playback) {
             auto expectedPose=evaluator.Evaluate(UsdTimeCode(frame));
-            CHECK(expectedPose.valid);CHECK(expectedPose.bakedParityMismatches==0);
+            CHECK(expectedPose.valid);CHECK(expectedPose.comparisonMismatches==0);
             if(!reader.Play(frame,&error))throw std::runtime_error(error);
             bool found=false;
             for(const auto &actual:reader->GetPoints()) {
@@ -159,7 +158,6 @@ int main(int argc,char **argv) {
         auto skin=chain.AddSkinMover("Skin",{anchor.GetPath(),tip.GetPath()});
         skin.SetJointInfluences({0,0,0,0,1,0},{1,1,1,1,1,1},1);
         RigExecRigEvaluator live(liveStage,SdfPath("/Rig"));
-        live.SetEvaluationMode(RigExecEvaluationMode::BakedWithParityCheck);
         RigExecBakeOpts options;options.time=1;
         RigExecBakeResult result;std::string error;
         CHECK(RigExecBakeToBinary(live,options,&result,&error));
@@ -169,7 +167,7 @@ int main(int argc,char **argv) {
             tip.SetAvarTranslation(translation,0,0);
             CHECK(reader->SetInput(tip.GetPath().AppendProperty(TfToken("avars:tx")).GetString(),translation,&error));
             auto pose=live.Evaluate(UsdTimeCode(1));CHECK(pose.valid);
-            CHECK(pose.bakedParityMismatches==0);
+            CHECK(pose.comparisonMismatches==0);
             if(!reader->Execute(&error))throw std::runtime_error(error);
             auto points=pose.movedProperties.at(body.GetPointsAttr().GetPath()).Get<VtVec3fArray>();
             auto input=rest;input[4][0]+=float(translation);

@@ -1,6 +1,8 @@
 # runVerifyBinary.cmake: one fixture's bake-then-verify gate.
 #
-# Bakes STAGE once at TIME with the rigExecBake CLI, then gates the zero-USD
+# Bakes STAGE at TIME with the rigExecBake CLI, then checks an independent
+# fresh bake for byte determinism and complete native owner/default/source
+# conformance before gating the zero-USD
 # runtime against the baked path with rigExecPose --verify-binary: the
 # binary's defaults at TIME, every frame of FRAMES (TIME alone when CLASS is
 # static) with its Animated inputs sampled from the stage, and two drags of
@@ -9,12 +11,12 @@
 # source in static data, an inputs stage none. Run as a ctest entry (see
 # rigexec_add_verify_binary_test in CMakeLists.txt); fails loudly on either
 # half.
-# Required -D arguments: BAKE, POSE, STAGE, FRAMES, OUT. Optional: TIME (the
+# Required -D arguments: BAKE, CONFORMANCE, POSE, STAGE, FRAMES, OUT. Optional: TIME (the
 # first of FRAMES by default), CLASS (inputs or static; inputs by default),
 # DRAGS (comma-separated <prim>.<attr> list).
-if (NOT DEFINED BAKE OR NOT DEFINED POSE OR NOT DEFINED STAGE
+if (NOT DEFINED BAKE OR NOT DEFINED CONFORMANCE OR NOT DEFINED POSE OR NOT DEFINED STAGE
         OR NOT DEFINED FRAMES OR NOT DEFINED OUT)
-    message(FATAL_ERROR "runVerifyBinary.cmake: BAKE, POSE, STAGE, FRAMES "
+    message(FATAL_ERROR "runVerifyBinary.cmake: BAKE, CONFORMANCE, POSE, STAGE, FRAMES "
                         "and OUT are all required")
 endif()
 string(REPLACE "," ";" _frame_list "${FRAMES}")
@@ -63,6 +65,18 @@ if ((CLASS STREQUAL "static" AND _static_sources EQUAL 0) OR
 endif()
 message(STATUS "class ${CLASS}: ${_static_sources} animated static "
                "source(s)")
+execute_process(
+    COMMAND "${CONFORMANCE}" --conformance "${STAGE}" "${TIME}" "${CLASS}" "${OUT}"
+    RESULT_VARIABLE _conformance_rc
+    OUTPUT_VARIABLE _conformance_out
+    ERROR_VARIABLE _conformance_err)
+message(STATUS "${_conformance_out}")
+if (NOT _conformance_rc EQUAL 0)
+    message(FATAL_ERROR "binary conformance failed (${_conformance_rc}):\n${_conformance_out}\n${_conformance_err}")
+endif()
+if (NOT _conformance_out MATCHES "binary conformance: .* failures=0")
+    message(FATAL_ERROR "binary conformance printed no successful ledger")
+endif()
 execute_process(
     COMMAND "${POSE}" "${STAGE}" --verify-binary "${OUT}"
             --frames "${_verify_frames}" ${_drag_args}

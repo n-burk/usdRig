@@ -1,6 +1,7 @@
 // Frozen evaluation API, input containers, serial scopes, and purity audit.
 
 #include "frozenContextInternal.h"
+#include "inputReplay.h"
 #include "frameCache.h"
 #include "generation.h"
 #include <algorithm>
@@ -20,10 +21,6 @@ thread_local size_t _frozenSerialDepth = 0;
 } // namespace
 
 namespace frozenDetail {
-
-thread_local std::shared_ptr<const void> _lastFrozenSlots;
-
-thread_local size_t _lastFrozenSlotBytes = 0;
 
 thread_local RigExecFrozenRunReport *_frozenRunReport = nullptr;
 
@@ -113,8 +110,11 @@ void
 RigExecFrameInputs::Clear()
 {
     time = UsdTimeCode::Default();
+    oraclePublications.reset();
+    oracleWeightInputs.clear();
     values.clear();
     layoutLeaves.clear();
+    layoutSourcePaths.clear();
     revisionLeaves.clear();
     derivedLeaves.clear();
     stageSeeds = RigExecStageFrameSeeds();
@@ -172,8 +172,7 @@ RigExecEvaluateFrozen(const RigExecFrozenEvalContext &context,
                       const RigExecBackgroundScheduler *scheduler,
                       const SdfPath &rig, RigExecFrozenRunReport *report)
 {
-    _lastFrozenSlots.reset();
-    _lastFrozenSlotBytes = 0;
+    RigExecInputReplayComparisonScope replayComparison("RigExecEvaluateFrozen");
     if (report) {
         report->Clear();
     }
@@ -247,6 +246,7 @@ RigExecRigPose
 RigExecEvaluateFrozen(const RigExecFrozenEvalContext &context,
                       const RigExecFrameInputs &inputs)
 {
+    RigExecInputReplayComparisonScope replayComparison("RigExecEvaluateFrozen");
     // Stream 0 stub, retained: without a step runner no request can prove
     // bit-identity, so every request answers invalid -- the fail-closed
     // answer -- while still carrying the requested time for the fallback's

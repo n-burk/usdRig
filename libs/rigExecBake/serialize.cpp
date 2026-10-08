@@ -4,6 +4,7 @@
 #include "rigExecBake/pathTable.h"
 #include "rigExecBake/staticCapture.h"
 #include "rigExec/bakedProgramImpl.h"
+#include "rigExecGraph/providerRecordExport.h"
 
 #include <algorithm>
 #include <map>
@@ -46,6 +47,7 @@ _RIGEXEC_BAKE_PIN_STEP(PropertyRevision);
 _RIGEXEC_BAKE_PIN_STEP(RestCompose);
 _RIGEXEC_BAKE_PIN_STEP(LadderCompose);
 _RIGEXEC_BAKE_PIN_STEP(SkinTopology);
+_RIGEXEC_BAKE_PIN_STEP(ProviderRefresh);
 #undef _RIGEXEC_BAKE_PIN_STEP
 
 #define _RIGEXEC_BAKE_PIN_DOMAIN(name)                                     \
@@ -85,7 +87,7 @@ _RIGEXEC_BAKE_PIN_DOMAIN(SkinTopology);
 #undef _RIGEXEC_BAKE_PIN_DOMAIN
 // The program's last enumerators are the wire's: a program kind or domain
 // appended without its wire value fails the build here.
-static_assert(uint8_t(RigExecBakedStepKind::SkinTopology) ==
+static_assert(uint8_t(RigExecBakedStepKind::ProviderRefresh) ==
                   uint8_t(RigExecWireStepKind::MAX),
               "the wire step kinds end before the program's");
 static_assert(RigExecBakedSlotDomainCount ==
@@ -272,8 +274,8 @@ _FbAncestorLists(
 class _FileFill {
 public:
     _FileFill(const RigExecBakedProgramImpl &program,
-              const RigExecBakeInputs &inputs, RigExecBakePathTable *paths)
-        : _program(program), _inputs(inputs), _paths(paths)
+              const RigExecBakeInputs &inputs, RigExecBakePathTable *paths, RigExecBakePools *pools)
+        : _program(program), _inputs(inputs), _paths(paths), _pools(pools)
     {
     }
 
@@ -327,6 +329,7 @@ private:
 
     const RigExecBakedProgramImpl &_program;
     const RigExecBakeInputs &_inputs;
+    RigExecBakePools *_pools;
     RigExecBakePathTable *_paths;
     std::string _error;
     std::map<std::tuple<uint8_t, uint32_t, uint32_t>,
@@ -446,6 +449,10 @@ _FileFill::_SlotMeta(fb::RigExecWireSlotMeta *meta)
     for (RigExecBakedSlotKind kind : program.slotKind) {
         meta->slotKind.push_back(fb::SlotKind(uint8_t(kind)));
     }
+    meta->providerActive.reserve(program.providerActive.size());
+    for (char active : program.providerActive) {
+        meta->providerActive.push_back(active ? uint8_t(1) : uint8_t(0));
+    }
     meta->parent = _ToI32s(program.parent);
     meta->propParent = _ToI32s(program.propParent);
     meta->xformSlots = _ToI32s(program.xformSlots);
@@ -453,6 +460,10 @@ _FileFill::_SlotMeta(fb::RigExecWireSlotMeta *meta)
     for (const UsdPrim &prim : program.xformPrimsBySlot) {
         meta->xformPaths.push_back(_Path(prim.GetPath()));
     }
+    meta->publicationRoles.assign(program.paths.size(), uint8_t(0));
+    for (int slot : program.jointSlots) meta->publicationRoles[size_t(slot)] |= uint8_t(1);
+    for (int slot : program.controlSlots) meta->publicationRoles[size_t(slot)] |= uint8_t(2);
+    meta->solverGuidesEnabled = program.solverGuidesEnabled && *program.solverGuidesEnabled;
     meta->jointSlots = _ToI32s(program.jointSlots);
     meta->jointPaths.reserve(program.jointPaths.size());
     for (const SdfPath &path : program.jointPaths) {
@@ -505,6 +516,10 @@ _FileFill::_Constants(fb::RigExecWireConstants *constants)
     for (const GfMatrix4d &m : program.selfD) {
         constants->selfD.push_back(_ToMatrix(m));
     }
+    for (const auto &m : program.posedD) constants->posedD.push_back(_ToMatrix(m));
+    for (const auto &m : program.parentSpaceM) constants->parentSpaceM.push_back(_ToMatrix(m));
+    for (char value : program.parentSpaceAuthored)
+        constants->parentSpaceAuthored.push_back(value ? uint8_t(1) : uint8_t(0));
     constants->parentDinv.reserve(program.parentDinv.size());
     for (const GfMatrix4d &m : program.parentDinv) {
         constants->parentDinv.push_back(_ToMatrix(m));
@@ -547,6 +562,8 @@ _FileFill::_Steps(std::vector<fb::RigExecWireStep> *steps)
         out.kind = fb::StepKind(uint8_t(step.kind));
         out.object = int32_t(step.object);
         out.part = int32_t(step.part);
+        out.descriptorKey=step.descriptorKey;
+        out.semanticPredecessorKeys = step.semanticPredecessorKeys;
         out.reads = _FbRanges(step.reads);
         out.writes = _FbRanges(step.writes);
         out.preds = _ToI32s(step.preds);
@@ -597,10 +614,6 @@ void
 _FileFill::_Cones(fb::RigExecWireCones *cones)
 {
     const uint32_t clusters = uint32_t(_program.clustering.clusters.size());
-    cones->cone.reserve(_program.cones.cone.size());
-    for (const RigExecBakedClusterSet &set : _program.cones.cone) {
-        cones->cone.push_back(_FbClusterSet(set, clusters));
-    }
     cones->always = std::make_unique<fb::RigExecWireClusterSet>(
         _FbClusterSet(_program.cones.always, clusters));
     cones->poseClusters = std::make_unique<fb::RigExecWireClusterSet>(
@@ -687,6 +700,14 @@ _FileFill::_Solver(size_t index, fb::RigExecWireSolver *out)
     out->spaceRead = uint32_t(std::max(solver.spaceRead, 0));
     out->inA = int32_t(solver.inA);
     out->inB = int32_t(solver.inB);
+    out->solveDescriptorKey = solver.solveDescriptorKey;
+    out->relationshipRequirements.reserve(solver.relationshipRequirements.size());
+    for (const auto &requirement : solver.relationshipRequirements) {
+        fb::RigExecWireSolverRelationshipRequirement wire;
+        wire.port = requirement.first;
+        wire.solver = int32_t(requirement.second);
+        out->relationshipRequirements.push_back(std::move(wire));
+    }
     out->scaleMode = uint8_t(solver.scaleMode);
     out->blendRotationRejected = solver.blendRotationRejected;
     auto rest = std::make_unique<fb::RigExecWireSplineIkRest>();
@@ -754,6 +775,7 @@ _FileFill::_Constraint(size_t index, fb::RigExecWireConstraint *out)
     out->path = _Path(constraint.path);
     out->type = _Tok(constraint.type);
     out->weightObject = _Path(constraint.weightObject);
+    out->weightField = constraint.weightField;
     out->weightObjectIndex =
         index < _inputs.constraintWeightObjectIndex.size()
             ? _inputs.constraintWeightObjectIndex[index]
@@ -832,6 +854,9 @@ void
 _FileFill::_Pose(fb::RigExecWireDomainPose *pose)
 {
     const RigExecBakedProgramImpl &program = _program;
+    pose->requiredStageFramesAdmission = std::make_unique<fb::RigExecWireRequiredStageFramesAdmission>();
+    pose->requiredStageFramesAdmission->admitted = program.requiredStageFramesAdmission.admitted;
+    pose->requiredStageFramesAdmission->firstBadTarget = program.requiredStageFramesAdmission.firstBadTarget;
     pose->ladders.resize(program.ladders.size());
     for (size_t i = 0; i < program.ladders.size(); ++i) {
         fb::RigExecWireLadder &out = pose->ladders[i];
@@ -847,6 +872,21 @@ _FileFill::_Pose(fb::RigExecWireDomainPose *pose)
                 _RegisteredValue(_Family::Ladder, i, 9 + k));
         }
         out.rotationOrder = _Registered(_Family::Ladder, i, 15);
+        out.parentSpace = _Registered(_Family::Ladder, i, 16);
+        out.parentDefaultSpace = _Registered(_Family::Ladder, i, 17);
+        out.avarDefaultSpace = _Registered(_Family::Ladder, i, 18);
+        out.posedDefaultSpace = _Registered(_Family::Ladder, i, 19);
+        out.rotationSign = _Registered(_Family::Ladder, i, 20);
+        out.interveningSpace = _Registered(_Family::Ladder, i, 21);
+        const auto &ladder = program.ladders[i];
+        out.interveningReset = ladder.interveningReset;
+        out.spaceValues.assign(ladder.spaceValues.begin(),ladder.spaceValues.end());
+        out.posedSpaceConnected = ladder.posedSpaceConnected;
+        out.defaultSpaceConnected = ladder.defaultSpaceConnected;
+        out.parentSpaceConnected = ladder.parentSpaceConnected;
+        out.parentDefaultSpaceConnected = ladder.parentDefaultSpaceConnected;
+        out.avarDefaultSpaceConnected = ladder.avarDefaultSpaceConnected;
+        out.posedDefaultSpaceConnected = ladder.posedDefaultSpaceConnected;
     }
     pose->ladderVarying = program.ladderVarying;
     pose->ladderOverrides = _ToI32s(program.ladderOverrides);
@@ -924,6 +964,7 @@ _FileFill::_Pose(fb::RigExecWireDomainPose *pose)
             program.constraintArrays[i];
         fb::RigExecWireConstraintArrays &out = pose->constraintArrays[i];
         out.prim = arrays.prim ? _Path(arrays.prim.GetPath()) : 0;
+        out.rawSlots.assign(_inputs.constraintRawSlots[i].begin(),_inputs.constraintRawSlots[i].end());
         out.sourceCount = uint64_t(arrays.sourceCount);
         out.parentOffsets = arrays.parentOffsets;
         out.readPole = arrays.readPole;
@@ -1049,6 +1090,7 @@ _FileFill::_Pose(fb::RigExecWireDomainPose *pose)
             fb::RigExecWireFrameVersion out;
             out.anchor = int32_t(read.anchor);
             out.recompose = _ToI32s(read.recompose);
+            out.context = read.context;
             return out;
         };
         out.parentRead = std::make_unique<fb::RigExecWireFrameVersion>(
@@ -1060,6 +1102,8 @@ _FileFill::_Pose(fb::RigExecWireDomainPose *pose)
         out.spaceRead = std::make_unique<fb::RigExecWireFrameVersion>(
             version(sw.spaceRead));
         out.active = _Registered(_Family::SpaceSwitch, i, 0);
+        out.tokenIndex=sw.tokenIndex;
+        for(const auto &label:sw.labels) out.labels.push_back(label.GetString());
         for (size_t axis = 0; axis < 3; ++axis) {
             out.affectTranslation[axis] = sw.affectTranslation[axis];
             out.affectRotation[axis] = sw.affectRotation[axis];
@@ -1084,6 +1128,14 @@ _FileFill::_Pose(fb::RigExecWireDomainPose *pose)
     }
     pose->overrideCount = uint32_t(program.overridden.size());
     // In the program's walk order, which the FrameMatrix steps index.
+    pose->spaceCheckpoints.reserve(program.switchFrameContexts.size());
+    for (const auto &checkpoint : program.switchFrameContexts) {
+        fb::RigExecWireSpaceCheckpoint out;
+        out.key = checkpoint.key;
+        out.anchor = checkpoint.anchor;
+        out.recompose = _ToI32s(checkpoint.recompose);
+        pose->spaceCheckpoints.push_back(std::move(out));
+    }
     pose->frameRecords.reserve(program.frameRecords.size());
     for (const RigExecBakedFrameRecord &record : program.frameRecords) {
         const uint32_t mover = _Path(record.mover);
@@ -1091,6 +1143,45 @@ _FileFill::_Pose(fb::RigExecWireDomainPose *pose)
             uint32_t(record.slot), uint32_t(record.commit),
             int32_t(record.target), int32_t(record.position), record.version,
             mover);
+    }
+    pose->providerFrameInputs.reserve(program.providerFrameInputs.size());
+    for (const auto &input : program.providerFrameInputs) {
+        fb::RigExecWireProviderFrameInput out;
+        out.value = input.value;
+        out.slot = input.slot;
+        out.base = input.base;
+        out.version = input.version;
+        out.reader = _Path(input.reader);
+        pose->providerFrameInputs.push_back(std::move(out));
+    }
+    pose->providerRefreshes.reserve(program.providerRefreshes.size());
+    for (const auto &refresh : program.providerRefreshes) {
+        fb::RigExecWireProviderRefresh out;
+        out.key = refresh.key;
+        out.reader = _Path(refresh.reader);
+        out.slot = refresh.slot;
+        out.checkpoint = refresh.checkpoint;
+        out.baseValue = refresh.baseValue;
+        out.currentValue = refresh.currentValue;
+        out.baseRead = refresh.baseRead;
+        out.finRead = refresh.finRead;
+        out.baseWrite = refresh.baseWrite;
+        out.finWrite = refresh.finWrite;
+        out.carries.reserve(refresh.carries.size());
+        for (const auto &carry : refresh.carries) {
+            fb::RigExecWireProviderRefreshCarry row;
+            row.slot = carry.slot;
+            row.baseRead = carry.baseRead;
+            row.finRead = carry.finRead;
+            row.baseWrite = carry.baseWrite;
+            row.finWrite = carry.finWrite;
+            row.blockingSlots.assign(carry.blockingSlots.begin(),
+                                     carry.blockingSlots.end());
+            out.carries.push_back(std::move(row));
+        }
+        out.priorConstraints.assign(refresh.priorConstraints.begin(),
+                                    refresh.priorConstraints.end());
+        pose->providerRefreshes.push_back(std::move(out));
     }
 }
 
@@ -1118,6 +1209,32 @@ _FileFill::_Revision(const RigExecBakedProgramImpl::GeomRevision &revision,
                      size_t chain, size_t index, bool derived,
                      fb::RigExecWireRevision *out)
 {
+    const auto fillSites = [&](bool layout, auto *destination) {
+        const auto found = _inputs.leafSites.find({uint32_t(chain), uint32_t(index), derived, layout});
+        if (found == _inputs.leafSites.end()) return;
+        *destination = found->second.reads;
+        for (size_t k = 0; k < destination->size(); ++k) {
+            auto &row = (*destination)[k];
+            if (!RigExecFormatIsArrayTag(row.read->tag)) continue;
+            const auto &fallback = found->second.fallbacks[k];
+            fb::RigExecWireValue value; value.tag = row.read->tag;
+            if (fallback.IsHolding<VtIntArray>()) {
+                const auto &v=fallback.UncheckedGet<VtIntArray>(); value.array=_pools->Ints(v.cdata(),v.size());
+            } else if (fallback.IsHolding<VtFloatArray>()) {
+                const auto &v=fallback.UncheckedGet<VtFloatArray>(); value.array=_pools->Floats(v.cdata(),v.size());
+            } else if (fallback.IsHolding<VtDoubleArray>()) {
+                const auto &v=fallback.UncheckedGet<VtDoubleArray>(); value.array=_pools->Doubles(v.cdata(),v.size());
+            } else if (fallback.IsHolding<VtVec2fArray>()) {
+                const auto &v=fallback.UncheckedGet<VtVec2fArray>(); value.array=_pools->Vec2fs(v.empty()?nullptr:v.cdata()->data(),v.size());
+            } else if (fallback.IsHolding<VtVec3fArray>()) {
+                const auto &v=fallback.UncheckedGet<VtVec3fArray>(); value.array=_pools->Vec3fs(v.empty()?nullptr:v.cdata()->data(),v.size());
+            }
+            row.read->constant=_pools->Value(value);
+            if (row.bodyWalk) row.bodyWalk->constant=row.read->constant;
+        }
+    };
+    fillSites(false, &out->leafSites);
+    fillSites(true, &out->layoutLeafSites);
     out->moverPath = _Path(revision.moverPath);
     out->target = _Path(revision.target);
     out->moverPrim =
@@ -1210,6 +1327,7 @@ _FileFill::_Revision(const RigExecBakedProgramImpl::GeomRevision &revision,
             wireSample.pointsPath = _Path(sample.pointsPath);
             wireSample.phase = _Phase(sample.phase);
             wireSample.blendShape = _Path(sample.blendShape);
+            wireSample.shapeValid = sample.shapeValid;
             wireSample.hasLayout = bool(sample.layout);
             if (sample.layout) {
                 wireSample.offsets.reserve(sample.layout->offsets.size());
@@ -1287,12 +1405,20 @@ _FileFill::_Revision(const RigExecBakedProgramImpl::GeomRevision &revision,
     out->partitionPointCount = uint64_t(revision.partitionPointCount);
     out->chunked = revision.chunked;
     out->partitionCandidates = uint64_t(revision.partitionCandidates);
-    out->partitionReadyMin = int32_t(revision.partitionReadyMin);
-    out->partitionReadyMax = int32_t(revision.partitionReadyMax);
+    out->partitionProducerMin = int32_t(revision.partitionProducerMin);
+    out->partitionProducerMax = int32_t(revision.partitionProducerMax);
+    out->partitionDistinctReads=uint64_t(revision.partitionDistinctReads);
+    for(const auto &set:revision.partitionProducerSets) {
+        fb::RigExecWirePartitionProducerSet row;
+        for(const auto &value:set) row.values.emplace_back(
+            fb::SlotDomain(value.first),uint32_t(value.second),uint32_t(value.second)+1);
+        out->partitionProducerSets.push_back(std::move(row));
+    }
     out->weightObject = int32_t(revision.weightObject);
     out->weightOperationDomain = revision.weightOperationDomain;
     out->weightFieldTarget = _Path(revision.weightFieldTarget);
     out->weightCurrentPhase = revision.weightCurrentPhase;
+    out->weightField = revision.weightField;
     if (revision.topology) {
         out->topology = _Topology(*revision.topology, revision);
     }
@@ -1347,6 +1473,9 @@ _FileFill::_Geometry(fb::RigExecWireDomainGeometry *geometry)
         wire.derived.resize(chain.derived.size());
         for (size_t d = 0; d < chain.derived.size(); ++d) {
             wire.derived[d].target = _Path(chain.derived[d].target);
+            for(size_t k=0;k<program.derivedIndex.size();++k)
+                if(program.derivedIndex[k].first==int(c) && program.derivedIndex[k].second==int(d))
+                    wire.derived[d].baseSlot=_inputs.derivedBaseSlots[k];
             wire.derived[d].revision =
                 std::make_unique<fb::RigExecWireRevision>();
             _Revision(chain.derived[d].revision, c, d, true,
@@ -1372,6 +1501,15 @@ _FileFill::_Geometry(fb::RigExecWireDomainGeometry *geometry)
     // The step-backed objects in the program's order, then the envelope-
     // only ones, each with its reads and oracle facts as collected.
     geometry->weightObjects = _inputs.weightObjects;
+    geometry->weightFields = _inputs.weightFields;
+    for (size_t f=0;f<geometry->weightFields.size();++f) {
+        for (const auto &read:_program.weightFields[f].pointReads) {
+            fb::RigExecWireWeightFieldPointRead row;
+            row.object=read.object; row.leaf=read.leaf;
+            row.binding=std::make_unique<fb::RigExecWirePointsBinding>(_PointsBinding(read.binding));
+            geometry->weightFields[f].pointReads.push_back(std::move(row));
+        }
+    }
     geometry->falloffPaths.reserve(program.falloffLuts.size());
     geometry->falloffLuts.reserve(program.falloffLuts.size());
     for (const auto &entry : program.falloffLuts) {
@@ -1411,6 +1549,157 @@ _FileFill::Run(fb::RigExecWireFile *file, std::string *error)
     file->constants = std::make_unique<fb::RigExecWireConstants>();
     _Constants(file->constants.get());
     _Steps(&file->steps);
+    file->commonGraph = std::make_unique<fb::RigExecWireCommonGraph>();
+    auto &common = *file->commonGraph;
+    for (const auto &value : _program.opAdapter.values) {
+        fb::RigExecWireCommonValueSpec spec;
+        spec.domain = value.domain;
+        spec.slot = value.slot;
+        common.valueSpecs.push_back(spec);
+    }
+    common.leaves = _program.opAdapter.leaves;
+    common.excludedValues = _program.opAdapter.excludedValues;
+    common.canonicalIndex = _program.opGraph.canonicalIndex;
+    common.longestPath = _program.opGraph.longestPath;
+    common.opClusters = _program.opGraph.opClusters;
+    for (const auto &cluster : _program.opGraph.clusters) {
+        fb::RigExecWireCommonCluster row;
+        row.members = cluster.members;
+        row.predecessors = cluster.predecessors;
+        row.successors = cluster.successors;
+        common.clusters.push_back(std::move(row));
+    }
+    for (const auto &op : _program.opGraph.ops) {
+        fb::RigExecWireCommonOp row;
+        row.key = op.descriptor.key;
+        row.kind = op.descriptor.kind;
+        row.originalIndex = op.originalIndex;
+        row.reads = op.descriptor.reads;
+        row.writes = op.descriptor.writes;
+        row.descriptorPredecessors = op.descriptor.predecessors;
+        row.predecessors = op.predecessors;
+        row.successors = op.successors;
+        row.volatileInput = op.descriptor.volatileInput;
+        common.ops.push_back(std::move(row));
+    }
+    std::map<RigExecValueId, std::vector<uint32_t>> readers(
+        _program.opGraph.readers.begin(), _program.opGraph.readers.end());
+    for (const auto &entry : readers) {
+        fb::RigExecWireCommonReaders row;
+        row.value = entry.first;
+        row.ops = entry.second;
+        common.readers.push_back(std::move(row));
+    }
+    for (const auto &cycle : _program.opGraph.cycles) {
+        fb::RigExecWireCommonCycle row;
+        row.keys = cycle;
+        common.cycles.push_back(std::move(row));
+    }
+    RigExecProviderPlainProgram provider;
+    if (!RigExecExportProviderRecords(_program.providerProgram,
+                                     _program.providerValues, &provider, error)) {
+        return false;
+    }
+    file->providerProgram = std::make_unique<fb::RigExecWireProviderProgram>();
+    auto &portable = *file->providerProgram;
+    portable.valueKeys = provider.valueKeys;
+    portable.leaves = provider.leaves;
+    for (const auto &state : provider.defaults) {
+        fb::RigExecWireProviderValue row;
+        row.kind = fb::ProviderValueKind(state.value.index());
+        row.initialized = state.initialized;
+        row.blocked = state.blocked;
+        row.authoritative = state.authoritative;
+        row.count = state.count;
+        row.error = state.error;
+        if (const auto *v = std::get_if<double>(&state.value)) row.scalarDouble = std::make_unique<double>(*v);
+        else if (const auto *v = std::get_if<float>(&state.value)) row.scalarFloat = std::make_unique<float>(*v);
+        else if (const auto *v = std::get_if<std::array<double, 3>>(&state.value))
+            row.vector = std::make_unique<RigExecWireVec3d>(*v);
+        else if (const auto *v = std::get_if<std::array<double, 16>>(&state.value))
+            row.matrix = std::make_unique<RigExecWireMatrix4d>(*v);
+        else if (const auto *v = std::get_if<std::string>(&state.value)) row.token = *v;
+        else if (const auto *v = std::get_if<RigExecProviderPlainFrame>(&state.value)) {
+            row.framePoints.assign(v->points.begin(), v->points.end());
+            row.frameFlags = v->flags;
+        }
+        if(const auto *v=std::get_if<std::array<float,3>>(&state.value))
+            row.vec3f=std::make_unique<RigExecWireVec3f>(*v);
+        else if(const auto *v=std::get_if<bool>(&state.value)) row.boolean=*v;
+        else if(const auto *v=std::get_if<int32_t>(&state.value)) row.integer=*v;
+        else if(const auto *v=std::get_if<std::vector<float>>(&state.value)) row.floats=*v;
+        else if(const auto *v=std::get_if<std::vector<double>>(&state.value)) row.doubles=*v;
+        else if(const auto *v=std::get_if<std::vector<std::array<float,3>>>(&state.value)) row.vec3fs=*v;
+        else if(const auto *v=std::get_if<std::vector<std::array<double,3>>>(&state.value)) row.vec3ds=*v;
+        else if(const auto *v=std::get_if<std::vector<int32_t>>(&state.value)) row.ints=*v;
+        else if(const auto *v=std::get_if<std::vector<std::array<double,16>>>(&state.value)) row.matrices=*v;
+        else if(const auto *v=std::get_if<std::vector<std::string>>(&state.value)) row.tokens=*v;
+        else if(const auto *v=std::get_if<std::vector<bool>>(&state.value))
+            for(bool bit:*v) row.bools.push_back(bit?1:0);
+        else if(const auto *v=std::get_if<std::array<float,2>>(&state.value))
+            row.vec2f=std::make_unique<RigExecWireVec2f>(*v);
+        else if(const auto *v=std::get_if<std::vector<std::array<float,2>>>(&state.value)) row.vec2fs=*v;
+        else if(const auto *v=std::get_if<std::array<int32_t,3>>(&state.value))
+            row.vec3i=std::make_unique<RigExecWireVec3i>(*v);
+        portable.defaults.push_back(std::move(row));
+    }
+    for (const auto &op : provider.ops) {
+        fb::RigExecWireProviderOp row;
+        row.kind = uint32_t(op.kind);
+        row.owner = op.owner;
+        row.output = op.output;
+        row.inputs = op.inputs;
+        row.scaleAvars = op.scaleAvars;
+        portable.ops.push_back(std::move(row));
+    }
+    const auto leaves = [](const auto &source, auto *destination) {
+        for (const auto &leaf : source) {
+            fb::RigExecWireProviderLeaf row;
+            row.value = leaf.value;
+            row.path = leaf.path;
+            row.computation = leaf.computation;
+            destination->push_back(std::move(row));
+        }
+    };
+    leaves(provider.sampled, &portable.sampled);
+    leaves(provider.externalInputs, &portable.externalInputs);
+    for (size_t k = 0; k < portable.sampled.size(); ++k) {
+        auto &row = portable.sampled[k];
+        row.inputSlot = _inputs.providerLeafSlots[k];
+
+    }
+    for (size_t k = 0; k < portable.externalInputs.size(); ++k) {
+        auto &row = portable.externalInputs[k];
+        row.providerSlot = _program.providerExternalSlots[k];
+        if(row.providerSlot>=0 && (row.computation=="computePointFrame" || row.computation=="computeBasePointFrame"))
+            row.frameVersion=row.providerSlot;
+        if (row.providerSlot >= 0 && row.computation != "computeRestFrame" &&
+            row.computation != "computePointFrame" && row.computation != "computeBasePointFrame") {
+            row.interveningRead = std::make_unique<fb::RigExecWireInput>(
+                _RegisteredValue(_Family::Ladder, uint32_t(row.providerSlot), 21));
+        }
+    }
+
+    for (size_t k=0;k<provider.routedInputs.size();++k) {
+        const auto &route=provider.routedInputs[k];
+        fb::RigExecWireProviderRoutedInput row;
+        row.value=route.value; row.consumer=route.consumer; row.source=route.source;
+        row.readPhase=route.readPhase; row.crossRead=_program.providerRoutedReads[k];
+        portable.routedInputs.push_back(std::move(row));
+    }
+    for (size_t k=0;k<_program.crossDomainReads.size();++k) {
+        const auto &read=_program.crossDomainReads[k];
+        fb::RigExecWireCrossDomainRead row;
+        row.kind=fb::CrossDomainReadKind(read.kind);
+        row.consumer=_Path(read.consumer); row.source=_Path(read.source); row.reader=_Path(read.reader);
+        row.phase=_Phase(read.phase); row.element=read.element; row.provider=read.provider;
+        row.rawSlot=_inputs.crossDomainRawSlots[k]; row.spaceValue=read.spaceValue;
+        row.propertyChain=read.propertyChain; row.propertyVersion=read.propertyVersion;
+        row.baseFrame=read.baseFrame; row.finalPoints=read.finalPoints;
+        for (const auto &point:read.points) row.points.emplace_back(point.chain,point.version);
+        row.frames=read.frames; row.unavailable=read.unavailable;
+        file->crossDomainReads.push_back(std::move(row));
+    }
     file->clustering = std::make_unique<fb::RigExecWireClustering>();
     _Clustering(file->clustering.get());
     file->cones = std::make_unique<fb::RigExecWireCones>();
@@ -1440,7 +1729,7 @@ RigExecBakeFillFile(const RigExecBakedProgramImpl &program,
         why = "nothing to fill";
     } else if (!pools->Seed(inputs, &why)) {
         why = "cannot pool the collected values: " + why;
-    } else if (_FileFill(program, inputs, paths).Run(file, &why)) {
+    } else if (_FileFill(program, inputs, paths, pools).Run(file, &why)) {
         return true;
     }
     if (error) {

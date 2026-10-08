@@ -25,15 +25,16 @@ and [Matt Schiller](https://github.com/matthewschiller).
 - External mover plugins built from separate repositories through a public
   registration API and CMake helper.
 - Scalar, vector, and matrix operations; painted and procedural weight fields.
-- Dynamic evaluation, a baked program, and experimental `.rigexec` export
-  with a standalone binary runtime.
+- Native and frozen evaluation through a shared operation graph, plus
+  experimental `.rigexec` export with a standalone binary runtime.
 - `usdview` tools for controls, curves, layers, picking, and node graphs.
 
 RigExec builds against OpenUSD installation with OpenExec.
 The [architecture guide](docs/specs/spec.md) explains the evaluation layers;
 the [node reference](docs/index.md) describes authoring and parameters.
 
-![Baked and dynamic execution share math kernels, diverge in scheduling and data storage, and produce the same rig pose.](docs/images/baked-vs-dynamic-execution.png)
+The [evaluation guide](docs/concepts/baked-vs-dynamic.md) describes the shared
+operation graph, frozen execution, binary playback, and independent checks.
 
 ## Build and run
 
@@ -108,7 +109,8 @@ The [biped](examples/biped/README.md) is the full character example.
 |---|---|
 | `libs/rigExecMath` | Solver, deformation, interpolation, and weight math |
 | `libs/rigExecSchema` | Authored USD schema definitions |
-| `libs/rigExec` | OpenExec integration, evaluation, baked programs, and caches |
+| `libs/rigExec` | Scene binding, compiled evaluation, independent checks, and caches |
+| `libs/rigExecGraph` | Shared operation compiler, typed values, and executor |
 | `libs/rigExecRigging` | C++ authoring API |
 | `libs/rigExecImaging` | Hydra scene indices and viewport publication |
 | `libs/rigExecBake`, `libs/rigExecBinary`, `libs/rigExecRuntime` | Binary export, format, and playback |
@@ -145,15 +147,12 @@ describes the parts named here.
   schemas with `EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA`: provider frames and
   matrices (`computePointFrame`, `computeRestFrame`, `computeMatrix`), solver
   outputs (`computePointFrameArray`), weight packets, and mover parameters.
-- **Requests and overrides.** The dynamic evaluator reads those values through
-  `ExecUsdSystem` requests keyed by `ExecUsdValueKey`, and applies interactive
-  edits as `ExecUsdValueOverride` values.
-- **Mover graph.** Mover revision chains are built as an in-memory
-  `VdfNetwork` from the authored relationships, scheduled and run by the Vdf
-  pull-based executor (`libs/rigExec/moverGraph.cpp`).
+- **Independent checks.** Optional operation checks read reference values
+  through `ExecUsdSystem` requests keyed by `ExecUsdValueKey`, with captured
+  inputs supplied as `ExecUsdValueOverride` values.
 - **Standalone adapter.** The experimental `libs/rigExecStandalone` implements
   the Esf scene interfaces over its own scene database.
 
-The baked program and the `.rigexec` runtime evaluate frames without calling
-OpenExec, and the runtime links no USD library. Other upstream and published
+Native, frozen, and `.rigexec` production execution use the shared operation
+graph. The binary runtime links no USD library. Other upstream and published
 sources are listed in the [method references](docs/references.md).

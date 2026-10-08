@@ -6,12 +6,14 @@
 #include "pxr/base/gf/matrix4d.h"
 #include "pxr/base/gf/vec3d.h"
 #include "pxr/base/gf/vec3f.h"
+#include "pxr/base/gf/vec3i.h"
 #include "pxr/base/tf/token.h"
 #include "pxr/base/tf/type.h"
 #include "pxr/base/vt/value.h"
 #include "pxr/base/vt/types.h"
 #include "pxr/usd/sdf/path.h"
 #include "pxr/usd/sdf/valueTypeName.h"
+#include "pxr/usd/usd/resolveInfo.h"
 
 PXR_NAMESPACE_USING_DIRECTIVE
 
@@ -37,6 +39,8 @@ RigExecInputTagType(RrInputTag tag)
         return TfType::Find<GfVec3d>();
     case RrInputTag::Vec3f:
         return TfType::Find<GfVec3f>();
+    case RrInputTag::Vec3i:
+        return TfType::Find<GfVec3i>();
     case RrInputTag::IntArray:
         return TfType::Find<VtIntArray>();
     case RrInputTag::FloatArray:
@@ -47,6 +51,14 @@ RigExecInputTagType(RrInputTag tag)
         return TfType::Find<VtVec2fArray>();
     case RrInputTag::Vec3fArray:
         return TfType::Find<VtVec3fArray>();
+    case RrInputTag::Vec3dArray:
+        return TfType::Find<VtVec3dArray>();
+    case RrInputTag::Matrix4dArray:
+        return TfType::Find<VtMatrix4dArray>();
+    case RrInputTag::TokenArray:
+        return TfType::Find<VtTokenArray>();
+    case RrInputTag::BoolArray:
+        return TfType::Find<VtBoolArray>();
     default:
         break;
     }
@@ -73,6 +85,8 @@ RigExecInputTagName(RrInputTag tag)
         return "vec3d";
     case RrInputTag::Vec3f:
         return "vec3f";
+    case RrInputTag::Vec3i:
+        return "int3";
     case RrInputTag::IntArray:
         return "int[]";
     case RrInputTag::FloatArray:
@@ -83,6 +97,14 @@ RigExecInputTagName(RrInputTag tag)
         return "float2[]";
     case RrInputTag::Vec3fArray:
         return "float3[]";
+    case RrInputTag::Vec3dArray:
+        return "double3[]";
+    case RrInputTag::Matrix4dArray:
+        return "matrix4d[]";
+    case RrInputTag::TokenArray:
+        return "token[]";
+    case RrInputTag::BoolArray:
+        return "bool[]";
     default:
         break;
     }
@@ -131,6 +153,11 @@ RigExecInputValueFrom(const VtValue &value, RrInputTag tag,
         v.vec3f = RrVec3f(f[0], f[1], f[2]);
         break;
     }
+    case RrInputTag::Vec3i: {
+        const auto &i=value.UncheckedGet<GfVec3i>();
+        v.vec3i={int32_t(i[0]),int32_t(i[1]),int32_t(i[2])};
+        break;
+    }
     case RrInputTag::Token:
         return false;
     }
@@ -164,6 +191,12 @@ RigExecInputArrayFrom(const VtValue &value, RrInputTag tag,
     case RrInputTag::Vec3fArray:
         out->data = value.UncheckedGet<VtVec3fArray>().cdata();
         return true;
+    case RrInputTag::Vec3dArray:
+        out->data = value.UncheckedGet<VtVec3dArray>().cdata();
+        return true;
+    case RrInputTag::Matrix4dArray:
+        out->data = value.UncheckedGet<VtMatrix4dArray>().cdata();
+        return true;
     default:
         return false;
     }
@@ -175,6 +208,18 @@ RigExecSampleInputAt(const UsdAttribute &a, size_t index,
                      UsdTimeCode time, RigExecRuntimeReader *reader,
                      std::string *error)
 {
+    const auto publishBlocked=[&](bool result) {
+        if(!result || !RigExecRuntimeStageArrayInputs::CanSampleProviderValue(*reader,index))return result;
+        return RigExecRuntimeStageArrayInputs::SetSampleBlocked(*reader,index,
+            a.GetResolveInfo(time).ValueIsBlocked(),error);
+    };
+    if (tag == RrInputTag::Token &&
+        RigExecRuntimeStageArrayInputs::CanSampleToken(*reader,index)) {
+        TfToken value;
+        return publishBlocked(a.Get(&value,time)
+            ? RigExecRuntimeStageArrayInputs::SetTokenSample(*reader,index,value.GetString(),error)
+            : RigExecRuntimeStageArrayInputs::ClearTokenSample(*reader,index,error));
+    }
     if (RrInputTagIsArray(tag)) {
         const bool bound =
             RigExecRuntimeStageArrayInputs::CanSample(*reader, index);
@@ -183,7 +228,29 @@ RigExecSampleInputAt(const UsdAttribute &a, size_t index,
         }
         VtValue value;
         if (!a.Get(&value, time)) {
-            return RigExecRuntimeStageArrayInputs::ClearSample(*reader, index, error);
+            return publishBlocked(RigExecRuntimeStageArrayInputs::ClearSample(*reader, index, error));
+        }
+        if (value.GetType() != RigExecInputTagType(tag)) {
+            if (error) *error = name + ": the stage sample is not a " +
+                                RigExecInputTagName(tag);
+            return false;
+        }
+        if (tag == RrInputTag::TokenArray) {
+            const auto &tokens = value.UncheckedGet<VtTokenArray>();
+            std::vector<std::string> text;
+            text.reserve(tokens.size());
+            for (const auto &token : tokens) text.push_back(token.GetString());
+            return publishBlocked(RigExecRuntimeStageArrayInputs::SetTokenArraySample(
+                *reader, index, text, error));
+        }
+        if (tag == RrInputTag::BoolArray) {
+            const auto &bits = value.UncheckedGet<VtBoolArray>();
+            std::vector<uint8_t> bytes;
+            bytes.reserve(bits.size());
+            for (bool bit : bits) bytes.push_back(bit ? uint8_t(1) : uint8_t(0));
+            const RigExecRuntimeArray array{tag, bytes.data(), bytes.size()};
+            return publishBlocked(RigExecRuntimeStageArrayInputs::SetSample(
+                *reader, index, array, error));
         }
         RigExecRuntimeArray array;
         if (!RigExecInputArrayFrom(value, tag, &array)) {
@@ -191,8 +258,8 @@ RigExecSampleInputAt(const UsdAttribute &a, size_t index,
                                 RigExecInputTagName(tag);
             return false;
         }
-        return RigExecRuntimeStageArrayInputs::SetSample(
-            *reader, index, array, error);
+        return publishBlocked(RigExecRuntimeStageArrayInputs::SetSample(
+            *reader, index, array, error));
     }
     RrInputValue value;
     value.tag = tag;
@@ -227,7 +294,7 @@ RigExecSampleInputAt(const UsdAttribute &a, size_t index,
     case RrInputTag::Token: {
         TfToken v;
         if (a.Get(&v, time)) {
-            return reader->SetInputToken(name, v.GetString(), error);
+            return publishBlocked(reader->SetInputToken(name, v.GetString(), error));
         }
         break;
     }
@@ -245,11 +312,19 @@ RigExecSampleInputAt(const UsdAttribute &a, size_t index,
         }
         break;
     }
+    case RrInputTag::Vec3i: {
+        GfVec3i v(0);
+        if((read=a.Get(&v,time)))value.vec3i={int32_t(v[0]),int32_t(v[1]),int32_t(v[2])};
+        break;
+    }
     }
     // A failed read leaves the input with no value, as the stage has none
     // there; a value is taken as the stage holds it, finite or not.
-    return read ? reader->SetSampledInputAt(index, value, error)
-                : reader->ClearInputAt(index, error);
+    if(RigExecRuntimeStageArrayInputs::CanSampleProviderValue(*reader,index))
+        return publishBlocked(read?RigExecRuntimeStageArrayInputs::SetScalarSample(*reader,index,value,error):
+            RigExecRuntimeStageArrayInputs::ClearScalarSample(*reader,index,error));
+    return publishBlocked(read ? reader->SetSampledInputAt(index, value, error)
+                : reader->ClearInputAt(index, error));
 }
 
 bool
@@ -258,6 +333,7 @@ RigExecInputSampler::Bind(const UsdStagePtr &stage,
                           std::string *error)
 {
     _animated.clear();
+    _animatedCount = 0;
     _warnings.clear();
     _sampled = false;
     if (!stage) {
@@ -298,6 +374,7 @@ RigExecInputSampler::Bind(const UsdStagePtr &stage,
             bound.name = info.name;
             bound.type = info.type;
             bound.attribute = attribute;
+            _animatedCount += bound.animated ? 1 : 0;
             _animated.push_back(std::move(bound));
         }
     }
@@ -314,6 +391,30 @@ RigExecInputSampler::Bind(const UsdStagePtr &stage,
         bound.name = info.name;
         bound.type = info.tag;
         bound.attribute = attribute;
+        _animatedCount += bound.animated ? 1 : 0;
+        _animated.push_back(std::move(bound));
+    }
+    for (const auto &info : RigExecRuntimeStageArrayInputs::EnumerateTokens(reader)) {
+        const auto attribute = stage->GetAttributeAtPath(SdfPath(info.name));
+        if (!attribute || attribute.GetTypeName().GetType() != RigExecInputTagType(info.tag)) {
+            _warnings.push_back(info.name + ": no matching stage token");
+            continue;
+        }
+        _Bound bound;
+        bound.index = info.slot; bound.name = info.name;
+        bound.type = info.tag; bound.attribute = attribute;
+        _animatedCount += bound.animated ? 1 : 0;
+        _animated.push_back(std::move(bound));
+    }
+    for(const auto &info:RigExecRuntimeStageArrayInputs::EnumerateProviderValues(reader)) {
+        if(std::any_of(_animated.begin(),_animated.end(),[&](const _Bound &bound) { return bound.index==info.slot; }))continue;
+        const auto attribute=stage->GetAttributeAtPath(SdfPath(info.name));
+        if(!attribute || attribute.GetTypeName().GetType()!=RigExecInputTagType(info.tag)) {
+            _warnings.push_back(info.name+": no matching stage provider input");continue;
+        }
+        _Bound bound;bound.index=info.slot;bound.name=info.name;
+        bound.type=info.tag;bound.attribute=attribute;bound.animated=info.animated;
+        _animatedCount += bound.animated ? 1 : 0;
         _animated.push_back(std::move(bound));
     }
     _last = UsdTimeCode(reader.GetBakeTime());

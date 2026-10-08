@@ -5,6 +5,7 @@
 // build-time path choices; and packet assembly from provider values, which is
 // what lets a revision run with no derived stage in existence.
 #include "rigExec/moverGraph.h"
+#include "rigExecRevisionProgramTest.h"
 #include "rigExec/types.h"
 
 #include "pxr/base/gf/matrix4d.h"
@@ -13,7 +14,6 @@
 #include "pxr/base/plug/registry.h"
 #include "pxr/base/tf/diagnostic.h"
 #include "pxr/base/vt/array.h"
-#include "pxr/exec/exec/typeRegistry.h"
 #include "pxr/usd/sdf/path.h"
 #include "pxr/usd/sdf/types.h"
 #include "pxr/usd/usd/attribute.h"
@@ -25,7 +25,8 @@
 
 PXR_NAMESPACE_USING_DIRECTIVE
 
-using rigExec::RigExecMoverGraph;
+using rigExecTest::RevisionProgram;
+using rigExecTest::RevisionValue;
 using rigExec::RigExecMoverParameters;
 using rigExec::RigExecMoverStatus;
 using rigExec::RigExecRevisionBinding;
@@ -121,7 +122,7 @@ TestSkinRevision()
     // Single influence at weight 1: identical to the sequential matrix
     // mover on the same transform, point for point.
     {
-        RigExecMoverGraph graph;
+        rigExecTest::RevisionProgram graph;
         const auto source = graph.AddPointSource(target, base);
         const auto skin = graph.AddRevision(
             RigExecRevisionOp::Skin, source,
@@ -130,7 +131,7 @@ TestSkinRevision()
         const VtVec3fArray skinned = graph.Evaluate(skin);
         CHECK(graph.GetRevisionStatus(skin).state == "ok");
 
-        RigExecMoverGraph sequential;
+        rigExecTest::RevisionProgram sequential;
         const auto seqSource = sequential.AddPointSource(target, base);
         RigExecMoverParameters matrix = MakeMatrixParams(GfVec3d(0), 1.0f);
         matrix.transform = rt;
@@ -146,7 +147,7 @@ TestSkinRevision()
     // Two translations at 0.5 / 0.5 on every point: the analytic midpoint
     // of T1 p and T2 p.
     {
-        RigExecMoverGraph graph;
+        rigExecTest::RevisionProgram graph;
         const auto source = graph.AddPointSource(target, base);
         const auto skin = graph.AddRevision(
             RigExecRevisionOp::Skin, source,
@@ -164,7 +165,7 @@ TestSkinRevision()
     // exactly where it was. Per-point layouts differ to prove the gather
     // indexes per point, not per mesh.
     {
-        RigExecMoverGraph graph;
+        rigExecTest::RevisionProgram graph;
         const auto source = graph.AddPointSource(target, base);
         const auto skin = graph.AddRevision(
             RigExecRevisionOp::Skin, source,
@@ -183,7 +184,7 @@ TestSkinRevision()
     // The common MoverAPI envelope mixes the skinned candidate back over
     // the incoming revision, as for every other point mover.
     {
-        RigExecMoverGraph graph;
+        rigExecTest::RevisionProgram graph;
         const auto source = graph.AddPointSource(target, base);
         const auto skin = graph.AddRevision(
             RigExecRevisionOp::Skin, source,
@@ -198,7 +199,7 @@ TestSkinRevision()
     // The skin reads the INCOMING revision: a blend shape ahead of it is
     // skinned, as a skinCluster skins its input geometry.
     {
-        RigExecMoverGraph graph;
+        rigExecTest::RevisionProgram graph;
         const auto source = graph.AddPointSource(target, base);
         RigExecMoverParameters blend;
         blend.valid = true;
@@ -221,7 +222,7 @@ TestSkinRevision()
     // weight 1 is that transform, as the linear kernel is (the two methods
     // only part with two or more rotating influences).
     {
-        RigExecMoverGraph graph;
+        rigExecTest::RevisionProgram graph;
         const auto source = graph.AddPointSource(target, base);
         RigExecMoverParameters dq =
             MakeSkinParams(transforms, {2, 2, 2, 2}, {1, 1, 1, 1}, 1);
@@ -240,7 +241,7 @@ TestSkinRevision()
     // kernel owns.
     {
         auto failing = [&](const RigExecMoverParameters &params) {
-            RigExecMoverGraph graph;
+            rigExecTest::RevisionProgram graph;
             const auto source = graph.AddPointSource(target, base);
             const auto skin = graph.AddRevision(
                 RigExecRevisionOp::Skin, source, params, MakeOkStatus());
@@ -317,7 +318,7 @@ TestSkinBindingAndAssembly()
     CHECK(params.skinTransforms.size() == 2);
     CHECK(RigExecStatusForParameters(params, binding.moverPath).AllowsApply());
 
-    RigExecMoverGraph graph;
+    rigExecTest::RevisionProgram graph;
     const auto source = graph.AddPointSource(target, MakePoints());
     const VtVec3fArray out = graph.Evaluate(graph.AddRevision(
         RigExecRevisionOp::Skin, source, params,
@@ -353,7 +354,7 @@ TestSkinBindingAndAssembly()
         mover, RigExecRevisionOp::Skin, binding, values);
     CHECK(dq.valid);
     CHECK(dq.skinningMethod == TfToken("dualQuaternion"));
-    RigExecMoverGraph dqGraph;
+    rigExecTest::RevisionProgram dqGraph;
     const auto dqSource = dqGraph.AddPointSource(target, MakePoints());
     const auto dqHead = dqGraph.AddRevision(
         RigExecRevisionOp::Skin, dqSource, dq,
@@ -374,11 +375,11 @@ TestSkinBindingAndAssembly()
 static void
 TestSingleRevision()
 {
-    RigExecMoverGraph graph;
+    rigExecTest::RevisionProgram graph;
     const SdfPath target("/Asset/Geom/M.points");
 
-    const VdfMaskedOutput base = graph.AddPointSource(target, MakePoints());
-    const VdfMaskedOutput head = graph.AddRevision(
+    const rigExecTest::RevisionValue base = graph.AddPointSource(target, MakePoints());
+    const rigExecTest::RevisionValue head = graph.AddRevision(
         RigExecRevisionOp::Matrix, base,
         MakeMatrixParams(GfVec3d(0, 2, 0), 1.0f), MakeOkStatus());
 
@@ -399,10 +400,10 @@ TestSingleRevision()
 static void
 TestChainedRevisions()
 {
-    RigExecMoverGraph graph;
+    rigExecTest::RevisionProgram graph;
     const SdfPath target("/Asset/Geom/M.points");
 
-    VdfMaskedOutput head = graph.AddPointSource(target, MakePoints());
+    rigExecTest::RevisionValue head = graph.AddPointSource(target, MakePoints());
     head = graph.AddRevision(
         RigExecRevisionOp::Matrix, head,
         MakeMatrixParams(GfVec3d(0, 2, 0), 1.0f), MakeOkStatus());
@@ -424,10 +425,10 @@ TestChainedRevisions()
 static void
 TestWeightedRevision()
 {
-    RigExecMoverGraph graph;
-    const VdfMaskedOutput base =
+    rigExecTest::RevisionProgram graph;
+    const rigExecTest::RevisionValue base =
         graph.AddPointSource(SdfPath("/M.points"), MakePoints());
-    const VdfMaskedOutput head = graph.AddRevision(
+    const rigExecTest::RevisionValue head = graph.AddRevision(
         RigExecRevisionOp::Matrix, base,
         MakeMatrixParams(GfVec3d(0, 4, 0), 0.5f), MakeOkStatus());
 
@@ -443,14 +444,14 @@ TestWeightedRevision()
 static void
 TestStatusPassThrough()
 {
-    RigExecMoverGraph graph;
-    const VdfMaskedOutput base =
+    rigExecTest::RevisionProgram graph;
+    const rigExecTest::RevisionValue base =
         graph.AddPointSource(SdfPath("/M.points"), MakePoints());
 
     RigExecMoverStatus failed;
     failed.state = TfToken("failed");
 
-    const VdfMaskedOutput head = graph.AddRevision(
+    const rigExecTest::RevisionValue head = graph.AddRevision(
         RigExecRevisionOp::Matrix, base,
         MakeMatrixParams(GfVec3d(0, 9, 0), 1.0f), failed);
 
@@ -466,14 +467,14 @@ TestStatusPassThrough()
 static void
 TestInvalidParamsPassThrough()
 {
-    RigExecMoverGraph graph;
-    const VdfMaskedOutput base =
+    rigExecTest::RevisionProgram graph;
+    const rigExecTest::RevisionValue base =
         graph.AddPointSource(SdfPath("/M.points"), MakePoints());
 
     RigExecMoverParameters invalid = MakeMatrixParams(GfVec3d(0, 9, 0), 1.0f);
     invalid.valid = false;
 
-    const VdfMaskedOutput head = graph.AddRevision(
+    const rigExecTest::RevisionValue head = graph.AddRevision(
         RigExecRevisionOp::Matrix, base, invalid, MakeOkStatus());
 
     const VtVec3fArray out = graph.Evaluate(head);
@@ -487,8 +488,8 @@ TestInvalidParamsPassThrough()
 static void
 TestBlendShapeRevision()
 {
-    RigExecMoverGraph graph;
-    const VdfMaskedOutput base =
+    rigExecTest::RevisionProgram graph;
+    const rigExecTest::RevisionValue base =
         graph.AddPointSource(SdfPath("/M.points"), MakePoints());
 
     RigExecMoverParameters params;
@@ -498,7 +499,7 @@ TestBlendShapeRevision()
     params.blendDeltas = {GfVec3f(0, 1, 0), GfVec3f(0, 1, 0),
                           GfVec3f(0, 1, 0), GfVec3f(0, 1, 0)};
 
-    const VdfMaskedOutput head = graph.AddRevision(
+    const rigExecTest::RevisionValue head = graph.AddRevision(
         RigExecRevisionOp::BlendShape, base, params, MakeOkStatus());
 
     const VtVec3fArray out = graph.Evaluate(head);
@@ -514,8 +515,8 @@ TestBlendShapeRevision()
 static void
 TestBlendCardinalityMismatchPassesThrough()
 {
-    RigExecMoverGraph graph;
-    const VdfMaskedOutput base =
+    rigExecTest::RevisionProgram graph;
+    const rigExecTest::RevisionValue base =
         graph.AddPointSource(SdfPath("/M.points"), MakePoints());
 
     RigExecMoverParameters params;
@@ -524,7 +525,7 @@ TestBlendCardinalityMismatchPassesThrough()
     params.weights = RigExecWeightPacket::Constant(1.0f);
     params.blendDeltas = {GfVec3f(0, 1, 0)};  // 1 delta for 4 points
 
-    const VdfMaskedOutput head = graph.AddRevision(
+    const rigExecTest::RevisionValue head = graph.AddRevision(
         RigExecRevisionOp::BlendShape, base, params, MakeOkStatus());
 
     const VtVec3fArray out = graph.Evaluate(head);
@@ -545,12 +546,12 @@ TestBlendCardinalityMismatchPassesThrough()
 static void
 TestKindMismatchPassesThrough()
 {
-    RigExecMoverGraph graph;
-    const VdfMaskedOutput base =
+    rigExecTest::RevisionProgram graph;
+    const rigExecTest::RevisionValue base =
         graph.AddPointSource(SdfPath("/M.points"), MakePoints());
 
     // A matrix packet handed to a smooth revision.
-    const VdfMaskedOutput head = graph.AddRevision(
+    const rigExecTest::RevisionValue head = graph.AddRevision(
         RigExecRevisionOp::Smooth, base,
         MakeMatrixParams(GfVec3d(0, 5, 0), 1.0f), MakeOkStatus());
 
@@ -567,8 +568,8 @@ TestKindMismatchPassesThrough()
 static void
 TestMixedOpChain()
 {
-    RigExecMoverGraph graph;
-    VdfMaskedOutput head =
+    rigExecTest::RevisionProgram graph;
+    rigExecTest::RevisionValue head =
         graph.AddPointSource(SdfPath("/M.points"), MakePoints());
 
     head = graph.AddRevision(
@@ -739,9 +740,9 @@ TestAssembleAndEvaluateWithoutDerivedStage()
         RigExecStatusForParameters(params, binding.moverPath);
     CHECK(status.AllowsApply());
 
-    RigExecMoverGraph graph;
-    const VdfMaskedOutput base = graph.AddPointSource(target, MakePoints());
-    const VdfMaskedOutput head =
+    rigExecTest::RevisionProgram graph;
+    const rigExecTest::RevisionValue base = graph.AddPointSource(target, MakePoints());
+    const rigExecTest::RevisionValue head =
         graph.AddRevision(RigExecRevisionOp::Matrix, base, params, status);
 
     const VtVec3fArray out = graph.Evaluate(head);
@@ -878,24 +879,24 @@ TestAssembleNonMatrixParameters()
 static void
 TestIncrementalRevisionUpdates()
 {
-    RigExecMoverGraph graph;
+    rigExecTest::RevisionProgram graph;
     const VtVec3fArray initial = MakePoints();
-    const VdfMaskedOutput source =
+    const rigExecTest::RevisionValue source =
         graph.AddPointSource(SdfPath("/M.points"), initial);
     const RigExecMoverParameters firstParams =
         MakeMatrixParams(GfVec3d(0, 2, 0), 1.0f);
     const RigExecMoverParameters secondParams =
         MakeMatrixParams(GfVec3d(0, 3, 0), 1.0f);
-    const VdfMaskedOutput first = graph.AddRevision(
+    const rigExecTest::RevisionValue first = graph.AddRevision(
         RigExecRevisionOp::Matrix, source, firstParams, MakeOkStatus());
-    const VdfMaskedOutput second = graph.AddRevision(
+    const rigExecTest::RevisionValue second = graph.AddRevision(
         RigExecRevisionOp::Matrix, first, secondParams, MakeOkStatus());
-    const VdfMaskedOutput otherSource =
+    const rigExecTest::RevisionValue otherSource =
         graph.AddPointSource(SdfPath("/Other.points"), initial);
-    const VdfMaskedOutput other = graph.AddRevision(
+    const rigExecTest::RevisionValue other = graph.AddRevision(
         RigExecRevisionOp::Matrix, otherSource, firstParams, MakeOkStatus());
 
-    auto checkFirst = [&](const VdfMaskedOutput &output, const GfVec3f &expected) {
+    auto checkFirst = [&](const rigExecTest::RevisionValue &output, const GfVec3f &expected) {
         const VtVec3fArray result = graph.Evaluate(output);
         CHECK(result.size() == initial.size());
         if (!result.empty()) {
@@ -903,31 +904,31 @@ TestIncrementalRevisionUpdates()
         }
     };
     checkFirst(second, GfVec3f(0, 5, 0));
-    CHECK(graph.GetRevisionExecutionCount() == 2);
+    CHECK(graph.GetRevisionExecutionCount() == 3);
     CHECK(graph.GetScheduleBuildCount() == 1);
     checkFirst(first, GfVec3f(0, 2, 0));
     checkFirst(second, GfVec3f(0, 5, 0));
-    CHECK(graph.GetRevisionExecutionCount() == 2);
+    CHECK(graph.GetRevisionExecutionCount() == 3);
 
     CHECK(graph.UpdatePointSource(source, initial));
     CHECK(graph.UpdateRevision(second, secondParams, MakeOkStatus()));
     checkFirst(second, GfVec3f(0, 5, 0));
-    CHECK(graph.GetRevisionExecutionCount() == 2);
+    CHECK(graph.GetRevisionExecutionCount() == 3);
 
     RigExecMoverParameters changed =
         MakeMatrixParams(GfVec3d(0, 6, 0), 1.0f);
     CHECK(graph.UpdateRevision(second, changed, MakeOkStatus()));
     checkFirst(second, GfVec3f(0, 8, 0));
-    CHECK(graph.GetRevisionExecutionCount() == 3);
+    CHECK(graph.GetRevisionExecutionCount() == 4);
 
     RigExecMoverStatus disabled;
     disabled.state = TfToken("disabled");
     CHECK(graph.UpdateRevision(second, changed, disabled));
     checkFirst(second, GfVec3f(0, 2, 0));
-    CHECK(graph.GetRevisionExecutionCount() == 4);
+    CHECK(graph.GetRevisionExecutionCount() == 5);
     CHECK(graph.UpdateRevision(second, changed, MakeOkStatus()));
     checkFirst(second, GfVec3f(0, 8, 0));
-    CHECK(graph.GetRevisionExecutionCount() == 5);
+    CHECK(graph.GetRevisionExecutionCount() == 6);
 
     checkFirst(other, GfVec3f(0, 2, 0));
     CHECK(graph.GetRevisionExecutionCount() == 6);
@@ -943,7 +944,7 @@ TestIncrementalRevisionUpdates()
     CHECK(!graph.UpdatePointSource(source, VtVec3fArray(1)));
     CHECK(!graph.UpdatePointSource(second, initial));
     CHECK(!graph.UpdateRevision(source, changed, MakeOkStatus()));
-    CHECK(graph.Evaluate(VdfMaskedOutput()).empty());
+    CHECK(graph.Evaluate(rigExecTest::RevisionValue()).empty());
     checkFirst(second, GfVec3f(1, 8, 0));
     CHECK(graph.GetRevisionExecutionCount() == 8);
 }
@@ -951,12 +952,12 @@ TestIncrementalRevisionUpdates()
 static void
 TestLongChainDirtySuffix()
 {
-    RigExecMoverGraph graph;
+    rigExecTest::RevisionProgram graph;
     const VtVec3fArray initial({GfVec3f(0, 0, 0)});
-    const VdfMaskedOutput source =
+    const rigExecTest::RevisionValue source =
         graph.AddPointSource(SdfPath("/M.points"), initial);
-    VdfMaskedOutput head = source;
-    std::vector<VdfMaskedOutput> revisions;
+    rigExecTest::RevisionValue head = source;
+    std::vector<rigExecTest::RevisionValue> revisions;
     const size_t count = 2048;
     const RigExecMoverParameters step =
         MakeMatrixParams(GfVec3d(0, 1, 0), 1.0f);
@@ -989,15 +990,15 @@ TestLongChainDirtySuffix()
 static void
 TestAppendAfterEvaluation()
 {
-    RigExecMoverGraph graph;
-    const VdfMaskedOutput source = graph.AddPointSource(
+    rigExecTest::RevisionProgram graph;
+    const rigExecTest::RevisionValue source = graph.AddPointSource(
         SdfPath("/M.points"), VtVec3fArray({GfVec3f(0, 0, 0)}));
     CHECK(graph.UpdatePointSource(source, VtVec3fArray({GfVec3f(1, 0, 0)})));
     const auto step = MakeMatrixParams(GfVec3d(0, 1, 0), 1.0f);
-    const VdfMaskedOutput first = graph.AddRevision(
+    const rigExecTest::RevisionValue first = graph.AddRevision(
         RigExecRevisionOp::Matrix, source, step, MakeOkStatus());
     CHECK(graph.Evaluate(first).size() == 1);
-    const VdfMaskedOutput second = graph.AddRevision(
+    const rigExecTest::RevisionValue second = graph.AddRevision(
         RigExecRevisionOp::Matrix, first, step, MakeOkStatus());
     CHECK(graph.UpdateRevision(second,
         MakeMatrixParams(GfVec3d(0, 2, 0), 1.0f), MakeOkStatus()));
@@ -1019,13 +1020,13 @@ TestEveryOperationUpdatesInteractively()
     auto check = [&](RigExecRevisionOp op, const VtVec3fArray &base,
                      const RigExecMoverParameters &before,
                      const RigExecMoverParameters &after) {
-        RigExecMoverGraph graph;
+        rigExecTest::RevisionProgram graph;
         const auto source = graph.AddPointSource(SdfPath("/M.points"), base);
         const auto head = graph.AddRevision(op, source, before, MakeOkStatus());
         const VtVec3fArray initial = graph.Evaluate(head);
         CHECK(graph.UpdateRevision(head, after, MakeOkStatus()));
         const VtVec3fArray updated = graph.Evaluate(head);
-        RigExecMoverGraph fresh;
+        rigExecTest::RevisionProgram fresh;
         const auto freshSource = fresh.AddPointSource(SdfPath("/M.points"), base);
         const VtVec3fArray expected = fresh.Evaluate(
             fresh.AddRevision(op, freshSource, after, MakeOkStatus()));
@@ -1173,23 +1174,7 @@ TestLongResolvedInputConnections()
 int
 main(int argc, char **argv)
 {
-    // rigExecReadPhase lives in the schema plugin's SdfMetadata block.
-    // ctest does not set a plugin path for this suite.
-    if (PlugRegistry::GetInstance()
-            .RegisterPlugins(RIGEXEC_SCHEMA_RESOURCE_DIR)
-            .empty()) {
-        std::printf("FAILED: schema plugin did not register from %s\n",
-                    RIGEXEC_SCHEMA_RESOURCE_DIR);
-        return 1;
-    }
-
-    // Force the exec type registry to run its registry functions. The other
-    // suites get this for free by constructing an ExecUsdSystem; this one talks
-    // to VDF directly, and without it RigExecMoverParameters/RigExecMoverStatus
-    // are never handed to VdfExecutionTypeRegistry::Define and the executor
-    // cannot tell the two apart.
-    ExecTypeRegistry::GetInstance();
-
+    PlugRegistry::GetInstance().RegisterPlugins(RIGEXEC_SCHEMA_RESOURCE_DIR);
     TestSingleRevision();
     TestSkinRevision();
     TestSkinBindingAndAssembly();

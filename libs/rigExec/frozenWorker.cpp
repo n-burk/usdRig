@@ -1,108 +1,84 @@
-// Worker execution, result publication, and partial-cone restoration.
+// Frozen shared-graph execution and result publication.
 
 #include "frozenContextInternal.h"
+#include "inputReplay.h"
 #include "bakedSchedule.h"
+#include "bakedOpGraph.h"
 #include "generation.h"
 #include "frameCacheSparsity.h"
 #include "weightPackets.h"
 #include <algorithm>
+#include <atomic>
 #include <cmath>
+#include <cstring>
 #include <set>
 
-// The frozen executor.
-// ISOLATION AUDIT (D3). A frozen run executes on a worker thread while the
-// host may author on the UI thread, so no frozen code path may reach a
-// UsdStage, UsdAttribute, UsdAttributeQuery, UsdPrim, the evaluator, its
-// caches, or any live lock. The argument, per unit the run touches:
-//  * The snapshot (RigExecFrozenProgram) is cloned on the UI thread. Its
-//    program copy keeps the live program's USD handles COPIED but DEAD: the
-//    worker copies them again (refcount operations, thread-safe) and never
-//    dereferences one -- not even IsValid or GetPath, which reach composed
-//    specs and prim data. Every handle identity the run needs (head paths,
-//    query validity, attribute presence) is captured into the snapshot's
-//    plain-data side-tables at freeze time.
-//  * Constant patching (below) writes every varying input's sampled value
-//    into its `constant` and nulls its head/query/resolvedAttr handles, so
-//    RigExecBakedRead answers the patched constant on every arm: the
-//    overridden arm's GetAttribute on a nulled head is a safe no-op
-//    returning false with the value untouched, and the query/resolved arms
-//    are skipped for invalid handles. The prologue samples every leaf
-//    through it (RigExecBakedSampleLeaves, `all`), and the reused step
-//    bodies read only those leaves.
-//  * Pose step bodies (RigExecBakedRunPoseStep, bakedPose.cpp:2524-3490)
-//    touch no live state besides B.resolvedInputs (reference formation only
-//    -- rd() reads only the sampled leaves) and B.resolveWeights, which is
-//    called only for a constraint binding a weight object; the freeze gate
-//    refuses any such constraint, and the snapshot nulls the function, so a
-//    call would throw into the scheduler's fail-closed catch, never into
-//    the evaluator.
-//  * Geometry chunk/fuse/status bodies (bakedGeometry.cpp:2370-2718, minus
-//    RevisionStatic/Derived) are pure functions of program slots plus the
-//    shared kernels. RevisionStatic and Derived read the program's own
-//    leaves (and an external mover's plugin, which freeze refuses), so the
-//    frozen run does NOT call them: every revision and every derived target
-//    is assembled by the live RigExecBakedAssembleFromLeaves and
-//    RigExecBakedRunProjectorTarget from the job's leaves, a skin with the
-//    layout handle its SkinTopology op built from the job's layout leaves,
-//    and the small pure remainder of each body is replicated line-for-line
-//    (frozenGeometry.cpp: _FrozenRevisionStatic, _FrozenDerived).
-//  * RigExecBakedComputeClosure (bakedSchedule.cpp:1223) and
-//    RigExecBakedSkipGeometryStep are pure program-state functions and run
-//    unmodified. The region loop itself is a serial reimplementation of
-//    RunStepsSerial (which is static and dispatches parallel by
-//    environment); it never touches the parallel executor or its atomics.
-//  * RigExecBakedPublishPose is stage-clean (audited: jointSolverBinding,
-//    profiler, guide taps, resolved inputs only). The frozen run points the
-//    first at the snapshot's copy, the profiler at a private disabled one
-//    (its scopes take only that profiler's own uncontended mutex), the
-//    guide taps at a null held privately (the bool test then skips), and
-//    replays the guide publication itself from the aggregates.
-//  * Geometry publication uses the worker's own chain results through
-//    _FrozenPublishGeometry.
-//  * The head tier (property revisions) runs in the frozen prologue from
-//    the job's head-leaf values (the varying leaves' samples and the shared
-//    constant table), which _PatchHeadLeaves writes into the
-//    clone's leaves (their attribute handles stay dead and unread): a
-//    body reads leaves, overrides and earlier versions only
-//    (RigExecBakedRunPropertyStep), and the one op that would reach the
-//    oracle, a weight-object envelope, refuses the freeze. Every read after
-//    the tier that a chain result or a record can answer -- a chain-routed
-//    binding, a path leaf read through the resolved inputs -- resolves from
-//    the same leaves, the override slots and the tier's versions through
-//    its reader walk (RigExecBakedResolveReaderWalk). Override slots
-//    are found by (prim, attribute), building no path. The worker passes
-//    no cone verifier and a disabled profiler. The rest and ladder ops
-//    (RigExecBakedRunRestTier) run after the leaf sample, from the ladder
-//    leaves and the Rest and Ladder tables of the clone only. The
-//    SkinTopology ops (RigExecBakedRunLayoutTier) run from the job's layout
-//    leaves, written over the clone's, so an unmoved layout keeps live's
-//    handle.
-//  * Shared kernels (skin, derived, solvers, constraints) are pure per-point
-//    math over worker-owned buffers, and their five WorkParallelForN launch
-//    sites in moverGraph.cpp (the blend-channel sum among them, which the
-//    frozen blend-shape assembler below calls) take the serial variant
-//    inside a frozen run (the RigExecFrozenSerialActive hook, D4), so the
-//    only thread a frozen frame ever runs on is its own.
-//  * The upstream layer is the job's table (RigExecFrameInputs::upstream),
-//    diffed against the clone's by RigExecBakedPlaceUpstream with the
-//    oracle placement off, so no admission set is built (that reads the
-//    stage); every value it reaches was sampled through it on the UI thread.
-//  * The worker builds none of the paths it places overrides at or looks
-//    samples up by: override placement and the overlay use the vector's
-//    overridePaths, and the RevisionStatic and weight steps use the
-//    snapshot's moverDefaultWeightKeys and weightArrayKeys, all built on
-//    the UI thread, so it never takes the path table's lock to make one.
-//  * TfToken/SdfPath/VtValue copies on the worker touch only their own
-//    atomic refcounts and the process-global immutable-after-load tables
-//    under brief internal locks -- the same operations the live path
-//    performs per frame, never the stage, and never held across evaluation.
-// What the frozen run therefore reads: the immutable snapshot, the job's
-// sampled vector, and its own working state. What it writes: its own
-// working state and the output pose. Everything else declines.
+// Source sampling happens before dispatch. Bodies consume copied leaves and
+// typed outputs through the same graph executor as live evaluation; the serial
+// scope keeps nested numerical kernels on this background execution lane.
 
 namespace rigExec {
 
 using namespace frozenDetail;
+
+struct RigExecFrozenWorkspace::Impl {
+    std::shared_ptr<const RigExecFrozenProgram> snapshot;
+    _FrozenWorker worker;
+    std::atomic<bool> busy{false};
+    bool bound = false;
+    uint64_t epochDigest = 0;
+    uint64_t programDigest = 0;
+};
+
+RigExecFrozenWorkspace::RigExecFrozenWorkspace(
+    std::shared_ptr<const RigExecFrozenProgram> snapshot)
+    : _impl(new Impl)
+{
+    _impl->snapshot = std::move(snapshot);
+    _impl->worker.snapshot = _impl->snapshot.get();
+    _CloneImpl(_impl->snapshot->program, &_impl->worker.B);
+    _impl->worker.B.opAdapter.parallel = false;
+    // _CloneImpl adopts only completed owned output/signature state.
+}
+
+RigExecFrozenWorkspace::~RigExecFrozenWorkspace() = default;
+
+std::unique_ptr<RigExecFrozenWorkspace>
+RigExecCreateFrozenWorkspace(std::shared_ptr<const RigExecFrozenProgram> snapshot)
+{
+    RigExecInputReplayComparisonScope replayComparison("RigExecCreateFrozenWorkspace");
+    if (!snapshot) return {};
+    return std::unique_ptr<RigExecFrozenWorkspace>(
+        new RigExecFrozenWorkspace(std::move(snapshot)));
+}
+
+struct RigExecFrozenWorkspaceAccess {
+    static _FrozenWorker *Acquire(const RigExecFrozenEvalContext &context)
+    {
+        auto &state = *context.workspace->_impl;
+        bool idle = false;
+        if (!state.busy.compare_exchange_strong(idle, true)) return nullptr;
+        if (state.snapshot.get() != context.frozen ||
+            (state.bound && (state.epochDigest != context.epochDigest ||
+                             state.programDigest != context.programDigest))) {
+            state.busy.store(false);
+            return nullptr;
+        }
+        state.bound = true;
+        state.epochDigest = context.epochDigest;
+        state.programDigest = context.programDigest;
+        return &state.worker;
+    }
+    static void Release(RigExecFrozenWorkspace *workspace, bool complete)
+    {
+        if (!workspace) return;
+        auto &state = *workspace->_impl;
+        // A declined body may have published only part of the generation.
+        // The next accepted job must rebuild every output before cutoff.
+        if (!complete) state.worker.B.opAdapter.everRan = false;
+        state.busy.store(false);
+    }
+};
 
 namespace {
 
@@ -112,8 +88,8 @@ namespace {
 // An input with a reader walk has no sample: the leaf sample resolves its
 // walk from the head-leaf samples (RigExecBakedReadWalked), so only its
 // handles are nulled. A varying input with no sample, or a sample holding a
-// type the typed read cannot consume, declines the job: the snapshot and
-// the vector describe different programs.
+// type the typed read cannot consume, retains its authored fallback.
+// Missing declarations decline a job sampled from a different program.
 bool
 _PatchInputs(RigExecBakedProgramImpl &B,
              const RigExecFrozenProgram &snapshot,
@@ -126,11 +102,17 @@ _PatchInputs(RigExecBakedProgramImpl &B,
         if (!ok) {
             return;
         }
-        if (walked >= snapshot.inputHeadPaths.size()) {
+        if (walked >= snapshot.inputHeadPaths.size() ||
+            walked >= snapshot.inputConstants.size()) {
             ok = false;
             return;
         }
-        const SdfPath &key = snapshot.inputHeadPaths[walked++];
+        const SdfPath &key = snapshot.inputHeadPaths[walked];
+        if (!_SampleHolds(snapshot.inputConstants[walked], &input.constant)) {
+            ok = false;
+            return;
+        }
+        ++walked;
         if (input.walk >= 0) {
             input.head = UsdAttribute();
             input.query = UsdAttributeQuery();
@@ -141,7 +123,7 @@ _PatchInputs(RigExecBakedProgramImpl &B,
             // Invalid head: the sampler emits nothing, and live answers the
             // constant on every arm. A varying input the sampler cannot key
             // is a shape it cannot reproduce.
-            if (input.varying) {
+            if (input.varying || input.sourceBacked) {
                 ok = false;
             }
             return;
@@ -152,29 +134,28 @@ _PatchInputs(RigExecBakedProgramImpl &B,
             // reads the constant). A varying input with no sample means the
             // vector was sampled from a different program than the snapshot
             // (stale snapshot) -- decline.
-            if (input.varying) {
+            if (input.varying || input.sourceBacked) {
                 ok = false;
             }
             return;
         }
         const RigExecSampledInput &sample = inputs.values[found->second];
         if (sample.hasValue && !_SampleHolds(sample.value, &input.constant)) {
-            ok = false;
-            return;
+            ok = false; return;
         }
         // A valueless sample is a stage read that failed at sample time;
         // live's typed read fails the same way and keeps the constant.
         input.head = UsdAttribute();
         input.query = UsdAttributeQuery();
         input.resolvedAttr = UsdAttribute();
-    });
+    }, /*includeIntervening=*/false);
     return ok && walked == snapshot.inputHeadPaths.size();
 }
 
 // Writes every head leaf the sampler keyed (RigExecForEachHeadLeaf) from
 // the job's vector -- a constant leaf from the shared table, a varying one
 // from its sample -- setting its `changed` byte against the value the
-// snapshot last held, so the head tier re-runs exactly the ops whose inputs
+// snapshot last held, so the common graph selects ops whose inputs
 // differ from the snapshot's. Every other leaf holds no value and is
 // unchanged. A missing sample or table entry, or one of another type,
 // declines: the vector was sampled for another program. No stage, no path
@@ -237,40 +218,17 @@ _PatchHeadLeaves(RigExecBakedProgramImpl &B,
 
 // One revision's or derived target's path leaves from the job's vector,
 // answered where the live prologue's reads go through the worker's own
-// state: a Present key from the worker's resolved inputs, and a key with a
-// reader walk from the head tier this job ran (the sampler leaves it
-// empty). A walked value that moved from the snapshot's marks its walk.
+// source facts. Walk and property resolution belongs to the consuming body.
 void
-_PatchPathLeaves(RigExecBakedProgramImpl *program,
+_PatchPathLeaves(RigExecBakedProgramImpl *,
                  RigExecBakedPathLeaves *leaves,
                  const std::vector<VtValue> &values)
 {
-    RigExecBakedProgramImpl &B = *program;
-    leaves->values.resize(values.size());
-    for (size_t k = 0; k < values.size(); ++k) {
-        const RigExecRevisionLeafKey &key = leaves->decl.keys[k];
-        const int walk = k < leaves->walks.size() ? leaves->walks[k] : -1;
-        if (walk >= 0) {
-            VtValue value = RigExecBakedSampleWalkedPathLeaf(B, key, walk);
-            if (k < leaves->values.size() && !(value == leaves->values[k])) {
-                B.readerWalkChanged[size_t(walk)] = 1;
-            }
-            leaves->values[k] = std::move(value);
-        } else if (key.flavour == RigExecRevisionLeafFlavour::Present) {
-            leaves->values[k] =
-                VtValue(B.resolvedInputs->Find(key.path) != nullptr);
-        } else {
-            leaves->values[k] = values[k];
-        }
-    }
+    leaves->values = values;
 }
 
-// The frozen prologue: RigExecBakedProgram::Run's prologue (bakedProgram.cpp)
-// plus RunInputs, RunSolverSources, the constraint-array sweep, and the
-// geometry prologue, with every stage or live-state read replaced by its
-// sampled value. Reads the snapshot, the job's vector, and the worker's own
-// program copy; writes only the copy (and the pose's prologue counters).
-// Anything it cannot reproduce declines the job.
+// Places sampled source facts in private leaf tables. Derived validation,
+// arithmetic, and property resolution happen in their declared graph bodies.
 bool
 _FrozenPrologue(_FrozenWorker *worker, const RigExecFrozenProgram &snapshot,
                const RigExecFrameInputs &inputs,
@@ -283,9 +241,10 @@ _FrozenPrologue(_FrozenWorker *worker, const RigExecFrozenProgram &snapshot,
         return found == index.end() ? nullptr : &inputs.values[found->second];
     };
 
+    B.oraclePublications=inputs.oraclePublications;
+    B.oracleWeightInputs=inputs.oracleWeightInputs;
     B.propertyResults.clear();
     B.resolvedInputs->Clear();
-    B.chainSnapshots->Clear();
     // The override placement, replicated from
     // _ApplyInteractiveOverridesToResolved: every attribute override stands
     // in the resolved inputs, and a chain result at a dragged target takes
@@ -303,67 +262,55 @@ _FrozenPrologue(_FrozenWorker *worker, const RigExecFrozenProgram &snapshot,
         }
         B.resolvedInputs->SetProperty(inputs.overridePaths[i], o.value);
     }
-    // The property chains, after the override placement, as on the live
-    // path: the head tier from the job's head-leaf samples, then the
-    // publication into the results and the overlay. The tier's lines are
-    // the first of the generation. No cone verifier: the worker shares its
-    // statics with nothing.
-    if (B.hasPropertyChains) {
+    // Place property source leaves after explicit overrides. Operations and
+    // publication remain in the common graph and its joined epilogue.
+    for (auto &object : B.weightObjects) {
+        auto &leaves = object.oracleLeaves;
+        for (size_t k=0;k<leaves.decl.keys.size();++k) {
+            const auto found = index.find(object.oracleFrozenKeys[k]);
+            const VtValue value = found != index.end() && inputs.values[found->second].hasValue
+                ? inputs.values[found->second].value : VtValue();
+            leaves.changed[k] = !RigExecBakedHeadValueSame(value,leaves.values[k]);
+            leaves.values[k] = value;
+        }
+    }
+    if (B.hasPropertyChains || !B.weightFields.empty() || !B.headLeaves.empty()) {
         if (!_PatchHeadLeaves(B, index, inputs)) {
             return false;
         }
-        RigExecBakedRunHeadTier(&B, time, pose, /*force=*/false,
-                                /*verify=*/false);
-        RigExecBakedPublishPropertyChains(&B);
-        RigExecBakedNoteReaderWalks(&B);
+
     }
 
-    // Every leaf, sampled through the real RigExecBakedRead, which answers
-    // the patched constants, or through its reader walk over the tier just
-    // run. All of them on every job: the clone carries live's time, flags
-    // and stamps, so nothing about the job's own inputs can be told from
-    // them.
+    // Place every sampled leaf. Bound walks stay unresolved until their body runs.
+    if (inputs.stageSeeds.intervening.size() != B.interveningSlots.size() ||
+        inputs.stageSeeds.interveningReset.size() != B.interveningSlots.size()) return false;
+    for(size_t k=0;k<B.providerFrozenKeys.size();++k) {
+        const auto found=index.find(B.providerFrozenKeys[k]);
+        const VtValue value=found!=index.end() && inputs.values[found->second].hasValue
+            ? inputs.values[found->second].value : VtValue();
+        const bool blocked=found!=index.end() && inputs.values[found->second].valueBlocked;
+        B.providerLeaves.changed[k]=!RigExecBakedHeadValueSame(value,B.providerLeaves.values[k]) ||
+            bool(B.providerLeafBlocked[k])!=blocked;
+        B.providerLeaves.values[k]=value;
+        B.providerLeafBlocked[k]=blocked;
+    }
     RigExecBakedSampleLeaves(&B, time, /* all = */ true);
+    // This source has no attribute head. Publish the dedicated stage seed
+    // into its numbered pool after ordinary sampling resets changed flags.
+    for (size_t k = 0; k < B.interveningSlots.size(); ++k) {
+        auto &ladder = B.ladders[size_t(B.interveningSlots[k])];
+        auto &input = ladder.interveningSpace;
+        auto &pool = B.leaves.Of<GfMatrix4d>();
+        if (input.leaf < 0 || size_t(input.leaf) >= pool.value.size() ||
+            size_t(input.leaf) >= pool.changed.size()) return false;
+        const size_t leaf = size_t(input.leaf);
+        input.constant = inputs.stageSeeds.intervening[k];
+        pool.changed[leaf] = std::memcmp(pool.value[leaf].GetArray(),
+            input.constant.GetArray(), 16 * sizeof(double)) != 0;
+        pool.value[leaf] = input.constant;
+        ladder.interveningReset = inputs.stageSeeds.interveningReset[k];
+    }
 
-    // The rest and ladder ops, as on the live path, from the ladder leaves
-    // just sampled: an op re-runs when one of its leaves differs from the
-    // clone's (live's last sample) or a Rest or Ladder slot it reads moved,
-    // and the moves it records seed the closure against the clone's tables,
-    // which live composed from those leaves. Each pass clears the clone's
-    // move records and run numbers first.
-    RigExecBakedRunRestTier(&B, pose, /*force=*/false, /*verify=*/false);
-
-    // RunInputs, replayed from leaves. The Solve steps refresh from the
-    // rests the tier above moved against the clone's tables.
-    for (const auto &binding : B.avarBindings) {
-        B.avars[binding.slot] = RigExecBakedLeafRead(B, binding.input);
-    }
-    for (const size_t promoted : B.promotedAvars) {
-        if (promoted >= B.avarConstantBindings.size()) {
-            return false;
-        }
-        const auto &binding = B.avarConstantBindings[promoted];
-        B.avars[binding.slot] = RigExecBakedLeafRead(B, binding.input);
-    }
-    // As RigExecBakedRunInputs: an upstream value placed, moved or lifted
-    // against the snapshot's table (_FrozenPlaceUpstream) runs the pass
-    // too, and each slot takes its leaf.
-    if (B.anyOverridden || B.avarsDisturbed || B.upstreamMovedThisRun) {
-        for (const auto &binding : B.avarConstantBindings) {
-            B.avars[binding.slot] = RigExecBakedLeaf(B, binding.input);
-        }
-        B.avarsDisturbed = B.anyOverridden;
-    }
-    for (RigExecBakedProgramImpl::PoseInterpolator &interpolator :
-         B.poseInterpolators) {
-        interpolator.enabledValue =
-            RigExecBakedLeafRead(B, interpolator.enabled);
-        // A numeric driver's dials, as RigExecBakedRunInputs reads them.
-        for (size_t i = 0; i < interpolator.valueInputs.size(); ++i) {
-            interpolator.values[i] =
-                RigExecBakedLeafRead(B, interpolator.valueInputs[i]);
-        }
-    }
 
     // RunSolverSources (bakedPose.cpp:2156): ribbon points replay from the
     // sampled attribute, with the same swap-and-compare.
@@ -412,163 +359,45 @@ _FrozenPrologue(_FrozenWorker *worker, const RigExecFrozenProgram &snapshot,
         inputs.stageSeeds.nativeFrames.size() != B.nativeSources.size()) {
         return false;
     }
+    const auto &admission = inputs.stageSeeds.requiredStageFramesAdmission;
+    if ((admission.admitted && admission.firstBadTarget != -1) ||
+        (!admission.admitted && (admission.firstBadTarget < 0 ||
+          size_t(admission.firstBadTarget) >= B.xformSlots.size()))) return false;
+    B.requiredStageFramesAdmission = admission;
     for (size_t k = 0; k < B.xformSlots.size(); ++k) {
+        if (!admission.admitted && k >= size_t(admission.firstBadTarget)) break;
         const size_t slot = size_t(B.xformSlots[k]);
         B.xformBase[k] = inputs.stageSeeds.xformBase[k];
         B.base[slot] = inputs.stageSeeds.xformFrames[k];
         B.fin[slot] = inputs.stageSeeds.xformFrames[k];
     }
-    for (size_t k = 0; k < B.deltaBasePaths.size(); ++k) {
+    for (size_t k = 0; admission.admitted && k < B.deltaBasePaths.size(); ++k) {
         B.deltaBaseOk[k] = inputs.stageSeeds.deltaOk[k];
         B.deltaBaseMatrix[k] = inputs.stageSeeds.deltaBase[k];
     }
-    for (size_t k = 0; k < B.nativeSources.size(); ++k) {
+    for (size_t k = 0; admission.admitted && k < B.nativeSources.size(); ++k) {
         B.nativeFrameOk[k] = inputs.stageSeeds.nativeOk[k];
         B.nativeFrames[k] = inputs.stageSeeds.nativeFrames[k];
     }
 
-    // Constraint operator arrays (bakedProgram.cpp:2467): replayed from the
-    // sampled raw attributes with the same cardinality validation, the same
-    // neutral fills, and the same diagnostic lines as
-    // _ReadConstraintSourceWeights/_ReadConstraintSourceOffsets. A missing
-    // or valueless sample is an absent or unreadable attribute -- neutral,
-    // exactly as live -- while a mistyped holding declines.
-    for (size_t k = 0; k < B.constraintArrays.size(); ++k) {
-        RigExecBakedProgramImpl::ConstraintArrays &arrays =
-            B.constraintArrays[k];
-        if (snapshot.arrayKeys.size() < k * 4 + 4) {
-            return false;
-        }
-        arrays.diagnostics.clear();
-        const SdfPath &weightsKey = snapshot.arrayKeys[k * 4];
-        VtFloatArray authoredWeights;
-        if (!weightsKey.IsEmpty()) {
-            if (const RigExecSampledInput *sample = findSample(weightsKey)) {
-                if (sample->hasValue) {
-                    if (!sample->value.IsHolding<VtFloatArray>()) {
-                        return false;
-                    }
-                    authoredWeights =
-                        sample->value.UncheckedGet<VtFloatArray>();
-                }
-            }
-        }
-        arrays.ok = true;
-        if (!authoredWeights.empty() &&
-            authoredWeights.size() != arrays.sourceCount) {
-            arrays.diagnostics.push_back(
-                weightsKey.GetPrimPath().GetString() +
-                " inputs:sourceWeights has " +
-                std::to_string(authoredWeights.size()) + " entries for " +
-                std::to_string(arrays.sourceCount) + " sources");
-            arrays.ok = false;
-        } else {
-            arrays.weights.assign(arrays.sourceCount, 1.0);
-            for (size_t i = 0;
-                 i < authoredWeights.size() && i < arrays.weights.size();
-                 ++i) {
-                arrays.weights[i] = double(authoredWeights[i]);
-            }
-        }
-        bool mistyped = false;
-        const auto readOffsets =
-            [&](const SdfPath &key, const char *name,
-                std::vector<GfVec3d> *offsets) -> bool {
-            VtVec3dArray authored;
-            if (!key.IsEmpty()) {
-                if (const RigExecSampledInput *sample = findSample(key)) {
-                    if (sample->hasValue) {
-                        if (!sample->value.IsHolding<VtVec3dArray>()) {
-                            mistyped = true;
-                            return false;
-                        }
-                        authored =
-                            sample->value.UncheckedGet<VtVec3dArray>();
-                    }
-                }
-            }
-            if (!authored.empty() &&
-                authored.size() != arrays.sourceCount) {
-                arrays.diagnostics.push_back(
-                    key.GetPrimPath().GetString() + " " + name + " has " +
-                    std::to_string(authored.size()) + " entries for " +
-                    std::to_string(arrays.sourceCount) + " sources");
-                return false;
-            }
-            offsets->assign(arrays.sourceCount, GfVec3d(0));
-            for (size_t i = 0;
-                 i < authored.size() && i < offsets->size(); ++i) {
-                (*offsets)[i] = authored[i];
-            }
-            return true;
-        };
-        if (arrays.parentOffsets) {
-            arrays.ok =
-                arrays.ok &&
-                readOffsets(snapshot.arrayKeys[k * 4 + 1],
-                            "inputs:translationOffsets",
-                            &arrays.translationOffsets) &&
-                readOffsets(snapshot.arrayKeys[k * 4 + 2],
-                            "inputs:rotationOffsets", &arrays.rotationOffsets);
-            if (mistyped) {
-                // A mistyped holding, not a cardinality line: decline rather
-                // than serve a half-validated table.
-                return false;
-            }
-        } else {
-            arrays.translationOffsets.assign(arrays.sourceCount, GfVec3d(0));
-            arrays.rotationOffsets.assign(arrays.sourceCount, GfVec3d(0));
-        }
-        if (arrays.readPole) {
-            arrays.poleDiagnostics.clear();
-            const SdfPath &poleKey = snapshot.arrayKeys[k * 4 + 3];
-            VtFloatArray authoredPole;
-            if (!poleKey.IsEmpty()) {
-                if (const RigExecSampledInput *sample = findSample(poleKey)) {
-                    if (sample->hasValue) {
-                        if (!sample->value.IsHolding<VtFloatArray>()) {
-                            return false;
-                        }
-                        authoredPole =
-                            sample->value.UncheckedGet<VtFloatArray>();
-                    }
-                }
-            }
-            arrays.poleOk = true;
-            if (!authoredPole.empty() &&
-                authoredPole.size() != arrays.poleCount) {
-                arrays.poleDiagnostics.push_back(
-                    poleKey.GetPrimPath().GetString() +
-                    " inputs:poleVectorWeights has " +
-                    std::to_string(authoredPole.size()) + " entries for " +
-                    std::to_string(arrays.poleCount) + " sources");
-                arrays.poleOk = false;
-            } else {
-                arrays.poleWeights.assign(arrays.poleCount, 1.0);
-                for (size_t i = 0;
-                     i < authoredPole.size() && i < arrays.poleWeights.size();
-                     ++i) {
-                    arrays.poleWeights[i] = double(authoredPole[i]);
-                }
-            }
+    // Raw operator arrays are sampled sources. The owning Constraint body
+    // validates cardinalities and expands neutral defaults when it runs.
+    if (snapshot.arrayKeys.size() < B.constraintArrays.size() * 4) return false;
+    for (size_t row = 0; admission.admitted && row < B.constraintArrays.size(); ++row) {
+        for (size_t channel = 0; channel < 4; ++channel) {
+            const SdfPath &key = snapshot.arrayKeys[row * 4 + channel];
+            // An empty key denotes an unbound channel, not a source named
+            // by an empty path. Keep its captured raw opinion unchanged.
+            if (key.IsEmpty()) continue;
+            const auto *sample = findSample(key);
+            B.constraintArrays[row].raw[channel] = sample && sample->hasValue
+                ? sample->value : VtValue();
         }
     }
 
-    // Geometry prologue (bakedGeometry.cpp:1759): base reads replay from the
-    // sampled queries, with the same reset/count/swap/compare sequence; the
-    // topology adoption takes the layout op's handle with the same partition
-    // rule; blend layouts travel with the sampled inputs.
-    const auto resetRevision =
-        [](RigExecBakedProgramImpl::GeomRevision *revision) {
-        revision->created = true;
-        revision->ran = false;
-        revision->output.clear();
-        revision->currentSource = -1;
-        revision->lastParameters = RigExecMoverParameters();
-        revision->lastAuxPoints = VtVec3fArray();
-        revision->lastStatus = RigExecMoverStatus();
-    };
-    for (size_t ci = 0; ci < B.chains.size(); ++ci) {
+    // Copy only admitted geometry source samples, matching live prologue;
+    // ChainInputs and Derived own adoption. Layout-source prep stays independent.
+    for (size_t ci = 0; admission.admitted && ci < B.chains.size(); ++ci) {
         RigExecBakedProgramImpl::GeomChain &chain = B.chains[ci];
         if (ci >= snapshot.chainBaseQueryValid.size()) {
             return false;
@@ -580,51 +409,18 @@ _FrozenPrologue(_FrozenWorker *worker, const RigExecFrozenProgram &snapshot,
             if (!sample) {
                 return false;
             }
-            if (sample->hasValue) {
-                if (!sample->value.IsHolding<VtVec3fArray>()) {
-                    return false;
-                }
+            if (sample->hasValue && sample->value.IsHolding<VtVec3fArray>()) {
                 basePoints = sample->value.UncheckedGet<VtVec3fArray>();
                 haveBase = true;
             }
         }
-        chain.haveBase = haveBase;
-        if (!chain.haveBase) {
-            for (RigExecBakedProgramImpl::GeomChain::Derived &derived :
-                 chain.derived) {
-                derived.haveBase = false;
-            }
-            continue;
-        }
-        if (chain.haveResult && basePoints.size() != chain.lastBase.size()) {
-            chain.haveResult = false;
-            chain.result = VtVec3fArray();
-            chain.scheduleDirty = true;
-            for (RigExecBakedProgramImpl::GeomRevision &revision :
-                 chain.revisions) {
-                resetRevision(&revision);
-            }
-        }
-        for (RigExecBakedProgramImpl::GeomRevision &revision :
-             chain.revisions) {
-            if (revision.created) {
-                ++pose->moverGraphRevisionsCreated;
-                revision.created = false;
-            }
-        }
-        if (chain.scheduleDirty && !chain.revisions.empty()) {
-            ++pose->moverGraphSchedulesBuilt;
-        }
-        chain.scheduleDirty = false;
-        chain.baseDirty = !chain.haveResult || basePoints != chain.lastBase;
-        chain.lastBase = basePoints;
+        chain.sampledHaveBase = haveBase;
+        chain.sampledBase = basePoints;
         for (RigExecBakedProgramImpl::GeomChain::Derived &derived :
              chain.derived) {
             if (derived.matrixTarget) {
                 // As the baked prologue: no base, evaluated every run.
-                derived.haveBase = true;
-                derived.baseDirty = true;
-                derived.revision.created = false;
+                derived.sampledHaveBase = true;
                 continue;
             }
             // Derived bases key by target like chain bases; validity rides
@@ -650,89 +446,79 @@ _FrozenPrologue(_FrozenWorker *worker, const RigExecFrozenProgram &snapshot,
                 if (!sample) {
                     return false;
                 }
-                if (sample->hasValue) {
-                    if (!sample->value.IsHolding<VtVec3fArray>()) {
-                        return false;
-                    }
+                if (sample->hasValue && sample->value.IsHolding<VtVec3fArray>()) {
                     derivedBase =
                         sample->value.UncheckedGet<VtVec3fArray>();
                     haveDerivedBase = true;
                 }
             }
-            derived.haveBase = haveDerivedBase;
-            if (!derived.haveBase) {
-                continue;
-            }
-            if (derived.haveResult &&
-                derivedBase.size() != derived.lastBase.size()) {
-                derived.haveResult = false;
-                derived.result = VtVec3fArray();
-                resetRevision(&derived.revision);
-            }
-            if (derived.revision.created) {
-                ++pose->moverGraphRevisionsCreated;
-                ++pose->moverGraphSchedulesBuilt;
-                derived.revision.created = false;
-            }
-            derived.baseDirty =
-                !derived.haveResult || derivedBase != derived.lastBase;
-            derived.lastBase = derivedBase;
+            derived.sampledHaveBase = haveDerivedBase;
+            derived.sampledBase = derivedBase;
         }
     }
-    // The SkinTopology ops, from the job's layout leaves written over the
-    // clone's (rule 2: a job re-reads every leaf, and `changed` says which
-    // differ from live's last sample). The job and the clone must agree on
-    // which layouts are fixed, since the job carries leaves for those alone.
+    // Copy all SkinTopology source leaves. The owning operation prepares
+    // the current layout when its exact inputs change.
     const size_t layouts = B.revisionIndex.size() + B.derivedIndex.size();
-    if (inputs.layoutLeaves.size() != layouts) {
+    if (inputs.layoutSourcePaths.size() != inputs.layoutLeaves.size())
         return false;
+    size_t auxiliary = layouts;
+    for (size_t r = 0; r < layouts; ++r) {
+        const auto &revision = *RigExecBakedLayoutRevision(&B, r);
+        const auto &owners = r < B.revisionIndex.size() ?
+            inputs.revisionLeaves : inputs.derivedLeaves;
+        const size_t owner = r < B.revisionIndex.size() ? r :
+            r - B.revisionIndex.size();
+        size_t k = 0;
+        for (const auto &channel : revision.blendChannels)
+            for (const auto &sample : channel.samples) {
+                if (sample.blendShape.IsEmpty()) continue;
+                const int ids[] = {sample.offsetsLeaf, sample.indicesLeaf};
+                const RigExecRevisionLeafType types[] = {
+                    RigExecRevisionLeafType::Vec3fArray,
+                    RigExecRevisionLeafType::IntArray};
+                for (size_t i = 0; i < 2; ++i, ++k) {
+                    if (ids[i] < 0 || size_t(ids[i]) >= revision.leaves.decl.keys.size() ||
+                        owner >= owners.size() || size_t(ids[i]) >= owners[owner].size() ||
+                        auxiliary >= inputs.layoutLeaves.size() ||
+                        k >= inputs.layoutLeaves[auxiliary].size() ||
+                        k >= inputs.layoutSourcePaths[auxiliary].size()) return false;
+                    const auto &key = revision.leaves.decl.keys[size_t(ids[i])];
+                    if (key.flavour != RigExecRevisionLeafFlavour::Raw ||
+                        key.time != RigExecRevisionLeafTime::AtDefault ||
+                        key.type != types[i] || key.path.IsEmpty() ||
+                        inputs.layoutSourcePaths[auxiliary][k] != key.path ||
+                        !RigExecBakedHeadValueSame(inputs.layoutLeaves[auxiliary][k],
+                                                  owners[owner][size_t(ids[i])])) return false;
+                }
+            }
+        if (k) {
+            if (inputs.layoutLeaves[auxiliary].size() != k ||
+                inputs.layoutSourcePaths[auxiliary].size() != k) return false;
+            ++auxiliary;
+        }
     }
+    if (inputs.layoutLeaves.size() != auxiliary) return false;
     for (size_t r = 0; r < layouts; ++r) {
         RigExecBakedProgramImpl::GeomRevision &revision =
             *RigExecBakedLayoutRevision(&B, r);
-        if (!revision.skinTopologyFixed) {
+        if (revision.op != RigExecRevisionOp::Skin) {
             continue;
         }
         const std::vector<VtValue> &values = inputs.layoutLeaves[r];
         RigExecBakedPathLeaves &leaves = revision.layoutLeaves;
         revision.layoutFixedChanged = false;
         std::fill(leaves.changed.begin(), leaves.changed.end(), 0);
-        if (values.empty() == revision.layoutFixed) {
-            return false;
-        }
-        if (!revision.layoutFixed) {
-            continue;
-        }
         if (values.size() != leaves.values.size() ||
             values.size() != leaves.changed.size()) {
             return false;
         }
         for (size_t k = 0; k < values.size(); ++k) {
-            leaves.changed[k] = values[k] == leaves.values[k] ? 0 : 1;
+            leaves.changed[k] = RigExecBakedHeadValueSame(values[k],leaves.values[k]) ? 0 : 1;
             leaves.values[k] = values[k];
         }
     }
-    RigExecBakedRunLayoutTier(&B, time, pose, /*force=*/false,
-                              /*sample=*/false, /*verify=*/false);
-    // The prologue's adoption, after the bases: every fixed revision takes
-    // its op's handle, with the prologue's partition rule.
-    for (size_t r = 0; r < B.revisionIndex.size(); ++r) {
-        const auto &[chainIndex, revisionIndex] = B.revisionIndex[r];
-        RigExecBakedProgramImpl::GeomRevision &revision =
-            B.chains[size_t(chainIndex)].revisions[size_t(revisionIndex)];
-        if (!revision.skinTopologyFixed) {
-            continue;
-        }
-        revision.topology = revision.layoutHandle;
-        revision.topologyResolved = true;
-        RigExecBakedAdoptPartition(&revision);
-    }
-    // The revisions the worker assembles from leaves: the job's leaves, read
-    // on the UI thread by the live prologue's reads, and the blend layouts
-    // the job resolved. Whether the job's resolved inputs hold a blend
-    // weight's path is the worker's own placement's answer, as the live
-    // gather asks its own. A missing layout is left null for RevisionStatic
-    // to decline on, as it is only read where the chain reads a base.
+    // Raw revision leaves are copied into the worker's private pools.
+    // Sparse layout normalization belongs to the selected assembly body.
     if (inputs.revisionLeaves.size() != B.revisionIndex.size()) {
         return false;
     }
@@ -748,21 +534,6 @@ _FrozenPrologue(_FrozenWorker *worker, const RigExecFrozenProgram &snapshot,
             return false;
         }
         _PatchPathLeaves(&B, &revision.leaves, values);
-        for (size_t c = 0; c < revision.blendChannels.size(); ++c) {
-            auto &channel = revision.blendChannels[c];
-            for (size_t s = 0; s < channel.samples.size(); ++s) {
-                auto &sample = channel.samples[s];
-                if (sample.blendShape.IsEmpty()) {
-                    continue;
-                }
-                sample.layout = nullptr;
-                if (r < inputs.blendLayouts.size() &&
-                    c < inputs.blendLayouts[r].size() &&
-                    s < inputs.blendLayouts[r][c].size()) {
-                    sample.layout = inputs.blendLayouts[r][c][s];
-                }
-            }
-        }
     }
     // Every derived target's leaves (normals, extent, a projector's matrix
     // targets), which hold no Present key.
@@ -787,116 +558,11 @@ _FrozenPrologue(_FrozenWorker *worker, const RigExecFrozenProgram &snapshot,
     return true;
 }
 
-// The frozen region: RigExecBakedRunSteps (bakedSchedule.cpp:1833) with the
-// serial executor INLINED rather than dispatched by environment -- sources
-// in program order, the real closure, skips, then the closed set serially.
-// No calibration, no step timing, no trace intervals: the worker shares the
-// timing statics with nothing and reports no trace. It skips by CLUSTER, not
-// by the live executors' step closure: every step of a cluster that holds a
-// closed step runs, which is a superset of the closure and so the same
-// answer -- a clean step re-run reads what it read last run.
+// The frozen backend uses the same operation graph and cutoff loop.
 bool
-_FrozenRunSteps(_FrozenWorker *worker,
-               const std::map<SdfPath, size_t> &index,
-               const RigExecFrameInputs &inputs, UsdTimeCode time)
+_FrozenExecuteGraph(_FrozenWorker *worker, UsdTimeCode time)
 {
-    RigExecBakedProgramImpl &B = worker->B;
-    for (RigExecBakedStep &step : B.steps) {
-        step.startUs = step.endUs = 0;
-    }
-    for (RigExecBakedStep &step : B.steps) {
-        if (!step.isHead && step.isSource) {
-            if (!_FrozenStepBody(worker, &step, index, inputs, time)) {
-                return false;
-            }
-            if (step.bail) {
-                return false;
-            }
-        }
-    }
-    RigExecBakedComputeClosure(&B, time, /*force=*/false);
-    for (RigExecBakedStep &step : B.steps) {
-        if (step.isHead || step.isSource || B.closed.Test(step.cluster)) {
-            continue;
-        }
-        step.MarkSkipped();
-        if (RigExecBakedIsGeometryStep(step.kind)) {
-            RigExecBakedSkipGeometryStep(&B, &step);
-        }
-    }
-    B.clustering.lastRunTimed = false;
-    for (RigExecBakedStep &step : B.steps) {
-        if (step.isHead || step.isSource || !B.closed.Test(step.cluster)) {
-            continue;
-        }
-        if (!_FrozenStepBody(worker, &step, index, inputs, time)) {
-            return false;
-        }
-        if (step.bail) {
-            return false;
-        }
-    }
-    // Execution order for RigExecFrozenRunReport (RigExecBakedLastRunTrace):
-    // the sources, then the closed steps, as they ran above.
-    uint32_t seq = B.runSeqCounter.next.load(std::memory_order_relaxed);
-    for (RigExecBakedStep &step : B.steps) {
-        if (!step.isHead && step.isSource) {
-            step.runSeq = ++seq;
-        }
-    }
-    for (RigExecBakedStep &step : B.steps) {
-        if (!step.isHead && !step.isSource && B.closed.Test(step.cluster)) {
-            step.runSeq = ++seq;
-        }
-    }
-    return true;
-}
-
-// The production cluster runner (plan 2.0): binds the worker's rebound
-// clone -- the per-job program the caller cloned and restored retained
-// slots into -- plus the retained handle it was rebound from, into the
-// rebind context RigExecRunSparsePlan executes. One cluster runs through
-// _FrozenStepBody, the exact per-step body _FrozenRunSteps dispatches,
-// with the same bail handling; the program parameter
-// must name the bound clone (a foreign program declines rather than run
-// against state the runner does not own). File-local beside the dispatch
-// it shares: _FrozenStepBody takes the worker, so no header surface can
-// name this factory -- the public production surface is
-// RigExecRunPartialCone, which builds its context here.
-RigExecClusterRebindContext
-_MakeProductionClusterRunner(
-    _FrozenWorker *worker, const std::map<SdfPath, size_t> &index,
-    const RigExecFrameInputs &inputs, UsdTimeCode time,
-    const std::shared_ptr<const void> &retained)
-{
-    RigExecClusterRebindContext rebind;
-    if (!worker) {
-        return rebind;
-    }
-    rebind.program = std::shared_ptr<RigExecBakedProgramImpl>(
-        &worker->B, [](RigExecBakedProgramImpl *) {});
-    rebind.retained = retained;
-    rebind.runCluster =
-        [worker, &index, &inputs, time](RigExecBakedProgramImpl &prog,
-                                       int cluster) {
-            if (!worker || &prog != &worker->B) {
-                return false;
-            }
-            RigExecBakedProgramImpl &owned = worker->B;
-            for (RigExecBakedStep &step : owned.steps) {
-                if (step.cluster != cluster) {
-                    continue;
-                }
-                if (!_FrozenStepBody(worker, &step, index, inputs, time)) {
-                    return false;
-                }
-                if (step.bail) {
-                    return false;
-                }
-            }
-            return true;
-        };
-    return rebind;
+    return RigExecBakedExecuteOpGraph(&worker->B,time,false);
 }
 
 // The frozen geometry epilogue follows RigExecBakedPublishGeometry's order:
@@ -918,14 +584,15 @@ _FrozenPublishGeometry(RigExecBakedProgramImpl &B, RigExecRigPose *pose)
                 B.chains[size_t(chainIndex)];
             const RigExecBakedProgramImpl::GeomRevision &revision =
                 chain.revisions[size_t(revisionIndex)];
-            if (chain.haveBase && revision.weightFieldPublished &&
+            if (B.publishWeightFields && chain.haveBase && revision.weightFieldPublished &&
                 revision.weightObject >= 0 &&
                 size_t(revision.weightObject) < B.weightObjects.size()) {
                 RigExecResolvedWeightField &field =
                     pose->weightFields[
                         B.weightObjects[size_t(revision.weightObject)].path];
                 field.target = revision.weightFieldTarget;
-                field.weights = revision.weightField;
+                field.weights.assign(revision.publishedWeightValues.cbegin(),
+                                     revision.publishedWeightValues.cend());
             }
         } else if (step.kind == RigExecBakedStepKind::ChainStatus) {
             RigExecBakedProgramImpl::GeomChain &chain =
@@ -973,8 +640,8 @@ _FrozenPlaceUpstream(RigExecBakedProgramImpl *program,
 bool _RunFrozen(const RigExecFrozenEvalContext &context,
                 const RigExecFrameInputs &inputs, RigExecRigPose *pose);
 
-// Runs one frozen frame: clone, patch, prologue, region, epilogue. Returns
-// false to decline (the caller hands the generation back); a declined run
+// Runs one frozen frame: acquire, sample placement, common graph, publication.
+// False denotes incompatible transport or fatal execution; a declined run
 // leaves the pose invalid and publishes nothing.
 bool
 _RunFrozen(const RigExecFrozenEvalContext &context,
@@ -987,16 +654,29 @@ _RunFrozen(const RigExecFrozenEvalContext &context,
     if (inputs.HasChainResolvedInputs()) {
         return false;
     }
-    _FrozenWorker worker;
-    worker.snapshot = &snapshot;
-    _CloneImpl(snapshot.program, &worker.B);
+    _FrozenWorker ephemeral;
+    _FrozenWorker *lane = nullptr;
+    if (context.workspace) {
+        lane = RigExecFrozenWorkspaceAccess::Acquire(context);
+        if (!lane) return false;
+    } else {
+        ephemeral.snapshot = &snapshot;
+        _CloneImpl(snapshot.program, &ephemeral.B);
+        ephemeral.B.opAdapter.parallel = false;
+        // The same completed-state guard applies to ephemeral workers.
+        lane = &ephemeral;
+    }
+    struct LaneRelease {
+        RigExecFrozenWorkspace *workspace;
+        bool complete = false;
+        ~LaneRelease() { RigExecFrozenWorkspaceAccess::Release(workspace, complete); }
+    } release{context.workspace};
+    _FrozenWorker &worker = *lane;
     RigExecBakedProgramImpl &B = worker.B;
     B.resolvedInputs = &worker.resolved;
-    B.chainSnapshots = &worker.chainSnapshots;
     B.profiler = &worker.profiler;
     B.interactiveOverrides = &inputs.overrides;
     B.jointSolverBinding = &snapshot.jointSolverBinding;
-    B.guideTaps = &worker.nullTaps;
     B.solverGuidesEnabled = &worker.guidesEnabled;
     B.publishWeightFields =
         (context.flags & kRigExecFrozenPublishWeightFields) != 0;
@@ -1004,7 +684,7 @@ _RunFrozen(const RigExecFrozenEvalContext &context,
         (context.flags & kRigExecFrozenSolverGuidesEnabled) != 0;
 
     // Override flags for the job's overrides, exactly as SetOverrides
-    // computes them; unplaceable declines (live runs dynamically).
+    // computes them; unplaceable declines incompatible transport.
     std::vector<char> flags;
     if (!_FrozenPlaceOverrides(B, inputs.overrides, inputs.overridePaths,
                                &flags)) {
@@ -1039,19 +719,21 @@ _RunFrozen(const RigExecFrozenEvalContext &context,
     if (!_FrozenPrologue(&worker, snapshot, inputs, index, time, &working)) {
         return false;
     }
-    if (!_FrozenRunSteps(&worker, index, inputs, time)) {
+    if (!_FrozenExecuteGraph(&worker, time)) {
         return false;
     }
 
-    // Epilogue (bakedProgram.cpp:2644): the pose and geometry publication,
-    // the work counters and the summary line, in live's order, after the
-    // chain lines the prologue's head tier put first. No timing replay,
-    // calibration, or cone verification: the worker shares those statics
-    // with nothing and reports no trace.
+    if (!B.requiredStageFramesAdmission.admitted) {
+        RigExecBakedPublishStageFramesRefusal(&B, &working);
+        working.time = time;
+        *pose = std::move(working);
+        return false;
+    }
+    // Publish only after the shared graph has joined.
     if (!RigExecBakedPublishPose(&B, &working)) {
         return false;
     }
-    if (snapshot.guideTapsPresent && worker.guidesEnabled) {
+    if (snapshot.solverGuidesPresent && worker.guidesEnabled) {
         // The guide block PublishPose skipped for the null taps
         // (bakedPose.cpp:3673), replayed from the aggregates.
         for (const int solverIndex : B.solverPublishOrder) {
@@ -1064,422 +746,20 @@ _RunFrozen(const RigExecFrozenEvalContext &context,
     // kept the clone's placement; its inputs are unchanged.
     RigExecBakedPublishVolumePlacements(B, &working.weightFrames);
     _FrozenPublishGeometry(B, &working);
-    working.solverOverrideRounds += B.solverOverrideRounds;
-    working.solverEvaluations += B.solverEvaluations;
-    size_t chainsBuilt = 0, revisionsBuilt = 0;
-    for (const RigExecBakedStep &step : B.steps) {
-        working.moverGraphRevisionsExecuted += step.counters.revisionsExecuted;
-        working.moverGraphRevisionsCreated += step.counters.revisionsCreated;
-        working.moverGraphSchedulesBuilt += step.counters.schedulesBuilt;
-        chainsBuilt += step.counters.chainsBuilt;
-        revisionsBuilt += step.counters.revisionsBuilt;
-    }
-    working.diagnostics.push_back(
-        "mover graph: " + std::to_string(chainsBuilt) + " chain(s), " +
-        std::to_string(revisionsBuilt) + " revision(s); " +
-        std::to_string(working.moverGraphRevisionsCreated) + " created, " +
-        std::to_string(working.moverGraphRevisionsExecuted) + " executed, " +
-        std::to_string(working.moverGraphSchedulesBuilt) +
-        " schedule(s) built");
-    working.valid = true;
+    RigExecBakedAppendCycleDiagnostics(B,&working);
+    const bool scalarReferenceValid=RigExecBakedRunScalarReference(&B,time,&working);
+    working.executedOpCount=B.opExecution.executed;
+    working.valid = scalarReferenceValid;
     working.time = time;
-    *pose = working;
-    RigExecCapturePartialSlots(B, &_lastFrozenSlots, &_lastFrozenSlotBytes);
+    *pose = std::move(working);
     if (RigExecFrozenRunReport *report = _frozenRunReport) {
         report->region = RigExecBakedLastRunTrace(B);
         report->ran = true;
     }
+    release.complete = true;
     return true;
 }
 
 } // namespace frozenDetail
-
-void
-RigExecPartialSlots::Capture(const RigExecBakedProgramImpl &program)
-{
-    poseWeights = program.poseWeights;
-    weightPackets = program.weightPackets;
-    posedM = program.posedM;
-    finalMatrix = program.finalMatrix;
-    baseMatrix = program.baseMatrix;
-    base = program.base;
-    fin = program.fin;
-    aggregates = program.aggregates;
-    deltaValues = program.deltaValues;
-    deltaPresent = program.deltaPresent;
-    frameMatrix = program.frameMatrix;
-    frameMatrixValid = program.frameMatrixValid;
-    // Volume slots only, in slot order: the table is provider-sized and
-    // almost every slot of a large rig is not a volume.
-    volumePlacement.clear();
-    for (size_t i = 0; i < program.noScaleAvars.size() &&
-                       i < program.volumePlacement.size(); ++i) {
-        if (program.noScaleAvars[i]) {
-            volumePlacement.push_back(program.volumePlacement[i]);
-        }
-    }
-    solvers.resize(program.solvers.size());
-    for (size_t s = 0; s < program.solvers.size(); ++s) {
-        solvers[s].outFrames = program.solvers[s].outFrames;
-        solvers[s].outPresent = program.solvers[s].outPresent;
-        solvers[s].fallbackJoints = program.solvers[s].fallbackJoints;
-    }
-    commits.resize(program.commits.size());
-    for (size_t c = 0; c < program.commits.size(); ++c) {
-        commits[c].present = program.commits[c].present;
-        commits[c].deltaOk = program.commits[c].deltaOk;
-        commits[c].frames = program.commits[c].frames;
-        commits[c].staged = program.commits[c].staged;
-        commits[c].deltas = program.commits[c].deltas;
-        commits[c].outcome = program.commits[c].outcome;
-        commits[c].sources = program.commits[c].sources;
-        commits[c].abandoned = program.commits[c].abandoned;
-        commits[c].recordAfter = program.commits[c].recordAfter;
-        commits[c].recordEveryTarget = program.commits[c].recordEveryTarget;
-    }
-    steps.resize(program.steps.size());
-    for (size_t k = 0; k < program.steps.size(); ++k) {
-        steps[k].diagnostics = program.steps[k].diagnostics;
-        steps[k].counters = program.steps[k].counters;
-        steps[k].bail = program.steps[k].bail;
-    }
-}
-
-bool
-RigExecPartialSlots::Restore(RigExecBakedProgramImpl *program) const
-{
-    if (!program) {
-        return false;
-    }
-    RigExecBakedProgramImpl &B = *program;
-    if (solvers.size() != B.solvers.size() ||
-        commits.size() != B.commits.size() ||
-        steps.size() != B.steps.size() ||
-        frameMatrix.size() != B.frameRecords.size() ||
-        frameMatrixValid.size() != B.frameRecords.size() ||
-        B.volumePlacement.size() < B.noScaleAvars.size()) {
-        return false;
-    }
-    size_t volumes = 0;
-    for (const char isVolume : B.noScaleAvars) {
-        volumes += isVolume ? 1 : 0;
-    }
-    if (volumes != volumePlacement.size()) {
-        return false;
-    }
-    B.poseWeights = poseWeights;
-    B.weightPackets = weightPackets;
-    B.posedM = posedM;
-    B.finalMatrix = finalMatrix;
-    B.baseMatrix = baseMatrix;
-    B.base = base;
-    B.fin = fin;
-    B.aggregates = aggregates;
-    B.deltaValues = deltaValues;
-    B.deltaPresent = deltaPresent;
-    B.frameMatrix = frameMatrix;
-    B.frameMatrixValid = frameMatrixValid;
-    for (size_t i = 0, v = 0; i < B.noScaleAvars.size(); ++i) {
-        if (B.noScaleAvars[i]) {
-            B.volumePlacement[i] = volumePlacement[v++];
-        }
-    }
-    for (size_t s = 0; s < B.solvers.size(); ++s) {
-        B.solvers[s].outFrames = solvers[s].outFrames;
-        B.solvers[s].outPresent = solvers[s].outPresent;
-        B.solvers[s].fallbackJoints = solvers[s].fallbackJoints;
-    }
-    for (size_t c = 0; c < B.commits.size(); ++c) {
-        B.commits[c].present = commits[c].present;
-        B.commits[c].deltaOk = commits[c].deltaOk;
-        B.commits[c].frames = commits[c].frames;
-        B.commits[c].staged = commits[c].staged;
-        B.commits[c].deltas = commits[c].deltas;
-        B.commits[c].outcome = commits[c].outcome;
-        B.commits[c].sources = commits[c].sources;
-        B.commits[c].abandoned = commits[c].abandoned;
-        B.commits[c].recordAfter = commits[c].recordAfter;
-        B.commits[c].recordEveryTarget = commits[c].recordEveryTarget;
-    }
-    for (size_t k = 0; k < B.steps.size(); ++k) {
-        B.steps[k].diagnostics = steps[k].diagnostics;
-        B.steps[k].counters = steps[k].counters;
-        B.steps[k].bail = steps[k].bail;
-    }
-    return true;
-}
-
-size_t
-RigExecPartialSlots::Bytes() const
-{
-    size_t total = sizeof(RigExecPartialSlots);
-    total += poseWeights.size() * sizeof(float);
-    for (const RigExecWeightPacket &packet : weightPackets) {
-        total += sizeof(RigExecWeightPacket);
-        total += packet.values.size() * sizeof(float);
-        total += packet.indices.size() * sizeof(int);
-    }
-    total += posedM.size() * sizeof(GfMatrix4d);
-    total += finalMatrix.size() * sizeof(GfMatrix4d);
-    total += baseMatrix.size() * sizeof(GfMatrix4d);
-    total += base.size() * sizeof(RigExecPointFrame);
-    total += fin.size() * sizeof(RigExecPointFrame);
-    total += aggregates.size() * sizeof(RigExecPointFrameArray);
-    total += deltaValues.size() * sizeof(GfMatrix4d);
-    total += deltaPresent.size() * sizeof(char);
-    total += volumePlacement.size() * sizeof(GfMatrix4d);
-    total += frameMatrix.size() * sizeof(GfMatrix4d);
-    total += frameMatrixValid.size() * sizeof(char);
-    for (const SolverSlots &solver : solvers) {
-        total += solver.outFrames.size() * sizeof(RigExecPointFrame);
-        total += solver.outPresent.size() * sizeof(char);
-        total += solver.fallbackJoints.size() * sizeof(SdfPath);
-    }
-    for (const CommitSlots &commit : commits) {
-        total += commit.present.size() * sizeof(char);
-        total += commit.deltaOk.size() * sizeof(char);
-        total += commit.frames.size() * sizeof(RigExecPointFrame);
-        total += commit.staged.size() * sizeof(RigExecPointFrame);
-        total += commit.deltas.size() * sizeof(GfMatrix4d);
-        total += commit.outcome.size() * sizeof(uint8_t);
-        total += commit.sources.size() * sizeof(RigExecConstraintSource);
-    }
-    for (const StepSlots &step : steps) {
-        for (const std::string &line : step.diagnostics) {
-            total += line.size();
-        }
-        total += sizeof(RigExecBakedStepCounters) + sizeof(bool);
-    }
-    return total;
-}
-
-bool
-RigExecCapturePartialSlots(
-    const RigExecBakedProgramImpl &program,
-    std::shared_ptr<const void> *slotsOut, size_t *bytesOut)
-{
-    if (!slotsOut || !bytesOut) {
-        return false;
-    }
-    auto slots = std::make_shared<RigExecPartialSlots>();
-    slots->Capture(program);
-    *bytesOut = slots->Bytes();
-    *slotsOut = std::move(slots);
-    return true;
-}
-
-bool
-RigExecTakeLastFrozenSlots(std::shared_ptr<const void> *slotsOut,
-                         size_t *bytesOut)
-{
-    if (!slotsOut || !bytesOut) {
-        return false;
-    }
-    if (!_lastFrozenSlots) {
-        return false;
-    }
-    *slotsOut = std::move(_lastFrozenSlots);
-    *bytesOut = _lastFrozenSlotBytes;
-    _lastFrozenSlots.reset();
-    _lastFrozenSlotBytes = 0;
-    return true;
-}
-
-RigExecPartialRunResult
-RigExecRunPartialCone(
-    const RigExecFrozenProgram &snapshot,
-    const RigExecFrameInputs &freshInputs,
-    const std::shared_ptr<const void> &baseSlots,
-    const RigExecRigPose &basePose,
-    const RigExecBakedClusterSet &planClusters, uint32_t contextFlags)
-{
-    RigExecPartialRunResult result;
-    result.pose.time = freshInputs.time;
-    result.pose.valid = false;
-    if (!baseSlots) {
-        return result;
-    }
-    const RigExecPartialSlots *slots =
-        static_cast<const RigExecPartialSlots *>(baseSlots.get());
-    if (!slots) {
-        return result;
-    }
-    if (freshInputs.HasChainResolvedInputs()) {
-        return result;
-    }
-    const size_t clusterCount =
-        snapshot.program.clustering.clusters.size();
-    const size_t planBits = planClusters.words.size() * 64;
-    for (size_t c = clusterCount; c < planBits; ++c) {
-        if ((planClusters.words[c / 64] >> (c % 64)) & 1ull) {
-            return result;
-        }
-    }
-    _FrozenWorker worker;
-    worker.snapshot = &snapshot;
-    _CloneImpl(snapshot.program, &worker.B);
-    RigExecBakedProgramImpl &B = worker.B;
-    B.resolvedInputs = &worker.resolved;
-    B.chainSnapshots = &worker.chainSnapshots;
-    B.profiler = &worker.profiler;
-    B.interactiveOverrides = &freshInputs.overrides;
-    B.jointSolverBinding = &snapshot.jointSolverBinding;
-    B.guideTaps = &worker.nullTaps;
-    B.solverGuidesEnabled = &worker.guidesEnabled;
-    B.publishWeightFields =
-        (contextFlags & kRigExecFrozenPublishWeightFields) != 0;
-    worker.guidesEnabled =
-        (contextFlags & kRigExecFrozenSolverGuidesEnabled) != 0;
-    if (!slots->Restore(&B)) {
-        return result;
-    }
-    std::vector<char> flags;
-    if (!_FrozenPlaceOverrides(B, freshInputs.overrides,
-                               freshInputs.overridePaths, &flags)) {
-        return result;
-    }
-    if (flags.size() != B.overridden.size()) {
-        return result;
-    }
-    B.overridden = flags;
-    B.anyOverridden = false;
-    for (char flag : B.overridden) {
-        if (flag) {
-            B.anyOverridden = true;
-            break;
-        }
-    }
-    _FrozenPlaceUpstream(&B, freshInputs);
-    std::map<SdfPath, size_t> index;
-    for (size_t i = 0; i < freshInputs.values.size(); ++i) {
-        index.emplace(freshInputs.values[i].path, i);
-    }
-    if (!_PatchInputs(B, snapshot, index, freshInputs)) {
-        return result;
-    }
-    const UsdTimeCode time = freshInputs.time;
-    RigExecRigPose working;
-    if (!_FrozenPrologue(&worker, snapshot, freshInputs, index, time,
-                         &working)) {
-        return result;
-    }
-    for (RigExecBakedStep &step : B.steps) {
-        step.startUs = step.endUs = 0;
-    }
-    for (RigExecBakedStep &step : B.steps) {
-        if (step.cluster < 0 || planClusters.Test(step.cluster)) {
-            continue;
-        }
-        step.MarkSkipped();
-        if (RigExecBakedIsGeometryStep(step.kind)) {
-            RigExecBakedSkipGeometryStep(&B, &step);
-        }
-    }
-    B.clustering.lastRunTimed = false;
-    RigExecClusterRebindContext rebind = _MakeProductionClusterRunner(
-        &worker, index, freshInputs, time, baseSlots);
-    RigExecSparsePlan sparsePlan;
-    sparsePlan.verdict = RigExecSparseVerdict::Partial;
-    sparsePlan.clusters = planClusters;
-    const RigExecSparseExecution execution = RigExecRunSparsePlan(
-        sparsePlan, B.clustering.topologicalOrder,
-        RigExecMakeClusterRunner(rebind));
-    if (!execution.completed) {
-        return result;
-    }
-    result.executedClusters = execution.executedClusters;
-    if (!RigExecBakedPublishPose(&B, &working)) {
-        return result;
-    }
-    if (snapshot.guideTapsPresent && worker.guidesEnabled) {
-        for (const int solverIndex : B.solverPublishOrder) {
-            const auto &[solverPath, si] = B.solverArrays[size_t(solverIndex)];
-            RigExecBakedEmplace(&working.solverFrames, B.solverArraysAscending,
-                                solverPath, B.aggregates[size_t(si)].frames);
-        }
-    }
-    // Live's key set (placedVolumes), whichever placement steps this cone
-    // ran. A skipped step kept the restored placement.
-    RigExecBakedPublishVolumePlacements(B, &working.weightFrames);
-    _FrozenPublishGeometry(B, &working);
-    for (const RigExecBakedStep &step : B.steps) {
-        if (!RigExecBakedIsGeometryStep(step.kind)) {
-            continue;
-        }
-        if (step.cluster >= 0 && planClusters.Test(step.cluster)) {
-            continue;
-        }
-        if (step.kind == RigExecBakedStepKind::ChainStatus) {
-            const RigExecBakedProgramImpl::GeomChain &chain =
-                B.chains[size_t(step.object)];
-            const auto found = basePose.movedProperties.find(chain.target);
-            if (found != basePose.movedProperties.end()) {
-                working.movedProperties[chain.target] = found->second;
-            } else {
-                working.movedProperties.erase(chain.target);
-            }
-        } else if (step.kind == RigExecBakedStepKind::Derived) {
-            const auto &[chainIndex, derivedIndex] =
-                B.derivedIndex[size_t(step.object)];
-            const RigExecBakedProgramImpl::GeomChain::Derived &derived =
-                B.chains[size_t(chainIndex)].derived[size_t(derivedIndex)];
-            const auto found =
-                basePose.movedProperties.find(derived.target);
-            if (found != basePose.movedProperties.end()) {
-                working.movedProperties[derived.target] = found->second;
-            } else {
-                working.movedProperties.erase(derived.target);
-            }
-        } else if (step.kind == RigExecBakedStepKind::RevisionStatic) {
-            const auto &[chainIndex, revisionIndex] =
-                B.revisionIndex[size_t(step.object)];
-            (void)chainIndex;
-            (void)revisionIndex;
-            const RigExecBakedProgramImpl::GeomChain &chain =
-                B.chains[size_t(chainIndex)];
-            const RigExecBakedProgramImpl::GeomRevision &revision =
-                chain.revisions[size_t(revisionIndex)];
-            if (revision.weightObject >= 0 &&
-                size_t(revision.weightObject) < B.weightObjects.size()) {
-                const SdfPath &path =
-                    B.weightObjects[size_t(revision.weightObject)].path;
-                const auto found = basePose.weightFields.find(path);
-                if (found != basePose.weightFields.end()) {
-                    working.weightFields[path] = found->second;
-                } else {
-                    working.weightFields.erase(path);
-                }
-            }
-        }
-    }
-    working.solverOverrideRounds += B.solverOverrideRounds;
-    working.solverEvaluations += B.solverEvaluations;
-    size_t chainsBuilt = 0, revisionsBuilt = 0;
-    for (const RigExecBakedStep &step : B.steps) {
-        working.moverGraphRevisionsExecuted += step.counters.revisionsExecuted;
-        working.moverGraphRevisionsCreated += step.counters.revisionsCreated;
-        working.moverGraphSchedulesBuilt += step.counters.schedulesBuilt;
-        chainsBuilt += step.counters.chainsBuilt;
-        revisionsBuilt += step.counters.revisionsBuilt;
-    }
-    working.diagnostics.push_back(
-        "mover graph: " + std::to_string(chainsBuilt) + " chain(s), " +
-        std::to_string(revisionsBuilt) + " revision(s); " +
-        std::to_string(working.moverGraphRevisionsCreated) + " created, " +
-        std::to_string(working.moverGraphRevisionsExecuted) + " executed, " +
-        std::to_string(working.moverGraphSchedulesBuilt) +
-        " schedule(s) built");
-    working.valid = true;
-    working.time = time;
-    result.pose = working;
-    if (!RigExecCapturePartialSlots(B, &result.slots, &result.slotBytes)) {
-        result.pose.valid = false;
-        result.slots.reset();
-        result.slotBytes = 0;
-        return result;
-    }
-    result.completed = true;
-    return result;
-}
 
 } // namespace rigExec

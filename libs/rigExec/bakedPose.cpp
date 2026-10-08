@@ -1,3 +1,4 @@
+#include "rigExec/weightField.h"
 // The baked program's pose half: the interleaved solver/constraint walk, at
 // bake and at run, plus the rest->pose matrices and the frame publication it
 // feeds.
@@ -8,12 +9,16 @@
 // captured into RigExecBakedProgramImpl at Build (see bakedProgramImpl.h),
 // and the compiled walk arrives restated as RigExecBakedWalkEntry.
 #include "bakedProgramImpl.h"
+#include "bakedExecCrossCheckRows.h"
 
 #include "frameExtraction.h"
 #include "frozenContextInternal.h"
 #include "moverGraph.h"
 #include "rigEvaluator.h"
 #include "solverKernels.h"
+#include "rigExecGraph/sceneCompileInputs.h"
+#include "rigExecGraph/solverSceneLowering.h"
+#include "rigExecGraph/constraintSceneLowering.h"
 #include "types.h"
 
 #include "rigExecMath/geometryKernels.h"
@@ -65,12 +70,20 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
     auto foldShape = [&](const UsdPrim &prim, const char *name) {
         ctx->FoldShape(prim, name);
     };
+    const RigExecSceneCompileInputs compileInputs(*B.sceneDescriptors);
+    const auto readFact=[&](const SdfPath &path,UsdTimeCode identity,auto *value) {
+        RigExecSceneBoundInput input;
+        return compileInputs.Bind(path,RigExecSceneReadRoute::Raw,&input) &&
+               compileInputs.Read(input,identity,value);
+    };
     auto readToken = [&](const UsdPrim &prim, const char *name,
                          const char *fallback) {
-        return ctx->ReadToken(prim, name, fallback);
+        TfToken value(fallback);
+        readFact(prim.GetPath().AppendProperty(TfToken(name)),UsdTimeCode::Default(),&value);
+        return value;
     };
     auto targets = [&](const UsdPrim &prim, const char *name) {
-        return ctx->Targets(prim, name);
+        return compileInputs.Targets(prim.GetPath().AppendProperty(TfToken(name)));
     };
     auto bind = [&](const UsdPrim &prim, const char *name, auto fallback) {
         return ctx->Bind(prim, name, fallback);
@@ -91,6 +104,11 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
                    : -1;
     };
 
+    std::map<SdfPath,RigExecPointFrame> providerRests;
+    for(size_t slot=0;slot<B.paths.size();++slot)
+        if(B.slotKind[slot]==RigExecBakedSlotKind::FirstFramePose)
+            providerRests.emplace(B.paths[slot],B.restFrames[slot]);
+
     auto bakeSolver = [&](const SdfPath &solverPath,
                           const std::vector<std::pair<SdfPath, int>>
                               &jointOutputs,
@@ -109,7 +127,8 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
         };
         s.path = solverPath;
         const UsdPrim prim = B.stage->GetPrimAtPath(solverPath);
-        s.type = prim.GetTypeName();
+        const auto *node=compileInputs.Node(solverPath);
+        s.type = node?node->fact.type:TfToken();
 
         // rigExec:joints is the single declaration of the chain: a solver
         // whose output is consumed downstream claims no joints but still
@@ -119,10 +138,8 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
             const SdfPathVector joints = targets(prim, "rigExec:joints");
             VtIntArray elements;
             fold(prim, "rigExec:jointElements");
-            if (const UsdAttribute a =
-                    prim.GetAttribute(TfToken("rigExec:jointElements"))) {
-                a.Get(&elements);
-            }
+            readFact(solverPath.AppendProperty(TfToken("rigExec:jointElements")),UsdTimeCode::Default(),&elements);
+            s.execJointElements = elements;
             // exec binds ONE rest input per rigExec:joints target that
             // PUBLISHES computeRestFrame -- a target that publishes none
             // contributes no input at all -- and the computation then
@@ -212,8 +229,6 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
             s.parentRelative =
                 readToken(prim, "rigExec:controlSpace", "") ==
                 "parentRelative";
-            s.fkScaleSegments =
-                readToken(prim, "rigExec:segmentScale", "") == "toChild";
             // The chain is the FILTERED list. The computation reads its
             // controls through a read iterator over the relationship's
             // targeted objects, so a target that publishes no frame
@@ -290,61 +305,21 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
             s.lowerOffset = bind(prim, "rigExec:lowerLengthOffset", 0.0);
             s.stretch = bind(prim, "inputs:stretch", 1.0f);
             s.softness = bind(prim, "inputs:softness", 0.0f);
-            s.pin = bind(prim, "inputs:pin", 0.0f);
-            s.upperScale = bind(prim, "inputs:upperScale", 1.0);
-            s.lowerScale = bind(prim, "inputs:lowerScale", 1.0);
-            s.softDistance = bind(prim, "inputs:softDistance", 0.0f);
-            s.limbTwist = bind(prim, "inputs:twist", 0.0f);
             s.ikParams.preferredBendRadians = s.bend.constant;
             s.ikParams.stretch = s.stretch.constant;
             s.ikParams.softness = s.softness.constant;
-            {
-                TfToken policy, segmentScale;
-                if (const UsdAttribute a =
-                        prim.GetAttribute(TfToken("rigExec:stretchPolicy"))) {
-                    a.Get(&policy);
-                }
-                if (const UsdAttribute a =
-                        prim.GetAttribute(TfToken("rigExec:segmentScale"))) {
-                    a.Get(&segmentScale);
-                }
-                s.ikParams.softDistancePolicy = policy == "softDistance";
-                double calibration = 0.0;
-                if (const UsdAttribute a = prim.GetAttribute(
-                        TfToken("rigExec:scaleCalibration"))) {
-                    a.Get(&calibration);
-                }
-                s.ikParams.limb.scaleCalibration = calibration;
-                s.ikParams.scaleSegments = segmentScale == "toChild";
-            }
             RigExecTwoBoneIkLengths(s.ikRests, s.ikSpace.constant,
                                   s.upperOffset.constant,
                                   s.lowerOffset.constant,
                                   &s.ikParams.upperLength,
                                   &s.ikParams.lowerLength);
-            RigExecSetTwoBoneLimbParams(s.ikRests, s.ikSpace.constant,
-                                      s.stretch.constant, s.pin.constant,
-                                      s.upperScale.constant,
-                                      s.lowerScale.constant,
-                                      s.softDistance.constant,
-                                      s.limbTwist.constant, &s.ikParams);
         } else if (s.type == "RigExecBlendPointFrames") {
-            // -1 is the computation's null pointer: a target that publishes
-            // no aggregate, so one missing input passes the OTHER through
-            // unchanged, rests and all, and two missing inputs publish
-            // nothing. An aggregate solver not baked yet is refused instead:
-            // the blend would read its aggregate before this run's Solve
-            // step wrote it, and the walk computes it in the same frame.
+            // Aggregate inputs bind after every solver descriptor exists.
+            // Missing inputs retain the kernel's null-input behavior.
             auto solverSlot = [&](const SdfPathVector &v) {
                 if (v.empty()) return -1;
                 const auto it = B.solverIndex.find(v[0]);
                 if (it != B.solverIndex.end()) return it->second;
-                if (ctx->aggregateSolvers.count(v[0])) {
-                    refuse(solverPath.GetString() + " reads the aggregate of " +
-                               v[0].GetString() +
-                               ", which is not baked before it",
-                           solverPath);
-                }
                 return -1;
             };
             s.inA = solverSlot(targets(prim, "rigExec:inputA"));
@@ -411,10 +386,8 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
             std::vector<double> weights;
             VtFloatArray authoredWeights;
             fold(prim, "rigExec:volumeWeights");
-            if (const UsdAttribute a =
-                    prim.GetAttribute(TfToken("rigExec:volumeWeights"))) {
-                a.Get(&authoredWeights);
-            }
+            readFact(solverPath.AppendProperty(TfToken("rigExec:volumeWeights")),UsdTimeCode::Default(),&authoredWeights);
+            s.execSplineWeights = authoredWeights;
             for (float w : authoredWeights) weights.push_back(w);
             if (!weights.empty() && weights.size() != count) {
                 s.degenerate = true;
@@ -507,17 +480,13 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
             // and in array order, as the computation's read iterator does it.
             VtFloatArray authoredWeights;
             fold(prim, "rigExec:weights");
-            if (const UsdAttribute a =
-                    prim.GetAttribute(TfToken("rigExec:weights"))) {
-                a.Get(&authoredWeights);
-            }
+            readFact(solverPath.AppendProperty(TfToken("rigExec:weights")),UsdTimeCode::Default(),&authoredWeights);
+            s.execTwistWeights = authoredWeights;
             for (float w : authoredWeights) s.twistWeights.push_back(w);
             int count = 1;
             fold(prim, "rigExec:count");
-            if (const UsdAttribute a =
-                    prim.GetAttribute(TfToken("rigExec:count"))) {
-                a.Get(&count);
-            }
+            readFact(solverPath.AppendProperty(TfToken("rigExec:count")),UsdTimeCode::Default(),&count);
+            s.execTwistCount = count;
             RigExecResolveTwistWeights(count, &s.twistWeights);
             s.twistTurns = bind(prim, "inputs:twistTurns", 0.0);
         } else if (s.type == "RigExecRibbon") {
@@ -533,6 +502,10 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
             if (found != ctx->ribbonDriverPoints.end()) {
                 s.ribbonPointsPath = found->second;
             }
+            std::string phaseError;
+            if (!RigExecResolveReadPhase(prim.GetRelationship(TfToken("rigExec:driverCurve")),
+                                         &s.ribbonPointsPhase,&phaseError))
+                B.crossDomainErrors.push_back(phaseError);
             if (const UsdAttribute a =
                     B.stage->GetAttributeAtPath(s.ribbonPointsPath)) {
                 // Read at Default, and left empty when nothing answers
@@ -540,7 +513,7 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
                 // value, and an empty rest is what makes the sampler publish
                 // nothing at all.
                 VtVec3fArray rest;
-                a.Get(&rest, UsdTimeCode::Default());
+                readFact(s.ribbonPointsPath,UsdTimeCode::Default(),&rest);
                 s.ribbonRestPoints.assign(rest.begin(), rest.end());
                 s.ribbonPointsVarying = a.ValueMightBeTimeVarying() ||
                                         a.GetNumTimeSamples() > 0;
@@ -550,7 +523,7 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
                     // One value at every time code, so the prologue has
                     // nothing to read and the cone nothing to compare.
                     VtVec3fArray live;
-                    a.Get(&live, ctx->capture);
+                    readFact(s.ribbonPointsPath,ctx->capture,&live);
                     s.ribbonConstantPoints.assign(live.begin(), live.end());
                 }
                 // Registered BY PATH rather than through fold(prim, name):
@@ -625,6 +598,23 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
                 std::unique(s.restOverrides.begin(), s.restOverrides.end()),
                 s.restOverrides.end());
         }
+        RigExecSceneSolverDescriptor descriptor;
+        std::string lowerError;
+        if(!RigExecLowerSceneSolver(*B.sceneDescriptors,solverPath,providerRests,&descriptor,&lowerError))
+            refuse(lowerError,solverPath);
+        else {
+            // Native input binding selects live/rest SSA versions; the common
+            // structural record owns the solver's schema interpretation.
+            auto &record=descriptor.record;
+            record.degenerate=record.degenerate||s.degenerate;
+            record.restIsLive=std::move(s.restIsLive);
+            record.jointRests=std::move(s.jointRests);
+            static_cast<RigExecSolverRecord &>(s)=std::move(record);
+        }
+        s.kernelInputs.controls.resize(s.controls.size());
+        s.kernelInputs.ribbonPoints.reserve(std::max(s.ribbonPoints.size(),s.ribbonConstantPoints.size()));
+        s.kernelWorkspace.fkElements.resize(s.controls.size()+size_t(s.start>=0));
+        s.kernelWorkspace.spacedFrames.reserve(s.splineRestFrames.size());
         const int slot = int(B.solvers.size());
         B.solverIndex[solverPath] = slot;
         B.solvers.push_back(std::move(s));
@@ -671,6 +661,19 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
         c.type = fc.schemaType;
         c.singleChainIk = fc.schemaType == "RigExecSingleChainIkConstraint";
         const UsdPrim prim = B.stage->GetPrimAtPath(fc.moverPath);
+        RigExecSceneConstraintDescriptor sceneConstraint;
+        bool loweredConstraint=false;
+        const auto *constraintNode=compileInputs.Node(fc.moverPath);
+        // Pose MatrixMover has its own matrix record and numerical body;
+        // the shared constraint descriptor covers the six constraint schemas.
+        if(fc.schemaType!="RigExecMatrixMover" && constraintNode &&
+           constraintNode->fact.type==fc.schemaType) {
+            std::string error;
+            loweredConstraint=RigExecLowerSceneConstraint(*B.sceneDescriptors,fc.moverPath,
+                fc.targets,&sceneConstraint,&error);
+            if(!loweredConstraint) refuse(error,fc.moverPath);
+            else c.kernelRecord=sceneConstraint.record;
+        }
         // Every target, in compiled order, with the read-phase membership
         // the dynamic recordFrame tests per call. A SingleChainIK's targets
         // ARE its joint chain (rigEvaluator's compile sets the two equal),
@@ -741,7 +744,14 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
         {
             RigExecBakedProgramImpl::ConstraintArrays arrays;
             arrays.prim = prim;
+            arrays.path=fc.moverPath;
             arrays.sourceCount = c.sources.size();
+            // An unconsumed table has the same neutral shape as a missing
+            // authored array. Admitted bodies still validate and replace it
+            // from the current raw samples before using any entry.
+            arrays.weights.assign(arrays.sourceCount, 1.0);
+            arrays.translationOffsets.assign(arrays.sourceCount, GfVec3d(0));
+            arrays.rotationOffsets.assign(arrays.sourceCount, GfVec3d(0));
             arrays.parentOffsets =
                 fc.schemaType == "RigExecParentConstraint";
             foldShape(prim, "inputs:sourceWeights");
@@ -823,7 +833,6 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
                 c.poleObjects.push_back(slot);
                 c.poleObjectNatives.push_back(native);
             }
-            c.ikStretch = bind(prim, "inputs:stretch", 0.0f);
             // Bound only in RotatePlane mode, which is the only mode the
             // dynamic walk reads them in: binding them everywhere would let
             // an override on one place itself on a solve that ignores it.
@@ -838,6 +847,7 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
                 c.ikMode == RigExecSingleChainIkMode::RotatePlane &&
                 c.poleModeObject && !c.poleObjects.empty();
             arrays.poleCount = c.poleObjects.size();
+            arrays.poleWeights.assign(arrays.poleCount, 1.0);
             if (arrays.readPole &&
                 prim.GetAttribute(TfToken("inputs:poleVectorWeights"))) {
                 foldShape(prim, "inputs:poleVectorWeights");
@@ -851,7 +861,8 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
             c.affectX = bind(prim, "inputs:affectTranslationX", true);
             c.affectY = bind(prim, "inputs:affectTranslationY", true);
             c.affectZ = bind(prim, "inputs:affectTranslationZ", true);
-            c.offset = bind(prim, "inputs:translationOffset", GfVec3d(0));
+            c.offset = ctx->Bind(prim, "inputs:translationOffset", GfVec3d(0),
+                                 /*sourceValue=*/true);
         } else if (fc.schemaType == "RigExecRotationConstraint") {
             c.affectX = bind(prim, "inputs:affectRotationX", true);
             c.affectY = bind(prim, "inputs:affectRotationY", true);
@@ -930,6 +941,23 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
                 refuse("constraint space is not a pose provider", fc.space);
             }
         }
+        if(loweredConstraint) {
+            c.order=sceneConstraint.order;
+            c.preserveJointOrientation=sceneConstraint.record.singleChain.preserveJointOrientation;
+            c.ikMode=sceneConstraint.record.singleChain.mode;
+            c.poleModeObject=sceneConstraint.poleModeObject;
+            c.useAnimatedTs=sceneConstraint.useAnimatedTs;
+            c.aimVectorAuthored=sceneConstraint.aimVectorAuthored;
+            c.aimAxisFallback=sceneConstraint.aimAxisFallback;
+            c.worldUpType=sceneConstraint.worldUpType;
+            c.sceneUp=sceneConstraint.sceneUp;
+            c.preserveInputUp=sceneConstraint.preserveInputUp;
+            c.blendShear=sceneConstraint.blendShear;
+            c.worldUpRotationOnly=sceneConstraint.worldUpRotationOnly;
+        }
+        c.kernelInputs.sources.reserve(c.sources.size());
+        c.kernelInputs.chain.reserve(c.targetSlots.size());
+        c.kernelResult.chain.reserve(c.targetSlots.size());
         B.constraints.push_back(std::move(c));
         return int(B.constraints.size()) - 1;
     };
@@ -1044,15 +1072,47 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
     for (const SdfPath &solverPath : ctx->guideOnlySolvers) {
         B.guideSolvers.push_back(bakeSolver(solverPath, {}, {}, {}));
     }
+    // Aggregate identities are bound after all descriptors exist; authored
+    // discovery order does not decide whether an upstream solver is visible.
+    for(auto &solver:B.solvers) if(solver.type=="RigExecBlendPointFrames") {
+        const auto prim=B.stage->GetPrimAtPath(solver.path);
+        const auto source=[&](const char *name) {
+            SdfPathVector paths;
+            if(const auto rel=prim.GetRelationship(TfToken(name))) rel.GetTargets(&paths);
+            const auto found=paths.empty()?B.solverIndex.end():B.solverIndex.find(paths[0].GetPrimPath());
+            return found==B.solverIndex.end()?-1:found->second;
+        };
+        solver.inA=source("rigExec:inputA"); solver.inB=source("rigExec:inputB");
+    }
+    // Retain only supported solver-input relationships as semantic
+    // prerequisites. Generic relationships and authored stack order are not
+    // imported into this list. All solver identities exist before this census.
+    for (auto &solver : B.solvers) {
+        for (const auto &port : RigExecSolverRelationshipPorts(solver.kind)) {
+            auto targets = compileInputs.Targets(solver.path.AppendProperty(TfToken(port)));
+            // Structural-only Ribbon ports retain every authored target.
+            // Numerical input ports select the binder's first target; FK
+            // controls retain their ordered list.
+            const bool ribbonStructural = solver.kind == RigExecSolverKind::Ribbon &&
+                port != "rigExec:driverCurve";
+            if (port != "rigExec:controls" && !ribbonStructural && targets.size() > 1)
+                targets.resize(1);
+            for (const auto &target : targets) {
+                const auto found = B.solverIndex.find(target.GetPrimPath());
+                if (found != B.solverIndex.end())
+                    solver.relationshipRequirements.emplace_back(port, found->second);
+            }
+        }
+        std::sort(solver.relationshipRequirements.begin(), solver.relationshipRequirements.end());
+        solver.relationshipRequirements.erase(std::unique(solver.relationshipRequirements.begin(),
+            solver.relationshipRequirements.end()), solver.relationshipRequirements.end());
+    }
     B.aggregates.resize(B.solvers.size());
 }
 
 
-// Build: the pose half of the program, in program order.
-// Program order is today's straight line. What changes is that each piece of
-// it now says which slots it reads and which it writes, so that the edges
-// between the pieces follow from the declarations rather than from the order
-// -- and the order becomes one valid schedule instead of the only one.
+// Lower authored pose checkpoints to typed operation reads and writes.
+// The common compiler assigns execution order after all domains are present.
 
 namespace {
 
@@ -1097,6 +1157,11 @@ BindPoseVersions(RigExecBakedProgramImpl *program)
     // Without that the frame's most-walked reads scatter over the whole
     // version table and the publication alone costs a third more.
     std::vector<uint32_t> finWrites(n, 0), baseWrites(n, 0);
+    RigExecBakedPlanProviderRefreshes(&B);
+    for(const auto &refresh:B.providerRefreshes) {
+        ++baseWrites[size_t(refresh.slot)];++finWrites[size_t(refresh.slot)];
+        for(const auto &carry:refresh.carries) {++baseWrites[size_t(carry.slot)];++finWrites[size_t(carry.slot)];}
+    }
     for (const RigExecBakedCommit &commit : B.commits) {
         for (const int slot : commit.slots) {
             ++finWrites[size_t(slot)];
@@ -1131,6 +1196,12 @@ BindPoseVersions(RigExecBakedProgramImpl *program)
     const auto readBase = [&liveBase, n](int slot) {
         return slot >= 0 && size_t(slot) < n ? liveBase[size_t(slot)] : 0u;
     };
+    const auto refreshBefore=[&](size_t checkpoint) {
+        for(uint32_t index:B.providerRefreshBefore[checkpoint])
+            if(!RigExecBakedBindProviderRefresh(&B,index,&liveBase,&liveFin,
+                [&](bool base,int slot) {return base?take(&baseWrites,&baseNext,size_t(slot)):take(&finWrites,&finNext,size_t(slot));}))return false;
+        return true;
+    };
     // One solver's frame reads, bound to the versions live where it runs.
     // Written once because two callers need it at two different points of
     // the sweep: a batch's solvers read the versions live where their batch
@@ -1163,6 +1234,7 @@ BindPoseVersions(RigExecBakedProgramImpl *program)
     };
 
     for (size_t w = 0; w < B.walkSteps.size(); ++w) {
+        if(!refreshBefore(w))return;
         const RigExecBakedProgramImpl::WalkStep &walk = B.walkSteps[w];
         RigExecBakedCommit &commit = B.commits[w];
         // The producers first: a batch's solvers and a constraint's own
@@ -1276,6 +1348,73 @@ BindPoseVersions(RigExecBakedProgramImpl *program)
         }
     }
 
+    if(!refreshBefore(B.walkSteps.size()))return;
+    // All writes are indexed before ordinary data-flow inputs are bound.
+    // A dependency can name a later authored writer; scheduling never changes
+    // the positional carry versions or the producer selected here.
+    std::set<uint32_t> refreshedBase,refreshedFin;
+    for(const auto &refresh:B.providerRefreshes) {
+        refreshedBase.insert(refresh.baseWrite);refreshedFin.insert(refresh.finWrite);
+        for(const auto &carry:refresh.carries) {refreshedBase.insert(carry.baseWrite);refreshedFin.insert(carry.finWrite);}
+    }
+    const auto selected=[&](const SdfPath &reader,int slot,uint32_t positional,bool base=false) {
+        if(slot<0 || size_t(slot)>=n) return positional;
+        if((base?refreshedBase:refreshedFin).count(positional))return positional;
+        const auto dependencies=B.poseDependencyPaths.find(reader);
+        if(dependencies==B.poseDependencyPaths.end()) return positional;
+        uint32_t value=positional;
+        for(size_t w=0;w<B.walkSteps.size();++w) {
+            const auto &walk=B.walkSteps[w]; const auto &commit=B.commits[w];
+            bool reads=false;
+            if(walk.solverBatch) for(const int si:walk.batchSolvers)
+                reads=reads || dependencies->second.count(B.solvers[size_t(si)].path);
+            else reads=dependencies->second.count(B.constraints[size_t(walk.index)].path);
+            if(!reads || (base && !commit.solverOutput)) continue;
+            const auto &writes=base?commit.slotBaseWrites:commit.slotWrites;
+            for(size_t k=0;k<commit.slots.size();++k)
+                if(commit.slots[k]==slot && k<writes.size()) value=writes[k];
+            const auto &descendants=base?commit.descendantBaseWrites:commit.descendantWrites;
+            for(size_t k=0;k<commit.propagate.size();++k)
+                if(commit.propagate[k].first==slot && k<descendants.size()) value=descendants[k];
+        }
+        return value;
+    };
+    for(auto &input:B.providerFrameInputs)
+        input.version=selected(input.reader,input.slot,input.version,input.base);
+    for(size_t w=0;w<B.walkSteps.size();++w) {
+        const auto &walk=B.walkSteps[w]; auto &commit=B.commits[w];
+        if(walk.solverBatch) {
+            for(const int si:walk.batchSolvers) {
+                auto &solver=B.solvers[size_t(si)];
+                for(size_t k=0;k<solver.controls.size();++k)
+                    solver.controlReads[k]=selected(solver.path,solver.controls[k],solver.controlReads[k]);
+                solver.startRead=selected(solver.path,solver.start,solver.startRead);
+                solver.rootRead=selected(solver.path,solver.root,solver.rootRead);
+                solver.midRead=selected(solver.path,solver.mid,solver.midRead);
+                solver.endRead=selected(solver.path,solver.end,solver.endRead);
+                solver.poleRead=selected(solver.path,solver.pole,solver.poleRead);
+                solver.spaceRead=selected(solver.path,solver.spaceSlot,solver.spaceRead);
+            }
+            continue;
+        }
+        const auto &constraint=B.constraints[size_t(walk.index)];
+        for(size_t k=0;k<constraint.sources.size();++k)
+            commit.sourceReads[k]=selected(constraint.path,constraint.sources[k],commit.sourceReads[k]);
+        commit.worldUpRead=selected(constraint.path,constraint.worldUpObject,commit.worldUpRead);
+        commit.effectorRead=selected(constraint.path,constraint.effector,commit.effectorRead);
+        for(size_t k=0;k<constraint.poleObjects.size();++k)
+            commit.poleReads[k]=selected(constraint.path,constraint.poleObjects[k],commit.poleReads[k]);
+        const auto ancestors=[&](auto &reads) {
+            for(auto &read:reads) {
+                read.fin=selected(constraint.path,read.slot,read.fin);
+                read.base=selected(constraint.path,read.slot,read.base,true);
+            }
+        };
+        for(auto &reads:commit.sourceAncestors) ancestors(reads);
+        ancestors(commit.worldUpAncestors); ancestors(commit.effectorAncestors);
+        for(auto &reads:commit.poleAncestors) ancestors(reads);
+    }
+
     // And the guide-only solvers, against what the walk left standing: the
     // dynamic path's guide request overrides every provider with its FINAL
     // frame, which is what liveFin holds now that the sweep is over.
@@ -1294,7 +1433,7 @@ BindPoseVersions(RigExecBakedProgramImpl *program)
 /// version. A record is a target a constraint's exit records
 /// (`snapshotTargets`) or an output a solver's commit records
 /// (`outputSnapshots`) -- the compile's named pairs -- kept only when some
-/// reader's list holds it. A list is RigExecChainSnapshots::Lookup's AtPrim
+/// reader's list holds it. A list is the original AtPrim lookup
 /// rule stated statically: the provider's records whose writer is the
 /// phase's prim or under it, newest first in walk order.
 void
@@ -1514,84 +1653,47 @@ _ComposeParentRead(const RigExecBakedProgramImpl &B, int slot)
 
 }  // namespace
 
-void
-RigExecBakedBindSpaceSwitchVersions(RigExecBakedProgramImpl *program,
-                                    const std::vector<int> &resolveOrder)
-{
-    RigExecBakedProgramImpl &B = *program;
-    using FrameVersion = RigExecBakedProgramImpl::SpaceSwitch::FrameVersion;
-    const auto nearestSwitched = [&B](int slot) {
-        for (; slot >= 0; slot = B.parent[size_t(slot)]) {
-            if (B.spaceSwitchBySlot[size_t(slot)] >= 0) {
-                return slot;
-            }
-        }
-        return -1;
-    };
-    // The dynamic walk resolves round k from a seed holding the answers of
-    // rounds below k and nothing else, so a slot whose nearest switched
-    // control at or above it resolves in round k or later is read as exec
-    // composes it without that switch: unswitched, from its parent's
-    // version, up to the first slot whose last version already stands.
-    const auto bind = [&](int slot, int round) {
-        FrameVersion read;
-        int at = slot;
-        while (at >= 0 &&
-               B.slotKind[size_t(at)] == RigExecBakedSlotKind::FirstFramePose) {
-            const int above = nearestSwitched(at);
-            if (above < 0 ||
-                resolveOrder[size_t(B.spaceSwitchBySlot[size_t(above)])] <
-                    round) {
-                break;
-            }
-            read.recompose.push_back(at);
-            at = B.parent[size_t(at)];
-        }
-        read.anchor = at;
-        std::reverse(read.recompose.begin(), read.recompose.end());
-        return read;
-    };
-    for (size_t s = 0; s < B.spaceSwitches.size(); ++s) {
-        RigExecBakedProgramImpl::SpaceSwitch &sw = B.spaceSwitches[s];
-        const int round = resolveOrder[s];
-        sw.parentRead = bind(B.parent[size_t(sw.slot)], round);
-        sw.sourceReads.assign(sw.sourceSlots.size(), FrameVersion());
-        for (size_t k = 0; k < sw.sourceSlots.size(); ++k) {
-            if (sw.sourceSlots[k] >= 0) {
-                sw.sourceReads[k] = bind(sw.sourceSlots[k], round);
-            }
-        }
-        sw.spaceRead = sw.spaceSlot >= 0 ? bind(sw.spaceSlot, round)
-                                         : FrameVersion();
-    }
-}
-
 bool
-RigExecBakedRefuseBatchedStackWrites(RigExecBakedBuildContext *ctx)
+RigExecBakedBindSpaceSwitchVersions(RigExecBakedProgramImpl *program,std::string *error)
 {
-    RigExecBakedProgramImpl &B = *ctx->program;
-    for (const RigExecBakedProgramImpl::WalkStep &walk : B.walkSteps) {
-        if (!walk.solverBatch || walk.batchSolvers.size() < 2) {
-            continue;
-        }
-        std::map<int, SdfPath> declaredBy;
-        for (const int si : walk.batchSolvers) {
-            const RigExecBakedProgramImpl::Solver &s = B.solvers[size_t(si)];
-            for (const auto &[slot, element] : s.outputs) {
-                const auto already = declaredBy.emplace(slot, s.path);
-                if (!already.second) {
-                    ctx->Refuse(
-                        "two solvers of one batch write " +
-                            B.paths[size_t(slot)].GetString() +
-                            "; a stack must be one solver per commit (its "
-                            "other writer is " +
-                            already.first->second.GetString() + ")",
-                        s.path);
-                    return false;
-                }
-            }
-        }
+    auto &B=*program;
+    using FrameVersion=RigExecBakedProgramImpl::SpaceSwitch::FrameVersion;
+    std::vector<uint8_t> composed(B.paths.size(),0);
+    for(size_t slot=0;slot<B.paths.size();++slot)
+        composed[slot]=B.slotKind[slot]==RigExecBakedSlotKind::FirstFramePose;
+    std::vector<int> targets,carrySlots;
+    std::vector<std::vector<int>> sources;
+    for(const auto &sw:B.spaceSwitches) {
+        targets.push_back(sw.slot);sources.push_back(sw.sourceSlots);carrySlots.push_back(sw.spaceSlot);
     }
+    std::vector<RigExecSpaceParentContext> contexts,carryContexts;
+    if(!RigExecDeriveSpaceSwitchParentContexts(B.parent,composed,targets,sources,
+        &contexts,&carrySlots,&carryContexts)) {
+        if(error)*error="space switch checkpoint has an invalid provider identity";
+        return false;
+    }
+    B.switchFrameContexts.clear();
+    for(size_t index=0;index<B.spaceSwitches.size();++index) {
+        auto &sw=B.spaceSwitches[index];
+        const auto bind=[&](const RigExecSpaceParentContext &selected,const char *site) {
+            FrameVersion read;
+            if(selected.recompose.empty())read.anchor=selected.anchor;
+            else {
+                RigExecBakedProgramImpl::SpaceCheckpoint checkpoint;
+                checkpoint.key="switchCheckpoint:"+B.paths[size_t(sw.slot)].GetString()+":"+site;
+                checkpoint.anchor=selected.anchor;checkpoint.recompose=selected.recompose;
+                checkpoint.kernelInputs.resize(checkpoint.recompose.size());
+                read.context=int(B.switchFrameContexts.size());
+                B.switchFrameContexts.push_back(std::move(checkpoint));
+            }
+            return read;
+        };
+        sw.parentRead=bind(contexts[index],"parent");
+        sw.spaceRead=bind(carryContexts[index],"carry");
+        sw.sourceReads.assign(sw.sourceSlots.size(),FrameVersion());
+        for(size_t k=0;k<sw.sourceSlots.size();++k)sw.sourceReads[k].anchor=sw.sourceSlots[k];
+    }
+    B.switchFrames.assign(B.switchFrameContexts.size(),GfMatrix4d(1.0));
     return true;
 }
 
@@ -1600,249 +1702,60 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
 {
     RigExecBakedProgramImpl &B = *program;
     const int N = int(B.paths.size());
-
-    // One step per provider would be ~2 500 steps on a biped for work that is
-    // a few hundred nanoseconds each. The partition cuts the provider forest
-    // into subtrees of about total/(4P) slots -- enough of them that the work
-    // spreads, few enough that a step is worth its edge. Slots are in
-    // namespace DFS pre-order, so a subtree is CONTIGUOUS: the whole compose
-    // pass is a sequence of adjacent ranges in increasing order, and each
-    // range's parents are either inside it or below its first slot.
-    {
-        std::vector<int> subtreeSize(size_t(N), 1);
-        for (int i = N - 1; i >= 0; --i) {
-            if (B.propParent[size_t(i)] >= 0) {
-                subtreeSize[size_t(B.propParent[size_t(i)])] +=
-                    subtreeSize[size_t(i)];
-            }
+    for(size_t index=0;index<B.switchFrameContexts.size();++index) {
+        const auto &context=B.switchFrameContexts[index];
+        auto &step=AddStep(&B,RigExecBakedStepKind::SpaceCheckpoint,int(index));
+        step.label=context.key;
+        if(context.anchor>=0)
+            step.reads.push_back(RigExecBakedOne(RigExecBakedSlotDomain::PosedM,context.anchor));
+        for(int slot:context.recompose) {
+            step.reads.push_back(RigExecBakedOne(RigExecBakedSlotDomain::Avars,slot));
+            step.reads.push_back(RigExecBakedOne(RigExecBakedSlotDomain::Ladder,slot));
         }
-        const int concurrency = std::max(1, int(WorkGetConcurrencyLimit()));
-        const int budget =
-            std::max(1, N / std::max(1, 4 * concurrency));
-        // A SWITCHED slot breaks the one assumption the single pass rests on.
-        // Slots are in SdfPath order, which guarantees that a slot's PARENT
-        // is below it and nothing more -- and a space source is not a parent:
-        // an arm's IK handle at /Rig/Controls/arm_l_ik sorts BEFORE the chest
-        // it may be parented into at /Rig/Controls/hips_ctl/.../spine_end_ctl.
-        // So the switched slot and its whole subtree (contiguous, for the
-        // same path-order reason) are cut into groups of their own, and the
-        // source frames are declared as reads of that group. The ordinary
-        // read/write dependency sweep then runs it after the groups that
-        // compose its spaces, which is exactly the machinery a cross-group
-        // parent already uses.
-        std::set<int> forced;
-        for (const RigExecBakedProgramImpl::SpaceSwitch &sw :
-                 B.spaceSwitches) {
-            if (sw.slot < 0) continue;
-            forced.insert(sw.slot);
-            const int after = sw.slot + subtreeSize[size_t(sw.slot)];
-            if (after < N) forced.insert(after);
-        }
-        // An auto clavicle reads frames from other branches, exactly as a
-        // switch reads its sources, so its subtree is cut out the same way.
-        for (const RigExecBakedProgramImpl::AutoClavicle &ac :
-                 B.autoClavicles) {
-            if (ac.slot < 0) continue;
-            forced.insert(ac.slot);
-            const int after = ac.slot + subtreeSize[size_t(ac.slot)];
-            if (after < N) forced.insert(after);
-        }
-        std::vector<int> starts;
-        for (int i = 0; i < N;) {
-            // The shallowest node whose whole subtree fits is a cut; one
-            // whose subtree does not starts a group of its own and the scan
-            // continues into its children, which is what "cut at the deepest
-            // nodes whose subtree exceeds the budget" comes to.
-            starts.push_back(i);
-            i += subtreeSize[size_t(i)] <= budget ? subtreeSize[size_t(i)] : 1;
-        }
-        starts.insert(starts.end(), forced.begin(), forced.end());
-        std::sort(starts.begin(), starts.end());
-        starts.erase(std::unique(starts.begin(), starts.end()), starts.end());
-        // Then merge ADJACENT groups while the result is still inside the
-        // budget. Without this an internal node too big to be its own
-        // subtree becomes a one-slot step, and a biped -- whose controls
-        // hang off a handful of deep scopes -- ends up with a step per
-        // provider for exactly the work the budget exists to avoid. Merging
-        // is always sound: slots are in namespace DFS pre-order, so any
-        // contiguous range's parents are either inside it or below its first
-        // slot.
-        for (size_t k = 0; k < starts.size(); ++k) {
-            RigExecBakedComposeGroup group;
-            group.begin = starts[k];
-            group.end = k + 1 < starts.size() ? starts[k + 1] : N;
-            while (k + 1 < starts.size() &&
-                   !forced.count(starts[k + 1]) &&
-                   (k + 2 < starts.size() ? starts[k + 2] : N) -
-                           group.begin <= budget) {
-                ++k;
-                group.end = k + 1 < starts.size() ? starts[k + 1] : N;
-            }
-            for (int slot = group.begin; slot < group.end; ++slot) {
-                const int parent = _ComposeParentRead(B, slot);
-                if (parent >= 0 && parent < group.begin) {
-                    group.parentSlots.push_back(parent);
-                }
-            }
-            std::sort(group.parentSlots.begin(), group.parentSlots.end());
-            group.parentSlots.erase(
-                std::unique(group.parentSlots.begin(),
-                            group.parentSlots.end()),
-                group.parentSlots.end());
-            B.composeGroups.push_back(std::move(group));
-        }
+        step.writes.push_back(RigExecBakedOne(RigExecBakedSlotDomain::SwitchFrame,int(index)));
     }
-    // Groups are emitted in DEPENDENCY order, not in slot order.
-    //
-    // The schedule's dependency sweep runs forward through the step list and
-    // raises an edge only against a step it has already passed (see
-    // bakedSchedule.cpp: "an edge only ever leaves a step the sweep has
-    // already passed"). A read of a slot some LATER step writes therefore
-    // raises no edge at all and quietly takes the previous run's value. Slot
-    // order settles parents, which is all an unswitched rig reads, but a
-    // space source is not a parent: /Rig/Controls/arm_l_ik sorts before the
-    // chest it may be parented into, so the group that composes the chest
-    // has to be emitted first.
-    const auto autoClavicleReads =
-        [&B](int slot) {
-            std::vector<int> reads;
-            const int index = B.autoClavicleBySlot.empty()
-                                  ? -1 : B.autoClavicleBySlot[size_t(slot)];
-            if (index < 0) return reads;
-            const RigExecBakedProgramImpl::AutoClavicle &ac =
-                B.autoClavicles[size_t(index)];
-            reads = {ac.pivotSlot, ac.anchorSlot, ac.ikTargetSlot,
-                     ac.poleSlot};
-            return reads;
-        };
-    std::vector<size_t> emission(B.composeGroups.size());
-    {
-        for (size_t g = 0; g < emission.size(); ++g) emission[g] = g;
-        std::vector<int> groupOfSlot(size_t(N), -1);
-        for (size_t g = 0; g < B.composeGroups.size(); ++g) {
-            for (int slot = B.composeGroups[g].begin;
-                 slot < B.composeGroups[g].end; ++slot) {
-                groupOfSlot[size_t(slot)] = int(g);
-            }
-        }
-        std::vector<std::vector<int>> after(B.composeGroups.size());
-        bool reordered = false;
-        for (size_t g = 0; g < B.composeGroups.size(); ++g) {
-            const RigExecBakedComposeGroup &group = B.composeGroups[g];
-            for (const int parent : group.parentSlots) {
-                if (groupOfSlot[size_t(parent)] >= 0) {
-                    after[g].push_back(groupOfSlot[size_t(parent)]);
-                }
-            }
-            for (int slot = group.begin; slot < group.end; ++slot) {
-                for (const int source : autoClavicleReads(slot)) {
-                    if (source < 0) continue;
-                    const int owner = groupOfSlot[size_t(source)];
-                    if (owner < 0 || size_t(owner) == g) continue;
-                    after[g].push_back(owner);
-                    if (size_t(owner) > g) reordered = true;
-                }
-                const int switchIndex =
-                    B.spaceSwitchBySlot.empty()
-                        ? -1 : B.spaceSwitchBySlot[size_t(slot)];
-                if (switchIndex < 0) continue;
-                const RigExecBakedProgramImpl::SpaceSwitch &sw =
-                    B.spaceSwitches[size_t(switchIndex)];
-                // The space is read exactly like a source, so it orders the
-                // groups exactly like one: leave it out and a switch could
-                // read its master's frame from the group before that group
-                // had composed it. Only LAST versions order anything: an
-                // earlier version is recomposed from avars inside this
-                // step, which is what keeps a switch nested under a control
-                // that switches into this one's subtree from closing a
-                // cycle.
-                std::vector<int> reads, recomposed;
-                _SwitchVersionReads(sw, &reads, &recomposed);
-                for (const int source : reads) {
-                    if (source < 0) continue;
-                    const int owner = groupOfSlot[size_t(source)];
-                    if (owner < 0 || size_t(owner) == g) continue;
-                    after[g].push_back(owner);
-                    if (size_t(owner) > g) reordered = true;
-                }
-            }
-        }
-        // Slot order already satisfies every edge on a rig whose switches
-        // all read backwards, which is most of them; the sort runs only when
-        // one of them does not.
-        if (reordered) {
-            std::vector<int> state(B.composeGroups.size(), 0);
-            std::vector<size_t> order;
-            bool cyclic = false;
-            std::function<void(size_t)> visit = [&](size_t g) {
-                if (state[g] == 2 || cyclic) return;
-                if (state[g] == 1) { cyclic = true; return; }
-                state[g] = 1;
-                for (const int pred : after[g]) visit(size_t(pred));
-                state[g] = 2;
-                order.push_back(g);
-            };
-            for (size_t g = 0; g < B.composeGroups.size(); ++g) visit(g);
-            if (cyclic) {
-                // Unreachable on a rig the compile accepted: every last
-                // version a group reads belongs to a control resolved in an
-                // earlier round, or to an ancestor in its own round. Build
-                // refuses the program rather than run an unsorted one.
-                B.composeCycle = true;
-            } else {
-                emission = order;
-            }
-        }
+
+    // A provider is a semantic operation. Packing occurs after the common
+    // graph has bound every connected and phased input to its producer.
+    std::vector<size_t> emission;
+    for (int slot=0;slot<N;++slot) {
+        // Ordinary Xform targets are sampled frame seeds, not composed
+        // providers. A skipped body must not claim their source versions.
+        if (B.slotKind[size_t(slot)] != RigExecBakedSlotKind::FirstFramePose) continue;
+        RigExecBakedComposeGroup group;
+        group.begin=slot; group.end=slot+1;
+        const int parent=_ComposeParentRead(B,slot);
+        if(parent>=0) group.parentSlots.push_back(parent);
+        emission.push_back(B.composeGroups.size());
+        B.composeGroups.push_back(std::move(group));
     }
     for (const size_t g : emission) {
         const RigExecBakedComposeGroup &group = B.composeGroups[g];
         RigExecBakedStep &step = AddStep(
             &B, RigExecBakedStepKind::ComposeSubtree, int(g));
         step.reads.push_back(RigExecBakedRange(
-            RigExecBakedSlotDomain::Avars, group.begin * 11, group.end * 11));
+            RigExecBakedSlotDomain::Avars, group.begin, group.end));
         for (const int parent : group.parentSlots) {
             step.reads.push_back(
                 RigExecBakedOne(RigExecBakedSlotDomain::PosedM, parent));
         }
         // A switched slot reads its spaces instead of its namespace parent,
         // so those frames are reads of this step too -- that is what orders
-        // a pole vector's group after its IK handle's. A source inside the
-        // group is already ordered by the loop itself, and one at -1 is
-        // world, which is a constant and no read at all.
+        // a pole vector's group after its IK handle's. A source at -1 is
+        // world; an own-source read remains a real dependency for SCC policy.
         for (int slot = group.begin; slot < group.end; ++slot) {
-            for (const int source : autoClavicleReads(slot)) {
-                if (source >= 0 &&
-                    (source < group.begin || source >= group.end)) {
-                    step.reads.push_back(RigExecBakedOne(
-                        RigExecBakedSlotDomain::PosedM, source));
-                }
-            }
-            if (const int index = B.autoClavicleBySlot.empty()
-                                      ? -1 : B.autoClavicleBySlot[size_t(slot)];
-                index >= 0) {
-                const RigExecBakedProgramImpl::AutoClavicle &ac =
-                    B.autoClavicles[size_t(index)];
-                RigExecBakedNoteInput(ac.ikBlendInput, &step);
-                RigExecBakedNoteInput(ac.ikBlendFloat, &step);
-                RigExecBakedNoteInput(ac.amountInput, &step);
-                RigExecBakedNoteInput(ac.amountFloat, &step);
-                if (ac.limbSolver >= 0) {
-                    const RigExecBakedProgramImpl::Solver &s =
-                        B.solvers[size_t(ac.limbSolver)];
-                    RigExecBakedNoteInput(s.stretch, &step);
-                    RigExecBakedNoteInput(s.pin, &step);
-                    RigExecBakedNoteInput(s.upperScale, &step);
-                    RigExecBakedNoteInput(s.lowerScale, &step);
-                    RigExecBakedNoteInput(s.softDistance, &step);
-                    RigExecBakedNoteInput(s.limbTwist, &step);
-                }
-            }
             const int switchIndex =
                 B.spaceSwitchBySlot.empty()
                     ? -1 : B.spaceSwitchBySlot[size_t(slot)];
             if (switchIndex < 0) continue;
             const RigExecBakedProgramImpl::SpaceSwitch &sw =
                 B.spaceSwitches[size_t(switchIndex)];
+            const auto checkpointRead=[&](const auto &read) {
+                if(read.context>=0)step.reads.push_back(
+                    RigExecBakedOne(RigExecBakedSlotDomain::SwitchFrame,read.context));
+            };
+            checkpointRead(sw.parentRead);checkpointRead(sw.spaceRead);
+            for(const auto &read:sw.sourceReads)checkpointRead(read);
             std::vector<int> reads, recomposed;
             _SwitchVersionReads(sw, &reads, &recomposed);
             // An earlier version recomposed here reads those slots' avars,
@@ -1856,24 +1769,11 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
             for (const int at : recomposed) {
                 if (at < group.begin || at >= group.end) {
                     step.reads.push_back(RigExecBakedRange(
-                        RigExecBakedSlotDomain::Avars, at * 11, at * 11 + 11));
+                        RigExecBakedSlotDomain::Avars, at, at + 1));
                 }
             }
-            for (const int source : reads) {
-                // OUTSIDE the group in EITHER direction. A source above the
-                // group is as real a read as one below it -- emission is in
-                // dependency order, not slot order, so "below" says nothing
-                // about what has run -- and an undeclared read is invisible
-                // to the dirty sweep: the first generation runs every step
-                // and gets it right, and no later edit of that source ever
-                // re-runs this step again. That is a switched control going
-                // deaf to its space the moment anything is authored on it.
-                if (source >= 0 &&
-                    (source < group.begin || source >= group.end)) {
-                    step.reads.push_back(RigExecBakedOne(
-                        RigExecBakedSlotDomain::PosedM, source));
-                }
-            }
+            for(const int source:reads)if(source>=0)
+                step.reads.push_back(RigExecBakedOne(RigExecBakedSlotDomain::PosedM,source));
             // The index itself is declared by
             // RigExecBakedDeclareInputDependencies.
         }
@@ -1909,7 +1809,6 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
                 RigExecBakedSlotDomain::FrameMatrix, int(nextRecord)));
         }
     };
-    std::set<size_t> levels;
     // Where the next split commit's staging pairs start. The scratch behind
     // them is per commit, but the SLOT IDS are handed out once for the whole
     // program: two commits declaring the same [0, n) would be ordered against
@@ -1926,17 +1825,7 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
         // so the merge is an indexed store and "last writer wins on a
         // duplicate slot" survives as the order the stores happen in.
         if (walk.solverBatch) {
-            levels.insert(walk.level);
-            B.solverEvaluations += walk.batchSolvers.size();
-            // A solver STACK is two commits on one slot, never two producers
-            // inside one commit: the sort-and-unique below would fold them
-            // into one entry and the merge would keep only the last store,
-            // silently collapsing a stack -- and the dynamic path collapses
-            // identically (candidates[joint] = frame into a map), so the two
-            // would agree on the WRONG answer. One solver per batch makes it
-            // unreachable, and Build REFUSES the shape by name before it gets
-            // here (RigExecBakedRefuseBatchedStackWrites), so this loop may
-            // assume it.
+            // Each solver owns its authored commit and distinct pose versions.
             for (const int si : walk.batchSolvers) {
                 for (const auto &[slot, element] : B.solvers[size_t(si)]
                                                        .outputs) {
@@ -2001,7 +1890,7 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
                     solver.outPosition.push_back(positionOf(slot));
                 }
                 // +1 for the start provider's synthetic base element.
-                solver.elements.resize(solver.controls.size() +
+                solver.kernelWorkspace.fkElements.resize(solver.controls.size() +
                                        (solver.start >= 0 ? 1 : 0));
                 RigExecBakedStep &step =
                     AddStep(&B, RigExecBakedStepKind::Solve, si);
@@ -2280,10 +2169,34 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
         }
         addFrameRecordSteps(w);
     }
-    B.solverOverrideRounds = levels.size();
     // Before the matrices, which read the LAST version of a slot: the table
     // that says which entry that is comes out of this sweep.
     BindPoseVersions(&B);
+    if(!B.providerRefreshError.empty())return;
+    for(size_t index=0;index<B.providerRefreshes.size();++index) {
+        const auto &refresh=B.providerRefreshes[index];
+        auto &step=AddStep(&B,RigExecBakedStepKind::ProviderRefresh,int(index));
+        step.part=0;
+        step.maxDiagnostics=1;
+        step.reads.push_back(RigExecBakedOne(RigExecBakedSlotDomain::SpaceValue,refresh.baseValue));
+        step.reads.push_back(RigExecBakedOne(RigExecBakedSlotDomain::SpaceValue,refresh.currentValue));
+        step.reads.push_back(RigExecBakedOne(RigExecBakedSlotDomain::PoseBase,refresh.baseRead));
+        step.reads.push_back(RigExecBakedOne(RigExecBakedSlotDomain::PoseFin,refresh.finRead));
+        step.writes.push_back(RigExecBakedOne(RigExecBakedSlotDomain::PoseBase,refresh.baseWrite));
+        step.writes.push_back(RigExecBakedOne(RigExecBakedSlotDomain::PoseFin,refresh.finWrite));
+        for(const auto &carry:refresh.carries) {
+            step.reads.push_back(RigExecBakedOne(RigExecBakedSlotDomain::PoseBase,carry.baseRead));
+            step.reads.push_back(RigExecBakedOne(RigExecBakedSlotDomain::PoseFin,carry.finRead));
+            step.writes.push_back(RigExecBakedOne(RigExecBakedSlotDomain::PoseBase,carry.baseWrite));
+            step.writes.push_back(RigExecBakedOne(RigExecBakedSlotDomain::PoseFin,carry.finWrite));
+            for(int slot:carry.blockingSlots) {
+                const int raw=B.providerParentRawLeaves[size_t(slot)];
+                if(raw>=0)step.reads.push_back(RigExecBakedOne(RigExecBakedSlotDomain::SpaceLeaf,uint32_t(raw)));
+            }
+        }
+        for(const auto &[commit,pos]:refresh.priorConstraints)
+            step.reads.push_back(RigExecBakedOne(RigExecBakedSlotDomain::CommitTable,commit));
+    }
     BindFrameRecordVersions(&B);
 
     // The dynamic path answers these from a second exec request, whose
@@ -2304,7 +2217,7 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
     for (const int si : B.guideSolvers) {
         RigExecBakedProgramImpl::Solver &solver = B.solvers[size_t(si)];
         // +1 for the start provider's synthetic base element.
-        solver.elements.resize(solver.controls.size() +
+        solver.kernelWorkspace.fkElements.resize(solver.controls.size() +
                                (solver.start >= 0 ? 1 : 0));
         RigExecBakedStep &step =
             AddStep(&B, RigExecBakedStepKind::Solve, si);
@@ -2381,6 +2294,8 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
                 &B, RigExecBakedStepKind::ProviderMatrix, slot, 1);
             step.reads.push_back(
                 RigExecBakedOne(RigExecBakedSlotDomain::PoseFin, slot));
+            step.reads.push_back(
+                RigExecBakedOne(RigExecBakedSlotDomain::PoseBase, slot));
             step.writes.push_back(
                 RigExecBakedOne(RigExecBakedSlotDomain::FinalMatrix, slot));
         }
@@ -2420,6 +2335,114 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
         step.writes.push_back(RigExecBakedRange(
             RigExecBakedSlotDomain::PoseWeight, interpolator.weightBegin,
             interpolator.weightEnd));
+    }
+
+    // The body bindings are the operation's value identities. Provider slots
+    // name only the initial compose values; every authored commit owns its
+    // assigned SSA outputs, independent of the common graph's eventual order.
+    using Domain = RigExecBakedSlotDomain;
+    using Kind = RigExecBakedStepKind;
+    for (auto &step : B.steps) {
+        if (step.kind != Kind::Solve && step.kind != Kind::FrameMatrix &&
+            step.kind != Kind::ProviderMatrix && step.kind != Kind::PoseInterpolator &&
+            step.kind != Kind::Constraint && step.kind != Kind::SolverCommit &&
+            step.kind != Kind::CommitDelta && step.kind != Kind::PropagateChunk &&
+            step.kind != Kind::CommitApply) continue;
+        const auto poseRange = [](const RigExecBakedSlotRange &range) {
+            return range.domain == Domain::PoseFin || range.domain == Domain::PoseBase;
+        };
+        step.reads.erase(std::remove_if(step.reads.begin(), step.reads.end(), poseRange), step.reads.end());
+        step.writes.erase(std::remove_if(step.writes.begin(), step.writes.end(), poseRange), step.writes.end());
+        const auto read = [&](Domain domain, uint32_t value) {
+            step.reads.push_back(RigExecBakedOne(domain, value));
+        };
+        const auto readAll = [&](Domain domain, const auto &values) {
+            for (const auto value : values) read(domain, value);
+        };
+        const auto writeAll = [&](Domain domain, const auto &values) {
+            for (const auto value : values) step.writes.push_back(RigExecBakedOne(domain, value));
+        };
+        if (step.kind == Kind::Solve) {
+            const auto &solver = B.solvers[size_t(step.object)];
+            readAll(Domain::PoseFin, solver.controlReads);
+            for (const auto binding : {std::make_pair(solver.start, solver.startRead),
+                     std::make_pair(solver.root, solver.rootRead),
+                     std::make_pair(solver.mid, solver.midRead),
+                     std::make_pair(solver.end, solver.endRead),
+                     std::make_pair(solver.pole, solver.poleRead),
+                     std::make_pair(solver.spaceSlot, uint32_t(solver.spaceRead))}) {
+                if (binding.first >= 0) read(Domain::PoseFin, binding.second);
+            }
+            for (size_t k = 0; k < solver.restReads.size(); ++k)
+                if (k < solver.restIsLive.size() && solver.restIsLive[k])
+                    read(Domain::PoseFin, solver.restReads[k]);
+        } else if (step.kind == Kind::FrameMatrix) {
+            read(Domain::PoseFin, B.frameRecords[size_t(step.object)].version);
+        } else if (step.kind == Kind::ProviderMatrix) {
+            const size_t slot = size_t(step.object);
+            if (step.part) read(Domain::PoseFin, B.finLast[slot]);
+            read(Domain::PoseBase, B.baseLast[slot]);
+        } else if (step.kind == Kind::PoseInterpolator) {
+            const auto &interp = B.poseInterpolators[size_t(step.object)];
+            if (interp.driverSlot >= 0) read(Domain::PoseFin, B.finLast[size_t(interp.driverSlot)]);
+            if (interp.parentSlot >= 0) read(Domain::PoseFin, B.finLast[size_t(interp.parentSlot)]);
+        } else if (step.kind == Kind::Constraint || step.kind == Kind::SolverCommit ||
+                   step.kind == Kind::CommitDelta || step.kind == Kind::PropagateChunk ||
+                   step.kind == Kind::CommitApply) {
+            const auto &commit = B.commits[size_t(step.object)];
+            if (step.kind == Kind::Constraint) {
+                const auto &c = B.constraints[size_t(B.walkSteps[size_t(step.object)].index)];
+                for (size_t k = 0; k < c.sources.size(); ++k)
+                    if (c.sources[k] >= 0) read(Domain::PoseFin, commit.sourceReads[k]);
+                if (c.target >= 0) read(Domain::PoseFin, commit.targetRead);
+                readAll(Domain::PoseFin, commit.targetReads);
+                if (c.worldUpObject >= 0) read(Domain::PoseFin, commit.worldUpRead);
+                if (c.effector >= 0) read(Domain::PoseFin, commit.effectorRead);
+                for (size_t k = 0; k < c.poleObjects.size(); ++k)
+                    if (c.poleObjects[k] >= 0) read(Domain::PoseFin, commit.poleReads[k]);
+                const auto ancestors = [&](const auto &values) {
+                    for (const auto &value : values) {
+                        read(Domain::PoseFin, value.fin); read(Domain::PoseBase, value.base);
+                    }
+                };
+                for (const auto &values : commit.sourceAncestors) ancestors(values);
+                for (const auto &values : commit.poleAncestors) ancestors(values);
+                ancestors(commit.worldUpAncestors); ancestors(commit.effectorAncestors);
+            }
+            const bool apply = step.kind == Kind::CommitApply ||
+                (!commit.split && (step.kind == Kind::Constraint || step.kind == Kind::SolverCommit));
+            if (step.kind == Kind::CommitDelta || (apply && !commit.split))
+                readAll(Domain::PoseFin, commit.slotReads);
+            if (step.kind == Kind::PropagateChunk || (apply && !commit.split)) {
+                const size_t begin = step.kind == Kind::PropagateChunk
+                    ? size_t(step.part) * kPropagateChunkSize : 0;
+                const size_t end = step.kind == Kind::PropagateChunk
+                    ? std::min(begin + kPropagateChunkSize, commit.propagate.size())
+                    : commit.propagate.size();
+                for (size_t k = begin; k < end; ++k) {
+                    read(Domain::PoseFin, commit.descendantReads[k]);
+                    read(Domain::PoseFin, commit.closestReads[k]);
+                }
+            }
+            if (apply) {
+                writeAll(Domain::PoseFin, commit.slotWrites);
+                writeAll(Domain::PoseFin, commit.descendantWrites);
+                writeAll(Domain::PoseBase, commit.slotBaseWrites);
+                writeAll(Domain::PoseBase, commit.descendantBaseWrites);
+                for(auto value:commit.slotCarry)read(Domain::PoseFin,value);
+                for(auto value:commit.slotBaseCarry)read(Domain::PoseBase,value);
+                const auto carries = [&](Domain domain,const auto &values,const auto &candidateWrites) {
+                    for(size_t k=0;k<values.size();++k) {
+                        bool internal=false;
+                        for(size_t pos=0;pos<commit.slots.size() && pos<candidateWrites.size();++pos)
+                            internal=internal || (commit.propagate[k].first==commit.slots[pos] && values[k]==candidateWrites[pos]);
+                        if(!internal)read(domain,values[k]);
+                    }
+                };
+                carries(Domain::PoseFin,commit.descendantCarry,commit.slotWrites);
+                carries(Domain::PoseBase,commit.descendantBaseCarry,commit.slotBaseWrites);
+            }
+        }
     }
 }
 
@@ -2461,11 +2484,6 @@ NoteSolverInputs(const RigExecBakedProgramImpl::Solver &solver,
     NoteInput(solver.lowerOffset, sink);
     NoteInput(solver.stretch, sink);
     NoteInput(solver.softness, sink);
-    NoteInput(solver.pin, sink);
-    NoteInput(solver.upperScale, sink);
-    NoteInput(solver.lowerScale, sink);
-    NoteInput(solver.softDistance, sink);
-    NoteInput(solver.limbTwist, sink);
     NoteInput(solver.blendWeight, sink);
     NoteInput(solver.preserveVolume, sink);
     NoteInput(solver.midFollowWeight, sink);
@@ -2510,7 +2528,6 @@ NoteConstraintInputs(const RigExecBakedProgramImpl::Constraint &constraint,
     // deal harder to forget.
     NoteInput(constraint.poleVector, sink);
     NoteInput(constraint.twistDegrees, sink);
-    NoteInput(constraint.ikStretch, sink);
     // The authored source-weight, offset and pole-weight tables are NOT
     // noted here: they are not inputs the step reads at all. The prologue
     // re-reads them off the stage each run and compares them by value, and
@@ -2535,7 +2552,10 @@ void NoteStepInputs(const RigExecBakedProgramImpl &B, RigExecBakedDependencySink
         const RigExecBakedProgramImpl::WalkStep &walk =
             B.walkSteps[size_t(step.object)];
         if (!walk.solverBatch && walk.index >= 0 && size_t(walk.index) < B.constraints.size()) {
-            NoteConstraintInputs(B.constraints[size_t(walk.index)], sink);
+            const auto &constraint=B.constraints[size_t(walk.index)];
+            NoteConstraintInputs(constraint,sink);
+            if(constraint.arrays>=0) sink->step->reads.push_back(RigExecBakedOne(
+                RigExecBakedSlotDomain::ConstraintInputs,uint32_t(constraint.arrays)));
         }
         break;
     }
@@ -2543,6 +2563,16 @@ void NoteStepInputs(const RigExecBakedProgramImpl &B, RigExecBakedDependencySink
         if (step.object < 0 || size_t(step.object) >= B.weightObjects.size()) break;
         RigExecBakedNoteWeightInputs(
             B.weightObjects[size_t(step.object)], sink);
+        break;
+    case RigExecBakedStepKind::AvarInputs: {
+        const size_t slot=size_t(step.object);
+        for(const auto &binding:B.avarBindings) if(binding.slot/11==slot) NoteInput(binding.input,sink);
+        for(const auto &binding:B.avarConstantBindings) if(binding.slot/11==slot) NoteInput(binding.input,sink);
+        break;
+    }
+    case RigExecBakedStepKind::ProviderRefresh:
+        for(const auto &carry:B.providerRefreshes[size_t(step.object)].carries)
+            for(int slot:carry.blockingSlots)NoteInput(B.ladders[size_t(slot)].parentSpace,sink);
         break;
     case RigExecBakedStepKind::ComposeSubtree: {
         if (step.object < 0 || size_t(step.object) >= B.composeGroups.size()) break;
@@ -2555,38 +2585,16 @@ void NoteStepInputs(const RigExecBakedProgramImpl &B, RigExecBakedDependencySink
                 slot < 0 || size_t(slot) >= B.spaceSwitchBySlot.size()
                     ? -1 : B.spaceSwitchBySlot[size_t(slot)];
             if (switchIndex >= 0 && size_t(switchIndex) < B.spaceSwitches.size()) {
-                NoteInput(B.spaceSwitches[size_t(switchIndex)].activeInput,
-                          sink);
-            }
-            const int clavicleIndex =
-                B.autoClavicleBySlot.empty()
-                    ? -1 : B.autoClavicleBySlot[size_t(slot)];
-            if (clavicleIndex >= 0) {
-                const RigExecBakedProgramImpl::AutoClavicle &ac =
-                    B.autoClavicles[size_t(clavicleIndex)];
-                NoteInput(ac.ikBlendInput, sink);
-                NoteInput(ac.ikBlendFloat, sink);
-                NoteInput(ac.amountInput, sink);
-                NoteInput(ac.amountFloat, sink);
-                if (ac.limbSolver >= 0) {
-                    // The limb's IK inputs shape the clavicle's estimate.
-                    const RigExecBakedProgramImpl::Solver &s =
-                        B.solvers[size_t(ac.limbSolver)];
-                    NoteInput(s.stretch, sink);
-                    NoteInput(s.pin, sink);
-                    NoteInput(s.upperScale, sink);
-                    NoteInput(s.lowerScale, sink);
-                    NoteInput(s.softDistance, sink);
-                    NoteInput(s.limbTwist, sink);
-                }
+                const auto &sw = B.spaceSwitches[size_t(switchIndex)];
+                if (sw.tokenIndex) NoteInput(sw.activeTokenInput, sink);
+                else NoteInput(sw.activeInput, sink);
             }
         }
         break;
     }
     case RigExecBakedStepKind::PoseInterpolator: {
         if (step.object < 0 || size_t(step.object) >= B.poseInterpolators.size()) break;
-        // Read by the prologue into enabledValue and values, which the
-        // step consumes; the step owns the dependency.
+        // The owning body resolves the current enable and numeric channels.
         const RigExecBakedProgramImpl::PoseInterpolator &interpolator =
             B.poseInterpolators[size_t(step.object)];
         NoteInput(interpolator.enabled, sink);
@@ -2624,7 +2632,10 @@ RigExecBakedDeclareInputDependencies(RigExecBakedProgramImpl *program)
 {
     RigExecBakedProgramImpl &B = *program;
     for (RigExecBakedStep &step : B.steps) {
-        if (step.isHead) continue;
+        if (step.isHead) {
+            if (step.kind == RigExecBakedStepKind::WeightField) RigExecBakedDeclareWeightField(&B,&step);
+            continue;
+        }
         step.varyingInputs = false;
         step.overrideInputs.clear();
         step.readerWalks.clear();
@@ -2632,6 +2643,21 @@ RigExecBakedDeclareInputDependencies(RigExecBakedProgramImpl *program)
             [](const auto &r) { return RigExecBakedIsHeadDomain(r.domain); }),step.reads.end());
         RigExecBakedDependencySink sink{&step};
         NoteStepInputs(B, &sink);
+        if (step.kind == RigExecBakedStepKind::WeightField) {
+            RigExecBakedDeclareWeightField(&B,&step);
+            const auto &field = B.weightFields[size_t(step.object)];
+            for (const auto &read : field.scalarReads)
+                for (uint32_t leaf : read.leaves)
+                    step.varyingInputs = step.varyingInputs || B.headLeaves[leaf].varying;
+        }
+        if (step.kind == RigExecBakedStepKind::Constraint) {
+            const auto &walk = B.walkSteps[size_t(step.object)];
+            if (!walk.solverBatch && walk.index >= 0) {
+                const auto &constraint = B.constraints[size_t(walk.index)];
+                if (constraint.weightField >= 0)
+                    step.reads.push_back(RigExecBakedOne(RigExecBakedSlotDomain::WeightField,constraint.weightField));
+            }
+        }
         std::sort(step.overrideInputs.begin(), step.overrideInputs.end());
         step.overrideInputs.erase(
             std::unique(step.overrideInputs.begin(),
@@ -2666,10 +2692,13 @@ RigExecBakedNumberLeaves(RigExecBakedProgramImpl *program)
     RigExecBakedProgramImpl &B = *program;
     B.leaves = RigExecBakedLeafPools();
     B.leafRefs.clear();
+    B.sourceBackedPaths.clear();
     B.leafOfOverride.assign(B.overridden.size(), -1);
     frozenDetail::_ForEachPatchableInput(B, [&B](auto &input) {
         using T = std::decay_t<decltype(input.constant)>;
         using Stored = typename RigExecBakedLeafTraits<T>::Stored;
+        if (input.sourceBacked && input.head)
+            B.sourceBackedPaths.insert(input.head.GetPath());
         RigExecBakedLeafPool<T> &pool = B.leaves.Of<T>();
         const uint32_t id = uint32_t(B.leafRefs.size());
         input.leaf = int(pool.value.size());
@@ -2706,9 +2735,32 @@ RigExecBakedNumberLeaves(RigExecBakedProgramImpl *program)
     // layouts. Each is filed under every path its read can reach, so a value
     // edit there or on its routed prim marks it (ApplyValueEdits).
     B.pathLeafRefs.clear();
-    const auto number = [&B](const RigExecBakedPathLeaves &leaves,
+    const auto number = [&B](RigExecBakedPathLeaves &leaves,
                              RigExecBakedPathLeafRef ref) {
+        leaves.exactVersions.assign(leaves.decl.keys.size(),-1);
+        leaves.exactRecordIndices.assign(leaves.decl.keys.size(),-1);
+        leaves.exactValueTypes.assign(leaves.decl.keys.size(),-1);
         for (size_t k = 0; k < leaves.decl.keys.size(); ++k) {
+            const auto &key=leaves.decl.keys[k];
+            using F=RigExecRevisionLeafFlavour;
+            if(ref.owner!=RigExecBakedPathLeafOwner::WeightOracle &&
+               key.time==RigExecRevisionLeafTime::AtTime && key.flavour!=F::Raw) {
+                for(size_t r=0;r<B.propertyRecords.size();++r) {
+                    const auto &record=B.propertyRecords[r];
+                    if(record.consumer!=key.path) continue;
+                    leaves.exactVersions[k]=int(record.id);
+                    leaves.exactRecordIndices[k]=int(r);
+                    leaves.exactValueTypes[k]=int(B.propertyChains[record.chain].arm);
+                    break;
+                }
+                if(leaves.exactVersions[k]<0) for(const auto &chain:B.propertyChains)
+                    if(chain.target==key.path) {
+                        leaves.exactVersions[k]=int(chain.versionBase+chain.revisions.size());
+                        leaves.exactValueTypes[k]=int(chain.arm);
+                        break;
+                    }
+
+            }
             ref.key = uint32_t(k);
             const uint32_t id =
                 uint32_t(B.leafRefs.size() + B.pathLeafRefs.size());
@@ -2721,7 +2773,7 @@ RigExecBakedNumberLeaves(RigExecBakedProgramImpl *program)
         }
     };
     for (size_t c = 0; c < B.chains.size(); ++c) {
-        const RigExecBakedProgramImpl::GeomChain &chain = B.chains[c];
+        RigExecBakedProgramImpl::GeomChain &chain = B.chains[c];
         for (size_t r = 0; r < chain.revisions.size(); ++r) {
             number(chain.revisions[r].leaves,
                    {RigExecBakedPathLeafOwner::Revision, uint32_t(c),
@@ -2736,10 +2788,12 @@ RigExecBakedNumberLeaves(RigExecBakedProgramImpl *program)
     for (size_t w = 0; w < B.weightObjects.size(); ++w) {
         number(B.weightObjects[w].pointLeaves,
                {RigExecBakedPathLeafOwner::Weight, uint32_t(w), 0, 0});
+        number(B.weightObjects[w].oracleLeaves,
+               {RigExecBakedPathLeafOwner::WeightOracle,uint32_t(w),0,0});
     }
     // The SkinTopology ops' layout leaves, chain by chain.
     for (size_t c = 0; c < B.chains.size(); ++c) {
-        const RigExecBakedProgramImpl::GeomChain &chain = B.chains[c];
+        RigExecBakedProgramImpl::GeomChain &chain = B.chains[c];
         for (size_t r = 0; r < chain.revisions.size(); ++r) {
             number(chain.revisions[r].layoutLeaves,
                    {RigExecBakedPathLeafOwner::RevisionLayout, uint32_t(c),
@@ -2750,6 +2804,89 @@ RigExecBakedNumberLeaves(RigExecBakedProgramImpl *program)
                    {RigExecBakedPathLeafOwner::DerivedLayout, uint32_t(c),
                     uint32_t(d), 0});
         }
+    }
+    number(B.providerLeaves,{RigExecBakedPathLeafOwner::Provider,0,0,0});
+    const auto declareExact=[&](const RigExecBakedPathLeaves &leaves,RigExecBakedStep *step) {
+        // Every declared source opinion participates in the readiness-time
+        // memo, including sites without a produced-value reader walk.
+        // Numbering precedes this binding so IDs reference the final census.
+        for(size_t i=0;i<B.pathLeafRefs.size();++i)
+            if(RigExecBakedPathLeavesOf(B,B.pathLeafRefs[i])==&leaves) {
+                const uint32_t id=uint32_t(B.leafRefs.size()+i);
+                if(std::find(step->bindingLeaves.begin(),step->bindingLeaves.end(),id)==step->bindingLeaves.end())
+                    step->bindingLeaves.push_back(id);
+            }
+        for(int version:leaves.exactVersions) if(version>=0)
+            step->reads.push_back(RigExecBakedOne(RigExecBakedSlotDomain::PropertyResult,uint32_t(version)));
+    };
+    const auto directBindings=[&](RigExecBakedStep *step,const auto &visit) {
+        visit([&](const auto &input) {
+            using T=std::decay_t<decltype(input.constant)>;
+            if(input.leaf<0) return;
+            const uint32_t id=B.leaves.Of<T>().id[size_t(input.leaf)];
+            if(std::find(step->bindingLeaves.begin(),step->bindingLeaves.end(),id)==step->bindingLeaves.end())
+                step->bindingLeaves.push_back(id);
+            if(input.walk>=0) {
+                const auto binding=std::make_pair(RigExecBakedLeafTraits<T>::type,uint32_t(input.leaf));
+                if(std::find(step->walkedBindingLeaves.begin(),step->walkedBindingLeaves.end(),binding)==step->walkedBindingLeaves.end())
+                    step->walkedBindingLeaves.push_back(binding);
+            }
+        });
+    };
+    for(auto &step:B.steps) {
+        // Direct bindings are numbered only now. Their current values must
+        // reach both source candidates and the effective numerical memo.
+        if(step.kind==RigExecBakedStepKind::Solve) {
+            directBindings(&step,[&](const auto &fn) { frozenDetail::_VisitSolverInputs(B.solvers[size_t(step.object)],fn); });
+        } else if(step.kind==RigExecBakedStepKind::Constraint) {
+            const auto &walk=B.walkSteps[size_t(step.object)];
+            if(!walk.solverBatch && walk.index>=0)
+                directBindings(&step,[&](const auto &fn) { frozenDetail::_VisitConstraintInputs(B.constraints[size_t(walk.index)],fn); });
+        } else if(step.kind==RigExecBakedStepKind::WeightPacket) {
+            directBindings(&step,[&](const auto &fn) { frozenDetail::_VisitWeightInputs(B.weightObjects[size_t(step.object)],fn); });
+        } else if(step.kind==RigExecBakedStepKind::PoseInterpolator) {
+            directBindings(&step,[&](const auto &fn) { frozenDetail::_VisitInterpolatorInputs(B.poseInterpolators[size_t(step.object)],fn); });
+        } else if(step.kind==RigExecBakedStepKind::ProviderRefresh) {
+            directBindings(&step,[&](const auto &fn) {
+                for(const auto &carry:B.providerRefreshes[size_t(step.object)].carries)
+                    for(int slot:carry.blockingSlots)fn(B.ladders[size_t(slot)].parentSpace);
+            });
+            for(const auto &carry:B.providerRefreshes[size_t(step.object)].carries)for(int slot:carry.blockingSlots) {
+                const int raw=B.providerParentRawLeaves[size_t(slot)];
+                if(raw<0)continue;
+                for(size_t i=0;i<B.pathLeafRefs.size();++i) {
+                    const auto &ref=B.pathLeafRefs[i];
+                    if(ref.owner==RigExecBakedPathLeafOwner::Provider && ref.key==uint32_t(raw)) {
+                        const uint32_t id=uint32_t(B.leafRefs.size()+i);
+                        if(std::find(step.bindingLeaves.begin(),step.bindingLeaves.end(),id)==step.bindingLeaves.end())step.bindingLeaves.push_back(id);
+                        break;
+                    }
+                }
+            }
+        } else if(step.kind==RigExecBakedStepKind::ComposeSubtree) {
+            const auto &group=B.composeGroups[size_t(step.object)];
+            for(int slot=group.begin;slot<group.end;++slot) {
+                const int sw=B.spaceSwitchBySlot[size_t(slot)];
+                if(sw>=0) directBindings(&step,[&](const auto &fn) { frozenDetail::_VisitSpaceSwitchInputs(B.spaceSwitches[size_t(sw)],fn); });
+            }
+        }
+        if(step.kind==RigExecBakedStepKind::RevisionStatic) {
+            const auto &at=B.revisionIndex[size_t(step.object)];
+            declareExact(B.chains[size_t(at.first)].revisions[size_t(at.second)].leaves,&step);
+        } else if(step.kind==RigExecBakedStepKind::Derived) {
+            const auto &at=B.derivedIndex[size_t(step.object)];
+            declareExact(B.chains[size_t(at.first)].derived[size_t(at.second)].revision.leaves,&step);
+        } else if(step.kind==RigExecBakedStepKind::SkinTopology) {
+            const auto &at=B.revisionIndex[size_t(step.object)];
+            declareExact(B.chains[size_t(at.first)].revisions[size_t(at.second)].layoutLeaves,&step);
+        } else if(step.kind==RigExecBakedStepKind::WeightPacket)
+            declareExact(B.weightObjects[size_t(step.object)].pointLeaves,&step);
+    }
+    // Oracle path leaves are allocated by field capture after the initial
+    // census; bind field memo IDs only against this final numbered census.
+    for (auto &step : B.steps) if (step.kind == RigExecBakedStepKind::WeightField) {
+        step.bindingLeaves.clear();
+        RigExecBakedDeclareWeightField(&B, &step);
     }
     // The head leaves after those, each under its own path: a head leaf
     // reads one attribute and follows no connection.
@@ -2810,9 +2947,10 @@ RigExecBakedSampleLeaves(RigExecBakedProgramImpl *program, UsdTimeCode time,
         if (input.leaf < 0) {
             return;
         }
-        // A chain-routed binding reads after the head tier has published;
-        // no other binding's walk can reach a chain result or a record.
-        const bool routed = input.resolvedAttr || input.walk >= 0;
+        // Bound walks are resolved by their consumer against current graph
+        // values. Their source heads are sampled separately as raw leaves.
+        if(input.walk>=0) return;
+        const bool routed = bool(input.resolvedAttr);
         if ((pass == RigExecBakedLeafPass::BeforeHead && routed) ||
             (pass == RigExecBakedLeafPass::ChainRouted && !routed)) {
             return;
@@ -2847,6 +2985,34 @@ RigExecBakedSampleLeaves(RigExecBakedProgramImpl *program, UsdTimeCode time,
     });
 }
 
+namespace {
+bool _ProviderActive(const RigExecBakedProgramImpl &B,size_t slot)
+{
+    // Isolated hand-built kernel fixtures may have no captured scene. Actual
+    // source-built programs always retain the complete activity table.
+    return B.providerActive.empty() ||
+           (slot<B.providerActive.size() && B.providerActive[slot]);
+}
+GfMatrix4d _UnavailableProviderSpace()
+{
+    GfMatrix4d value(1.0);
+    value[3][0]=std::numeric_limits<double>::quiet_NaN();
+    return value;
+}
+bool _SpaceReady(const RigExecBakedProgramImpl &B,const RigExecBakedProgramImpl::Ladder &L,size_t channel)
+{
+    const int id=L.spaceValues[channel];
+    return id>=0 && B.providerValues.Read<GfMatrix4d>(RigExecValueId(id));
+}
+GfMatrix4d _SpaceMatrix(const RigExecBakedProgramImpl &B,const RigExecBakedProgramImpl::Ladder &L,
+    size_t channel,const GfMatrix4d &fallback)
+{
+    const int id=L.spaceValues[channel];
+    const auto *value=id>=0?B.providerValues.Read<GfMatrix4d>(RigExecValueId(id)):nullptr;
+    return value?*value:fallback;
+}
+}
+
 void
 RigExecBakedComposeRestRange(RigExecBakedProgramImpl *program, int begin,
                              int end, bool trackMoves)
@@ -2867,17 +3033,37 @@ RigExecBakedComposeRestRange(RigExecBakedProgramImpl *program, int begin,
             // stays the identity a descendant of one would inherit.
             continue;
         }
+        if (B.execCheckRows) B.execCheckRows->BeforeSlot(
+            B, RigExecBakedStepKind::RestCompose, begin, i);
+        if(!_ProviderActive(B,slot)) {
+            RigExecPointFrame unavailableFrame;
+            unavailableFrame.flags=0;
+            const auto unavailable=_UnavailableProviderSpace();
+            bool changed=!RigExecTypedSame(B.restFrames[slot],unavailableFrame) ||
+                !RigExecTypedSame(B.restM[slot],unavailable) ||
+                !RigExecTypedSame(B.restRoundTrip[slot],unavailable);
+            for(size_t k=0;k<unavailableFrame.points.size();++k)
+                changed=changed || !RigExecTypedSame(B.restPts[slot][k],unavailableFrame.points[k]);
+            B.restFrames[slot]=unavailableFrame;
+            B.restPts[slot]=unavailableFrame.points;
+            B.restM[slot]=unavailable;
+            B.restRoundTrip[slot]=unavailable;
+            if(trackMoves && changed) B.restChanged[slot]=1;
+            continue;
+        }
         const RigExecBakedProgramImpl::Ladder &L = B.ladders[slot];
         GfMatrix4d rest =
             RigExecBakedComposeAvars(rd(L.restAvars[0]), rd(L.restAvars[1]),
                                      rd(L.restAvars[2]), 1, 1, 1,
                                      rd(L.restAvars[3]), rd(L.restAvars[4]),
                                      rd(L.restAvars[5]), 0, B.xyzToken) *
-            rd(L.restSpace);
+            _SpaceMatrix(B,L,0,rd(L.restSpace));
         rest.Orthonormalize(/* issueWarning = */ false);
         const int parent = B.parent[slot];
         const GfMatrix4d parentRest =
             parent >= 0 ? B.restRoundTrip[size_t(parent)] : identity;
+        const GfMatrix4d intervening = rd(L.interveningSpace);
+        if (intervening != identity) rest = rest * intervening;
         B.restM[slot] = rest * parentRest;
         B.restFrames[slot] = RigExecFrameFromMatrix(B.restM[slot]);
         B.restPts[slot] = B.restFrames[slot].points;
@@ -2891,7 +3077,7 @@ RigExecBakedComposeRestRange(RigExecBakedProgramImpl *program, int begin,
             B.lastRestM[slot] = B.restM[slot];
             if (!B.restChanged[slot]) {
                 B.restChanged[slot] = 1;
-                B.restMoved.push_back(i);
+
             }
         }
     }
@@ -2912,36 +3098,68 @@ RigExecBakedComposeLadderRange(RigExecBakedProgramImpl *program, int begin,
             // No default-space ladder either; see the rest above.
             continue;
         }
+        if (B.execCheckRows) B.execCheckRows->BeforeSlot(
+            B, RigExecBakedStepKind::LadderCompose, begin, i);
+        if(!_ProviderActive(B,slot)) {
+            const auto unavailable=_UnavailableProviderSpace();
+            const bool changed=!RigExecTypedSame(B.selfD[slot],unavailable) ||
+                !RigExecTypedSame(B.parentDinv[slot],unavailable) ||
+                !RigExecTypedSame(B.restRoundTrip[slot],unavailable) ||
+                !RigExecTypedSame(B.defaultRoundTrip[slot],unavailable) ||
+                !RigExecTypedSame(B.posedAuthoredM[slot],unavailable) ||
+                !RigExecTypedSame(B.posedD[slot],unavailable) ||
+                !RigExecTypedSame(B.parentSpaceM[slot],unavailable) ||
+                B.posedAuthored[slot]!=0 || B.parentSpaceAuthored[slot]!=0 ||
+                B.rotOrder[slot]!=B.xyzToken || B.rotationSign[slot]!=0;
+            B.selfD[slot]=B.parentDinv[slot]=B.restRoundTrip[slot]=B.defaultRoundTrip[slot]=unavailable;
+            B.posedAuthoredM[slot]=B.posedD[slot]=B.parentSpaceM[slot]=unavailable;
+            B.posedAuthored[slot]=B.parentSpaceAuthored[slot]=0;
+            B.rotOrder[slot]=B.xyzToken;
+            B.rotationSign[slot]=0;
+            if(trackMoves && changed) B.ladderChanged[slot]=1;
+            continue;
+        }
         const RigExecBakedProgramImpl::Ladder &L = B.ladders[slot];
-        // A non-identity authored posed:space stands in for the whole
-        // compose: exec returns its frame and reads nothing else about the
-        // provider, so the compose does the same and the rest chain below
-        // still resolves, because the REST frame is a different question.
-        const GfMatrix4d posed = rd(L.posedSpace);
-        B.posedAuthored[slot] = posed != identity ? 1 : 0;
+        const auto authoritative = [&B](const auto &input, bool connected) {
+            const int index = input.overrideIndex;
+            return connected || (index >= 0 &&
+                ((size_t(index) < B.overridden.size() && B.overridden[size_t(index)]) ||
+                 (size_t(index) < B.upstreamOn.size() && B.upstreamOn[size_t(index)])));
+        };
+        const GfMatrix4d posed = _SpaceMatrix(B,L,2,rd(L.posedSpace));
+        B.posedAuthored[slot] = authoritative(L.posedSpace, L.posedSpaceConnected) || posed != identity;
         B.posedAuthoredM[slot] = posed;
-
         const int parent = B.parent[slot];
-        const GfMatrix4d parentRest =
-            parent >= 0 ? B.restRoundTrip[size_t(parent)] : identity;
-        // default:space is a space EXPRESSION: a non-identity authored value
-        // wins, otherwise the computed ladder.
-        const GfMatrix4d authoredDefault = rd(L.defaultSpace);
+        const GfMatrix4d parentRest = parent >= 0 ? B.restRoundTrip[size_t(parent)] : identity;
+        const GfMatrix4d authoredParentDefault = _SpaceMatrix(B,L,4,rd(L.parentDefaultSpace));
         const GfMatrix4d parentDefault =
-            parent >= 0 ? B.defaultRoundTrip[size_t(parent)] : identity;
-        if (authoredDefault != identity) {
+            _SpaceReady(B,L,4) || authoritative(L.parentDefaultSpace, L.parentDefaultSpaceConnected) || authoredParentDefault != identity
+                ? authoredParentDefault
+                : (parent >= 0 ? B.defaultRoundTrip[size_t(parent)] : identity);
+        const GfMatrix4d authoredDefault = _SpaceMatrix(B,L,1,rd(L.defaultSpace));
+        if (_SpaceReady(B,L,1) || authoritative(L.defaultSpace, L.defaultSpaceConnected) || authoredDefault != identity) {
             B.selfD[slot] = authoredDefault;
         } else {
             const GfMatrix4d offset = RigExecBakedComposeAvars(
                 rd(L.defaultAvars[0]), rd(L.defaultAvars[1]),
                 rd(L.defaultAvars[2]), 1, 1, 1, rd(L.defaultAvars[3]),
-                rd(L.defaultAvars[4]), rd(L.defaultAvars[5]), 0,
-                B.xyzToken);
-            B.selfD[slot] = offset * B.restRoundTrip[slot] *
-                            parentRest.GetInverse() * parentDefault;
+                rd(L.defaultAvars[4]), rd(L.defaultAvars[5]), 0, B.xyzToken);
+            B.selfD[slot] = offset * B.restRoundTrip[slot] * parentRest.GetInverse() * parentDefault;
         }
         B.defaultRoundTrip[slot] = RigExecBakedRoundTrip(B.selfD[slot]);
+        const GfMatrix4d authoredAvarDefault = _SpaceMatrix(B,L,5,rd(L.avarDefaultSpace));
+        const GfMatrix4d avarDefault =
+            _SpaceReady(B,L,5) || authoritative(L.avarDefaultSpace, L.avarDefaultSpaceConnected) || authoredAvarDefault != identity
+                ? authoredAvarDefault : B.selfD[slot];
+        const GfMatrix4d authoredPosedDefault = _SpaceMatrix(B,L,6,rd(L.posedDefaultSpace));
+        B.posedD[slot] =
+            _SpaceReady(B,L,6) || authoritative(L.posedDefaultSpace, L.posedDefaultSpaceConnected) || authoredPosedDefault != identity
+                ? authoredPosedDefault : avarDefault;
         B.parentDinv[slot] = parentDefault.GetInverse();
+        B.parentSpaceM[slot] = _SpaceMatrix(B,L,3,rd(L.parentSpace));
+        B.parentSpaceAuthored[slot] = authoritative(L.parentSpace, L.parentSpaceConnected) || rd(L.parentSpace) != identity;
+        const GfVec3d sign = rd(L.rotationSign);
+        B.rotationSign[slot] = RigExecRotationSignMask(sign[0], sign[1], sign[2]);
         const TfToken order = rd(L.rotationOrder);
         B.rotOrder[slot] = order.IsEmpty() ? B.xyzToken : order;
 
@@ -2952,15 +3170,23 @@ RigExecBakedComposeLadderRange(RigExecBakedProgramImpl *program, int begin,
              B.parentDinv[slot] != B.lastParentDinv[slot] ||
              B.posedAuthored[slot] != B.lastPosedAuthored[slot] ||
              B.posedAuthoredM[slot] != B.lastPosedAuthoredM[slot] ||
-             B.rotOrder[slot] != B.lastRotOrder[slot])) {
+             B.rotOrder[slot] != B.lastRotOrder[slot] ||
+             B.posedD[slot] != B.lastPosedD[slot] ||
+             B.parentSpaceM[slot] != B.lastParentSpaceM[slot] ||
+             B.parentSpaceAuthored[slot] != B.lastParentSpaceAuthored[slot] ||
+             B.rotationSign[slot] != B.lastRotationSign[slot])) {
             B.lastSelfD[slot] = B.selfD[slot];
             B.lastParentDinv[slot] = B.parentDinv[slot];
             B.lastPosedAuthored[slot] = B.posedAuthored[slot];
             B.lastPosedAuthoredM[slot] = B.posedAuthoredM[slot];
             B.lastRotOrder[slot] = B.rotOrder[slot];
+            B.lastPosedD[slot] = B.posedD[slot];
+            B.lastParentSpaceM[slot] = B.parentSpaceM[slot];
+            B.lastParentSpaceAuthored[slot] = B.parentSpaceAuthored[slot];
+            B.lastRotationSign[slot] = B.rotationSign[slot];
             if (!B.ladderChanged[slot]) {
                 B.ladderChanged[slot] = 1;
-                B.ladderMoved.push_back(i);
+
             }
         }
     }
@@ -2980,9 +3206,15 @@ _ForEachLadderChannel(const RigExecBakedProgramImpl::Ladder &L, bool rest,
             fn(input);
         }
         fn(L.restSpace);
+        fn(L.interveningSpace);
     } else {
         fn(L.posedSpace);
         fn(L.defaultSpace);
+        fn(L.parentSpace);
+        fn(L.parentDefaultSpace);
+        fn(L.avarDefaultSpace);
+        fn(L.posedDefaultSpace);
+        fn(L.rotationSign);
         for (const RigExecBakedInput<double> &input : L.defaultAvars) {
             fn(input);
         }
@@ -3021,11 +3253,16 @@ RigExecBakedBuildRestSteps(RigExecBakedProgramImpl *program)
             step.label =
                 std::string(rest ? "RestCompose " : "LadderCompose ") +
                 first.GetString();
-            std::set<uint32_t> versions, rests, ladders;
+            std::set<uint32_t> versions, rests, ladders, spaces;
             for (int i = group.begin; i < group.end; ++i) {
                 const size_t slot = size_t(i);
                 if (B.slotKind[slot] != RigExecBakedSlotKind::FirstFramePose) {
                     continue;
+                }
+                const auto &L=B.ladders[slot];
+                for(size_t channel=0;channel<7;++channel) {
+                    if((rest && channel!=0) || (!rest && channel==0)) continue;
+                    if(L.spaceValues[channel]>=0) spaces.insert(uint32_t(L.spaceValues[channel]));
                 }
                 const int parent = B.parent[slot];
                 if (parent >= 0 &&
@@ -3051,6 +3288,7 @@ RigExecBakedBuildRestSteps(RigExecBakedProgramImpl *program)
                     rests.insert(uint32_t(i));
                 }
             }
+            ranges(RigExecBakedSlotDomain::SpaceValue,spaces,&step.reads);
             ranges(RigExecBakedSlotDomain::PropertyResult, versions,
                    &step.reads);
             ranges(RigExecBakedSlotDomain::Rest, rests, &step.reads);
@@ -3067,7 +3305,6 @@ RigExecBakedBuildRestSteps(RigExecBakedProgramImpl *program)
     B.ladderChanged.assign(N, 0);
     B.restMoved.clear();
     B.ladderMoved.clear();
-    B.restTierEverRan = false;
 }
 
 void
@@ -3102,7 +3339,6 @@ RigExecBakedNoteRestLeaves(RigExecBakedProgramImpl *program)
         }
     }
     // A notice between Build and the first run moves the stamp past this.
-    B.restTierStamp = B.programStamp;
 }
 
 std::vector<RigExecBakedSlotRange>
@@ -3114,13 +3350,17 @@ RigExecBakedRequiredRestReads(const RigExecBakedProgramImpl &B,
     const int N = int(B.paths.size());
     {
         std::set<uint32_t> rests, ladders;
-        const auto rest = [&rests, N](int slot) {
-            if (slot >= 0 && slot < N) {
+        // Plain Xform slots have immutable identity rest/default tables.
+        // Their sampled pose is a separate PoseBase/PoseFin value.
+        const auto rest = [&B, &rests, N](int slot) {
+            if (slot >= 0 && slot < N &&
+                B.slotKind[size_t(slot)] == RigExecBakedSlotKind::FirstFramePose) {
                 rests.insert(uint32_t(slot));
             }
         };
-        const auto ladder = [&ladders, N](int slot) {
-            if (slot >= 0 && slot < N) {
+        const auto ladder = [&B, &ladders, N](int slot) {
+            if (slot >= 0 && slot < N &&
+                B.slotKind[size_t(slot)] == RigExecBakedSlotKind::FirstFramePose) {
                 ladders.insert(uint32_t(slot));
             }
         };
@@ -3165,6 +3405,11 @@ RigExecBakedRequiredRestReads(const RigExecBakedProgramImpl &B,
             }
             break;
         }
+        case RigExecBakedStepKind::SpaceCheckpoint:
+            if (step.object < 0 || size_t(step.object) >= B.switchFrameContexts.size()) break;
+            for (const int slot : B.switchFrameContexts[size_t(step.object)].recompose)
+                ladder(slot);
+            break;
         case RigExecBakedStepKind::Solve:
             if (step.object < 0 || size_t(step.object) >= B.solvers.size()) break;
             for (const int slot : B.solvers[size_t(step.object)].restSlots) {
@@ -3191,6 +3436,13 @@ RigExecBakedRequiredRestReads(const RigExecBakedProgramImpl &B,
                 }
             }
             ladder(c.spaceSlot);
+            break;
+        }
+        case RigExecBakedStepKind::PropagateChunk: {
+            if(step.object<0 || size_t(step.object)>=B.commits.size()) break;
+            const auto &commit=B.commits[size_t(step.object)];
+            for(const auto &pair:commit.propagate)
+                for(int slot=pair.first;slot>=0 && slot!=pair.second;slot=B.propParent[size_t(slot)]) ladder(slot);
             break;
         }
         case RigExecBakedStepKind::ProviderMatrix:
@@ -3272,49 +3524,25 @@ RigExecBakedProgramTesting::LadderTablesOf(const RigExecBakedProgram &program)
 }
 
 void
-RigExecBakedRunInputs(RigExecBakedProgramImpl *program, UsdTimeCode time)
+RigExecBakedBuildAvarSteps(RigExecBakedProgramImpl *program)
 {
-    RigExecBakedProgramImpl &B = *program;
-    RIGEXEC_PROFILE_SCOPE_CAT(*B.profiler, "BakedInputs", "baked");
-    // The rest and ladder ops composed the provider ladder before this
-    // (RigExecBakedRunRestTier), and each Solve step refreshes from the
-    // rests that moved there.
-    // Every read below is a leaf RigExecBakedSampleLeaves left this run.
-    for (const auto &binding : B.avarBindings) {
-        B.avars[binding.slot] = RigExecBakedLeafRead(B, binding.input);
+    auto &B=*program;
+    for(size_t slot=0;slot<B.paths.size();++slot) {
+        RigExecBakedStep step; step.kind=RigExecBakedStepKind::AvarInputs; step.object=int(slot);
+        step.label="AvarInputs "+B.paths[slot].GetString();
+        step.writes.push_back(RigExecBakedOne(RigExecBakedSlotDomain::Avars,slot));
+        B.steps.push_back(std::move(step));
     }
-    for (const size_t index : B.promotedAvars) {
-        const auto &binding = B.avarConstantBindings[index];
-        B.avars[binding.slot] = RigExecBakedLeafRead(B, binding.input);
-    }
-    // A drag lands on avars the bake captured as constants -- that is what
-    // dragging a control on a still rig IS -- so the varying list above is not
-    // the whole table while one stands. The constant slots are walked while a
-    // drag stands and once more after it is released, because the released
-    // slot holds the dragged value until something writes the constant back
-    // over it. Once per run: the pass and the flag update are the prologue's,
-    // not a step's, so no arrangement of the graph can perform them twice.
-    // An upstream value placed, moved or lifted on a constant avar runs it
-    // too; each slot takes its leaf, which is the constant unless a drag or
-    // an upstream value stands there, so a standing upstream value survives
-    // a drag on another avar.
-    if (B.anyOverridden || B.avarsDisturbed || B.upstreamMovedThisRun) {
-        for (const auto &binding : B.avarConstantBindings) {
-            B.avars[binding.slot] = RigExecBakedLeaf(B, binding.input);
-        }
-        B.avarsDisturbed = B.anyOverridden;
-    }
-    // The pose interpolators' enables, read here so their step reads no USD.
-    for (RigExecBakedProgramImpl::PoseInterpolator &interpolator :
-             B.poseInterpolators) {
-        interpolator.enabledValue =
-            RigExecBakedLeafRead(B, interpolator.enabled);
-        // A numeric driver's dials, read here so its step reads no USD.
-        for (size_t i = 0; i < interpolator.valueInputs.size(); ++i) {
-            interpolator.values[i] =
-                RigExecBakedLeafRead(B, interpolator.valueInputs[i]);
-        }
-    }
+}
+void
+RigExecBakedRunAvarOp(RigExecBakedProgramImpl *program,RigExecBakedStep *step)
+{
+    auto &B=*program; const size_t slot=size_t(step->object);
+    const auto read=[&](const auto &binding) {
+        if(binding.slot/11==slot) B.avars[binding.slot]=RigExecBakedLeafRead(B,binding.input);
+    };
+    for(const auto &binding:B.avarBindings) read(binding);
+    for(const auto &binding:B.avarConstantBindings) read(binding);
 }
 
 void
@@ -3361,9 +3589,9 @@ ComputeCommitDeltas(const RigExecBakedProgramImpl &B,
         }
         commit->deltas[pos] = GfMatrix4d(1.0);
         commit->deltaOk[pos] =
-            RigExecPointsToMatrix(
-                B.fin[size_t(commit->slotReads[pos])].points,
-                commit->frames[pos].points, &commit->deltas[pos])
+            RigExecPreparePoseDelta(
+                B.fin[size_t(commit->slotReads[pos])],
+                commit->frames[pos], &commit->deltas[pos])
                 ? 1
                 : 2;
     }
@@ -3381,43 +3609,25 @@ StageCommitPairs(const RigExecBakedProgramImpl &B, RigExecBakedCommit *commit,
 {
     for (size_t k = begin; k < end; ++k) {
         const int pos = commit->closestPos[k];
-        if (pos < 0 || !commit->present[size_t(pos)]) {
-            // A solver published no element for this ancestor, so the baked
-            // propagation pairs no longer describe the walk.
+        bool parentBlocked = false;
+        for (int slot = commit->propagate[k].first;
+             slot >= 0 && slot != commit->propagate[k].second;
+             slot = B.propParent[size_t(slot)]) {
+            if (B.parentSpaceAuthored[size_t(slot)]) { parentBlocked = true; break; }
+        }
+        if (parentBlocked || pos < 0 || !commit->present[size_t(pos)]) {
+            // No candidate leaves this descendant unchanged.
             commit->outcome[k] =
-                uint8_t(RigExecBakedPropagateOutcome::NoCandidate);
+                uint8_t(RigExecBakedPropagateOutcome::Skipped);
             continue;
         }
         const RigExecPointFrame &current =
             B.fin[size_t(commit->descendantReads[k])];
         const RigExecPointFrame &before =
             B.fin[size_t(commit->closestReads[k])];
-        if (commit->solverOutput &&
-            (!RigExecBakedUsable(current) || !RigExecBakedUsable(before) ||
-             !RigExecBakedUsable(commit->frames[size_t(pos)]))) {
-            commit->outcome[k] =
-                uint8_t(RigExecBakedPropagateOutcome::Skipped);
-            continue;
-        }
-        if (!RigExecBakedUsable(current)) {
-            commit->outcome[k] =
-                uint8_t(RigExecBakedPropagateOutcome::UnusableDescendant);
-            continue;
-        }
-        if (commit->deltaOk[size_t(pos)] != 1) {
-            commit->outcome[k] =
-                uint8_t(RigExecBakedPropagateOutcome::SingularDelta);
-            continue;
-        }
-        const RigExecPointFrame frame =
-            RigExecMatrixToPoints(current.points, commit->deltas[size_t(pos)]);
-        if (!RigExecBakedUsable(frame)) {
-            commit->outcome[k] =
-                uint8_t(RigExecBakedPropagateOutcome::InvalidResult);
-            continue;
-        }
-        commit->staged[k] = frame;
-        commit->outcome[k] = uint8_t(RigExecBakedPropagateOutcome::Staged);
+        commit->outcome[k]=uint8_t(RigExecPropagatePoseFrame(current,before,
+            commit->frames[size_t(pos)],commit->deltas[size_t(pos)],
+            commit->deltaOk[size_t(pos)]==1,commit->solverOutput,false,true,&commit->staged[k]));
     }
 }
 
@@ -3480,14 +3690,6 @@ FinishCommit(RigExecBakedProgramImpl *program, RigExecBakedStep *step,
             continue;
         }
         switch (outcome) {
-        case RigExecBakedPropagateOutcome::NoCandidate:
-            // The generation is given back here, and the caller destroys the
-            // program, so nothing will ever read these versions -- but a
-            // step that leaves storage it declared unwritten is a rule with
-            // an exception, and this one is not worth having.
-            carryEverything();
-            step->bail = true;
-            return;
         case RigExecBakedPropagateOutcome::UnusableDescendant:
             step->diagnostics.push_back(
                 mover() + " could not propagate its pose revision through " +
@@ -3534,81 +3736,6 @@ FinishCommit(RigExecBakedProgramImpl *program, RigExecBakedStep *step,
                 commit->staged[k];
         }
     }
-}
-
-/// Translates an auto clavicle's target slot, whose base the compose has
-/// just written, by RigExecAutoClavicleShift. The first FK control is a
-/// direct child of the target (checked at build) and is composed here from
-/// its avars against the unshifted target, exactly as the dynamic path reads
-/// it before the shift is republished.
-void
-ApplyAutoClavicle(RigExecBakedProgramImpl &B,
-                  const RigExecBakedProgramImpl::AutoClavicle &ac,
-                  double ikBlend, double amount, int slot,
-                  const RigExecLimbStretch *limb = nullptr,
-                  double twistRadians = 0.0, double restUpper = 0.0,
-                  double restLower = 0.0)
-{
-    GfMatrix4d target;
-    if (!B.base[size_t(slot)].IsValid() || B.base[size_t(slot)].IsDegenerate() ||
-        !RigExecPointsToMatrix(RigExecIdentityLandmarks(),
-                               B.base[size_t(slot)].points, &target)) {
-        return;
-    }
-    const int u = ac.fkSlot[0];
-    RigExecPointFrame fkFrame;
-    if (B.posedAuthored[size_t(u)]) {
-        fkFrame = RigExecFrameFromMatrix(B.posedAuthoredM[size_t(u)]);
-    } else {
-        const double *a = &B.avars[size_t(u) * 11];
-        const double units = a[10];
-        const bool noScale = B.noScaleAvars[size_t(u)] != 0;
-        const unsigned sign = size_t(u) < B.rotationSign.size()
-            ? B.rotationSign[size_t(u)] : 0u;
-        const double sx = RigExecRotationSignFromMask(sign, 0);
-        const GfMatrix4d avars = RigExecBakedComposeAvars(
-            a[0] * units, a[1] * units, a[2] * units,
-            noScale ? 1.0 : a[3], noScale ? 1.0 : a[4], noScale ? 1.0 : a[5],
-            a[6] * sx, a[7] * RigExecRotationSignFromMask(sign, 1),
-            a[8] * RigExecRotationSignFromMask(sign, 2), a[9] * sx,
-            B.rotOrder[size_t(u)]);
-        fkFrame = RigExecFrameFromMatrix(avars * B.selfD[size_t(u)] *
-                                         B.parentDinv[size_t(u)] * target);
-    }
-    GfMatrix4d fk;
-    if (!fkFrame.IsValid() || fkFrame.IsDegenerate() ||
-        !RigExecPointsToMatrix(RigExecIdentityLandmarks(), fkFrame.points,
-                               &fk)) {
-        return;
-    }
-    RigExecAutoClavicleFrames f;
-    f.anchorPosed = B.posedM[size_t(ac.anchorSlot)].data();
-    f.anchorDefault = B.defaultRoundTrip[size_t(ac.anchorSlot)].data();
-    f.pivotPosed = B.posedM[size_t(ac.pivotSlot)].data();
-    f.targetPosed = target.data();
-    f.fkPosed = fk.data();
-    for (int k = 0; k < 3; ++k) {
-        f.fkDefault[k] = B.defaultRoundTrip[size_t(ac.fkSlot[k])].data();
-    }
-    if (ac.ikTargetSlot >= 0) {
-        f.ikTargetPosed = B.posedM[size_t(ac.ikTargetSlot)].data();
-    }
-    if (ac.poleSlot >= 0) f.polePosed = B.posedM[size_t(ac.poleSlot)].data();
-    f.ikBlend = ikBlend;
-    f.amount = amount;
-    if (limb) {
-        f.hasLimb = true;
-        f.limb = *limb;
-        f.twistRadians = twistRadians;
-        f.limbRestUpper = restUpper;
-        f.limbRestLower = restLower;
-    }
-    double delta[3];
-    RigExecAutoClavicleShift(ac.constants, f, delta);
-    if (delta[0] == 0.0 && delta[1] == 0.0 && delta[2] == 0.0) return;
-    target.SetTranslateOnly(target.ExtractTranslation() +
-                            GfVec3d(delta[0], delta[1], delta[2]));
-    B.base[size_t(slot)] = RigExecFrameFromMatrix(target);
 }
 
 /// Rebuilds one solver's rest description from the ladder this run composed.
@@ -3752,8 +3879,9 @@ _ComposeUnswitched(const RigExecBakedProgramImpl &B, int i,
         // frame and reads neither the avars nor the parent.
         return RigExecFrameFromMatrix(B.posedAuthoredM[size_t(i)]);
     }
-    return RigExecFrameFromMatrix(_ComposeAvarsOf(B, i) * B.selfD[size_t(i)] *
-                                  B.parentDinv[size_t(i)] * parentPosed);
+    return RigExecFrameFromMatrix(RigExecComposeUnswitchedPoseMatrix(
+        _ComposeAvarsOf(B,i),B.posedD[size_t(i)],B.parentDinv[size_t(i)],
+        B.parentSpaceAuthored[size_t(i)]?B.parentSpaceM[size_t(i)]:parentPosed));
 }
 
 /// _SpaceFromFrame: an unusable frame selects the NaN sentinel, so the
@@ -3772,23 +3900,38 @@ _SpaceOfFrame(const RigExecPointFrame &frame)
     return space;
 }
 
-/// The frame a switch reads at its bound version. Recomposes into locals
-/// only: the slots on the way keep their last versions for every other
-/// reader.
+/// Reads an explicit composed provider or a separately produced checkpoint.
+/// The consumer performs no recomposition or source walk.
 GfMatrix4d
 _ReadFrameVersion(
     const RigExecBakedProgramImpl &B,
     const RigExecBakedProgramImpl::SpaceSwitch::FrameVersion &read)
 {
-    GfMatrix4d posed =
-        read.anchor >= 0 ? B.posedM[size_t(read.anchor)] : GfMatrix4d(1.0);
-    for (const int slot : read.recompose) {
-        posed = _SpaceOfFrame(_ComposeUnswitched(B, slot, posed));
-    }
-    return posed;
+    if(read.context>=0)return B.switchFrames[size_t(read.context)];
+    return read.anchor>=0?B.posedM[size_t(read.anchor)]:GfMatrix4d(1.0);
 }
 
 }  // namespace
+
+void RigExecBakedRunSpaceCheckpoint(RigExecBakedProgramImpl *program,RigExecBakedStep *step)
+{
+    auto &B=*program;
+    auto &context=B.switchFrameContexts[size_t(step->object)];
+    for(size_t k=0;k<context.recompose.size();++k) {
+        const size_t slot=size_t(context.recompose[k]);
+        auto &input=context.kernelInputs[k];
+        input.avars=_ComposeAvarsOf(B,int(slot));
+        input.posedDefault=B.posedD[slot];
+        input.parentDefaultInverse=B.parentDinv[slot];
+        input.parentExpression=B.parentSpaceM[slot];
+        input.parentExpressionAuthored=B.parentSpaceAuthored[slot]!=0;
+        input.posedAuthoredMatrix=B.posedAuthoredM[slot];
+        input.posedAuthored=B.posedAuthored[slot]!=0;
+    }
+    B.switchFrames[size_t(step->object)]=RigExecRunSpaceCheckpoint(
+        context.anchor>=0?B.posedM[size_t(context.anchor)]:GfMatrix4d(1.0),context.kernelInputs);
+}
+
 
 RigExecBakedProgramImpl::Solver
 RigExecBakedProgramTesting::RefreshedSolverRests(
@@ -3808,10 +3951,7 @@ RigExecBakedEvalFrameRecord(const RigExecBakedProgramImpl &B,
     *matrix = GfMatrix4d(1.0);
     const RigExecBakedCommit &commit = B.commits[size_t(record.commit)];
     if (commit.solverOutput) {
-        // The walk records a solver's joint only when the batch published
-        // an element for it this run. No two solvers of one batch write one
-        // slot (RigExecBakedRefuseBatchedStackWrites), so the walk's
-        // batch-wide `candidates.count(joint)` is this slot's `present` byte.
+        // This descriptor's current output presence gates its checkpoint.
         if (record.position < 0 ||
             size_t(record.position) >= commit.present.size() ||
             !commit.present[size_t(record.position)]) {
@@ -3831,6 +3971,40 @@ RigExecBakedEvalFrameRecord(const RigExecBakedProgramImpl &B,
     const std::array<GfVec3d, 4> landmarks =
         rest.IsValid() ? rest.points : RigExecIdentityLandmarks();
     return RigExecPointsToMatrix(landmarks, frame.points, matrix);
+}
+
+namespace {
+void PrepareConstraintArrays(RigExecBakedProgramImpl::ConstraintArrays *arrays) {
+    auto &a=*arrays;a.diagnostics.clear();a.poleDiagnostics.clear();
+    const auto weights=[&](size_t channel,size_t count,const char *name,
+        std::vector<std::string> *diagnostics,std::vector<double> *values) {
+        const auto *raw=a.raw[channel].IsHolding<VtFloatArray>()?
+            &a.raw[channel].UncheckedGet<VtFloatArray>():nullptr;
+        if(raw && !raw->empty() && raw->size()!=count) {
+            diagnostics->push_back(a.path.GetString()+" "+name+" has "+std::to_string(raw->size())+
+                " entries for "+std::to_string(count)+" sources");return false;
+        }
+        values->assign(count,1.0);
+        if(raw) for(size_t i=0;i<raw->size();++i) (*values)[i]=(*raw)[i];
+        return true;
+    };
+    const auto offsets=[&](size_t channel,const char *name,std::vector<GfVec3d> *values) {
+        const auto *raw=a.raw[channel].IsHolding<VtVec3dArray>()?
+            &a.raw[channel].UncheckedGet<VtVec3dArray>():nullptr;
+        if(raw && !raw->empty() && raw->size()!=a.sourceCount) {
+            a.diagnostics.push_back(a.path.GetString()+" "+name+" has "+std::to_string(raw->size())+
+                " entries for "+std::to_string(a.sourceCount)+" sources");return false;
+        }
+        values->assign(a.sourceCount,GfVec3d(0));
+        if(raw) for(size_t i=0;i<raw->size();++i) (*values)[i]=(*raw)[i];
+        return true;
+    };
+    a.ok=weights(0,a.sourceCount,"inputs:sourceWeights",&a.diagnostics,&a.weights);
+    if(a.parentOffsets) a.ok=a.ok && offsets(1,"inputs:translationOffsets",&a.translationOffsets) &&
+        offsets(2,"inputs:rotationOffsets",&a.rotationOffsets);
+    else {a.translationOffsets.assign(a.sourceCount,GfVec3d(0));a.rotationOffsets.assign(a.sourceCount,GfVec3d(0));}
+    if(a.readPole) a.poleOk=weights(3,a.poleCount,"inputs:poleVectorWeights",&a.poleDiagnostics,&a.poleWeights);
+}
 }
 
 void
@@ -3870,6 +4044,15 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
                 // does the same nothing writes it.
                 continue;
             }
+            if (B.execCheckRows) B.execCheckRows->BeforeSlot(
+                B, RigExecBakedStepKind::ComposeSubtree, group.begin, i);
+            if(!_ProviderActive(B,size_t(i))) {
+                B.base[size_t(i)]=RigExecPointFrame();
+                B.base[size_t(i)].flags=0;
+                B.fin[size_t(i)]=B.base[size_t(i)];
+                B.posedM[size_t(i)]=_UnavailableProviderSpace();
+                continue;
+            }
             const int switchIndex =
                 B.spaceSwitchBySlot.empty()
                     ? -1 : B.spaceSwitchBySlot[size_t(i)];
@@ -3885,165 +4068,37 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
                 B.base[size_t(i)] =
                     RigExecFrameFromMatrix(B.posedAuthoredM[size_t(i)]);
             } else {
-                const GfMatrix4d avars = _ComposeAvarsOf(B, i);
-                // A switched slot composes against the SELECTED source's
-                // pair of spaces instead of its namespace parent's. Both
-                // halves come from one source, so at rest they cancel
-                // and no space moves the rig standing still.
-                const RigExecBakedProgramImpl::SpaceSwitch &sw =
-                    B.spaceSwitches[size_t(switchIndex)];
-                // `local` is avars * default:space, and it is reached the
-                // long way round -- compose the UNSWITCHED world, then
-                // divide the namespace parent back out -- rather than as
-                // `avars * selfD`, which is the same quantity in exact
-                // arithmetic and NOT the same in doubles. The dynamic
-                // path can only reach it this way (it reads frames, not
-                // the ladder), the two answers are compared bit for bit
-                // by the parity mode, and 4e-15 of disagreement here
-                // propagates to every descendant of a switched control.
-                // The parent at the version the dynamic walk reads it
-                // at: before its own switch when that resolves in this
-                // switch's round or later (FrameVersion).
-                const GfMatrix4d parentPosed =
-                    _ReadFrameVersion(B, sw.parentRead);
-                const GfMatrix4d parentDefault =
-                    B.parent[size_t(i)] >= 0
-                        ? B.defaultRoundTrip[size_t(B.parent[size_t(i)])]
-                        : GfMatrix4d(1.0);
-                const GfMatrix4d unswitched =
-                    RigExecBakedRoundTrip(avars * B.selfD[size_t(i)] *
-                                          B.parentDinv[size_t(i)] *
-                                          parentPosed);
-                const GfMatrix4d local =
-                    unswitched * parentPosed.GetInverse() * parentDefault;
-                const GfMatrix4d localInverse = local.GetInverse();
-                const int count = int(sw.sourceSlots.size());
-                // The index's leaf, sampled in the prologue with every
-                // other bound input, so an override reaches it by the same
-                // rules.
-                double active = rd(sw.activeInput);
-                if (!std::isfinite(active)) active = 0.0;
-                active = GfClamp(active, 0.0, double(count - 1));
-                const int lower = int(std::floor(active));
-                const int upper = std::min(lower + 1, count - 1);
-                const double blend = active - double(lower);
-                // rigExec:space. `local` above composes over the
-                // target's DEFAULT ancestors, so a master's motion
-                // reaches a switched control only inside the source's
-                // motion -- and a twist or swing filter drops that
-                // carry along with the part it was asked to drop.
-                // Strip the master map off before the filter and put it
-                // back after, so the filter only sees the source's own
-                // master-free motion. Identity when no space is named.
-                // The branches below must be UNTOUCHED when no space is
-                // named, not multiplied by an identity: `local *
-                // identity * localInverse` is identity in exact
-                // arithmetic and a few ulps off it in doubles, and that
-                // difference reaches verify_binary as a failure.
-                const bool hasCarry = sw.spaceSlot >= 0;
-                GfMatrix4d carry(1.0), carryInverse(1.0);
-                if (hasCarry) {
-                    carry = B.defaultRoundTrip[size_t(sw.spaceSlot)]
-                                .GetInverse() *
-                            _ReadFrameVersion(B, sw.spaceRead);
-                    carryInverse = carry.GetInverse();
+                auto &sw=B.spaceSwitches[size_t(switchIndex)];
+                auto &input=sw.kernelInputs;
+                input.avars=_ComposeAvarsOf(B,i);
+                input.posedDefault=B.posedD[size_t(i)];
+                input.parentDefaultInverse=B.parentDinv[size_t(i)];
+                input.parentPosed=_ReadFrameVersion(B,sw.parentRead);
+                input.parentDefault=B.parent[size_t(i)]>=0?
+                    B.defaultRoundTrip[size_t(B.parent[size_t(i)])]:GfMatrix4d(1.0);
+                input.active=0.0;
+                if(sw.tokenIndex) {
+                    const TfToken selected=rd(sw.activeTokenInput);
+                    const auto label=std::find(sw.labels.begin(),sw.labels.end(),selected);
+                    if(label!=sw.labels.end()) input.active=double(label-sw.labels.begin());
+                } else input.active=rd(sw.activeInput);
+                input.hasCarry=sw.spaceSlot>=0;
+                if(input.hasCarry) {
+                    input.spaceDefault=B.defaultRoundTrip[size_t(sw.spaceSlot)];
+                    input.spacePosed=_ReadFrameVersion(B,sw.spaceRead);
                 }
-                const auto rawDeltaOf = [&](int index) {
-                    const int slot = sw.sourceSlots[size_t(index)];
-                    if (slot < 0) {
-                        // World: the source never moves, so the only
-                        // motion left is the space's own carry -- and
-                        // with no space named there is none, which is
-                        // the pin-to-zero-pose this branch has always
-                        // meant.
-                        return hasCarry ? local * carry * localInverse
-                                        : GfMatrix4d(1.0);
+                for(size_t source=0;source<sw.sourceSlots.size();++source) {
+                    const int slot=sw.sourceSlots[source];
+                    auto &value=input.sources[source];value.world=slot<0;
+                    if(slot>=0) {
+                        value.defaultSpace=B.defaultRoundTrip[size_t(slot)];
+                        value.posedSpace=_ReadFrameVersion(B,sw.sourceReads[source]);
                     }
-                    // defaultRoundTrip, not selfD: the ladder's own
-                    // parent link is the ROUND TRIPPED default (see
-                    // parentDinv in RigExecBakedComposeLadderRange), which is
-                    // what exec's computeDefaultFrame hands back, and a
-                    // space source has to be read the same way its
-                    // namespace parent would be or the two paths
-                    // disagree in the last few digits on every
-                    // descendant.
-                    // Filtered while the motion is still measured
-                    // against the SOURCE's rest, because the twist axis
-                    // is the source's. See the dynamic path, which does
-                    // the same thing in the same order.
-                    const GfMatrix4d sourceDefault =
-                        B.defaultRoundTrip[size_t(slot)];
-                    const RigExecRotationFilter filter =
-                        sw.filters.empty()
-                            ? RigExecRotationFilter::All
-                            : sw.filters[size_t(index)];
-                    const GfVec3d axis =
-                        sourceDefault.TransformDir(sw.twistAxis);
-                    const GfMatrix4d moved =
-                        sourceDefault.GetInverse() *
-                        _ReadFrameVersion(
-                            B, sw.sourceReads[size_t(index)]);
-                    const GfMatrix4d motion =
-                        hasCarry
-                            ? RigExecFilterSpaceRotation(
-                                  moved * carryInverse, axis, filter) *
-                                  carry
-                            : RigExecFilterSpaceRotation(moved, axis,
-                                                         filter);
-                    return local * motion * localInverse;
-                };
-                const auto deltaOf = [&](int index) {
-                    const GfMatrix4d d = rawDeltaOf(index);
-                    if (sw.filters.empty() ||
-                        sw.filters[size_t(index)] != RigExecRotationFilter::Orient) {
-                        return d;
-                    }
-                    return RigExecOrientSpaceDelta(d, local, localInverse,
-                                                   unswitched);
-                };
-                GfMatrix4d delta = deltaOf(lower);
-                if (upper != lower && blend > 0.0) {
-                    delta = RigExecBlendTransforms(delta, deltaOf(upper),
-                                                   blend);
                 }
-                delta = RigExecMaskTransform(delta, sw.affectTranslation,
-                                             sw.affectRotation,
-                                             sw.affectScale);
-                B.base[size_t(i)] =
-                    RigExecFrameFromMatrix(delta * local);
-            }
-            // An auto clavicle on this slot: the composed (and switched)
-            // frame translated before any descendant reads it, as the
-            // dynamic path republishes it.
-            if (const int clavicleIndex =
-                    B.autoClavicleBySlot.empty()
-                        ? -1 : B.autoClavicleBySlot[size_t(i)];
-                clavicleIndex >= 0) {
-                const RigExecBakedProgramImpl::AutoClavicle &ac =
-                    B.autoClavicles[size_t(clavicleIndex)];
-                RigExecLimbStretch limb;
-                double twist = 0.0, restUpper = 0.0, restLower = 0.0;
-                if (ac.limbSolver >= 0) {
-                    const RigExecBakedProgramImpl::Solver &s =
-                        B.solvers[size_t(ac.limbSolver)];
-                    limb.stretch = rd(s.stretch);
-                    limb.pin = rd(s.pin);
-                    limb.upperScale = rd(s.upperScale);
-                    limb.lowerScale = rd(s.lowerScale);
-                    limb.softDistance = rd(s.softDistance);
-                    limb.scaleCalibration = s.ikParams.limb.scaleCalibration;
-                    twist = rd(s.limbTwist) * std::acos(-1.0) / 180.0;
-                    restUpper = s.ikParams.upperLength;
-                    restLower = s.ikParams.lowerLength;
+                if(!RigExecRunSpaceSwitch(sw.kernelRecord,input,&B.base[size_t(i)])) {
+                    B.base[size_t(i)].flags=0;
+                    step->diagnostics.push_back("space switch has no source for "+B.paths[size_t(i)].GetString());
                 }
-                ApplyAutoClavicle(
-                    B, ac,
-                    ac.ikBlendIsFloat ? double(rd(ac.ikBlendFloat))
-                                      : rd(ac.ikBlendInput),
-                    ac.amountIsFloat ? double(rd(ac.amountFloat))
-                                     : rd(ac.amountInput),
-                    i, ac.limbSolver >= 0 ? &limb : nullptr, twist,
-                    restUpper, restLower);
             }
             B.fin[size_t(i)] = B.base[size_t(i)];
             B.posedM[size_t(i)] = _SpaceOfFrame(B.base[size_t(i)]);
@@ -4053,19 +4108,6 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
 
     case RigExecBakedStepKind::Solve: {
         RigExecBakedProgramImpl::Solver &s = B.solvers[size_t(step->object)];
-        // The dynamic path's RigExecPointFrameLiveRest, per element: which
-        // of this solver's joints a pose step BELOW it wrote, and what that
-        // step left there. Only a live one re-bases its element, which is
-        // what keeps every unstacked rig bit-identical (spec 4.2).
-        const std::vector<std::array<GfVec3d, 4>> &liveRests = s.jointRests;
-        std::vector<bool> liveFlags;
-        if (s.hasLiveRest) {
-            liveFlags.assign(s.jointRests.size(), false);
-            for (size_t k = 0;
-                 k < s.restIsLive.size() && k < liveFlags.size(); ++k) {
-                liveFlags[k] = s.restIsLive[k];
-            }
-        }
         // The rest description, where the rest tier moved a rest it is
         // measured from this run (`restSlots` holds the space slot too), or
         // where the closure trusts nothing it holds: a full run can follow
@@ -4090,212 +4132,60 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
             }
         }
         RigExecPointFrameArray &aggregate = B.aggregates[size_t(step->object)];
-        aggregate.frames.clear();
-        aggregate.rests.clear();
         s.fallbackJoints.clear();
-        // The one degeneracy guard, and it sits AFTER the clear: a solver
-        // whose joint binding the bake found malformed publishes the EMPTY
-        // aggregate its computation returns, and "publishes an empty
-        // aggregate" is what the clear makes true. The output loop below
-        // still runs, so every joint the solver names falls back to its rest
-        // chain and says so -- which is exactly what the dynamic path
-        // reports.
-        if (s.degenerate) {
-        } else if (s.type == "RigExecFkChain") {
-            // One joint rest per control is the positional contract
-            // rigExec:joints[N] <- element N already carries; anything else
-            // (a guide-only chain, a target publishing no rest) keeps the
-            // control's own rest as the basis, exactly as before.
-            const bool jointBasis =
-                s.jointRests.size() == s.controls.size();
-            aggregate.rests = s.controlRests;
-            // The dynamic computation's synthetic base element: the start
-            // provider's rest-to-pose delta prepended as element 0, with
-            // every real element parented onto it (parentRelative) or
-            // chained after it (world), and its own frame dropped from
-            // the aggregate so no joint's element index moves.
-            const int base = s.start >= 0 ? 1 : 0;
-            if (base) {
-                s.elements[0].restPoints = s.startRest;
-                s.elements[0].posePoints =
-                    B.fin[size_t(s.startRead)].points;
-                s.elements[0].hasOutRest = false;
-                s.elements[0].parentIndex = -1;
+        auto &input=s.kernelInputs;
+        s.hasStart=s.start>=0;
+        input.hasSpace=s.spaceSlot>=0;
+        if(input.hasSpace) {input.spaceRest=s.spaceRest;input.space=B.fin[size_t(s.spaceRead)];}
+        const auto frame=[&](int provider,uint32_t version) {
+            return provider>=0?B.fin[size_t(version)]:RigExecPointFrame();
+        };
+        input.root=frame(s.root,s.rootRead);
+        input.mid=frame(s.mid,s.midRead);
+        input.end=frame(s.end,s.endRead);
+        input.pole=frame(s.pole,s.poleRead);
+        input.start=frame(s.start,s.startRead);
+        if(s.type=="RigExecFkChain") {
+            s.kind=RigExecSolverKind::FkChain;
+            input.controls.resize(s.controls.size());
+            for(size_t k=0;k<s.controls.size();++k) input.controls[k]=B.fin[size_t(s.controlReads[k])];
+        } else if(s.type=="RigExecTwoBoneIk") {
+            s.kind=RigExecSolverKind::TwoBoneIk;
+            input.ikSpace=rd(s.ikSpace);
+            input.refreshIkParams=live(s.bend)||live(s.stretch)||live(s.softness)||
+                live(s.upperOffset)||live(s.lowerOffset)||live(s.ikSpace);
+            input.bend=rd(s.bend); input.stretch=rd(s.stretch);input.softness=rd(s.softness);
+            input.upperOffset=rd(s.upperOffset);input.lowerOffset=rd(s.lowerOffset);
+        } else if(s.type=="RigExecBlendPointFrames") {
+            s.kind=RigExecSolverKind::BlendPointFrames;
+            input.blendA=s.inA>=0?&B.aggregates[size_t(s.inA)]:nullptr;
+            input.blendB=s.inB>=0?&B.aggregates[size_t(s.inB)]:nullptr;
+            input.blendWeight=rd(s.blendWeight);
+        } else if(s.type=="RigExecTwistDistribution") {
+            s.kind=RigExecSolverKind::TwistDistribution; input.twistTurns=rd(s.twistTurns);
+        } else if(s.type=="RigExecRibbon") {
+            s.kind=RigExecSolverKind::Ribbon;
+            const auto &sampled=s.ribbonPointsVarying?s.ribbonPoints:s.ribbonConstantPoints;
+            const GfVec3f *points=nullptr;size_t count=0;
+            const bool available=RigExecBakedResolvePoints(B,s.ribbonPointsBinding,&points,&count);
+            if(available && count) input.ribbonPoints.assign(points,points+count);
+            else if(available) input.ribbonPoints.clear();
+            else {
+                input.ribbonPoints=sampled;
+                if(!s.ribbonPointsBinding.candidates.empty()) step->diagnostics.push_back(
+                    "diag "+s.path.GetString()+": ribbon driver points are unavailable; using sampled base");
             }
-            for (size_t k = 0; k < s.controls.size(); ++k) {
-                const size_t e = k + size_t(base);
-                s.elements[e].restPoints = s.controlRests[k];
-                // Every entry is a provider: the bake filtered the list
-                // the way the computation's read iterator does.
-                s.elements[e].posePoints =
-                    B.fin[size_t(s.controlReads[k])].points;
-                // The dynamic path's RigExecPointFrameLiveRest, per element:
-                // only a joint a step BELOW this chain wrote re-bases it.
-                const bool live = jointBasis && k < s.restIsLive.size() &&
-                                  s.restIsLive[k];
-                s.elements[e].hasOutRest = live;
-                if (live) {
-                    s.elements[e].outRestPoints = s.jointRests[k];
-                    aggregate.rests[k] = s.jointRests[k];
-                }
-                s.elements[e].parentIndex =
-                    s.parentRelative ? base - 1 : int(k) + base - 1;
-            }
-            aggregate.frames = RigExecSolveFkChain(s.elements);
-            if (s.fkScaleSegments) {
-                RigExecScaleFkSegments(s.elements, &aggregate.frames);
-            }
-            if (base && !aggregate.frames.empty()) {
-                aggregate.frames.erase(aggregate.frames.begin());
-            }
-        } else if (s.type == "RigExecTwoBoneIk") {
-            RigExecTwoBoneIkParams params = s.ikParams;
-            GfMatrix4d ikSpace = rd(s.ikSpace);
-            bool spaceMoved = false;
-            // spaceSlot, not spaceRead: readFin(-1) is 0u, a perfectly
-            // valid slot, so testing the READ made every solver that
-            // names no space apply whatever frame slot 0 happens to
-            // hold.
-            if (s.spaceSlot >= 0) {
-                GfMatrix4d delta(1.0);
-                if (RigExecPointsToMatrix(s.spaceRest,
-                                          B.fin[size_t(s.spaceRead)],
-                                          &delta)) {
-                    ikSpace = delta * ikSpace;
-                    spaceMoved = true;
-                }
-            }
-            if (live(s.bend) || live(s.stretch) || live(s.softness) ||
-                live(s.upperOffset) || live(s.lowerOffset) ||
-                live(s.ikSpace) || spaceMoved || live(s.pin) ||
-                live(s.upperScale) || live(s.lowerScale) ||
-                live(s.softDistance) || live(s.limbTwist)) {
-                params.preferredBendRadians = rd(s.bend);
-                params.stretch = rd(s.stretch);
-                params.softness = rd(s.softness);
-                params.space = ikSpace;
-                RigExecTwoBoneIkLengths(s.ikRests, ikSpace,
-                                        rd(s.upperOffset), rd(s.lowerOffset),
-                                        &params.upperLength,
-                                        &params.lowerLength);
-                RigExecSetTwoBoneLimbParams(s.ikRests, ikSpace, rd(s.stretch),
-                                          rd(s.pin), rd(s.upperScale),
-                                          rd(s.lowerScale),
-                                          rd(s.softDistance),
-                                          rd(s.limbTwist), &params);
-            }
-            const auto frames = RigExecSolveTwoBoneIk(
-                B.fin[size_t(s.rootRead)], B.fin[size_t(s.endRead)],
-                B.fin[size_t(s.poleRead)], s.ikRests, params);
-            aggregate.frames.assign(frames.begin(), frames.end());
-            aggregate.rests.assign(s.ikRests.begin(), s.ikRests.end());
-        } else if (s.type == "RigExecBlendPointFrames") {
-            // An unwired input is the computation's null pointer, and a null
-            // pointer passes the OTHER input through BY VALUE -- rests
-            // included, because element extraction reads them and dropping
-            // them would move every posed joint without moving a frame.
-            const RigExecPointFrameArray *a =
-                s.inA >= 0 ? &B.aggregates[size_t(s.inA)] : nullptr;
-            const RigExecPointFrameArray *b =
-                s.inB >= 0 ? &B.aggregates[size_t(s.inB)] : nullptr;
-            if (!a) {
-                if (b) aggregate = *b;
-            } else if (!b) {
-                aggregate = *a;
-            } else if (s.blendRotationRejected) {
-                // Both bound, so the token is reached: the computation warns
-                // and returns nothing. The aggregate is already clear.
-            } else {
-                const size_t n = a->GetSize();
-                // Clamp to [0, 1]: a blend weight outside the unit interval
-                // extrapolates past both inputs.
-                const double w =
-                    std::min(std::max(double(rd(s.blendWeight)), 0.0), 1.0);
-                if (n == b->GetSize() && a->rests.size() == n) {
-                    aggregate.frames.reserve(n);
-                    aggregate.rests.reserve(n);
-                    for (size_t k = 0; k < n; ++k) {
-                        const bool live = k < liveFlags.size() &&
-                                          liveFlags[k] &&
-                                          k < liveRests.size();
-                        aggregate.frames.push_back(RigExecBlendFrames(
-                            a->frames[k], b->frames[k], a->rests[k], w,
-                            RigExecRotationBlend::ShortestArc, s.scaleMode,
-                            live ? &liveRests[k] : nullptr));
-                        aggregate.rests.push_back(live ? liveRests[k]
-                                                       : a->rests[k]);
-                    }
-                }
-            }
-        } else if (s.type == "RigExecTwistDistribution") {
-            aggregate = RigExecSolveTwistDistribution(
-                B.fin[size_t(s.rootRead)], B.fin[size_t(s.endRead)],
-                s.twistStartRest, s.twistEndRest, s.twistWeights,
-                rd(s.twistTurns), liveRests, liveFlags);
-        } else if (s.type == "RigExecRibbon") {
-            // Both curves go in as the dynamic path supplies them: the live
-            // points the prologue read (or the folded constant, for a curve
-            // that cannot vary with time), and the bind-time points captured
-            // at Build. Either one empty is the sampler's own guard, and an
-            // empty aggregate is what it answers with.
-            aggregate = RigExecSampleRibbonFrames(
-                s.ribbonPointsVarying ? s.ribbonPoints
-                                      : s.ribbonConstantPoints,
-                s.ribbonRestPoints, rd(s.ribbonSampleCount), liveRests,
-                liveFlags);
-        } else if (s.type == "RigExecSplineIk") {
-            RigExecSplineIkParams params = s.splineParams;
-            if (s.splineParamsVary || live(s.preserveVolume) ||
-                live(s.midFollowWeight) || live(s.roll) || live(s.twist) ||
-                live(s.minLengthRatio)) {
-                params.preserveVolume = rd(s.preserveVolume);
-                params.midFollowWeight = rd(s.midFollowWeight);
-                params.roll = GfDegreesToRadians(rd(s.roll));
-                params.twist = GfDegreesToRadians(rd(s.twist));
-                params.minLengthRatio = rd(s.minLengthRatio);
-            }
-            // REBUILD THE REST IN THE SPACE WHEN THE SPACE HAS MOVED.
-            // The bind-time rest is measured at identity, and the
-            // placement ratio is arcLength / restArcLength -- so a scaled
-            // root reads as stretch until the rest is carried into the
-            // same space. Only when a space is named and has actually
-            // moved, so an unscaled rig pays nothing.
-            const RigExecSplineIkRest *restForSolve = &s.splineRest;
-            RigExecSplineIkRest spacedRest;
-            if (s.spaceSlot >= 0) {
-                GfMatrix4d delta(1.0);
-                if (RigExecPointsToMatrix(s.spaceRest,
-                                          B.fin[size_t(s.spaceRead)],
-                                          &delta) &&
-                    delta != GfMatrix4d(1.0)) {
-                    std::vector<RigExecPointFrame> spaced;
-                    spaced.reserve(s.splineRestFrames.size());
-                    for (const RigExecPointFrame &f : s.splineRestFrames) {
-                        spaced.push_back(RigExecTransformFrame(f, delta));
-                    }
-                    spacedRest = RigExecSplineIkMakeRest(
-                        spaced,
-                        RigExecTransformFrame(s.splineRootRest, delta),
-                        RigExecTransformFrame(s.splineMidRest, delta),
-                        RigExecTransformFrame(s.splineEndRest, delta),
-                        s.splineRestWeights, s.splineRestMode);
-                    restForSolve = &spacedRest;
-                }
-            }
-            RigExecSplineIkControls controls;
-            controls.root = B.fin[size_t(s.rootRead)];
-            controls.mid = B.fin[size_t(s.midRead)];
-            controls.end = B.fin[size_t(s.endRead)];
-            RigExecSplineIkResult solved;
-            RigExecSolveSplineIk(*restForSolve, controls, params, &solved);
-            if (solved.joints.size() == s.splineCount) {
-                aggregate.frames.reserve(s.splineCount);
-                for (const auto &joint : solved.joints) {
-                    aggregate.frames.push_back(joint.frame);
-                }
-                aggregate.rests = s.splineJointRests;
-            }
+            input.ribbonSampleCount=rd(s.ribbonSampleCount);
+        } else if(s.type=="RigExecSplineIk") {
+            s.kind=RigExecSolverKind::SplineIk;
+            input.refreshSplineParams=s.splineParamsVary||live(s.preserveVolume)||live(s.midFollowWeight)||
+                live(s.roll)||live(s.twist)||live(s.minLengthRatio);
+            input.preserveVolume=rd(s.preserveVolume);input.midFollowWeight=rd(s.midFollowWeight);
+            input.rollDegrees=rd(s.roll);input.twistDegrees=rd(s.twist);input.minLengthRatio=rd(s.minLengthRatio);
         }
+        std::string error;
+        if(!RigExecRunSolver(s,input,&s.kernelWorkspace,&aggregate,&error) && !error.empty())
+            step->diagnostics.push_back("diag "+s.path.GetString()+": "+error);
         for (size_t k = 0; k < s.outputs.size(); ++k) {
             const auto &[slot, element] = s.outputs[k];
             if (element < 0 || size_t(element) >= aggregate.GetSize()) {
@@ -4357,6 +4247,25 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
         // other step names.
         RigExecBakedProgramImpl::Constraint &c =
             B.constraints[size_t(B.walkSteps[size_t(step->object)].index)];
+        const auto runSourceConstraint=[&](const RigExecPointFrame &incoming,
+            const std::vector<RigExecConstraintSource> &sources,const auto &params) {
+            auto &record=c.kernelRecord;auto &inputs=c.kernelInputs;
+            using T=std::decay_t<decltype(params)>;
+            inputs.incoming=incoming;inputs.sources=sources;inputs.carry.reset();
+            if constexpr(std::is_same_v<T,RigExecPositionConstraintParams>) {
+                record.kind=RigExecConstraintKind::Position;record.position=params;
+            } else if constexpr(std::is_same_v<T,RigExecRotationConstraintParams>) {
+                record.kind=RigExecConstraintKind::Rotation;record.rotation=params;
+                if(params.carry) inputs.carry=*params.carry;record.rotation.carry=nullptr;
+            } else if constexpr(std::is_same_v<T,RigExecScaleConstraintParams>) {
+                record.kind=RigExecConstraintKind::Scale;record.scale=params;
+            } else {
+                record.kind=RigExecConstraintKind::Parent;record.parent=params;
+                if(params.carry) inputs.carry=*params.carry;record.parent.carry=nullptr;
+            }
+            RigExecRunConstraint(record,inputs,&c.kernelResult);
+            return c.kernelResult.frame;
+        };
         // Every exit below leaves `recordAfter`/`recordEveryTarget` saying
         // whether the dynamic walk records the target's frame there; the
         // commit's FrameMatrix steps, which run after its write-back, read
@@ -4419,16 +4328,10 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
         // covers.
         double weight = 1.0;
         if (!c.weightObject.IsEmpty() && c.pointsTarget.IsEmpty()) {
-            c.weightScratch.clear();
-            c.weightError.clear();
-            bool resolved = false;
-            {
-                // The weight oracle: volatile until S4 (bodyPurity.h).
-                const RigExecVolatileRead volatileRead;
-                resolved = B.resolveWeights(c.weightObject, 1, time,
-                                            &c.weightScratch, &c.weightError,
-                                            nullptr);
-            }
+            const auto &field = B.weightFields[size_t(c.weightField)];
+            c.weightScratch = field.values;
+            c.weightError = field.error;
+            const bool resolved = field.ok;
             if (!resolved || c.weightScratch.size() != 1) {
                 step->diagnostics.push_back(
                     c.path.GetString() + ": " + c.weightError +
@@ -4505,8 +4408,8 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
         };
         // This constraint's authored tables, as the prologue read them at
         // this frame's time.
-        const RigExecBakedProgramImpl::ConstraintArrays &arrays =
-            B.constraintArrays[size_t(c.arrays)];
+        auto &arrays=B.constraintArrays[size_t(c.arrays)];
+        PrepareConstraintArrays(&arrays);
         if (c.singleChainIk) {
             // The one multi-target built-in, in the dynamic walk's order:
             // the chain, the effector, the parameters, the pole, the
@@ -4530,7 +4433,6 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
             params.mode = c.ikMode;
             params.preserveJointOrientation = c.preserveJointOrientation;
             params.weight = weight;
-            params.stretch = rd(c.ikStretch);
             // Read BEFORE the pole mode is consulted, and only in
             // RotatePlane mode, which is where the dynamic walk reads them:
             // object mode then overwrites params.pole. A different read
@@ -4614,8 +4516,11 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
             }
             commit.ikSolved.clear();
             if (inputsValid) {
-                commit.ikSolved =
-                    RigExecSolveSingleChainIk(*solveChain, effector, params);
+                c.kernelRecord.kind=RigExecConstraintKind::SingleChainIk;
+                c.kernelRecord.singleChain=params;c.kernelInputs.chain=*solveChain;
+                c.kernelInputs.effector=effector;
+                RigExecRunConstraint(c.kernelRecord,c.kernelInputs,&c.kernelResult);
+                commit.ikSolved=c.kernelResult.chain;
             }
             // Atomic: the whole chain or none of it, and before any write.
             if (inputsValid &&
@@ -4772,7 +4677,7 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
             params.offset = rd(c.offset);
             params.affect = affect;
             params.weight = solveWeight;
-            candidate = RigExecApplyPositionConstraint(input, sources, params);
+            candidate = runSourceConstraint(input, sources, params);
         } else if (c.type == "RigExecRotationConstraint") {
             RigExecRotationConstraintParams params;
             params.offsetDegrees = rd(c.offset);
@@ -4780,14 +4685,14 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
             params.rotationOrder = c.order;
             params.weight = solveWeight;
             params.carry = hasCarry ? &carry : nullptr;
-            candidate = RigExecApplyRotationConstraint(input, sources, params);
+            candidate = runSourceConstraint(input, sources, params);
         } else if (c.type == "RigExecScaleConstraint") {
             RigExecScaleConstraintParams params;
             params.offset = rd(c.offset);
             params.affect = affect;
             params.weight = solveWeight;
             params.blendShear = c.blendShear;
-            candidate = RigExecApplyScaleConstraint(input, sources, params);
+            candidate = runSourceConstraint(input, sources, params);
         } else if (c.type == "RigExecParentConstraint") {
             RigExecParentConstraintParams params;
             params.translationAxes.x = rd(c.tX);
@@ -4803,7 +4708,7 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
             params.weight = solveWeight;
             params.carry = hasCarry ? &carry : nullptr;
             params.blendShear = c.blendShear;
-            candidate = RigExecApplyParentConstraint(input, sources, params);
+            candidate = runSourceConstraint(input, sources, params);
         } else {
             // Aim: the same weighted source set reduced to the target point
             // FBX's AimAtObjects contract specifies.
@@ -4899,11 +4804,16 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
                     }
                 }
                 if (candidateReady) {
-                    candidate =
-                        RigExecApplyAimConstraint(input, target, params);
+                    c.kernelRecord.kind=RigExecConstraintKind::Aim;
+                    c.kernelRecord.aim=params;c.kernelInputs.incoming=input;
+                    c.kernelInputs.aimTarget=target;
+                    RigExecRunConstraint(c.kernelRecord,c.kernelInputs,&c.kernelResult);
+                    candidate=c.kernelResult.frame;
                 }
             }
         }
+        if (candidateReady && B.execCheckRows)
+            B.execCheckRows->ObserveConstraintCandidate(step->object,candidate);
         if (candidateReady && deltaBase >= 0) {
             // The solve produced the same full-strength frame the transform
             // domain would publish; the delta against the prim's own base
@@ -4983,9 +4893,24 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
             // The LAST version of the slot: these steps run after the whole
             // walk, so what they describe is where the provider ended up.
             const RigExecPointFrame &frame = B.fin[size_t(B.finLast[slot])];
-            if (RigExecBakedUsable(B.restFrames[slot]) &&
-                RigExecBakedUsable(frame)) {
+            const bool primary = RigExecBakedUsable(B.restFrames[slot]) &&
+                RigExecBakedUsable(frame) &&
                 RigExecPointsToMatrix(B.restPts[slot], frame.points, &matrix);
+            // Unavailable final frames retain ORIGINAL's identity provider.
+            // The rest/base fallback is only meaningful for a usable final;
+            // PointsToMatrix validates its reference basis, not NaN pose data.
+            if (!primary && RigExecBakedUsable(frame)) {
+                const auto &baseFrame = B.base[size_t(B.baseLast[slot])];
+                matrix = GfMatrix4d(1.0);
+                if (B.restFrames[slot].IsValid() && baseFrame.IsValid()) {
+                    RigExecPointsToMatrix(B.restPts[slot], baseFrame.points, &matrix);
+                }
+                if (std::find(B.jointSlots.begin(), B.jointSlots.end(),
+                              int(slot)) != B.jointSlots.end()) {
+                    GfMatrix4d delta(1.0);
+                    if (RigExecPointsToMatrix(baseFrame.points, frame.points, &delta))
+                        matrix = matrix * delta;
+                }
             }
             B.finalMatrix[slot] = matrix;
         } else {
@@ -5014,6 +4939,9 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
     case RigExecBakedStepKind::PoseInterpolator: {
         RigExecBakedProgramImpl::PoseInterpolator &interpolator =
             B.poseInterpolators[size_t(step->object)];
+        interpolator.enabledValue=rd(interpolator.enabled);
+        for(size_t i=0;i<interpolator.valueInputs.size();++i)
+            interpolator.values[i]=rd(interpolator.valueInputs[i]);
         // Every slot the step owns starts at zero: a disabled pose was left
         // out of the solve and has no weight to be told, and a disabled
         // interpolator -- a shape-preserving enable -- is off, not frozen at
@@ -5025,84 +4953,39 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
         if (!interpolator.enabledValue || interpolator.poseSlots.empty()) {
             return;
         }
-        // The driver's LOCAL rotation relative to its own REST, which is what
-        // every authored pose is measured from and why a rig standing still
-        // reads its neutral at 1.000000:
-        //   local = parent^-1 * world       (row-vector; RigExecFrameRotation)
-        //   delta = restLocal^-1 * local
-        // The LAST version of the driver's slot, because this step runs after
-        // the whole walk -- the driver constraints in particular, whose
-        // parent subtracts the twist back out so the local rotation is the
-        // swing alone. The rest is the program's own asset-space rest frame,
-        // the same one the matrices are measured against.
-        const bool numeric = !interpolator.valueInputs.empty();
-        const size_t d = size_t(numeric ? 0 : interpolator.driverSlot);
-        GfQuatd driverFinal(1.0), driverRest(1.0);
-        GfQuatd parentFinal(1.0), parentRest(1.0);
-        bool usable = numeric ||
-            (RigExecFrameRotation(B.fin[size_t(B.finLast[d])],
-                                  &driverFinal) &&
-             RigExecFrameRotation(B.restFrames[d], &driverRest));
-        if (!numeric && usable && interpolator.parentSlot >= 0) {
-            const size_t p = size_t(interpolator.parentSlot);
-            usable = RigExecFrameRotation(B.fin[size_t(B.finLast[p])],
-                                          &parentFinal) &&
-                     RigExecFrameRotation(B.restFrames[p], &parentRest);
+        const bool numeric=!interpolator.valueInputs.empty();
+        const size_t d=size_t(numeric?0:interpolator.driverSlot);
+        auto &inputs=interpolator.kernelInputs;
+        inputs.enabled=interpolator.enabledValue;
+        inputs.numeric=interpolator.values;
+        inputs.driverFinal=numeric?nullptr:&B.fin[size_t(B.finLast[d])];
+        inputs.driverRest=numeric?nullptr:&B.restFrames[d];
+        inputs.parentFinal=inputs.parentRest=nullptr;
+        if(!numeric && interpolator.parentSlot>=0) {
+            const size_t parent=size_t(interpolator.parentSlot);
+            inputs.parentFinal=&B.fin[size_t(B.finLast[parent])];
+            inputs.parentRest=&B.restFrames[parent];
         }
-        if (!usable) {
-            step->diagnostics.push_back(
-                "pose interpolator " + interpolator.path.GetString() +
-                " has no usable frame for its driver " +
-                B.paths[d].GetString() +
+        const auto status=RigExecRunPoseInterpolator(interpolator,inputs,&interpolator.scratch);
+        using Status=RigExecPoseInterpolatorStatus;
+        if(status==Status::UnusableRotation) {
+            step->diagnostics.push_back("pose interpolator "+interpolator.path.GetString()+
+                " has no usable frame for its driver "+B.paths[d].GetString()+
                 " after the pose walk; its weights are zero this generation");
             return;
         }
-        const GfQuatd local = parentFinal.GetInverse() * driverFinal;
-        const GfQuatd restLocal = parentRest.GetInverse() * driverRest;
-        const GfQuatd delta = (restLocal.GetInverse() * local).GetNormalized();
-        // Through the euler, as the dynamic phase goes: the gate's expected
-        // weights take that route, and the same route is the same
-        // floating-point values and not merely the same rotation.
-        // The translation channel, measured the dynamic phase's way
-        // (RigExecFrameTranslation), in metres for the solver.
-        GfVec3d translation(0.0);
-        const GfVec3d *translationPtr = nullptr;
-        if (numeric) {
-            for (size_t i = 0; i < interpolator.values.size(); ++i) {
-                translation[int(i)] = interpolator.values[i];
-            }
-            translation /= 100.0;
-            translationPtr = &translation;
-        } else if (interpolator.enableTranslation) {
-            const RigExecPointFrame *pf = nullptr, *pr = nullptr;
-            if (interpolator.parentSlot >= 0) {
-                const size_t p = size_t(interpolator.parentSlot);
-                pf = &B.fin[size_t(B.finLast[p])];
-                pr = &B.restFrames[p];
-            }
-            if (!RigExecFrameTranslation(B.fin[size_t(B.finLast[d])],
-                                         B.restFrames[d], pf, pr,
-                                         &translation)) {
-                step->diagnostics.push_back(
-                    "pose interpolator " + interpolator.path.GetString() +
-                    " could not measure its driver's translation; its "
-                    "weights are zero this generation");
-                return;
-            }
-            translation /= 100.0;
-            translationPtr = &translation;
-        }
-        interpolator.solver.Evaluate(RigExecRbfEulerFromQuaternion(delta),
-                                     translationPtr, &interpolator.scratch,
-                                     interpolator.allowNegativeWeights);
-        if (interpolator.scratch.size() != interpolator.poseSlots.size()) {
-            step->diagnostics.push_back(
-                "pose interpolator " + interpolator.path.GetString() +
-                " solved " + std::to_string(interpolator.scratch.size()) +
-                " weights for " +
-                std::to_string(interpolator.poseSlots.size()) + " poses");
+        if(status==Status::UnusableTranslation) {
+            step->diagnostics.push_back("pose interpolator "+interpolator.path.GetString()+
+                " could not measure its driver's translation; its weights are zero this generation");
             return;
         }
+        if(status==Status::CountMismatch) {
+            step->diagnostics.push_back("pose interpolator "+interpolator.path.GetString()+
+                " solved "+std::to_string(interpolator.scratch.size())+" weights for "+
+                std::to_string(interpolator.poseSlots.size())+" poses");
+            return;
+        }
+        if(status==Status::Disabled) return;
         for (size_t i = 0; i < interpolator.poseSlots.size(); ++i) {
             // float, and that is load-bearing: a consumer reads inputs:weight
             // as a float, and the published property has to hold the type
@@ -5122,6 +5005,33 @@ bool
 RigExecBakedPublishPose(RigExecBakedProgramImpl *program, RigExecRigPose *pose)
 {
     RigExecBakedProgramImpl &B = *program;
+    // SCC-excluded solvers did not attempt publication this generation.
+    // The canonical operation inventory is the authority, not authored bindings.
+    std::vector<char> aliveSolver(B.solvers.size(), 0);
+    for (const RigExecBakedStep &step : B.steps)
+        if (step.kind == RigExecBakedStepKind::Solve)
+            aliveSolver[size_t(step.object)] = 1;
+    // ORIGINAL's property prologue reported the semantic chain/part
+    // inventory before pose diagnostics. Canonical graph execution may
+    // interleave independent bases; reporting must not expose that order.
+    std::vector<const RigExecBakedStep *> propertyDiagnostics;
+    for (const RigExecBakedStep &step : B.steps) {
+        if (step.kind == RigExecBakedStepKind::PropertyRevision &&
+            (!step.diagnostics.empty() || !step.lines.empty())) {
+            propertyDiagnostics.push_back(&step);
+        }
+    }
+    std::sort(propertyDiagnostics.begin(), propertyDiagnostics.end(),
+              [](const RigExecBakedStep *a, const RigExecBakedStep *b) {
+                  return std::make_pair(a->object, a->part) <
+                         std::make_pair(b->object, b->part);
+              });
+    for (const RigExecBakedStep *step : propertyDiagnostics) {
+        pose->diagnostics.insert(pose->diagnostics.end(),
+                                 step->diagnostics.begin(), step->diagnostics.end());
+        pose->diagnostics.insert(pose->diagnostics.end(),
+                                 step->lines.begin(), step->lines.end());
+    }
     // The walk's diagnostics, in step order: commit lines, constraint lines,
     // world-up lines. They were pushed into the pose as the walk produced
     // them; they are replayed here instead, so that no step body ever touches
@@ -5131,12 +5041,15 @@ RigExecBakedPublishPose(RigExecBakedProgramImpl *program, RigExecRigPose *pose)
         // The pose interpolators' lines come AFTER the joint block, where the
         // dynamic path's phase emits them; replayed below.
         if (RigExecBakedIsGeometryStep(step.kind) ||
-            step.kind == RigExecBakedStepKind::PoseInterpolator) {
+            step.kind == RigExecBakedStepKind::PoseInterpolator ||
+            step.kind == RigExecBakedStepKind::PropertyRevision) {
             continue;
         }
         for (const std::string &diagnostic : step.diagnostics) {
             pose->diagnostics.push_back(diagnostic);
         }
+        // Memoized step lines remain observable on clean skips.
+        for (const std::string &line : step.lines) pose->diagnostics.push_back(line);
     }
 
     // An incomplete solver is an authoring gap, not a silent one. Merged
@@ -5160,6 +5073,7 @@ RigExecBakedPublishPose(RigExecBakedProgramImpl *program, RigExecRigPose *pose)
             continue;
         }
         for (const int si : walk.batchSolvers) {
+            if (!aliveSolver[size_t(si)]) continue;
             const RigExecBakedProgramImpl::Solver &s = B.solvers[size_t(si)];
             for (size_t k = 0; k < s.outputs.size(); ++k) {
                 const SdfPath &jointPath = B.paths[size_t(s.outputs[k].first)];
@@ -5247,10 +5161,7 @@ RigExecBakedPublishPose(RigExecBakedProgramImpl *program, RigExecRigPose *pose)
             // matrix for a degenerate frame would let a matrix-only consumer
             // deform with a plausible-but-wrong transform.
             if (finalFrame.IsValid() && !finalFrame.IsDegenerate()) {
-                if (!RigExecBakedUsable(B.restFrames[size_t(slot)]) ||
-                    !RigExecBakedUsable(finalFrame)) {
-                    return false;  // the dynamic fallback needs exec
-                }
+
                 B.jointMatrixPublished[k] = 1;
             } else {
                 B.jointMatrixPublished[k] = 0;
@@ -5299,17 +5210,17 @@ RigExecBakedPublishPose(RigExecBakedProgramImpl *program, RigExecRigPose *pose)
     // check compares like with like. Read from the aggregates HERE, under the
     // runtime toggle, rather than cached in a step: either half of the toggle
     // can move without the epoch moving.
-    if (*B.guideTaps && *B.solverGuidesEnabled) {
+    if (*B.solverGuidesEnabled) {
         for (const int index : B.solverPublishOrder) {
             const auto &[solverPath, si] = B.solverArrays[size_t(index)];
+            if (!aliveSolver[size_t(si)]) continue;
             RigExecBakedEmplace(&pose->solverFrames, B.solverArraysAscending,
                                 solverPath, B.aggregates[size_t(si)].frames);
         }
     }
 
-    // The pose-interpolator phase's lines: after the joint and control
-    // publication and the guides, before the geometry, which is where
-    // _EvaluateDynamic's step 3c emits them.
+    // Preserve diagnostic publication order: interpolators follow joint,
+    // control and guide publications and precede geometry diagnostics.
     for (const RigExecBakedStep &step : B.steps) {
         if (step.kind != RigExecBakedStepKind::PoseInterpolator) {
             continue;
@@ -5318,24 +5229,6 @@ RigExecBakedPublishPose(RigExecBakedProgramImpl *program, RigExecRigPose *pose)
             pose->diagnostics.push_back(diagnostic);
         }
     }
-
-    // NO published domain is left empty by a standing refusal any more, and
-    // that is new as of the Phase 3 merge -- this block used to be a list of
-    // four. A volume weight object bakes, so weightFrames is published from
-    // the program's volumePlacement table, which the VolumePlacements steps
-    // write (bakedProgram.cpp's epilogue); a
-    // mover's weight object bakes, so weightFields is drained per revision
-    // beside the geometry it deformed (RigExecBakedPublishGeometry); and a
-    // constraint may target a plain Xformable, so providerXforms and
-    // providerBaseXforms are published from the seeded slots just above.
-    // solverOverridesConverged is the one field that stays at its default,
-    // and for a different reason than a refusal: it is cleared only by an
-    // incomplete exec snapshot, and there is no exec here.
-    // RigExecComparePoses compares all of them regardless, which is what
-    // made the checklist safe to keep as a comment while it was true: the
-    // parity mode says so on the first generation that publishes a domain on
-    // the dynamic side and nothing on this one. A group that adds a refusal
-    // back, or a domain, owes this block a line.
 
     // Property-domain results, in the same map as the point chains: a
     // consumer tells them apart by the type the VtValue holds.

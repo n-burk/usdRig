@@ -3096,7 +3096,7 @@ def TestSpaceSwitchTargetsAreClaimed():
            % missing[:4])
 
     rig = rigexec.Rig(stage, "/Biped/Rig")
-    rig.evaluation_mode = "baked"
+    rig.cpu_reference = True
     writer = gizmoMath.Writer(stage, 0, gizmoMath.WRITE_DEFAULT)
 
     def Set(spec, value):

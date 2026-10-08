@@ -72,6 +72,19 @@ struct RrArrayTag<RrVec3f> {
         RigExecWireInputTag::Vec3fArray;
 };
 
+template <> struct RrArrayTag<RigExecWireVec3d> {
+    static constexpr RigExecWireInputTag value=RigExecWireInputTag::Vec3dArray;
+};
+template <> struct RrArrayTag<RigExecWireMatrix4d> {
+    static constexpr RigExecWireInputTag value=RigExecWireInputTag::Matrix4dArray;
+};
+template <> struct RrArrayTag<uint32_t> {
+    static constexpr RigExecWireInputTag value=RigExecWireInputTag::TokenArray;
+};
+template <> struct RrArrayTag<uint8_t> {
+    static constexpr RigExecWireInputTag value=RigExecWireInputTag::BoolArray;
+};
+
 /// Typed element storage for an array input, one vector per element type;
 /// only the vector of the slot's tag is used.
 struct RrArrayBuffer {
@@ -80,6 +93,10 @@ struct RrArrayBuffer {
     std::vector<double> doubles;
     std::vector<RrVec2f> vec2s;
     std::vector<RrVec3f> vec3s;
+    std::vector<RigExecWireVec3d> vec3ds;
+    std::vector<RigExecWireMatrix4d> matrices;
+    std::vector<uint32_t> tokens;
+    std::vector<uint8_t> bools;
 };
 
 /// One array input slot. Its default is borrowed, never copied: a pool
@@ -113,6 +130,7 @@ struct RrWireValue {
     RigExecWireMatrix4d matrix{};
     RigExecWireVec3d vec3d{};
     RigExecWireVec3f vec3f{};
+    RigExecWireVec3i vec3i{};
 };
 
 // A slot-model value in the steps' form: the member its tag names holds
@@ -151,6 +169,9 @@ RrValueFromWire(const RrWireValue &value)
         break;
     case RigExecWireInputTag::Vec3d:
         out.vec = RrVec3d(value.vec3d[0], value.vec3d[1], value.vec3d[2]);
+        break;
+    case RigExecWireInputTag::Vec3i:
+        out.vec3i=RrVec3i(value.vec3i[0],value.vec3i[1],value.vec3i[2]);
         break;
     case RigExecWireInputTag::Vec3f:
         out.vec3f = RrVec3f(value.vec3f[0], value.vec3f[1], value.vec3f[2]);
@@ -236,6 +257,7 @@ struct RrInputState {
     const RigExecWireFile *file = nullptr;
     /// Animated arrays with actual AtTime consumers, computed once at Open.
     std::vector<size_t> stageArraySlots;
+    std::vector<size_t> stageTokenSlots;
     /// File.values inline, entry for entry.
     std::vector<RrWireValue> values;
     /// The first id SetInputToken gives text no Token node holds: the path
@@ -247,6 +269,7 @@ struct RrInputState {
     /// HasValue flag, kept in slotDefaultHasValue).
     std::vector<RrWireValue> slotCurrent;
     std::vector<uint8_t> slotHasValue;
+    std::vector<uint8_t> slotBlocked, slotProviderSource;
     std::vector<uint8_t> slotAuthored, slotRanAuthored;
     std::vector<uint8_t> slotDefaultHasValue;
     /// Per slot: the value and HasValue the last run read, which a set is
@@ -268,6 +291,7 @@ struct RrInputState {
     /// converted once at Open.
     std::map<uint32_t, std::vector<RrVec2f>> vec2Pool;
     std::map<uint32_t, std::vector<RrVec3f>> vec3Pool;
+    std::map<uint32_t, std::vector<uint32_t>> tokenArrayPool;
 
     /// The avar table's reads (RigExecBakedProgramImpl::avarBindings and
     /// avarConstantBindings), as RrProgram::registeredReads indices, in
@@ -360,6 +384,10 @@ bool RrInputsSetArray(RrProgram *program, size_t index,
 std::vector<size_t> RrStageArraySlots(const RrProgram *program);
 bool RrStageArraySet(RrProgram *program, size_t slot,
                      const RigExecRuntimeArray &value, std::string *error);
+bool RrStageTokenArraySet(RrProgram *, size_t, const std::vector<std::string> &, std::string *);
+bool RrStageInputBlockedSet(RrProgram *, size_t, bool, std::string *);
+bool RrStageScalarSet(RrProgram *,size_t,const RrInputValue &,std::string *);
+bool RrStageScalarClear(RrProgram *,size_t,std::string *);
 bool RrStageArrayClear(RrProgram *program, size_t slot, std::string *error);
 
 /// Array input \p index's elements as the reads see them: its held set,
@@ -464,6 +492,10 @@ RrPathArray(const RrProgram *program, const RrPathRead &row)
 /// for an index past the listed inputs or an input that is not a Token.
 bool RrInputsSetToken(RrProgram *program, size_t index,
                       const std::string &text, std::string *error);
+// Internal sampling only; private tokens remain outside authored APIs.
+bool RrStageTokenSet(RrProgram *program, size_t slot,
+                     const std::string &text, bool hasValue,
+                     std::string *error);
 
 /// Input \p index (a listed slot) returns to its bake-time default, value
 /// and HasValue alike (an array input also drops its authored mark), and
@@ -524,6 +556,16 @@ bool RrChainBase(const RrProgram *program, size_t chain,
 RrWireValue RrReadInput(const RrProgram *program,
                         const RigExecWireInput &input);
 
+// API4 scalar declaration evaluation preserves failed reads separately from fallback.
+bool RrEffectiveInputMemo(const RrProgram *program,uint32_t step,std::string *key,
+                         std::vector<uint32_t> *coveredPropertyVersions,
+                         std::vector<std::pair<uint32_t,uint32_t>> *coveredTyped = nullptr);
+void RrEffectiveReadMemo(const RrProgram *program,const RigExecWireInput &read,std::string *key);
+void RrSourceReadMemo(const RrProgram *program,const RigExecWireInput &read,std::string *key);
+bool RrReadExternalScalar(const RrProgram *, const RigExecWireExternalDeclaredInput &,
+                          RrWireValue *);
+const void *RrReadExternalArray(const RrProgram *, const RigExecWireExternalDeclaredInput &);
+
 /// A connection-following assembler read (a read row of path_reads):
 /// RrReadInput, and for a site that reads the head's own value when the
 /// walk yields nothing (`head_fallback`), that value before the read's
@@ -534,6 +576,7 @@ RrWireValue RrReadPathScalar(const RrProgram *program,
 /// \p value of read row \p row in the form the assemblers read stage
 /// values in: the read's own type. A double site widens a Float value
 /// itself. False for a type no scalar site reads.
+bool RrPathValueFromWire(RigExecWireInputTag tag,const RrWireValue &value,RrPathValue *out);
 bool RrPathValueFromRead(const RigExecWirePathRead &row,
                          const RrWireValue &value, RrPathValue *out);
 
@@ -564,6 +607,10 @@ float RrReadDefaultWeight(const RrProgram *program, size_t chain,
 /// oracle's own fallback at that read site) when the walk yields nothing.
 /// A double hop is read as a double walk from that hop and cast with
 /// static_cast<float>.
+struct RrOracleReadContext;
+float RrReadOracleFloat(const RrProgram *program, const RigExecWireInput &input,
+                       const RrOracleReadContext &context, float fallback);
+
 float RrReadResolvedFloat(const RrProgram *program,
                           const RigExecWireInput &input, float fallback);
 

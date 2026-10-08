@@ -21,6 +21,25 @@
 #include <set>
 
 namespace rigExec {
+namespace {
+const TfToken finalPhase("final");
+const VtValue emptySnapshotValue;
+const RigExecValueAddress emptyTapAddress;
+}
+const TfToken &RigExecFinalPhase()
+{
+    return finalPhase;
+}
+const VtValue &RigExecSnapshot::Get(RigExecTapId tap) const
+{
+    return tap >= 0 && static_cast<size_t>(tap) < _values.size()
+        ? _values[tap] : emptySnapshotValue;
+}
+const RigExecValueAddress &RigExecTapSet::GetAddress(RigExecTapId tap) const
+{
+    return tap >= 0 && static_cast<size_t>(tap) < _addresses.size()
+        ? _addresses[tap] : emptyTapAddress;
+}
 
 TF_REGISTRY_FUNCTION(TfDebug)
 {
@@ -318,8 +337,10 @@ RigExecTapSet::EvaluateWithSuppliedResults(
 
 RigExecSnapshot
 RigExecTapSet::Evaluate(
-    UsdTimeCode time, const std::vector<RigExecValueOverride> &overrides)
+    UsdTimeCode time, const std::vector<RigExecValueOverride> &overrides,
+    size_t *dropped)
 {
+    if (dropped) *dropped = 0;
     // Rebuild on expiry as well as on an explicit tap-list change. A request
     // can be invalidated under us by a structural edit -- a prim deactivated
     // and reactivated, a variant switched away and back, a payload unloaded
@@ -356,11 +377,13 @@ RigExecTapSet::Evaluate(
     for (const RigExecValueOverride &o : overrides) {
         const UsdPrim prim = _stage->GetPrimAtPath(o.prim);
         if (!prim) {
+            if (dropped) ++*dropped;
             continue;
         }
         if (!o.attribute.IsEmpty()) {
             const UsdAttribute attr = prim.GetAttribute(o.attribute);
             if (!attr) {
+                if (dropped) ++*dropped;
                 continue;
             }
             execOverrides.push_back(

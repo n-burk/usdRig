@@ -27,6 +27,7 @@ PXR_NAMESPACE_USING_DIRECTIVE
 namespace rigExec {
 
 class RigExecTapContext;
+const TfToken &RigExecFinalPhase();
 
 /// Backend-neutral value address (spec §9.1, v0.1 subset).
 ///
@@ -41,16 +42,16 @@ struct RigExecValueAddress {
     SdfPath target;
     TfToken publicComputation;
     /// base, afterMover, or final (informational public identity).
-    TfToken phase = TfToken("final");
+    TfToken phase = RigExecFinalPhase();
 
     static RigExecValueAddress Prim(
         const SdfPath &path, const TfToken &computation,
-        const TfToken &phase = TfToken("final")) {
+        const TfToken &phase = RigExecFinalPhase()) {
         return {path, computation, phase};
     }
     static RigExecValueAddress Property(
         const SdfPath &propertyPath,
-        const TfToken &phase = TfToken("final")) {
+        const TfToken &phase = RigExecFinalPhase()) {
         return {propertyPath, TfToken(), phase};
     }
 };
@@ -99,16 +100,21 @@ struct RigExecValueOverride {
 /// Immutable extracted generation: one value per tap.
 class RigExecSnapshot {
 public:
-    const VtValue &Get(RigExecTapId tap) const {
-        static const VtValue empty;
-        return tap >= 0 && static_cast<size_t>(tap) < _values.size()
-            ? _values[tap] : empty;
-    }
+    const VtValue &Get(RigExecTapId tap) const;
 
     template <class T>
     T Get(RigExecTapId tap) const {
         const VtValue &v = Get(tap);
         return v.IsHolding<T>() ? v.UncheckedGet<T>() : T();
+    }
+
+    /// Borrowed access to the tapped value without copying: null when the
+    /// tap is missing or holds another type. The pointer stays valid while
+    /// this snapshot is alive; callers needing ownership keep Get<T>.
+    template <class T>
+    const T *TryGet(RigExecTapId tap) const {
+        const VtValue &v = Get(tap);
+        return v.IsHolding<T>() ? &v.UncheckedGet<T>() : nullptr;
     }
 
     UsdTimeCode GetTime() const { return _time; }
@@ -161,11 +167,7 @@ public:
     size_t GetTapCount() const { return _addresses.size(); }
 
     /// The public canonical address of a tap.
-    const RigExecValueAddress &GetAddress(RigExecTapId tap) const {
-        static const RigExecValueAddress empty;
-        return tap >= 0 && static_cast<size_t>(tap) < _addresses.size()
-            ? _addresses[tap] : empty;
-    }
+    const RigExecValueAddress &GetAddress(RigExecTapId tap) const;
 
     /// Builds and front-loads the batched request schedule. Returns
     /// false when the request could not be built valid.
@@ -188,8 +190,11 @@ public:
     ///
     /// Overrides apply to this call only; they do not persist into later
     /// Evaluate calls or affect cached values (ExecUsdSystem contract).
+    /// dropped counts missing prim/attribute addresses during key construction;
+    /// it cannot report whether an existing key lies in the request's cone.
     RigExecSnapshot Evaluate(
-        UsdTimeCode time, const std::vector<RigExecValueOverride> &overrides);
+        UsdTimeCode time, const std::vector<RigExecValueOverride> &overrides,
+        size_t *dropped = nullptr);
 
     /// Extract results already computed by the caller's pose walk, evaluating
     /// only empty slots through Exec. Supplied values must be the exact

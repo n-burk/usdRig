@@ -57,11 +57,10 @@ part of the rig and changing that is a structural (epoch-rebuilding) edit
 rather than a value edit. A rig that finds no controls, joints, volume weights,
 and no movers at all is a compile error ("Rig publishes no outputs"), and every
 mover target is checked against the root's *parent* prim, which is the rig
-asset and the boundary of what the rig may write. `uniform bool rigExec:baked`
-is re-read at the tail of each compile and only asks for the baked program: an
-explicit `SetEvaluationMode` call or a non-empty `RIGEXEC_EVALUATION_MODE`
-outranks it, an epoch the program cannot express falls back to the dynamic path
-with a note on the published pose, and both paths publish the same values.
+asset and the boundary of what the rig may write. The evaluator compiles one
+production operation graph. Scene sampling, detached frozen jobs, and binary
+playback execute typed declarations through that graph; reference checks are
+optional judges and do not choose an evaluation path.
 
 ## Wiring
 
@@ -79,32 +78,6 @@ with a note on the published pose, and both paths publish the same values.
 
 *Type:* `uniform token`. *Default:* `""`.
 
-#### `rigExec:baked`
-
-*Type:* `uniform bool`. *Default:* `false`.
-
-Asks the evaluator to answer this rig through its BAKED
-PROGRAM -- the flattened, epoch-constant form of the rig -- instead
-of through OpenExec and the in-memory pose walk. It is a request and
-never an assertion: the program is built only for an epoch it can
-express, every generation it cannot answer falls back to the dynamic
-path, and both paths publish the same values. So setting it can
-change how fast a frame arrives and not what the frame is. A rig
-that asked and fell back says so once per generation, as a plain
-diagnostic on the pose naming the first reason.
-
-Uniform because it is a decision about the whole compiled epoch --
-which path evaluates the rig -- and not a channel an animator keys.
-
-It is the WEAKEST of the three ways the mode is chosen, and is
-consulted only when neither stronger one has spoken:
-an explicit RigExecRigEvaluator::SetEvaluationMode call (a tool that
-chose deliberately) outranks it, and so does a non-empty
-RIGEXEC_EVALUATION_MODE in the environment (a session-wide override,
-including =dynamic, which the parity suites rely on being able to
-force onto any stage they open). Absent or false, and with neither
-of those set, the rig evaluates dynamically.
-
 #### `rigExec:asset`
 
 *Type:* `uniform asset`. *Default:* `@@`.
@@ -119,7 +92,7 @@ single .rigexec file with no sidecar.
 Uniform because it is a decision about the whole rig -- which
 source answers it -- and not a channel an animator keys. Setting
 it can change how fast a frame arrives and not what the frame is:
-the binary is bit-identical to the baked path by construction, and
+the binary preserves the compiled scene program's published-value contract, and
 a host that cannot open the file it names evaluates live and says
 so, rather than rendering a rig it did not evaluate.
 
@@ -142,8 +115,6 @@ bin\launch_usdview.bat docs\examples\two_bone_ik.usda
 
 - Keep the deformed geometry inside the same asset prim as the rig: a mover whose target is outside the rig root's parent fails compile with "targets outside the rig asset".
 - Order two movers that write the same target — or a solver against a constraint, or two solvers against each other, which are all steps of ONE pose stack — by arranging them in namespace: nesting, or `reorder nameChildren` on their parent. The bottom composed sibling executes first, the compiler reads the final composed order and nothing about how it arose, and nothing else breaks a tie. Put `Solvers` at the bottom of the rig root for the classic "solve, then revise" shape.
-- `rigExec:baked` has to be *authored* to be heard (the check is `HasAuthoredValue`), it is only a request, and it is the weakest of the three ways the mode is chosen.
-- An importer that has validated its connected frame and attribute input closures may set boolean custom data `rigExec:connectedPoseSeedReuse` on the root. This lets refresh requests pin dependency frames and omit upstream overrides. Other rigs retain complete override reads; `RIGEXEC_CONNECTED_POSE_SEED_REUSE=0` disables the optimization.
 
 ## See also
 

@@ -1,29 +1,9 @@
-// Property revisions as head-tier ops.
-// The baked prologue runs the property chains as its own ops, not through
-// the evaluator's _EvaluatePropertyChains: one head op per revision part
-// runs from leaves sampled before it, in an
-// order derived from what it declares, and only when something it reads
-// moved; a publication pass refills the results and the overlay every run.
-// These cases hold the ops to the evaluator's own function, run detached
-// after every baked generation (results bit for bit, lines line for line),
-// under no override, a drag on a mover input, on a chain target, on a phased
-// hop, and the drags lifted; pin which parts re-run for a drag on one
-// revision's input and on the target; rebind a target removed or retyped
-// in place; pin the line order to the chain order
-// where the declarations allow another; pin that a stage-frames bail still
-// publishes the chains, that a clean tier still publishes, and that a bake
-// after an evaluation exports what a fresh one does; and hold a chain
-// input connected to a pose interpolator's weight to the authored value.
-// The region's readers declare the versions their walks can meet: only the
-// readers of a moved version re-run, a stand-aside reader re-runs on its
-// hop's drag, every walk's versions are declared and a missing declaration
-// refuses the program, a record of another type than the read shadows
-// nothing, a chain drag on the biped costs less than a forced run, and the
-// exported always-dirty set keeps its recorded digests.
-// Registered plain and under the parity entries; under
-// RIGEXEC_BAKED_VERIFY_CONES the head tier is also checked against a forced
-// run of itself.
+// Property revisions in the common graph. Numeric fixtures and exact version
+// declarations establish correctness. Fresh canonical evaluators, repeated
+// generations and frozen jobs check cache freshness and publication, including
+// input/target/checkpoint drags, malformed inputs and source capture failure.
 // argv[1] = path to the examples directory.
+#include "rigExec/inputReplay.h"
 #include "rigExec/backgroundScheduler.h"
 #include "rigExec/bakedProgram.h"
 #include "rigExec/bakedProgramImpl.h"
@@ -34,6 +14,7 @@
 #include "rigExecBake/bake.h"
 #include "rigExecMath/propertyMath.h"
 #include "rigExecPromotionCases.h"
+#include "rigExecInputActionsAdapters.h"
 
 #include "pxr/base/gf/math.h"
 #include "pxr/base/gf/quatf.h"
@@ -49,6 +30,7 @@
 #include "pxr/usd/sdf/types.h"
 #include "pxr/usd/usd/attribute.h"
 #include "pxr/usd/usd/prim.h"
+#include "pxr/usd/usd/primRange.h"
 #include "pxr/usd/usd/relationship.h"
 #include "pxr/usd/usd/stage.h"
 
@@ -124,8 +106,7 @@ FixtureNamed(const std::vector<Fixture> &fixtures, const std::string &name)
 }
 
 std::unique_ptr<RigExecRigEvaluator>
-MakeEvaluator(const UsdStageRefPtr &stage, const SdfPath &rig,
-              RigExecEvaluationMode mode)
+MakeEvaluator(const UsdStageRefPtr &stage, const SdfPath &rig)
 {
     auto evaluator = std::make_unique<RigExecRigEvaluator>(stage, rig);
     std::vector<std::string> errors;
@@ -135,7 +116,7 @@ MakeEvaluator(const UsdStageRefPtr &stage, const SdfPath &rig,
             std::printf("    compile: %s\n", e.c_str());
         }
     }
-    evaluator->SetEvaluationMode(mode);
+
     return evaluator;
 }
 
@@ -150,7 +131,7 @@ UsdStageRefPtr
 StageFrom(const std::string &text)
 {
     UsdStageRefPtr stage = UsdStage::CreateInMemory();
-    CHECK(stage->GetRootLayer()->ImportFromString(text));
+    CHECK(rigExec::RigExecInputReplayImportFromString(stage->GetRootLayer(), text));
     return stage;
 }
 
@@ -248,38 +229,38 @@ LineMismatches(const std::vector<std::string> &want,
     return 1;
 }
 
-// The last baked run's chain results and lines against the evaluator's own
-// function run detached at \p time, which must leave the overlay and the
-// memo as it found them.
+// Compare the cached generation to a fresh canonical program at the same
+// input state. This checks cache freshness and publication consistency.
 size_t
-CheckAgainstTheEvaluator(RigExecRigEvaluator *evaluator, UsdTimeCode time,
-                         const RigExecRigPose &pose, const std::string &what)
+CheckFreshEvaluator(RigExecRigEvaluator *evaluator, UsdTimeCode time,
+                    const RigExecRigPose &pose, const std::string &what)
 {
-    const RigExecBakedProgramImpl *program = Program(*evaluator);
+    const auto *program = Program(*evaluator);
     CHECK(program);
-    if (!program) {
-        return 1;
-    }
-    const RigExecBakedProgramImpl &B = *program;
+    if (!program) return 1;
+    const auto &B = *program;
     const RigExecResolvedInputs overlay = *B.resolvedInputs;
-    const void *memo = RigExecBakedProgramTesting::ChainMemo(*evaluator);
-    std::map<SdfPath, VtValue> results;
-    std::vector<std::string> lines;
-    CHECK(RigExecTestEvaluateChainsDetached(evaluator, time, &results,
-                                            &lines));
+    auto fresh = MakeEvaluator(B.stage,evaluator->GetRigPath());
+    std::map<SdfPath,VtValue> held = B.routedOverrides;
+    for (const auto &[path,slot] : B.headOverrideSlots)
+        if (slot < B.headOverrides.size() && !B.headOverrides[slot].IsEmpty())
+            held[path] = B.headOverrides[slot];
+    std::vector<RigExecValueOverride> overrides;
+    for (const auto &[path,value] : held)
+        overrides.push_back({path.GetPrimPath(),TfToken(),path.GetNameToken(),value});
+    fresh->SetInteractiveOverrides(overrides);
+    const auto regenerated = fresh->Evaluate(time);
+    CHECK(regenerated.valid);
     CHECK(overlay.HasSameValues(*B.resolvedInputs));
-    CHECK(RigExecBakedProgramTesting::ChainMemo(*evaluator) == memo);
-    size_t mismatches = ResultMismatches(results, B.propertyResults, what);
-    mismatches += LineMismatches(lines, HeadLines(B), what);
-    // What the pose publishes at the chains' paths is the results.
-    for (const auto &[path, value] : B.propertyResults) {
+    const auto *freshProgram = Program(*fresh);
+    CHECK(freshProgram);
+    if (!freshProgram) return 1;
+    size_t mismatches = ResultMismatches(freshProgram->propertyResults,B.propertyResults,what);
+    mismatches += LineMismatches(HeadLines(*freshProgram),HeadLines(B),what);
+    for (const auto &[path,value] : B.propertyResults) {
         const auto found = pose.movedProperties.find(path);
         if (found == pose.movedProperties.end() ||
-            !RigExecBakedHeadValueSame(value, found->second)) {
-            std::printf("FAIL %s: the pose does not publish %s\n",
-                        what.c_str(), path.GetText());
-            ++mismatches;
-        }
+            !RigExecBakedHeadValueSame(value,found->second)) ++mismatches;
     }
     return mismatches;
 }
@@ -367,7 +348,7 @@ TestPropertyOpsEqualTheEvaluatorChains(const std::string &examples)
             continue;
         }
         auto evaluator =
-            MakeEvaluator(stage, f.rig, RigExecEvaluationMode::Baked);
+            MakeEvaluator(stage, f.rig);
         const double start = stage->GetStartTimeCode();
         CHECK(evaluator->Evaluate(UsdTimeCode(start)).valid);
         const RigExecBakedProgramImpl *program = Program(*evaluator);
@@ -378,7 +359,7 @@ TestPropertyOpsEqualTheEvaluatorChains(const std::string &examples)
         const SdfPath input = MoverInput(*program);
         const SdfPath target = ChainTarget(*program);
         const SdfPath hop = PhasedHop(*program);
-        size_t compared = 0, dynamic = 0;
+        size_t compared = 0;
         for (const double offset : {0.0, 2.0, 6.0}) {
             const UsdTimeCode t(start + offset);
             const std::vector<std::pair<std::string, SdfPath>> cases = {
@@ -405,60 +386,25 @@ TestPropertyOpsEqualTheEvaluatorChains(const std::string &examples)
                     evaluator->GetBakedGenerationCount();
                 const RigExecRigPose pose = evaluator->Evaluate(t);
                 CHECK(pose.valid);
-                CHECK(pose.bakedParityMismatches == 0);
-                if (evaluator->GetBakedGenerationCount() == generations) {
-                    // An override the program cannot place answers
-                    // dynamically: nothing baked to compare.
-                    CHECK(name == "phased hop");
-                    ++dynamic;
-                    continue;
-                }
-                CHECK(CheckAgainstTheEvaluator(evaluator.get(), t, pose,
+
+                CHECK(evaluator->GetBakedGenerationCount() == generations+1);
+                CHECK(CheckFreshEvaluator(evaluator.get(), t, pose,
                                                what) == 0);
                 ++compared;
             }
         }
         std::printf("equal %s: %zu chain(s), %zu record(s), %zu head "
-                    "step(s), %zu generation(s) compared, %zu dynamic; "
+                    "step(s), %zu generation(s) compared; "
                     "drags on %s, %s, %s\n",
                     f.name, program->propertyChains.size(),
                     program->propertyRecords.size(),
-                    PropertySteps(*program), compared, dynamic,
+                    PropertySteps(*program), compared,
                     input.GetText(), target.GetText(), hop.GetText());
 
-        // A generation that runs both paths binds the dynamic chain memo;
-        // the hook leaves it as it found it, field for field.
-        auto both = MakeEvaluator(stage, f.rig,
-                                  RigExecEvaluationMode::BakedWithParityCheck);
-        const RigExecRigPose pose = both->Evaluate(UsdTimeCode(start + 2.0));
-        CHECK(pose.valid);
-        CHECK(pose.bakedParityMismatches == 0);
-        const auto *memo = static_cast<const RigExecPropertyChainBindings *>(
-            RigExecBakedProgramTesting::ChainMemo(*both));
-        CHECK(memo);
-        if (!memo) {
-            continue;
-        }
-        const RigExecPropertyChainBindings before = *memo;
-        CHECK(CheckAgainstTheEvaluator(both.get(), UsdTimeCode(start + 2.0),
-                                       pose,
-                                       std::string(f.name) + " parity") == 0);
-        CHECK(RigExecBakedProgramTesting::ChainMemo(*both) == memo);
-        CHECK(memo->haveLast == before.haveLast);
-        CHECK(memo->lastTime == before.lastTime);
-        CHECK(memo->lastOverrides == before.lastOverrides);
-        CHECK(memo->chains.size() == before.chains.size());
-        for (size_t c = 0; c < memo->chains.size() &&
-                           c < before.chains.size();
-             ++c) {
-            const auto &a = memo->chains[c];
-            const auto &b = before.chains[c];
-            CHECK(a.cached == b.cached && a.published == b.published &&
-                  a.changedThisRun == b.changedThisRun &&
-                  a.lastValue == b.lastValue &&
-                  a.lastPhased == b.lastPhased &&
-                  a.lastDiagnostics == b.lastDiagnostics);
-        }
+        const RigExecRigPose repeated = evaluator->Evaluate(UsdTimeCode(start+2.0));
+        CHECK(repeated.valid);
+        CHECK(CheckFreshEvaluator(evaluator.get(),UsdTimeCode(start+2.0),repeated,
+                                  std::string(f.name)+" fresh generation") == 0);
     }
 }
 
@@ -616,7 +562,7 @@ TestPerVersionMemo()
 {
     UsdStageRefPtr stage = StageFrom(kThreeRevisions);
     const SdfPath rig("/Asset/Rig");
-    auto evaluator = MakeEvaluator(stage, rig, RigExecEvaluationMode::Baked);
+    auto evaluator = MakeEvaluator(stage, rig);
     const UsdTimeCode t(1.0);
     RigExecRigPose pose = evaluator->Evaluate(t);
     CHECK(pose.valid);
@@ -632,12 +578,12 @@ TestPerVersionMemo()
     CHECK(B.propertyChains[0].target == dial);
     CHECK(B.propertyRecords.size() == 1);
     CHECK(Ran(B).size() == PropertySteps(B));
-    CHECK(CheckAgainstTheEvaluator(evaluator.get(), t, pose, "memo first") ==
+    CHECK(CheckFreshEvaluator(evaluator.get(), t, pose, "memo first") ==
           0);
 
     pose = evaluator->Evaluate(t);
     CHECK(Ran(B).empty());
-    CHECK(CheckAgainstTheEvaluator(evaluator.get(), t, pose, "memo again") ==
+    CHECK(CheckFreshEvaluator(evaluator.get(), t, pose, "memo again") ==
           0);
 
     using Ran_ = std::set<std::pair<SdfPath, int>>;
@@ -657,13 +603,13 @@ TestPerVersionMemo()
                1.0f));
     pose = evaluator->Evaluate(t);
     expect({{dial, 2}, {dial, 3}, {finalOut, 1}}, "revision 2 dragged");
-    CHECK(CheckAgainstTheEvaluator(evaluator.get(), t, pose,
+    CHECK(CheckFreshEvaluator(evaluator.get(), t, pose,
                                    "revision 2 dragged") == 0);
 
     evaluator->SetInteractiveOverrides({});
     pose = evaluator->Evaluate(t);
     expect({{dial, 2}, {dial, 3}, {finalOut, 1}}, "revision 2 lifted");
-    CHECK(CheckAgainstTheEvaluator(evaluator.get(), t, pose,
+    CHECK(CheckFreshEvaluator(evaluator.get(), t, pose,
                                    "revision 2 lifted") == 0);
 
     evaluator->SetInteractiveOverrides(DragBy(stage, dial, t, 0.5f));
@@ -671,7 +617,7 @@ TestPerVersionMemo()
     expect({{dial, 0}, {dial, 1}, {dial, 2}, {dial, 3}, {finalOut, 1},
             {early, 1}},
            "target dragged");
-    CHECK(CheckAgainstTheEvaluator(evaluator.get(), t, pose,
+    CHECK(CheckFreshEvaluator(evaluator.get(), t, pose,
                                    "target dragged") == 0);
 }
 
@@ -679,35 +625,63 @@ TestPerVersionMemo()
 // else edited: the epoch digest names the target's path but not its type, so
 // the epoch stands, and the ops must answer from the target as it now is --
 // the evaluator rebinds its chain on any edit that reaches the target.
+std::vector<std::string> ChainLines(const RigExecRigPose &pose);
+
 void
 TestATargetRetypedInPlaceRebinds()
 {
     UsdStageRefPtr stage = StageFrom(kThreeRevisions);
     const SdfPath rig("/Asset/Rig");
     const SdfPath early("/Asset/Rig/Channels/Out.rigExec:early");
-    auto evaluator = MakeEvaluator(stage, rig, RigExecEvaluationMode::Baked);
+    auto evaluator = MakeEvaluator(stage, rig);
     const UsdTimeCode t(1.0);
     RigExecRigPose pose = evaluator->Evaluate(t);
     CHECK(pose.valid);
-    CHECK(CheckAgainstTheEvaluator(evaluator.get(), t, pose,
+    CHECK(CheckFreshEvaluator(evaluator.get(), t, pose,
                                    "target, before") == 0);
     UsdPrim out = stage->GetPrimAtPath(early.GetPrimPath());
-    const auto baked = [&](const char *what) {
+    const auto baked = [&](const char *what, bool targetMissing = false) {
         const size_t generations = evaluator->GetBakedGenerationCount();
         pose = evaluator->Evaluate(t);
         CHECK(pose.valid);
         CHECK(evaluator->GetBakedGenerationCount() == generations + 1);
-        CHECK(CheckAgainstTheEvaluator(evaluator.get(), t, pose, what) == 0);
+        if (targetMissing) {
+            // ORIGINAL 6d83d42's detached walk keeps this committed epoch's
+            // phase records after removal. A fresh compile admits different
+            // movers. These exact literals were confirmed independently by
+            // that original walk and original baked evaluator, with the same
+            // before/remove/retype history (no current outputs as expected).
+            const std::map<SdfPath, VtValue> want = {
+                {SdfPath("/Asset/Rig/Channels/Dial.rigExec:amount"),
+                 VtValue(1.625f)},
+                {SdfPath("/Asset/Rig/Channels/Out.rigExec:final"),
+                 VtValue(1.625f)},
+                {SdfPath("/Asset/Rig/Movers/EarlyReader.inputs:value"),
+                 VtValue(0.75f)}};
+            const std::vector<std::string> lines = {
+                "property chain /Asset/Rig/Channels/Out.rigExec:early: "
+                "target attribute disappeared; chain skipped"};
+            const auto *program = Program(*evaluator);
+            CHECK(program);
+            if (!program) return;
+            CHECK(ResultMismatches(want, program->propertyResults, what) == 0);
+            CHECK(ResultMismatches(want, pose.movedProperties, what) == 0);
+            CHECK(LineMismatches(lines, HeadLines(*program), what) == 0);
+            CHECK(LineMismatches(lines, ChainLines(pose), what) == 0);
+        } else {
+            CHECK(CheckFreshEvaluator(evaluator.get(), t, pose, what) == 0);
+        }
     };
     CHECK(out.RemoveProperty(early.GetNameToken()));
-    baked("target removed");
+    baked("target removed", true);
     CHECK(pose.movedProperties.count(early) == 0);
     CHECK(out.CreateAttribute(early.GetNameToken(), SdfValueTypeNames->Double)
               .Set(1.5));
     baked("target retyped");
     const auto found = pose.movedProperties.find(early);
     CHECK(found != pose.movedProperties.end() &&
-          found->second.IsHolding<double>());
+          found->second.IsHolding<double>() &&
+          found->second.UncheckedGet<double>() == 2.25);
 }
 
 // Independent chains whose movers sort the other way round from their
@@ -830,13 +804,394 @@ ChainLines(const RigExecRigPose &pose)
     return lines;
 }
 
+using PropertySource = std::pair<SdfPath, RigExecBakedHeadValueType>;
+struct AuthoredPropertyWalk {
+    RigExecBakedWalk::Flavour flavour = RigExecBakedWalk::Flavour::Absent;
+    std::vector<SdfPath> hops, doubles;
+    std::set<PropertySource> sources;
+};
+
+AuthoredPropertyWalk AuthoredWalk(const UsdAttribute &head,
+                                  RigExecBakedHeadValueType type)
+{
+    AuthoredPropertyWalk result;
+    if (!head) return result;
+    result.flavour = head.HasAuthoredConnections()
+        ? RigExecBakedWalk::Flavour::Connected : RigExecBakedWalk::Flavour::Pinned;
+    if (result.flavour == RigExecBakedWalk::Flavour::Pinned) {
+        result.hops.push_back(head.GetPath());
+        result.sources.emplace(head.GetPath(), type);
+        return result;
+    }
+    UsdAttribute attribute = head;
+    std::set<SdfPath> seen;
+    bool doubleTail = type == RigExecBakedHeadValueType::Float &&
+                      head.GetTypeName() == SdfValueTypeNames->Double;
+    while (attribute && seen.insert(attribute.GetPath()).second) {
+        const SdfPath path = attribute.GetPath();
+        if (!doubleTail) result.hops.push_back(path);
+        if (type == RigExecBakedHeadValueType::Float &&
+            attribute.GetTypeName() == SdfValueTypeNames->Double) doubleTail = true;
+        if (doubleTail) result.doubles.push_back(path);
+        else result.sources.emplace(path, type);
+        SdfPathVector connections;
+        if (attribute.HasAuthoredConnections()) attribute.GetConnections(&connections);
+        CHECK(connections.size() <= 1);
+        if (connections.size() != 1) break;
+        attribute = attribute.GetStage()->GetAttributeAtPath(connections.front());
+    }
+    if (!result.doubles.empty()) {
+        // Float recursion from a Double has no raw Float fallback, including
+        // earlier Float hops. Each Double-tail hop retains its own raw value.
+        result.sources.clear();
+        for (const SdfPath &path : result.doubles)
+            result.sources.emplace(path, RigExecBakedHeadValueType::Double);
+    }
+    return result;
+}
+
+struct AuthoredPropertyChain {
+    SdfValueTypeName type;
+    std::vector<UsdPrim> movers;
+};
+using AuthoredPropertyChains = std::map<SdfPath, AuthoredPropertyChain>;
+
+AuthoredPropertyChains AuthoredChains(const UsdStageRefPtr &stage,
+                                     const SdfPath &rig)
+{
+    AuthoredPropertyChains expected;
+    std::vector<UsdPrim> prims;
+    for (const UsdPrim &prim : UsdPrimRange(stage->GetPrimAtPath(rig))) prims.push_back(prim);
+    for (auto it = prims.rbegin(); it != prims.rend(); ++it) {
+        const TfToken schema = it->GetTypeName();
+        const bool scalar = schema == "RigExecFloatMathMover";
+        const bool vector = schema == "RigExecVec3fMathMover";
+        const bool matrix = schema == "RigExecMatrixMathMover";
+        if (!scalar && !vector && !matrix) {
+            CHECK(schema.GetString().find("MathMover") == std::string::npos);
+            continue;
+        }
+        SdfPathVector targets;
+        const UsdRelationship moves = it->GetRelationship(TfToken("rigExec:moves"));
+        if (moves) moves.GetTargets(&targets);
+        // An explicitly unwired owner has no property publication.
+        if (targets.empty()) continue;
+        CHECK(targets.size() == 1 && targets.front().IsPropertyPath());
+        if (targets.size() != 1 || !targets.front().IsPropertyPath()) continue;
+        const UsdAttribute target = stage->GetAttributeAtPath(targets.front());
+        CHECK(target);
+        if (!target) continue;
+        const TfType type = target.GetTypeName().GetType();
+        CHECK((scalar && (type == TfType::Find<float>() || type == TfType::Find<double>())) ||
+              (vector && type == TfType::Find<GfVec3f>()) ||
+              (matrix && type == TfType::Find<GfMatrix4d>()));
+        auto &chain = expected[targets.front()];
+        chain.type = target.GetTypeName();
+        chain.movers.push_back(*it);
+    }
+    return expected;
+}
+
+struct AuthoredPropertyRecord {
+    SdfPath target;
+    SdfValueTypeName type;
+    SdfPathVector hops;
+    size_t applied = 0;
+    bool final = false, widens = false;
+};
+
+std::map<SdfPath, AuthoredPropertyRecord>
+AuthoredRecords(const UsdStageRefPtr &stage, const SdfPath &rig,
+                const AuthoredPropertyChains &chains)
+{
+    std::map<SdfPath, UsdAttribute> inputs;
+    std::vector<UsdPrim> prims;
+    std::set<SdfPath> visited;
+    for (const UsdPrim &prim : UsdPrimRange(stage->GetPrimAtPath(rig))) prims.push_back(prim);
+    for (size_t i = 0; i < prims.size(); ++i) {
+        const UsdPrim prim = prims[i];
+        if (!prim || !visited.insert(prim.GetPath()).second) continue;
+        for (const UsdAttribute &a : prim.GetAttributes())
+            if (a.HasAuthoredConnections()) inputs.emplace(a.GetPath(), a);
+        for (const char *name : {"rigExec:weightObject", "rigExec:inputWeights",
+                               "rigExec:baseWeight", "rigExec:blendInputs"}) {
+            SdfPathVector targets;
+            if (const auto rel = prim.GetRelationship(TfToken(name))) rel.GetTargets(&targets);
+            for (const SdfPath &path : targets)
+                if (!path.GetPrimPath().HasPrefix(rig)) prims.push_back(stage->GetPrimAtPath(path.GetPrimPath()));
+        }
+        for (const char *name : {"rigExec:driverAttributes", "rigExec:shaderDialSources",
+                               "rigExec:activeSpaceAttribute"}) {
+            SdfPathVector targets;
+            if (const auto rel = prim.GetRelationship(TfToken(name))) rel.GetTargets(&targets);
+            for (const SdfPath &path : targets) {
+                const UsdAttribute a = stage->GetAttributeAtPath(path);
+                if (a && a.HasAuthoredConnections()) inputs.emplace(path, a);
+            }
+        }
+    }
+    std::map<SdfPath, AuthoredPropertyRecord> candidates, expected;
+    for (const auto &[path, input] : inputs) {
+        if (chains.count(path)) continue;
+        AuthoredPropertyRecord record;
+        record.type = input.GetTypeName();
+        UsdAttribute current = input;
+        std::set<SdfPath> seen;
+        while (current && seen.insert(current.GetPath()).second) {
+            record.hops.push_back(current.GetPath());
+            SdfPathVector links;
+            if (current.HasAuthoredConnections()) current.GetConnections(&links);
+            if (links.size() != 1) break;
+            if (chains.count(links.front())) { record.target = links.front(); break; }
+            current = stage->GetAttributeAtPath(links.front());
+        }
+        if (record.target.IsEmpty()) continue;
+        const auto &chain = chains.at(record.target);
+        const auto scalar = [](const TfType &type) {
+            return type == TfType::Find<float>() || type == TfType::Find<double>();
+        };
+        const TfType consumerType = record.type.GetType(), targetType = chain.type.GetType();
+        if (consumerType != targetType && !(scalar(consumerType) && scalar(targetType))) continue;
+        VtValue phaseValue;
+        std::string phase = "base";
+        if (input.HasAuthoredMetadata(TfToken("rigExecReadPhase"))) {
+            CHECK(input.GetMetadata(TfToken("rigExecReadPhase"), &phaseValue));
+            CHECK(phaseValue.IsHolding<std::string>());
+            if (!phaseValue.IsHolding<std::string>()) continue;
+            phase = phaseValue.UncheckedGet<std::string>();
+        }
+        record.final = phase == "final";
+        if (record.final) record.applied = chain.movers.size();
+        else if (phase != "base") {
+            const SdfPath checkpoint(phase);
+            CHECK(checkpoint.IsAbsolutePath() && checkpoint.IsPrimPath());
+            for (size_t k = 0; k < chain.movers.size(); ++k)
+                if (chain.movers[k].GetPath().HasPrefix(checkpoint)) record.applied = k + 1;
+            CHECK(record.applied > 0);
+        }
+        record.widens = consumerType == TfType::Find<double>() && targetType == TfType::Find<float>();
+        candidates.emplace(path, record);
+        if (!record.final) expected.emplace(path, record);
+    }
+    std::vector<SdfPath> finals;
+    for (const auto &[path, record] : candidates) if (record.final) finals.push_back(path);
+    std::stable_sort(finals.begin(), finals.end(), [&](const auto &a, const auto &b) {
+        return candidates.at(a).hops.size() < candidates.at(b).hops.size();
+    });
+    for (const SdfPath &path : finals) {
+        const auto &record = candidates.at(path);
+        const bool passesRecord = std::any_of(record.hops.begin() + 1, record.hops.end(),
+            [&](const SdfPath &hop) { return expected.count(hop) != 0; });
+        if (record.widens || passesRecord) expected.emplace(path, record);
+    }
+    return expected;
+}
+
+void CheckAuthoredPropertyHeads(const UsdStageRefPtr &stage, const SdfPath &rig,
+                               const RigExecBakedProgramImpl &B)
+{
+    const auto expected = AuthoredChains(stage, rig);
+    const auto records = AuthoredRecords(stage, rig, expected);
+    CHECK(B.propertyChains.size() == expected.size());
+    CHECK(B.propertyRecords.size() == records.size());
+    std::map<SdfPath, size_t> chainSlots, recordSlots;
+    for (size_t c = 0; c < B.propertyChains.size(); ++c)
+        CHECK(chainSlots.emplace(B.propertyChains[c].target, c).second);
+    std::map<int, SdfPath> overridePaths;
+    for (const auto &[path, slot] : B.headOverrideSlots) overridePaths.emplace(int(slot), path);
+    for (size_t r = 0; r < B.propertyRecords.size(); ++r) {
+        const auto &record = B.propertyRecords[r];
+        CHECK(recordSlots.emplace(record.consumer, r).second);
+        const auto found = records.find(record.consumer);
+        CHECK(found != records.end());
+        CHECK(record.chain < B.propertyChains.size());
+        if (found == records.end() || record.chain >= B.propertyChains.size()) continue;
+        CHECK(B.propertyChains[record.chain].target == found->second.target);
+        CHECK(record.consumerType == found->second.type);
+        CHECK(record.applied == found->second.applied);
+        SdfPathVector paths;
+        for (int slot : record.hopSlots) {
+            CHECK(overridePaths.count(slot));
+            if (overridePaths.count(slot)) paths.push_back(overridePaths.at(slot));
+        }
+        CHECK(paths == found->second.hops);
+    }
+    for (const auto &[path, record] : records) CHECK(recordSlots.count(path) == 1);
+    std::map<std::pair<SdfPath, int>, size_t> parts;
+    for (size_t i = 0; i < B.steps.size(); ++i) {
+        const auto &step = B.steps[i];
+        if (step.kind != RigExecBakedStepKind::PropertyRevision) continue;
+        CHECK(step.isHead && !step.isSource && !step.externalReads);
+        CHECK(step.object >= 0 && size_t(step.object) < B.propertyChains.size());
+        if (step.object < 0 || size_t(step.object) >= B.propertyChains.size()) continue;
+        CHECK(parts.emplace(std::make_pair(B.propertyChains[size_t(step.object)].target, step.part), i).second);
+    }
+    for (const auto &step : B.excludedSteps)
+        CHECK(step.kind != RigExecBakedStepKind::PropertyRevision);
+    size_t expectedParts = 0;
+    std::set<uint32_t> allWrites;
+    for (const auto &[target, authored] : expected) {
+        CHECK(chainSlots.count(target));
+        if (!chainSlots.count(target)) continue;
+        const auto &chain = B.propertyChains[chainSlots.at(target)];
+        CHECK(chain.valueType == authored.type && chain.revisions.size() == authored.movers.size());
+        expectedParts += authored.movers.size() + 1;
+        for (size_t k = 0; k <= authored.movers.size(); ++k) {
+            const auto key = std::make_pair(target, int(k));
+            CHECK(parts.count(key));
+            if (!parts.count(key)) continue;
+            const size_t index = parts.at(key);
+            const auto &step = B.steps[index];
+            std::set<PropertySource> wantSources, gotSources;
+            std::set<SdfPath> wantOverrides, gotOverrides;
+            if (k == 0) {
+                const auto type = authored.type.GetType();
+                const auto query = type == TfType::Find<double>() ? RigExecBakedHeadValueType::Double :
+                    type == TfType::Find<float>() ? RigExecBakedHeadValueType::Float :
+                    type == TfType::Find<GfMatrix4d>() ? RigExecBakedHeadValueType::Matrix4d : RigExecBakedHeadValueType::Vec3f;
+                wantSources.emplace(target, query); wantOverrides.insert(target);
+            } else {
+                const UsdPrim mover = authored.movers[k - 1];
+                CHECK(k <= chain.revisions.size());
+                if (k > chain.revisions.size()) continue;
+                const auto &revision = chain.revisions[k - 1];
+                CHECK(revision.mover == mover.GetPath());
+                SdfPathVector weight;
+                if (const auto rel = mover.GetRelationship(TfToken("rigExec:weightObject"))) rel.GetTargets(&weight);
+                const bool hasWeight = !weight.empty();
+                CHECK(weight.size() <= 1);
+                CHECK(revision.weightObject == (hasWeight ? weight.front() : SdfPath()));
+                if (hasWeight) {
+                    // The authored envelope has one explicit field producer;
+                    // property work is dirtied by that publication, not volatile.
+                    using Field = RigExecBakedProgramImpl::WeightField;
+                    std::vector<size_t> fields;
+                    for (size_t f = 0; f < B.weightFields.size(); ++f) {
+                        const auto &field = B.weightFields[f];
+                        if (field.form == Field::Form::EnvelopeProperty &&
+                            field.consumer == int(chainSlots.at(target)) &&
+                            field.part == int(k)) fields.push_back(f);
+                    }
+                    CHECK(fields.size() == 1);
+                    if (fields.size() == 1) {
+                        const size_t f = fields.front();
+                        const auto &field = B.weightFields[f];
+                        CHECK(revision.weightField == int(f));
+                        CHECK(field.object >= 0 && size_t(field.object) < B.weightObjects.size());
+                        if (field.object >= 0 && size_t(field.object) < B.weightObjects.size())
+                            CHECK(B.weightObjects[size_t(field.object)].path == weight.front());
+                        CHECK(std::any_of(step.reads.begin(), step.reads.end(), [&](const auto &range) {
+                            return range.domain == RigExecBakedSlotDomain::WeightField &&
+                                   range.begin == f && range.end == f + 1;
+                        }));
+                        std::vector<size_t> producers;
+                        for (size_t i = 0; i < B.steps.size(); ++i)
+                            if (B.steps[i].kind == RigExecBakedStepKind::WeightField &&
+                                B.steps[i].object == int(f)) producers.push_back(i);
+                        CHECK(producers.size() == 1);
+                        if (producers.size() == 1) {
+                            const size_t producer = producers.front();
+                            CHECK(producer < index);
+                            CHECK(std::find(step.preds.begin(), step.preds.end(), int(producer)) != step.preds.end());
+                            CHECK(std::any_of(B.steps[producer].writes.begin(), B.steps[producer].writes.end(),
+                                [&](const auto &range) {
+                                    return range.domain == RigExecBakedSlotDomain::WeightField &&
+                                           range.begin == f && range.end == f + 1;
+                                }));
+                        }
+                    }
+                } else {
+                    CHECK(revision.weightField == -1);
+                    CHECK(std::none_of(step.reads.begin(), step.reads.end(), [](const auto &range) {
+                        return range.domain == RigExecBakedSlotDomain::WeightField;
+                    }));
+                }
+                const auto checkWalk = [&](const char *name, RigExecBakedHeadValueType type,
+                                           const RigExecBakedWalk &walk) {
+                    const auto want = AuthoredWalk(mover.GetAttribute(TfToken(name)), type);
+                    CHECK(walk.type == type && walk.flavour == want.flavour);
+                    SdfPathVector hops, doubles;
+                    for (const auto &hop : walk.hops) hops.push_back(hop.path);
+                    for (const auto &hop : walk.doubleHops) doubles.push_back(hop.path);
+                    CHECK(hops == want.hops && doubles == want.doubles);
+                    wantSources.insert(want.sources.begin(), want.sources.end());
+                    wantOverrides.insert(want.hops.begin(), want.hops.end());
+                    wantOverrides.insert(want.doubles.begin(), want.doubles.end());
+                };
+                using T = RigExecBakedHeadValueType;
+                checkWalk("inputs:enabled", T::Bool, revision.enabled);
+                checkWalk("inputs:defaultWeight", T::Float, revision.defaultWeight);
+                const TfToken schema = mover.GetTypeName();
+                const T valueType = schema == "RigExecMatrixMathMover" ? T::Matrix4d :
+                    schema == "RigExecVec3fMathMover" ? T::Vec3f : T::Float;
+                checkWalk("inputs:value", valueType, revision.value);
+                if (valueType != T::Matrix4d) {
+                    checkWalk("inputs:min", valueType, revision.minimum);
+                    checkWalk("inputs:max", valueType, revision.maximum);
+                }
+                TfToken operation;
+                CHECK(mover.GetAttribute(TfToken("rigExec:operation")).Get(&operation));
+                if (operation == "curve") {
+                    checkWalk("inputs:keys", T::Vec2fArray, revision.keys);
+                    checkWalk("inputs:tangents", T::Vec2fArray, revision.tangents);
+                }
+                const auto prior = parts.find(std::make_pair(target, int(k - 1)));
+                CHECK(prior != parts.end());
+                if (prior != parts.end()) {
+                    CHECK(prior->second < index);
+                    CHECK(std::find(step.preds.begin(), step.preds.end(), int(prior->second)) != step.preds.end());
+                }
+                const uint32_t value = chain.versionBase + uint32_t(k - 1);
+                CHECK(std::any_of(step.reads.begin(), step.reads.end(), [&](const auto &range) {
+                    return range.domain == RigExecBakedSlotDomain::PropertyResult && range.begin <= value && value < range.end;
+                }));
+            }
+            CHECK(!step.alwaysRuns);
+            for (uint32_t id : step.leaves) {
+                CHECK(id < B.headLeaves.size());
+                if (id >= B.headLeaves.size()) continue;
+                const auto &leaf = B.headLeaves[id];
+                gotSources.emplace(leaf.path, leaf.type);
+                const UsdAttribute source = stage->GetAttributeAtPath(leaf.path);
+                CHECK(source);
+                using T = RigExecBakedHeadValueType;
+                const TfType queryType = leaf.type == T::Bool ? TfType::Find<bool>() :
+                    leaf.type == T::Float ? TfType::Find<float>() :
+                    leaf.type == T::Double ? TfType::Find<double>() :
+                    leaf.type == T::Matrix4d ? TfType::Find<GfMatrix4d>() :
+                    leaf.type == T::Vec2fArray ? TfType::Find<VtArray<GfVec2f>>() : TfType::Find<GfVec3f>();
+                CHECK(leaf.typeMatches == (source && source.GetTypeName().GetType() == queryType));
+                CHECK(leaf.varying == (source && (source.ValueMightBeTimeVarying() || source.GetNumTimeSamples() > 0)));
+            }
+            for (uint32_t slot : step.overrideSlots) {
+                CHECK(overridePaths.count(int(slot)));
+                if (overridePaths.count(int(slot))) gotOverrides.insert(overridePaths.at(int(slot)));
+            }
+            CHECK(gotSources == wantSources && gotOverrides == wantOverrides);
+            std::set<uint32_t> gotWrites, wantWrites{chain.versionBase + uint32_t(k)};
+            for (const auto &[consumer, record] : records)
+                if (record.target == target && record.applied == k && recordSlots.count(consumer))
+                    wantWrites.insert(B.propertyRecords[recordSlots.at(consumer)].id);
+            for (const auto &range : step.writes) {
+                CHECK(range.domain == RigExecBakedSlotDomain::PropertyResult && range.begin < range.end);
+                for (uint32_t id = range.begin; id < range.end; ++id) CHECK(gotWrites.insert(id).second);
+            }
+            CHECK(gotWrites == wantWrites);
+            for (uint32_t id : gotWrites) CHECK(allWrites.insert(id).second);
+        }
+    }
+    CHECK(parts.size() == expectedParts);
+    CHECK(B.propertyVersionCount == expectedParts + records.size());
+    CHECK(allWrites.size() == expectedParts + records.size());
+}
+
 void
 TestHeadOrderIsChainOrder()
 {
     UsdStageRefPtr stage = StageFrom(kTwoChains);
     const SdfPath rig("/Asset/Rig");
     const UsdTimeCode t(1.0);
-    auto evaluator = MakeEvaluator(stage, rig, RigExecEvaluationMode::Baked);
+    auto evaluator = MakeEvaluator(stage, rig);
     const RigExecRigPose pose = evaluator->Evaluate(t);
     CHECK(pose.valid);
     const RigExecBakedProgramImpl *program = Program(*evaluator);
@@ -847,28 +1202,21 @@ TestHeadOrderIsChainOrder()
     const RigExecBakedProgramImpl &B = *program;
     CHECK(B.propertyChains[0].target ==
           SdfPath("/Asset/Rig/Channels/A.rigExec:x"));
-    // The order holds every step, chain by chain, part by part.
-    int lastChain = -1, lastPart = -1;
-    bool ordered = true;
-    for (const uint32_t index : RigExecBakedHeadIndices(B)) {
-        const RigExecBakedStep &step = B.steps[index];
-        if (step.kind != RigExecBakedStepKind::PropertyRevision) {
-            continue;
-        }
-        ordered = ordered && (step.object > lastChain ||
-                              (step.object == lastChain &&
-                               step.part == lastPart + 1));
-        lastChain = step.object;
-        lastPart = step.part;
-    }
-    CHECK(ordered);
-    // No step of one chain reads the other's.
-    for (const RigExecBakedStep &step : B.steps) {
-        if (step.kind != RigExecBakedStepKind::PropertyRevision) {
-            continue;
-        }
-        for (const uint32_t pred : step.preds) {
-            CHECK(B.steps[pred].object == step.object);
+    CheckAuthoredPropertyHeads(stage, rig, B);
+    // These authored chains have no cross-chain sources. Every publication
+    // predecessor is the immediately preceding part of its own target.
+    for (const auto &step : B.steps) {
+        if (step.kind != RigExecBakedStepKind::PropertyRevision) continue;
+        for (int predecessor : step.preds) {
+            CHECK(predecessor >= 0 && size_t(predecessor) < B.steps.size());
+            if (predecessor < 0 || size_t(predecessor) >= B.steps.size()) continue;
+            const auto &prior = B.steps[size_t(predecessor)];
+            CHECK(prior.kind == RigExecBakedStepKind::PropertyRevision);
+            CHECK(prior.object >= 0 && size_t(prior.object) < B.propertyChains.size());
+            if (prior.object < 0 || size_t(prior.object) >= B.propertyChains.size()) continue;
+            CHECK(B.propertyChains[size_t(prior.object)].target ==
+                  B.propertyChains[size_t(step.object)].target);
+            CHECK(prior.part + 1 == step.part);
         }
     }
     const std::vector<std::string> want = {
@@ -882,10 +1230,10 @@ TestHeadOrderIsChainOrder()
         "not finite; chain skipped"};
     CHECK(LineMismatches(want, ChainLines(pose), "two chains, baked") == 0);
     auto reference =
-        MakeEvaluator(stage, rig, RigExecEvaluationMode::ExecReference);
+        MakeEvaluator(stage, rig);
     CHECK(LineMismatches(ChainLines(reference->Evaluate(t)), ChainLines(pose),
                          "two chains, against the reference") == 0);
-    CHECK(CheckAgainstTheEvaluator(evaluator.get(), t, pose, "two chains") ==
+    CHECK(CheckFreshEvaluator(evaluator.get(), t, pose, "two chains") ==
           0);
 }
 
@@ -900,11 +1248,9 @@ FindRig(const UsdStageRefPtr &stage)
     return SdfPath();
 }
 
-// A constraint target that stops being a transform hands the generation
-// back in the prologue, after the chains: the pose it gives back still
-// carries the chain results and lines, as the dynamic walk's does.
+// Required-frame refusal preserves independent scalar chains and retained buffers.
 void
-TestTheStageFramesBailStillPublishesChains(const std::string &examples)
+TestUnavailableConstraintTargetKeepsIndependentChains(const std::string &examples)
 {
     const UsdStageRefPtr stage =
         UsdStage::Open(examples + "/05_TwistRibbonSpine.usda");
@@ -948,46 +1294,106 @@ TestTheStageFramesBailStillPublishesChains(const std::string &examples)
     mover("BailOff", false);
 
     RigExecRigEvaluator rig(stage, rigPath);
-    rig.SetEvaluationMode(RigExecEvaluationMode::Baked);
+
     std::vector<std::string> errors;
     CHECK(rig.Compile(&errors));
     for (const std::string &e : errors) {
         std::printf("    compile: %s\n", e.c_str());
     }
-    const std::unique_ptr<RigExecBakedProgram> kept =
-        RigExecBakedProgram::Build(&rig, nullptr);
-    CHECK(kept);
-    if (!kept) {
+    const auto kept =
+        RigExecInputReplayHeldProgram::Build(&rig, nullptr);
+    CHECK(kept && *kept);
+    if (!kept || !*kept) {
         return;
     }
+    // A program first visited after the source is lost must not require a
+    // retained valid target frame from a previous generation.
+    const auto cold = RigExecInputReplayHeldProgram::Build(&rig, nullptr);
+    CHECK(cold && *cold);
+    if (!cold || !*cold) return;
     RigExecRigPose first;
-    CHECK(kept->Run(UsdTimeCode(1001.0), &first));
+    CHECK(kept->Run(UsdTimeCode(1001.0), &first, false));
+
+    const auto checkDial = [&](const RigExecRigPose &pose) {
+        // ORIGINAL publishes this complete scalar property inventory even
+        // when its StageFrames bail stops the pose: 0.5f + 0.25f, BailOff off.
+        std::map<SdfPath,VtValue> scalars;
+        for (const auto &[path,value] : pose.movedProperties)
+            if (!value.IsArrayValued()) scalars.emplace(path,value);
+        const std::map<SdfPath,VtValue> want = {{dial,VtValue(0.75f)}};
+        CHECK(ResultMismatches(want,scalars,"unavailable target scalar inventory") == 0);
+    };
+    checkDial(first);
+    CHECK(first.providerXforms.count(target) == 1);
+    const auto &initial = (*kept)->GetStepGraph();
+    const auto targetSlot = initial.index.find(target);
+    CHECK(targetSlot != initial.index.end());
+    if (targetSlot == initial.index.end()) return;
+    const auto required = std::find(initial.xformSlots.begin(), initial.xformSlots.end(), targetSlot->second);
+    CHECK(required != initial.xformSlots.end());
+    if (required == initial.xformSlots.end()) return;
+    const int32_t firstBad = int32_t(required - initial.xformSlots.begin());
+    const auto keptBase = initial.base;
+    const auto keptFin = initial.fin;
+    const auto coldBase = (*cold)->GetStepGraph().base;
+    const auto coldFin = (*cold)->GetStepGraph().fin;
 
     CHECK(targetPrim.SetTypeName(TfToken("Scope")));
     const UsdTimeCode bent(1024.0);
+    const std::vector<std::string> wantLines = {
+        "diag " + rigPath.AppendPath(SdfPath("Movers/BailOff")).GetString() +
+            ": disabled; revision passed through",
+        "could not resolve constraint target " + target.GetString() +
+            " relative to the asset root"};
+    const auto checkRefusal = [&](const RigExecBakedProgram &program,
+                                  const RigExecRigPose &pose,
+                                  const auto &retainedBase, const auto &retainedFin) {
+        CHECK(!pose.valid);
+        CHECK(program.GetLastBail() == RigExecBakedBail::StageFrames);
+        checkDial(pose);
+        CHECK(LineMismatches(wantLines,pose.diagnostics,"required target diagnostics") == 0);
+        CHECK(pose.providerXforms.count(target) == 0);
+        CHECK(pose.providerBaseXforms.count(target) == 0);
+        const auto &B = program.GetStepGraph();
+        CHECK(!B.requiredStageFramesAdmission.admitted);
+        CHECK(B.requiredStageFramesAdmission.firstBadTarget == firstBad);
+        CHECK(B.base[size_t(targetSlot->second)] == retainedBase[size_t(targetSlot->second)]);
+        const size_t fin = size_t(B.finLast[size_t(targetSlot->second)]);
+        CHECK(B.fin[fin] == retainedFin[fin]);
+        // ORIGINAL publishes scalar heads, not unrelated post-frame geometry.
+        for (const char *name : {"Fin.points","Fin.normals","Fin.extent",
+                 "SpineGuides.points","SpineGuides.extent","SpineStrip.points",
+                 "SpineStrip.normals","SpineStrip.extent"}) {
+            const SdfPath path(std::string("/SpineAsset/Geom/")+name);
+            CHECK(pose.movedProperties.count(path) == 0);
+        }
+    };
     RigExecRigPose given;
-    CHECK(!kept->Run(bent, &given));
-    CHECK(kept->GetLastBail() == RigExecBakedBail::StageFrames);
-    CHECK(!given.valid);
-    std::map<SdfPath, VtValue> results;
-    std::vector<std::string> lines;
-    CHECK(RigExecTestEvaluateChainsDetached(&rig, bent, &results, &lines));
-    CHECK(results.count(dial) == 1);
-    CHECK(ResultMismatches(results, given.movedProperties, "bail") == 0);
-    // The chains' lines first, the target's last.
-    CHECK(!lines.empty());
-    CHECK(given.diagnostics.size() >= lines.size() + 1);
-    if (given.diagnostics.size() >= lines.size() + 1) {
-        const std::vector<std::string> head(
-            given.diagnostics.begin(),
-            given.diagnostics.begin() + long(lines.size()));
-        CHECK(LineMismatches(lines, head, "bail lines") == 0);
-        CHECK(given.diagnostics.back() ==
-              "could not resolve constraint target " + target.GetString() +
-                  " relative to the asset root");
-    }
-    std::printf("bail: %zu result(s), %zu chain line(s)\n", results.size(),
-                lines.size());
+    // Direct held-program refusal follows ORIGINAL's property-only boundary.
+    CHECK(!kept->Run(bent,&given,false));
+    checkRefusal(**kept,given,keptBase,keptFin);
+    RigExecRigPose held,coldGiven;
+    CHECK(!kept->Run(bent,&held,false));
+    CHECK(!cold->Run(bent,&coldGiven,false));
+    checkRefusal(**kept,held,keptBase,keptFin);
+    checkRefusal(**cold,coldGiven,coldBase,coldFin);
+    CHECK(held.movedProperties == given.movedProperties);
+    CHECK(coldGiven.movedProperties == given.movedProperties);
+    CHECK(held.providerXforms == given.providerXforms);
+    CHECK(coldGiven.providerXforms == given.providerXforms);
+
+    CHECK(targetPrim.SetTypeName(TfToken("Xform")));
+    RigExecRigPose recovered;
+    CHECK(kept->Run(bent,&recovered,false));
+    CHECK(recovered.valid);
+    CHECK((*kept)->GetLastBail() == RigExecBakedBail::None);
+    CHECK((*kept)->GetStepGraph().requiredStageFramesAdmission.admitted);
+    checkDial(recovered);
+    CHECK(recovered.providerXforms.count(target) == 1);
+    CHECK(recovered.providerBaseXforms.count(target) == 1);
+    CHECK(LineMismatches({wantLines.front()}, recovered.diagnostics,
+                         "recovered target diagnostics") == 0);
+    std::printf("Required target refusal: ORIGINAL scalar publication, held/cold/recovery checked\n");
 }
 
 // The same frame twice with nothing moved: the second run executes no head
@@ -1006,7 +1412,7 @@ TestACleanHeadTierStillPublishes(const std::string &examples)
             continue;
         }
         auto evaluator =
-            MakeEvaluator(stage, f.rig, RigExecEvaluationMode::Baked);
+            MakeEvaluator(stage, f.rig);
         const UsdTimeCode t(stage->GetStartTimeCode() + 2.0);
         const RigExecRigPose first = evaluator->Evaluate(t);
         CHECK(first.valid);
@@ -1085,7 +1491,7 @@ TestABakeAfterAnEvaluationExportsTheChains(const std::string &examples)
             continue;
         }
         auto evaluator =
-            MakeEvaluator(stage, f.rig, RigExecEvaluationMode::Baked);
+            MakeEvaluator(stage, f.rig);
         const double t = stage->GetStartTimeCode();
         CHECK(evaluator->Evaluate(UsdTimeCode(t)).valid);
         // The request the bake makes, on the standing program: a run at the
@@ -1118,7 +1524,7 @@ TestABakeAfterAnEvaluationExportsTheChains(const std::string &examples)
             CHECK(ExecutedHeads(*program).size() ==
                   RigExecBakedHeadIndices(*program).size());
         }
-        auto fresh = MakeEvaluator(stage, f.rig, RigExecEvaluationMode::Baked);
+        auto fresh = MakeEvaluator(stage, f.rig);
         RigExecBakeResult reference;
         bake(*fresh, &reference);
         if (result.bytes != reference.bytes) {
@@ -1195,8 +1601,8 @@ TestAChainReadsAnInterpolatorWeightAsAuthored()
     stage->GetPrimAtPath(driver).GetAttribute(TfToken("avars:rz")).Set(45.0);
 
     auto reference =
-        MakeEvaluator(stage, rig, RigExecEvaluationMode::ExecReference);
-    auto baked = MakeEvaluator(stage, rig, RigExecEvaluationMode::Baked);
+        MakeEvaluator(stage, rig);
+    auto baked = MakeEvaluator(stage, rig);
     const UsdTimeCode t = UsdTimeCode::Default();
     const RigExecRigPose want = reference->Evaluate(t);
     const size_t generations = baked->GetBakedGenerationCount();
@@ -1219,7 +1625,7 @@ TestAChainReadsAnInterpolatorWeightAsAuthored()
                   1e-5f);
     }
     if (Program(*baked)) {
-        CHECK(CheckAgainstTheEvaluator(baked.get(), t, got,
+        CHECK(CheckFreshEvaluator(baked.get(), t, got,
                                        "interpolator weight") == 0);
     }
 }
@@ -1463,7 +1869,7 @@ RigExecRigPose
 FreshPose(const UsdStageRefPtr &stage, const SdfPath &rig, UsdTimeCode time,
           const std::vector<RigExecValueOverride> &overrides)
 {
-    auto fresh = MakeEvaluator(stage, rig, RigExecEvaluationMode::Baked);
+    auto fresh = MakeEvaluator(stage, rig);
     fresh->SetInteractiveOverrides(overrides);
     return fresh->Evaluate(time);
 }
@@ -1518,7 +1924,7 @@ TestOnlyReadersOfTheChangedVersionRerun()
 {
     UsdStageRefPtr stage = StageFrom(kVersionReaders);
     const SdfPath rig("/Asset/Rig");
-    auto evaluator = MakeEvaluator(stage, rig, RigExecEvaluationMode::Baked);
+    auto evaluator = MakeEvaluator(stage, rig);
     const UsdTimeCode t(1.0);
     CHECK(evaluator->Evaluate(t).valid);
     CHECK(evaluator->Evaluate(t).valid);
@@ -1579,7 +1985,7 @@ TestAStandAsideReaderDeclaresItsHops()
 {
     UsdStageRefPtr stage = StageFrom(kVersionReaders);
     const SdfPath rig("/Asset/Rig");
-    auto evaluator = MakeEvaluator(stage, rig, RigExecEvaluationMode::Baked);
+    auto evaluator = MakeEvaluator(stage, rig);
     const UsdTimeCode t(1.0);
     CHECK(evaluator->Evaluate(t).valid);
     CHECK(evaluator->Evaluate(t).valid);
@@ -1667,7 +2073,7 @@ TestARecordOfAnotherTypeShadowsNothing()
         chain.CreateRelationship(TfToken("rigExec:joints"))
             .AddTarget(joint.GetPath());
     }
-    auto evaluator = MakeEvaluator(stage, rig, RigExecEvaluationMode::Baked);
+    auto evaluator = MakeEvaluator(stage, rig);
     const UsdTimeCode t(1.0);
     CHECK(evaluator->Evaluate(t).valid);
     CHECK(evaluator->Evaluate(t).valid);
@@ -1691,6 +2097,39 @@ TestARecordOfAnotherTypeShadowsNothing()
     // The walk declares the final, and only the avar's own record shadows
     // it.
     const RigExecBakedReaderWalk &walk = B.readerWalks[size_t(input->walk)];
+    CHECK(walk.walk.type == RigExecBakedHeadValueType::Double);
+    CHECK(walk.walk.hops.size() == 3 && walk.walk.doubleHops.empty());
+    if (walk.walk.hops.size() != 3) {
+        return;
+    }
+    const RigExecBakedWalkHop &terminal = walk.walk.hops.back();
+    CHECK(terminal.path == B.propertyChains.front().target);
+    CHECK(terminal.chain == 0);
+    int ownRecord = -1, floatRecord = -1;
+    for (size_t r = 0; r < B.propertyRecords.size(); ++r) {
+        const auto &record = B.propertyRecords[r];
+        if (record.consumer == probeRz) {
+            CHECK(ownRecord < 0);
+            ownRecord = int(r);
+            CHECK(record.consumerType == SdfValueTypeNames->Double);
+            CHECK(record.applied == 0);
+        } else if (record.consumer == kFollowBase.AppendProperty(
+                       TfToken("inputs:defaultWeight"))) {
+            CHECK(floatRecord < 0);
+            floatRecord = int(r);
+            CHECK(record.consumerType == SdfValueTypeNames->Float);
+        }
+    }
+    CHECK(ownRecord >= 0 && floatRecord >= 0);
+    const uint32_t finalVersion = B.propertyChains.front().versionBase +
+        uint32_t(B.propertyChains.front().revisions.size());
+    CHECK(std::find(walk.versions.begin(), walk.versions.end(), finalVersion) !=
+          walk.versions.end());
+    if (ownRecord >= 0) {
+        const std::vector<std::pair<uint32_t, uint32_t>> expectedShadow = {
+            {finalVersion, uint32_t(ownRecord)}};
+        CHECK(walk.shadowed == expectedShadow);
+    }
     CHECK(!walk.shadowed.empty());
     for (const auto &[version, record] : walk.shadowed) {
         CHECK(B.propertyRecords[record].consumer == probeRz);
@@ -1757,7 +2196,7 @@ TestReaderWalksDeclareTheirVersions(const std::string &examples)
     size_t declaring = 0;
     for (const Rig &r : rigs) {
         auto evaluator =
-            MakeEvaluator(r.stage, r.rig, RigExecEvaluationMode::Baked);
+            MakeEvaluator(r.stage, r.rig);
         const RigExecBakedProgramImpl *program = Program(*evaluator);
         CHECK(program != nullptr);
         if (!program) {
@@ -1833,7 +2272,7 @@ TestAChainDragIsNoLongerAWholeRigCost(const std::string &examples)
     const std::vector<Fixture> fixtures = Fixtures(examples);
     const Fixture &f = FixtureNamed(fixtures, "biped");
     UsdStageRefPtr stage = UsdStage::Open(f.stage);
-    auto evaluator = MakeEvaluator(stage, f.rig, RigExecEvaluationMode::Baked);
+    auto evaluator = MakeEvaluator(stage, f.rig);
     const UsdTimeCode t(stage->GetStartTimeCode() + 2.0);
     CHECK(evaluator->Evaluate(t).valid);
     CHECK(evaluator->Evaluate(t).valid);
@@ -1936,73 +2375,31 @@ void TestResolvedReadersAreBuildOnlyBindings()
     CHECK((B.steps[1].readerWalks==std::vector<int>{0}));
 }
 
-// Pin semantic identities and region-relative indices across the promotion,
-// including all source/always members. Expected values come from the native
-// graph before promotion, with only numeric interpolator/Derived removals.
+// Every reviewed fixture contributes its complete authored property-head
+// owners, typed input sources, phase records and publication producers.
 void
-TestTheSourceAndAlwaysSetsSurviveThePromotion(const std::string &examples)
+TestAuthoredPropertyHeadCensus(const std::string &examples)
 {
-    size_t checked=0, totalRegion=0, totalSources=0, totalAlways=0, totalVarying=0;
-    constexpr uint64_t initial=14695981039346656037ull;
-    for (const auto &expected : rigExecTest::rigExecPromotionCases) {
-        auto stage=UsdStage::Open(examples+"/../"+expected.fixture);
-        CHECK(stage); if (!stage) continue;
-        RigExecRigEvaluator evaluator(stage,SdfPath(expected.rig));
+    std::set<std::pair<std::string, SdfPath>> checked;
+    for (const auto &fixture : rigExecTest::rigExecPromotionCases) {
+        const SdfPath rig(fixture.rig);
+        CHECK(checked.emplace(fixture.fixture, rig).second);
+        const auto stage = UsdStage::Open(examples + "/../" + fixture.fixture);
+        CHECK(stage);
+        if (!stage) continue;
+        RigExecRigEvaluator evaluator(stage, rig);
         std::vector<std::string> errors;
         CHECK(evaluator.Compile(&errors));
-        evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
-        const auto *program=Program(evaluator);
-        CHECK(program); if (!program) continue;
-        const auto &B=*program;
-        size_t H=0;
-        while (H<B.steps.size() && B.steps[H].isHead) ++H;
-        size_t sources=0, always=0;
-        uint64_t headIdentity=initial, regionIdentity=initial,
-            sourceIdentity=initial, alwaysIdentity=initial, varyingIdentity=initial;
-        const auto hash=[](uint64_t *value,size_t index,const RigExecBakedStep &step) {
-            const std::string text=std::to_string(index)+"|"+
-                RigExecBakedStepKindName(step.kind)+"|"+std::to_string(step.object)+
-                "|"+std::to_string(step.part)+"|"+step.label+"\n";
-            for (const unsigned char c:text) *value=(*value^uint64_t(c))*1099511628211ull;
-        };
-        for (size_t i=0;i<B.steps.size();++i) {
-            const auto &step=B.steps[i];
-            CHECK(step.isHead==(i<H));
-            CHECK(B.cones.alwaysSteps.Test(int(i))==step.externalReads);
-            if (i<H) {
-                CHECK(!step.isSource && !step.externalReads);
-                hash(&headIdentity,i,step);
-            } else {
-                hash(&regionIdentity,i-H,step);
-                if (step.isSource) { ++sources; hash(&sourceIdentity,i-H,step); }
-                if (step.externalReads) { ++always; hash(&alwaysIdentity,i-H,step); }
-            }
-        }
-        std::set<int> varyingSeen;
-        for (const int index : B.cones.varyingSteps) {
-            CHECK(index >= 0 && size_t(index) < B.steps.size());
-            if (index < 0 || size_t(index) >= B.steps.size()) continue;
-            CHECK(size_t(index) >= H && !B.steps[size_t(index)].isHead);
-            CHECK(varyingSeen.insert(index).second);
-            if (size_t(index) >= H) hash(&varyingIdentity,size_t(index)-H,B.steps[size_t(index)]);
-        }
-        CHECK(B.cones.varyingSteps.size()==expected.varying);
-        CHECK(varyingIdentity==expected.varyingIdentity);
-        totalVarying+=B.cones.varyingSteps.size();
-        const bool same=H==expected.heads && B.steps.size()-H==expected.region &&
-            sources==expected.sources && always==expected.always &&
-            headIdentity==expected.headIdentity && regionIdentity==expected.regionIdentity &&
-            sourceIdentity==expected.sourceIdentity && alwaysIdentity==expected.alwaysIdentity;
-        CHECK(same);
-        if (!same) std::printf("promotion %s %s: H%zu region%zu source%zu always%zu hashes %016llx %016llx %016llx %016llx\n",
-            expected.fixture,expected.rig,H,B.steps.size()-H,sources,always,
-            static_cast<unsigned long long>(headIdentity),static_cast<unsigned long long>(regionIdentity),
-            static_cast<unsigned long long>(sourceIdentity),static_cast<unsigned long long>(alwaysIdentity));
-        ++checked; totalRegion+=B.steps.size()-H; totalSources+=sources; totalAlways+=always;
+        const auto *program = Program(evaluator);
+        CHECK(program);
+        if (!program) continue;
+        const size_t before = size_t(failures);
+        CheckAuthoredPropertyHeads(stage, rig, *program);
+        if (size_t(failures) != before)
+            std::printf("FAIL property census %s %s: authored identities differ\n",
+                        fixture.fixture, fixture.rig);
     }
-    CHECK(checked==47);
-    CHECK(totalRegion==7154 && totalSources==345 && totalAlways==375);
-    CHECK(totalVarying==140);
+    CHECK(checked.size() == 47);
 }
 
 }  // namespace
@@ -2021,7 +2418,7 @@ main(int argc, char **argv)
     TestPerVersionMemo();
     TestATargetRetypedInPlaceRebinds();
     TestHeadOrderIsChainOrder();
-    TestTheStageFramesBailStillPublishesChains(examples);
+    TestUnavailableConstraintTargetKeepsIndependentChains(examples);
     TestACleanHeadTierStillPublishes(examples);
     TestABakeAfterAnEvaluationExportsTheChains(examples);
     TestAChainReadsAnInterpolatorWeightAsAuthored();
@@ -2031,7 +2428,7 @@ main(int argc, char **argv)
     TestReaderWalksDeclareTheirVersions(examples);
     TestAChainDragIsNoLongerAWholeRigCost(examples);
     TestResolvedReadersAreBuildOnlyBindings();
-    TestTheSourceAndAlwaysSetsSurviveThePromotion(examples);
+    TestAuthoredPropertyHeadCensus(examples);
     std::printf("testRigExecPropertyOps: %d failure(s)\n", failures);
     return failures ? 1 : 0;
 }

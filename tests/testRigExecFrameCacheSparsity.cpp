@@ -70,11 +70,10 @@ MakeInputs(UsdTimeCode time,
     return inputs;
 }
 
-// Constraint envelopes remain genuinely volatile until their oracle
-// becomes graph work. Use its real walk/constraint lookup for the synthetic
-// external reader; Derived now reads declared head-produced values.
+// An explicit external-read descriptor represents the synthetic time-dependent
+// source. Real weight envelopes use declared producers in the common graph.
 void
-AddVolatileEnvelopeStep(RigExecBakedProgramImpl *program, int cluster)
+AddVolatileReadStep(RigExecBakedProgramImpl *program, int cluster)
 {
     program->walkSteps.emplace_back();
     program->walkSteps.back().index = int(program->constraints.size());
@@ -84,6 +83,7 @@ AddVolatileEnvelopeStep(RigExecBakedProgramImpl *program, int cluster)
     step.kind = RigExecBakedStepKind::Constraint;
     step.object = int(program->walkSteps.size() - 1);
     step.cluster = cluster;
+    step.externalReads = true;
     program->steps.push_back(std::move(step));
 }
 
@@ -110,7 +110,7 @@ MakeDiamond(bool alwaysStep)
     edge(2, 3);
     edge(3, 4);
     if (alwaysStep) {
-        AddVolatileEnvelopeStep(&program, 4);
+        AddVolatileReadStep(&program, 4);
     }
     RigExecBakedBuildCones(&program);
     return program;
@@ -342,10 +342,7 @@ TestChangedControls()
     CHECK(RigExecChangedControls(cached, dropped, noOverrides) ==
           std::vector<RigExecControlId>{"/Ctl/A"});
 
-    // +0.0 and -0.0 compare equal here, as they do in §7's own `!=` on the
-    // avar table: an in-frame cone would skip that change, so the
-    // cross-frame one does too. (The key digest stays bitwise-strict, so
-    // exact-key lookup still misses across the sign.)
+    // Source equality preserves floating bits, including signed zero.
     CHECK(RigExecChangedControls(
               cached,
               MakeInputs(UsdTimeCode(1.0),
@@ -358,17 +355,20 @@ TestChangedControls()
     cachedZero.inputs = negZero;
     RigExecFrameInputs negZeroReq = MakeInputs(UsdTimeCode(1.0), {});
     negZeroReq.Add(SdfPath("/Zero"), VtValue(-0.0));
-    CHECK(RigExecChangedControls(cachedZero, negZeroReq, noOverrides)
-              .empty());
+    CHECK(RigExecChangedControls(cachedZero, negZeroReq, noOverrides) ==
+          std::vector<RigExecControlId>{"/Zero"});
 
-    // A NaN is unequal to everything including itself: always a change,
-    // never a skip.
+    // A changed NaN payload is a change; the same payload is retained.
     RigExecFrameInputs nanReq = MakeInputs(UsdTimeCode(1.0), {});
     nanReq.Add(SdfPath("/Ctl/A"),
                VtValue(std::numeric_limits<double>::quiet_NaN()));
     nanReq.Add(SdfPath("/Ctl/B"), VtValue(2.0));
     CHECK(RigExecChangedControls(cached, nanReq, noOverrides) ==
           std::vector<RigExecControlId>{"/Ctl/A"});
+
+    RigExecRetainedFrameState cachedNaN = cached;
+    cachedNaN.inputs = nanReq;
+    CHECK(RigExecChangedControls(cachedNaN, nanReq, noOverrides).empty());
 
     // Overrides key by (prim, computation, attribute): a changed value, an
     // added override, and a lifted one each name their control.
@@ -405,114 +405,26 @@ TestPlanSparseReuse()
     index.Build(program, 7);
     index.MapControl("/Ctl/A", {1});
     index.MapControl("/Ctl/B", {2});
-    RigExecTaskListCache memo;
-
-    const RigExecRetainedFrameState cached =
-        MakeRetained(7, 6, UsdTimeCode(1.0), {{"/Ctl/A", 1.0}, {"/Ctl/B", 2.0}});
-    const std::vector<RigExecValueOverride> noOverrides;
-
-    // Identical sources: a hit, and the suite's zero-work case.
-    RigExecSparsePlan hit = RigExecPlanSparseReuse(
-        index, &memo, cached, 7, cached.inputs, noOverrides);
-    CHECK(hit.verdict == RigExecSparseVerdict::Hit);
-    CHECK(hit.ClustersToRun() == 0);
-    CHECK(hit.ClustersSkipped(6) == 6);
-    CHECK(!hit.memoUsed);
-    CHECK(index.Walks() == 0);
-
-    // One moved control: the strict subset downstream of it.
-    RigExecFrameInputs movedA = MakeInputs(UsdTimeCode(1.0), {});
-    movedA.Add(SdfPath("/Ctl/A"), VtValue(1.5));
-    movedA.Add(SdfPath("/Ctl/B"), VtValue(2.0));
-    RigExecSparsePlan partial = RigExecPlanSparseReuse(
-        index, &memo, cached, 7, movedA, noOverrides);
-    CHECK(partial.verdict == RigExecSparseVerdict::Partial);
-    CHECK(SetIs(partial.clusters, {1, 3, 4}));
-    CHECK(partial.ClustersToRun() == 3);
-    CHECK(partial.ClustersSkipped(6) == 3);
-    CHECK(!partial.memoUsed);
-    CHECK(index.Walks() == 1);
-
-    // The repeat edit reuses the memoized selection: same set, no rewalk.
-    RigExecSparsePlan repeat = RigExecPlanSparseReuse(
-        index, &memo, cached, 7, movedA, noOverrides);
-    CHECK(repeat.verdict == RigExecSparseVerdict::Partial);
-    CHECK(SetIs(repeat.clusters, {1, 3, 4}));
-    CHECK(repeat.memoUsed);
-    CHECK(index.Walks() == 1);
-    CHECK(memo.Stats().hits == 1);
-
-    // Two moved controls union their memoized sets.
-    RigExecFrameInputs movedBoth = MakeInputs(UsdTimeCode(1.0), {});
-    movedBoth.Add(SdfPath("/Ctl/A"), VtValue(1.5));
-    movedBoth.Add(SdfPath("/Ctl/B"), VtValue(2.5));
-    RigExecSparsePlan both = RigExecPlanSparseReuse(
-        index, &memo, cached, 7, movedBoth, noOverrides);
-    CHECK(both.verdict == RigExecSparseVerdict::Partial);
-    CHECK(SetIs(both.clusters, {1, 2, 3, 4}));
-
-    // dirty ∩ affecting(requested): a move that reaches nothing requested
-    // is still a hit.
-    RigExecBakedClusterSet affecting;
-    affecting.Resize(6);
-    affecting.Set(5);
-    RigExecSparsePlan unrequested = RigExecPlanSparseReuse(
-        index, &memo, cached, 7, movedA, noOverrides, &affecting);
-    CHECK(unrequested.verdict == RigExecSparseVerdict::Hit);
-    affecting.Set(3);
-    RigExecSparsePlan narrowed = RigExecPlanSparseReuse(
-        index, &memo, cached, 7, movedA, noOverrides, &affecting);
-    CHECK(narrowed.verdict == RigExecSparseVerdict::Partial);
-    CHECK(SetIs(narrowed.clusters, {3}));
-
-    // An unknown control re-runs everything: conservative, never wrong.
-    RigExecFrameInputs movedUnknown = MakeInputs(UsdTimeCode(1.0), {});
-    movedUnknown.Add(SdfPath("/Ctl/A"), VtValue(1.0));
-    movedUnknown.Add(SdfPath("/Ctl/B"), VtValue(2.0));
-    movedUnknown.Add(SdfPath("/Ctl/Z"), VtValue(0.0));
-    RigExecSparsePlan unknown = RigExecPlanSparseReuse(
-        index, &memo, cached, 7, movedUnknown, noOverrides);
-    CHECK(unknown.verdict == RigExecSparseVerdict::Partial);
-    CHECK(unknown.ClustersToRun() == 6);
-
-    // Epoch drift either side of the plan is a miss.
-    CHECK(RigExecPlanSparseReuse(index, &memo, cached, 8, movedA,
-                                 noOverrides).verdict ==
-          RigExecSparseVerdict::Miss);
-    RigExecRetainedFrameState otherEpoch = cached;
+    const auto cached = MakeRetained(7, 6, UsdTimeCode(1.0),
+                                     {{"/Ctl/A", 1.0}, {"/Ctl/B", 2.0}});
+    CHECK(RigExecCanReuseRetainedPose(index, cached, 7, cached.inputs, {}));
+    const auto moved = MakeInputs(UsdTimeCode(1.0),
+                                  {{"/Ctl/A", 1.5}, {"/Ctl/B", 2.0}});
+    CHECK(!RigExecCanReuseRetainedPose(index, cached, 7, moved, {}));
+    CHECK(SetIs(index.AffectedByControls(RigExecChangedControls(cached, moved, {})),
+                {1, 3, 4}));
+    CHECK(!RigExecCanReuseRetainedPose(index, cached, 8, cached.inputs, {}));
+    auto otherEpoch = cached;
     otherEpoch.epochDigest = 8;
-    CHECK(RigExecPlanSparseReuse(index, &memo, otherEpoch, 7, movedA,
-                                 noOverrides).verdict ==
-          RigExecSparseVerdict::Miss);
-    RigExecOutputAffectedIndex otherIndex;
-    otherIndex.Build(program, 8);
-    CHECK(RigExecPlanSparseReuse(otherIndex, &memo, cached, 7, movedA,
-                                 noOverrides).verdict ==
-          RigExecSparseVerdict::Miss);
-    RigExecOutputAffectedIndex emptyIndex;
-    CHECK(RigExecPlanSparseReuse(emptyIndex, &memo, cached, 7, movedA,
-                                 noOverrides).verdict ==
-          RigExecSparseVerdict::Miss);
-
-    // A cluster count that moved under a standing epoch is a topology
-    // change: miss, flagged, and the epoch's memo dropped.
-    CHECK(memo.Size() > 0);
-    RigExecRetainedFrameState reshaped = cached;
-    reshaped.clusterCount = 5;
-    RigExecSparsePlan topology = RigExecPlanSparseReuse(
-        index, &memo, reshaped, 7, movedA, noOverrides);
-    CHECK(topology.verdict == RigExecSparseVerdict::Miss);
-    CHECK(topology.topologyChanged);
-    CHECK(memo.Size() == 0);
-
-    // Without a memo the plan still draws, walking every time.
-    const size_t walks = index.Walks();
-    RigExecSparsePlan unmemoized = RigExecPlanSparseReuse(
-        index, nullptr, cached, 7, movedA, noOverrides);
-    CHECK(unmemoized.verdict == RigExecSparseVerdict::Partial);
-    CHECK(SetIs(unmemoized.clusters, {1, 3, 4}));
-    CHECK(!unmemoized.memoUsed);
-    CHECK(index.Walks() == walks + 1);
+    CHECK(!RigExecCanReuseRetainedPose(index, otherEpoch, 7, cached.inputs, {}));
+    auto otherShape = cached;
+    ++otherShape.clusterCount;
+    CHECK(!RigExecCanReuseRetainedPose(index, otherShape, 7, cached.inputs, {}));
+    RigExecOutputAffectedIndex empty;
+    CHECK(!RigExecCanReuseRetainedPose(empty, cached, 7, cached.inputs, {}));
+    auto unknown = cached.inputs;
+    unknown.Add(SdfPath("/Ctl/Unknown"), VtValue(0.0));
+    CHECK(!RigExecCanReuseRetainedPose(index, cached, 7, unknown, {}));
 }
 
 // A frame retained under other upstream values is never reused: no control
@@ -537,34 +449,25 @@ TestUpstreamMissesSparseReuse()
 
     // The same table: as before, a hit.
     RigExecFrameInputs same = cached.inputs;
-    CHECK(RigExecPlanSparseReuse(index, nullptr, cached, 7, same,
-                                 noOverrides).verdict ==
-          RigExecSparseVerdict::Hit);
+    CHECK(RigExecCanReuseRetainedPose(index, cached, 7, same, noOverrides));
     // Another value, or none, with every sampled source equal: a miss.
     RigExecFrameInputs moved = cached.inputs;
     moved.upstream = {up(31.0)};
     CHECK(RigExecChangedControls(cached, moved, noOverrides).empty());
-    CHECK(RigExecPlanSparseReuse(index, nullptr, cached, 7, moved,
-                                 noOverrides).verdict ==
-          RigExecSparseVerdict::Miss);
+    CHECK(!RigExecCanReuseRetainedPose(index, cached, 7, moved, noOverrides));
     RigExecFrameInputs lifted = cached.inputs;
     lifted.upstream.clear();
-    CHECK(RigExecPlanSparseReuse(index, nullptr, cached, 7, lifted,
-                                 noOverrides).verdict ==
-          RigExecSparseVerdict::Miss);
+    CHECK(!RigExecCanReuseRetainedPose(index, cached, 7, lifted, noOverrides));
     RigExecRetainedFrameState authored = cached;
     authored.inputs.upstream.clear();
-    CHECK(RigExecPlanSparseReuse(index, nullptr, authored, 7, same,
-                                 noOverrides).verdict ==
-          RigExecSparseVerdict::Miss);
+    CHECK(!RigExecCanReuseRetainedPose(index, authored, 7, same, noOverrides));
     // A moved control under the same table still plans its cone.
     RigExecFrameInputs movedA = cached.inputs;
     movedA.values.clear();
     movedA.Add(SdfPath("/Ctl/A"), VtValue(1.5));
-    const RigExecSparsePlan partial = RigExecPlanSparseReuse(
-        index, nullptr, cached, 7, movedA, noOverrides);
-    CHECK(partial.verdict == RigExecSparseVerdict::Partial);
-    CHECK(SetIs(partial.clusters, {1, 3, 4}));
+    CHECK(!RigExecCanReuseRetainedPose(index, cached, 7, movedA, noOverrides));
+    CHECK(SetIs(index.AffectedByControls(RigExecChangedControls(cached, movedA, {})),
+                {1, 3, 4}));
 
     CHECK(RigExecSameUpstream(cached.inputs.upstream, same.upstream));
     CHECK(!RigExecSameUpstream(cached.inputs.upstream, moved.upstream));
@@ -585,16 +488,12 @@ TestUpstreamMissesSparseReuse()
     arrayCached.inputs.upstream = {upArray(painted)};
     RigExecFrameInputs arraySame = arrayCached.inputs;
     arraySame.upstream = {upArray(VtFloatArray(10, 0.5f))};
-    CHECK(RigExecPlanSparseReuse(index, nullptr, arrayCached, 7, arraySame,
-                                 noOverrides).verdict ==
-          RigExecSparseVerdict::Hit);
+    CHECK(RigExecCanReuseRetainedPose(index, arrayCached, 7, arraySame, noOverrides));
     RigExecFrameInputs arrayMoved = arrayCached.inputs;
     VtFloatArray repainted = painted;
     repainted[3] = 0.75f;
     arrayMoved.upstream = {upArray(repainted)};
-    CHECK(RigExecPlanSparseReuse(index, nullptr, arrayCached, 7, arrayMoved,
-                                 noOverrides).verdict ==
-          RigExecSparseVerdict::Miss);
+    CHECK(!RigExecCanReuseRetainedPose(index, arrayCached, 7, arrayMoved, noOverrides));
     RigExecFrameInputs arrayRehashed = arrayCached.inputs;
     arrayRehashed.upstream[0].foldHash += 1;
     CHECK(!RigExecSameUpstream(arrayCached.inputs.upstream,
@@ -618,111 +517,20 @@ TestUpstreamMissesSparseReuse()
 void
 TestPlanTimeRule()
 {
-    const RigExecBakedProgramImpl program = MakeDiamond(true);
+    const auto program = MakeDiamond(true);
     RigExecOutputAffectedIndex index;
     index.Build(program, 7);
     CHECK(SetIs(index.Always(), {4}));
-
-    const RigExecRetainedFrameState cached =
-        MakeRetained(7, 6, UsdTimeCode(1.0), {{"/Ctl/A", 1.0}});
-    const std::vector<RigExecValueOverride> noOverrides;
-
-    RigExecSparsePlan standing = RigExecPlanSparseReuse(
-        index, nullptr, cached, 7, cached.inputs, noOverrides);
-    CHECK(standing.verdict == RigExecSparseVerdict::Hit);
-
-    const RigExecFrameInputs later =
-        MakeInputs(UsdTimeCode(2.0), {{"/Ctl/A", 1.0}});
-    RigExecSparsePlan moved = RigExecPlanSparseReuse(
-        index, nullptr, cached, 7, later, noOverrides);
-    CHECK(moved.verdict == RigExecSparseVerdict::Partial);
-    CHECK(SetIs(moved.clusters, {4}));
+    const auto cached = MakeRetained(7, 6, UsdTimeCode(1.0), {{"/Ctl/A", 1.0}});
+    CHECK(RigExecCanReuseRetainedPose(index, cached, 7, cached.inputs, {}));
+    const auto later = MakeInputs(UsdTimeCode(2.0), {{"/Ctl/A", 1.0}});
+    CHECK(!RigExecCanReuseRetainedPose(index, cached, 7, later, {}));
 }
 
 // Execution runs the plan's clusters in the program's topological order and
 // counts them: hits run zero, partials run their strict subset, misses run
 // nothing, and a runner that hands the generation back stops the run.
-void
-TestRunSparsePlan()
-{
-    const RigExecBakedProgramImpl program = MakeDiamond(false);
-    const std::vector<int> &order = program.clustering.topologicalOrder;
-    RigExecOutputAffectedIndex index;
-    index.Build(program, 7);
-    index.MapControl("/Ctl/A", {1});
 
-    const RigExecRetainedFrameState cached =
-        MakeRetained(7, 6, UsdTimeCode(1.0), {{"/Ctl/A", 1.0}});
-    const std::vector<RigExecValueOverride> noOverrides;
-    const RigExecFrameInputs movedA =
-        MakeInputs(UsdTimeCode(1.0), {{"/Ctl/A", 2.0}});
-
-    const RigExecSparsePlan partial = RigExecPlanSparseReuse(
-        index, nullptr, cached, 7, movedA, noOverrides);
-    CHECK(partial.verdict == RigExecSparseVerdict::Partial);
-    std::vector<int> ran;
-    const RigExecSparseExecution done = RigExecRunSparsePlan(
-        partial, order, [&ran](int cluster) {
-            ran.push_back(cluster);
-            return true;
-        });
-    CHECK(done.completed);
-    CHECK(done.executed == 3);
-    CHECK(ran == std::vector<int>({1, 3, 4}));
-    CHECK(done.executedClusters == ran);
-
-    const RigExecSparsePlan hit = RigExecPlanSparseReuse(
-        index, nullptr, cached, 7, cached.inputs, noOverrides);
-    ran.clear();
-    const RigExecSparseExecution zero = RigExecRunSparsePlan(
-        hit, order, [&ran](int cluster) {
-            ran.push_back(cluster);
-            return true;
-        });
-    CHECK(zero.completed);
-    CHECK(zero.executed == 0);
-    CHECK(ran.empty());
-
-    const RigExecSparsePlan miss = RigExecPlanSparseReuse(
-        index, nullptr, cached, 8, movedA, noOverrides);
-    ran.clear();
-    const RigExecSparseExecution none = RigExecRunSparsePlan(
-        miss, order, [&ran](int cluster) {
-            ran.push_back(cluster);
-            return true;
-        });
-    CHECK(!none.completed);
-    CHECK(none.executed == 0);
-    CHECK(ran.empty());
-    CHECK(RigExecRunSparsePlan(partial, order, nullptr).executed == 0);
-
-    // The runner hands the generation back at cluster 3: cluster 1 ran and
-    // the run reports incomplete, so the caller live-evals.
-    ran.clear();
-    const RigExecSparseExecution aborted = RigExecRunSparsePlan(
-        partial, order, [&ran](int cluster) {
-            if (cluster == 3) {
-                return false;
-            }
-            ran.push_back(cluster);
-            return true;
-        });
-    CHECK(!aborted.completed);
-    CHECK(aborted.executed == 1);
-    CHECK(ran == std::vector<int>({1}));
-
-    // An order that leaves out a planned cluster runs nothing: running a
-    // subset of the plan is never correct, so the caller live-evals.
-    ran.clear();
-    const RigExecSparseExecution uncovered = RigExecRunSparsePlan(
-        partial, std::vector<int>({1, 4}), [&ran](int cluster) {
-            ran.push_back(cluster);
-            return true;
-        });
-    CHECK(!uncovered.completed);
-    CHECK(uncovered.executed == 0);
-    CHECK(ran.empty());
-}
 
 // Cluster ids number level-packing bins, not dependencies: a cluster can
 // have a higher-numbered predecessor. Here 3 -> 0 -> 1 and 2 -> 1, so a walk
@@ -733,103 +541,7 @@ TestRunSparsePlan()
 //   3 -> 0 -> 1
 //        2 -> 1
 //   4 (no edges)
-void
-TestRunSparsePlanRunsPredecessorsFirst()
-{
-    RigExecBakedProgramImpl program{};
-    program.clustering.clusters.resize(5);
-    const auto edge = [&program](int from, int to) {
-        program.clustering.clusters[size_t(from)].succs.push_back(to);
-        program.clustering.clusters[size_t(to)].preds.push_back(from);
-    };
-    edge(3, 0);
-    edge(0, 1);
-    edge(2, 1);
-    RigExecBakedBuildCones(&program);
 
-    // Build caches the order: every cluster once, each after its preds.
-    const std::vector<int> &order = program.clustering.topologicalOrder;
-    CHECK(order.size() == 5);
-    std::vector<int> position(5, -1);
-    for (size_t k = 0; k < order.size(); ++k) {
-        CHECK(order[k] >= 0 && order[k] < 5);
-        if (order[k] >= 0 && order[k] < 5) {
-            CHECK(position[size_t(order[k])] == -1);
-            position[size_t(order[k])] = int(k);
-        }
-    }
-    for (int c = 0; c < 5; ++c) {
-        for (const int pred : program.clustering.clusters[size_t(c)].preds) {
-            CHECK(position[size_t(pred)] < position[size_t(c)]);
-        }
-    }
-    CHECK(RigExecBakedClusterTopologicalOrder(program.clustering) == order);
-    CHECK(SetIs(program.cones.cone[3], {3, 0, 1}));
-
-    RigExecOutputAffectedIndex index;
-    index.Build(program, 7);
-    index.MapControl("/Ctl/A", {3});
-    index.MapControl("/Ctl/B", {2});
-    const RigExecRetainedFrameState cached = MakeRetained(
-        7, 5, UsdTimeCode(1.0), {{"/Ctl/A", 1.0}, {"/Ctl/B", 1.0}});
-    const std::vector<RigExecValueOverride> noOverrides;
-
-    // A fake runner: a cluster may run only once every predecessor the plan
-    // names has run. It counts the clusters that ran too early.
-    const auto runInOrder = [&program](const RigExecSparsePlan &plan,
-                                       const std::vector<int> &walk,
-                                       std::vector<int> *ran,
-                                       int *early) {
-        return RigExecRunSparsePlan(
-            plan, walk, [&program, &plan, ran, early](int cluster) {
-                for (const int pred :
-                     program.clustering.clusters[size_t(cluster)].preds) {
-                    if (plan.clusters.Test(pred) &&
-                        std::find(ran->begin(), ran->end(), pred) ==
-                            ran->end()) {
-                        ++*early;
-                    }
-                }
-                ran->push_back(cluster);
-                return true;
-            });
-    };
-
-    const RigExecSparsePlan movedA = RigExecPlanSparseReuse(
-        index, nullptr, cached, 7,
-        MakeInputs(UsdTimeCode(1.0), {{"/Ctl/A", 2.0}, {"/Ctl/B", 1.0}}),
-        noOverrides);
-    CHECK(movedA.verdict == RigExecSparseVerdict::Partial);
-    CHECK(SetIs(movedA.clusters, {0, 1, 3}));
-    std::vector<int> ran;
-    int early = 0;
-    const RigExecSparseExecution a = runInOrder(movedA, order, &ran, &early);
-    CHECK(a.completed);
-    CHECK(a.executed == 3);
-    CHECK(early == 0);
-    CHECK(ran == std::vector<int>({3, 0, 1}));
-    CHECK(a.executedClusters == ran);
-
-    // The runner does catch the old walk: increasing id runs 0 before 3.
-    ran.clear();
-    early = 0;
-    runInOrder(movedA, std::vector<int>({0, 1, 2, 3, 4}), &ran, &early);
-    CHECK(early > 0);
-
-    const RigExecSparsePlan movedBoth = RigExecPlanSparseReuse(
-        index, nullptr, cached, 7,
-        MakeInputs(UsdTimeCode(1.0), {{"/Ctl/A", 2.0}, {"/Ctl/B", 2.0}}),
-        noOverrides);
-    CHECK(SetIs(movedBoth.clusters, {0, 1, 2, 3}));
-    ran.clear();
-    early = 0;
-    const RigExecSparseExecution both =
-        runInOrder(movedBoth, order, &ran, &early);
-    CHECK(both.completed);
-    CHECK(both.executed == 4);
-    CHECK(early == 0);
-    CHECK(ran.size() == 4 && ran.back() == 1);
-}
 
 // The cache's sparsity hooks: retained handles publish and serve beside the
 // pose with accounted bytes, pose-only entries serve a null handle, and
@@ -844,9 +556,8 @@ TestRetainedPublishAndEpochEviction()
 
     auto retained = std::make_shared<RigExecRetainedFrameState>(
         MakeRetained(7, 6, UsdTimeCode(1.0), {{"/Ctl/A", 1.0}}));
-    retained->slotBytes = 4096;
     const size_t retainedBytes = retained->RetainedBytes();
-    CHECK(retainedBytes > 4096);
+    CHECK(retainedBytes > 0);
 
     const RigExecFrameCacheKey key{7, 11};
     CHECK(cache.Publish(key, UsdTimeCode(1.0), pose, retainedBytes,
@@ -1189,14 +900,9 @@ TestKnownEmptyVsUnknown()
     const RigExecRetainedFrameState cached = MakeRetained(
         7, 6, UsdTimeCode(1.0), {{"/Ctl/Empty", 1.0}, {"/Ctl/A", 1.0}});
     const std::vector<RigExecValueOverride> noOverrides;
-    const RigExecSparsePlan hit = RigExecPlanSparseReuse(
-        index, nullptr, cached, 7,
-        MakeInputs(UsdTimeCode(1.0),
-                   {{"/Ctl/Empty", 2.0}, {"/Ctl/A", 1.0}}),
-        noOverrides);
-    CHECK(hit.verdict == RigExecSparseVerdict::Hit);
-    CHECK(hit.ClustersToRun() == 0);
-    CHECK(hit.ClustersSkipped(6) == 6);
+    CHECK(RigExecCanReuseRetainedPose(index, cached, 7,
+        MakeInputs(UsdTimeCode(1.0), {{"/Ctl/Empty", 2.0}, {"/Ctl/A", 1.0}}),
+        noOverrides));
 }
 
 // The notice adapter over explicit path lists: property paths contribute
@@ -1337,71 +1043,7 @@ TestOverrideSeeds()
 // Planner/executor parity (plan 2.1): at a moved time the plan re-runs
 // the always-dirty set plus the varying closure (not just Always), and
 // standing overrides dirty the override closure even when no value moved.
-void
-TestPlannerExecutorParity()
-{
-    // The diamond, plus a varying step in cluster 1 and an override step
-    // in cluster 2. Solve with empty reads is inert in BuildCones' table
-    // lookups and reads nothing outside the graph. The genuine volatile
-    // Constraint envelope keeps Always at {4}, while the two declared
-    // input closures land exactly on their cones.
-    RigExecBakedProgramImpl program{};
-    program.clustering.clusters.resize(6);
-    const auto edge = [&program](int from, int to) {
-        program.clustering.clusters[size_t(from)].succs.push_back(to);
-        program.clustering.clusters[size_t(to)].preds.push_back(from);
-    };
-    edge(0, 1);
-    edge(0, 2);
-    edge(1, 3);
-    edge(2, 3);
-    edge(3, 4);
-    AddVolatileEnvelopeStep(&program, 4);
-    RigExecBakedStep varying;
-    varying.kind = RigExecBakedStepKind::Solve;
-    varying.object = -1;
-    varying.cluster = 1;
-    varying.varyingInputs = true;
-    program.steps.push_back(varying);
-    RigExecBakedStep overriden;
-    overriden.kind = RigExecBakedStepKind::Solve;
-    overriden.object = -1;
-    overriden.cluster = 2;
-    overriden.overrideInputs = {0};
-    program.steps.push_back(overriden);
-    program.clustering.clusterOf = {4, 1, 2};
-    RigExecBakedBuildCones(&program);
 
-    RigExecOutputAffectedIndex index;
-    index.Build(program, 7);
-    CHECK(!index.Empty());
-    CHECK(SetIs(index.Always(), {4}));
-    CHECK(SetIs(index.Varying(), {1, 3, 4}));
-    CHECK(SetIs(index.Override(), {2, 3, 4}));
-
-    const RigExecRetainedFrameState cached = MakeRetained(
-        7, 6, UsdTimeCode(1.0), {{"/Ctl/A", 1.0}});
-    const std::vector<RigExecValueOverride> noOverrides;
-    // A moved time with agreeing sources: Always plus the varying
-    // closure, matching the executor's time rule.
-    const RigExecSparsePlan moved = RigExecPlanSparseReuse(
-        index, nullptr, cached, 7,
-        MakeInputs(UsdTimeCode(2.0), {{"/Ctl/A", 1.0}}), noOverrides);
-    CHECK(moved.verdict == RigExecSparseVerdict::Partial);
-    CHECK(SetIs(moved.clusters, {1, 3, 4}));
-    // Standing overrides with agreeing values: the override closure,
-    // matching the executor's override rule.
-    RigExecValueOverride standing;
-    standing.prim = SdfPath("/Ctl/A");
-    standing.computation = TfToken("computePointFrame");
-    standing.value = VtValue(1.0);
-    RigExecRetainedFrameState cachedOvr = cached;
-    cachedOvr.overrides = {standing};
-    const RigExecSparsePlan held = RigExecPlanSparseReuse(
-        index, nullptr, cachedOvr, 7, cachedOvr.inputs, {standing});
-    CHECK(held.verdict == RigExecSparseVerdict::Partial);
-    CHECK(SetIs(held.clusters, {2, 3, 4}));
-}
 
 namespace {
 
@@ -1459,13 +1101,8 @@ MakeNestedSpaceSwitchRig()
 
 }  // namespace
 
-// A switched group that recomposes an earlier version of a provider reads
-// that provider's avars, not its posed frame, so its cluster lies outside
-// the provider's compose cone. The index seeds it through avarVersionSteps
-// for the provider's control, its varying avar, and an override on that
-// avar. A partial cone re-run planned from those seeds, after a drag or a
-// key edit of P's rz, is bit-identical to live; after the key edit, a run of
-// P's compose cone alone is not.
+// Warm frozen jobs use the same value-cutoff engine as live evaluation,
+// including provider versions read by nested space switches.
 void
 TestRecomposedVersionSeedsSparseReuse()
 {
@@ -1474,148 +1111,53 @@ TestRecomposedVersionSeedsSparseReuse()
     RigExecRigEvaluator evaluator(stage, rig);
     std::vector<std::string> errors;
     CHECK(evaluator.Compile(&errors));
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     const UsdTimeCode time(1.0);
-    const RigExecRigPose basePose = evaluator.Evaluate(time);
-    CHECK(basePose.valid);
-    const RigExecBakedProgram *baked = evaluator.GetBakedProgram();
-    CHECK(baked != nullptr);
-    if (!baked) {
-        return;
-    }
-    const RigExecBakedProgramImpl &program = baked->GetStepGraph();
-    const auto slotOf = [&program](const char *path) {
-        const auto it = std::find(program.paths.begin(), program.paths.end(),
-                                  SdfPath(path));
-        return it == program.paths.end()
-            ? size_t(-1)
-            : size_t(it - program.paths.begin());
+    CHECK(evaluator.Evaluate(time).valid);
+    std::string error;
+    std::shared_ptr<const RigExecFrozenProgram> frozen;
+    CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
+    if (!frozen) return;
+    auto workspace = RigExecCreateFrozenWorkspace(frozen);
+    CHECK(workspace != nullptr);
+    RigExecFrozenEvalContext context;
+    context.frozen = frozen.get();
+    context.workspace = workspace.get();
+    context.epochDigest = uint64_t(evaluator.GetBindingEpochDigest());
+    context.slotCount = frozen->program.paths.size();
+    const auto run = [&](const std::vector<RigExecValueOverride> &overrides) {
+        evaluator.SetInteractiveOverrides(overrides);
+        RigExecFrameInputs inputs;
+        CHECK(RigExecSampleFrameInputs(evaluator, time, overrides, &inputs, &error));
+        context.varyingInputCount = inputs.values.size();
+        const RigExecRigPose live = evaluator.Evaluate(time);
+        RigExecFrozenRunReport report;
+        const RigExecRigPose pose = RigExecEvaluateFrozen(
+            context, inputs, RigExecMakeProductionStepRunner(), nullptr, rig, &report);
+        CHECK(live.valid && pose.valid && report.ran);
+        RigExecRigPose diff;
+        RigExecComparePoses(live, pose, &diff);
+        CHECK(diff.comparisonMismatches == 0);
+        CHECK(pose.executedOpCount == report.region.size());
+        return pose.executedOpCount;
     };
-    const size_t pSlot = slotOf("/Asset/Rig/P");
-    const size_t sSlot = slotOf("/Asset/Rig/P/S");
-    CHECK(pSlot < program.cones.avarCluster.size());
-    CHECK(sSlot < program.cones.avarCluster.size());
-    if (pSlot >= program.cones.avarCluster.size() ||
-        sSlot >= program.cones.avarCluster.size()) {
-        return;
-    }
-    const int pCluster = program.cones.avarCluster[pSlot];
-    const int sCluster = program.cones.avarCluster[sSlot];
-    // Distinct only at one step per cluster (RIGEXEC_BAKED_GRAIN_US=0, set
-    // by the test registration).
-    CHECK(pCluster >= 0 && sCluster >= 0 && pCluster != sCluster);
-    if (pCluster == sCluster) {
-        return;
-    }
-    // S's group reads P's avars to recompose P's pre-switch frame.
-    CHECK(pSlot < program.cones.avarVersionSteps.size());
-    bool sReadsP = false;
-    if (pSlot < program.cones.avarVersionSteps.size()) {
-        for (const int step : program.cones.avarVersionSteps[pSlot]) {
-            sReadsP = sReadsP || (step >= 0 &&
-                                  size_t(step) < program.steps.size() &&
-                                  program.steps[size_t(step)].cluster ==
-                                      sCluster);
-        }
-    }
-    CHECK(sReadsP);
-
-    const uint64_t epoch = uint64_t(evaluator.GetBindingEpochDigest());
-    RigExecOutputAffectedIndex index;
-    index.Build(program, epoch);
-    // Without the version seeds, P's compose cone misses S.
-    CHECK(!index.ConeOf(pCluster).Test(sCluster));
-    for (const char *id : {"/Asset/Rig/P", "/Asset/Rig/P.avars:rz"}) {
-        CHECK(index.IsKnownControl(id));
-        const std::vector<int> seeds = index.SeedsForControl(id);
-        CHECK(std::find(seeds.begin(), seeds.end(), pCluster) !=
-              seeds.end());
-        CHECK(std::find(seeds.begin(), seeds.end(), sCluster) !=
-              seeds.end());
-        CHECK(index.AffectedByControls({id}).Test(sCluster));
-    }
+    run({});
+    CHECK(run({}) == 0);
     RigExecValueOverride drag;
     drag.prim = SdfPath("/Asset/Rig/P");
     drag.attribute = TfToken("avars:rz");
     drag.value = VtValue(40.0);
-    const std::vector<int> dragSeeds = RigExecOverrideSeeds(program, drag);
-    CHECK(std::find(dragSeeds.begin(), dragSeeds.end(), sCluster) !=
-          dragSeeds.end());
-    // The bridge's override admission.
-    index.MapControl(RigExecControlIdForOverride(drag), dragSeeds);
-
-    // Retained base: the live frame as authored, with its slots.
-    std::string error;
-    std::shared_ptr<const void> slots;
-    size_t slotBytes = 0;
-    CHECK(RigExecCapturePartialSlots(program, &slots, &slotBytes));
-    RigExecFrameInputs baseInputs;
-    CHECK(RigExecSampleFrameInputs(evaluator, time, {}, &baseInputs,
-                                   &error));
-    const RigExecRetainedFrameState retained = RigExecCaptureRetainedState(
-        baseInputs, {}, epoch, program.clustering.clusters.size());
-    if (!slots) {
-        return;
-    }
-    // Plans a re-run from the retained base, runs it and a run of P's
-    // compose cone alone, and compares both with live.
-    const auto rerun = [&](const char *what,
-                           const std::vector<RigExecValueOverride> &held,
-                           bool versionsMatter) {
-        evaluator.SetInteractiveOverrides(held);
-        std::shared_ptr<const RigExecFrozenProgram> frozen;
-        CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
-        CHECK(uint64_t(evaluator.GetBindingEpochDigest()) == epoch);
-        RigExecFrameInputs fresh;
-        CHECK(RigExecSampleFrameInputs(evaluator, time, held, &fresh,
-                                       &error));
-        const RigExecSparsePlan plan = RigExecPlanSparseReuse(
-            index, nullptr, retained, epoch, fresh, held);
-        CHECK(plan.verdict == RigExecSparseVerdict::Partial);
-        CHECK(plan.clusters.Test(sCluster));
-        const RigExecRigPose live = evaluator.Evaluate(time);
-        CHECK(live.valid);
-        if (!frozen) {
-            return;
-        }
-        const auto mismatches = [&live](const RigExecRigPose &pose) {
-            RigExecRigPose diff;
-            RigExecComparePoses(live, pose, &diff);
-            return diff.bakedParityMismatches;
-        };
-        const RigExecPartialRunResult partial = RigExecRunPartialCone(
-            *frozen, fresh, slots, basePose, plan.clusters, 0);
-        CHECK(partial.completed);
-        CHECK(partial.pose.valid);
-        if (mismatches(partial.pose) != 0) {
-            std::printf("FAIL %s: the planned re-run differs from live\n",
-                        what);
-            CHECK(false);
-        }
-        if (!versionsMatter) {
-            return;
-        }
-        // Without the version seeds the plan is P's compose cone, which
-        // leaves S's frame from the retained base.
-        const RigExecBakedClusterSet &withoutVersions =
-            index.ConeOf(pCluster);
-        CHECK(!withoutVersions.Test(sCluster));
-        const RigExecPartialRunResult stale = RigExecRunPartialCone(
-            *frozen, fresh, slots, basePose, withoutVersions, 0);
-        CHECK(stale.completed);
-        CHECK(mismatches(stale.pose) > 0);
-    };
-    // A held drag: the standing-override closure runs every override
-    // step's cluster, S's switch index among them, so the seeds are
-    // checked above and the re-run only has to match.
-    rerun("drag of P.avars:rz", {drag}, false);
-    // A key edit: P's sampled rz moves with nothing held, and only the
-    // version seeds bring S's group into the plan.
-    stage->GetPrimAtPath(SdfPath("/Asset/Rig/P"))
-        .GetAttribute(TfToken("avars:rz"))
-        .Set(40.0, time);
-    rerun("key edit of P.avars:rz", {}, true);
-    evaluator.SetInteractiveOverrides({});
+    CHECK(run({drag}) > 0);
+    CHECK(run({drag}) == 0);
+    CHECK(run({}) > 0);
+    CHECK(run({}) == 0);
+    // A workspace cannot be silently reused for a different source epoch.
+    RigExecFrameInputs inputs;
+    CHECK(RigExecSampleFrameInputs(evaluator, time, {}, &inputs, &error));
+    context.varyingInputCount = inputs.values.size();
+    ++context.epochDigest;
+    CHECK(!RigExecEvaluateFrozen(context, inputs, RigExecMakeProductionStepRunner()).valid);
+    --context.epochDigest;
+    CHECK(run({}) == 0);
 }
 
 int
@@ -1633,8 +1175,6 @@ main()
     TestPlanSparseReuse();
     TestPlanTimeRule();
     TestUpstreamMissesSparseReuse();
-    TestRunSparsePlan();
-    TestRunSparsePlanRunsPredecessorsFirst();
     TestRetainedPublishAndEpochEviction();
     TestCandidateIndex();
     TestUnionToleratesMismatchedWidths();
@@ -1643,7 +1183,6 @@ main()
     TestNoticeAdapterPaths();
     TestNoticeAdapterRealNotice();
     TestOverrideSeeds();
-    TestPlannerExecutorParity();
     TestRecomposedVersionSeedsSparseReuse();
     if (failures == 0) {
         std::printf("PASS testRigExecFrameCacheSparsity\n");

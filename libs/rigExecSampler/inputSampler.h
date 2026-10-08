@@ -3,7 +3,8 @@
 // starting at its value at the bake time. Playing the binary along the
 // stage's timeline means handing the reader, at every new time, the values
 // the stage holds there. Only the inputs the file marks Animated can hold
-// another value at another time, so only those are read: raw typed Gets of
+// another value at another time. Explicit static SourceBacked rows are also
+// sampled after invalidation to transport Default edits. Reads are raw typed Gets of
 // the attribute itself (the runtime performs the connection walks). A time
 // equal to the last one makes no calls, so the reader's closure sees time
 // move exactly when it did.
@@ -27,7 +28,7 @@
 namespace rigExec {
 
 /// The value type an input of \p tag holds, the way the bake typed its
-/// slot: the attribute's own scalar type, any role.
+/// slot: the attribute's own type, any role.
 PXR_NS::TfType RigExecInputTagType(RrInputTag tag);
 
 /// The name of \p tag's type as a stage spells it ("double", "matrix4d").
@@ -38,6 +39,12 @@ const char *RigExecInputTagName(RrInputTag tag);
 /// input, which is set by its text (SetInputToken).
 bool RigExecInputValueFrom(const PXR_NS::VtValue &value, RrInputTag tag,
                            RrInputValue *out);
+
+/// A borrowed view of \p value's array elements, for SetInputArray, which
+/// copies them. False unless the held array type equals \p tag. Token and
+/// bool arrays require owned text/byte conversion in RigExecSampleInputAt.
+bool RigExecInputArrayFrom(const PXR_NS::VtValue &value, RrInputTag tag,
+                           RigExecRuntimeArray *out);
 
 /// Sets input \p index of \p reader, named \p name and of type \p tag, to
 /// \p attribute's typed value at \p time, as Apply sets an Animated input:
@@ -86,8 +93,8 @@ public:
     /// One line per input Bind could not resolve, naming it and why.
     const std::vector<std::string> &GetWarnings() const { return _warnings; }
 
-    /// The inputs Apply reads.
-    size_t GetAnimatedCount() const { return _animated.size(); }
+    /// Captured temporal inputs; static SourceBacked rows are sampled separately.
+    size_t GetAnimatedCount() const { return _animatedCount; }
 
 private:
     struct _Bound {
@@ -95,9 +102,11 @@ private:
         std::string name;
         RrInputTag type = RrInputTag::Double;
         PXR_NS::UsdAttribute attribute;
+        bool animated = true;
     };
 
     std::vector<_Bound> _animated;
+    size_t _animatedCount = 0;
     std::vector<std::string> _warnings;
     PXR_NS::UsdTimeCode _last;
     bool _sampled = false;

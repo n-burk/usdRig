@@ -1,18 +1,15 @@
-// rigExecRuntime executor (M2 framework).
-// A port of the serial half of bakedSchedule.cpp: RigExecBakedComputeClosure
-// and the serial step walk of RigExecBakedRunSteps. The runtime never
-// rebuilds, so revision `ran` starts false and the program stamp never
-// moves, and it holds no time: where the program compares the time with
-// the last run's, the closure reads RrStore::animatedTouched. An input set
-// is an authored value, so its readers re-run once per change, as the
-// program re-runs them for a value edit (RrStore::changedSinceRun), not on
-// every run a drag stands. Everything else is the same value comparisons
-// in the same order.
+// Runtime adapter for the shared readiness and value propagation loop.
 #include "rigExecRuntime/labels.h"
 #include "rigExecRuntime/store.h"
+#include "opGraph.h"
+#include "poseInternal.h"
+#include "spaces.h"
 
 #include <algorithm>
 #include <cstring>
+#include <limits>
+#include <map>
+#include <set>
 
 namespace rigExec {
 
@@ -28,6 +25,7 @@ _RrIsGeometryKind(RigExecWireStepKind kind)
     case RigExecWireStepKind::RevisionFuse:
     case RigExecWireStepKind::ChainStatus:
     case RigExecWireStepKind::Derived:
+    case RigExecWireStepKind::ChainInputs:
         return true;
     default:
         return false;
@@ -37,45 +35,9 @@ _RrIsGeometryKind(RigExecWireStepKind kind)
 bool
 _RrIsWeightKind(RigExecWireStepKind kind)
 {
-    return kind == RigExecWireStepKind::WeightPacket ||
+    return kind == RigExecWireStepKind::WeightField ||
+           kind == RigExecWireStepKind::WeightPacket ||
            kind == RigExecWireStepKind::VolumePlacements;
-}
-
-unsigned
-_RrFamilyBit(RigExecWireStepKind kind)
-{
-    if (_RrIsWeightKind(kind)) {
-        return 0x2u;
-    }
-    if (_RrIsGeometryKind(kind)) {
-        return 0x4u;
-    }
-    return 0x1u;
-}
-
-bool
-_RrTest(const std::vector<uint64_t> &words, size_t cluster)
-{
-    return (words[cluster / 64] & (uint64_t(1) << (cluster % 64))) != 0;
-}
-
-void
-_RrSet(std::vector<uint64_t> *words, size_t cluster)
-{
-    (*words)[cluster / 64] |= uint64_t(1) << (cluster % 64);
-}
-
-size_t
-_RrCount(const std::vector<uint64_t> &words)
-{
-    size_t count = 0;
-    for (uint64_t word : words) {
-        while (word) {
-            count += size_t(word & 1);
-            word >>= 1;
-        }
-    }
-    return count;
 }
 
 }  // namespace
@@ -90,6 +52,7 @@ void _RrMemoValue(std::string *key, const RrWireValue &value)
     _RrAppend(key, value.tag); _RrAppend(key, value.bits);
     _RrAppend(key, value.matrix); _RrAppend(key, value.vec3d);
     _RrAppend(key, value.vec3f);
+    _RrAppend(key, value.vec3i);
 }
 template <class T> void _RrMemoArray(const RrProgram *program, uint32_t slot,
                                    std::string *key)
@@ -100,50 +63,77 @@ template <class T> void _RrMemoArray(const RrProgram *program, uint32_t slot,
     if (count) key->append(reinterpret_cast<const char *>(values->data()),
                            sizeof(T) * count);
 }
-std::string _RrHeadMemo(const RrProgram *program, const RigExecWireStep &step)
+void _RrRawSlotMemo(const RrProgram *program, int slot, std::string *key)
 {
-    std::string key;
     const auto &state = program->inputState;
-    for (const auto slot : step.headInputSlots) {
-        _RrAppend(&key, state.slotHasValue[slot]);
-        if (RrInputTagIsArray(RrInputTag(uint8_t(state.file->inputs[slot].type())))) {
-            switch (state.file->inputs[slot].type()) {
-            case RigExecWireInputTag::IntArray: _RrMemoArray<int32_t>(program,slot,&key); break;
-            case RigExecWireInputTag::FloatArray: _RrMemoArray<float>(program,slot,&key); break;
-            case RigExecWireInputTag::DoubleArray: _RrMemoArray<double>(program,slot,&key); break;
-            case RigExecWireInputTag::Vec2fArray: _RrMemoArray<RrVec2f>(program,slot,&key); break;
-            case RigExecWireInputTag::Vec3fArray: _RrMemoArray<RrVec3f>(program,slot,&key); break;
-            default: break;
-            }
-        } else _RrMemoValue(&key, state.slotCurrent[slot]);
+    const bool declared = slot >= 0 && size_t(slot) < state.slotHasValue.size();
+    _RrAppend(key, declared);
+    if (!declared) return;
+    _RrAppend(key, state.slotHasValue[size_t(slot)]);
+    const auto tag = state.file->inputs[size_t(slot)].type();
+    const bool array = RrInputTagIsArray(RrInputTag(uint8_t(tag)));
+    // Arrays carry authorship beside their retained payload. An authored
+    // set of the same bytes changes a Default read after a sampled set.
+    _RrAppend(key, array ? RrInputArrayAuthored(program,uint32_t(slot))
+                         : state.slotAuthored[size_t(slot)]!=0);
+    _RrAppend(key, state.slotBlocked[size_t(slot)]);
+    _RrAppend(key, tag);
+    if (array) {
+        switch (tag) {
+        case RigExecWireInputTag::IntArray: _RrMemoArray<int32_t>(program,slot,key); break;
+        case RigExecWireInputTag::FloatArray: _RrMemoArray<float>(program,slot,key); break;
+        case RigExecWireInputTag::DoubleArray: _RrMemoArray<double>(program,slot,key); break;
+        case RigExecWireInputTag::Vec2fArray: _RrMemoArray<RrVec2f>(program,slot,key); break;
+        case RigExecWireInputTag::Vec3fArray: _RrMemoArray<RrVec3f>(program,slot,key); break;
+        case RigExecWireInputTag::Vec3dArray: _RrMemoArray<RigExecWireVec3d>(program,slot,key); break;
+        case RigExecWireInputTag::Matrix4dArray: _RrMemoArray<RigExecWireMatrix4d>(program,slot,key); break;
+        case RigExecWireInputTag::TokenArray: _RrMemoArray<uint32_t>(program,slot,key); break;
+        case RigExecWireInputTag::BoolArray: _RrMemoArray<uint8_t>(program,slot,key); break;
+        default: break;
+        }
+    } else {
+        _RrMemoValue(key,state.slotCurrent[size_t(slot)]);
+        if (tag == RigExecWireInputTag::Token)
+            RigExecOpKeyAppend(key,program->TextOrEmpty(uint32_t(state.slotCurrent[size_t(slot)].bits)));
     }
-    for (const auto &read : step.headInputReads)
-        _RrMemoValue(&key, RrReadInput(program, read));
-    return key;
 }
-std::string _RrPropertyVersion(const RrProgram *program, uint32_t v)
+void _RrInputMemo(const RrProgram *program, const RigExecWireStep &step, std::string *key)
 {
-    std::string key;
+    const auto &state=program->inputState;
+    const auto appendSlot=[&](uint32_t slot) { _RrRawSlotMemo(program,int(slot),key); };
+    for(uint32_t slot:step.headInputSlots) appendSlot(slot);
+    for(const auto &read:step.headInputReads) RrSourceReadMemo(program,read,key);
+    if(step.kind==RigExecWireStepKind::AvarInputs) {
+        const auto bindings=[&](const std::vector<uint32_t> &reads) {
+            for(uint32_t id:reads) {
+                const auto &binding=program->registeredReads[id];
+                if(binding.avar<0 || binding.avar/11!=step.object) continue;
+                const auto &read=*binding.read;
+                _RrAppend(key,binding.avar); _RrMemoValue(key,state.values[read.constant]);
+                for(uint32_t slot:read.walk) appendSlot(slot);
+                for(const auto &candidate:read.propertyCandidates) if(candidate.raw) appendSlot(candidate.slot);
+                for(const auto &candidate:read.doubleCandidates) if(candidate.raw) appendSlot(candidate.slot);
+                if(read.rawFallbackSlot>=0) appendSlot(uint32_t(read.rawFallbackSlot));
+            }
+        };
+        bindings(state.avarBindingReads); bindings(state.avarConstantReads);
+    }
+    for(int number:step.overrideInputs) {
+        if(number<0 || size_t(number)+1>=state.overrideSlotBegin.size()) continue;
+        for(uint32_t i=state.overrideSlotBegin[size_t(number)];i<state.overrideSlotBegin[size_t(number)+1];++i)
+            appendSlot(state.overrideSlotList[i]);
+    }
+}
+void _RrPropertyVersion(const RrProgram *program, uint32_t v,std::string *key)
+{
     const auto &value = program->store.propertyVersions[v];
-    _RrAppend(&key, program->store.propertyVersionValid[v]);
-    _RrAppend(&key, value.tag); _RrAppend(&key, value.f32);
-    _RrAppend(&key, value.f64);
+    _RrAppend(key, program->store.propertyVersionValid[v]);
+    _RrAppend(key, value.tag); _RrAppend(key, value.f32);
+    _RrAppend(key, value.f64);
     for (size_t row = 0; row < 4; ++row)
         for (size_t col = 0; col < 4; ++col)
-            _RrAppend(&key, value.matrix[row][col]);
-    for (size_t k = 0; k < 3; ++k) _RrAppend(&key, value.vec[k]);
-    return key;
-}
-bool _RrRangeMoved(const RrStore &store, const fb::SlotRange &range)
-{
-    const std::vector<char> *moved =
-        range.domain() == RigExecWireSlotDomain::Rest ? &store.restChanged :
-        range.domain() == RigExecWireSlotDomain::Ladder ? &store.ladderChanged :
-        range.domain() == RigExecWireSlotDomain::SkinTopology ? &store.topologyChanged : nullptr;
-    if (!moved) return false;
-    for (uint32_t v = range.begin(); v < range.end(); ++v)
-        if ((*moved)[v]) return true;
-    return false;
+            _RrAppend(key, value.matrix[row][col]);
+    for (size_t k = 0; k < 3; ++k) _RrAppend(key, value.vec[k]);
 }
 bool _RrShadowed(const RrStore &store, const RigExecWireStep &step, uint32_t v)
 {
@@ -157,367 +147,518 @@ bool _RrShadowed(const RrStore &store, const RigExecWireStep &step, uint32_t v)
 }
 } // namespace
 
-bool
-RrRunHeadSteps(RrProgram *program, std::vector<std::string> *diagnostics,
-               std::string *error)
+
+namespace {
+void RrOpFrame(std::string *key, const RrPointFrame &v)
+{ RigExecOpKeyAppend(key,v.points); RigExecOpKeyAppend(key,v.flags); }
+template<class T> void RrOpArray(std::string *key, const std::vector<T> &v)
+{ RigExecOpKeyArray(key,v); }
+void RrOpArray(std::string *key, const std::vector<RrPointFrame> &v)
+{ RigExecOpKeyAppend(key,v.size()); for(const auto &x:v) RrOpFrame(key,x); }
+void RrResetExcludedValue(RrProgram *p,uint32_t domain,uint32_t slot)
 {
-    auto &store = program->store;
-    const auto &steps = *program->steps;
-    if (store.headRan.size() != steps.size()) {
-        store.headRan.assign(steps.size(), 0);
-        store.headLines.resize(steps.size());
-        store.headMemoKeys.resize(steps.size());
+    auto &s=p->store; auto *pose=static_cast<RrPoseScratch *>(p->pose.get());
+    RrPointFrame invalid; invalid.flags=0; RrMat4d identity; identity.SetIdentity();
+    RrMat4d invalidMatrix=identity;
+    invalidMatrix[3][0]=std::numeric_limits<double>::quiet_NaN();
+    using D=RigExecWireSlotDomain;
+    switch(D(domain)) {
+    case D::Avars: std::fill(s.avars.begin()+size_t(slot)*11,s.avars.begin()+(size_t(slot)+1)*11,0); break;
+    case D::PoseBase: s.base[slot]=invalid; break;
+    case D::PoseFin: s.fin[slot]=invalid; break;
+    case D::PosedM: s.posedM[slot]=invalidMatrix; break;
+    case D::FinalMatrix: s.finalMatrix[slot]=invalidMatrix; break;
+    case D::BaseMatrix: s.baseMatrix[slot]=invalidMatrix; break;
+    case D::SwitchFrame: s.switchFrames[slot]=invalidMatrix; break;
+    case D::Aggregate: s.aggregates[slot]={}; break;
+    case D::Candidates:
+        std::fill(s.solverOutPresent[slot].begin(),s.solverOutPresent[slot].end(),char(0));
+        std::fill(s.solverOutFrames[slot].begin(),s.solverOutFrames[slot].end(),invalid); break;
+    case D::CommitTable: {
+        auto &c=s.commits[slot]; c.abandoned=true;
+        std::fill(c.present.begin(),c.present.end(),char(0)); std::fill(c.frames.begin(),c.frames.end(),invalid); break;
     }
-    store.headOutputChanged.assign(steps.size(), 0);
-    store.restChanged.assign(program->slotMeta->paths.size(), 0);
-    store.ladderChanged.assign(program->slotMeta->paths.size(), 0);
-    store.topologyChanged.assign(program->geometry->revisionIndex.size() +
-                                  program->geometry->derivedIndex.size(), 0);
-    RrPropertyBegin(program);
-    std::vector<char> finished(program->inputState.file->propertyChains.size(), 0);
-    for (size_t i = 0; i < steps.size() && steps[i].isHead; ++i) {
-        const auto &step = steps[i];
-        if (step.kind == RigExecWireStepKind::PropertyRevision && step.headAlwaysRuns)
-            RrPropertyPublishFinished(program, finished);
-        const auto key = _RrHeadMemo(program, step);
-        const bool first = !store.headRan[i];
-        bool initialBindingMoved = false;
-        if (first) {
-            for (const auto &read : step.headInputReads) {
-                std::string current, captured;
-                _RrMemoValue(&current, RrReadInput(program, read));
-                _RrMemoValue(&captured, program->inputState.values[read.constant]);
-                initialBindingMoved = initialBindingMoved || current != captured;
-            }
-        }
-        bool dirty = initialBindingMoved || step.headAlwaysRuns ||
-            (first ? (step.kind == RigExecWireStepKind::PropertyRevision ||
-                      step.kind == RigExecWireStepKind::SkinTopology ||
-                      step.headVaryingLeaves) : key != store.headMemoKeys[i]);
-        for (const auto &range : step.reads) {
-            if (range.domain() == RigExecWireSlotDomain::PropertyResult) {
-                for (uint32_t v = range.begin(); v < range.end(); ++v)
-                    dirty = dirty || (store.propertyVersionChanged[v] &&
-                                       !_RrShadowed(store, step, v));
-            } else {
-                dirty = dirty || _RrRangeMoved(store, range);
-            }
-        }
-        store.headMemoKeys[i] = key;
-        store.headRan[i] = 1;
-        if (dirty) {
-            store.runTrace.push_back(int32_t(i));
-            store.stepOutputs[i].BeginRun();
-            auto &lines = store.headLines[i]; lines.clear();
-            bool changed = false;
-            if (step.kind == RigExecWireStepKind::PropertyRevision) {
-                std::vector<std::pair<uint32_t, std::string>> before;
-                for (const auto &range : step.writes)
-                    for (uint32_t v = range.begin(); v < range.end(); ++v)
-                        before.emplace_back(v, _RrPropertyVersion(program, v));
-                if (!RrRunPropertyPart(program, size_t(step.object), size_t(step.part), &lines)) {
-                    if (error) *error = "step " + RrStepLabel(*program, i) + " has no property part";
-                    return false;
-                }
-                for (const auto &[v, previous] : before) {
-                    if (previous != _RrPropertyVersion(program, v)) {
-                        store.propertyVersionChanged[v] = 1;
-                        changed = true;
-                    }
-                }
-                const auto &chain = program->inputState.file->propertyChains[size_t(step.object)];
-                const uint32_t backing = chain.versionBase + uint32_t(step.part);
-                if (store.propertyVersionChanged[backing])
-                    for (const auto &record : program->inputState.file->phasedConsumers)
-                        if (record.chain == uint32_t(step.object) && record.applied == uint32_t(step.part))
-                            store.propertyVersionChanged[record.version] = 1;
-            } else if (step.kind == RigExecWireStepKind::RestCompose ||
-                       step.kind == RigExecWireStepKind::LadderCompose) {
-                changed = RrRunRestHead(program, size_t(step.object),
-                                        step.kind == RigExecWireStepKind::LadderCompose);
-            } else if (step.kind == RigExecWireStepKind::SkinTopology) {
-                changed = RrRunTopologyHead(program, size_t(step.object));
-                store.topologyChanged[size_t(step.object)] = changed ? 1 : 0;
-            }
-            store.headOutputChanged[i] = changed ? 1 : 0;
-        } else store.stepOutputs[i].MarkSkipped();
-        if (step.kind == RigExecWireStepKind::PropertyRevision &&
-            size_t(step.part) == program->inputState.file->propertyChains[size_t(step.object)].revisions.size())
-            finished[size_t(step.object)] = 1;
-        diagnostics->insert(diagnostics->end(), store.headLines[i].begin(), store.headLines[i].end());
+    case D::CommitDelta: std::fill(s.commits[slot].deltaOk.begin(),s.commits[slot].deltaOk.end(),char(0)); break;
+    case D::CommitStaging:
+        for(size_t c=0;c<p->poses->commits.size();++c) {
+            const auto base=p->poses->commits[c].stagingBase;
+            if(base<0 || slot<uint32_t(base) || uint64_t(slot)-uint32_t(base)>=s.commits[c].staged.size()) continue;
+            const auto k=slot-uint32_t(base); s.commits[c].staged[k]=invalid; s.commits[c].outcome[k]=2; break;
+        } break;
+    case D::ConstraintDelta: s.deltaPresent[slot]=0; s.deltaValues[slot]=identity; break;
+    case D::PropertyResult:
+        s.propertyVersionValid[slot]=0; s.propertyVersions[slot]={};
+        for(size_t r=0;r<p->file->phasedConsumers.size();++r)
+            if(p->file->phasedConsumers[r].version==slot) s.propertyRecordStoodAside[r]=1;
+        break;
+    case D::WeightPacket: s.weightPackets[slot]={}; break;
+    case D::WeightFrames:
+        s.volumePlaced[slot]=slot<p->constants->noScaleAvars.size() && p->constants->noScaleAvars[slot];
+        s.volumePlacement[slot]=invalidMatrix; break;
+    case D::WeightFramesBase:
+        s.volumePlacedBase[slot]=slot<p->constants->noScaleAvars.size() && p->constants->noScaleAvars[slot];
+        s.volumePlacementBase[slot]=invalidMatrix; break;
+    case D::PoseWeight: s.poseWeights[slot]=0; break;
+    case D::FrameMatrix: s.frameMatrixValid[slot]=0; s.frameMatrix[slot]=identity; break;
+    case D::WeightField: {
+        auto &v=s.weightFieldResults[slot]; v.values.clear(); v.count=0; v.ok=false; v.error="operation cycle"; break;
     }
-    RrPropertyPublish(program);
-    return true;
+    case D::SpaceValue: {
+        auto &v=s.providerValues[slot]; v.value=std::monostate(); v.initialized=false;
+        v.authoritative=false; v.blocked=true; v.count=0; v.error="operation cycle"; break;
+    }
+    case D::Rest:
+        if(pose) {
+            pose->restFrames[slot]=invalid; pose->restM[slot]=identity;
+            for(auto &point:pose->restPts[slot]) point=RrVec3d(0);
+        } break;
+    case D::Ladder:
+        if(pose) {
+            pose->selfD[slot]=pose->parentDinv[slot]=pose->restRoundTrip[slot]=pose->defaultRoundTrip[slot]=identity;
+            pose->posedAuthoredM[slot]=pose->posedD[slot]=pose->parentSpaceM[slot]=identity;
+            pose->posedAuthored[slot]=pose->parentSpaceAuthored[slot]=0;
+            pose->rotOrder[slot]=0; pose->rotationSign[slot]=0;
+        } break;
+    default: RrResetExcludedGeometryValue(p,D(domain),slot); break;
+    }
+}
+void RrOpValue(const RrProgram *p, uint32_t domain, uint32_t slot, std::string *key)
+{
+    const auto d=RigExecWireSlotDomain(domain); const auto &s=p->store;
+    const auto *pose=static_cast<const RrPoseScratch *>(p->pose.get());
+    switch(d) {
+    case RigExecWireSlotDomain::Avars:
+        for(size_t i=size_t(slot)*11;i<size_t(slot)*11+11 && i<s.avars.size();++i) RigExecOpKeyAppend(key,s.avars[i]);
+        for(size_t i=0;i<p->slotMeta->xformSlots.size();++i) if(p->slotMeta->xformSlots[i]==int32_t(slot)) RigExecOpKeyAppend(key,s.xformBase[i]);
+        break;
+    case RigExecWireSlotDomain::PoseBase: RrOpFrame(key,s.base[slot]); break;
+    case RigExecWireSlotDomain::PoseFin: RrOpFrame(key,s.fin[slot]); break;
+    case RigExecWireSlotDomain::PosedM: RigExecOpKeyAppend(key,s.posedM[slot]); break;
+    case RigExecWireSlotDomain::FinalMatrix: RigExecOpKeyAppend(key,s.finalMatrix[slot]); break;
+    case RigExecWireSlotDomain::BaseMatrix: RigExecOpKeyAppend(key,s.baseMatrix[slot]); break;
+    case RigExecWireSlotDomain::SwitchFrame: RigExecOpKeyAppend(key,s.switchFrames[slot]); break;
+    case RigExecWireSlotDomain::RequiredStageFramesAdmission:
+        RigExecOpKeyAppend(key,uint8_t(p->requiredStageFramesAdmission.admitted));
+        RigExecOpKeyAppend(key,p->requiredStageFramesAdmission.firstBadTarget); break;
+    case RigExecWireSlotDomain::Aggregate: RrOpArray(key,s.aggregates[slot].frames); RrOpArray(key,s.aggregates[slot].rests); break;
+    case RigExecWireSlotDomain::SolverPoints: RrOpArray(key,s.ribbonConstant[slot]); break;
+    case RigExecWireSlotDomain::Candidates: RrOpArray(key,s.solverOutFrames[slot]); RrOpArray(key,s.solverOutPresent[slot]); break;
+    case RigExecWireSlotDomain::CommitTable: {
+        const auto &c=s.commits[slot]; RigExecOpKeyAppend(key,c.abandoned);
+        RrOpArray(key,c.frames); RrOpArray(key,c.present);
+        if(pose) { RigExecOpKeyAppend(key,pose->recordAfter[slot]); RigExecOpKeyAppend(key,pose->recordEveryTarget[slot]); } break;
+    }
+    case RigExecWireSlotDomain::CommitDelta: RrOpArray(key,s.commits[slot].deltas); RrOpArray(key,s.commits[slot].deltaOk); break;
+    case RigExecWireSlotDomain::CommitStaging:
+        for(size_t c=0;c<p->poses->commits.size();++c) {
+            const auto &wire=p->poses->commits[c];
+            if(slot<uint32_t(wire.stagingBase) || slot>=uint32_t(wire.stagingBase)+wire.propagate.size()) continue;
+            const auto k=slot-uint32_t(wire.stagingBase); RrOpFrame(key,s.commits[c].staged[k]); RigExecOpKeyAppend(key,s.commits[c].outcome[k]); break;
+        } break;
+    case RigExecWireSlotDomain::ConstraintDelta: RigExecOpKeyAppend(key,s.deltaPresent[slot]); RigExecOpKeyAppend(key,s.deltaValues[slot]); break;
+    case RigExecWireSlotDomain::PropertyResult: _RrPropertyVersion(p,slot,key); break;
+    case RigExecWireSlotDomain::WeightPacket: {
+        const auto &w=s.weightPackets[slot]; RigExecOpKeyAppend(key,w.representation); RigExecOpKeyAppend(key,w.rangePolicy);
+        RigExecOpKeyAppend(key,w.defaultWeight); RigExecOpKeyAppend(key,w.valid); RrOpArray(key,w.values); RrOpArray(key,w.indices); break;
+    }
+    case RigExecWireSlotDomain::WeightFrames: RigExecOpKeyAppend(key,s.volumePlaced[slot]); RigExecOpKeyAppend(key,s.volumePlacement[slot]); break;
+    case RigExecWireSlotDomain::WeightFramesBase: RigExecOpKeyAppend(key,s.volumePlacedBase[slot]); RigExecOpKeyAppend(key,s.volumePlacementBase[slot]); break;
+    case RigExecWireSlotDomain::PoseWeight: RigExecOpKeyAppend(key,s.poseWeights[slot]); break;
+    case RigExecWireSlotDomain::FrameMatrix: RigExecOpKeyAppend(key,s.frameMatrixValid[slot]); RigExecOpKeyAppend(key,s.frameMatrix[slot]); break;
+    case RigExecWireSlotDomain::WeightField: {
+        const auto &w=s.weightFieldResults[slot]; RigExecOpKeyAppend(key,w.count); RigExecOpKeyAppend(key,w.ok); RigExecOpKeyAppend(key,w.error); RrOpArray(key,w.values); break;
+    }
+    case RigExecWireSlotDomain::Rest:
+        if(pose) {
+            RigExecOpKeyAppend(key,pose->restM[slot]); RrOpFrame(key,pose->restFrames[slot]);
+            for(const auto &point:pose->restPts[slot]) RigExecOpKeyAppend(key,point);
+        } break;
+    case RigExecWireSlotDomain::Ladder:
+        if(pose) { RigExecOpKeyAppend(key,pose->selfD[slot]); RigExecOpKeyAppend(key,pose->parentDinv[slot]);
+            RigExecOpKeyAppend(key,pose->restRoundTrip[slot]); RigExecOpKeyAppend(key,pose->defaultRoundTrip[slot]); RigExecOpKeyAppend(key,pose->rotOrder[slot]);
+            RigExecOpKeyAppend(key,pose->posedAuthored[slot]); RigExecOpKeyAppend(key,pose->posedAuthoredM[slot]);
+            RigExecOpKeyAppend(key,pose->posedD[slot]); RigExecOpKeyAppend(key,pose->parentSpaceM[slot]);
+            RigExecOpKeyAppend(key,pose->parentSpaceAuthored[slot]); RigExecOpKeyAppend(key,pose->rotationSign[slot]); } break;
+    case RigExecWireSlotDomain::SpaceValue: {
+        const auto &v=s.providerValues[slot];
+        RigExecOpKeyAppend(key,v.initialized); RigExecOpKeyAppend(key,v.authoritative);
+        RigExecOpKeyAppend(key,v.blocked); RigExecOpKeyAppend(key,v.count);
+        RigExecOpKeyAppend(key,v.error); RigExecOpKeyAppend(key,v.value.index());
+        std::visit([&](const auto &value) {
+            using T=std::decay_t<decltype(value)>;
+            if constexpr(std::is_same_v<T,RigExecProviderPlainFrame>) {
+                RigExecOpKeyAppend(key,value.points); RigExecOpKeyAppend(key,value.flags);
+            } else if constexpr(!std::is_same_v<T,std::monostate>) RigExecOpKeyAppend(key,value);
+        },v.value);
+        break;
+    }
+    case RigExecWireSlotDomain::ConstraintInputs:
+        for (int input : p->file->pose->constraintArrays[slot].rawSlots)
+            _RrRawSlotMemo(p,input,key);
+        break;
+    case RigExecWireSlotDomain::SpaceLeaf: {
+        const auto &leaf=p->file->providerProgram->sampled[slot];
+        const int input=leaf.inputSlot;
+        RigExecOpKeyAppend(key,input);
+        if(input<0) { RigExecOpKeyAppend(key,uint8_t(0)); break; }
+        _RrRawSlotMemo(p,input,key);
+        break;
+    }
+    default: RrGeometryOpValueKey(p,d,slot,key); break;
+    }
+}
+bool RrRunOpBody(RrProgram *p,size_t i,std::string *error)
+{
+    const auto &step=(*p->steps)[i]; auto &s=p->store;
+    s.stepOutputs[i].BeginRun();
+    if(!p->requiredStageFramesAdmission.admitted &&
+       std::any_of(step.reads.begin(),step.reads.end(),[](const auto &range) {
+           return range.domain()==RigExecWireSlotDomain::RequiredStageFramesAdmission;
+       })) return true;
+    bool ok=true;
+    if(step.kind==RigExecWireStepKind::PropertyRevision) {
+        auto &lines=s.headLines[i]; lines.clear();
+        ok=RrRunPropertyPart(p,size_t(step.object),size_t(step.part),&lines);
+        if(!ok && error) *error="step "+RrStepLabel(*p,i)+" has no property part";
+    } else if(step.kind==RigExecWireStepKind::RestCompose || step.kind==RigExecWireStepKind::LadderCompose)
+        RrRunRestHead(p,size_t(step.object),step.kind==RigExecWireStepKind::LadderCompose);
+    else if(step.kind==RigExecWireStepKind::SkinTopology) RrRunTopologyHead(p,size_t(step.object));
+    else if(step.kind==RigExecWireStepKind::SpaceExpression) ok=RrRunSpaceExpression(p,step,error);
+    else if(_RrIsWeightKind(step.kind)) ok=RrRunWeightStep(p,i,error);
+    else if(_RrIsGeometryKind(step.kind)) ok=RrRunGeometryStep(p,i,error);
+    else ok=RrRunPoseStep(p,i,error);
+    return ok;
+}
 }
 
-void
-RrComputeClosure(RrProgram *program, bool force)
+bool RrCompileOpGraph(RrProgram *p,std::string *error)
 {
-    RrStore &store = program->store;
-    const RigExecWireCones &cones = *program->cones;
-    const size_t count = program->clustering->clusters.size();
-    store.closedWords.assign((count + 63) / 64, 0);
-    if (count == 0) {
-        store.closedSteps.clear();
-        store.animatedTouched = false;
-        std::fill(store.changedSinceRun.begin(), store.changedSinceRun.end(),
-                  char(0));
-        store.anyChangedSinceRun = false;
-        return;
+    if(!p->file) {
+        // In-memory kernel fixtures bypass strict Open. Validate opted-in
+        // authored relationships before compiling their declared semantic keys.
+        const auto invalid = [&](const char *message) { if (error) *error = message; return false; };
+        for (const auto &step : *p->steps) {
+            if (step.kind != RigExecWireStepKind::Solve) {
+                if (!step.semanticPredecessorKeys.empty()) return invalid("semantic prerequisites require a Solve body");
+                continue;
+            }
+            if (step.semanticPredecessorKeys.empty() && (!p->poses || step.object < 0 ||
+                size_t(step.object) >= p->poses->solvers.size())) continue;
+            if (!p->poses || step.object < 0 || size_t(step.object) >= p->poses->solvers.size())
+                return invalid("semantic solver owner has no record");
+            const auto &solver = p->poses->solvers[size_t(step.object)];
+            if (solver.relationshipRequirements.empty() && solver.solveDescriptorKey.empty() &&
+                step.semanticPredecessorKeys.empty()) continue;
+            if (solver.solveDescriptorKey.empty() || solver.solveDescriptorKey != step.descriptorKey)
+                return invalid("semantic solver descriptor identity differs from body");
+            const auto type = p->TextOrEmpty(solver.type);
+            std::vector<std::string> ports;
+            if (type == "RigExecFkChain") ports = {"rigExec:controls","rigExec:startFrame"};
+            else if (type == "RigExecTwoBoneIk") ports = {"rigExec:rootControl","rigExec:effectorControl","rigExec:poleControl","rigExec:space"};
+            else if (type == "RigExecBlendPointFrames") ports = {"rigExec:inputA","rigExec:inputB"};
+            else if (type == "RigExecTwistDistribution") ports = {"rigExec:start","rigExec:end"};
+            else if (type == "RigExecRibbon") ports =
+                {"rigExec:driverCurve", "rigExec:startFrame", "rigExec:endFrame", "rigExec:twistFrames"};
+            else if (type == "RigExecSplineIk") ports = {"rigExec:rootControl","rigExec:midControl","rigExec:endControl","rigExec:space"};
+            std::set<std::pair<std::string,int>> seen;
+            std::map<std::string,size_t> counts;
+            std::vector<std::string> keys;
+            for (const auto &requirement : solver.relationshipRequirements) {
+                if (std::find(ports.begin(),ports.end(),requirement.port) == ports.end() ||
+                    !seen.emplace(requirement.port,requirement.solver).second ||
+                    (requirement.port != "rigExec:controls" &&
+                     !(type == "RigExecRibbon" && requirement.port != "rigExec:driverCurve") &&
+                     ++counts[requirement.port] > 1) ||
+                    requirement.solver < 0 || size_t(requirement.solver) >= p->poses->solvers.size())
+                    return invalid("invalid solver relationship requirement");
+                if (type == "RigExecBlendPointFrames" &&
+                    ((requirement.port == "rigExec:inputA" && requirement.solver != solver.inA) ||
+                     (requirement.port == "rigExec:inputB" && requirement.solver != solver.inB)))
+                    return invalid("solver relationship differs from aggregate binding");
+                const auto &source = p->poses->solvers[size_t(requirement.solver)];
+                if (source.solveDescriptorKey.empty()) return invalid("semantic source has no descriptor identity");
+                const auto found = std::find_if(p->steps->begin(),p->steps->end(),[&](const auto &candidate) {
+                    return candidate.descriptorKey == source.solveDescriptorKey;
+                });
+                if (found == p->steps->end() || found->kind != RigExecWireStepKind::Solve || found->object != requirement.solver)
+                    return invalid("semantic source key names no matching Solve body");
+                keys.push_back(source.solveDescriptorKey);
+            }
+            if (type == "RigExecBlendPointFrames" &&
+                ((solver.inA >= 0 && !seen.count({"rigExec:inputA",solver.inA})) ||
+                 (solver.inB >= 0 && !seen.count({"rigExec:inputB",solver.inB}))))
+                return invalid("solver omits aggregate relationship requirement");
+            std::sort(keys.begin(),keys.end()); keys.erase(std::unique(keys.begin(),keys.end()),keys.end());
+            if (keys != step.semanticPredecessorKeys) return invalid("semantic keys differ from solver requirements");
+        }
+        return RigExecOpCompileAdapter(*p->steps,
+            [](const auto &r){return uint32_t(r.domain());},
+            [](const auto &r){return r.begin();},[](const auto &r){return r.end();},
+            [&](const auto &step){ const auto i=size_t(&step-p->steps->data());
+                return step.descriptorKey.empty() ?
+                    RrStepLabel(*p,i)+"/"+std::to_string(uint32_t(step.kind))+"/"+std::to_string(step.part) :
+                    step.descriptorKey; },
+            [p](uint32_t domain,uint32_t slot) {
+                using D=RigExecWireSlotDomain;
+                switch(D(domain)) {
+                case D::SolverPoints: case D::SpaceLeaf: case D::DerivedBase:
+                case D::ChainInput: case D::ConstraintInputs: return true;
+                case D::RequiredStageFramesAdmission: return slot==0;
+                case D::PoseBase: case D::PoseFin:
+                    return p->slotMeta && std::find(p->slotMeta->xformSlots.begin(),
+                        p->slotMeta->xformSlots.end(),int32_t(slot))!=p->slotMeta->xformSlots.end();
+                default: return false;
+                }
+            },
+            &p->opGraph,&p->store.opAdapter,error,RigExecCyclePolicy::Reject,
+            [p](uint32_t i) -> const std::vector<std::string> & {
+                return (*p->steps)[i].semanticPredecessorKeys;
+            });
     }
-    const size_t stepCount = program->steps->size();
-    std::vector<uint64_t> dirty((stepCount + 63) / 64, 0);
-    store.closedSteps.assign(dirty.size(), 0);
-
-    // The runtime never rebuilds and carries no evaluator stamp, so the
-    // stamp never moves and only the caller forces a whole run. A phased
-    // read is no reason either: it reads frame records and chain versions
-    // that persist across runs like every other slot.
-    const bool full = force;
-    if (full) {
-        for (size_t i = 0; i < stepCount; ++i) {
-            if (!(*program->steps)[i].isHead) _RrSet(&dirty, i);
+    if(!p->file->commonGraph) { if(error) *error="missing common operation graph"; return false; }
+    const auto &wire=*p->file->commonGraph;
+    if(wire.ops.size()!=p->steps->size()) { if(error) *error="common graph omits operation bodies"; return false; }
+    RigExecCompiledGraph graph; RigExecOpAdapterState state;
+    for(const auto &spec:wire.valueSpecs) state.values.push_back({spec.domain,spec.slot});
+    state.leaves=wire.leaves; graph.canonicalIndex=wire.canonicalIndex;
+    state.excludedValues=wire.excludedValues;
+    graph.longestPath=size_t(wire.longestPath);
+    std::map<std::string, uint32_t> byKey;
+    for (uint32_t i = 0; i < wire.ops.size(); ++i)
+        if (!byKey.emplace(wire.ops[i].key, i).second) {
+            if (error) *error = "duplicate common operation key"; return false;
         }
-    } else if (!store.everRan) {
-        for (size_t i = 0; i < stepCount; ++i) {
-            const auto &step = (*program->steps)[i];
-            if (!step.isHead && (!_RrIsGeometryKind(step.kind) || step.externalReads))
-                _RrSet(&dirty, i);
+    const auto excludedSolverValue = [&](uint32_t domain, uint32_t slot) {
+        for (auto id : state.excludedValues)
+            if (id < state.values.size() && state.values[size_t(id)].domain == domain &&
+                state.values[size_t(id)].slot == slot) return true;
+        return false;
+    };
+    std::vector<RigExecOpDescriptor> descriptors;
+    for(const auto &row:wire.ops) {
+        RigExecCompiledOp op; op.originalIndex=row.originalIndex;
+        if(op.originalIndex>=p->steps->size()) { if(error) *error="common operation names no body"; return false; }
+        op.descriptor.key=row.key; op.descriptor.kind=row.kind;
+        if(op.descriptor.kind!=uint32_t((*p->steps)[op.originalIndex].kind)) {
+            if(error) *error="common operation kind differs from its body"; return false;
         }
-        for (int index : cones.varyingSteps) {
-            _RrSet(&dirty, size_t(index));
-        }
-        for (int index : cones.overrideSteps) {
-            _RrSet(&dirty, size_t(index));
-        }
-        for (size_t r = 0; r < program->geometry->revisionIndex.size();
-             ++r) {
-            if (store.revisionStaticDirty[r]) {
-                _RrSet(&dirty, size_t(program->revisionStaticStep[r]));
+        op.descriptor.reads=row.reads; op.descriptor.writes=row.writes;
+        // Serialized generated edges are checked below, not imported as
+        // semantic authority. Reconstruct only declared solver prerequisites.
+        op.descriptor.volatileInput=row.volatileInput;
+        op.predecessors=row.predecessors; op.successors=row.successors;
+        for(auto id:op.descriptor.reads) if(id>=state.values.size()) { if(error) *error="common read names no value"; return false; }
+        for(auto id:op.descriptor.writes) if(id>=state.values.size()) { if(error) *error="common write names no value"; return false; }
+        const auto &body=(*p->steps)[op.originalIndex];
+        std::vector<std::string> requiredKeys;
+        if (body.kind == RigExecWireStepKind::Solve) {
+            if (!p->poses || body.object < 0 || size_t(body.object) >= p->poses->solvers.size()) {
+                if (error) *error = "semantic solver owner has no record"; return false;
             }
-            if (store.revisionRan[r]) {
-                continue;
-            }
-            for (int step : program->revisionSteps[r]) {
-                _RrSet(&dirty, size_t(step));
+            const auto &solver = p->poses->solvers[size_t(body.object)];
+            for (const auto &requirement : solver.relationshipRequirements) {
+                if (requirement.solver < 0 || size_t(requirement.solver) >= p->poses->solvers.size()) {
+                    if (error) *error = "semantic relationship target has no solver"; return false;
+                }
+                const auto &source = p->poses->solvers[size_t(requirement.solver)];
+                requiredKeys.push_back(source.solveDescriptorKey);
+                const auto found = byKey.find(source.solveDescriptorKey);
+                if (found != byKey.end()) {
+                    const auto &sourceOp = wire.ops[found->second];
+                    if (sourceOp.kind != uint32_t(RigExecWireStepKind::Solve) ||
+                        sourceOp.originalIndex >= p->steps->size() ||
+                        (*p->steps)[sourceOp.originalIndex].object != requirement.solver) {
+                        if (error) *error = "semantic relationship key names another body"; return false;
+                    }
+                    op.descriptor.predecessors.push_back(found->second);
+                } else if (!excludedSolverValue(uint32_t(RigExecWireSlotDomain::Aggregate), uint32_t(requirement.solver)) ||
+                           !excludedSolverValue(uint32_t(RigExecWireSlotDomain::Candidates), uint32_t(requirement.solver))) {
+                    if (error) *error = "semantic relationship target is neither active nor excluded"; return false;
+                }
             }
         }
-        for (size_t c = 0; c < program->geometry->chains.size(); ++c) {
-            if (store.chainHaveBase[c] && !store.chainBaseDirty[c]) {
-                continue;
-            }
-            for (int step : program->chainBaseSteps[c]) {
-                _RrSet(&dirty, size_t(step));
-            }
+        std::sort(requiredKeys.begin(), requiredKeys.end());
+        requiredKeys.erase(std::unique(requiredKeys.begin(), requiredKeys.end()), requiredKeys.end());
+        if (body.semanticPredecessorKeys != requiredKeys) {
+            if (error) *error = "operation semantic prerequisites differ from solver requirements"; return false;
         }
-    } else {
-        for (size_t i = 0; i < stepCount; ++i)
-            if (!(*program->steps)[i].isHead && (*program->steps)[i].externalReads)
-                _RrSet(&dirty, i);
-        // A provider's own compose step, and every step that
-        // recomposes an earlier version of it from the same avars and
-        // ladder.
-        const auto dirtyAvarReaders = [&](size_t slot) {
-            for (int32_t step : program->avarReaderSteps[slot])
-                _RrSet(&dirty, size_t(step));
+        const auto projection=[&](const auto &ids) {
+            std::vector<std::pair<uint32_t,uint32_t>> values;
+            for(auto id:ids) {
+                const auto &value=state.values[size_t(id)];
+                values.emplace_back(value.domain,value.slot);
+            }
+            std::sort(values.begin(),values.end());
+            values.erase(std::unique(values.begin(),values.end()),values.end());
+            return values;
         };
-        const size_t slots = program->slotMeta->paths.size();
-        for (size_t i = 0; i < slots; ++i) {
-            const size_t base = i * 11;
-            bool moved = false;
-            for (size_t k = 0; k < 11 && !moved; ++k) {
-                moved = store.avars[base + k] != store.lastAvars[base + k];
-            }
-            if (moved) {
-                dirtyAvarReaders(i);
-            }
-        }
-        for (size_t k = 0; k < program->slotMeta->xformSlots.size(); ++k) {
-            if (store.xformBase[k] != store.lastXformBase[k]) {
-                dirtyAvarReaders(size_t(program->slotMeta->xformSlots[k]));
-            }
-        }
-        // Constraint arrays, delta bases, native frames and ribbon driver
-        // points are static: they never differ from the last run's, so no
-        // diff is taken.
-        for (size_t c = 0; c < program->geometry->chains.size(); ++c) {
-            if (!store.chainBaseDirty[c] &&
-                store.chainHaveBase[c] == store.lastHaveBase[c]) {
-                continue;
-            }
-            for (int step : program->chainBaseSteps[c]) {
-                _RrSet(&dirty, size_t(step));
-            }
-        }
-        for (size_t r = 0; r < program->geometry->revisionIndex.size();
-             ++r) {
-            if (store.revisionStaticDirty[r]) {
-                _RrSet(&dirty, size_t(program->revisionStaticStep[r]));
-            }
-            if (!store.revisionRan[r]) {
-                for (int step : program->revisionSteps[r]) {
-                    _RrSet(&dirty, size_t(step));
-                }
-            }
-        }
-        // An Animated input set, or time said to move: what the program
-        // dirties when time moves.
-        if (store.animatedTouched) {
-            for (int index : cones.varyingSteps) {
-                _RrSet(&dirty, size_t(index));
-            }
-        }
-        // A step that declares an input re-runs once when a set changed a
-        // slot of its walk since the last run, a released drag included.
-        // A standing override re-runs it again only where its long-way
-        // read can move with time or with the chains while no slot is set.
-        const std::vector<char> &walkMoves =
-            program->inputState.overrideWalkMoves;
-        const bool runMoved = store.animatedTouched;
-        if (store.anyChangedSinceRun || (runMoved && store.anyOverridden)) {
-            for (int index : cones.overrideSteps) {
-                const RigExecWireStep &step =
-                    (*program->steps)[size_t(index)];
-                for (int input : step.overrideInputs) {
-                    const size_t number = size_t(input);
-                    if (store.changedSinceRun[number] ||
-                        (runMoved && store.overridden[number] &&
-                         number < walkMoves.size() && walkMoves[number])) {
-                        _RrSet(&dirty, size_t(index));
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
-        for (size_t i = 0; i < program->steps->size(); ++i) {
-        const auto &step = (*program->steps)[i];
-        if (step.isHead) continue;
-        bool moved = false;
-        for (const auto &range : step.reads) {
-            if (range.domain() == RigExecWireSlotDomain::PropertyResult)
-                for (uint32_t v = range.begin(); v < range.end(); ++v)
-                    moved = moved || (store.propertyVersionChanged[v] &&
-                                      !_RrShadowed(store, step, v));
-        }
-        for (const auto &read : step.reads)
-            moved = moved || _RrRangeMoved(store, read);
-        if (moved) _RrSet(&dirty, i);
-    }
-    // Exact semantic closure; clusters schedule and count selected bodies only.
-    store.closedSteps = dirty;
-    std::vector<size_t> pending;
-    for (size_t i = 0; i < stepCount; ++i)
-        if (_RrTest(store.closedSteps, i)) pending.push_back(i);
-    for (size_t at = 0; at < pending.size(); ++at) {
-        for (int next : (*program->steps)[pending[at]].succs) {
-            const size_t index = size_t(next);
-            if ((*program->steps)[index].isHead || _RrTest(store.closedSteps, index)) continue;
-            _RrSet(&store.closedSteps, index);
-            pending.push_back(index);
-        }
-    }
-    for (size_t i = 0; i < stepCount; ++i) {
-        if (!(*program->steps)[i].isHead && _RrTest(store.closedSteps, i))
-            _RrSet(&store.closedWords, size_t((*program->steps)[i].cluster));
-    }
-
-    // What the next run compares against.
-    store.lastAvars = store.avars;
-    store.lastXformBase = store.xformBase;
-    // Consumed by this closure whichever branch took it: a first or a
-    // forced run re-runs every reader the flags could name.
-    if (store.anyChangedSinceRun) {
-        std::fill(store.changedSinceRun.begin(), store.changedSinceRun.end(),
-                  char(0));
-        store.anyChangedSinceRun = false;
-    }
-    for (size_t c = 0; c < program->geometry->chains.size(); ++c) {
-        store.lastHaveBase[c] = store.chainHaveBase[c];
-    }
-    store.animatedTouched = false;
-    store.everRan = true;
-    store.lastClosedClusters = _RrCount(store.closedWords);
-}
-
-bool
-RrRunSteps(RrProgram *program, bool force, std::string *error)
-{
-    RrStore &store = program->store;
-    const std::vector<RigExecWireStep> &steps = *program->steps;
-    // Sources first, serial and in program order: a source weight packet
-    // is composed from other source packets.
-    for (size_t i = 0; i < steps.size(); ++i) {
-        if (steps[i].isHead || !steps[i].isSource) {
-            continue;
-        }
-        if ((_RrFamilyBit(steps[i].kind) & program->runMask) == 0) {
-            continue;
-        }
-        store.runTrace.push_back(int32_t(i));
-        store.stepOutputs[i].BeginRun();
-        const RigExecWireStepKind kind = steps[i].kind;
-        bool ok = true;
-        if (_RrIsWeightKind(kind)) {
-            ok = RrRunWeightStep(program, i, error);
-        } else if (_RrIsGeometryKind(kind)) {
-            ok = RrRunGeometryStep(program, i, error);
-        } else {
-            ok = RrRunPoseStep(program, i, error);
-        }
-        if (!ok) {
+        const auto declaration=[](const auto &ranges) {
+            std::vector<std::pair<uint32_t,uint32_t>> values;
+            for(const auto &range:ranges)
+                for(uint32_t slot=range.begin();slot<range.end();++slot)
+                    values.emplace_back(uint32_t(range.domain()),slot);
+            std::sort(values.begin(),values.end());
+            values.erase(std::unique(values.begin(),values.end()),values.end());
+            return values;
+        };
+        if(projection(op.descriptor.reads)!=declaration(body.reads) ||
+           projection(op.descriptor.writes)!=declaration(body.writes) ||
+           op.descriptor.volatileInput!=body.externalReads) {
+            if(error) *error="common operation values differ from its body declarations";
             return false;
         }
-    }
-    RrComputeClosure(program, force);
-    for (size_t i = 0; i < steps.size(); ++i) {
-        if (steps[i].isHead || steps[i].isSource ||
-            _RrTest(store.closedSteps, i)) {
-            continue;
-        }
-        store.stepOutputs[i].MarkSkipped();
-        if (_RrIsGeometryKind(steps[i].kind)) {
-            RrSkipGeometryStep(program, i);
-        }
-    }
-    // Serial walk in program order. A masked family's steps are skipped
-    // the same way the cone skips: values stand, deltas reset.
-    for (size_t i = 0; i < steps.size(); ++i) {
-        if (steps[i].isHead || steps[i].isSource ||
-            !_RrTest(store.closedSteps, i)) {
-            continue;
-        }
-        if ((_RrFamilyBit(steps[i].kind) & program->runMask) == 0) {
-            store.stepOutputs[i].MarkSkipped();
-            if (_RrIsGeometryKind(steps[i].kind)) {
-                RrSkipGeometryStep(program, i);
-            }
-            continue;
-        }
-        store.runTrace.push_back(int32_t(i));
-        store.stepOutputs[i].BeginRun();
-        const RigExecWireStepKind kind = steps[i].kind;
-        bool ok = true;
-        if (_RrIsWeightKind(kind)) {
-            ok = RrRunWeightStep(program, i, error);
-        } else if (_RrIsGeometryKind(kind)) {
-            ok = RrRunGeometryStep(program, i, error);
-        } else {
-            ok = RrRunPoseStep(program, i, error);
-        }
-        if (!ok) {
+        std::vector<uint32_t> bodyPredecessors(body.preds.begin(),body.preds.end());
+        std::sort(bodyPredecessors.begin(),bodyPredecessors.end());
+        bodyPredecessors.erase(std::unique(bodyPredecessors.begin(),bodyPredecessors.end()),bodyPredecessors.end());
+        if(bodyPredecessors!=op.predecessors) {
+            if(error) *error="common operation predecessors differ from its body declarations";
             return false;
         }
-        if (store.stepOutputs[i].bail) {
-            if (error) {
-                *error = "step " + RrStepLabel(*program, i) +
-                         " gave the generation back";
-            }
-            return false;
+        descriptors.push_back(op.descriptor); graph.ops.push_back(std::move(op));
+    }
+    for(auto id:state.leaves) if(id>=state.values.size()) { if(error) *error="common leaf names no value"; return false; }
+    for(auto id:state.excludedValues) {
+        if(id>=state.values.size() || std::find(state.leaves.begin(),state.leaves.end(),id)==state.leaves.end()) {
+            if(error) *error="excluded output is not a declared fallback leaf"; return false;
+        }
+        for(const auto &op:graph.ops) if(std::find(op.descriptor.writes.begin(),op.descriptor.writes.end(),id)!=op.descriptor.writes.end()) {
+            if(error) *error="excluded output has an active producer"; return false;
         }
     }
+    for(const auto &row:wire.readers) graph.readers.emplace(row.value,row.ops);
+    for(const auto &row:wire.cycles) graph.cycles.push_back(row.keys);
+    graph.opClusters=wire.opClusters;
+    for(const auto &row:wire.clusters)
+        graph.clusters.push_back({row.members,row.predecessors,row.successors});
+    if(!RigExecValidateOpClusters(graph,error)) return false;
+    RigExecCompiledGraph checked;
+    if(!RigExecCompileOpGraph(descriptors,state.leaves,RigExecCyclePolicy::Reject,&checked,error)) return false;
+    if(checked.ops.size()!=graph.ops.size() || checked.longestPath!=graph.longestPath ||
+       checked.readers!=graph.readers || checked.canonicalIndex!=graph.canonicalIndex) {
+        if(error) *error="common graph differs from its producer declarations"; return false;
+    }
+    for(size_t i=0;i<graph.ops.size();++i) {
+        if(checked.ops[i].originalIndex!=i || checked.ops[i].predecessors!=graph.ops[i].predecessors ||
+           checked.ops[i].successors!=graph.ops[i].successors || graph.ops[i].originalIndex!=i) {
+            if(error) *error="common graph is not the canonical producer order"; return false;
+        }
+    }
+    state.compiled=true; p->opGraph=std::move(graph); p->store.opAdapter=std::move(state);
     return true;
 }
 
-}  // namespace rigExec
+bool RrExecuteOpGraph(RrProgram *p,bool force,std::string *error)
+{
+    auto &s=p->store; auto &state=s.opAdapter;
+    s.lastClosedClusters=0;
+    if(!state.compiled && !RrCompileOpGraph(p,error)) return false;
+    force=force || p->requiredStageFramesFullOwed;
+    const bool first=!state.everRan;
+    state.changedLeaves.clear(); state.seeds.clear(); state.candidateOps.clear();
+    state.inputKeys.resize(p->opGraph.ops.size()); state.inputScratch.resize(p->opGraph.ops.size());
+    state.coveredPropertyInputs.resize(p->opGraph.ops.size());
+    state.coveredTypedInputs.resize(p->opGraph.ops.size());
+    s.headLines.resize(p->steps->size()); s.headMemoKeys.resize(p->steps->size());
+    s.opInputScratch.resize(p->steps->size());
+    s.weightFieldChanged.assign(p->geometry->weightFields.size(),0);
+    s.restChanged.assign(p->slotMeta->paths.size(),0); s.ladderChanged.assign(p->slotMeta->paths.size(),0);
+    s.topologyChanged.assign(p->geometry->revisionIndex.size()+p->geometry->derivedIndex.size(),0);
+    RrPropertyBegin(p);
+    for(auto id:state.excludedValues) {
+        const auto &value=state.values[size_t(id)]; RrResetExcludedValue(p,value.domain,value.slot);
+    }
+    for(auto &v:state.values) v.changed=0;
+    const auto sample=[&](uint32_t d,uint32_t slot,std::string *key){RrOpValue(p,d,slot,key);};
+    for(const auto id:state.leaves) { RigExecOpPublishValue(&state.values[size_t(id)],sample);
+        if(state.values[size_t(id)].changed) state.changedLeaves.push_back(id); }
+    for(uint32_t c=0;c<p->opGraph.ops.size();++c) {
+        const auto i=p->opGraph.ops[c].originalIndex; const auto &step=(*p->steps)[i];
+        bool seed=first || step.headAlwaysRuns;
+        auto &input=s.headMemoKeys[i]; auto &scratch=s.opInputScratch[i]; scratch.clear();
+        _RrInputMemo(p,step,&scratch); const bool changed=input!=scratch; input.swap(scratch);
+        if(seed) state.seeds.push_back(c);
+        else if(changed) state.candidateOps.push_back(c);
+    }
+    RigExecOpCallbacks callbacks;
+    callbacks.changed=[&](RigExecValueId id){return state.values[size_t(id)].changed!=0;};
+    callbacks.inputChanged=[&](uint32_t c,RigExecValueId id){
+        const auto &v=state.values[size_t(id)]; const auto &step=(*p->steps)[p->opGraph.ops[c].originalIndex];
+        return v.changed && (v.domain!=uint32_t(RigExecWireSlotDomain::PropertyResult) || !_RrShadowed(s,step,v.slot));
+    };
+    callbacks.inputsChanged=[&](uint32_t c) {
+        const auto i=p->opGraph.ops[c].originalIndex; const auto &step=(*p->steps)[i];
+        auto &input=state.inputKeys[c]; auto &scratch=state.inputScratch[c]; scratch.clear();
+        auto &covered=state.coveredPropertyInputs[c]; covered.clear();
+        auto &coveredTyped=state.coveredTypedInputs[c]; coveredTyped.clear();
+        const bool scalarConsumer=step.kind==RigExecWireStepKind::PropertyRevision ||
+            step.kind==RigExecWireStepKind::AvarInputs ||
+            step.kind==RigExecWireStepKind::ComposeSubtree;
+        const bool exact=RrEffectiveInputMemo(p,i,&scratch,&covered,
+            scalarConsumer?&coveredTyped:nullptr);
+        std::sort(covered.begin(),covered.end());
+        std::sort(coveredTyped.begin(),coveredTyped.end());
+        for(auto id:p->opGraph.ops[c].descriptor.reads) {
+            const auto &value=state.values[size_t(id)];
+            if(exact && step.kind==RigExecWireStepKind::WeightField) continue;
+            if(exact && step.kind==RigExecWireStepKind::ProviderRefresh &&
+               value.domain==uint32_t(RigExecWireSlotDomain::SpaceLeaf)) continue;
+            const bool incoming=step.kind==RigExecWireStepKind::PropertyRevision && step.part>0 &&
+                value.domain==uint32_t(RigExecWireSlotDomain::PropertyResult) &&
+                value.slot==uint32_t(p->file->propertyChains[size_t(step.object)].versionBase)+uint32_t(step.part-1);
+            if(exact && !incoming && std::binary_search(coveredTyped.begin(),coveredTyped.end(),
+                std::make_pair(value.domain,value.slot))) continue;
+            if(exact && step.kind==RigExecWireStepKind::SpaceExpression &&
+               ((step.part==0 && value.domain==uint32_t(RigExecWireSlotDomain::SpaceValue)) ||
+                (step.part==2 && value.domain==uint32_t(RigExecWireSlotDomain::SpaceLeaf)))) continue;
+            if(!incoming && value.domain==uint32_t(RigExecWireSlotDomain::PropertyResult) &&
+               (std::binary_search(covered.begin(),covered.end(),value.slot) ||
+                _RrShadowed(s,step,value.slot))) continue;
+            RigExecOpKeyAppend(&scratch,id); RigExecOpKeyAppend(&scratch,value.revision);
+        }
+        const bool changed=!exact || input!=scratch; input.swap(scratch);
+        return changed;
+    };
+    callbacks.run=[&](uint32_t c){
+        const auto i=p->opGraph.ops[c].originalIndex;
+        if(!RrRunOpBody(p,i,error)) return false;
+        for(auto id:p->opGraph.ops[c].descriptor.writes) {
+            auto &v=state.values[size_t(id)]; RigExecOpPublishValue(&v,sample);
+            if(v.domain==uint32_t(RigExecWireSlotDomain::PropertyResult)) s.propertyVersionChanged[v.slot]=v.changed;
+            if(v.domain==uint32_t(RigExecWireSlotDomain::WeightField)) s.weightFieldChanged[v.slot]=v.changed;
+        }
+        return true;
+    };
+    callbacks.skip=[&](uint32_t c){const auto i=p->opGraph.ops[c].originalIndex;
+        s.stepOutputs[i].MarkSkipped(); if(_RrIsGeometryKind((*p->steps)[i].kind)) RrSkipGeometryStep(p,i);};
+    std::string graphError;
+    if(!RigExecExecuteOpGraph(p->opGraph,state.changedLeaves,state.seeds,force,callbacks,&s.opExecution,&graphError,&s.opWorkspace,&state.candidateOps)) {
+        state.everRan=false; s.everRan=false;
+        if(error && error->empty()) *error=graphError;
+        return false;
+    }
+    s.runTrace.clear(); state.seeds.clear();
+    for(uint32_t c=0;c<p->opGraph.ops.size();++c) if(s.opExecution.ran[c]) state.seeds.push_back(c);
+    std::sort(state.seeds.begin(),state.seeds.end(),[&](uint32_t a,uint32_t b) { return s.opExecution.completion[a]<s.opExecution.completion[b]; });
+    for(uint32_t c:state.seeds) s.runTrace.push_back(int32_t(p->opGraph.ops[c].originalIndex));
+    // Trace already owns completion order; reuse retained scratch to count
+    // the production clusters whose operation bodies actually ran.
+    for(uint32_t &c:state.seeds) c=p->opGraph.opClusters[c];
+    std::sort(state.seeds.begin(),state.seeds.end());
+    s.lastClosedClusters=size_t(std::unique(state.seeds.begin(),state.seeds.end())-state.seeds.begin());
+    RrPropertyPublish(p);
+    // Refusal finishes preparation but owes a full pass on the next Execute.
+    if(!p->requiredStageFramesAdmission.admitted) {
+        state.everRan=true;
+        p->requiredStageFramesFullOwed=true;
+        return true;
+    }
+    p->requiredStageFramesFullOwed=false;
+    state.everRan=true; s.everRan=true; s.animatedTouched=false;
+    std::fill(s.changedSinceRun.begin(),s.changedSinceRun.end(),char(0)); s.anyChangedSinceRun=false;
+    return true;
+}
+
+bool RrRunSteps(RrProgram *p,bool force,std::string *error)
+{ return RrExecuteOpGraph(p,force,error); }
+
+} // namespace rigExec

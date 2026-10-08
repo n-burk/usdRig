@@ -168,7 +168,6 @@ _CheckSets(const std::string &label, const UsdStageRefPtr &stage,
     std::string error;
     {
         RigExecRigEvaluator evaluator(stage, rigPath);
-        evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
         if (!RigExecTestBakeAt(evaluator, time, &bytes, &error)) {
             std::printf("%s: bake: %s\n", label.c_str(), error.c_str());
             CHECK(false);
@@ -202,19 +201,18 @@ _CheckSets(const std::string &label, const UsdStageRefPtr &stage,
     }
 
     std::vector<RigExecRigPose> defaults;
-    CHECK(RigExecTestEditedPoses(stage, rigPath, RigExecEvaluationMode::Baked,
+    CHECK(RigExecTestEditedPoses(stage, rigPath,
                                  {}, {t}, &defaults, &error));
     struct Reference {
         const char *mode;
         RigExecRigPose pose;
     };
     std::vector<Reference> references;
-    for (const auto &[mode, text] :
-         {std::make_pair(RigExecEvaluationMode::Dynamic, "dynamic"),
-          std::make_pair(RigExecEvaluationMode::Baked, "baked")}) {
+    {
+        const char *text = "native";
         std::vector<RigExecRigPose> poses;
         const bool ok =
-            RigExecTestEditedPoses(stage, rigPath, mode, edits, {t}, &poses,
+            RigExecTestEditedPoses(stage, rigPath, edits, {t}, &poses,
                                    &error);
         CHECK(ok && poses.size() == 1);
         if (!ok || poses.size() != 1) {
@@ -301,7 +299,6 @@ _BakeArrays(const std::string &label, const UsdStageRefPtr &stage,
             const SdfPath &rigPath, double time, std::vector<uint8_t> *bytes)
 {
     RigExecRigEvaluator evaluator(stage, rigPath);
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     std::string error;
     if (!RigExecTestBakeAt(evaluator, time, bytes, &error)) {
         std::printf("%s: bake: %s\n", label.c_str(), error.c_str());
@@ -450,11 +447,9 @@ _SameRuns(const RigExecRuntimeReader &a, const RigExecRuntimeReader &b)
     const RigExecRuntimeCounters ca = a.GetCounters();
     const RigExecRuntimeCounters cb = b.GetCounters();
     return _SameOutputs(a, b) &&
-           RigExecTestWithoutSummary(a.GetDiagnostics()) ==
-               RigExecTestWithoutSummary(b.GetDiagnostics()) &&
-           ca.revisionsExecuted == cb.revisionsExecuted &&
-           ca.revisionsCreated == cb.revisionsCreated &&
-           ca.schedulesBuilt == cb.schedulesBuilt;
+           a.GetDiagnostics() ==
+               b.GetDiagnostics() &&
+           ca.executedOpCount == cb.executedOpCount;
 }
 
 // What a case compares its run with.
@@ -501,12 +496,10 @@ _CheckArraySets(const std::string &label, const UsdStageRefPtr &stage,
         return;
     }
     bool same = true;
-    for (const auto &[mode, text] :
-         {std::make_pair(RigExecEvaluationMode::Dynamic, "dynamic"),
-          std::make_pair(RigExecEvaluationMode::Baked, "baked")}) {
+    {
+        const char *text = "native";
         RigExecRigPose pose;
-        if (!RigExecTestArrayReference(
-                stage, rigPath, mode,
+        if (!RigExecTestArrayReference(stage, rigPath,
                 reference == _Reference::Unedited
                     ? std::vector<RigExecTestArraySet>()
                     : sets,
@@ -562,7 +555,7 @@ static int overrideMatched = 0;
 // as interactive overrides and places them in its program, with no
 // rebuild. Every run, the first at the defaults included, must agree in
 // outputs, property values and every diagnostic line, the work counters'
-// summary among them; each live run must come from the program. \p check
+// included; each live run must come from the program. \p check
 // sees the reader after step \p k.
 static void
 _CheckAgainstOverrides(
@@ -575,7 +568,6 @@ _CheckAgainstOverrides(
     const std::unique_ptr<RigExecRuntimeReader> reader =
         RigExecRuntimeReader::Open(bytes.data(), bytes.size(), &error);
     RigExecRigEvaluator evaluator(stage, rigPath);
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     std::vector<std::string> notices;
     if (!reader || !evaluator.Compile(&notices)) {
         std::printf("%s: open or compile: %s\n", label.c_str(),
@@ -589,7 +581,7 @@ _CheckAgainstOverrides(
         const size_t generations = evaluator.GetBakedGenerationCount();
         const RigExecRigPose pose = evaluator.Evaluate(UsdTimeCode(t));
         std::vector<std::string> diffs;
-        bool same = pose.valid && pose.bakedParityMismatches == 0 &&
+        bool same = pose.valid && pose.comparisonMismatches == 0 &&
                     evaluator.GetBakedGenerationCount() == generations + 1;
         if (!same) {
             diffs.push_back("the live run is invalid or not the program's");
@@ -669,8 +661,8 @@ _CheckAgainstOverrides(
 // interactive overlay, so that live baked takes the same values without a
 // rebuild: here the work counters agree too. MeshASkin's weights (tests/
 // fixtures/oneloop_two_limbs.usda) set, then set to the defaults with one
-// +0 weight written -0, then reset: the last two compare equal by value to
-// the layout standing, which stays, as live's layout op keeps it; and the
+// +0 weight written -0, then reset: the signed-zero arrays keep distinct
+// layouts, while reset restores the original Open layout; and the
 // delta mush's rest points (tests/fixtures/computed_path_reads.usda).
 static void
 _TestArraysAgainstOverrides(const std::string &fixtures)
@@ -707,10 +699,9 @@ _TestArraysAgainstOverrides(const std::string &fixtures)
                  {"reset", {}},
                  {"-0 for +0 again", {{weightsName, b, false}}},
                  {"reset again", {}}},
-                [&](size_t, RigExecRuntimeReader &played) {
-                    // Past the first set the Open layout never returns:
-                    // the -0 layout stands through both resets.
-                    CHECK(!played.GetSkinLayoutIsOpenForTesting(mover));
+                [&](size_t step, RigExecRuntimeReader &played) {
+                    const bool reset = step == 2 || step == 4;
+                    CHECK(played.GetSkinLayoutIsOpenForTesting(mover) == reset);
                 });
         }
     }
@@ -742,6 +733,74 @@ _TestArraysAgainstOverrides(const std::string &fixtures)
 // itself: the export binds that read to the cage's input beside the rest
 // read, the binary plays the bake time as live does, and a sampled set
 // reaches the lattice through it.
+
+// Current source presence must retire a retained Final result, then recover
+// on the same imported graph; a blocked source is not a successful empty array.
+static void
+_TestRetainedPointFinalAvailability(const std::string &examples)
+{
+    const auto stage=_Open(examples+"/13_ReadPhases.usda");
+    if(!stage)return;
+    const auto rig=_FindRig(stage);
+    const SdfPath cage("/ReadPhaseAsset/Geom/Cage.points");
+    const SdfPath slab("/ReadPhaseAsset/Geom/Slab.points");
+    stage->SetEditTarget(stage->GetSessionLayer());
+    const auto attribute=stage->GetAttributeAtPath(cage);
+    VtVec3fArray authored,rawSlab;
+    CHECK(attribute.Get(&authored));
+    CHECK(stage->GetAttributeAtPath(slab).Get(&rawSlab));
+    CHECK(attribute.Set(authored,UsdTimeCode(1001)));
+    CHECK(attribute.Set(SdfValueBlock(),UsdTimeCode(1002)));
+    CHECK(attribute.Set(authored,UsdTimeCode(1003)));
+    std::string rootBefore,sessionBefore;
+    CHECK(stage->GetRootLayer()->ExportToString(&rootBefore));
+    CHECK(stage->GetSessionLayer()->ExportToString(&sessionBefore));
+    std::vector<uint8_t> bytes;
+    CHECK(_BakeArrays("retained point Final availability",stage,rig,1001,&bytes));
+    std::string error;
+    auto reader=RigExecRuntimeReader::Open(bytes.data(),bytes.size(),&error);
+    CHECK(reader);if(!reader)return;
+    RigExecInputSampler sampler;
+    CHECK(sampler.Bind(stage,*reader,&error));
+    CHECK(sampler.GetWarnings().empty());
+    RigExecRigEvaluator evaluator(stage,rig);
+    std::vector<std::string> errors;
+    CHECK(evaluator.Compile(&errors));
+    const auto epoch=evaluator.GetBindingEpochDigest();
+    const std::string fallback="diag /ReadPhaseAsset/Rig/Movers/Geometry/SlabLattice: read phase 'final' for "+cage.GetString()+" resolved to nothing; read the authored base";
+    VtVec3fArray first,recovered;
+    for(double frame:{1001.0,1002.0,1003.0}) {
+        const bool blocked=frame==1002.0;
+        CHECK(RigExecTestDrive(reader.get(),&sampler,frame,&error));
+        const auto pose=evaluator.Evaluate(UsdTimeCode(frame));
+        CHECK(pose.valid && evaluator.GetBindingEpochDigest()==epoch);
+        std::vector<std::string> diffs;
+        const bool same=RigExecCompareRuntimeRun(pose,*reader,&diffs);
+        if(!same)for(const auto &line:diffs)std::printf("retained point availability frame%g: %s\n",frame,line.c_str());
+        CHECK(same);
+        CHECK((std::find(reader->GetDiagnostics().begin(),reader->GetDiagnostics().end(),fallback)!=reader->GetDiagnostics().end())==blocked);
+        CHECK((pose.movedProperties.count(cage)!=0)==!blocked);
+        const auto result=pose.movedProperties.find(slab);
+        CHECK(result!=pose.movedProperties.end() && result->second.IsHolding<VtVec3fArray>());
+        if(result!=pose.movedProperties.end() && result->second.IsHolding<VtVec3fArray>()) {
+            const auto &points=result->second.UncheckedGet<VtVec3fArray>();
+            if(blocked)CHECK(points==rawSlab);
+            else if(frame==1001.0)first=points;
+            else recovered=points;
+        }
+        const auto diagnostics=reader->GetDiagnostics();
+        CHECK(reader->Execute(&error));
+        CHECK(reader->GetCounters().executedOpCount==0);
+        CHECK(reader->GetDiagnostics()==diagnostics);
+        diffs.clear();CHECK(RigExecCompareRuntimeRun(pose,*reader,&diffs));
+    }
+    std::string rootAfter,sessionAfter;
+    CHECK(stage->GetRootLayer()->ExportToString(&rootAfter));
+    CHECK(stage->GetSessionLayer()->ExportToString(&sessionAfter));
+    CHECK(rootAfter==rootBefore && sessionAfter==sessionBefore);
+    CHECK(!first.empty() && !recovered.empty() && first!=recovered);
+}
+
 static void
 _TestUnansweredPhaseArray(const std::string &examples)
 {
@@ -785,14 +844,13 @@ _TestUnansweredPhaseArray(const std::string &examples)
     std::unique_ptr<RigExecRuntimeReader> reader =
         listed ? _OpenRun(label, bytes) : nullptr;
     bool same = reader != nullptr;
-    for (const auto &[mode, text] :
-         {std::make_pair(RigExecEvaluationMode::Dynamic, "dynamic"),
-          std::make_pair(RigExecEvaluationMode::Baked, "baked")}) {
+    {
+        const char *text = "native";
         RigExecRigPose pose;
         std::string error;
         std::vector<std::string> diffs;
         if (!reader ||
-            !RigExecTestArrayReference(stage, rigPath, mode, {}, 1002.0, &pose,
+            !RigExecTestArrayReference(stage, rigPath, {}, 1002.0, &pose,
                                        &error) ||
             !RigExecCompareRuntimeRun(pose, *reader, &diffs)) {
             same = false;
@@ -1027,10 +1085,9 @@ _TestLatticeArray(const UsdStageRefPtr &stage)
         CHECK(fresh && fresh->GetInputArrayAt(index, &atOpen) &&
               std::memcmp(sampled.data, atOpen.data,
                           sizeof(GfVec3f) * 12) != 0);
-        for (const auto mode : {RigExecEvaluationMode::Dynamic,
-                                RigExecEvaluationMode::Baked}) {
+        {
             RigExecRigPose pose;
-            CHECK(RigExecTestArrayReference(stage, rigPath, mode, {}, 1036.0,
+            CHECK(RigExecTestArrayReference(stage, rigPath, {}, 1036.0,
                                              &pose, &error));
             std::vector<std::string> diffs;
             CHECK(RigExecCompareRuntimeRun(pose, *player.operator->(), &diffs));
@@ -1287,14 +1344,15 @@ _TestLayoutArrays(const UsdStageRefPtr &stage)
             const std::vector<int32_t> idle =
                 played.GetLastRunTraceForTesting();
             const RigExecRuntimeCounters idleCounters = played.GetCounters();
+            CHECK(idle.empty() && idleCounters.executedOpCount == 0);
             size_t at = 0;
             CHECK(played.FindInput(weightsName, &at) &&
                   played.SetInputArrayAt(
                       at, RigExecTestArrayView(VtValue(swapped)), &error) &&
                   played.Execute(&error));
             CHECK(played.GetLastRunTraceForTesting() == idle &&
-                  played.GetCounters().revisionsExecuted ==
-                      idleCounters.revisionsExecuted);
+                  played.GetCounters().executedOpCount ==
+                      idleCounters.executedOpCount);
             // The reset returns the Open layout itself, and its outputs.
             CHECK(played.ResetInput(weightsName, &error) &&
                   played.Execute(&error));
@@ -1408,7 +1466,7 @@ _TestPaintedArrays(const UsdStageRefPtr &stage)
         {{seg4Indices, VtValue(repeated), false}}, true,
         [&](RigExecRuntimeReader &played) {
             const std::vector<std::string> lines =
-                RigExecTestWithoutSummary(played.GetDiagnostics());
+                played.GetDiagnostics();
             CHECK(lines ==
                   std::vector<std::string>(
                       {"MoverFailed " + seg4Skin +
@@ -1436,8 +1494,8 @@ _CheckStageArraySamples(const std::string &label, const UsdStageRefPtr &stage,
     if (!attribute) return;
     {
         UsdEditContext context(stage, stage->GetSessionLayer());
-        // A single key marks the original file Animated without making a
-        // fixed skin layout time-varying at export. Later keys arrive live.
+        // A single key marks the original file Animated. The owning layout
+        // operation consumes later samples, including count loss and recovery.
         CHECK(attribute.Set(initial, UsdTimeCode(time)));
     }
     std::vector<uint8_t> bytes;
@@ -1480,7 +1538,6 @@ _CheckStageArraySamples(const std::string &label, const UsdStageRefPtr &stage,
     CHECK(_SameOutputs(*reader, *held));
     {
         RigExecRigEvaluator evaluator(stage, rigPath);
-        evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
         evaluator.Evaluate(UsdTimeCode(time));
         std::vector<RigExecBakeStaticEntry> entries;
         std::string why;
@@ -1509,10 +1566,9 @@ _CheckStageArraySamples(const std::string &label, const UsdStageRefPtr &stage,
     for (int step = 1; step <= (extra.IsEmpty() ? 3 : 5); ++step) {
         const double frame = time + step;
         CHECK(RigExecTestDrive(reader.get(), &sampler, frame, &error));
-        for (const auto mode : {RigExecEvaluationMode::Dynamic,
-                                RigExecEvaluationMode::Baked}) {
+        {
             RigExecRigPose pose;
-            CHECK(RigExecTestArrayReference(stage, rigPath, mode, {}, frame,
+            CHECK(RigExecTestArrayReference(stage, rigPath, {}, frame,
                                              &pose, &error));
             std::vector<std::string> diffs;
             const bool equal = RigExecCompareRuntimeRun(pose, *reader, &diffs);
@@ -1853,28 +1909,16 @@ main(int argc, char **argv)
                       .Set(initial, UsdTimeCode(5)));
         }
         RigExecRigEvaluator evaluator(stage, _FindRig(stage));
-        evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
         std::vector<std::string> notices;
         CHECK(evaluator.Compile(&notices));
         std::vector<std::string> reasons;
-        CHECK(!evaluator.IsBakeable(&reasons));
-        const std::string reason =
-            "time-varying or connected rigExec:jointWeights: " +
-            SdfPath(name).GetPrimPath().GetString();
-        CHECK(reasons == std::vector<std::string>{reason});
-        RigExecBakeOpts opts;
-        opts.time = 5;
-        RigExecBakeResult result;
-        result.bytes = {42};
-        result.upstreamInputs = {"sentinel"};
-        result.pathReadsWritten = 17;
-        result.pathReadsEnumerated = 19;
-        std::string error;
-        CHECK(!RigExecBakeToBinary(evaluator, opts, &result, &error));
-        CHECK(error == "epoch is not bakeable\n  " + reason);
-        CHECK(result.bytes == std::vector<uint8_t>{42});
-        CHECK(result.upstreamInputs == std::vector<std::string>{"sentinel"});
-        CHECK(result.pathReadsWritten == 17 && result.pathReadsEnumerated == 19);
+        CHECK(evaluator.IsBakeable(&reasons));
+        CHECK(reasons.empty());
+        VtFloatArray changed = initial;
+        std::reverse(changed.begin(), changed.end());
+        _CheckStageArraySamples("animated skin layout admitted", stage,
+            _FindRig(stage), name, 5.0, VtValue(initial), VtValue(changed),
+            VtValue(VtFloatArray{}));
     }
 
     std::printf("array inputs: %d of %d case(s) == session edit\n",
@@ -1886,6 +1930,7 @@ main(int argc, char **argv)
                 overrideMatched, overrideRuns);
     CHECK(overrideMatched == overrideRuns && overrideRuns == 9);
     _TestUnansweredPhaseArray(examples);
+    _TestRetainedPointFinalAvailability(examples);
     if (failures == 0) {
         std::printf("testRigExecRuntimeInputs: all tests passed\n");
         return 0;

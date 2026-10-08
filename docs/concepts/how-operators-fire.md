@@ -84,6 +84,13 @@ metadata on the relationship that names the input — `rigExec:transform`,
 and so on. Metadata is the only way to declare a phase; there is no schema
 attribute for it. With none authored the input reads `base`.
 
+Property matrix connections, selected geometry points, Ribbon driver curves,
+and phased weight sample targets also use this contract. A `float3` input
+selects one array element only when it authors the integer
+`rigExecInputElement`; a shorter current array uses the input's typed fallback
+and reports a diagnostic. See [Cross-domain inputs](../specs/cross-domain-inputs.md)
+for the S9 authoring rules and count recovery behavior.
+
 - `base` — the joint **after its last solver**. Note that this is not "before
   every constraint": a constraint that fell *below* the last solver is already
   folded in, through that solver's rest reference.
@@ -186,7 +193,7 @@ switch's, a pose interpolator's and its poses', a control's or a joint's
 avars — on the weight objects and blend inputs an operator names, and on
 the attributes an operator names as ones it reads
 (`rigExec:driverAttributes`, `rigExec:shaderDialSources`,
-`rigExec:activeSpaceAttribute`). The dynamic evaluator, the baked program,
+`rigExec:activeSpaceAttribute`). The native program, frozen jobs,
 the frame cache and the `.rigexec` runtime all read it the same way. An
 unconnected input reads its own value, so a phase there has nothing to
 choose and is ignored. An input that math movers revise itself reads its

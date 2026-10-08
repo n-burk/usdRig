@@ -4,6 +4,7 @@
 #define RIGEXEC_RUNTIME_POSE_INTERNAL_H
 
 #include "store.h"
+#include "rigExecGraph/poseArithmetic.h"
 #include <array>
 #include <cmath>
 #include <string>
@@ -260,6 +261,9 @@ struct RrPoseScratch {
     // baked program's restM/restPts/restFrames/selfD/parentDinv/rotOrder/
     // posedAuthored(M)/restRoundTrip/defaultRoundTrip tables.
     std::vector<RrMat4d> restM, selfD, parentDinv, posedAuthoredM;
+    std::vector<RrMat4d> posedD, parentSpaceM;
+    std::vector<std::vector<RigExecSpaceCheckpointInputT<RrMat4d>>> checkpointInputs;
+    std::vector<char> parentSpaceAuthored;
     std::vector<RrMat4d> restRoundTrip, defaultRoundTrip;
     std::vector<std::array<RrVec3d, 4>> restPts;
     std::vector<RrPointFrame> restFrames;
@@ -270,6 +274,9 @@ struct RrPoseScratch {
     std::vector<unsigned char> rotationSign;
     std::vector<RrMat4d> lastRestM, lastSelfD, lastParentDinv;
     std::vector<RrMat4d> lastPosedAuthoredM;
+    std::vector<RrMat4d> lastPosedD, lastParentSpaceM;
+    std::vector<char> lastParentSpaceAuthored;
+    std::vector<unsigned char> lastRotationSign;
     std::vector<char> lastPosedAuthored;
     std::vector<uint32_t> lastRotOrder;
     // A drag stood last run, so this run writes the constant avars back.

@@ -27,6 +27,9 @@ TF_DEFINE_PRIVATE_TOKENS(_wrinkle,
     (cloth) (surfaceStruts));
 
 namespace {
+const TfToken _oracleToken0("faceVertexCounts");
+const TfToken _oracleToken1("faceVertexIndices");
+
 
 template<class T>
 T Input(const VdfContext &ctx, const TfToken &name, T fallback)
@@ -112,10 +115,10 @@ RigExecOracleResult Oracle(const RigExecMoverOracleContext &ctx)
     VtVec3fArray rest;
     ctx.prim.GetAttribute(_wrinkle->rest).Get(&rest);
     if (rest.empty()) rest = ctx.basePoints;
-    const UsdPrim owner = ctx.stage->GetPrimAtPath(ctx.target.GetPrimPath());
+    const RigExecOraclePrim owner = ctx.stage->GetPrimAtPath(ctx.target.GetPrimPath());
     VtIntArray counts, indices;
-    owner.GetAttribute(TfToken("faceVertexCounts")).Get(&counts, ctx.time);
-    owner.GetAttribute(TfToken("faceVertexIndices")).Get(&indices, ctx.time);
+    owner.GetAttribute(_oracleToken0).Get(&counts, ctx.time);
+    owner.GetAttribute(_oracleToken1).Get(&indices, ctx.time);
     RigExecWrinkleSettings s;
     TfToken topology;
     ctx.prim.GetAttribute(_wrinkle->topology).Get(&topology);

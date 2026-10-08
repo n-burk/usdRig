@@ -1,19 +1,7 @@
-// One definition of "the same published generation", for the tests.
-// The baked-mode suite grew three comparisons with three different
-// coverages -- one that omitted the provider transforms, one that omitted
-// every scalar, one that omitted the diagnostics -- and none of them matched
-// RigExecComparePoses, which is the comparison the parity mode actually
-// makes. Three coverages means three different answers to "did the two paths
-// publish the same generation", and the one a failing test happened to call
-// decided whether a defect was seen at all.
-// So: one set of functions, mirroring RigExecComparePoses domain for domain
-// -- every published map including the provider transforms and the two
-// weight domains, the compared scalars, and the diagnostics in order. A
-// domain added to the comparator is added here, and a test that wants less
-// than the whole generation says so by calling the narrower function rather
-// than by having the broader one quietly cover less.
-// Reports through a caller-owned failure counter rather than a global, so a
-// suite keeps its own `failures` and its own CHECK macro.
+// Shared exact published-value comparisons mirror RigExecComparePoses.
+// History tests compare maps and ordered diagnostics; executor work traces
+// are checked separately because cached and fresh runs can execute differently.
+// Helpers report through the caller-owned failure counter.
 #ifndef RIGEXEC_TESTS_POSE_COMPARE_H
 #define RIGEXEC_TESTS_POSE_COMPARE_H
 
@@ -56,7 +44,7 @@ CompareMaps(int *failures, const char *what, const std::string &where,
         const auto found = baked.find(path);
         if (found == baked.end()) {
             ++*failures;
-            std::printf("FAIL %s: baked mode published no %s for %s\n",
+            std::printf("FAIL %s: actual pose published no %s for %s\n",
                         where.c_str(), what, path.GetText());
         } else if (!equal(value, found->second)) {
             ++*failures;
@@ -67,7 +55,7 @@ CompareMaps(int *failures, const char *what, const std::string &where,
     for (const auto &[path, value] : baked) {
         if (!reference.count(path)) {
             ++*failures;
-            std::printf("FAIL %s: baked mode published an extra %s at %s\n",
+            std::printf("FAIL %s: actual pose published an extra %s at %s\n",
                         where.c_str(), what, path.GetText());
         }
     }
@@ -123,46 +111,13 @@ CompareEveryMap(int *failures, const std::string &where,
 
 /// The published SCALARS of a generation, the diagnostics included.
 ///
-/// A path that lands on the right points while reporting different work is
-/// still a second rig, and the difference is exactly the shape a map
-/// comparison cannot see. The diagnostics are compared in ORDER, because the
-/// order is the walk order and a consumer reading "MoverFailed X" after
-/// "constraint Y passed through" is being told a sequence.
-///
-/// The mover-graph counters are a property of how WARM the evaluator is, not
-/// of the frame -- a graph built this generation reports the revisions it
-/// created -- so this belongs beside a comparison of two evaluators that
-/// have answered the same generations, and not beside one that compares a
-/// fresh evaluator with a running one.
+/// Compare ordered published diagnostics. Work counts are inspected through
+/// the actual executor trace by scheduling tests and can differ with cache history.
 inline void
 CompareGenerationScalars(int *failures, const std::string &where,
                          const rigExec::RigExecRigPose &reference,
                          const rigExec::RigExecRigPose &baked)
 {
-    const auto count = [failures, &where](const char *what, size_t a,
-                                          size_t b) {
-        if (a != b) {
-            ++*failures;
-            std::printf("FAIL %s: %s is %zu dynamically and %zu baked\n",
-                        where.c_str(), what, a, b);
-        }
-    };
-    count("mover graph revisions created", reference.moverGraphRevisionsCreated,
-          baked.moverGraphRevisionsCreated);
-    count("mover graph revisions executed",
-          reference.moverGraphRevisionsExecuted,
-          baked.moverGraphRevisionsExecuted);
-    count("mover graph schedules built", reference.moverGraphSchedulesBuilt,
-          baked.moverGraphSchedulesBuilt);
-    count("solver override rounds", reference.solverOverrideRounds,
-          baked.solverOverrideRounds);
-    if (reference.solverOverridesConverged != baked.solverOverridesConverged) {
-        ++*failures;
-        std::printf("FAIL %s: solver overrides converged is %s dynamically "
-                    "and %s baked\n", where.c_str(),
-                    reference.solverOverridesConverged ? "true" : "false",
-                    baked.solverOverridesConverged ? "true" : "false");
-    }
     if (reference.diagnostics != baked.diagnostics) {
         ++*failures;
         std::printf("FAIL %s: diagnostics differ (%zu vs %zu)\n",
@@ -210,12 +165,10 @@ inline void
 CheckHistoryIndependent(int *failures, const std::string &what,
                         const std::function<UsdStageRefPtr()> &make,
                         const SdfPath &rigPath,
-                        rigExec::RigExecEvaluationMode mode,
                         const EvaluationState &before,
                         const EvaluationState &after)
 {
-    const bool baked = rigExec::RigExecEvaluationModeWantsProgram(mode);
-    const std::string where = what + (baked ? " (baked)" : " (walk)");
+    const std::string where = what + " (history independence)";
     const UsdStageRefPtr warmStage = make();
     const UsdStageRefPtr freshStage = make();
     if (!warmStage || !freshStage) {
@@ -225,8 +178,6 @@ CheckHistoryIndependent(int *failures, const std::string &what,
     }
     rigExec::RigExecRigEvaluator warm(warmStage, rigPath);
     rigExec::RigExecRigEvaluator fresh(freshStage, rigPath);
-    warm.SetEvaluationMode(mode);
-    fresh.SetEvaluationMode(mode);
     std::vector<std::string> errors;
     if (!warm.Compile(&errors) || !fresh.Compile(&errors)) {
         ++*failures;
@@ -258,8 +209,8 @@ CheckHistoryIndependent(int *failures, const std::string &what,
     }
     CompareEveryMap(failures, where + " after a previous generation", alone,
                     second);
-    if (baked && (warm.GetBakedGenerationCount() != 2 ||
-                  fresh.GetBakedGenerationCount() != 1)) {
+    if (warm.GetBakedGenerationCount() != 2 ||
+                  fresh.GetBakedGenerationCount() != 1) {
         ++*failures;
         std::printf("FAIL %s: %zu of 2 and %zu of 1 generation(s) came from "
                     "the program\n", where.c_str(),

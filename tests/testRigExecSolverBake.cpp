@@ -1,10 +1,6 @@
-// The baked program's solver half, on rigs the shipped examples do not have.
-// Every solver the program expresses is exercised by some example, but only
-// through a rig that ALSO carries geometry the program cannot bake yet -- the
-// ribbon and twist stages decline for their mover operations, so a parity run
-// on them compares the dynamic path with itself and proves nothing about the
-// solver. The fixtures here are the same solvers with the geometry left off,
-// so the first generation each one bakes is measured.
+// Canonical solver execution on focused fixtures. Numeric assertions check
+// solver formulas; separately initialized programs and frozen jobs check
+// cache freshness and deterministic publication.
 // They are also where the authoring errors live. Every solver computation
 // answers a malformed binding with an empty aggregate and a warning that
 // never reaches the pose, so the only observable consequence is that the
@@ -67,33 +63,25 @@ using MakeStage = std::function<UsdStageRefPtr()>;
 
 // The check every fixture is run through.
 
-/// Builds \p make twice and compares the two paths over \p frames.
-///
-/// The baked side runs in the parity mode, so the judge is
-/// RigExecComparePoses itself rather than a second opinion assembled here;
-/// the shared comparator then re-checks the published generation against a
-/// separate dynamic evaluator, which is what catches a domain the parity
-/// mode's own publication leaves empty on both sides.
-///
-/// \p expectBaked is the half that stops the whole thing passing vacuously:
-/// a fixture whose rig declines would agree perfectly and say nothing.
+/// Separate canonical evaluators repeat the same input history and must
+/// publish exactly equal generations. This checks deterministic publication
+/// and cache behavior; the numeric solver checks below establish correctness.
 void
-CheckParity(const char *what, const MakeStage &make,
+CheckEvaluatorConsistency(const char *what, const MakeStage &make,
             const std::vector<double> &frames, bool expectBaked,
             bool guides = true)
 {
-    const UsdStageRefPtr referenceStage = make();
+    const UsdStageRefPtr baselineStage = make();
     const UsdStageRefPtr bakedStage = make();
-    CHECK(referenceStage && bakedStage);
-    if (!referenceStage || !bakedStage) return;
+    CHECK(baselineStage && bakedStage);
+    if (!baselineStage || !bakedStage) return;
 
-    RigExecRigEvaluator reference(referenceStage, kRigPath);
+    RigExecRigEvaluator baseline(baselineStage, kRigPath);
     RigExecRigEvaluator baked(bakedStage, kRigPath);
-    // The oracle by name, so the comparison stays against the exec walk
-    // whatever the default mode comes to run.
-    reference.SetEvaluationMode(RigExecEvaluationMode::ExecReference);
+    // A separately initialized canonical evaluator supplies the baseline.
+
     std::vector<std::string> errors;
-    if (!reference.Compile(&errors) || !baked.Compile(&errors)) {
+    if (!baseline.Compile(&errors) || !baked.Compile(&errors)) {
         ++failures;
         std::printf("FAIL %s: the fixture does not compile\n", what);
         for (const std::string &error : errors) {
@@ -101,12 +89,12 @@ CheckParity(const char *what, const MakeStage &make,
         }
         return;
     }
-    baked.SetEvaluationMode(RigExecEvaluationMode::BakedWithParityCheck);
+
     // A headless consumer skips the guide request outright, and the program
     // has to skip its publication with it -- while still running the solvers
     // it would have published, because the toggle can move without the epoch
     // moving.
-    reference.SetSolverGuidesEnabled(guides);
+    baseline.SetSolverGuidesEnabled(guides);
     baked.SetSolverGuidesEnabled(guides);
 
     std::vector<std::string> reasons;
@@ -131,17 +119,10 @@ CheckParity(const char *what, const MakeStage &make,
     for (const double frame : sweep) {
         const std::string where =
             std::string(what) + " frame " + std::to_string(frame);
-        const RigExecRigPose a = reference.Evaluate(UsdTimeCode(frame));
+        const RigExecRigPose a = baseline.Evaluate(UsdTimeCode(frame));
         const RigExecRigPose b = baked.Evaluate(UsdTimeCode(frame));
         CHECK(a.valid && b.valid);
-        if (b.bakedParityMismatches) {
-            ++failures;
-            std::printf("FAIL %s: %zu baked parity mismatch(es)\n",
-                        where.c_str(), b.bakedParityMismatches);
-            for (const std::string &line : b.diagnostics) {
-                std::printf("    %s\n", line.c_str());
-            }
-        }
+
         ++generations;
         // The two evaluators are at the same point in their lives -- the
         // same fixture, the same frames, in the same order -- so the mover
@@ -156,7 +137,7 @@ CheckParity(const char *what, const MakeStage &make,
     }
 }
 
-/// Compares the two paths while an interactive override stands on
+/// Compares canonical evaluators while an interactive override stands on
 /// \p prim.\p attribute -- the drag a gizmo makes, on a solver's own input.
 ///
 /// Every per-frame input a new solver reads has to reach the program through
@@ -167,38 +148,38 @@ void
 CheckDrag(const char *what, const MakeStage &make, const SdfPath &prim,
           const char *attribute, const VtValue &held)
 {
-    const UsdStageRefPtr referenceStage = make();
+    const UsdStageRefPtr baselineStage = make();
     const UsdStageRefPtr bakedStage = make();
-    CHECK(referenceStage && bakedStage);
-    if (!referenceStage || !bakedStage) return;
+    CHECK(baselineStage && bakedStage);
+    if (!baselineStage || !bakedStage) return;
 
-    RigExecRigEvaluator reference(referenceStage, kRigPath);
+    RigExecRigEvaluator baseline(baselineStage, kRigPath);
     RigExecRigEvaluator baked(bakedStage, kRigPath);
     std::vector<std::string> errors;
-    if (!reference.Compile(&errors) || !baked.Compile(&errors)) {
+    if (!baseline.Compile(&errors) || !baked.Compile(&errors)) {
         ++failures;
         std::printf("FAIL %s: the fixture does not compile\n", what);
         return;
     }
-    baked.SetEvaluationMode(RigExecEvaluationMode::BakedWithParityCheck);
+
 
     const std::vector<RigExecValueOverride> drag{
         RigExecValueOverride{prim, TfToken(), TfToken(attribute), held}};
     // Settled, then held, then released: the release is the half a drag test
     // usually forgets, and the one a value captured at Build survives.
-    const RigExecRigPose settledA = reference.Evaluate(UsdTimeCode(2.0));
+    const RigExecRigPose settledA = baseline.Evaluate(UsdTimeCode(2.0));
     const RigExecRigPose settledB = baked.Evaluate(UsdTimeCode(2.0));
     rigExecTest::ComparePose(&failures, std::string(what) + " settled",
                              settledA, settledB);
-    reference.SetInteractiveOverrides(drag);
+    baseline.SetInteractiveOverrides(drag);
     baked.SetInteractiveOverrides(drag);
-    const RigExecRigPose heldA = reference.Evaluate(UsdTimeCode(2.0));
+    const RigExecRigPose heldA = baseline.Evaluate(UsdTimeCode(2.0));
     const RigExecRigPose heldB = baked.Evaluate(UsdTimeCode(2.0));
     rigExecTest::ComparePose(&failures, std::string(what) + " held", heldA,
                              heldB);
-    reference.ClearInteractiveOverrides();
+    baseline.ClearInteractiveOverrides();
     baked.ClearInteractiveOverrides();
-    const RigExecRigPose freedA = reference.Evaluate(UsdTimeCode(2.0));
+    const RigExecRigPose freedA = baseline.Evaluate(UsdTimeCode(2.0));
     const RigExecRigPose freedB = baked.Evaluate(UsdTimeCode(2.0));
     rigExecTest::ComparePose(&failures, std::string(what) + " released",
                              freedA, freedB);
@@ -806,14 +787,11 @@ MakeBlendRigWithLinearRotationAndANonSolverInput()
 /// The driver curve's bind pose is folded into bake state, so a drag on its
 /// points must be REFUSED rather than placed.
 ///
-/// The dynamic path reads that attribute straight off the stage with
-/// UsdAttribute::Get, so it ignores an override on it entirely; a program
-/// that placed one would answer a question no other path asks. Refusing is
-/// what sends the generation down the dynamic path instead.
+/// This captured raw source is outside the scalar override contract, so
+/// placing an override must report failure before executing the graph.
 ///
 /// Asked of the PROGRAM rather than through Evaluate on purpose: a
-/// deliberate fallback reports itself as a parity mismatch on the pose when
-/// RIGEXEC_BAKE_REQUIRED=1, which is how this suite is run.
+/// unsupported override must be detected at the input boundary.
 void
 CheckRibbonPointsOverrideIsRefused()
 {
@@ -895,20 +873,20 @@ void
 CheckRibbonPointsCreatedAfterTheBake()
 {
     const char *const what = "the driver curve's points created later";
-    const UsdStageRefPtr referenceStage = MakeRibbonRigWithNoPointsYet();
+    const UsdStageRefPtr baselineStage = MakeRibbonRigWithNoPointsYet();
     const UsdStageRefPtr bakedStage = MakeRibbonRigWithNoPointsYet();
-    CHECK(referenceStage && bakedStage);
-    if (!referenceStage || !bakedStage) return;
+    CHECK(baselineStage && bakedStage);
+    if (!baselineStage || !bakedStage) return;
 
-    RigExecRigEvaluator reference(referenceStage, kRigPath);
+    RigExecRigEvaluator baseline(baselineStage, kRigPath);
     RigExecRigEvaluator baked(bakedStage, kRigPath);
     std::vector<std::string> errors;
-    if (!reference.Compile(&errors) || !baked.Compile(&errors)) {
+    if (!baseline.Compile(&errors) || !baked.Compile(&errors)) {
         ++failures;
         std::printf("FAIL %s: the fixture does not compile\n", what);
         return;
     }
-    baked.SetEvaluationMode(RigExecEvaluationMode::BakedWithParityCheck);
+
     const RigExecRigPose before = baked.Evaluate(UsdTimeCode(3.0));
     CHECK(before.valid);
     if (baked.GetBakedGenerationCount() != 1) {
@@ -918,20 +896,13 @@ CheckRibbonPointsCreatedAfterTheBake()
         return;
     }
 
-    AuthorDriverPoints(referenceStage);
+    AuthorDriverPoints(baselineStage);
     AuthorDriverPoints(bakedStage);
 
-    const RigExecRigPose a = reference.Evaluate(UsdTimeCode(3.0));
+    const RigExecRigPose a = baseline.Evaluate(UsdTimeCode(3.0));
     const RigExecRigPose b = baked.Evaluate(UsdTimeCode(3.0));
     CHECK(a.valid && b.valid);
-    if (b.bakedParityMismatches) {
-        ++failures;
-        std::printf("FAIL %s: %zu baked parity mismatch(es)\n", what,
-                    b.bakedParityMismatches);
-        for (const std::string &line : b.diagnostics) {
-            std::printf("    %s\n", line.c_str());
-        }
-    }
+
     rigExecTest::ComparePose(&failures, what, a, b);
     if (baked.GetBakedGenerationCount() != 2) {
         ++failures;
@@ -944,7 +915,7 @@ CheckRibbonPointsCreatedAfterTheBake()
     }
 }
 
-/// Compares the two paths across an edit to the driver curve's points made
+/// Compares canonical evaluators across an edit to the driver curve's points made
 /// AFTER the program was built.
 ///
 /// The bind-pose half of that curve is folded into bake state, so an edit
@@ -955,24 +926,24 @@ CheckRibbonPointsCreatedAfterTheBake()
 void
 CheckRibbonPointsEdit(const char *what, bool editDefault)
 {
-    const UsdStageRefPtr referenceStage = MakeAnimatedRibbonRig();
+    const UsdStageRefPtr baselineStage = MakeAnimatedRibbonRig();
     const UsdStageRefPtr bakedStage = MakeAnimatedRibbonRig();
-    CHECK(referenceStage && bakedStage);
-    if (!referenceStage || !bakedStage) return;
+    CHECK(baselineStage && bakedStage);
+    if (!baselineStage || !bakedStage) return;
 
-    RigExecRigEvaluator reference(referenceStage, kRigPath);
+    RigExecRigEvaluator baseline(baselineStage, kRigPath);
     RigExecRigEvaluator baked(bakedStage, kRigPath);
     std::vector<std::string> errors;
-    if (!reference.Compile(&errors) || !baked.Compile(&errors)) {
+    if (!baseline.Compile(&errors) || !baked.Compile(&errors)) {
         ++failures;
         std::printf("FAIL %s: the fixture does not compile\n", what);
         return;
     }
-    baked.SetEvaluationMode(RigExecEvaluationMode::BakedWithParityCheck);
+
     const RigExecRigPose before = baked.Evaluate(UsdTimeCode(3.0));
     CHECK(before.valid);
     // The program answered that generation, so what follows is a comparison
-    // between the two paths and not between the dynamic path and itself.
+    // between separately initialized canonical programs.
     if (baked.GetBakedGenerationCount() != 1) {
         ++failures;
         std::printf("FAIL %s: the first generation was not the program's\n",
@@ -982,7 +953,7 @@ CheckRibbonPointsEdit(const char *what, bool editDefault)
 
     const VtVec3fArray edited{GfVec3f(0, 0, 0), GfVec3f(1.1f, 2.7f, 0),
                               GfVec3f(2.3f, 5.3f, 0), GfVec3f(3.5f, 7.6f, 0)};
-    for (const UsdStageRefPtr &stage : {referenceStage, bakedStage}) {
+    for (const UsdStageRefPtr &stage : {baselineStage, bakedStage}) {
         UsdAttribute points = stage->GetAttributeAtPath(
             SdfPath("/Asset/Geom/SpineCurve.points"));
         CHECK(points);
@@ -993,17 +964,10 @@ CheckRibbonPointsEdit(const char *what, bool editDefault)
         }
     }
 
-    const RigExecRigPose a = reference.Evaluate(UsdTimeCode(3.0));
+    const RigExecRigPose a = baseline.Evaluate(UsdTimeCode(3.0));
     const RigExecRigPose b = baked.Evaluate(UsdTimeCode(3.0));
     CHECK(a.valid && b.valid);
-    if (b.bakedParityMismatches) {
-        ++failures;
-        std::printf("FAIL %s: %zu baked parity mismatch(es)\n", what,
-                    b.bakedParityMismatches);
-        for (const std::string &line : b.diagnostics) {
-            std::printf("    %s\n", line.c_str());
-        }
-    }
+
     rigExecTest::ComparePose(&failures, what, a, b);
     // A folded value the edit moved REBUILDS the program; it does not make
     // it refuse the rig, and a generation answered dynamically would have
@@ -1433,7 +1397,7 @@ TestRefreshSolverRestsOnBuildStateIsIdentity(const char *what,
     const UsdStageRefPtr stage = make();
     const auto evaluator = CompileFixture(what, stage);
     if (!evaluator) return 0;
-    evaluator->SetEvaluationMode(RigExecEvaluationMode::Baked);
+
     const std::vector<double> frames{1, 3, 7};
     const auto runAndCompare = [&](const std::string &phase) {
         for (const double frame : frames) {
@@ -1570,11 +1534,11 @@ const SdfPath kIkSpaceWrist("/IkSpaceAsset/Rig/Joints/Shoulder/Elbow/Wrist");
 const SdfPath kIkSpaceTailEnd(
     "/IkSpaceAsset/Rig/Joints/Tail0/Tail1/Tail2/Tail3/Tail4");
 
-/// A reference and a baked evaluator, each over its own stage.
+/// Canonical baseline and cached evaluators, each over its own stage.
 struct EvaluatorPair {
-    UsdStageRefPtr referenceStage;
+    UsdStageRefPtr baselineStage;
     UsdStageRefPtr bakedStage;
-    std::unique_ptr<RigExecRigEvaluator> reference;
+    std::unique_ptr<RigExecRigEvaluator> baseline;
     std::unique_ptr<RigExecRigEvaluator> baked;
 };
 
@@ -1582,19 +1546,18 @@ bool
 MakeEvaluatorPair(const char *what, const MakeStage &make,
                   EvaluatorPair *pair)
 {
-    pair->referenceStage = make();
+    pair->baselineStage = make();
     pair->bakedStage = make();
-    pair->reference = CompileFixture(what, pair->referenceStage);
+    pair->baseline = CompileFixture(what, pair->baselineStage);
     pair->baked = CompileFixture(what, pair->bakedStage);
-    if (!pair->reference || !pair->baked) return false;
-    pair->reference->SetEvaluationMode(RigExecEvaluationMode::ExecReference);
-    pair->baked->SetEvaluationMode(
-        RigExecEvaluationMode::BakedWithParityCheck);
+    if (!pair->baseline || !pair->baked) return false;
+
+
     return true;
 }
 
 /// Evaluates one generation on each side of \p pair at \p frame and
-/// compares them the way CheckParity does. Returns whether they agreed;
+/// compares them the way CheckEvaluatorConsistency does. Returns whether they agreed;
 /// \p dynamic receives the reference generation.
 bool
 GenerationsAgree(const std::string &where, EvaluatorPair *pair, double frame,
@@ -1602,17 +1565,10 @@ GenerationsAgree(const std::string &where, EvaluatorPair *pair, double frame,
 {
     const int before = failures;
     const size_t generations = pair->baked->GetBakedGenerationCount();
-    *dynamic = pair->reference->Evaluate(UsdTimeCode(frame));
+    *dynamic = pair->baseline->Evaluate(UsdTimeCode(frame));
     const RigExecRigPose b = pair->baked->Evaluate(UsdTimeCode(frame));
     CHECK(dynamic->valid && b.valid);
-    if (b.bakedParityMismatches) {
-        ++failures;
-        std::printf("FAIL %s: %zu baked parity mismatch(es)\n", where.c_str(),
-                    b.bakedParityMismatches);
-        for (const std::string &line : b.diagnostics) {
-            std::printf("    %s\n", line.c_str());
-        }
-    }
+
     rigExecTest::ComparePose(&failures, where, *dynamic, b);
     if (pair->baked->GetBakedGenerationCount() != generations + 1) {
         ++failures;
@@ -1683,7 +1639,7 @@ TestASpaceRestMoveReachesTheSolve(const std::string &examples)
             const UsdStageRefPtr stillStage = plain();
             const auto still = CompileFixture(what, stillStage);
             if (still) {
-                still->SetEvaluationMode(RigExecEvaluationMode::ExecReference);
+
                 const RigExecRigPose unmoved =
                     still->Evaluate(UsdTimeCode(10.0));
                 RequireJointMoved(what, dynamic, unmoved, kIkSpaceWrist);
@@ -1705,14 +1661,14 @@ TestASpaceRestMoveReachesTheSolve(const std::string &examples)
                     RigExecValueOverride{kIkSpaceMaster, TfToken(),
                                          TfToken("rest:ry"),
                                          VtValue(degrees)}};
-                pair.reference->SetInteractiveOverrides(overrides);
+                pair.baseline->SetInteractiveOverrides(overrides);
                 pair.baked->SetInteractiveOverrides(overrides);
             };
             drag(15.0);
             compare(std::string(what) + " at 15", &pair, frame, &dragged);
             drag(25.0);
             compare(std::string(what) + " at 25", &pair, frame, &other);
-            pair.reference->ClearInteractiveOverrides();
+            pair.baseline->ClearInteractiveOverrides();
             pair.baked->ClearInteractiveOverrides();
             compare(std::string(what) + " released", &pair, frame, &other);
             RequireJointMoved(what, dragged, settled, kIkSpaceWrist);
@@ -1735,7 +1691,7 @@ TestASpaceRestMoveReachesTheSolve(const std::string &examples)
         RigExecRigPose before, after;
         compare(what + " before", &pair, frame, &before);
         for (const UsdStageRefPtr &stage :
-             {pair.referenceStage, pair.bakedStage}) {
+             {pair.baselineStage, pair.bakedStage}) {
             UsdEditContext session(stage, stage->GetSessionLayer());
             UsdAttribute a =
                 stage->GetPrimAtPath(kIkSpaceMaster)
@@ -1969,7 +1925,7 @@ ListSpaceRestCandidates(const std::vector<CandidateRig> &rigs)
                     }
                 }
             }
-            evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+
             std::vector<bool> moved(build.solvers.size(), false);
             for (const double frame : rig.frames) {
                 evaluator.Evaluate(UsdTimeCode(frame));
@@ -2108,56 +2064,56 @@ main(int argc, char **argv)
 
     const std::vector<double> frames{1, 2, 3, 4, 5};
 
-    CheckParity("twist distribution", MakeTwistRig, frames, true);
-    CheckParity("twist distribution with keyed turns",
+    CheckEvaluatorConsistency("twist distribution", MakeTwistRig, frames, true);
+    CheckEvaluatorConsistency("twist distribution with keyed turns",
                 MakeTwistRigWithKeyedTurns, frames, true);
-    CheckParity("twist distribution with unauthored weights",
+    CheckEvaluatorConsistency("twist distribution with unauthored weights",
                 MakeTwistRigWithUnauthoredWeights, frames, true);
-    CheckParity("twist distribution with one sample",
+    CheckEvaluatorConsistency("twist distribution with one sample",
                 MakeTwistRigWithOneSample, frames, true);
-    CheckParity("twist distribution with no end", MakeTwistRigWithNoEnd,
+    CheckEvaluatorConsistency("twist distribution with no end", MakeTwistRigWithNoEnd,
                 frames, true);
 
-    CheckParity("ribbon on a keyed driver curve", MakeAnimatedRibbonRig,
+    CheckEvaluatorConsistency("ribbon on a keyed driver curve", MakeAnimatedRibbonRig,
                 frames, true);
-    CheckParity("ribbon on a static driver curve", MakeStaticRibbonRig,
+    CheckEvaluatorConsistency("ribbon on a static driver curve", MakeStaticRibbonRig,
                 frames, true);
-    CheckParity("ribbon whose driver curve has no bind pose",
+    CheckEvaluatorConsistency("ribbon whose driver curve has no bind pose",
                 MakeRibbonRigWithNoBindPose, frames, true);
-    CheckParity("ribbon with no driver curve", MakeRibbonRigWithNoDriver,
+    CheckEvaluatorConsistency("ribbon with no driver curve", MakeRibbonRigWithNoDriver,
                 frames, true);
 
-    CheckParity("two-bone ik", MakeTwoBoneIkRig, frames, true);
-    CheckParity("two-bone ik binding two joints",
+    CheckEvaluatorConsistency("two-bone ik", MakeTwoBoneIkRig, frames, true);
+    CheckEvaluatorConsistency("two-bone ik binding two joints",
                 MakeTwoBoneIkRigWithTwoJoints, frames, true);
 
-    CheckParity("two-bone ik with a non-provider pole",
+    CheckEvaluatorConsistency("two-bone ik with a non-provider pole",
                 MakeTwoBoneIkRigWithANonProviderPole, frames, true);
-    CheckParity("fk chain with a non-provider control",
+    CheckEvaluatorConsistency("fk chain with a non-provider control",
                 MakeFkChainWithANonProviderControl, frames, true);
 
-    CheckParity("spline ik", MakeSplineIkRig, frames, true);
-    CheckParity("spline ik with an unsupported restLength",
+    CheckEvaluatorConsistency("spline ik", MakeSplineIkRig, frames, true);
+    CheckEvaluatorConsistency("spline ik with an unsupported restLength",
                 MakeSplineIkRigWithUnsupportedRestLength, frames, true);
-    CheckParity("spline ik with an unsupported rootTangent",
+    CheckEvaluatorConsistency("spline ik with an unsupported rootTangent",
                 MakeSplineIkRigWithUnsupportedRootTangent, frames, true);
 
-    CheckParity("ik/fk blend", MakeBlendRig, frames, true);
-    CheckParity("ik/fk blend with a linear rotation blend",
+    CheckEvaluatorConsistency("ik/fk blend", MakeBlendRig, frames, true);
+    CheckEvaluatorConsistency("ik/fk blend with a linear rotation blend",
                 MakeBlendRigWithLinearRotation, frames, true);
-    CheckParity("ik/fk blend with a non-solver input",
+    CheckEvaluatorConsistency("ik/fk blend with a non-solver input",
                 MakeBlendRigWithANonSolverInput, frames, true);
-    CheckParity("ik/fk blend with a linear rotation blend AND a non-solver "
+    CheckEvaluatorConsistency("ik/fk blend with a linear rotation blend AND a non-solver "
                 "input",
                 MakeBlendRigWithLinearRotationAndANonSolverInput, frames,
                 true);
 
-    CheckParity("guide-only ribbon", MakeGuideOnlyRibbonRig, frames, true);
-    CheckParity("guide-only twist distribution", MakeGuideOnlyTwistRig,
+    CheckEvaluatorConsistency("guide-only ribbon", MakeGuideOnlyRibbonRig, frames, true);
+    CheckEvaluatorConsistency("guide-only twist distribution", MakeGuideOnlyTwistRig,
                 frames, true);
-    CheckParity("guide-only blend of two guide-only solvers",
+    CheckEvaluatorConsistency("guide-only blend of two guide-only solvers",
                 MakeGuideOnlyBlendRig, frames, true);
-    CheckParity("guide-only solvers with the guides switched off",
+    CheckEvaluatorConsistency("guide-only solvers with the guides switched off",
                 MakeGuideOnlyBlendRig, frames, true,
                 /* guides = */ false);
 
@@ -2179,13 +2135,11 @@ main(int argc, char **argv)
         const EvaluationState turnsDrag =
             drag("/Asset/Rig/Solvers/SecondTwist", "inputs:twistTurns",
                  VtValue(0.2));
-        for (const RigExecEvaluationMode mode :
-                 {RigExecEvaluationMode::ExecReference,
-                  RigExecEvaluationMode::Baked}) {
+        {
             const auto check = [&](const char *what, const MakeStage &make,
                                    const EvaluationState &before) {
                 rigExecTest::CheckHistoryIndependent(
-                    &failures, what, make, kRigPath, mode, before, frame2);
+                    &failures, what, make, kRigPath, before, frame2);
             };
             check("ik/fk blend after another frame", MakeBlendRig, frame5);
             check("ik/fk blend after a drag on its ik", MakeBlendRig,

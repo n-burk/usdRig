@@ -55,24 +55,22 @@ static int failures = 0;
     } while (0)
 
 namespace {
-// A full ordinary closure selects every region step, with each occupied
-// region cluster counted once; memo heads never enter closedSteps.
-void CheckWholeOrdinaryClosure(const RigExecRigEvaluator &evaluator)
+// A conservative untracked edit runs every active operation once, including
+// source operations. The census reports actual bodies and occupied clusters.
+void CheckWholeExecution(const RigExecRigEvaluator &evaluator)
 {
     const auto &B = evaluator.GetBakedProgram()->GetStepGraph();
-    std::set<int> clusters;
-    size_t region = 0;
-    for (size_t i = 0; i < B.steps.size(); ++i) {
-        if (B.steps[i].isHead) {
-            CHECK(!B.closedSteps.Test(int(i)));
-        } else {
-            ++region;
-            CHECK(B.closedSteps.Test(int(i)));
-            clusters.insert(B.steps[i].cluster);
-        }
+    std::set<uint32_t> clusters;
+    CHECK(!B.opGraph.ops.empty());
+    CHECK(B.opExecution.ran.size() == B.opGraph.ops.size());
+    for (size_t i = 0; i < B.opGraph.ops.size(); ++i) {
+        CHECK(B.closedSteps.Test(int(i)));
+        CHECK(i < B.opExecution.ran.size() && B.opExecution.ran[i]);
+        CHECK(i < B.opGraph.opClusters.size());
+        if (i < B.opGraph.opClusters.size()) clusters.insert(B.opGraph.opClusters[i]);
     }
-    CHECK(region > 0);
-    CHECK(B.lastClosedSteps == region);
+    CHECK(B.closedSteps.Count() == B.opGraph.ops.size());
+    CHECK(B.lastClosedSteps == B.opGraph.ops.size());
     CHECK(evaluator.GetBakedClustersRunLastGeneration() == clusters.size());
 }
 
@@ -87,20 +85,10 @@ SchemaResourceDir(const std::string &examplesDir)
 #endif
 }
 
-// Baked, unless the parity entries asked for the checked mode: under it every
-// generation is compared with the dynamic walk as well.
-RigExecEvaluationMode
-Mode()
-{
-    return TfGetenv("RIGEXEC_EVALUATION_MODE") == "parity"
-               ? RigExecEvaluationMode::BakedWithParityCheck
-               : RigExecEvaluationMode::Baked;
-}
-
 bool
 Parity()
 {
-    return Mode() == RigExecEvaluationMode::BakedWithParityCheck;
+    return TfGetenvBool("RIGEXEC_BAKED_VERIFY_CONES", false);
 }
 
 const char *
@@ -125,9 +113,7 @@ FreshPose(const UsdStageRefPtr &stage, const SdfPath &rig, UsdTimeCode time)
     RigExecRigEvaluator fresh(stage, rig);
     std::vector<std::string> errors;
     CHECK(fresh.Compile(&errors));
-    fresh.SetEvaluationMode(Mode());
     const RigExecRigPose pose = fresh.Evaluate(time);
-    CHECK(fresh.GetBakedGenerationCount() == 1);
     return pose;
 }
 
@@ -141,9 +127,6 @@ CheckSamePose(const std::string &what, const RigExecRigPose &reference,
     CHECK(pose.valid);
     CHECK(reference.valid);
     RigExecRigPose fresh = reference;
-    pose.moverGraphRevisionsCreated = fresh.moverGraphRevisionsCreated;
-    pose.moverGraphRevisionsExecuted = fresh.moverGraphRevisionsExecuted;
-    pose.moverGraphSchedulesBuilt = fresh.moverGraphSchedulesBuilt;
     // And the lines that report them, with the one a recompile adds: what a
     // generation built, not what it posed.
     const auto keepPosed = [](std::vector<std::string> *lines) {
@@ -160,9 +143,9 @@ CheckSamePose(const std::string &what, const RigExecRigPose &reference,
     keepPosed(&pose.diagnostics);
     RigExecRigPose diff;
     RigExecComparePoses(fresh, pose, &diff);
-    if (diff.bakedParityMismatches != 0) {
+    if (diff.comparisonMismatches != 0) {
         std::printf("FAIL %s: %zu mismatch(es) against a fresh program:\n",
-                    what.c_str(), diff.bakedParityMismatches);
+                    what.c_str(), diff.comparisonMismatches);
         for (size_t i = 0; i < diff.diagnostics.size() && i < 12; ++i) {
             std::printf("    %s\n", diff.diagnostics[i].c_str());
         }
@@ -173,7 +156,7 @@ CheckSamePose(const std::string &what, const RigExecRigPose &reference,
             std::printf("    edited: %s\n", line.c_str());
         }
     }
-    CHECK(diff.bakedParityMismatches == 0);
+    CHECK(diff.comparisonMismatches == 0);
 }
 
 struct Case {
@@ -202,24 +185,26 @@ struct Case {
 void
 RunCase(const Case &c)
 {
+    // This helper owns its source stage exclusively. Observers must not
+    // prolong a previous case beyond its actual caller lifetime.
+    static UsdStageWeakPtr previousStage;
+    CHECK(!previousStage);
     UsdStageRefPtr stage = UsdStage::Open(c.stagePath);
     CHECK(stage);
     if (!stage) {
         return;
     }
+    previousStage = stage;
     if (c.setup) {
         c.setup(stage);
     }
     RigExecRigEvaluator evaluator(stage, c.rig);
     std::vector<std::string> errors;
     CHECK(evaluator.Compile(&errors));
-    evaluator.SetEvaluationMode(Mode());
     const UsdTimeCode time(c.time);
     CHECK(evaluator.Evaluate(time).valid);
     CHECK(evaluator.Evaluate(time).valid);
-    const size_t generations = evaluator.GetBakedGenerationCount();
     const size_t builds = evaluator.GetBakedProgramBuildCount();
-    CHECK(generations == 2);
 
     c.edit(stage);
     const RigExecNoticeDisposition got = evaluator.GetLastNoticeDisposition();
@@ -245,8 +230,7 @@ RunCase(const Case &c)
     }
 
     const RigExecRigPose edited = evaluator.Evaluate(time);
-    CHECK(edited.bakedParityMismatches == 0);
-    CHECK(evaluator.GetBakedGenerationCount() == generations + 1);
+    CHECK(edited.comparisonMismatches == 0);
     if (c.expect != RigExecNoticeDisposition::Stale) {
         CHECK(evaluator.GetBakedProgramBuildCount() == builds);
     }
@@ -262,7 +246,7 @@ RunCase(const Case &c)
         CHECK(ran < total);
     }
     if (c.expectWhole) {
-        CheckWholeOrdinaryClosure(evaluator);
+        CheckWholeExecution(evaluator);
     }
     CheckSamePose(c.name + " (edited frame)", FreshPose(stage, c.rig, time),
                   edited);
@@ -270,12 +254,13 @@ RunCase(const Case &c)
     // And the frames after it: the edit was consumed once, and the program
     // goes on agreeing with a fresh one at the held time and at a new one.
     const RigExecRigPose held = evaluator.Evaluate(time);
-    CHECK(held.bakedParityMismatches == 0);
+    if (c.expectWhole) CHECK(!B.closureFull);
+    CHECK(held.comparisonMismatches == 0);
     CheckSamePose(c.name + " (held frame)", FreshPose(stage, c.rig, time),
                   held);
     const UsdTimeCode next(c.time + 1.0);
     const RigExecRigPose moved = evaluator.Evaluate(next);
-    CHECK(moved.bakedParityMismatches == 0);
+    CHECK(moved.comparisonMismatches == 0);
     CheckSamePose(c.name + " (next frame)", FreshPose(stage, c.rig, next),
                   moved);
 }
@@ -474,7 +459,6 @@ TestAConstraintInputSampleRunsItsCone(const std::string &examplesDir)
     KeyAimWeight(stage);
     RigExecRigEvaluator evaluator(stage, kAimRig);
     CHECK(evaluator.Compile());
-    evaluator.SetEvaluationMode(Mode());
     CHECK(evaluator.Evaluate(UsdTimeCode(50.0)).valid);
     CHECK(evaluator.Evaluate(UsdTimeCode(50.0)).valid);
     Attr(stage, kAim, "inputs:defaultWeight").Set(0.75f, UsdTimeCode(100.0));
@@ -558,7 +542,6 @@ TestARetargetedWalkRebuildsBeforeItsUpstreamEdit(
     setup(stage);
     RigExecRigEvaluator evaluator(stage, kAimRig);
     CHECK(evaluator.Compile());
-    evaluator.SetEvaluationMode(Mode());
     const UsdTimeCode time(50.0);
     CHECK(evaluator.Evaluate(time).valid);
     CHECK(evaluator.Evaluate(time).valid);
@@ -579,7 +562,7 @@ TestARetargetedWalkRebuildsBeforeItsUpstreamEdit(
     CHECK(evaluator.GetLastNoticeDisposition() ==
           RigExecNoticeDisposition::Stale);
     const RigExecRigPose retargeted = evaluator.Evaluate(time);
-    CHECK(retargeted.bakedParityMismatches == 0);
+    CHECK(retargeted.comparisonMismatches == 0);
     CHECK(evaluator.GetBakedProgramBuildCount() == builds + 1);
     CheckSamePose("retargeted walk", FreshPose(stage, kAimRig, time),
                   retargeted);
@@ -602,13 +585,13 @@ TestARetargetedWalkRebuildsBeforeItsUpstreamEdit(
                 DispositionName(got));
     CHECK(got == RigExecNoticeDisposition::Edited);
     const RigExecRigPose edited = evaluator.Evaluate(time);
-    CHECK(edited.bakedParityMismatches == 0);
+    CHECK(edited.comparisonMismatches == 0);
     CheckSamePose("upstream edit after the retarget",
                   FreshPose(stage, kAimRig, time), edited);
     // And the old hop is read by nothing now: its edit moves no pose.
     CHECK(stage->GetAttributeAtPath(driverA).Set(0.6f, UsdTimeCode(100.0)));
     const RigExecRigPose stale = evaluator.Evaluate(time);
-    CHECK(stale.bakedParityMismatches == 0);
+    CHECK(stale.comparisonMismatches == 0);
     CheckSamePose("old hop after the retarget",
                   FreshPose(stage, kAimRig, time), stale);
 }
@@ -623,7 +606,6 @@ TestLayerMetadataRebuilds(const std::string &examplesDir)
     UsdStageRefPtr stage = UsdStage::Open(AimStage(examplesDir));
     RigExecRigEvaluator evaluator(stage, kAimRig);
     CHECK(evaluator.Compile());
-    evaluator.SetEvaluationMode(Mode());
     CHECK(evaluator.Evaluate(UsdTimeCode(50.0)).valid);
     stage->SetStartTimeCode(stage->GetStartTimeCode() - 1.0);
     std::printf("  layer metadata: %s\n",
@@ -632,10 +614,9 @@ TestLayerMetadataRebuilds(const std::string &examplesDir)
           RigExecNoticeDisposition::Stale);
     const RigExecRigPose pose = evaluator.Evaluate(UsdTimeCode(50.0));
     CHECK(pose.valid);
-    CHECK(pose.bakedParityMismatches == 0);
-    CheckWholeOrdinaryClosure(evaluator);
+    CHECK(pose.comparisonMismatches == 0);
+    CheckWholeExecution(evaluator);
 }
-
 
 // A property the bake asked about by name that no step declares as an input
 // -- a blend shape's target points, read whole by the geometry prologue's
@@ -714,7 +695,6 @@ TestAConnectedChainSourceIsReported(const std::string &examplesDir)
     ConnectClampToSettings(stage);
     RigExecRigEvaluator evaluator(stage, kPropMathRig);
     CHECK(evaluator.Compile());
-    evaluator.SetEvaluationMode(Mode());
     const UsdTimeCode time(c.time);
     const RigExecRigPose before = evaluator.Evaluate(time);
     CHECK(before.valid);
@@ -737,7 +717,7 @@ TestAConnectedChainSourceIsReported(const std::string &examplesDir)
                   FreshPose(stage, kPropMathRig, time), edited);
     RigExecRigPose moved;
     RigExecComparePoses(before, edited, &moved);
-    CHECK(moved.bakedParityMismatches != 0);
+    CHECK(moved.comparisonMismatches != 0);
 
     // The retarget onto the sibling: a connection field, never routed.
     CHECK(Attr(stage, kClampGain, "inputs:max").SetConnections({otherGain}));
@@ -783,7 +763,7 @@ main(int argc, char **argv)
                     resources.c_str());
         return 2;
     }
-    std::printf("mode: %s\n", Parity() ? "parity" : "baked");
+    std::printf("graph execution; scoped verifier: %s\n", Parity() ? "on" : "off");
     // Unbuffered, and with the whole run inside a catch: an exception out of
     // the evaluator reaches ucrtbase's abort, which discards the buffer and
     // leaves ctest reporting 0xc0000409 with no output at all. A test that

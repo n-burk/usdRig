@@ -178,13 +178,13 @@ def TestOnlyALayoutReachingOverrideInvalidates():
     going out either.
 
     The cache is the dynamic walk's, so the rig evaluates dynamically here;
-    the baked program builds its layouts in its SkinTopology ops instead
+    the compiled graph builds its layouts in its SkinTopology ops instead
     (testRigExecSkinTopology --baked).
     """
     _, rig, controls, skins = _Open()
     assert skins, "the biped is expected to carry a skin mover"
     tip = controls["L_IndexTip"]
-    rig.evaluation_mode = "dynamic"
+    rig.cpu_reference = True
 
     rig.evaluate(1.0)
     held = rig.skin_topology_cache_size

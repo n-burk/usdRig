@@ -4,8 +4,8 @@
     suite (testRigExecOneLoopAcceptance). LimbA is an FK chain skinning
     MeshA; LimbB is a two-bone IK skinning MeshB. They share no control,
     joint, weight or mesh, so nothing limb B computes is an input of limb
-    A's geometry. Both limbs are keyed; the rig bakes, and dynamic and
-    baked agree bit for bit across the keyed range."""
+    A's geometry. Both limbs are keyed. Production cluster paths stay
+    independent; MeshA completes while LimbB's actual solver is gated."""
     defaultPrim = "LimbsAsset"
     endTimeCode = 12
     metersPerUnit = 0.01

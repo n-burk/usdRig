@@ -41,6 +41,10 @@
 PXR_NAMESPACE_USING_DIRECTIVE
 
 namespace rigExec {
+class RigExecBlendSampleCache;
+
+struct RigExecSceneDescriptors;
+struct RigExecOpExclusionProof;
 
 /// Whether a value of \p typeName fits a .rigexec input slot: a scalar,
 /// token, 4x4 double matrix or 3-vector of either precision, any role. No
@@ -134,144 +138,9 @@ struct RigExecWeightOracleFacts;
 struct RigExecBakedEnvelopeObject;
 struct RigExecBakedPropertyChainDesc;
 
-/// Which path RigExecRigEvaluator::Evaluate takes.
-///
-/// `Baked` is a REQUEST, not a guarantee: Compile builds the program only
-/// when the epoch is bakeable and Evaluate falls back to the dynamic path
-/// whenever it is not, so setting it can never change an answer -- only how
-/// fast it arrives.
-enum class RigExecEvaluationMode {
-    /// The product default. OpenExec plus the in-memory pose walk -- unless
-    /// RIGEXEC_DYNAMIC_RUNS_PROGRAM is set, in which case the program
-    /// answers whenever the epoch has one and the walk answers otherwise,
-    /// exactly as under Baked but with nothing announced when it falls back
-    /// (see RigExecEvaluationModeRunsProgram).
-    Dynamic,
-    /// The baked program when the epoch allows it, Dynamic otherwise.
-    Baked,
-    /// Both, in one generation, compared with exact equality. Every
-    /// disagreement is a diagnostic and a count on the published pose.
-    BakedWithParityCheck,
-    /// The exec-authoritative walk and nothing else: no program is built,
-    /// asked for, or reported on. It is the oracle every other path is
-    /// judged against, named for that job so that a test comparing against
-    /// it keeps comparing against the oracle whatever Dynamic comes to run.
-    /// With RIGEXEC_DYNAMIC_RUNS_PROGRAM off it answers exactly what Dynamic
-    /// answers; with it on, Dynamic runs the program and this is what that
-    /// program is held to.
-    ExecReference,
-};
-
-/// Whether \p mode ASKS for the baked program.
-///
-/// Asking is what makes a fallback worth announcing: RIGEXEC_BAKE_REQUIRED's
-/// mismatch and the attribute's artist-facing line are said only for a mode
-/// that asked and was answered by the walk instead. Dynamic and ExecReference
-/// never ask, so both are silent. Whether a program is BUILT and RUN is a
-/// wider question -- Dynamic may run one without asking for it -- and is
-/// RigExecEvaluationModeRunsProgram's. Asked through here rather than as
-/// `!= Dynamic` so that a mode added later has to be placed on one side of
-/// that line on purpose.
-inline bool
-RigExecEvaluationModeWantsProgram(RigExecEvaluationMode mode)
-{
-    return mode == RigExecEvaluationMode::Baked ||
-        mode == RigExecEvaluationMode::BakedWithParityCheck;
-}
-
-/// WHO chose the evaluation mode an evaluator is in.
-///
-/// Three things can ask for a path and they do not carry the same weight, so
-/// the mode alone cannot answer "may I change this?" or "why is this rig
-/// baked?". The answer is the source, and the order below is the precedence,
-/// weakest first: a rig's authored `rigExec:baked` is the asset's own
-/// request, RIGEXEC_EVALUATION_MODE is one session's answer for every stage
-/// it opens (which is what lets a parity suite force a mode onto rigs that
-/// ask for another), and SetEvaluationMode is a caller that chose knowing
-/// what it was doing and is therefore never overridden -- not by a later
-/// notice, not by a recompile.
-enum class RigExecEvaluationModeSource {
-    /// Nobody asked. The mode is Dynamic.
-    Default,
-    /// The rig's `uniform bool rigExec:baked`, re-read at every Compile and
-    /// whenever a notice names it.
-    Attribute,
-    /// A non-empty RIGEXEC_EVALUATION_MODE, read once per process.
-    Environment,
-    /// RigExecRigEvaluator::SetEvaluationMode.
-    Explicit,
-};
-
-/// Whether Dynamic runs the baked program: RIGEXEC_DYNAMIC_RUNS_PROGRAM set to
-/// a true value (TfGetenvBool). Read ONCE per process, at its first call, and
-/// fixed from then on, like RIGEXEC_EVALUATION_MODE: every evaluator of a
-/// session must dispatch Dynamic the same way, or two rigs of one stage would
-/// answer the same question from different paths.
-///
-/// Off by default. With it off Dynamic is the exec walk and nothing else,
-/// unless a viewport evaluator opts into a program for its default mode.
-/// Explicit mode choices retain the policy described below.
-bool RigExecDynamicRunsProgram();
-
-/// Whether an evaluator in \p mode, chosen by \p source, builds the baked
-/// program and answers from it whenever the epoch has one.
-///
-/// Every gate that exists because a program might answer asks this: the
-/// build at Compile, the lazy build in Evaluate, the dispatch, the rebuild's
-/// early return, the rigExec:baked notice drop, and whether Compile may
-/// defer the walk-only exec preparations. Baked and BakedWithParityCheck
-/// always do; ExecReference never does -- it is the oracle, and an oracle
-/// that could answer from the program would be judging itself.
-///
-/// Dynamic is the one mode with a choice, and it reaches here from four
-/// sources, each mapped on purpose rather than by falling through: nobody
-/// asking (the default), an authored `rigExec:baked = false`, a
-/// RIGEXEC_EVALUATION_MODE=dynamic session, and SetEvaluationMode(Dynamic).
-/// All four follow RigExecDynamicRunsProgram today. An authored false is the
-/// one whose meaning is an open product question -- it may come to mean
-/// ExecReference -- which is why the source is an argument at all.
-///
-/// A Dynamic generation that the program cannot answer (a refused bake, an
-/// unplaceable override, cpuParityMode, a program bail) runs the walk, as a
-/// Baked one does, but never ANNOUNCES it: Dynamic did not ask for the
-/// program (RigExecEvaluationModeWantsProgram), so the walk is its answer
-/// rather than a substitute for one.
-bool RigExecEvaluationModeRunsProgram(RigExecEvaluationMode mode,
-                                      RigExecEvaluationModeSource source);
-
-/// Appends one diagnostic per exact-equality disagreement between \p baked
-/// and \p reference, counting them on \p out->bakedParityMismatches.
-///
-/// The comparison BakedWithParityCheck performs, as a function of two poses
-/// and nothing else. It is the only thing in the suite that catches several
-/// classes of bake defect -- a solver aggregate that drifts in its last bits,
-/// a rest that moved on one path and not the other -- and every assertion
-/// made through the parity mode is that it found NOTHING, which is an
-/// assertion a dead comparator also satisfies. Declared here so a test can
-/// hand it two poses it built itself and check that it finds what is there.
-///
-/// Compares the nine published maps plus the solver guides, in both
-/// directions: a key present only in \p reference and a key present only in
-/// \p baked are each one mismatch. Two of the nine -- the resolved weight
-/// fields and the volume placements -- are empty on both paths while the
-/// features that fill them refuse the bake; they are compared anyway, so
-/// that the first generation a weight object ever bakes is measured rather
-/// than waved through. It also compares the SCALARS of the generation -- the
-/// mover-graph work counters, the solver override rounds, whether the solver
-/// overrides converged, and the diagnostics, the last order-sensitively --
-/// because those are published state a consumer reads, and a program that
-/// arrives at the right numbers while claiming different work is still a
-/// second rig. Each is its own mismatch domain with its own text, so a count
-/// of one names which.
-///
-/// RigExecRigPose::solverEvaluations is the one published scalar left out,
-/// and on purpose: it counts the solver computations the schedule requested,
-/// and the dynamic path's per-batch exec cache answers a repeated time with
-/// the same inputs for free while the program, which holds no such cache,
-/// re-solves. The two numbers are each true of the path that reported them.
-/// movedPropertiesCpu and the two moverGraphParity counters are left out for
-/// the opposite reason -- the mode that fills them turns the baked path off,
-/// so they are empty on both sides of every comparison made here.
+/// Exact comparison of independently supplied poses, including published maps,
+/// guides, operation counters and diagnostics. Appends disagreements to out.
+/// Reference-only outputs and solver request counts are separate check domains.
 void RigExecComparePoses(const RigExecRigPose &reference,
                          const RigExecRigPose &baked, RigExecRigPose *out);
 
@@ -286,12 +155,20 @@ void RigExecComparePoses(const RigExecRigPose &reference,
 /// xformSlots, nativeSources, and deltaBasePaths. Fresh stage data, not a
 /// pure function of the sampled attribute values, so the control-state
 /// digest folds it -- unlike the layout leaves and the other transports.
+struct RigExecRequiredStageFramesAdmission {
+    bool admitted = true;
+    int32_t firstBadTarget = -1; // index into immutable xformSlots, not a path
+    bool operator==(const RigExecRequiredStageFramesAdmission &o) const {
+        return admitted == o.admitted && firstBadTarget == o.firstBadTarget;
+    }
+};
+
 struct RigExecStageFrameSeeds {
+    RigExecRequiredStageFramesAdmission requiredStageFramesAdmission;
     /// Per xformSlots entry: the relative transform and the frame, the
-    /// pose's two currencies of the same seed. Sampling declines rather
-    /// than recording a failure: live gives the whole generation back when
-    /// a target does not resolve, so a frame with an unresolvable target
-    /// has no frozen job.
+    /// pose's two currencies of the same seed. Typed admission records the
+    /// first unavailable target. Failed/later entries remain captured values;
+    /// the worker finishes pure preparation then declines publication.
     std::vector<GfMatrix4d> xformBase;
     std::vector<RigExecPointFrame> xformFrames;
     /// Per nativeSources entry: whether the stage answered, and the frame
@@ -303,40 +180,22 @@ struct RigExecStageFrameSeeds {
     /// matrix the geometry-domain delta is measured against.
     std::vector<char> deltaOk;
     std::vector<GfMatrix4d> deltaBase;
+    std::vector<GfMatrix4d> intervening;
+    std::vector<char> interveningReset;
 
     bool operator==(const RigExecStageFrameSeeds &o) const {
-        return xformBase == o.xformBase && xformFrames == o.xformFrames &&
+        return requiredStageFramesAdmission == o.requiredStageFramesAdmission &&
+               xformBase == o.xformBase && xformFrames == o.xformFrames &&
                nativeOk == o.nativeOk && nativeFrames == o.nativeFrames &&
-               deltaOk == o.deltaOk && deltaBase == o.deltaBase;
+               deltaOk == o.deltaOk && deltaBase == o.deltaBase &&
+               intervening == o.intervening && interveningReset == o.interveningReset;
     }
     bool operator!=(const RigExecStageFrameSeeds &o) const {
         return !(*this == o);
     }
 };
 
-/// Why RigExecBakedProgram::Run gave a generation back, if it did.
-///
-/// The caller answers each cause differently (unified-program spec rule
-/// D3), because the dynamic walk does different things at the three points:
-///   * StageFrames: a constraint target's stage transform could not be
-///     resolved. The walk gives up at exactly that point with the same line,
-///     so the pose Run leaves -- invalid, carrying the settle's lines, the
-///     property chains' lines and the target's -- IS the walk's answer and is
-///     published as it stands. The program stays: nothing the region owns was
-///     touched, and the next run runs everything once.
-///   * Step: a step gave the generation back mid-region -- a solver commit
-///     whose descendant's closest candidate published nothing. The walk
-///     re-picks the closest candidate that did publish and returns a valid
-///     pose, so the caller drops the program and asks the walk.
-///   * Publish: a joint's final or rest frame is unusable at publication. The
-///     walk keeps such a joint on its rest chain, so this too is the walk's to
-///     answer.
-enum class RigExecBakedBail {
-    None,
-    StageFrames,
-    Step,
-    Publish,
-};
+enum class RigExecBakedBail { None, StageFrames, Step, Publish };
 
 /// One compiled epoch, flattened.
 class RigExecBakedProgram {
@@ -388,10 +247,7 @@ public:
 
     /// Runs the whole program at \p time and publishes into \p pose.
     ///
-    /// Returns false when the program could not complete, and GetLastBail
-    /// then says why: after a StageFrames bail \p pose is the generation's
-    /// (invalid) answer, after any other the caller falls back to the dynamic
-    /// path and drops the program.
+    /// Returns false with an invalid generation when execution cannot complete.
     bool Run(UsdTimeCode time, RigExecRigPose *pose);
 
     /// Asks the next Run to execute every step rather than the closure of
@@ -400,10 +256,9 @@ public:
     /// what changes is that every step's reads happen in that run, which a
     /// bake capturing them needs. Const because the evaluator hands its
     /// program out const; the flag is the only thing it touches.
-    void RequestFullRun() const { _fullRunRequested = true; }
-
-    /// Why the last Run returned false; None after one that returned true.
     RigExecBakedBail GetLastBail() const { return _lastBail; }
+
+    void RequestFullRun() const { _fullRunRequested = true; }
 
     /// Samples the stage-frame prologue's reads at \p time into \p seeds.
     ///
@@ -413,10 +268,10 @@ public:
     /// program's per-frame state, which is untouched. UI thread only: the
     /// reader walks the live stage.
     ///
-    /// False, naming the target, when a constraint target does not resolve
-    /// at all; live gives the generation back at the same point, so the
-    /// frame has no frozen job and evaluates live. Native and delta misses
-    /// record per entry, as live.
+    /// An unavailable required target records typed refusal and the successful
+    /// ordered prefix. The worker runs independent preparation and refuses
+    /// publication at the same boundary as live. Native and delta sampling
+    /// occurs only for admitted frames. False reports malformed arguments.
     bool SampleStageFrameSeeds(UsdTimeCode time,
                                RigExecStageFrameSeeds *seeds,
                                std::string *error = nullptr) const;
@@ -541,6 +396,9 @@ public:
     /// upstream layer (RigExecResolvedInputs::GetAttributeOverStageLayer).
     /// A standing value that did not move costs nothing.
     void SetUpstreamInputs(const std::vector<RigExecValueOverride> &inputs);
+    /// Owner-thread handover of successfully recomputed sparse layout handles.
+    /// Call only after Run has joined; frozen workers never access this cache.
+    void AdoptBlendSampleLayouts(RigExecBlendSampleCache *cache);
 
     /// Path -> value type of every attribute a read the bake lists as an
     /// input slot walks: the hops of every registered binding, of the
@@ -580,22 +438,7 @@ public:
 
     /// Takes over \p previous's persistent geometry state.
     ///
-    /// The program's geometry revisions are the dynamic path's `_liveGraphs`
-    /// with the VdfNetwork baked away: each holds the packet it last ran with
-    /// and the points it produced, so an unchanged input re-publishes instead
-    /// of re-running the kernel. That state belongs to the RIG, not to one
-    /// program -- the dynamic path keeps its nodes across a value edit and
-    /// across a recompile, reconnecting whichever survive -- and a program
-    /// that started over would re-run every kernel and publish
-    /// `moverGraphRevisionsCreated` / `SchedulesBuilt` and the mover graph
-    /// diagnostic for nodes that were never rebuilt.
-    ///
-    /// Matched exactly the way the dynamic walk matches VdfNetwork nodes: by
-    /// chain target, then by (mover, operation) identity, with the schedule
-    /// counted as rebuilt only when the identity SEQUENCE of a chain changed.
-    /// A revision with no match is new and is reported as created.
-    ///
-    /// \p previous is left empty of the state it handed over.
+    /// Retains compatible native geometry revision state across an epoch rebuild.
     void AdoptGeometryStateFrom(RigExecBakedProgram &previous);
 
     /// Drops every reference the program holds that keeps the stage alive:
@@ -628,13 +471,23 @@ private:
     // Test-only; reached through RigExecBakedProgramTesting
     // (bakedProgramImpl.h), because only this class is the evaluator's friend.
     friend struct RigExecBakedProgramTesting;
-    static void _SetWalkVolumePlacements(RigExecRigEvaluator *evaluator,
-                                         const GfMatrix4d &matrix);
-    static bool _EvaluateChainsDetached(RigExecRigEvaluator *evaluator,
-                                        UsdTimeCode time,
-                                        std::map<SdfPath, VtValue> *results,
-                                        std::vector<std::string> *lines);
-    static const void *_ChainMemo(const RigExecRigEvaluator &evaluator);
+    friend class RigExecRigEvaluator;
+    /// Project the common compiler's exact SCC members to authored operation
+    /// owners for the evaluator's public compile report. Neutral Build is unchanged.
+    std::map<SdfPath, std::string> _GetCycleSkips(
+        const std::map<SdfPath, SdfPath> &switchOwners) const;
+    /// Only the synchronous compile caller can offer its local capture.
+    static std::unique_ptr<RigExecBakedProgram> _BuildWithSceneCapture(
+        RigExecRigEvaluator *evaluator, std::vector<std::string> *reasons,
+        const RigExecSceneDescriptors *scene, const UsdStageWeakPtr &sceneStage,
+        uint64_t sceneSerial);
+    static std::unique_ptr<RigExecBakedProgram> _BuildWithSceneCaptureAttempt(
+        RigExecRigEvaluator *, std::vector<std::string> *,
+        const RigExecSceneDescriptors *, const UsdStageWeakPtr &, uint64_t,
+        const std::set<SdfPath> &excludedPoseWriters,
+        const std::set<SdfPath> &excludedSolverBodies,
+        const RigExecOpExclusionProof &exclusionProof,
+        const std::map<SdfPath, std::string> &cycleSkipReasons);
     /// Binds \p evaluator's property chains into \p program's head tier
     /// (bakedProperties.cpp): chains, records, walks, head leaves and
     /// override slots. Build only.
@@ -643,9 +496,9 @@ private:
 
     explicit RigExecBakedProgram(std::unique_ptr<RigExecBakedProgramImpl> impl);
     std::unique_ptr<RigExecBakedProgramImpl> _impl;
-    RigExecBakedBail _lastBail = RigExecBakedBail::None;
     /// RequestFullRun's one-shot flag, consumed by the next Run.
     mutable bool _fullRunRequested = false;
+    RigExecBakedBail _lastBail = RigExecBakedBail::None;
 };
 
 }  // namespace rigExec

@@ -163,6 +163,10 @@ TF_DEFINE_PRIVATE_TOKENS(
 );
 
 namespace {
+const TfToken _avarOrderXYZ("XYZ");
+const GfVec3d _avarAxes[3] = {
+    GfVec3d(1, 0, 0), GfVec3d(0, 1, 0), GfVec3d(0, 0, 1)};
+
 
 std::array<GfVec3d, 4>
 _IdentityLandmarks()
@@ -203,8 +207,7 @@ _ComposeAvars(
     double tx, double ty, double tz, double sx, double sy, double sz,
     double rx, double ry, double rz, double rspin, const TfToken &order)
 {
-    static const GfVec3d axes[3] = {
-        GfVec3d(1, 0, 0), GfVec3d(0, 1, 0), GfVec3d(0, 0, 1)};
+    const auto &axes = _avarAxes;
     const double angles[3] = {rx, ry, rz};
     std::string sequence = order.GetString();
     if (sequence.size() != 3) {
@@ -287,7 +290,7 @@ _JointRestSpace(const VdfContext &ctx)
         _ScalarInput(ctx, _tokens->restRx, 0),
         _ScalarInput(ctx, _tokens->restRy, 0),
         _ScalarInput(ctx, _tokens->restRz, 0),
-        0.0, TfToken("XYZ"));
+        0.0, _avarOrderXYZ);
     GfMatrix4d rest = local * (space ? *space : GfMatrix4d(1.0));
     // Rest spaces are always orthonormalized (Ir contract). Orthonormalize
     // the local factor BEFORE the parent multiply: the parent's frame is
@@ -337,7 +340,7 @@ _ComputeDefaultSpace(const VdfContext &ctx)
         _ScalarInput(ctx, _tokens->defaultTz, 0), 1, 1, 1,
         _ScalarInput(ctx, _tokens->defaultRx, 0),
         _ScalarInput(ctx, _tokens->defaultRy, 0),
-        _ScalarInput(ctx, _tokens->defaultRz, 0), 0, TfToken("XYZ"));
+        _ScalarInput(ctx, _tokens->defaultRz, 0), 0, _avarOrderXYZ);
     return offset * rest * parentRest.GetInverse() *
            (parentDefault ? *parentDefault : GfMatrix4d(1.0));
 }
@@ -392,7 +395,7 @@ _ComputeXformablePointFrame(const VdfContext &ctx, bool readScaleAvars)
         _ScalarInput(ctx, _tokens->avarRy, 0) * sign[1],
         _ScalarInput(ctx, _tokens->avarRz, 0) * sign[2],
         _ScalarInput(ctx, _tokens->avarRspin, 0) * sign[0],
-        order ? *order : TfToken("XYZ"));
+        order ? *order : _avarOrderXYZ);
     return _FrameFromMatrix(
         avars * (defaultSpace ? *defaultSpace : GfMatrix4d(1.0)) *
         (parentDefault ? parentDefault->GetInverse() : GfMatrix4d(1.0)) *

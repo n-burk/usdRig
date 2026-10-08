@@ -1,17 +1,5 @@
-// RigExec compiled mover graph (spec §7.2).
-// The per-(mover, target) revision chain is a VdfNetwork built in memory from
-// the relationships already authored on the user's stage. Nothing is authored
-// anywhere to express it: no generated prims, no compiler, no derived stage, and
-// no schema types for the revisions themselves. Compiled nodes live only on the
-// graph side.
-// This is what the write-set authoring model always meant. A mover says "I
-// write this target" and its namespace position says "in this order"; the chain
-// of revisions that implies is dataflow, and dataflow is what a VdfNetwork is
-// for. Materializing it as USD prims required a second stage to hold them, cost
-// a recomposition, and put engine machinery on the authoring surface -- while
-// still not being able to express the optimizations the graph form makes
-// natural (splitting one revision across face sets, cloning legs, per-element
-// masks driving sparse recomputation).
+#include "rigExecGraph/blendLayout.h"
+// Compiled revision bindings, typed leaves and pure revision kernels.
 #ifndef RIGEXEC_MOVER_GRAPH_H
 #define RIGEXEC_MOVER_GRAPH_H
 
@@ -20,13 +8,13 @@
 
 #include "rigExecMath/simdKernels.h"
 #include "rigExecMath/solvers.h"
+#include "rigExecMath/surfaceKernelCache.h"
+#include "rigExecMath/wireKernelCache.h"
 
 #include "pxr/base/tf/span.h"
 #include "pxr/base/vt/array.h"
 #include "pxr/base/vt/value.h"
 #include "pxr/base/gf/vec3f.h"
-#include "pxr/exec/vdf/maskedOutput.h"
-#include "pxr/exec/vdf/network.h"
 #include "pxr/usd/sdf/path.h"
 #include "pxr/usd/usd/object.h"
 #include "pxr/usd/usd/attribute.h"
@@ -339,16 +327,40 @@ class RigExecResolvedInputs
 public:
     /// Records a property chain's result for \p path.
     void SetProperty(const SdfPath &path, const VtValue &value) {
+        _erased.erase(path);
         _values[path] = value;
     }
 
     /// Forgets \p path, so a read of it goes back to the stage.
-    void ClearProperty(const SdfPath &path) { _values.erase(path); }
+    void ClearProperty(const SdfPath &path) {
+        _values.erase(path);
+        if (_base && _base->Find(path)) _erased.insert(path);
+    }
+
+    /// Consumer-local overlay over an immutable source layer. The borrowed
+    /// base must outlive this overlay; clones/shadows detach or reset it.
+    void SetChainedBase(const RigExecResolvedInputs *base) {
+        _values.clear(); _erased.clear();
+        _base = base == this ? nullptr : base;
+        if (_base) _cache = _base->_cache;
+    }
+
+    /// Cold snapshot operations own their effective values independently.
+    RigExecResolvedInputs DetachedCopy() const {
+        RigExecResolvedInputs copy;
+        if (_base) copy = _base->DetachedCopy();
+        for (const auto &path : _erased) copy._values.erase(path);
+        for (const auto &entry : _values) copy._values[entry.first] = entry.second;
+        copy._cache = _cache;
+        return copy;
+    }
 
     /// The resolved value for \p path, or null to read the stage.
     const VtValue *Find(const SdfPath &path) const {
         const auto it = _values.find(path);
-        return it == _values.end() ? nullptr : &it->second;
+        if (it != _values.end()) return &it->second;
+        if (_erased.count(path)) return nullptr;
+        return _base ? _base->Find(path) : nullptr;
     }
 
     /// Typed convenience: true when \p path resolved to a \p T.
@@ -407,10 +419,10 @@ public:
         // read skips the path hash; the path itself is spelled once, because
         // the cache lookup below used to spell it a second time.
         if (attribute) {
-            const bool checkOverlay = !_values.empty();
+            const bool checkOverlay = !_values.empty() || (_base && !_base->IsEmpty());
             const SdfPath attrPath =
                 (checkOverlay || _cache) ? attribute.GetPath() : SdfPath();
-            if (!checkOverlay || !_values.count(attrPath)) {
+            if (!checkOverlay || !Find(attrPath)) {
                 if (_cache) {
                     bool handled = false;
                     const bool got = _cache->Read(
@@ -545,13 +557,17 @@ public:
         return false;
     }
 
-    bool IsEmpty() const { return _values.empty(); }
-    size_t GetSize() const { return _values.size(); }
+    bool IsEmpty() const { return GetSize() == 0; }
+    size_t GetSize() const {
+        if (!_base) return _values.size();
+        // This cold inspection is not used by consumer typed lookup.
+        return DetachedCopy()._values.size();
+    }
     /// Whether \p other holds the same values at the same paths.
     bool HasSameValues(const RigExecResolvedInputs &other) const {
-        return _values == other._values;
+        return DetachedCopy()._values == other.DetachedCopy()._values;
     }
-    void Clear() { _values.clear(); }
+    void Clear() { _values.clear(); _erased.clear(); _base = nullptr; }
 
     /// Attaches the owner's static-input cache. Not owned, and not cleared
     /// by Clear(): this object is emptied every generation, while the cache
@@ -560,64 +576,9 @@ public:
 
 private:
     std::unordered_map<SdfPath, VtValue, SdfPath::Hash> _values;
+    std::set<SdfPath> _erased;
+    const RigExecResolvedInputs *_base = nullptr;
     RigExecStaticInputCache *_cache = nullptr;
-};
-
-/// What each chain held at each point in the walk.
-///
-/// A chain is a sequence of revisions, and until now only its two ends were
-/// nameable -- the authored base going in and the final value coming out.
-/// Everything between them existed for a moment inside the evaluation loop
-/// and was dropped. A read phase that names a prim needs exactly one of those
-/// intermediate values, so they are kept: one entry per (target, mover) as
-/// the chain is built, plus the final.
-///
-/// Cheap by construction. Chains are short, the values are already
-/// materialized to publish the result anyway, and VtValue's array backing is
-/// copy-on-write -- so recording a revision costs a refcount, not a copy of
-/// the geometry.
-class RigExecChainSnapshots
-{
-public:
-    /// Records \p value as \p target stood immediately after \p afterMover.
-    void Record(const SdfPath &target, const SdfPath &afterMover,
-                const VtValue &value);
-
-    /// Records \p target's value after its whole chain.
-    void RecordFinal(const SdfPath &target, const VtValue &value);
-
-    /// The value of \p target at \p phase, or null when nothing was recorded.
-    ///
-    /// \p readerMover is the mover doing the reading, needed by Preceding.
-    /// An AtPrim phase naming a grouping Scope resolves to the LAST recorded
-    /// revision at or beneath it, which is what post-order makes that Scope
-    /// mean.
-    const VtValue *Lookup(
-        const SdfPath &target, const RigExecReadPhase &phase,
-        const SdfPath &readerMover) const;
-
-    /// Takes over everything recorded in \p other, appending its revisions
-    /// after any this already holds for the same target.
-    ///
-    /// One chain's records are written by whoever walked that chain and are
-    /// folded in here afterwards, in chain order. That is what lets the walk
-    /// hand a task its own store instead of this one: a task records into a
-    /// store nobody else can see, and the walk order -- not the order the
-    /// tasks happened to finish in -- decides what this ends up holding.
-    void Merge(RigExecChainSnapshots &&other);
-
-    void Clear() { _chains.clear(); }
-    bool IsEmpty() const { return _chains.empty(); }
-
-private:
-    struct _Chain {
-        /// (mover, value) in walk order. A vector, not a map: Preceding and
-        /// the Scope rule are both positional questions.
-        std::vector<std::pair<SdfPath, VtValue>> revisions;
-        VtValue final;
-        bool hasFinal = false;
-    };
-    std::map<SdfPath, _Chain> _chains;
 };
 
 /// Where one revision reads its side inputs from.
@@ -644,7 +605,16 @@ struct RigExecBlendSampleBinding {
     }
 };
 
+struct RigExecMoverHandler;
+struct RigExecRevisionLeafKey;
+
 struct RigExecRevisionBinding {
+    const RigExecMoverHandler *handler = nullptr;
+    TfToken externalSchema;
+    VtValue externalCompileData;
+    /// Existence/type/connection/subtree facts used by the compile manifest.
+    std::vector<SdfPath> externalStructure;
+    std::vector<RigExecRevisionLeafKey> externalInputs;
     SdfPath moverPath;        ///< the authored mover
     SdfPath target;           ///< canonical exact write target
     SdfPath transform;        ///< computeMatrix provider (matrix)
@@ -841,6 +811,23 @@ public:
     std::shared_ptr<const RigExecBlendSampleLayout> Resolve(
         const SdfPath &sample,
         const std::function<bool(RigExecBlendSampleLayout *)> &build);
+
+    /// Adopt after the evaluator's Run joins, with stage edits and evaluator
+    /// calls serialized on its owner thread. Equal layouts retain identity.
+    std::shared_ptr<const RigExecBlendSampleLayout> AdoptExclusive(
+        const SdfPath &sample,
+        std::shared_ptr<const RigExecBlendSampleLayout> layout, bool refused) {
+        if (refused) { _entries[sample]=nullptr; return nullptr; }
+        if (!layout) return nullptr;
+        const auto active=_entries.find(sample);
+        if (active!=_entries.end() && active->second &&
+            (active->second==layout || RigExecSameBlendLayout(*active->second,*layout))) return active->second;
+        const auto candidate=_candidates.find(sample);
+        if (candidate!=_candidates.end() && candidate->second && RigExecSameBlendLayout(*candidate->second,*layout))
+            layout=candidate->second;
+        _entries[sample]=layout;
+        return layout;
+    }
 
     void Clear() {
         std::lock_guard<std::mutex> lock(_mutex);
@@ -1170,7 +1157,7 @@ struct RigExecWireDriverFrame {
 /// A wire asking for neither keeps the plain measurement bit for bit. The
 /// runtime twin is the `measured` lambda in RrGeoAssembleWire.
 inline GfMatrix4d
-RigExecMeasureWireDriver(GfMatrix4d transform, GfMatrix4d space,
+RigExecMeasureWireDriver(const GfMatrix4d &transform, const GfMatrix4d &space,
                          const RigExecWireDriverFrame &frame,
                          GfVec3d *spaceScale)
 {
@@ -1182,8 +1169,11 @@ RigExecMeasureWireDriver(GfMatrix4d transform, GfMatrix4d space,
         k != GfVec3d(1.0, 1.0, 1.0)) {
         GfMatrix4d unscale(1.0);
         unscale.SetScale(GfVec3d(1.0 / k[0], 1.0 / k[1], 1.0 / k[2]));
-        transform = transform * unscale;
-        space = space * unscale;
+        const GfMatrix4d unscaledTransform = transform * unscale;
+        const GfMatrix4d unscaledSpace = space * unscale;
+        return frame.posedDelta
+            ? RigExecMeasureInPosedSpace(unscaledTransform, unscaledSpace)
+            : RigExecMeasureInSpace(unscaledTransform, unscaledSpace);
     }
     return frame.posedDelta ? RigExecMeasureInPosedSpace(transform, space)
                             : RigExecMeasureInSpace(transform, space);
@@ -1197,8 +1187,8 @@ RigExecMeasureWireDriver(GfMatrix4d transform, GfMatrix4d space,
 /// polygon on output; \p auxPoints receives the posed polygon. A posed wire
 /// with no carry has its displacement multiplied by the space's scale; one
 /// with a carry has both polygons carried instead (RigExecCarryWireCurves).
-/// Shared by the live assembler, the frozen replay and nothing else, so the
-/// two USD-side paths cannot drift; the runtime restates it.
+/// Shared by native and frozen parameter assembly; runtime mirrors the same
+/// measurement and per-call selected-pair cache.
 inline void
 RigExecPoseWireDrivers(const std::vector<GfMatrix4d> &table, size_t t,
                        size_t s, size_t bt, const VtFloatArray &weights,
@@ -1211,15 +1201,41 @@ RigExecPoseWireDrivers(const std::vector<GfMatrix4d> &table, size_t t,
     const auto pick = [](size_t count, size_t j) {
         return count <= 1 ? size_t(0) : j % count;
     };
+    // One driver/space pair serves most CVs, so each selected pair's
+    // measured matrix and scale compute once per call: the measurement
+    // inverts the space, and a linear scan over the few distinct pairs
+    // is nothing beside that. Shared by the base-motion and driver
+    // arms; spaceless pairs are a table read and skip the cache.
+    struct _MeasuredWirePair {
+        size_t driver;
+        size_t space;
+        GfMatrix4d m;
+        GfVec3d scale;
+    };
+    std::vector<_MeasuredWirePair> measuredCache;
     const auto measured = [&](size_t first, size_t count, size_t spaceFirst,
                               size_t spaceCount, size_t j,
                               GfVec3d *spaceScale) {
-        GfMatrix4d m = table[first + pick(count, j)];
-        if (spaceCount > 0) {
-            m = RigExecMeasureWireDriver(
-                m, table[spaceFirst + pick(spaceCount, j)], frame,
-                spaceScale);
+        const size_t ti = first + pick(count, j);
+        if (spaceCount == 0) {
+            return table[ti];
         }
+        const size_t si = spaceFirst + pick(spaceCount, j);
+        for (const _MeasuredWirePair &hit : measuredCache) {
+            if (hit.driver == ti && hit.space == si) {
+                if (spaceScale) {
+                    *spaceScale = hit.scale;
+                }
+                return hit.m;
+            }
+        }
+        GfVec3d scale(1.0, 1.0, 1.0);
+        GfMatrix4d m = RigExecMeasureWireDriver(
+            table[ti], table[si], frame, &scale);
+        if (spaceScale) {
+            *spaceScale = scale;
+        }
+        measuredCache.push_back({ti, si, m, scale});
         return m;
     };
     const bool carried = frame.posedPoints && frame.carry;
@@ -1274,7 +1290,7 @@ bool RigExecSimdEnabled();
 /// Constructs this file's token tables on the calling thread. Build calls it
 /// so that their lazy construction, which builds tokens from text, never runs
 /// first on a worker.
-void RigExecMoverGraphTouchTokens();
+void RigExecRevisionKernelTouchTokens();
 
 bool RigExecApplyMatrixKernel(const RigExecMoverParameters &p,
                               std::vector<GfVec3f> *pts, bool useSimd);
@@ -1421,7 +1437,8 @@ bool RigExecApplySkinKernelWithTransforms(
 /// folded in, and the rigs that would show a disagreement are the ones no
 /// fixture happened to have.
 bool RigExecApplyBlendShapeKernel(const RigExecMoverParameters &p,
-                                  std::vector<GfVec3f> *pts);
+                                  std::vector<GfVec3f> *pts,
+    RigExecSurfaceKernelCache<GfVec3f,GfVec3d> *cache = nullptr);
 
 /// Recomputes the derived property \p op maintains -- vertex normals or an
 /// extent -- from \p p and blends it over \p pts in place, returning false
@@ -1438,6 +1455,10 @@ bool RigExecApplyBlendShapeKernel(const RigExecMoverParameters &p,
 bool RigExecApplyDerivedKernel(RigExecRevisionOp op,
                                const RigExecMoverParameters &p,
                                std::vector<GfVec3f> *pts);
+/// Borrow authored output without first copying it; failed calls leave result intact.
+bool RigExecApplyDerivedKernel(RigExecRevisionOp op,
+    const RigExecMoverParameters &p,const GfVec3f *authored,size_t authoredCount,
+    std::vector<GfVec3f> *result);
 
 /// The bases of a sparse-envelope wire revision, memoized by content.
 ///
@@ -1475,6 +1496,9 @@ private:
     struct _Entry;
     std::unordered_map<uint64_t, std::shared_ptr<const _Entry>> _entries;
     size_t _builds = 0;
+    std::shared_ptr<const _Entry> _last;
+public:
+    RigExecWireRestCache<GfVec3f,GfVec2f> restEvaluations;
 };
 
 /// Applies \p op to \p pts in place, returning false when the packet fails
@@ -1494,7 +1518,8 @@ private:
 bool RigExecApplyRevisionKernel(RigExecRevisionOp op,
                                 const RigExecMoverParameters &p,
                                 std::vector<GfVec3f> *pts, bool useSimd,
-                                RigExecWireBasisCache *wireBasis);
+                                RigExecWireBasisCache *wireBasis,
+    RigExecSurfaceKernelCache<GfVec3f,GfVec3d> *cache = nullptr);
 
 /// Runs one revision of \p op over \p pts in place, envelope included: the
 /// packet check, the full-strength fast path, RigExecApplyRevisionKernel and
@@ -1509,7 +1534,16 @@ bool RigExecApplyRevisionKernel(RigExecRevisionOp op,
 bool RigExecRunRevisionKernel(RigExecRevisionOp op,
                               const RigExecMoverParameters &p,
                               std::vector<GfVec3f> *pts, bool useSimd,
-                              RigExecWireBasisCache *wireBasis);
+                              RigExecWireBasisCache *wireBasis,
+    RigExecSurfaceKernelCache<GfVec3f,GfVec3d> *cache = nullptr);
+
+namespace geometryDetail {
+/// Internal owned staging only: failure may modify output; the caller must
+/// discard it and retain the preceding published version. Never borrowed points.
+bool RunDiscardableRevisionKernel(RigExecRevisionOp,const RigExecMoverParameters &,
+    std::vector<GfVec3f> *,bool,RigExecWireBasisCache *,
+    RigExecSurfaceKernelCache<GfVec3f,GfVec3d> *);
+}
 
 /// Whether \p envelope makes the "apply once" blend the identity, so the
 /// copy of the preceding revision, the resolved envelope array and the blend
@@ -1559,7 +1593,21 @@ struct RigExecProviderValues {
     /// Bound computeWeightPacket, or null to use inputs:defaultWeight.
     const RigExecWeightPacket *weights = nullptr;
     const RigExecPointFrameArray *driverFrames = nullptr;
-    std::vector<GfVec3f> basePoints;   ///< authored base of the target
+    std::vector<GfVec3f> basePoints;   ///< owning stage/reference adapter form
+    const GfVec3f *borrowedBasePoints = nullptr;
+    size_t borrowedBaseCount = 0;
+    bool borrowsBasePoints = false;
+    const GfVec3f *BasePointData() const {
+        return borrowsBasePoints ? borrowedBasePoints : basePoints.data();
+    }
+    size_t BasePointCount() const {
+        return borrowsBasePoints ? borrowedBaseCount : basePoints.size();
+    }
+    void CopyBasePoints(std::vector<GfVec3f> *out) const {
+        const size_t n = BasePointCount();
+        if (n) out->assign(BasePointData(),BasePointData()+n);
+        else out->clear();
+    }
     std::vector<GfVec3f> blendDeltas;  ///< summed channel deltas
     /// Cache for a skin mover's epoch-fixed per-point layout. Null re-reads
     /// and re-validates the arrays every call, which is what a layout that
@@ -1629,7 +1677,8 @@ bool RigExecRunProjectorTarget(
     const RigExecProjectorReads &reads,
     const std::vector<GfVec3f> &basePoints,
     const std::vector<GfVec3f> &finalPoints, GfMatrix4d *matrix,
-    std::vector<std::string> *diagnostics);
+    std::vector<std::string> *diagnostics,
+    RigExecSurfaceKernelCache<GfVec3f,GfVec3d> *cache = nullptr);
 
 /// RigExecReadProjectorTarget then RigExecRunProjectorTarget: what the
 /// dynamic walk and the baked program both call.
@@ -1659,6 +1708,9 @@ bool RigExecSumBlendChannels(
     const std::vector<RigExecBlendChannel> &channels,
     const std::vector<GfVec3f> &base,
     std::vector<GfVec3f> *deltas);
+bool RigExecSumBlendChannels(
+    const std::vector<RigExecBlendChannel> &channels,
+    const GfVec3f *base, size_t baseCount, std::vector<GfVec3f> *deltas);
 
 /// Assembles any revision's parameter packet without a derived stage.
 ///
@@ -1679,6 +1731,7 @@ RigExecMoverParameters RigExecAssembleParameters(
 /// What an external mover's assembleExternal answered: the plugin's opaque
 /// payload, compared by its own operator==.
 struct RigExecExternalPayload {
+    const RigExecMoverHandler *handler = nullptr;
     /// The mover's schema type, which names its handler.
     TfToken schema;
     /// A handler with an assembleExternal was found and it returned true.
@@ -1691,8 +1744,8 @@ struct RigExecExternalPayload {
 };
 
 /// The External arm's plugin call, shared by RigExecAssembleParameters and
-/// the baked prologue: finds the handler for the prim's schema and asks it
-/// for the payload at \p time. Reads the stage: owning thread only.
+/// the sampled boundary: reads declared leaves and calls the immutable
+/// compiled handler. Reads the stage: owning thread only.
 void RigExecAssembleExternalPayload(const UsdPrim &moverPrim,
                                     const RigExecRevisionBinding &binding,
                                     const RigExecProviderValues &values,
@@ -1716,6 +1769,8 @@ enum class RigExecRevisionLeafType : uint8_t {
     /// A shader dial as a double: a float attribute read as a float and
     /// widened, any other read as a double (RigExecReadProjectorTarget).
     Dial,
+    Double,
+    Vec3f,
 };
 
 /// When a revision leaf is read: at the evaluated time, or at Default (an
@@ -1796,6 +1851,10 @@ struct RigExecRevisionLeafKey {
     RigExecRevisionLeafTime time = RigExecRevisionLeafTime::AtTime;
     RigExecRevisionLeafFlavour flavour = RigExecRevisionLeafFlavour::Raw;
     VtValue fallback;
+    bool operator==(const RigExecRevisionLeafKey &o) const {
+        return path == o.path && type == o.type && time == o.time &&
+            flavour == o.flavour && fallback == o.fallback;
+    }
 };
 
 /// The reads of one revision (or weight object), in declaration order, and
@@ -1808,6 +1867,8 @@ struct RigExecRevisionLeafDecl {
     /// The first of a deltaMush's or wrinkle's scalar inputs, declared in
     /// the stage assembler's order, or -1.
     int scalarBegin = -1;
+    /// First declared external input, in handler declaration order.
+    int externalBegin = -1;
     /// The first of a ShaderDials target's dials, one key per
     /// binding.shaderDials entry in its order, or -1.
     int dialBegin = -1;
@@ -1884,8 +1945,8 @@ struct RigExecRevisionLeafView {
     /// declare is appended by attribute name (a test's report); the read
     /// answers the site's fallback.
     std::vector<std::string> *missing = nullptr;
-    /// An External revision's payload leaf, sampled where the plugin may
-    /// read the stage. Null answers an invalid packet.
+    /// Legacy payload transport retained for callers during API4 migration.
+    /// API4 assembly reads declared input leaves directly.
     const RigExecExternalPayload *external = nullptr;
 };
 
@@ -1911,84 +1972,6 @@ bool RigExecExternalPayloadIsRead(const RigExecRevisionLeafView &leaves,
 void RigExecReadProjectorTargetFromLeaves(
     RigExecRevisionOp op, const RigExecRevisionBinding &binding,
     const RigExecRevisionLeafView &leaves, RigExecProjectorReads *reads);
-
-/// A compiled mover graph.
-///
-/// Build order mirrors the composed mover-stack walk: descendants before their
-/// mover parent, sibling branches bottom-to-top (reverse composed child order).
-/// Seed a target's chain with its authored base points, then append one revision
-/// per mover that writes it. Each append returns the new chain head, which is
-/// the input to the next revision and, at the end, the published result.
-class RigExecMoverGraph
-{
-public:
-    RigExecMoverGraph();
-    ~RigExecMoverGraph();
-
-    RigExecMoverGraph(const RigExecMoverGraph &) = delete;
-    RigExecMoverGraph &operator=(const RigExecMoverGraph &) = delete;
-
-    /// Seeds a chain with the authored base points of \p target.
-    VdfMaskedOutput AddPointSource(
-        const SdfPath &target, const VtVec3fArray &points);
-
-    /// Appends one revision reading \p previous.
-    ///
-    /// \p parameters and \p status are the mover's own resolved packet and
-    /// status. They arrive as values rather than as scene lookups because the
-    /// resolution that used to be authored as rigExec:resolved* relationships
-    /// is just a build-time choice of which output to read.
-    VdfMaskedOutput AddRevision(
-        RigExecRevisionOp op,
-        const VdfMaskedOutput &previous,
-        const RigExecMoverParameters &parameters,
-        const RigExecMoverStatus &status);
-
-    /// Updates an existing source without changing graph topology. Returns
-    /// false for an unknown source or a changed point count; cardinality
-    /// changes require rebuilding that target's chain. Equal values stay clean.
-    bool UpdatePointSource(
-        const VdfMaskedOutput &source, const VtVec3fArray &points);
-
-    /// Updates a revision's packet and status in place. Returns false for an
-    /// unknown revision. Only changed inputs and their dependents are dirtied.
-    bool UpdateRevision(
-        const VdfMaskedOutput &revision,
-        const RigExecMoverParameters &parameters,
-        const RigExecMoverStatus &status);
-
-    /// Splices a retained revision into a new chain. Its operation and point
-    /// cardinality stay fixed; only that revision and its dependents are dirty.
-    bool ReconnectRevision(const VdfMaskedOutput &revision,
-                           const VdfMaskedOutput &previous);
-
-    /// Removes an obsolete revision after surviving consumers are reconnected.
-    bool RemoveRevision(const VdfMaskedOutput &revision);
-
-    /// Evaluates \p output and returns its points. The schedule and executor
-    /// persist between calls, including intermediate revision values, so an
-    /// edit only executes the affected suffix and an unchanged call is cached.
-    VtVec3fArray Evaluate(const VdfMaskedOutput &output) const;
-
-    /// Actual cached execution status, including kernel-time rejection.
-    /// Evaluate the revision or a downstream output before querying it.
-    RigExecMoverStatus GetRevisionStatus(const VdfMaskedOutput &revision) const;
-
-    /// Number of revision nodes currently in the graph (excludes sources).
-    size_t GetRevisionCount() const { return _revisionCount; }
-
-    /// Cumulative counters for inspecting incremental execution behavior.
-    size_t GetRevisionExecutionCount() const;
-    size_t GetScheduleBuildCount() const;
-
-    const VdfNetwork &GetNetwork() const { return _network; }
-
-private:
-    struct _Runtime;
-    VdfNetwork _network;
-    size_t _revisionCount = 0;
-    std::unique_ptr<_Runtime> _runtime;
-};
 
 }  // namespace rigExec
 

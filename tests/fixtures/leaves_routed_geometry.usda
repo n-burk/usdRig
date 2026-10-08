@@ -1,0 +1,75 @@
+#usda 1.0
+(
+ defaultPrim = "Asset"
+ startTimeCode = 1
+ endTimeCode = 10
+)
+def Xform "Asset" {
+ def RigExecRoot "Rig" {
+  uniform token rigExec:partition = "Asset"
+  def Scope "Controls" {
+   def RigExecControl "DriverA" (prepend apiSchemas = ["RigExecControlAPI"]) {
+    matrix4d rest:space = ((1,0,0,0),(0,1,0,0),(0,0,1,0),(0,0,0,1))
+    double avars:ty = 0
+    double avars:ty.timeSamples = {1: 0, 10: 3}
+   }
+   def RigExecControl "DriverB" (prepend apiSchemas = ["RigExecControlAPI"]) {
+    matrix4d rest:space = ((1,0,0,0),(0,1,0,0),(0,0,1,0),(0,0,0,1))
+    double avars:ty = 0
+    double avars:ty.timeSamples = {1: 0, 10: 1.5}
+   }
+   def RigExecControl "Base" (prepend apiSchemas = ["RigExecControlAPI"]) {
+    matrix4d rest:space = ((1,0,0,0),(0,1,0,0),(0,0,1,0),(0,0,0,1))
+    double avars:tx = 0.1
+   }
+   def RigExecControl "Space" (prepend apiSchemas = ["RigExecControlAPI"]) {
+    matrix4d rest:space = ((1,0,0,0),(0,1,0,0),(0,0,1,0),(0,0,0,1))
+   }
+   def RigExecControl "SpaceB" (prepend apiSchemas = ["RigExecControlAPI"]) {
+    matrix4d rest:space = ((1,0,0,0),(0,1,0,0),(0,0,1,0),(0,0,0,1))
+   }
+  }
+  def Scope "Movers" {
+   def RigExecSkinMover "Skin" (prepend apiSchemas = ["RigExecMoverAPI"]) {
+    rel rigExec:moves = </Asset/SkinMesh.points>
+    rel rigExec:influences = </Asset/Rig/Controls/DriverA> (rigExecReadPhase = "final")
+    uniform int rigExec:elementSize = 1
+    uniform token rigExec:skinningMethod = "classicLinear"
+    int[] rigExec:jointIndices = [0,0]
+    float[] rigExec:jointWeights = [1,1]
+    float inputs:defaultWeight = 1
+   }
+   def RigExecCurveMover "Wire" (prepend apiSchemas = ["RigExecMoverAPI"]) {
+    uniform token rigExec:mode = "wire"
+    uniform token rigExec:driverDeltaFrame = "local"
+    uniform token rigExec:pointFrame = "rest"
+    rel rigExec:moves = </Asset/WireMesh.points>
+    rel rigExec:driverCurve = </Asset/Curve>
+    rel rigExec:bindCoordinates = </Asset/Bind.st>
+    rel rigExec:driverTransforms = [</Asset/Rig/Controls/DriverA>,</Asset/Rig/Controls/DriverB>] (rigExecReadPhase = "final")
+    rel rigExec:driverTransformSpaces = [</Asset/Rig/Controls/Space>,</Asset/Rig/Controls/SpaceB>]
+    rel rigExec:driverBaseTransforms = </Asset/Rig/Controls/Base> (rigExecReadPhase = "final")
+    rel rigExec:driverBaseTransformSpaces = </Asset/Rig/Controls/Space>
+    float[] inputs:driverWeights = [1,0.75]
+    float[] inputs:driverBaseWeights = [0.5,0.25]
+    float inputs:dropoffDistance = 8
+    float inputs:defaultWeight = 1
+   }
+  }
+ }
+ def Mesh "SkinMesh" {
+  point3f[] points = [(0.25,0,0),(0.75,0,0)]
+ }
+ def Mesh "WireMesh" {
+  point3f[] points = [(0.25,0,1),(0.75,0,1)]
+ }
+ def Scope "Bind" {
+  float2[] st = [(0.25,1),(0.75,1)]
+ }
+ def NurbsCurves "Curve" {
+  int[] curveVertexCounts = [2]
+  int[] order = [2]
+  double[] knots = [0,0,1,1]
+  point3f[] points = [(0,0,0),(1,0,0)]
+ }
+}

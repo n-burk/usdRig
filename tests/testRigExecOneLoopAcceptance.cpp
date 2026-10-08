@@ -1,35 +1,13 @@
-// Acceptance criteria for one interleaved evaluation loop, measured on the
-// baked program's op trace and op graph (rigExec/bakedTrace.h) as it stands.
-// Each criterion asserts what holds today. Where the criterion cannot hold
-// yet, the test asserts the CURRENT behaviour instead, with a comment naming
-// the migration stage that changes it, so that stage has to update the
-// assertion on purpose rather than drift past it.
-//
-// Fixtures (tests/fixtures):
-//   oneloop_cross_domain.usda  property clamp -> IK/FK blend -> constraint ->
-//                              FK solver -> skin -> preceding sphere -> smooth
-//   oneloop_two_limbs.usda     two limbs, one solver set and one skinned mesh
-//                              each, sharing nothing
-//   oneloop_cycle.usda         IK reads its effector at `final`; a constraint
-//                              moves that effector from a volume weight riding
-//                              the IK's end joint (an intra-pose loop through
-//                              the volume's frame)
-//
-// Criteria:
-//   (a) the trace crosses domains along the fixture's chain;
-//   (b) a limb's geometry does not depend on the other limb's pose;
-//   (c) the preceding weight is computed by an ordinary step after the
-//       revision it measures;
-//   (d) a property drag executes only the forward cone of its readers;
-//   (e) a cycle is rejected: fixture C's intra-pose loop, and fixture A's
-//       volume weight reading its target at `final`, a cross-domain loop.
-// Fixtures A and B are also held to bit-for-bit dynamic/baked parity here,
-// because tests/exampleFixtures.cmake covers examples/ only.
-// argv[1] = path to tests/fixtures.
+// Canonical one-loop acceptance over actual native operations, production
+// lowering and backend runners. Fixtures are the supported oneloop_* scenes.
 #include "rigExec/bakedProgram.h"
 #include "rigExec/bakedProgramImpl.h"
 #include "rigExec/bakedSchedule.h"
 #include "rigExec/bakedTrace.h"
+#include "rigExec/frozenContext.h"
+#include "rigExecBake/bake.h"
+#include "rigExecBinary/format.h"
+#include "rigExecRuntime/runtime.h"
 #include "rigExec/rigEvaluator.h"
 
 #include "pxr/base/plug/registry.h"
@@ -41,12 +19,16 @@
 #include "pxr/usd/usd/primRange.h"
 #include "pxr/usd/usd/relationship.h"
 #include "pxr/usd/usd/stage.h"
+#include "pxr/usd/sdf/types.h"
 
 #include "rigExecOpTrace.h"
 #include "rigExecPoseCompare.h"
 
 #include <algorithm>
 #include <cmath>
+#include <chrono>
+#include <atomic>
+#include <thread>
 #include <cstdint>
 #include <cstdio>
 #include <map>
@@ -69,15 +51,16 @@ static int failures = 0;
         }                                                                  \
     } while (0)
 
+#include "rigExecFileEdit.h"
+#include "rigExecRuntimeDrive.h"
+
 namespace {
 
 const char *const kCrossDomain = "oneloop_cross_domain.usda";
 const char *const kTwoLimbs = "oneloop_two_limbs.usda";
-const char *const kCycle = "oneloop_cycle.usda";
 
 const SdfPath kCrossRig("/CrossAsset/Rig");
 const SdfPath kLimbsRig("/LimbsAsset/Rig");
-const SdfPath kCycleRig("/CycleAsset/Rig");
 
 bool
 SerialExecutor()
@@ -93,8 +76,7 @@ struct LiveRig {
 };
 
 LiveRig
-OpenRig(const std::string &stagePath, const SdfPath &rigPath,
-        RigExecEvaluationMode mode)
+OpenRig(const std::string &stagePath, const SdfPath &rigPath)
 {
     LiveRig rig;
     rig.stage = UsdStage::Open(stagePath);
@@ -102,7 +84,6 @@ OpenRig(const std::string &stagePath, const SdfPath &rigPath,
         return rig;
     }
     rig.evaluator = std::make_unique<RigExecRigEvaluator>(rig.stage, rigPath);
-    rig.evaluator->SetEvaluationMode(mode);
     if (!rig.evaluator->Compile(&rig.errors)) {
         rig.evaluator.reset();
     }
@@ -153,112 +134,6 @@ PrintTrace(const std::string &what,
     }
 }
 
-// --- parity -----------------------------------------------------------------
-
-/// Dynamic and baked answer every frame identically, forwards, backwards
-/// and forwards again, and every baked generation came from the program.
-/// With \p drag set, the drag is held for a second sweep and released for a
-/// third.
-///
-/// Three evaluators over three stages. `checked` runs BakedWithParityCheck:
-/// it executes the program and the dynamic path each generation, counts
-/// their disagreements in bakedParityMismatches, and publishes the DYNAMIC
-/// generation. `baked` runs Baked and publishes the program's own answer,
-/// so ComparePose(reference, baked) is the bit-for-bit dynamic/baked check
-/// on the published pose; ComparePose(reference, checked) checks that two
-/// dynamic evaluations of one rig agree.
-void
-CheckParity(const std::string &fixturesDir, const char *file,
-            const SdfPath &rigPath, const std::vector<double> &frames,
-            const std::vector<RigExecValueOverride> &drag = {})
-{
-    const std::string path = fixturesDir + "/" + file;
-    const UsdStageRefPtr referenceStage = UsdStage::Open(path);
-    const UsdStageRefPtr checkedStage = UsdStage::Open(path);
-    const UsdStageRefPtr bakedStage = UsdStage::Open(path);
-    CHECK(referenceStage && checkedStage && bakedStage);
-    if (!referenceStage || !checkedStage || !bakedStage) return;
-    RigExecRigEvaluator reference(referenceStage, rigPath);
-    RigExecRigEvaluator checked(checkedStage, rigPath);
-    RigExecRigEvaluator baked(bakedStage, rigPath);
-    reference.SetEvaluationMode(RigExecEvaluationMode::Dynamic);
-    checked.SetEvaluationMode(RigExecEvaluationMode::BakedWithParityCheck);
-    baked.SetEvaluationMode(RigExecEvaluationMode::Baked);
-    std::vector<std::string> errors;
-    if (!reference.Compile(&errors) || !checked.Compile(&errors) ||
-        !baked.Compile(&errors)) {
-        ++failures;
-        std::printf("FAIL %s: does not compile\n", file);
-        for (const std::string &error : errors) {
-            std::printf("    %s\n", error.c_str());
-        }
-        return;
-    }
-    CHECK(reference.GetSkippedOperations().empty());
-    for (RigExecRigEvaluator *program : {&checked, &baked}) {
-        std::vector<std::string> reasons;
-        if (!program->IsBakeable(&reasons)) {
-            ++failures;
-            std::printf("FAIL %s: does not bake\n", file);
-            for (const std::string &reason : reasons) {
-                std::printf("    %s\n", reason.c_str());
-            }
-            return;
-        }
-    }
-
-    std::vector<double> sweep = frames;
-    sweep.insert(sweep.end(), frames.rbegin(), frames.rend());
-    sweep.insert(sweep.end(), frames.begin(), frames.end());
-    size_t generations = 0;
-    const auto compareSweep = [&](const char *phase) {
-        for (const double frame : sweep) {
-            const std::string where = std::string(file) + " " + phase +
-                                      " t=" + TfStringify(frame);
-            const RigExecRigPose a = reference.Evaluate(UsdTimeCode(frame));
-            const RigExecRigPose b = checked.Evaluate(UsdTimeCode(frame));
-            const RigExecRigPose c = baked.Evaluate(UsdTimeCode(frame));
-            ++generations;
-            CHECK(a.valid && b.valid && c.valid);
-            if (b.bakedParityMismatches) {
-                ++failures;
-                std::printf("FAIL %s: %zu baked parity mismatch(es)\n",
-                            where.c_str(), b.bakedParityMismatches);
-                for (const std::string &line : b.diagnostics) {
-                    std::printf("    %s\n", line.c_str());
-                }
-            }
-            rigExecTest::ComparePose(&failures, where + " (checked)", a, b);
-            rigExecTest::ComparePose(&failures, where + " (baked)", a, c);
-        }
-    };
-    const auto setDrag = [&](const std::vector<RigExecValueOverride> &o) {
-        for (RigExecRigEvaluator *e : {&reference, &checked, &baked}) {
-            if (o.empty()) {
-                e->ClearInteractiveOverrides();
-            } else {
-                e->SetInteractiveOverrides(o);
-            }
-        }
-    };
-    compareSweep("authored");
-    if (!drag.empty()) {
-        setDrag(drag);
-        compareSweep("dragged");
-        setDrag({});
-        compareSweep("released");
-    }
-    for (const RigExecRigEvaluator *program : {&checked, &baked}) {
-        if (program->GetBakedGenerationCount() != generations) {
-            ++failures;
-            std::printf("FAIL %s: %zu of %zu generation(s) came from the "
-                        "program\n", file, program->GetBakedGenerationCount(),
-                        generations);
-        }
-    }
-    std::printf("  %s: parity over %zu generation(s)\n", file, generations);
-}
-
 std::vector<RigExecValueOverride>
 ClampMaxDrag(float value)
 {
@@ -271,6 +146,7 @@ ClampMaxDrag(float value)
 
 /// The fixture's chain, as program steps.
 struct CrossDomainChain {
+    size_t property = SIZE_MAX, precedingField = SIZE_MAX;
     size_t blendSolve = SIZE_MAX, blendCommit = SIZE_MAX;
     size_t constraint = SIZE_MAX;
     size_t fingerSolve = SIZE_MAX, fingerCommit = SIZE_MAX;
@@ -284,13 +160,20 @@ CrossDomainChain
 FindChain(const std::vector<RigExecOpGraphNode> &graph)
 {
     CrossDomainChain c;
+    c.property = OneStep(graph,"PropertyRevision","/ClampBlendWeight");
+    c.precedingField = OneStep(graph,"WeightField","/FingerVolume");
     c.blendSolve = OneStep(graph, "Solve", "/IKFKBlend");
     c.constraint = OneStep(graph, "Constraint", "/FingerToWrist");
     c.fingerSolve = OneStep(graph, "Solve", "/FingerFK");
     c.armFkSolve = OneStep(graph, "Solve", "/ArmFK");
     c.armIkSolve = OneStep(graph, "Solve", "/ArmIK");
     c.skinFuse = OneStep(graph, "RevisionFuse", "/ArmSmooth/ArmSkin");
-    c.volumePlacements = OneStep(graph, "VolumePlacements", "/FingerVolume");
+    size_t basePlacements=0;
+    for(const auto &node:graph)if(node.kind=="VolumePlacements" && node.label.find("/FingerVolume")!=std::string::npos)
+        if(std::any_of(node.writes.begin(),node.writes.end(),[](const auto &range){return range.domain=="WeightFramesBase";})) {
+            c.volumePlacements=node.step;++basePlacements;
+        }
+    CHECK(basePlacements==1);
     c.volumePacket = OneStep(graph, "WeightPacket", "/FingerVolume");
     // The smooth's own steps: the label is a prefix of the skin's, so take
     // the one that is not the skin's.
@@ -326,7 +209,7 @@ bool
 ChainFound(const CrossDomainChain &c)
 {
     for (const size_t step :
-         {c.blendSolve, c.blendCommit, c.constraint, c.fingerSolve,
+         {c.property, c.precedingField, c.blendSolve, c.blendCommit, c.constraint, c.fingerSolve,
           c.fingerCommit, c.skinFuse, c.volumePlacements, c.volumePacket,
           c.smoothStatic, c.smoothFuse, c.armFkSolve, c.armIkSolve}) {
         if (step == SIZE_MAX) return false;
@@ -337,128 +220,34 @@ ChainFound(const CrossDomainChain &c)
 void
 TestCrossDomainTrace(const std::string &fixturesDir)
 {
-    LiveRig rig = OpenRig(fixturesDir + "/" + kCrossDomain, kCrossRig,
-                          RigExecEvaluationMode::Baked);
-    CHECK(rig.evaluator);
-    if (!rig.evaluator) return;
-    RigExecRigEvaluator &E = *rig.evaluator;
-    const RigExecRigPose pose = E.Evaluate(UsdTimeCode(12.0));
-    CHECK(pose.valid);
-    CHECK(E.GetBakedGenerationCount() == 1);
-    const std::vector<RigExecOpGraphNode> graph = E.GetOpGraph();
-    const std::vector<RigExecOpTraceEntry> trace = E.GetLastOpTrace();
-    Report("(a) op graph", rigExecTest::CheckOpGraphIsAcyclic(graph));
-    Report("(a) trace", rigExecTest::CheckTraceRespectsEdges(trace, graph));
-    PrintTrace("(a) cross-domain first run", trace);
-    const CrossDomainChain c = FindChain(graph);
-    if (!ChainFound(c)) return;
-
-    // One path along the chain: every hop is a graph edge path, so its
-    // completion order holds under either executor.
-    const std::vector<size_t> path = {c.blendSolve,  c.blendCommit,
-                                      c.constraint,  c.fingerSolve,
-                                      c.fingerCommit, c.skinFuse,
-                                      c.smoothStatic, c.smoothFuse};
-    for (size_t i = 0; i < path.size(); ++i) {
-        CHECK(rigExecTest::TraceSeqOf(trace, path[i]) != 0);
-        if (i > 0) {
-            CHECK(rigExecTest::OpGraphForwardCone(graph, {path[i - 1]})
-                      [path[i]]);
-            CHECK(rigExecTest::Precedes(trace, path[i - 1], path[i]));
-        }
-    }
-    // The whole chain: every step on some path from the blend to the
-    // smooth's fuse, so a step later inserted anywhere between them is in
-    // it. Its domains, collapsed in completion order.
-    const std::vector<char> afterBlend =
-        rigExecTest::OpGraphForwardCone(graph, {c.blendSolve});
-    const std::vector<char> beforeSmooth =
-        rigExecTest::OpGraphBackwardCone(graph, {c.smoothFuse});
-    std::vector<char> onChain(graph.size(), 0);
-    size_t chainSize = 0;
-    for (size_t k = 0; k < graph.size(); ++k) {
-        onChain[k] = afterBlend[k] && beforeSmooth[k];
-        if (onChain[k]) {
-            ++chainSize;
-            CHECK(rigExecTest::TraceSeqOf(trace, k) != 0);
-        }
-    }
-    for (const size_t step : path) CHECK(onChain[step]);
-    CHECK(onChain[c.volumePlacements] && onChain[c.volumePacket]);
+    auto rig=OpenRig(fixturesDir+"/"+kCrossDomain,kCrossRig);
+    CHECK(rig.evaluator); if(!rig.evaluator)return;
+    auto &E=*rig.evaluator;
+    CHECK(E.Evaluate(UsdTimeCode(12)).valid);
+    const auto graph=E.GetOpGraph(); const auto trace=E.GetLastOpTrace();
+    Report("(a) native graph",rigExecTest::CheckOpGraphIsAcyclic(graph));
+    Report("(a) completion trace",rigExecTest::CheckTraceRespectsEdges(trace,graph));
+    const auto c=FindChain(graph); if(!ChainFound(c))return;
+    const std::vector<size_t> path={c.property,c.blendSolve,c.blendCommit,c.constraint,
+        c.fingerSolve,c.fingerCommit,c.skinFuse,c.precedingField,c.smoothStatic,c.smoothFuse};
     std::vector<std::string> domains;
-    std::set<std::string> domainSet;
-    for (const RigExecOpTraceEntry &entry : trace) {
-        if (entry.step >= onChain.size() || !onChain[entry.step]) continue;
-        domainSet.insert(entry.domain);
-        if (domains.empty() || domains.back() != entry.domain) {
-            domains.push_back(entry.domain);
+    for(size_t i=0;i<path.size();++i) {
+        CHECK(rigExecTest::TraceSeqOf(trace,path[i])!=0);
+        if(i) {
+            CHECK(rigExecTest::OpGraphForwardCone(graph,{path[i-1]})[path[i]]);
+            CHECK(rigExecTest::Precedes(trace,path[i-1],path[i]));
         }
+        const auto &domain=graph[path[i]].domain;
+        if(domains.empty() || domains.back()!=domain)domains.push_back(domain);
     }
-    // Today the chain reads pose -> weight -> geometry: the property
-    // revision runs in the prologue outside the graph (until S3); the weight
-    // steps are the volume's placements and packet, which read pose only;
-    // and the preceding field is measured inside the smooth's
-    // RevisionStatic, a geometry step (until S4 makes it a WeightField op
-    // between the two revisions). The target adds the property domain
-    // ahead and a weight step between the skin's and the smooth's geometry:
-    // property, pose, ..., geometry, weight, geometry. Completion order
-    // within the domain set is fixed only by program order, so serial only;
-    // the parallel executor is held to the set and the edge orders above.
-    CHECK((domainSet ==
-           std::set<std::string>{"pose", "weight", "geometry"}));
-    if (SerialExecutor()) {
-        CHECK((domains ==
-               std::vector<std::string>{"pose", "weight", "geometry"}));
+    CHECK((domains==std::vector<std::string>{"property","pose","geometry","weight","geometry"}));
+    const auto &B=E.GetBakedProgram()->GetStepGraph();
+    CHECK(B.opGraph.ops.size()==B.steps.size());
+    for(size_t i=0;i<B.steps.size();++i) {
+        CHECK(B.opGraph.ops[i].originalIndex==i);
+        CHECK(B.steps[i].preds.size()==B.opGraph.ops[i].predecessors.size());
     }
-    const auto &unifiedSteps = E.GetBakedProgram()->GetStepGraph().steps;
-    size_t headCount = 0;
-    while (headCount < unifiedSteps.size() && unifiedSteps[headCount].isHead) ++headCount;
-    CHECK(headCount > 0);
-    for (const RigExecOpGraphNode &node : graph) {
-        CHECK(node.domain == "head" || node.domain == "pose" ||
-              node.domain == "weight" || node.domain == "geometry");
-        const auto &steps = E.GetBakedProgram()->GetStepGraph().steps;
-        CHECK((node.domain == "head") == steps[node.step].isHead);
-        CHECK(steps[node.step].isHead ==
-              (node.step < headCount));
-        if (steps[node.step].isHead) CHECK(!steps[node.step].isSource);
-    }
-    CHECK(rigExecTest::CountTraceDomain(trace, "property") == 0);
-
-    // The fixture's weight-domain steps read pose only: neither waits on the
-    // skin revision whose points the preceding field measures (S4). Their
-    // order after the finger commit is an edge; their order before the skin
-    // fuse is program order, so serial only.
-    CHECK(rigExecTest::Precedes(trace, c.fingerCommit, c.volumePacket));
-    CHECK(!rigExecTest::OpGraphForwardCone(graph, {c.skinFuse})
-               [c.volumePacket]);
-    CHECK(!rigExecTest::OpGraphForwardCone(graph, {c.skinFuse})
-               [c.volumePlacements]);
-    if (SerialExecutor()) {
-        // Serial program order: the whole pose half, then the weights, then
-        // the geometry half (barriers B9/B12, retired in S8).
-        CHECK(rigExecTest::Precedes(trace, c.volumePacket, c.skinFuse));
-        size_t lastPose = 0, firstGeometryAfterPose = SIZE_MAX;
-        for (const RigExecOpTraceEntry &entry : trace) {
-            if (entry.domain == "pose") lastPose = entry.seq;
-        }
-        for (const RigExecOpTraceEntry &entry : trace) {
-            const RigExecBakedStep &step =
-                E.GetBakedProgram()->GetStepGraph().steps[entry.step];
-            // A source step runs in the source pass ahead of everything.
-            if (entry.domain == "geometry" && !step.isSource) {
-                firstGeometryAfterPose =
-                    std::min<size_t>(firstGeometryAfterPose, entry.seq);
-            }
-        }
-        CHECK(firstGeometryAfterPose > lastPose);
-    }
-    std::string sequence;
-    for (const std::string &domain : domains) {
-        sequence += (sequence.empty() ? "" : " -> ") + domain;
-    }
-    std::printf("  (a) chain of %zu step(s), domains today: %s\n",
-                chainSize, sequence.c_str());
+    PrintTrace("(a) property -> pose -> geometry -> weight -> geometry",trace);
 }
 
 // --- (b) geometry starts when its own pose is done ---------------------------
@@ -466,125 +255,72 @@ TestCrossDomainTrace(const std::string &fixturesDir)
 void
 TestTwoLimbs(const std::string &fixturesDir)
 {
-    LiveRig rig = OpenRig(fixturesDir + "/" + kTwoLimbs, kLimbsRig,
-                          RigExecEvaluationMode::Baked);
-    CHECK(rig.evaluator);
-    if (!rig.evaluator) return;
-    RigExecRigEvaluator &E = *rig.evaluator;
-    CHECK(E.Evaluate(UsdTimeCode(6.0)).valid);
-    CHECK(E.GetBakedGenerationCount() == 1);
-    const std::vector<RigExecOpGraphNode> graph = E.GetOpGraph();
-    const std::vector<RigExecOpTraceEntry> trace = E.GetLastOpTrace();
-    Report("(b) op graph", rigExecTest::CheckOpGraphIsAcyclic(graph));
-    Report("(b) trace", rigExecTest::CheckTraceRespectsEdges(trace, graph));
-    PrintTrace("(b) two limbs first run", trace);
-
-    // Each limb's pose seeds: its solver and the compose steps of its own
-    // controls and joints.
-    const auto poseSeeds = [&graph](const std::vector<std::string> &labels) {
-        std::vector<size_t> seeds;
-        for (const RigExecOpGraphNode &node : graph) {
-            if (node.domain != "pose") continue;
-            for (const std::string &label : labels) {
-                if (node.label.find(label) != std::string::npos) {
-                    seeds.push_back(node.step);
-                    break;
-                }
-            }
+    auto rig=OpenRig(fixturesDir+"/"+kTwoLimbs,kLimbsRig);
+    CHECK(rig.evaluator); if(!rig.evaluator)return;
+    auto &E=*rig.evaluator;
+    CHECK(E.Evaluate(UsdTimeCode(6)).valid);
+    const auto graph=E.GetOpGraph();
+    const size_t aSolve=OneStep(graph,"Solve","/LimbAFK");
+    const size_t bSolve=OneStep(graph,"Solve","/LimbBIK");
+    const size_t aSkin=OneStep(graph,"RevisionFuse","/MeshASkin");
+    const size_t bSkin=OneStep(graph,"RevisionFuse","/MeshBSkin");
+    if(aSolve==SIZE_MAX || bSolve==SIZE_MAX || aSkin==SIZE_MAX || bSkin==SIZE_MAX)return;
+    CHECK(rigExecTest::OpGraphForwardCone(graph,{aSolve})[aSkin]);
+    CHECK(rigExecTest::OpGraphForwardCone(graph,{bSolve})[bSkin]);
+    CHECK(!rigExecTest::OpGraphForwardCone(graph,{bSolve})[aSkin]);
+    CHECK(!rigExecTest::OpGraphForwardCone(graph,{aSolve})[bSkin]);
+    // This is the compiled production artifact, including real kernel chunks.
+    const auto &B=E.GetBakedProgram()->GetStepGraph();
+    CHECK(B.opGraph.ops.size()==B.steps.size());
+    std::string clusterError;
+    CHECK(RigExecValidateOpClusters(B.opGraph,&clusterError));
+    CHECK(!B.opGraph.clusters.empty());
+    const auto clusterCone=[&](size_t source) {
+        std::vector<char> reached(B.opGraph.clusters.size(),0);
+        std::vector<uint32_t> todo={B.opGraph.opClusters[source]};
+        while(!todo.empty()) {
+            const auto cluster=todo.back(); todo.pop_back();
+            if(reached[cluster])continue;
+            reached[cluster]=1;
+            for(auto successor:B.opGraph.clusters[cluster].successors)todo.push_back(successor);
         }
-        return seeds;
+        return reached;
     };
-    const std::vector<size_t> limbAPose =
-        poseSeeds({"/LimbAFK", "/Controls/A0", "/Joints/LimbA0"});
-    const std::vector<size_t> limbBPose = poseSeeds(
-        {"/LimbBIK", "/Controls/BRoot", "/Controls/BEffector",
-         "/Controls/BPole", "/Joints/LimbB0"});
-    const std::vector<size_t> limbAGeometry = [&graph] {
-        std::vector<size_t> out;
-        for (const RigExecOpGraphNode &node : graph) {
-            if (node.domain == "geometry" &&
-                node.label.find("MeshA") != std::string::npos) {
-                out.push_back(node.step);
+    CHECK(clusterCone(aSolve)[B.opGraph.opClusters[aSkin]]);
+    CHECK(clusterCone(bSolve)[B.opGraph.opClusters[bSkin]]);
+    CHECK(!clusterCone(bSolve)[B.opGraph.opClusters[aSkin]]);
+    CHECK(!clusterCone(aSolve)[B.opGraph.opClusters[bSkin]]);
+    if(SerialExecutor())return;
+    struct Gate {
+        std::atomic<bool> blocked{false},release{false},aFinished{false},bFinished{false};
+    } gate;
+    RigExecBakedProgramTesting::SetOpObservers(*E.GetBakedProgram(),
+        [&](uint32_t step) {
+            if(step!=bSolve)return;
+            gate.blocked.store(true,std::memory_order_release);
+            while(!gate.release.load(std::memory_order_acquire))std::this_thread::yield();
+        },[&](uint32_t step) {
+            if(step==aSkin)gate.aFinished.store(true,std::memory_order_release);
+            if(step==bSolve)gate.bFinished.store(true,std::memory_order_release);
+        });
+    bool early=false;
+    bool bWasStillBlocked=false;
+    std::thread monitor([&] {
+        const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(10);
+        while(std::chrono::steady_clock::now()<deadline) {
+            if(gate.blocked.load(std::memory_order_acquire) && gate.aFinished.load(std::memory_order_acquire)) {
+                early=true;break;
             }
+            std::this_thread::yield();
         }
-        return out;
-    }();
-    const std::vector<size_t> limbBGeometry = [&graph] {
-        std::vector<size_t> out;
-        for (const RigExecOpGraphNode &node : graph) {
-            if (node.domain == "geometry" &&
-                node.label.find("MeshB") != std::string::npos) {
-                out.push_back(node.step);
-            }
-        }
-        return out;
-    }();
-    CHECK(!limbAPose.empty() && !limbBPose.empty());
-    CHECK(!limbAGeometry.empty() && !limbBGeometry.empty());
-
-    // Structural, at step grain: holds today. No path from limb B's pose to
-    // limb A's geometry, nor the other way round.
-    const std::vector<char> fromB =
-        rigExecTest::OpGraphForwardCone(graph, limbBPose);
-    const std::vector<char> fromA =
-        rigExecTest::OpGraphForwardCone(graph, limbAPose);
-    for (const size_t step : limbAGeometry) CHECK(!fromB[step]);
-    for (const size_t step : limbBGeometry) CHECK(!fromA[step]);
-    // And each limb's geometry does wait on its own pose.
-    const size_t meshAFuse = OneStep(graph, "RevisionFuse", "/MeshASkin");
-    const size_t meshBFuse = OneStep(graph, "RevisionFuse", "/MeshBSkin");
-    const size_t limbASolve = OneStep(graph, "Solve", "/LimbAFK");
-    const size_t limbBSolve = OneStep(graph, "Solve", "/LimbBIK");
-    if (meshAFuse == SIZE_MAX || meshBFuse == SIZE_MAX ||
-        limbASolve == SIZE_MAX || limbBSolve == SIZE_MAX) {
-        return;
-    }
-    CHECK(fromA[meshAFuse]);
-    CHECK(fromB[meshBFuse]);
-
-    // Structural, at the production cluster grain. The packing bins by
-    // longest-path level, and every pose level of this rig costs less than
-    // the 5 us grain floor, so each level is one bin holding both limbs:
-    // limb A's skin fuse waits on limb B's pose at cluster grain today. S3.5
-    // lowering decides clusters from the op graph, and S8's loop is held to
-    // "no path" at this grain. Asserted only at the default grain. The count
-    // printed is of limb A geometry steps that wait (source steps and
-    // members ahead of the seeds in their own cluster do not).
-    const RigExecBakedProgramImpl &B = E.GetBakedProgram()->GetStepGraph();
-    std::vector<char> sources(B.steps.size(), 0);
-    for (size_t k = 0; k < B.steps.size(); ++k) {
-        sources[k] = B.steps[k].isSource ? 1 : 0;
-    }
-    const std::vector<char> fromBClusters =
-        rigExecTest::OpGraphClusterForwardCone(graph, limbBPose, sources);
-    size_t limbAGeometryWaitingOnB = 0;
-    for (const size_t step : limbAGeometry) {
-        limbAGeometryWaitingOnB += fromBClusters[step] ? 1 : 0;
-    }
-    std::printf("  (b) cluster grain %.2f us, %zu cluster(s): %zu of %zu "
-                "limb A geometry step(s) wait on limb B's pose\n",
-                B.clustering.grainUs, B.clustering.clusters.size(),
-                limbAGeometryWaitingOnB, limbAGeometry.size());
-    // A source step never waits, whatever cluster holds it.
-    for (const size_t step : limbAGeometry) {
-        if (sources[step]) CHECK(!fromBClusters[step]);
-    }
-    if (TfGetenv("RIGEXEC_BAKED_GRAIN_US").empty()) {
-        CHECK(B.clustering.grainUs > 0);
-        CHECK(fromBClusters[meshAFuse]);
-    }
-
-    // Behavioural: under the serial executor limb A's skin finishes after
-    // limb B's solver, because program order runs the whole pose half first
-    // (B9/B12). S8 replaces this with a gated limb-B leaf and asserts limb
-    // A's skin still completes.
-    std::printf("  (b) limb A skin fuse seq %u, limb B solve seq %u\n",
-                rigExecTest::TraceSeqOf(trace, meshAFuse),
-                rigExecTest::TraceSeqOf(trace, limbBSolve));
-    if (SerialExecutor()) {
-        CHECK(rigExecTest::Precedes(trace, limbBSolve, meshAFuse));
-        CHECK(rigExecTest::Precedes(trace, limbASolve, meshBFuse));
-    }
+        bWasStillBlocked=!gate.bFinished.load(std::memory_order_acquire);
+        gate.release.store(true,std::memory_order_release);
+    });
+    const auto pose=E.Evaluate(UsdTimeCode(12));
+    monitor.join(); CHECK(pose.valid); CHECK(early && bWasStillBlocked);
+    RigExecBakedProgramTesting::SetOpObservers(*E.GetBakedProgram(),{},{});
+    CHECK(gate.bFinished.load(std::memory_order_acquire));
+    std::printf("  (b) independent mesh finished while unrelated solver was gated: %s\n",early?"yes":"no");
 }
 
 // --- (c) preceding weights as ordinary dependencies --------------------------
@@ -592,8 +328,7 @@ TestTwoLimbs(const std::string &fixturesDir)
 void
 TestPrecedingWeight(const std::string &fixturesDir)
 {
-    LiveRig rig = OpenRig(fixturesDir + "/" + kCrossDomain, kCrossRig,
-                          RigExecEvaluationMode::Baked);
+    LiveRig rig = OpenRig(fixturesDir + "/" + kCrossDomain, kCrossRig);
     CHECK(rig.evaluator);
     if (!rig.evaluator) return;
     RigExecRigEvaluator &E = *rig.evaluator;
@@ -609,54 +344,40 @@ TestPrecedingWeight(const std::string &fixturesDir)
     // The program knows the volume reads `preceding`.
     CHECK(B.currentPhaseWeights.count(volume) == 1);
 
-    // Today the field is measured inside the consuming revision's
-    // RevisionStatic (a geometry step) through the evaluator's weight
-    // oracle, against the points the skin left. Its predecessors are the
-    // skin's fuse, the volume placements and the volume's packet -- the
-    // last two pose-only. S4 splits it into a WeightField op that reads
-    // RevisionFuse(k-1) and feeds RevisionStatic(k).
-    const RigExecOpGraphNode &smooth = graph[c.smoothStatic];
-    CHECK(smooth.domain == "geometry");
-    const std::set<size_t> preds(smooth.preds.begin(), smooth.preds.end());
-    CHECK(preds.count(c.skinFuse) == 1);
-    CHECK(preds.count(c.volumePlacements) == 1);
-    CHECK(preds.count(c.volumePacket) == 1);
-    // It reads the one placement its field's volume has: the slot the
-    // FingerVolume placement step writes, and no other.
-    size_t weightFramesReads = 0;
-    bool readsPacket = false, readsOwnPlacement = false;
-    for (const RigExecOpSlotRange &range : smooth.reads) {
-        if (range.domain == "WeightFrames") {
-            ++weightFramesReads;
-            for (const RigExecOpSlotRange &write :
-                     graph[c.volumePlacements].writes) {
-                readsOwnPlacement |= write.domain == "WeightFrames" &&
-                                     write.first == range.first &&
-                                     write.last == range.last;
-            }
-        }
-        readsPacket |= range.domain == "WeightPacket";
-    }
-    CHECK(weightFramesReads == 1 && readsOwnPlacement && readsPacket);
-    // No weight-domain step depends on the skin revision: nothing in the
-    // weight domain is downstream of geometry today (S4).
-    const std::vector<char> afterSkin =
-        rigExecTest::OpGraphForwardCone(graph, {c.skinFuse});
-    for (const RigExecOpGraphNode &node : graph) {
-        if (node.domain == "weight") CHECK(!afterSkin[node.step]);
-    }
-    // The volume's packet and the placements read pose only, so the
-    // cone machinery marks the packet as reading outside the program and
-    // runs it every generation (until S4 makes placements per-volume ops).
-    CHECK(B.steps[c.volumePacket].externalReads);
-    // Each revision runs once per evaluation.
-    CHECK(rigExecTest::FindTraceEntries(trace, "RevisionFuse", "",
-                                        "/ArmSmooth")
-              .size() == 2);
-    std::printf("  (c) preceding field computed by step %zu (%s %s), preds "
-                "skin fuse %zu, placements %zu, packet %zu\n",
-                c.smoothStatic, smooth.kind.c_str(), smooth.label.c_str(),
-                c.skinFuse, c.volumePlacements, c.volumePacket);
+    const auto &field=graph[c.precedingField];
+    CHECK(field.domain=="weight");
+    CHECK(std::find(field.preds.begin(),field.preds.end(),c.skinFuse)!=field.preds.end());
+    CHECK(std::find(graph[c.smoothStatic].preds.begin(),graph[c.smoothStatic].preds.end(),c.precedingField)!=graph[c.smoothStatic].preds.end());
+    CHECK(rigExecTest::Precedes(trace,c.skinFuse,c.precedingField));
+    CHECK(rigExecTest::Precedes(trace,c.precedingField,c.smoothStatic));
+    const auto &bound=B.weightFields[size_t(B.steps[c.precedingField].object)];
+    CHECK(bound.form==RigExecBakedProgramImpl::WeightField::Form::Revision);
+    CHECK(bound.placementPhase==RigExecBakedProgramImpl::WeightField::PlacementPhase::Base);
+    const auto [chain,revision]=B.revisionIndex[size_t(bound.consumer)];
+    CHECK(revision>0);
+    const auto readsSlot=[&](const char *domain,int slot) {
+        return std::any_of(field.reads.begin(),field.reads.end(),[&](const auto &range) {
+            return range.domain==domain && slot>=0 && uint32_t(slot)>=range.first && uint32_t(slot)<=range.last;
+        });
+    };
+    // RevisionDone publishes the completed currentSource-resolved points;
+    // RevisionOut names a chunk's staging range. Every earlier completion
+    // and the base are required because a revision can pass through its input.
+    CHECK(readsSlot("ChainBase",chain));
+    for(int earlier=0;earlier<revision;++earlier)
+        CHECK(readsSlot("RevisionDone",B.chainRevisionBegin[size_t(chain)]+earlier));
+    CHECK(readsSlot("ChainDirty",bound.consumer-1));
+    CHECK(!bound.volumes.empty());
+    for(int slot:bound.volumes)CHECK(readsSlot("WeightFramesBase",slot));
+    CHECK(std::any_of(graph[c.skinFuse].writes.begin(),graph[c.skinFuse].writes.end(),[&](const auto &range) {
+        return range.domain=="RevisionDone" && uint32_t(bound.consumer-1)>=range.first && uint32_t(bound.consumer-1)<=range.last;
+    }));
+    const auto &preceding=B.chains[size_t(chain)].revisions[size_t(revision-1)];
+    CHECK(!preceding.output.empty());
+    CHECK(bound.count==preceding.output.size());
+    std::set<size_t> completed;
+    for(const auto &entry:trace)CHECK(completed.insert(entry.step).second);
+    CHECK(completed.count(c.precedingField)==1);
 
     // The field follows the skin revision it measures: points 8 and 18
     // carry part Wrist inside the sphere riding Finger, so FingerCtl over
@@ -667,8 +388,10 @@ TestPrecedingWeight(const std::string &fixturesDir)
         CHECK(pose.valid);
         const auto it = pose.weightFields.find(volume);
         CHECK(it != pose.weightFields.end());
-        return it != pose.weightFields.end() ? it->second.weights
-                                             : std::vector<float>{};
+        return it != pose.weightFields.end()
+            ? std::vector<float>(it->second.weights.cbegin(),
+                                 it->second.weights.cend())
+            : std::vector<float>{};
     };
     const std::vector<float> atStart = fieldAt(1.0);
     const std::vector<float> settled = fieldAt(12.0);
@@ -700,240 +423,290 @@ TestPrecedingWeight(const std::string &fixturesDir)
 void
 TestPropertyDragCone(const std::string &fixturesDir)
 {
-    LiveRig rig = OpenRig(fixturesDir + "/" + kCrossDomain, kCrossRig,
-                          RigExecEvaluationMode::Baked);
-    CHECK(rig.evaluator);
-    if (!rig.evaluator) return;
-    RigExecRigEvaluator &E = *rig.evaluator;
-    // At t = 12 the authored blend weight is 1.3 and the clamp holds it at
-    // 1; dragging the clamp's max to 0.6 moves the blend.
-    const UsdTimeCode time(12.0);
-    const SdfPath weight =
-        kCrossRig.AppendPath(SdfPath("ArmSolvers/IKFKBlend"))
-            .AppendProperty(TfToken("inputs:weight"));
-    const RigExecRigPose settled = E.Evaluate(time);
-    CHECK(settled.valid);
-    const RigExecRigPose repeat = E.Evaluate(time);
-    CHECK(repeat.valid);
-    const std::vector<RigExecOpTraceEntry> repeatTrace = E.GetLastOpTrace();
+    auto rig=OpenRig(fixturesDir+"/"+kCrossDomain,kCrossRig);
+    CHECK(rig.evaluator); if(!rig.evaluator)return;
+    auto &E=*rig.evaluator; const UsdTimeCode time(12);
+    CHECK(E.Evaluate(time).valid); CHECK(E.Evaluate(time).valid);
+    CHECK(E.GetLastOpTrace().empty());
+    const auto graph=E.GetOpGraph(); const auto c=FindChain(graph); if(!ChainFound(c))return;
+    const auto cone=rigExecTest::OpGraphForwardCone(graph,{c.property});
     E.SetInteractiveOverrides(ClampMaxDrag(0.6f));
-    const RigExecRigPose dragged = E.Evaluate(time);
-    CHECK(dragged.valid);
-    CHECK(E.GetBakedGenerationCount() == 3);
-    const std::vector<RigExecOpTraceEntry> trace = E.GetLastOpTrace();
-    const std::vector<RigExecOpGraphNode> graph = E.GetOpGraph();
-    Report("(d) trace", rigExecTest::CheckTraceRespectsEdges(trace, graph));
-    PrintTrace("(d) clamp max dragged to 0.6", trace);
+    CHECK(E.Evaluate(time).valid);
+    const auto trace=E.GetLastOpTrace(); const auto &B=E.GetBakedProgram()->GetStepGraph();
+    std::set<size_t> ran;
+    for(const auto &entry:trace) {CHECK(cone[entry.step]);CHECK(ran.insert(entry.step).second);}
+    CHECK(ran.count(c.property) && ran.count(c.blendSolve) && ran.count(c.constraint));
+    CHECK(ran.count(c.fingerSolve) && ran.count(c.skinFuse) && ran.count(c.precedingField) && ran.count(c.smoothFuse));
+    CHECK(!ran.count(c.armFkSolve) && !ran.count(c.armIkSolve));
+    // Independently derive the stopped wave from compiled value-reader edges
+    // and the exact current-generation change flags of their stored outputs.
+    std::vector<char> expected(B.opGraph.ops.size(),0); expected[c.property]=1;
+    for(size_t op=0;op<B.opGraph.ops.size();++op) {
+        if(!expected[op])continue;
+        for(const auto value:B.opGraph.ops[op].descriptor.writes) {
+            if(!B.opAdapter.values[size_t(value)].changed)continue;
+            const auto found=B.opGraph.readers.find(value);
+            if(found!=B.opGraph.readers.end())for(const auto reader:found->second)expected[reader]=1;
+        }
+    }
+    for(size_t op=0;op<expected.size();++op)CHECK(bool(expected[op])==bool(ran.count(op)));
+    // Different input, identical clamp output: the property op executes,
+    // and its unchanged version prevents every successor body from running.
+    E.SetInteractiveOverrides(ClampMaxDrag(2.0f)); CHECK(E.Evaluate(time).valid);
+    E.SetInteractiveOverrides(ClampMaxDrag(3.0f)); CHECK(E.Evaluate(time).valid);
+    const auto cutoff=E.GetLastOpTrace();
+    CHECK(cutoff.size()==1 && cutoff.front().step==c.property);
+    CHECK(!B.opExecution.ran[c.blendSolve]);
     E.ClearInteractiveOverrides();
-
-    // The drag reached the property chain and moved the published pose.
-    const auto weightOf = [&weight](const RigExecRigPose &pose) {
-        const auto it = pose.movedProperties.find(weight);
-        return it != pose.movedProperties.end() && it->second.IsHolding<float>()
-                   ? it->second.UncheckedGet<float>()
-                   : -1.0f;
-    };
-    CHECK(weightOf(settled) == 1.0f);
-    CHECK(weightOf(dragged) == 0.6f);
-    const SdfPath finger = kCrossRig.AppendPath(SdfPath("Joints/Finger"));
-    CHECK(settled.jointMatricesFinal.count(finger) &&
-          dragged.jointMatricesFinal.count(finger) &&
-          settled.jointMatricesFinal.at(finger) !=
-              dragged.jointMatricesFinal.at(finger));
-
-    const CrossDomainChain c = FindChain(graph);
-    if (!ChainFound(c)) return;
-    const RigExecBakedProgramImpl &B = E.GetBakedProgram()->GetStepGraph();
-
-    // The promoted property head owns the clamp's versions; ordinary
-    // consumers declare the exact PropertyResult ranges they can read.
-    size_t chain = SIZE_MAX;
-    for (size_t k = 0; k < B.propertyChains.size(); ++k) {
-        if (B.propertyChains[k].target == weight) chain = k;
-    }
-    CHECK(chain != SIZE_MAX);
-    if (chain == SIZE_MAX) return;
-    const auto &property = B.propertyChains[chain];
-    const uint32_t begin = property.versionBase;
-    const uint32_t end = begin + uint32_t(property.revisions.size()) + 1;
-    std::vector<size_t> readers;
-    for (size_t k = 0; k < B.steps.size(); ++k) {
-        if (B.steps[k].isHead) continue;
-        for (const auto &range : B.steps[k].reads) {
-            if (range.domain == RigExecBakedSlotDomain::PropertyResult &&
-                range.begin < end && begin < range.end) {
-                readers.push_back(k); break;
-            }
-        }
-    }
-    CHECK((readers == std::vector<size_t>{c.blendSolve}));
-    CHECK(rigExecTest::OpGraphForwardCone(graph, readers)[c.volumePacket]);
-    // Executed set within the forward cone of the readers, except for the
-    // steps that run every generation: the source pass (isSource) and the
-    // externally-read steps with their cones -- the same set a repeated time
-    // with nothing changed executes. S3/S8 fold sources into the loop and
-    // leave nothing outside the cone.
-    const std::vector<char> cone =
-        rigExecTest::OpGraphForwardCone(graph, readers);
-    std::set<size_t> alwaysRun;
-    for (const RigExecOpTraceEntry &entry : repeatTrace) {
-        alwaysRun.insert(entry.step);
-    }
-    std::set<size_t> executed;
-    std::set<std::string> domainsRun;
-    for (const RigExecOpTraceEntry &entry : trace) {
-        executed.insert(entry.step);
-        domainsRun.insert(entry.domain);
-        if (B.steps[entry.step].isHead) {
-            CHECK(B.steps[entry.step].kind == RigExecBakedStepKind::PropertyRevision);
-            CHECK(B.steps[entry.step].object == int(chain));
-            CHECK(B.steps[entry.step].runSeq == entry.seq);
-            CHECK(!B.steps[entry.step].isSource);
-        } else if (!cone[entry.step]) {
-            CHECK(alwaysRun.count(entry.step) == 1);
-            CHECK(B.steps[entry.step].isSource);
-        }
-    }
-    // Every cone step ran: there is no unchanged-output cutoff yet (S8's
-    // loop stops a wave at an unchanged output).
-    size_t coneSize = 0;
-    for (size_t k = 0; k < cone.size(); ++k) {
-        if (!cone[k]) continue;
-        ++coneSize;
-        if (!executed.count(k)) {
-            ++failures;
-            std::printf("FAIL (d): cone step %zu (%s) did not run\n", k,
-                        graph[k].label.c_str());
-        }
-    }
-    // The re-run crossed pose, weight and geometry; the two arm solvers
-    // feeding the blend are outside the cone and stayed clean.
-    CHECK((domainsRun ==
-           std::set<std::string>{"head", "pose", "weight", "geometry"}));
-    CHECK(!executed.count(c.armFkSolve));
-    CHECK(!executed.count(c.armIkSolve));
-    for (const size_t step :
-         {c.blendSolve, c.constraint, c.fingerSolve, c.skinFuse,
-          c.volumePacket, c.smoothStatic, c.smoothFuse}) {
-        CHECK(executed.count(step) == 1);
-    }
-    // The repeated time ran only the always-run set: the source pass and
-    // the externally-read volume packet with the revision that reads it.
-    for (const size_t step : alwaysRun) {
-        CHECK(B.steps[step].isSource ||
-              rigExecTest::OpGraphForwardCone(graph, {c.volumePacket})[step]);
-    }
-    std::printf("  (d) drag ran %zu step(s): cone %zu, outside it %zu "
-                "(sources); a repeated time runs %zu\n",
-                trace.size(), coneSize, executed.size() - coneSize,
-                repeatTrace.size());
+    std::printf("  (d) exact cross-domain wave and unchanged-property cutoff\n");
 }
 
-// --- (e) cycles rejected -----------------------------------------------------
+// Every backend runs each authored geometry kernel once, through its actual
+// compiled chunk operations. A fused assembly is a separate operation.
+void
+TestBackendKernelsAndBinaryCycle(const std::string &fixturesDir)
+{
+    auto rig=OpenRig(fixturesDir+"/"+kCrossDomain,kCrossRig);
+    CHECK(rig.evaluator); if(!rig.evaluator)return;
+    auto &E=*rig.evaluator;
+    const auto live=E.Evaluate(UsdTimeCode(12)); CHECK(live.valid);
+    const auto &B=E.GetBakedProgram()->GetStepGraph();
+    // Partition metadata names natural typed producers. Scheduling levels
+    // cannot stand in for the matrix-domain/provider identities the body reads.
+    for (const auto &chain : B.chains) for (const auto &revision : chain.revisions) {
+        if (revision.partitionProducerSets.empty()) continue;
+        const auto domain = uint8_t(RigExecBakedOwnMatrixDomain(revision));
+        std::set<std::vector<std::pair<uint8_t,int>>> distinct;
+        size_t minimum = SIZE_MAX, maximum = 0;
+        for (const auto &producers : revision.partitionProducerSets) {
+            CHECK(std::is_sorted(producers.begin(),producers.end()));
+            CHECK(std::adjacent_find(producers.begin(),producers.end()) == producers.end());
+            for (const auto &producer : producers) {
+                CHECK(producer.first == domain);
+                CHECK(std::find(revision.influenceSlots.begin(),revision.influenceSlots.end(),producer.second) != revision.influenceSlots.end());
+            }
+            distinct.insert(producers);
+            minimum = std::min(minimum,producers.size());
+            maximum = std::max(maximum,producers.size());
+        }
+        CHECK(distinct.size() == revision.partitionDistinctReads);
+        CHECK(minimum == size_t(revision.partitionProducerMin));
+        CHECK(maximum == size_t(revision.partitionProducerMax));
+    }
+    const auto checkNative=[&](const std::vector<RigExecOpTraceEntry> &trace) {
+        // Baking recompiles the evaluator, so each trace belongs to the
+        // program currently held by the evaluator.
+        const auto &B=E.GetBakedProgram()->GetStepGraph();
+        std::vector<size_t> counts(B.steps.size(),0);
+        for(const auto &entry:trace) {CHECK(entry.step<counts.size());if(entry.step<counts.size())++counts[entry.step];}
+        size_t kernels=0;
+        for(size_t i=0;i<B.steps.size();++i) {
+            CHECK(counts[i]<=1);
+            if(B.steps[i].kind==RigExecBakedStepKind::RevisionChunk) {
+                ++kernels;CHECK(counts[i]==1);
+                const auto identity = B.revisionIndex[size_t(B.steps[i].object)];
+                const auto &revision = B.chains[size_t(identity.first)].revisions[size_t(identity.second)];
+                if (revision.chunked && !revision.partitionProducerSets.empty()) {
+                    std::vector<std::pair<uint8_t,int>> reads;
+                    const auto own = RigExecBakedOwnMatrixDomain(revision);
+                    for (const auto &range : B.steps[i].reads) if (range.domain == own)
+                        for (int slot = range.begin; slot < range.end; ++slot) reads.emplace_back(uint8_t(own),slot);
+                    std::sort(reads.begin(),reads.end());
+                    reads.erase(std::unique(reads.begin(),reads.end()),reads.end());
+                    CHECK(size_t(B.steps[i].part) < revision.partitionProducerSets.size());
+                    if (size_t(B.steps[i].part) < revision.partitionProducerSets.size())
+                        CHECK(reads == revision.partitionProducerSets[size_t(B.steps[i].part)]);
+                }
+            }
+        }
+        CHECK(kernels>=2);
+    };
+    checkNative(E.GetLastOpTrace());
+    std::shared_ptr<const RigExecFrozenProgram> frozen;
+    std::string error;
+    CHECK(RigExecFreezeProgram(E,&frozen,&error));
+    RigExecFrameInputs inputs;
+    CHECK(RigExecSampleFrameInputs(E,UsdTimeCode(6),{},&inputs,&error));
+    if(frozen) {
+        RigExecFrozenEvalContext context;
+        context.epochDigest=E.GetBindingEpochDigest();
+        context.slotCount=E.GetBakedProgram()->GetProviderCount();
+        context.varyingInputCount=inputs.values.size();
+        context.flags=(E.GetPublishWeightFields()?kRigExecFrozenPublishWeightFields:0)
+            |(E.GetSolverGuidesEnabled()?kRigExecFrozenSolverGuidesEnabled:0);
+        context.frozen=frozen.get();
+        RigExecFrozenRunReport report;
+        const auto pose=RigExecEvaluateFrozen(context,inputs,RigExecMakeProductionStepRunner(),nullptr,kCrossRig,&report);
+        CHECK(pose.valid && report.ran); checkNative(report.region);
+        const auto liveAt6=E.Evaluate(UsdTimeCode(6));
+        rigExecTest::ComparePose(&failures,"frozen actual one-loop kernels",liveAt6,pose);
+    }
+    RigExecBakeOpts opts;opts.time=6;
+    RigExecBakeResult baked;
+    CHECK(RigExecBakeToBinary(E,opts,&baked,&error));
+    if(baked.bytes.empty())return;
+    checkNative(E.GetLastOpTrace());
+    auto reader=RigExecRuntimeReader::Open(baked.bytes.data(),baked.bytes.size(),&error);
+    CHECK(reader); if(!reader)return;
+    CHECK(reader->Execute(&error));
+    const auto file=RigExecTestUnpack(baked.bytes); if(!file)return;
+    std::vector<size_t> runtimeCounts(file->steps.size(),0);
+    for(auto index:reader->GetLastRunTraceForTesting()) {
+        CHECK(index>=0 && size_t(index)<runtimeCounts.size());
+        if(index>=0 && size_t(index)<runtimeCounts.size())++runtimeCounts[size_t(index)];
+    }
+    size_t runtimeKernels=0;
+    for(size_t i=0;i<file->steps.size();++i) {
+        CHECK(runtimeCounts[i]<=1);
+        if(file->steps[i].kind==fb::StepKind::RevisionChunk) {++runtimeKernels;CHECK(runtimeCounts[i]==1);}
+    }
+    CHECK(runtimeKernels>=2);
+    std::vector<std::string> differences;
+    const bool runtimeMatches=RigExecCompareRuntimeRun(E.Evaluate(UsdTimeCode(6)),*reader,&differences,true);
+    if(!runtimeMatches)for(const auto &difference:differences)
+        std::printf("  runtime acceptance mismatch: %s\n",difference.c_str());
+    CHECK(runtimeMatches);
+    CHECK(!file->steps.empty());
+    if(!file->steps.empty()) {
+        const auto cyclic=RigExecTestEdited(baked.bytes,[](fb::RigExecWireFile *edited) {
+            const auto self=uint32_t(edited->steps.size()-1);
+            edited->steps.back().preds.push_back(int32_t(self));
+            edited->steps.back().succs.push_back(int32_t(self));
+            // Keep the body and its common descriptor in agreement: the
+            // defect is a genuine self-cycle, rather than mismatched tables.
+            CHECK(edited->commonGraph && edited->commonGraph->ops.size()==edited->steps.size());
+            if(edited->commonGraph && edited->commonGraph->ops.size()==edited->steps.size()) {
+                auto &op=edited->commonGraph->ops.back();
+                CHECK(op.originalIndex==self);
+                op.descriptorPredecessors.push_back(self);
+                op.predecessors.push_back(self);
+                op.successors.push_back(self);
+            }
+        });
+        error.clear();
+        CHECK(!RigExecRuntimeReader::Open(cyclic.data(),cyclic.size(),&error));
+        CHECK(error=="invalid .rigexec: step "+std::to_string(file->steps.size()-1)+" depends on itself");
+    }
+    std::printf("  (c,f) live, frozen and runtime kernels once; cyclic binary refused\n");
+}
+
+// --- (e) live cycles fail closed --------------------------------------------
 
 void
 TestCycle(const std::string &fixturesDir)
 {
-    LiveRig rig = OpenRig(fixturesDir + "/" + kCycle, kCycleRig,
-                          RigExecEvaluationMode::Baked);
-    // Today's policy (D3, kept): the compile succeeds, the loop's members
-    // are set aside with a diagnostic, and the rest of the rig evaluates.
-    CHECK(rig.evaluator);
-    if (!rig.evaluator) {
-        for (const std::string &error : rig.errors) {
-            std::printf("    %s\n", error.c_str());
-        }
-        return;
-    }
-    RigExecRigEvaluator &E = *rig.evaluator;
-    const SdfPath constraint =
-        kCycleRig.AppendPath(SdfPath("Constraints/EffectorFollowsVolume"));
-    const SdfPath solver = kCycleRig.AppendPath(SdfPath("Solvers/LimbIK"));
-    const std::string loop = "pose dependency cycle among: " +
-                             constraint.GetString() + " -> " +
-                             solver.GetString() + " -> " +
-                             constraint.GetString();
-    const std::map<SdfPath, std::string> &skipped = E.GetSkippedOperations();
-    CHECK(skipped.size() == 2);
-    for (const SdfPath &member : {constraint, solver}) {
-        const auto it = skipped.find(member);
-        CHECK(it != skipped.end() &&
-              TfStringStartsWith(it->second, loop));
-    }
-    bool reported = false;
-    for (const std::string &error : rig.errors) {
-        reported |= error.find(loop) != std::string::npos;
-        std::printf("  (e) compile reported: %s\n", error.c_str());
-    }
-    CHECK(reported);
-    // The loop is reported by operator only: the volume weight it runs
-    // through and the joint and control it crosses are not named (S6's one
-    // reporter names the loop by op and prim, VolumePlacement included).
-    for (const auto &[member, message] : skipped) {
-        CHECK(message.find("EndVolume") == std::string::npos);
-    }
-
-    // What remains bakes and evaluates, without the loop's steps.
-    CHECK(E.IsBakeable());
-    const RigExecRigPose pose = E.Evaluate(UsdTimeCode(2.0));
-    CHECK(pose.valid);
-    CHECK(E.GetBakedGenerationCount() == 1);
-    const std::vector<RigExecOpGraphNode> graph = E.GetOpGraph();
-    Report("(e) op graph", rigExecTest::CheckOpGraphIsAcyclic(graph));
-    CHECK(rigExecTest::FindOpGraphSteps(graph, "Solve").empty());
-    CHECK(rigExecTest::FindOpGraphSteps(graph, "Constraint").empty());
-    // One placement step per volume, and the rig has one: EndVolume.
-    CHECK(rigExecTest::FindOpGraphSteps(graph, "VolumePlacements").size() ==
-          1);
-    CHECK(rigExecTest::FindOpGraphSteps(graph, "VolumePlacements",
-                                        "/EndVolume")
-              .size() == 1);
-    CHECK(rigExecTest::FindOpGraphSteps(graph, "RevisionFuse", "/EndCarry")
-              .size() == 1);
-
-    // The cross-domain loop that can be authored today: fixture A's volume
-    // weight reading its target at `final`, after the smooth that consumes
-    // the field. Compile refuses the phase itself, in either mode, before
-    // any ordering is attempted (S4/S6 turn this into a reported cycle).
-    const SdfPath volume =
-        kCrossRig.AppendPath(SdfPath("Joints/Finger/FingerVolume"));
-    const std::string refusal =
-        volume.GetString() +
-        ": rigExecReadPhase 'final' on rigExec:weightTarget is not "
-        "supported; a volume weight measures its source at base or the "
-        "points in flight at preceding";
-    for (const RigExecEvaluationMode mode :
-         {RigExecEvaluationMode::Dynamic, RigExecEvaluationMode::Baked}) {
-        const UsdStageRefPtr stage =
-            UsdStage::Open(fixturesDir + "/" + kCrossDomain);
-        CHECK(stage);
-        if (!stage) continue;
-        stage->SetEditTarget(stage->GetSessionLayer());
-        const UsdPrim prim = stage->GetPrimAtPath(volume);
-        const UsdRelationship target =
-            prim ? prim.GetRelationship(TfToken("rigExec:weightTarget"))
-                 : UsdRelationship();
-        CHECK(target);
-        if (!target) continue;
-        CHECK(target.SetMetadata(TfToken("rigExecReadPhase"),
-                                 std::string("final")));
-        RigExecRigEvaluator evaluator(stage, kCrossRig);
-        evaluator.SetEvaluationMode(mode);
-        std::vector<std::string> errors;
-        CHECK(!evaluator.Compile(&errors));
-        bool refused = false;
-        for (const std::string &error : errors) {
-            refused |= error.find(refusal) != std::string::npos;
-        }
-        CHECK(refused);
-        if (!refused) {
-            for (const std::string &error : errors) {
-                std::printf("    %s\n", error.c_str());
+    const SdfPath rigPath("/S9Asset/Rig");
+    auto rig=OpenRig(fixturesDir+"/oneloop_cross_cycle.usda",rigPath);
+    CHECK(rig.evaluator); if(!rig.evaluator)return;
+    auto &E=*rig.evaluator;
+    const auto pose=E.Evaluate(UsdTimeCode(2)); CHECK(pose.valid);
+    const auto &B=E.GetBakedProgram()->GetStepGraph();
+    // D3 preserves unrelated work while every output of the complete cycle
+    // is cleared. No member may run against a prior-generation loop value.
+    CHECK(!B.opGraph.cycles.empty()); CHECK(!B.excludedSteps.empty());
+    bool solveNamed=false,geometryNamed=false,commitNamed=false;
+    const SdfPath ribbon("/S9Asset/Rig/Solvers/Ribbon");
+    const SdfPath lift("/S9Asset/Rig/Geometry/Lift");
+    for(const auto &cycle:B.opGraph.cycles) {
+        CHECK(cycle.size()>1 && cycle.front()==cycle.back());
+        for(const auto &member:cycle) {
+            const auto found=std::find_if(B.excludedSteps.begin(),B.excludedSteps.end(),[&](const auto &step) {
+                return step.descriptorKey==member;
+            });
+            const bool removed=std::find(B.cycleExclusionProof.removedKeys.begin(),
+                B.cycleExclusionProof.removedKeys.end(),member)!=B.cycleExclusionProof.removedKeys.end();
+            CHECK((found!=B.excludedSteps.end())!=removed);
+            if(removed) {
+                CHECK(std::none_of(B.steps.begin(),B.steps.end(),[&](const auto &step){return step.descriptorKey==member;}));
+                const auto commitPrefix=ribbon.GetString()+"/category:"+
+                    std::to_string(int(RigExecBakedStepKind::SolverCommit))+"/stack:";
+                commitNamed|=member.compare(0,commitPrefix.size(),commitPrefix)==0;
+                continue;
             }
+            if(found==B.excludedSteps.end())continue;
+            if(found->kind==RigExecBakedStepKind::Solve)
+                solveNamed|=B.solvers[size_t(found->object)].path==ribbon;
+            if(found->kind==RigExecBakedStepKind::RevisionFuse) {
+                const auto index=B.revisionIndex[size_t(found->object)];
+                geometryNamed|=B.chains[size_t(index.first)].revisions[size_t(index.second)].moverPath==lift;
+            }
+            if(found->kind==RigExecBakedStepKind::SolverCommit)
+                commitNamed|=found->label==ribbon.GetString();
         }
     }
-}
+    CHECK(solveNamed && geometryNamed && commitNamed);
+    for(const auto &step:B.excludedSteps) {
+        CHECK(std::none_of(B.steps.begin(),B.steps.end(),[&](const auto &live) {
+            return live.kind==step.kind && live.object==step.object && live.part==step.part;
+        }));
+        if(step.kind==RigExecBakedStepKind::Solve)CHECK(B.aggregates[size_t(step.object)].frames.empty());
+        if(step.kind==RigExecBakedStepKind::RevisionFuse) {
+            const auto index=B.revisionIndex[size_t(step.object)];
+            const auto &revision=B.chains[size_t(index.first)].revisions[size_t(index.second)];
+            CHECK(revision.output.empty());
+        }
+    }
+    Report("(f) acyclic remainder",rigExecTest::CheckOpGraphIsAcyclic(E.GetOpGraph()));
+    CHECK(rigExecTest::FindOpGraphSteps(E.GetOpGraph(),"Solve","/Solvers/Lift").size()==1);
+    CHECK(rigExecTest::FindOpGraphSteps(E.GetOpGraph(),"PropertyRevision","/RawSelected").size()==1);
+    bool diagnosed=false;
+    for(const auto &line:pose.diagnostics)diagnosed|=line.find("cycle")!=std::string::npos;
+    for(const auto &line:rig.errors)diagnosed|=line.find("cycle")!=std::string::npos;
+    CHECK(diagnosed);
+    CHECK(E.Evaluate(UsdTimeCode(3)).valid);
+    for(const auto &step:B.excludedSteps)
+        if(step.kind==RigExecBakedStepKind::Solve)CHECK(B.aggregates[size_t(step.object)].frames.empty());
+    std::printf("  (f) complete cross-domain SCC named and excluded; independent work runs\n");
+    {
+    // An earlier optional-driver revision shares the SCC geometry chain.
+    // Withdrawing it must not renumber the later retained exclusion identity.
+    LiveRig rig;
+    rig.stage=UsdStage::Open(fixturesDir+"/oneloop_cross_cycle.usda");
+    CHECK(rig.stage); if(!rig.stage)return;
+    const auto oldTarget=rig.stage->GetEditTarget();
+    rig.stage->SetEditTarget(rig.stage->GetSessionLayer());
+    const SdfPath withdrawn("/S9Asset/Rig/Geometry/BeforeLift");
+    auto earlier=rig.stage->DefinePrim(withdrawn,TfToken("RigExecCurveMover"));
+    CHECK(earlier.AddAppliedSchema(TfToken("RigExecMoverAPI")));
+    CHECK(earlier.CreateRelationship(TfToken("rigExec:moves")).SetTargets({SdfPath("/S9Asset/Geom/Curve.points")}));
+    CHECK(earlier.CreateRelationship(TfToken("rigExec:driverCurve")).SetTargets({SdfPath("/S9Asset/Geom/Curve")}));
+    CHECK(earlier.CreateRelationship(TfToken("rigExec:driverFrames")).SetTargets({SdfPath("/S9Asset/Rig/Solvers/Ribbon")}));
+    CHECK(earlier.CreateAttribute(TfToken("rigExec:mode"),SdfValueTypeNames->Token,false,SdfVariabilityUniform).Set(TfToken("emitGuidePoints")));
+    // The mover compiler visits siblings in reverse authored order.
+    const std::vector<TfToken> revisionOrder{TfToken("Lift"),TfToken("BeforeLift")};
+    const auto geometry=rig.stage->GetPrimAtPath(SdfPath("/S9Asset/Rig/Geometry"));
+    geometry.SetChildrenReorder(revisionOrder);
+    CHECK(geometry.GetChildrenReorder()==revisionOrder);
+    rig.stage->SetEditTarget(oldTarget);
+    rig.evaluator=std::make_unique<RigExecRigEvaluator>(rig.stage,rigPath);
+    if(!rig.evaluator->Compile(&rig.errors))rig.evaluator.reset();
+    CHECK(rig.evaluator); if(!rig.evaluator)return;
+    auto &E=*rig.evaluator;
+    CHECK(E.Evaluate(UsdTimeCode(2)).valid);
+    const auto &B=E.GetBakedProgram()->GetStepGraph();
+    const SdfPath lift("/S9Asset/Rig/Geometry/Lift");
+    CHECK(E.GetSkippedOperations().count(withdrawn)==1);
+    bool laterIdentity=false;
+    for(const auto &step:B.excludedSteps)if(step.kind==RigExecBakedStepKind::RevisionFuse) {
+        const auto index=B.revisionIndex[size_t(step.object)];
+        const auto &revision=B.chains[size_t(index.first)].revisions[size_t(index.second)];
+        if(revision.moverPath==lift) {
+            CHECK(index.second==0); // withdrawn predecessor is no longer a revision
+            CHECK(step.descriptorKey.find("/revision:1/")!=std::string::npos);
+            laterIdentity=true;
+        }
+    }
+    CHECK(laterIdentity);
+    for(const auto &chain:B.chains)for(const auto &revision:chain.revisions)
+        CHECK(revision.moverPath!=withdrawn);
+    CHECK(!B.opGraph.cycles.empty());
+    CHECK(rigExecTest::FindOpGraphSteps(E.GetOpGraph(),"Solve","/Solvers/Lift").size()==1);
+    CHECK(E.Evaluate(UsdTimeCode(3)).valid);
+    for(const auto &step:B.excludedSteps)if(step.kind==RigExecBakedStepKind::Solve)
+        CHECK(B.aggregates[size_t(step.object)].frames.empty());
+    }
 
+}
 std::string
 SchemaResourceDir(const std::string &fixturesDir)
 {
@@ -963,13 +736,11 @@ main(int argc, char **argv)
     }
     std::printf("testRigExecOneLoopAcceptance: %s executor\n",
                 SerialExecutor() ? "serial" : "parallel");
-    CheckParity(fixturesDir, kCrossDomain, kCrossRig,
-                {1, 3, 4.5, 6, 8, 10, 12}, ClampMaxDrag(0.6f));
-    CheckParity(fixturesDir, kTwoLimbs, kLimbsRig, {1, 3, 4.5, 6, 8, 10, 12});
     TestCrossDomainTrace(fixturesDir);
     TestTwoLimbs(fixturesDir);
     TestPrecedingWeight(fixturesDir);
     TestPropertyDragCone(fixturesDir);
+    TestBackendKernelsAndBinaryCycle(fixturesDir);
     TestCycle(fixturesDir);
     if (failures) {
         std::printf("%d FAILURE(S)\n", failures);

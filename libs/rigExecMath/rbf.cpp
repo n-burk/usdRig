@@ -436,7 +436,7 @@ RigExecRbfSolver::TranslationDistance(const GfVec3d *translation,
     if (index >= _translations.size()) {
         return 0.0;
     }
-    static const GfVec3d rest(0.0);
+    const GfVec3d rest(0.0);
     const GfVec3d &here = translation ? *translation : rest;
     const GfVec3d &there = _translations[index];
     double total = 0.0;
@@ -868,7 +868,7 @@ RigExecRbfSolver::Walk(size_t first, size_t second, double amount,
         *translation = GfVec3d(0.0);
         return;
     }
-    static const GfVec3d rest(0.0);
+    const GfVec3d rest(0.0);
     const GfVec3d *a = _Translation(first);
     const GfVec3d *b = _Translation(second);
     const GfVec3d &here = a ? *a : rest;

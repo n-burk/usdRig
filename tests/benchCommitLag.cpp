@@ -238,7 +238,6 @@ main(int argc, char **argv)
             return 1;
         }
     }
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     const RigExecBakedProgram *program = evaluator.GetBakedProgram();
     if (!program) {
         std::printf("FATAL: the biped built no program\n");

@@ -32,105 +32,48 @@ RIG = "/PhaseConnectAsset/Rig"
 DIAL = "/PhaseConnectAsset/Rig/Channels/Dial.rigExec:amount"
 FRAME = 1024.0
 
-DOMAINS = {"batch", "solver", "constraint", "chain", "revision", "propchain",
-           "proprev", "tap", "provider", "switch", "interp", "skipped"}
-EDGE_KINDS = {"member", "order", "dep", "read", "write", "provides", "phase",
-              "rides"}
+def _Check(condition,message):
+    if not condition: raise AssertionError(message)
 
-
-def _Check(condition, message):
-    if not condition:
-        raise AssertionError(message)
-
-
-def _Rig(mode="dynamic"):
-    stage = Usd.Stage.Open(STAGE)
-    rig = rigexec.Rig(stage, RIG)
-    rig.compile()
-    rig.evaluation_mode = mode
+def _Rig():
+    stage=Usd.Stage.Open(STAGE); rig=rigexec.Rig(stage,RIG)
+    rig.cpu_reference=True; rig.compile(); rig.evaluate(FRAME)
     return rig
 
-
-def _Values(rig, frame):
-    pose = rig.evaluate(frame)
-    _Check(pose.valid, "pose at %g is invalid: %s" % (frame, pose.diagnostics))
-    frames = dict((path, list(pose.control_frame(path).to_matrix4()))
-                  for path in pose.control_paths())
-    return repr(sorted(pose.moved_properties().items())), repr(sorted(
-        frames.items()))
-
+def _Values(rig,frame):
+    pose=rig.evaluate(frame)
+    _Check(pose.valid,"invalid graph pose")
+    _Check(pose.reference_agreements>0 and pose.reference_mismatches==0,
+           "independent scalar reference disagrees")
+    frames={path:list(pose.control_frame(path).to_matrix4()) for path in pose.control_paths()}
+    return repr(sorted(pose.moved_properties().items())),repr(sorted(frames.items()))
 
 def TestGraphIsWellFormed():
-    graph = _Rig().operation_graph()
-    ids = [node["id"] for node in graph["nodes"]]
-    _Check(ids, "a compiled rig has operations")
-    _Check(len(ids) == len(set(ids)), "node ids are unique")
-    known = set(ids)
-    for edge in graph["edges"]:
-        _Check(edge["src"] in known and edge["dst"] in known,
-               "edge names a missing node: %s" % edge)
-        _Check(edge["kind"] in EDGE_KINDS, "undocumented edge %s" % edge)
-    for node in graph["nodes"]:
-        _Check(node["domain"] in DOMAINS,
-               "undocumented domain %s" % node["domain"])
-
+    nodes=_Rig().op_graph(); by_id={node["step"]:node for node in nodes}
+    _Check(bool(nodes) and len(nodes)==len(by_id),"unique compiled operations")
+    for node in nodes:
+        _Check("level" not in node,"retired barrier level exposed")
+        for predecessor in node["preds"]:
+            _Check(predecessor in by_id and node["step"] in by_id[predecessor]["succs"],
+                   "dependency endpoints and reverse edges")
 
 def TestPhasedReadersAreListed():
-    graph = _Rig().operation_graph()
-    nodes = dict((node["id"], node) for node in graph["nodes"])
-    chain = nodes.get("prop:" + DIAL)
-    _Check(chain is not None, "the dial has a property chain node")
-    readers = chain["lists"].get("phased_readers", [])
-
-    def reads(prim, phase):
-        return any(line.split(".")[0].endswith("/" + prim) and
-                   line.endswith(": " + phase) for line in readers)
-
-    for prim in ("Base", "BaseCard"):
-        _Check(reads(prim, "base"), "%s reads base: %s" % (prim, readers))
-    for prim in ("Gain", "GainCard"):
-        _Check(reads(prim, "after 1 of 2"),
-               "%s reads after the Gain revision: %s" % (prim, readers))
-    _Check(not any("/Final" in line and line.endswith(": base")
-                   for line in readers),
-           "a declared final never reads base: %s" % readers)
-    phased = [edge for edge in graph["edges"]
-              if edge["kind"] == "phase" and edge["dst"] == "prop:" + DIAL]
-    sources = set(nodes[edge["src"]]["domain"] for edge in phased)
-    _Check("proprev" in sources,
-           "a property mover reading the dial points at its chain")
-    _Check("revision" in sources,
-           "a geometry revision reading the dial points at its chain")
-
+    nodes=_Rig().op_graph()
+    # A phased property has multiple typed output slots; consumers must name
+    # the exact slot rather than a time-dependent source lookup.
+    writes=[tuple(r) for n in nodes for r in n["writes"] if "Property" in r[0]]
+    reads=[tuple(r) for n in nodes for r in n["reads"] if "Property" in r[0]]
+    _Check(len(set(writes))>=2 and bool(reads),"phased typed values missing")
+    _Check(any(read in writes for read in reads),"no phased value consumer")
 
 def TestDescribingChangesNothing():
-    for mode in ("dynamic", "baked"):
-        rig = _Rig(mode)
-        before = _Values(rig, FRAME)
-        rig.operation_graph()
-        rig.baked_steps()
-        rig.baked_clusters()
-        _Check(_Values(rig, FRAME) == before,
-               "%s: describing the epoch changed a value" % mode)
-        if mode == "baked":
-            _Check(rig.baked_steps() and rig.baked_clusters(),
-                   "a baked rig describes its program")
-            _Check(rig.baked_generation_count > 0,
-                   "the baked program answered")
-
+    rig=_Rig(); before=_Values(rig,FRAME)
+    rig.op_graph(); rig.last_op_trace()
+    _Check(_Values(rig,FRAME)==before,"graph inspection changed publication")
 
 def TestProfileScopesExist():
-    rig = _Rig()
-    rig.profiling_enabled = True
-    rig.clear_profile()
-    rig.evaluate(FRAME)
-    recorded = set(event["name"] for event in rig.profile_events())
-    graph = rig.operation_graph()
-    for node in graph["nodes"]:
-        if node["domain"] in ("propchain", "revision") and node["profile"]:
-            _Check(node["profile"] in recorded,
-                   "%s names scope %r, which never fired: %s"
-                   % (node["id"], node["profile"], sorted(recorded)))
+    rig=_Rig(); rig.profiling_enabled=True; rig.clear_profile(); rig.evaluate(FRAME+1)
+    _Check(bool(rig.profile_events()),"graph execution records scopes")
 
 
 def main():

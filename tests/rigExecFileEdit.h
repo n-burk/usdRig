@@ -63,6 +63,25 @@ RigExecTestEdited(const std::vector<uint8_t> &bytes, const Edit &edit)
     return RigExecTestPackUnchecked(*file);
 }
 
+// Clone an already validated fixture object. Each mutation owns its copy;
+// the caller keeps the original bytes and immutable baseline alive locally.
+static std::unique_ptr<rigExec::fb::RigExecWireFile>
+RigExecTestUnpack(const rigExec::fb::RigExecWireFile &baseline)
+{
+    return std::make_unique<rigExec::fb::RigExecWireFile>(baseline);
+}
+
+template <class Edit>
+static std::vector<uint8_t>
+RigExecTestEdited(const rigExec::fb::RigExecWireFile &baseline,
+                 const Edit &edit)
+{
+    const std::unique_ptr<rigExec::fb::RigExecWireFile> file =
+        RigExecTestUnpack(baseline);
+    edit(file.get());
+    return RigExecTestPackUnchecked(*file);
+}
+
 // Calls \p visit with a pointer to every input slot id \p file holds: the
 // walk of every read, the property chains' targets, the phased consumers'
 // consumers and hops, and the chain base, layout, painted and oracle slot
@@ -108,7 +127,9 @@ RigExecTestForEachSlotId(rigExec::fb::RigExecWireFile *file,
     fb::RigExecWireDomainPose &pose = *file->pose;
     for (fb::RigExecWireLadder &ladder : pose.ladders) {
         reads({&ladder.restSpace, &ladder.defaultSpace, &ladder.posedSpace,
-               &ladder.rotationOrder});
+               &ladder.rotationOrder, &ladder.parentSpace, &ladder.parentDefaultSpace,
+               &ladder.avarDefaultSpace, &ladder.posedDefaultSpace,
+               &ladder.rotationSign, &ladder.interveningSpace});
         for (fb::RigExecWireInput &input : ladder.restAvars) {
             read(&input);
         }
@@ -141,10 +162,18 @@ RigExecTestForEachSlotId(rigExec::fb::RigExecWireFile *file,
     for (fb::RigExecWireAvarBinding &binding : pose.avarBindings) {
         reads({&binding.read});
     }
+    const auto declaration = [&](fb::RigExecWireExternalDeclaredInput &input) {
+        read(input.read.get());
+        read(input.bodyWalk.get());
+    };
+    for (auto &row : pose.constraintArrays)
+        for (auto &slot : row.rawSlots) field(&slot);
     const auto revision = [&](fb::RigExecWireRevision &r) {
         reads({&r.defaultWeight});
         field(&r.jointIndicesSlot);
         field(&r.jointWeightsSlot);
+        for (auto &input : r.leafSites) declaration(input);
+        for (auto &input : r.layoutLeafSites) declaration(input);
         for (fb::RigExecWireBlendChannel &channel : r.blendChannels) {
             reads({&channel.weightRead});
             for (fb::RigExecWireBlendSample &sample : channel.samples) {
@@ -159,6 +188,7 @@ RigExecTestForEachSlotId(rigExec::fb::RigExecWireFile *file,
             revision(r);
         }
         for (fb::RigExecWireDerived &derived : chain.derived) {
+            field(&derived.baseSlot);
             revision(*derived.revision);
         }
     }
@@ -172,7 +202,21 @@ RigExecTestForEachSlotId(rigExec::fb::RigExecWireFile *file,
         field(&w.indicesSlot);
         field(&w.oracleSamplesSlot);
         field(&w.oracleCurveSlot);
+        field(&w.oraclePlaneAxisSlot);
+        field(&w.oraclePlaneBoundsSlot);
     }
+    for (auto &weightField : geometry.weightFields)
+        for (auto &input : weightField.scalarReads) read(&input);
+    if (file->providerProgram) {
+        for (auto *rows : {&file->providerProgram->sampled,
+                           &file->providerProgram->externalInputs}) {
+            for (auto &leaf : *rows) {
+                field(&leaf.inputSlot);
+                read(leaf.interveningRead.get());
+            }
+        }
+    }
+    for (auto &input : file->crossDomainReads) field(&input.rawSlot);
     for (fb::RigExecWirePathRead &row : geometry.pathReads) {
         reads({&row.read});
     }
@@ -189,10 +233,54 @@ RigExecTestForEachSlotId(rigExec::fb::RigExecWireFile *file,
         }
     }
     for (fb::RigExecWireExternalMover &mover : file->externalMovers) {
+        for (auto &input : mover.declaredInputs) declaration(input);
         for (fb::RigExecWireInput &input : mover.inputs) {
             read(&input);
         }
     }
+}
+
+// A crafted file exposing its private array storage for runtime API tests.
+// Real exporter admission is checked before applying this transformation.
+static std::vector<uint8_t>
+RigExecTestListPrivateArraySlots(const std::vector<uint8_t> &bytes)
+{
+    namespace fb = rigExec::fb;
+    return RigExecTestEdited(bytes, [](fb::RigExecWireFile *file) {
+        std::vector<uint32_t> order(file->inputs.size());
+        for (size_t i = 0; i < order.size(); ++i) {
+            order[i] = uint32_t(i);
+        }
+        const auto listed = [&](uint32_t id) {
+            const auto &slot = file->inputs[id];
+            return (slot.flags() & uint8_t(fb::InputSlotFlags::Listed)) ||
+                (slot.type() >= fb::InputTag::IntArray &&
+                 slot.type() <= fb::InputTag::Vec3fArray);
+        };
+        std::sort(order.begin(), order.end(), [&](uint32_t a, uint32_t b) {
+            if (listed(a) != listed(b)) return listed(a) > listed(b);
+            return rigExec::RigExecFormatPathText(*file, file->inputs[a].name()) <
+                   rigExec::RigExecFormatPathText(*file, file->inputs[b].name());
+        });
+        std::vector<uint32_t> remap(order.size());
+        std::vector<fb::InputSlot> slots;
+        size_t listedCount = 0;
+        for (size_t i = 0; i < order.size(); ++i) {
+            remap[order[i]] = uint32_t(i);
+            const fb::InputSlot &slot = file->inputs[order[i]];
+            const bool expose = listed(order[i]);
+            listedCount += expose;
+            slots.emplace_back(slot.name(), slot.value(), slot.chain(),
+                               slot.phased(), slot.type(), expose
+                                   ? slot.flags() | uint8_t(fb::InputSlotFlags::Listed)
+                                   : slot.flags());
+        }
+        RigExecTestForEachSlotId(file, [&](uint32_t *slot) {
+            *slot = remap[*slot];
+        });
+        file->inputs = std::move(slots);
+        file->listedInputs = uint32_t(listedCount);
+    });
 }
 
 // The path id of \p text ("/A/B" or "/A/B.attr") in \p file, adding the

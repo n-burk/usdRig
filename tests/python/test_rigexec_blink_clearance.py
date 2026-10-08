@@ -155,7 +155,7 @@ def main():
         assert stage, _STACK
         stage.SetEditTarget(Usd.EditTarget(stage.GetSessionLayer()))
         rig = rigexec.Rig(stage, _RIG)
-        rig.evaluation_mode = "baked"
+        rig.cpu_reference = True
 
         prim = None
         for p in stage.Traverse():

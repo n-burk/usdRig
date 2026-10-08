@@ -26,9 +26,11 @@
 #include "pxr/usd/usd/timeCode.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <functional>
+#include <set>
 #include <map>
 #include <memory>
 #include <string>
@@ -155,7 +157,7 @@ struct RigExecTestEdit {
 };
 
 /// The reference for a binary driven with inputs set: a fresh evaluator in
-/// \p mode, compiled on \p stage as it stands (the stage the binary was
+/// compiled on \p stage as it stands (the stage the binary was
 /// baked from), then handed \p edits in the session layer, evaluates each
 /// of \p times. With \p compileAfterEdits it compiles once the edits stand
 /// instead, for an edit the evaluator's value-edit path does not take. \p
@@ -166,7 +168,6 @@ struct RigExecTestEdit {
 inline bool
 RigExecTestEditedPoses(
     const PXR_NS::UsdStageRefPtr &stage, const PXR_NS::SdfPath &rigPath,
-    rigExec::RigExecEvaluationMode mode,
     const std::vector<RigExecTestEdit> &edits,
     const std::vector<double> &times,
     std::vector<rigExec::RigExecRigPose> *poses, std::string *error,
@@ -175,7 +176,6 @@ RigExecTestEditedPoses(
     bool compileAfterEdits = false)
 {
     rigExec::RigExecRigEvaluator evaluator(stage, rigPath);
-    evaluator.SetEvaluationMode(mode);
     std::vector<std::string> notices;
     if (!compileAfterEdits && !evaluator.Compile(&notices)) {
         *error = "the reference did not compile";
@@ -206,8 +206,8 @@ RigExecTestEditedPoses(
     for (size_t i = 0; i < times.size(); ++i) {
         rigExec::RigExecRigPose pose =
             evaluator.Evaluate(PXR_NS::UsdTimeCode(times[i]));
-        if (!pose.valid || pose.bakedParityMismatches != 0 ||
-            pose.moverGraphParityMismatches != 0) {
+        if (!pose.valid || pose.comparisonMismatches != 0 ||
+            pose.referenceMismatches != 0) {
             *error = "the reference pose at " + std::to_string(times[i]) +
                      " is invalid";
             ok = false;
@@ -326,7 +326,15 @@ SameMatrix(const PXR_NS::GfMatrix4d &a, const rigExec::RrMat4d &b)
     for (int r = 0; r < 4; ++r) {
         for (int c = 0; c < 4; ++c) {
             if (a[r][c] != b[r][c]) {
-                return false;
+                // Invalid graph publications use NaN sentinels. Matching
+                // sentinel bits are equal; other numerical mismatches remain
+                // failures, including a different NaN payload.
+                if (!std::isnan(a[r][c]) || !std::isnan(b[r][c])) return false;
+                uint64_t left = 0, right = 0;
+                const double value = b[r][c];
+                std::memcpy(&left, &a[r][c], sizeof(left));
+                std::memcpy(&right, &value, sizeof(right));
+                if (left != right) return false;
             }
         }
     }
@@ -354,6 +362,11 @@ RigExecCompareRuntimeOutputs(const rigExec::RigExecRigPose &pose,
         same = false;
         rigExecTestDrive::Push(diffs, line);
     };
+    const auto &trace = reader.GetLastRunTraceForTesting();
+    if (reader.GetCounters().executedOpCount != trace.size() ||
+        std::set<int32_t>(trace.begin(), trace.end()).size() != trace.size()) {
+        push("runtime completion trace does not name each executed operation once");
+    }
     {
         const auto &rt = reader.GetJointMatrices();
         if (pose.jointMatricesFinal.size() != rt.size()) {
@@ -621,8 +634,8 @@ RigExecCompareRuntimeProperties(const rigExec::RigExecRigPose &pose,
 /// (RigExecCompareRuntimeOutputs), and the diagnostics, with
 /// \p compileNotices ahead of the pose's (the notices an explicit Compile
 /// took from the first generation, which the runtime replays on its first
-/// Execute). With \p compareCounters, the revisions executed and created
-/// and the schedules built too. Appends at most twelve lines to \p diffs;
+/// Execute). With \p compareCounters, actual executed op count too.
+/// Appends at most twelve lines to \p diffs;
 /// true when nothing differs.
 inline bool
 RigExecCompareRuntime(const rigExec::RigExecRigPose &pose,
@@ -656,35 +669,13 @@ RigExecCompareRuntime(const rigExec::RigExecRigPose &pose,
     }
     if (compareCounters) {
         const rigExec::RigExecRuntimeCounters counters = reader.GetCounters();
-        if (pose.moverGraphRevisionsExecuted != counters.revisionsExecuted ||
-            pose.moverGraphRevisionsCreated != counters.revisionsCreated ||
-            pose.moverGraphSchedulesBuilt != counters.schedulesBuilt) {
-            push("work counters differ: executed " +
-                     std::to_string(pose.moverGraphRevisionsExecuted) +
-                     "/" + std::to_string(counters.revisionsExecuted) +
-                     ", created " +
-                     std::to_string(pose.moverGraphRevisionsCreated) +
-                     "/" + std::to_string(counters.revisionsCreated) +
-                     ", schedules " +
-                     std::to_string(pose.moverGraphSchedulesBuilt) +
-                     "/" + std::to_string(counters.schedulesBuilt));
+        if (pose.executedOpCount != counters.executedOpCount) {
+            push("executed op counts differ: " +
+                     std::to_string(pose.executedOpCount) +
+                     "/" + std::to_string(counters.executedOpCount));
         }
     }
     return same;
-}
-
-/// \p lines without the "mover graph:" summary line, whose counters a
-/// freshly compiled reference moves (rigExecPose's drag comparison strips
-/// it the same way).
-inline std::vector<std::string>
-RigExecTestWithoutSummary(std::vector<std::string> lines)
-{
-    lines.erase(std::remove_if(lines.begin(), lines.end(),
-                               [](const std::string &line) {
-                                   return line.rfind("mover graph:", 0) == 0;
-                               }),
-                lines.end());
-    return lines;
 }
 
 /// The runtime view of array value \p value (a VtIntArray, VtFloatArray,
@@ -730,20 +721,18 @@ struct RigExecTestArraySet {
     bool sampled = false;
 };
 
-/// The reference of \p sets at \p time: a fresh evaluator in \p mode,
+/// The reference of \p sets at \p time: a fresh native evaluator,
 /// compiled on \p stage, then given each set's value in the session layer
 /// (at Default, or as a time sample at \p time), evaluated at \p time. The
 /// session layer is put back exactly. False with the reason.
 inline bool
 RigExecTestArrayReference(const PXR_NS::UsdStageRefPtr &stage,
                           const PXR_NS::SdfPath &rigPath,
-                          rigExec::RigExecEvaluationMode mode,
                           const std::vector<RigExecTestArraySet> &sets,
                           double time, rigExec::RigExecRigPose *pose,
                           std::string *error)
 {
     rigExec::RigExecRigEvaluator evaluator(stage, rigPath);
-    evaluator.SetEvaluationMode(mode);
     std::vector<std::string> notices;
     if (!evaluator.Compile(&notices)) {
         *error = "the reference did not compile";
@@ -772,8 +761,8 @@ RigExecTestArrayReference(const PXR_NS::UsdStageRefPtr &stage,
         *error = "the session layer refused a set";
         return false;
     }
-    if (!pose->valid || pose->bakedParityMismatches != 0 ||
-        pose->moverGraphParityMismatches != 0) {
+    if (!pose->valid || pose->comparisonMismatches != 0 ||
+        pose->referenceMismatches != 0) {
         *error = "the reference pose is invalid";
         return false;
     }
@@ -827,8 +816,7 @@ RigExecTestApplyArraySets(rigExec::RigExecRuntimeReader *reader,
 }
 
 /// \p reader's last run against \p pose: the outputs, the property values
-/// and, unless \p outputsOnly, the diagnostics less the summary line and
-/// less the line a reference that rebuilt for a structural edit opens with
+/// and, unless \p outputsOnly, the diagnostics, except for the line a reference that rebuilt for a structural edit opens with
 /// (the binary never rebuilds). Appends at most twelve lines to \p diffs;
 /// true when nothing differs.
 inline bool
@@ -843,12 +831,12 @@ RigExecCompareRuntimeRun(const rigExec::RigExecRigPose &pose,
         return same;
     }
     std::vector<std::string> want =
-        RigExecTestWithoutSummary(pose.diagnostics);
+        pose.diagnostics;
     if (!want.empty() && want.front() == "structural edit: epoch rebuilt") {
         want.erase(want.begin());
     }
     const std::vector<std::string> got =
-        RigExecTestWithoutSummary(reader.GetDiagnostics());
+        reader.GetDiagnostics();
     if (want != got) {
         same = false;
         rigExecTestDrive::Push(diffs, "diagnostics differ: " +

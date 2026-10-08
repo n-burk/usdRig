@@ -16,6 +16,7 @@
 #include "rigExecBinary/format.h"
 #include "rigExecMath/avarScale.h"
 #include "rigExec/bakedProgramImpl.h"
+#include "rigExec/bakedSchedule.h"
 #include "rigExec/bakedTrace.h"
 #include "rigExec/frozenContext.h"
 #include "rigExecRuntimeDrive.h"
@@ -6177,9 +6178,7 @@ _UpstreamPoseMismatches(const RigExecRigPose &reference,
 {
     RigExecRigPose a = reference, b = pose;
     for (RigExecRigPose *p : {&a, &b}) {
-        p->moverGraphRevisionsCreated = 0;
-        p->moverGraphRevisionsExecuted = 0;
-        p->moverGraphSchedulesBuilt = 0;
+        p->executedOpCount = 0;
         p->diagnostics.clear();
     }
     RigExecRigPose diff;
@@ -6187,7 +6186,7 @@ _UpstreamPoseMismatches(const RigExecRigPose &reference,
     for (size_t i = 0; i < diff.diagnostics.size() && i < 6; ++i) {
         std::printf("    %s\n", diff.diagnostics[i].c_str());
     }
-    return diff.bakedParityMismatches;
+    return diff.comparisonMismatches;
 }
 
 // Step 5: a job from a snapshot frozen now, sampled with the bridge's
@@ -6246,7 +6245,7 @@ _CheckUpstreamFrozen(const _UpstreamImaging &imaging,
     }
     RigExecRigEvaluator reference(stage, imaging.rig);
     CHECK(reference.Compile());
-    reference.SetEvaluationMode(RigExecEvaluationMode::Baked);
+
     reference.SetSolverGuidesEnabled(evaluator->GetSolverGuidesEnabled());
     reference.SetPublishWeightFields(evaluator->GetPublishWeightFields());
     const size_t mismatches =
@@ -6413,7 +6412,7 @@ _UpstreamPlaybackSteps(const std::string &fixture)
     }
     RigExecRigEvaluator evaluator(stage, kUpLimbsRig);
     CHECK(evaluator.Compile());
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+
     const RigExecRigPose authored = evaluator.Evaluate(UsdTimeCode(t));
     std::vector<uint8_t> bytes;
     std::string error;
@@ -6562,7 +6561,7 @@ TestABakeExposesUpstreamAsInputs(const std::string &fixture)
         return;
     }
     RigExecRigEvaluator evaluator(stage, kUpLimbsRig);
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+
     CHECK(evaluator.Compile());
     const UsdTimeCode time(1.0);
     const auto authored = evaluator.Evaluate(time);
@@ -6618,7 +6617,7 @@ TestTheRuntimeUpstreamCone(const std::string &fixture)
     if (!stage) return;
     RigExecRigEvaluator evaluator(stage, kUpLimbsRig);
     CHECK(evaluator.Compile());
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+
     evaluator.Evaluate(UsdTimeCode(1.0));
     std::vector<uint8_t> bytes;
     std::string error;
@@ -6645,13 +6644,33 @@ TestTheRuntimeUpstreamCone(const std::string &fixture)
             }
         }
     }
-    size_t heads = 0;
-    while (heads < file->steps.size() && file->steps[heads].isHead) ++heads;
-    CHECK(heads > 0);
-    for (size_t i = 0;i<file->steps.size();++i) {
-        CHECK(file->steps[i].isHead == (i<heads));
-        if (i<heads) CHECK(!file->steps[i].isSource);
+    // Canonical producer order can interleave heads and region operations.
+    // Serialization must retain every actual head's identity and body mapping.
+    const auto *nativeProgram = evaluator.GetBakedProgram();
+    CHECK(nativeProgram);
+    if (!nativeProgram) return;
+    const auto &native = nativeProgram->GetStepGraph();
+    CHECK(file->steps.size() == native.steps.size());
+    CHECK(file->commonGraph);
+    if (!file->commonGraph || file->steps.size() != native.steps.size()) return;
+    CHECK(file->commonGraph->ops.size() == file->steps.size());
+    if (file->commonGraph->ops.size() != file->steps.size()) return;
+    std::set<size_t> nativeHeads, exportedHeads;
+    for (size_t i = 0; i < file->steps.size(); ++i) {
+        const auto &step = file->steps[i];
+        const auto &body = native.steps[i];
+        if (body.isHead) nativeHeads.insert(i);
+        if (step.isHead) {
+            exportedHeads.insert(i);
+            CHECK(!step.isSource);
+            CHECK(file->commonGraph->ops[i].originalIndex == i);
+            CHECK(uint32_t(step.kind) == uint32_t(body.kind));
+            CHECK(step.object == body.object);
+            CHECK(step.part == body.part);
+        }
     }
+    CHECK(!nativeHeads.empty());
+    CHECK(exportedHeads == nativeHeads);
     // The actual static fixture owes no volatile ordinary work.
     CHECK(std::all_of(file->cones->always->words.begin(), file->cones->always->words.end(),
         [](uint64_t word){return word == 0;}));
@@ -6674,21 +6693,21 @@ TestTheRuntimeUpstreamCone(const std::string &fixture)
                 CHECK(reader);
                 if (!reader) return;
                 const auto authored = imaging->Pose();
-                const auto compareModes = [&](const std::vector<_UpstreamAuthored> &edits) {
-                    for (auto mode:{RigExecEvaluationMode::Dynamic, RigExecEvaluationMode::Baked}) {
+                const auto compareNativeGraph = [&](const std::vector<_UpstreamAuthored> &edits) {
+                    { // Native graph versus independently serialized runtime outputs.
                         const auto reference = UsdStage::Open(fixture);
                         CHECK(reference);
                         UsdEditContext editContext(reference, reference->GetSessionLayer());
                         for (const auto &edit:edits) CHECK(reference->GetAttributeAtPath(edit.path).Set(edit.value));
                         RigExecRigEvaluator live(reference, kUpLimbsRig);
-                        live.SetEvaluationMode(mode);
+
                         CHECK(live.Compile());
                         const auto pose = live.Evaluate(UsdTimeCode(1.0));
                         std::vector<std::string> diffs;
                         CHECK(RigExecCompareRuntimeOutputs(pose, *reader, &diffs));
                     }
                 };
-                compareModes({});
+                compareNativeGraph({});
                 const auto coneFor = [&](const SdfPath &path) {
                     size_t slot = 0;
                     CHECK(reader->FindInput(path.GetString(), &slot));
@@ -6715,16 +6734,58 @@ TestTheRuntimeUpstreamCone(const std::string &fixture)
                                 cone[i] = 1;
                             }
                         }
-                        for (const auto &avar:file->pose->avarBindings) if (std::find(avar.read->walk.begin(),
-                            avar.read->walk.end(), uint32_t(slot)) != avar.read->walk.end()) {
-                            for (const auto &read : step.reads) {
-                                if (read.domain() == fb::SlotDomain::Avars &&
-                                    read.begin() <= avar.flat && avar.flat < read.end()) {
-                                    cone[i] = 1;
-                                }
-                            }
+                        // A scalar binding's flat index contains 11 channels
+                        // per provider. AvarInputs consumes the raw read and
+                        // publishes that provider's typed Avars value; its
+                        // successors then cover Compose and geometry readers.
+                        for (const auto &avar : file->pose->avarBindings) {
+                            if (std::find(avar.read->walk.begin(), avar.read->walk.end(),
+                                          uint32_t(slot)) == avar.read->walk.end()) continue;
+                            const uint32_t provider = avar.flat / 11;
+                            if (step.kind != fb::StepKind::AvarInputs ||
+                                step.object != int32_t(provider)) continue;
+                            CHECK(std::any_of(step.writes.begin(), step.writes.end(),
+                                [&](const auto &write) {
+                                    return write.domain() == fb::SlotDomain::Avars &&
+                                           write.begin() == provider && write.end() == provider + 1;
+                                }));
+                            cone[i] = 1;
                         }
                     }
+                    for (const auto &avar : file->pose->avarBindings) {
+                        if (std::find(avar.read->walk.begin(), avar.read->walk.end(),
+                                      uint32_t(slot)) == avar.read->walk.end()) continue;
+                        const uint32_t provider = avar.flat / 11;
+                        CHECK(std::count_if(file->steps.begin(), file->steps.end(),
+                            [&](const auto &step) {
+                                return step.kind == fb::StepKind::AvarInputs &&
+                                       step.object == int32_t(provider);
+                            }) == 1);
+                    }
+                    // Provider raw sampling enters through a typed SpaceLeaf,
+                    // rather than a head input memo or an avar binding.
+                    CHECK(file->providerProgram);
+                    bool providerSource = false;
+                    if (file->providerProgram) {
+                        for (size_t leaf = 0; leaf < file->providerProgram->sampled.size(); ++leaf) {
+                            if (file->providerProgram->sampled[leaf].inputSlot != int32_t(slot)) continue;
+                            providerSource = true;
+                            size_t readers = 0;
+                            for (size_t i = 0; i < file->steps.size(); ++i) {
+                                const auto &step = file->steps[i];
+                                for (const auto &read : step.reads) {
+                                    if (read.domain() != fb::SlotDomain::SpaceLeaf ||
+                                        read.begin() > leaf || leaf >= read.end()) continue;
+                                    CHECK(step.kind == fb::StepKind::SpaceExpression);
+                                    CHECK(step.part == 2 && step.object == int32_t(leaf));
+                                    cone[i] = 1;
+                                    ++readers;
+                                }
+                            }
+                            CHECK(readers == 1);
+                        }
+                    }
+                    CHECK(providerSource);
                     CHECK(std::find(cone.begin(), cone.end(), char(1)) != cone.end());
                     for (size_t n = 0; n < cone.size(); ++n) {
                         for (size_t i = 0; i < cone.size(); ++i) {
@@ -6769,7 +6830,7 @@ TestTheRuntimeUpstreamCone(const std::string &fixture)
                         CHECK(!foreign);
                     }
                     const auto standing = imaging->Pose();
-                    compareModes({{key.first, key.second, {}}});
+                    compareNativeGraph({{key.first, key.second, {}}});
                     CHECK(_SameUpstreamPose(_UpstreamGeometry(_UpstreamReference(fixture, kUpLimbsRig,
                         {{key.first, key.second, {}}}, 1.0)), standing, "D2 placed"));
                     CHECK(!_SameUpstreamPose(authored, standing, "D2 nonvacuity", false));
@@ -6780,13 +6841,13 @@ TestTheRuntimeUpstreamCone(const std::string &fixture)
                     CHECK(imaging->Evaluations() == count);
                     CHECK(playback->EvaluateAndPublishResult(UsdTimeCode(1.0)).ok);
                     checkTrace(cone, true);
-                    compareModes({{key.first, key.second, {}}});
+                    compareNativeGraph({{key.first, key.second, {}}});
                     CHECK(_SameUpstreamPose(standing, imaging->Pose(),
                                             "D2 held standing"));
                     imaging->upstream->Clear(key.first);
                     checkTrace(cone, false);
                     CHECK(_SameUpstreamPose(authored, imaging->Pose(), "D2 lifted"));
-                    compareModes({});
+                    compareNativeGraph({});
                     CHECK(playback->EvaluateAndPublishResult(UsdTimeCode(1.0)).ok);
                     checkTrace(cone, true);
                 }
@@ -6795,11 +6856,11 @@ TestTheRuntimeUpstreamCone(const std::string &fixture)
                 imaging->upstream->Set(kUpA0Rz, VtValue(30.0));
                 imaging->upstream->Set(kUpSpace, VtValue(space));
                 checkTrace(both, false);
-                compareModes({{kUpA0Rz, VtValue(30.0), {}}, {kUpSpace, VtValue(space), {}}});
+                compareNativeGraph({{kUpA0Rz, VtValue(30.0), {}}, {kUpSpace, VtValue(space), {}}});
                 CHECK(_SameUpstreamPose(_UpstreamGeometry(_UpstreamReference(fixture, kUpLimbsRig, {{kUpA0Rz,
                     VtValue(30.0), {}}, {kUpSpace, VtValue(space), {}}}, 1.0)), imaging->Pose(), "D2 both"));
                 CHECK(playback->EvaluateAndPublishResult(UsdTimeCode(1.0)).ok); checkTrace(both, true);
-                compareModes({{kUpA0Rz, VtValue(30.0), {}},
+                compareNativeGraph({{kUpA0Rz, VtValue(30.0), {}},
                               {kUpSpace, VtValue(space), {}}});
                 imaging->upstream->Clear(kUpA0Rz); checkTrace(both, false);
                 imaging->upstream->Clear(kUpSpace); checkTrace(both, false);
@@ -7031,6 +7092,31 @@ _UpstreamAddedOutsideRoots(const std::string &fixture)
                             "outside roots: pulled"));
 }
 
+// A connected posed space is an ordinary bound input in the sole graph.
+// This checks admission and source identity independently of cache policy.
+static void
+_CheckConnectedPosedSourceGraph(const _UpstreamImaging &imaging)
+{
+    const RigExecBakedProgram *program = imaging.Program();
+    CHECK(program != nullptr);
+    if (!program) return;
+    const auto &B = program->GetStepGraph();
+    std::string error;
+    CHECK(RigExecBakedValidateStepGraph(B, &error));
+    const SdfPath owner("/LimbsAsset/Rig/Controls/BRoot");
+    const auto found = B.index.find(owner);
+    CHECK(found != B.index.end());
+    if (found == B.index.end()) return;
+    CHECK(found->second >= 0 && size_t(found->second) < B.ladders.size());
+    if (found->second < 0 || size_t(found->second) >= B.ladders.size()) return;
+    CHECK(B.ladders[size_t(found->second)].posedSpaceConnected);
+    CHECK(B.providerProgram.rawInputs.count(kUpSpace) == 1);
+    SdfPathVector connections;
+    CHECK(imaging.stage->GetAttributeAtPath(
+        owner.AppendProperty(TfToken("posed:space"))).GetConnections(&connections));
+    CHECK(connections == SdfPathVector{kUpSpace});
+}
+
 // Step 8: the frame cache on, at time 1. Never serves the other value's
 // pose: the sparse path misses on an upstream difference, and the D7
 // pose-only key folds the values.
@@ -7058,8 +7144,12 @@ _UpstreamCacheSteps(const std::string &fixture, const SdfPath &attribute,
         }
         CHECK(based);
     } else {
-        CHECK(imaging->Program() == nullptr);
+        CHECK(TfGetenv("RIGEXEC_FRAME_CACHE", "") == "on");
+        _CheckConnectedPosedSourceGraph(*imaging);
     }
+    VtValue sourceBefore;
+    const UsdAttribute rawSource = imaging->stage->GetAttributeAtPath(attribute);
+    CHECK(rawSource && rawSource.Get(&sourceBefore, UsdTimeCode(1.0)));
     const size_t evaluations0 = imaging->Evaluations();
     imaging->upstream->Set(attribute, value);
     const _UpstreamPose p1 = imaging->Pose();
@@ -7079,6 +7169,9 @@ _UpstreamCacheSteps(const std::string &fixture, const SdfPath &attribute,
     imaging->SetTime(2.0);
     imaging->SetTime(1.0);
     CHECK(_SameUpstreamPose(p1, imaging->Pose(), what + ": revisited"));
+    VtValue sourceAfter;
+    CHECK(rawSource.Get(&sourceAfter, UsdTimeCode(1.0)));
+    CHECK(sourceAfter == sourceBefore);
 }
 
 // Steps 9 and 9c: other frames warm from a time-varying source, with no
@@ -7412,17 +7505,31 @@ TestUpstreamSceneIndexDrivesRigInputs(const std::string &examplesDir)
         _UpstreamAddsAndChains(fixture);
         _UpstreamChainConflictTimes(fixture);
         _UpstreamAddedOutsideRoots(fixture);
-        // The posed variant: the program refuses, the walk follows.
+        // Connected posed space follows the upstream input through the graph.
         std::unique_ptr<_UpstreamImaging> imaging =
             _OpenUpstreamImaging(posed, kUpLimbsRig, 1.0);
         if (imaging) {
-            CHECK(imaging->Program() == nullptr);
+            CHECK(TfGetenv("RIGEXEC_FRAME_CACHE", "") == "off");
+            _CheckConnectedPosedSourceGraph(*imaging);
+            const auto authored = imaging->Pose();
+            VtValue sourceBefore;
+            const UsdAttribute rawSource = imaging->stage->GetAttributeAtPath(kUpSpace);
+            CHECK(rawSource && rawSource.Get(&sourceBefore, UsdTimeCode(1.0)));
             imaging->upstream->Set(kUpSpace, VtValue(_UpTranslate(1, 0, 10)));
             CHECK(_SameUpstreamPose(
                 _UpstreamReference(
                     posed, kUpLimbsRig,
                     {{kUpSpace, VtValue(_UpTranslate(1, 0, 10)), {}}}, 1.0),
                 imaging->Pose(), "posed: standing"));
+            CHECK(imaging->Evaluator()->GetUpstreamInputPaths() ==
+                  std::vector<SdfPath>{kUpSpace});
+            CHECK(!_SameUpstreamPose(authored, imaging->Pose(), "posed: sensitivity", false));
+            imaging->upstream->Clear(kUpSpace);
+            CHECK(imaging->Evaluator()->GetUpstreamInputPaths().empty());
+            CHECK(_SameUpstreamPose(authored, imaging->Pose(), "posed: lifted"));
+            VtValue sourceAfter;
+            CHECK(rawSource.Get(&sourceAfter, UsdTimeCode(1.0)));
+            CHECK(sourceAfter == sourceBefore);
         }
     }
     {

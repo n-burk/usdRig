@@ -13,8 +13,8 @@
                 against the skinned points (`preceding` on weightTarget)
       geometry  ArmSmooth relaxes Arm.points under that field
 
-    Every operator is an existing schema; the rig bakes, and dynamic and
-    baked agree bit for bit across the keyed range."""
+    Every operator is an existing schema. The supported acceptance suite
+    traces the actual shared graph and runs live, frozen and runtime kernels."""
     defaultPrim = "CrossAsset"
     endTimeCode = 12
     metersPerUnit = 0.01

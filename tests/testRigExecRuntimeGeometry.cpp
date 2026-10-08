@@ -1,4 +1,4 @@
-// rigExecRuntime geometry-family parity (M2): baked program vs runtime
+// rigExecRuntime geometry outputs: native program vs runtime
 // over every baking fixture, comparing published chain points bit for
 // bit. Each stage is baked at one time and the binary is played through
 // its inputs: the input sampler hands it the stage's animated inputs at
@@ -10,6 +10,7 @@
 #include "rigExec/rigEvaluator.h"
 #include "rigExecBinary/format.h"
 #include "rigExecRuntime/runtime.h"
+#include "rigExecRuntime/store.h"
 #include "rigExecRuntime/stageArrayInputs.h"
 #include "rigExecSampler/inputSampler.h"
 #include "rigExecExampleFixtures.h"
@@ -35,6 +36,7 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include <set>
 
 using namespace rigExec;
 PXR_NAMESPACE_USING_DIRECTIVE
@@ -86,38 +88,9 @@ _ParseFrames(const std::string &text)
     return frames;
 }
 
-// The baked epilogue's summary line is the only place chainsBuilt and
-// revisionsBuilt are published; the runtime reader emits the same line.
-// Parse its five numbers so the counters are checked against it too.
-static bool
-_ParseSummary(const std::string &line, size_t *chains, size_t *revisions,
-              size_t *created, size_t *executed, size_t *schedules)
-{
-    size_t values[5] = {0, 0, 0, 0, 0};
-    int matched = 0;
-#ifdef _MSC_VER
-#pragma warning(push)
-#pragma warning(disable : 4996)
-#endif
-    matched = std::sscanf(line.c_str(),
-                           "mover graph: %zu chain(s), %zu revision(s); "
-                           "%zu created, %zu executed, %zu schedule(s) built",
-                           &values[0], &values[1], &values[2], &values[3],
-                           &values[4]);
-#ifdef _MSC_VER
-#pragma warning(pop)
-#endif
-    *chains = values[0];
-    *revisions = values[1];
-    *created = values[2];
-    *executed = values[3];
-    *schedules = values[4];
-    return matched == 5;
-}
-
 // Bakes \p stage at the first of \p frames and plays the file through the
 // input sampler beside a fresh baked evaluator, frame by frame: the moved
-// points, the diagnostics (summary line included) and the work counters,
+// points, ordered diagnostics and actual operation counts,
 // bit for bit. A `static` stage holds an animated source in static data
 // at the bake time, so it plays that time alone. \p played, when given,
 // receives each frame's points.
@@ -139,7 +112,6 @@ _TestStage(const std::string &name, const UsdStageRefPtr &stage,
     std::string error;
     {
         RigExecRigEvaluator baker(stage, rigPath);
-        baker.SetEvaluationMode(RigExecEvaluationMode::Baked);
         if (!RigExecTestBakeAt(baker, frames.front(), &bytes, &error)) {
             std::printf("%s: FAILED (bake: %s)\n", name.c_str(),
                         error.c_str());
@@ -156,7 +128,6 @@ _TestStage(const std::string &name, const UsdStageRefPtr &stage,
     // A fresh evaluator beside a fresh reader: both start at the bake
     // time's generation, the compile notices in it, with the same history.
     RigExecRigEvaluator evaluator(stage, rigPath);
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
 
     bool failed = false;
     int compared = 0;
@@ -263,32 +234,9 @@ _TestStage(const std::string &name, const UsdStageRefPtr &stage,
             }
         }
 
-        // Diagnostics: verbatim, summary line included. The summary's
-        // five numbers are also checked against the counters below.
-        const std::vector<std::string> &diagnostics =
-            reader->GetDiagnostics();
-        const std::vector<std::string> &wantDiags = pose.diagnostics;
-        size_t wantChains = 0, wantRevisions = 0, wantCreated = 0;
-        size_t wantExecuted = 0, wantSchedules = 0;
-        bool haveSummary = false;
-        if (!wantDiags.empty() &&
-            wantDiags.back().compare(0, 12, "mover graph:") == 0) {
-            haveSummary = _ParseSummary(
-                wantDiags.back(), &wantChains, &wantRevisions,
-                &wantCreated, &wantExecuted, &wantSchedules);
-            if (!haveSummary) {
-                std::printf("%s frame %.17g: unparsable summary: %s\n",
-                            name.c_str(), frame,
-                            wantDiags.back().c_str());
-                CHECK(false);
-                failed = true;
-            }
-        } else {
-            std::printf("%s frame %.17g: no summary line\n", name.c_str(),
-                        frame);
-            CHECK(false);
-            failed = true;
-        }
+        // Ordered semantic diagnostics remain part of the native/runtime check.
+        const auto &diagnostics = reader->GetDiagnostics();
+        const auto &wantDiags = pose.diagnostics;
         if (diagnostics != wantDiags) {
             std::printf("%s frame %.17g: diagnostics differ "
                         "(%zu vs %zu)\n", name.c_str(), frame,
@@ -315,33 +263,11 @@ _TestStage(const std::string &name, const UsdStageRefPtr &stage,
             failed = true;
         }
 
-        // Counters: the pose's three plus the summary's five.
-        const RigExecRuntimeCounters counters = reader->GetCounters();
-        if (counters.revisionsExecuted !=
-                pose.moverGraphRevisionsExecuted ||
-            counters.revisionsCreated !=
-                pose.moverGraphRevisionsCreated ||
-            counters.schedulesBuilt != pose.moverGraphSchedulesBuilt) {
-            std::printf("%s frame %.17g: counters %u/%u/%u vs %zu/%zu/%zu\n",
-                        name.c_str(), frame, counters.revisionsCreated,
-                        counters.revisionsExecuted, counters.schedulesBuilt,
-                        pose.moverGraphRevisionsCreated,
-                        pose.moverGraphRevisionsExecuted,
-                        pose.moverGraphSchedulesBuilt);
-            CHECK(false);
-            failed = true;
-        }
-        if (haveSummary &&
-            (counters.chainsBuilt != wantChains ||
-             counters.revisionsBuilt != wantRevisions ||
-             counters.revisionsCreated != wantCreated ||
-             counters.revisionsExecuted != wantExecuted ||
-             counters.schedulesBuilt != wantSchedules)) {
-            std::printf("%s frame %.17g: counters vs summary differ\n",
-                        name.c_str(), frame);
-            CHECK(false);
-            failed = true;
-        }
+        // Accounting names actual shared operations and completion trace.
+        const auto trace = reader->GetLastRunTraceForTesting();
+        CHECK(reader->GetCounters().executedOpCount == trace.size());
+        const std::set<int32_t> unique(trace.begin(), trace.end());
+        CHECK(unique.size() == trace.size());
         if (played) {
             played->push_back(readerPoints);
         }
@@ -521,7 +447,6 @@ TestPathReadsFixture()
     }
 
     RigExecRigEvaluator evaluator(stage, _FindRig(stage));
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     std::vector<uint8_t> bytes;
     std::string error;
     CHECK(RigExecTestBakeAt(evaluator, frames.front(), &bytes, &error));
@@ -789,7 +714,7 @@ _SameMovedPoints(const RigExecRigPose &pose,
 // set to 1.5 and held over the frames (set again after the stage's keys
 // at each frame) its points equal, bit for bit, the baked program's with
 // 1.5 authored on the avar in the session layer (and the baked program
-// agrees with the dynamic evaluator): before, while and after the set, and
+// agrees with the native evaluator): before, while and after the set, and
 // reset at the frame it stood on.
 static void
 TestBlendActivationDrag()
@@ -803,7 +728,6 @@ TestBlendActivationDrag()
 
     const SdfPath rigPath("/Asset/Rig");
     RigExecRigEvaluator evaluator(stage, rigPath);
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     std::vector<uint8_t> bytes;
     std::string error;
     CHECK(RigExecTestBakeAt(evaluator, frames.front(), &bytes, &error));
@@ -819,7 +743,7 @@ TestBlendActivationDrag()
     const auto references = [&](const std::vector<RigExecTestEdit> &edits) {
         std::vector<RigExecRigPose> poses;
         const bool ok = RigExecTestEditedPoses(
-            stage, rigPath, RigExecEvaluationMode::BakedWithParityCheck,
+            stage, rigPath,
             edits, frames, &poses, &error);
         CHECK(ok);
         if (!ok) {
@@ -990,22 +914,20 @@ _FindPoints(const RigExecRuntimeReader &reader, const char *path)
 }
 
 // Plays \p stage's bake at the first frame through its inputs beside an
-// ExecReference evaluator (the exec-authoritative walk every evaluator is
-// held to). At every frame the runtime's published field for
+// native evaluator. At every frame the runtime's published field for
 // \p weightObject -- the current-phase field its oracle measured against
-// the points entering the revision -- must equal the dynamic evaluator's
+// the points entering the revision -- must equal the native evaluator's
 // weightFields entry bit for bit, and so must the points at \p pointsPath.
-// \p fields receives the dynamic fields, one per frame. False on any
+// \p fields receives the native fields, one per frame. False on any
 // difference.
 static bool
-_FieldsMatchDynamic(const std::string &name, const UsdStageRefPtr &stage,
+_FieldsMatchNative(const std::string &name, const UsdStageRefPtr &stage,
                     const std::vector<double> &frames,
                     const char *weightObject, const char *pointsPath,
                     std::vector<std::vector<float>> *fields)
 {
     const SdfPath rigPath = _FindRig(stage);
     RigExecRigEvaluator baked(stage, rigPath);
-    baked.SetEvaluationMode(RigExecEvaluationMode::Baked);
     std::vector<uint8_t> bytes;
     std::string error;
     if (!RigExecTestBakeAt(baked, frames.front(), &bytes, &error)) {
@@ -1017,14 +939,13 @@ _FieldsMatchDynamic(const std::string &name, const UsdStageRefPtr &stage,
         std::printf("%s: open failed: %s\n", name.c_str(), error.c_str());
         return false;
     }
-    RigExecRigEvaluator dynamic(stage, rigPath);
-    dynamic.SetEvaluationMode(RigExecEvaluationMode::ExecReference);
+    RigExecRigEvaluator native(stage, rigPath);
 
     bool same = true;
     for (double frame : frames) {
-        const RigExecRigPose want = dynamic.Evaluate(UsdTimeCode(frame));
+        const RigExecRigPose want = native.Evaluate(UsdTimeCode(frame));
         if (!want.valid) {
-            std::printf("%s frame %g: dynamic pose invalid\n", name.c_str(),
+            std::printf("%s frame %g: native pose invalid\n", name.c_str(),
                         frame);
             return false;
         }
@@ -1037,30 +958,30 @@ _FieldsMatchDynamic(const std::string &name, const UsdStageRefPtr &stage,
         const RigExecRuntimeWeightField *gotField =
             _FindWeightField(player.Reader(), weightObject);
         if (wantField == want.weightFields.end() || !gotField) {
-            std::printf("%s frame %g: no field for %s (dynamic %d, runtime "
+            std::printf("%s frame %g: no field for %s (native %d, runtime "
                         "%d)\n", name.c_str(), frame, weightObject,
                         int(wantField != want.weightFields.end()),
                         int(gotField != nullptr));
             return false;
         }
-        const std::vector<float> &w = wantField->second.weights;
+        const auto &w = wantField->second.weights;
         if (gotField->weights.size() != w.size() ||
             (!w.empty() &&
              std::memcmp(gotField->weights.data(), w.data(),
                          w.size() * sizeof(float)) != 0)) {
             std::printf("%s frame %g: the runtime's field for %s differs "
-                        "from the dynamic evaluator's\n", name.c_str(),
+                        "from the native evaluator's\n", name.c_str(),
                         frame, weightObject);
             for (size_t i = 0; i < gotField->weights.size() || i < w.size();
                  ++i) {
-                std::printf("  [%zu] runtime %.9g, dynamic %.9g\n", i,
+                std::printf("  [%zu] runtime %.9g, native %.9g\n", i,
                             i < gotField->weights.size()
                                 ? double(gotField->weights[i]) : -1.0,
                             i < w.size() ? double(w[i]) : -1.0);
             }
             same = false;
         }
-        fields->push_back(w);
+        fields->emplace_back(w.begin(), w.end());
         const auto wantPoints = want.movedProperties.find(SdfPath(pointsPath));
         const RigExecRuntimePoints *gotPoints =
             _FindPoints(player.Reader(), pointsPath);
@@ -1186,7 +1107,6 @@ _TestFalloffInputMatchesSessionEdit()
     std::string error;
     {
         RigExecRigEvaluator evaluator(stage, rigPath);
-        evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
         CHECK(RigExecTestBakeAt(evaluator, bakeTime, &bytes, &error));
     }
     RigExecTestPlayer player;
@@ -1205,10 +1125,9 @@ _TestFalloffInputMatchesSessionEdit()
     field = _FindWeightField(player.Reader(), sphere);
     CHECK(field &&
           field->weights == (std::vector<float>{0.0f, 0.0f, 1.0f}));
-    for (const RigExecEvaluationMode mode :
-         {RigExecEvaluationMode::Dynamic, RigExecEvaluationMode::Baked}) {
+    {
         std::vector<RigExecRigPose> poses;
-        CHECK(RigExecTestEditedPoses(stage, rigPath, mode,
+        CHECK(RigExecTestEditedPoses(stage, rigPath,
                                      {{SdfPath(falloffMax), VtValue(4.0f)}},
                                      {bakeTime}, &poses, &error));
         std::vector<std::string> diffs;
@@ -1217,8 +1136,7 @@ _TestFalloffInputMatchesSessionEdit()
             RigExecCompareRuntimeOutputs(poses[0], player.Reader(), &diffs);
         CHECK(same);
         std::printf("%s, %s: %s\n", name,
-                    mode == RigExecEvaluationMode::Dynamic ? "dynamic"
-                                                           : "baked",
+                    "native",
                     same ? "binary == session edit" : "MISMATCH");
         for (const std::string &line : diffs) {
             std::printf("    %s\n", line.c_str());
@@ -1235,7 +1153,7 @@ TestGeometryDomainArm()
     _TestStage(name, _GeometryDomainArmStage(), frames, &rows);
     _CheckFramesDiffer(name, rows);
     std::vector<std::vector<float>> fields;
-    CHECK(_FieldsMatchDynamic(name, _GeometryDomainArmStage(), frames,
+    CHECK(_FieldsMatchNative(name, _GeometryDomainArmStage(), frames,
                               "/Asset/Rig/Weights/Sphere",
                               "/Asset/Geom/Slab.points", &fields));
     // The field follows the sphere: 1 - d/8 about y = 0 at frame 1 and
@@ -1246,7 +1164,7 @@ TestGeometryDomainArm()
         CHECK(fields[2] == (std::vector<float>{0.0f, 0.5f, 1.0f}));
     }
     _TestFalloffInputMatchesSessionEdit();
-    std::printf("%s: %zu field(s) equal the dynamic evaluator's\n", name,
+    std::printf("%s: %zu field(s) equal the native evaluator's\n", name,
                 fields.size());
 
     // The same arm with inputs:falloffMax halved by a float math mover: the
@@ -1257,7 +1175,7 @@ TestGeometryDomainArm()
     _TestStage(chained, _GeometryDomainArmStage(true), frames, &rows);
     _CheckFramesDiffer(chained, rows);
     std::vector<std::vector<float>> narrowed;
-    CHECK(_FieldsMatchDynamic(chained, _GeometryDomainArmStage(true), frames,
+    CHECK(_FieldsMatchNative(chained, _GeometryDomainArmStage(true), frames,
                               "/Asset/Rig/Weights/Sphere",
                               "/Asset/Geom/Slab.points", &narrowed));
     CHECK(narrowed.size() == frames.size());
@@ -1265,7 +1183,7 @@ TestGeometryDomainArm()
         CHECK(narrowed[0] == (std::vector<float>{1.0f, 0.0f, 0.0f}));
         CHECK(narrowed[2] == (std::vector<float>{0.0f, 0.0f, 1.0f}));
     }
-    std::printf("%s: %zu field(s) equal the dynamic evaluator's\n", chained,
+    std::printf("%s: %zu field(s) equal the native evaluator's\n", chained,
                 narrowed.size());
 }
 
@@ -1379,7 +1297,7 @@ TestCurrentPhaseThroughCombine()
     _TestStage(name, _CurrentPhaseThroughCombineStage(), frames, &rows);
     _CheckFramesDiffer(name, rows);
     std::vector<std::vector<float>> fields;
-    CHECK(_FieldsMatchDynamic(name, _CurrentPhaseThroughCombineStage(),
+    CHECK(_FieldsMatchNative(name, _CurrentPhaseThroughCombineStage(),
                               frames, "/Asset/Rig/Weights/Wrapped",
                               "/Asset/Geom/M.points", &fields));
     CHECK(fields.size() == frames.size());
@@ -1394,7 +1312,7 @@ TestCurrentPhaseThroughCombine()
         // Unlifted: the rest-pose field 1 - d/3 at d = 0, 0.5, 1, 2.
         CHECK(fields[3].size() == 4 && fields[3][0] == 1.0f);
     }
-    std::printf("%s: %zu field(s) equal the dynamic evaluator's\n", name,
+    std::printf("%s: %zu field(s) equal the native evaluator's\n", name,
                 fields.size());
 }
 
@@ -1409,7 +1327,6 @@ _RunDiagnostics(const UsdStageRefPtr &stage, const std::vector<double> &frames,
     std::vector<uint8_t> bytes;
     {
         RigExecRigEvaluator evaluator(stage, _FindRig(stage));
-        evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
         if (!RigExecTestBakeAt(evaluator, frames.front(), &bytes, error)) {
             return false;
         }
@@ -1630,7 +1547,7 @@ _VolumeMixStage(const _MixOptions &options)
 
 // The oracle's plane, curve, per-axis and signed sphere scales, and the
 // combine modes no other stage folds several fields with, each against the
-// baked program and the dynamic evaluator bit for bit.
+// baked program and the native evaluator bit for bit.
 static void
 TestVolumeMixCurrentPhase()
 {
@@ -1651,7 +1568,7 @@ TestVolumeMixCurrentPhase()
         _TestStage(name, _VolumeMixStage(options), frames, &rows);
         _CheckFramesDiffer(name, rows);
         std::vector<std::vector<float>> fields;
-        CHECK(_FieldsMatchDynamic(name, _VolumeMixStage(options), frames,
+        CHECK(_FieldsMatchNative(name, _VolumeMixStage(options), frames,
                                   "/Asset/Rig/Weights/Mix",
                                   "/Asset/Geom/M.points", &fields));
         // Not vacuous: some point lies strictly inside the field.
@@ -1662,7 +1579,7 @@ TestVolumeMixCurrentPhase()
             }
         }
         CHECK(inside > 0);
-        std::printf("%s: %zu field(s) equal the dynamic evaluator's, %zu "
+        std::printf("%s: %zu field(s) equal the native evaluator's, %zu "
                     "weight(s) strictly inside\n", name.c_str(),
                     fields.size(), inside);
     }
@@ -1706,7 +1623,6 @@ TestAnimatedStaticPointsReported()
                             const std::string &sampledPath) {
         const auto stage = _VolumeMixStage(options);
         RigExecRigEvaluator evaluator(stage, _FindRig(stage));
-        evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
         RigExecBakeOpts opts;
         opts.time = 1.0;
         RigExecBakeResult result;
@@ -1759,7 +1675,6 @@ TestComputedOpenRefusals()
 {
     const UsdStageRefPtr stage = _CurrentPhaseStage();
     RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     RigExecBakeOpts opts;
     opts.time = 1.0;
     RigExecBakeResult result;
@@ -1891,7 +1806,6 @@ TestSparseSkinTopology()
             // fails the layout's validation, so the bake keeps no epoch
             // layout and both sides read the per-frame arrays.
             RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
-            evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
             std::vector<uint8_t> bytes;
             std::string error;
             CHECK(RigExecTestBakeAt(evaluator, 1.0, &bytes, &error));
@@ -2051,10 +1965,9 @@ _ArraySetsMatch(const char *name, const std::string &leg,
         return false;
     }
     bool same = true;
-    for (const auto mode : {RigExecEvaluationMode::Dynamic,
-                            RigExecEvaluationMode::Baked}) {
+    {
         RigExecRigPose pose;
-        if (!RigExecTestArrayReference(stage, rigPath, mode, sets,
+        if (!RigExecTestArrayReference(stage, rigPath, sets,
                                        reader->GetBakeTime(), &pose,
                                        &error)) {
             std::printf("FAILED: %s, %s: %s\n", name, leg.c_str(),
@@ -2066,8 +1979,7 @@ _ArraySetsMatch(const char *name, const std::string &leg,
         if (!RigExecCompareRuntimeRun(pose, *reader, &diffs)) {
             same = false;
             std::printf("FAILED: %s, %s, %s mode:\n", name, leg.c_str(),
-                        mode == RigExecEvaluationMode::Dynamic ? "dynamic"
-                                                               : "baked");
+                        "native");
             for (const std::string &diff : diffs) {
                 std::printf("    %s\n", diff.c_str());
             }
@@ -2077,10 +1989,62 @@ _ArraySetsMatch(const char *name, const std::string &leg,
     return same;
 }
 
+// Exec's per-element weight inputs are excluded from upstream admission.
+// Assert the real file's private storage and public refusal before crafting
+// a public slot for the independent runtime setter/diagnostic tests.
+static std::unique_ptr<RigExecRuntimeReader>
+_PrivateOracleSetterReader(const char *name, const UsdStageRefPtr &stage,
+                           const SdfPath &rigPath,
+                           const std::vector<uint8_t> &bytes,
+                           const std::string &path,
+                           const VtVec3fArray &points,
+                           RigExecRuntimeReader *original)
+{
+    const auto file = RigExecTestUnpack(bytes);
+    if (!file) {
+        return nullptr;
+    }
+    const int64_t slot = RigExecTestSlotOf(*file, path);
+    CHECK(slot >= 0 && slot >= int64_t(file->listedInputs) &&
+          slot < int64_t(file->inputs.size()));
+    if (slot < 0 || slot < int64_t(file->listedInputs) ||
+        slot >= int64_t(file->inputs.size())) {
+        return nullptr;
+    }
+    size_t index = 0;
+    CHECK(!original->FindInput(path, &index));
+    VtVec3fArray changed = points;
+    if (!changed.empty()) {
+        changed[0][0] += 1.0f;
+    }
+    const RigExecRuntimeArray value{
+        RrInputTag::Vec3fArray, changed.cdata(), changed.size()};
+    std::string error;
+    CHECK(!original->SetInputArray(path, value, &error));
+    CHECK(!original->SetInputArrayAt(size_t(slot), value, &error));
+    CHECK(!original->SetSampledInputArrayAt(size_t(slot), value, &error));
+    RigExecRuntimeArray privateView;
+    CHECK(!original->GetInputArrayAt(size_t(slot), &privateView));
+    CHECK(!original->ResetInput(path, &error));
+    CHECK(original->Execute(&error));
+    {
+        RigExecRigPose pose;
+        CHECK(RigExecTestArrayReference(stage, rigPath, {}, 2.0,
+                                        &pose, &error));
+        std::vector<std::string> diffs;
+        CHECK(RigExecCompareRuntimeRun(pose, *original, &diffs));
+        for (const auto &diff : diffs) {
+            std::printf("  %s, refused private set: %s\n", name,
+                        diff.c_str());
+        }
+    }
+    return _ArrayReader(name, RigExecTestListPrivateArraySlots(bytes));
+}
+
 // The oracle's sample points as an input: the volume mix's plane samples
-// a keyed Points prim through rigExec:sampleSource, which the export lists
-// at the attribute the oracle resolves the relationship to, its packet
-// gather bound to the same input. An authored set of its count reaches the
+// a keyed Points prim through rigExec:sampleSource. Private storage is kept
+// at the attribute the oracle resolves the relationship to, with its packet
+// gather bound to the same slot. A crafted authored set of its count reaches the
 // current-phase field; a sampled one of another count fails it with the
 // oracle's words, as live fails it.
 static void
@@ -2096,10 +2060,9 @@ TestOraclePointsSet()
     std::string error;
     {
         RigExecRigEvaluator evaluator(stage, rigPath);
-        evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
         CHECK(RigExecTestBakeAt(evaluator, 2.0, &bytes, &error));
     }
-    // The plane's oracle samples and its packet's gather read one input.
+    // The plane's oracle and packet gather share private array storage.
     {
         const std::unique_ptr<fb::RigExecWireFile> file =
             RigExecTestUnpack(bytes);
@@ -2117,7 +2080,11 @@ TestOraclePointsSet()
         }
         const fb::RigExecWirePathRead *row =
             RigExecTestPathReadRow(file.get(), sampler, false);
-        CHECK(slot >= 0 && listed == 1 && row && row->read &&
+        CHECK(slot >= 0 && slot >= int64_t(file->listedInputs) &&
+              slot < int64_t(file->inputs.size()) && listed == 1 &&
+              row && row->read &&
+              (file->inputs[size_t(slot)].flags() &
+               uint8_t(fb::InputSlotFlags::Listed)) == 0 &&
               !row->value &&
               row->read->walk == std::vector<uint32_t>{uint32_t(slot)});
     }
@@ -2128,8 +2095,7 @@ TestOraclePointsSet()
     }
     {
         RigExecRigPose pose;
-        CHECK(RigExecTestArrayReference(stage, rigPath,
-                                        RigExecEvaluationMode::Baked, {}, 2.0,
+        CHECK(RigExecTestArrayReference(stage, rigPath, {}, 2.0,
                                         &pose, &error));
         std::vector<std::string> diffs;
         CHECK(RigExecCompareRuntimeRun(pose, *reader, &diffs));
@@ -2140,15 +2106,23 @@ TestOraclePointsSet()
     VtVec3fArray points;
     CHECK(stage->GetAttributeAtPath(SdfPath(sampler))
               .Get(&points, UsdTimeCode(2.0)));
+    reader = _PrivateOracleSetterReader(name, stage, rigPath, bytes,
+                                        sampler, points, reader.get());
+    if (!reader) {
+        return;
+    }
     VtVec3fArray moved = points;
     for (GfVec3f &p : moved) {
         p[0] -= 0.75f;
         p[1] += 0.25f;
     }
+    const auto defaults = reader->GetPoints();
     int matched = 0;
     matched += _ArraySetsMatch(name, "authored", stage, rigPath, reader.get(),
                                {{sampler, VtValue(moved), false}});
-    std::unique_ptr<RigExecRuntimeReader> fewer = _ArrayReader(name, bytes);
+    CHECK(!_SamePoints({defaults}, {reader->GetPoints()}));
+    std::unique_ptr<RigExecRuntimeReader> fewer =
+        _ArrayReader(name, RigExecTestListPrivateArraySlots(bytes));
     if (fewer) {
         VtVec3fArray shorter(points.begin(), points.end() - 1);
         matched += _ArraySetsMatch(name, "sampled, one point fewer", stage,
@@ -2166,10 +2140,10 @@ TestOraclePointsSet()
 
 // The oracle's sample points are the attribute the oracle resolves its
 // relationship to: a plane whose rigExec:sampleSource names a Points prim
-// samples that prim's points, an input of their own beside the packet's
+// samples that prim's points, a private slot beside the packet's
 // gathered weight target, which names its attribute. The packet gathers
 // no sample points through a prim, so the samples have no row. An
-// authored set of the points reaches the current-phase field as the
+// authored set in a crafted public file reaches the current-phase field as the
 // session edit does.
 static void
 TestOracleSlotIsCanonical()
@@ -2186,7 +2160,6 @@ TestOracleSlotIsCanonical()
     std::string error;
     {
         RigExecRigEvaluator evaluator(stage, rigPath);
-        evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
         CHECK(RigExecTestBakeAt(evaluator, 2.0, &bytes, &error));
     }
     bool canonical = false;
@@ -2203,7 +2176,11 @@ TestOracleSlotIsCanonical()
             const fb::RigExecWirePathRead *row =
                 RigExecTestPathReadRow(file.get(), target, false);
             canonical =
-                samples >= 0 && gathered >= 0 && samples != gathered &&
+                samples >= 0 && samples >= int64_t(file->listedInputs) &&
+                samples < int64_t(file->inputs.size()) && gathered >= 0 &&
+                (file->inputs[size_t(samples)].flags() &
+                 uint8_t(fb::InputSlotFlags::Listed)) == 0 &&
+                samples != gathered &&
                 object.oracleSamplesSlot == samples &&
                 object.samplePoints.empty() &&
                 !RigExecTestPathReadRow(file.get(), sampler, false) && row &&
@@ -2218,8 +2195,7 @@ TestOracleSlotIsCanonical()
     }
     {
         RigExecRigPose pose;
-        CHECK(RigExecTestArrayReference(stage, rigPath,
-                                        RigExecEvaluationMode::Baked, {}, 2.0,
+        CHECK(RigExecTestArrayReference(stage, rigPath, {}, 2.0,
                                         &pose, &error));
         std::vector<std::string> diffs;
         CHECK(RigExecCompareRuntimeRun(pose, *reader, &diffs));
@@ -2230,13 +2206,20 @@ TestOracleSlotIsCanonical()
     VtVec3fArray points;
     CHECK(stage->GetAttributeAtPath(SdfPath(sampler))
               .Get(&points, UsdTimeCode(2.0)));
+    reader = _PrivateOracleSetterReader(name, stage, rigPath, bytes,
+                                        sampler, points, reader.get());
+    if (!reader) {
+        return;
+    }
     for (GfVec3f &p : points) {
         p[0] -= 0.5f;
     }
+    const auto defaults = reader->GetPoints();
     const bool matched =
         _ArraySetsMatch(name, "authored", stage, rigPath, reader.get(),
                         {{sampler, VtValue(points), false}});
-    std::printf("%s: %s listed apart from the gathered %s; set %s\n", name,
+    CHECK(!_SamePoints({defaults}, {reader->GetPoints()}));
+    std::printf("%s: private %s apart from gathered %s; crafted set %s\n", name,
                 sampler.c_str(), target.c_str(),
                 matched ? "== session edit" : "differs");
 }
@@ -2325,7 +2308,6 @@ TestStageArrayOracleAndChain()
         std::string error;
         {
             RigExecRigEvaluator evaluator(stage, rigPath);
-            evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
             CHECK(RigExecTestBakeAt(evaluator, 1, &bytes, &error));
         }
         const auto file = RigExecTestUnpack(bytes);
@@ -2418,10 +2400,9 @@ TestStageArrayOracleAndChain()
             CHECK(sampler.Apply(UsdTimeCode(time), reader.get(), &error, &sampled));
             CHECK(reader->Execute(&error));
             CHECK(reader->GetInputCount() == publicCount);
-            for (const auto mode : {RigExecEvaluationMode::Dynamic,
-                                    RigExecEvaluationMode::Baked}) {
+            {
                 RigExecRigPose pose;
-                CHECK(RigExecTestArrayReference(stage, rigPath, mode, {}, time,
+                CHECK(RigExecTestArrayReference(stage, rigPath, {}, time,
                                                 &pose, &error));
                 std::vector<std::string> diffs;
                 CHECK(RigExecCompareRuntimeRun(pose, *reader, &diffs));
@@ -2449,7 +2430,7 @@ TestStageArrayOracleAndChain()
             if (time == 2) {
                 RigExecRigPose held;
                 CHECK(RigExecTestArrayReference(
-                    stage, rigPath, RigExecEvaluationMode::Baked,
+                    stage, rigPath,
                     {{path.GetString(), VtValue(initial), true}}, time,
                     &held, &error));
                 std::vector<std::string> diffs;
@@ -2487,7 +2468,6 @@ TestLosslessLayoutPlaysAsLive()
     std::string error;
     {
         RigExecRigEvaluator baker(stage, rigPath);
-        baker.SetEvaluationMode(RigExecEvaluationMode::Baked);
         CHECK(RigExecTestBakeAt(baker, 1001.0, &bytes, &error));
     }
     const std::unique_ptr<fb::RigExecWireFile> file = RigExecTestUnpack(bytes);
@@ -2532,8 +2512,8 @@ TestLosslessLayoutPlaysAsLive()
             for (size_t e = 0; e + 1 < indices.size(); e += 2) {
                 leadingZeros += indices[e] == 0 && weights[e] == 0.0f ? 1 : 0;
             }
-            // Returning from a value-equal signed-zero layout keeps its
-            // handle and does no more revision work than an unchanged run.
+            // Restoring signed-zero source bits reruns the owning layout
+            // producer; the next held run must do no work.
             for (size_t z = 0; z < weights.size(); ++z) {
                 if (weights[z] != 0.0f || std::signbit(weights[z])) {
                     continue;
@@ -2558,12 +2538,29 @@ TestLosslessLayoutPlaysAsLive()
                       reader->Execute(&error));
                 CHECK(!reader->GetSkinLayoutIsOpenForTesting(mover));
                 CHECK(reader->Execute(&error));
-                const uint32_t unchanged =
-                    reader->GetCounters().revisionsExecuted;
+                const uint64_t unchanged =
+                    reader->GetCounters().executedOpCount;
+                CHECK(unchanged == 0 && reader->GetLastRunTraceForTesting().empty());
                 CHECK(reader->ResetInput(input, &error) &&
                       reader->Execute(&error));
-                CHECK(!reader->GetSkinLayoutIsOpenForTesting(mover));
-                CHECK(reader->GetCounters().revisionsExecuted == unchanged);
+                CHECK(reader->GetSkinLayoutIsOpenForTesting(mover));
+                bool ranLayout = false;
+                for (int32_t id : reader->GetLastRunTraceForTesting())
+                    ranLayout = ranLayout || (id >= 0 && size_t(id) < file->steps.size() &&
+                        file->steps[size_t(id)].kind == fb::StepKind::SkinTopology &&
+                        reader->GetStepLabelForTesting(size_t(id)).find(mover) != std::string::npos);
+                CHECK(ranLayout);
+                RigExecRigPose restored;
+                CHECK(RigExecTestArrayReference(stage, rigPath, {}, 1001.0,
+                                                &restored, &error));
+                std::vector<std::string> restoredDiffs;
+                CHECK(RigExecCompareRuntimeRun(restored, *reader,
+                                               &restoredDiffs, true));
+                for (const auto &diff : restoredDiffs)
+                    std::printf("restored signed-zero layout: %s\n", diff.c_str());
+                CHECK(reader->Execute(&error));
+                CHECK(reader->GetCounters().executedOpCount == unchanged);
+                CHECK(reader->GetLastRunTraceForTesting().empty());
                 break;
             }
             layouts += same ? 1 : 0;
@@ -2709,7 +2706,6 @@ TestDynamicSupportFromSlots()
     std::string error;
     {
         RigExecRigEvaluator evaluator(stage, rigPath);
-        evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
         CHECK(RigExecTestBakeAt(evaluator, 2.0, &bytes, &error));
     }
     // Each weight's indices are its input.
@@ -2740,8 +2736,7 @@ TestDynamicSupportFromSlots()
     // At its defaults the support matches: live's run.
     {
         RigExecRigPose pose;
-        CHECK(RigExecTestArrayReference(stage, rigPath,
-                                        RigExecEvaluationMode::Baked, {}, 2.0,
+        CHECK(RigExecTestArrayReference(stage, rigPath, {}, 2.0,
                                         &pose, &error));
         std::vector<std::string> diffs;
         CHECK(RigExecCompareRuntimeRun(pose, *reader, &diffs));
@@ -2750,16 +2745,24 @@ TestDynamicSupportFromSlots()
         }
         CHECK(!hasLine(*reader));
     }
+    size_t publicIndex = 0;
+    CHECK(!reader->FindInput(indices, &publicIndex));
+    // A crafted file exercises dynamic support validation on a runtime
+    // array set; real painted storage remains inaccessible to callers.
+    reader = _ArrayReader(name, RigExecTestListPrivateArraySlots(bytes));
+    CHECK(reader);
+    if (!reader) {
+        return;
+    }
     // Off the base's support.
     const std::vector<RigExecTestArraySet> off = {
         {indices, VtValue(VtIntArray{0, 2}), false}};
     CHECK(RigExecTestApplyArraySets(reader.get(), off, &error) &&
           reader->Execute(&error));
     CHECK(hasLine(*reader));
-    for (const auto mode :
-         {RigExecEvaluationMode::Dynamic, RigExecEvaluationMode::Baked}) {
+    {
         RigExecRigPose pose;
-        CHECK(RigExecTestArrayReference(stage, rigPath, mode, off, 2.0,
+        CHECK(RigExecTestArrayReference(stage, rigPath, off, 2.0,
                                         &pose, &error));
         std::vector<std::string> diffs;
         CHECK(RigExecCompareRuntimeRun(pose, *reader, &diffs, true));
@@ -2797,7 +2800,6 @@ TestLayoutSetOnChunkedRevision()
     std::string error;
     {
         RigExecRigEvaluator evaluator(stage, rigPath);
-        evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
         CHECK(RigExecTestBakeAt(evaluator, 1.0, &bytes, &error));
     }
     // The chunked revision's layout arrays are its inputs, defaulting to
@@ -3079,7 +3081,6 @@ TestRepaintedChunkLayoutRunsWhole()
     const std::string j1 = "/Asset/Rig/J1.avars:ty";
     const UsdStageRefPtr stage = _TwoKeySkinStage();
     RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     const UsdTimeCode time(1.0);
     std::vector<uint8_t> asBuilt;
     std::string error;
@@ -3171,7 +3172,6 @@ TestSimdSettingPerReader()
     const char *const variable = "RIGEXEC_ENABLE_SIMD";
     const UsdStageRefPtr stage = _SimdSettingStage();
     RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     std::vector<uint8_t> bytes;
     std::string error;
     // Baked before the switch moves, so the evaluator's own reading of it
@@ -3276,6 +3276,25 @@ TestSimdSettingPerReader()
                 name, differing);
 }
 
+static void TestRetainedResultOwnership()
+{
+    RrRetainedArray<RrVec3f> producer;
+    std::vector<RrVec3f> spare(1,RrVec3f(1,2,3));
+    producer.swap(spare);
+    const auto retained=producer;
+    CHECK(retained.data()==producer.data());
+    spare.assign(1,RrVec3f(4,5,6));producer.swap(spare);
+    CHECK(retained.Read()[0]==RrVec3f(1,2,3));
+    CHECK(producer.Read()[0]==RrVec3f(4,5,6));
+    producer.clear();CHECK(producer.empty());
+    CHECK(retained.size()==1);
+    RrRetainedArray<float> weights;weights.Write().assign(1,0.25f);
+    const auto retainedWeights=weights;
+    weights.Write()[0]=0.75f;
+    CHECK(retainedWeights.Read()[0]==0.25f);
+    CHECK(weights.Read()[0]==0.75f);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -3330,6 +3349,7 @@ main(int argc, char **argv)
                      std::string(fixture.animation) == "static");
     }
     CHECK(sawBaking);
+    TestRetainedResultOwnership();
     TestRepaintedChunkLayoutRunsWhole();
     TestLayoutSetOnChunkedRevision();
     // Last: it moves RIGEXEC_ENABLE_SIMD, which the evaluator reads once.

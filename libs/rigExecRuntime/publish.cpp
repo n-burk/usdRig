@@ -22,6 +22,11 @@ RrPublishPose(RrProgram *program,
     const RigExecWireSlotMeta &meta = *program->slotMeta;
     const std::vector<RigExecWireStep> &steps = *program->steps;
 
+    std::vector<char> aliveSolver(program->poses->solvers.size(), 0);
+    for (const RigExecWireStep &step : steps)
+        if (step.kind == RigExecWireStepKind::Solve)
+            aliveSolver[size_t(step.object)] = 1;
+
     store.providerXforms.clear();
     store.providerBaseXforms.clear();
     store.jointMatricesFinal.clear();
@@ -29,7 +34,29 @@ RrPublishPose(RrProgram *program,
     store.jointFramesFinal.clear();
     store.controlFrames.clear();
 
+    // Property reporting follows its immutable chain/part inventory,
+    // independently of the canonical execution graph's interleaving.
+    std::vector<size_t> propertyDiagnostics;
+    for(size_t i=0;i<steps.size();++i)
+        if(steps[i].kind==RigExecWireStepKind::PropertyRevision &&
+           (!store.stepOutputs[i].diagnostics.empty() ||
+            (i<store.headLines.size() && !store.headLines[i].empty())))
+            propertyDiagnostics.push_back(i);
+    std::sort(propertyDiagnostics.begin(),propertyDiagnostics.end(),
+        [&](size_t a,size_t b) {
+            return std::make_pair(steps[a].object,steps[a].part)<
+                   std::make_pair(steps[b].object,steps[b].part);
+        });
+    for(size_t i:propertyDiagnostics) {
+        poseDiagnostics->insert(poseDiagnostics->end(),
+            store.stepOutputs[i].diagnostics.begin(),store.stepOutputs[i].diagnostics.end());
+        if(i<store.headLines.size())
+            poseDiagnostics->insert(poseDiagnostics->end(),
+                store.headLines[i].begin(),store.headLines[i].end());
+    }
+
     for (const RigExecWireStep &step : steps) {
+        if(step.kind==RigExecWireStepKind::PropertyRevision)continue;
         if (step.kind == RigExecWireStepKind::PoseInterpolator) {
             continue;
         }
@@ -61,6 +88,7 @@ RrPublishPose(RrProgram *program,
             continue;
         }
         for (int si : walk.batchSolvers) {
+            if (!aliveSolver[size_t(si)]) continue;
             const RigExecWireSolver &s =
                 program->poses->solvers[size_t(si)];
             for (size_t k = 0; k < s.outputs.size(); ++k) {
@@ -135,23 +163,12 @@ RrPublishPose(RrProgram *program,
     // Joint publication, decided first so a frame that cannot publish
     // returns before a single key is inserted. The rest tested is this
     // run's composed one, which a recompose can make unusable.
-    const std::vector<RrPointFrame> &restFrames = RrPoseRestFrames(program);
     store.jointMatrixPublished.assign(meta.jointSlots.size(), 0);
     for (size_t k = 0; k < meta.jointSlots.size(); ++k) {
         const size_t slot = size_t(meta.jointSlots[k]);
         const RrPointFrame &finalFrame =
             store.fin[size_t(store.finLast[slot])];
         if (finalFrame.IsValid() && !finalFrame.IsDegenerate()) {
-            if (slot >= restFrames.size() ||
-                !RrFrameUsable(restFrames[slot]) ||
-                !RrFrameUsable(finalFrame)) {
-                if (error) {
-                    *error = "joint " +
-                             program->TextOrEmpty(meta.jointPaths[k]) +
-                             " has an unusable rest or final frame";
-                }
-                return false;
-            }
             store.jointMatrixPublished[k] = 1;
         } else {
             store.jointMatrixPublished[k] = 0;
@@ -188,6 +205,14 @@ RrPublishPose(RrProgram *program,
         for (const std::string &diagnostic : output.diagnostics) {
             poseDiagnostics->push_back(diagnostic);
         }
+    }
+    // Pose outputs publish after property chains, as the native epilogue does.
+    // The current typed weight also includes disabled or failed solve zeros.
+    for (size_t k = 0; k < program->poses->poseWeightPaths.size(); ++k) {
+        RrPropertyValue value;
+        value.tag = RrPropertyValue::Tag::Float;
+        value.f32 = store.poseWeights[k];
+        store.propertyResults[program->poses->poseWeightPaths[k]] = value;
     }
     return true;
 }
@@ -227,7 +252,7 @@ RrPublishGeometry(RrProgram *program,
                     .revisions[size_t(entry.second)];
             RrWeightFieldPublish field;
             field.target = publish.weightFieldTarget;
-            field.weights = publish.weightField;
+            field.weights = publish.weightField.Read();
             store.weightFields[geo.weightObjects[size_t(wire.weightObject)]
                                    .path] = std::move(field);
         } else if (step.kind == RigExecWireStepKind::ChainStatus) {
@@ -239,7 +264,7 @@ RrPublishGeometry(RrProgram *program,
                 continue;
             }
             store.movedProperties[store.chainPublish[chain].target] =
-                store.chainPublish[chain].result;
+                store.chainPublish[chain].result.Read();
         } else if (step.kind == RigExecWireStepKind::Derived) {
             for (const std::string &diagnostic : output.diagnostics) {
                 poseDiagnostics->push_back(diagnostic);
@@ -250,7 +275,7 @@ RrPublishGeometry(RrProgram *program,
                 store.derivedPublish[size_t(step.object)];
             if (store.chainPublish[chain].haveBase && derived.haveBase) {
                 if (!derived.matrixTarget) {
-                    store.movedProperties[derived.target] = derived.result;
+                    store.movedProperties[derived.target] = derived.result.Read();
                 } else if (derived.haveMatrix) {
                     store.movedMatrices[derived.target] = derived.matrix;
                 }

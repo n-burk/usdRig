@@ -54,19 +54,14 @@ re-evaluation.
 
 ## Viewport evaluation
 
-usdview prepares an executable program by default so the background workers
-can fill the animation range before playback. Explicit evaluation modes and
-an authored `rigExec:baked = false` retain their requested behavior. Rigs that
-cannot prepare or freeze a program fill the requested range one frame per
-idle tick. Every valid live result can also be cached as you visit frames.
-These fallback entries use frame time and the stage edit serial, so adding
-an operation does not require adding a separate cache input sampler.
-Background sampling also discards its saved static inputs after a stage
-edit, including edits that keep the same executable program and bindings.
+usdview evaluates the compiled operation graph and can sample detached inputs
+for background workers to fill the animation range. Every job executes frozen
+state without querying the stage. Source edits invalidate incompatible entries
+and discard saved static samples, including edits that retain the same program
+and bindings. Visited-frame caching uses the same published pose values.
 
-Set `RIGEXEC_DYNAMIC_RUNS_PROGRAM=0` to opt out of the viewport default.
-This leaves visited-frame caching and idle range filling enabled, but
-prevents worker-thread warming for rigs using the dynamic evaluator.
+A rig that cannot compile or provide a complete frozen input vector reports the
+reason. It does not select a different evaluator.
 
 ## Switches
 
@@ -78,10 +73,9 @@ prevents worker-thread warming for rigs using the dynamic evaluator.
 
 ## Limits worth knowing
 
-- **Rigs that decline the bake** (see [Baked and dynamic
-  evaluation](baked-vs-dynamic.md)) use the idle fallback. A costly dynamic
-  rig can therefore make an idle tick take as long as one frame evaluation.
-  Worker-thread warming remains the preferred path.
+- **Incomplete frozen inputs** prevent worker-thread warming; the host can
+  still evaluate a valid scene program on its owning thread. Compilation
+  failures remain invalid poses with diagnostics.
 - **`.rigexec` playback sessions** are unchanged and never consult the
   frame cache.
 - The cache is **in memory only** — there is no on-disk persistence, so

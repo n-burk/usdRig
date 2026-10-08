@@ -8,34 +8,54 @@
 
 #include "pointFrame.h"
 #include "wrinkleSettings.h"
+#include "meshConnectivity.h"
 
 #include "pxr/base/gf/vec2f.h"
+#include "pxr/base/gf/vec3d.h"
 #include "pxr/base/gf/vec3f.h"
 #include "pxr/base/gf/vec3i.h"
 
+#include <memory>
 #include <vector>
+#include "rigExecMath/deltaMushKernel.h"
+#include "rigExecMath/spatialAccel.h"
 #include "rigExecMath/surfaceProjectorKernel.h"
 
 namespace rigExec {
 
+/// The concrete delta-mush rest state the evaluator caches: GfVec3f
+/// points, GfVec3d working frames -- the instantiation every USD-side
+/// caller shares. (The binary runtime instantiates the same templates
+/// over its own vector types; the alias lives here, with USD, rather
+/// than in the USD-free kernel header.)
+using RigExecDeltaMushRest = RigExecDeltaMushRestData<GfVec3f, GfVec3d>;
+
+/// The concrete transport rest state every USD-side caller shares:
+/// GfVec3f points, GfVec3d working frames.
+using RigExecTransportRest = RigExecTransportRestData<GfVec3f, GfVec3d>;
+
 /// Smooth rest and posed meshes with identical rest-derived weights, then
 /// transport the rest detail onto the smoothed posed surface. No host runtime.
 /// Invalid input fails atomically; isolated vertices and pinned borders stay put.
+/// \p restData supplies prebuilt rest state; null builds it from the inputs.
 bool RigExecApplyDeltaMush(
     std::vector<GfVec3f> *points, const std::vector<GfVec3f> &rest,
     const std::vector<int> &counts, const std::vector<int> &indices,
     int iterations = 10, double step = 0.5, bool pinBorders = true,
-    double distanceWeight = 0.0, double displacement = 1.0);
+    double distanceWeight = 0.0, double displacement = 1.0,
+    const RigExecDeltaMushRest *restData = nullptr);
 
 /// Resolve phase-guided rest-length constraints inside attachment balls about
 /// incoming points. A material phase field stabilizes the folds. Quasistatic:
 /// no history, velocity, or authored waveform. Invalid inputs fail atomically;
 /// pins, isolated vertices, and degenerate normals stay put.
 /// See docs/concepts/wrinkle-deformation.md and the cited Wrinkle Meshes paper.
+/// \p topology supplies prebuilt connectivity; null builds it from the inputs.
 bool RigExecApplyWrinkle(
     std::vector<GfVec3f> *points, const std::vector<GfVec3f> &rest,
     const std::vector<int> &counts, const std::vector<int> &indices,
-    const RigExecWrinkleSettings &settings = {});
+    const RigExecWrinkleSettings &settings = {},
+    const RigExecWrinkleMesh *topology = nullptr);
 
 /// Axis-aligned bound volume of a point set (zero for < 2 points).
 double RigExecBoundVolume(const GfVec3f *points, size_t count);
@@ -51,11 +71,40 @@ void RigExecApplyVolumeCorrect(
 /// derived from standard mesh topology (RigExecPostMover "smooth",
 /// spec §7.6): p' = lerp(p, average of edge-connected neighbors, strength).
 /// Points without neighbors are unchanged.
+///
+/// \p source lends the read side: a caller that seeded \p points from a
+/// stable buffer passes it so the kernel reads there instead of copying.
+/// Null (the default) keeps the owned copy; a non-null range covering
+/// anything but the points passes through, as invalid topology does.
 void RigExecApplyLaplacianSmooth(
     std::vector<GfVec3f> *points,
     const std::vector<int> &faceVertexCounts,
     const std::vector<int> &faceVertexIndices,
-    double strength);
+    double strength,
+    const GfVec3f *source = nullptr,
+    size_t sourceCount = 0);
+
+/// The span form borrows every input range for the call only: the
+/// caller keeps the storage (e.g. the VtArray behind cdata()) alive
+/// until it returns. Bit-identical to the vector form, which
+/// delegates to it.
+void RigExecApplyLaplacianSmooth(
+    std::vector<GfVec3f> *points,
+    const int *faceVertexCounts, size_t faceVertexCountsSize,
+    const int *faceVertexIndices, size_t faceVertexIndicesSize,
+    double strength,
+    const GfVec3f *source = nullptr,
+    size_t sourceCount = 0);
+
+/// The smoothing above over prebuilt connectivity: the same lerp against
+/// the same neighbor lists, without rebuilding them. An entry covering
+/// anything but the points passes through, as invalid topology does.
+void RigExecApplyLaplacianSmoothWithAdjacency(
+    std::vector<GfVec3f> *points,
+    const RigExecMeshAdjacency &adjacency,
+    double strength,
+    const GfVec3f *source = nullptr,
+    size_t sourceCount = 0);
 
 
 /// Cast a ray at a mesh: Moller-Trumbore against each face fan-triangulated
@@ -128,6 +177,31 @@ bool RigExecRaycastSurfaceFrame(
 GfMatrix4d RigExecPartialTransform(const GfMatrix4d &transform,
                                    double weight);
 
+/// The weight-independent half of RigExecPartialTransform: scale
+/// factors, screw axis and angle, translation, and the recovered
+/// pivot. Decomposing once and applying per weight keeps an
+/// alternating fractional falloff from paying a decomposition per
+/// distinct weight; endpoints need no decomposition at all.
+struct RigExecPartialDecomposition {
+    GfVec3d scale{1.0};
+    GfVec3d axis{1.0, 0.0, 0.0};
+    double angle = 0.0;
+    GfVec3d translation{0.0};
+    double along = 0.0;
+    GfVec3d pivot{0.0};
+    bool smallAngle = true;
+};
+
+/// The decomposition behind RigExecPartialTransform, for callers
+/// that apply several weights to one transform.
+RigExecPartialDecomposition RigExecDecomposePartialTransform(
+    const GfMatrix4d &transform);
+
+/// The weight-dependent half for a clamped \p w in (0, 1), exactly
+/// the fractional matrix RigExecPartialTransform returns.
+GfMatrix4d RigExecApplyPartialDecomposition(
+    const RigExecPartialDecomposition &decomposition, double w);
+
 /// Angle-weighted vertex normals from standard polygon topology
 /// (RigExecPostMover "recomputeNormals", spec §7.6).
 ///
@@ -138,6 +212,21 @@ std::vector<GfVec3f> RigExecComputeVertexNormals(
     const std::vector<GfVec3f> &points,
     const std::vector<int> &faceVertexCounts,
     const std::vector<int> &faceVertexIndices);
+
+/// The vector form's signature, for callers taking its address as the
+/// normals callback (the span overload below would make &Name ambiguous).
+using RigExecVertexNormalsFn = std::vector<GfVec3f> (*)(
+    const std::vector<GfVec3f> &, const std::vector<int> &,
+    const std::vector<int> &);
+
+/// The span form borrows every input range for the call only: the
+/// caller keeps the storage (e.g. the VtArray behind cdata()) alive
+/// until it returns. Bit-identical to the vector form, which
+/// delegates to it.
+std::vector<GfVec3f> RigExecComputeVertexNormals(
+    const GfVec3f *points, size_t pointsSize,
+    const int *faceVertexCounts, size_t faceVertexCountsSize,
+    const int *faceVertexIndices, size_t faceVertexIndicesSize);
 
 /// Rotate target-local offsets through corresponding rest/posed surface frames.
 /// Area-weighted polygon normals supply each vertex normal. The longest
@@ -160,6 +249,14 @@ std::vector<GfVec3f> RigExecComputeExtent(
     const std::vector<GfVec3f> &points,
     const std::vector<float> &widths);
 
+/// The span form borrows every input range for the call only: the
+/// caller keeps the storage (e.g. the VtArray behind cdata()) alive
+/// until it returns. Bit-identical to the vector form, which
+/// delegates to it.
+std::vector<GfVec3f> RigExecComputeExtent(
+    const GfVec3f *points, size_t pointsSize,
+    const float *widths, size_t widthsSize);
+
 /// Tensor-product Bernstein lattice evaluation (RigExecLatticeMover,
 /// spec §7.5): p'(u,v,w) = sum_abc B_a(u) B_b(v) B_c(w) C_abc.
 ///
@@ -173,6 +270,17 @@ void RigExecApplyLattice(
     const std::vector<GfVec3f> &restPoints,
     const std::vector<GfVec3f> &restCage,
     const std::vector<GfVec3f> &posedCage,
+    const GfVec3i &divisions);
+
+/// The span form borrows every input range for the call only: the
+/// caller keeps the storage (e.g. the VtArray behind cdata()) alive
+/// until it returns. Bit-identical to the vector form, which
+/// delegates to it.
+void RigExecApplyLattice(
+    std::vector<GfVec3f> *points,
+    const GfVec3f *restPoints, size_t restPointsSize,
+    const GfVec3f *restCage, size_t restCageSize,
+    const GfVec3f *posedCage, size_t posedCageSize,
     const GfVec3i &divisions);
 
 /// A non-rational NURBS curve as UsdGeomNurbsCurves authors one: control
@@ -208,14 +316,17 @@ std::vector<GfVec2f> RigExecBindWire(
 /// coordinates and f = 1 - smoothstep(0, dropoff, d) (f = 1 when dropoff
 /// <= 0). The two curves must share order, knots and point count. Only the
 /// points in [begin, end) are written, so a caller can split the range
-/// across threads. Returns false, writing nothing, on a shape mismatch.
+/// across threads. restEvals, when given, supplies C0(u) for every point
+/// and must cover the points; a null table evaluates the rest curve per
+/// point instead. Returns false, writing nothing, on a shape mismatch.
 bool RigExecApplyWire(
     std::vector<GfVec3f> *points,
     const RigExecNurbsCurve &restCurve,
     const RigExecNurbsCurve &posedCurve,
     const GfVec2f *bindCoords, size_t bindCount,
     double dropoffDistance,
-    size_t begin, size_t end);
+    size_t begin, size_t end,
+    const GfVec3f *restEvals = nullptr, size_t restEvalCount = 0);
 
 /// RigExecApplyWire weighted by a sparse field: only the named points move,
 /// each by weight * f(d) * (C(u) - C0(u)). indices must be ascending and in
@@ -263,14 +374,64 @@ bool RigExecApplyWireBasis(
     const std::vector<GfVec3f> &restControlPoints,
     const std::vector<GfVec3f> &posedControlPoints);
 
+/// The surface projector's cached query data: the fan triangulation and
+/// the candidate index, built once and shared across frames. Triangle
+/// candidates remain non-prunable to preserve legacy float arithmetic.
+/// A null bvh runs the direct fan loop: either the fan is below the gate
+/// or the build met non-finite surface points. The owned
+/// keys are the build inputs: the projector rebuilds unretained rather
+/// than answering a stale entry, so a mismatched accel falls back to
+/// the per-call build exactly as a null one does.
+struct RigExecSurfaceAccel {
+    std::shared_ptr<const RigExecFanTrisH7> fan;
+    std::shared_ptr<const RigExecTriangleBvh<GfVec3f>> bvh;
+    std::vector<int> counts;
+    std::vector<int> indices;
+    std::vector<GfVec3f> points;
+};
+
+/// Builds query data for a surface: always the fan, plus its candidate
+/// index when the fan reaches the gate and every referenced point is
+/// finite. Always fills \p accel; the bvh member carries the verdict.
+void RigExecBuildSurfaceAccel(
+    const std::vector<int> &faceVertexCounts,
+    const std::vector<int> &faceVertexIndices,
+    const std::vector<GfVec3f> &surfacePoints,
+    RigExecSurfaceAccel *accel);
+
+/// The span form borrows every input range for the call only: the
+/// caller keeps the storage (e.g. the VtArray behind cdata()) alive
+/// until it returns. Bit-identical to the vector form, which
+/// delegates to it.
+void RigExecBuildSurfaceAccel(
+    const int *faceVertexCounts, size_t faceVertexCountsSize,
+    const int *faceVertexIndices, size_t faceVertexIndicesSize,
+    const GfVec3f *surfacePoints, size_t surfacePointsSize,
+    RigExecSurfaceAccel *accel);
+
 /// Closest point on a triangulated standard mesh (RigExecSurfaceMover
 /// "project", spec §7.5): p' = lerp(p, closestSurfacePoint(p), weight).
+/// \p accel supplies prebuilt triangulation; null builds it per call.
+/// An entry built for another surface falls back to the per-call build.
 void RigExecApplySurfaceProject(
     std::vector<GfVec3f> *points,
     const std::vector<GfVec3f> &surfacePoints,
     const std::vector<int> &faceVertexCounts,
     const std::vector<int> &faceVertexIndices,
-    double weight);
+    double weight,
+    const RigExecSurfaceAccel *accel = nullptr);
+
+/// The span form borrows every input range for the call only: the
+/// caller keeps the storage (e.g. the VtArray behind cdata()) alive
+/// until it returns. Bit-identical to the vector form, which
+/// delegates to it.
+void RigExecApplySurfaceProject(
+    std::vector<GfVec3f> *points,
+    const GfVec3f *surfacePoints, size_t surfacePointsSize,
+    const int *faceVertexCounts, size_t faceVertexCountsSize,
+    const int *faceVertexIndices, size_t faceVertexIndicesSize,
+    double weight,
+    const RigExecSurfaceAccel *accel = nullptr);
 
 /// Sampled curve frames: positions plus a rotation-minimizing frame per
 /// sample (spec §7.5), parameterized by normalized arc length.
@@ -292,6 +453,14 @@ struct RigExecCurveFrameSamples {
 RigExecCurveFrameSamples RigExecSampleCurveRMF(
     const std::vector<GfVec3f> &controlPoints, int sampleCount);
 
+/// The span form borrows every input range for the call only: the
+/// caller keeps the storage (e.g. the VtArray behind cdata()) alive
+/// until it returns. Bit-identical to the vector form, which
+/// delegates to it.
+RigExecCurveFrameSamples RigExecSampleCurveRMF(
+    const GfVec3f *controlPoints, size_t controlPointsSize,
+    int sampleCount);
+
 /// Rest-relative ribbon transport (RigExecCurveMover "ribbon", spec
 /// §7.5): each destination point binds to the curve parameter u from its
 /// declared two-component bind coordinates; the point moves by the rigid
@@ -301,6 +470,16 @@ RigExecCurveFrameSamples RigExecSampleCurveRMF(
 void RigExecApplyRibbonTransport(
     std::vector<GfVec3f> *points,
     const std::vector<GfVec2f> &bindCoords,
+    const RigExecCurveFrameSamples &restSamples,
+    const RigExecCurveFrameSamples &posedSamples);
+
+/// The span form borrows every input range for the call only: the
+/// caller keeps the storage (e.g. the VtArray behind cdata()) alive
+/// until it returns. Bit-identical to the vector form, which
+/// delegates to it.
+void RigExecApplyRibbonTransport(
+    std::vector<GfVec3f> *points,
+    const GfVec2f *bindCoords, size_t bindCoordsSize,
     const RigExecCurveFrameSamples &restSamples,
     const RigExecCurveFrameSamples &posedSamples);
 

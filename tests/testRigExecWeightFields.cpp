@@ -3,9 +3,15 @@
 // Covers the distance-to-weight remap, the baked falloff profiles, the
 // three distance functions, and weight-object composition.
 #include "rigExecMath/weightFields.h"
+#include "rigExecMath/spatialAccel.h"
 
+#include "pxr/base/gf/rotation.h"
+
+#include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <limits>
 
 using namespace rigExec;
@@ -462,6 +468,189 @@ TestCombine()
     CHECK(out.empty());
 }
 
+// ---- Batch 8: curve segment acceleration (M49) ----
+
+static uint32_t _CurveRandState = 0xACCE0808u;
+static float
+_CurveRandFloat(float lo, float hi)
+{
+    _CurveRandState = _CurveRandState * 1664525u + 1013904223u;
+    return lo + (hi - lo) *
+                 (float(_CurveRandState >> 8) * (1.0f / 16777216.0f));
+}
+
+static bool
+_SameBitsf(float a, float b)
+{
+    return std::memcmp(&a, &b, sizeof(float)) == 0;
+}
+
+// Segment distance transcribed from the kernel's documented behavior
+// (clamped projection, degenerate segment is its endpoint), validated
+// by the pins in TestCurveWeightFieldBvh, as the brute-force oracle.
+static float
+_OracleSegmentDistance(const GfVec3f &p, const GfVec3f &a,
+                       const GfVec3f &b)
+{
+    const GfVec3f ab = b - a;
+    const float lengthSq = ab.GetLengthSq();
+    if (lengthSq <= 1e-20f) {
+        return (p - a).GetLength();
+    }
+    float t = GfDot(p - a, ab) / lengthSq;
+    t = std::min(1.0f, std::max(0.0f, t));
+    return (p - (a + ab * t)).GetLength();
+}
+
+static void
+TestCurveWeightFieldBvh()
+{
+    // M49: the segment-BVH field answers the nested scan bit-for-bit.
+    // Oracle pins first: projection, clamp, degenerate. All exact.
+    const GfVec3f o(0, 0, 0), e(10, 0, 0);
+    CHECK(_SameBitsf(_OracleSegmentDistance(GfVec3f(5, 1, 0), o, e),
+                     1.0f));
+    CHECK(_SameBitsf(_OracleSegmentDistance(GfVec3f(-5, 0, 0), o, e),
+                     5.0f));
+    CHECK(_SameBitsf(_OracleSegmentDistance(GfVec3f(3, 4, 0), o, o),
+                     5.0f));
+    const RigExecFalloffParams p = LinearBand(0.0f, 2.0f);
+    auto oracleField = [&](const std::vector<GfVec3f> &points,
+                           const std::vector<GfVec3f> &curve,
+                           const GfMatrix4d &xform) {
+        std::vector<float> w(points.size());
+        if (curve.empty()) {
+            std::fill(w.begin(), w.end(), 0.0f);
+            return w;
+        }
+        std::vector<GfVec3f> localCurve(curve.size());
+        for (size_t k = 0; k < curve.size(); ++k) {
+            localCurve[k] =
+                GfVec3f(xform.TransformAffine(GfVec3d(curve[k])));
+        }
+        for (size_t i = 0; i < points.size(); ++i) {
+            const GfVec3f local =
+                GfVec3f(xform.TransformAffine(GfVec3d(points[i])));
+            float best;
+            if (localCurve.size() == 1) {
+                best = (local - localCurve[0]).GetLength();
+            } else {
+                best = std::numeric_limits<float>::infinity();
+                for (size_t s = 0; s + 1 < localCurve.size(); ++s) {
+                    best = std::min(best, _OracleSegmentDistance(
+                        local, localCurve[s], localCurve[s + 1]));
+                }
+            }
+            w[i] = RigExecEvaluateFalloff(best, p);
+        }
+        return w;
+    };
+    auto checkBoth = [&](const std::vector<GfVec3f> &points,
+                         const std::vector<GfVec3f> &curve,
+                         const GfMatrix4d &xform) {
+        std::vector<float> got;
+        RigExecCurveWeightField(points, curve, xform, p, &got);
+        const std::vector<float> want = oracleField(points, curve, xform);
+        CHECK(got.size() == want.size());
+        for (size_t i = 0; i < want.size(); ++i) {
+            CHECK(_SameBitsf(got[i], want[i]));
+        }
+    };
+    _CurveRandState = 0xB0BA0809u;
+    std::vector<GfVec3f> curve;
+    for (int i = 0; i < 60; ++i) {
+        curve.push_back(GfVec3f(_CurveRandFloat(-5.0f, 5.0f),
+                                _CurveRandFloat(-5.0f, 5.0f),
+                                _CurveRandFloat(-5.0f, 5.0f)));
+        if (i % 10 == 0) {
+            curve.push_back(curve.back());  // degenerate segment
+        }
+    }
+    std::vector<GfVec3f> points;
+    for (int i = 0; i < 40; ++i) {
+        points.push_back(GfVec3f(_CurveRandFloat(-6.0f, 6.0f),
+                                 _CurveRandFloat(-6.0f, 6.0f),
+                                 _CurveRandFloat(-6.0f, 6.0f)));
+    }
+    GfMatrix4d placement(1.0);
+    placement.SetRotate(GfRotation(GfVec3d(0, 1, 0), 30.0));
+    placement.SetTranslateOnly(GfVec3d(3, -1, 2));
+    // BVH path, identity and rotated placements.
+    checkBoth(points, curve, GfMatrix4d(1.0));
+    checkBoth(points, curve, placement);
+    // Verbatim paths: 0/1/2 points and a short curve.
+    checkBoth(points, {}, GfMatrix4d(1.0));
+    checkBoth(points, {curve[0]}, GfMatrix4d(1.0));
+    checkBoth(points, {curve[0], curve[1]}, GfMatrix4d(1.0));
+    checkBoth(points,
+              std::vector<GfVec3f>(curve.begin(), curve.begin() + 10),
+              placement);
+    // Both sides of each gate: 31/32/33 segments x 3/4 queries.
+    for (size_t segs : {size_t(31), size_t(32), size_t(33)}) {
+        const std::vector<GfVec3f> gateCurve(curve.begin(),
+                                             curve.begin() + segs + 1);
+        for (size_t nq : {size_t(3), size_t(4)}) {
+            const std::vector<GfVec3f> few(points.begin(),
+                                           points.begin() + nq);
+            checkBoth(few, gateCurve, placement);
+        }
+    }
+    // Non-finite curve points take the verbatim fallback.
+    {
+        std::vector<GfVec3f> nanCurve = curve;
+        nanCurve[20] = GfVec3f(
+            std::numeric_limits<float>::quiet_NaN(), 0.0f, 0.0f);
+        checkBoth(points, nanCurve, placement);
+    }
+    // Non-finite queries on the BVH path.
+    {
+        std::vector<GfVec3f> nanPoints = points;
+        nanPoints[5] = GfVec3f(
+            0.0f, std::numeric_limits<float>::quiet_NaN(), 0.0f);
+        checkBoth(nanPoints, curve, placement);
+    }
+}
+
+static void
+TestCurveWeightFieldCancellation()
+{
+    // M49: catastrophic cancellation can land a computed segment
+    // distance far outside the exact box (sol counterexample); the
+    // sound pad keeps the segment visited. 33-point curve, four origin
+    // queries: the BVH path, pinned against the oracle scan.
+    std::vector<GfVec3f> curve;
+    const GfVec3f runs[5] = {
+        GfVec3f(1e8f, 1e8f, 1e8f), GfVec3f(0.25f, 0, 0),
+        GfVec3f(-100, 100, 100), GfVec3f(0, 1, 0),
+        GfVec3f(2e8f, 2e8f, 2e8f)};
+    const int reps[5] = {8, 8, 8, 8, 1};
+    for (int r = 0; r < 5; ++r) {
+        for (int i = 0; i < reps[r]; ++i) {
+            curve.push_back(runs[r]);
+        }
+    }
+    const std::vector<GfVec3f> points = {
+        GfVec3f(0, 0, 0), GfVec3f(0, 0, 0), GfVec3f(0, 0, 0),
+        GfVec3f(0, 0, 0)};
+    const RigExecFalloffParams p = LinearBand(0.0f, 1.0f);
+    std::vector<float> got;
+    RigExecCurveWeightField(points, curve, GfMatrix4d(1.0), p, &got);
+    std::vector<float> want(points.size());
+    for (size_t i = 0; i < points.size(); ++i) {
+        float best = std::numeric_limits<float>::infinity();
+        for (size_t s = 0; s + 1 < curve.size(); ++s) {
+            best = std::min(best, _OracleSegmentDistance(
+                points[i], curve[s], curve[s + 1]));
+        }
+        want[i] = RigExecEvaluateFalloff(best, p);
+    }
+    CHECK(got.size() == want.size());
+    for (size_t i = 0; i < want.size(); ++i) {
+        CHECK(_SameBitsf(got[i], want[i]));
+        CHECK(_SameBitsf(got[i], 1.0f));  // zero distance, full weight
+    }
+}
+
 int
 main()
 {
@@ -475,6 +664,8 @@ main()
     TestPlaneField();
     TestPlaneBounds();
     TestCurveField();
+    TestCurveWeightFieldBvh();
+    TestCurveWeightFieldCancellation();
     TestCombine();
 
     if (failures) {

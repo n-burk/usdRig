@@ -247,15 +247,6 @@ PrepareRig(const char *name, const UsdStageRefPtr &stage, BenchRig *out)
         }
         return false;
     }
-    std::vector<std::string> reasons;
-    if (!RigExecBakedProgram::IsBakeable(*out->evaluator, &reasons)) {
-        std::printf("FATAL: %s does not bake\n", name);
-        for (const std::string &reason : reasons) {
-            std::printf("  %s\n", reason.c_str());
-        }
-        return false;
-    }
-    out->evaluator->SetEvaluationMode(RigExecEvaluationMode::Baked);
     const RigExecBakedProgram *program = out->evaluator->GetBakedProgram();
     if (!program) {
         std::printf("FATAL: %s built no program\n", name);
@@ -456,22 +447,8 @@ BenchScrub(BenchRig *rig, const char *name,
     return true;
 }
 
-const char *
-VerdictName(RigExecSparseVerdict verdict)
-{
-    switch (verdict) {
-    case RigExecSparseVerdict::Hit:
-        return "Hit";
-    case RigExecSparseVerdict::Partial:
-        return "Partial";
-    case RigExecSparseVerdict::Miss:
-        return "Miss";
-    }
-    return "?";
-}
-
 // Edit cost: one control-sample edit across an N-frame range, then what the
-// sparse planner does with the affected frames.
+// whole-pose cache proof does with the affected frames.
 
 bool
 BenchEdit(BenchRig *rig, const std::vector<double> &frames)
@@ -546,59 +523,21 @@ BenchEdit(BenchRig *rig, const std::vector<double> &frames)
                 affectedUs / double(frames.size()), affected,
                 frames.size());
 
-    // Sparse planning for the affected frame: the retained pre-edit state
-    // against the edited request. Planning is sub-microsecond scale, so it
-    // is timed over 200 repetitions and reported as a mean.
-    const double indexStart = NowUs();
     RigExecOutputAffectedIndex index;
-    index.Build(rig->evaluator->GetBakedProgram()->GetStepGraph(),
-                rig->epoch);
-    std::printf("  %-22s %10.1f us (one-time per epoch, %zu clusters)\n",
-                "affected-index build", NowUs() - indexStart,
-                index.ClusterCount());
+    index.Build(rig->evaluator->GetBakedProgram()->GetStepGraph(), rig->epoch);
     RigExecRetainedFrameState retained;
     retained.inputs = warmed[affectedIndex];
     retained.epochDigest = rig->epoch;
     retained.clusterCount = rig->clusters;
-    RigExecTaskListCache memo;
-    const size_t walksBefore = index.Walks();
-    RigExecSparsePlan plan;
-    const double planStart = NowUs();
+    bool reusable = false;
+    const double proofStart = NowUs();
     for (int rep = 0; rep < 200; ++rep) {
-        plan = RigExecPlanSparseReuse(index, &memo, retained, rig->epoch,
-                                      edited[affectedIndex], noOverrides);
+        reusable = RigExecCanReuseRetainedPose(index, retained, rig->epoch,
+                                               edited[affectedIndex], noOverrides);
     }
-    const double planUs = (NowUs() - planStart) / 200.0;
-    std::printf("  %-22s %10.1f us/plan (%s: run %zu of %zu clusters, "
-                "memo %s, walks +%zu)\n",
-                "sparse plan", planUs, VerdictName(plan.verdict),
-                plan.ClustersToRun(), rig->clusters,
-                plan.memoUsed ? "used" : "cold",
-                index.Walks() - walksBefore);
-    const RigExecTaskListStats memoStats = memo.Stats();
-    std::printf("  memo stats: hits=%zu misses=%zu stores=%zu entries=%zu\n",
-                memoStats.hits, memoStats.misses, memoStats.stores,
-                memoStats.entries);
-
-    // A second edit of the same control re-runs the memoized selection
-    // without rewalking: the walk count must not move.
-    tx.Set(1001.0, UsdTimeCode(editedFrame));
-    RigExecFrameInputs editedAgain;
+    std::printf("  whole-pose reuse proof: %.1f us/check; reusable=%s\n",
+                (NowUs() - proofStart) / 200.0, reusable ? "yes" : "no");
     std::string error;
-    if (!RigExecSampleFrameInputs(*rig->evaluator,
-                                  UsdTimeCode(editedFrame), noOverrides,
-                                  &editedAgain, &error)) {
-        std::printf("  FATAL: repeat sample failed (%s)\n", error.c_str());
-        return false;
-    }
-    const size_t walksBeforeRepeat = index.Walks();
-    const RigExecSparsePlan repeat =
-        RigExecPlanSparseReuse(index, &memo, retained, rig->epoch,
-                               editedAgain, noOverrides);
-    std::printf("  %-22s %s (memo %s, walks +%zu)\n", "repeat-edit plan",
-                VerdictName(repeat.verdict),
-                repeat.memoUsed ? "used" : "cold",
-                index.Walks() - walksBeforeRepeat);
 
     // An override drag touches every frame's digest: the affected scan
     // below is the all-frames-moved endpoint, and the plan is the
@@ -627,14 +566,10 @@ BenchEdit(BenchRig *rig, const std::vector<double> &frames)
             dragInputs = at;
         }
     }
-    const RigExecSparsePlan dragPlan =
-        RigExecPlanSparseReuse(index, &memo, retained, rig->epoch,
-                               dragInputs, dragged);
-    std::printf("  override drag: %zu of %zu frames affected; plan %s, "
-                "run %zu of %zu clusters (conservative: unmapped control)\n",
-                dragAffected, frames.size(),
-                VerdictName(dragPlan.verdict), dragPlan.ClustersToRun(),
-                rig->clusters);
+    const bool dragReusable = RigExecCanReuseRetainedPose(
+        index, retained, rig->epoch, dragInputs, dragged);
+    std::printf("  override drag: %zu of %zu frames affected; whole pose reusable=%s\n",
+                dragAffected, frames.size(), dragReusable ? "yes" : "no");
     return true;
 }
 

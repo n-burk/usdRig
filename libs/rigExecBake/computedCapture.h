@@ -21,6 +21,9 @@
 
 #include "rigExecBinary/format.h"
 
+#include "pxr/base/vt/value.h"
+#include <map>
+#include <tuple>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -146,6 +149,10 @@ struct RigExecBakeLayoutSlots {
 /// What the collection gathered. Every value id indexes \c values, every
 /// walk entry \c inputs; values[0] is Double +0.0, as the file's pool
 /// holds it.
+struct RigExecBakeExternalInputs {
+    std::vector<fb::RigExecWireExternalDeclaredInput> reads;
+    std::vector<pxr::VtValue> fallbacks;
+};
 struct RigExecBakeInputs {
     std::vector<fb::RigExecWireValue> values;
     /// Every slot, listed ones first, those ordered by path text.
@@ -162,9 +169,17 @@ struct RigExecBakeInputs {
     /// The step-backed objects in the program's order, then the
     /// envelope-only ones, each with its reads and oracle facts.
     std::vector<fb::RigExecWireWeightObject> weightObjects;
+    std::vector<fb::RigExecWireWeightField> weightFields;
     /// Per program constraint, the weight object its envelope arm reads,
     /// or -1.
     std::vector<int32_t> constraintWeightObjectIndex;
+    std::map<std::pair<uint32_t,uint32_t>,RigExecBakeExternalInputs> externalInputs;
+    /// (chain, revision/derived index, derived, layout) identifies the exact native owner.
+    std::map<std::tuple<uint32_t,uint32_t,bool,bool>,RigExecBakeExternalInputs> leafSites;
+    std::vector<std::array<int32_t,4>> constraintRawSlots;
+    std::vector<int32_t> providerLeafSlots;
+    std::vector<int32_t> crossDomainRawSlots;
+    std::vector<int32_t> derivedBaseSlots;
     std::vector<std::vector<uint32_t>> headInputSlots;
     std::vector<std::vector<fb::RigExecWireInput>> headInputReads;
     std::vector<fb::RigExecWirePropertyChain> propertyChains;

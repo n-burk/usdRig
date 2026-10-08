@@ -12,8 +12,10 @@
 // With --baked <examples>, the baked program's own layout handles instead.
 #include "rigExec/bakedProgram.h"
 #include "rigExec/bakedProgramImpl.h"
+#include "rigExec/bakedSchedule.h"
 #include "rigExec/moverGraph.h"
 #include "rigExec/rigEvaluator.h"
+#include "rigExecInputActionsAdapters.h"
 
 #include "pxr/base/arch/env.h"
 #include "pxr/base/plug/registry.h"
@@ -21,6 +23,7 @@
 #include "pxr/base/tf/notice.h"
 #include "pxr/base/tf/weakBase.h"
 #include "pxr/usd/sdf/types.h"
+#include "pxr/usd/usd/editContext.h"
 #include "pxr/usd/usd/notice.h"
 #include "pxr/usd/usd/primRange.h"
 #include "pxr/usd/usd/relationship.h"
@@ -480,20 +483,25 @@ TestAnUnrelatedEditDoesNotRerunTheKernel()
 
     RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
     CompileOrReport(&evaluator);
+    CHECK(evaluator.GetBakedProgram());
+    if (!evaluator.GetBakedProgram()) return;
     const size_t epoch = evaluator.GetBindingEpochDigest();
     // The first generation builds the graph and runs the kernel; the second,
     // identical, must run nothing. That is the baseline the case below is
     // measured against.
-    CHECK(evaluator.Evaluate(1.0).moverGraphRevisionsExecuted > 0);
-    CHECK(evaluator.Evaluate(1.0).moverGraphRevisionsExecuted == 0);
+    CHECK(evaluator.Evaluate(1.0).executedOpCount > 0);
+    CHECK(evaluator.Evaluate(1.0).executedOpCount == 0);
 
     // A prim the rig has never heard of, between two identical frames.
+    // Neutral routing preserves the stamp as well as the binding epoch.
+    const size_t stamp=evaluator.GetBakedProgram()->GetStepGraph().programStamp;
     stage->DefinePrim(SdfPath("/Scratch"), TfToken("Scope"));
+    CHECK(evaluator.GetLastNoticeDisposition()==RigExecNoticeDisposition::Edited);
+    CHECK(evaluator.GetBakedProgram()->GetStepGraph().programStamp==stamp);
     const RigExecRigPose after = evaluator.Evaluate(1.0);
     CheckSkinned(after, 1.0f, 0.0f, "after an unrelated edit");
     CHECK(evaluator.GetBindingEpochDigest() == epoch);
-    CHECK(after.moverGraphRevisionsExecuted == 0);
-    CHECK(after.moverGraphRevisionsCreated == 0);
+    CHECK(after.executedOpCount == 0);
 
     // And the cache is still a cache, not a freeze: a real weight edit after
     // the unrelated one still lands.
@@ -501,7 +509,7 @@ TestAnUnrelatedEditDoesNotRerunTheKernel()
         .GetAttribute(TfToken("rigExec:jointWeights")).Set(Weights(0.0f, 1.0f));
     const RigExecRigPose repainted = evaluator.Evaluate(1.0);
     CheckSkinned(repainted, 0.0f, 1.0f, "repainted after an unrelated edit");
-    CHECK(repainted.moverGraphRevisionsExecuted > 0);
+    CHECK(repainted.executedOpCount > 0);
 }
 
 // An override one hop UPSTREAM of a layout attribute drops the layouts, and
@@ -639,20 +647,20 @@ ParityMode()
     return TfGetenv("RIGEXEC_EVALUATION_MODE") == "parity";
 }
 
-RigExecEvaluationMode
-BakedMode()
+bool
+ReferenceChecksRequested()
 {
-    return ParityMode() ? RigExecEvaluationMode::BakedWithParityCheck
-                        : RigExecEvaluationMode::Baked;
+    return ParityMode() ? true
+                        : false;
 }
 
 std::unique_ptr<RigExecRigEvaluator>
 CompiledIn(const UsdStageRefPtr &stage, const SdfPath &rig,
-           RigExecEvaluationMode mode)
+           bool referenceChecks)
 {
     auto evaluator = std::make_unique<RigExecRigEvaluator>(stage, rig);
     CompileOrReport(evaluator.get());
-    evaluator->SetEvaluationMode(mode);
+    evaluator->cpuReference = referenceChecks;
     return evaluator;
 }
 
@@ -700,15 +708,12 @@ CheckAgreesWithFresh(const std::string &what, const UsdStageRefPtr &stage,
                      const std::vector<RigExecValueOverride> &overrides,
                      UsdTimeCode time, RigExecRigPose pose)
 {
-    auto fresh = CompiledIn(stage, SdfPath("/Asset/Rig"), BakedMode());
+    auto fresh = CompiledIn(stage, SdfPath("/Asset/Rig"), ReferenceChecksRequested());
     fresh->SetInteractiveOverrides(overrides);
     RigExecRigPose expected = fresh->Evaluate(time);
     CHECK(pose.valid);
     CHECK(expected.valid);
-    CHECK(pose.bakedParityMismatches == 0);
-    pose.moverGraphRevisionsCreated = expected.moverGraphRevisionsCreated;
-    pose.moverGraphRevisionsExecuted = expected.moverGraphRevisionsExecuted;
-    pose.moverGraphSchedulesBuilt = expected.moverGraphSchedulesBuilt;
+    CHECK(pose.referenceMismatches == 0);
     const auto keepPosed = [](std::vector<std::string> *lines) {
         std::vector<std::string> kept;
         for (std::string &line : *lines) {
@@ -722,10 +727,10 @@ CheckAgreesWithFresh(const std::string &what, const UsdStageRefPtr &stage,
     keepPosed(&pose.diagnostics);
     RigExecRigPose diff;
     RigExecComparePoses(expected, pose, &diff);
-    if (diff.bakedParityMismatches != 0) {
+    if (diff.comparisonMismatches != 0) {
         ++failures;
         std::printf("FAIL %s: %zu difference(s) from a fresh program\n",
-                    what.c_str(), diff.bakedParityMismatches);
+                    what.c_str(), diff.comparisonMismatches);
         for (const std::string &line : diff.diagnostics) {
             std::printf("    %s\n", line.c_str());
         }
@@ -740,20 +745,17 @@ CheckAgreesWithReference(const std::string &what,
                          RigExecRigPose pose)
 {
     auto reference = CompiledIn(stage, SdfPath("/Asset/Rig"),
-                                RigExecEvaluationMode::ExecReference);
+                                true);
     const RigExecRigPose expected = reference->Evaluate(time);
     CHECK(pose.valid);
     CHECK(expected.valid);
-    pose.moverGraphRevisionsCreated = expected.moverGraphRevisionsCreated;
-    pose.moverGraphRevisionsExecuted = expected.moverGraphRevisionsExecuted;
-    pose.moverGraphSchedulesBuilt = expected.moverGraphSchedulesBuilt;
     pose.diagnostics = expected.diagnostics;
     RigExecRigPose diff;
     RigExecComparePoses(expected, pose, &diff);
-    if (diff.bakedParityMismatches != 0) {
+    if (diff.comparisonMismatches != 0) {
         ++failures;
         std::printf("FAIL %s: %zu difference(s) from the reference\n",
-                    what.c_str(), diff.bakedParityMismatches);
+                    what.c_str(), diff.comparisonMismatches);
         for (const std::string &line : diff.diagnostics) {
             std::printf("    %s\n", line.c_str());
         }
@@ -778,10 +780,11 @@ public:
     ValueEditRouter(const UsdStageRefPtr &stage, RigExecBakedProgram *program)
         : _program(program)
     {
+        RigExecInputReplayHeldProgram::Router(program, true);
         _key = TfNotice::Register(TfCreateWeakPtr(this),
                                   &ValueEditRouter::_OnChanged, stage);
     }
-    ~ValueEditRouter() { TfNotice::Revoke(_key); }
+    ~ValueEditRouter() { TfNotice::Revoke(_key); RigExecInputReplayHeldProgram::Router(_program, false); }
 
 private:
     void _OnChanged(const UsdNotice::ObjectsChanged &notice,
@@ -800,6 +803,19 @@ private:
 // and each equal to a program built fresh after it. Then time samples
 // authored on the weights and removed again, run on a program directly and
 // held to the exec reference.
+// Direct Run publishes into caller-owned pose storage; initialize the same
+// fresh output and requested-time metadata that Evaluate initializes before Run.
+bool
+RunSkinProgramAtTime(RigExecBakedProgram &program, RigExecRigEvaluator &owner,
+                     UsdTimeCode time, RigExecRigPose *pose)
+{
+    if (pose) {
+        *pose = RigExecRigPose();
+        pose->time = time;
+    }
+    return RigExecInputActionsRunProgram(program, owner, time, pose);
+}
+
 void
 TestBakedLayoutFollowsEdits()
 {
@@ -808,7 +824,7 @@ TestBakedLayoutFollowsEdits()
     const UsdAttribute weights = skin.CreateAttribute(
         TfToken("rigExec:jointWeights"), SdfValueTypeNames->FloatArray);
     weights.Set(Weights(1.0f, 0.0f));
-    auto evaluator = CompiledIn(stage, SdfPath("/Asset/Rig"), BakedMode());
+    auto evaluator = CompiledIn(stage, SdfPath("/Asset/Rig"), ReferenceChecksRequested());
     const UsdTimeCode t1(1.0), t2(2.0);
     const std::vector<RigExecValueOverride> none;
 
@@ -850,21 +866,17 @@ TestBakedLayoutFollowsEdits()
     CHECK(evaluator->GetBakedProgramBuildCount() == builds);
 
     // Two time samples on the weights: the layout is no longer epoch state.
-    // An evaluator stops running the program for such a rig (IsBakeable
-    // refuses an animated layout), so a program built before the samples is
-    // run directly, with the notices routed to it as the evaluator routes
-    // them. Its handle is refused, the packet reads each frame's arrays, and
-    // once the samples are gone the handle it held before comes back.
+    // Retain a program across the new animation. Its declared SkinTopology
+    // producer adopts every sampled layout and preserves equal held values.
     RigExecRigEvaluator rig(stage, SdfPath("/Asset/Rig"));
     CompileOrReport(&rig);
-    rig.SetEvaluationMode(RigExecEvaluationMode::Baked);
     const std::unique_ptr<RigExecBakedProgram> program =
         RigExecBakedProgram::Build(&rig, nullptr);
     CHECK(program);
     if (!program) {
         return;
     }
-    CHECK(program->Run(t1, &pose));
+    CHECK(RunSkinProgramAtTime(*program, rig, t1, &pose));
     CheckSkinned(pose, 0.5f, 0.25f, "direct, before the samples");
     const Revision *revision = RevisionOf(program->GetStepGraph(), kSkin);
     CHECK(revision != nullptr);
@@ -878,35 +890,38 @@ TestBakedLayoutFollowsEdits()
     weights.Set(Weights(1.0f, 0.0f), 1.0);
     weights.Set(Weights(0.0f, 1.0f), 2.0);
     CHECK(weights.ValueMightBeTimeVarying());
-    CHECK(program->Run(t1, &pose));
+    CHECK(RunSkinProgramAtTime(*program, rig, t1, &pose));
     CheckSkinned(pose, 0.0f, 1.0f, "direct, time-sampled weights at 1");
     CheckAgreesWithReference("direct, time-sampled weights at 1", stage, t1,
                              pose);
-    CHECK(revision->topologyResolved && revision->topology == nullptr);
-    CHECK(revision->layoutHandle == nullptr && !revision->layoutFixed);
-    CHECK(program->Run(t2, &pose));
+    CHECK(revision->topologyResolved && revision->topology != nullptr);
+    CHECK(revision->layoutHandle == revision->topology && !revision->layoutFixed);
+    const auto firstAnimatedLayout = revision->topology;
+    CHECK(RunSkinProgramAtTime(*program, rig, t2, &pose));
     CheckSkinned(pose, 1.0f, 0.0f, "direct, time-sampled weights at 2");
     CheckAgreesWithReference("direct, time-sampled weights at 2", stage, t2,
                              pose);
-    CHECK(revision->topology == nullptr);
-    CHECK(revision->layoutHandle == nullptr);
+    CHECK(revision->topology != nullptr && revision->topology != firstAnimatedLayout);
+    CHECK(revision->layoutHandle == revision->topology);
     weights.ClearAtTime(1.0);
     weights.ClearAtTime(2.0);
     CHECK(!weights.ValueMightBeTimeVarying());
-    CHECK(program->Run(t1, &pose));
+    CHECK(RunSkinProgramAtTime(*program, rig, t1, &pose));
     CheckSkinned(pose, 0.5f, 0.25f, "direct, time samples removed");
     CheckAgreesWithReference("direct, time samples removed", stage, t1, pose);
-    CHECK(revision->topology == held);
-    CHECK(revision->layoutHandle == held && revision->layoutFixed);
+    CHECK(revision->topology != nullptr && *revision->topology == *held);
+    CHECK(revision->layoutHandle == revision->topology);
+    const auto restoredLayout = revision->topology;
+    CHECK(RunSkinProgramAtTime(*program, rig, t1,&pose));
+    CheckSkinned(pose, 0.5f, 0.25f, "held restored layout");
+    CHECK(revision->topology == restoredLayout);
 }
 
-// A generation that gives itself back in the prologue (a constraint target
-// that stops being a transform) after the layout was repainted, then the
-// target restored: the next generation deforms with the repainted layout,
-// as the dynamic walk does. The live path recompiles before it can reach
-// this bail, so the program is run directly.
+// Original retained StageFrames refusal preserves prepared layout work,
+// but withholds geometry adoption/publication until target restoration.
+// Run the retained program directly to exercise sampled refusal state.
 void
-TestABailedGenerationLeavesTheLayoutAsTheNextNeedsIt()
+TestATargetRefusalKeepsIndependentLayoutWork()
 {
     UsdStageRefPtr stage = MakeSkinnedRig();
     const UsdPrim skin = stage->GetPrimAtPath(kSkin);
@@ -915,6 +930,8 @@ TestABailedGenerationLeavesTheLayoutAsTheNextNeedsIt()
     weights.Set(Weights(1.0f, 0.0f));
     const SdfPath probe("/Asset/Geom/Probe");
     const UsdPrim probePrim = stage->DefinePrim(probe, TfToken("Xform"));
+    const SdfPath probeB("/Asset/Geom/ProbeB");
+    const UsdPrim probeBPrim = stage->DefinePrim(probeB, TfToken("Xform"));
     const UsdPrim aim = stage->DefinePrim(
         SdfPath("/Asset/Rig/Movers/ProbeAim"),
         TfToken("RigExecAimConstraint"));
@@ -926,23 +943,39 @@ TestABailedGenerationLeavesTheLayoutAsTheNextNeedsIt()
               .SetTargets({SdfPath("/Asset/Rig/AlongX")}));
     CHECK(aim.CreateRelationship(TfToken("rigExec:moves")).SetTargets({probe}));
 
+    const UsdPrim aimB = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Movers/ProbeAimB"),
+        TfToken("RigExecAimConstraint"));
+    CHECK(aimB.CreateAttribute(TfToken("rigExec:aimAxis"),
+                              SdfValueTypeNames->Token, false,
+                              SdfVariabilityUniform)
+              .Set(TfToken("z")));
+    CHECK(aimB.CreateRelationship(TfToken("rigExec:aimTarget"))
+              .SetTargets({SdfPath("/Asset/Rig/AlongX")}));
+    CHECK(aimB.CreateRelationship(TfToken("rigExec:moves")).SetTargets({probeB}));
+
     RigExecRigEvaluator rig(stage, SdfPath("/Asset/Rig"));
     CompileOrReport(&rig);
-    rig.SetEvaluationMode(RigExecEvaluationMode::Baked);
     std::vector<std::string> reasons;
-    const std::unique_ptr<RigExecBakedProgram> program =
-        RigExecBakedProgram::Build(&rig, &reasons);
-    CHECK(program);
-    if (!program) {
+    const auto program = RigExecInputReplayHeldProgram::Build(&rig, &reasons);
+    CHECK(bool(*program));
+    if (!*program) {
         for (const std::string &reason : reasons) {
             std::printf("    refused: %s\n", reason.c_str());
         }
         return;
     }
+    const auto &compiled = (*program)->GetStepGraph();
+    const auto hasRequiredTarget = [&](const SdfPath &path) {
+        return std::any_of(compiled.xformSlots.begin(), compiled.xformSlots.end(),
+            [&](int slot) { return compiled.paths[size_t(slot)] == path; });
+    };
+    CHECK(hasRequiredTarget(probe));
+    CHECK(hasRequiredTarget(probeB));
     RigExecRigPose first;
-    CHECK(program->Run(UsdTimeCode(1.0), &first));
+    CHECK(program->Run(UsdTimeCode(1.0), &first, true));
     CheckSkinned(first, 1.0f, 0.0f, "before the bail");
-    const Revision *revision = RevisionOf(program->GetStepGraph(), kSkin);
+    const Revision *revision = RevisionOf((*program)->GetStepGraph(), kSkin);
     CHECK(revision != nullptr);
     if (!revision) {
         return;
@@ -951,14 +984,55 @@ TestABailedGenerationLeavesTheLayoutAsTheNextNeedsIt()
         revision->topology;
     CHECK(held != nullptr);
 
-    ValueEditRouter router(stage, program.get());
+    // Duplicate admission input must be rejected, not counted as one read.
+    auto &mutableGraph = const_cast<RigExecBakedProgramImpl &>((*program)->GetStepGraph());
+    auto gate = std::find_if(mutableGraph.steps.begin(), mutableGraph.steps.end(), [](const auto &step) {
+        return std::any_of(step.reads.begin(), step.reads.end(), [](const auto &read) {
+            return read.domain == RigExecBakedSlotDomain::RequiredStageFramesAdmission;
+        });
+    });
+    CHECK(gate != mutableGraph.steps.end());
+    std::string graphError;
+    CHECK(RigExecBakedValidateStepGraph(mutableGraph, &graphError));
+    if (gate != mutableGraph.steps.end()) {
+        const auto savedReads = gate->reads;
+        const auto admissionRead = *std::find_if(savedReads.begin(), savedReads.end(), [](const auto &read) {
+            return read.domain == RigExecBakedSlotDomain::RequiredStageFramesAdmission;
+        });
+        gate->reads.push_back(admissionRead);
+        CHECK(!RigExecBakedValidateStepGraph(mutableGraph, &graphError));
+        CHECK(graphError.find("required stage-frame admission role") != std::string::npos);
+        gate->reads = savedReads;
+        CHECK(RigExecBakedValidateStepGraph(mutableGraph, &graphError));
+    }
+
+    ValueEditRouter router(stage, program->get());
+    CHECK(probeBPrim.SetTypeName(TfToken("Scope")));
     CHECK(probePrim.SetTypeName(TfToken("Scope")));
     weights.Set(Weights(0.0f, 1.0f));
     RigExecRigPose given;
-    CHECK(!program->Run(UsdTimeCode(2.0), &given));
-    CHECK(program->GetLastBail() == RigExecBakedBail::StageFrames);
-    // The geometry prologue did not run, so nothing adopted the repaint;
-    // the SkinTopology op, which runs on every generation, already holds it.
+    CHECK(!program->Run(UsdTimeCode(2.0), &given, true));
+    CHECK((*program)->GetLastBail() == RigExecBakedBail::StageFrames);
+    CHECK(!given.valid);
+    const auto &graph = (*program)->GetStepGraph();
+    const auto &admission = graph.requiredStageFramesAdmission;
+    CHECK(!admission.admitted && admission.firstBadTarget >= 0);
+    int firstBad = -1;
+    for (size_t i = 0; i < graph.xformSlots.size(); ++i) {
+        const SdfPath &path = graph.paths[size_t(graph.xformSlots[i])];
+        if (path == probe || path == probeB) { firstBad = int(i); break; }
+    }
+    CHECK(firstBad >= 0 && admission.firstBadTarget == firstBad);
+    const SdfPath firstBadPath = firstBad >= 0
+        ? graph.paths[size_t(graph.xformSlots[size_t(firstBad)])] : SdfPath();
+    CHECK(given.providerXforms.empty());
+    CHECK(given.providerBaseXforms.empty());
+    CHECK(given.jointMatricesFinal.empty());
+    CHECK(given.movedProperties.count(kTarget) == 0);
+    CHECK(!given.diagnostics.empty() && given.diagnostics.back() ==
+        "could not resolve constraint target " + firstBadPath.GetString() +
+        " relative to the asset root");
+    // Preparation survives, but the geometry adoption boundary does not run.
     CHECK(revision->topology == held);
     CHECK(revision->layoutHandle != nullptr && revision->layoutHandle != held);
     if (revision->layoutHandle) {
@@ -969,15 +1043,39 @@ TestABailedGenerationLeavesTheLayoutAsTheNextNeedsIt()
     const std::shared_ptr<const RigExecSkinTopology> repainted =
         revision->layoutHandle;
 
+    RigExecRigPose heldRefusal;
+    CHECK(!program->Run(UsdTimeCode(2.0), &heldRefusal, true));
+    CHECK((*program)->GetLastBail() == RigExecBakedBail::StageFrames);
+    CHECK(!heldRefusal.valid && heldRefusal.movedProperties.count(kTarget) == 0);
+    CHECK(heldRefusal.diagnostics == given.diagnostics);
+    CHECK(revision->topology == held);
+    CHECK(revision->layoutHandle == repainted);
+
     CHECK(probePrim.SetTypeName(TfToken("Xform")));
+    CHECK(probeBPrim.SetTypeName(TfToken("Xform")));
     RigExecRigPose next;
-    CHECK(program->Run(UsdTimeCode(3.0), &next));
+    CHECK(program->Run(UsdTimeCode(3.0), &next, true));
+    CHECK((*program)->GetStepGraph().requiredStageFramesAdmission.admitted);
+    CHECK((*program)->GetStepGraph().requiredStageFramesAdmission.firstBadTarget == -1);
     CheckSkinned(next, 0.0f, 1.0f, "the generation after the bail");
     CHECK(revision->topology != held);
     CHECK(revision->topology == repainted);
 
     CheckAgreesWithReference("the generation after the bail", stage,
                              UsdTimeCode(3.0), next);
+
+    // Successfully reading a degenerate transform is not a missing source.
+    // Downstream numerical refusal remains separate from StageFrames admission.
+    GfMatrix4d degenerate(1.0); degenerate.SetScale(GfVec3d(0.0));
+    CHECK(probePrim.CreateAttribute(TfToken("xformOp:transform"),
+        SdfValueTypeNames->Matrix4d).Set(degenerate));
+    CHECK(probePrim.CreateAttribute(TfToken("xformOpOrder"),
+        SdfValueTypeNames->TokenArray).Set(VtTokenArray{TfToken("xformOp:transform")}));
+    RigExecRigPose degeneratePose;
+    program->Run(UsdTimeCode(4.0), &degeneratePose, true);
+    CHECK((*program)->GetStepGraph().requiredStageFramesAdmission.admitted);
+    CHECK((*program)->GetStepGraph().requiredStageFramesAdmission.firstBadTarget == -1);
+    CHECK((*program)->GetLastBail() != RigExecBakedBail::StageFrames);
 }
 
 // FNV-1a over bytes, for a signature that reads the same in every process.
@@ -1052,7 +1150,7 @@ FoldLayoutFields(Fnv *f, const Revision &revision)
 }
 
 // What a fresh evaluator layout cache answers for \p revision at \p time:
-// the dynamic walk's layout, which the adopted one must equal.
+// the independent scalar reference's layout, which the adopted one must equal.
 std::shared_ptr<const RigExecSkinTopology>
 CacheReference(const RigExecBakedProgramImpl &B, const Revision &revision,
                UsdTimeCode time)
@@ -1086,7 +1184,6 @@ CheckLayoutFields(const std::string &what, const UsdStageRefPtr &stage,
 {
     RigExecRigEvaluator rig(stage, rigPath);
     CompileOrReport(&rig);
-    rig.SetEvaluationMode(RigExecEvaluationMode::Baked);
     std::vector<std::string> reasons;
     const std::unique_ptr<RigExecBakedProgram> program =
         RigExecBakedProgram::Build(&rig, &reasons);
@@ -1137,10 +1234,10 @@ CheckLayoutFields(const std::string &what, const UsdStageRefPtr &stage,
             FoldLayoutFields(&f, revision);
             const std::string at =
                 what + " " + when + " " + revision.moverPath.GetString();
-            // Set where the prologue resolves a topology, and never reset.
+            // Set when an owning body adopts a sampled SkinTopology handle.
             bool &expected = resolved[revision.moverPath];
             expected = expected ||
-                       (ran && revision.skinTopologyFixed && haveBase);
+                       (ran && revision.op == rigExec::RigExecRevisionOp::Skin && haveBase);
             if (revision.topologyResolved != expected) {
                 ++violations;
                 std::printf("FAIL %s: topologyResolved %d, expected %d\n",
@@ -1188,12 +1285,12 @@ CheckLayoutFields(const std::string &what, const UsdStageRefPtr &stage,
     const double start = stage->GetStartTimeCode();
     moment("build", UsdTimeCode(start), false);
     RigExecRigPose pose;
-    CHECK(program->Run(UsdTimeCode(start), &pose));
+    CHECK(RunSkinProgramAtTime(*program, rig, UsdTimeCode(start), &pose));
     moment("run1", UsdTimeCode(start), true);
-    CHECK(program->Run(UsdTimeCode(start + 2.0), &pose));
+    CHECK(RunSkinProgramAtTime(*program, rig, UsdTimeCode(start + 2.0), &pose));
     moment("run3", UsdTimeCode(start + 2.0), true);
     program->RequestFullRun();
-    CHECK(program->Run(UsdTimeCode(start + 2.0), &pose));
+    CHECK(RunSkinProgramAtTime(*program, rig, UsdTimeCode(start + 2.0), &pose));
     moment("bake", UsdTimeCode(start + 2.0), true);
     std::printf("layout fields %s: %zu fixed, %zu chunked, %zu adopted\n",
                 what.c_str(), fixed, chunked, layouts);
@@ -1239,6 +1336,19 @@ TestTheLayoutFieldsAreSetWhereTheyWere(const std::string &examples)
                 std::printf("FAIL cannot open %s\n", c.path.c_str());
                 continue;
             }
+            if (c.name == "volume_placements") {
+                // This parity history requests the original final-placement
+                // field explicitly; unannotated fields retain the base default.
+                const auto weight = stage->GetPrimAtPath(
+                    SdfPath("/PlacementAsset/Rig/GeometryMovers/StripSmooth"))
+                    .GetRelationship(TfToken("rigExec:weightObject"));
+                CHECK(weight);
+                if (weight) {
+                    const UsdEditContext edit(stage, UsdEditTarget(stage->GetSessionLayer()));
+                    CHECK(weight.SetMetadata(TfToken(RigExecReadPhaseMetadataName),
+                                             std::string("final")));
+                }
+            }
             CheckLayoutFields(c.name + (always ? " chunked" : ""), stage,
                               RigOf(stage));
         }
@@ -1269,18 +1379,44 @@ TestTheLayoutHandleSurvivesUnrelatedNotices()
     skin.CreateAttribute(TfToken("rigExec:jointWeights"),
                          SdfValueTypeNames->FloatArray)
         .Set(Weights(1.0f, 0.0f));
-    auto evaluator = CompiledIn(stage, SdfPath("/Asset/Rig"), BakedMode());
-    CHECK(evaluator->Evaluate(UsdTimeCode(1.0)).moverGraphRevisionsExecuted >
+    auto evaluator = CompiledIn(stage, SdfPath("/Asset/Rig"), ReferenceChecksRequested());
+    CHECK(evaluator->Evaluate(UsdTimeCode(1.0)).executedOpCount >
           0);
-    CHECK(evaluator->Evaluate(UsdTimeCode(1.0)).moverGraphRevisionsExecuted ==
+    CHECK(evaluator->Evaluate(UsdTimeCode(1.0)).executedOpCount ==
           0);
     const std::shared_ptr<const RigExecSkinTopology> held =
         Adopted(*evaluator);
     CHECK(held != nullptr);
-    const auto unrelated = [&](const std::string &what) {
+    const auto unrelated = [&](const std::string &what, bool rebuilt=false) {
         const RigExecRigPose pose = evaluator->Evaluate(UsdTimeCode(1.0));
         CheckSkinned(pose, 1.0f, 0.0f, what.c_str());
-        CHECK(pose.moverGraphRevisionsExecuted == 0);
+        if (!rebuilt && pose.executedOpCount != 0) {
+            std::printf("held-layout notice %s executed %zu op(s)\n",
+                        what.c_str(), size_t(pose.executedOpCount));
+        }
+        if (!rebuilt) {
+            CHECK(pose.executedOpCount == 0);
+        } else {
+            // ORIGINAL requires no retained geometry kernels. The new control
+            // still initializes through the common graph in this generation.
+            CHECK(pose.valid && pose.executedOpCount > 0);
+            const auto &B=evaluator->GetBakedProgram()->GetStepGraph();
+            size_t geometryBodies=0;
+            for(size_t i=0;i<B.steps.size();++i)
+                if(i<B.opExecution.ran.size() && B.opExecution.ran[i] &&
+                   (B.steps[i].kind==RigExecBakedStepKind::RevisionChunk ||
+                    B.steps[i].kind==RigExecBakedStepKind::RevisionFuse))++geometryBodies;
+            CHECK(geometryBodies == 0);
+            CHECK(pose.controlFrames.count(SdfPath("/Asset/Rig/Extra")) == 1);
+            const auto extra=B.index.find(SdfPath("/Asset/Rig/Extra"));
+            CHECK(extra!=B.index.end());
+            bool initialized=false;
+            if(extra!=B.index.end())for(size_t i=0;i<B.steps.size();++i)
+                if(B.steps[i].kind==RigExecBakedStepKind::AvarInputs &&
+                   B.steps[i].object==extra->second && i<B.opExecution.ran.size() &&
+                   B.opExecution.ran[i])initialized=true;
+            CHECK(initialized);
+        }
         CHECK(Adopted(*evaluator) == held);
         const Revision *revision = SkinRevision(*evaluator);
         CHECK(revision && !revision->staticDirty);
@@ -1299,18 +1435,32 @@ TestTheLayoutHandleSurvivesUnrelatedNotices()
     // one's geometry state, and its first build of the same layout hands
     // back the same object, so the kept packet still compares equal.
     const size_t builds = evaluator->GetBakedProgramBuildCount();
+    const int oldAlongX=evaluator->GetBakedProgram()->GetStepGraph().index.at(SdfPath("/Asset/Rig/AlongX"));
+    const auto reordered=stage->DefinePrim(SdfPath("/Asset/Rig/A0Extra"),TfToken("RigExecControl"));
+    CHECK(reordered.GetAttribute(TfToken("avars:tx")).Set(3.0));
     stage->DefinePrim(SdfPath("/Asset/Rig/Extra"), TfToken("RigExecControl"));
-    unrelated("after a rebuild");
+    unrelated("after a rebuild", true);
+    CHECK(evaluator->GetBakedProgram()->GetStepGraph().index.at(SdfPath("/Asset/Rig/AlongX"))!=oldAlongX);
+    const auto reorderedPose=evaluator->Evaluate(UsdTimeCode(1.0));
+    CHECK(reorderedPose.controlFrames.count(reordered.GetPath())==1);
+    if(reorderedPose.controlFrames.count(reordered.GetPath()))
+        CHECK(reorderedPose.controlFrames.at(reordered.GetPath()).Origin()==GfVec3d(3,0,0));
+    unrelated("held after a rebuild");
     CHECK(evaluator->GetBakedProgramBuildCount() > builds);
 
     // A drag on a control reaches none of the layout's reads: no
     // SkinTopology op runs and the handle stands, on both edges. A drag on
     // the weights builds a new layout, and so does its lift.
-    const auto opsRun = [&evaluator]() {
+    const auto layoutOpsRun = [&evaluator]() {
         const RigExecBakedProgram *program = evaluator->GetBakedProgram();
-        return program ? program->GetStepGraph().headOpsRun : uint64_t(0);
+        if (!program) return size_t(0);
+        const auto &B = program->GetStepGraph();
+        size_t count = 0;
+        for (size_t i = 0; i < B.steps.size() && i < B.opExecution.ran.size(); ++i)
+            if (B.steps[i].kind == RigExecBakedStepKind::SkinTopology && B.opExecution.ran[i])
+                ++count;
+        return count;
     };
-    const uint64_t ops = opsRun();
     RigExecValueOverride control;
     control.prim = SdfPath("/Asset/Rig/AlongX");
     control.attribute = TfToken("avars:tx");
@@ -1319,24 +1469,56 @@ TestTheLayoutHandleSurvivesUnrelatedNotices()
     CheckSkinned(evaluator->Evaluate(UsdTimeCode(1.0)), 2.0f, 0.0f,
                  "during a control drag");
     CHECK(Adopted(*evaluator) == held);
+    CHECK(layoutOpsRun() == 0);
     evaluator->ClearInteractiveOverrides();
     CheckSkinned(evaluator->Evaluate(UsdTimeCode(1.0)), 1.0f, 0.0f,
                  "after a control drag");
     CHECK(Adopted(*evaluator) == held);
-    CHECK(opsRun() == ops);
+    CHECK(layoutOpsRun() == 0);
     evaluator->SetInteractiveOverrides({WeightsOverride(Weights(0.0f, 1.0f))});
     CheckSkinned(evaluator->Evaluate(UsdTimeCode(1.0)), 0.0f, 1.0f,
                  "during a weights drag");
     const std::shared_ptr<const RigExecSkinTopology> dragged =
         Adopted(*evaluator);
     CHECK(dragged != nullptr && dragged != held);
-    CHECK(opsRun() == ops + 1);
+    CHECK(layoutOpsRun() == 1);
     evaluator->ClearInteractiveOverrides();
     CheckSkinned(evaluator->Evaluate(UsdTimeCode(1.0)), 1.0f, 0.0f,
                  "after a weights drag");
     CHECK(Adopted(*evaluator) != dragged);
     CHECK(SameLayout(Adopted(*evaluator), held));
-    CHECK(opsRun() == ops + 2);
+    CHECK(layoutOpsRun() == 1);
+}
+
+void TestRetainedSkinRebuildInvalidation()
+{
+    for(int mode=0;mode<2;++mode) {
+        const auto stage=MakeSkinnedRig();const auto skin=stage->GetPrimAtPath(kSkin);
+        CHECK(skin.CreateAttribute(TfToken("rigExec:jointWeights"),SdfValueTypeNames->FloatArray)
+            .Set(Weights(1.0f,0.0f)));
+        auto evaluator=CompiledIn(stage,SdfPath("/Asset/Rig"),ReferenceChecksRequested());
+        CheckSkinned(evaluator->Evaluate(UsdTimeCode(1)),1.0f,0.0f,"before retained input change");
+        CHECK(evaluator->Evaluate(UsdTimeCode(1)).executedOpCount==0);
+        const size_t builds=evaluator->GetBakedProgramBuildCount();
+        if(mode==0)CHECK(skin.GetAttribute(TfToken("inputs:defaultWeight")).Set(0.5f));
+        else CHECK(skin.GetRelationship(TfToken("rigExec:influences")).SetTargets(
+            {SdfPath("/Asset/Rig/AlongY"),SdfPath("/Asset/Rig/AlongX")}));
+        stage->DefinePrim(SdfPath("/Asset/Rig/A0Changed"),TfToken("RigExecControl"));
+        const auto changed=evaluator->Evaluate(UsdTimeCode(1));
+        CheckSkinned(changed,mode==0?0.5f:0.0f,mode==0?0.0f:1.0f,"changed retained inputs");
+        CHECK(changed.diagnostics==(std::vector<std::string>{"structural edit: epoch rebuilt"}));
+        CHECK(evaluator->GetBakedProgramBuildCount()>builds);
+        const auto &B=evaluator->GetBakedProgram()->GetStepGraph();size_t kernels=0;
+        for(size_t i=0;i<B.steps.size();++i)
+            if(B.steps[i].kind==RigExecBakedStepKind::RevisionChunk && i<B.opExecution.ran.size() &&
+               B.opExecution.ran[i])++kernels;
+        CHECK(kernels>0);
+        const auto held=evaluator->Evaluate(UsdTimeCode(1));
+        CheckSkinned(held,mode==0?0.5f:0.0f,mode==0?0.0f:1.0f,"held changed inputs");
+        CHECK(held.executedOpCount==0);
+        CHECK(held.diagnostics.empty());
+        CheckAgreesWithFresh("held changed retained inputs",stage,{},UsdTimeCode(1),held);
+    }
 }
 
 }  // namespace
@@ -1350,9 +1532,10 @@ main(int argc, char **argv)
 
     if (argc > 2 && std::string(argv[1]) == "--baked") {
         TestBakedLayoutFollowsEdits();
-        TestABailedGenerationLeavesTheLayoutAsTheNextNeedsIt();
+        TestATargetRefusalKeepsIndependentLayoutWork();
         TestTheLayoutFieldsAreSetWhereTheyWere(argv[2]);
         TestTheLayoutHandleSurvivesUnrelatedNotices();
+        TestRetainedSkinRebuildInvalidation();
         if (failures) {
             std::printf("%d FAILURE(S)\n", failures);
             return 1;

@@ -22,7 +22,9 @@
 #include "rigExec/backgroundScheduler.h"
 #include "rigExec/frameCache.h"
 
+#include <atomic>
 #include <cstdint>
+#include <memory>
 #include <map>
 #include <mutex>
 #include <set>
@@ -49,10 +51,35 @@ enum class RigExecWarmFrameState {
 /// (retired frames re-pend), and on publish (which resets the streak).
 constexpr size_t kRigExecWarmUnwarmableAfter = 3;
 
-/// Shared-owned per-frame warming index. Thread-safe; every method takes
-/// only the index mutex. See the file header for the lock discipline.
+/// Shared-owned per-frame warming index with two explicit ownership domains.
+/// Completion/cache methods are thread-safe under the legacy index mutex.
+/// RequestPublicationFor and the request/progress methods below require
+/// registry-owner serialization; this is not a blanket thread-safe API.
+/// workers receive RequestPublication cells, never the request maps.
+/// NoteGeneration (including generation-map writes), NoteDirtied and ResetRig
+/// must share that owner serialization whenever requests are active.
+/// Worker completion,
+/// transition and eviction methods retain their original leaf protection.
+/// See the file header for the legacy lock discipline.
 class RigExecWarmFrameIndex {
+    struct _Progress;
 public:
+    /// Immutable lifetime/scope captured on the registry owner, before enqueue.
+    /// A worker may only Publish: one nonspinning claim, then release-ready.
+    /// Cancellation replaces owner cells; it never resets a captured cell.
+    class RequestPublication {
+    public:
+        bool Publish(const RigExecFrameCacheKey &key,
+                     RigExecFrameGeneration generation) const;
+        explicit operator bool() const { return bool(_progress); }
+    private:
+        friend class RigExecWarmFrameIndex;
+        std::shared_ptr<_Progress> _progress;
+    };
+    RequestPublication RequestPublicationFor(const SdfPath &rig,
+        double timeValue, RigExecFrameGeneration generation,
+        uint64_t epochDigest);
+
     /// Records the rig's current warming generation (the registry pushes on
     /// every cancel; 0 for a rig never pushed). Also clears the rig's
     /// non-publish streaks: the edit may have fixed warmability.
@@ -72,6 +99,22 @@ public:
                      RigExecFrameGeneration generation,
                      uint64_t epochDigest) const;
     RigExecFrameGeneration CurrentGeneration(const SdfPath &rig) const;
+
+    /// OWNER ONLY: called under existing registry ownership, not on workers.
+    /// Bounded progress for one explicit range request. This is never cache
+    /// residency: FindCachedKey/State and foreground requests are unchanged.
+    void SetRequest(const SdfPath &rig, const std::vector<double> &times,
+                    RigExecFrameGeneration generation, uint64_t epochDigest);
+    uint64_t RequestToken(const SdfPath &rig) const;
+    void InvalidateRequest(const SdfPath &rig);
+    void NoteRequestPublished(const SdfPath &rig, double timeValue,
+        const RigExecFrameCacheKey &key, RigExecFrameGeneration generation,
+        uint64_t requestToken);
+    bool HasRequestPublished(const SdfPath &rig, double timeValue,
+        RigExecFrameGeneration generation, uint64_t epochDigest) const;
+    bool IsCursorVisitable(const SdfPath &rig, double timeValue,
+        RigExecFrameGeneration generation, uint64_t epochDigest) const;
+
 
     /// Records a publish completion: \p timeValue now holds \p key under \p
     /// generation. Overwrites any earlier record for the time -- a republish
@@ -144,7 +187,8 @@ public:
     /// repaint, no sampling on the query path.
     std::vector<RigExecWarmFrameState> States(
         const SdfPath &rig, const std::vector<double> &timeValues,
-        RigExecFrameGeneration generation, uint64_t epochDigest) const;
+        RigExecFrameGeneration generation, uint64_t epochDigest,
+        std::vector<bool> *currentCompletions = nullptr) const;
 
 private:
     struct _Frame {
@@ -159,6 +203,25 @@ private:
         size_t running = 0;
         size_t streak = 0;
     };
+
+    struct _Progress {
+        _Progress(RigExecFrameGeneration g, uint64_t e, bool ready = false)
+            : generation(g), epochDigest(e), state(ready ? 2 : 0) {}
+        const RigExecFrameGeneration generation;
+        const uint64_t epochDigest;
+        // 0 unclaimed, 1 claimed, 2 ready. Never reset while captured.
+        std::atomic<uint8_t> state;
+    };
+    struct _Request {
+        uint64_t token = 0;
+        std::map<double, std::shared_ptr<_Progress>> frames;
+    };
+    // Registry-owner-only maps; no worker accesses them. Shared cells hold
+    // immutable scope and a lock-free ready handoff, not a replacement lock.
+    // Only explicitly requested times live here; eviction does not erase a
+    // successful publication, but edits/cancel/range replacement invalidate it.
+    std::map<SdfPath, _Request> _requests;
+    uint64_t _nextRequest = 0;
 
     // The state rule over a found-or-absent record. Call with _mutex held.
     static RigExecWarmFrameState _StateFor(

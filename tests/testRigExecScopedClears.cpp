@@ -5,8 +5,8 @@
 // Each case edits one value the caches hold or were read from, evaluates,
 // and holds the pose to two things: a second evaluator compiled fresh on the
 // edited stage, which cannot have kept anything, and the cache's own
-// occupancy or the property chain's own profile scope, which is the only way
-// to see that an edit ELSEWHERE left a cache standing. The three edits are
+// occupancy or the property chain's executed part identities, which show
+// whether an unrelated edit left a cache standing. The three edits are
 // the ones the spec names as the hazards of a scoped clear:
 //   * a default edit on an unconnected property-chain mover input, whose
 //     value the chain binding captured as a constant;
@@ -18,7 +18,9 @@
 // Registered plain (baked and dynamic in turn), under the parity entries,
 // and under RIGEXEC_VERIFY_SCOPED_CLEARS=1, where every evaluator is shadowed
 // by one that drops the caches whole and the two poses are compared.
+#include "rigExec/inputReplay.h"
 #include "rigExec/bakedProgram.h"
+#include "rigExec/bakedProgramImpl.h"
 #include "rigExec/profiler.h"
 #include "rigExec/rigEvaluator.h"
 
@@ -33,10 +35,12 @@
 #include "pxr/usd/usd/relationship.h"
 #include "pxr/usd/usd/stage.h"
 
+#include <algorithm>
 #include <cmath>
 #include <memory>
 #include <cstdio>
 #include <string>
+#include <set>
 #include <vector>
 
 using namespace rigExec;
@@ -55,31 +59,8 @@ static int failures = 0;
 
 namespace {
 
-// The modes a case runs in: the program and the dynamic walk share every
-// cache these edits reach. Under the parity entries the program's generations
-// are also compared with the dynamic walk.
-std::vector<RigExecEvaluationMode>
-Modes()
-{
-    if (TfGetenv("RIGEXEC_EVALUATION_MODE") == "parity") {
-        return {RigExecEvaluationMode::BakedWithParityCheck};
-    }
-    return {RigExecEvaluationMode::Baked, RigExecEvaluationMode::Dynamic};
-}
-
-const char *
-ModeName(RigExecEvaluationMode mode)
-{
-    switch (mode) {
-    case RigExecEvaluationMode::Baked: return "baked";
-    case RigExecEvaluationMode::Dynamic: return "dynamic";
-    case RigExecEvaluationMode::BakedWithParityCheck: return "parity";
-    default: return "other";
-    }
-}
-
 std::unique_ptr<RigExecRigEvaluator>
-Compiled(const UsdStageRefPtr &stage, RigExecEvaluationMode mode)
+Compiled(const UsdStageRefPtr &stage)
 {
     auto evaluator =
         std::make_unique<RigExecRigEvaluator>(stage, SdfPath("/Asset/Rig"));
@@ -90,7 +71,6 @@ Compiled(const UsdStageRefPtr &stage, RigExecEvaluationMode mode)
             std::printf("FAIL compile: %s\n", error.c_str());
         }
     }
-    evaluator->SetEvaluationMode(mode);
     return evaluator;
 }
 
@@ -102,16 +82,13 @@ Compiled(const UsdStageRefPtr &stage, RigExecEvaluationMode mode)
 // identity), which reports the edit rather than the pose.
 void
 CheckAgreesWithFresh(const std::string &what, const UsdStageRefPtr &stage,
-                     RigExecEvaluationMode mode, RigExecRigPose pose)
+                     RigExecRigPose pose)
 {
     RigExecRigPose fresh =
-        Compiled(stage, mode)->Evaluate(UsdTimeCode::Default());
+        Compiled(stage)->Evaluate(UsdTimeCode::Default());
     CHECK(pose.valid);
     CHECK(fresh.valid);
-    CHECK(pose.bakedParityMismatches == 0);
-    pose.moverGraphRevisionsCreated = fresh.moverGraphRevisionsCreated;
-    pose.moverGraphRevisionsExecuted = fresh.moverGraphRevisionsExecuted;
-    pose.moverGraphSchedulesBuilt = fresh.moverGraphSchedulesBuilt;
+    CHECK(pose.comparisonMismatches == 0);
     const auto keepPosed = [](std::vector<std::string> *lines) {
         std::vector<std::string> kept;
         for (std::string &line : *lines) {
@@ -126,9 +103,9 @@ CheckAgreesWithFresh(const std::string &what, const UsdStageRefPtr &stage,
     keepPosed(&pose.diagnostics);
     RigExecRigPose diff;
     RigExecComparePoses(fresh, pose, &diff);
-    if (diff.bakedParityMismatches != 0) {
+    if (diff.comparisonMismatches != 0) {
         std::printf("FAIL %s: %zu difference(s) from a fresh evaluator:\n",
-                    what.c_str(), diff.bakedParityMismatches);
+                    what.c_str(), diff.comparisonMismatches);
         for (size_t i = 0; i < diff.diagnostics.size() && i < 12; ++i) {
             std::printf("    %s\n", diff.diagnostics[i].c_str());
         }
@@ -139,24 +116,35 @@ CheckAgreesWithFresh(const std::string &what, const UsdStageRefPtr &stage,
             std::printf("    edited: %s\n", line.c_str());
         }
     }
-    CHECK(diff.bakedParityMismatches == 0);
+    CHECK(diff.comparisonMismatches == 0);
 }
 
-// How many times the last generation ran the property chain on \p target,
-// off the profile scope a chain opens only when it is dirty.
-size_t
-ChainRuns(const RigExecRigEvaluator &evaluator, const SdfPath &target)
+// Exact property parts the last generation executed for this target.
+std::set<int>
+ChainPartsRan(const RigExecRigEvaluator &evaluator, const SdfPath &target)
 {
-    const std::string scope = "PropertyChain " + target.GetString();
-    size_t runs = 0;
-    for (const RigExecProfileEvent &event :
-             evaluator.GetProfiler().GetEvents()) {
-        if (event.kind == RigExecProfileEventKind::Complete &&
-            event.name == scope) {
-            ++runs;
-        }
+    std::set<int> parts;
+    const auto *program = evaluator.GetBakedProgram();
+    CHECK(program);
+    if (!program) return parts;
+    const auto &B = program->GetStepGraph();
+    for (const auto &entry : evaluator.GetLastOpTrace()) {
+        if (entry.kind != "PropertyRevision") continue;
+        CHECK(entry.step < B.opGraph.ops.size());
+        if (entry.step >= B.opGraph.ops.size()) continue;
+        const size_t body = B.opGraph.ops[entry.step].originalIndex;
+        CHECK(body < B.steps.size());
+        if (body >= B.steps.size()) continue;
+        const auto &step = B.steps[body];
+        CHECK(step.kind == RigExecBakedStepKind::PropertyRevision);
+        CHECK(step.object >= 0 && size_t(step.object) < B.propertyChains.size());
+        if (step.object < 0 || size_t(step.object) >= B.propertyChains.size()) continue;
+        const auto &chain = B.propertyChains[size_t(step.object)];
+        if (chain.target != target) continue;
+        CHECK(step.part >= 0 && size_t(step.part) <= chain.revisions.size());
+        CHECK(parts.insert(step.part).second);
     }
-    return runs;
+    return parts;
 }
 
 float
@@ -238,7 +226,7 @@ UsdStageRefPtr
 Open(const char *text)
 {
     const SdfLayerRefPtr layer = SdfLayer::CreateAnonymous(".usda");
-    if (!layer || !layer->ImportFromString(text)) {
+    if (!layer || !rigExec::RigExecInputReplayImportFromString(layer, text)) {
         ++failures;
         std::printf("FAIL: could not build a fixture\n");
         return UsdStageRefPtr();
@@ -247,21 +235,29 @@ Open(const char *text)
 }
 
 void
-TestAChainInputDefaultEditReachesTheChain(RigExecEvaluationMode mode)
+TestAChainInputDefaultEditReachesTheChain()
 {
     const UsdStageRefPtr stage = Open(kChainFixture);
     if (!stage) {
         return;
     }
     const SdfPath dial("/Asset/Rig/Channels.rigExec:dial");
-    auto evaluator = Compiled(stage, mode);
+    auto evaluator = Compiled(stage);
     evaluator->SetProfilingEnabled(true);
     RigExecRigPose pose = evaluator->Evaluate(UsdTimeCode::Default());
     CHECK(FloatAt(pose, dial) == 21.0f);
-    // A parity generation runs the chain on both paths: the dynamic walk's
-    // function and the program's head tier each record one span.
-    const size_t oneRun =
-        mode == RigExecEvaluationMode::BakedWithParityCheck ? 2 : 1;
+    const auto *program = evaluator->GetBakedProgram();
+    CHECK(program);
+    if (!program) return;
+    const auto &chains = program->GetStepGraph().propertyChains;
+    const auto chain = std::find_if(chains.begin(), chains.end(),
+        [&](const auto &entry) { return entry.target == dial; });
+    CHECK(chain != chains.end());
+    if (chain == chains.end()) return;
+    CHECK(chain->revisions.size() == 2);
+    if (chain->revisions.size() != 2) return;
+    CHECK(chain->revisions[0].mover == SdfPath("/Asset/Rig/Movers/TimesTen"));
+    CHECK(chain->revisions[1].mover == SdfPath("/Asset/Rig/Movers/AddOne"));
 
     // A value nothing the chain reads: the chain keeps its answer and does
     // not run.
@@ -270,9 +266,9 @@ TestAChainInputDefaultEditReachesTheChain(RigExecEvaluationMode mode)
     evaluator->ClearProfile();
     pose = evaluator->Evaluate(UsdTimeCode::Default());
     CHECK(FloatAt(pose, dial) == 21.0f);
-    CHECK(ChainRuns(*evaluator, dial) == 0);
-    CheckAgreesWithFresh(std::string("unread value, ") + ModeName(mode),
-                         stage, mode, pose);
+    CHECK(ChainPartsRan(*evaluator, dial).empty());
+    CheckAgreesWithFresh(std::string("unread value, ") + "graph",
+                         stage, pose);
 
     // A default edit on an unconnected input, whose value the binding held
     // as a constant: the chain is rebound and runs.
@@ -281,10 +277,11 @@ TestAChainInputDefaultEditReachesTheChain(RigExecEvaluationMode mode)
     evaluator->ClearProfile();
     pose = evaluator->Evaluate(UsdTimeCode::Default());
     CHECK(FloatAt(pose, dial) == 41.0f);
-    CHECK(ChainRuns(*evaluator, dial) == oneRun);
+    // The unchanged base is retained; TimesTen changes its output, so AddOne follows.
+    CHECK((ChainPartsRan(*evaluator, dial) == std::set<int>{1, 2}));
     CheckAgreesWithFresh(std::string("chain input default, ") +
-                             ModeName(mode),
-                         stage, mode, pose);
+                             "graph",
+                         stage, pose);
 
     // A default edit one hop upstream of a connected input.
     stage->GetPrimAtPath(SdfPath("/Asset/Rig/Channels"))
@@ -292,16 +289,17 @@ TestAChainInputDefaultEditReachesTheChain(RigExecEvaluationMode mode)
     evaluator->ClearProfile();
     pose = evaluator->Evaluate(UsdTimeCode::Default());
     CHECK(FloatAt(pose, dial) == 45.0f);
-    CHECK(ChainRuns(*evaluator, dial) == oneRun);
+    // Only AddOne reads gain. TimesTen and the authored base retain their versions.
+    CHECK((ChainPartsRan(*evaluator, dial) == std::set<int>{2}));
     CheckAgreesWithFresh(std::string("connection source default, ") +
-                             ModeName(mode),
-                         stage, mode, pose);
+                             "graph",
+                         stage, pose);
 
     // And the frame after: nothing moved, so nothing runs.
     evaluator->ClearProfile();
     pose = evaluator->Evaluate(UsdTimeCode::Default());
     CHECK(FloatAt(pose, dial) == 45.0f);
-    CHECK(ChainRuns(*evaluator, dial) == 0);
+    CHECK(ChainPartsRan(*evaluator, dial).empty());
 }
 
 // Skin layouts.
@@ -377,18 +375,14 @@ Deformed(const RigExecRigPose &pose, const SdfPath &target)
 }
 
 void
-TestAnInputsMethodEditOnASkinMover(RigExecEvaluationMode mode)
+TestAnInputsMethodEditOnASkinMover()
 {
     const UsdStageRefPtr stage = MakeSkinnedRig();
-    auto evaluator = Compiled(stage, mode);
+    auto evaluator = Compiled(stage);
     RigExecRigPose pose = evaluator->Evaluate(UsdTimeCode::Default());
     const VtVec3fArray linear = Deformed(pose, kSkinTarget);
     CHECK(linear.size() == kSkinPoints);
-    // The bake refuses a connected rigExec:skinningMethod, so every mode
-    // evaluates this rig through the dynamic walk, whose layouts the cache
-    // holds. The baked program's own layout handles are
-    // testRigExecSkinTopology --baked's.
-    CHECK(evaluator->GetBakedProgram() == nullptr);
+    CHECK(evaluator->GetBakedProgram() != nullptr);
     CHECK(evaluator->GetSkinTopologyCacheSize() > 0);
 
     // The mesh the layout deforms, and the mover's own envelope: neither is
@@ -403,8 +397,8 @@ TestAnInputsMethodEditOnASkinMover(RigExecEvaluationMode mode)
     pose = evaluator->Evaluate(UsdTimeCode::Default());
     CHECK(Deformed(pose, kSkinTarget) == linear);
     CheckAgreesWithFresh(std::string("skin, unrelated edits, ") +
-                             ModeName(mode),
-                         stage, mode, pose);
+                             "graph",
+                         stage, pose);
 
     // The method, one connection hop upstream of rigExec:skinningMethod: a
     // layout input reached through a connection, so the layouts go.
@@ -418,8 +412,8 @@ TestAnInputsMethodEditOnASkinMover(RigExecEvaluationMode mode)
     CHECK(dual != linear);
     CHECK(evaluator->GetSkinTopologyCacheSize() > 0);
     CheckAgreesWithFresh(std::string("skin, inputs:method, ") +
-                             ModeName(mode),
-                         stage, mode, pose);
+                             "graph",
+                         stage, pose);
 
     // A weight paint is a layout input itself.
     VtFloatArray weights(kSkinPoints * 2);
@@ -433,8 +427,8 @@ TestAnInputsMethodEditOnASkinMover(RigExecEvaluationMode mode)
     pose = evaluator->Evaluate(UsdTimeCode::Default());
     CHECK(Deformed(pose, kSkinTarget) != dual);
     CheckAgreesWithFresh(std::string("skin, weight paint, ") +
-                             ModeName(mode),
-                         stage, mode, pose);
+                             "graph",
+                         stage, pose);
 }
 
 // Blend sample shapes.
@@ -500,10 +494,10 @@ MakeBlendRig()
 }
 
 void
-TestABlendSampleEdit(RigExecEvaluationMode mode)
+TestABlendSampleEdit()
 {
     const UsdStageRefPtr stage = MakeBlendRig();
-    auto evaluator = Compiled(stage, mode);
+    auto evaluator = Compiled(stage);
     RigExecRigPose pose = evaluator->Evaluate(UsdTimeCode::Default());
     VtVec3fArray points = Deformed(pose, kBlendTarget);
     CHECK(points.size() == 4);
@@ -524,8 +518,8 @@ TestABlendSampleEdit(RigExecEvaluationMode mode)
     CHECK(points.size() == 4 && points[2] == GfVec3f(1, 1, 2));
     CHECK(evaluator->GetBlendSampleCacheSize() == 2);
     CheckAgreesWithFresh(std::string("blend shape offsets, ") +
-                             ModeName(mode),
-                         stage, mode, pose);
+                             "graph",
+                         stage, pose);
 
     // The other sample's own activation: a value on the sample prim.
     stage->GetPrimAtPath(SdfPath("/Asset/Rig/Channels/Push/Full"))
@@ -533,8 +527,8 @@ TestABlendSampleEdit(RigExecEvaluationMode mode)
     CHECK(evaluator->GetBlendSampleCacheSize() == 1);
     pose = evaluator->Evaluate(UsdTimeCode::Default());
     CheckAgreesWithFresh(std::string("blend sample activation, ") +
-                             ModeName(mode),
-                         stage, mode, pose);
+                             "graph",
+                         stage, pose);
 
     // The points both layouts were range-checked against.
     stage->GetPrimAtPath(kBlendTarget.GetPrimPath())
@@ -545,8 +539,8 @@ TestABlendSampleEdit(RigExecEvaluationMode mode)
     points = Deformed(pose, kBlendTarget);
     CHECK(points.size() == 4 && points[2] == GfVec3f(2, 2, 2));
     CheckAgreesWithFresh(std::string("blend target points, ") +
-                             ModeName(mode),
-                         stage, mode, pose);
+                             "graph",
+                         stage, pose);
 }
 
 }  // namespace
@@ -555,10 +549,10 @@ int
 main()
 {
     PlugRegistry::GetInstance().RegisterPlugins(RIGEXEC_SCHEMA_RESOURCE_DIR);
-    for (const RigExecEvaluationMode mode : Modes()) {
-        TestAChainInputDefaultEditReachesTheChain(mode);
-        TestAnInputsMethodEditOnASkinMover(mode);
-        TestABlendSampleEdit(mode);
+    {
+        TestAChainInputDefaultEditReachesTheChain();
+        TestAnInputsMethodEditOnASkinMover();
+        TestABlendSampleEdit();
     }
     if (failures) {
         std::printf("testRigExecScopedClears: %d failure(s)\n", failures);

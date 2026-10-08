@@ -7,6 +7,7 @@
 #include "rigExec/rigEvaluator.h"
 #include "rigExecBinary/external.h"
 #include "rigExecBinary/format.h"
+#include "rigExecBinary/transport.h"
 #include "rigExecBinary/generated/presentation_generated.h"
 #include "rigExecExampleFixtures.h"
 #include "rigExecMath/propertyMath.h"
@@ -32,6 +33,7 @@
 #include <map>
 #include <set>
 #include <string>
+#include <stdexcept>
 #include <vector>
 
 using namespace rigExec;
@@ -126,7 +128,6 @@ _BakeFixture(const std::string &fixture, double time)
         return {};
     }
     RigExecRigEvaluator evaluator(stage, FindRig(stage));
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     RigExecBakeOpts opts;
     opts.time = time;
     RigExecBakeResult result;
@@ -381,9 +382,27 @@ TestRealFileCorruption(const std::vector<uint8_t> &bytes)
     if (bytes.size() <= 8) {
         return;
     }
-    // An aligned copy for the accessors that locate the tables.
-    std::vector<uint64_t> aligned((bytes.size() + 7) / 8);
-    std::memcpy(aligned.data(), bytes.data(), bytes.size());
+    // Physical table access follows strict Open. A transport envelope wraps
+    // the same FlatBuffer; corruption below still exercises its verifier.
+    std::unique_ptr<fb::RigExecWireFile> accepted;
+    std::string error;
+    const bool acceptedOpen = RigExecFormatOpen(bytes.data(), bytes.size(), &accepted, &error);
+    CHECK(acceptedOpen);
+    if (!acceptedOpen || !accepted) return;
+    rigExec::transport::Buffer decoded;
+    const uint8_t *payload = bytes.data();
+    size_t payloadSize = bytes.size();
+    if (rigExec::transport::IsEnvelope(payload, payloadSize)) {
+        const bool ready = rigExec::transport::Decode(payload, payloadSize, &decoded, &error);
+        CHECK(ready);
+        CHECK(decoded.data && decoded.size >= 8);
+        if (!ready || !decoded.data || decoded.size < 8) return;
+        payload = decoded.data.get();
+        payloadSize = decoded.size;
+    }
+    // The decoded owner remains alive through every physical table access.
+    std::vector<uint64_t> aligned((payloadSize + 7) / 8);
+    std::memcpy(aligned.data(), payload, payloadSize);
     const uint8_t *base = reinterpret_cast<const uint8_t *>(aligned.data());
     const fb::File *root = flatbuffers::GetRoot<fb::File>(base);
     const fb::Revision *revision = nullptr;
@@ -420,7 +439,7 @@ TestRealFileCorruption(const std::vector<uint8_t> &bytes)
     };
     for (const std::vector<size_t> *offsets : {&rootBytes, &revisionBytes}) {
         for (const size_t at : *offsets) {
-            std::vector<uint8_t> mutated = bytes;
+            std::vector<uint8_t> mutated(payload, payload + payloadSize);
             mutated[at] ^= 0xff;
             judge(mutated);
         }
@@ -438,10 +457,10 @@ TestRealFileCorruption(const std::vector<uint8_t> &bytes)
                                    0x7f, 0x80, 0xfe, 0xff};
     constexpr int rounds = 2000;
     for (int round = 0; round < rounds; ++round) {
-        std::vector<uint8_t> mutated = bytes;
+        std::vector<uint8_t> mutated(payload, payload + payloadSize);
         const int edits = 1 + int(next() % 4);
         for (int e = 0; e < edits; ++e) {
-            const size_t at = next() % bytes.size();
+            const size_t at = next() % payloadSize;
             if (at >= 4 && at < 8) {
                 continue;  // keep the identifier: reach the verifier
             }
@@ -455,7 +474,7 @@ TestRealFileCorruption(const std::vector<uint8_t> &bytes)
             default: {
                 // An aligned word set to a small offset or length.
                 const size_t word = at & ~size_t(3);
-                const uint32_t small = uint32_t(next() % bytes.size());
+                const uint32_t small = uint32_t(next() % payloadSize);
                 if (word >= 8 && word + 4 <= mutated.size()) {
                     std::memcpy(mutated.data() + word, &small, 4);
                 }
@@ -469,7 +488,7 @@ TestRealFileCorruption(const std::vector<uint8_t> &bytes)
                 "bytes flipped, %zu refused, %zu opened; sweep %zu refused, "
                 "%zu opened (of %d, %zu bytes)\n",
                 rootBytes.size(), revisionBytes.size(), vtableRefused,
-                vtableOpened, refused, opened, rounds, bytes.size());
+                vtableOpened, refused, opened, rounds, payloadSize);
     // Every mutation was judged, and both kinds were refused at least once.
     CHECK(vtableRefused + vtableOpened ==
           rootBytes.size() + revisionBytes.size());
@@ -1196,6 +1215,24 @@ _ComputedReadFloat(const fb::RigExecWireFile &file,
     return _ChainFloat(value);
 }
 
+static const fb::RigExecWireInput *
+_EnvelopeScalarRead(const fb::RigExecWireFile &file, int fieldIndex, int member)
+{
+    CHECK(file.geometry && fieldIndex >= 0 && size_t(fieldIndex) < file.geometry->weightFields.size());
+    if (!file.geometry || fieldIndex < 0 || size_t(fieldIndex) >= file.geometry->weightFields.size()) return nullptr;
+    const auto &field = file.geometry->weightFields[size_t(fieldIndex)];
+    const fb::RigExecWireInput *read = nullptr;
+    for (size_t r = 0; r < field.scalarReads.size() && r < field.scalarObjects.size() && r < field.scalarMembers.size(); ++r) {
+        if (field.scalarObjects[r] == field.object && int(field.scalarMembers[r]) == member) {
+            CHECK(!read);
+            read = &field.scalarReads[r];
+        }
+    }
+    CHECK(read);
+    if (read) CHECK(read->mode == fb::ReadMode::Resolved && read->tag == fb::InputTag::Float && read->overrideIndex == -1);
+    return read;
+}
+
 /// A bake of \p stage's rig at \p time, compared with the program; null
 /// with a failed CHECK when it does not bake or open.
 static std::unique_ptr<fb::RigExecWireFile>
@@ -1268,7 +1305,6 @@ TestPhaseBindingBakes()
         bool same = false;
         for (int pass = 0; pass < 2; ++pass) {
             RigExecRigEvaluator evaluator(stage, rigPath);
-            evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
             RigExecBakeOpts opts;
             opts.time = row.time;
             RigExecBakeResult result;
@@ -1335,7 +1371,6 @@ TestRawSkinLayoutBake()
     bool same = false;
     for (int pass = 0; pass < 2; ++pass) {
         RigExecRigEvaluator evaluator(stage, rigPath);
-        evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
         RigExecBakeOpts opts;
         opts.time = 1.0;
         RigExecBakeResult result;
@@ -1430,7 +1465,6 @@ TestComputedEnvelopeBake()
 
     for (const double time : {1.0, 5.0, 10.0}) {
         RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
-        evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
         const std::unique_ptr<fb::RigExecWireFile> file =
             _BakeAndCompare(evaluator, time, "envelope bake");
         if (!file) {
@@ -1439,7 +1473,7 @@ TestComputedEnvelopeBake()
         const RigExecBakedProgramImpl &program =
             evaluator.GetBakedProgram()->GetStepGraph();
         const auto &objects = file->geometry->weightObjects;
-        CHECK(program.weightObjects.empty());
+        CHECK(program.weightObjects.size() == 2);
         CHECK(objects.size() == 2);
         CHECK(file->pose->constraints.size() == program.constraints.size());
         size_t checkedEnvelopes = 0;
@@ -1453,19 +1487,33 @@ TestComputedEnvelopeBake()
             }
             const fb::RigExecWireWeightObject &object =
                 objects[size_t(index)];
-            CHECK(object.envelopeOnly);
+            CHECK(!object.envelopeOnly);
+            const int fieldIndex = file->pose->constraints[k].weightField;
+            CHECK(fieldIndex >= 0 && size_t(fieldIndex) < file->geometry->weightFields.size());
+            if (fieldIndex < 0 || size_t(fieldIndex) >= file->geometry->weightFields.size()) continue;
+            const auto &field = file->geometry->weightFields[size_t(fieldIndex)];
+            CHECK(field.object == index && uint8_t(field.form) == 1);
+            size_t producers = 0;
+            for (const auto &step : program.steps)
+                producers += step.kind == RigExecBakedStepKind::WeightPacket && step.object == index ? 1 : 0;
+            CHECK(producers == 1);
             CHECK(object.oracleStaticError.empty());
             CHECK(object.oraclePhaseError.empty());
-            CHECK(object.defaultWeight->mode == fb::ReadMode::Resolved);
+            CHECK(object.defaultWeight->mode == fb::ReadMode::Baked);
             const bool dynamic =
                 RigExecFormatPathText(*file, object.type) ==
                 "RigExecDynamicWeight";
+            const auto *defaultWeight = _EnvelopeScalarRead(*file, fieldIndex, 0);
+            const auto *driverRead = dynamic ? _EnvelopeScalarRead(*file, fieldIndex, 1) : nullptr;
+            const auto *scaleRead = dynamic ? _EnvelopeScalarRead(*file, fieldIndex, 2) : nullptr;
+            const auto *biasRead = dynamic ? _EnvelopeScalarRead(*file, fieldIndex, 3) : nullptr;
+            if (!defaultWeight || (dynamic && (!driverRead || !scaleRead || !biasRead))) continue;
             if (dynamic) {
                 // inputs:driver walks to the avar it is connected to.
-                CHECK(object.driver->walk.size() == 2);
-                if (object.driver->walk.size() == 2) {
+                CHECK(driverRead->walk.size() == 2);
+                if (driverRead->walk.size() == 2) {
                     const fb::InputSlot &leaf =
-                        file->inputs[object.driver->walk[1]];
+                        file->inputs[driverRead->walk[1]];
                     CHECK(RigExecFormatPathText(*file, leaf.name()) ==
                           amount.GetPath().GetString());
                     CHECK(leaf.type() == fb::InputTag::Double);
@@ -1478,12 +1526,12 @@ TestComputedEnvelopeBake()
             if (dynamic) {
                 const float base = 1.0f;
                 const float driver =
-                    _ComputedReadFloat(*file, *object.driver);
-                const float scale = _ComputedReadFloat(*file, *object.scale);
-                const float bias = _ComputedReadFloat(*file, *object.bias);
+                    _ComputedReadFloat(*file, *driverRead);
+                const float scale = _ComputedReadFloat(*file, *scaleRead);
+                const float bias = _ComputedReadFloat(*file, *biasRead);
                 expected = (base * driver) * scale + bias;
             } else {
-                expected = _ComputedReadFloat(*file, *object.defaultWeight);
+                expected = _ComputedReadFloat(*file, *defaultWeight);
             }
             const auto &scratch = program.constraints[k].weightScratch;
             CHECK(scratch.size() == 1);
@@ -1562,7 +1610,6 @@ TestComputedCurrentPhaseBake()
     std::vector<std::vector<float>> fields;
     for (const double time : times) {
         RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
-        evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
         const std::unique_ptr<fb::RigExecWireFile> file =
             _BakeAndCompare(evaluator, time, "current-phase bake");
         if (!file) {
@@ -1610,7 +1657,7 @@ TestComputedCurrentPhaseBake()
     CHECK(fields.size() < 2 || fields[0] != fields[1]);
 }
 
-// The oracle's two scalar arms for an envelope-only object at count 1
+// The oracle's two scalar arms for an envelope field at count 1
 // (rigEvaluatorGeometry.cpp _ResolveWeights): a constant StaticWeight and
 // a DynamicWeight with no base, reading through GetAttribute with the
 // oracle's own fallbacks.
@@ -1626,6 +1673,17 @@ _ChainScalarEnvelopes(const fb::RigExecWireFile &file)
         const std::string representation =
             _BinaryText(file, object.representation);
         const std::string path = _BinaryText(file, object.path);
+        int fieldIndex = -1;
+        for (size_t f = 0; f < file.geometry->weightFields.size(); ++f) {
+            const auto &field = file.geometry->weightFields[f];
+            if (field.object == index && uint8_t(field.form) == 0) { fieldIndex = int(f); break; }
+        }
+        const auto *defaultWeight = _EnvelopeScalarRead(file, fieldIndex, 0);
+        const bool dynamic = type == "RigExecDynamicWeight";
+        const auto *driver = dynamic ? _EnvelopeScalarRead(file, fieldIndex, 1) : nullptr;
+        const auto *scale = dynamic ? _EnvelopeScalarRead(file, fieldIndex, 2) : nullptr;
+        const auto *bias = dynamic ? _EnvelopeScalarRead(file, fieldIndex, 3) : nullptr;
+        if (!defaultWeight || (dynamic && (!driver || !scale || !bias))) return false;
         const auto read = [&](const fb::RigExecWireInput &input,
                               float fallback) {
             _Val value;
@@ -1635,14 +1693,14 @@ _ChainScalarEnvelopes(const fb::RigExecWireFile &file)
                        : fallback;
         };
         std::string painted;
-        CHECK(object.envelopeOnly && object.oracleStaticError.empty() &&
+        CHECK(!object.envelopeOnly && object.oracleStaticError.empty() &&
               object.base < 0 && object.inputs.empty() &&
               representation == "constant" &&
               (object.valuesSlot < 0 ||
                (_BinarySlotBytes(file, object.valuesSlot, &painted) &&
                 painted.empty())));
         if (type == "RigExecStaticWeight") {
-            float w = read(*object.defaultWeight, 0.0f);
+            float w = read(*defaultWeight, 0.0f);
             if (!std::isfinite(w) ||
                 (rangePolicy == "strict" && (w < 0.0f || w > 1.0f))) {
                 *error = "weight range violation on " + path;
@@ -1655,10 +1713,10 @@ _ChainScalarEnvelopes(const fb::RigExecWireFile &file)
             return true;
         }
         CHECK(type == "RigExecDynamicWeight");
-        const float driver = read(*object.driver, 1.0f);
-        const float scale = read(*object.scale, 1.0f);
-        const float bias = read(*object.bias, 0.0f);
-        float r = (1.0f * driver) * scale + bias;
+        const float driverValue = read(*driver, 1.0f);
+        const float scaleValue = read(*scale, 1.0f);
+        const float biasValue = read(*bias, 0.0f);
+        float r = (1.0f * driverValue) * scaleValue + biasValue;
         if (!std::isfinite(r)) {
             *error = "non-finite dynamic weight on " + path;
             return false;
@@ -1696,7 +1754,6 @@ TestComputedChainBake()
     const SdfPath rigPath("/Asset/Rig");
     for (const double time : {1.0, 3.0, 5.0, 7.0, 10.0}) {
         RigExecRigEvaluator evaluator(stage, rigPath);
-        evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
         const std::unique_ptr<fb::RigExecWireFile> owned =
             _BakeAndCompare(evaluator, time, "chain bake");
         if (!owned) {
@@ -1843,7 +1900,7 @@ TestComputedChainBake()
                 (read.flags & uint8_t(fb::InputReadFlags::ViaChain))) {
                 crossing.push_back(&read);
             }
-        });
+        }, false);
         CHECK(crossing.size() == 1);
         if (crossing.size() == 1) {
             const fb::RigExecWireInput &weight = *crossing[0];
@@ -1860,6 +1917,10 @@ TestComputedChainBake()
             CHECK(numbers != program.overridableInputs.end() &&
                   std::find(numbers->second.begin(), numbers->second.end(),
                             weight.overrideIndex) != numbers->second.end());
+            size_t memoCopies = 0;
+            for (const auto &step : file.steps) for (const auto &read : step.headInputReads)
+                if (read.overrideIndex == weight.overrideIndex) { CHECK(_BinarySameRead(read, weight)); ++memoCopies; }
+            CHECK(memoCopies > 0);
         }
 
         // Every property result, with the envelopes resolved, and the
@@ -1877,7 +1938,6 @@ TestComputedChainBake()
         CHECK(chainReads == 1);
         CHECK(lines.size() == 3);
         RigExecRigEvaluator replay(stage, rigPath);
-        replay.SetEvaluationMode(RigExecEvaluationMode::Baked);
         const RigExecRigPose pose = replay.Evaluate(UsdTimeCode(time));
         const auto at = std::search(pose.diagnostics.begin(),
                                     pose.diagnostics.end(), lines.begin(),
@@ -1946,7 +2006,6 @@ TestEnumeratedReadThroughPropertyResult()
         .AddFloatMathMover("Blend", TfToken("blend"), 0.8f);
 
     RigExecRigEvaluator evaluator(stage, rig);
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     RigExecBakeOpts opts;
     opts.time = 1.0;
     RigExecBakeResult result;
@@ -2036,7 +2095,6 @@ TestStaticReportRevisionReads()
     std::string error;
     {
         RigExecRigEvaluator evaluator(stage, rig);
-        evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
         CHECK(RigExecBakeStaticReport(evaluator, &entries, &error));
         CHECK(entries.empty());
         for (const RigExecBakeStaticEntry &entry : entries) {
@@ -2057,7 +2115,6 @@ TestStaticReportRevisionReads()
     }
     {
         RigExecRigEvaluator evaluator(stage, rig);
-        evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
         CHECK(RigExecBakeStaticReport(evaluator, &entries, &error));
     }
     stage->GetSessionLayer()->Clear();
@@ -2109,7 +2166,6 @@ TestStaticReportAnsweredBlendSamples()
     size_t bound = 0;
     {
         RigExecRigEvaluator evaluator(stage, rig);
-        evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
         std::string error;
         const bool ok = RigExecBakeStaticReport(evaluator, &entries, &error);
         CHECK(ok);
@@ -2188,7 +2244,6 @@ TestBakeOptions(const std::string &fixture, const std::string &input)
     const auto bake = [&](const std::vector<uint8_t> &presentation,
                           RigExecBakeResult *result, std::string *error) {
         RigExecRigEvaluator evaluator(stage, rigPath);
-        evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
         RigExecBakeOpts opts;
         opts.presentation = presentation;
         return RigExecBakeToBinary(evaluator, opts, result, error);
@@ -2204,7 +2259,6 @@ TestBakeOptions(const std::string &fixture, const std::string &input)
     for (const double time : {std::numeric_limits<double>::infinity(),
                               -std::numeric_limits<double>::infinity()}) {
         RigExecRigEvaluator evaluator(stage, rigPath);
-        evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
         RigExecBakeOpts opts;
         opts.time = time;
         error.clear();
@@ -2242,7 +2296,8 @@ constexpr size_t kBipedBudget = kBipedBytes + kBipedBytes / 20;
 static bool sizeBudgetChecked = false;
 
 /// The file's size against the biped budget, and what each root field
-/// costs: the bytes a copy with that field emptied packs smaller by.
+/// costs in the raw inner payload: the bytes a copy with that field emptied
+/// packs smaller by. The budget applies to the published transport bytes.
 static void
 _BinarySizeBudget(const std::string &fixture, const RigExecBakeResult &result)
 {
@@ -2260,7 +2315,18 @@ _BinarySizeBudget(const std::string &fixture, const RigExecBakeResult &result)
     if (!file) {
         return;
     }
-    CHECK(RigExecTestPackUnchecked(*file).size() == bytes);
+    size_t rawBytes = bytes;
+    rigExec::transport::Buffer decoded;
+    if (rigExec::transport::IsEnvelope(result.bytes.data(), bytes)) {
+        std::string error;
+        const bool ready = rigExec::transport::Decode(
+            result.bytes.data(), bytes, &decoded, &error);
+        CHECK(ready);
+        if (!ready) return;
+        rawBytes = decoded.size;
+    }
+    CHECK(RigExecTestPackUnchecked(*file).size() == rawBytes);
+    std::printf("  raw inner payload: %zu bytes\n", rawBytes);
     using F = fb::RigExecWireFile;
     const auto topologies = [](F &f) {
         const auto clear = [](fb::RigExecWireRevision &r) {
@@ -2329,9 +2395,9 @@ _BinarySizeBudget(const std::string &fixture, const RigExecBakeResult &result)
         F copy(*file);
         field.second(copy);
         const size_t cleared = RigExecTestPackUnchecked(copy).size();
-        CHECK(cleared <= bytes);
+        CHECK(cleared <= rawBytes);
         std::printf("  size %-34s %10zu bytes\n", field.first,
-                    bytes - std::min(bytes, cleared));
+                    rawBytes - std::min(rawBytes, cleared));
     }
 }
 
@@ -2342,7 +2408,8 @@ static int classGuardInputs = 0;
 
 static void
 TestBake(const std::string &fixture, const std::vector<double> &tableFrames,
-         const char *animation, const std::filesystem::path &scratch)
+         const char *animation, const std::filesystem::path &scratch,
+         const std::vector<uint8_t> *cliArtifact = nullptr)
 {
     const UsdStageRefPtr stage = UsdStage::Open(fixture);
     CHECK(stage);
@@ -2361,13 +2428,15 @@ TestBake(const std::string &fixture, const std::vector<double> &tableFrames,
     const double t = std::isnan(bakeTime)
                          ? RigExecBakedProbeTime(stage).GetValue()
                          : bakeTime;
-    // Two fresh evaluators, one bake each: a bake is deterministic, so the
-    // bytes are identical -- which is what makes a byte golden meaningful.
-    std::vector<uint8_t> first;
+    // In the registered gate the CLI made the first fresh bake. This
+    // independent evaluator makes the second, against the same authored
+    // stage, root, time and inherited environment. Standalone calls still
+    // make both fresh bakes here.
+    std::vector<uint8_t> first = cliArtifact ? *cliArtifact
+                                             : std::vector<uint8_t>();
     std::unique_ptr<fb::RigExecWireFile> file;
-    for (int pass = 0; pass < 2; ++pass) {
+    for (int pass = 0; pass < (cliArtifact ? 1 : 2); ++pass) {
         RigExecRigEvaluator evaluator(stage, rigPath);
-        evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
         RigExecBakeOpts opts;
         opts.time = bakeTime;
         RigExecBakeResult result;
@@ -2383,11 +2452,16 @@ TestBake(const std::string &fixture, const std::vector<double> &tableFrames,
             CHECK(result.bytes == first);
             continue;
         }
-        first = result.bytes;
+        if (cliArtifact) {
+            CHECK(result.bytes == first);
+        } else {
+            first = result.bytes;
+        }
         ++compareTried;
         const int failuresBefore = failures;
         _BinaryCompareStats stats;
-        file = _BinaryCompareProgram(evaluator, result.bytes, fixture, &stats);
+        file = _BinaryCompareProgram(
+            evaluator, cliArtifact ? first : result.bytes, fixture, &stats);
         if (!file) {
             return;
         }
@@ -2493,7 +2567,6 @@ TestBake(const std::string &fixture, const std::vector<double> &tableFrames,
     // A bake is of the authored epoch: a held drag refuses it rather than
     // printing its value into the defaults.
     RigExecRigEvaluator evaluator(stage, rigPath);
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     RigExecValueOverride drag;
     drag.prim = rigPath;
     drag.attribute = TfToken("avars:tx");
@@ -2520,6 +2593,44 @@ main(int argc, char **argv)
     if (!std::filesystem::create_directory(scratch)) {
         return 1;
     }
+    if (argc > 1 && std::string(argv[1]) == "--conformance") {
+        // CLI artifact, one fresh independent bake, then every physical
+        // owner/default/route assertion and the authored-epoch refusal.
+        if (argc != 6) {
+            std::fprintf(stderr, "usage: --conformance STAGE TIME CLASS ARTIFACT\n");
+            return 2;
+        }
+        double time = 0.0;
+        try {
+            size_t consumed = 0;
+            time = std::stod(argv[3], &consumed);
+            if (consumed != std::strlen(argv[3]) || !std::isfinite(time)) {
+                throw std::invalid_argument("nonfinite or malformed time");
+            }
+        } catch (const std::exception &) {
+            std::fprintf(stderr, "conformance requires a finite bake time\n");
+            return 2;
+        }
+        const std::string animation(argv[4]);
+        if (animation != "inputs" && animation != "static") {
+            std::fprintf(stderr, "conformance CLASS must be inputs or static\n");
+            return 2;
+        }
+        const std::vector<uint8_t> artifact = Bytes(argv[5]);
+        CHECK(!artifact.empty());
+        if (!artifact.empty()) {
+            TestBake(argv[2], {time}, animation.c_str(), scratch, &artifact);
+        }
+        CHECK(compareTried == 1 && compareRows == 1);
+        CHECK(classGuardStatic + classGuardInputs == 1);
+        if (_EndsWith(_Slashed(argv[2]), "/biped/Biped.usda")) {
+            CHECK(sizeBudgetChecked);
+        }
+        if (!failures) std::filesystem::remove_all(scratch);
+        std::printf("binary conformance: %s time=%.17g class=%s failures=%d\n",
+                    argv[2], time, argv[4], failures);
+        return failures ? 1 : 0;
+    }
     // The tail rig's file, baked at its fixture time: the real bake the
     // codec and corruption cases edit.
     const std::string tail =
@@ -2538,60 +2649,11 @@ main(int argc, char **argv)
     TestStaticReportRevisionReads();
     TestStaticReportAnsweredBlendSamples();
     TestBakeOptions(tail, "/TailAsset/Rig/Controls/Tail2.avars:rz");
-    auto BakeOne = [&](const std::string &stage,
-                       const std::vector<double> &frames,
-                       const char *animation) {
-        std::printf("bake conformance: %s\n", stage.c_str());
-        TestBake(stage, frames, animation, scratch);
-    };
-    int bakingRows = 0;
-    bool fixtureTable = false;
-    if (argc > 1 && std::filesystem::is_directory(argv[1])) {
-        fixtureTable = true;
-        for (const RigExecExampleFixture &fixture :
-             kRigExecExampleFixtures) {
-            if (!fixture.bakesToday) {
-                std::printf("bake conformance: skip %s (blocked by %s)\n",
-                            fixture.stage, fixture.blockedBy);
-                continue;
-            }
-            const std::string stage =
-                (std::filesystem::path(argv[1]) / fixture.stage).string();
-            BakeOne(stage, _ParseTableFrames(fixture.frames),
-                    fixture.animation);
-            ++bakingRows;
-        }
-    } else if (argc > 1) {
-        for (int i = 1; i < argc; ++i) {
-            BakeOne(argv[i], {1001}, nullptr);
-        }
-    } else {
-        fixtureTable = true;
-        for (const RigExecExampleFixture &fixture :
-             kRigExecExampleFixtures) {
-            if (!fixture.bakesToday) {
-                continue;
-            }
-            const std::string stage =
-                (std::filesystem::path(RIGEXEC_EXAMPLES_DIR) /
-                 fixture.stage).string();
-            BakeOne(stage, _ParseTableFrames(fixture.frames),
-                    fixture.animation);
-            ++bakingRows;
-        }
-    }
-    std::printf("class guard: %d static row(s) holding an animated source "
-                "in static data, %d inputs row(s) holding none, of %d "
-                "baking row(s)\n",
-                classGuardStatic, classGuardInputs, bakingRows);
-    CHECK(classGuardStatic + classGuardInputs == bakingRows);
-    std::printf("compare: %d of %d baking row(s) hold the program they were "
-                "baked from\n",
-                compareRows, compareTried);
-    CHECK(compareRows == compareTried);
-    CHECK(bakingRows == 0 || compareTried == bakingRows);
-    // The fixture table holds the biped, so its run checks the budget.
-    CHECK(!fixtureTable || sizeBudgetChecked);
+    // Each example's positive capture/default/source conformance and two
+    // fresh bakes run in its existing verify_binary registration before
+    // the unchanged runtime defaults, frame sampling and drag ledger.
+    // This suite keeps the focused malformed, synthetic and multi-time
+    // protocols, including their independent numerical assertions.
     if (!failures) {
         std::filesystem::remove_all(scratch);
     }

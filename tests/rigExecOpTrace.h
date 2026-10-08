@@ -18,7 +18,7 @@
 
 namespace rigExecTest {
 
-/// The entries whose kind, domain and label contain the given substrings;
+/// The entries whose kind matches exactly and whose domain/label contain the given substrings;
 /// an empty substring matches everything.
 inline std::vector<rigExec::RigExecOpTraceEntry>
 FindTraceEntries(const std::vector<rigExec::RigExecOpTraceEntry> &trace,
@@ -27,7 +27,7 @@ FindTraceEntries(const std::vector<rigExec::RigExecOpTraceEntry> &trace,
 {
     std::vector<rigExec::RigExecOpTraceEntry> out;
     for (const rigExec::RigExecOpTraceEntry &entry : trace) {
-        if (entry.kind.find(kind) != std::string::npos &&
+        if ((kind.empty() || entry.kind == kind) &&
             entry.domain.find(domain) != std::string::npos &&
             entry.label.find(label) != std::string::npos) {
             out.push_back(entry);
@@ -76,7 +76,7 @@ TraceSeqOf(const std::vector<rigExec::RigExecOpTraceEntry> &trace,
     return 0;
 }
 
-/// The program indices of the graph nodes whose kind and label contain the
+/// The program indices of graph nodes whose kind matches exactly and label contains the
 /// given substrings, in program order; an empty substring matches everything.
 inline std::vector<size_t>
 FindOpGraphSteps(const std::vector<rigExec::RigExecOpGraphNode> &graph,
@@ -84,7 +84,7 @@ FindOpGraphSteps(const std::vector<rigExec::RigExecOpGraphNode> &graph,
 {
     std::vector<size_t> out;
     for (const rigExec::RigExecOpGraphNode &node : graph) {
-        if (node.kind.find(kind) != std::string::npos &&
+        if ((kind.empty() || node.kind == kind) &&
             node.label.find(label) != std::string::npos) {
             out.push_back(node.step);
         }
@@ -216,8 +216,8 @@ OpGraphClusterForwardCone(const std::vector<rigExec::RigExecOpGraphNode> &graph,
 }
 
 /// Every way \p trace fails to be a valid completion order over \p graph:
-/// a step listed twice or outside the graph, sequence numbers that are not
-/// exactly 1..N, and an executed predecessor that did not finish before its
+/// a step listed twice or outside the graph, nonpositive, repeated or
+/// out-of-graph completion numbers, and an executed predecessor that did not finish before its
 /// executed successor. Empty when the trace respects the graph.
 inline std::vector<std::string>
 CheckTraceRespectsEdges(const std::vector<rigExec::RigExecOpTraceEntry> &trace,
@@ -225,7 +225,8 @@ CheckTraceRespectsEdges(const std::vector<rigExec::RigExecOpTraceEntry> &trace,
 {
     std::vector<std::string> violations;
     std::vector<uint32_t> seqOf(graph.size(), 0);
-    std::vector<char> seqSeen(trace.size() + 1, 0);
+    // Skipped candidates complete too, so executed rows may contain gaps.
+    std::vector<char> seqSeen(graph.size() + 1, 0);
     for (const rigExec::RigExecOpTraceEntry &entry : trace) {
         const std::string what =
             "step " + std::to_string(entry.step) + " (" + entry.label + ")";
@@ -238,10 +239,10 @@ CheckTraceRespectsEdges(const std::vector<rigExec::RigExecOpTraceEntry> &trace,
             continue;
         }
         seqOf[entry.step] = entry.seq;
-        if (entry.seq == 0 || entry.seq > trace.size()) {
+        if (entry.seq == 0 || entry.seq > graph.size()) {
             violations.push_back(what + " has seq " +
                                  std::to_string(entry.seq) + " outside 1.." +
-                                 std::to_string(trace.size()));
+                                 std::to_string(graph.size()));
         } else if (seqSeen[entry.seq]) {
             violations.push_back(what + " repeats seq " +
                                  std::to_string(entry.seq));

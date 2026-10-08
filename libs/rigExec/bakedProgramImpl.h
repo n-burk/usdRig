@@ -13,15 +13,25 @@
 #ifndef RIGEXEC_BAKED_PROGRAM_IMPL_H
 #define RIGEXEC_BAKED_PROGRAM_IMPL_H
 
+#include "rigExecGraph/weightProgram.h"
+#include "rigExecGraph/geometrySceneLowering.h"
 #include "bakedProgram.h"
 #include "frameExtraction.h"
 #include "moverGraph.h"
+#include "crossDomainInputs.h"
+#include "scalarReferenceAdapter.h"
 #include "parallel.h"
 #include "profiler.h"
 #include "solverKernels.h"
 #include "tapSet.h"
 #include "types.h"
 #include "weightPackets.h"
+#include "rigExecGraph/opGraph.h"
+#include "rigExecGraph/opValues.h"
+#include "rigExecGraph/providerProgram.h"
+#include "rigExecGraph/solverProgram.h"
+#include "rigExecGraph/constraintProgram.h"
+#include "rigExecGraph/poseProgram.h"
 
 #include "rigExecMath/autoClavicleKernel.h"
 #include "rigExecMath/avarScale.h"
@@ -39,6 +49,7 @@
 #include "pxr/base/gf/vec3f.h"
 #include "pxr/base/tf/diagnostic.h"
 #include "pxr/base/tf/token.h"
+#include "pxr/base/tf/type.h"
 #include "pxr/base/vt/array.h"
 #include "pxr/base/vt/value.h"
 #include "pxr/usd/sdf/path.h"
@@ -78,38 +89,12 @@ struct RigExecHeadLeafConstants;
 
 // Shared helpers.
 
-// Mirrors computations.cpp _ComposeAvars (the provider compose exec runs).
-// The program must produce the same numbers as that callback, so the two are
-// written the same way rather than algebraically simplified.
+// Provider compose uses the same arithmetic as detached scene kernels.
 inline GfMatrix4d
-RigExecBakedComposeAvars(double tx, double ty, double tz, double sx,
-                         double sy, double sz, double rx, double ry,
-                         double rz, double rspin, const TfToken &order)
+RigExecBakedComposeAvars(double tx,double ty,double tz,double sx,double sy,double sz,
+    double rx,double ry,double rz,double spin,const TfToken &order)
 {
-    static const GfVec3d axes[3] = {
-        GfVec3d(1, 0, 0), GfVec3d(0, 1, 0), GfVec3d(0, 0, 1)};
-    const double angles[3] = {rx, ry, rz};
-    std::string sequence = order.GetString();
-    if (sequence.size() != 3) {
-        sequence = "XYZ";
-    }
-    GfMatrix4d m(1.0);
-    m.SetScale(GfVec3d(RigExecNormalizeAvarScale(sx),
-                       RigExecNormalizeAvarScale(sy),
-                       RigExecNormalizeAvarScale(sz)));
-    for (const char axis : sequence) {
-        const int index = axis == 'X' ? 0 : axis == 'Y' ? 1 : 2;
-        if (angles[index] != 0.0) {
-            m = m * GfMatrix4d(GfRotation(axes[index], angles[index]),
-                               GfVec3d(0));
-        }
-    }
-    if (rspin != 0.0) {
-        m = m * GfMatrix4d(GfRotation(axes[0], rspin), GfVec3d(0));
-    }
-    GfMatrix4d t(1.0);
-    t.SetTranslate(GfVec3d(tx, ty, tz));
-    return m * t;
+    return RigExecComposePoseAvars(tx,ty,tz,sx,sy,sz,rx,ry,rz,spin,order);
 }
 
 inline RigExecEulerOrder
@@ -136,21 +121,10 @@ RigExecBakedRoundTrip(const GfMatrix4d &m)
     return out;
 }
 
-// rigEvaluator.cpp _IsUsableConstraintFrame, which gates every commit in the
-// pose walk this program reproduces.
 inline bool
 RigExecBakedUsable(const RigExecPointFrame &frame)
 {
-    if (!frame.IsValid() || frame.IsDegenerate()) {
-        return false;
-    }
-    for (const GfVec3d &point : frame.points) {
-        if (!std::isfinite(point[0]) || !std::isfinite(point[1]) ||
-            !std::isfinite(point[2])) {
-            return false;
-        }
-    }
-    return true;
+    return RigExecConstraintFrameUsable(frame);
 }
 
 // True when \p attribute or anything it resolves through carries animation,
@@ -195,6 +169,9 @@ RigExecBakedAnimatedOrConnected(const UsdAttribute &attribute)
 template <class T>
 struct RigExecBakedInput {
     T constant{};
+    /// Direct source sampling is independent of temporal variation.
+    bool sourceBacked = false;
+    T sourceFallback{};
     UsdAttributeQuery query;  ///< set when USD alone answers, per frame
     UsdAttribute resolvedAttr;  ///< set when a property chain is on the walk
     UsdAttribute head;        ///< where the walk starts, for an override
@@ -322,7 +299,9 @@ RigExecBakedRead(const RigExecBakedInput<T> &input,
                  const std::vector<char> *upstreamOn = nullptr)
 {
     RIGEXEC_PURITY_CHECK();
-    T value = input.constant;
+    // Detached jobs have already resolved overrides and upstream sources.
+    if (input.sourceBacked && !input.head) return input.constant;
+    T value = input.sourceBacked ? input.sourceFallback : input.constant;
     const auto flagged = [&input](const std::vector<char> *flags) {
         return input.overrideIndex >= 0 && flags &&
                size_t(input.overrideIndex) < flags->size() &&
@@ -338,6 +317,12 @@ RigExecBakedRead(const RigExecBakedInput<T> &input,
     if (flagged(overridden) || flagged(upstreamOn)) {
         resolved.GetAttributeOverStageLayer(input.head, time, upstream,
                                             &value);
+        return value;
+    }
+    if (input.sourceBacked) {
+        // A live source without a usable query retains the argument fallback.
+        if (!input.query.IsValid()) return input.sourceFallback;
+        input.query.Get(&value, time);
         return value;
     }
     if (!input.varying) {
@@ -476,9 +461,13 @@ struct RigExecBakedPathLeaves {
     /// read goes through the resolved inputs and its hops meet a chain
     /// target or a record consumer, else -1 (or empty: none). Build state.
     std::vector<int> walks;
+    std::vector<int> exactVersions; ///< per-key current property/record output, -1 for raw
+    std::vector<int> exactRecordIndices; ///< record index or -1 for direct version
+    std::vector<int> exactValueTypes; ///< producer PropertyChain::Arm or -1 for raw
     /// Per key, the value the last sample read, and whether that sample
     /// moved it (bitwise, as the binding leaves compare).
     std::vector<VtValue> values;
+    mutable std::vector<VtValue> consumedValues; ///< per-owner body values, never sampled memo keys
     std::vector<char> changed;
     /// Per key, the next sample must re-read it whatever else holds: a value
     /// edit reached one of its paths, or a sample skipped it.
@@ -511,10 +500,12 @@ enum class RigExecBakedPathLeafOwner : uint8_t {
     Revision,
     Derived,
     Weight,
+    WeightOracle,
     /// The layout leaves of a chain revision's or a derived target's
     /// SkinTopology op.
     RevisionLayout,
     DerivedLayout,
+    Provider,
 };
 
 /// One path leaf: its owner (chain and revision, chain and derived target,
@@ -586,13 +577,46 @@ RigExecBakedOpName(RigExecRevisionOp op)
     return "unknown";
 }
 
+struct RigExecWeightOracleFacts {
+    /// _VolumeWeightSamplesInFlight: a volume whose rigExec:weightTarget
+    /// reads `preceding`.
+    bool samplesInFlight = false;
+    /// A volume not in flight: _ReadTargetPoints of rigExec:sampleSource,
+    /// else of rigExec:weightTarget. False when neither reads.
+    bool haveSamples = false;
+    std::vector<GfVec3f> samples;
+    /// A curve volume: _ReadTargetPoints of rigExec:curve, non-empty.
+    bool haveCurve = false;
+    std::vector<GfVec3f> curve;
+    /// A plane volume's rigExec:planeAxis and rigExec:planeBounds as the
+    /// oracle reads them: Get at the time, the fallback only when the
+    /// attribute is absent. Empty for every other type.
+    TfToken planeAxis, planeBounds;
+    /// The first attribute whose answer these facts hold at one time while
+    /// the oracle reads it at every evaluation time -- the points a volume
+    /// not in flight samples, a curve volume's curve points, a plane's axis
+    /// and bounds -- when it is animated (time samples, or a value that
+    /// might vary); empty otherwise.
+    SdfPath timeVarying;
+    /// The oracle's whole error text when the read-phase check fails.
+    std::string phaseError;
+    /// The oracle's whole error text for the object's first structural
+    /// failure: an unknown type, combine mode or range policy, a dynamic
+    /// weight's operation, base, target, representation or sparse-support
+    /// rule, or a static field carrying time samples or connections. Each
+    /// precedes every per-run read of the object, so the port reports it
+    /// on entering the object.
+    std::string staticError;
+};
+
+
 // The program.
 
 /// What a provider slot IS, which decides both what writes it and what the
 /// walk may do with it.
 ///
 /// The dynamic path keeps one frame map covering both families and tells them
-/// apart by asking whether the path is in _firstFramePoseFrames -- its
+/// apart by asking whether the path is in _nativeProviderPaths -- its
 /// `hierarchicalProviders` set. The program answers the same question off a
 /// dense table instead, because it asks it once per descendant per commit.
 enum class RigExecBakedSlotKind {
@@ -664,12 +688,21 @@ enum class RigExecBakedSlotDomain : uint8_t {
     Rest = 27,
     Ladder = 28,
     SkinTopology = 29,
+    WeightField = 30,
+    WeightFramesBase = 31,
+    SpaceValue = 32,
+    SpaceLeaf = 33,
+    DerivedBase = 34,
+    ChainInput = 35,
+    ConstraintInputs = 36,
+    SwitchFrame = 37,
+    RequiredStageFramesAdmission = 38,
 };
 /// Derived from the last enumerator rather than written out: an array
 /// indexed by domain is how the edge sweep is written, and a count that
 /// drifted from the enum is an out-of-bounds write with no symptom at Build.
 inline constexpr size_t RigExecBakedSlotDomainCount =
-    size_t(RigExecBakedSlotDomain::SkinTopology) + 1;
+    size_t(RigExecBakedSlotDomain::RequiredStageFramesAdmission) + 1;
 
 /// A slot id: the domain in the top 8 bits, the index in the low 24.
 using RigExecBakedSlot = uint32_t;
@@ -728,7 +761,7 @@ RigExecBakedOne(RigExecBakedSlotDomain domain, int index)
 
 /// The type a head leaf holds and a walk reads.
 enum class RigExecBakedHeadValueType : uint8_t {
-    Bool, Float, Double, Vec3f, Matrix4d, Vec2fArray, Int, Token, Vec3d
+    Bool, Float, Double, Vec3f, Matrix4d, Vec2fArray, Int, Token, Vec3d, Vec3fArray
 };
 
 /// One stage value a head op reads: an attribute's own value at the run's
@@ -788,6 +821,8 @@ struct RigExecBakedWalkHop {
     /// The head leaf holding `path`'s own value as the walk reads it; -1
     /// where the walk never falls back to it.
     int leaf = -1;
+    int poseWeight = -1; ///< same-generation Float publication, revision oracle only
+    int crossDomain = -1; ///< explicit S9 pose/geometry version read
 };
 
 /// One input of a property revision as _EvaluatePropertyChains reads it
@@ -838,6 +873,13 @@ struct RigExecBakedReaderWalk {
     std::vector<std::pair<uint32_t, uint32_t>> shadowed;
 };
 
+RigExecBakedReaderWalk RigExecBakedBuildOracleRead(
+    RigExecBakedProgramImpl *, const UsdAttribute &, const std::vector<int> &);
+float RigExecBakedReadOracleScalar(const RigExecBakedProgramImpl &,
+    const RigExecBakedReaderWalk &, const std::vector<int> &, float);
+bool RigExecBakedResolveWalkValue(const RigExecBakedProgramImpl &,
+    const RigExecBakedWalk &,VtValue *);
+
 /// One version's value, in the member the chain's arm computes.
 struct RigExecBakedPropertyValue {
     float f = 0.0f;
@@ -870,6 +912,7 @@ struct RigExecBakedPropertyChain {
         RigExecPropertyOp op = RigExecPropertyOp::Add;
         /// rigExec:weightObject's first target; empty when none.
         SdfPath weightObject;
+        int weightField = -1;
         RigExecBakedWalk enabled, defaultWeight, value, minimum, maximum,
             keys, tangents;
         /// inputs:tangents exists, which is what decides it is read.
@@ -909,7 +952,7 @@ struct RigExecBakedPointVersion {
 /// phased-read store would have answered from: the records of the revisions some phase
 /// names (`snapshotAfter`) whose fuse -- or, for `final`, whose chain's
 /// status step -- runs before the reader, matched to the phase as
-/// RigExecChainSnapshots::Lookup matches them, newest first. `preceding` on
+/// the original AtPrim lookup matches them, newest first. `preceding` on
 /// the reader's own chain is instead the one version entering the reader,
 /// which the walk reads off the chain built so far. The reader
 /// takes the first candidate whose chain read a base this run -- every
@@ -934,7 +977,7 @@ struct RigExecBakedPointsBinding {
 /// One provider frame as one writer of its stack -- a constraint or a
 /// solver -- left it, for an AtPrim read phase on a transform that names that
 /// writer. A record exists only for a pair (provider, writer) the compile
-/// named (`_chainPlan.snapshots`), exactly as the walk records only named
+/// named (`_nativePhaseCheckpoints`), exactly as the walk records only named
 /// pairs; its FrameMatrix step writes the matrix and a valid byte that is 0
 /// exactly where the walk declines to record (RigExecBakedEvalFrameRecord).
 struct RigExecBakedFrameRecord {
@@ -975,9 +1018,12 @@ const char *RigExecBakedSlotDomainName(RigExecBakedSlotDomain domain);
 inline bool
 RigExecBakedIsSourceDomain(RigExecBakedSlotDomain domain)
 {
-    return domain == RigExecBakedSlotDomain::Avars ||
-           domain == RigExecBakedSlotDomain::ChainBase ||
-           domain == RigExecBakedSlotDomain::SolverPoints;
+    return domain == RigExecBakedSlotDomain::SolverPoints ||
+           domain == RigExecBakedSlotDomain::SpaceLeaf ||
+           domain == RigExecBakedSlotDomain::DerivedBase ||
+           domain == RigExecBakedSlotDomain::ChainInput ||
+           domain == RigExecBakedSlotDomain::ConstraintInputs ||
+           domain == RigExecBakedSlotDomain::RequiredStageFramesAdmission;
 }
 
 /// Whether \p domain's storage is SSA, one entry per writer (§3.1).
@@ -1022,6 +1068,12 @@ enum class RigExecBakedStepKind {
     RestCompose = 20,
     LadderCompose = 21,
     SkinTopology = 22,
+    WeightField = 23,
+    SpaceExpression = 24,
+    AvarInputs = 26,
+    SpaceCheckpoint = 27,
+    ProviderRefresh = 28,
+    ChainInputs = 25,
 };
 
 /// The name of \p kind, for the schedule report.
@@ -1036,6 +1088,8 @@ inline bool
 RigExecBakedIsGeometryStep(RigExecBakedStepKind kind)
 {
     switch (kind) {
+    case RigExecBakedStepKind::ChainInputs:
+    case RigExecBakedStepKind::WeightField:
     case RigExecBakedStepKind::InfluenceFold:
     case RigExecBakedStepKind::RevisionStatic:
     case RigExecBakedStepKind::RevisionChunk:
@@ -1116,6 +1170,9 @@ struct RigExecBakedStep {
     /// overwritten, so re-running a reader never means re-running a writer
     /// to put a slot back.
     std::vector<int> preds, succs;
+    /// Declared authored prerequisites, separate from generated graph edges.
+    /// Stable keys survive canonicalization and local SCC exclusion.
+    std::vector<std::string> semanticPredecessorKeys;
 
     // A step is a pure function of its declared reads with three exceptions,
     // and every one of them is recorded here so that the dirty set can name
@@ -1146,6 +1203,7 @@ struct RigExecBakedStep {
     /// moved (`walkReaders`) and a Rest or Ladder slot that moved
     /// (`restReaders`, `ladderReaders`).
     std::vector<int> readerWalks;
+    std::vector<std::pair<RigExecBakedLeafType,uint32_t>> walkedBindingLeaves;
     /// The `reads` ids every walk of the step that declares them reads
     /// only past a record (RigExecBakedReaderWalk::shadowed), with those
     /// records: such an id seeds the step only while one of them stands
@@ -1174,19 +1232,15 @@ struct RigExecBakedStep {
     std::vector<std::string> diagnostics;
     size_t maxDiagnostics = RigExecBakedMaxStepDiagnostics;
     RigExecBakedStepCounters counters;
-    /// The step gave the generation back: the baked propagation pairs no
-    /// longer describe the walk. Nothing after it runs.
-    bool bail = false;
     /// When the profiler is on: the step's interval, replayed into it by the
     /// epilogue in step order so the trace is deterministic.
     uint64_t startUs = 0, endUs = 0;
-    /// 1-based order in which this step's body finished during the last run;
-    /// 0 if it did not run. Stamped before successors are released, so an
-    /// executed predecessor always holds a smaller value than its successor.
-    uint32_t runSeq = 0;
+    /// Thread that ran this body, retained for profiler replay.
+    std::thread::id runner;
     /// What the step is called in the report and the trace, built once at
     /// Build so that neither costs a string per step per frame.
     std::string label;
+    std::string descriptorKey; ///< owner/category/authored revision/subindex identity
 
     /// Empties this run's output. Called by the executor before the body, so
     /// that a step that is skipped keeps last run's lines for the epilogue
@@ -1196,8 +1250,6 @@ struct RigExecBakedStep {
     void BeginRun() {
         diagnostics.clear();
         counters.Clear();
-        bail = false;
-        runSeq = 0;
     }
 
     /// Records that this run skipped the step (§7).
@@ -1208,18 +1260,12 @@ struct RigExecBakedStep {
     /// program rather than of a run (§4.2). What does not stay is the three
     /// counters that are OBSERVATIONS of this run -- a revision the frame
     /// did not execute did not execute, a node it did not report did not
-    /// report its creation, a schedule it did not build did not build one --
-    /// nor the bail flag, which belongs to the run that raised it. The three
-    /// are reported again by the run that does the work, because what they
-    /// count is held in state that outlives a skip (`executed` off a value
-    /// comparison, `created` and `scheduleDirty` off one-shot flags the
-    /// geometry prologue clears only when it counts them).
+    /// report its creation, a schedule it did not build did not build one.
+    /// These observations are reported by the operations that do the work.
     void MarkSkipped() {
         counters.revisionsExecuted = 0;
         counters.revisionsCreated = 0;
         counters.schedulesBuilt = 0;
-        bail = false;
-        runSeq = 0;
     }
 };
 
@@ -1439,7 +1485,8 @@ struct RigExecBakedCones {
     /// PropertyVersion id -> the steps that declare it in `reads`, and
     /// reader walk -> the steps that read it. What a moved version and a
     /// moved walk value dirty.
-    std::vector<std::vector<int>> headReaders, walkReaders;
+    std::vector<std::vector<int>> headReaders, walkReaders, fieldReaders;
+    std::vector<int> fieldSteps;
     /// Provider slot -> the steps that declare its Rest, and its Ladder, in
     /// `reads`. What a moved rest or ladder output dirties.
     std::vector<std::vector<int>> restReaders, ladderReaders;
@@ -1464,12 +1511,6 @@ struct RigExecBakedCones {
     // answer. Every entry below is the step-grain twin of the entry of the
     // same name above; a seed added to one family belongs in both.
 
-    /// Forward closure of each step over `step.succs`, including itself: row
-    /// s is `stepWords` words starting at `stepCone[s * stepWords]`. Flat, so
-    /// that a copy of the cones is one allocation and a frame's union is a
-    /// word loop over rows.
-    size_t stepWords = 0;
-    std::vector<uint64_t> stepCone;
     /// Steps that read outside the graph (dirty every run), and steps that
     /// are not geometry steps (dirty on a program's first run).
     RigExecBakedClusterSet alwaysSteps, poseSteps;
@@ -1626,15 +1667,9 @@ struct RigExecBakedCommit {
 /// What a staged propagation pair turned into. Ordered so that the first
 /// non-Staged, non-Skipped outcome in pair order decides the commit, which is
 /// where today's loop returns.
-enum class RigExecBakedPropagateOutcome : uint8_t {
-    Staged,             ///< a usable descendant frame is waiting
-    Skipped,            ///< a solver commit stepped over an unusable pair
-    NoCandidate,        ///< the baked pairs no longer describe the walk
-    UnusableDescendant, ///< the descendant's own frame is unusable
-    SingularDelta,      ///< the hierarchy delta would not resolve
-    InvalidResult,      ///< the propagated frame is unusable
-};
+using RigExecBakedPropagateOutcome=RigExecPosePropagateOutcome;
 
+class RigExecBakedExecCheckRows;
 struct RigExecBakedProgramImpl {
     RigExecRigEvaluator *evaluator = nullptr;
     UsdStageRefPtr stage;
@@ -1650,21 +1685,6 @@ struct RigExecBakedProgramImpl {
     // in, the profiler is switched on mid-session -- so the program reads what
     // the evaluator holds NOW and can never answer from a stale copy.
     RigExecResolvedInputs *resolvedInputs = nullptr;
-    /// The evaluator's phased-read store, EMPTIED at the head of a run
-    /// exactly as the dynamic walk empties it at the head of its own, so the
-    /// two paths leave the evaluator in the same state. The program neither
-    /// records into it nor reads it: its phased reads are bound at Build
-    /// (RigExecBakedPointsBinding, `frameRecords`).
-    RigExecChainSnapshots *chainSnapshots = nullptr;
-    /// The evaluator's per-epoch blend sample shapes, resolved in the
-    /// geometry prologue through the same cache the dynamic walk resolves
-    /// through -- so the two paths hold the same layout pointer, and no step
-    /// body takes the cache's lock. Beside it, the evaluator's own reader for
-    /// a shape the cache does not hold, bound at Build because only that
-    /// file can name it.
-    RigExecBlendSampleCache *blendSampleShapes = nullptr;
-    std::function<bool(const SdfPath &, size_t, RigExecBlendSampleLayout *)>
-        resolveBlendSample;
     RigExecProfiler *profiler = nullptr;
     const std::vector<RigExecValueOverride> *interactiveOverrides = nullptr;
     /// Joint -> the ordered stack of (solver, element) that write it, which
@@ -1673,10 +1693,14 @@ struct RigExecBakedProgramImpl {
     /// may carry several entries; the last one supplies its base frame.
     const std::map<SdfPath, std::vector<std::pair<SdfPath, int>>>
         *jointSolverBinding = nullptr;
+    // Compile-owned normalization. No evaluator table is edited and no
+    // original SCC body can become runnable when its writer is removed.
+    std::map<SdfPath, std::vector<std::pair<SdfPath, int>>> ownedJointSolverBinding;
+    RigExecOpExclusionProof cycleExclusionProof;
+    std::map<SdfPath, std::string> cycleSkipReasons;
     /// The observational guide request, which exists only while a consumer
     /// asked for one, and the runtime toggle beside it. Read per frame rather
     /// than folded: either can move without the epoch moving.
-    const std::unique_ptr<RigExecTapSet> *guideTaps = nullptr;
     const bool *solverGuidesEnabled = nullptr;
     /// Whether the epoch has any property chain at all. A chain appearing or
     /// disappearing is a structural edit, which recompiles and rebuilds this
@@ -1685,13 +1709,16 @@ struct RigExecBakedProgramImpl {
 
     // The slot table is the ordered UNION of the two provider families the
     // dynamic walk holds in one frame map: the RigExec providers exec seeds
-    // (_firstFramePoseFrames) and the plain Xformables a constraint targets
+    // (_nativeProviderPaths) and the plain Xformables a constraint targets
     // (_xformDerivedProviders). Both are keyed by SdfPath, whose order IS
     // namespace DFS pre-order, so a provider's parent always has a lower slot
     // than it does and one forward pass composes the whole hierarchy.
     std::vector<SdfPath> paths;
     std::map<SdfPath, int> index;
     std::vector<RigExecBakedSlotKind> slotKind;
+    /// Captured prim activity, distinct from individual attribute availability.
+    /// Production capture stores one immutable epoch bit per provider slot.
+    std::vector<char> providerActive;
     /// Nearest COMPOSE ancestor -- the nearest FirstFramePose slot above this one.
     /// The compose ladder inherits from it, because exec's NamespaceAncestor
     /// resolves only RigExec provider types and skips anything else.
@@ -1708,6 +1735,7 @@ struct RigExecBakedProgramImpl {
     // FIRST version, where the compose would have left one.
     /// The XformDerived slots, ascending, and the prim each one reads.
     std::vector<int> xformSlots;
+    RigExecRequiredStageFramesAdmission requiredStageFramesAdmission;
     std::vector<UsdPrim> xformPrimsBySlot;
     /// The asset root every relative transform is measured against, which is
     /// the rig prim's parent (rigEvaluator.cpp's `assetRoot`).
@@ -1729,6 +1757,8 @@ struct RigExecBakedProgramImpl {
     // pose it would have gone into.
     struct ConstraintArrays {
         UsdPrim prim;
+        SdfPath path;
+        std::array<VtValue,4> raw; ///< source weights/translation/rotation/pole raw samples
         size_t sourceCount = 0;
         bool parentOffsets = false;
         std::vector<double> weights;
@@ -1783,6 +1813,15 @@ struct RigExecBakedProgramImpl {
     // them, which is the fast path the whole rig shape used to be.
     struct Ladder {
         RigExecBakedInput<GfMatrix4d> restSpace, defaultSpace, posedSpace;
+        RigExecBakedInput<GfMatrix4d> parentSpace, parentDefaultSpace,
+            avarDefaultSpace, posedDefaultSpace;
+        RigExecBakedInput<GfVec3d> rotationSign;
+        RigExecBakedInput<GfMatrix4d> interveningSpace;
+        bool interveningReset = false;
+        std::array<int, 7> spaceValues{{-1,-1,-1,-1,-1,-1,-1}};
+        bool posedSpaceConnected = false, defaultSpaceConnected = false;
+        bool parentSpaceConnected = false, parentDefaultSpaceConnected = false;
+        bool avarDefaultSpaceConnected = false, posedDefaultSpaceConnected = false;
         /// rest:tx/ty/tz/rx/ry/rz and default:tx/ty/tz/rx/ry/rz, in that
         /// order, which is the order RigExecBakedComposeAvars takes them in.
         RigExecBakedInput<double> restAvars[6];
@@ -1791,6 +1830,52 @@ struct RigExecBakedProgramImpl {
     };
     /// One per slot; an xform-derived slot's is unused and stays default.
     std::vector<Ladder> ladders;
+    std::map<SdfPath,std::set<SdfPath>> poseDependencyPaths;
+    std::shared_ptr<const RigExecSceneDescriptors> sceneDescriptors; ///< detached compile facts
+    RigExecProviderProgram providerProgram;
+    RigExecTypedValueStore providerValues{0};
+    RigExecBakedPathLeaves providerLeaves;
+    std::vector<uint8_t> providerLeafBlocked;
+    std::vector<RigExecValueId> providerLeafValues;
+    std::vector<int> providerLeafChains;
+    std::vector<int> providerRoutedReads;
+    std::vector<SdfPath> providerFrozenKeys;
+    std::vector<int> providerExternalSlots;
+    struct ProviderFrameInput {
+        RigExecValueId value=RigExecNoProviderValue;
+        int slot=-1;
+        bool base=false;
+        uint32_t version=0;
+        SdfPath reader;
+    };
+    std::vector<ProviderFrameInput> providerFrameInputs;
+    std::vector<std::vector<int>> poseProviderInputs;
+    std::vector<char> connectedPoseProviders;
+    std::vector<int> providerParentRawLeaves;
+    std::vector<RigExecValueId> providerRefreshTemplates;
+    std::vector<size_t> providerRefreshTemplateOps;
+    struct ProviderRefresh {
+        struct Carry {
+            int slot=-1;
+            uint32_t baseRead=0,finRead=0,baseWrite=0,finWrite=0;
+            std::vector<int> blockingSlots;
+        };
+        std::string key;
+        SdfPath reader;
+        int slot=-1;
+        size_t checkpoint=0;
+        RigExecValueId baseValue=RigExecNoProviderValue,currentValue=RigExecNoProviderValue;
+        uint32_t baseRead=0,finRead=0,baseWrite=0,finWrite=0;
+        std::vector<Carry> carries;
+        std::vector<std::pair<uint32_t,uint32_t>> priorConstraints;
+        std::vector<RigExecPointFrame> baseInputs,finInputs,baseOutputs,finOutputs;
+        std::vector<uint8_t> blocked;
+    };
+    std::vector<ProviderRefresh> providerRefreshes;
+    std::vector<std::vector<uint32_t>> providerRefreshBefore;
+    std::string providerRefreshError;
+    std::vector<int> interveningSlots;
+    std::vector<SdfPath> interveningAnchors;
     /// True when any channel of any ladder is read per frame. False is the
     /// ordinary rig, and it is what keeps the recompute off the frame path.
     bool ladderVarying = false;
@@ -1814,6 +1899,11 @@ struct RigExecBakedProgramImpl {
     std::vector<std::array<GfVec3d, 4>> restPts;
     std::vector<RigExecPointFrame> restFrames;
     std::vector<GfMatrix4d> selfD;                     // default:space
+    std::vector<GfMatrix4d> posedD, parentSpaceM;
+    std::vector<char> parentSpaceAuthored;
+    std::vector<GfMatrix4d> lastPosedD, lastParentSpaceM;
+    std::vector<char> lastParentSpaceAuthored;
+    std::vector<unsigned char> lastRotationSign;
     std::vector<GfMatrix4d> parentDinv;                // parent default^-1
     std::vector<TfToken> rotOrder;
     /// The frame round trips exec performs between its ladder computations,
@@ -1831,10 +1921,6 @@ struct RigExecBakedProgramImpl {
     /// and what the next tier run clears.
     std::vector<char> restChanged, ladderChanged;
     std::vector<int> restMoved, ladderMoved;
-    /// The rest tier's last run (RigExecBakedRunRestTier); `restTierStamp`
-    /// is seeded by Build, so a notice before the first run forces it.
-    bool restTierEverRan = false;
-    uint64_t restTierStamp = 0;
     /// The rotation order a rest or default offset composes in, and the
     /// order an empty `avars:rotationOrder` stands for. Built at Build, so
     /// no compose builds a token from text.
@@ -1865,16 +1951,13 @@ struct RigExecBakedProgramImpl {
     // whose inputs:weight is connected to one of those reads the slot. The
     // edges follow, and so does the cone -- a drag that cannot reach the
     // driver leaves every corrective it drives untouched.
-    struct PoseInterpolator {
+    struct PoseInterpolator : RigExecPoseInterpolatorRecord {
         SdfPath path;
         int driverSlot = -1;
         /// The nearest frame-publishing ancestor the driver's local rotation
         /// is measured against, or -1 when its local rotation is its world
         /// one. Compiled by the evaluator, restated here as a slot.
         int parentSlot = -1;
-        bool allowNegativeWeights = true;
-        /// Whether the solve measures the driver's translation as well.
-        bool enableTranslation = false;
         /// A NUMERIC driver (rigExec:driverAttributes): the dials read in
         /// place of a transform's translation, one per axis, bound like any
         /// other per-frame input so a dragged or animated one is honoured.
@@ -1893,7 +1976,7 @@ struct RigExecBakedProgramImpl {
         std::vector<int> disabledSlots;
         /// The solved table, copied from the evaluator's compiled record: a
         /// constant of the epoch, and the program is dropped with the epoch.
-        RigExecRbfSolver solver;
+        RigExecPoseInterpolatorInputs kernelInputs;
         /// The solve's output, retained so a frame allocates nothing.
         std::vector<double> scratch;
     };
@@ -1991,9 +2074,16 @@ struct RigExecBakedProgramImpl {
     /// it. Build fills both.
     std::vector<char> needFinal, needBase;
 
-    struct Solver {
+    struct Solver : RigExecSolverRecord {
+        RigExecSolverInputs kernelInputs;
+        RigExecSolverWorkspace kernelWorkspace;
         SdfPath path;
         TfToken type;
+        /// Exact supported schema port and compiled target solver identity.
+        /// This is a structural prerequisite, not a fabricated numerical read.
+        std::vector<std::pair<std::string, int>> relationshipRequirements;
+        /// Canonical Solve identity, retained even when the common SCC excludes it.
+        std::string solveDescriptorKey;
         // Exec rebuilds every one of the rest members below from the
         // epoch's rests on EVERY evaluation, because it is a pure function
         // of them. The bake resolves it once, and the Solve step resolves it
@@ -2009,7 +2099,6 @@ struct RigExecBakedProgramImpl {
         /// Parallel to restRefs: true where a pose step BELOW this solver in
         /// the rig hierarchical stack wrote that joint, so the rest is the
         /// frame that step left rather than the authored one (spec 4.2).
-        std::vector<bool> restIsLive;
         /// Parallel to restRefs: the `fin` version each LIVE rest reads, bound
         /// by bindSolverReads to the version standing where this batch begins
         /// -- the same moment the dynamic path reads finalFrames for its
@@ -2029,39 +2118,29 @@ struct RigExecBakedProgramImpl {
         /// chain is carried through the solve instead of replaced (spec 4.2).
         /// Empty when the solver's joints do not line up one-for-one with its
         /// elements, and the solver then keeps its own basis.
-        std::vector<std::array<GfVec3d, 4>> jointRests;
         /// True when any slot's whole rest CHAIN can move with time.
         bool restsVary = false;
         /// Every override index a rest channel of that chain registered, so
         /// a drag on one dirties this solver's step.
         std::vector<int> restOverrides;
         /// SplineIk rebuilds its rest curve from these two beside the rests.
-        std::vector<double> splineRestWeights;
-        RigExecSplineIkRestLength splineRestMode =
-            RigExecSplineIkRestLength::Curve;
         /// The bake found this solver's rigExec:joints / jointElements
         /// binding malformed in one of the ways its exec computation checks
         /// at runtime. Such a computation warns and returns an EMPTY
         /// aggregate, so the program publishes one too: every joint the
         /// solver names then falls back to its rest chain, with the
         /// diagnostic that carries.
-        bool degenerate = false;
         // FkChain
         std::vector<int> controls;
-        bool parentRelative = false;
-        std::vector<std::array<GfVec3d, 4>> controlRests;
         /// rigExec:startFrame provider slot (-1 when unwired or not a
         /// provider, the computation's silent absolute path), its rest,
         /// and the `fin` version bound where this batch begins -- the
         /// baked mirror of the computation's synthetic base element.
         int start = -1;
-        std::array<GfVec3d, 4> startRest{};
         uint32_t startRead = 0;
         // IK / spline controls
         int root = -1, mid = -1, end = -1, pole = -1;
         // TwoBoneIk: rests and the measured bone lengths, both epoch-constant
-        std::array<std::array<GfVec3d, 4>, 3> ikRests{};
-        RigExecTwoBoneIkParams ikParams;
         RigExecBakedInput<double> bend, upperOffset, lowerOffset;
         RigExecBakedInput<float> stretch, softness;
         /// stretchPolicy softDistance: the limb inputs (inputs:pin,
@@ -2088,27 +2167,19 @@ struct RigExecBakedProgramImpl {
         /// The rest frames a spline needs to rebuild its rest description
         /// when the space has moved. Kept because the bind-time
         /// splineRest is measured at identity.
-        std::vector<RigExecPointFrame> splineRestFrames;
-        RigExecPointFrame splineRootRest, splineMidRest, splineEndRest;
         std::array<GfVec3d, 4> spaceRest = {GfVec3d(0), GfVec3d(1, 0, 0),
                                             GfVec3d(0, 1, 0),
                                             GfVec3d(0, 0, 1)};
         // BlendPointFrames
         int inA = -1, inB = -1;
         RigExecBakedInput<float> blendWeight;
-        RigExecScaleBlend scaleMode = RigExecScaleBlend::Log;
         /// An unsupported rigExec:rotationBlend, which is NOT a
         /// `degenerate`: the computation returns the surviving input before
         /// it ever looks at the token, so the rejection only bites when
         /// BOTH inputs are bound. It is checked where the computation
         /// checks it -- in the arm that has two aggregates in hand.
-        bool blendRotationRejected = false;
         // SplineIk: the rest description is a pure function of epoch-constant
         // rests, so exec's per-evaluation rebuild bakes out.
-        RigExecSplineIkRest splineRest;
-        RigExecSplineIkParams splineParams;
-        std::vector<std::array<GfVec3d, 4>> splineJointRests;
-        size_t splineCount = 0;
         RigExecBakedInput<double> preserveVolume, midFollowWeight, roll, twist,
             minLengthRatio;
         bool splineParamsVary = false;
@@ -2121,8 +2192,12 @@ struct RigExecBakedProgramImpl {
         // for an unwired end -- a case the bake answers with `degenerate`
         // instead, because an unwired end also leaves the REQUIRED frame
         // input unbound and the computation publishes nothing at all.
-        std::array<GfVec3d, 4> twistStartRest{}, twistEndRest{};
-        std::vector<double> twistWeights;
+        // Exact immutable authored array inputs, retained before remapping
+        // or default expansion for the optional independent exec witness.
+        VtIntArray execJointElements;
+        VtFloatArray execTwistWeights;
+        VtFloatArray execSplineWeights;
+        int execTwistCount = 1;
         RigExecBakedInput<double> twistTurns;
         // Ribbon. The driver curve's points are the one solver input that
         // is scene data rather than rig state: the dynamic path reads the
@@ -2133,10 +2208,11 @@ struct RigExecBakedProgramImpl {
         // may not touch USD.
         SdfPath ribbonPointsPath;
         UsdAttributeQuery ribbonPointsQuery;
+        RigExecReadPhase ribbonPointsPhase;
+        RigExecBakedPointsBinding ribbonPointsBinding;
         /// The bind-time value, read once at Default. An attribute carrying
         /// only time samples answers nothing there, which is how the dynamic
         /// path ends up with an empty rest and an empty aggregate.
-        std::vector<GfVec3f> ribbonRestPoints;
         /// This run's live value and the last run's, compared by value so a
         /// moved driver curve dirties this solver's cluster and nothing
         /// else. Both empty for a curve that cannot vary with time, whose
@@ -2149,7 +2225,7 @@ struct RigExecBakedProgramImpl {
         // (providerSlot, element) pairs this solver writes
         std::vector<std::pair<int, int>> outputs;
         /// Parallel to `outputs`: whether a read phase names this solver's
-        /// checkpoint of that joint (the evaluator's _chainPlan.snapshots
+        /// checkpoint of that joint (the evaluator's _nativePhaseCheckpoints
         /// membership), which is what gives the output a frame record.
         std::vector<char> outputSnapshots;
 
@@ -2166,7 +2242,6 @@ struct RigExecBakedProgramImpl {
         /// other solver's list into one ordered set by the epilogue.
         std::vector<SdfPath> fallbackJoints;
         /// FkChain's element table, so the solve allocates nothing.
-        std::vector<RigExecFkChainElement> elements;
         /// The `fin` versions this solve reads: one per control, then the
         /// four named controls. Decided at Build like every other read
         /// (§3.1); -1 controls are bound to their own slot's seed and never
@@ -2183,6 +2258,9 @@ struct RigExecBakedProgramImpl {
     std::vector<RigExecPointFrameArray> aggregates;
 
     struct Constraint {
+        RigExecConstraintRecord kernelRecord;
+        RigExecConstraintInputs kernelInputs;
+        RigExecConstraintResult kernelResult;
         SdfPath path;
         TfToken type;
         /// rigExec:weightObject, empty when the constraint binds none.
@@ -2191,6 +2269,7 @@ struct RigExecBakedProgramImpl {
         /// copies the ORACLE, and the oracle resolves the whole composition
         /// itself from the stage (see the head of bakedWeights.cpp).
         SdfPath weightObject;
+        int weightField = -1;
         /// The one float the oracle resolves into, and the string it would
         /// report. Sized at Build so the step body allocates neither.
         std::vector<float> weightScratch;
@@ -2302,6 +2381,7 @@ struct RigExecBakedProgramImpl {
     // program order -- the order today's straight-line Run visited the same
     // work in -- and every edge points forward in it.
     std::vector<RigExecBakedStep> steps;
+    std::vector<RigExecBakedStep> excludedSteps;
     /// The compose pass, partitioned into contiguous subtrees at Build.
     /// One compiled RigExecSpaceSwitch, in the program's own terms.
     ///
@@ -2334,6 +2414,7 @@ struct RigExecBakedProgramImpl {
         struct FrameVersion {
             int anchor = -1;
             std::vector<int> recompose;
+            int context = -1;
         };
         int slot = -1;
         std::vector<int> sourceSlots;
@@ -2354,10 +2435,23 @@ struct RigExecBakedProgramImpl {
         /// path, which derives the same carry from a pair of taps.
         int spaceSlot = -1;
         RigExecBakedInput<double> activeInput;
+        RigExecBakedInput<TfToken> activeTokenInput;
+        bool tokenIndex = false;
+        std::vector<TfToken> labels;
         bool affectTranslation[3] = {true, true, true};
         bool affectRotation[3] = {true, true, true};
         bool affectScale[3] = {true, true, true};
+        RigExecSpaceSwitchRecord kernelRecord;
+        RigExecSpaceSwitchInputs kernelInputs;
     };
+    struct SpaceCheckpoint {
+        std::string key;
+        int anchor=-1;
+        std::vector<int> recompose;
+        std::vector<RigExecSpaceCheckpointInput> kernelInputs;
+    };
+    std::vector<SpaceCheckpoint> switchFrameContexts;
+    std::vector<GfMatrix4d> switchFrames;
     std::vector<SpaceSwitch> spaceSwitches;
     /// Per provider slot: its switch's index, or -1. Read once per slot by
     /// the compose, so the ordinary rig pays one array lookup and nothing
@@ -2434,19 +2528,6 @@ struct RigExecBakedProgramImpl {
     /// that the region allocates nothing. An array rather than a vector
     /// because std::atomic is neither copyable nor movable.
     std::unique_ptr<RigExecBakedClusterCounter[]> clusterCounters;
-    /// Hands out each step's runSeq. Reset at the head of every run; a copy
-    /// or move starts at zero, so it does not make the program immovable.
-    struct RunSeqCounter {
-        std::atomic<uint32_t> next{0};
-        RunSeqCounter() = default;
-        RunSeqCounter(const RunSeqCounter &) {}
-        RunSeqCounter &operator=(const RunSeqCounter &) {
-            next.store(0, std::memory_order_relaxed);
-            return *this;
-        }
-    };
-    RunSeqCounter runSeqCounter;
-
     // Settings a body path needs, read from the environment once at Build so
     // that no body reads the environment or a function-local static.
     /// RIGEXEC_BAKED_CHUNK_VERTS: vertices one chunk covers before the cap.
@@ -2537,16 +2618,6 @@ struct RigExecBakedProgramImpl {
     /// How many steps the last run's closure held, sources it seeded from
     /// included.
     size_t lastClosedSteps = 0;
-
-    /// Program constants the epilogue adds to the generation's counters.
-    ///
-    /// Both are structural, not observations: the dynamic path's override
-    /// rounds are the number of distinct batch levels the schedule holds,
-    /// and the baked meaning of solverEvaluations is the number of solver
-    /// computations the program requests, which is the sum of the batch
-    /// sizes and is the same every run.
-    size_t solverOverrideRounds = 0;
-    size_t solverEvaluations = 0;
 
     std::vector<int> jointSlots;
     std::vector<SdfPath> jointPaths;
@@ -2683,26 +2754,22 @@ struct RigExecBakedProgramImpl {
             /// A dense sample's non-base phase, bound at Build; `id` is -1
             /// for a base or sparse sample, which never reads a record.
             RigExecBakedPointsBinding pointBinding;
-            /// The UsdSkelBlendShape a SPARSE sample names, and the layout
-            /// the prologue resolved for it this frame: shared out of the
-            /// evaluator's cache when the shape is epoch-constant, read per
-            /// frame when the cache refused it. Null until the prologue has
-            /// run once.
+            /// Sparse shape identity and the last body-normalized immutable layout.
             SdfPath blendShape;
             std::shared_ptr<const RigExecBlendSampleLayout> layout;
-            /// Whether the prologue's resolve refused the cache this frame,
-            /// which is what puts the layout on the per-frame stream rather
-            /// than leaving the runtime to the epoch one. Written beside
-            /// `layout`, every frame, so it is never stale.
+            bool shapeValid = false;
+            /// Structural cache refusal retained for the runtime stream policy.
             bool layoutRefused = false;
             /// The dense points the last assembly consumed; the bake stores
             /// them as the sample's static points. Dense form only; a sparse
             /// sample's shape rides its layout instead.
             std::vector<GfVec3f> lastPoints;
-            /// The revision's path leaves (GeomRevision::leaves) holding
-            /// `rigExec:activation` and, dense form only, the points, or -1.
+            /// The revision's declared activation, dense points, and sparse
+            /// Raw Default offsets/indices leaf IDs, or -1.
             int activationLeaf = -1;
             int pointsLeaf = -1;
+            int offsetsLeaf = -1;
+            int indicesLeaf = -1;
         };
         std::vector<Sample> samples;
         /// The revision's path leaves holding `inputs:weight` and whether the
@@ -2712,6 +2779,8 @@ struct RigExecBakedProgramImpl {
     };
 
     struct GeomRevision {
+        RigExecGeometryRecord kernelRecord;
+        RigExecSceneGeometryDescriptor sceneGeometry;
         SdfPath moverPath;
         SdfPath target;
         UsdPrim moverPrim;
@@ -2757,6 +2826,7 @@ struct RigExecBakedProgramImpl {
         /// did not take part in -- so does its diagnostic.
         TfToken resultStatus;
         std::vector<GfVec3f> output;
+        std::vector<GfVec3f> stagingOutput;
         // Last evaluated packet/status and result, so an unchanged input
         // re-publishes instead of re-running -- which is the accounting the
         // VdfNetwork performs for the dynamic path.
@@ -2775,10 +2845,13 @@ struct RigExecBakedProgramImpl {
         /// This revision's own wire-basis memo: only its step runs its
         /// kernel, so nothing else touches it. A clone shares the entries.
         RigExecWireBasisCache wireBasis;
+        /// Mutated only by this revision's unchunked body/projector. Copies
+        /// share immutable entries; each clone replaces its own cache slots.
+        mutable RigExecSurfaceKernelCache<GfVec3f,GfVec3d> surfaceCache;
         /// A read phase named this revision as the point in the chain it
         /// wants the target's points from (the dynamic walk records them
         /// after it). Decided at bake out of the evaluator's
-        /// _chainPlan.snapshots; BindPointReads binds `preceding` reads of
+        /// _nativePhaseCheckpoints; BindPointReads binds `preceding` reads of
         /// another chain and AtPrim reads to it. The plan also names the
         /// predecessor of an own-chain `preceding` reader, but that read
         /// binds to the version entering the reader and reads no record.
@@ -2868,18 +2941,13 @@ struct RigExecBakedProgramImpl {
         /// The keys are used -- more than one chunk, so an influence outside
         /// a chunk's key is an influence that chunk will not see.
         bool chunked = false;
-        /// What the cut decision saw, recorded so it can be asserted and
-        /// printed rather than re-derived. `partitionCandidates` is how many
-        /// ranges the vertex target and the cap produced, and the two levels
-        /// are the lowest and highest level at which one of those ranges has
-        /// every joint it reads. Cutting pays only when they differ -- a
-        /// range that cannot start before the whole revision could is a
-        /// serial loop where a self-parallelising kernel call used to be --
-        /// so `chunked` is `partitionCandidates > 1 && readyMin < readyMax`,
-        /// unless RIGEXEC_BAKED_CHUNK_ALWAYS asked for the cut regardless.
+        /// The natural vertex cut and its exact typed matrix producer sets.
+        /// Bounds count distinct producers, independently of graph scheduling.
         size_t partitionCandidates = 0;
-        int partitionReadyMin = 0;
-        int partitionReadyMax = 0;
+        int partitionProducerMin = 0;
+        int partitionProducerMax = 0;
+        size_t partitionDistinctReads = 0;
+        std::vector<std::vector<std::pair<uint8_t,int>>> partitionProducerSets;
 
         /// The layout half of the skin kernel's validation (the matrix half
         /// is `influencesValid` below).
@@ -2915,6 +2983,7 @@ struct RigExecBakedProgramImpl {
         /// The packet itself is shared -- one per object per frame, however
         /// many movers bind it -- so what a revision holds is the index.
         int weightObject = -1;
+        int weightField = -1;
         /// Whether the weight object weights the MOVER (one declared target,
         /// and it is this mover) rather than the points. Decided at Build
         /// because it is a relationship read, and the relationship is epoch
@@ -2933,7 +3002,7 @@ struct RigExecBakedProgramImpl {
         /// published one at all. Written by RevisionStatic -- which is where
         /// the dynamic path publishes it, from the packet the mover is about
         /// to consume -- and drained by the epilogue in chain order.
-        std::vector<float> weightField;
+        std::vector<float> publishedWeightValues;
         bool weightFieldPublished = false;
 
         /// Every influence matrix finite and affine. For a skin revision the
@@ -2985,6 +3054,7 @@ struct RigExecBakedProgramImpl {
         bool layoutFixed = false;
         bool layoutFixedChanged = false;
         bool layoutRan = false;
+        bool layoutOutputChanged = false;
         std::shared_ptr<const RigExecSkinTopology> layoutHandle;
         std::shared_ptr<const RigExecSkinTopology> layoutCandidate;
         /// Every read RevisionStatic and the packet assembly make, sampled
@@ -3014,6 +3084,8 @@ struct RigExecBakedProgramImpl {
         SdfPath target;
         UsdAttributeQuery baseQuery;
         std::vector<GeomRevision> revisions;
+        VtVec3fArray sampledBase;
+        bool sampledHaveBase = false;
         VtVec3fArray lastBase;
         VtVec3fArray result;
         /// The other half of the published double buffer. Publication
@@ -3039,6 +3111,8 @@ struct RigExecBakedProgramImpl {
             SdfPath target;
             UsdAttributeQuery baseQuery;
             GeomRevision revision;
+            VtVec3fArray sampledBase;
+            bool sampledHaveBase = false;
             VtVec3fArray lastBase;
             VtVec3fArray result;
             /// The other half of the published double buffer; see the
@@ -3098,6 +3172,15 @@ struct RigExecBakedProgramImpl {
         SdfPath path;
         TfToken type;
         TfToken representation, rangePolicy;
+        bool envelopeOnly = false;
+        RigExecWeightOracleFacts oracleFacts;
+        RigExecBakedPathLeaves oracleLeaves;
+        std::vector<SdfPath> oracleFrozenKeys;
+        int oracleKind = -1, oracleRepresentation = -1, oracleCombineMode = -1;
+        int oracleAxis = -1;
+        bool oracleAxisAttribute = false, oracleBoundsAttribute = false;
+        bool oracleClamp = false, oracleBounded = false, oracleUnbounded = false;
+        std::string oracleName, oracleAxisName, oracleBoundsName;
         // RigExecStaticWeight: every field is uniform, so all three fold --
         // but they are still REGISTERED, so a drag on a painted weight can
         // be placed.
@@ -3150,6 +3233,11 @@ struct RigExecBakedProgramImpl {
         std::vector<UsdAttribute> targetPoints, samplePoints, curvePoints;
         /// The epoch's resampled falloff remap, copied from falloffLuts.
         std::vector<float> falloffCurve;
+        std::array<VtVec3fArray,3> packetPointViews;
+        std::array<std::vector<GfVec3f>,3> packetPointScratch;
+        std::vector<GfVec3f> packetLocalCurve;
+        std::vector<const RigExecWeightPacket *> packetInputRefs;
+        RigExecWeightPacketWorkspace packetWorkspace;
         /// The point gathers' reads, one key per attribute of
         /// `targetPoints`, `samplePoints`, `curvePoints` and
         /// `combineTargetPoints` in that order, each list starting at its
@@ -3160,9 +3248,49 @@ struct RigExecBakedProgramImpl {
 
     };
     std::vector<WeightObject> weightObjects;
-    /// Path to index in weightObjects. A NEGATIVE entry is an object whose
-    /// composition walk is under way (the bake is depth first and enters the
-    /// table on the way out), so meeting one is a cycle.
+    std::vector<RigExecWeightRecord> weightProgram;
+    std::vector<char> weightCycleBlocked; ///< immutable common SCC outcome
+    struct WeightField {
+        enum class Form : uint8_t {
+            EnvelopeProperty = 0, EnvelopeConstraint = 1, Revision = 2
+        };
+        enum class PlacementPhase : uint8_t { Final = 0, Base = 1 };
+        Form form = Form::Revision;
+        PlacementPhase placementPhase = PlacementPhase::Base;
+        int object = -1;
+        int consumer = -1;
+        int part = 0;
+        std::vector<int> volumes;
+        std::vector<int> availableChains;
+        bool changed = false;
+        std::vector<RigExecBakedReaderWalk> scalarReads;
+        std::vector<int> scalarObjects, scalarMembers;
+        std::vector<int> objects; ///< immutable reachable object identities
+        std::vector<int> scalarReadIndex; ///< object * 19 + member, built once
+        struct PointInput {
+            int object = -1, leaf = -1;
+            RigExecBakedPointsBinding binding;
+        };
+        std::vector<PointInput> pointReads;
+        std::vector<float> values;
+        std::vector<float> nextValues; ///< producer-owned reusable result scratch
+        RigExecWeightFieldWorkspace workspace;
+        std::vector<RigExecWeightFieldInputs> currentInputs; ///< producer-owned current packet scratch
+        mutable std::vector<RigExecWeightFieldInputs> effectiveInputs; ///< exclusive producer key scratch
+        size_t count = 0;
+        bool ok = false;
+        std::string error;
+    };
+    RigExecCompiledGraph opGraph;
+    RigExecOpWorkspace opWorkspace;
+    RigExecOpExecution opExecution;
+    RigExecOpAdapterState opAdapter;
+    std::shared_ptr<RigExecBakedExecCheckRows> execCheckRows;
+    std::function<void(uint32_t)> opBeforeBody, opAfterBody; ///< opt-in test observation
+    std::vector<WeightField> weightFields;
+    std::vector<GfMatrix4d> volumePlacementBase;
+    /// Discovery allocates identities on entry, including authored back-edges.
+    /// The canonical graph diagnoses cycles after all producer reads exist.
     std::map<SdfPath, int> weightIndex;
     /// The weight oracle, as the evaluator's own RigExecRigEvaluator::
     /// _ResolveWeights.
@@ -3174,17 +3302,13 @@ struct RigExecBakedProgramImpl {
     /// the answer and the error string identical by construction rather
     /// than by review -- a constraint's envelope is one of the two places
     /// the dynamic path does not go through exec at all.
-    std::function<bool(const SdfPath &, size_t, UsdTimeCode,
-                       std::vector<float> *, std::string *,
-                       const std::vector<GfVec3f> *)> resolveWeights;
-
     /// Per provider slot, where the volume at that slot is placed: the
     /// output of that slot's VolumePlacements step (WeightFrames[slot]), read
     /// by the oracle and by pose.weightFrames. Every noScaleAvars slot has
     /// a live and a frozen step; the oracle and every publication (live and
     /// frozen) read only the placedVolumes slots. Non-volume slots stay
     /// identity and are never read. Kept across runs like deltaValues, and
-    /// carried by a frozen clone and RigExecPartialSlots: a cone that
+    /// carried by a retained frozen workspace: an operation that
     /// skipped a step keeps its last run's placement; its inputs are unchanged.
     std::vector<GfMatrix4d> volumePlacement;
     /// Per provider slot: 1 where the dynamic walk places this volume (a key
@@ -3235,6 +3359,7 @@ struct RigExecBakedProgramImpl {
     // A changed-info notice that misses all of them is a value edit on an
     // input the frame path re-reads, and needs nothing.
     std::set<SdfPath> rebuild;
+    std::set<SdfPath> sourceBackedPaths;
     std::set<SdfPath> named;
     std::set<SdfPath> prims;
     std::set<SdfPath> xformPrims;
@@ -3337,10 +3462,13 @@ struct RigExecBakedProgramImpl {
     /// RigExecBakedProgram::SetPublishWeightFields.
     bool publishWeightFields = true;
 
-    /// The head tier (RigExecBakedRunHeadTier). Build state: the chains,
+    /// Property operation metadata. Build state: the chains,
     /// records, leaves, override slots and steps. Everything after
     /// the head prefix is prologue state, written on the owning thread before
     /// the region.
+    std::vector<RigExecCrossDomainRead> crossDomainReads;
+    std::vector<std::string> crossDomainErrors;
+    std::map<SdfPath,int> crossDomainOrdinals;
     std::vector<RigExecBakedPropertyChain> propertyChains;
     std::vector<RigExecBakedPropertyRecord> propertyRecords;
     /// The PropertyVersion domain's size: every chain's versions, then the
@@ -3365,7 +3493,11 @@ struct RigExecBakedProgramImpl {
     /// Per record: its value, and whether an override on one of its hops
     /// stands it aside this run.
     std::vector<VtValue> recordValues;
+    std::vector<int> propertyRecordById; ///< immutable PropertyResult id to record index, -1 for chain versions
     std::vector<char> recordStoodAside;
+    /// Independent reference publication markers, enabled only for checks.
+    std::optional<RigExecOraclePublicationContext> oraclePublications;
+    std::map<SdfPath,RigExecWeightReferenceContext> oracleWeightInputs;
     /// Per override slot: the interactive override standing there this run
     /// (empty when none), last run's, and whether it moved.
     std::vector<VtValue> headOverrides, lastHeadOverrides;
@@ -3436,6 +3568,27 @@ RigExecBakedLeaf(const RigExecBakedProgramImpl &program,
     return T(program.leaves.Of<T>().value[size_t(input.leaf)]);
 }
 
+bool RigExecBakedResolveReaderWalk(const RigExecBakedProgramImpl &program,
+                                   int walk, double *out);
+bool RigExecBakedResolveReaderWalk(const RigExecBakedProgramImpl &program,
+                                   int walk, float *out);
+bool RigExecBakedResolveReaderWalk(const RigExecBakedProgramImpl &program,
+                                   int walk, int *out);
+bool RigExecBakedResolveReaderWalk(const RigExecBakedProgramImpl &program,
+                                   int walk, bool *out);
+bool RigExecBakedResolveReaderWalk(const RigExecBakedProgramImpl &program,
+                                   int walk, TfToken *out);
+bool RigExecBakedResolveReaderWalk(const RigExecBakedProgramImpl &program,
+                                   int walk, GfMatrix4d *out);
+bool RigExecBakedResolveReaderWalk(const RigExecBakedProgramImpl &program,
+                                   int walk, GfVec3d *out);
+bool RigExecBakedResolveReaderWalk(const RigExecBakedProgramImpl &program,
+                                   int walk, GfVec3f *out);
+bool RigExecBakedResolveReaderWalk(const RigExecBakedProgramImpl &program,
+                                   int walk, VtVec3fArray *out);
+bool RigExecBakedResolveReaderWalk(const RigExecBakedProgramImpl &program,
+                                   int walk, VtArray<GfVec2f> *out);
+
 /// The read every step body and the prologue's input fill make: the value
 /// RigExecBakedRead answered for \p input when the leaf was last sampled,
 /// which the re-sample rules make this run's answer. No stage, no resolved
@@ -3446,7 +3599,9 @@ RigExecBakedLeafRead(const RigExecBakedProgramImpl &program,
                      const RigExecBakedInput<T> &input)
 {
     TF_VERIFY(input.leaf >= 0 || !input.varying);
-    return RigExecBakedLeaf(program, input);
+    T value=input.walk>=0?input.constant:RigExecBakedLeaf(program,input);
+    if(input.walk>=0) RigExecBakedResolveReaderWalk(program,input.walk,&value);
+    return value;
 }
 
 /// The path leaves path leaf \p ref belongs to, or null when the program no
@@ -3456,6 +3611,8 @@ RigExecBakedPathLeavesOf(RigExecBakedProgramImpl *program,
                          const RigExecBakedPathLeafRef &ref)
 {
     switch (ref.owner) {
+    case RigExecBakedPathLeafOwner::Provider:
+        return &program->providerLeaves;
     case RigExecBakedPathLeafOwner::Revision:
         if (ref.a < program->chains.size() &&
             ref.b < program->chains[ref.a].revisions.size()) {
@@ -3473,6 +3630,9 @@ RigExecBakedPathLeavesOf(RigExecBakedProgramImpl *program,
             return &program->weightObjects[ref.a].pointLeaves;
         }
         return nullptr;
+    case RigExecBakedPathLeafOwner::WeightOracle:
+        return ref.a < program->weightObjects.size()
+            ? &program->weightObjects[ref.a].oracleLeaves : nullptr;
     case RigExecBakedPathLeafOwner::RevisionLayout:
         if (ref.a < program->chains.size() &&
             ref.b < program->chains[ref.a].revisions.size()) {
@@ -3560,6 +3720,21 @@ RigExecBakedLeafChanged(const RigExecBakedProgramImpl &program, uint32_t id)
 /// leaf after them (`pathLeafRefs`), filed under every path its read can
 /// reach, and every head leaf after those, filed under its path. Renumbers
 /// from scratch, so Build calls it again once every binding exists.
+const VtValue *RigExecBakedSpaceLeafOverlay(const RigExecBakedProgramImpl &, size_t);
+GfMatrix4d RigExecBakedProviderParentRaw(const RigExecBakedProgramImpl &,int slot);
+bool RigExecBakedBuildSpaces(RigExecBakedProgramImpl *program, UsdTimeCode capture,
+    std::string *error, const RigExecSceneDescriptors *scene = nullptr,
+    const UsdStageWeakPtr &sceneStage = UsdStageWeakPtr(), uint64_t sceneSerial = 0);
+bool RigExecBakedBindOwnPropertySpaces(RigExecBakedProgramImpl *program, std::string *error);
+void RigExecBakedBuildSpaceSteps(RigExecBakedProgramImpl *program);
+void RigExecBakedSampleSpaces(RigExecBakedProgramImpl *program, UsdTimeCode time, bool all);
+void RigExecBakedRunSpaceOp(RigExecBakedProgramImpl *program, RigExecBakedStep *step);
+void RigExecBakedPlanProviderRefreshes(RigExecBakedProgramImpl *program);
+bool RigExecBakedBindProviderRefresh(RigExecBakedProgramImpl *program,uint32_t index,
+    std::vector<uint32_t> *base,std::vector<uint32_t> *fin,
+    const std::function<uint32_t(bool,int)> &allocate);
+void RigExecBakedRunProviderRefresh(RigExecBakedProgramImpl *program,RigExecBakedStep *step);
+
 void RigExecBakedNumberLeaves(RigExecBakedProgramImpl *program);
 
 /// Resolves \p leaves' keys on \p stage at Build: each key's attribute, the
@@ -3684,7 +3859,7 @@ bool RigExecBakedHeadLeafVaries(const RigExecBakedHeadLeaf &leaf);
 /// _EvaluatePropertyChains it replaces (rigEvaluatorProperties.cpp), over
 /// head leaves, overrides and earlier versions; its lines go to
 /// `step->lines`, and it sets the `propertyChanged` byte of the version it
-/// writes. A weight-object envelope is resolved through `resolveWeights`
+/// writes. A weight-object envelope consumes its declared WeightField result
 /// inside RigExecVolatileRead. Owning thread.
 void RigExecBakedRunPropertyStep(RigExecBakedProgramImpl *program,
                                  RigExecBakedStep *step,
@@ -3745,6 +3920,10 @@ bool RigExecBakedResolveReaderWalk(const RigExecBakedProgramImpl &program,
                                    int walk, GfVec3d *out);
 bool RigExecBakedResolveReaderWalk(const RigExecBakedProgramImpl &program,
                                    int walk, GfVec3f *out);
+bool RigExecBakedResolveReaderWalk(const RigExecBakedProgramImpl &program,
+                                   int walk, VtVec3fArray *out);
+bool RigExecBakedResolveReaderWalk(const RigExecBakedProgramImpl &program,
+                                   int walk, VtArray<GfVec2f> *out);
 
 /// RigExecBakedRead for a binding with a reader walk: the walk read while
 /// an override or an upstream value (\p upstreamOn) stands on its number or
@@ -4048,7 +4227,7 @@ RigExecBakedRecordBind(Sink *sink, const UsdPrim &prim, const char *name,
     // walk of one there is no choice left to invalidate, and a value moving
     // on it -- including being cleared, which drops the input back to the
     // same fallback both paths use -- is answered by the query itself.
-    const bool live = input->resolvedAttr || (input->varying &&
+    const bool live = input->sourceBacked || input->resolvedAttr || (input->varying &&
                                               walk.size() == 1);
     if (live) {
         return;
@@ -4097,7 +4276,7 @@ struct RigExecBakedConstraintSpec {
     TfToken schemaType;
     SdfPathVector targets;
     /// Per target, whether a read phase asked for its frame as of this
-    /// constraint (the evaluator's _chainPlan.snapshots membership). A
+    /// constraint (the evaluator's _nativePhaseCheckpoints membership). A
     /// SingleChainIK names its whole chain here, and the dynamic walk
     /// records every one of them.
     std::vector<char> snapshotTargets;
@@ -4149,7 +4328,7 @@ struct RigExecBakedRevisionSpec {
     bool transformPosedPoints = false;
     bool skinTopologyFixed = false;
     /// Whether a read phase asked for the target's points as of this
-    /// revision (the evaluator's _chainPlan.snapshots membership).
+    /// revision (the evaluator's _nativePhaseCheckpoints membership).
     bool snapshotAfter = false;
 };
 
@@ -4169,7 +4348,7 @@ struct RigExecBakedWalkEntry {
     SdfPathVector batchSolvers;
     std::vector<std::vector<std::pair<SdfPath, int>>> solverJoints;
     /// Parallel to solverJoints: whether a read phase asked for that joint's
-    /// frame as of that solver (the evaluator's _chainPlan.snapshots
+    /// frame as of that solver (the evaluator's _nativePhaseCheckpoints
     /// membership).
     std::vector<std::vector<char>> solverSnapshotJoints;
     /// Per solver, the joints whose REST is LIVE: a pose step below this
@@ -4256,7 +4435,8 @@ struct RigExecBakedBuildContext {
     /// index -- which is a silently wrong program rather than a failure.
     template <class T>
     RigExecBakedInput<T> ResolveBind(const UsdPrim &prim, const char *name,
-                                     T fallback, SdfPathVector *walk) const;
+                                     T fallback, SdfPathVector *walk,
+                                     bool sourceValue = false) const;
 
     /// The RECORDING half: the counters, the invalidation index and the
     /// override index.
@@ -4279,16 +4459,16 @@ struct RigExecBakedBuildContext {
     /// that have no reason to separate them.
     template <class T>
     RigExecBakedInput<T> Bind(const UsdPrim &prim, const char *name,
-                              T fallback);
+                              T fallback, bool sourceValue = false);
 };
 
 template <class T>
 RigExecBakedInput<T>
 RigExecBakedBuildContext::Bind(const UsdPrim &prim, const char *name,
-                               T fallback)
+                               T fallback, bool sourceValue)
 {
     SdfPathVector walk;
-    RigExecBakedInput<T> input = ResolveBind(prim, name, fallback, &walk);
+    RigExecBakedInput<T> input = ResolveBind(prim, name, fallback, &walk, sourceValue);
     CommitBind(prim, name, &input, walk);
     return input;
 }
@@ -4296,11 +4476,24 @@ RigExecBakedBuildContext::Bind(const UsdPrim &prim, const char *name,
 template <class T>
 RigExecBakedInput<T>
 RigExecBakedBuildContext::ResolveBind(const UsdPrim &prim, const char *name,
-                                      T fallback, SdfPathVector *walk) const
+                                      T fallback, SdfPathVector *walk,
+                                      bool sourceValue) const
 {
     RigExecBakedInput<T> input =
         RigExecBakedBindInput(prim, name, fallback, capture, chainTargets,
                               walk);
+    // Only opted-in direct numeric arguments sample ordinary source edits.
+    if constexpr (std::is_same_v<T,double> || std::is_same_v<T,GfVec3d>) {
+        if (sourceValue && !input.varying && input.head &&
+            input.head.GetTypeName().GetType()==TfType::Find<T>() && walk &&
+            walk->size()==1 && walk->front()==input.head.GetPath() &&
+            !input.head.ValueMightBeTimeVarying() &&
+            input.head.GetNumTimeSamples()==0 && !input.head.HasSpline()) {
+            input.sourceBacked=true;
+            input.sourceFallback=fallback;
+            input.query=UsdAttributeQuery(input.head);
+        }
+    }
     // A selection that moves with the time code is read the long way,
     // through this generation's resolved inputs, rather than through a
     // query pinned to the wrong attribute.
@@ -4368,27 +4561,13 @@ void RigExecBakedBuildGeometry(
     RigExecBakedBuildContext *ctx,
     const std::vector<RigExecBakedChainSpec> &chains);
 
-/// Refuses a walk step whose batch holds two solvers writing one slot.
-///
-/// A solver stack is one commit per writer; two writers inside ONE commit
-/// would collapse into a single SSA version and keep only the last store --
-/// and the dynamic path collapses identically, so the two would agree on the
-/// wrong answer. One solver per batch makes it unreachable today; this is the
-/// guard that keeps a future batching optimization from changing results
-/// silently. Returns false having recorded the refusal.
-bool RigExecBakedRefuseBatchedStackWrites(RigExecBakedBuildContext *ctx);
 
-/// Binds every frame read of every space switch to its version.
-///
-/// \p resolveOrder is parallel to spaceSwitches: the compile's resolution
-/// round for each (_SpaceSwitch::band), which depends on structure alone --
-/// every source of every switch -- and never on the active index. A read
-/// of slot X by a switch of round k takes X's last version unless the
-/// nearest switched control at or above X resolves in round k or later;
-/// then X is recomposed unswitched from its parent's version, because the
-/// dynamic walk reads that control before its switch is applied.
-void RigExecBakedBindSpaceSwitchVersions(
-    RigExecBakedProgramImpl *program, const std::vector<int> &resolveOrder);
+
+/// Binds source and namespace parent anchors to typed provider compose outputs.
+bool RigExecBakedBindSpaceSwitchVersions(
+    RigExecBakedProgramImpl *program,std::string *error=nullptr);
+void RigExecBakedRunSpaceCheckpoint(
+    RigExecBakedProgramImpl *program,RigExecBakedStep *step);
 
 /// Appends the pose half of the program in program order: the compose
 /// subtrees, then one Solve and one commit per walk entry, then the
@@ -4446,13 +4625,15 @@ void RigExecBakedOverlayPointReads(
 /// base for a chain revision and its final points for a derived one. Reads
 /// no stage: the live RevisionStatic and Derived bodies and the frozen
 /// RevisionStatic all assemble here. \p missing: see
-/// RigExecRevisionLeafView.
+/// RigExecRevisionLeafView. \p layoutPointCount is the owning chain's raw
+/// base cardinality for sparse layouts; the default uses basePointCount.
 RigExecMoverParameters RigExecBakedAssembleFromLeaves(
     RigExecBakedProgramImpl *program,
     RigExecBakedProgramImpl::GeomRevision *revision,
     const GfVec3f *basePoints, size_t basePointCount,
     std::vector<std::string> *diagnostics,
-    std::vector<std::string> *missing = nullptr);
+    std::vector<std::string> *missing = nullptr,
+    size_t layoutPointCount = size_t(-1));
 
 /// Appends one VolumePlacements step per volume provider slot (object =
 /// slot, part 1), then one WeightPacket step per weight object in the
@@ -4537,7 +4718,8 @@ void RigExecBakedBuildRestSteps(RigExecBakedProgramImpl *program);
 void RigExecBakedNoteRestLeaves(RigExecBakedProgramImpl *program);
 
 /// The pose half of the prologue: the bound inputs, once per run.
-void RigExecBakedRunInputs(RigExecBakedProgramImpl *program, UsdTimeCode time);
+void RigExecBakedBuildAvarSteps(RigExecBakedProgramImpl *program);
+void RigExecBakedRunAvarOp(RigExecBakedProgramImpl *program, RigExecBakedStep *step);
 
 /// The solver half of the prologue: every ribbon's live driver-curve points,
 /// read off the stage and compared with the last run's.
@@ -4598,17 +4780,9 @@ void RigExecBakedSampleLayoutLeaves(
 /// the layout is not fixed, else RigExecBuildSkinTopology of the leaves,
 /// handed back as `layoutCandidate` when that holds the same layout. Writes
 /// `layoutHandle` and `layoutCandidate` and nothing else. Pure.
-void RigExecBakedRunLayoutOp(RigExecBakedProgramImpl::GeomRevision *revision);
+void RigExecBakedRunLayoutOp(const RigExecBakedProgramImpl &,
+                           RigExecBakedProgramImpl::GeomRevision *revision);
 
-/// The SkinTopology ops in the head prefix, after the rest and ladder ops: with
-/// \p sample, first samples each op's leaves (RigExecBakedSampleLayoutLeaves;
-/// a frozen job writes them from its vector instead), then runs each op whose
-/// leaves or fixedness moved, on its first run, or when \p force. Under
-/// \p verify, then rebuilds every layout from leaves sampled afresh and
-/// reports a handle that differs as a cone mismatch on \p pose.
-void RigExecBakedRunLayoutTier(RigExecBakedProgramImpl *program,
-                               UsdTimeCode time, RigExecRigPose *pose,
-                               bool force, bool sample, bool verify);
 
 /// The pose half of the epilogue: the joint and control publication, the
 /// solver guides and the property-domain results.
@@ -4624,7 +4798,7 @@ void RigExecBakedPublishGeometry(RigExecBakedProgramImpl *program,
                                  RigExecRigPose *pose);
 
 /// Construct the token tables the step bodies of each translation unit use,
-/// on the calling thread. Build calls them, with RigExecMoverGraphTouchTokens
+/// on the calling thread. Build calls them, with RigExecRevisionKernelTouchTokens
 /// and RigExecWeightPacketsTouchTokens, so a table's lazy construction --
 /// which builds tokens from text -- never runs first on a worker.
 void RigExecBakedGeometryTouchTokens();
@@ -4659,6 +4833,9 @@ void RigExecBakedPartitionRevision(
 /// handle with those arrays is adopted again or the program is rebuilt.
 /// Nothing for an unchunked revision or a null handle. Called where the
 /// handle is adopted: the live geometry prologue and the frozen worker.
+void RigExecBakedAdoptRevisionLayout(RigExecBakedProgramImpl::GeomRevision *);
+void RigExecBakedRunChainInputs(RigExecBakedProgramImpl *,RigExecBakedStep *);
+void RigExecBakedPrepareDerivedBase(RigExecBakedProgramImpl::GeomChain::Derived *,RigExecBakedStep *);
 void RigExecBakedAdoptPartition(
     RigExecBakedProgramImpl::GeomRevision *revision);
 
@@ -4695,6 +4872,7 @@ RigExecBakedNoteInput(const RigExecBakedInput<T> &input,
     }
     if (input.walk >= 0) {
         step->readerWalks.push_back(input.walk);
+        if(input.leaf>=0)step->walkedBindingLeaves.emplace_back(RigExecBakedLeafTraits<T>::type,uint32_t(input.leaf));
     }
 }
 
@@ -4728,38 +4906,6 @@ UsdTimeCode RigExecBakedProbeTime(const UsdStageRefPtr &stage);
 /// What a port of RigExecRigEvaluator::_ResolveWeights needs beyond a
 /// weight object's composition and its scalar reads: the answers the oracle
 /// takes from the stage alone. Read at one time.
-struct RigExecWeightOracleFacts {
-    /// _VolumeWeightSamplesInFlight: a volume whose rigExec:weightTarget
-    /// reads `preceding`.
-    bool samplesInFlight = false;
-    /// A volume not in flight: _ReadTargetPoints of rigExec:sampleSource,
-    /// else of rigExec:weightTarget. False when neither reads.
-    bool haveSamples = false;
-    std::vector<GfVec3f> samples;
-    /// A curve volume: _ReadTargetPoints of rigExec:curve, non-empty.
-    bool haveCurve = false;
-    std::vector<GfVec3f> curve;
-    /// A plane volume's rigExec:planeAxis and rigExec:planeBounds as the
-    /// oracle reads them: Get at the time, the fallback only when the
-    /// attribute is absent. Empty for every other type.
-    TfToken planeAxis, planeBounds;
-    /// The first attribute whose answer these facts hold at one time while
-    /// the oracle reads it at every evaluation time -- the points a volume
-    /// not in flight samples, a curve volume's curve points, a plane's axis
-    /// and bounds -- when it is animated (time samples, or a value that
-    /// might vary); empty otherwise.
-    SdfPath timeVarying;
-    /// The oracle's whole error text when the read-phase check fails.
-    std::string phaseError;
-    /// The oracle's whole error text for the object's first structural
-    /// failure: an unknown type, combine mode or range policy, a dynamic
-    /// weight's operation, base, target, representation or sparse-support
-    /// rule, or a static field carrying time samples or connections. Each
-    /// precedes every per-run read of the object, so the port reports it
-    /// on entering the object.
-    std::string staticError;
-};
-
 /// Fills \p facts for the weight object at \p path, reading the stage as
 /// the oracle does at \p time.
 inline void
@@ -4833,6 +4979,7 @@ struct RigExecBakedPropertyChainDesc {
         UsdAttribute enabled, defaultWeight, value, minimum, maximum;
         /// rigExec:weightObject's first target; empty when it has none.
         SdfPath weightObject;
+        int weightField = -1;
         /// inputs:keys and inputs:tangents at Default, read only for a
         /// float or double chain whose operation is curve (the only arm
         /// that reads them).
@@ -4889,8 +5036,8 @@ void RigExecBakedDeclareInputDependencies(RigExecBakedProgramImpl *program);
 ///
 /// Capture/Restore are what let one frame run twice from one starting point:
 /// the cone run's answer is captured, the starting point is restored, the
-/// whole program is re-run, and Compare reports every slot, counter and
-/// diagnostic the two runs disagree about. Nothing here is on a production
+/// whole program is re-run, and Compare checks retained values and diagnostics.
+/// Work observations are projected through the cone's actual body selection. Nothing here is on a production
 /// path -- the state is large and copying it is the point.
 ///
 /// WHAT IT DELIBERATELY DOES NOT COMPARE, and why each one is scratch rather
@@ -4905,12 +5052,13 @@ void RigExecBakedDeclareInputDependencies(RigExecBakedProgramImpl *program);
 ///    A run that changed one of those would be a run editing the program.
 ///  * what only a NOTICE writes and no run reads: `valueEditSerial`/
 ///    `editSerial` and the routing's `connectedSources` cache.
-///  * what the PROLOGUE writes: `propertyResults`, `avarsDisturbed`,
+///  * what the PROLOGUE writes: `avarsDisturbed`,
 ///    `overridden`/`anyOverridden`/`folded`, the sampled `leaves`,
 ///    `routedOverrides`/`lastRoutedOverrides` and `leafSamples`, and the
 ///    geometry prologue's sampler pools and routing stamps. Persistent
-///    property versions/validity/records, rest and ladder tables, layout
-///    handles and shared-step memo lines are captured below.
+///    property versions/validity/records, property publication overlays,
+///    rest and ladder tables, layout handles and shared-step memo lines
+///    are captured below.
 ///    The prologue runs ONCE per
 ///    generation, before either pass, so both passes see one value of each
 ///    by construction. Several are captured and restored anyway, because
@@ -4939,6 +5087,7 @@ void RigExecBakedDeclareInputDependencies(RigExecBakedProgramImpl *program);
 ///    the second pass is forced and so writes different ones by
 ///    construction: `lastClosedClusters`, `lastClosedSteps`, the
 ///    clustering's `lastRunTimed`
+///    the closed-operation sets and full-run flag,
 ///    and each `RigExecBakedCluster`'s `readyUs`/`startUs`/`endUs`, and each
 ///    step's `startUs`/`endUs`. RigExecBakedRunStatistics takes all of them
 ///    before the second pass and puts them back after it, so that every
@@ -4954,7 +5103,9 @@ struct RigExecBakedLadderTables {
     std::vector<GfMatrix4d> restM;
     std::vector<std::array<GfVec3d, 4>> restPts;
     std::vector<RigExecPointFrame> restFrames;
-    std::vector<GfMatrix4d> selfD, parentDinv;
+    std::vector<GfMatrix4d> selfD, parentDinv, posedD, parentSpaceM;
+    std::vector<char> parentSpaceAuthored;
+    std::vector<unsigned char> rotationSign;
     std::vector<TfToken> rotOrder;
     std::vector<GfMatrix4d> restRoundTrip, defaultRoundTrip;
     std::vector<char> posedAuthored;
@@ -4975,23 +5126,28 @@ struct RigExecBakedRunShadow {
     std::vector<RigExecBakedPropertyValue> values;
     std::vector<char> versionValid, changed, chainValid, recordStoodAside;
     std::vector<VtValue> chainFinal, recordValues;
+    std::map<SdfPath,VtValue> propertyResults;
+    RigExecResolvedInputs resolvedInputs;
+    bool hasResolvedInputs = false;
+    std::vector<VtValue> headOverrides, lastHeadOverrides;
+    std::vector<char> headOverrideMoved, readerWalkMoved, readerWalkChanged;
 
 
     RigExecBakedLadderTables tables;
     std::vector<GfMatrix4d> lastRestM, lastSelfD, lastParentDinv,
         lastPosedAuthoredM;
     std::vector<char> lastPosedAuthored;
+    std::vector<GfMatrix4d> lastPosedD, lastParentSpaceM;
+    std::vector<char> lastParentSpaceAuthored;
+    std::vector<unsigned char> lastRotationSign;
     std::vector<TfToken> lastRotOrder;
     std::vector<char> restChanged, ladderChanged;
     std::vector<int> restMoved, ladderMoved;
     uint64_t opsRun = 0;
 
-    uint32_t sequence = 0;
     struct StepState {
         std::vector<std::string> diagnostics, lines;
-        uint32_t runSeq = 0;
-        RigExecBakedStepCounters counters;
-        bool bail = false;
+            RigExecBakedStepCounters counters;
     };
     struct ChunkState {
         std::vector<GfMatrix4d> transforms;
@@ -4999,10 +5155,19 @@ struct RigExecBakedRunShadow {
         std::vector<RigExecScaledDualQuat> palette;
         bool keyChanged = false, ok = false;
     };
+    struct BlendSampleState {
+        std::shared_ptr<const RigExecBlendSampleLayout> layout;
+        std::vector<GfVec3f> lastPoints;
+        bool layoutRefused = false;
+    };
     struct RevisionState {
+        std::vector<std::vector<BlendSampleState>> blendSamples;
+        std::shared_ptr<const RigExecSkinTopology> topology, partitionTopology;
+        bool topologyResolved = false;
         std::shared_ptr<const RigExecSkinTopology> layoutHandle, layoutCandidate;
         bool layoutFixed = false, layoutRan = false;
         std::vector<GfVec3f> output;
+        std::vector<GfVec3f> stagingOutput;
         std::vector<GfMatrix4d> packetInfluences, influences;
         RigExecResolvedInputs revisionInputs;
         std::vector<float> rows, envelope;
@@ -5016,11 +5181,11 @@ struct RigExecBakedRunShadow {
         size_t precedingCount = 0;
         int currentSource = -1;
         float defaultWeight = 0, lastDefaultWeight = 0;
-        bool haveTransform = false, ran = false, executed = false;
+        bool haveTransform = false, ran = false, executed = false, created = false;
         bool influencesValid = false, influencesChanged = false;
         bool staticDirty = false, partitionStale = false;
         bool layoutUsable = false, envelopeOk = false, fullStrength = false;
-        std::vector<float> weightField;
+        std::vector<float> publishedWeightValues;
         RigExecWeightPacket currentPhasePacket;
         bool weightFieldPublished = false;
     };
@@ -5035,7 +5200,7 @@ struct RigExecBakedRunShadow {
         std::vector<RevisionState> revisions;
         std::vector<DerivedState> derived;
         VtVec3fArray lastBase, result, spare;
-        bool haveResult = false, haveBase = false, baseDirty = false;
+        bool haveResult = false, haveBase = false, baseDirty = false, scheduleDirty = false;
     };
     struct SolverState {
         std::vector<RigExecPointFrame> outFrames;
@@ -5052,6 +5217,12 @@ struct RigExecBakedRunShadow {
         bool recordAfter = true, recordEveryTarget = true;
     };
 
+    std::optional<RigExecOraclePublicationContext> oraclePublications;
+    std::map<SdfPath,RigExecWeightReferenceContext> oracleWeightInputs;
+    RigExecTypedValueStore providerValues{0};
+    std::vector<GfMatrix4d> switchFrames;
+    RigExecOpAdapterState opAdapter;
+    RigExecOpExecution opExecution;
     std::vector<double> avars;
     std::vector<float> poseWeights;
     std::vector<RigExecWeightPacket> weightPackets;
@@ -5064,6 +5235,8 @@ struct RigExecBakedRunShadow {
     std::vector<StepState> steps;
     std::vector<GfMatrix4d> deltaValues;
     std::vector<char> deltaPresent;
+    std::vector<RigExecBakedProgramImpl::WeightField> weightFields;
+    std::vector<GfMatrix4d> volumePlacementBase;
     std::vector<GfMatrix4d> volumePlacement;
     std::vector<GfMatrix4d> frameMatrix;
     std::vector<char> frameMatrixValid;
@@ -5095,14 +5268,17 @@ struct RigExecBakedRunStatistics {
 
     struct ClusterTimes {
         uint64_t readyUs = 0, startUs = 0, endUs = 0;
+        std::thread::id runner;
     };
     struct StepTimes {
         uint64_t startUs = 0, endUs = 0;
-        /// Restored too, so the op trace describes the cone run.
-        uint32_t runSeq = 0;
+        std::thread::id runner;
     };
+    RigExecOpExecution opExecution;
     std::vector<ClusterTimes> clusters;
     std::vector<StepTimes> steps;
+    RigExecBakedClusterSet selectedClusters, selectedSteps;
+    bool closureFull = false;
     size_t closedClusters = 0;
     size_t closedSteps = 0;
     bool timed = false;
@@ -5129,11 +5305,14 @@ bool RigExecBakedRunProjectorTarget(
 
 /// Test-only access to evaluator state a baked run must not touch.
 struct RigExecBakedProgramTesting {
-    /// Sets every entry of \p evaluator's dynamic-walk volume placement map
-    /// (_volumeWeightMatrices) to \p matrix. A baked run never reads that
-    /// map, so poisoning it must not move a baked answer.
-    static void SetWalkVolumePlacements(RigExecRigEvaluator *evaluator,
-                                        const GfMatrix4d &matrix);
+    /// Enables live per-operation exec witnesses. Build and Evaluate are
+    /// owning-thread operations; native bodies only copy their bound values.
+    static bool EnableExecCrossCheck(const RigExecBakedProgram &program,
+                                    std::string *error = nullptr);
+    static std::shared_ptr<RigExecBakedExecCheckRows> ExecCrossCheckRows(
+        const RigExecBakedProgram &program);
+    static void SetOpObservers(const RigExecBakedProgram &program,
+        std::function<void(uint32_t)> before,std::function<void(uint32_t)> after);
     /// Clears \p program's point captures and has every later run record,
     /// per point binding, the binding's answer as its reader took it.
     /// Returns false and captures nothing under the parallel schedule: the
@@ -5177,32 +5356,14 @@ struct RigExecBakedProgramTesting {
         const std::function<void(const SdfPath &, RigExecRevisionLeafDecl *)>
             &edit,
         size_t *compared);
-    /// Runs \p evaluator's own _EvaluatePropertyChains at \p time, as a
-    /// generation with a fresh chain memo would, and leaves the evaluator as
-    /// it found it: the resolved inputs are swapped by value for a fresh
-    /// object holding the evaluator's interactive overrides (so the
-    /// program's pointer to them stays valid) and the chain memo is moved
-    /// aside, and both are restored after. Owning thread, between
-    /// evaluations. False when the restore did not hand back the same memo.
-    static bool EvaluateChainsDetached(RigExecRigEvaluator *evaluator,
-                                       UsdTimeCode time,
-                                       std::map<SdfPath, VtValue> *results,
-                                       std::vector<std::string> *lines);
-    /// The evaluator's chain memo (null before a dynamic generation binds
-    /// one), for an identity check.
-    static const void *ChainMemo(const RigExecRigEvaluator &evaluator);
 };
 
-/// RigExecBakedProgramTesting::EvaluateChainsDetached.
-inline bool
-RigExecTestEvaluateChainsDetached(RigExecRigEvaluator *evaluator,
-                                  UsdTimeCode time,
-                                  std::map<SdfPath, VtValue> *results,
-                                  std::vector<std::string> *lines)
-{
-    return RigExecBakedProgramTesting::EvaluateChainsDetached(
-        evaluator, time, results, lines);
-}
+VtValue RigExecBakedResolvePathLeaf(const RigExecBakedProgramImpl &,const RigExecBakedPathLeaves &,size_t);
+/// Exact captured current API4 input heads and connection hops. No stage access.
+bool RigExecBakedHasExternalInputRoute(const RigExecBakedProgramImpl &,const SdfPath &);
+const std::vector<VtValue> &RigExecBakedResolvePathLeaves(const RigExecBakedProgramImpl &, const RigExecBakedPathLeaves &);
+void RigExecBakedResetWeightField(RigExecBakedProgramImpl *, int);
+void RigExecBakedResetSetAsideGeometryValue(RigExecBakedProgramImpl *, RigExecBakedSlotDomain, uint32_t);
 
 }  // namespace rigExec
 

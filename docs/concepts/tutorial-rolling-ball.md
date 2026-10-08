@@ -541,8 +541,7 @@ and the game loop against the native extension.
 
 * [Godot and baked rigs](../concepts/tutorial-godot-baked-rig.md) — package this
   ball as a reusable game object and drive its controls in Godot, with gameplay GIFs.
-* [Baked and dynamic evaluation](baked-vs-dynamic.md) — the same rig, two
-  ways to compute it.
+* [Evaluation and independent checks](baked-vs-dynamic.md) — one production graph and optional reference checks.
 * [Two-Bone IK](../nodes/two_bone_ik.md) — the next solver up, and the one
   that makes a limb out of the chain you just built.
 * [Lattice Mover](../nodes/lattice_mover.md) — squash and stretch as a

@@ -3,6 +3,7 @@ from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
 import hashlib
 import json
+import argparse
 
 ROOT = Path(__file__).resolve().parents[1]
 PLUGIN = ROOT.parent / "godot_rigExec"
@@ -17,13 +18,19 @@ def _tree(folder):
 
 
 def main():
+    global PLUGIN
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--addon-root", type=Path, default=PLUGIN,
+                        help="Godot addon checkout (default: sibling godot_rigExec)")
+    PLUGIN = parser.parse_args().addon_root.resolve()
     files = [PLUGIN / "SConstruct"]
     files += list((PLUGIN / "addons/rigexec").glob("*.gd"))
     files += list((PLUGIN / "addons/rigexec").glob("*.cfg"))
     files += list((PLUGIN / "addons/rigexec").glob("*.gdextension"))
     files += [PLUGIN / "addons/rigexec" / name for name in (
         "README.md", "THIRD_PARTY_NOTICES.md", "LICENSE-OpenUSD.txt",
-        "LICENSE-flatbuffers.txt", "LICENSE-godot-cpp.md")]
+        "LICENSE-flatbuffers.txt", "LICENSE-godot-cpp.md",
+        "LICENSE-LZMA-SDK.txt", "NOTICE-LZMA-SDK.md")]
     files += list((PLUGIN / "addons/rigexec/src").glob("*.cpp"))
     files += list((PLUGIN / "addons/rigexec/src").glob("*.h"))
     # Windows only: bin/ can also hold other platforms' untested libraries.
@@ -50,6 +57,8 @@ def main():
         ("LICENSE-OpenUSD", ROOT / "plugin/usdNoodles/LICENSE.txt"),
         ("LICENSE-flatbuffers", ROOT / "thirdparty/flatbuffers/LICENSE"),
         ("THIRD_PARTY_NOTICES-usdRig.md", ROOT / "THIRD_PARTY_NOTICES.md"),
+        ("LICENSE-LZMA-SDK", ROOT / "third_party/lzma/DOC/lzma-sdk.txt"),
+        ("NOTICE-LZMA-SDK.md", ROOT / "third_party/lzma/NOTICE.md"),
         ("LICENSE-godot-cpp", PLUGIN / "thirdparty/godot-cpp/LICENSE.md"),
     )
     missing = [str(path) for path, _ in members if not path.is_file()]

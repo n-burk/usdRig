@@ -63,11 +63,17 @@ _VisitIterativeMoverScalars(RigExecRevisionOp op,
 // snapshot capture, and worker patching all use these visitors.
 template <class Obj, class Fn>
 void
-_VisitLadderInputs(Obj &ladder, Fn &&fn)
+_VisitLadderInputs(Obj &ladder, Fn &&fn, bool includeIntervening = true)
 {
     fn(ladder.restSpace);
+    if (includeIntervening) fn(ladder.interveningSpace);
     fn(ladder.defaultSpace);
     fn(ladder.posedSpace);
+    fn(ladder.parentSpace);
+    fn(ladder.parentDefaultSpace);
+    fn(ladder.avarDefaultSpace);
+    fn(ladder.posedDefaultSpace);
+    fn(ladder.rotationSign);
     for (int i = 0; i < 6; ++i) {
         fn(ladder.restAvars[i]);
         fn(ladder.defaultAvars[i]);
@@ -145,7 +151,8 @@ template <class Obj, class Fn>
 void
 _VisitSpaceSwitchInputs(Obj &spaceSwitch, Fn &&fn)
 {
-    fn(spaceSwitch.activeInput);
+    if (spaceSwitch.tokenIndex) fn(spaceSwitch.activeTokenInput);
+    else fn(spaceSwitch.activeInput);
 }
 
 template <class Obj, class Fn>
@@ -264,9 +271,7 @@ _HashString(uint64_t hash, const char *text);
 bool
 _HashVtValue(uint64_t *hash, const VtValue &value);
 
-extern thread_local std::shared_ptr<const void> _lastFrozenSlots;
 
-extern thread_local size_t _lastFrozenSlotBytes;
 
 // Visits each auto clavicle's IK/FK blend and dial, which the compose reads
 // beside the avars (space switches have their own visitor above). They are
@@ -299,10 +304,12 @@ _FrozenPlaceUpstream(RigExecBakedProgramImpl *program,
 // Visits every patchable input in one fixed order. The freeze uses it to
 // capture head paths (UI thread, handles valid there) and the worker uses
 // it to patch constants (side-table keys, no handle dereference); sharing
-// the walker is what keeps the two in lockstep.
+// the walker is what keeps the two in lockstep. Native numbering includes
+// synthetic intervening space; frozen attribute bookkeeping excludes it
+// because its source is transported in stageSeeds.
 template <class Impl, class Fn>
 void
-_ForEachPatchableInput(Impl &B, Fn &&fn)
+_ForEachPatchableInput(Impl &B, Fn &&fn, bool includeIntervening = true)
 {
     for (auto &binding : B.avarBindings) {
         fn(binding.input);
@@ -311,7 +318,7 @@ _ForEachPatchableInput(Impl &B, Fn &&fn)
         fn(binding.input);
     }
     for (auto &ladder : B.ladders) {
-        _VisitLadderInputs(ladder, fn);
+        _VisitLadderInputs(ladder, fn, includeIntervening);
     }
     for (auto &spaceSwitch : B.spaceSwitches) {
         _VisitSpaceSwitchInputs(spaceSwitch, fn);
@@ -345,10 +352,8 @@ struct _FrozenWorker {
     const RigExecFrozenProgram *snapshot = nullptr;
     RigExecBakedProgramImpl B;
     RigExecResolvedInputs resolved;
-    RigExecChainSnapshots chainSnapshots;
     RigExecProfiler profiler;
     bool guidesEnabled = false;
-    std::unique_ptr<RigExecTapSet> nullTaps;
 };
 
 template <class T>
@@ -379,11 +384,6 @@ _SampleHolds<float>(const VtValue &held, float *out)
     }
     return false;
 }
-
-bool
-_FrozenStepBody(_FrozenWorker *worker, RigExecBakedStep *step,
-               const std::map<SdfPath, size_t> &index,
-               const RigExecFrameInputs &inputs, UsdTimeCode time);
 
 bool
 _RunFrozen(const RigExecFrozenEvalContext &context,

@@ -1,5 +1,5 @@
 #
-# Avar edits patch a baked program in place instead of rebuilding it.
+# Avar edits patch a compiled graph in place instead of rebuilding it.
 #
 # What a released gizmo drag and its undo author, in both authoring modes:
 #   * the first value a layer holds for an avar creates its property spec
@@ -49,9 +49,9 @@ def _Evaluate(rig, label):
     for time in _TIMES:
         pose = rig.evaluate(time)
         _Check(pose.valid, "%s: pose at %g is not valid" % (label, time))
-        _Check(pose.baked_parity_mismatches == 0,
-               "%s: baked and dynamic disagree at %g (%d mismatches)"
-               % (label, time, pose.baked_parity_mismatches))
+        _Check((pose.reference_agreements > 0 and pose.reference_mismatches == 0),
+               "%s: graph and scalar reference disagree at %g (%d mismatches)"
+               % (label, time, pose.reference_mismatches))
         origins.append(tuple(pose.control_frame(_LOOK).origin))
     return origins
 
@@ -76,9 +76,8 @@ def main():
 
     rig = _rigexec.Rig(stage, _RIG)
     rig.compile()
-    _Check(rig.is_bakeable(), "example is not bakeable: %s"
-           % rig.bakeability_reasons())
-    rig.evaluation_mode = "parity"
+    pass # Compile/evaluate validates the single graph.
+    rig.cpu_reference = True
     rig.profiling_enabled = True
     rest = _Evaluate(rig, "start")
     baseline = _Bakes(rig)

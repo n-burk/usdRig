@@ -3,12 +3,14 @@
 #define RIGEXEC_MOVERS_MOVER_REGISTRY_H
 
 #include "../moverGraph.h"
+#include "../oracleInputs.h"
 #include "rigExecBinary/external.h"
 
 #include "pxr/usd/usd/relationship.h"
 #include "pxr/usd/usd/stage.h"
 
 #include <functional>
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -17,6 +19,7 @@
 PXR_NAMESPACE_USING_DIRECTIVE
 
 namespace rigExec {
+struct RigExecSceneDescriptors;
 
 /// Which value domain a mover revises. Points movers revise a native
 /// UsdGeomPointBased point3f[] points property through the revision
@@ -35,10 +38,12 @@ enum class RigExecMoverDomain {
 /// recording whatever diagnostic the branch pushed). Blend falls through
 /// to the shared envelope blend over the branch's full-strength
 /// candidate -- including the curve mover's `goto envelope`, which
-/// exists only to skip the ribbon arm after the wire arm ran.
+/// exists only to skip the ribbon arm after the wire arm ran. Applied
+/// returns an already weighted result and skips that final linear blend.
 enum class RigExecOracleResult {
     PassThrough,
     Blend,
+    Applied, ///< already consumed the independently resolved envelope
 };
 
 /// Inputs to a mover's revision-binding step. See
@@ -53,18 +58,27 @@ struct RigExecMoverBindContext {
     RigExecRevisionBinding *binding;
 };
 
-/// Inputs to a mover's parity-oracle branch. See _EvaluateChain: the
+/// Inputs to a mover's parity-oracle branch over captured source facts: the
 /// common envelope prologue has already run (enabled check, envelope
 /// resolution), and the shared envelope blend runs after a Blend return.
 /// `points` is the working array, in and out.
+struct RigExecOracleFrameInput {
+    SdfPath owner;
+    UsdTimeCode time;
+    uint64_t generation = 0;
+    bool available = false;
+    RigExecPointFrameArray value;
+};
+
 struct RigExecMoverOracleContext {
-    const UsdStageRefPtr &stage;
-    const UsdPrim &prim;
+    const RigExecOracleScene &stage;
+    const RigExecOraclePrim &prim;
     const SdfPath &moverPath;
     const SdfPath &target;
     UsdTimeCode time;
-    const RigExecResolvedInputs &resolved;
-    const RigExecChainSnapshots &snapshots;
+    const RigExecOracleScene &resolved;
+    std::function<const VtValue *(const SdfPath &, const RigExecReadPhase &, const SdfPath &)> phasedPoints;
+    std::function<const GfMatrix4d *(const SdfPath &, const RigExecReadPhase &, const SdfPath &)> phasedMatrix;
     const std::unordered_map<SdfPath, GfMatrix4d, SdfPath::Hash>
         &baseProviderMatrices;
     const std::unordered_map<SdfPath, GfMatrix4d, SdfPath::Hash>
@@ -85,6 +99,33 @@ struct RigExecMoverOracleContext {
     /// reads these (RigExecReadPhasedPoints). Last, so the members before
     /// it keep their offsets.
     const VtVec3fArray *entering = nullptr;
+    /// Independent scalar envelope; kernels with nonlinear weighting apply it once.
+    const std::vector<float> *envelope = nullptr;
+    /// Copied declared upstream solver input, never this mover's result.
+    /// A present adapter returning no value is an unavailable input.
+    std::function<const RigExecOracleFrameInput *(const SdfPath &, const SdfPath &,
+                                                 UsdTimeCode)> boundFrames = {};
+};
+
+/// Pure external assembly inputs. Provider values contain only explicit arrays
+/// and matrices; no stage or resolved-input overlay is exposed to the plugin.
+struct RigExecExternalProviderValues {
+    const GfMatrix4d *transform;
+    const std::vector<GfMatrix4d> *influenceTransforms;
+    const GfMatrix4d *carry;
+    const RigExecWeightPacket *weights;
+    const RigExecPointFrameArray *driverFrames;
+    const std::vector<GfVec3f> &basePoints;
+    const std::vector<GfVec3f> &blendDeltas;
+    explicit RigExecExternalProviderValues(const RigExecProviderValues &v)
+        : transform(v.transform), influenceTransforms(v.influenceTransforms),
+          carry(v.carry), weights(v.weights), driverFrames(v.driverFrames),
+          basePoints(v.basePoints), blendDeltas(v.blendDeltas) {}
+};
+struct RigExecExternalInputContext {
+    const RigExecRevisionBinding &binding;
+    const RigExecExternalProviderValues &values;
+    const std::vector<VtValue> &inputs;
 };
 
 struct RigExecMoverHandler;
@@ -160,18 +201,21 @@ struct RigExecMoverHandler {
     RigExecOracleResult (*oracle)(const RigExecMoverOracleContext &ctx) =
         nullptr;
 
-    /// External points movers resolve External and supply both callbacks.
-    /// Assemble an immutable, equality-comparable payload at the requested
-    /// time. Read attributes through values.resolved.GetAttribute() when
-    /// available so overrides and connection values retain the same
-    /// semantics as built-in movers. Scene authoring is
-    /// forbidden. The engine supplies enabled and envelope handling.
+    /// External points movers declare source reads at compile and assemble a
+    /// payload from sampled values. The engine owns enabled/envelope handling.
+    /// Declaration order is also the assembly and runtime input order.
+    void (*declareExternalInputs)(
+        const RigExecMoverBindContext &ctx,
+        std::vector<RigExecRevisionLeafKey> *inputs) = nullptr;
+    /// Owner-thread detached compilation over composed, owned source facts.
+    /// Produces the same immutable binding/declared inputs as native capture.
+    /// Plugin-owned scene data schemas consumed by immutable detached capture.
+    /// They are data records, not separately scheduled rig operations.
+    std::vector<std::string> sceneDataSchemas;
+    bool (*compileScene)(const RigExecSceneDescriptors &,const SdfPath &mover,
+        const SdfPath &target,RigExecRevisionBinding *,std::string *error) = nullptr;
     bool (*assembleExternal)(
-        const UsdPrim &prim,
-        const RigExecRevisionBinding &binding,
-        const RigExecProviderValues &values,
-        UsdTimeCode time,
-        VtValue *data) = nullptr;
+        const RigExecExternalInputContext &ctx, VtValue *data) = nullptr;
     /// Pure, thread-safe computation over the payload and preceding points.
     /// Produce the full-strength candidate without changing point count.
     /// No stage access, mutable shared state, or envelope application here.
@@ -189,6 +233,10 @@ struct RigExecMoverHandler {
     /// the kernel as playback evaluates them, so a posed playback moves
     /// them; the frame bytes may still carry what the export read, for a
     /// phase playback holds no value at.
+    /// Immutable runtime schema/state encoded from compiled facts even when a
+    /// declared dynamic sample is missing. No sampled payload is required.
+    bool (*encodeExternalEpoch)(const RigExecRevisionBinding &binding,
+        std::vector<uint8_t> *epoch) = nullptr;
     bool (*encodeExternal)(
         const VtValue &data, const RigExecRevisionBinding &binding,
         std::vector<uint8_t> *epoch, std::vector<uint8_t> *frame) = nullptr;
@@ -202,9 +250,11 @@ struct RigExecMoverHandler {
 /// Info.RigExecMoverPlugin in their OpenUSD plugInfo.json. Plugins must also
 /// use the same compiler, USD build, and RigExec SDK as the host.
 /// Version 2 added encodeExternal and runtimeKernel to the handler.
+/// Version 4 declares sampled external inputs, detached compileScene facts,
+/// and explicit phased oracle lookups.
 /// Version 3 passes the oracle context to RigExecReadPhasedPoints and adds
 /// RigExecMoverOracleContext::entering.
-inline constexpr int RigExecMoverPluginApiVersion = 3;
+inline constexpr int RigExecMoverPluginApiVersion = 4;
 
 /// Registers one mover, retaining an immutable copy and its schema name.
 /// Duplicate schema names and incomplete external callbacks are rejected.

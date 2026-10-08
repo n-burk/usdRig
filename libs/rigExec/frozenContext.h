@@ -93,6 +93,8 @@ struct RigExecSampledInput {
     /// sampled both stage-direct and through the resolved inputs can never
     /// alias across the two. The plain sampler leaves every sample fresh.
     int burstSampleRoute = RigExecBurstRouteFresh;
+    /// True for an explicit authored source block, distinct from missing.
+    bool valueBlocked = false;
 };
 
 /// One admitted upstream value at a frame's time: authored-level, so it
@@ -146,28 +148,28 @@ struct RigExecHeadLeafConstants {
 /// Plain values: safe to hand across threads and to hold past the stage edit
 /// that cancels the job it was sampled for.
 struct RigExecFrameInputs {
+    /// Independently sampled job-time oracle facts, value-owned and stage-free.
+    std::optional<RigExecOraclePublicationContext> oraclePublications;
+    std::map<SdfPath,RigExecWeightReferenceContext> oracleWeightInputs;
     UsdTimeCode time = UsdTimeCode::Default();
     std::vector<RigExecSampledInput> values;
     /// Per SkinTopology index (RigExecBakedLayoutRevision: revisionIndex,
-    /// then derivedIndex), the layout leaves of a revision whose layout the
-    /// live program holds as fixed: one value per key
-    /// (GeomRevision::layoutLeaves), read on the UI thread at sample time
-    /// through the refreshed inputs, or live's own sample where nothing that
-    /// can move it differs (no pending edit, the same overlay entries).
-    /// Empty for every other index. The worker runs the SkinTopology op from
-    /// them. Transport-only and EXCLUDED from the control-state digest: a
-    /// fixed layout reads the same at every time, so it moves only with a
-    /// value edit, which the frame cache retires frames for, or a drag,
-    /// whose sampled override the digest folds.
+    /// then derivedIndex), source values for every skin layout operation.
+    /// Empty for other indices. Sparse Raw Default offset/index source rows
+    /// follow this fixed prefix, one per sparse owner in the same order.
+    /// The graph body prepares the current layout.
     std::vector<std::vector<VtValue>> layoutLeaves;
+    /// Actual source paths, parallel to layoutLeaves. Separate route rows
+    /// preserve distinct reads of a path already present in values.
+    std::vector<std::vector<SdfPath>> layoutSourcePaths;
     /// Per-chain-revision path leaves (GeomRevision::leaves), parallel to
     /// the baked program's revisionIndex: one value per key, read on the UI
     /// thread at sample time by the live sampler's own reads
     /// (RigExecSampleRevisionLeaf) through the refreshed inputs, for each
     /// revision whose packet the leaves assemble on the worker; empty for
-    /// the rest. A key with a reader walk is empty: the worker resolves it
-    /// after its head tier. So are a skin's three layout keys while its
-    /// layout is fixed: the packet carries the handle instead.
+    /// the rest. Authored fallback values travel even for reader walks;
+    /// the consuming graph body resolves produced versions. A fixed skin's
+    /// layout keys travel separately in layoutLeaves.
     /// Transport-only: every value is a pure function of digest-covered
     /// samples (the same attributes, sampled by path in `values`, and the
     /// head-leaf samples), so the leaves are EXCLUDED from the digest.
@@ -175,17 +177,6 @@ struct RigExecFrameInputs {
     /// The same for every derived target (normals, extent and a projector's
     /// matrix targets), parallel to the baked program's derivedIndex.
     std::vector<std::vector<VtValue>> derivedLeaves;
-    /// Per blend sample's sparse layout, resolved at sample time through the
-    /// live blend-shape cache: [revisionIndex position][channel][sample], by
-    /// shared pointer. A null entry means the revision is not a blendshape or
-    /// the sample is dense (points ride the sampled values instead). Layouts
-    /// resolved from the shared cache are pointer-identical to the live
-    /// prologue's, which is what keeps packet == cheap; refused (connected)
-    /// shapes resolve per frame and additionally sample their
-    /// offsets/indices arrays into values so the key moves with them.
-    std::vector<std::vector<std::vector<
-        std::shared_ptr<const RigExecBlendSampleLayout>>>>
-        blendLayouts;
     /// One frame's stage-derived constraint seeds, sampled on the UI thread
     /// through RigExecBakedProgram::SampleStageFrameSeeds: the xform-slot
     /// bases and frames, the native-source ok/frame pairs, and the
@@ -229,7 +220,7 @@ struct RigExecFrameInputs {
     /// explicitly valueless source. \p viaChain marks a stale sample (see
     /// RigExecSampledInput::viaChain).
     void Add(const SdfPath &path, const VtValue &value, bool hasValue = true,
-             bool viaChain = false);
+             bool viaChain = false, bool valueBlocked = false);
 
     /// Whether any sample is marked stale (RigExecSampledInput::viaChain).
     /// No warming job may be built from a vector answering true.
@@ -251,10 +242,8 @@ struct RigExecFrameInputs {
 /// stays trivially copyable.
 constexpr uint32_t kRigExecFrozenPublishWeightFields = 1u << 0;
 constexpr uint32_t kRigExecFrozenSolverGuidesEnabled = 1u << 1;
-/// The rig refused the bake (plan D7). A worker must decline a context
-/// carrying this flag: the dynamic path drives OpenExec against the live
-/// stage and cannot run off the UI thread. Refusal rigs memoize UI-thread
-/// results only; no background job is ever created for them.
+/// No admitted compiled program is available. A worker declines a context
+/// carrying this flag: it has no admitted compiled program to execute.
 constexpr uint32_t kRigExecFrozenBakeRefused = 1u << 2;
 
 /// An epoch-pinned, worker-safe snapshot of a baked program.
@@ -265,11 +254,9 @@ constexpr uint32_t kRigExecFrozenBakeRefused = 1u << 2;
 /// evaluator-bound std::functions), and captures the small epoch values the
 /// frame path reads through those pointers (the joint/solver binding map,
 /// whether guide taps stand). Immutable after the freeze: shared across the
-/// jobs of its epoch, read-only on every thread. A job's worker clones the
-/// snapshot into private working state at job start (on the worker, off the
-/// UI thread), patches the clone's varying-input constants from its sampled
-/// vector, and runs the serial executor against the clone -- so the snapshot
-/// itself is never mutated, and concurrent jobs never share mutable state.
+/// jobs of its epoch, read-only on every thread. A workspace clones the
+/// snapshot once into private working state and executes sampled jobs through
+/// the shared graph. Concurrent jobs use distinct workspace lanes.
 ///
 /// The clone keeps the live program's USD handles COPIED but DEAD: no frozen
 /// code path dereferences them (see the audit on RigExecFreezeProgram in
@@ -289,7 +276,7 @@ struct RigExecFrozenProgram {
     /// Whether the live program had guide taps standing at freeze time.
     /// The frozen epilogue replays the guide publication from the aggregates
     /// when this and the context's guides flag are both set.
-    bool guideTapsPresent = false;
+    bool solverGuidesPresent = false;
     // Freeze-captured handle identities, plain data for the worker. A
     // worker must not dereference a USD handle -- not even IsValid or
     // GetPath, which reach composed specs and prim data -- so every handle
@@ -298,6 +285,7 @@ struct RigExecFrozenProgram {
     /// (empty when the head is invalid; the worker declines a varying input
     /// it cannot key).
     std::vector<SdfPath> inputHeadPaths;
+    std::vector<VtValue> inputConstants; ///< typed fallbacks, parallel to inputHeadPaths
     /// Per constraintArrays entry, the four operator-array keys (source
     /// weights, translation offsets, rotation offsets, pole weights); empty
     /// where the entry reads no such array.
@@ -327,30 +315,11 @@ struct RigExecFrozenProgram {
 /// snapshot for background warming. UI thread only: it reads the live
 /// program and the stage.
 ///
-/// Answers false, having left \p frozen untouched, when the rig cannot warm:
-/// no baked program (D7), the evaluator's CPU-parity mode is on (live runs
-/// dynamically, which no snapshot can reproduce), a pose-domain constraint
-/// or property chain binding a weight object (whose oracle resolves from
-/// the live stage), a current-phase weight read, an unsupported revision
-/// operation, a blend-sample read phase, a derived-target read phase, or an
-/// unfixed skin layout.
-/// \p error, when given, says which. Anything refused
-/// here evaluates live when asked; a refusal is never served wrong. Weight
-/// objects and their steps DO freeze: their scalars patch from samples and
-/// their point arrays sample per frame into the shared packet kernels. So
-/// does a provider ladder that recomposes (a time-varying, connected,
-/// dragged or chain-written ladder channel): the frozen prologue runs the
-/// rest and ladder ops from the job's sampled ladder leaves.
-///
-/// Property chains are supported: the sampler carries every head leaf the
-/// chains and the reader walks read (RigExecForEachHeadLeaf, under its
-/// synthetic key; the varying ones as samples, the rest in the shared
-/// RigExecHeadLeafConstants), and the frozen prologue runs the program's
-/// head tier from those values and resolves every read a chain or record
-/// can answer through its reader walk. A chain binding a weight object
-/// refuses, because its envelope resolves through the evaluator's live
-/// oracle, and so does a skin whose packet reads a chain or record, because
-/// the packet is assembled on the UI thread where no head tier runs.
+/// Answers false, leaving \p frozen untouched, when the program is absent
+/// or has a descriptor the detached execution contract cannot reproduce.
+/// \p error names the refusal. Property chains, providers, weight fields,
+/// layouts, and geometry use their admitted operations in the same graph.
+/// Optional scalar reference checks carry fresh source facts with each job.
 ///
 /// A snapshot pins the program OBJECT it was cloned from plus the epoch it
 /// was cloned in. Re-freeze after any change that rebuilds the program; a
@@ -447,6 +416,26 @@ bool RigExecPatchFrozenAvarConstants(
     std::shared_ptr<const RigExecFrozenProgram> *out,
     std::string *error = nullptr);
 
+/// Retained execution state for one frozen snapshot and one execution lane.
+/// Reuse it for sequential jobs; overlapping jobs require separate workspaces.
+class RigExecFrozenWorkspace {
+public:
+    ~RigExecFrozenWorkspace();
+    RigExecFrozenWorkspace(const RigExecFrozenWorkspace &) = delete;
+    RigExecFrozenWorkspace &operator=(const RigExecFrozenWorkspace &) = delete;
+private:
+    struct Impl;
+    explicit RigExecFrozenWorkspace(std::shared_ptr<const RigExecFrozenProgram>);
+    std::unique_ptr<Impl> _impl;
+    friend struct RigExecFrozenWorkspaceAccess;
+    friend std::unique_ptr<RigExecFrozenWorkspace> RigExecCreateFrozenWorkspace(
+        std::shared_ptr<const RigExecFrozenProgram>);
+};
+
+/// Retains the snapshot and clones its private working state once.
+std::unique_ptr<RigExecFrozenWorkspace> RigExecCreateFrozenWorkspace(
+    std::shared_ptr<const RigExecFrozenProgram> snapshot);
+
 /// The epoch a background job is pinned to: digests and counts only, plus
 /// the frozen program reference. No member can name the stage, the
 /// evaluator, or any USD object, which is what makes it safe to share with
@@ -454,8 +443,8 @@ bool RigExecPatchFrozenAvarConstants(
 struct RigExecFrozenEvalContext {
     /// RigExecRigEvaluator::GetBindingEpochDigest at enqueue time: the epoch
     /// the job was sampled for. Enforcement is the generation fence (any
-    /// edit bumps it) plus the epoch-keyed cache (a completion lands only
-    /// where the UI thread looks) -- no worker compares this field.
+    /// edit bumps it) plus the epoch-keyed cache. A retained workspace also
+    /// requires every job to carry its initially bound epoch.
     uint64_t epochDigest = 0;
     /// The scheduler generation the job was enqueued under. Rechecked before
     /// publish; a mismatch drops the result.
@@ -463,10 +452,8 @@ struct RigExecFrozenEvalContext {
     /// Provider slots the worker sizes its private arena for.
     size_t slotCount = 0;
     /// Identity of the baked program the job was sampled for: the epoch
-    /// digest mixed with the program's bound/varying input counts. Reserved
-    /// for a pre-run shape check; today the generation fence retires a job
-    /// whose program was rebuilt (a rebuild follows an edit, which bumps),
-    /// so no worker compares this field either.
+    /// digest mixed with the program's bound/varying input counts. Retained
+    /// workspaces reject jobs carrying a different program digest.
     uint64_t programDigest = 0;
     /// Samples RigExecSampleFrameInputs recorded. The worker compares by
     /// value against the vector it was handed; a count that disagrees means
@@ -485,6 +472,10 @@ struct RigExecFrozenEvalContext {
     /// it. Null declines a production job -- the runner cannot evaluate
     /// without a program -- while an injected test kernel ignores it.
     const RigExecFrozenProgram *frozen = nullptr;
+    /// Optional caller-owned execution lane. Snapshot identity, epoch, and
+    /// program digest must match every job on this workspace. Null gives a
+    /// fresh independent job without retained value or readiness state.
+    RigExecFrozenWorkspace *workspace = nullptr;
 };
 
 static_assert(std::is_trivially_copyable<RigExecFrozenEvalContext>::value,
@@ -598,7 +589,7 @@ using RigExecFrozenStepRunner = std::function<bool(
 /// inputs; when it cannot be -- unimplemented, inconsistent, stale, or
 /// cancelled -- the pose is invalid and the caller evaluates live instead.
 ///
-/// The checks, in order: the context must not carry the D7 refusal flag; the
+/// The checks, in order: the context must carry an admitted program; the
 /// input vector's count must equal the context's sampled count; when \p
 /// scheduler is given, the generation must be current (start check); the
 /// runner executes under a serial scope against a private arena sized from
@@ -650,9 +641,8 @@ struct RigExecChainSampleInput {
 struct RigExecChainSampleRevision {
     SdfPath moverPath;
     UsdPrim moverPrim;
-    /// The mover's bound weight objects, if any. The freeze refuses a chain
-    /// carrying one: its envelope resolves through the evaluator's live
-    /// oracle.
+    /// The mover's bound weight objects, if any. Their compiled field
+    /// producers run from the frozen job's captured source facts.
     SdfPathVector weightObjects;
     RigExecChainSampleInput enabled;
     RigExecChainSampleInput defaultWeight;
@@ -699,7 +689,7 @@ struct RigExecChainSampleBindings {
 /// Answers false, having left \p out untouched, when the chains cannot be
 /// named faithfully: a math mover with anything but exactly one exact
 /// property target, or a dependency cycle. A bound chain carrying a weight
-/// object binds fine (the freeze refuses it), so the caller can tell "no
+/// object binds and names its compiled field, so the caller can tell "no
 /// chains" (empty, success) from "unchainable" (failure). \p error, when
 /// given, says which.
 bool RigExecBindChainSampleInputs(
@@ -725,8 +715,7 @@ bool RigExecChainSampleBindingsStillCurrent(
 /// therefore must be sampled from the list the caller passes.
 ///
 /// Returns false, having left \p out untouched, when no faithful vector can
-/// be sampled: no baked program (a dynamic/refusal rig takes the D7 memo
-/// path instead of a background job), a prologue read the sampler cannot
+/// be sampled: no compiled program, a source read the sampler cannot
 /// reproduce without the program's own sampling hook (xform-derived seeds,
 /// native constraint sources, geometry-delta bases), or a null resolved
 /// inputs pointer. \p error, when given, says which.
@@ -735,10 +724,9 @@ bool RigExecChainSampleBindingsStillCurrent(
 /// answer is not sampled as a value: every head leaf the property ops and
 /// the reader walks read travels under its synthetic key -- sampled at the
 /// job's time where it varies, from RigExecFrameInputs::headLeafConstants
-/// where it does not -- and the frozen prologue runs the head tier from them,
-/// publishes its results and lines, and resolves each such read from its
-/// reader walk, exactly as the live prologue does. A rig whose chain binds
-/// a weight object is refused at freeze.
+/// where it does not. The shared graph evaluates property operations and
+/// resolves produced values in consuming operations through declared reader
+/// walks, exactly as live execution does.
 bool RigExecSampleFrameInputs(
     const RigExecRigEvaluator &evaluator, UsdTimeCode time,
     const std::vector<RigExecValueOverride> &overrides,
@@ -921,36 +909,13 @@ bool RigExecSampleFrameInputsWithBurstCache(
     RigExecBurstSampleCache *cache, RigExecFrameInputs *out,
     std::string *error = nullptr);
 
-/// Builds the production frozen step runner: the worker-side executor the
-/// C-API warming triggers run jobs under when no runner is injected.
-///
-/// The runner reads its program from the job's context (frozen, pinned for
-/// the job's epoch) and its per-frame values from the job's sampled vector,
-/// clones the snapshot into worker-owned working state, patches the clone's
-/// varying-input constants from the vector, and runs the baked serial
-/// executor end to end -- prologue, closure, region, epilogue -- producing
-/// a pose bit-identical to live evaluation of the same inputs. One instance
-/// serves every rig and every job; per-epoch and per-frame state travels in
-/// the job, never in the runner.
-///
-/// FAIL-CLOSED WHERE IT CANNOT PROVE BIT-IDENTITY. The runner declines
-/// (hands the generation back, exactly as RigExecBakedProgram::Run does
-/// when it cannot complete) when the context carries no frozen program, a
-/// D7 refusal, or a mismatched count; when the vector carries stale
-/// chain-resolved samples or a held type the worker cannot consume; and when
-/// the snapshot or the vector fails any structural cross-check. A declined
-/// job completes without publishing and its frame evaluates live when
-/// asked. See RigExecFreezeProgram for what a snapshot covers, and the audit
-/// in frozenContext.cpp for the frozen code paths' isolation argument.
-///
-/// SERIAL DISCIPLINE (D4): the shared skin kernels consult
-/// RigExecFrozenSerialActive at their five launch sites (moverGraph.cpp)
-/// and take their serial variant inside a frozen run, so a background job
-/// never dispatches TBB work past the host's own scheduling. The serial
-/// and parallel variants compute byte-identical numbers by the kernels'
-/// range independence, which testRigExecParallelKernels holds to account.
-/// Everything else in the frozen run is serial by construction (its own
-/// region loop).
+/// Builds the frozen runner over the same compiled graph as live execution.
+/// It places the job's sampled sources, executes on context.workspace when
+/// supplied, and publishes after joining. A null workspace creates a fresh
+/// private job. No stage or evaluator access occurs on the worker.
+/// Snapshot, sampled counts, and retained workspace identity must agree;
+/// mismatches decline the job without publishing. Numerical kernels use
+/// the calling thread's frozen serial scope.
 RigExecFrozenStepRunner RigExecMakeProductionStepRunner();
 
 /// Hashes \p inputs to the control-state digest the frame cache keys on
@@ -1004,75 +969,6 @@ struct RigExecPurityFinding {
 /// (Pure), safe as an enqueue-time copy (EpochPinned), or bypassed by
 /// construction with the bypass named (LiveOnly).
 const std::vector<RigExecPurityFinding> &RigExecFrozenPurityAudit();
-
-/// Partial cone re-run slots (plan 2.0/2.2): pose-domain step state kept
-/// per cached frame (geometry chains excluded -- skipped geometry serves
-/// from the retained pose, run geometry overwrites; prologue writes
-/// excluded -- the re-run recomputes them from the fresh vector).
-struct RigExecPartialSlots {
-    std::vector<float> poseWeights;
-    std::vector<RigExecWeightPacket> weightPackets;
-    std::vector<GfMatrix4d> posedM;
-    std::vector<GfMatrix4d> finalMatrix;
-    std::vector<GfMatrix4d> baseMatrix;
-    std::vector<RigExecPointFrame> base;
-    std::vector<RigExecPointFrame> fin;
-    std::vector<RigExecPointFrameArray> aggregates;
-    std::vector<GfMatrix4d> deltaValues;
-    std::vector<char> deltaPresent;
-    struct SolverSlots {
-        std::vector<RigExecPointFrame> outFrames;
-        std::vector<char> outPresent;
-        std::vector<SdfPath> fallbackJoints;
-    };
-    std::vector<SolverSlots> solvers;
-    struct CommitSlots {
-        std::vector<char> present;
-        std::vector<char> deltaOk;
-        std::vector<RigExecPointFrame> frames;
-        std::vector<RigExecPointFrame> staged;
-        std::vector<GfMatrix4d> deltas;
-        std::vector<uint8_t> outcome;
-        std::vector<RigExecConstraintSource> sources;
-        bool abandoned = true;
-        bool recordAfter = true, recordEveryTarget = true;
-    };
-    std::vector<CommitSlots> commits;
-    struct StepSlots {
-        std::vector<std::string> diagnostics;
-        RigExecBakedStepCounters counters;
-        bool bail = false;
-    };
-    std::vector<StepSlots> steps;
-    /// The program's volumePlacement at its volume slots, in slot order.
-    std::vector<GfMatrix4d> volumePlacement;
-    /// What each FrameMatrix step left: an AtPrim reader whose record the
-    /// re-run skips reads it.
-    std::vector<GfMatrix4d> frameMatrix;
-    std::vector<char> frameMatrixValid;
-    void Capture(const RigExecBakedProgramImpl &program);
-    bool Restore(RigExecBakedProgramImpl *program) const;
-    size_t Bytes() const;
-};
-
-bool RigExecCapturePartialSlots(
-    const RigExecBakedProgramImpl &program,
-    std::shared_ptr<const void> *slotsOut, size_t *bytesOut);
-bool RigExecTakeLastFrozenSlots(std::shared_ptr<const void> *slotsOut,
-                              size_t *bytesOut);
-struct RigExecPartialRunResult {
-    RigExecRigPose pose;
-    std::shared_ptr<const void> slots;
-    size_t slotBytes = 0;
-    std::vector<int> executedClusters;
-    bool completed = false;
-};
-RigExecPartialRunResult RigExecRunPartialCone(
-    const RigExecFrozenProgram &snapshot,
-    const RigExecFrameInputs &freshInputs,
-    const std::shared_ptr<const void> &baseSlots,
-    const RigExecRigPose &basePose,
-    const RigExecBakedClusterSet &planClusters, uint32_t contextFlags);
 
 }  // namespace rigExec
 

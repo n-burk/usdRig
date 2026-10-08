@@ -242,7 +242,7 @@ MeasurePoseBytes(const RigExecRigPose &pose, const char *rig)
     size_t fieldBytes = keyBytes(pose.weightFields.size());
     for (const auto &[path, field] : pose.weightFields) {
         (void)path;
-        fieldBytes += sizeof(SdfPath) + VecBytes(field.weights);
+        fieldBytes += sizeof(SdfPath) + field.weights.size() * sizeof(float);
     }
     line("weightFields", fieldBytes, pose.weightFields.size());
     line("weightFrames",
@@ -296,7 +296,7 @@ GeomRevisionBytes(
     // derived revision. Counted anyway; the report notes the sharing.
     bytes += VtArrayVec3fBytes(revision.lastAuxPoints);
     bytes += StringBytes(revision.lastStatus.firstBadAddress);
-    bytes += VecBytes(revision.envelope) + VecBytes(revision.weightField);
+    bytes += VecBytes(revision.envelope) + VecBytes(revision.publishedWeightValues);
     bytes += VecBytes(revision.influences) + VecBytes(revision.rows) +
              VecBytes(revision.palette);
     bytes += WeightPacketBytes(revision.currentPhasePacket);
@@ -368,7 +368,7 @@ MeasureArenaBytes(const RigExecBakedProgramImpl &B, const char *rig)
         solverBytes += VecBytes(solver.outFrames) +
                        VecBytes(solver.outPresent) +
                        VecBytes(solver.outPosition) +
-                       VecBytes(solver.elements) +
+                       VecBytes(solver.kernelWorkspace.fkElements) +
                        VecBytes(solver.controlReads) +
                        solver.fallbackJoints.size() * sizeof(SdfPath) +
                        VecBytes(solver.ribbonPoints) +
@@ -885,17 +885,6 @@ MeasureRig(const char *rig, const UsdStageRefPtr &stage,
     std::printf("  %-22s %10.1f ms\n", "compile",
                 NowMs() - compileStart);
 
-    std::vector<std::string> reasons;
-    if (!RigExecBakedProgram::IsBakeable(evaluator, &reasons)) {
-        std::printf("FATAL: %s does not bake\n", rig);
-        for (const std::string &reason : reasons) {
-            std::printf("  %s\n", reason.c_str());
-        }
-        return false;
-    }
-    const double bakeStart = NowMs();
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
-    std::printf("  %-22s %10.1f ms\n", "bake", NowMs() - bakeStart);
     const RigExecBakedProgram *program = evaluator.GetBakedProgram();
     if (!program) {
         std::printf("FATAL: %s built no program\n", rig);
@@ -980,8 +969,7 @@ MeasureRig(const char *rig, const UsdStageRefPtr &stage,
                 medianMean);
     std::printf("  %-22s %10zu of %zu\n", "min clusters run",
                 minClustersRun, program->GetClusterCount());
-    std::printf("  %-22s %10zu (asked %zu)\n", "baked generations",
-                evaluator.GetBakedGenerationCount(), frames + 2);
+    std::printf("  %-22s %10zu\n", "generations requested", frames + 2);
     return true;
 }
 

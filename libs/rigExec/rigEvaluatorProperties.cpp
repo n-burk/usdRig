@@ -3,6 +3,7 @@
 #include "rigEvaluatorInternal.h"
 #include "rigEvaluatorDependencies.h"
 #include "rigEvaluatorPropertyBindings.h"
+#include "crossDomainInputs.h"
 #include "movers/moverRegistry.h"
 #include "rigExecMath/propertyMath.h"
 
@@ -194,553 +195,6 @@ _ReadPinnedPropertyMathParams(
 
 } // namespace
 
-void
-RigExecRigEvaluator::_EvaluatePropertyChains(
-    UsdTimeCode time,
-    std::map<SdfPath, VtValue> *results,
-    std::vector<RigExecValueOverride> *overrides,
-    std::vector<std::string> *diagnostics)
-{
-    auto diag = [diagnostics](const std::string &message) {
-        if (diagnostics) {
-            diagnostics->push_back(message);
-        }
-    };
-
-    // The first frame of an epoch pays for the bindings; every frame after it
-    // reads through them. Built here rather than in Compile because a chain
-    // is also rebound after a notice that recompiles nothing, and "whatever
-    // the stage now says" is the only state this has to describe.
-    const auto bind = [this, time](
-                          const SdfPath &targetPath,
-                          const std::vector<_PropertyRevision> &chainRevisions) {
-        RigExecPropertyChainBindings::Chain bound;
-        bound.targetPath = targetPath;
-        bound.target = _stage->GetAttributeAtPath(bound.targetPath);
-        if (bound.target) {
-            bound.targetQuery = UsdAttributeQuery(bound.target);
-            bound.valueType = bound.target.GetTypeName();
-        }
-        for (const _PropertyRevision &revision : chainRevisions) {
-            RigExecPropertyChainBindings::Revision boundRevision;
-            bound.moverPaths.push_back(revision.moverPath);
-            boundRevision.moverPrim =
-                _stage->GetPrimAtPath(revision.moverPath);
-            const UsdPrim &mover = boundRevision.moverPrim;
-            if (mover) {
-                if (const UsdRelationship rel = mover.GetRelationship(
-                        TfToken("rigExec:weightObject"))) {
-                    rel.GetTargets(&boundRevision.weightObjects);
-                }
-            }
-            boundRevision.enabled =
-                _BindInput(mover, "inputs:enabled", time);
-            boundRevision.defaultWeight =
-                _BindInput(mover, "inputs:defaultWeight", time);
-            boundRevision.operation =
-                _BindInput(mover, "rigExec:operation", time);
-            boundRevision.value = _BindInput(mover, "inputs:value", time);
-            boundRevision.minimum = _BindInput(mover, "inputs:min", time);
-            boundRevision.maximum = _BindInput(mover, "inputs:max", time);
-            boundRevision.keys = _BindInput(mover, "inputs:keys", time);
-            boundRevision.tangents =
-                _BindInput(mover, "inputs:tangents", time);
-            bound.alwaysDirty =
-                bound.alwaysDirty || !boundRevision.weightObjects.empty();
-            for (const RigExecPropertyChainBindings::Input *input :
-                     {&boundRevision.enabled,
-                      &boundRevision.defaultWeight,
-                      &boundRevision.operation, &boundRevision.value,
-                      &boundRevision.minimum, &boundRevision.maximum,
-                      &boundRevision.keys, &boundRevision.tangents}) {
-                if (!input->attribute) {
-                    continue;
-                }
-                bound.watch.push_back(input->path);
-                if (input->constant) {
-                    continue;
-                }
-                if (!input->connected) {
-                    bound.varying = true;  // animated in place
-                    continue;
-                }
-                // Follow the connection chain the read will walk.
-                UsdAttribute a = input->attribute;
-                std::set<SdfPath> seen;
-                while (a && seen.insert(a.GetPath()).second) {
-                    bound.watch.push_back(a.GetPath());
-                    if (a.ValueMightBeTimeVarying() ||
-                        a.GetNumTimeSamples() > 0) {
-                        bound.varying = true;
-                    }
-                    SdfPathVector sources;
-                    a.GetConnections(&sources);
-                    if (sources.size() != 1) {
-                        break;
-                    }
-                    a = _stage->GetAttributeAtPath(sources[0]);
-                    if (!a) {
-                        bound.missingSources.push_back(sources[0]);
-                    }
-                }
-            }
-            bound.revisions.push_back(std::move(boundRevision));
-        }
-        if (bound.target && (bound.target.ValueMightBeTimeVarying() ||
-                             bound.target.GetNumTimeSamples() > 0)) {
-            bound.varying = true;
-        }
-        for (const RigExecPhasedConnection &connection : _phasedConnections) {
-            if (connection.target == targetPath) {
-                bound.phased.push_back(
-                    RigExecPropertyChainBindings::Chain::Phased{
-                        connection.consumer, connection.consumerType,
-                        connection.applied, connection.hops});
-            }
-        }
-        return bound;
-    };
-    // Which chains' targets each chain watches. Recomputed whole whenever a
-    // chain is (re)bound, because a rebound chain's walk may reach another
-    // target than before; the indices themselves are stable, since chains
-    // keep _propertyChainOrder's order.
-    const auto link = [](std::vector<RigExecPropertyChainBindings::Chain>
-                             *chains) {
-        std::unordered_map<SdfPath, size_t, SdfPath::Hash> chainOf;
-        for (size_t i = 0; i < chains->size(); ++i) {
-            chainOf[(*chains)[i].targetPath] = i;
-        }
-        for (size_t i = 0; i < chains->size(); ++i) {
-            RigExecPropertyChainBindings::Chain &chain = (*chains)[i];
-            chain.upstream.clear();
-            for (const SdfPath &path : chain.watch) {
-                const auto it = chainOf.find(path);
-                if (it != chainOf.end() && it->second != i) {
-                    chain.upstream.push_back(it->second);
-                }
-            }
-        }
-    };
-    if (!_propertyChainBindings) {
-        _propertyChainBindings =
-            std::make_unique<RigExecPropertyChainBindings>();
-        for (const SdfPath &orderedTarget : _propertyChainOrder) {
-            const auto chainIt = _propertyChains.find(orderedTarget);
-            if (chainIt == _propertyChains.end()) {
-                continue;
-            }
-            _propertyChainBindings->chains.push_back(
-                bind(chainIt->first, chainIt->second));
-        }
-        link(&_propertyChainBindings->chains);
-    } else if (_propertyChainBindings->anyStale) {
-        // Only what a notice reached, rebound as the first frame bound it.
-        // A rebound chain has run nothing, so it runs this frame and reports
-        // itself changed to every chain downstream of it; every other chain
-        // keeps its last answer for as long as nothing it reads moves.
-        for (RigExecPropertyChainBindings::Chain &chain :
-                 _propertyChainBindings->chains) {
-            if (chain.stale) {
-                chain = bind(chain.targetPath,
-                             _propertyChains.at(chain.targetPath));
-            }
-        }
-        _propertyChainBindings->anyStale = false;
-        link(&_propertyChainBindings->chains);
-    }
-
-    // What moved since the last run: the time, and each interactive override
-    // placed, lifted or changed in value.
-    RigExecPropertyChainBindings &bindings = *_propertyChainBindings;
-    const bool timeMoved = !bindings.haveLast || time != bindings.lastTime;
-    std::unordered_map<SdfPath, VtValue, SdfPath::Hash> nowOverrides;
-    for (const RigExecValueOverride &o : _valueInputs) {
-        if (!o.attribute.IsEmpty()) {
-            nowOverrides[o.prim.AppendProperty(o.attribute)] = o.value;
-        }
-    }
-    std::unordered_set<SdfPath, SdfPath::Hash> overrideMoved;
-    for (const auto &[path, value] : nowOverrides) {
-        const auto it = bindings.lastOverrides.find(path);
-        if (it == bindings.lastOverrides.end() || it->second != value) {
-            overrideMoved.insert(path);
-        }
-    }
-    for (const auto &[path, value] : bindings.lastOverrides) {
-        if (!nowOverrides.count(path)) {
-            overrideMoved.insert(path);
-        }
-    }
-    bindings.haveLast = true;
-    bindings.lastTime = time;
-    bindings.lastOverrides = std::move(nowOverrides);
-    const auto &overridden = bindings.lastOverrides;
-    // Whether a phased reader stands aside this run: an interactive override
-    // on its consumer or on a hop before the target is what the overlay walk
-    // meets first, so publishing the chain there would hide it.
-    const auto readerOverridden =
-        [&overridden](const RigExecPropertyChainBindings::Chain::Phased &p) {
-            for (const SdfPath &hop : p.hops) {
-                if (overridden.count(hop)) {
-                    return true;
-                }
-            }
-            return false;
-        };
-
-    // One value onto one property, through the three routes a chain result
-    // takes: the published results, the generation's resolved inputs, and
-    // the exec overrides.
-    const auto publish = [&](const SdfPath &path, const VtValue &value) {
-        if (results) {
-            (*results)[path] = value;
-        }
-        _resolvedInputs.SetProperty(path, value);
-        if (overrides) {
-            overrides->push_back(RigExecValueOverride{
-                path.GetPrimPath(), TfToken(), path.GetNameToken(), value});
-        }
-    };
-    // A chain's result at its target. A drag on the target was placed for
-    // exec before the chains as the base the result was computed from, and
-    // the result takes its place there, as it does in the resolved inputs.
-    const auto publishTarget = [&](const SdfPath &path, const VtValue &value) {
-        if (overrides && overridden.count(path)) {
-            const SdfPath prim = path.GetPrimPath();
-            const TfToken &name = path.GetNameToken();
-            overrides->erase(
-                std::remove_if(overrides->begin(), overrides->end(),
-                               [&](const RigExecValueOverride &o) {
-                                   return o.prim == prim &&
-                                          o.attribute == name;
-                               }),
-                overrides->end());
-        }
-        publish(path, value);
-    };
-
-    for (RigExecPropertyChainBindings::Chain &chain :
-             _propertyChainBindings->chains) {
-        const SdfPath &target = chain.targetPath;
-        const std::vector<RigExecPropertyChainBindings::Revision> &revisions =
-            chain.revisions;
-        if (!chain.target) {
-            diag("property chain " + target.GetString() +
-                 ": target attribute disappeared; chain skipped");
-            continue;
-        }
-        // Clean: nothing the chain reads moved, so the last answer stands.
-        // Published and reported exactly as a run would publish and report
-        // it, so no consumer can tell the difference.
-        bool dirty = !chain.cached || chain.alwaysDirty ||
-                     (chain.varying && timeMoved);
-        for (size_t k = 0; !dirty && k < chain.watch.size(); ++k) {
-            dirty = overrideMoved.count(chain.watch[k]) != 0;
-        }
-        for (size_t k = 0; !dirty && k < chain.upstream.size(); ++k) {
-            dirty = bindings.chains[chain.upstream[k]].changedThisRun;
-        }
-        // What the chain publishes also turns on overrides its inputs do
-        // not reach: one on the target, which is its base, and one on a
-        // phased reader's hops, which stands it aside. Lifting one on the
-        // target reruns the chain from the authored base.
-        if (!dirty) {
-            dirty = overrideMoved.count(target) != 0;
-            for (size_t k = 0; !dirty && k < chain.phased.size(); ++k) {
-                for (const SdfPath &hop : chain.phased[k].hops) {
-                    if (overrideMoved.count(hop)) {
-                        dirty = true;
-                        break;
-                    }
-                }
-            }
-        }
-        if (!dirty) {
-            chain.changedThisRun = false;
-            for (const std::string &line : chain.lastDiagnostics) {
-                diag(line);
-            }
-            if (chain.published) {
-                publishTarget(target, chain.lastValue);
-            }
-            for (size_t k = 0; k < chain.lastPhased.size(); ++k) {
-                if (!chain.lastPhased[k].IsEmpty()) {
-                    publish(chain.phased[k].consumer, chain.lastPhased[k]);
-                }
-            }
-            continue;
-        }
-        const size_t diagnosticsBefore =
-            diagnostics ? diagnostics->size() : 0;
-        // A drag on the target is this run's base. The target is not
-        // cleared: until the chain publishes, the drag stays where it was
-        // placed, so a skipped chain leaves every reader on the held value,
-        // as a skipped chain leaves them on that value authored.
-        const auto dragged = overridden.find(target);
-        const VtValue *const dragBase =
-            dragged != overridden.end() ? &dragged->second : nullptr;
-        // What the target and each phased reader publish this run, empty
-        // where nothing is; a reader standing aside keeps its override in
-        // place.
-        VtValue targetPublished;
-        std::vector<VtValue> phasedPublished(chain.phased.size());
-        for (const auto &phased : chain.phased) {
-            if (!readerOverridden(phased)) {
-                _resolvedInputs.ClearProperty(phased.consumer);
-            }
-        }
-        struct _Remember {
-            RigExecPropertyChainBindings::Chain &chain;
-            const VtValue &targetPublished;
-            const std::vector<VtValue> &phasedPublished;
-            std::vector<std::string> *diagnostics;
-            size_t before;
-            ~_Remember() {
-                const VtValue *now =
-                    targetPublished.IsEmpty() ? nullptr : &targetPublished;
-                const bool published = now != nullptr;
-                // A phased consumer can move while the final value does not
-                // (a clamp at the end of the chain), and a chain downstream
-                // of it has to hear about that too.
-                bool phasedMoved = false;
-                chain.lastPhased.resize(chain.phased.size());
-                for (size_t k = 0; k < chain.phased.size(); ++k) {
-                    const VtValue &current = phasedPublished[k];
-                    phasedMoved = phasedMoved ||
-                                  current != chain.lastPhased[k];
-                    chain.lastPhased[k] = current;
-                }
-                chain.changedThisRun =
-                    !chain.cached || published != chain.published ||
-                    (published && *now != chain.lastValue) || phasedMoved;
-                chain.published = published;
-                chain.lastValue = published ? *now : VtValue();
-                chain.lastDiagnostics.clear();
-                if (diagnostics) {
-                    chain.lastDiagnostics.assign(
-                        diagnostics->begin() + long(before),
-                        diagnostics->end());
-                }
-                chain.cached = true;
-            }
-        } remember{chain, targetPublished, phasedPublished, diagnostics,
-                   diagnosticsBefore};
-        RIGEXEC_PROFILE_SCOPE_CAT(
-            _profiler, "PropertyChain " + target.GetString(), "property");
-        const SdfValueTypeName &valueType = chain.valueType;
-
-        // One shared revision loop over the three value domains. Each
-        // iteration reads the mover's own authored state and applies it to
-        // the preceding revision -- the base being the target's AUTHORED
-        // value, exactly as a point chain's base is the target's authored
-        // points, or the value a drag holds on the target, which stands in
-        // for it. A drag of another value type (float and double convert)
-        // is no base, and the chain runs as though none stood.
-        auto runChain = [&](auto value, auto apply) {
-            using ValueT = decltype(value);
-            bool haveBase = false;
-            if (dragBase) {
-                const VtValue held =
-                    RigExecPhasedConsumerValue(*dragBase, valueType);
-                if (held.IsHolding<ValueT>()) {
-                    value = held.UncheckedGet<ValueT>();
-                    haveBase = true;
-                }
-            }
-            if (!haveBase && !chain.targetQuery.Get(&value, time)) {
-                diag("property chain " + target.GetString() +
-                     ": target has no authored value; chain skipped");
-                return false;
-            }
-            // The same line for a held base as for an authored one: it is
-            // what the generation says once the drag is authored.
-            if (!_IsFinite(value)) {
-                diag("property chain " + target.GetString() +
-                     ": authored base is not finite; chain skipped");
-                return false;
-            }
-            // The value after each revision, base first, so a phased
-            // consumer can read the chain where it asked to. A revision that
-            // passes through still takes its place.
-            std::vector<ValueT> history;
-            if (!chain.phased.empty()) {
-                history.reserve(revisions.size() + 1);
-            }
-            for (const RigExecPropertyChainBindings::Revision &revision :
-                     revisions) {
-                if (!chain.phased.empty()) {
-                    history.push_back(value);
-                }
-                const UsdPrim &moverPrim = revision.moverPrim;
-                if (!moverPrim) {
-                    continue;
-                }
-                const SdfPath moverPath = moverPrim.GetPath();
-                const bool enabled = _PinnedRead(
-                    _resolvedInputs, revision.enabled, true, time);
-                if (!enabled) {
-                    diag("diag " + moverPath.GetString() +
-                         ": disabled; revision passed through");
-                    continue;  // ordinary pass-through (spec §6.6)
-                }
-                float envelope = 1.0f;
-                const SdfPathVector &weightObjects = revision.weightObjects;
-                if (!weightObjects.empty()) {
-                    std::vector<float> weights;
-                    std::string error;
-                    // Reads _volumeWeightMatrices, which a baked run does
-                    // not refresh. Unreachable for a volume: a property
-                    // envelope cannot bind one (_ValidateWeightObjectDomain).
-                    if (!_ResolveWeights(weightObjects[0], 1, time,
-                                         &weights, &error) ||
-                        weights.size() != 1) {
-                        diag("diag " + moverPath.GetString() +
-                             ": " + error + "; revision passed through");
-                        continue;
-                    }
-                    envelope = weights[0];
-                } else {
-                    envelope = _PinnedRead(
-                        _resolvedInputs, revision.defaultWeight, 1.0f, time);
-                    if (!std::isfinite(envelope) || envelope < 0.0f ||
-                        envelope > 1.0f) {
-                        diag("diag " + moverPath.GetString() +
-                             ": inputs:defaultWeight must be finite and in "
-                             "[0, 1]; revision passed through");
-                        continue;
-                    }
-                }
-                ValueT next = value;
-                if (!apply(revision, value, envelope, &next)) {
-                    diag("diag " + moverPath.GetString() +
-                         ": inputs unusable; revision passed through");
-                    continue;
-                }
-                if (!_IsFinite(next)) {
-                    // A NaN reaching an exec override propagates into every
-                    // consumer of the attribute with no way to report it
-                    // back, so the mover fails and passes through instead
-                    // (spec §6.6).
-                    diag("diag " + moverPath.GetString() +
-                         ": produced a non-finite value; revision passed "
-                         "through");
-                    continue;
-                }
-                value = next;
-            }
-            // Publish immediately, not after every chain has run. Dependency
-            // ordering guarantees that any later chain which consumes this
-            // property reads the revised value.
-            targetPublished = VtValue(value);
-            publishTarget(target, targetPublished);
-            if (!chain.phased.empty()) {
-                history.push_back(value);
-                for (size_t k = 0; k < chain.phased.size(); ++k) {
-                    const auto &phased = chain.phased[k];
-                    if (readerOverridden(phased)) {
-                        continue;
-                    }
-                    phasedPublished[k] = RigExecPhasedConsumerValue(
-                        VtValue(history[std::min(phased.applied,
-                                                 revisions.size())]),
-                        phased.consumerType);
-                    publish(phased.consumer, phasedPublished[k]);
-                }
-            }
-            return true;
-        };
-
-        using BoundRevision = RigExecPropertyChainBindings::Revision;
-        const auto applyFloat = [&](const BoundRevision &mover, float in,
-                                    float envelope, float *out) {
-                RigExecPropertyMathParams<float> params;
-                if (!_ReadPinnedPropertyMathParams(
-                        _resolvedInputs, mover, time, &params) ||
-                    !_IsFinite(params.value) || !_IsFinite(params.min) ||
-                    !_IsFinite(params.max)) {
-                    return false;
-                }
-                // Held here so the borrowed key pointer outlives the apply.
-                VtArray<GfVec2f> keys;
-                VtArray<GfVec2f> tangents;
-                if (params.op == RigExecPropertyOp::Curve) {
-                    keys = _PinnedRead(
-                        _resolvedInputs, mover.keys, keys, time);
-                    if (keys.empty() || !RigExecValidateLinearKeys(
-                                            keys.cdata(), keys.size())) {
-                        return false;
-                    }
-                    params.keys = keys.cdata();
-                    params.keyCount = keys.size();
-                    if (mover.tangents) {
-                        tangents = _PinnedRead(
-                            _resolvedInputs, mover.tangents, tangents, time);
-                    }
-                    if (!tangents.empty()) {
-                        if (tangents.size() != keys.size()) {
-                            return false;
-                        }
-                        params.tangents = tangents.cdata();
-                        params.tangentCount = tangents.size();
-                    }
-                }
-                params.weight = envelope;
-                *out = RigExecApplyFloatMath(in, params);
-                return true;
-        };
-        if (valueType == SdfValueTypeNames->Float) {
-            runChain(float(0), applyFloat);
-        } else if (valueType == SdfValueTypeNames->Double) {
-            runChain(double(0), [&](const BoundRevision &mover, double in,
-                                    float envelope, double *out) {
-                float result = 0.0f;
-                if (!applyFloat(mover, float(in), envelope, &result)) {
-                    return false;
-                }
-                *out = double(result);
-                return true;
-            });
-        } else if (valueType == SdfValueTypeNames->Matrix4d) {
-            runChain(GfMatrix4d(1.0), [&](const BoundRevision &mover,
-                                          const GfMatrix4d &in,
-                                          float envelope,
-                                          GfMatrix4d *out) {
-                TfToken operation;
-                if (mover.operation) {
-                    _ReadOperation(mover.operation, &operation);
-                }
-                RigExecPropertyOp op;
-                if (!RigExecParsePropertyOp(operation, &op)) {
-                    return false;
-                }
-                const GfMatrix4d opValue = _PinnedRead(
-                    _resolvedInputs, mover.value, GfMatrix4d(1.0), time);
-                if (!_IsFinite(opValue)) {
-                    return false;
-                }
-                return RigExecApplyMatrixMath(
-                    in, op, opValue, envelope, out);
-            });
-        } else {
-            // Every remaining type the compiler admits is GfVec3f-backed.
-            runChain(GfVec3f(0), [&](const BoundRevision &mover,
-                                     const GfVec3f &in, float envelope,
-                                     GfVec3f *out) {
-                RigExecPropertyMathParams<GfVec3f> params;
-                if (!_ReadPinnedPropertyMathParams(
-                        _resolvedInputs, mover, time, &params) ||
-                    !_IsFinite(params.value) || !_IsFinite(params.min) ||
-                    !_IsFinite(params.max)) {
-                    return false;
-                }
-                params.weight = envelope;
-                *out = RigExecApplyVec3fMath(in, params);
-                return true;
-            });
-        }
-    }
-}
-
 bool
 RigExecRigEvaluator::_CompilePropertyChains(
     const std::vector<RigExecMoverRecord> &newMovers,
@@ -767,121 +221,9 @@ RigExecRigEvaluator::_CompilePropertyChains(
         }
     }
 
-    // A property chain can revise an input consumed by another property
-    // chain. Resolve those producers first; namespace/map order is unrelated
-    // to dataflow and made `/Consumer` read its authored envelope before a
-    // lexically later `/Driver` had produced the revised one.
-    {
-        std::map<SdfPath, std::set<SdfPath>> dependsOn;
-        for (const auto &[target, _] : newPropertyChains) {
-            dependsOn[target];
-        }
-
-        auto addAttributeDependency = [&](const SdfPath &consumer,
-                                          const UsdAttribute &attribute) {
-            std::set<SdfPath> visited;
-            std::function<void(const UsdAttribute &)> walk =
-                [&](const UsdAttribute &a) {
-                if (!a || !visited.insert(a.GetPath()).second) {
-                    return;
-                }
-                if (newPropertyChains.count(a.GetPath())) {
-                    dependsOn[consumer].insert(a.GetPath());
-                }
-                const SdfPathVector connections = _AuthoredConnections(a);
-                for (const SdfPath &sourcePath : connections) {
-                    walk(_stage->GetAttributeAtPath(sourcePath));
-                }
-            };
-            walk(attribute);
-        };
-        auto addPrimDependencies = [&](const SdfPath &consumer,
-                                       const UsdPrim &prim) {
-            if (!prim) {
-                return;
-            }
-            for (const UsdAttribute &attribute : prim.GetAttributes()) {
-                addAttributeDependency(consumer, attribute);
-            }
-        };
-        std::function<void(const SdfPath &, const SdfPath &,
-                           std::set<SdfPath> *)>
-            addWeightDependencies =
-                [&](const SdfPath &consumer, const SdfPath &weightPath,
-                    std::set<SdfPath> *visited) {
-                if (!visited->insert(weightPath).second) {
-                    return;
-                }
-                const UsdPrim weight = _stage->GetPrimAtPath(weightPath);
-                addPrimDependencies(consumer, weight);
-                for (const char *relationship :
-                     {"rigExec:inputWeights", "rigExec:baseWeight"}) {
-                    SdfPathVector inputs;
-                    if (const UsdRelationship rel =
-                            weight.GetRelationship(TfToken(relationship))) {
-                        rel.GetTargets(&inputs);
-                    }
-                    for (const SdfPath &input : inputs) {
-                        addWeightDependencies(consumer, input, visited);
-                    }
-                }
-            };
-
-        for (const auto &[target, revisions] : newPropertyChains) {
-            for (const _PropertyRevision &revision : revisions) {
-                const UsdPrim mover =
-                    _stage->GetPrimAtPath(revision.moverPath);
-                addPrimDependencies(target, mover);
-                SdfPathVector weights;
-                if (const UsdRelationship rel = mover.GetRelationship(
-                        TfToken("rigExec:weightObject"))) {
-                    rel.GetTargets(&weights);
-                }
-                std::set<SdfPath> visitedWeights;
-                for (const SdfPath &weight : weights) {
-                    addWeightDependencies(target, weight, &visitedWeights);
-                }
-            }
-        }
-
-        std::map<SdfPath, int> colour;
-        std::vector<SdfPath> stack;
-        std::function<bool(const SdfPath &)> visit =
-            [&](const SdfPath &target) {
-            colour[target] = 1;
-            stack.push_back(target);
-            for (const SdfPath &producer : dependsOn[target]) {
-                if (colour[producer] == 1) {
-                    std::string cycle;
-                    for (const SdfPath &path : stack) {
-                        cycle += path.GetString() + " -> ";
-                    }
-                    cycle += producer.GetString();
-                    SdfPathVector operations;
-                    const auto first = std::find(stack.begin(), stack.end(), producer);
-                    for (auto it = first; it != stack.end(); ++it) {
-                        for (const auto &revision : newPropertyChains.at(*it)) {
-                            operations.push_back(revision.moverPath);
-                        }
-                    }
-                    return fail("property input dependency cycle: " + cycle,
-                                std::move(operations));
-                }
-                if (colour[producer] == 0 && !visit(producer)) {
-                    return false;
-                }
-            }
-            stack.pop_back();
-            colour[target] = 2;
-            newPropertyChainOrder.push_back(target);
-            return true;
-        };
-        for (const auto &[target, _] : dependsOn) {
-            if (colour[target] == 0 && !visit(target)) {
-                return false;
-            }
-        }
-    }
+    // Descriptor discovery order never schedules a domain in isolation.
+    // Cross-domain producer references are linked by the common compiler.
+    for(const auto &entry:newPropertyChains) newPropertyChainOrder.push_back(entry.first);
 
     // Read phases on connections. Every connected operator input
     // (_ForEachConnectedInput) whose single-source walk -- the walk
@@ -1065,7 +407,9 @@ RigExecRigEvaluator::_CompilePropertyChains(
             if (!RigExecResolveReadPhase(input, &phase, &phaseError)) {
                 return refuse(phaseError);
             }
-            if (phase.kind == RigExecReadPhaseKind::Preceding) {
+            if (phase.kind == RigExecReadPhaseKind::Preceding &&
+                !input.HasAuthoredMetadata(TfToken(RigExecInputElementMetadataName)) &&
+                input.GetTypeName() != SdfValueTypeNames->Matrix4d) {
                 return refuse(who + " 'preceding' names no position for a "
                                     "connection; use base, final or a prim "
                                     "path");
@@ -1081,6 +425,7 @@ RigExecRigEvaluator::_CompilePropertyChains(
         // The first chain target along the single-source walk, and every
         // hop before it.
         SdfPath target;
+        bool crossDomain = false;
         SdfPathVector hops{path};
         while (hop.size() == 1 &&
                std::find(hops.begin(), hops.end(), hop[0]) == hops.end()) {
@@ -1092,14 +437,24 @@ RigExecRigEvaluator::_CompilePropertyChains(
             if (!next) {
                 break;
             }
+            crossDomain = crossDomain ||
+                (input.HasAuthoredMetadata(TfToken(RigExecInputElementMetadataName)) &&
+                 next.GetTypeName().GetType() == TfType::Find<VtVec3fArray>()) ||
+                (input.GetTypeName() == SdfValueTypeNames->Matrix4d &&
+                 next.GetTypeName() == SdfValueTypeNames->Matrix4d &&
+                 next.GetName() == TfToken("posed:space"));
             hops.push_back(hop[0]);
             hop = _AuthoredConnections(next);
         }
         if (target.IsEmpty()) {
+            if (phase.kind == RigExecReadPhaseKind::Preceding && !crossDomain) {
+                return refuse(who + " 'preceding' names no position for a "
+                                    "connection; use base, final or a prim path");
+            }
             // No math mover writes what the connection reads: base and
             // final are the same value there, and a checkpoint names a
             // revision that does not exist.
-            if (phase.kind == RigExecReadPhaseKind::AtPrim) {
+            if (phase.kind == RigExecReadPhaseKind::AtPrim && !crossDomain) {
                 refuse(who + " names " + phase.prim.GetString() +
                        ", but the connection reaches no property a math "
                        "mover writes");
@@ -1107,6 +462,10 @@ RigExecRigEvaluator::_CompilePropertyChains(
             return;
         }
         const UsdAttribute targetAttr = _stage->GetAttributeAtPath(target);
+        if (phase.kind == RigExecReadPhaseKind::Preceding) {
+            return refuse(who + " 'preceding' names no position for a "
+                                "connection; use base, final or a prim path");
+        }
         const SdfValueTypeName consumerType = input.GetTypeName();
         const SdfValueTypeName targetType =
             targetAttr ? targetAttr.GetTypeName() : SdfValueTypeName();

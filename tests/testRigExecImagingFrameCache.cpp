@@ -103,6 +103,7 @@
 #include "rigExecBake/bake.h"
 #include "rigExec/backgroundScheduler.h"
 #include "rigExec/bakedProgramImpl.h"
+#include "rigExec/goldenPose.h"
 #include "rigExec/frameCache.h"
 #include "rigExec/frameCacheSparsity.h"
 #include "rigExec/frozenContext.h"
@@ -930,7 +931,7 @@ TestPlaybackBypassesCache(
     UsdStageRefPtr stage = MakeTinyRig();
     const SdfPath rig("/Asset/Rig");
     RigExecRigEvaluator evaluator(stage, rig);
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+
     RigExecBakeOpts opts;
     opts.time = 1.0;
     RigExecBakeResult baked;
@@ -1467,7 +1468,7 @@ TestProductionTriggerPathEnqueuesAndFences()
 // the animated posed:space is what makes frames genuinely differ, and
 // per-time memos cannot cross-serve undetected.
 UsdStageRefPtr
-MakeRefusalRig()
+MakeConnectedSpaceRig()
 {
     UsdStageRefPtr stage = UsdStage::CreateInMemory();
     stage->DefinePrim(SdfPath("/Asset"), TfToken("Scope"));
@@ -1489,7 +1490,7 @@ MakeRefusalRig()
                                             TfToken("RigExecJoint"));
     joint.GetAttribute(TfToken("avars:ty")).Set(2.0);
 
-    // The refusal. The connection is to the control's own posed:space, which
+    // The connection is to the control's own posed:space, which
     // is the identity the joint would have composed anyway -- so the rig
     // still evaluates to a comparable pose, and the only thing the
     // connection changes is that a value which was an epoch constant is now
@@ -1523,7 +1524,7 @@ MakeRefusalRig()
 // The program bakes, but its weighted property chain reads a live weight
 // oracle and therefore cannot freeze its complete inputs.
 UsdStageRefPtr
-MakeUnfreezableBakedRig()
+MakePropertyChainRig()
 {
     UsdStageRefPtr stage = MakeTinyRig();
     const UsdPrim gain = stage->DefinePrim(
@@ -1552,15 +1553,15 @@ MakeUnfreezableBakedRig()
 }
 
 void
-TestUnfreezableBakedRigMemoizesCompletePoses()
+TestPropertyChainRigMemoizesCompletePoses()
 {
-    std::printf("progress: TestUnfreezableBakedRigMemoizesCompletePoses\n");
+    std::printf("progress: TestPropertyChainRigMemoizesCompletePoses\n");
     SetEnv("RIGEXEC_FRAME_CACHE", "on");
     SetEnv("RIGEXEC_FRAME_CACHE_VERIFY", "0");
     if (RigExecFrameCacheModeFromEnvironment() == RigExecFrameCacheMode::Off) {
         return;
     }
-    const UsdStageRefPtr stage = MakeUnfreezableBakedRig();
+    const UsdStageRefPtr stage = MakePropertyChainRig();
     RigExecImagingBridge bridge(stage, SdfPath("/Asset/Rig"));
     CHECK(bridge.Compile());
     std::map<double, _GenerationGeometry> live;
@@ -1570,10 +1571,10 @@ TestUnfreezableBakedRigMemoizesCompletePoses()
         live[time] = _CaptureGeometry(bridge.GetStore()->Get());
         RigExecFreshProof proof;
         CHECK(bridge.GetFreshProof(UsdTimeCode(time), &proof));
-        CHECK(!proof.sampledInputs);
+        CHECK(proof.sampledInputs);
     }
     CHECK(bridge.GetEvaluator().GetBakedProgram() != nullptr);
-    CHECK(!RigExecCanFreezeProgram(bridge.GetEvaluator()));
+    CHECK(RigExecCanFreezeProgram(bridge.GetEvaluator()));
     CHECK(!_SameGeometry(live[1.0], live[2.0]));
     for (double time : {3.0, 1.0, 4.0, 2.0}) {
         const auto result = bridge.EvaluateAndPublishResult(UsdTimeCode(time));
@@ -1592,157 +1593,54 @@ TestUnfreezableBakedRigMemoizesCompletePoses()
 }
 
 void
-TestIdleFallbackWarmsCompletePoses()
+TestSupportedSourcesWarmCompletePoses()
 {
-    std::printf("progress: TestIdleFallbackWarmsCompletePoses\n");
     SetEnv("RIGEXEC_FRAME_CACHE", "on");
     SetEnv("RIGEXEC_FRAME_CACHE_VERIFY", "0");
-    if (!RigExecBackgroundWarmingEnabled()) {
-        return;
-    }
+    if (!RigExecBackgroundWarmingEnabled()) return;
     const SdfPath rig("/Asset/Rig");
     const std::vector<double> range{1.0, 2.0, 3.0, 4.0};
     auto &registry = RigExecImagingRegistry::GetInstance();
-    for (bool baked : {false, true}) {
-        const auto stage = baked ? MakeUnfreezableBakedRig() : MakeRefusalRig();
-        const UsdAttribute unrelated = stage->DefinePrim(SdfPath("/Unrelated"))
-            .CreateAttribute(TfToken("value"), SdfValueTypeNames->Double);
-        unrelated.Set(0.0);
+    for (bool propertyChain : {false, true}) {
+        const auto stage = propertyChain ? MakePropertyChainRig() : MakeConnectedSpaceRig();
         std::string sourceBefore;
         stage->GetRootLayer()->ExportToString(&sourceBefore);
         RigExecImagingBridge reference(stage, rig);
         CHECK(reference.Compile());
-        std::map<double, _GenerationGeometry> live;
+        std::map<double, _GenerationGeometry> expected;
         for (double time : range) {
             CHECK(reference.EvaluateAndPublishResult(UsdTimeCode(time)).ok);
-            live[time] = _CaptureGeometry(reference.GetStore()->Get());
+            expected[time] = _CaptureGeometry(reference.GetStore()->Get());
         }
+        CHECK(RigExecCanFreezeProgram(reference.GetEvaluator()));
         std::vector<std::string> errors;
         CHECK(registry.Activate(stage, rig, UsdTimeCode(1.0), &errors));
         CHECK(registry.SetWarmRange(rig, range));
         const auto snapshot = registry.GetStore()->Get();
-        const size_t before = registry.GetSessionEvaluationCount(rig);
-        for (int tick = 0; tick != 3; ++tick) {
-            CHECK(registry.OnIdle() == 0);
-            CHECK(registry.GetStore()->Get() == snapshot);
-            CHECK(registry.GetSessionEvaluationCount(rig) == before + tick + 1);
+        for (int tick = 0; tick != 8; ++tick) {
+            registry.OnIdle();
+            registry.WaitUntilBackgroundIdle();
         }
-        for (const auto state : registry.GetFrameStates(rig, range)) {
+        CHECK(registry.GetStore()->Get() == snapshot);
+        for (auto state : registry.GetFrameStates(rig, range)) {
             CHECK(state == RigExecWarmFrameState::Cached);
         }
-        CHECK(registry.OnIdle() == 0);
-        CHECK(registry.GetSessionEvaluationCount(rig) == before + 3);
-        // Exhaust the bounded proof table without evicting cached poses.
-        // Serial-keyed entries remain directly reachable through the index.
-        RigExecFrameInputs unrelatedInputs;
-        for (int i = 0; i != 1100; ++i) {
-            registry.GetBridge(rig)->NoteWarmingEnqueued(
-                UsdTimeCode(1000.0 + i), 1, 1, unrelatedInputs);
-        }
-        RigExecFreshProof retired;
-        CHECK(!registry.GetBridge(rig)->GetFreshProof(UsdTimeCode(2.0), &retired));
-        for (double time : {2.0, 4.0, 3.0, 1.0}) {
+        for (double time : range) {
             CHECK(registry.SetTime(UsdTimeCode(time)));
-            CHECK(_SameGeometry(live[time], _CaptureGeometry(registry.GetStore()->Get())));
+            CHECK(_SameGeometry(expected[time], _CaptureGeometry(registry.GetStore()->Get())));
         }
-        CHECK(registry.GetSessionEvaluationCount(rig) == before + 3);
         std::string sourceAfter;
         stage->GetRootLayer()->ExportToString(&sourceAfter);
-        CHECK(sourceAfter == sourceBefore);
-
-        // Clear preserves the selected range. Idle fills even the held
-        // playhead, without a new range request or snapshot publication.
-        registry.ClearFrameCache(rig);
-        const auto clearedPlayhead = registry.GetStore()->Get();
-        const size_t cleared = registry.GetSessionEvaluationCount(rig);
-        const size_t progress = registry.GetWarmingProgressCount();
-        const size_t factories = registry.GetBackgroundStats().factoryInvocations;
-        for (int tick = 0; tick != 4; ++tick) {
-            CHECK(registry.OnIdle() == 0);
-            CHECK(registry.GetStore()->Get() == clearedPlayhead);
-        }
-        CHECK(registry.GetSessionEvaluationCount(rig) == cleared + 4);
-        CHECK(registry.GetWarmingProgressCount() == progress + 4 +
-              registry.GetBackgroundStats().factoryInvocations - factories);
-        for (const auto state : registry.GetFrameStates(rig, range)) {
-            CHECK(state == RigExecWarmFrameState::Cached);
-        }
-
-        // Disabling warming and an active manipulation each prevent the
-        // synchronous fallback, just as they prevent worker warming.
-        registry.ClearFrameCache(rig);
-        SetEnv("RIGEXEC_FRAME_CACHE", "warm-off");
-        const size_t disabled = registry.GetSessionEvaluationCount(rig);
-        CHECK(registry.OnIdle() == 0);
-        CHECK(registry.GetSessionEvaluationCount(rig) == disabled);
-        SetEnv("RIGEXEC_FRAME_CACHE", "on");
-        CHECK(registry.BeginPreview(baked ? "/Asset/Rig/AlongX.avars:tx"
-                                          : "/Asset/Rig/Root.avars:tx") == 1);
-        const size_t preview = registry.GetSessionEvaluationCount(rig);
-        CHECK(registry.OnIdle() == 0);
-        CHECK(registry.GetSessionEvaluationCount(rig) == preview);
-        CHECK(registry.EndPreview());
-        for (int tick = 0; tick != 3; ++tick) {
-            registry.OnIdle();
-        }
-        // Edit a frozen-unsupported input, then fill and read its revised
-        // pose without either publishing the idle frame or pulling live.
-        if (baked) {
-            stage->GetAttributeAtPath(SdfPath("/Asset/Rig/Movers/TxGain.inputs:value"))
-                .Set(8.0f, UsdTimeCode(2.0));
-        } else {
-            GfMatrix4d space(1.0);
-            space.SetTranslate(GfVec3d(999.0, 0, 0));
-            stage->GetAttributeAtPath(SdfPath("/Asset/Rig/Root.posed:space"))
-                .Set(space, UsdTimeCode(2.0));
-        }
-        const auto editedPlayhead = registry.GetStore()->Get();
-        for (int tick = 0; tick != 3; ++tick) {
-            registry.OnIdle();
-            CHECK(registry.GetStore()->Get() == editedPlayhead);
-        }
-        for (const auto state : registry.GetFrameStates(rig, range)) {
-            CHECK(state == RigExecWarmFrameState::Cached);
-        }
-        const size_t rewarmed = registry.GetSessionEvaluationCount(rig);
-        CHECK(registry.SetTime(UsdTimeCode(2.0)));
-        CHECK(registry.GetSessionEvaluationCount(rig) == rewarmed);
-        CHECK(!_SameGeometry(live[2.0], _CaptureGeometry(registry.GetStore()->Get())));
-        CHECK(reference.EvaluateAndPublishResult(UsdTimeCode(2.0)).ok);
-        CHECK(_SameGeometry(_CaptureGeometry(reference.GetStore()->Get()),
-                            _CaptureGeometry(registry.GetStore()->Get())));
-        // Opaque keys include the stage serial, so even an unrelated edit
-        // must retire their green index rows and permit automatic refill.
-        const auto beforeUnrelated = registry.GetStore()->Get();
-        const size_t beforeUnrelatedPulls = registry.GetSessionEvaluationCount(rig);
-        unrelated.Set(1.0);
-        CHECK(registry.GetStore()->Get() == beforeUnrelated);
-        for (const auto state : registry.GetFrameStates(rig, range)) {
-            CHECK(state == RigExecWarmFrameState::Dirty);
-        }
-        for (int tick = 0; tick != 4; ++tick) {
-            CHECK(registry.OnIdle() == 0);
-            CHECK(registry.GetStore()->Get() == beforeUnrelated);
-        }
-        CHECK(registry.GetSessionEvaluationCount(rig) == beforeUnrelatedPulls + 4);
-        for (const auto state : registry.GetFrameStates(rig, range)) {
-            CHECK(state == RigExecWarmFrameState::Cached);
-        }
-        CHECK(registry.SetTime(UsdTimeCode(1.0)));
-        CHECK(registry.GetSessionEvaluationCount(rig) == beforeUnrelatedPulls + 4);
+        CHECK(sourceBefore == sourceAfter);
         registry.Deactivate();
     }
 }
 
-// D7 end to end: a bake-refusal rig memoizes the UI thread's own live
-// evaluations and serves repeats with zero evaluator pulls, while no
-// background job is ever created for it -- and a value edit retires the
-// time-keyed memos, so the next visit evaluates live and serves the edited
-// pose rather than a stale one.
+// Connected source-space values participate in cache keys and edit invalidation.
 void
-TestRefusalRigMemoizesUiThreadResults()
+TestConnectedSpaceRigMemoizesResults()
 {
-    std::printf("progress: TestRefusalRigMemoizesUiThreadResults\n");
+    std::printf("progress: TestConnectedSpaceRigMemoizesResults\n");
     std::fflush(stdout);
     SetEnv("RIGEXEC_FRAME_CACHE", "on");
     SetEnv("RIGEXEC_FRAME_CACHE_VERIFY", "0");
@@ -1750,60 +1648,17 @@ TestRefusalRigMemoizesUiThreadResults()
     const bool readsOn =
         RigExecFrameCacheModeFromEnvironment() != RigExecFrameCacheMode::Off;
 
-    // The fixture still refuses the bake: without this, the "zero jobs"
-    // assertions below would pass on a rig that warms.
-    {
-        UsdStageRefPtr probeStage = MakeRefusalRig();
-        RigExecRigEvaluator probe(probeStage, SdfPath("/Asset/Rig"));
-        probe.SetEvaluationMode(RigExecEvaluationMode::Baked);
-        std::vector<std::string> errors;
-        CHECK(probe.Compile(&errors));
-        std::vector<std::string> reasons;
-        CHECK(!probe.IsBakeable(&reasons));
-        CHECK(!reasons.empty());
-        bool named = false;
-        for (const std::string &reason : reasons) {
-            if (reason.find("connected posed:space") != std::string::npos) {
-                named = true;
-            }
-        }
-        CHECK(named);
-    }
-
-    UsdStageRefPtr stage = MakeRefusalRig();
+    UsdStageRefPtr stage = MakeConnectedSpaceRig();
     const SdfPath rig("/Asset/Rig");
     RigExecImagingRegistry &registry = RigExecImagingRegistry::GetInstance();
     std::vector<std::string> errors;
     CHECK(registry.Activate(stage, rig, UsdTimeCode(1.0), &errors));
     CHECK(registry.GetSessionEvaluationCount(rig) == 1);
 
-    // No background job for a refusal rig, by every route: direct builds
-    // (injected and production runners) decline, and both triggers enqueue
-    // nothing while the pool sits idle.
-    const RigExecFrameGeneration gen = registry.CurrentFrameGeneration(rig);
-    const RigExecWarmFactoryResult refusedInjected =
-        registry.BuildWarmWork(rig, UsdTimeCode(2.0), gen, _TestKernel);
-    CHECK(!refusedInjected.work);
-    CHECK(refusedInjected.skip == RigExecWarmSkipReason::D7Exempt);
-    const RigExecWarmFactoryResult refusedProduction =
-        registry.BuildWarmWork(
-            rig, UsdTimeCode(2.0), gen, RigExecFrozenStepRunner());
-    CHECK(!refusedProduction.work);
-    CHECK(refusedProduction.skip == RigExecWarmSkipReason::D7Exempt);
-    CHECK(!refusedProduction.detail.empty());
-    CHECK(registry.GetLastWarmSkipReason(rig) ==
-          RigExecWarmSkipReason::D7Exempt);
-    CHECK(registry.GetLastWarmSkipDetail(rig) == refusedProduction.detail);
-    const RigExecBackgroundSchedulerStats bgBefore =
-        registry.GetBackgroundStats();
-    CHECK(registry.OnEditCommitted() == 0);
-    CHECK(registry.OnIdle() == 0);
-    CHECK(registry.OnEditCommitted(_TestKernel) == 0);
-    CHECK(registry.OnIdle(_TestKernel) == 0);
-    const RigExecBackgroundSchedulerStats bgAfter =
-        registry.GetBackgroundStats();
-    CHECK(bgAfter.completed == bgBefore.completed);
-    CHECK(bgAfter.queuedDepth == 0 && bgAfter.running == 0);
+    const auto work = registry.BuildWarmWork(
+        rig, UsdTimeCode(2.0), registry.CurrentFrameGeneration(rig),
+        RigExecFrozenStepRunner());
+    CHECK(work.work);
 
     // Cold pass: every new frame evaluates live and memoizes.
     std::map<double, _GenerationGeometry> firstPass;
@@ -1818,7 +1673,7 @@ TestRefusalRigMemoizesUiThreadResults()
     // Sensitivity: frames genuinely differ, so a memo served at the wrong
     // frame would be caught by the geometry comparisons below.
     if (_SameGeometry(firstPass[1.0], firstPass[2.0])) {
-        std::printf("refusal frames do not differ: the rig is static\n");
+        std::printf("connected-space frames do not differ: the rig is static\n");
         CHECK(false);
     }
     const RigExecFrameCacheStats coldStats =
@@ -1826,6 +1681,9 @@ TestRefusalRigMemoizesUiThreadResults()
     if (readsOn) {
         CHECK(coldStats.published == 4);
         CHECK(coldStats.hits == 0);
+        // The explicitly built but unrun frame2 job installed its fresh
+        // input proof. The cold proven-key consultation misses once.
+        CHECK(coldStats.misses == 1);
     } else {
         CHECK(coldStats.published == 0);
     }
@@ -1838,7 +1696,7 @@ TestRefusalRigMemoizesUiThreadResults()
         const _GenerationGeometry now =
             _CaptureGeometry(registry.GetStore()->Get());
         if (!_SameGeometry(firstPass[frame], now)) {
-            std::printf("refusal generation differs at frame %g\n", frame);
+            std::printf("connected-space generation differs at frame %g\n", frame);
             CHECK(false);
         }
     }
@@ -1853,12 +1711,11 @@ TestRefusalRigMemoizesUiThreadResults()
     } else {
         CHECK(pulls == 4);
         CHECK(warmStats.hits == revisits);
-        // No store miss was ever counted: the lookup runs only under a
-        // freshness proof, and every proven lookup hit.
-        CHECK(warmStats.misses == 0);
+        // Warm revisits add no misses to the earlier cold consultation.
+        CHECK(warmStats.misses == coldStats.misses);
     }
 
-    // An edit retires the refusal memos: the stage-edit serial folded into
+    // An edit retires the connected-space memos: the stage-edit serial folded into
     // the digest moves at every frame, so the next visit evaluates live,
     // serves the edited pose, and memoizes it again.
     if (readsOn && !verify) {
@@ -1881,7 +1738,7 @@ TestRefusalRigMemoizesUiThreadResults()
         const _GenerationGeometry edited =
             _CaptureGeometry(registry.GetStore()->Get());
         if (_SameGeometry(firstPass[2.0], edited)) {
-            std::printf("refusal edit did not move the frame-2 pose\n");
+            std::printf("connected-space edit did not move the frame-2 pose\n");
             CHECK(false);
         }
         // And the edited pose memoizes: a scrub away and back is free.
@@ -1892,7 +1749,7 @@ TestRefusalRigMemoizesUiThreadResults()
         const _GenerationGeometry again =
             _CaptureGeometry(registry.GetStore()->Get());
         if (!_SameGeometry(edited, again)) {
-            std::printf("refusal re-memoized pose differs at frame 2\n");
+            std::printf("connected-space re-memoized pose differs at frame 2\n");
             CHECK(false);
         }
     }
@@ -2709,53 +2566,49 @@ TestWarmRangeCursorSkipsVisited()
     registry.Deactivate();
 }
 
-// CURSOR. A refusal (D7) rig never counts visited: no factory, no
-// completions, no invocations -- across repeated triggers over a set range.
-// (Frame 2.0 reads Cached: Activate's initial evaluation memoized it
-// through the live path, a genuine cached frame for the strip. The null
-// factory takes no per-frame verdicts, so no streaks advance and the
-// cursor keeps proposing; each trigger instead records the session-level
-// D7Exempt skip, naming the cause without warming anything.)
+// Connected source-space rigs warm through the production graph runner.
 void
-TestRefusalRigNeverCountsVisited()
+TestConnectedSpaceRigWarmsRange()
 {
-    std::printf("progress: TestRefusalRigNeverCountsVisited\n");
-    std::fflush(stdout);
     SetEnv("RIGEXEC_FRAME_CACHE", "on");
     SetEnv("RIGEXEC_FRAME_CACHE_VERIFY", "0");
+    if (!RigExecBackgroundWarmingEnabled()) return;
     const SdfPath rig("/Asset/Rig");
-    RigExecImagingRegistry &registry = RigExecImagingRegistry::GetInstance();
-    std::vector<std::string> errors;
-    UsdStageRefPtr stage = MakeRefusalRig();
-    CHECK(registry.Activate(stage, rig, UsdTimeCode(2.0), &errors));
-    if (!RigExecBackgroundWarmingEnabled()) {
+    const std::vector<double> range{1.0, 2.0, 3.0, 4.0};
+    auto &registry = RigExecImagingRegistry::GetInstance();
+    for (bool propertyChain : {false}) {
+        const auto stage = propertyChain ? MakePropertyChainRig() : MakeConnectedSpaceRig();
+        std::string sourceBefore;
+        stage->GetRootLayer()->ExportToString(&sourceBefore);
+        RigExecImagingBridge reference(stage, rig);
+        CHECK(reference.Compile());
+        std::map<double, _GenerationGeometry> expected;
+        for (double time : range) {
+            CHECK(reference.EvaluateAndPublishResult(UsdTimeCode(time)).ok);
+            expected[time] = _CaptureGeometry(reference.GetStore()->Get());
+        }
+        CHECK(RigExecCanFreezeProgram(reference.GetEvaluator()));
+        std::vector<std::string> errors;
+        CHECK(registry.Activate(stage, rig, UsdTimeCode(1.0), &errors));
+        CHECK(registry.SetWarmRange(rig, range));
+        const auto snapshot = registry.GetStore()->Get();
+        for (int tick = 0; tick != 8; ++tick) {
+            registry.OnIdle();
+            registry.WaitUntilBackgroundIdle();
+        }
+        CHECK(registry.GetStore()->Get() == snapshot);
+        for (auto state : registry.GetFrameStates(rig, range)) {
+            CHECK(state == RigExecWarmFrameState::Cached);
+        }
+        for (double time : range) {
+            CHECK(registry.SetTime(UsdTimeCode(time)));
+            CHECK(_SameGeometry(expected[time], _CaptureGeometry(registry.GetStore()->Get())));
+        }
+        std::string sourceAfter;
+        stage->GetRootLayer()->ExportToString(&sourceAfter);
+        CHECK(sourceBefore == sourceAfter);
         registry.Deactivate();
-        return;
     }
-    CHECK(registry.SetWarmRange(rig, {1.0, 2.0, 3.0, 4.0}));
-    const size_t invocationsBefore =
-        registry.GetBackgroundStats().factoryInvocations;
-    for (int i = 0; i < 5; ++i) {
-        CHECK(registry.OnIdle(_TestKernel) == 0);
-        registry.WaitUntilBackgroundIdle();
-    }
-    CHECK(registry.GetBackgroundStats().factoryInvocations ==
-          invocationsBefore);
-    // The session-level verdict: a factory-less trigger names its cause.
-    CHECK(registry.GetLastWarmSkipReason(rig) ==
-          RigExecWarmSkipReason::D7Exempt);
-    CHECK(!registry.GetLastWarmSkipDetail(rig).empty());
-    {
-        const std::vector<RigExecWarmFrameState> got =
-            registry.GetFrameStates(rig, {1.0, 2.0, 3.0, 4.0});
-        CHECK(got.size() == 4);
-        CHECK(got[0] == RigExecWarmFrameState::Uncached);
-        CHECK(got[1] == RigExecWarmFrameState::Cached);
-        CHECK(got[2] == RigExecWarmFrameState::Uncached);
-        CHECK(got[3] == RigExecWarmFrameState::Uncached);
-    }
-    registry.ClearFrameCache(rig);
-    registry.Deactivate();
 }
 
 // INDEX. Non-publish streaks: declined-invalid finishes and reasoned skips
@@ -2811,12 +2664,61 @@ TestWarmFrameStreaks()
     CHECK(index.IsVisitable(rig, 2.0, 4, 7));
 }
 
+// Progress is bounded to a request and never grants a cache hit. Eviction,
+// failure, late request tokens, epoch changes and cancellation are distinct.
+void TestWarmRangeProgress()
+{
+    RigExecWarmFrameIndex index;
+    const SdfPath rig("/Asset/Rig");
+    const RigExecFrameCacheKey key{7, 9};
+    index.NoteGeneration(rig, 3);
+    index.SetRequest(rig, {1.0, 2.0}, 3, 7);
+    const uint64_t first = index.RequestToken(rig);
+    index.NoteCompleted(rig, 1.0, key, 3);
+    index.NoteRequestPublished(rig, 1.0, key, 3, first);
+    index.NoteEvicted(rig, key, 1.0);
+    CHECK(index.State(rig, 1.0, 3, 7) == RigExecWarmFrameState::Uncached);
+    RigExecFrameCacheKey found;
+    CHECK(!index.FindCachedKey(rig, 1.0, 3, 7, &found));
+    CHECK(index.IsVisitable(rig, 1.0, 3, 7)); // explicit foreground miss
+    CHECK(!index.IsCursorVisitable(rig, 1.0, 3, 7)); // finite range progressed
+    CHECK(index.IsCursorVisitable(rig, 2.0, 3, 7)); // never published
+    CHECK(index.IsCursorVisitable(rig, 1.0, 3, 8)); // different epoch
+    index.InvalidateRequest(rig);
+    index.NoteRequestPublished(rig, 1.0, key, 3, first); // late fenced job
+    CHECK(index.IsCursorVisitable(rig, 1.0, 3, 7));
+    const uint64_t second = index.RequestToken(rig);
+    index.NoteRequestPublished(rig, 1.0, key, 2, second); // stale generation
+    CHECK(index.IsCursorVisitable(rig, 1.0, 3, 7));
+    index.NoteRequestPublished(rig, 1.0, key, 3, second);
+    CHECK(!index.IsCursorVisitable(rig, 1.0, 3, 7));
+    index.NoteDirtied(rig, 1.0); // source change after eviction still matters
+    CHECK(index.IsCursorVisitable(rig, 1.0, 3, 7));
+    index.SetRequest(rig, {2.0}, 3, 7);
+    index.NoteRequestPublished(rig, 1.0, key, 3, index.RequestToken(rig));
+    CHECK(index.IsCursorVisitable(rig, 1.0, 3, 7)); // outside request ignored
+    RigExecWarmTransition failed;
+    failed.rig = rig; failed.timeValue = 2.0;
+    failed.kind = RigExecWarmTransitionKind::Finished;
+    failed.outcome = RigExecWarmOutcome::DeclinedInvalid;
+    index.NoteTransition(failed);
+    CHECK(index.IsCursorVisitable(rig, 2.0, 3, 7)); // failure is not progress
+    index.NoteGeneration(rig, 4);
+    index.NoteRequestPublished(rig, 2.0, key, 3, index.RequestToken(rig));
+    CHECK(index.IsCursorVisitable(rig, 2.0, 4, 7));
+    index.NoteRequestPublished(rig, 2.0, key, 4, index.RequestToken(rig));
+    CHECK(!index.IsCursorVisitable(rig, 2.0, 4, 7)); // recovery
+    index.ResetRig(rig);
+    CHECK(index.RequestToken(rig) == 0);
+    CHECK(index.IsCursorVisitable(rig, 2.0, 4, 7));
+}
+
 // STACK. The full-range cursor over the layered stack anim: a registry-level
 // idle driver (the headless shape of the plugin's recurring driver) warms
 // every in-range frame -- published grows once per warmed frame, no trigger
 // exceeds the sampling budget, the stack declines nothing, warmed frames
-// serve a full scrub without evaluating, and warmed poses are bit-identical
-// to live.
+// each published job result reads back exactly, retained entries serve
+// without evaluating, and spread background poses are bit-identical to live.
 void
 TestStackFullRangeCursorWarmsEveryFrame(const std::string &examplesDir)
 {
@@ -2867,9 +2769,115 @@ TestStackFullRangeCursorWarmsEveryFrame(const std::string &examplesDir)
     }
     std::vector<std::string> errors;
     CHECK(registry.Activate(stage, rig, UsdTimeCode(start), &errors));
-    // Every warmed frame must stay resident under the default cap.
+    // Every requested frame must actually publish and its full job result
+    // must survive cache transport exactly before any later eviction.
+    // Only compact keys/counts survive the callback, not 200 full poses.
+    struct PublishedFrame {
+        RigExecFrameCacheKey key{0, 0};
+        size_t count = 0;
+    };
+    const std::vector<double> spots = {
+        frames[frames.size() / 4], frames[frames.size() / 2],
+        frames[3 * frames.size() / 4]};
+    std::map<double, uint64_t> backgroundDigests;
+    const auto poseDigest = [](const RigExecRigPose &pose, uint64_t *digest) {
+        std::vector<RigExecGoldenValue> values;
+        if (!RigExecEncodeGoldenPose(pose, &values)) return false;
+        *digest = RigExecGoldenDigest(RigExecGoldenVisit(
+            "background-native", 0, pose, values, true));
+        return true;
+    };
+    struct PublicationCell {
+        std::atomic<uint8_t> state{0}; // one claim; release-ready after payload
+        std::atomic<size_t> count{0};
+        RigExecFrameCacheKey key{0, 0};
+        uint64_t digest = 0;
+        bool exact = false;
+        bool encoded = false;
+        bool spot = false;
+    };
+    static_assert(std::atomic<uint8_t>::is_always_lock_free &&
+                  std::atomic<size_t>::is_always_lock_free,
+                  "publication observations must not introduce hidden locks");
+    std::unique_ptr<PublicationCell[]> publicationCells(new PublicationCell[frames.size()]);
+    std::map<double, PublishedFrame> publications; // owner only
+    std::atomic<bool> publicationFailure{false};
+    static_assert(std::atomic<bool>::is_always_lock_free,
+                  "publication failure flag must be lock-free");
+    const auto mergePublications = [&]() {
+        for (size_t i = 0; i < frames.size(); ++i) {
+            const auto &cell = publicationCells[i];
+            if (cell.state.load(std::memory_order_acquire) != 2) continue;
+            if (cell.spot && cell.exact && cell.encoded)
+                backgroundDigests[frames[i]] = cell.digest;
+            if (cell.exact) {
+                auto &row = publications[frames[i]];
+                row.key = cell.key;
+                row.count = cell.count.load(std::memory_order_relaxed);
+            }
+        }
+    };
+    const RigExecFrameGeneration generation = registry.CurrentFrameGeneration(rig);
+    registry.SetWarmPublishObserverForTesting(
+        [&](const SdfPath &publishedRig, UsdTimeCode time,
+            const RigExecFrameCacheKey &key, RigExecFrameGeneration token,
+            const RigExecRigPose &result,
+            const std::shared_ptr<RigExecFrameCache> &cache) {
+            if (!time.IsNumeric()) {
+                publicationFailure.store(true, std::memory_order_relaxed);
+                return;
+            }
+            const auto position = std::lower_bound(frames.begin(), frames.end(), time.GetValue());
+            if (position == frames.end() || *position != time.GetValue()) {
+                publicationFailure.store(true, std::memory_order_relaxed);
+                return;
+            }
+            auto &cell = publicationCells[size_t(position - frames.begin())];
+            cell.count.fetch_add(1, std::memory_order_relaxed);
+            uint8_t empty = 0;
+            if (!cell.state.compare_exchange_strong(empty, uint8_t(1),
+                    std::memory_order_relaxed, std::memory_order_relaxed)) {
+                // Duplicate observation never blocks or overwrites payload.
+                publicationFailure.store(true, std::memory_order_relaxed);
+                return;
+            }
+            RigExecRigPose served, comparison;
+            const bool found = cache && cache->Lookup(key, &served);
+            if (found) RigExecComparePoses(result, served, &comparison);
+            const bool exact = publishedRig == rig && time.IsNumeric() &&
+                token == generation && result.valid && found && served.valid &&
+                result.time == time && served.time == time &&
+                comparison.comparisonMismatches == 0 &&
+                std::binary_search(frames.begin(), frames.end(), time.GetValue());
+            uint64_t digest = 0;
+            const bool spot = std::find(spots.begin(), spots.end(),
+                time.GetValue()) != spots.end();
+            const bool encoded = !spot || poseDigest(result, &digest);
+            cell.key = key;
+            cell.digest = digest;
+            cell.spot = spot;
+            cell.exact = exact;
+            cell.encoded = encoded;
+            if (!encoded || !exact) publicationFailure.store(true, std::memory_order_relaxed);
+            cell.state.store(2, std::memory_order_release);
+        });
+    // Activate published the playhead natively. Run one genuine default
+    // closure for that same input/time to verify its cache transport too;
+    // the range cursor correctly never queues the playhead itself.
+    RigExecWarmFactoryResult playheadWork = registry.BuildWarmWork(
+        rig, UsdTimeCode(start), generation, RigExecFrozenStepRunner());
+    CHECK(static_cast<bool>(playheadWork.work));
+    RigExecWarmRequest playheadRequest;
+    playheadRequest.rig = rig;
+    playheadRequest.time = UsdTimeCode(start);
+    playheadRequest.generation = generation;
+    playheadRequest.fenceToken = registry.CurrentFenceToken(rig, UsdTimeCode(start));
+    if (playheadWork.work)
+        CHECK(playheadWork.work(playheadRequest) == RigExecWarmOutcome::Published);
+    // The 1 GiB logical cap deliberately cannot retain all 200 stack frames.
     if (!registry.SetWarmRange(rig, frames)) {
         CHECK(false);
+        registry.SetWarmPublishObserverForTesting({});
         registry.Deactivate();
         return;
     }
@@ -2885,44 +2893,31 @@ TestStackFullRangeCursorWarmsEveryFrame(const std::string &examplesDir)
     }
     const RigExecBackgroundSchedulerStats before =
         registry.GetBackgroundStats();
-    // The recurring-driver shape: tick, drain, re-query, until every frame
-    // is cached or the bound trips (a stuck frame fails loudly below).
+    // Drive the existing scheduler until all unique requested publications
+    // have been verified, rather than reheating already completed evictions.
     const size_t maxTicks = frames.size() + 8;
     size_t ticks = 0;
     for (; ticks < maxTicks; ++ticks) {
-        const std::vector<RigExecWarmFrameState> states =
-            registry.GetFrameStates(rig, frames);
-        CHECK(states.size() == frames.size());
-        bool allCached = states.size() == frames.size();
-        for (const RigExecWarmFrameState state : states) {
-            allCached = allCached && state == RigExecWarmFrameState::Cached;
-        }
-        if (allCached) {
-            break;
-        }
+        mergePublications();
+        if (publications.size() == frames.size()) break;
         const size_t invocationsBefore =
             registry.GetBackgroundStats().factoryInvocations;
         const int enqueued = registry.OnIdle();
         CHECK(enqueued >= 0);
-        CHECK(enqueued >= 0 &&
-              static_cast<size_t>(enqueued) <= budget);
+        CHECK(enqueued >= 0 && static_cast<size_t>(enqueued) <= budget);
         CHECK(registry.GetBackgroundStats().factoryInvocations -
-                  invocationsBefore <=
-              budget);
+                  invocationsBefore <= budget);
         registry.WaitUntilBackgroundIdle();
     }
     CHECK(ticks < maxTicks);
-    {
-        const std::vector<RigExecWarmFrameState> states =
-            registry.GetFrameStates(rig, frames);
-        CHECK(states.size() == frames.size());
-        for (size_t i = 0; i < states.size() && i < frames.size(); ++i) {
-            if (states[i] != RigExecWarmFrameState::Cached) {
-                std::printf("frame %g never cached (state %d)\n", frames[i],
-                            int(states[i]));
-                CHECK(false);
-            }
-        }
+    registry.SetWarmPublishObserverForTesting({}); // all jobs drained
+    mergePublications();
+    CHECK(!publicationFailure.load(std::memory_order_relaxed));
+    CHECK(publications.size() == frames.size());
+    for (const double time : frames) {
+        const auto found = publications.find(time);
+        CHECK(found != publications.end());
+        if (found != publications.end()) CHECK(found->second.count == 1);
     }
     const RigExecBackgroundSchedulerStats stats =
         registry.GetBackgroundStats();
@@ -2933,40 +2928,68 @@ TestStackFullRangeCursorWarmsEveryFrame(const std::string &examplesDir)
     CHECK(stats.completed - before.completed ==
           stats.published - before.published);
     CHECK(stats.queuedDepth == 0 && stats.running == 0);
-    // A full scrub serves without evaluating: every SetTime hits (the first
-    // may be a same-frame no-op that reads nothing).
+    const RigExecFrameCacheStats cacheStats = registry.GetFrameCacheStats(rig);
+    CHECK(cacheStats.bytes <= kRigExecFrameCacheDefaultByteCap);
+    CHECK(cacheStats.evictions > 0);
+    CHECK(cacheStats.entryCount < frames.size());
+    // Still-resident publications must serve without an evaluator pull.
+    // Progress alone is never considered cached: evicted frames are absent.
+    const auto retained = registry.GetCompletedKeys(rig);
+    CHECK(retained.size() == cacheStats.entryCount);
     const size_t evalsBefore = registry.GetSessionEvaluationCount(rig);
     const size_t hitsBefore = registry.GetFrameCacheStats(rig).hits;
-    for (const double frame : frames) {
-        CHECK(registry.SetTime(UsdTimeCode(frame)));
+    for (const auto &[time, key] : retained) {
+        const auto found = publications.find(time.GetValue());
+        CHECK(found != publications.end());
+        if (found != publications.end()) CHECK(found->second.key == key);
+        CHECK(registry.SetTime(time));
     }
     CHECK(registry.GetSessionEvaluationCount(rig) == evalsBefore);
     const size_t hits = registry.GetFrameCacheStats(rig).hits - hitsBefore;
-    CHECK(hits == frames.size() || hits + 1 == frames.size());
+    CHECK(hits == retained.size() || hits + 1 == retained.size());
     // Warmed-vs-live bit identity on three spread frames: capture warmed,
     // clear, re-evaluate live, compare exactly.
-    const std::vector<double> spots = {
-        frames[frames.size() / 4], frames[frames.size() / 2],
-        frames[3 * frames.size() / 4]};
     std::map<double, _GenerationGeometry> warmed;
+    size_t spotMisses = 0;
     for (const double frame : spots) {
+        const auto state = registry.GetFrameStates(rig, {frame});
+        CHECK(state.size() == 1);
+        if (state.size() == 1 && state[0] != RigExecWarmFrameState::Cached)
+            ++spotMisses;
         CHECK(registry.SetTime(UsdTimeCode(frame)));
         warmed[frame] = _CaptureGeometry(registry.GetStore()->Get());
         CHECK(!warmed[frame].points.empty());
     }
-    CHECK(registry.GetSessionEvaluationCount(rig) == evalsBefore);
+    // A foreground visit to an evicted completed frame must evaluate;
+    // a resident one still hits. The following three exact live comparisons
+    // retain the original independent numeric/sensitivity witness.
+    const size_t evalsAfterWarmSpots = registry.GetSessionEvaluationCount(rig);
+    CHECK(evalsAfterWarmSpots == evalsBefore + spotMisses);
     registry.ClearFrameCache(rig);
     for (const double frame : spots) {
         CHECK(registry.SetTime(UsdTimeCode(frame)));
         const _GenerationGeometry live =
             _CaptureGeometry(registry.GetStore()->Get());
+        // The native generation just evaluated above is held here; its
+        // publication maps are independently compared to the original
+        // default-worker result, even when that cache entry was evicted.
+        RigExecImagingBridge *bridge = registry.GetBridge(rig);
+        CHECK(bridge != nullptr);
+        uint64_t liveDigest = 0;
+        CHECK(backgroundDigests.count(frame) == 1);
+        if (bridge) {
+            auto &evaluator = const_cast<RigExecRigEvaluator &>(bridge->GetEvaluator());
+            CHECK(poseDigest(evaluator.Evaluate(UsdTimeCode(frame)),
+                &liveDigest));
+            CHECK(backgroundDigests[frame] == liveDigest);
+        }
         if (!_SameGeometry(warmed[frame], live)) {
             std::printf("warmed-vs-live differs at frame %g\n", frame);
             CHECK(false);
         }
     }
     CHECK(registry.GetSessionEvaluationCount(rig) ==
-          evalsBefore + spots.size());
+          evalsAfterWarmSpots + spots.size());
     registry.ClearFrameCache(rig);
     registry.Deactivate();
 }
@@ -3801,7 +3824,7 @@ TestWrinkleParameterEditsRetireAndRewarm()
         {"inputs:smoothingIterations", VtValue(0), VtValue(2)},
         {"inputs:enabled", VtValue(true), VtValue(false), true, true},
         {"inputs:defaultWeight", VtValue(1.0f), VtValue(0.0f), true, true}};
-    for (bool baked : {true, false}) {
+    { // All authored parameter cases use the same compiled graph.
         for (const Parameter &parameter : parameters) {
             for (int authored = 0; authored != 5; ++authored) {
                 const bool late = authored >= 3;
@@ -3812,7 +3835,7 @@ TestWrinkleParameterEditsRetireAndRewarm()
                     continue;
                 }
                 std::printf("  %s, %s, %s\n", parameter.name,
-                            baked ? "baked" : "dynamic",
+                            "graph",
                             authored == 0 ? "schema fallback" :
                             authored == 1 ? "default" :
                             authored == 2 ? "time samples" :
@@ -3823,7 +3846,6 @@ TestWrinkleParameterEditsRetireAndRewarm()
                 stage->SetEndTimeCode(3.0);
                 stage->DefinePrim(SdfPath("/Asset"), TfToken("Scope"));
                 const UsdPrim root = stage->DefinePrim(rig, TfToken("RigExecRoot"));
-                CHECK(root.GetAttribute(TfToken("rigExec:baked")).Set(baked));
                 const UsdPrim mesh = stage->DefinePrim(meshPath, TfToken("Mesh"));
                 CHECK(mesh.GetAttribute(TfToken("faceVertexCounts")).Set(counts));
                 CHECK(mesh.GetAttribute(TfToken("faceVertexIndices")).Set(indices));
@@ -4352,53 +4374,20 @@ int
 main(int argc, char **argv)
 {
     const std::string examplesDir = argc > 1 ? argv[1] : "";
-    // Baked unless the outer environment chose a mode: the bridge's
-    // evaluators inherit the session mode, and only a baked program can be
-    // sampled for cache keys. Read once per process by the evaluator, so
-    // this must precede the first construction.
-#ifdef _WIN32
-    char *outerMode = nullptr;
-    size_t outerModeSize = 0;
-    const bool outerChoseMode =
-        _dupenv_s(&outerMode, &outerModeSize, "RIGEXEC_EVALUATION_MODE") == 0 &&
-        outerMode && *outerMode;
-    free(outerMode);
-#else
-    const char *outerMode = getenv("RIGEXEC_EVALUATION_MODE");
-    const bool outerChoseMode = outerMode && *outerMode;
-#endif
-    const bool defaultMode = argc > 2 && std::string(argv[2]) == "--default-mode";
-    if (!outerChoseMode && !defaultMode) {
-        SetEnv("RIGEXEC_EVALUATION_MODE", "baked");
-    }
-    if (defaultMode) {
-        UsdStageRefPtr stage = MakeTinyRig();
-        const SdfPath rig("/Asset/Rig");
-        RigExecImagingBridge bridge(stage, rig);
-        CHECK(bridge.Compile());
+    // A legacy custom attribute cannot choose a different evaluator.
+    {
+        auto stage=MakeTinyRig(); const SdfPath rig("/Asset/Rig");
+        RigExecImagingBridge bridge(stage,rig); CHECK(bridge.Compile());
         CHECK(bridge.EvaluateAndPublishResult(UsdTimeCode(1)).ok);
-        CHECK(bridge.GetEvaluator().GetBakedProgram() != nullptr);
-        CHECK(bridge.GetEvaluator().GetEvaluationModeSource() ==
-              RigExecEvaluationModeSource::Default);
-        RigExecRigEvaluator explicitMode(stage, rig, true);
-        CHECK(explicitMode.Compile());
-        CHECK(explicitMode.Evaluate(UsdTimeCode(1)).valid);
-        CHECK(explicitMode.GetBakedProgram() != nullptr);
-        explicitMode.SetEvaluationMode(RigExecEvaluationMode::Dynamic);
-        CHECK(explicitMode.Evaluate(UsdTimeCode(2)).valid);
-        CHECK(explicitMode.GetBakedProgram() == nullptr);
-        const UsdAttribute baked = stage->GetPrimAtPath(rig).GetAttribute(
-            TfToken("rigExec:baked"));
-        baked.Set(false);
+        CHECK(bridge.GetEvaluator().GetBakedProgram()!=nullptr);
+        const auto legacy=stage->GetPrimAtPath(rig).CreateAttribute(
+            TfToken("rigExec:baked"),SdfValueTypeNames->Bool,true);
+        CHECK(legacy.Set(false));
         CHECK(bridge.EvaluateAndPublishResult(UsdTimeCode(2)).ok);
-        CHECK(bridge.GetEvaluator().GetBakedProgram() == nullptr);
-        RigExecImagingBridge optedOut(stage, rig);
-        CHECK(optedOut.Compile());
-        CHECK(optedOut.EvaluateAndPublishResult(UsdTimeCode(1)).ok);
-        CHECK(optedOut.GetEvaluator().GetBakedProgram() == nullptr);
-        baked.Clear();
+        CHECK(bridge.GetEvaluator().GetBakedProgram()!=nullptr);
+        CHECK(legacy.Set(true));
         CHECK(bridge.EvaluateAndPublishResult(UsdTimeCode(3)).ok);
-        CHECK(bridge.GetEvaluator().GetBakedProgram() != nullptr);
+        CHECK(bridge.GetEvaluator().GetBakedProgram()!=nullptr);
     }
     const auto scratch =
         std::filesystem::temp_directory_path() /
@@ -4428,16 +4417,17 @@ main(int argc, char **argv)
     TestFrameStatesEvictionRetires();
     TestSamplingBudgetShapesTriggers();
     TestWarmRangeCursorSkipsVisited();
-    TestRefusalRigNeverCountsVisited();
+    TestConnectedSpaceRigWarmsRange();
     TestWarmFrameStreaks();
+    TestWarmRangeProgress();
     TestCommitDuringPreviewExcludesPlayhead();
     TestCommitOfPreviewedPoseSkipsEvaluation();
     TestCommitOfAChainTargetSettles();
     TestProductionTriggerPathEnqueuesAndFences();
     TestWarmedCompletionServesWithoutEvaluating();
-    TestRefusalRigMemoizesUiThreadResults();
-    TestUnfreezableBakedRigMemoizesCompletePoses();
-    TestIdleFallbackWarmsCompletePoses();
+    TestConnectedSpaceRigMemoizesResults();
+    TestPropertyChainRigMemoizesCompletePoses();
+    TestSupportedSourcesWarmCompletePoses();
     TestInteractiveDragBypassesCache();
     TestProfilerFrameCacheLane();
     TestCachedServeSkipsLookupSample();

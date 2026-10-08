@@ -13,6 +13,7 @@
 #include "pxr/base/gf/matrix4d.h"
 #include "pxr/base/gf/vec3d.h"
 #include "pxr/base/gf/vec3f.h"
+#include "pxr/base/gf/vec3i.h"
 #include "pxr/base/tf/token.h"
 #include "pxr/base/tf/type.h"
 #include "pxr/base/vt/array.h"
@@ -21,11 +22,13 @@
 #include "pxr/usd/sdf/valueTypeName.h"
 #include "pxr/usd/usd/attribute.h"
 #include "pxr/usd/usd/relationship.h"
+#include "pxr/usd/usd/resolveInfo.h"
 #include "pxr/usd/usd/stage.h"
 #include "pxr/usd/usd/timeCode.h"
 
 #include <algorithm>
 #include <cstring>
+#include <functional>
 #include <iterator>
 #include <map>
 #include <numeric>
@@ -75,6 +78,8 @@ _SlotTag(const UsdAttribute &attribute, InputTag *tag)
         *tag = InputTag::Matrix4d;
     } else if (type == TfType::Find<GfVec3d>()) {
         *tag = InputTag::Vec3d;
+    } else if (type == TfType::Find<GfVec3i>()) {
+        *tag=InputTag::Vec3i;
     } else if (type == TfType::Find<GfVec3f>()) {
         *tag = InputTag::Vec3f;
     } else {
@@ -96,6 +101,9 @@ _Zero(InputTag tag)
         break;
     case InputTag::Vec3d:
         value.vec3d = std::make_unique<RigExecWireVec3d>();
+        break;
+    case InputTag::Vec3i:
+        value.vec3i=std::make_unique<RigExecWireVec3i>();
         break;
     case InputTag::Vec3f:
         value.vec3f = std::make_unique<RigExecWireVec3f>();
@@ -293,6 +301,7 @@ struct RigExecBakeComputedCapture::_State {
     std::map<std::string, uint32_t> valueIds;
     /// Slots in first-reference order until Finish sorts them.
     std::map<SdfPath, uint32_t> slotIds;
+    std::set<SdfPath> privateTokenPaths;
     std::vector<UsdAttribute> slots;
     std::vector<InputTag> slotTags;
     /// Paths each override number was registered under (the inverse of
@@ -371,6 +380,11 @@ struct RigExecBakeComputedCapture::_State {
             }
             break;
         }
+        case InputTag::Vec3i: {
+            GfVec3i v(0);
+            if((*has=a.Get(&v,time))) *value.vec3i=RigExecWireVec3i{v[0],v[1],v[2]};
+            break;
+        }
         case InputTag::Vec3f: {
             GfVec3f v(0.0f);
             if ((*has = a.Get(&v, time))) {
@@ -396,6 +410,18 @@ struct RigExecBakeComputedCapture::_State {
         if (found == slotIds.end()) {
             const UsdAttribute a = stage->GetAttributeAtPath(path);
             InputTag tag = InputTag::Double;
+            if (a && a.GetTypeName().IsArray()) {
+                const auto type=a.GetTypeName().GetType();
+                if(type==TfType::Find<VtVec3fArray>()) return ArraySlot(path,InputTag::Vec3fArray,id,error);
+                if(type==TfType::Find<VtVec2fArray>()) return ArraySlot(path,InputTag::Vec2fArray,id,error);
+                if(type==TfType::Find<VtFloatArray>()) return ArraySlot(path,InputTag::FloatArray,id,error);
+                if(type==TfType::Find<VtDoubleArray>()) return ArraySlot(path,InputTag::DoubleArray,id,error);
+                if(type==TfType::Find<VtIntArray>()) return ArraySlot(path,InputTag::IntArray,id,error);
+                if(type==TfType::Find<VtVec3dArray>()) return ArraySlot(path,InputTag::Vec3dArray,id,error);
+                if(type==TfType::Find<VtMatrix4dArray>()) return ArraySlot(path,InputTag::Matrix4dArray,id,error);
+                if(type==TfType::Find<VtTokenArray>()) return ArraySlot(path,InputTag::TokenArray,id,error);
+                if(type==TfType::Find<VtBoolArray>()) return ArraySlot(path,InputTag::BoolArray,id,error);
+            }
             if (!a || !_SlotTag(a, &tag)) {
                 *error = reader + " reads through " + path.GetString() +
                          ", whose value type no input slot can hold";
@@ -500,6 +526,7 @@ struct RigExecBakeComputedCapture::_State {
                 if (!Slot(hop.path, "property input", &candidate.slot, error))
                     return false;
                 candidate.raw = hop.leaf >= 0;
+                candidate.crossDomain = hop.crossDomain;
                 if (hop.chain >= 0) {
                     const auto &chain = program->propertyChains[size_t(hop.chain)];
                     candidate.kind = uint8_t(fb::PropertyCandidateKind::ChainFinal);
@@ -518,6 +545,54 @@ struct RigExecBakeComputedCapture::_State {
             uint32_t slot = 0;
             if (!Slot(program->headLeaves[size_t(rawLeaf)].path,
                       "property input fallback", &slot, error)) return false;
+            out->rawFallbackSlot = int32_t(slot);
+        }
+        return true;
+    }
+
+    bool OracleRead(const RigExecBakedReaderWalk &read,
+                    const std::vector<int> &available, float fallback,
+                    fb::RigExecWireInput *out, std::string *error)
+    {
+        *out = fb::RigExecWireInput();
+        out->tag = InputTag::Float;
+        out->mode = fb::ReadMode::Resolved;
+        out->constant = Intern(_Float(fallback));
+        const auto capture = [&](const auto &hops, auto *candidates) {
+            for (const auto &hop : hops) {
+                RigExecWirePropertyInputCandidate candidate;
+                if (!Slot(hop.path, "weight field oracle", &candidate.slot, error)) return false;
+                candidate.raw = hop.leaf >= 0;
+                candidate.poseWeight = hop.poseWeight;
+                // Actual publication precedence in the field's context.
+                // Runtime chooses the last VALID writer, so all available
+                // chains are retained independently in the descriptor.
+                for (int c : available) {
+                    const auto &chain = program->propertyChains[size_t(c)];
+                    if (chain.target == hop.path) {
+                        candidate.kind = uint8_t(fb::PropertyCandidateKind::ChainFinal);
+                        candidate.version = int32_t(chain.versionBase + chain.revisions.size());
+                    }
+                    for (uint32_t r : chain.records) {
+                        const auto &record = program->propertyRecords[r];
+                        if (record.consumer == hop.path) {
+                            candidate.kind = uint8_t(fb::PropertyCandidateKind::PhasedRecord);
+                            candidate.version = int32_t(record.id);
+                        }
+                    }
+                }
+                candidates->push_back(candidate);
+                if (std::find(out->walk.begin(), out->walk.end(), candidate.slot) == out->walk.end())
+                    out->walk.push_back(candidate.slot);
+            }
+            return true;
+        };
+        if (!capture(read.walk.hops, &out->propertyCandidates) ||
+            !capture(read.walk.doubleHops, &out->doubleCandidates)) return false;
+        if (read.rawLeaf >= 0) {
+            uint32_t slot = 0;
+            if (!Slot(program->headLeaves[size_t(read.rawLeaf)].path,
+                      "weight field fallback", &slot, error)) return false;
             out->rawFallbackSlot = int32_t(slot);
         }
         return true;
@@ -584,7 +659,8 @@ struct RigExecBakeComputedCapture::_State {
                std::string *error)
     {
         *out = fb::RigExecWireInput();
-        const fb::RigExecWireValue constant = Value(input.constant);
+        const fb::RigExecWireValue constant =
+            Value(input.sourceBacked ? input.sourceFallback : input.constant);
         out->tag = constant.tag;
         out->mode = fb::ReadMode::Baked;
         out->overrideIndex = int32_t(input.overrideIndex);
@@ -596,6 +672,10 @@ struct RigExecBakeComputedCapture::_State {
             out->flags |= _Bit(fb::InputReadFlags::LongWay);
         }
         if (!input.head) {
+            if (input.sourceBacked) {
+                *error = "a source-backed input has no head";
+                return false;
+            }
             if (input.overrideIndex >= 0) {
                 *error = "a registered input has no head";
                 return false;
@@ -606,6 +686,18 @@ struct RigExecBakeComputedCapture::_State {
         SdfPathVector paths;
         if (!Walk(input.head, out, &paths, error)) {
             return false;
+        }
+        if (input.sourceBacked) {
+            if (input.varying || input.resolvedAttr || input.walk >= 0 ||
+                paths.size() != 1 || input.head.HasAuthoredConnections() ||
+                out->flags != 0 ||
+                (out->tag != InputTag::Double && out->tag != InputTag::Vec3d) ||
+                slotTags[out->walk[0]] != out->tag) {
+                *error = "input " + head + " is not a direct static source-backed read";
+                return false;
+            }
+            out->flags |= _Bit(fb::InputReadFlags::SourceBacked);
+            out->selected = 0;
         }
         if (input.varying && !input.resolvedAttr && input.query.IsValid()) {
             const SdfPath pinned = input.query.GetAttribute().GetPath();
@@ -863,6 +955,19 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
         if (type == TfToken("RigExecPlaneWeight")) {
             wire.oraclePlaneAxis = token(facts.planeAxis);
             wire.oraclePlaneBounds = token(facts.planeBounds);
+            const auto prim = B.stage->GetPrimAtPath(path);
+            for (const auto &entry : {std::make_pair("rigExec:planeAxis", &wire.oraclePlaneAxisSlot),
+                                     std::make_pair("rigExec:planeBounds", &wire.oraclePlaneBoundsSlot)}) {
+                const auto attr = prim.GetAttribute(TfToken(entry.first));
+                if (attr) {
+                    uint32_t slot = 0;
+                    if (!S.Slot(attr.GetPath(), "oracle token", &slot, &why)) {
+                        Fail(why); return;
+                    }
+                    *entry.second = int32_t(slot);
+                    S.privateTokenPaths.insert(attr.GetPath());
+                }
+            }
         }
         wire.oraclePhaseError = facts.phaseError;
         wire.oracleStaticError = facts.staticError;
@@ -959,6 +1064,29 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
         }
         chainDescs.push_back(std::move(desc));
     }
+    for (const auto &field : B.weightFields) {
+        fb::RigExecWireWeightField out;
+        out.form = fb::WeightFieldForm(field.form);
+        out.object = field.object;
+        out.consumer = field.consumer;
+        out.part = field.part;
+        out.placementPhase = fb::WeightFieldPlacementPhase(field.placementPhase);
+        out.volumes.assign(field.volumes.begin(), field.volumes.end());
+        out.availableChains.assign(field.availableChains.begin(), field.availableChains.end());
+        out.scalarObjects.assign(field.scalarObjects.begin(), field.scalarObjects.end());
+        for (int member : field.scalarMembers)
+            out.scalarMembers.push_back(fb::WeightFieldScalarMember(member));
+        for (size_t r = 0; r < field.scalarReads.size(); ++r) {
+            const int member = field.scalarMembers[r];
+            const float fallback = member == 0 || member == 3 || member == 5 || member == 6 ? 0.0f : 1.0f;
+            fb::RigExecWireInput read;
+            if (!S.OracleRead(field.scalarReads[r], field.availableChains, fallback, &read, &why)) {
+                Fail(why); return;
+            }
+            out.scalarReads.push_back(std::move(read));
+        }
+        C.weightFields.push_back(std::move(out));
+    }
     C.propertyChains.reserve(chainDescs.size());
     for (const RigExecBakedPropertyChainDesc &desc : chainDescs) {
         using ValueType = RigExecBakedPropertyChainDesc::ValueType;
@@ -999,6 +1127,7 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
                 return;
             }
             const auto &bound = boundChain.revisions[chain.revisions.size()];
+            revision.weightField = bound.weightField;
             const bool boundOk =
                 S.Candidates(bound.enabled, revision.enabled.get(), &why) &&
                 S.Candidates(bound.defaultWeight, revision.defaultWeight.get(), &why) &&
@@ -1123,9 +1252,17 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
                 place(&ladder.defaultAvars[k], Family::Ladder, i, 9 + k);
             }
             place(&ladder.rotationOrder, Family::Ladder, i, 15);
+            place(&ladder.parentSpace, Family::Ladder, i, 16);
+            place(&ladder.parentDefaultSpace, Family::Ladder, i, 17);
+            place(&ladder.avarDefaultSpace, Family::Ladder, i, 18);
+            place(&ladder.posedDefaultSpace, Family::Ladder, i, 19);
+            place(&ladder.rotationSign, Family::Ladder, i, 20);
+            place(&ladder.interveningSpace, Family::Ladder, i, 21);
         }
         for (size_t i = 0; i < B.spaceSwitches.size(); ++i) {
-            place(&B.spaceSwitches[i].activeInput, Family::SpaceSwitch, i, 0);
+            if(B.spaceSwitches[i].tokenIndex)
+                place(&B.spaceSwitches[i].activeTokenInput, Family::SpaceSwitch, i, 0);
+            else place(&B.spaceSwitches[i].activeInput, Family::SpaceSwitch, i, 0);
         }
         for (size_t i = 0; i < B.poseInterpolators.size(); ++i) {
             const auto &interp = B.poseInterpolators[i];
@@ -1378,8 +1515,10 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
     // The facts hold one time's answer, so an object the runtime resolves
     // -- a constraint or property-mover envelope, a current-phase field,
     // and every object either composes -- that reads an animated one holds
-    // it at the bake time only. Composition points below the entry, so one
-    // descending pass closes the set.
+    // it at the bake time only. Object identities are allocated before their
+    // dependencies. Close the
+    // set by identity rather than assuming a discovery order; SCC back-edges
+    // terminate because each identity enters the work list once.
     std::vector<char> resolved(C.weightObjects.size(), 0);
     for (int32_t index : C.constraintWeightObjectIndex) {
         if (index >= 0) {
@@ -1403,20 +1542,26 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
             }
         }
     }
-    for (size_t i = C.weightObjects.size(); i-- > 0;) {
-        if (!resolved[i]) {
-            continue;
-        }
+    std::vector<size_t> pending;
+    for(size_t i=0;i<resolved.size();++i) if(resolved[i]) pending.push_back(i);
+    for (size_t cursor=0;cursor<pending.size();++cursor) {
+        const size_t i=pending[cursor];
         if (!timeVarying[i].IsEmpty()) {
             S.timeVaryingFacts.push_back(
                 {objectPaths[i].GetString(), timeVarying[i].GetString()});
         }
         const fb::RigExecWireWeightObject &wire = C.weightObjects[i];
+        const auto include=[&](int32_t input) {
+            if(input>=0 && !resolved[size_t(input)]) {
+                resolved[size_t(input)]=1;
+                pending.push_back(size_t(input));
+            }
+        };
         if (wire.base >= 0) {
-            resolved[size_t(wire.base)] = 1;
+            include(wire.base);
         }
         for (int32_t input : wire.inputs) {
-            resolved[size_t(input)] = 1;
+            include(input);
         }
     }
 
@@ -1496,6 +1641,10 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
                 ? &C.weightObjects[read.object]
                 : nullptr;
         switch (read.consumer) {
+        case RigExecBakeArrayConsumer::Declared:
+            // The owning API4 leaf descriptor is captured below. Shared
+            // typed slots and time/default metadata were registered above.
+            break;
         case RigExecBakeArrayConsumer::Row: {
             const auto key =
                 std::make_pair(interner->Path(read.hops.front()), read.rest);
@@ -1572,12 +1721,260 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
             break;
         }
     }
+    const auto captureDeclaration=[&](const RigExecRevisionLeafKey &key,
+                                     fb::RigExecWireExternalDeclaredInput *output)->bool {
+            auto &row=*output;
+            row.path=S.interner->Path(key.path);
+            row.time=fb::ExternalInputTime(key.time);
+            row.flavour=fb::ExternalInputFlavour(key.flavour);
+            row.fallbackHasValue=!key.fallback.IsEmpty();
+            row.read=std::make_unique<fb::RigExecWireInput>();
+            row.read->sampleTime=uint8_t(key.time);
+            InputTag tag=InputTag::Float;
+            using Type=RigExecRevisionLeafType;
+            switch(key.type) {
+            case Type::Bool:tag=InputTag::Bool;break;
+            case Type::Int:tag=InputTag::Int;break;
+            case Type::Float:tag=InputTag::Float;break;
+            case Type::Double:case Type::Dial:tag=InputTag::Double;break;
+            case Type::Token:tag=InputTag::Token;break;
+            case Type::Matrix4d:tag=InputTag::Matrix4d;break;
+            case Type::Vec3d:tag=InputTag::Vec3d;break;
+            case Type::Vec3f:tag=InputTag::Vec3f;break;
+            case Type::Vec3i:tag=InputTag::Vec3i;break;
+            case Type::IntArray:tag=InputTag::IntArray;break;
+            case Type::FloatArray:tag=InputTag::FloatArray;break;
+            case Type::DoubleArray:tag=InputTag::DoubleArray;break;
+            case Type::Vec2fArray:tag=InputTag::Vec2fArray;break;
+            case Type::Vec3fArray:tag=InputTag::Vec3fArray;break;
+            default:Fail("declaration has no exact transport type");return false;
+            }
+            fb::RigExecWireValue fallback=_Zero(tag);
+            const auto &v=key.fallback;
+            if(v.IsHolding<float>()) fallback=S.Value(v.UncheckedGet<float>());
+            else if(v.IsHolding<double>()) fallback=S.Value(v.UncheckedGet<double>());
+            else if(v.IsHolding<bool>()) fallback=S.Value(v.UncheckedGet<bool>());
+            else if(v.IsHolding<int>()) fallback=S.Value(v.UncheckedGet<int>());
+            else if(v.IsHolding<TfToken>()) fallback=S.Value(v.UncheckedGet<TfToken>());
+            else if(v.IsHolding<GfMatrix4d>()) fallback=S.Value(v.UncheckedGet<GfMatrix4d>());
+            else if(v.IsHolding<GfVec3d>()) fallback=S.Value(v.UncheckedGet<GfVec3d>());
+            else if(v.IsHolding<GfVec3i>()) {
+                const auto &point=v.UncheckedGet<GfVec3i>();
+                fallback.vec3i=std::make_unique<RigExecWireVec3i>(RigExecWireVec3i{point[0],point[1],point[2]});
+            }
+            else if(v.IsHolding<GfVec3f>()) {
+                const auto &point=v.UncheckedGet<GfVec3f>();
+                fallback.vec3f=std::make_unique<RigExecWireVec3f>(RigExecWireVec3f{point[0],point[1],point[2]});
+            }
+            const auto attribute=B.stage->GetAttributeAtPath(key.path);
+            // Dial reads follow the source's actual scalar precision, then
+            // the projector packet widens Float to Double after selection.
+            if(key.type==Type::Dial && attribute &&
+               attribute.GetTypeName().GetType()==SdfValueTypeNames->Float.GetType()) {
+                tag=InputTag::Float;
+                fallback=S.Value(v.IsHolding<double>() ? float(v.UncheckedGet<double>()) :
+                    v.IsHolding<float>() ? v.UncheckedGet<float>() : 0.0f);
+            }
+            // Static structural int3 values remain literals. Only actual
+            // current sampled sources require the private Vec3i slot transport.
+            if(key.type==Type::Vec3i && key.flavour==RigExecRevisionLeafFlavour::Raw &&
+               (!attribute || key.time==RigExecRevisionLeafTime::AtDefault ||
+                !attribute.ValueMightBeTimeVarying())) {
+                GfVec3i value;
+                if(attribute && attribute.Get(&value,key.time==RigExecRevisionLeafTime::AtDefault
+                    ? UsdTimeCode::Default() : S.bakeTime)) {
+                    fallback.vec3i=std::make_unique<RigExecWireVec3i>(RigExecWireVec3i{value[0],value[1],value[2]});
+                    row.fallbackHasValue=true;
+                }
+                row.read->tag=tag; row.read->mode=fb::ReadMode::Pinned;
+                row.read->constant=S.Intern(fallback);
+                return true;
+            }
+            std::string why;
+            if(key.flavour==RigExecRevisionLeafFlavour::Raw ||
+               key.flavour==RigExecRevisionLeafFlavour::OverlayThenRaw ||
+               key.flavour==RigExecRevisionLeafFlavour::Present) {
+                row.read->tag=tag; row.read->mode=fb::ReadMode::Raw;
+                row.read->constant=S.Intern(fallback);
+                if(attribute) {
+                    uint32_t slot=0;
+                    if(!S.Slot(key.path,"external declaration",&slot,&why)) {Fail(why);return false;}
+                    row.read->walk.push_back(slot);
+                } else row.read->mode=RigExecFormatIsArrayTag(tag)
+                    ? fb::ReadMode::Resolved : fb::ReadMode::Pinned;
+            } else if(!S.Resolved(attribute,fallback,row.read.get(),&why)) {Fail(why);return false;}
+            row.read->sampleTime=uint8_t(key.time);
+            row.allowFloatToDouble=key.type==Type::Dial && row.read->tag==InputTag::Double;
+        return true;
+    };
+    const auto captureLeafSite = [&](const RigExecBakedPathLeaves &leaves, size_t k,
+                                     fb::RigExecWireExternalDeclaredInput *row) -> bool {
+        if (!captureDeclaration(leaves.decl.keys[k], row)) return false;
+        row->exactVersion = k < leaves.exactVersions.size() ? leaves.exactVersions[k] : -1;
+        row->exactRecord = k < leaves.exactRecordIndices.size() ? leaves.exactRecordIndices[k] : -1;
+        row->exactValueType = k < leaves.exactValueTypes.size() ? leaves.exactValueTypes[k] : -1;
+        // Sampling retains only raw connection traversal. Computed producers are
+        // consumed through the exact owning route, never through publication lookup.
+        for (auto *segment : {&row->read->propertyCandidates, &row->read->doubleCandidates})
+            for (auto &hop : *segment) {
+                hop.kind = uint8_t(fb::PropertyCandidateKind::SlotOnly);
+                hop.version = -1; hop.crossDomain = -1; hop.poseWeight = -1;
+            }
+        if ((row->exactVersion < 0 || leaves.decl.keys[k].type==RigExecRevisionLeafType::Double) &&
+            k < leaves.walks.size() && leaves.walks[k] >= 0) {
+            const auto &reader = B.readerWalks[size_t(leaves.walks[k])];
+            row->bodyWalk = std::make_unique<fb::RigExecWireInput>(*row->read);
+            row->bodyWalk->propertyCandidates.clear(); row->bodyWalk->doubleCandidates.clear();
+            std::string why;
+            if (!S.Candidates(reader.walk, row->bodyWalk.get(), &why, reader.rawLeaf)) {
+                Fail(why); return false;
+            }
+        }
+        return true;
+    };
+    const auto captureOwner = [&](const RigExecBakedPathLeaves &leaves,
+                                  uint32_t chain, uint32_t revision, bool derived, bool layout) {
+        auto &owner = C.leafSites[{chain, revision, derived, layout}];
+        for (size_t k = 0; k < leaves.decl.keys.size(); ++k) {
+            fb::RigExecWireExternalDeclaredInput row;
+            if (!captureLeafSite(leaves, k, &row)) return false;
+            owner.reads.push_back(std::move(row));
+            owner.fallbacks.push_back(leaves.decl.keys[k].fallback);
+        }
+        return true;
+    };
+    for (size_t c = 0; c < B.chains.size(); ++c) {
+        for (size_t r = 0; r < B.chains[c].revisions.size(); ++r) {
+            const auto &rev = B.chains[c].revisions[r];
+            if (!captureOwner(rev.leaves, uint32_t(c), uint32_t(r), false, false) ||
+                !captureOwner(rev.layoutLeaves, uint32_t(c), uint32_t(r), false, true)) return;
+        }
+        for (size_t r = 0; r < B.chains[c].derived.size(); ++r) {
+            const auto &rev = B.chains[c].derived[r].revision;
+            if (!captureOwner(rev.leaves, uint32_t(c), uint32_t(r), true, false) ||
+                !captureOwner(rev.layoutLeaves, uint32_t(c), uint32_t(r), true, true)) return;
+        }
+    }
+    for(size_t c=0;c<B.chains.size();++c) for(size_t r=0;r<B.chains[c].revisions.size();++r) {
+        const auto &revision=B.chains[c].revisions[r];
+        if(revision.binding.externalInputs.empty()) continue;
+        auto &captured=C.externalInputs[{uint32_t(c),uint32_t(r)}];
+        for(size_t i=0;i<revision.binding.externalInputs.size();++i) {
+            const auto &key=revision.binding.externalInputs[i];
+            fb::RigExecWireExternalDeclaredInput row;
+            const int begin=revision.leaves.decl.externalBegin;
+            if(begin<0 || size_t(begin)+i>=revision.leaves.decl.keys.size()) {
+                Fail("external declaration has no owning native leaf site"); return;
+            }
+            if(!captureLeafSite(revision.leaves,size_t(begin)+i,&row)) return;
+            captured.reads.push_back(std::move(row));
+            captured.fallbacks.push_back(key.fallback);
+        }
+    }
+    C.derivedBaseSlots.assign(B.derivedIndex.size(), -1);
+    for(size_t k=0;k<B.derivedIndex.size();++k) {
+        const auto &index=B.derivedIndex[k];
+        const auto &derived=B.chains[size_t(index.first)].derived[size_t(index.second)];
+        if(derived.matrixTarget || !derived.baseQuery.IsValid()) continue;
+        const auto attribute=derived.baseQuery.GetAttribute();
+        if(!attribute || attribute.GetTypeName().GetType()!=TfType::Find<VtVec3fArray>()) continue;
+        const SdfPath path=attribute.GetPath();
+        uint32_t slot=0; std::string why;
+        if(!S.ArraySlot(path,InputTag::Vec3fArray,&slot,&why)) { Fail(why); return; }
+        arraySlots[slot].tag=InputTag::Vec3fArray;
+        arrayLive.insert(slot);
+        C.derivedBaseSlots[k]=int32_t(slot);
+    }
+    C.crossDomainRawSlots.assign(B.crossDomainReads.size(), -1);
+    for (size_t k=0;k<B.crossDomainReads.size();++k) {
+        const int leaf=B.crossDomainReads[k].rawLeaf;
+        if (leaf<0) continue;
+        const auto &path=B.headLeaves[size_t(leaf)].path;
+        uint32_t slot=0; std::string why;
+        if (!S.Slot(path,"cross-domain raw fallback",&slot,&why)) {
+            Fail(why); return;
+        }
+        C.crossDomainRawSlots[k]=int32_t(slot);
+        if (RigExecFormatIsArrayTag(S.slotTags[slot])) {
+            arraySlots[slot].tag = S.slotTags[slot];
+            arrayLive.insert(slot);
+        }
+    }
+    C.constraintRawSlots.assign(B.constraintArrays.size(), std::array<int32_t,4>{-1,-1,-1,-1});
+    const char *constraintNames[]={"inputs:sourceWeights","inputs:translationOffsets","inputs:rotationOffsets","inputs:poleVectorWeights"};
+    for(size_t k=0;k<B.constraintArrays.size();++k) {
+        const auto &arrays=B.constraintArrays[k];
+        for(size_t channel=0;channel<4;++channel) {
+            const auto attribute=arrays.prim.GetAttribute(TfToken(constraintNames[channel]));
+            if(!attribute) continue;
+            uint32_t slot=0; std::string why;
+            if(!S.Slot(attribute.GetPath(),"constraint raw array",&slot,&why)) { Fail(why); return; }
+            C.constraintRawSlots[k][channel]=int32_t(slot);
+            // Constraint arrays are typed raw AtTime reads. S.Slot only
+            // declares their identity; the array census owns their payload.
+            if (RigExecFormatIsArrayTag(S.slotTags[slot])) {
+                arraySlots[slot].tag = S.slotTags[slot];
+                arrayLive.insert(slot);
+            }
+        }
+    }
+    C.providerLeafSlots.assign(B.providerProgram.sampled.size(), -1);
+    for (size_t k = 0; k < B.providerProgram.sampled.size(); ++k) {
+        const auto &leaf = B.providerProgram.sampled[k];
+        const auto attribute = B.stage->GetAttributeAtPath(leaf.attribute);
+        if (!attribute) continue;
+        uint32_t slot = 0;
+        std::string why;
+        if (!S.Slot(leaf.attribute, "provider raw leaf", &slot, &why)) {
+            Fail(why); return;
+        }
+        C.providerLeafSlots[k] = int32_t(slot);
+        if (RigExecFormatIsArrayTag(S.slotTags[slot])) {
+            arraySlots[slot].tag = S.slotTags[slot];
+            arrayLive.insert(slot);
+        }
+    }
+    // Keep the original typed visitor order, including duplicate conversions:
+    // Baked may allocate slots before first-emplace discards a duplicate read.
+    using MemoReads = std::map<uint32_t, fb::RigExecWireInput>;
+    std::map<uint32_t, std::vector<size_t>> memoOccurrences;
+    std::vector<std::function<void(MemoReads &)>> memoConvert;
+    frozenDetail::_ForEachPatchableInput(B, [&](const auto &input) {
+        using T = std::decay_t<decltype(input.constant)>;
+        if (input.leaf < 0) return;
+        const uint32_t leaf = B.leaves.Of<T>().id[size_t(input.leaf)];
+        memoOccurrences[leaf].push_back(memoConvert.size());
+        memoConvert.emplace_back([&, input, leaf](MemoReads &bindingReads) {
+            fb::RigExecWireInput read;
+            if (!S.Baked(input, &read, &why)) { readsOk = false; return; }
+            bindingReads.emplace(leaf, std::move(read));
+        });
+    });
+    // The original scan stops at the first path for an ID, even when that
+    // path is unavailable or an array. Preserve that exact alias policy.
+    std::map<uint32_t, SdfPath> firstOverridePath;
+    for (const auto &[path, overrideId] : B.headOverrideSlots)
+        firstOverridePath.emplace(overrideId, path);
     C.headInputSlots.resize(B.steps.size());
     C.headInputReads.resize(B.steps.size());
     for (size_t index = 0; index < B.steps.size(); ++index) {
         const auto &step = B.steps[index];
-        if (!step.isHead) continue;
+        // Raw/binding memo declarations belong to every common op.
         auto &slots = C.headInputSlots[index];
+        // Painted storage is private, but its current payload still schedules
+        // the packet and diagnostic field that read it. Folded native arrays
+        // rebuild the epoch; detached input slots must wake the same bodies.
+        const auto paintedSlots = [&](int object) {
+            if (object < 0 || size_t(object) >= C.weightObjects.size()) return;
+            const auto &weight = C.weightObjects[size_t(object)];
+            for (int32_t slot : {weight.valuesSlot, weight.indicesSlot})
+                if (slot >= 0) slots.push_back(uint32_t(slot));
+        };
+        if (step.kind == RigExecBakedStepKind::WeightPacket)
+            paintedSlots(step.object);
+        else if (step.kind == RigExecBakedStepKind::WeightField)
+            for (int object : B.weightFields[size_t(step.object)].objects)
+                paintedSlots(object);
         for (const auto leafId : step.leaves) {
             const auto &leaf = B.headLeaves[leafId];
             // Curve keys/tangents are immutable Default literals in the
@@ -1588,32 +1985,74 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
             if (!S.Slot(leaf.path, "head memo", &slot, &why)) {
                 Fail(why); return;
             }
+            if (RigExecFormatIsArrayTag(S.slotTags[slot])) {
+                arraySlots[slot].tag = S.slotTags[slot];
+                arrayLive.insert(slot);
+            }
             slots.push_back(slot);
         }
         for (const auto id : step.overrideSlots) {
-            for (const auto &[path, overrideId] : B.headOverrideSlots) {
-                if (overrideId != id) continue;
-                const auto attr = B.stage->GetAttributeAtPath(path);
-                if (!attr || attr.GetTypeName().IsArray()) break;
-                uint32_t slot = 0;
-                if (!S.Slot(path, "head override", &slot, &why)) {
-                    Fail(why); return;
-                }
-                slots.push_back(slot); break;
+            const auto found = firstOverridePath.find(id);
+            if (found == firstOverridePath.end()) continue;
+            const auto &path = found->second;
+            const auto attr = B.stage->GetAttributeAtPath(path);
+            if (!attr || attr.GetTypeName().IsArray()) continue;
+            uint32_t slot = 0;
+            if (!S.Slot(path, "head override", &slot, &why)) {
+                Fail(why); return;
             }
+            slots.push_back(slot);
         }
-        std::map<uint32_t, fb::RigExecWireInput> bindingReads;
-        frozenDetail::_ForEachPatchableInput(B, [&](const auto &input) {
-            using T = std::decay_t<decltype(input.constant)>;
-            if (input.leaf < 0) return;
-            const uint32_t leaf = B.leaves.Of<T>().id[size_t(input.leaf)];
-            if (std::find(step.bindingLeaves.begin(), step.bindingLeaves.end(), leaf)
-                == step.bindingLeaves.end()) return;
-            fb::RigExecWireInput read;
-            if (!S.Baked(input, &read, &why)) { readsOk = false; return; }
-            bindingReads.emplace(leaf, std::move(read));
-        });
+        MemoReads bindingReads;
+        std::vector<size_t> selectedOccurrences;
         for (const auto leaf : step.bindingLeaves) {
+            const auto found = memoOccurrences.find(leaf);
+            if (found != memoOccurrences.end())
+                selectedOccurrences.insert(selectedOccurrences.end(),
+                                           found->second.begin(), found->second.end());
+        }
+        std::sort(selectedOccurrences.begin(), selectedOccurrences.end());
+        selectedOccurrences.erase(
+            std::unique(selectedOccurrences.begin(), selectedOccurrences.end()),
+            selectedOccurrences.end());
+        for (const auto ordinal : selectedOccurrences)
+            memoConvert[ordinal](bindingReads);
+        for (const auto leaf : step.bindingLeaves) {
+            // Topology heads already capture their exact raw layout slots
+            // below. Native path IDs must not add a second read form.
+            if (step.kind == RigExecBakedStepKind::SkinTopology) continue;
+            if (leaf >= B.leafRefs.size()) {
+                const size_t pathLeaf = size_t(leaf) - B.leafRefs.size();
+                if (pathLeaf >= B.pathLeafRefs.size()) {
+                    Fail("head memo path binding is absent"); return;
+                }
+                const auto &ref = B.pathLeafRefs[pathLeaf];
+                const auto *leaves=RigExecBakedPathLeavesOf(B,ref);
+                if (!leaves || ref.key>=leaves->decl.keys.size()) {
+                    Fail("memo path binding has no actual owner"); return;
+                }
+                const auto &key=leaves->decl.keys[ref.key];
+                fb::RigExecWireExternalDeclaredInput sample;
+                if (!captureLeafSite(*leaves,ref.key,&sample)) return;
+                // Raw oracle arrays/tokens retain direct slot sampling. Ordinary
+                // leaves retain their complete raw connection traversal instead.
+                if (ref.owner==RigExecBakedPathLeafOwner::WeightOracle) {
+                    for (uint32_t slot:sample.read->walk) slots.push_back(slot);
+                } else {
+                    // The sampling descriptor strips computed producers. A memo
+                    // read belongs to the body and retains its actual bound walk.
+                    auto memo=std::move(*sample.read);
+                    if (ref.key<leaves->walks.size() && leaves->walks[ref.key]>=0) {
+                        const auto &reader=B.readerWalks[size_t(leaves->walks[ref.key])];
+                        memo.propertyCandidates.clear();memo.doubleCandidates.clear();
+                        if (!S.Candidates(reader.walk,&memo,&why,reader.rawLeaf)) {
+                            Fail(why); return;
+                        }
+                    }
+                    C.headInputReads[index].push_back(std::move(memo));
+                }
+                continue;
+            }
             const auto found = bindingReads.find(leaf);
             if (found == bindingReads.end()) { Fail("head memo binding is absent"); return; }
             C.headInputReads[index].push_back(found->second);
@@ -1725,7 +2164,53 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
         }
     }
 
-    // Every slot is listed; listed slots are ordered by path text.
+    // Public arrays follow the evaluator's admission set. Other array
+    // slots retain static consumer defaults without exposing input APIs.
+    std::set<SdfPath> publicArrays;
+    for (const RigExecUpstreamArrayRow &row :
+         RigExecBakedUpstreamAdmissibleArrays(evaluator)) {
+        InputTag tag;
+        if (row.type == TfType::Find<VtIntArray>()) {
+            tag = InputTag::IntArray;
+        } else if (row.type == TfType::Find<VtFloatArray>()) {
+            tag = InputTag::FloatArray;
+        } else if (row.type == TfType::Find<VtDoubleArray>()) {
+            tag = InputTag::DoubleArray;
+        } else if (row.type == TfType::Find<VtVec2fArray>()) {
+            tag = InputTag::Vec2fArray;
+        } else if (row.type == TfType::Find<VtVec3fArray>()) {
+            tag = InputTag::Vec3fArray;
+        } else {
+            Fail("no array input tag holds " + row.path.GetString());
+            return;
+        }
+        uint32_t id = 0;
+        if (!S.ArraySlot(row.path, tag, &id, &why)) {
+            Fail(why);
+            return;
+        }
+        publicArrays.insert(row.path);
+        arraySlots[id].tag = tag;
+        if (row.time == RigExecUpstreamArrayRow::Time::AtDefault) {
+            arrayLive.erase(id);
+        } else {
+            arrayLive.insert(id);
+        }
+    }
+    const auto &publicScalars = baked->GetUpstreamAdmissible();
+    const auto listedSlot = [&](uint32_t id) {
+        const UsdAttribute &attribute = S.slots[id];
+        if (RigExecFormatIsArrayTag(S.slotTags[id]))
+            return publicArrays.count(attribute.GetPath()) != 0;
+        const auto found = publicScalars.find(attribute.GetPath());
+        return found != publicScalars.end() &&
+               found->second == attribute.GetTypeName().GetType();
+    };
+    uint32_t listedCount = 0;
+    for (size_t id = 0; id < S.slots.size(); ++id)
+        listedCount += listedSlot(uint32_t(id)) ? 1 : 0;
+    // The public prefix and private suffix are each ordered by path text.
+
     std::vector<std::string> names;
     names.reserve(S.slots.size());
     for (const UsdAttribute &a : S.slots) {
@@ -1735,7 +2220,8 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
     std::iota(order.begin(), order.end(), 0u);
     std::stable_sort(order.begin(), order.end(),
                      [&](uint32_t a, uint32_t b) {
-                         return names[a] < names[b];
+                         const bool x = listedSlot(a), y = listedSlot(b);
+                         return x != y ? x > y : names[a] < names[b];
                      });
     std::vector<uint32_t> remap(S.slots.size());
     std::vector<UsdAttribute> slots(S.slots.size());
@@ -1763,8 +2249,26 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
         for (auto &slot : slots) slot = remap[slot];
         std::sort(slots.begin(), slots.end());
     }
+    for (auto &field : C.weightFields)
+        for (auto &read : field.scalarReads) remapWalk(read);
     for (auto &reads : C.headInputReads)
         for (auto &read : reads) remapWalk(read);
+    for (auto &entry : C.externalInputs)
+        for (auto &row : entry.second.reads) {
+            remapWalk(*row.read); if (row.bodyWalk) remapWalk(*row.bodyWalk);
+        }
+    for (auto &entry : C.leafSites)
+        for (auto &row : entry.second.reads) {
+            remapWalk(*row.read); if (row.bodyWalk) remapWalk(*row.bodyWalk);
+        }
+    for (auto &slot : C.derivedBaseSlots)
+        if (slot >= 0) slot = int32_t(remap[size_t(slot)]);
+    for (auto &slot : C.crossDomainRawSlots)
+        if (slot >= 0) slot = int32_t(remap[size_t(slot)]);
+    for (auto &row : C.constraintRawSlots)
+        for(auto &slot:row) if(slot>=0) slot=int32_t(remap[size_t(slot)]);
+    for (auto &slot : C.providerLeafSlots)
+        if (slot >= 0) slot = int32_t(remap[size_t(slot)]);
     for (fb::RigExecWireWeightObject &object : C.weightObjects) {
         _ForEachReadSlot(object,
                          [&](std::unique_ptr<fb::RigExecWireInput> &input) {
@@ -1821,6 +2325,8 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
         remapField(&object.indicesSlot);
         remapField(&object.oracleSamplesSlot);
         remapField(&object.oracleCurveSlot);
+        remapField(&object.oraclePlaneAxisSlot);
+        remapField(&object.oraclePlaneBoundsSlot);
     }
     for (const auto &[id, slot] : arraySlots) {
         RigExecBakeArraySlot entry = slot;
@@ -1849,19 +2355,21 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
         slot.type = S.slotTags[s];
         bool has = false;
         slot.value = S.ReadSlot(a, slot.type, S.bakeTime, &has);
-        slot.flags = _Bit(fb::InputSlotFlags::Listed);
+        slot.flags = s < listedCount ? _Bit(fb::InputSlotFlags::Listed) : 0;
         if (a.ValueMightBeTimeVarying() || a.GetNumTimeSamples() > 0) {
             slot.flags |= _Bit(fb::InputSlotFlags::Animated);
         }
         if (has) {
             slot.flags |= _Bit(fb::InputSlotFlags::HasValue);
         }
+        if(a.GetResolveInfo(S.bakeTime).ValueIsBlocked())
+            slot.flags |= _Bit(fb::InputSlotFlags::SourceBlocked);
         rows.push_back(slot);
     }
-    C.listedInputs = uint32_t(rows.size());
+    C.listedInputs = listedCount;
     S.listedNames.reserve(order.size());
-    for (const uint32_t at : order) {
-        S.listedNames.push_back(names[at]);
+    for (size_t s = 0; s < listedCount; ++s) {
+        S.listedNames.push_back(names[order[s]]);
     }
     // Each slot names the chain it is the target of and the phased consumer
     // publishing at it; one of each at most.

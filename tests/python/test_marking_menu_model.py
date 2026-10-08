@@ -711,7 +711,7 @@ def TestBuiltInModesMenu():
     expected = {"W": "modes.guides", "E": "modes.touchPoseLive",
                 "S": "modes.touchPosePaint", "N": "modes.focus",
                 "NW": "modes.write", "NE": "modes.tool",
-                "SW": "modes.evaluation", "SE": "modes.toolVisibility"}
+                "SE": "modes.toolVisibility"}
     _Check(_Kinds(resolved) == expected,
            "the Modes ring is laid out as the plan names it: %s"
            % (_Kinds(resolved),))

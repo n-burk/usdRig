@@ -1430,6 +1430,19 @@ TestRegistrySetWeightOverlay()
         CHECK(!published->hasWeightOverlay);
     }
 
+    // Re-enable at the same time after a clean off generation, then hold.
+    // Publication policy is a declared assembly input even when geometry
+    // and all sampled leaves are unchanged.
+    CHECK(registry.SetWeightOverlay(_kVolumePath.GetString()));
+    CHECK(registry.SetTime(UsdTimeCode::Default()));
+    published = meshOverlay();
+    CHECK(published && published->hasWeightOverlay && published->weightOverlay.size()==4);
+    if(published && published->weightOverlay.size()==4)
+        for(size_t i=0;i<4;++i)CHECK(Near(published->weightOverlay[i],_kExpectedWeights[i]));
+    CHECK(registry.SetWeightOverlay(std::string()));
+    published = meshOverlay();
+    CHECK(published && !published->hasWeightOverlay);
+
     // A malformed path is rejected rather than reaching SdfPath's loud
     // constructor, and leaves the selection alone.
     CHECK(!registry.SetWeightOverlay("not a path"));
@@ -1666,9 +1679,8 @@ CheckBakedWeightFramesMatchTheWalk(const UsdStageRefPtr &stage,
     }
     CHECK(!rigPath.IsEmpty());
     RigExecRigEvaluator walk(stage, rigPath);
-    walk.SetEvaluationMode(RigExecEvaluationMode::ExecReference);
+    walk.cpuReference = true;
     RigExecRigEvaluator baked(stage, rigPath);
-    baked.SetEvaluationMode(RigExecEvaluationMode::Baked);
     std::vector<std::string> errors;
     if (!walk.Compile(&errors) || !baked.Compile(&errors)) {
         std::printf("FAIL %s: does not compile\n", label.c_str());
@@ -1769,7 +1781,6 @@ TestUntappedVolumeSourceBakesWithTheWalksKeys(const std::string &examplesDir)
     // place. One VolumePlacements step per volume slot fills every volume
     // slot, and the live program publishes only the placed ones.
     RigExecRigEvaluator baked(stage, SdfPath("/SweepAsset/Rig"));
-    baked.SetEvaluationMode(RigExecEvaluationMode::Baked);
     std::vector<std::string> errors;
     CHECK(baked.Compile(&errors));
     const RigExecRigPose got =

@@ -32,7 +32,9 @@
 #include "rigExec/bakedProgram.h"
 #include "rigExec/bakedProgramImpl.h"
 #include "rigExec/bakedSchedule.h"
+#include "rigExec/bakedOpGraph.h"
 #include "rigExec/frozenContext.h"
+#include "rigExec/frameCacheSparsity.h"
 #include "rigExec/parallel.h"
 #include "rigExec/moverGraph.h"
 #include "rigExecMath/dualQuat.h"
@@ -58,11 +60,13 @@
 #include "rigExecPoseCompare.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <set>
 #include <cstdint>
 #include <cstdio>
 #include <map>
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -286,10 +290,84 @@ public:
                 (earlier % 64)) & uint64_t(1);
     }
 
+    size_t WordCount() const { return _words; }
+    const uint64_t *Row(size_t later) const { return &_bits[later * _words]; }
+
 private:
     size_t _words;
     std::vector<uint64_t> _bits;
 };
+
+// Index exact typed slots, retaining each range site once per query. Overlap
+// of several slots is still one range-pair conflict, as in the exhaustive test.
+class WriteSiteIndex {
+public:
+    using Site=std::pair<size_t,size_t>;
+    explicit WriteSiteIndex(const std::vector<RigExecBakedStep> &steps) {
+        for(size_t step=0;step<steps.size();++step)
+            for(size_t range=0;range<steps[step].writes.size();++range) {
+                const auto &write=steps[step].writes[range];
+                _all[write.domain].push_back({{step,range},write});
+                if(!CanIndex(write))_unindexed[write.domain].push_back({{step,range},write});
+                else for(uint32_t slot=write.begin;slot<write.end;++slot)
+                    _sites[{write.domain,slot}].push_back({step,range});
+            }
+    }
+    std::vector<Site> Overlapping(const RigExecBakedSlotRange &range) const {
+        std::vector<Site> result;
+        if(CanIndex(range))for(uint32_t slot=range.begin;slot<range.end;++slot) {
+            const auto found=_sites.find({range.domain,slot});
+            if(found!=_sites.end())result.insert(result.end(),found->second.begin(),found->second.end());
+        }
+        // Large and malformed ranges use bounded interval queries. Empty
+        // intervals may still satisfy Overlaps' original inequalities.
+        const auto &fallback=CanIndex(range)?_unindexed:_all;
+        const auto found=fallback.find(range.domain);
+        if(found!=fallback.end())for(const auto &site:found->second)
+            if(site.second.Overlaps(range))result.push_back(site.first);
+        std::sort(result.begin(),result.end());
+        result.erase(std::unique(result.begin(),result.end()),result.end());
+        return result;
+    }
+private:
+    static bool CanIndex(const RigExecBakedSlotRange &range) {
+        return !range.IsEmpty() && uint64_t(range.end)-range.begin<=4096;
+    }
+    std::map<std::pair<RigExecBakedSlotDomain,uint32_t>,std::vector<Site>> _sites;
+    std::map<RigExecBakedSlotDomain,std::vector<std::pair<Site,RigExecBakedSlotRange>>> _all,_unindexed;
+};
+
+// The four exhaustive quantified conditions, with candidates restricted only
+// by exact domain/slot overlap. Witnesses retain range multiplicity and order.
+using AccessWitness=std::array<size_t,5>;
+template<class Report>
+void IndexedAccessViolations(const std::vector<RigExecBakedStep> &steps,
+                             const Reachability &reachable,Report report)
+{
+    const WriteSiteIndex writes(steps);
+    for(size_t step=0;step<steps.size();++step) {
+        for(size_t r=0;r<steps[step].reads.size();++r) {
+            const auto &read=steps[step].reads[r];
+            const auto candidates=writes.Overlapping(read);
+            if(!RigExecBakedIsSourceDomain(read.domain) && !read.IsEmpty()) {
+                bool earlier=false;
+                for(const auto &site:candidates)earlier=earlier || site.first<step;
+                if(!earlier)report(AccessWitness{0,step,r,0,0});
+            }
+            for(const auto &site:candidates) {
+                if(site.first<step && !reachable.Ordered(site.first,step))
+                    report(AccessWitness{2,site.first,site.second,step,r});
+                else if(site.first>step && !RigExecBakedIsVersionedDomain(read.domain) &&
+                        !reachable.Ordered(step,site.first))
+                    report(AccessWitness{3,step,r,site.first,site.second});
+            }
+        }
+        for(size_t r=0;r<steps[step].writes.size();++r)
+            for(const auto &site:writes.Overlapping(steps[step].writes[r]))
+                if(site.first<step && !reachable.Ordered(site.first,step))
+                    report(AccessWitness{1,site.first,site.second,step,r});
+    }
+}
 
 void
 TestTheGraphDescribesTheProgram(const BuiltProgram &built, const char *name)
@@ -326,124 +404,39 @@ TestTheGraphDescribesTheProgram(const BuiltProgram &built, const char *name)
     }
     CHECK(edges > 0);
 
-    // (2) Every declared read is produced by something: an earlier step, or
-    // the prologue.
-    for (size_t index = 0; index < B.steps.size(); ++index) {
-        for (const RigExecBakedSlotRange &read : B.steps[index].reads) {
-            if (RigExecBakedIsSourceDomain(read.domain) || read.IsEmpty()) {
-                continue;
-            }
-            bool written = false;
-            for (size_t earlier = 0; earlier < index && !written; ++earlier) {
-                for (const RigExecBakedSlotRange &write :
-                         B.steps[earlier].writes) {
-                    if (write.Overlaps(read)) {
-                        written = true;
-                        break;
-                    }
-                }
-            }
-            if (!written) {
-                ++failures;
-                std::printf("FAIL %s: step %zu (%s) reads %s[%u,%u) which no "
-                            "earlier step writes\n", name, index,
-                            B.steps[index].label.c_str(),
-                            RigExecBakedSlotDomainName(read.domain),
-                            read.begin, read.end);
-            }
-        }
-    }
-
-    // (3) Two steps whose declared writes overlap are ordered. A declared
-    // write is an upper bound, so this is stricter than what any run does --
-    // which is the point: a scheduler may only look at the declarations.
+    // (2--4) Producer existence and unordered write/write or read/write
+    // conflicts, queried by the exact typed values each range names.
     const Reachability reachable(B.steps);
-    size_t conflicts = 0;
-    for (size_t earlier = 0; earlier < B.steps.size(); ++earlier) {
-        for (size_t later = earlier + 1; later < B.steps.size(); ++later) {
-            if (reachable.Ordered(earlier, later)) {
-                continue;
-            }
-            for (const RigExecBakedSlotRange &a : B.steps[earlier].writes) {
-                for (const RigExecBakedSlotRange &b : B.steps[later].writes) {
-                    if (!a.Overlaps(b)) {
-                        continue;
-                    }
-                    if (++conflicts <= 4) {
-                        std::printf("FAIL %s: steps %zu (%s) and %zu (%s) "
-                                    "both write %s[%u,%u) with no edge "
-                                    "between them\n", name, earlier,
-                                    B.steps[earlier].label.c_str(), later,
-                                    B.steps[later].label.c_str(),
-                                    RigExecBakedSlotDomainName(a.domain),
-                                    b.begin, b.end);
-                    }
-                }
-            }
+    size_t conflicts=0,races=0;
+    IndexedAccessViolations(B.steps,reachable,[&](const AccessWitness &w) {
+        const auto &earlier=B.steps[w[1]];
+        if(w[0]==0) {
+            const auto &read=earlier.reads[w[2]];
+            ++failures;
+            std::printf("FAIL %s: step %zu (%s) reads %s[%u,%u) which no earlier step writes\n",
+                name,w[1],earlier.label.c_str(),RigExecBakedSlotDomainName(read.domain),read.begin,read.end);
+            return;
         }
-    }
-    failures += int(conflicts);
-
-    // (4) And a step that reads a slot an unordered step writes is the same
-    // race seen from the other side.
-    size_t races = 0;
-    for (size_t earlier = 0; earlier < B.steps.size(); ++earlier) {
-        for (size_t later = earlier + 1; later < B.steps.size(); ++later) {
-            if (reachable.Ordered(earlier, later)) {
-                continue;
-            }
-            for (const RigExecBakedSlotRange &write :
-                     B.steps[earlier].writes) {
-                for (const RigExecBakedSlotRange &read :
-                         B.steps[later].reads) {
-                    if (write.Overlaps(read)) {
-                        if (++races <= 4) {
-                            std::printf("FAIL %s: step %zu (%s) writes %s"
-                                        "[%u,%u) that unordered step %zu (%s) "
-                                        "reads\n", name, earlier,
-                                        B.steps[earlier].label.c_str(),
-                                        RigExecBakedSlotDomainName(write.domain),
-                                        write.begin, write.end, later,
-                                        B.steps[later].label.c_str());
-                        }
-                    }
-                }
-            }
-            for (const RigExecBakedSlotRange &read : B.steps[earlier].reads) {
-                for (const RigExecBakedSlotRange &write :
-                         B.steps[later].writes) {
-                    // WRITE AFTER READ in a VERSIONED pose domain is not a
-                    // race and is deliberately left unordered by
-                    // RigExecBakedBuildStepEdges: a writer there writes
-                    // storage of its OWN version, so a reader of an earlier
-                    // version and a later writer touch different memory. The
-                    // unified pose stack makes this shape ordinary rather
-                    // than theoretical -- a solver reads a joint the
-                    // constraint ABOVE it revises, which is exactly a read of
-                    // the earlier version -- so the check follows the edge
-                    // builder instead of being stricter than the program.
-                    if (RigExecBakedIsVersionedDomain(write.domain)) {
-                        continue;
-                    }
-                    if (write.Overlaps(read)) {
-                        if (++races <= 4) {
-                            std::printf("FAIL %s: step %zu (%s) reads %s"
-                                        "[%u,%u) that unordered step %zu (%s) "
-                                        "writes\n", name, earlier,
-                                        B.steps[earlier].label.c_str(),
-                                        RigExecBakedSlotDomainName(write.domain),
-                                        write.begin, write.end, later,
-                                        B.steps[later].label.c_str());
-                        }
-                    }
-                }
-            }
+        const auto &later=B.steps[w[3]];
+        if(w[0]==1) {
+            const auto &write=later.writes[w[4]];
+            if(++conflicts<=4)
+                std::printf("FAIL %s: steps %zu (%s) and %zu (%s) both write %s[%u,%u) with no edge between them\n",
+                    name,w[1],earlier.label.c_str(),w[3],later.label.c_str(),
+                    RigExecBakedSlotDomainName(write.domain),write.begin,write.end);
+        } else {
+            const auto &range=w[0]==2?earlier.writes[w[2]]:earlier.reads[w[2]];
+            if(++races<=4)
+                std::printf("FAIL %s: step %zu (%s) %s %s[%u,%u) that unordered step %zu (%s) %s\n",
+                    name,w[1],earlier.label.c_str(),w[0]==2?"writes":"reads",
+                    RigExecBakedSlotDomainName(range.domain),range.begin,range.end,
+                    w[3],later.label.c_str(),w[0]==2?"reads":"writes");
         }
-    }
-    if (races) {
+    });
+    failures+=int(conflicts);
+    if(races) {
         ++failures;
-        std::printf("FAIL %s: %zu unordered read/write slot overlap(s)\n",
-                    name, races);
+        std::printf("FAIL %s: %zu unordered read/write slot overlap(s)\n",name,races);
     }
     // (5) A step that reads a revision's OUTPUT buffer must also read that
     // revision's RevisionDone slot. A chain's running points live in
@@ -583,18 +576,25 @@ TestTheGraphDescribesTheProgram(const BuiltProgram &built, const char *name)
                         step.label.c_str(), what,
                         RigExecBakedSlotDomainName(domain), slot);
         };
-        for (const int slot : commit.slots) {
-            require(RigExecBakedSlotDomain::PoseFin, slot,
-                    head ? "measures a delta against" : "carries");
-            if (commit.solverOutput) {
-                require(RigExecBakedSlotDomain::PoseBase, slot, "carries");
-            }
+        for (size_t pos = 0; pos < commit.slots.size(); ++pos) {
+            if (head) require(RigExecBakedSlotDomain::PoseFin, commit.slotReads[pos],
+                              "measures a delta against");
+            require(RigExecBakedSlotDomain::PoseFin, commit.slotCarry[pos], "carries");
+            if (commit.solverOutput)
+                require(RigExecBakedSlotDomain::PoseBase, commit.slotBaseCarry[pos], "carries");
         }
-        if (!commit.solverOutput) {
-            continue;
-        }
-        for (const auto &pair : commit.propagate) {
-            require(RigExecBakedSlotDomain::PoseBase, pair.first, "carries");
+        for (size_t k = 0; k < commit.propagate.size(); ++k) {
+            const auto carry = [&](RigExecBakedSlotDomain domain, uint32_t value,
+                                   const auto &candidateWrites) {
+                bool earlierCandidate = false;
+                for (size_t pos = 0; pos < commit.slots.size() && pos < candidateWrites.size(); ++pos)
+                    if (commit.slots[pos] == commit.propagate[k].first &&
+                        candidateWrites[pos] == value) earlierCandidate = true;
+                if (!earlierCandidate) require(domain, value, "carries");
+            };
+            carry(RigExecBakedSlotDomain::PoseFin, commit.descendantCarry[k], commit.slotWrites);
+            if (commit.solverOutput)
+                carry(RigExecBakedSlotDomain::PoseBase, commit.descendantBaseCarry[k], commit.slotBaseWrites);
         }
     }
 
@@ -615,113 +615,38 @@ void
 TestTheClusteringIsSound(const BuiltProgram &built, const char *name)
 {
     CHECK(built.program != nullptr);
-    if (!built.program) {
-        return;
-    }
-    const RigExecBakedProgramImpl &B = built.program->GetStepGraph();
-    const double grains[3] = {0.0, B.clustering.grainUs, 200.0};
-    for (const double grain : grains) {
-        const RigExecBakedClustering schedule =
-            RigExecBakedBuildClusters(B, grain);
-        if (schedule.clusterOf.size() != B.steps.size()) {
-            ++failures;
-            std::printf("FAIL %s grain %g: %zu step assignments for %zu "
-                        "steps\n", name, grain, schedule.clusterOf.size(),
-                        B.steps.size());
-            continue;
-        }
-
-        // (1) Every step is in exactly one cluster, and it is the cluster
-        // clusterOf names.
-        std::vector<int> seen(B.steps.size(), 0);
-        for (size_t c = 0; c < schedule.clusters.size(); ++c) {
-            for (const int member : schedule.clusters[c].members) {
-                if (member < 0 || size_t(member) >= B.steps.size()) {
-                    ++failures;
-                    std::printf("FAIL %s grain %g: cluster %zu names step "
-                                "%d\n", name, grain, c, member);
-                    continue;
-                }
-                ++seen[size_t(member)];
-                if (schedule.clusterOf[size_t(member)] != int(c)) {
-                    ++failures;
-                    std::printf("FAIL %s grain %g: step %d is in cluster %zu "
-                                "but assigned to %d\n", name, grain, member,
-                                c, schedule.clusterOf[size_t(member)]);
-                }
+    if (!built.program) return;
+    const auto &B = built.program->GetStepGraph();
+    std::string error;
+    CHECK(RigExecValidateOpClusters(B.opGraph, &error));
+    std::vector<double> costs;
+    for (const auto &op : B.opGraph.ops) costs.push_back(B.steps[op.originalIndex].cost);
+    for (double grain : {0.0, B.clustering.grainUs, 200.0}) {
+        auto graph = B.opGraph;
+        CHECK(RigExecLowerOpClusters(&graph, costs, grain, &error));
+        CHECK(RigExecValidateOpClusters(graph, &error));
+        CHECK(graph.opClusters.size() == graph.ops.size());
+        std::vector<size_t> seen(graph.ops.size());
+        for (size_t c = 0; c < graph.clusters.size(); ++c) {
+            const auto &cluster = graph.clusters[c];
+            CHECK(!cluster.members.empty() && cluster.members.size() <= 64);
+            if (grain == 0) CHECK(cluster.members.size() == 1);
+            for (uint32_t member : cluster.members) {
+                CHECK(member < seen.size());
+                if (member >= seen.size()) continue;
+                ++seen[member];
+                CHECK(graph.opClusters[member] == c);
             }
-        }
-        for (size_t index = 0; index < seen.size(); ++index) {
-            if (seen[index] != 1) {
-                ++failures;
-                std::printf("FAIL %s grain %g: step %zu is in %d cluster(s)\n",
-                            name, grain, index, seen[index]);
+            for (size_t i = 1; i < cluster.members.size(); ++i) {
+                const auto before = cluster.members[i - 1], after = cluster.members[i];
+                CHECK(graph.ops[before].successors == std::vector<uint32_t>{after});
+                CHECK(graph.ops[after].predecessors == std::vector<uint32_t>{before});
             }
+            for (uint32_t predecessor : cluster.predecessors) CHECK(predecessor < c);
         }
-
-        // (2) Members are in increasing program order, which is what lets a
-        // cluster run them with no schedule of its own: program order is a
-        // topological order of the step graph.
-        for (size_t c = 0; c < schedule.clusters.size(); ++c) {
-            const std::vector<int> &members = schedule.clusters[c].members;
-            for (size_t i = 1; i < members.size(); ++i) {
-                if (members[i - 1] >= members[i]) {
-                    ++failures;
-                    std::printf("FAIL %s grain %g: cluster %zu lists step %d "
-                                "before %d\n", name, grain, c,
-                                members[i - 1], members[i]);
-                }
-            }
-        }
-
-        // (3) The quotient graph is acyclic. A cycle would deadlock the
-        // parallel executor outright -- two clusters each waiting on the
-        // other's counter -- so this is the one property the executor cannot
-        // check for itself.
-        std::vector<int> remaining(schedule.clusters.size(), 0);
-        std::vector<int> ready;
-        for (size_t c = 0; c < schedule.clusters.size(); ++c) {
-            remaining[c] = int(schedule.clusters[c].preds.size());
-            if (!remaining[c]) {
-                ready.push_back(int(c));
-            }
-        }
-        size_t drained = 0;
-        for (size_t head = 0; head < ready.size(); ++head) {
-            ++drained;
-            const RigExecBakedCluster &cluster =
-                schedule.clusters[size_t(ready[head])];
-            for (const int succ : cluster.succs) {
-                if (--remaining[size_t(succ)] == 0) {
-                    ready.push_back(succ);
-                }
-            }
-        }
-        if (drained != schedule.clusters.size()) {
-            ++failures;
-            std::printf("FAIL %s grain %g: the cluster graph has a cycle "
-                        "(%zu of %zu clusters reachable)\n", name, grain,
-                        drained, schedule.clusters.size());
-        }
-
-        // (4) preds and succs describe one relation, which the counters the
-        // executor resets from depend on.
-        for (size_t c = 0; c < schedule.clusters.size(); ++c) {
-            for (const int pred : schedule.clusters[c].preds) {
-                const std::vector<int> &succs =
-                    schedule.clusters[size_t(pred)].succs;
-                if (std::find(succs.begin(), succs.end(), int(c)) ==
-                    succs.end()) {
-                    ++failures;
-                    std::printf("FAIL %s grain %g: cluster %zu names "
-                                "predecessor %d, which does not name it "
-                                "back\n", name, grain, c, pred);
-                }
-            }
-        }
-        std::printf("  %s grain %g: %zu cluster(s), serial %.1fus, critical "
-                    "path %.1fus\n", name, grain, schedule.clusters.size(),
-                    schedule.serialCost, schedule.criticalPathCost);
+        for (size_t count : seen) CHECK(count == 1);
+        std::printf("  %s grain %g: %zu common cluster(s)\n",
+                    name, grain, graph.clusters.size());
     }
 }
 
@@ -764,7 +689,7 @@ TestTheReportIsDeterministic(const std::string &stagePath)
 void
 TestTheModeIsTheOneTheEnvironmentAsked()
 {
-    const bool asked = TfGetenv("RIGEXEC_BAKED_SCHEDULE", "serial") ==
+    const bool asked = TfGetenv("RIGEXEC_BAKED_SCHEDULE", "parallel") ==
                        "parallel";
     const RigExecBakedScheduleMode expected =
         asked && RigExecParallelEvaluationEnabled()
@@ -1103,19 +1028,8 @@ TestTheVertexPartitionCoversEveryVertexOnce(const std::string &stagePath,
     }
 }
 
-/// A revision is cut into chunks only where the cut buys a head start.
-///
-/// The rule (§6): a chunk body is a serial loop, while an uncut revision is
-/// one RigExecApplySkinKernel call that spreads itself over the arena -- so
-/// cutting is a LOSS unless some range becomes runnable before the whole
-/// revision could. That is a question about levels, which is why Build sweeps
-/// the pose half's edges before the geometry half is built.
-///
-/// Asserted on the decision the program recorded rather than on a rig that
-/// happens to answer one way: `chunked` must be exactly "more than one
-/// candidate range, and their ready levels differ". The environment override
-/// is checked in the same breath, because it is what keeps every other chunk
-/// assertion in this file from passing vacuously.
+/// Chunk selection depends on distinct declared typed producer read sets.
+/// Grain and vertex caps affect grouping without introducing scheduling bands.
 void
 TestThePartitionIsCutOnlyWhereItPays(const BuiltProgram &built,
                                      const char *name, bool always)
@@ -1133,20 +1047,27 @@ TestThePartitionIsCutOnlyWhereItPays(const BuiltProgram &built,
                 continue;
             }
             ++skins;
-            const bool differ =
-                revision.partitionReadyMin < revision.partitionReadyMax;
-            const bool expected = revision.partitionCandidates > 1 &&
-                                  (always || differ);
-            if (revision.chunked != expected) {
-                ++failures;
-                std::printf("FAIL %s: %s is %scut with %zu candidate(s) and "
-                            "ready levels %d..%d\n", name,
-                            revision.moverPath.GetString().c_str(),
-                            revision.chunked ? "" : "not ",
-                            revision.partitionCandidates,
-                            revision.partitionReadyMin,
-                            revision.partitionReadyMax);
+            auto sets = revision.partitionProducerSets;
+            for (const auto &reads : sets) {
+                CHECK(std::is_sorted(reads.begin(), reads.end()));
+                CHECK(std::adjacent_find(reads.begin(), reads.end()) == reads.end());
             }
+            std::sort(sets.begin(), sets.end());
+            sets.erase(std::unique(sets.begin(), sets.end()), sets.end());
+            CHECK(revision.partitionDistinctReads == sets.size());
+            size_t minCount = 0, maxCount = 0;
+            if (!sets.empty()) {
+                minCount = sets.front().size();
+                for (const auto &reads : sets) {
+                    minCount = std::min(minCount, reads.size());
+                    maxCount = std::max(maxCount, reads.size());
+                }
+            }
+            CHECK(revision.partitionProducerMin == minCount);
+            CHECK(revision.partitionProducerMax == maxCount);
+            const bool expected = revision.partitionCandidates > 1 &&
+                                  (always || sets.size() > 1);
+            CHECK(revision.chunked == expected);
             cut += revision.chunked ? 1 : 0;
             // An uncut revision is the degenerate partition, not a partition
             // with its keys quietly dropped: one range, and the fuse's
@@ -1190,7 +1111,7 @@ TestTheDerivedCompareAgreesWithTheElementwiseOne(const std::string &stagePath)
     CHECK(built.program->Run(UsdTimeCode::Default(), &first));
     CHECK(built.program->Run(UsdTimeCode::Default(), &repeated));
     // The identity arm, end to end: nothing moved, so nothing re-executed.
-    CHECK(repeated.moverGraphRevisionsExecuted == 0);
+    CHECK(repeated.executedOpCount == 0);
     const RigExecBakedProgramImpl &B = built.program->GetStepGraph();
     size_t derivedRevisions = 0;
     for (const RigExecBakedProgramImpl::GeomChain &chain : B.chains) {
@@ -1363,27 +1284,27 @@ TestARecompiledRigStillAgreesWithTheDynamicPath(const std::string &stagePath,
     std::vector<std::string> errors;
     CHECK(evaluator.Compile(&errors));
     CHECK(evaluator.IsBakeable());
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::BakedWithParityCheck);
+    evaluator.cpuReference = true;
     const RigExecRigPose warm = evaluator.Evaluate(UsdTimeCode::Default());
     CHECK(warm.valid);
-    CHECK(warm.bakedParityMismatches == 0);
+    CHECK(warm.comparisonMismatches == 0);
 
     // A recompile of the same stage: a new epoch, the same shape, and an
     // outgoing program for the replacement to adopt.
     CHECK(evaluator.Compile(&errors));
     const RigExecRigPose after = evaluator.Evaluate(UsdTimeCode::Default());
     CHECK(after.valid);
-    if (after.bakedParityMismatches != 0) {
+    if (after.comparisonMismatches != 0) {
         ++failures;
         std::printf("FAIL %s: %zu mismatch(es) after a recompile\n", name,
-                    after.bakedParityMismatches);
+                    after.comparisonMismatches);
         for (const std::string &diagnostic : after.diagnostics) {
             std::printf("    %s\n", diagnostic.c_str());
         }
         return;
     }
     std::printf("  %s: a recompiled rig agrees, %zu revision(s) executed\n",
-                name, after.moverGraphRevisionsExecuted);
+                name, after.executedOpCount);
 }
 
 /// A skin revision the frame rejects publishes what the dynamic path
@@ -1417,11 +1338,11 @@ TestARejectedSkinPacketPassesThroughLikeTheDynamicPath(
     std::vector<std::string> errors;
     CHECK(evaluator.Compile(&errors));
     CHECK(evaluator.IsBakeable());
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::BakedWithParityCheck);
+    evaluator.cpuReference = true;
 
     const RigExecRigPose clean = evaluator.Evaluate(UsdTimeCode::Default());
     CHECK(clean.valid);
-    CHECK(clean.bakedParityMismatches == 0);
+    CHECK(clean.comparisonMismatches == 0);
 
     RigExecValueOverride override;
     override.prim = moverPath;
@@ -1432,10 +1353,10 @@ TestARejectedSkinPacketPassesThroughLikeTheDynamicPath(
     evaluator.ClearInteractiveOverrides();
 
     CHECK(rejected.valid);
-    if (rejected.bakedParityMismatches != 0) {
+    if (rejected.comparisonMismatches != 0) {
         ++failures;
         std::printf("FAIL %s: %zu baked/dynamic mismatch(es)\n", what,
-                    rejected.bakedParityMismatches);
+                    rejected.comparisonMismatches);
         for (const std::string &diagnostic : rejected.diagnostics) {
             std::printf("    %s\n", diagnostic.c_str());
         }
@@ -1503,10 +1424,10 @@ TestADualQuaternionSkinChunksLikeTheDynamicPath(const std::string &stagePath)
     std::vector<std::string> errors;
     CHECK(evaluator.Compile(&errors));
     CHECK(evaluator.IsBakeable());
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::BakedWithParityCheck);
+    evaluator.cpuReference = true;
     const RigExecRigPose linear = evaluator.Evaluate(UsdTimeCode::Default());
     CHECK(linear.valid);
-    CHECK(linear.bakedParityMismatches == 0);
+    CHECK(linear.comparisonMismatches == 0);
 
     // Whichever method the rig did NOT author, so the override changes the
     // kernel rather than restating it.
@@ -1525,10 +1446,10 @@ TestADualQuaternionSkinChunksLikeTheDynamicPath(const std::string &stagePath)
     const RigExecRigPose dual = evaluator.Evaluate(UsdTimeCode::Default());
     evaluator.ClearInteractiveOverrides();
     CHECK(dual.valid);
-    if (dual.bakedParityMismatches != 0) {
+    if (dual.comparisonMismatches != 0) {
         ++failures;
         std::printf("FAIL dual-quaternion chunks: %zu baked/dynamic "
-                    "mismatch(es)\n", dual.bakedParityMismatches);
+                    "mismatch(es)\n", dual.comparisonMismatches);
         return;
     }
     for (const std::string &diagnostic : dual.diagnostics) {
@@ -1607,6 +1528,7 @@ TestAStalePartitionRunsTheRevisionWhole(const std::string &stagePath)
     stale->ran = false;
 
     RigExecRigPose wholePose;
+    built.program->RequestFullRun();
     CHECK(built.program->Run(UsdTimeCode::Default(), &wholePose));
     CHECK(stale->partitionStale);
     CHECK(stale->executed);
@@ -1719,7 +1641,6 @@ TestARecutLayoutCannotReadAnUndeclaredJoint()
     std::vector<std::string> errors;
     CHECK(evaluator.Compile(&errors));
     CHECK(evaluator.IsBakeable());
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     const UsdTimeCode time(1.0);
 
     const auto skin = [&]() -> const RigExecBakedProgramImpl::GeomRevision * {
@@ -1744,7 +1665,7 @@ TestARecutLayoutCannotReadAnUndeclaredJoint()
         RigExecRigEvaluator reference(stage, rigPath);
         std::vector<std::string> referenceErrors;
         CHECK(reference.Compile(&referenceErrors));
-        reference.SetEvaluationMode(RigExecEvaluationMode::ExecReference);
+        reference.cpuReference = true;
         reference.SetInteractiveOverrides(overrides);
         const RigExecRigPose expected = reference.Evaluate(time);
         CHECK(pose.valid && expected.valid);
@@ -1926,14 +1847,34 @@ TestTheInfluenceValidityCheckRejectsWhatTheAssemblerRejects()
 // actually skipped something. Either alone passes over the defect the other
 // one catches.
 
-/// The two closures Build computes are closures (§7).
-///
-/// Neither can be checked against a published pose -- a cone that is too big
-/// is slow and right, and one that is too small is fast and wrong in a way
-/// only some frame of some rig will ever show. So they are checked as what
-/// they claim to be: cone[c] holds c and every successor's cone, restore[c]
-/// holds every restore of everything in it, and a step's restore
-/// predecessors are predecessors.
+/// Exact forward reachability: on a finite DAG, each cone equals its own
+/// cluster plus the union of its direct successors' cones. This equation
+/// detects both missing and extraneous members without all-pairs scans.
+size_t
+ConeRecurrenceViolations(const RigExecBakedClustering &graph,
+                         const std::vector<RigExecBakedClusterSet> &cones,
+                         size_t *edges,size_t *wordChecks)
+{
+    const size_t count=graph.clusters.size(),words=(count+63)/64;
+    size_t broken=0;
+    std::vector<uint64_t> expected(words,0);
+    for(size_t c=0;c<count;++c) {
+        std::fill(expected.begin(),expected.end(),uint64_t(0));
+        expected[c/64]|=uint64_t(1)<<(c%64);
+        for(int next:graph.clusters[c].succs) {
+            ++*edges;
+            for(size_t w=0;w<words;++w) {
+                expected[w]|=cones[size_t(next)].words[w]; ++*wordChecks;
+            }
+        }
+        for(size_t w=0;w<words;++w) {
+            ++*wordChecks;
+            if(expected[w]!=cones[c].words[w])++broken;
+        }
+    }
+    return broken;
+}
+
 void
 TestTheConeClosuresAreSound(const BuiltProgram &built, const char *name)
 {
@@ -1942,42 +1883,57 @@ TestTheConeClosuresAreSound(const BuiltProgram &built, const char *name)
         std::printf("FAIL %s: no program to check cones of\n", name);
         return;
     }
-    const RigExecBakedProgramImpl &B = built.program->GetStepGraph();
-    const size_t clusters = B.clustering.clusters.size();
-    CHECK(B.cones.cone.size() == clusters);
-    size_t broken = 0;
-    for (size_t c = 0; c < clusters; ++c) {
-        if (!B.cones.cone[c].Test(int(c))) {
-            ++broken;
+    const auto &B=built.program->GetStepGraph();
+    const size_t clusters=B.clustering.clusters.size();
+    const size_t words=(clusters+63)/64;
+    CHECK(B.cones.cone.size()==clusters);
+    if(B.cones.cone.size()!=clusters)return;
+    for(const auto &cluster:B.clustering.clusters) {
+        for(int next:cluster.succs) {
+            CHECK(next>=0 && size_t(next)<clusters);
+            if(next<0 || size_t(next)>=clusters)return;
         }
-        for (const int succ : B.clustering.clusters[c].succs) {
-            if (!B.cones.cone[c].Test(succ)) {
-                ++broken;
-            }
-        }
-        for (size_t d = 0; d < clusters; ++d) {
-            if (B.cones.cone[c].Test(int(d))) {
-                for (size_t e = 0; e < clusters; ++e) {
-                    if (B.cones.cone[d].Test(int(e)) &&
-                        !B.cones.cone[c].Test(int(e))) {
-                        ++broken;
-                    }
-                }
-            }
+        for(int previous:cluster.preds) {
+            CHECK(previous>=0 && size_t(previous)<clusters);
+            if(previous<0 || size_t(previous)>=clusters)return;
         }
     }
-    if (broken) {
+    const auto order=RigExecBakedClusterTopologicalOrder(B.clustering);
+    CHECK(order.size()==clusters);
+    if(order.size()!=clusters)return;
+    std::vector<int> rank(clusters,-1);
+    for(size_t i=0;i<order.size();++i) {
+        const int c=order[i];
+        CHECK(c>=0 && size_t(c)<clusters);
+        if(c<0 || size_t(c)>=clusters)return;
+        CHECK(rank[size_t(c)]<0);
+        if(rank[size_t(c)]>=0)return;
+        rank[size_t(c)]=int(i);
+    }
+    for(size_t c=0;c<clusters;++c) {
+        CHECK(B.cones.cone[c].words.size()==words);
+        if(B.cones.cone[c].words.size()!=words)return;
+        for(int next:B.clustering.clusters[c].succs) {
+            CHECK(next>=0 && size_t(next)<clusters);
+            if(next<0 || size_t(next)>=clusters)return;
+            CHECK(rank[c]<rank[size_t(next)]);
+            if(rank[c]>=rank[size_t(next)])return;
+        }
+        if(clusters%64) {
+            const uint64_t mask=(uint64_t(1)<<(clusters%64))-1;
+            CHECK((B.cones.cone[c].words.back()&~mask)==0);
+        }
+    }
+    size_t edges=0,wordChecks=0;
+    const size_t broken=ConeRecurrenceViolations(B.clustering,B.cones.cone,&edges,&wordChecks);
+    if(broken) {
         ++failures;
-        std::printf("FAIL %s: %zu cone closure violation(s)\n", name, broken);
-        return;
+        std::printf("FAIL %s: %zu cone recurrence word violation(s)\n",name,broken);
     }
-    size_t reach = 0;
-    for (size_t c = 0; c < clusters; ++c) {
-        reach += B.cones.cone[c].Count();
-    }
-    std::printf("  %s: %zu cluster(s), %.1f cluster(s) in the average cone\n",
-                name, clusters,
-                clusters ? double(reach) / double(clusters) : 0.0);
+    size_t reach=0;
+    for(const auto &cone:B.cones.cone)reach+=cone.Count();
+    std::printf("  %s: %zu cluster(s), %.1f cluster(s) in the average cone; %zu edges, %zu word checks\n",
+        name,clusters,clusters?double(reach)/double(clusters):0.0,edges,wordChecks);
 }
 
 /// Every pose write has storage of its own, and every read names a version
@@ -2113,7 +2069,7 @@ struct LiveRig {
 };
 
 LiveRig
-OpenRig(const std::string &stagePath, RigExecEvaluationMode mode)
+OpenRig(const std::string &stagePath, bool referenceChecks = false)
 {
     LiveRig rig;
     rig.stage = UsdStage::Open(stagePath);
@@ -2127,7 +2083,7 @@ OpenRig(const std::string &stagePath, RigExecEvaluationMode mode)
     rig.evaluator =
         std::make_unique<RigExecRigEvaluator>(rig.stage, rigPath);
     rig.evaluator->SetSolverGuidesEnabled(true);
-    rig.evaluator->SetEvaluationMode(mode);
+    rig.evaluator->cpuReference = referenceChecks;
     std::vector<std::string> errors;
     if (!rig.evaluator->Compile(&errors)) {
         rig.evaluator.reset();
@@ -2168,7 +2124,7 @@ void
 TestARepeatedTimeReExecutesNothing(const std::string &stagePath,
                                    const char *name)
 {
-    const LiveRig rig = OpenRig(stagePath, RigExecEvaluationMode::Baked);
+    const LiveRig rig = OpenRig(stagePath);
     if (!rig.evaluator) {
         ++failures;
         std::printf("FAIL %s: does not compile\n", name);
@@ -2185,8 +2141,7 @@ TestARepeatedTimeReExecutesNothing(const std::string &stagePath,
         return;
     }
     // Nothing moved, so nothing was deformed again.
-    CHECK(second.moverGraphRevisionsExecuted == 0);
-    CHECK(second.moverGraphRevisionsCreated == 0);
+    CHECK(second.executedOpCount == 0);
     // ... and the run knew it: a frame that re-ran every cluster would
     // satisfy the counter above by accident, because the fuse's executed
     // decision is a value comparison of its own.
@@ -2213,7 +2168,7 @@ TestADragReturnedToItsValueExecutesNothing(const std::string &stagePath,
                                            const SdfPath &control,
                                            const TfToken &avar)
 {
-    const LiveRig rig = OpenRig(stagePath, RigExecEvaluationMode::Baked);
+    const LiveRig rig = OpenRig(stagePath);
     if (!rig.evaluator) {
         ++failures;
         std::printf("FAIL drag-return: does not compile\n");
@@ -2236,7 +2191,7 @@ TestADragReturnedToItsValueExecutesNothing(const std::string &stagePath,
     E.SetInteractiveOverrides(
         {RigExecValueOverride{control, TfToken(), avar, dragged}});
     const RigExecRigPose moved = E.Evaluate(UsdTimeCode(1));
-    CHECK(moved.moverGraphRevisionsExecuted > 0);
+    CHECK(moved.executedOpCount > 0);
 
     // Back to where it started, and HELD there. The first generation after
     // the value moves back executes -- it moved -- and the one after it must
@@ -2244,9 +2199,9 @@ TestADragReturnedToItsValueExecutesNothing(const std::string &stagePath,
     E.SetInteractiveOverrides(
         {RigExecValueOverride{control, TfToken(), avar, original}});
     const RigExecRigPose back = E.Evaluate(UsdTimeCode(1));
-    CHECK(back.moverGraphRevisionsExecuted > 0);
+    CHECK(back.executedOpCount > 0);
     const RigExecRigPose held = E.Evaluate(UsdTimeCode(1));
-    CHECK(held.moverGraphRevisionsExecuted == 0);
+    CHECK(held.executedOpCount == 0);
     CHECK(E.GetBakedClustersRunLastGeneration() < E.GetBakedClusterCount());
     if (E.GetBakedGenerationCount() != 5) {
         ++failures;
@@ -2320,7 +2275,6 @@ StepConeBound(const RigExecBakedProgramImpl &B,
               const std::vector<int> &dirty)
 {
     const size_t steps = B.steps.size();
-    const size_t words = B.cones.stepWords;
     RigExecBakedClusterSet seeds;
     seeds.Resize(steps);
     seeds.Union(B.cones.alwaysSteps);
@@ -2339,12 +2293,20 @@ StepConeBound(const RigExecBakedProgramImpl &B,
     }
     RigExecBakedClusterSet closed;
     closed.Resize(steps);
-    for (size_t s = 0; s < steps; ++s) {
-        if (!seeds.Test(int(s))) {
-            continue;
+    // Traverse the execution artifact; result bits retain physical step IDs.
+    std::vector<uint32_t> pending;
+    std::vector<char> seen(B.opGraph.ops.size(), 0);
+    for (uint32_t c = 0; c < B.opGraph.ops.size(); ++c) {
+        const uint32_t physical = B.opGraph.ops[c].originalIndex;
+        if (physical < steps && seeds.Test(int(physical))) {
+            seen[c] = 1; pending.push_back(c);
         }
-        for (size_t w = 0; w < words && w < closed.words.size(); ++w) {
-            closed.words[w] |= B.cones.stepCone[s * words + w];
+    }
+    for (size_t at = 0; at < pending.size(); ++at) {
+        const auto &op = B.opGraph.ops[pending[at]];
+        closed.Set(int(op.originalIndex));
+        for (uint32_t next : op.successors) if (!seen[next]) {
+            seen[next] = 1; pending.push_back(next);
         }
     }
     return closed;
@@ -2392,11 +2354,11 @@ TestAConstraintDragRunsOnlyItsCone(const std::string &stagePath,
 
     // The path that skips: warmed up first, so its next generation has last
     // frame's values to keep.
-    const LiveRig baked = OpenRig(stagePath, RigExecEvaluationMode::Baked);
+    const LiveRig baked = OpenRig(stagePath);
     // The path that never skips, and never baked: one evaluator, one
     // generation, the whole exec walk.
     const LiveRig reference =
-        OpenRig(stagePath, RigExecEvaluationMode::ExecReference);
+        OpenRig(stagePath, true);
     if (!baked.evaluator || !reference.evaluator) {
         ++failures;
         std::printf("FAIL constraint-drag: does not compile\n");
@@ -2461,9 +2423,9 @@ TestALeafControlDragRunsOnlyItsCone(const std::string &stagePath,
     const std::vector<RigExecValueOverride> overrides = {
         RigExecValueOverride{control, TfToken(), avar, dragged}};
 
-    const LiveRig baked = OpenRig(stagePath, RigExecEvaluationMode::Baked);
+    const LiveRig baked = OpenRig(stagePath);
     const LiveRig reference =
-        OpenRig(stagePath, RigExecEvaluationMode::ExecReference);
+        OpenRig(stagePath, true);
     if (!baked.evaluator || !reference.evaluator) {
         ++failures;
         std::printf("FAIL leaf-drag: does not compile\n");
@@ -2516,7 +2478,7 @@ TestALeafControlDragRunsOnlyItsCone(const std::string &stagePath,
     }
     // The drag really moved the rig, rather than the cone being small
     // because nothing happened.
-    CHECK(moved.moverGraphRevisionsExecuted > 0);
+    CHECK(moved.executedOpCount > 0);
 
     // And per STEP, which is the grain the run closed at: the steps it ran
     // are the drag's step cone and no more, and a clean step packed into a
@@ -2524,9 +2486,17 @@ TestALeafControlDragRunsOnlyItsCone(const std::string &stagePath,
     // dirty cluster-mate. The count survives the cone verifier's forced
     // second pass (RigExecBakedRunStatistics puts it back); the sets do not,
     // so they are read only when that pass did not run.
-    const RigExecBakedClusterSet stepBound =
-        StepConeBound(B, {B.cones.avarStep[size_t(slot->second)]});
-    const size_t stepsRan = B.lastClosedSteps;
+    std::vector<int> sourceSeeds{B.cones.avarStep[size_t(slot->second)]};
+    const SdfPath source = control.AppendProperty(avar);
+    for (size_t k=0;k<B.providerProgram.sampled.size();++k) {
+        if (B.providerProgram.sampled[k].attribute != source) continue;
+        for (size_t s=0;s<B.steps.size();++s)
+            if (B.steps[s].kind == RigExecBakedStepKind::SpaceExpression &&
+                B.steps[s].part == 2 && B.steps[s].object == int(k))
+                sourceSeeds.push_back(int(s));
+    }
+    const RigExecBakedClusterSet stepBound = StepConeBound(B,sourceSeeds);
+    const size_t stepsRan = B.opExecution.executed;
     CHECK(stepsRan > 0);
     if (stepsRan > stepBound.Count()) {
         ++failures;
@@ -2536,7 +2506,10 @@ TestALeafControlDragRunsOnlyItsCone(const std::string &stagePath,
     if (!RigExecBakedVerifyConesRequested()) {
         size_t packed = 0;
         for (size_t s = 0; s < B.steps.size(); ++s) {
-            const bool stepClosed = B.closedSteps.Test(int(s));
+            const bool stepClosed = B.opExecution.ran[s] != 0;
+            if (stepClosed && !stepBound.Test(int(s)))
+                std::printf("FAIL leaf-drag: selected step %zu (%s), kind %u part %d, outside exact input cone\n",
+                            s,B.steps[s].label.c_str(),unsigned(B.steps[s].kind),B.steps[s].part);
             CHECK(!stepClosed || stepBound.Test(int(s)));
             CHECK(!stepClosed || B.closed.Test(B.steps[s].cluster));
             packed += B.closed.Test(B.steps[s].cluster) ? 1 : 0;
@@ -2548,7 +2521,7 @@ TestALeafControlDragRunsOnlyItsCone(const std::string &stagePath,
             }
             bool holds = false;
             for (const int member : B.clustering.clusters[c].members) {
-                holds = holds || B.closedSteps.Test(member);
+                holds = holds || B.opExecution.ran[size_t(member)] != 0;
             }
             CHECK(holds);
         }
@@ -2592,9 +2565,9 @@ TestANonFiniteValueIsNotAConeMismatch(const std::string &stagePath,
                                       const TfToken &input,
                                       const VtValue &value)
 {
-    const LiveRig baked = OpenRig(stagePath, RigExecEvaluationMode::Baked);
+    const LiveRig baked = OpenRig(stagePath);
     const LiveRig reference =
-        OpenRig(stagePath, RigExecEvaluationMode::ExecReference);
+        OpenRig(stagePath, true);
     if (!baked.evaluator || !reference.evaluator) {
         ++failures;
         std::printf("FAIL non-finite cone: does not compile\n");
@@ -2652,7 +2625,7 @@ TestANonFiniteValueIsNotAConeMismatch(const std::string &stagePath,
         }
     }
     CHECK(coneMismatches == 0);
-    CHECK(held.bakedParityMismatches == 0);
+    CHECK(held.comparisonMismatches == 0);
     rigExecTest::CompareEveryMap(&failures, "a non-finite value held", expected,
                                  held);
     std::printf("  a non-finite %s: %zu cone mismatch(es), verifier %s\n",
@@ -2697,18 +2670,51 @@ HandStep(std::vector<RigExecBakedSlotRange> reads,
 
 /// Edges, levels and a one-step-per-cluster schedule for a hand-built
 /// program, the way Build derives them.
-void
-ScheduleByHand(RigExecBakedProgramImpl *B)
+bool
+ScheduleByHand(RigExecBakedProgramImpl *B,std::string *compileError=nullptr)
 {
-    RigExecBakedEdgeSweep sweep;
-    RigExecBakedBuildStepEdges(B, &sweep);
-    RigExecBakedAssignStepCosts(B);
-    B->clustering = RigExecBakedBuildClusters(*B, 0.0);
-    for (size_t index = 0; index < B->steps.size(); ++index) {
-        B->steps[index].cluster = B->clustering.clusterOf[index];
+    for (size_t i=0;i<B->steps.size();++i) {
+        auto &step=B->steps[i];
+        if (step.label.empty()) {
+            std::string subject="every volume weight";
+            if (step.kind==RigExecBakedStepKind::VolumePlacements && step.part!=0 &&
+                step.object>=0 && size_t(step.object)<B->paths.size())
+                subject=B->paths[size_t(step.object)].GetString();
+            else if ((step.kind==RigExecBakedStepKind::RevisionStatic ||
+                      step.kind==RigExecBakedStepKind::RevisionFuse) &&
+                     step.object>=0 && size_t(step.object)<B->revisionIndex.size()) {
+                const auto [chain,revision]=B->revisionIndex[size_t(step.object)];
+                subject=B->chains[size_t(chain)].revisions[size_t(revision)].moverPath.GetString();
+            }
+            step.label=std::string(RigExecBakedStepKindName(step.kind))+" "+subject;
+        }
+        step.descriptorKey=step.label+"/hand:"+std::to_string(i);
     }
-    B->clustering.topologicalOrder =
-        RigExecBakedClusterTopologicalOrder(B->clustering);
+    std::string error;
+    if (!RigExecBakedCompileOpGraph(B,&error)) {
+        if(compileError)*compileError=error;
+        return false;
+    }
+    std::vector<double> costs(B->steps.size(),1.0);
+    CHECK(RigExecLowerOpClusters(&B->opGraph,costs,0.0,&error));
+    CHECK(RigExecValidateOpClusters(B->opGraph,&error));
+    auto &view=B->clustering;
+    view={};
+    view.clusterOf.assign(B->opGraph.opClusters.begin(),B->opGraph.opClusters.end());
+    view.clusters.resize(B->opGraph.clusters.size());
+    for(size_t c=0;c<view.clusters.size();++c) {
+        const auto &compiled=B->opGraph.clusters[c]; auto &cluster=view.clusters[c];
+        cluster.members.assign(compiled.members.begin(),compiled.members.end());
+        cluster.preds.assign(compiled.predecessors.begin(),compiled.predecessors.end());
+        cluster.succs.assign(compiled.successors.begin(),compiled.successors.end());
+        for(uint32_t member:compiled.members) {
+            B->steps[member].cluster=int(c);
+        }
+        view.topologicalOrder.push_back(int(c));
+    }
+    B->closed.Resize(B->opGraph.clusters.size());
+    B->closedSteps.Resize(B->opGraph.ops.size());
+    return true;
 }
 
 /// Whether the validator rejects \p B with an error holding every one of
@@ -2760,14 +2766,14 @@ HandBuiltHeadTier(RigExecBakedProgramImpl *B)
     walk.hops.push_back(hop);
     RigExecBakedBuildPropertySteps(B);
     std::string error;
-    CHECK(RigExecBakedSortHeadTier(B, &error));
+    CHECK(ScheduleByHand(B));
 }
 
 // The head step of chain \p chain, part \p part.
 uint32_t
 HeadStepOf(const RigExecBakedProgramImpl &B, int chain, int part)
 {
-    for (uint32_t i = 0; i < RigExecBakedHeadIndices(B).size(); ++i) {
+    for (uint32_t i : RigExecBakedHeadIndices(B)) {
         if (B.steps[i].object == chain && B.steps[i].part == part) {
             return i;
         }
@@ -2821,19 +2827,17 @@ TestTheHeadValidatorRejectsAMalformedTier(const BuiltProgram &built)
         const uint32_t one = HeadStepOf(B, 0, 1);
         const uint32_t two = HeadStepOf(B, 0, 2);
         std::swap(B.steps[one],B.steps[two]);
-        ExpectHeadRejected(B, "part 2 before part 1",
-                           "head step PropertyRevision /Rig/M0_1 reads "
-                           "PropertyResult slot 1, which no earlier head "
-                           "step writes");
+        CHECK(ScheduleByHand(&B));
+        CHECK(HeadStepOf(B,0,1)<HeadStepOf(B,0,2));
+        CHECK(RigExecBakedValidateHeadTier(B,&error));
     }
     {
         RigExecBakedProgramImpl B;
         HandBuiltHeadTier(&B);
-        B.steps[HeadStepOf(B, 0, 1)].reads.push_back(
+        B.steps[HeadStepOf(B, 0, 1)].writes.push_back(
             RigExecBakedOne(RigExecBakedSlotDomain::PoseFin, 0));
-        ExpectHeadRejected(B, "a property step reading PoseFin",
-                           "head step PropertyRevision /Rig/M0_0 reads the "
-                           "region domain PoseFin");
+        ExpectHeadRejected(B, "a property step writing PoseFin",
+                           "writes a non-property domain");
     }
     {
         RigExecBakedProgramImpl B;
@@ -2854,8 +2858,8 @@ TestTheHeadValidatorRejectsAMalformedTier(const BuiltProgram &built)
     {
         RigExecBakedProgramImpl B;
         HandBuiltHeadTier(&B);
-        B.steps.insert(B.steps.begin()+1,RigExecBakedStep());
-        ExpectHeadRejected(B,"a hole in the head prefix","is outside the head prefix");
+        B.steps[HeadStepOf(B,0,1)].isHead=false;
+        ExpectHeadRejected(B,"a property descriptor with a wrong kind flag","inconsistent head kind");
     }
     {
         RigExecBakedProgramImpl B;
@@ -2881,6 +2885,383 @@ TestTheHeadValidatorRejectsAMalformedTier(const BuiltProgram &built)
 
 }
 
+static void
+TestVerifierComparesExactSkinTopologyContent()
+{
+    RigExecBakedProgramImpl B;
+    B.chains.resize(1);
+    B.chains[0].target = SdfPath("/Verifier/Mesh.points");
+    B.chains[0].revisions.resize(1);
+    auto &revision = B.chains[0].revisions[0];
+    revision.moverPath = SdfPath("/Verifier/Skin");
+    auto topology = std::make_shared<RigExecSkinTopology>();
+    topology->indices = {0, 1};
+    topology->weights = {1.0f, -0.0f};
+    topology->elementSize = 2;
+    topology->pointCount = 1;
+    topology->influenceCount = 2;
+    topology->validated = true;
+    const auto bind = [&](const std::shared_ptr<RigExecSkinTopology> &value) {
+        revision.layoutHandle = value;
+        revision.layoutCandidate = value;
+        revision.parameters.skinTopology = value;
+        revision.lastParameters.skinTopology = value;
+    };
+    bind(topology);
+    RigExecBakedRunShadow expected;
+    expected.Capture(B);
+    auto copy = std::make_shared<RigExecSkinTopology>(*topology);
+    CHECK(copy != topology);
+    bind(copy);
+    std::vector<std::string> differences;
+    CHECK(expected.Compare(B, &differences) == 0);
+    const auto reject = [&](const auto &edit) {
+        auto changed = std::make_shared<RigExecSkinTopology>(*topology);
+        edit(changed.get());
+        bind(changed);
+        differences.clear();
+        CHECK(expected.Compare(B, &differences) > 0);
+        CHECK(!differences.empty());
+    };
+    reject([](auto *v) { v->weights[1] = 0.0f; });
+    reject([](auto *v) { v->weights.push_back(0.0f); });
+    reject([](auto *v) { v->indices[1] = 0; });
+    reject([](auto *v) { ++v->elementSize; });
+    reject([](auto *v) { ++v->pointCount; });
+    reject([](auto *v) { ++v->influenceCount; });
+    reject([](auto *v) { v->validated = false; });
+    bind(nullptr);
+    differences.clear();
+    CHECK(expected.Compare(B, &differences) > 0);
+
+    // Invalid raw layouts still retain exact non-finite payload bits.
+    topology->validated = false;
+    const uint32_t firstNaN = 0x7fc00011u;
+    std::memcpy(&topology->weights[0], &firstNaN, sizeof(firstNaN));
+    bind(topology);
+    expected.Capture(B);
+    bind(std::make_shared<RigExecSkinTopology>(*topology));
+    differences.clear();
+    CHECK(expected.Compare(B, &differences) == 0);
+    reject([](auto *v) {
+        const uint32_t nextNaN = 0x7fc00012u;
+        std::memcpy(&v->weights[0], &nextNaN, sizeof(nextNaN));
+    });
+}
+
+void
+TestFrozenSparseRawLayoutDigest()
+{
+    RigExecFrameInputs inputs;
+    // The fixed SkinTopology prefix remains present even for non-Skin owners.
+    inputs.layoutLeaves.resize(1);
+    inputs.layoutSourcePaths.resize(1);
+    inputs.layoutSourcePaths.push_back({SdfPath("/Shape.offsets"),
+                                       SdfPath("/Shape.pointIndices")});
+    inputs.layoutLeaves.push_back({VtValue(VtVec3fArray{GfVec3f(1, -0.0f, 0)}),
+                                   VtValue(VtIntArray{0})});
+    bool exact = false;
+    const auto initial = RigExecFrozenControlDigest(inputs, &exact);
+    CHECK(exact);
+    const auto held = inputs;
+    RigExecRetainedFrameState retained;
+    retained.inputs = held;
+    CHECK(RigExecFrozenControlDigest(held, &exact) == initial && exact);
+    CHECK(RigExecChangedControls(retained, held, {}).empty());
+    inputs.layoutLeaves[1][0] = VtValue(VtVec3fArray{GfVec3f(1, 0.0f, 0)});
+    CHECK(RigExecFrozenControlDigest(inputs, &exact) != initial && exact);
+    CHECK(RigExecChangedControls(retained, inputs, {}) ==
+          std::vector<RigExecControlId>{RigExecControlIdForPath(SdfPath("/Shape.offsets"))});
+    inputs = held;
+    inputs.layoutLeaves[1][1] = VtValue(VtIntArray{1});
+    CHECK(RigExecFrozenControlDigest(inputs, &exact) != initial && exact);
+    CHECK(RigExecChangedControls(retained, inputs, {}) ==
+          std::vector<RigExecControlId>{RigExecControlIdForPath(SdfPath("/Shape.pointIndices"))});
+    inputs = held;
+    inputs.layoutLeaves[1][0] = VtValue(VtVec3fArray());
+    CHECK(RigExecFrozenControlDigest(inputs, &exact) != initial && exact);
+    inputs = held;
+    inputs.layoutSourcePaths[1].pop_back();
+    RigExecFrozenControlDigest(inputs, &exact);
+    CHECK(!exact);
+}
+
+void
+TestVerifierRestoresAdoptedLayoutsAndBlendCaches()
+{
+    RigExecBakedProgramImpl B;
+    B.chains.resize(1);
+    B.chains[0].revisions.resize(1);
+    auto &revision = B.chains[0].revisions[0];
+    auto topology = std::make_shared<RigExecSkinTopology>();
+    topology->indices = {0};
+    topology->weights = {1.0f};
+    topology->elementSize = 1;
+    topology->pointCount = 1;
+    topology->influenceCount = 1;
+    topology->validated = true;
+    revision.layoutHandle = revision.layoutCandidate = topology;
+    revision.topology = revision.partitionTopology = topology;
+    revision.topologyResolved = true;
+    revision.blendChannels.resize(1);
+    revision.blendChannels[0].samples.resize(1);
+    auto &sample = revision.blendChannels[0].samples[0];
+    auto layout = std::make_shared<RigExecBlendSampleLayout>();
+    layout->offsets = {GfVec3f(1, -0.0f, 0)};
+    layout->indices = {0};
+    layout->pointCount = 1;
+    layout->valid = true;
+    sample.layout = layout;
+    sample.lastPoints = {GfVec3f(2, 0, 0)};
+    sample.layoutRefused = true;
+    RigExecBakedRunShadow shadow;
+    shadow.Capture(B);
+
+    // Independent allocations retain semantic equality; replay restoration
+    // must restore all owned aliases and the sample cache, not only packets.
+    revision.topology = std::make_shared<RigExecSkinTopology>(*topology);
+    revision.partitionTopology = revision.topology;
+    sample.layout = std::make_shared<RigExecBlendSampleLayout>(*layout);
+    std::vector<std::string> differences;
+    CHECK(shadow.Compare(B, &differences) == 0);
+    revision.topologyResolved = false;
+    sample.lastPoints[0] = GfVec3f(9, 0, 0);
+    sample.layoutRefused = false;
+    CHECK(shadow.Compare(B, &differences) > 0);
+    shadow.Restore(&B);
+    CHECK(revision.topology == topology);
+    CHECK(revision.partitionTopology == topology);
+    CHECK(revision.topology == revision.layoutHandle);
+    CHECK(revision.topologyResolved);
+    CHECK(sample.layout == layout);
+    CHECK(sample.lastPoints == std::vector<GfVec3f>{GfVec3f(2, 0, 0)});
+    CHECK(sample.layoutRefused);
+    differences.clear();
+    CHECK(shadow.Compare(B, &differences) == 0);
+    auto changed = std::make_shared<RigExecBlendSampleLayout>(*layout);
+    changed->offsets[0][1] = 0.0f;
+    sample.layout = changed;
+    CHECK(shadow.Compare(B, &differences) > 0);
+}
+
+void
+TestVerifierRestoresInputsAndChecksSelectedWork()
+{
+    RigExecBakedProgramImpl B;
+    RigExecResolvedInputs inputs;
+    B.resolvedInputs = &inputs;
+    const SdfPath input("/Rig/Channels.value");
+    inputs.SetProperty(input,VtValue(.25f));
+    B.propertyResults[input] = VtValue(.25f);
+    B.posedD = {GfMatrix4d(2)};
+    B.parentSpaceM = {GfMatrix4d(3)};
+    B.parentSpaceAuthored = {1};
+    B.rotationSign = {5};
+    B.lastPosedD = {GfMatrix4d(4)};
+    B.lastParentSpaceM = {GfMatrix4d(5)};
+    B.lastParentSpaceAuthored = {1};
+    B.lastRotationSign = {3};
+    B.headOverrides = {VtValue(.4f)};
+    B.lastHeadOverrides = {VtValue(.2f)};
+    B.headOverrideMoved = {1};
+    B.readerWalkMoved = {1};
+    B.readerWalkChanged = {1};
+    B.chains.resize(1);
+    B.chains[0].revisions.resize(1);
+    B.chains[0].scheduleDirty = true;
+    B.chains[0].revisions[0].created = true;
+    RigExecBakedRunShadow before;
+    before.Capture(B);
+    B.posedD[0] = GfMatrix4d(9);
+    B.parentSpaceM[0] = GfMatrix4d(9);
+    B.parentSpaceAuthored[0] = 0;
+    B.rotationSign[0] = 0;
+    B.lastPosedD[0] = GfMatrix4d(9);
+    B.lastParentSpaceM[0] = GfMatrix4d(9);
+    B.lastParentSpaceAuthored[0] = 0;
+    B.lastRotationSign[0] = 0;
+    B.headOverrides.clear(); B.lastHeadOverrides.clear();
+    B.headOverrideMoved[0] = B.readerWalkMoved[0] = B.readerWalkChanged[0] = 0;
+    inputs.SetProperty(input,VtValue(.75f));
+    B.propertyResults.clear();
+    B.chains[0].scheduleDirty = B.chains[0].revisions[0].created = false;
+    before.Restore(&B);
+    CHECK(B.posedD[0] == GfMatrix4d(2));
+    CHECK(B.parentSpaceM[0] == GfMatrix4d(3));
+    CHECK(B.parentSpaceAuthored[0] == 1 && B.rotationSign[0] == 5);
+    CHECK(B.lastPosedD[0] == GfMatrix4d(4));
+    CHECK(B.lastParentSpaceM[0] == GfMatrix4d(5));
+    CHECK(B.lastParentSpaceAuthored[0] == 1 && B.lastRotationSign[0] == 3);
+    CHECK(B.headOverrides[0].UncheckedGet<float>() == .4f);
+    CHECK(B.lastHeadOverrides[0].UncheckedGet<float>() == .2f);
+    CHECK(B.headOverrideMoved[0] && B.readerWalkMoved[0] && B.readerWalkChanged[0]);
+    CHECK(inputs.Find(input) && inputs.Find(input)->UncheckedGet<float>() == .25f);
+    CHECK(B.propertyResults.at(input).UncheckedGet<float>() == .25f);
+    CHECK(B.chains[0].scheduleDirty && B.chains[0].revisions[0].created);
+
+    B.steps.resize(2);
+    B.steps[0].kind = RigExecBakedStepKind::RevisionStatic;
+    B.steps[1].kind = RigExecBakedStepKind::RevisionFuse;
+    for (auto &step : B.steps) { step.object = 0; step.label = "verifier fixture"; }
+    B.revisionIndex.emplace_back(0,0);
+    B.opGraph.ops.resize(2);
+    B.opGraph.ops[0].originalIndex = 0;
+    B.opGraph.ops[1].originalIndex = 1;
+    B.opExecution.ran = {0,0};
+    auto &revision = B.chains[0].revisions[0];
+    revision.staticDirty = revision.executed = false;
+    revision.output = {GfVec3f(1,2,3)};
+    revision.envelope = {.25f};
+    B.providerProgram.valueKeys = {"raw:/Rig/Channels.value"};
+    B.providerValues.values.resize(1);
+    B.providerValues.PublishSource(0,VtValue(.25f),false,true);
+    B.steps[0].counters.revisionsBuilt = 1;
+    B.steps[1].counters.chainsBuilt = 1;
+    RigExecBakedRunShadow cone;
+    cone.Capture(B);
+    // Identical values from a forced run with different, truthful work facts.
+    B.opExecution.ran = {1,1};
+    revision.staticDirty = revision.executed = true;
+    B.steps[1].counters.revisionsExecuted = 1;
+    std::vector<std::string> differences;
+    CHECK(cone.Compare(B,&differences) == 0);
+    revision.envelope[0] = .5f;
+    CHECK(cone.Compare(B,&differences) != 0);
+    revision.envelope[0] = .25f;
+    revision.output[0][0] = 9;
+    CHECK(cone.Compare(B,&differences) != 0);
+    revision.output[0][0] = 1;
+    B.providerValues.PublishSource(0,VtValue(.5f),false,true);
+    CHECK(cone.Compare(B,&differences) != 0);
+    B.providerValues.PublishSource(0,VtValue(.25f),false,false);
+    CHECK(cone.Compare(B,&differences) != 0);
+    B.providerValues.PublishSource(0,VtValue(.25f),false,true);
+    CHECK(cone.Compare(B,&differences) == 0);
+    // A skipped body cannot claim executed work, even with identical values.
+    cone.Restore(&B);
+    B.steps[1].counters.revisionsExecuted = 1;
+    RigExecBakedRunShadow incorrectCone;
+    incorrectCone.Capture(B);
+    revision.staticDirty = revision.executed = true;
+    CHECK(incorrectCone.Compare(B,&differences) != 0);
+    cone.Restore(&B);
+    CHECK(!revision.executed && !revision.staticDirty);
+    CHECK(B.steps[1].counters.revisionsExecuted == 0);
+    CHECK(B.opExecution.ran == std::vector<char>({0,0}));
+    B.closed.Resize(2); B.closed.Set(0);
+    B.closedSteps.Resize(2); B.closedSteps.Set(0);
+    B.closureFull = false;
+    const RigExecBakedRunStatistics statistics(B);
+    B.closed.Set(1); B.closedSteps.Set(1); B.closureFull = true;
+    statistics.Restore(&B);
+    CHECK(B.closed.Test(0) && !B.closed.Test(1));
+    CHECK(B.closedSteps.Test(0) && !B.closedSteps.Test(1));
+    CHECK(!B.closureFull);
+}
+
+static void
+TestProviderRefreshFailureBoundaries()
+{
+    const auto translated = [](double x) {
+        RigExecPointFrame frame;
+        for (auto &point : frame.points) point[0] += x;
+        return frame;
+    };
+    const auto make = [&](size_t count) {
+        auto program = std::make_unique<RigExecBakedProgramImpl>();
+        auto &B = *program;
+        B.paths = {SdfPath("/Rig/P"), SdfPath("/Rig/P/A"), SdfPath("/Rig/P/B")};
+        B.base.resize(6); B.fin.resize(6);
+        for (size_t slot = 0; slot < 3; ++slot) {
+            B.base[slot] = translated(double(slot + 1));
+            B.fin[slot] = translated(double(slot + 4));
+            B.base[slot + 3] = translated(100);
+            B.fin[slot + 3] = translated(200);
+        }
+        B.providerValues = RigExecTypedValueStore(2);
+        B.providerValues.Publish(0, translated(7));
+        B.providerValues.Publish(1, translated(11));
+        RigExecBakedProgramImpl::ProviderRefresh refresh;
+        refresh.slot = 0;
+        refresh.baseValue = 0; refresh.currentValue = 1;
+        refresh.baseRead = 0; refresh.finRead = 0;
+        refresh.baseWrite = 3; refresh.finWrite = 3;
+        for (size_t k = 0; k < count; ++k) {
+            RigExecBakedProgramImpl::ProviderRefresh::Carry carry;
+            carry.slot = int(k + 1);
+            carry.baseRead = carry.finRead = uint32_t(k + 1);
+            carry.baseWrite = carry.finWrite = uint32_t(k + 4);
+            refresh.carries.push_back(std::move(carry));
+        }
+        refresh.baseInputs.resize(count); refresh.finInputs.resize(count);
+        refresh.baseOutputs.resize(count); refresh.finOutputs.resize(count);
+        refresh.blocked.resize(count);
+        B.providerRefreshes.push_back(std::move(refresh));
+        return program;
+    };
+    const auto run = [](RigExecBakedProgramImpl &B) {
+        RigExecBakedStep step;
+        step.kind = RigExecBakedStepKind::ProviderRefresh; step.object = 0;
+        RigExecBakedRunProviderRefresh(&B, &step);
+        return step.diagnostics;
+    };
+    {
+        auto program = make(2); auto &B = *program;
+        B.providerValues.values[1] = RigExecTypedValueState();
+        const auto diagnostics = run(B);
+        CHECK(B.base[3] == translated(1) && B.fin[3] == translated(4));
+        CHECK(B.base[4] == translated(2) && B.fin[4] == translated(5));
+        CHECK(B.base[5] == translated(3) && B.fin[5] == translated(6));
+        CHECK(diagnostics == std::vector<std::string>{"connected final pose input incomplete: /Rig/P"});
+    }
+    {
+        auto program = make(2); auto &B = *program;
+        auto invalid = translated(11); invalid.flags = 0;
+        B.providerValues.Publish(1, invalid);
+        const auto diagnostics = run(B);
+        CHECK(B.base[3] == translated(7) && B.fin[3] == translated(4));
+        CHECK(B.base[4] == translated(8) && B.fin[4] == translated(5));
+        CHECK(B.base[5] == translated(9) && B.fin[5] == translated(6));
+        CHECK(diagnostics == std::vector<std::string>{"/Rig/P produced an invalid or degenerate frame for /Rig/P; constraint passed through"});
+    }
+    for (const size_t count : {size_t(0), size_t(1)}) {
+        auto program = make(count); auto &B = *program;
+        B.fin[0].points.fill(GfVec3d(0));
+        if (count) {
+            B.providerParentRawLeaves = {-1, 0, -1};
+            B.providerLeafBlocked = {0};
+            GfMatrix4d parent(1.0); parent.SetTranslate(GfVec3d(1, 0, 0));
+            B.providerLeaves.values = {VtValue(parent)};
+            B.providerRefreshes[0].carries[0].blockingSlots = {1};
+        }
+        CHECK(run(B).empty());
+        CHECK(B.base[3] == translated(7) && B.fin[3] == translated(11));
+        if (count) CHECK(B.base[4] == translated(2) && B.fin[4] == translated(5));
+    }
+    {
+        auto program = make(2); auto &B = *program;
+        B.fin[2].flags = 0;
+        const auto invalid = B.fin[2];
+        const auto diagnostics = run(B);
+        CHECK(B.base[3] == translated(7) && B.fin[3] == translated(4));
+        CHECK(B.base[4] == translated(8) && B.fin[4] == translated(5));
+        CHECK(B.base[5] == translated(9) && B.fin[5] == invalid);
+        CHECK(diagnostics == std::vector<std::string>{"/Rig/P could not propagate its pose revision through /Rig/P/B; constraint passed through"});
+    }
+    {
+        auto program = make(1); auto &B = *program;
+        B.commits.resize(1); B.commits[0].present = {1}; B.commits[0].abandoned = false;
+        B.providerRefreshes[0].priorConstraints = {{0, 0}};
+        CHECK(run(B).empty());
+        CHECK(B.base[3] == translated(1) && B.fin[3] == translated(4));
+        CHECK(B.base[4] == translated(2) && B.fin[4] == translated(5));
+        B.commits[0].abandoned = true;
+        CHECK(run(B).empty());
+        CHECK(B.base[3] == translated(7) && B.fin[3] == translated(11));
+        CHECK(B.base[4] == translated(8) && B.fin[4] == translated(12));
+    }
+}
+
 /// The shapes the edge sweep cannot see, each of which the validator must
 /// refuse by name: a read whose producer is later, missing or the reader
 /// itself; a phased-read prefix that reaches past its reader; edges that
@@ -2896,46 +3277,43 @@ TestTheValidatorRejectsAMalformedGraph()
         B.steps.push_back(HandStep({}, {RigExecBakedOne(D::WeightPacket, 0)}));
         B.steps.push_back(HandStep({RigExecBakedOne(D::WeightPacket, 0)},
                                    {RigExecBakedOne(D::WeightPacket, 1)}));
-        ScheduleByHand(&B);
+        CHECK(ScheduleByHand(&B));
         std::string error;
         CHECK(RigExecBakedValidateStepGraph(B, &error));
         CHECK(error.empty());
         CHECK(B.steps[1].preds == std::vector<int>{0});
     }
     {
-        // The sweep raises no edge for it, so step 0 would read last run's
-        // packet.
+        // Declaration order does not constrain execution: the exact producer
+        // emitted second must precede its consumer in the canonical graph.
         RigExecBakedProgramImpl B;
-        B.steps.push_back(HandStep({RigExecBakedOne(D::WeightPacket, 1)},
-                                   {RigExecBakedOne(D::WeightPacket, 0)}));
-        B.steps.push_back(HandStep({}, {RigExecBakedOne(D::WeightPacket, 1)}));
-        ScheduleByHand(&B);
-        CHECK(B.steps[0].preds.empty());
-        ExpectRejected(B, "a later producer",
-                       {"step 0 (VolumePlacements every volume weight) reads "
-                        "WeightPacket[1]",
-                        "no step before it writes",
-                        "the first writer is step 1"});
+        B.steps.push_back(HandStep({RigExecBakedOne(D::WeightPacket,1)},
+                                  {RigExecBakedOne(D::WeightPacket,0)}));
+        B.steps.push_back(HandStep({}, {RigExecBakedOne(D::WeightPacket,1)}));
+        CHECK(ScheduleByHand(&B));
+        CHECK(B.steps[0].writes.front()==RigExecBakedOne(D::WeightPacket,1));
+        CHECK(B.steps[1].preds==std::vector<int>{0});
+        std::string error;
+        CHECK(RigExecBakedValidateStepGraph(B,&error));
     }
     {
-        // A blend whose input solver is solved after it would read last
-        // run's aggregate; in the other order the same two steps are valid.
+        // Aggregate inputs bind their exact producer in either declaration
+        // order; execution never depends on a cached prior-generation value.
         RigExecBakedProgramImpl B;
         B.steps.push_back(HandStep({RigExecBakedOne(D::Aggregate, 1)},
                                    {RigExecBakedOne(D::Aggregate, 0)}));
         B.steps.push_back(HandStep({}, {RigExecBakedOne(D::Aggregate, 1)}));
-        ScheduleByHand(&B);
-        CHECK(B.steps[0].preds.empty());
-        ExpectRejected(B, "a blend input solved after the blend",
-                       {"step 0", "reads Aggregate[1]",
-                        "no step before it writes",
-                        "the first writer is step 1"});
+        CHECK(ScheduleByHand(&B));
+        CHECK(B.steps[0].writes.front()==RigExecBakedOne(D::Aggregate,1));
+        CHECK(B.steps[1].preds==std::vector<int>{0});
+        std::string canonicalError;
+        CHECK(RigExecBakedValidateStepGraph(B,&canonicalError));
         RigExecBakedProgramImpl ordered;
         ordered.steps.push_back(
             HandStep({}, {RigExecBakedOne(D::Aggregate, 1)}));
         ordered.steps.push_back(HandStep({RigExecBakedOne(D::Aggregate, 1)},
                                          {RigExecBakedOne(D::Aggregate, 0)}));
-        ScheduleByHand(&ordered);
+        CHECK(ScheduleByHand(&ordered));
         std::string error;
         CHECK(RigExecBakedValidateStepGraph(ordered, &error));
         CHECK(error.empty());
@@ -2945,31 +3323,58 @@ TestTheValidatorRejectsAMalformedGraph()
         B.steps.push_back(HandStep({}, {RigExecBakedOne(D::CommitTable, 0)}));
         B.steps.push_back(HandStep(
             {RigExecBakedRange(D::CommitTable, 0, 4)}, {}));
-        ScheduleByHand(&B);
-        ExpectRejected(B, "a range only partly produced",
-                       {"step 1", "reads CommitTable[1], which no step writes",
-                        "3 slots of CommitTable[0,4) are unproduced"});
+        std::string error;
+        CHECK(!ScheduleByHand(&B,&error));
+        CHECK(error.find("read has no producer or declared sampled source")!=std::string::npos);
+        CHECK(error.find("domain "+std::to_string(uint32_t(D::CommitTable))+" slot 1")!=std::string::npos);
     }
     {
-        // Read-modify-write with no earlier writer reads its own last run.
+        // A self-read is a real SCC. SetAside excludes its body and resets
+        // its retained output every generation, including held visits.
         RigExecBakedProgramImpl B;
-        B.steps.push_back(HandStep({RigExecBakedOne(D::Candidates, 2)},
-                                   {RigExecBakedOne(D::Candidates, 2)}));
-        ScheduleByHand(&B);
-        ExpectRejected(B, "a step that is its own only producer",
-                       {"step 0", "reads Candidates[2]",
-                        "the first writer is step 0"});
+        B.weightPackets.resize(1);
+        B.steps.push_back(HandStep({RigExecBakedOne(D::WeightPacket,0)},
+                                  {RigExecBakedOne(D::WeightPacket,0)}));
+        CHECK(ScheduleByHand(&B));
+        CHECK(B.opGraph.cycles.size()==1 && B.excludedSteps.size()==1);
+        CHECK(B.steps.empty());
+        for(int visit=0;visit<2;++visit) {
+            B.weightPackets[0].valid=true;
+            B.weightPackets[0].values={0.75f};
+            CHECK(RigExecBakedExecuteOpGraph(&B,UsdTimeCode(1),false));
+            CHECK(!B.weightPackets[0].valid && B.weightPackets[0].values.empty());
+        }
+    }
+    {
+        // SCC placement outputs must lose stale validity on every visit.
+        RigExecBakedProgramImpl B;
+        B.volumePlacement.resize(1,GfMatrix4d(1));
+        B.volumePlacementBase.resize(1,GfMatrix4d(1));
+        B.placedVolumes={1};
+        for(auto domain:{D::WeightFrames,D::WeightFramesBase})
+            B.steps.push_back(HandStep({RigExecBakedOne(domain,0)},
+                                      {RigExecBakedOne(domain,0)}));
+        CHECK(ScheduleByHand(&B));
+        CHECK(B.steps.empty() && B.opAdapter.excludedValues.size()==2);
+        for(int visit=0;visit<2;++visit) {
+            B.volumePlacement[0]=B.volumePlacementBase[0]=GfMatrix4d(1);
+            CHECK(RigExecBakedExecuteOpGraph(&B,UsdTimeCode(1),false));
+            CHECK(std::isnan(B.volumePlacement[0][3][0]));
+            CHECK(std::isnan(B.volumePlacementBase[0][3][0]));
+            CHECK(B.placedVolumes[0]==1);
+        }
     }
     {
         // A source domain needs no producer; the retired Snapshots domain
         // may be neither written nor read.
         RigExecBakedProgramImpl B;
+        B.solvers.resize(1);B.chains.resize(1);
         B.steps.push_back(HandStep({RigExecBakedOne(D::SolverPoints, 0),
-                                    RigExecBakedOne(D::ChainBase, 0)},
+                                    RigExecBakedOne(D::ChainInput, 0)},
                                    {RigExecBakedOne(D::WeightPacket, 0)}));
         B.steps.push_back(HandStep({RigExecBakedOne(D::WeightPacket, 0)},
                                    {}));
-        ScheduleByHand(&B);
+        CHECK(ScheduleByHand(&B));
         std::string error;
         CHECK(RigExecBakedValidateStepGraph(B, &error));
         CHECK(error.empty());
@@ -2981,6 +3386,17 @@ TestTheValidatorRejectsAMalformedGraph()
         ExpectRejected(B, "a read of the retired store",
                        {"step 1", "declares the retired Snapshots domain"});
     }
+    {
+        RigExecBakedProgramImpl B;
+        B.steps.push_back(HandStep({}, {RigExecBakedOne(D::WeightPacket,0)}));
+        B.steps.push_back(HandStep({}, {RigExecBakedOne(D::WeightPacket,0)}));
+        std::string error;
+        B.steps[0].descriptorKey="first"; B.steps[1].descriptorKey="duplicate";
+        CHECK(!RigExecBakedCompileOpGraph(&B,&error));
+        CHECK(error.find("multiple typed producers")!=std::string::npos);
+        CHECK(error.find("first")!=std::string::npos);
+        CHECK(error.find("duplicate")!=std::string::npos);
+    }
     // A three-step chain, valid as built; each case below breaks one thing.
     const auto chain = [](RigExecBakedProgramImpl *B) {
         B->steps.push_back(
@@ -2989,7 +3405,7 @@ TestTheValidatorRejectsAMalformedGraph()
                                     {RigExecBakedOne(D::WeightPacket, 1)}));
         B->steps.push_back(
             HandStep({RigExecBakedOne(D::WeightPacket, 1)}, {}));
-        ScheduleByHand(B);
+        CHECK(ScheduleByHand(B));
     };
     {
         RigExecBakedProgramImpl B;
@@ -3012,121 +3428,166 @@ TestTheValidatorRejectsAMalformedGraph()
     {
         RigExecBakedProgramImpl B;
         chain(&B);
-        CHECK(B.clustering.clusters.size() == 3);
-        std::reverse(B.clustering.topologicalOrder.begin(),
-                     B.clustering.topologicalOrder.end());
-        ExpectRejected(B, "a reversed cluster order",
-                       {"the cluster order puts cluster",
-                        "before its predecessor"});
+        auto graph=B.opGraph;
+        CHECK(graph.clusters.size()==3);
+        std::reverse(graph.clusters.begin(),graph.clusters.end());
+        std::string error;
+        CHECK(!RigExecValidateOpClusters(graph,&error));
+        CHECK(error.find("invalid operation cluster member")!=std::string::npos);
     }
     {
-        RigExecBakedProgramImpl B;
-        chain(&B);
-        B.clustering.topologicalOrder.pop_back();
-        ExpectRejected(B, "an incomplete cluster order",
-                       {"the cluster order holds 2 of 3 clusters"});
+        RigExecBakedProgramImpl B; chain(&B);
+        auto graph=B.opGraph;
+        graph.clusters.pop_back();
+        std::string error;
+        CHECK(!RigExecValidateOpClusters(graph,&error));
+        CHECK(error.find("operation missing from cluster lowering")!=std::string::npos);
     }
     {
-        RigExecBakedProgramImpl B;
-        chain(&B);
-        const int last = B.clustering.clusterOf[2];
-        const int middle = B.clustering.clusterOf[1];
-        B.clustering.clusters[size_t(last)].preds.clear();
-        B.clustering.clusters[size_t(middle)].succs.clear();
-        ExpectRejected(B, "a cluster edge missing under a step edge",
-                       {"step 2", "depends on step 1",
-                        "does not depend on cluster"});
+        RigExecBakedProgramImpl B; chain(&B);
+        auto graph=B.opGraph;
+        graph.clusters[2].predecessors.clear();
+        graph.clusters[1].successors.clear();
+        std::string error;
+        CHECK(!RigExecValidateOpClusters(graph,&error));
+        CHECK(error.find("cluster edges differ from operation dependencies")!=std::string::npos);
     }
     {
-        RigExecBakedProgramImpl B;
-        chain(&B);
-        std::swap(B.clustering.clusters[0].members,
-                  B.clustering.clusters[1].members);
-        ExpectRejected(B, "members filed under the wrong cluster",
-                       {"holds step", "which the clustering puts elsewhere"});
+        RigExecBakedProgramImpl B; chain(&B);
+        auto graph=B.opGraph;
+        std::swap(graph.clusters[0].members,graph.clusters[1].members);
+        std::string error;
+        CHECK(!RigExecValidateOpClusters(graph,&error));
+        CHECK(error.find("invalid operation cluster member")!=std::string::npos);
     }
 }
 
-/// One VolumePlacements step per volume slot (part 1), each writing its own
-/// WeightFrames slot, and a current-phase assemble reading the placements of
-/// its field's volumes: the reader hangs off exactly those steps, and a read
-/// of a placement no step writes is refused. The validated programs carry no
-/// pose table, so their placement steps read nothing; the label case names
-/// the slots' paths and is not validated.
+/// Placement values feed a current-phase field, whose assembly consumer
+/// reads the produced field rather than measuring the points a second time.
 void
 TestAPlacementReadNeedsItsVolumesStep()
 {
     using D = RigExecBakedSlotDomain;
     const auto build = [](RigExecBakedProgramImpl *B,
-                          std::vector<RigExecBakedSlotRange> placementReads,
-                          bool withPaths) {
-        if (withPaths) {
-            B->paths = {SdfPath("/Rig/Joint"), SdfPath("/Rig/Joint/SphereA"),
-                        SdfPath("/Rig/SphereB")};
-        }
-        B->chains.resize(1);
-        B->chains[0].revisions.resize(1);
-        B->chains[0].revisions[0].moverPath = SdfPath("/Rig/Movers/Smooth");
-        B->chains[0].revisions[0].weightCurrentPhase = true;
-        B->revisionIndex = {{0, 0}};
-        B->revisionFuseStep = {3};
-        for (const int slot : {1, 2}) {
+                         std::vector<RigExecBakedSlotRange> placementReads,
+                         std::string *compileError=nullptr) {
+        B->paths = {SdfPath("/Rig/Joint"),SdfPath("/Rig/Joint/SphereA"),SdfPath("/Rig/SphereB")};
+        B->xformSlots = {1,2};
+        B->slotKind.assign(3,RigExecBakedSlotKind::XformDerived);
+        B->base.resize(3); B->fin.resize(3);
+        B->baseLast = B->finLast = {0,1,2};
+        B->chains.resize(1); B->chains[0].revisions.resize(1);
+        auto &revision = B->chains[0].revisions[0];
+        revision.moverPath = SdfPath("/Rig/Movers/Smooth");
+        revision.op = RigExecRevisionOp::Smooth;
+        revision.weightCurrentPhase = true;
+        revision.weightObject = revision.weightField = 0;
+        B->revisionIndex = {{0,0}}; B->revisionFuseStep = {-1};
+        B->chainRevisionBegin = {0}; B->chainRevisionEnd = {1};
+        B->weightObjects.resize(1);
+        B->weightObjects[0].path = SdfPath("/Rig/Weights/Field");
+        B->weightFields.resize(1);
+        auto &field = B->weightFields[0];
+        field.object = field.consumer = 0;
+        field.form = RigExecBakedProgramImpl::WeightField::Form::Revision;
+        field.placementPhase = RigExecBakedProgramImpl::WeightField::PlacementPhase::Final;
+        for (const auto &range : placementReads)
+            for (uint32_t slot=range.begin;slot<range.end;++slot) field.volumes.push_back(int(slot));
+        RigExecBakedStep base;
+        base.kind = RigExecBakedStepKind::ChainInputs; base.object = 0;
+        base.reads = {RigExecBakedOne(D::ChainInput,0)};
+        base.writes = {RigExecBakedOne(D::ChainBase,0)};
+        B->steps.push_back(base);
+        RigExecBakedStep packet;
+        packet.kind = RigExecBakedStepKind::WeightPacket; packet.object = 0;
+        packet.writes = {RigExecBakedOne(D::WeightPacket,0)};
+        B->steps.push_back(packet);
+        for (int slot : {1,2}) {
             RigExecBakedStep step;
-            step.kind = RigExecBakedStepKind::VolumePlacements;
-            step.object = slot;
-            step.part = 1;
-            if (withPaths) {
-                step.reads = {RigExecBakedOne(D::PoseFin, slot)};
-            }
-            step.writes = {RigExecBakedOne(D::WeightFrames, slot)};
-            B->steps.push_back(std::move(step));
+            step.kind = RigExecBakedStepKind::VolumePlacements; step.object = slot; step.part = 1;
+            step.reads = {RigExecBakedOne(D::PoseFin,slot)};
+            step.writes = {RigExecBakedOne(D::WeightFrames,slot)};
+            B->steps.push_back(step);
         }
+        RigExecBakedStep measure;
+        measure.kind = RigExecBakedStepKind::WeightField; measure.object = 0;
+        measure.reads = std::move(placementReads);
+        measure.reads.push_back(RigExecBakedOne(D::ChainBase,0));
+        measure.writes = {RigExecBakedOne(D::WeightField,0)};
+        B->steps.push_back(measure);
         RigExecBakedStep assemble;
-        assemble.kind = RigExecBakedStepKind::RevisionStatic;
-        assemble.object = 0;
-        assemble.reads = std::move(placementReads);
-        assemble.writes = {RigExecBakedOne(D::RevisionPacket, 0)};
-        B->steps.push_back(std::move(assemble));
+        assemble.kind = RigExecBakedStepKind::RevisionStatic; assemble.object = 0;
+        assemble.reads = {RigExecBakedOne(D::ChainBase,0),RigExecBakedOne(D::WeightPacket,0),RigExecBakedOne(D::WeightField,0)};
+        assemble.writes = {RigExecBakedOne(D::RevisionPacket,0)};
+        B->steps.push_back(assemble);
         RigExecBakedStep fuse;
-        fuse.kind = RigExecBakedStepKind::RevisionFuse;
-        fuse.object = 0;
-        fuse.reads = {RigExecBakedOne(D::RevisionPacket, 0)};
-        fuse.writes = {RigExecBakedOne(D::RevisionDone, 0)};
-        B->steps.push_back(std::move(fuse));
-        ScheduleByHand(B);
+        fuse.kind = RigExecBakedStepKind::RevisionFuse; fuse.object = 0;
+        fuse.reads = {RigExecBakedOne(D::ChainBase,0),RigExecBakedOne(D::RevisionPacket,0)};
+        fuse.writes = {RigExecBakedOne(D::RevisionDone,0),RigExecBakedOne(D::ChainDirty,0)};
+        B->steps.push_back(fuse);
+        return ScheduleByHand(B,compileError);
     };
-    {
+    const auto index = [](const RigExecBakedProgramImpl &B,RigExecBakedStepKind kind,int object) {
+        for (size_t s=0;s<B.steps.size();++s)
+            if (B.steps[s].kind==kind && B.steps[s].object==object) return int(s);
+        return -1;
+    };
+    for (const std::vector<int> volumes : {std::vector<int>{2},std::vector<int>{1,2}}) {
         RigExecBakedProgramImpl B;
-        build(&B, {RigExecBakedOne(D::WeightFrames, 2)}, true);
-        CHECK(B.steps[0].label == "VolumePlacements /Rig/Joint/SphereA");
-        CHECK(B.steps[1].label == "VolumePlacements /Rig/SphereB");
-    }
-    {
-        RigExecBakedProgramImpl B;
-        build(&B, {RigExecBakedOne(D::WeightFrames, 2)}, false);
+        std::vector<RigExecBakedSlotRange> reads;
+        for (int slot : volumes) reads.push_back(RigExecBakedOne(D::WeightFrames,slot));
         std::string error;
-        CHECK(RigExecBakedValidateStepGraph(B, &error));
+        CHECK(build(&B,reads,&error));
+        CHECK(RigExecBakedValidateStepGraph(B,&error));
+        if (!error.empty()) std::printf("FAIL placement field: %s\n",error.c_str());
         CHECK(error.empty());
-        // Its own volume's step only: SphereA's placement is not an edge.
-        CHECK(B.steps[2].preds == std::vector<int>{1});
+        const int a=index(B,RigExecBakedStepKind::VolumePlacements,1);
+        const int b=index(B,RigExecBakedStepKind::VolumePlacements,2);
+        const int measured=index(B,RigExecBakedStepKind::WeightField,0);
+        const int assembled=index(B,RigExecBakedStepKind::RevisionStatic,0);
+        CHECK(a>=0 && b>=0 && measured>=0 && assembled>=0);
+        if (a<0 || b<0 || measured<0 || assembled<0) continue;
+        CHECK(B.steps[size_t(a)].label == "VolumePlacements /Rig/Joint/SphereA");
+        CHECK(B.steps[size_t(b)].label == "VolumePlacements /Rig/SphereB");
+        std::vector<int> expected{index(B,RigExecBakedStepKind::ChainInputs,0)};
+        for (int slot : volumes) expected.push_back(index(B,RigExecBakedStepKind::VolumePlacements,slot));
+        std::sort(expected.begin(),expected.end());
+        CHECK(B.steps[size_t(measured)].preds == expected);
+        CHECK(std::binary_search(B.steps[size_t(assembled)].preds.begin(),B.steps[size_t(assembled)].preds.end(),measured));
+        auto &consumer=B.steps[size_t(assembled)];
+        const auto savedReads=consumer.reads;
+        consumer.reads.erase(std::remove_if(consumer.reads.begin(),consumer.reads.end(),[](const auto &read) {
+            return read.domain==D::WeightField;
+        }),consumer.reads.end());
+        CHECK(!RigExecBakedValidateStepGraph(B,&error));
+        CHECK(error.find("adopts its WeightField without declaring it")!=std::string::npos);
+        consumer.reads=savedReads;
+        auto &producer=B.steps[size_t(measured)];
+        const auto savedFieldReads=producer.reads;
+        producer.reads.erase(std::remove_if(producer.reads.begin(),producer.reads.end(),[](const auto &read) {
+            return read.domain==D::ChainBase;
+        }),producer.reads.end());
+        CHECK(!RigExecBakedValidateStepGraph(B,&error));
+        CHECK(error.find("omits its entering base")!=std::string::npos);
+        producer.reads=savedFieldReads;
     }
-    {
-        RigExecBakedProgramImpl B;
-        build(&B, {RigExecBakedOne(D::WeightFrames, 1),
-                   RigExecBakedOne(D::WeightFrames, 2)}, false);
-        std::string error;
-        CHECK(RigExecBakedValidateStepGraph(B, &error));
-        CHECK(error.empty());
-        CHECK((B.steps[2].preds == std::vector<int>{0, 1}));
-    }
-    {
-        RigExecBakedProgramImpl B;
-        build(&B, {RigExecBakedOne(D::WeightFrames, 1),
-                   RigExecBakedOne(D::WeightFrames, 3)}, false);
-        ExpectRejected(B, "a placement read with no placement step",
-                       {"step 2 (RevisionStatic /Rig/Movers/Smooth) reads "
-                        "WeightFrames[3], which no step writes"});
-    }
+    RigExecBakedProgramImpl B;
+    std::string error;
+    CHECK(!build(&B,{RigExecBakedOne(D::WeightFrames,1),RigExecBakedOne(D::WeightFrames,3)},&error));
+    CHECK(!B.opAdapter.compiled);
+    CHECK(error.find("read has no producer or declared sampled source")!=std::string::npos);
+    CHECK(error.find("domain "+std::to_string(uint32_t(D::WeightFrames))+" slot 3")!=std::string::npos);
+}
+
+std::string
+CanonicalLabel(const RigExecBakedProgramImpl &B, RigExecBakedStepKind kind,
+               int object)
+{
+    for (const auto &step : B.steps)
+        if (step.kind == kind && step.object == object)
+            return "(" + step.label + ")";
+    CHECK(false);
+    return "(missing operation)";
 }
 
 /// Pose bindings on stacked_solvers (FK solve, its commit, IK solve, its
@@ -3172,7 +3633,7 @@ TestTheValidatorRejectsALaterPoseVersion()
         const uint32_t bound = first.slotReads.front();
         first.slotReads.front() = later;
         ExpectRejected(B, "a commit read of a later commit's version",
-                       {"(SolverCommit batch 0) is bound to PoseFin version",
+                       {CanonicalLabel(B, RigExecBakedStepKind::SolverCommit, 0) + " is bound to PoseFin version",
                         "/Asset/Rig/Joints/", "writes at or after it"});
         first.slotReads.front() = bound;
         passes("a commit read of a later commit's version");
@@ -3192,31 +3653,80 @@ TestTheValidatorRejectsALaterPoseVersion()
             const uint32_t bound = solver->controlReads.front();
             solver->controlReads.front() = later;
             ExpectRejected(B, "a solver control read of a later version",
-                           {"(Solve /Asset/Rig/Solvers/",
+                           {"(" + solver->path.GetString() + ")",
                             "is bound to PoseFin version",
                             "writes at or after it"});
             solver->controlReads.front() = bound;
             passes("a solver control read of a later version");
+            const size_t solverIndex = size_t(solver - B.solvers.data());
+            auto solve = std::find_if(B.steps.begin(), B.steps.end(), [&](const auto &step) {
+                return step.kind == RigExecBakedStepKind::Solve &&
+                       step.object == int(solverIndex);
+            });
+            CHECK(solve != B.steps.end());
+            if (solve != B.steps.end()) {
+                const auto reads = solve->reads;
+                solve->reads.erase(std::remove_if(solve->reads.begin(), solve->reads.end(),
+                    [&](const auto &read) { return read.domain == RigExecBakedSlotDomain::PoseFin &&
+                        read.begin <= bound && bound < read.end; }), solve->reads.end());
+                CHECK(solve->reads.size() < reads.size());
+                ExpectRejected(B, "a solver body binding without its declared input",
+                    {"(" + solver->path.GetString() + ") is bound to PoseFin version " +
+                        std::to_string(bound), "without declaring it"});
+                solve->reads = reads;
+                passes("a solver body binding without its declared input");
+            }
         }
     }
     {
-        // A carry may name its own commit's write-back -- a slot that is a
-        // candidate and a descendant carries the first write into the
-        // second -- but not another commit's later one.
+        // A candidate carry reads the entering version. Neither a later
+        // writer nor its own still-unwritten output is a valid fallback.
         const uint32_t carried = first.slotCarry.front();
         first.slotCarry.front() = later;
         ExpectRejected(B, "a carry of another commit's later version",
-                       {"(SolverCommit batch 0) is bound to PoseFin version",
+                       {CanonicalLabel(B, RigExecBakedStepKind::SolverCommit, 0) + " is bound to PoseFin version",
                         "writes at or after it"});
         first.slotCarry.front() = first.slotWrites.front();
-        std::string own;
-        CHECK(RigExecBakedValidateStepGraph(B, &own));
-        if (!own.empty()) {
-            std::printf("FAIL a carry of its own commit's version: %s\n",
-                        own.c_str());
-        }
+        // A missing candidate executes carry before its own output exists.
+        // Naming that output would retain the prior run's frame.
+        ExpectRejected(B, "a candidate carrying its own unreadable output",
+            {CanonicalLabel(B, RigExecBakedStepKind::SolverCommit, 0) +
+                " is bound to PoseFin version " + std::to_string(first.slotWrites.front()),
+             "writes at or after it"});
         first.slotCarry.front() = carried;
         passes("a carry of another commit's later version");
+    }
+    {
+        // Candidate outcomes (produced or carried) are written before the
+        // descendant loop. A descendant of the same provider may carry that
+        // earlier output, with the same slot identity and a distinct SSA ID.
+        const auto original = first;
+        const size_t finSize = B.fin.size(), baseSize = B.base.size();
+        auto apply = std::find_if(B.steps.begin(), B.steps.end(), [](const auto &step) {
+            return step.kind == RigExecBakedStepKind::SolverCommit && step.object == 0;
+        });
+        CHECK(apply != B.steps.end() && !first.split && first.solverOutput);
+        if (apply != B.steps.end() && !first.split && first.solverOutput) {
+            const auto writes = apply->writes;
+            first.propagate.emplace_back(first.slots.front(), first.slots.front());
+            first.descendantReads.push_back(first.slotReads.front());
+            first.closestReads.push_back(first.slotReads.front());
+            first.descendantCarry.push_back(first.slotWrites.front());
+            first.descendantBaseCarry.push_back(first.slotBaseWrites.front());
+            first.descendantWrites.push_back(uint32_t(B.fin.size()));
+            first.descendantBaseWrites.push_back(uint32_t(B.base.size()));
+            B.fin.emplace_back(); B.base.emplace_back();
+            apply->writes.push_back(RigExecBakedOne(RigExecBakedSlotDomain::PoseFin,
+                                                   first.descendantWrites.back()));
+            apply->writes.push_back(RigExecBakedOne(RigExecBakedSlotDomain::PoseBase,
+                                                   first.descendantBaseWrites.back()));
+            std::string internal;
+            CHECK(RigExecBakedValidateStepGraph(B, &internal));
+            if (!internal.empty()) std::printf("FAIL valid earlier-candidate carry: %s\n", internal.c_str());
+            first = original; B.fin.resize(finSize); B.base.resize(baseSize);
+            apply->writes = writes;
+            passes("an earlier candidate carried by its descendant");
+        }
     }
     {
         // Every matrix runs after the whole walk, so no version here is
@@ -3233,7 +3743,7 @@ TestTheValidatorRejectsALaterPoseVersion()
                 if (read.domain == RigExecBakedSlotDomain::PoseFin &&
                     !read.IsEmpty()) {
                     matrix = int(index);
-                    slot = read.begin;
+                    slot = uint32_t(B.steps[index].object);
                     break;
                 }
             }
@@ -3245,7 +3755,7 @@ TestTheValidatorRejectsALaterPoseVersion()
             B.finLast[slot] = unwritten;
             ExpectRejected(B, "a last-version read of an unwritten version",
                            {"step " + std::to_string(matrix) +
-                                " (ProviderMatrix ",
+                                " " + CanonicalLabel(B, RigExecBakedStepKind::ProviderMatrix, int(slot)),
                             "is bound to PoseFin version " +
                                 std::to_string(unwritten),
                             "which no step writes"});
@@ -3259,9 +3769,9 @@ TestTheValidatorRejectsALaterPoseVersion()
         const uint32_t own = first.slotWrites.front();
         first.slotWrites.front() = later;
         ExpectRejected(B, "two commits writing one version",
-                       {"(SolverCommit batch 1) writes PoseFin version " +
+                       {CanonicalLabel(B, RigExecBakedStepKind::SolverCommit, int(B.commits.size()-1)) + " writes PoseFin version " +
                             std::to_string(later),
-                        "(SolverCommit batch 0) writes too"});
+                        CanonicalLabel(B, RigExecBakedStepKind::SolverCommit, 0) + " writes too"});
         first.slotWrites.front() = own;
         passes("two commits writing one version");
     }
@@ -3317,12 +3827,10 @@ TestTheValidatorRejectsABadFrameRecord(const std::string &fixtures)
         first.version = last.version;
         ExpectRejected(
             B, "a frame record bound to a later commit's version",
-            {"(FrameMatrix /RecordAsset/Rig/Joints/X after "
-             "/RecordAsset/Rig/Movers/Constrain/Group/C1) is bound to "
-             "PoseFin version " + std::to_string(last.version) +
+            {CanonicalLabel(B, RigExecBakedStepKind::FrameMatrix, 0) +
+                 " is bound to PoseFin version " + std::to_string(last.version) +
                  " of /RecordAsset/Rig/Joints/X",
-             "(Constraint /RecordAsset/Rig/Movers/Constrain/C3) writes at or "
-             "after it"});
+             "(/RecordAsset/Rig/Movers/Constrain/C3) writes at or after it"});
         first.version = bound;
         passes("a frame record bound to a later commit's version");
     }
@@ -3344,7 +3852,7 @@ TestTheValidatorRejectsABadFrameRecord(const std::string &fixtures)
             fold->reads.push_back(RigExecBakedOne(
                 RigExecBakedSlotDomain::FrameMatrix, unwritten));
             ExpectRejected(B, "a fold reading a record no step evaluates",
-                           {"(InfluenceFold /RecordAsset/Rig/Movers/Geometry/",
+                           {"(" + fold->label + ")",
                             "reads FrameMatrix[" + std::to_string(unwritten),
                             "which no step writes"});
             fold->reads.pop_back();
@@ -3374,9 +3882,7 @@ TestTheValidatorRejectsABadFrameRecord(const std::string &fixtures)
         if (first) {
             first->object = -1;
             ExpectRejected(B, "a FrameMatrix step naming record -1",
-                           {"(FrameMatrix /RecordAsset/Rig/Joints/X after "
-                            "/RecordAsset/Rig/Movers/Constrain/Group/C1) "
-                            "names frame record -1 of 3"});
+                           {"(" + first->label + ") names frame record -1 of 3"});
             first->object = 0;
             passes("a FrameMatrix step naming record -1");
         }
@@ -3418,9 +3924,7 @@ TestTheValidatorRejectsABadSolverRecord(const std::string &fixtures)
         }
     }
     CHECK(other >= 0);
-    const std::string step =
-        "(FrameMatrix /CheckpointAsset/Rig/Joints/Hip/Knee after "
-        "/CheckpointAsset/Rig/Stack/LegFK)";
+    const std::string step = "(" + record->mover.GetString() + ")";
     const auto passes = [&](const char *what) {
         std::string restored;
         if (!RigExecBakedValidateStepGraph(B, &restored)) {
@@ -3444,57 +3948,69 @@ TestTheValidatorRejectsABadSolverRecord(const std::string &fixtures)
     }
 }
 
-/// Two root controls switched into each other's space: each compose group
-/// reads the other's last version, so no emission order is valid and Build
-/// must refuse the program. The compile rejects every such rig before a
-/// bake, so no stage reaches Build's refusal and this does not exercise it.
-/// It pins the composeCycle flag and the validator's verdict on the same
-/// steps: the group emitted first reads a PosedM slot only the second
-/// writes. One switch alone is the control: its source's group is moved
-/// ahead of it instead.
+/// Provider emission retains authored slot order. The shared compiler binds
+/// switched sources to exact producers, orders one-way reads, and sets aside
+/// both members of a switch SCC rather than retaining last-run matrices.
 void
 TestASwitchCycleIsDetectedNotEmitted()
 {
-    using Switch = RigExecBakedProgramImpl::SpaceSwitch;
-    const auto program = [](RigExecBakedProgramImpl *B, bool both) {
-        B->paths = {SdfPath("/Rig/A"), SdfPath("/Rig/B")};
-        B->parent = {-1, -1};
-        B->propParent = {-1, -1};
-        B->slotKind.assign(2, RigExecBakedSlotKind::FirstFramePose);
-        B->spaceSwitchBySlot = {0, both ? 1 : -1};
-        for (int slot = 0; slot < (both ? 2 : 1); ++slot) {
-            Switch sw;
-            sw.slot = slot;
-            sw.sourceSlots = {1 - slot};
-            Switch::FrameVersion read;
-            read.anchor = 1 - slot;
-            sw.sourceReads = {read};
-            B->spaceSwitches.push_back(sw);
-        }
-        RigExecBakedBuildPoseSteps(B);
+    using D=RigExecBakedSlotDomain;
+    const auto program=[](RigExecBakedProgramImpl *B,bool both) {
+        B->posedM.assign(2,GfMatrix4d(3));
+        B->steps.push_back(HandStep({RigExecBakedOne(D::PosedM,1)},
+                                   {RigExecBakedOne(D::PosedM,0)}));
+        B->steps.push_back(HandStep(both ? std::vector<RigExecBakedSlotRange>{RigExecBakedOne(D::PosedM,0)}
+                                        : std::vector<RigExecBakedSlotRange>{},
+                                   {RigExecBakedOne(D::PosedM,1)}));
+        CHECK(ScheduleByHand(B));
     };
     {
-        RigExecBakedProgramImpl B;
-        program(&B, /*both=*/false);
-        CHECK(!B.composeCycle);
-        // B's group is emitted first, because A's switch reads it.
-        std::vector<int> composed;
-        for (const RigExecBakedStep &step : B.steps) {
-            if (step.kind == RigExecBakedStepKind::ComposeSubtree) {
-                composed.push_back(B.composeGroups[size_t(step.object)].begin);
-            }
-        }
-        CHECK(composed == std::vector<int>({1, 0}));
+        RigExecBakedProgramImpl B; program(&B,false);
+        CHECK(B.opGraph.cycles.empty());
+        CHECK(B.steps.size()==2);
+        CHECK(B.steps[0].writes.front()==RigExecBakedOne(D::PosedM,1));
+        CHECK(B.steps[1].preds==std::vector<int>{0});
     }
     {
-        RigExecBakedProgramImpl B;
-        program(&B, /*both=*/true);
-        CHECK(B.composeCycle);
-        ScheduleByHand(&B);
-        ExpectRejected(B, "a switch cycle left in slot order",
-                       {"step 0", "reads PosedM[1]",
-                        "the first writer is step 1"});
+        RigExecBakedProgramImpl B; program(&B,true);
+        CHECK(B.opGraph.cycles.size()==1);
+        CHECK(B.excludedSteps.size()==2 && B.steps.empty());
+        CHECK(B.opAdapter.excludedValues.size()==2);
+        for(int visit=0;visit<2;++visit) {
+            B.posedM.assign(2,GfMatrix4d(3));
+            CHECK(RigExecBakedExecuteOpGraph(&B,UsdTimeCode(1),false));
+            CHECK(std::isnan(B.posedM[0][3][0]) && std::isnan(B.posedM[1][3][0]));
+        }
     }
+    {
+        // A real compose descendant must inherit an excluded parent's
+        // unavailable matrix on both first and held generations.
+        RigExecBakedProgramImpl B;
+        B.posedM.assign(3,GfMatrix4d(1));B.base.resize(3);B.fin.resize(3);
+        B.slotKind.assign(3,RigExecBakedSlotKind::FirstFramePose);
+        B.parent={-1,-1,0};B.noScaleAvars.assign(3,0);
+        B.posedAuthored.assign(3,0);B.posedAuthoredM.assign(3,GfMatrix4d(1));
+        B.parentSpaceAuthored.assign(3,0);B.parentSpaceM.assign(3,GfMatrix4d(1));
+        B.posedD.assign(3,GfMatrix4d(1));B.parentDinv.assign(3,GfMatrix4d(1));
+        B.rotOrder.assign(3,TfToken("XYZ"));B.avars.assign(33,0);
+        for(size_t i=0;i<3;++i) {for(size_t k=3;k<6;++k)B.avars[i*11+k]=1;B.avars[i*11+10]=1;}
+        B.composeGroups.push_back({2,3,{0}});
+        B.steps.push_back(HandStep({RigExecBakedOne(D::PosedM,1)},{RigExecBakedOne(D::PosedM,0)}));
+        B.steps.push_back(HandStep({RigExecBakedOne(D::PosedM,0)},{RigExecBakedOne(D::PosedM,1)}));
+        auto child=HandStep({RigExecBakedOne(D::PosedM,0)},
+            {RigExecBakedOne(D::PoseBase,2),RigExecBakedOne(D::PoseFin,2),RigExecBakedOne(D::PosedM,2)});
+        child.kind=RigExecBakedStepKind::ComposeSubtree;child.object=0;B.steps.push_back(child);
+        CHECK(ScheduleByHand(&B));CHECK(B.excludedSteps.size()==2 && B.steps.size()==1);
+        for(int visit=0;visit<2;++visit) {
+            B.posedM[0]=GfMatrix4d(1);B.posedM[1]=GfMatrix4d(1);
+            CHECK(RigExecBakedExecuteOpGraph(&B,UsdTimeCode(1),false));
+            CHECK(std::isnan(B.posedM[0][3][0]));
+            CHECK(!B.base[2].IsValid() || B.base[2].IsDegenerate());
+            CHECK(!B.fin[2].IsValid() || B.fin[2].IsDegenerate());
+            CHECK(std::isnan(B.posedM[2][3][0]));
+        }
+    }
+
 }
 
 /// Every reader of a chain's running points names exactly the version it
@@ -3528,7 +4044,7 @@ TestEachChainReaderBindsOneVersion(const BuiltProgram &built,
                   RigExecBakedStepKind::RevisionFuse &&
               B.steps[size_t(fuse)].object == int(id));
     }
-    // The slots of \p domain that \p ranges name, in order.
+    // Typed read identities: distinct consumer routes may name the same slot.
     const auto slots = [](const std::vector<RigExecBakedSlotRange> &ranges,
                           RigExecBakedSlotDomain domain) {
         std::vector<int> out;
@@ -3539,6 +4055,8 @@ TestEachChainReaderBindsOneVersion(const BuiltProgram &built,
                 }
             }
         }
+        std::sort(out.begin(),out.end());
+        out.erase(std::unique(out.begin(),out.end()),out.end());
         return out;
     };
     size_t checked = 0, stacked = 0, stackedChunked = 0;
@@ -3561,16 +4079,25 @@ TestEachChainReaderBindsOneVersion(const BuiltProgram &built,
             CHECK(out.empty());
             continue;
         }
+        const bool fieldReader = step.kind == RigExecBakedStepKind::WeightField &&
+            step.object >= 0 && size_t(step.object) < B.weightFields.size() &&
+            B.weightFields[size_t(step.object)].form == RigExecBakedProgramImpl::WeightField::Form::Revision;
         if (step.kind != RigExecBakedStepKind::RevisionChunk &&
             step.kind != RigExecBakedStepKind::RevisionFuse &&
-            step.kind != RigExecBakedStepKind::RevisionStatic) {
-            continue;
-        }
-        const int id = step.object;
+            step.kind != RigExecBakedStepKind::RevisionStatic && !fieldReader) continue;
+        const int id = fieldReader ? B.weightFields[size_t(step.object)].consumer : step.object;
         const auto &[c, r] = B.revisionIndex[size_t(id)];
-        const bool reader =
-            step.kind != RigExecBakedStepKind::RevisionStatic ||
-            B.chains[size_t(c)].revisions[size_t(r)].weightCurrentPhase;
+        const auto &revision = B.chains[size_t(c)].revisions[size_t(r)];
+        const bool reader = step.kind != RigExecBakedStepKind::RevisionStatic;
+        if (step.kind == RigExecBakedStepKind::RevisionStatic && revision.weightField >= 0) {
+            CHECK(slots(step.reads,RigExecBakedSlotDomain::WeightField) == std::vector<int>{revision.weightField});
+            const auto producer = std::find_if(B.steps.begin(),B.steps.end(),[&](const auto &candidate) {
+                return candidate.kind == RigExecBakedStepKind::WeightField && candidate.object == revision.weightField;
+            });
+            CHECK(producer != B.steps.end());
+            if (producer != B.steps.end())
+                CHECK(std::binary_search(step.preds.begin(),step.preds.end(),int(producer-B.steps.begin())));
+        }
         std::vector<int> ownChunks;
         if (step.kind == RigExecBakedStepKind::RevisionFuse) {
             for (int k = 0; k < B.revisionChunkCount[size_t(id)]; ++k) {
@@ -3583,26 +4110,69 @@ TestEachChainReaderBindsOneVersion(const BuiltProgram &built,
             continue;
         }
         ++checked;
-        if (r == 0) {
+        if (r == 0 && !fieldReader) {
             CHECK(done.empty() && dirty.empty());
             continue;
         }
-        ++stacked;
-        if (B.revisionChunkCount[size_t(id)] > 1) {
-            ++stackedChunked;
+        if (r > 0) {
+            ++stacked;
+            if (B.revisionChunkCount[size_t(id)] > 1) ++stackedChunked;
         }
-        const bool bound = done == std::vector<int>{id - 1} &&
-                           dirty == std::vector<int>{id - 1};
+        std::vector<int> expectedDone,expectedDirty;
+        if (r > 0) {
+            if (fieldReader) for (int earlier=B.chainRevisionBegin[size_t(c)];earlier<id;++earlier)
+                expectedDone.push_back(earlier);
+            else expectedDone.push_back(id-1);
+            expectedDirty.push_back(id-1);
+        }
+        if (fieldReader) {
+            const auto &field=B.weightFields[size_t(step.object)];
+            const auto bases=slots(step.reads,RigExecBakedSlotDomain::ChainBase);
+            const auto finals=slots(step.reads,RigExecBakedSlotDomain::ChainPoints);
+            CHECK(std::binary_search(bases.begin(),bases.end(),c));
+            // The entering point view and explicitly phased oracle inputs are
+            // separate body reads, even when both select the same revision.
+            for (const auto &input:field.pointReads) for (const auto &candidate:input.binding.candidates) {
+                CHECK(candidate.chain>=0 && size_t(candidate.chain)<B.chains.size());
+                if(candidate.chain<0 || size_t(candidate.chain)>=B.chains.size()) continue;
+                if(input.binding.finalRead) {
+                    CHECK(std::binary_search(finals.begin(),finals.end(),candidate.chain));
+                } else if(candidate.version==0) {
+                    CHECK(std::binary_search(bases.begin(),bases.end(),candidate.chain));
+                } else {
+                    const int selected=B.chainRevisionBegin[size_t(candidate.chain)]+candidate.version-1;
+                    CHECK(selected>=B.chainRevisionBegin[size_t(candidate.chain)] &&
+                          selected<B.chainRevisionEnd[size_t(candidate.chain)]);
+                    if(selected<B.chainRevisionBegin[size_t(candidate.chain)] ||
+                       selected>=B.chainRevisionEnd[size_t(candidate.chain)]) continue;
+                    expectedDone.push_back(selected);
+                    expectedDirty.push_back(selected);
+                }
+            }
+        }
+        const auto unique=[](std::vector<int> *values) {
+            std::sort(values->begin(),values->end());
+            values->erase(std::unique(values->begin(),values->end()),values->end());
+        };
+        unique(&expectedDone); unique(&expectedDirty);
+        const bool bound=done==expectedDone && dirty==expectedDirty;
         CHECK(bound);
-        const int producer = B.revisionFuseStep[size_t(id - 1)];
-        const bool ordered =
-            std::binary_search(step.preds.begin(), step.preds.end(),
-                               producer);
+        bool ordered=true;
+        for (int selected:expectedDone) {
+            const int producer=B.revisionFuseStep[size_t(selected)];
+            ordered=ordered && std::binary_search(step.preds.begin(),step.preds.end(),producer);
+        }
         CHECK(ordered);
         if (!bound || !ordered) {
-            std::printf("FAIL %s: step %zu (%s) does not read version %d of "
-                        "chain %d from step %d alone\n", name, index,
-                        step.label.c_str(), r, c, producer);
+            std::printf("FAIL %s: step %zu (%s) has incorrect entering or phased point reads for version %d of chain %d; done",name,index,step.label.c_str(),r,c);
+            for(int selected:done)std::printf(" %d",selected);
+            std::printf("; dirty");
+            for(int selected:dirty)std::printf(" %d",selected);
+            std::printf("; expected done");
+            for(int selected:expectedDone)std::printf(" %d",selected);
+            std::printf("; expected dirty");
+            for(int selected:expectedDirty)std::printf(" %d",selected);
+            std::printf("\n");
         }
     }
     std::printf("  %s: %zu chain readers, %zu past the first revision "
@@ -3665,72 +4235,195 @@ OverApproximateChainReads(const RigExecBakedProgramImpl &B,
     return reads;
 }
 
-/// The transitive closure of the slot-conflict relation over \p reads and
-/// \p writes, one bit row per step: step j depends on an earlier step i when
-/// j reads what i writes, when both write one slot, or when j writes what i
-/// read in a domain that is not versioned. That is the relation the edge
-/// sweep raises, before it drops the edges a later writer implies, so its
-/// closure is the closure of the sweep's `preds`.
+/// Independently rebuild dense typed producer dependencies from declarations.
+/// Reads bind their unique producer regardless of descriptor emission order;
+/// two reads alone and writes to distinct SSA values add no causal edge.
 std::vector<uint64_t>
 ConflictClosure(const std::vector<std::vector<RigExecBakedSlotRange>> &reads,
                 const std::vector<std::vector<RigExecBakedSlotRange>> &writes,
                 size_t *words)
 {
-    const size_t count = reads.size();
-    *words = (count + 63) / 64;
-    std::vector<uint64_t> bits(count * *words, 0);
-    struct Use {
-        size_t step;
-        uint32_t begin, end;
-        bool write;
-    };
-    std::vector<std::vector<Use>> byDomain(RigExecBakedSlotDomainCount);
-    for (size_t step = 0; step < count; ++step) {
-        for (const RigExecBakedSlotRange &range : reads[step]) {
-            if (!range.IsEmpty()) {
-                byDomain[size_t(range.domain)].push_back(
-                    {step, range.begin, range.end, false});
-            }
-        }
-        for (const RigExecBakedSlotRange &range : writes[step]) {
-            if (!range.IsEmpty()) {
-                byDomain[size_t(range.domain)].push_back(
-                    {step, range.begin, range.end, true});
-            }
+    const size_t count=reads.size();
+    *words=(count+63)/64;
+    std::vector<uint64_t> bits(count * *words,0);
+    std::vector<RigExecBakedStep> sites(count);
+    for(size_t step=0;step<count;++step)sites[step].writes=writes[step];
+    const WriteSiteIndex producers(sites);
+    for(size_t step=0;step<count;++step)for(const auto &range:writes[step]) {
+        if(range.IsEmpty())continue;
+        for(const auto &site:producers.Overlapping(range))
+            if(!writes[site.first][site.second].IsEmpty())CHECK(site.first==step);
+    }
+    std::vector<std::vector<size_t>> direct(count);
+    for(size_t step=0;step<count;++step)for(const auto &range:reads[step]) {
+        if(range.IsEmpty())continue;
+        for(const auto &site:producers.Overlapping(range)) {
+            if(site.first==step || writes[site.first][site.second].IsEmpty())continue;
+            CHECK(site.first<step);
+            if(site.first<step)direct[step].push_back(site.first);
         }
     }
-    for (size_t domain = 0; domain < byDomain.size(); ++domain) {
-        const bool versioned = RigExecBakedIsVersionedDomain(
-            RigExecBakedSlotDomain(domain));
-        const std::vector<Use> &uses = byDomain[domain];
-        for (const Use &later : uses) {
-            uint64_t *row = &bits[later.step * *words];
-            for (const Use &earlier : uses) {
-                if (earlier.step >= later.step ||
-                    earlier.begin >= later.end ||
-                    later.begin >= earlier.end) {
-                    continue;
-                }
-                if (earlier.write || (later.write && !versioned)) {
-                    row[earlier.step / 64] |= uint64_t(1)
-                                              << (earlier.step % 64);
-                }
-            }
-        }
-    }
-    // Program order is a topological order of the relation.
-    for (size_t step = 0; step < count; ++step) {
-        uint64_t *row = &bits[step * *words];
-        for (size_t pred = 0; pred < step; ++pred) {
-            if ((row[pred / 64] >> (pred % 64)) & uint64_t(1)) {
-                const uint64_t *closed = &bits[pred * *words];
-                for (size_t w = 0; w < *words; ++w) {
-                    row[w] |= closed[w];
-                }
-            }
+    // Each predecessor's already closed row includes all its ancestors.
+    for(size_t step=0;step<count;++step) {
+        auto &preds=direct[step];
+        std::sort(preds.begin(),preds.end());
+        preds.erase(std::unique(preds.begin(),preds.end()),preds.end());
+        uint64_t *row=&bits[step * *words];
+        for(size_t pred:preds) {
+            row[pred/64]|=uint64_t(1)<<(pred%64);
+            const uint64_t *closed=&bits[pred * *words];
+            for(size_t w=0;w<*words;++w)row[w]|=closed[w];
         }
     }
     return bits;
+}
+
+void
+TestIndexedQueriesMatchExhaustiveWitnesses()
+{
+    using D=RigExecBakedSlotDomain;
+    const auto exhaustive=[](const std::vector<RigExecBakedStep> &steps,const Reachability &reach) {
+        std::vector<AccessWitness> witnesses;
+        for(size_t i=0;i<steps.size();++i)for(size_t r=0;r<steps[i].reads.size();++r) {
+            const auto &read=steps[i].reads[r];
+            if(RigExecBakedIsSourceDomain(read.domain) || read.IsEmpty())continue;
+            bool found=false;
+            for(size_t e=0;e<i;++e)for(const auto &write:steps[e].writes)
+                found=found || write.Overlaps(read);
+            if(!found)witnesses.push_back({0,i,r,0,0});
+        }
+        for(size_t e=0;e<steps.size();++e)for(size_t l=e+1;l<steps.size();++l) {
+            if(reach.Ordered(e,l))continue;
+            for(size_t a=0;a<steps[e].writes.size();++a) {
+                for(size_t b=0;b<steps[l].writes.size();++b)
+                    if(steps[e].writes[a].Overlaps(steps[l].writes[b]))
+                        witnesses.push_back({1,e,a,l,b});
+                for(size_t b=0;b<steps[l].reads.size();++b)
+                    if(steps[e].writes[a].Overlaps(steps[l].reads[b]))
+                        witnesses.push_back({2,e,a,l,b});
+            }
+            for(size_t a=0;a<steps[e].reads.size();++a)
+                for(size_t b=0;b<steps[l].writes.size();++b)
+                    if(!RigExecBakedIsVersionedDomain(steps[l].writes[b].domain) &&
+                       steps[e].reads[a].Overlaps(steps[l].writes[b]))
+                        witnesses.push_back({3,e,a,l,b});
+        }
+        std::sort(witnesses.begin(),witnesses.end());
+        return witnesses;
+    };
+    std::array<bool,4> witnessed{};
+    for(unsigned variant=0;variant<9;++variant) {
+        std::vector<RigExecBakedStep> steps(5);
+        steps[0].writes={RigExecBakedRange(D::ChainDirty,0,3),RigExecBakedOne(D::ChainDirty,1)};
+        steps[1].reads={RigExecBakedRange(D::ChainDirty,0,2),RigExecBakedOne(D::ChainDirty,7)};
+        steps[1].writes={RigExecBakedOne(D::PoseFin,0)};
+        steps[2].reads={RigExecBakedOne(D::PoseFin,0)};
+        steps[2].writes={RigExecBakedRange(D::ChainDirty,2,4)};
+        steps[3].reads={RigExecBakedRange(D::ChainDirty,2,4),RigExecBakedRange(D::ChainDirty,1,1)};
+        steps[3].writes={RigExecBakedOne(D::PoseFin,0)};
+        steps[4].reads={RigExecBakedOne(D::ChainDirty,9),RigExecBakedOne(D::SpaceLeaf,7),RigExecBakedRange(D::WeightPacket,0,0)};
+        steps[4].writes={RigExecBakedOne(D::ChainDirty,7),RigExecBakedRange(D::ChainDirty,1,1)};
+        if(variant==8) {
+            const uint32_t limit=std::numeric_limits<uint32_t>::max();
+            steps[0].writes.push_back(RigExecBakedRange(D::WeightPacket,0,limit));
+            steps[1].reads.push_back(RigExecBakedRange(D::WeightPacket,limit-2,limit));
+            steps[2].reads.push_back(RigExecBakedRange(D::WeightPacket,0,limit));
+            steps[3].writes.push_back(RigExecBakedRange(D::WeightPacket,limit-1,limit));
+            steps[4].reads.push_back(RigExecBakedRange(D::WeightPacket,limit,1));
+        }
+        for(size_t i=1;i<4;++i)if(!(variant&(1u<<(i-1))))steps[i].preds={int(i-1)};
+        const Reachability reach(steps);
+        const auto expected=exhaustive(steps,reach);
+        std::vector<AccessWitness> actual;
+        IndexedAccessViolations(steps,reach,[&](const AccessWitness &w){actual.push_back(w);});
+        std::sort(actual.begin(),actual.end());
+        CHECK(actual==expected);
+        for(const auto &w:actual)witnessed[w[0]]=true;
+    }
+    for(bool seen:witnessed)CHECK(seen);
+
+    // Independently reproduce the former closure scan on a small producer
+    // graph, including removed and unrelated added reads and a duplicate route.
+    for(unsigned variant=0;variant<4;++variant) {
+        const size_t count=70,words=(count+63)/64;
+        std::vector<std::vector<RigExecBakedSlotRange>> reads(count),writes(count);
+        for(size_t i=0;i<count;++i) {
+            writes[i]={RigExecBakedOne(D::PoseFin,int(i))};
+            if(i>0)reads[i]={RigExecBakedOne(D::PoseFin,int(i-1))};
+        }
+        if(variant==1)reads[35].clear();
+        if(variant==2)reads[35].push_back(RigExecBakedOne(D::PoseFin,7));
+        if(variant==3)reads[35].push_back(reads[35].front());
+        std::vector<uint64_t> old(count*words,0);
+        for(size_t l=0;l<count;++l)for(size_t e=0;e<l;++e)
+            for(const auto &read:reads[l])for(const auto &write:writes[e])
+                if(read.Overlaps(write))old[l*words+e/64]|=uint64_t(1)<<(e%64);
+        for(size_t l=0;l<count;++l)for(size_t e=0;e<l;++e)
+            if((old[l*words+e/64]>>(e%64))&uint64_t(1))
+                for(size_t w=0;w<words;++w)old[l*words+w]|=old[e*words+w];
+        size_t actualWords=0;
+        const auto actual=ConflictClosure(reads,writes,&actualWords);
+        CHECK(actualWords==words && actual==old);
+        std::vector<uint64_t> changed=actual;
+        changed[69*words]^=uint64_t(1)<<7; // missing or spurious reachability
+        changed[69*words+1]^=uint64_t(1)<<1;
+        size_t scalar=0,packed=0;
+        for(size_t l=0;l<count;++l) {
+            for(size_t e=0;e<l;++e)
+                scalar+=((actual[l*words+e/64]^changed[l*words+e/64])>>(e%64))&uint64_t(1);
+            for(size_t w=0;w<(l+63)/64;++w) {
+                uint64_t difference=actual[l*words+w]^changed[l*words+w];
+                if(w==l/64 && l%64)difference&=(uint64_t(1)<<(l%64))-1;
+                packed+=_RigExecPopcount64(difference);
+            }
+        }
+        CHECK(scalar==2 && packed==scalar);
+    }
+
+    {
+        const uint32_t limit=std::numeric_limits<uint32_t>::max();
+        std::vector<std::vector<RigExecBakedSlotRange>> reads(3),writes(3);
+        writes[0]={RigExecBakedRange(D::ChainDirty,0,limit)};
+        writes[1]={RigExecBakedOne(D::PoseFin,0)};
+        reads[1]={RigExecBakedRange(D::ChainDirty,0,limit)};
+        reads[2]={RigExecBakedRange(D::ChainDirty,limit-2,limit),RigExecBakedOne(D::PoseFin,0)};
+        size_t words=0;
+        const auto closure=ConflictClosure(reads,writes,&words);
+        CHECK(words==1 && closure==std::vector<uint64_t>({0,1,3}));
+    }
+
+    RigExecBakedClustering graph;
+    graph.clusters.resize(4);
+    graph.clusters[0].succs={1}; graph.clusters[1].preds={0};
+    graph.clusters[1].succs={2}; graph.clusters[2].preds={1};
+    std::vector<RigExecBakedClusterSet> cones(4);
+    for(auto &cone:cones)cone.Resize(4);
+    for(int c=0;c<4;++c)cones[size_t(c)].Set(c);
+    cones[0].Set(1);cones[0].Set(2);cones[1].Set(2);
+    const auto oldClosed=[&](const auto &candidate) {
+        bool ok=true;
+        for(int c=0;c<4;++c) {
+            ok=ok && candidate[size_t(c)].Test(c);
+            for(int next:graph.clusters[size_t(c)].succs)ok=ok && candidate[size_t(c)].Test(next);
+            for(int d=0;d<4;++d)if(candidate[size_t(c)].Test(d))
+                for(int e=0;e<4;++e)if(candidate[size_t(d)].Test(e))
+                    ok=ok && candidate[size_t(c)].Test(e);
+        }
+        return ok;
+    };
+    const auto exact=[&](const auto &candidate) {
+        size_t edges=0,checks=0;
+        return ConeRecurrenceViolations(graph,candidate,&edges,&checks)==0;
+    };
+    CHECK(oldClosed(cones) && exact(cones));
+    auto missing=cones; missing[0].words[0]&=~(uint64_t(1)<<2);
+    CHECK(!oldClosed(missing) && !exact(missing));
+    auto extra=cones; extra[0].Set(3);
+    CHECK(oldClosed(extra) && !exact(extra)); // exactness strengthens the old superset check
+    auto tail=cones; tail[0].words[0]|=uint64_t(1)<<63;
+    CHECK(!exact(tail));
+    auto unrelatedMissing=extra; unrelatedMissing[3].words[0]=0;
+    CHECK(!oldClosed(unrelatedMissing) && !exact(unrelatedMissing));
 }
 
 /// One version read per chain reader orders the steps exactly as the
@@ -3758,22 +4451,25 @@ TestThePointVersionsKeepTheOrder(const BuiltProgram &built, const char *name)
         size_t words = 0;
         const std::vector<uint64_t> bits =
             ConflictClosure(reads, writes, &words);
-        size_t differ = 0;
-        for (size_t later = 0; later < count; ++later) {
-            for (size_t earlier = 0; earlier < later; ++earlier) {
-                const bool expected =
-                    (bits[later * words + earlier / 64] >> (earlier % 64)) &
-                    uint64_t(1);
-                if (expected == actual.Ordered(earlier, later)) {
-                    continue;
+        size_t differ = 0,reported=0;
+        CHECK(words==actual.WordCount());
+        for(size_t later=0;later<count;++later) {
+            const uint64_t *row=actual.Row(later);
+            for(size_t w=0;w<(later+63)/64;++w) {
+                uint64_t difference=bits[later*words+w]^row[w];
+                if(w==later/64 && later%64)
+                    difference&=(uint64_t(1)<<(later%64))-1;
+                if(!difference)continue;
+                if(reported<5)for(unsigned bit=0;bit<64 && reported<5;++bit) {
+                    if(!(difference&(uint64_t(1)<<bit)))continue;
+                    const size_t earlier=w*64+bit;
+                    const bool expected=(bits[later*words+w]>>bit)&uint64_t(1);
+                    std::printf("FAIL %s (%s): step %zu (%s) -> step %zu (%s) is %s\n",
+                        name,what,earlier,B.steps[earlier].label.c_str(),later,
+                        B.steps[later].label.c_str(),expected?"missing":"new");
+                    ++reported;
                 }
-                if (differ++ < 5) {
-                    std::printf("FAIL %s (%s): step %zu (%s) -> step %zu "
-                                "(%s) is %s\n", name, what, earlier,
-                                B.steps[earlier].label.c_str(), later,
-                                B.steps[later].label.c_str(),
-                                expected ? "missing" : "new");
-                }
+                differ+=_RigExecPopcount64(difference);
             }
         }
         CHECK(differ == 0);
@@ -3843,7 +4539,7 @@ TestTheValidatorRejectsAnUnboundPointVersion()
             reader.reads.end());
         CHECK(reader.reads.size() + 1 == reads.size());
         ExpectRejected(B, "a chunk without its version read",
-                       {"(RevisionChunk", "reads point version 2 of chain 0",
+                       {"(" + reader.label + ")", "reads point version 2 of chain 0",
                         "without declaring it"});
         reader.reads = reads;
         passes("a chunk without its version read");
@@ -3852,7 +4548,7 @@ TestTheValidatorRejectsAnUnboundPointVersion()
         B.revisionFuseStep[1] = chunk;
         ExpectRejected(B, "a fuse table naming a chunk",
                        {"revision 1's fuse is recorded as",
-                        "(RevisionChunk", "which is not its fuse"});
+                        "(" + reader.label + ")", "which is not its fuse"});
         B.revisionFuseStep[1] = producer;
         passes("a fuse table naming a chunk");
     }
@@ -3860,8 +4556,8 @@ TestTheValidatorRejectsAnUnboundPointVersion()
         reader.writes.push_back(
             RigExecBakedOne(RigExecBakedSlotDomain::ChainDirty, 1));
         ExpectRejected(B, "a second writer of a version",
-                       {"(RevisionChunk", "writes ChainDirty[1]",
-                        "which only", "(RevisionFuse", "may write"});
+                       {"(" + reader.label + ")", "writes ChainDirty[1]",
+                        "which only", "(" + B.steps[size_t(producer)].label + ")", "may write"});
         reader.writes.pop_back();
         passes("a second writer of a version");
     }
@@ -3869,7 +4565,7 @@ TestTheValidatorRejectsAnUnboundPointVersion()
         reader.writes.push_back(
             RigExecBakedOne(RigExecBakedSlotDomain::RevisionDone, 3));
         ExpectRejected(B, "a version written past the revision table",
-                       {"(RevisionChunk", "writes RevisionDone[3]",
+                       {"(" + reader.label + ")", "writes RevisionDone[3]",
                         "past the table's 3 revisions"});
         reader.writes.pop_back();
         passes("a version written past the revision table");
@@ -3881,8 +4577,8 @@ TestTheValidatorRejectsAnUnboundPointVersion()
         preds.erase(std::find(preds.begin(), preds.end(), producer));
         succs.erase(std::find(succs.begin(), succs.end(), chunk));
         ExpectRejected(B, "a version read without its producer's edge",
-                       {"(RevisionChunk", "reads RevisionDone[1] without an "
-                        "edge from its producer", "(RevisionFuse"});
+                       {"(" + reader.label + ")", "reads RevisionDone[1] without an "
+                        "edge from its producer", "(" + B.steps[size_t(producer)].label + ")"});
         preds.insert(std::lower_bound(preds.begin(), preds.end(), producer),
                      producer);
         succs.insert(std::lower_bound(succs.begin(), succs.end(), chunk),
@@ -3919,6 +4615,7 @@ main(int argc, char **argv)
         return 2;
     }
     TestTheModeIsTheOneTheEnvironmentAsked();
+    TestIndexedQueriesMatchExhaustiveWitnesses();
     const BuiltProgram biped = Build(examplesDir + "/biped/Biped.usda");
     const BuiltProgram animated =
         Build(examplesDir + "/biped/Biped_anim.usda");
@@ -3959,6 +4656,11 @@ main(int argc, char **argv)
             TestTheValidatorAcceptsTheProgram(built, name);
         }
     }
+    TestVerifierComparesExactSkinTopologyContent();
+    TestFrozenSparseRawLayoutDigest();
+    TestVerifierRestoresAdoptedLayoutsAndBlendCaches();
+    TestVerifierRestoresInputsAndChecksSelectedWork();
+    TestProviderRefreshFailureBoundaries();
     TestTheValidatorRejectsAMalformedGraph();
     TestTheHeadValidatorRejectsAMalformedTier(biped);
     TestAPlacementReadNeedsItsVolumesStep();

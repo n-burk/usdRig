@@ -43,6 +43,8 @@ enum class RigExecBakeArrayConsumer : uint8_t {
     /// Raw weightTarget fallback; its canonical path is already in the object.
     OracleFallback,
     OracleCurve,
+    /// An API4 declared input, owned by the revision's typed leaf descriptor.
+    Declared,
 };
 
 /// One array read the file lists an input slot for.

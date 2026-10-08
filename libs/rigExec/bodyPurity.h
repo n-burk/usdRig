@@ -1,22 +1,16 @@
 // Step-body purity: a baked or frozen step body reads its declared slots and
 // its sampled leaves, never the stage and never the resolved-input overlay.
 //
-// RunStepBody (bakedSchedule.cpp) and _FrozenStepBody (frozenGeometry.cpp)
+// RunStepBody (bakedSchedule.cpp), shared by native and frozen execution,
 // mark the running thread for the length of the body. The read funnels --
 // RigExecBakedRead, RigExecResolvedInputs::GetAttribute,
 // RigExecAssembleParameters, RigExecResolveSkinTopology and
 // RigExecRigEvaluator::_FrameFromXformRelativeToAsset -- start with
 // RIGEXEC_PURITY_CHECK(), which reports a read made under the mark.
 //
-// The volatile exceptions, each inside a RigExecVolatileRead until it moves
-// to the prologue:
-//   * the weight oracle (B.resolveWeights) called from a Constraint body and
-//     from a RevisionStatic body that measures a current-phase volume;
-//   * the stage assembly of a plugin revision bound to a value the region
-//     computes (bakedGeometry.cpp AssembleRevision), until plugin API v3.
-// They still run on workers; what keeps them lock-free is that every token
-// table they use is touched at Build and none of them builds a token from
-// text.
+// Production bodies consume copied leaves and typed operation values.
+// Source adapters sample before dispatch; declared API4 assembly is stage-free.
+
 #ifndef RIGEXEC_BODY_PURITY_H
 #define RIGEXEC_BODY_PURITY_H
 

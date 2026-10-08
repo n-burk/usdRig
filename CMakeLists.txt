@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.26)
-project(rigExec VERSION 0.1.0 LANGUAGES CXX)
+project(rigExec VERSION 0.1.0 LANGUAGES C CXX)
 
 # RigExec builds against an unchanged installed OpenUSD v26.08
 set(USD_INSTALL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../usd-install"
@@ -49,6 +49,17 @@ elseif (UNIX)
 endif()
 set(CMAKE_INSTALL_RPATH_USE_LINK_PATH ON)
 
+# Shared descriptor compiler and executor, with no USD dependency.
+add_library(rigExecGraph STATIC libs/rigExecGraph/opGraph.cpp)
+target_compile_features(rigExecGraph PUBLIC cxx_std_17)
+target_compile_definitions(rigExecGraph PUBLIC
+    $<$<PLATFORM_ID:Windows>:NOMINMAX>)
+target_include_directories(rigExecGraph PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs>
+    $<INSTALL_INTERFACE:${RIGEXEC_INSTALL_INCLUDEDIR}>)
+set_target_properties(rigExecGraph PROPERTIES POSITION_INDEPENDENT_CODE ON)
+add_library(rigExec::rigExecGraph ALIAS rigExecGraph)
+
 # rigExecMath: pure point-frame and solver kernels (spec §5).
 add_library(rigExecMath STATIC
     libs/rigExecMath/pointFrame.cpp
@@ -68,7 +79,15 @@ target_include_directories(rigExecMath PUBLIC
 target_link_libraries(rigExecMath PUBLIC arch tf gf vt)
 set_target_properties(rigExecMath PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
-# rigExec: exec type registrations, schema computations, tap set, and the
+# Keep value-codec template instantiations private to its archive. Only the
+# two declared codec functions become Windows DLL exports.
+add_library(rigExecInputValues STATIC libs/rigExec/inputReplayValues.cpp)
+target_include_directories(rigExecInputValues PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/libs")
+target_link_libraries(rigExecInputValues PRIVATE vt sdf ts)
+target_compile_definitions(rigExecInputValues PRIVATE RIGEXEC_INPUT_VALUES_EXPORTS)
+set_target_properties(rigExecInputValues PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+# rigExec: schema bindings, normalized graph lowering and native evaluation.
 add_library(rigExec SHARED
     libs/rigExec/types.cpp
     libs/rigExec/parallel.cpp
@@ -76,6 +95,45 @@ add_library(rigExec SHARED
     libs/rigExec/moverKernels.cpp
     libs/rigExec/solverKernels.cpp
     libs/rigExec/weightPackets.cpp
+    libs/rigExec/goldenPose.cpp
+    libs/rigExec/goldenSuite.cpp
+    libs/rigExec/inputReplay.cpp
+    libs/rigExec/bakedExecCrossCheck.cpp
+    libs/rigExec/weightReference.cpp
+    libs/rigExec/scalarReference.cpp
+    libs/rigExec/scalarReferenceAdapter.cpp
+    libs/rigExec/oracleInputs.cpp
+    libs/rigExecGraph/usdSceneAccess.cpp
+    libs/rigExecGraph/poseCommit.cpp
+    libs/rigExecGraph/providerContextBinding.cpp
+    libs/rigExecGraph/constraintGraphBinding.cpp
+    libs/rigExecGraph/geometryGraphBinding.cpp
+    libs/rigExecGraph/poseGraphBinding.cpp
+    libs/rigExecGraph/poseProgram.cpp
+    libs/rigExecGraph/poseSceneLowering.cpp
+    libs/rigExecGraph/propertyGraphBinding.cpp
+    libs/rigExecGraph/sceneGraphBinding.cpp
+    libs/rigExecGraph/sceneGraphTypedRead.cpp
+    libs/rigExecGraph/sceneProgram.cpp
+    libs/rigExecGraph/sceneProgramLayout.cpp
+    libs/rigExecGraph/sceneProgramLowering.cpp
+    libs/rigExecGraph/solverGraphBinding.cpp
+    libs/rigExecGraph/weightGraphBinding.cpp
+    libs/rigExecGraph/sceneDescriptors.cpp
+    libs/rigExecGraph/sceneCompileInputs.cpp
+    libs/rigExecGraph/solverProgram.cpp
+    libs/rigExecGraph/solverSceneLowering.cpp
+    libs/rigExecGraph/constraintProgram.cpp
+    libs/rigExecGraph/constraintSceneLowering.cpp
+    libs/rigExecGraph/propertyProgram.cpp
+    libs/rigExecGraph/propertySceneLowering.cpp
+    libs/rigExecGraph/sceneVersionRoutes.cpp
+    libs/rigExecGraph/geometryProgram.cpp
+    libs/rigExecGraph/geometrySceneLowering.cpp
+    libs/rigExecGraph/weightProgram.cpp
+    libs/rigExecGraph/weightSceneLowering.cpp
+    libs/rigExecGraph/sceneTypedReads.cpp
+    libs/rigExec/weightField.cpp
     libs/rigExec/movers/moverRegistry.cpp
     libs/rigExec/movers/matrixMover.cpp
     libs/rigExec/movers/skinMover.cpp
@@ -95,9 +153,7 @@ add_library(rigExec SHARED
     libs/rigExec/rigEvaluatorCompile.cpp
     libs/rigExec/rigEvaluatorDependencies.cpp
     libs/rigExec/rigEvaluatorDigest.cpp
-    libs/rigExec/rigEvaluatorDynamic.cpp
     libs/rigExec/rigEvaluatorGeometry.cpp
-    libs/rigExec/rigEvaluatorGeometryEvaluation.cpp
     libs/rigExec/rigEvaluatorInputs.cpp
     libs/rigExec/rigEvaluatorLiveGraph.cpp
     libs/rigExec/rigEvaluatorNotices.cpp
@@ -105,8 +161,16 @@ add_library(rigExec SHARED
     libs/rigExec/rigEvaluatorProperties.cpp
     libs/rigExec/rigEvaluatorValidation.cpp
     libs/rigExec/bakedProgram.cpp
+    libs/rigExec/crossDomainInputs.cpp
+    libs/rigExec/bakedSpaces.cpp
     libs/rigExec/bakedPose.cpp
     libs/rigExec/bakedProperties.cpp
+    libs/rigExec/bakedOpValues.cpp
+    libs/rigExec/bakedOpGraph.cpp
+    libs/rigExecGraph/providerRecordExport.cpp
+    libs/rigExecGraph/providerProgram.cpp
+    libs/rigExecGraph/typedValues.cpp
+    libs/rigExec/bakedExecCrossCheckRows.cpp
     libs/rigExec/bakedSchedule.cpp
     libs/rigExec/bakedTrace.cpp
     libs/rigExec/bakedUpstream.cpp
@@ -116,7 +180,6 @@ add_library(rigExec SHARED
     libs/rigExec/frameCache.cpp
     libs/rigExec/frozenContext.cpp
     libs/rigExec/frozenDigest.cpp
-    libs/rigExec/frozenGeometry.cpp
     libs/rigExec/frozenPropertySampling.cpp
     libs/rigExec/frozenSampling.cpp
     libs/rigExec/frozenSnapshot.cpp
@@ -130,17 +193,26 @@ target_include_directories(rigExec PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs>
     $<INSTALL_INTERFACE:${RIGEXEC_INSTALL_INCLUDEDIR}>)
 target_link_libraries(rigExec PUBLIC
+    rigExecGraph
     rigExecMath
     # usdSkel is here for UsdSkelBlendShape only: a sparse blend sample names
     plug sdf usd usdGeom usdSkel work
     exec execUsd ef vdf
 )
 
+target_link_libraries(rigExec PRIVATE rigExecInputValues)
+target_sources(rigExec INTERFACE
+    "$<BUILD_INTERFACE:$<$<STREQUAL:$<TARGET_PROPERTY:TYPE>,EXECUTABLE>:${CMAKE_CURRENT_SOURCE_DIR}/libs/rigExec/observerHostExit.cpp>>")
+
 add_library(rigExec::rigExec ALIAS rigExec)
 include(cmake/rigExecMoverPlugin.cmake)
 
 add_library(rigExecStandalone SHARED
     libs/rigExecStandalone/sceneDb.cpp
+    libs/rigExecStandalone/sceneAccess.cpp
+    libs/rigExecStandalone/graphFrontend.cpp
+    libs/rigExecStandalone/providerRuntime.cpp
+    libs/rigExecStandalone/sceneRuntime.cpp
     libs/rigExecStandalone/adapter.cpp
     libs/rigExecStandalone/system.cpp
     libs/rigExecStandalone/pack.cpp)
@@ -203,11 +275,23 @@ target_include_directories(rigExecFlatBuffers INTERFACE
     $<INSTALL_INTERFACE:${RIGEXEC_INSTALL_INCLUDEDIR}>)
 add_library(rigExec::rigExecFlatBuffers ALIAS rigExecFlatBuffers)
 
-add_library(rigExecBinary STATIC libs/rigExecBinary/format.cpp)
+add_library(rigExecLzma STATIC
+    third_party/lzma/C/LzmaEnc.c
+    third_party/lzma/C/LzmaDec.c
+    third_party/lzma/C/LzFind.c
+    third_party/lzma/C/CpuArch.c)
+target_include_directories(rigExecLzma PRIVATE third_party/lzma/C)
+target_compile_definitions(rigExecLzma PRIVATE Z7_ST RIGEXEC_LZMA_PORTABLE_SCALAR)
+set_target_properties(rigExecLzma PROPERTIES POSITION_INDEPENDENT_CODE ON)
+add_library(rigExec::rigExecLzma ALIAS rigExecLzma)
+
+add_library(rigExecBinary STATIC libs/rigExecBinary/format.cpp
+    libs/rigExecBinary/transport.cpp)
 target_include_directories(rigExecBinary PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs>
     $<INSTALL_INTERFACE:${RIGEXEC_INSTALL_INCLUDEDIR}>)
-target_link_libraries(rigExecBinary PUBLIC rigExecFlatBuffers)
+target_include_directories(rigExecBinary PRIVATE third_party/lzma/C)
+target_link_libraries(rigExecBinary PUBLIC rigExecFlatBuffers PRIVATE rigExecLzma)
 set_target_properties(rigExecBinary PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 add_library(rigExecRuntime STATIC
@@ -226,11 +310,12 @@ add_library(rigExecRuntime STATIC
     libs/rigExecRuntime/weights.cpp
     libs/rigExecRuntime/inputs.cpp
     libs/rigExecRuntime/labels.cpp
-    libs/rigExecRuntime/properties.cpp)
+    libs/rigExecRuntime/properties.cpp
+    libs/rigExecRuntime/spaces.cpp)
 target_include_directories(rigExecRuntime PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs>
     $<INSTALL_INTERFACE:${RIGEXEC_INSTALL_INCLUDEDIR}>)
-target_link_libraries(rigExecRuntime PUBLIC rigExecBinary)
+target_link_libraries(rigExecRuntime PUBLIC rigExecBinary rigExecGraph)
 set_target_properties(rigExecRuntime PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # Installed names, so a mover plugin's tests can export and replay its rigs
 # the same way inside this build and against an installed SDK.
@@ -248,7 +333,9 @@ endif ()
 # rigExecSampler: hands a .rigexec's Animated inputs the values a stage holds
 # at each new time (RigExecInputSampler), for every consumer that plays the
 # runtime over a stage. The runtime itself stays USD-free.
-add_library(rigExecSampler STATIC libs/rigExecSampler/inputSampler.cpp)
+add_library(rigExecSampler STATIC
+    libs/rigExecSampler/inputSampler.cpp
+    libs/rigExecSampler/runtimePoseProjection.cpp)
 target_include_directories(rigExecSampler PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs>
     $<INSTALL_INTERFACE:${RIGEXEC_INSTALL_INCLUDEDIR}>)
@@ -280,6 +367,9 @@ target_link_libraries(rigExecBakeTool PRIVATE rigExecBake)
 target_compile_definitions(rigExecBakeTool PRIVATE
     RIGEXEC_SCHEMA_RESOURCE_DIR="${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
 
+add_executable(rigExecReplayInputs tools/rigExecReplayInputs.cpp)
+target_link_libraries(rigExecReplayInputs PRIVATE rigExec)
+
 add_executable(rigExecPose tools/rigExecPose.cpp)
 target_link_libraries(rigExecPose PRIVATE rigExec rigExecRuntime rigExecSampler)
 target_compile_definitions(rigExecPose PRIVATE
@@ -304,6 +394,7 @@ set(RIGEXEC_TEST_USD_DIR "${USD_INSTALL_DIR}"
 
 if (RIGEXEC_BUILD_TESTS)
 enable_testing()
+find_package(Threads REQUIRED)
 
 set(_rigexec_schema_resource_define
     RIGEXEC_SCHEMA_RESOURCE_DIR="${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
@@ -375,18 +466,20 @@ target_compile_definitions(testRigExecRbf PRIVATE
 add_test(NAME testRigExecRbf COMMAND testRigExecRbf)
 
 add_executable(testRigExecConstraints tests/testRigExecConstraints.cpp)
-target_link_libraries(testRigExecConstraints PRIVATE rigExec)
+target_link_libraries(testRigExecConstraints PRIVATE rigExec rigExecBake rigExecRuntime rigExecSampler)
 target_compile_definitions(testRigExecConstraints PRIVATE
     ${_rigexec_schema_resource_define})
 add_test(NAME testRigExecConstraints COMMAND testRigExecConstraints)
 
-function(rigexec_add_baked_parity_test name)
+set(RIGEXEC_GOLDEN_SUITE_DIR "" CACHE PATH "Independent original-source suite goldens")
+function(rigexec_add_graph_test name)
     set(_args "${ARGN}")
-    set(_require_bake OFF)
-    list(FIND _args "REQUIRE_BAKE" _require_bake_at)
-    if (NOT _require_bake_at EQUAL -1)
-        list(REMOVE_AT _args ${_require_bake_at})
-        set(_require_bake ON)
+    set(_golden_args "${_args}")
+    list(REMOVE_ITEM _golden_args "CONE_VERIFY")
+    if (RIGEXEC_GOLDEN_SUITE_DIR)
+        add_test(NAME ${name}Golden COMMAND ${name} ${_golden_args})
+        set_tests_properties(${name}Golden PROPERTIES LABELS "golden"
+            ENVIRONMENT "RIGEXEC_GOLDEN_SUITE=check:${RIGEXEC_GOLDEN_SUITE_DIR};RIGEXEC_GOLDEN_SUITE_NAME=${name};RIGEXEC_ENABLE_PARALLEL_EVAL=0;RIGEXEC_BAKED_SCHEDULE=serial")
     endif()
     set(_cone_verify OFF)
     list(FIND _args "CONE_VERIFY" _cone_verify_at)
@@ -394,58 +487,41 @@ function(rigexec_add_baked_parity_test name)
         list(REMOVE_AT _args ${_cone_verify_at})
         set(_cone_verify ON)
     endif()
-    add_test(NAME ${name}BakedParity COMMAND ${name} ${_args})
-    set_tests_properties(${name}BakedParity PROPERTIES
-        ENVIRONMENT "RIGEXEC_EVALUATION_MODE=parity"
-        FAIL_REGULAR_EXPRESSION "baked parity mismatch")
-    if (_require_bake)
-        # APPEND, because ENVIRONMENT holds ONE ';'-separated value and
-        set_property(TEST ${name}BakedParity APPEND PROPERTY ENVIRONMENT
-            "RIGEXEC_BAKE_REQUIRED=1")
-    endif()
-    if (_cone_verify)
-        foreach(_schedule serial parallel)
-            add_test(NAME ${name}Cones_${_schedule}
-                COMMAND ${name} ${_args})
-            set_tests_properties(${name}Cones_${_schedule} PROPERTIES
-                ENVIRONMENT "RIGEXEC_EVALUATION_MODE=parity"
-                FAIL_REGULAR_EXPRESSION "baked parity mismatch")
-            set_property(TEST ${name}Cones_${_schedule} APPEND
-                PROPERTY ENVIRONMENT
-                "RIGEXEC_BAKED_VERIFY_CONES=1"
-                "RIGEXEC_BAKED_SCHEDULE=${_schedule}")
-            add_test(NAME ${name}Cones_grain0_${_schedule}
-                COMMAND ${name} ${_args})
-            set_tests_properties(${name}Cones_grain0_${_schedule} PROPERTIES
-                ENVIRONMENT "RIGEXEC_EVALUATION_MODE=parity"
-                FAIL_REGULAR_EXPRESSION "baked parity mismatch")
-            set_property(TEST ${name}Cones_grain0_${_schedule} APPEND
-                PROPERTY ENVIRONMENT
-                "RIGEXEC_BAKED_VERIFY_CONES=1"
-                "RIGEXEC_BAKED_SCHEDULE=${_schedule}"
-                "RIGEXEC_BAKED_GRAIN_US=0")
-            if (_require_bake)
-                set_property(TEST ${name}Cones_${_schedule}
-                    ${name}Cones_grain0_${_schedule} APPEND
-                    PROPERTY ENVIRONMENT "RIGEXEC_BAKE_REQUIRED=1")
-            endif()
-        endforeach()
-    endif()
+    foreach(_schedule serial parallel)
+        add_test(NAME ${name}Graph_${_schedule} COMMAND ${name} ${_args})
+        set_tests_properties(${name}Graph_${_schedule} PROPERTIES
+            ENVIRONMENT "RIGEXEC_BAKED_SCHEDULE=${_schedule};RIGEXEC_ENABLE_PARALLEL_EVAL=1")
+        if (_cone_verify)
+            foreach(_grain default 0)
+                set(_cone_test "${name}Cones_${_schedule}")
+                if (_grain STREQUAL "0")
+                    set(_cone_test "${name}Cones_grain0_${_schedule}")
+                endif()
+                add_test(NAME ${_cone_test} COMMAND ${name} ${_args})
+                set_tests_properties(${_cone_test} PROPERTIES
+                    ENVIRONMENT "RIGEXEC_BAKED_VERIFY_CONES=1;RIGEXEC_BAKED_SCHEDULE=${_schedule};RIGEXEC_ENABLE_PARALLEL_EVAL=1")
+                if (_grain STREQUAL "0")
+                    set_property(TEST ${_cone_test} APPEND
+                        PROPERTY ENVIRONMENT "RIGEXEC_BAKED_GRAIN_US=0")
+                endif()
+            endforeach()
+        endif()
+    endforeach()
 endfunction()
-rigexec_add_baked_parity_test(testRigExecConstraints CONE_VERIFY)
+rigexec_add_graph_test(testRigExecConstraints CONE_VERIFY)
 
-function(rigexec_add_example_parity_test)
-    cmake_parse_arguments(A "GUIDES;DISABLED" "NAME;RIG;STAGE;FRAMES" "" ${ARGN})
+function(rigexec_add_example_graph_test)
+    cmake_parse_arguments(A "GUIDES" "NAME;RIG;STAGE;FRAMES" "" ${ARGN})
     # DEFINED, not truthiness: a frame list that is the single frame 0 is
     # false to if().
     if (NOT DEFINED A_NAME OR NOT DEFINED A_FRAMES OR
             (NOT DEFINED A_RIG AND NOT DEFINED A_STAGE) OR
             (DEFINED A_RIG AND DEFINED A_STAGE))
-        message(FATAL_ERROR "rigexec_add_example_parity_test: "
+        message(FATAL_ERROR "rigexec_add_example_graph_test: "
                             "NAME, FRAMES and one of RIG or STAGE are required")
     endif()
     if (A_UNPARSED_ARGUMENTS)
-        message(FATAL_ERROR "rigexec_add_example_parity_test: unknown "
+        message(FATAL_ERROR "rigexec_add_example_graph_test: unknown "
                             "argument(s): ${A_UNPARSED_ARGUMENTS}")
     endif()
     set(_guides "")
@@ -455,20 +531,16 @@ function(rigexec_add_example_parity_test)
     if (DEFINED A_RIG)
         set(A_STAGE "${CMAKE_CURRENT_SOURCE_DIR}/examples/${A_RIG}")
     endif()
-    add_test(NAME example_parity_${A_NAME} COMMAND rigExecPose
+    add_test(NAME example_graph_${A_NAME} COMMAND rigExecPose
         "${A_STAGE}"
-        --frames "${A_FRAMES}" --mode parity --require-baked ${_guides})
-    set_tests_properties(example_parity_${A_NAME} PROPERTIES
-        ENVIRONMENT "RIGEXEC_EVALUATION_MODE=parity"
-        FAIL_REGULAR_EXPRESSION "baked parity mismatch;FAIL:")
+        --frames "${A_FRAMES}" --exec-crosscheck --cpu-reference ${_guides})
+    set_tests_properties(example_graph_${A_NAME} PROPERTIES
+        ENVIRONMENT "RIGEXEC_ENABLE_PARALLEL_EVAL=1"
+        FAIL_REGULAR_EXPRESSION "FAIL:")
     set(_schema_resources
         "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
-    set_property(TEST example_parity_${A_NAME} APPEND PROPERTY ENVIRONMENT
+    set_property(TEST example_graph_${A_NAME} APPEND PROPERTY ENVIRONMENT
         "PXR_PLUGINPATH_NAME=${_schema_resources}")
-    if (A_DISABLED)
-        set_tests_properties(example_parity_${A_NAME} PROPERTIES
-            DISABLED TRUE)
-    endif()
 endfunction()
 
 include("${CMAKE_CURRENT_SOURCE_DIR}/tests/exampleFixtures.cmake")
@@ -476,26 +548,20 @@ foreach(_fixture IN LISTS RIGEXEC_EXAMPLE_FIXTURES)
     string(REPLACE "|" ";" _fixture_fields "${_fixture}")
     list(GET _fixture_fields 0 _fixture_stage)
     list(GET _fixture_fields 1 _fixture_frames)
-    list(GET _fixture_fields 6 _fixture_bakes)
     # The entry name is the stage path with the separators CMake test names
     string(REGEX REPLACE "\\.(usda|usd)$" "" _fixture_name "${_fixture_stage}")
     string(REPLACE "/" "_" _fixture_name "${_fixture_name}")
-    if (_fixture_bakes STREQUAL "YES")
-        rigexec_add_example_parity_test(NAME ${_fixture_name}
-            RIG ${_fixture_stage} FRAMES ${_fixture_frames} GUIDES)
-    else()
-        rigexec_add_example_parity_test(NAME ${_fixture_name}
-            RIG ${_fixture_stage} FRAMES ${_fixture_frames} GUIDES DISABLED)
-    endif()
+    rigexec_add_example_graph_test(NAME ${_fixture_name}
+        RIG ${_fixture_stage} FRAMES ${_fixture_frames} GUIDES)
 endforeach()
 
-rigexec_add_example_parity_test(NAME biped_Biped_stack_anim
+rigexec_add_example_graph_test(NAME biped_Biped_stack_anim
     RIG biped/Biped_stack_anim.usda FRAMES 1,50,100,150,200 GUIDES)
 
 # Surface projectors whose rigExec:space, rigExec:sources and
 # rigExec:sourceSpace are constrained controls that nothing else reads: the
 # projector frames are built from base and final of all three.
-rigexec_add_example_parity_test(NAME projector_spaces
+rigexec_add_example_graph_test(NAME projector_spaces
     STAGE "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/projector_spaces.usda"
     FRAMES 1,4,7,10 GUIDES)
 
@@ -503,30 +569,31 @@ rigexec_add_example_parity_test(NAME projector_spaces
 # at base (a mover's packet) and at final (pose.weightFrames, a
 # current-phase field) because a constraint revises its joint after the
 # solver.
-rigexec_add_example_parity_test(NAME volume_placements
+rigexec_add_example_graph_test(NAME volume_placements
     STAGE "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/volume_placements.usda"
     FRAMES 1,5,10 GUIDES)
 
-# AtPrim read phases on rigExec:transform, read through frame records. No
-# verify_binary entry: the .rigexec runtime does not read FrameMatrix steps
-# yet.
-rigexec_add_example_parity_test(NAME frame_record_fallbacks
+# AtPrim read phases on rigExec:transform, read through frame records. The
+# .rigexec runtime's FrameMatrix steps are held to the baked program by
+# verify_binary_frame_record_fallbacks.
+rigexec_add_example_graph_test(NAME frame_record_fallbacks
     STAGE "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/frame_record_fallbacks.usda"
     FRAMES 1,4,8 GUIDES)
 
 # AtPrim read phases that name solver checkpoints, one of them a record the
 # solver never publishes. rigExecPose's parity mode is the dynamic/baked
-# comparison and never runs the CPU oracle, which has no AtPrim branch. No
-# verify_binary entry, for the same reason as above.
-rigexec_add_example_parity_test(NAME solver_checkpoint
+# comparison and never runs the CPU oracle, which has no AtPrim branch. The
+# .rigexec runtime is held to the baked program by
+# verify_binary_solver_checkpoint.
+rigexec_add_example_graph_test(NAME solver_checkpoint
     STAGE "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/solver_checkpoint.usda"
     FRAMES 1,5,9 GUIDES)
 
 # A lattice whose cage is its own target, read at `preceding`: it sees the
 # points the movers before it left. This checks dynamic/baked parity only;
-# testRigExecPhaseBindings pins the values. No verify_binary entry until the
-# runtime port: exported, Echo plays back as a MoverFailed pass-through.
-rigexec_add_example_parity_test(NAME preceding_own_chain
+# testRigExecPhaseBindings pins the values, and
+# verify_binary_preceding_own_chain holds the .rigexec runtime to them.
+rigexec_add_example_graph_test(NAME preceding_own_chain
     STAGE "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/preceding_own_chain.usda"
     FRAMES 1,5,9 GUIDES)
 
@@ -541,17 +608,14 @@ target_compile_definitions(testRigExecExampleParity PRIVATE
     ${_rigexec_schema_resource_define})
 add_test(NAME testRigExecExampleParity COMMAND testRigExecExampleParity
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
-# It sets the mode itself, so RIGEXEC_EVALUATION_MODE must stay unset here --
 set_tests_properties(testRigExecExampleParity PROPERTIES
-    ENVIRONMENT "RIGEXEC_BAKE_REQUIRED=1"
-    FAIL_REGULAR_EXPRESSION "baked parity mismatch")
+    FAIL_REGULAR_EXPRESSION "comparison mismatch")
 foreach(_schedule serial parallel)
     add_test(NAME testRigExecExampleParityCones_${_schedule}
         COMMAND testRigExecExampleParity
         "${CMAKE_CURRENT_SOURCE_DIR}/examples")
     set_tests_properties(testRigExecExampleParityCones_${_schedule} PROPERTIES
-        ENVIRONMENT "RIGEXEC_BAKE_REQUIRED=1"
-        FAIL_REGULAR_EXPRESSION "baked parity mismatch")
+        FAIL_REGULAR_EXPRESSION "comparison mismatch")
     set_property(TEST testRigExecExampleParityCones_${_schedule} APPEND
         PROPERTY ENVIRONMENT
         "RIGEXEC_BAKED_VERIFY_CONES=1"
@@ -561,8 +625,8 @@ foreach(_schedule serial parallel)
         COMMAND testRigExecExampleParity
         "${CMAKE_CURRENT_SOURCE_DIR}/examples")
     set_tests_properties(testRigExecExampleParityCones_grain0_${_schedule}
-        PROPERTIES ENVIRONMENT "RIGEXEC_BAKE_REQUIRED=1"
-        FAIL_REGULAR_EXPRESSION "baked parity mismatch")
+        PROPERTIES
+        FAIL_REGULAR_EXPRESSION "comparison mismatch")
     set_property(TEST testRigExecExampleParityCones_grain0_${_schedule} APPEND
         PROPERTY ENVIRONMENT
         "RIGEXEC_BAKED_VERIFY_CONES=1"
@@ -590,18 +654,16 @@ add_test(NAME testRigExecGeometryOpsBakedParity
     COMMAND testRigExecGeometryOpsBakedParity
     "${CMAKE_CURRENT_SOURCE_DIR}/examples"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/rigExecRibbonProbe.usda")
-# The mode is the suite's own, so RIGEXEC_EVALUATION_MODE stays unset here --
 set_tests_properties(testRigExecGeometryOpsBakedParity PROPERTIES
-    ENVIRONMENT "RIGEXEC_BAKE_REQUIRED=1"
-    FAIL_REGULAR_EXPRESSION "baked parity mismatch")
+    FAIL_REGULAR_EXPRESSION "comparison mismatch")
 foreach(_schedule serial parallel)
     add_test(NAME testRigExecGeometryOpsBakedParityCones_${_schedule}
         COMMAND testRigExecGeometryOpsBakedParity
         "${CMAKE_CURRENT_SOURCE_DIR}/examples"
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/rigExecRibbonProbe.usda")
     set_tests_properties(testRigExecGeometryOpsBakedParityCones_${_schedule}
-        PROPERTIES ENVIRONMENT "RIGEXEC_BAKE_REQUIRED=1"
-        FAIL_REGULAR_EXPRESSION "baked parity mismatch")
+        PROPERTIES
+        FAIL_REGULAR_EXPRESSION "comparison mismatch")
     set_property(TEST testRigExecGeometryOpsBakedParityCones_${_schedule}
         APPEND PROPERTY ENVIRONMENT
         "RIGEXEC_BAKED_VERIFY_CONES=1"
@@ -613,8 +675,8 @@ foreach(_schedule serial parallel)
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/rigExecRibbonProbe.usda")
     set_tests_properties(
         testRigExecGeometryOpsBakedParityCones_grain0_${_schedule}
-        PROPERTIES ENVIRONMENT "RIGEXEC_BAKE_REQUIRED=1"
-        FAIL_REGULAR_EXPRESSION "baked parity mismatch")
+        PROPERTIES
+        FAIL_REGULAR_EXPRESSION "comparison mismatch")
     set_property(
         TEST testRigExecGeometryOpsBakedParityCones_grain0_${_schedule}
         APPEND PROPERTY ENVIRONMENT
@@ -623,8 +685,92 @@ foreach(_schedule serial parallel)
         "RIGEXEC_BAKED_GRAIN_US=0")
 endforeach()
 
+add_executable(testRigExecOpGraph tests/testRigExecOpGraph.cpp)
+target_link_libraries(testRigExecOpGraph PRIVATE rigExecGraph work Threads::Threads)
+add_test(NAME testRigExecOpGraph COMMAND testRigExecOpGraph)
+
+add_executable(testRigExecExecCrossCheck tests/testRigExecExecCrossCheck.cpp)
+target_link_libraries(testRigExecExecCrossCheck PRIVATE rigExec)
+target_compile_definitions(testRigExecExecCrossCheck PRIVATE ${_rigexec_schema_resource_define})
+add_test(NAME testRigExecExecCrossCheck COMMAND testRigExecExecCrossCheck)
+set_tests_properties(testRigExecExecCrossCheck PROPERTIES LABELS "exec")
+
+add_executable(testRigExecOpValues tests/testRigExecOpValues.cpp)
+target_link_libraries(testRigExecOpValues PRIVATE rigExec)
+add_test(NAME testRigExecOpValues COMMAND testRigExecOpValues)
+
+add_executable(testRigExecSurfaceKernelCache tests/testRigExecSurfaceKernelCache.cpp)
+target_link_libraries(testRigExecSurfaceKernelCache PRIVATE rigExecMath)
+add_test(NAME testRigExecSurfaceKernelCache COMMAND testRigExecSurfaceKernelCache)
+
+add_executable(testRigExecExecCrossCheckRows tests/testRigExecExecCrossCheckRows.cpp)
+target_link_libraries(testRigExecExecCrossCheckRows PRIVATE rigExec)
+target_compile_definitions(testRigExecExecCrossCheckRows PRIVATE ${_rigexec_schema_resource_define})
+foreach(_fixture 01_FkChainTail 03_IkFkBlendClamp 05_TwistRibbonSpine 11_VolumeWeights 13_ReadPhases ArmRig)
+    add_test(NAME exec_crosscheck_${_fixture} COMMAND testRigExecExecCrossCheckRows
+        "${CMAKE_CURRENT_SOURCE_DIR}/examples/${_fixture}.usda" 1001)
+    set_tests_properties(exec_crosscheck_${_fixture} PROPERTIES LABELS "exec")
+endforeach()
+
+add_test(NAME exec_crosscheck_computed_ik_space COMMAND testRigExecExecCrossCheckRows
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/computed_ik_space.usda" 1)
+set_tests_properties(exec_crosscheck_computed_ik_space PROPERTIES LABELS "exec")
+
+add_executable(testRigExecInputActions tests/testRigExecInputActions.cpp)
+target_link_libraries(testRigExecInputActions PRIVATE rigExec)
+add_test(NAME testRigExecInputActions COMMAND "${CMAKE_COMMAND}"
+    "-DDRIVER=$<TARGET_FILE:testRigExecInputActions>"
+    "-DBINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}"
+    "-DSCHEMA=${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/checkInputActions.cmake")
+set_tests_properties(testRigExecInputActions PROPERTIES LABELS "golden;input-protocol")
+
+add_executable(testRigExecGoldenSuiteObserver tests/testRigExecGoldenSuiteObserver.cpp)
+target_link_libraries(testRigExecGoldenSuiteObserver PRIVATE rigExec)
+add_test(NAME testRigExecGoldenSuiteObserver COMMAND "${CMAKE_COMMAND}"
+    "-DDRIVER=$<TARGET_FILE:testRigExecGoldenSuiteObserver>"
+    "-DBINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/checkGoldenSuiteObserver.cmake")
+set_tests_properties(testRigExecGoldenSuiteObserver PROPERTIES LABELS "golden")
+
+foreach(_domain Geometry Weight)
+    add_executable(testRigExec${_domain}Program tests/testRigExec${_domain}Program.cpp)
+    target_link_libraries(testRigExec${_domain}Program PRIVATE rigExec)
+    add_test(NAME testRigExec${_domain}Program COMMAND testRigExec${_domain}Program)
+endforeach()
+
+add_executable(testRigExecEnvelopeVolumes tests/testRigExecEnvelopeVolumes.cpp)
+target_link_libraries(testRigExecEnvelopeVolumes PRIVATE rigExec)
+target_compile_definitions(testRigExecEnvelopeVolumes PRIVATE ${_rigexec_schema_resource_define})
+foreach(_schedule serial parallel)
+    add_test(NAME testRigExecEnvelopeVolumes_${_schedule} COMMAND testRigExecEnvelopeVolumes
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures")
+    set_tests_properties(testRigExecEnvelopeVolumes_${_schedule} PROPERTIES
+        ENVIRONMENT "RIGEXEC_BAKED_SCHEDULE=${_schedule};RIGEXEC_ENABLE_PARALLEL_EVAL=1")
+endforeach()
+
+add_executable(testRigExecGraphBindings tests/testRigExecGraphBindings.cpp)
+target_link_libraries(testRigExecGraphBindings PRIVATE rigExec)
+add_test(NAME testRigExecGraphBindings COMMAND testRigExecGraphBindings)
+
+add_executable(testRigExecInputReplayValues tests/testRigExecInputReplayValues.cpp)
+target_link_libraries(testRigExecInputReplayValues PRIVATE rigExec)
+add_test(NAME testRigExecInputReplayValues COMMAND testRigExecInputReplayValues)
+
+add_executable(testRigExecTypedValues tests/testRigExecTypedValues.cpp)
+target_link_libraries(testRigExecTypedValues PRIVATE rigExec)
+add_test(NAME testRigExecTypedValues COMMAND testRigExecTypedValues)
+
+add_executable(testRigExecGoldenPose tests/testRigExecGoldenPose.cpp)
+target_link_libraries(testRigExecGoldenPose PRIVATE rigExec)
+add_test(NAME testRigExecGoldenPose COMMAND testRigExecGoldenPose)
+
+add_executable(testRigExecOracleInputs tests/testRigExecOracleInputs.cpp)
+target_link_libraries(testRigExecOracleInputs PRIVATE rigExec)
+add_test(NAME testRigExecOracleInputs COMMAND testRigExecOracleInputs)
+
 add_executable(testRigExecStandalone tests/testRigExecStandalone.cpp)
-target_link_libraries(testRigExecStandalone PRIVATE rigExecStandalone)
+target_link_libraries(testRigExecStandalone PRIVATE rigExecStandalone rigExecRigging)
 target_compile_definitions(testRigExecStandalone PRIVATE ${_rigexec_schema_resource_define})
 add_test(NAME testRigExecStandalone COMMAND testRigExecStandalone)
 
@@ -642,7 +788,7 @@ target_compile_definitions(testRigExecRuntimeLoader PRIVATE
 add_test(NAME testRigExecRuntimeLoader COMMAND testRigExecRuntimeLoader
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
 
-# Family parity tests: baked program vs runtime, per family. Each is
+# Compare native graph and runtime publications for each domain.
 add_executable(testRigExecRuntimePose tests/testRigExecRuntimePose.cpp)
 target_link_libraries(testRigExecRuntimePose PRIVATE rigExecRuntime rigExecBake rigExecSampler)
 target_include_directories(testRigExecRuntimePose PRIVATE
@@ -682,7 +828,7 @@ add_test(NAME testRigExecRuntimeGeometry COMMAND testRigExecRuntimeGeometry
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
 
 # Inputs set on a binary against the same values authored in the session
-# layer, in the dynamic and baked evaluators: example inputs, held
+# layer in native graph evaluation: example inputs, held
 # space-switch indices and a ladder input a switch recomposes from; and
 # the array inputs the export lists (lattice cage, rest points, chain base,
 # skin layout, painted weights, topology, bind coordinates, blend sample
@@ -714,7 +860,7 @@ add_test(NAME testRigExecBinary COMMAND testRigExecBinary
 
 # RIG names a stage under examples/, STAGE any other stage by full path.
 # The test bakes the stage once, at TIME (default: the first of FRAMES), and
-# replays the binary against the parity evaluator: its defaults at TIME, then
+# compares binary and native graph publications: defaults at TIME, then
 # every frame of FRAMES with the binary's Animated inputs sampled from the
 # stage, then two drags of each input DRAGS names (a comma-separated list of
 # <prim>.<attr>) against the same value authored in the session layer.
@@ -753,6 +899,7 @@ function(rigexec_add_verify_binary_test)
     set(_out "${CMAKE_CURRENT_BINARY_DIR}/verify-binary/${A_NAME}.rigexec")
     add_test(NAME verify_binary_${A_NAME} COMMAND "${CMAKE_COMMAND}"
         "-DBAKE=$<TARGET_FILE:rigExecBakeTool>" "-DPOSE=$<TARGET_FILE:rigExecPose>"
+        "-DCONFORMANCE=$<TARGET_FILE:testRigExecBinary>"
         "-DSTAGE=${A_STAGE}"
         "-DFRAMES=${A_FRAMES}" "-DOUT=${_out}" ${_options}
         -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/runVerifyBinary.cmake")
@@ -905,7 +1052,7 @@ foreach(_chunked IN ITEMS raw_skin_layouts_chunked oneloop_two_limbs_chunked)
 endforeach()
 
 add_executable(testRigExecPack tests/testRigExecPack.cpp)
-target_link_libraries(testRigExecPack PRIVATE rigExecStandalone)
+target_link_libraries(testRigExecPack PRIVATE rigExecStandalone rigExecRigging)
 target_compile_definitions(testRigExecPack PRIVATE ${_rigexec_schema_resource_define})
 add_test(NAME testRigExecPack COMMAND testRigExecPack)
 
@@ -928,20 +1075,9 @@ add_test(NAME testRigExecBakedAttribute COMMAND testRigExecBakedAttribute
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
 add_test(NAME testRigExecBakedAttributeEnvironment
     COMMAND testRigExecBakedAttribute
-    "${CMAKE_CURRENT_SOURCE_DIR}/examples" --expect-environment)
-set_tests_properties(testRigExecBakedAttributeEnvironment PROPERTIES
-    ENVIRONMENT "RIGEXEC_EVALUATION_MODE=dynamic")
-
-add_executable(testRigExecDynamicDispatch tests/testRigExecDynamicDispatch.cpp)
-target_link_libraries(testRigExecDynamicDispatch PRIVATE rigExec)
-target_compile_definitions(testRigExecDynamicDispatch
-    PRIVATE ${_rigexec_schema_resource_define})
-add_test(NAME testRigExecDynamicDispatch COMMAND testRigExecDynamicDispatch
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
-add_test(NAME testRigExecDynamicDispatchProgram
-    COMMAND testRigExecDynamicDispatch "${CMAKE_CURRENT_SOURCE_DIR}/examples")
-set_tests_properties(testRigExecDynamicDispatchProgram PROPERTIES
-    ENVIRONMENT "RIGEXEC_DYNAMIC_RUNS_PROGRAM=1")
+set_tests_properties(testRigExecBakedAttributeEnvironment PROPERTIES
+    ENVIRONMENT "RIGEXEC_ENABLE_PARALLEL_EVAL=0")
 
 # The step graph behind the baked program: the edges, not the values.
 add_executable(testRigExecBakedSchedule tests/testRigExecBakedSchedule.cpp)
@@ -955,7 +1091,7 @@ foreach(_schedule serial parallel)
         "${CMAKE_CURRENT_SOURCE_DIR}/examples")
     set_tests_properties(testRigExecBakedScheduleCones_${_schedule} PROPERTIES
         ENVIRONMENT "RIGEXEC_BAKED_VERIFY_CONES=1"
-        FAIL_REGULAR_EXPRESSION "baked parity mismatch")
+        FAIL_REGULAR_EXPRESSION "comparison mismatch")
     set_property(TEST testRigExecBakedScheduleCones_${_schedule} APPEND
         PROPERTY ENVIRONMENT "RIGEXEC_BAKED_SCHEDULE=${_schedule}")
     # And at grain zero, one step per cluster (see CONE_VERIFY above).
@@ -964,7 +1100,7 @@ foreach(_schedule serial parallel)
         "${CMAKE_CURRENT_SOURCE_DIR}/examples")
     set_tests_properties(testRigExecBakedScheduleCones_grain0_${_schedule}
         PROPERTIES ENVIRONMENT "RIGEXEC_BAKED_VERIFY_CONES=1"
-        FAIL_REGULAR_EXPRESSION "baked parity mismatch")
+        FAIL_REGULAR_EXPRESSION "comparison mismatch")
     set_property(TEST testRigExecBakedScheduleCones_grain0_${_schedule} APPEND
         PROPERTY ENVIRONMENT "RIGEXEC_BAKED_SCHEDULE=${_schedule}"
         "RIGEXEC_BAKED_GRAIN_US=0")
@@ -986,7 +1122,7 @@ endforeach()
 
 # The one-loop acceptance criteria on their fixtures, under both executors.
 add_executable(testRigExecOneLoopAcceptance tests/testRigExecOneLoopAcceptance.cpp)
-target_link_libraries(testRigExecOneLoopAcceptance PRIVATE rigExec)
+target_link_libraries(testRigExecOneLoopAcceptance PRIVATE rigExec rigExecBake rigExecRuntime)
 target_compile_definitions(testRigExecOneLoopAcceptance PRIVATE ${_rigexec_schema_resource_define})
 foreach(_schedule serial parallel)
     add_test(NAME testRigExecOneLoopAcceptance_${_schedule}
@@ -996,6 +1132,31 @@ foreach(_schedule serial parallel)
     set_property(TEST testRigExecOneLoopAcceptance_${_schedule} APPEND
         PROPERTY ENVIRONMENT "RIGEXEC_ENABLE_PARALLEL_EVAL=1")
 endforeach()
+
+add_executable(testRigExecCrossDomainInputs tests/testRigExecCrossDomainInputs.cpp)
+target_link_libraries(testRigExecCrossDomainInputs PRIVATE rigExec)
+target_compile_definitions(testRigExecCrossDomainInputs PRIVATE ${_rigexec_schema_resource_define})
+foreach(_schedule serial parallel)
+    add_test(NAME testRigExecCrossDomainInputs_${_schedule}
+        COMMAND testRigExecCrossDomainInputs "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures")
+    set_tests_properties(testRigExecCrossDomainInputs_${_schedule} PROPERTIES
+        ENVIRONMENT "RIGEXEC_BAKED_SCHEDULE=${_schedule}")
+    set_property(TEST testRigExecCrossDomainInputs_${_schedule} APPEND
+        PROPERTY ENVIRONMENT "RIGEXEC_ENABLE_PARALLEL_EVAL=1")
+endforeach()
+
+# Exercise the default scheduler and production grain, with no schedule override.
+add_test(NAME testRigExecOneLoopAcceptance_production
+    COMMAND testRigExecOneLoopAcceptance "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures")
+set_tests_properties(testRigExecOneLoopAcceptance_production PROPERTIES
+    ENVIRONMENT "RIGEXEC_ENABLE_PARALLEL_EVAL=1"
+    ENVIRONMENT_MODIFICATION "RIGEXEC_BAKED_SCHEDULE=unset:;RIGEXEC_BAKED_GRAIN_US=unset:"
+    LABELS "one-loop")
+add_test(NAME testRigExecOneLoopRetired
+    COMMAND "${CMAKE_COMMAND}" "-DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+        "-DMANIFEST=${CMAKE_CURRENT_SOURCE_DIR}/tests/oneLoopRetiredSymbols.cmake"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/checkOneLoopRetired.cmake")
+set_tests_properties(testRigExecOneLoopRetired PROPERTIES LABELS "one-loop")
 
 add_executable(testRigExecSolverBake tests/testRigExecSolverBake.cpp)
 target_link_libraries(testRigExecSolverBake PRIVATE rigExec)
@@ -1010,7 +1171,7 @@ add_test(NAME testRigExecSolverBake COMMAND testRigExecSolverBake
 add_test(NAME testRigExecSolverBakeSpaceRestCandidates
     COMMAND testRigExecSolverBake "${CMAKE_CURRENT_SOURCE_DIR}/examples"
     --space-rest-candidates)
-rigexec_add_baked_parity_test(testRigExecSolverBake REQUIRE_BAKE CONE_VERIFY
+rigexec_add_graph_test(testRigExecSolverBake CONE_VERIFY
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
 
 add_executable(testRigExecSolverStacking tests/testRigExecSolverStacking.cpp)
@@ -1019,7 +1180,7 @@ target_compile_definitions(testRigExecSolverStacking
     PRIVATE ${_rigexec_schema_resource_define})
 add_test(NAME testRigExecSolverStacking COMMAND testRigExecSolverStacking
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
-rigexec_add_baked_parity_test(testRigExecSolverStacking CONE_VERIFY
+rigexec_add_graph_test(testRigExecSolverStacking CONE_VERIFY
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
 
 add_executable(testRigExecArm tests/testRigExecArm.cpp)
@@ -1027,7 +1188,7 @@ target_link_libraries(testRigExecArm PRIVATE rigExec)
 target_compile_definitions(testRigExecArm PRIVATE ${_rigexec_schema_resource_define})
 add_test(NAME testRigExecArm COMMAND testRigExecArm
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
-rigexec_add_baked_parity_test(testRigExecArm REQUIRE_BAKE CONE_VERIFY
+rigexec_add_graph_test(testRigExecArm CONE_VERIFY
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
 
 add_executable(testRigExecImaging tests/testRigExecImaging.cpp)
@@ -1044,7 +1205,7 @@ set_tests_properties(testRigExecImagingFineClusters PROPERTIES
 add_test(NAME testRigExecImagingFineClustersReference COMMAND testRigExecImaging
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
 set_tests_properties(testRigExecImagingFineClustersReference PROPERTIES
-    ENVIRONMENT "RIGEXEC_BAKED_GRAIN_US=0;RIGEXEC_EVALUATION_MODE=reference")
+    ENVIRONMENT "RIGEXEC_BAKED_GRAIN_US=0;RIGEXEC_ENABLE_PARALLEL_EVAL=0")
 
 add_executable(testRigExecProfilerApi tests/testRigExecProfilerApi.cpp)
 target_link_libraries(testRigExecProfilerApi PRIVATE rigExecImaging js)
@@ -1078,9 +1239,10 @@ target_link_libraries(testRigExecVolumeWeights PRIVATE rigExec)
 target_compile_definitions(testRigExecVolumeWeights PRIVATE ${_rigexec_schema_resource_define})
 add_test(NAME testRigExecVolumeWeights COMMAND testRigExecVolumeWeights
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
-rigexec_add_baked_parity_test(testRigExecVolumeWeights REQUIRE_BAKE
+rigexec_add_graph_test(testRigExecVolumeWeights
     CONE_VERIFY "${CMAKE_CURRENT_SOURCE_DIR}/examples")
-foreach(_entry testRigExecVolumeWeightsBakedParity
+foreach(_entry testRigExecVolumeWeightsGraph_serial
+               testRigExecVolumeWeightsGraph_parallel
                testRigExecVolumeWeightsCones_serial
                testRigExecVolumeWeightsCones_parallel
                testRigExecVolumeWeightsCones_grain0_serial
@@ -1089,21 +1251,15 @@ foreach(_entry testRigExecVolumeWeightsBakedParity
         "RIGEXEC_TEST_BAKED_PATH=1")
 endforeach()
 
-# Phased point reads bound to chain versions (among them
-# tests/fixtures/preceding_own_chain.usda at frames 1, 5 and 9 and under a
-# drag), and AtPrim transform phases read through frame records
-# (tests/fixtures/frame_record_fallbacks.usda at frames 1, 4 and 8 and under
-# drags), held to the dynamic walk (its phased-read store for other
-# chains, the points entering the reader for own-chain `preceding`)
-# through BakedWithParityCheck and output parity. CONE_VERIFY runs the cases
-# under the cone verifier in both schedules; a phased rig skips its clean
-# steps there like any other rig.
+# Phased point/frame reads use exact bound versions. These cases retain
+# original-source query evidence and run the graph's cone verifier in both
+# schedules, including singleton clusters.
 add_executable(testRigExecPhaseBindings tests/testRigExecPhaseBindings.cpp)
 target_link_libraries(testRigExecPhaseBindings PRIVATE rigExec)
 target_compile_definitions(testRigExecPhaseBindings PRIVATE ${_rigexec_schema_resource_define})
 add_test(NAME testRigExecPhaseBindings COMMAND testRigExecPhaseBindings
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
-rigexec_add_baked_parity_test(testRigExecPhaseBindings REQUIRE_BAKE
+rigexec_add_graph_test(testRigExecPhaseBindings
     CONE_VERIFY "${CMAKE_CURRENT_SOURCE_DIR}/examples")
 
 add_executable(testRigExecWeightOverlay tests/testRigExecWeightOverlay.cpp)
@@ -1114,8 +1270,7 @@ add_test(NAME testRigExecWeightOverlay COMMAND testRigExecWeightOverlay
 
 add_executable(testRigExecMoverGraph tests/testRigExecMoverGraph.cpp)
 target_link_libraries(testRigExecMoverGraph PRIVATE rigExec)
-target_compile_definitions(testRigExecMoverGraph PRIVATE
-    ${_rigexec_schema_resource_define})
+target_compile_definitions(testRigExecMoverGraph PRIVATE ${_rigexec_schema_resource_define})
 add_test(NAME testRigExecMoverGraph COMMAND testRigExecMoverGraph)
 
 # The epoch-fixed skin layout: what has to invalidate it, and what Compile
@@ -1125,10 +1280,10 @@ target_compile_definitions(testRigExecSkinTopology PRIVATE
     ${_rigexec_schema_resource_define})
 add_test(NAME testRigExecSkinTopology COMMAND testRigExecSkinTopology)
 set_tests_properties(testRigExecSkinTopology PROPERTIES
-    ENVIRONMENT "RIGEXEC_EVALUATION_MODE=reference")
+    ENVIRONMENT "RIGEXEC_ENABLE_PARALLEL_EVAL=0")
 # The baked program's own layout handles: authored edits, drags, time
 # samples, a bailed generation, and the exported layout fields.
-rigexec_add_baked_parity_test(testRigExecSkinTopology REQUIRE_BAKE CONE_VERIFY
+rigexec_add_graph_test(testRigExecSkinTopology CONE_VERIFY
     --baked "${CMAKE_CURRENT_SOURCE_DIR}/examples")
 
 add_executable(testRigExecStaticInputCache
@@ -1150,8 +1305,8 @@ target_compile_definitions(testRigExecEpochRests PRIVATE
 add_test(NAME testRigExecEpochRests COMMAND testRigExecEpochRests
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
 set_tests_properties(testRigExecEpochRests PROPERTIES
-    ENVIRONMENT "RIGEXEC_EVALUATION_MODE=reference")
-rigexec_add_baked_parity_test(testRigExecEpochRests REQUIRE_BAKE CONE_VERIFY
+    ENVIRONMENT "RIGEXEC_ENABLE_PARALLEL_EVAL=0")
+rigexec_add_graph_test(testRigExecEpochRests CONE_VERIFY
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
 
 # Bit-identical results from the parallel per-point kernels, both ways round:
@@ -1168,15 +1323,12 @@ target_link_libraries(testRigExecChainLevels PRIVATE rigExec work)
 target_compile_definitions(testRigExecChainLevels PRIVATE
     ${_rigexec_schema_resource_define})
 add_test(NAME testRigExecChainLevels COMMAND testRigExecChainLevels)
-add_test(NAME testRigExecChainLevelsSerial COMMAND testRigExecChainLevels)
-set_tests_properties(testRigExecChainLevelsSerial PROPERTIES
+set_tests_properties(testRigExecChainLevels PROPERTIES
     ENVIRONMENT "RIGEXEC_ENABLE_PARALLEL_EVAL=0")
-set_property(TEST testRigExecChainLevels testRigExecChainLevelsSerial APPEND
-    PROPERTY ENVIRONMENT "RIGEXEC_EVALUATION_MODE=reference")
 add_test(NAME testRigExecChainLevelsRepeat
     COMMAND testRigExecChainLevels 20)
 set_tests_properties(testRigExecChainLevelsRepeat PROPERTIES
-    ENVIRONMENT "RIGEXEC_EVALUATION_MODE=reference")
+    ENVIRONMENT "RIGEXEC_ENABLE_PARALLEL_EVAL=0")
 
 add_executable(testRigExecProfiler tests/testRigExecProfiler.cpp)
 target_link_libraries(testRigExecProfiler PRIVATE rigExec)
@@ -1195,7 +1347,7 @@ target_link_libraries(testRigExecFrameCache PRIVATE rigExec)
 add_test(NAME testRigExecFrameCache COMMAND testRigExecFrameCache)
 
 add_executable(testRigExecFrozenContext tests/testRigExecFrozenContext.cpp)
-target_link_libraries(testRigExecFrozenContext PRIVATE rigExec rigExecRigging)
+target_link_libraries(testRigExecFrozenContext PRIVATE rigExec rigExecRigging rigExecBake rigExecSampler)
 add_test(NAME testRigExecFrozenContext COMMAND testRigExecFrozenContext "${CMAKE_CURRENT_SOURCE_DIR}/examples")
 
 add_executable(testRigExecBackgroundScheduler tests/testRigExecBackgroundScheduler.cpp)
@@ -1225,7 +1377,7 @@ target_compile_definitions(testRigExecImagingFrameCache PRIVATE
 add_test(NAME testRigExecImagingFrameCache COMMAND testRigExecImagingFrameCache
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
 add_test(NAME testRigExecImagingFrameCacheDefault COMMAND "${CMAKE_COMMAND}" -E env
-    --unset=RIGEXEC_EVALUATION_MODE --unset=RIGEXEC_DYNAMIC_RUNS_PROGRAM
+    --unset=RIGEXEC_BAKED_SCHEDULE
     RIGEXEC_FRAME_CACHE=on RIGEXEC_ENABLE_PARALLEL_EVAL=1
     "$<TARGET_FILE:testRigExecImagingFrameCache>"
     "${CMAKE_CURRENT_SOURCE_DIR}/examples" --default-mode)
@@ -1274,7 +1426,7 @@ target_link_libraries(testRigExecInteractive PRIVATE rigExec)
 target_compile_definitions(testRigExecInteractive PRIVATE
     ${_rigexec_schema_resource_define})
 add_test(NAME testRigExecInteractive COMMAND testRigExecInteractive)
-rigexec_add_baked_parity_test(testRigExecInteractive REQUIRE_BAKE CONE_VERIFY)
+rigexec_add_graph_test(testRigExecInteractive CONE_VERIFY)
 
 add_executable(testRigExecValueEdits tests/testRigExecValueEdits.cpp)
 target_link_libraries(testRigExecValueEdits PRIVATE rigExec)
@@ -1282,7 +1434,7 @@ target_compile_definitions(testRigExecValueEdits PRIVATE
     ${_rigexec_schema_resource_define})
 add_test(NAME testRigExecValueEdits COMMAND testRigExecValueEdits
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
-rigexec_add_baked_parity_test(testRigExecValueEdits REQUIRE_BAKE CONE_VERIFY
+rigexec_add_graph_test(testRigExecValueEdits CONE_VERIFY
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
 
 # Sampled leaves: every patchable binding and every packet assembly read
@@ -1302,7 +1454,7 @@ add_test(NAME testRigExecLeaves_parallel COMMAND testRigExecLeaves
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
 set_tests_properties(testRigExecLeaves_parallel PROPERTIES
     ENVIRONMENT "RIGEXEC_BAKED_SCHEDULE=parallel")
-rigexec_add_baked_parity_test(testRigExecLeaves REQUIRE_BAKE CONE_VERIFY
+rigexec_add_graph_test(testRigExecLeaves CONE_VERIFY
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
 
 # Property revisions as head-tier ops: the ops equal the evaluator's
@@ -1314,7 +1466,7 @@ target_compile_definitions(testRigExecPropertyOps PRIVATE
     ${_rigexec_schema_resource_define})
 add_test(NAME testRigExecPropertyOps COMMAND testRigExecPropertyOps
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
-rigexec_add_baked_parity_test(testRigExecPropertyOps REQUIRE_BAKE CONE_VERIFY
+rigexec_add_graph_test(testRigExecPropertyOps CONE_VERIFY
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
 
 # The rest chain and the default-space ladder as head-tier ops: the ten
@@ -1327,7 +1479,7 @@ target_compile_definitions(testRigExecRestOps PRIVATE
     ${_rigexec_schema_resource_define})
 add_test(NAME testRigExecRestOps COMMAND testRigExecRestOps
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
-rigexec_add_baked_parity_test(testRigExecRestOps REQUIRE_BAKE CONE_VERIFY
+rigexec_add_graph_test(testRigExecRestOps CONE_VERIFY
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
 
 # Upstream inputs through the evaluator API: authored-level values in the
@@ -1343,7 +1495,7 @@ target_compile_definitions(testRigExecUpstreamInputs PRIVATE
     ${_rigexec_schema_resource_define})
 add_test(NAME testRigExecUpstreamInputs COMMAND testRigExecUpstreamInputs
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
-rigexec_add_baked_parity_test(testRigExecUpstreamInputs REQUIRE_BAKE
+rigexec_add_graph_test(testRigExecUpstreamInputs
     CONE_VERIFY "${CMAKE_CURRENT_SOURCE_DIR}/examples")
 
 add_executable(testRigExecScopedClears tests/testRigExecScopedClears.cpp)
@@ -1351,7 +1503,7 @@ target_link_libraries(testRigExecScopedClears PRIVATE rigExec)
 target_compile_definitions(testRigExecScopedClears PRIVATE
     ${_rigexec_schema_resource_define})
 add_test(NAME testRigExecScopedClears COMMAND testRigExecScopedClears)
-rigexec_add_baked_parity_test(testRigExecScopedClears CONE_VERIFY)
+rigexec_add_graph_test(testRigExecScopedClears CONE_VERIFY)
 
 add_executable(testRigExecDefaultSpaces tests/testRigExecDefaultSpaces.cpp)
 target_link_libraries(testRigExecDefaultSpaces PRIVATE rigExec)
@@ -1402,29 +1554,29 @@ target_compile_definitions(probeImagingPipeline PRIVATE ${_rigexec_schema_resour
 add_executable(probeEsfCompatibility EXCLUDE_FROM_ALL tests/probeEsfCompatibility.cpp)
 target_link_libraries(probeEsfCompatibility PRIVATE exec esfUsd usd)
 
-function(rigexec_add_reference_test name)
-    add_test(NAME ${name}Reference COMMAND ${name} ${ARGN})
-    set(_env "RIGEXEC_EVALUATION_MODE=reference")
+function(rigexec_add_serial_test name)
+    add_test(NAME ${name}Serial COMMAND ${name} ${ARGN})
+    set(_env "RIGEXEC_ENABLE_PARALLEL_EVAL=0")
     get_test_property(${name} ENVIRONMENT _plain_env)
     if (_plain_env)
         list(APPEND _env ${_plain_env})
     endif()
-    set_tests_properties(${name}Reference PROPERTIES ENVIRONMENT "${_env}")
+    set_tests_properties(${name}Serial PROPERTIES ENVIRONMENT "${_env}")
     get_test_property(${name} ENVIRONMENT_MODIFICATION _plain_modification)
     if (_plain_modification)
-        set_tests_properties(${name}Reference PROPERTIES
+        set_tests_properties(${name}Serial PROPERTIES
             ENVIRONMENT_MODIFICATION "${_plain_modification}")
     endif()
     get_test_property(${name} FAIL_REGULAR_EXPRESSION _plain_fail)
     if (_plain_fail)
-        set_tests_properties(${name}Reference PROPERTIES
+        set_tests_properties(${name}Serial PROPERTIES
             FAIL_REGULAR_EXPRESSION "${_plain_fail}")
     endif()
 endfunction()
 foreach(_suite testRigExecBackgroundScheduler testRigExecConstraints
                testRigExecFrameCacheSparsity
                testRigExecInteractive testRigExecPoseInterpolator)
-    rigexec_add_reference_test(${_suite})
+    rigexec_add_serial_test(${_suite})
 endforeach()
 
 function(rigexec_add_digest_gate_test name)
@@ -1454,7 +1606,7 @@ function(rigexec_add_scoped_clear_test name)
     endif()
     set_tests_properties(${name}ScopedClears PROPERTIES
         ENVIRONMENT "${_env}"
-        FAIL_REGULAR_EXPRESSION "baked parity mismatch")
+        FAIL_REGULAR_EXPRESSION "comparison mismatch")
     get_test_property(${name} ENVIRONMENT_MODIFICATION _plain_modification)
     if (_plain_modification)
         set_tests_properties(${name}ScopedClears PROPERTIES
@@ -1482,7 +1634,7 @@ foreach(_suite testRigExecArm testRigExecBakedMode testRigExecBakedSchedule
                testRigExecRuntimeWeights testRigExecSolverBake
                testRigExecSolverStacking testRigExecVolumeWeights
                testRigExecWeightOverlay)
-    rigexec_add_reference_test(${_suite}
+    rigexec_add_serial_test(${_suite}
         "${CMAKE_CURRENT_SOURCE_DIR}/examples")
 endforeach()
 
@@ -1790,6 +1942,10 @@ if (RIGEXEC_BUILD_PYTHON AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
         COMMAND ${Python3_EXECUTABLE}
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_session_state.py")
 
+    add_test(NAME testRigExecProfilerModel
+        COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_profiler_model.py")
+
     foreach(_python_test testRigExecPython testRigExecPythonSchemaAuthoring
                          testRigExecSplineIkPython
                          testRigExecFkControlSpacePython
@@ -1820,7 +1976,7 @@ if (RIGEXEC_BUILD_PYTHON AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
                          testGraphModel testGraphScreen testCacheStripModel
                          testCacheStripPanel testUsdviewFrameCacheDriver
                          testImagingHandle
-                         testSessionState)
+                         testSessionState testRigExecProfilerModel)
         set_tests_properties(${_python_test} PROPERTIES ENVIRONMENT
             "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR}/python")
         set_property(TEST ${_python_test} APPEND PROPERTY ENVIRONMENT
@@ -1902,14 +2058,14 @@ endforeach()
 # Install
 include(CMakePackageConfigHelpers)
 
-install(TARGETS rigExecMath rigExec rigExecStandalone rigExecRigging rigExecImaging rigExecFlatBuffers rigExecBinary rigExecBake rigExecRuntime rigExecSampler
+install(TARGETS rigExecLzma rigExecGraph rigExecMath rigExec rigExecStandalone rigExecRigging rigExecImaging rigExecFlatBuffers rigExecBinary rigExecBake rigExecRuntime rigExecSampler
     EXPORT rigExecTargets
     RUNTIME DESTINATION "${RIGEXEC_INSTALL_LIBDIR}"
     LIBRARY DESTINATION "${RIGEXEC_INSTALL_LIBDIR}"
     ARCHIVE DESTINATION "${RIGEXEC_INSTALL_LIBDIR}")
 
 # FILES_MATCHING still walks -- and recreates -- every subdirectory it passes
-foreach(_lib rigExecMath rigExec rigExecStandalone rigExecRigging rigExecImaging rigExecBinary rigExecBake rigExecRuntime rigExecSampler)
+foreach(_lib rigExecGraph rigExecMath rigExec rigExecStandalone rigExecRigging rigExecImaging rigExecBinary rigExecBake rigExecRuntime rigExecSampler)
     install(DIRECTORY "libs/${_lib}/"
         DESTINATION "${RIGEXEC_INSTALL_INCLUDEDIR}/${_lib}"
         FILES_MATCHING
@@ -2033,3 +2189,8 @@ install(FILES plugin/usdNoodles/LICENSE.txt
     DESTINATION "share/rigExec/licenses" RENAME OpenUSD-LICENSE.txt)
 install(FILES thirdparty/flatbuffers/LICENSE
     DESTINATION "share/rigExec/licenses" RENAME FlatBuffers-LICENSE.txt)
+
+install(FILES third_party/lzma/NOTICE.md
+    DESTINATION "share/rigExec/licenses" RENAME LZMA-SDK-NOTICE.md)
+install(FILES third_party/lzma/DOC/lzma-sdk.txt
+    DESTINATION "share/rigExec/licenses" RENAME LZMA-SDK-LICENSE.txt)

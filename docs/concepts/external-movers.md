@@ -1,6 +1,6 @@
 ---
 title: External mover plugins
-summary: Build and register point movers from a separate repository for dynamic, baked and .rigexec playback.
+summary: Build and register point movers from a separate repository for native, frozen and .rigexec playback.
 order: 50
 ---
 
@@ -11,15 +11,28 @@ callback and a points computation; no changes to RigExec's built-in mover list
 are required.
 
 Use the same compiler, architecture, build configuration, OpenUSD installation,
-and RigExec SDK as the host. Plugin API version 3 identifies the callback
-contract; it does not provide binary compatibility across different SDK builds.
-Version 2 added the `.rigexec` export and playback callbacks below, so a library
-built for version 1 must be rebuilt. Version 3 changed the oracle's phased read:
-`RigExecReadPhasedPoints(ctx, relName, pointsPath, out)` takes the oracle
-context, and `RigExecMoverOracleContext::entering` holds the points entering
-the mover, or null on the chain's first mover. A library built for version 2
-must be rebuilt, and an oracle that calls `RigExecReadPhasedPoints` must be
-edited to the new signature.
+and RigExec SDK as the host. Plugin API version 4 combines declared external
+input leaves and explicit phased oracle lookup callbacks. Libraries built for
+API 1, 2 or 3 must be rebuilt and migrate their assembly callback.
+
+`declareExternalInputs` runs only at compilation and declares ordered typed
+`RigExecRevisionLeafKey` records. Each record specifies its canonical property
+path, type, time policy, read flavour and missing-value fallback. Declared scalar
+inputs receive normal evaluator override numbers; array inputs follow the
+existing public and private array admission policy.
+
+`assembleExternal` receives `RigExecExternalInputContext`: the immutable binding,
+explicit provider values and sampled input values in declaration order. It must
+compute a payload without querying a stage, registry or mutable shared state.
+`applyExternal` computes the full-strength candidate from that payload and the
+preceding points. The engine owns enable, envelope and failure handling.
+
+Oracle handlers receive `phasedPoints` and `phasedMatrix` lookups with the exact
+provider path, authored phase and reader identity. A `preceding` read of the
+oracle's own target uses `entering`; the first revision falls back to base.
+The lookups expose current-generation finished publications and bound record
+versions supplied by the adapter. Cached values alone do not establish a
+finished publication.
 
 ## Build a mover repository
 
@@ -85,6 +98,7 @@ the value comparison needed by `VtValue` and the evaluation cache.
 
 ```cpp
 #include "rigExec/movers/moverRegistry.h"
+#include "rigExecGraph/sceneDescriptors.h"
 
 #include <cmath>
 
@@ -103,19 +117,32 @@ bool Validate(const RigExecMoverValidateContext &ctx, std::string *error)
     return true;
 }
 
-bool Assemble(const UsdPrim &prim, const RigExecRevisionBinding &,
-              const RigExecProviderValues &values, UsdTimeCode time,
-              VtValue *data)
+void DeclareInputs(const RigExecMoverBindContext &ctx,
+                   std::vector<RigExecRevisionLeafKey> *inputs)
 {
-    const UsdAttribute attr = prim.GetAttribute(TfToken("inputs:offset"));
-    GfVec3f offset;
-    const bool read = values.resolved
-        ? values.resolved->GetAttribute(attr, time, &offset)
-        : attr.Get(&offset, time);
-    if (!read || !std::isfinite(offset[0]) ||
-        !std::isfinite(offset[1]) || !std::isfinite(offset[2])) {
-        return false;
+    inputs->push_back({ctx.moverPrim.GetPath().AppendProperty(TfToken("inputs:offset")),
+        RigExecRevisionLeafType::Vec3f, RigExecRevisionLeafTime::AtTime,
+        RigExecRevisionLeafFlavour::Resolved, VtValue(GfVec3f(0))});
+}
+
+bool CompileScene(const RigExecSceneDescriptors &scene,const SdfPath &mover,
+                  const SdfPath &,RigExecRevisionBinding *binding,std::string *error)
+{
+    const auto path=mover.AppendProperty(TfToken("inputs:offset"));
+    const auto found=scene.attributes.find(path);
+    if(found==scene.attributes.end() || found->second.fact.type!=SdfValueTypeNames->Float3) {
+        *error="SampleOffsetMover requires float3 inputs:offset";return false;
     }
+    binding->externalInputs={{path,RigExecRevisionLeafType::Vec3f,
+        RigExecRevisionLeafTime::AtTime,RigExecRevisionLeafFlavour::Resolved,VtValue(GfVec3f(0))}};
+    return true;
+}
+
+bool Assemble(const RigExecExternalInputContext &ctx, VtValue *data)
+{
+    if (ctx.inputs.size() != 1 || !ctx.inputs[0].IsHolding<GfVec3f>()) return false;
+    const auto &offset = ctx.inputs[0].UncheckedGet<GfVec3f>();
+    if (!std::isfinite(offset[0]) || !std::isfinite(offset[1]) || !std::isfinite(offset[2])) return false;
     *data = VtValue(offset);
     return true;
 }
@@ -136,6 +163,8 @@ RigExecMoverHandler MakeHandler()
     handler.singleTarget = true;
     handler.hasScalarOracle = false;
     handler.validate = Validate;
+    handler.declareExternalInputs = DeclareInputs;
+    handler.compileScene = CompileScene;
     handler.assembleExternal = Assemble;
     handler.applyExternal = Apply;
     return handler;
@@ -151,11 +180,9 @@ Hosts that need a returned registration error can call
 `RigExecRegisterMoverHandler(handler, &error)` directly. Keep every plugin
 library loaded for the lifetime of its evaluators and payload values.
 
-`assembleExternal` reads the scene at the requested time and creates an
-immutable payload. Read attributes through `values.resolved->GetAttribute`
-when available so overrides and connected values follow normal evaluation
-semantics. Do not author stage changes during evaluation. Custom payloads must
-be copyable and equality-comparable.
+`assembleExternal` computes an immutable, equality-comparable payload from its
+sampled declarations. Only compilation and the engine's sampling boundary may
+query the source scene. Custom payloads must be copyable and equality-comparable.
 
 `applyExternal` performs pure, thread-safe computation over that payload and
 the incoming points. Preserve the point count and produce a full-strength
@@ -243,10 +270,13 @@ them. Start the epoch bytes with a format tag so `prepare` can refuse bytes it
 does not understand. Points named in `binding.phases` reach `apply` as playback
 evaluated them, so a playback posed through `SetAvar` moves them; frame bytes
 can still carry the value the export read, for a phase playback holds no value
-at. Everything else in the payload replays as the export captured it on that
-frame. That is a gap against the USD evaluators: a drag that reaches an input
-`assembleExternal` reads moves their result but not a playback's. The runtime applies `inputs:enabled` and the envelope, and fails the mover
-for that frame when `apply` returns false or produces a non-finite point.
+at. API4 also passes declared input values, typed and in declaration order,
+with their actual availability and element count. Kernels must validate the
+input tag and count before reading data, and prefer the current declared
+input over encoded frame bytes. Default-time declarations retain their
+Default read policy. The runtime applies `inputs:enabled` and the envelope,
+and fails the mover for that frame when `apply` returns false or produces a
+non-finite point.
 
 Extending the offset mover above:
 
@@ -276,11 +306,15 @@ std::shared_ptr<const void> Prepare(const uint8_t *epoch, size_t size,
 
 bool Play(const void *, const uint8_t *frame, size_t frameSize,
           const RigExecExternalPhasedPoints *, size_t,
+          const RigExecExternalInputValue *inputs, size_t inputCount,
           float *xyz, size_t count)
 {
     float offset[3];
     if (frameSize != sizeof(offset)) return false;
     std::memcpy(offset, frame, sizeof(offset));
+    if (inputCount != 1 || inputs[0].type != uint8_t(RigExecExternalInputType::Vec3f) ||
+        !inputs[0].hasValue || !inputs[0].data || inputs[0].count != 1) return false;
+    std::memcpy(offset, inputs[0].data, sizeof(offset));
     for (size_t i = 0; i < count * 3; ++i) xyz[i] += offset[i % 3];
     return true;
 }
@@ -323,19 +357,27 @@ errors. After adding search locations with
 `PlugRegistry::GetInstance().RegisterPlugins(path)`, call the loader again to
 discover those additional libraries.
 
-External point callbacks work in stage-backed dynamic and baked evaluation,
-and in `.rigexec` export and playback for plugins that provide the callbacks
-above. Frozen evaluation and background frame-cache warming reject rigs
-containing external movers; use live evaluation for those rigs. Independent
-property-mover callbacks and frozen payload snapshots are not part of this API.
+API4 external point callbacks execute from compiled immutable bindings and
+declared typed inputs in native and frozen jobs. Exported playback also needs
+the runtime callbacks. `encodeExternalEpoch` encodes immutable compile facts
+without requiring successful initial dynamic input sampling; unavailable inputs
+can recover on later frames. Property-mover plugin callbacks are outside this
+point-mover API.
 
 A plugin's tests can export and replay its rigs by linking
 `rigExec::rigExecBake` and `rigExec::rigExecRuntime`, which are available both
 inside the usdRig build and from an installed SDK.
 
-When integrating a mover, verify dynamic/baked parity, animated and connected
+When integrating a mover, check the independent reference and exact golden results, animated and connected
 inputs, override updates, envelope weights, disabled behavior, and failure
-pass-through. If it exports, check that playback matches the baked program on
+pass-through. If it exports, check that playback matches the independently captured published pose on
 every exported frame and with a posed `SetAvar`. Also check that an unavailable
 library or incompatible plugin version produces a diagnostic instead of a
 successful deformation.
+
+API4 requires `compileScene` for normalized standalone compilation. It receives
+owned composed `RigExecSceneDescriptors`, fills immutable binding facts and the
+ordered typed `externalInputs`, and retains no source access. The same
+`assembleExternal` and `applyExternal` callbacks run in native, frozen and
+detached graphs. Plugins declare any auxiliary source-only schema types in
+`sceneDataSchemas`; those records remain data rather than extra operations.

@@ -59,9 +59,15 @@ RigExecStageArraySlots(const fb::RigExecWireFile &file)
         field(chain.baseSlot);
         for (const auto &rev : chain.revisions) revision(rev);
         for (const auto &derived : chain.derived) {
+            field(derived.baseSlot);
             if (derived.revision) revision(*derived.revision);
         }
     }
+    if(file.pose) for(const auto &arrays:file.pose->constraintArrays)
+        for(int slot:arrays.rawSlots) if(slot>=0) field(slot);
+    if(file.providerProgram) for(const auto &leaf:file.providerProgram->sampled)
+        if(leaf.inputSlot>=0 && RigExecFormatIsArrayTag(file.inputs[size_t(leaf.inputSlot)].type()))
+            field(leaf.inputSlot);
     for (const auto &object : file.geometry->weightObjects) {
         field(object.oracleSamplesSlot);
         field(object.oracleCurveSlot);
@@ -77,14 +83,45 @@ RigExecStageArraySlots(const fb::RigExecWireFile &file)
     }
     return result;
 }
+inline std::vector<size_t>
+RigExecStageTokenSlots(const fb::RigExecWireFile &file)
+{
+    std::set<size_t> slots;
+    if (file.geometry) {
+        for (const auto &object : file.geometry->weightObjects) {
+            for (int32_t slot : {object.oraclePlaneAxisSlot, object.oraclePlaneBoundsSlot}) {
+                if (slot >= 0 && size_t(slot) < file.inputs.size() &&
+                    file.inputs[size_t(slot)].type() == fb::InputTag::Token &&
+                    (file.inputs[size_t(slot)].flags() & uint8_t(RigExecWireInputSlotFlags::Animated)))
+                    slots.insert(size_t(slot));
+            }
+        }
+    }
+    return {slots.begin(), slots.end()};
+}
 struct RigExecStageArrayInputInfo {
     size_t slot = 0;
     std::string name;
     RrInputTag tag = RrInputTag::FloatArray;
+    bool animated = true; // Existing array/token rows are temporal by admission.
 };
 class RigExecRuntimeStageArrayInputs {
 public:
     static bool CanSample(const RigExecRuntimeReader &reader, size_t slot);
+    static bool CanSampleProviderValue(const RigExecRuntimeReader &reader,size_t slot);
+    static bool SetSampleBlocked(RigExecRuntimeReader &reader,size_t slot,bool blocked,std::string *error);
+    static std::vector<RigExecStageArrayInputInfo> EnumerateProviderValues(const RigExecRuntimeReader &reader);
+    static bool SetScalarSample(RigExecRuntimeReader &,size_t,const RrInputValue &,std::string *);
+    static bool ClearScalarSample(RigExecRuntimeReader &,size_t,std::string *);
+    static bool CanSampleToken(const RigExecRuntimeReader &reader, size_t slot);
+    static bool SetTokenArraySample(RigExecRuntimeReader &reader, size_t slot,
+        const std::vector<std::string> &values, std::string *error);
+    static bool SetTokenSample(RigExecRuntimeReader &reader, size_t slot,
+                               const std::string &text, std::string *error);
+    static bool ClearTokenSample(RigExecRuntimeReader &reader, size_t slot,
+                                 std::string *error);
+    static std::vector<RigExecStageArrayInputInfo> EnumerateTokens(
+        const RigExecRuntimeReader &reader);
     static std::vector<RigExecStageArrayInputInfo> Enumerate(
         const RigExecRuntimeReader &reader);
     static bool SetSample(RigExecRuntimeReader &reader, size_t slot,

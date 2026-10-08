@@ -21,6 +21,10 @@ using rigExec::RigExecMoverExecTokens;
 PXR_NAMESPACE_USING_DIRECTIVE
 
 namespace {
+const TfToken _oracleToken0("rigExec:cage");
+const TfToken _oracleToken1("points");
+const TfToken _oracleToken2("rigExec:divisions");
+
 
 // Synthesized derived-maintenance parameters (spec §7.6 revised): the
 // hosts are compiler-authored with no authored mover and no enable; the
@@ -82,8 +86,8 @@ rigExec::RigExecOracleResult
 _OracleLatticeMover(const rigExec::RigExecMoverOracleContext &ctx)
 {
     using rigExec::RigExecOracleResult;
-    const UsdStageRefPtr &stage = ctx.stage;
-    const UsdPrim &prim = ctx.prim;
+    const rigExec::RigExecOracleScene &stage = ctx.stage;
+    const rigExec::RigExecOraclePrim &prim = ctx.prim;
     const SdfPath &moverPath = ctx.moverPath;
     const SdfPath &target = ctx.target;
     const UsdTimeCode time = ctx.time;
@@ -98,8 +102,8 @@ _OracleLatticeMover(const rigExec::RigExecMoverOracleContext &ctx)
     // rigExec:restCagePoints -- a Default-time read and nothing
     // more, which is why the authored capture was removable.
     SdfPathVector cages;
-    if (UsdRelationship rel =
-            prim.GetRelationship(TfToken("rigExec:cage"))) {
+    if (rigExec::RigExecOracleRelationship rel =
+            prim.GetRelationship(_oracleToken0)) {
         rel.GetTargets(&cages);
     }
     if (cages.empty()) {
@@ -107,22 +111,22 @@ _OracleLatticeMover(const rigExec::RigExecMoverOracleContext &ctx)
     }
     SdfPath cagePoints = cages[0];
     if (cagePoints.IsPrimPath()) {
-        cagePoints = cagePoints.AppendProperty(TfToken("points"));
+        cagePoints = cagePoints.AppendProperty(_oracleToken1);
     }
     VtVec3fArray restCage, posedCage, base;
     // Rest is the BIND pose and always the authored value; only the
     // live cage carries a phase.
-    if (UsdAttribute a = stage->GetAttributeAtPath(cagePoints)) {
+    if (rigExec::RigExecOracleAttribute a = stage->GetAttributeAtPath(cagePoints)) {
         a.Get(&restCage, UsdTimeCode::Default());
     }
     rigExec::RigExecReadPhasedPoints(
         ctx, "rigExec:cage", cagePoints, &posedCage);
-    if (UsdAttribute a = stage->GetAttributeAtPath(target)) {
+    if (rigExec::RigExecOracleAttribute a = stage->GetAttributeAtPath(target)) {
         a.Get(&base, time);
     }
     GfVec3i divisions(0);
-    if (UsdAttribute a =
-            prim.GetAttribute(TfToken("rigExec:divisions"))) {
+    if (rigExec::RigExecOracleAttribute a =
+            prim.GetAttribute(_oracleToken2)) {
         a.Get(&divisions, time);
     }
     const size_t cageCount = size_t(divisions[0]) *

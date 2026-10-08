@@ -5,8 +5,13 @@
 
 #include <algorithm>
 #include <cmath>
+#include <type_traits>
 
 namespace rigExec {
+
+namespace {
+const TfToken constantWeightRepresentation("constant"), strictWeightRange("strict");
+}
 
 void RigExecLoadComputations() {}
 
@@ -38,39 +43,48 @@ RigExecWeightPacket
 RigExecWeightPacket::Constant(float weight)
 {
     RigExecWeightPacket packet;
-    packet.representation = TfToken("constant");
-    packet.rangePolicy = TfToken("strict");
+    packet.representation = constantWeightRepresentation;
+    packet.rangePolicy = strictWeightRange;
     packet.defaultWeight = weight;
     packet.valid = std::isfinite(weight) && weight >= 0.0f && weight <= 1.0f;
     return packet;
 }
 
-bool
-RigExecWeightPacket::ResolveAll(
-    size_t count, std::vector<float> *resolved) const
+// One definition behind both ResolveAll overloads: identical
+// validation, values, failure conditions, and atomicity for either
+// output array. Every success arm assigns before writing, so resolving
+// into a shared VtFloatArray drops (never detaches-copies) the old
+// buffer. Only the vector instantiation can alias the packet's own
+// weights, so only it keeps the self-resolve temporary.
+template <typename FloatArray>
+static bool
+_ResolveWeightPacketAll(
+    const RigExecWeightPacket &packet, size_t count,
+    FloatArray *resolved)
 {
-    if (!resolved || !valid) {
+    if (!resolved || !packet.valid) {
         return false;
     }
-    if (!rangePolicy.IsEmpty() &&
-        rangePolicy != "strict" && rangePolicy != "clamp") {
+    if (!packet.rangePolicy.IsEmpty() &&
+        packet.rangePolicy != "strict" && packet.rangePolicy != "clamp") {
         return false;
     }
-    if (representation == "constant") {
-        if (!values.empty() || !indices.empty()) {
+    if (packet.representation == "constant") {
+        if (!packet.values.empty() || !packet.indices.empty()) {
             return false;
         }
-    } else if (representation == "dense") {
-        if (!indices.empty() || values.size() != count) {
+    } else if (packet.representation == "dense") {
+        if (!packet.indices.empty() || packet.values.size() != count) {
             return false;
         }
-    } else if (representation == "sparse") {
-        if (indices.size() != values.size()) {
+    } else if (packet.representation == "sparse") {
+        if (packet.indices.size() != packet.values.size()) {
             return false;
         }
-        for (size_t i = 0; i < indices.size(); ++i) {
-            if (indices[i] < 0 || static_cast<size_t>(indices[i]) >= count ||
-                (i > 0 && indices[i] <= indices[i - 1])) {
+        for (size_t i = 0; i < packet.indices.size(); ++i) {
+            if (packet.indices[i] < 0 ||
+                static_cast<size_t>(packet.indices[i]) >= count ||
+                (i > 0 && packet.indices[i] <= packet.indices[i - 1])) {
                 return false;
             }
         }
@@ -91,21 +105,22 @@ RigExecWeightPacket::ResolveAll(
         return std::isfinite(v) && v >= 0.0f && v <= 1.0f;
     };
 
-    if (representation == "constant") {
-        if (!usable(defaultWeight)) {
+    if (packet.representation == "constant") {
+        if (!usable(packet.defaultWeight)) {
             return false;
         }
-        resolved->assign(count, defaultWeight);
+        resolved->assign(count, packet.defaultWeight);
         return true;
     }
 
-    if (representation == "dense") {
+    if (packet.representation == "dense") {
         for (size_t i = 0; i < count; ++i) {
-            if (!usable(values[i])) {
+            if (!usable(packet.values[i])) {
                 return false;
             }
         }
-        resolved->assign(values.begin(), values.begin() + count);
+        resolved->assign(
+            packet.values.begin(), packet.values.begin() + count);
         return true;
     }
 
@@ -117,20 +132,49 @@ RigExecWeightPacket::ResolveAll(
     // default, and the per-point loop this replaces would never have seen
     // it -- so rejecting an unusable one here would fail a packet that used
     // to succeed.
-    if (indices.size() < count && !usable(defaultWeight)) {
+    if (packet.indices.size() < count && !usable(packet.defaultWeight)) {
         return false;
     }
-    for (const float value : values) {
+    for (const float value : packet.values) {
         if (!usable(value)) {
             return false;
         }
     }
-    std::vector<float> valuesOut(count, defaultWeight);
-    for (size_t i = 0; i < indices.size(); ++i) {
-        valuesOut[static_cast<size_t>(indices[i])] = values[i];
+    // Direct scatter: every validation exit sits above, so reaching here
+    // means success and *resolved is untouched on every failure arm. The
+    // self-resolve keeps the temporary below: scattering into the packet's
+    // own weights would clobber entries not yet read.
+    if constexpr (std::is_same<FloatArray, std::vector<float>>::value) {
+        if (resolved == &packet.values) {
+            std::vector<float> valuesOut(count, packet.defaultWeight);
+            for (size_t i = 0; i < packet.indices.size(); ++i) {
+                valuesOut[static_cast<size_t>(packet.indices[i])] =
+                    packet.values[i];
+            }
+            resolved->swap(valuesOut);
+            return true;
+        }
     }
-    resolved->swap(valuesOut);
+    resolved->assign(count, packet.defaultWeight);
+    for (size_t i = 0; i < packet.indices.size(); ++i) {
+        (*resolved)[static_cast<size_t>(packet.indices[i])] =
+            packet.values[i];
+    }
     return true;
+}
+
+bool
+RigExecWeightPacket::ResolveAll(
+    size_t count, std::vector<float> *resolved) const
+{
+    return _ResolveWeightPacketAll(*this, count, resolved);
+}
+
+bool
+RigExecWeightPacket::ResolveAll(
+    size_t count, VtFloatArray *resolved) const
+{
+    return _ResolveWeightPacketAll(*this, count, resolved);
 }
 
 }  // namespace rigExec

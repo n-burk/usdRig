@@ -1,3 +1,5 @@
+#include "poseInternal.h"
+#include "spaces.h"
 // rigExecRuntime input slot model and read evaluation: a line port of
 // RigExecResolvedInputs::GetAttribute (moverGraph.h), RigExecBakedRead
 // (bakedProgramImpl.h) and _PinnedRead (rigEvaluatorProperties.cpp) over
@@ -7,6 +9,7 @@
 // slot names.
 #include "rigExecRuntime/inputs.h"
 #include "rigExecRuntime/store.h"
+#include "rigExecRuntime/spaces.h"
 
 #include <algorithm>
 #include <set>
@@ -115,10 +118,24 @@ _RrOverlay(const RrProgram &program, uint32_t path, RigExecWireInputTag tag,
 bool
 _RrCandidateOverlay(const RrProgram &program,
                     const RigExecWirePropertyInputCandidate &candidate,
-                    RigExecWireInputTag tag, RrWireValue *out, bool publishedOnly = false)
+                    RigExecWireInputTag tag, RrWireValue *out, bool publishedOnly = false,
+                    const RrOracleReadContext *context = nullptr)
 {
     const auto &store = program.store;
     const size_t slot = candidate.slot;
+    if (context) {
+        if (candidate.poseWeight >= 0 && tag == RigExecWireInputTag::Float) {
+            *out = _RrFloatValue(store.poseWeights[size_t(candidate.poseWeight)]);
+            return true;
+        }
+        const auto found = context->versionsBySlot.find(uint32_t(slot));
+        if (found == context->versionsBySlot.end()) return false;
+        for (auto it = found->second.rbegin(); it != found->second.rend(); ++it) {
+            if (store.propertyVersionValid[size_t(*it)])
+                return _RrPropertyWire(store.propertyVersions[size_t(*it)], tag, out);
+        }
+        return false;
+    }
     if (publishedOnly) {
         const int32_t version = store.propertyPublishedVersions[slot];
         if (version >= 0 && store.propertyVersionValid[size_t(version)] &&
@@ -142,19 +159,24 @@ _RrCandidateOverlay(const RrProgram &program,
 
 bool
 _RrCandidates(const RrProgram &program, const RigExecWireInput &input,
-              RrWireValue *out, bool publishedOnly = false)
+              RrWireValue *out, bool publishedOnly = false,
+              const RrOracleReadContext *context = nullptr, bool defaultTime = false)
 {
     const auto &state = program.inputState;
+    const auto present=[&](size_t slot) { return defaultTime && !state.slotAuthored[slot]
+        ? state.slotDefaultHasValue[slot]!=0 : state.slotHasValue[slot]!=0; };
+    const auto value=[&](size_t slot)->const RrWireValue & { return defaultTime && !state.slotAuthored[slot]
+        ? state.values[state.file->inputs[slot].value()] : state.slotCurrent[slot]; };
     const auto overlay = [&](const auto &list, RigExecWireInputTag tag) {
         for (const auto &candidate : list)
-            if (_RrCandidateOverlay(program, candidate, tag, out, publishedOnly)) return true;
+            if (_RrCandidateOverlay(program, candidate, tag, out, publishedOnly, context)) return true;
         return false;
     };
     const auto raw = [&](const auto &list, RigExecWireInputTag tag) {
         for (auto it = list.rbegin(); it != list.rend(); ++it) {
-            if (it->raw && state.slotHasValue[it->slot] &&
+            if (it->raw && present(it->slot) &&
                 state.file->inputs[it->slot].type() == tag) {
-                *out = state.slotCurrent[it->slot]; return true;
+                *out = value(it->slot); return true;
             }
         }
         return false;
@@ -162,25 +184,33 @@ _RrCandidates(const RrProgram &program, const RigExecWireInput &input,
     if (input.mode == RigExecWireReadMode::Pinned &&
         !input.propertyCandidates.empty()) {
         const auto &candidate = input.propertyCandidates.front();
-        if (_RrCandidateOverlay(program, candidate, input.tag, out, publishedOnly)) return true;
-        if (candidate.raw && state.slotHasValue[candidate.slot] &&
+        if (_RrCandidateOverlay(program, candidate, input.tag, out, publishedOnly, context)) return true;
+        if (candidate.raw && present(candidate.slot) &&
             state.file->inputs[candidate.slot].type() == input.tag) {
-            *out = state.slotCurrent[candidate.slot]; return true;
+            *out = value(candidate.slot); return true;
         }
         return false;
     }
     if (overlay(input.propertyCandidates, input.tag)) return true;
-    if (!input.doubleCandidates.empty()) {
-        if (input.tag != RigExecWireInputTag::Float ||
-            !(overlay(input.doubleCandidates, RigExecWireInputTag::Double) ||
-              raw(input.doubleCandidates, RigExecWireInputTag::Double))) return false;
-        *out = _RrFloatValue(float(_RrWireDouble(*out))); return true;
+    // All overlay hops precede any typed cross-domain source, matching
+    // the native retained walk's two passes.
+    for(const auto &candidate:input.propertyCandidates) {
+        if(candidate.crossDomain>=0 && RrReadCrossDomain(&program,candidate.crossDomain,out) &&
+           out->tag==input.tag) return true;
     }
-    if (raw(input.propertyCandidates, input.tag)) return true;
+    if (!input.doubleCandidates.empty()) {
+        if (input.tag == RigExecWireInputTag::Float &&
+            (overlay(input.doubleCandidates, RigExecWireInputTag::Double) ||
+             raw(input.doubleCandidates, RigExecWireInputTag::Double))) {
+            *out = _RrFloatValue(float(_RrWireDouble(*out))); return true;
+        }
+        // A Double tail prevents raw Float upstream traversal, but does not
+        // discard an explicitly declared consumer fallback.
+    } else if (raw(input.propertyCandidates, input.tag)) return true;
     if (input.rawFallbackSlot >= 0) {
         const size_t slot = size_t(input.rawFallbackSlot);
-        if (state.slotHasValue[slot] && state.file->inputs[slot].type() == input.tag) {
-            *out = state.slotCurrent[slot]; return true;
+        if (present(slot) && state.file->inputs[slot].type() == input.tag) {
+            *out = value(slot); return true;
         }
     }
     return false;
@@ -207,14 +237,15 @@ struct _RrWalkAnswer {
 // whose typed read succeeds answers, which is the walk's reverse scan.
 bool
 _RrLongWay(const RrProgram &program, const std::vector<uint32_t> &walk,
-           size_t from, RigExecWireInputTag tag, _RrWalkAnswer *answer)
+           size_t from, RigExecWireInputTag tag, _RrWalkAnswer *answer,
+           bool defaultTime=false)
 {
     const RrInputState &state = program.inputState;
     const std::vector<RigExecWireInputSlot> &slots = state.file->inputs;
     const auto narrowFrom = [&](size_t k) {
         _RrWalkAnswer wide;
         if (!_RrLongWay(program, walk, k, RigExecWireInputTag::Double,
-                        &wide)) {
+                        &wide,defaultTime)) {
             return false;
         }
         const double d = _RrWireDouble(wide.value);
@@ -237,8 +268,10 @@ _RrLongWay(const RrProgram &program, const std::vector<uint32_t> &walk,
     }
     for (size_t k = walk.size(); k-- > from;) {
         const uint32_t slot = walk[k];
-        if (state.slotHasValue[slot] && slots[slot].type() == tag) {
-            answer->value = _RrSlotValue(state, slot);
+        const bool authored=state.slotAuthored[slot]!=0;
+        const bool have=defaultTime && !authored ? state.slotDefaultHasValue[slot]!=0 : state.slotHasValue[slot]!=0;
+        if (have && slots[slot].type() == tag) {
+            answer->value = defaultTime && !authored ? state.values[slots[slot].value()] : _RrSlotValue(state, slot);
             return true;
         }
     }
@@ -289,6 +322,8 @@ _RrSameValueBits(const RrWireValue &a, const RrWireValue &b)
     case RigExecWireInputTag::Vec3d:
         return std::memcmp(a.vec3d.data(), b.vec3d.data(),
                            sizeof(a.vec3d)) == 0;
+    case RigExecWireInputTag::Vec3i:
+        return a.vec3i==b.vec3i;
     case RigExecWireInputTag::Vec3f:
         return std::memcmp(a.vec3f.data(), b.vec3f.data(),
                            sizeof(a.vec3f)) == 0;
@@ -322,6 +357,10 @@ _RrElementSize(RigExecWireInputTag tag)
         return sizeof(RrVec2f);
     case RigExecWireInputTag::Vec3fArray:
         return sizeof(RrVec3f);
+    case RigExecWireInputTag::Vec3dArray: return sizeof(RigExecWireVec3d);
+    case RigExecWireInputTag::Matrix4dArray: return sizeof(RigExecWireMatrix4d);
+    case RigExecWireInputTag::TokenArray: return sizeof(uint32_t);
+    case RigExecWireInputTag::BoolArray: return sizeof(uint8_t);
     default:
         return 0;
     }
@@ -355,6 +394,10 @@ _RrVectorElements(RigExecWireInputTag tag, const void *vector)
         return _RrElementsOf<RrVec2f>(vector);
     case RigExecWireInputTag::Vec3fArray:
         return _RrElementsOf<RrVec3f>(vector);
+    case RigExecWireInputTag::Vec3dArray: return _RrElementsOf<RigExecWireVec3d>(vector);
+    case RigExecWireInputTag::Matrix4dArray: return _RrElementsOf<RigExecWireMatrix4d>(vector);
+    case RigExecWireInputTag::TokenArray: return _RrElementsOf<uint32_t>(vector);
+    case RigExecWireInputTag::BoolArray: return _RrElementsOf<uint8_t>(vector);
     default:
         return {};
     }
@@ -375,6 +418,10 @@ _RrBufferVector(RigExecWireInputTag tag, const RrArrayBuffer &buffer)
         return &buffer.vec2s;
     case RigExecWireInputTag::Vec3fArray:
         return &buffer.vec3s;
+    case RigExecWireInputTag::Vec3dArray: return &buffer.vec3ds;
+    case RigExecWireInputTag::Matrix4dArray: return &buffer.matrices;
+    case RigExecWireInputTag::TokenArray: return &buffer.tokens;
+    case RigExecWireInputTag::BoolArray: return &buffer.bools;
     default:
         return nullptr;
     }
@@ -386,6 +433,7 @@ template <class T>
 void
 _RrCopyInto(std::vector<T> *out, const void *data, size_t count)
 {
+    if (!count) { out->clear(); return; }
     const T *first = static_cast<const T *>(data);
     std::vector<T>(first, first + count).swap(*out);
 }
@@ -412,6 +460,10 @@ _RrAssign(RigExecWireInputTag tag, RrArrayBuffer *buffer, const void *data,
     case RigExecWireInputTag::Vec3fArray:
         _RrCopyInto(&buffer->vec3s, data, count);
         break;
+    case RigExecWireInputTag::Vec3dArray: _RrCopyInto(&buffer->vec3ds,data,count); break;
+    case RigExecWireInputTag::Matrix4dArray: _RrCopyInto(&buffer->matrices,data,count); break;
+    case RigExecWireInputTag::TokenArray: _RrCopyInto(&buffer->tokens,data,count); break;
+    case RigExecWireInputTag::BoolArray: _RrCopyInto(&buffer->bools,data,count); break;
     default:
         break;
     }
@@ -452,6 +504,16 @@ _RrPoolVector(const RrInputState &state, RigExecWireInputTag tag, uint32_t id)
     case RigExecWireInputTag::DoubleArray:
         return id < file.doubleArrays.size() ? &file.doubleArrays[id].v
                                              : nullptr;
+    case RigExecWireInputTag::Vec3dArray:
+        return id<file.vec3dArrays.size()?&file.vec3dArrays[id].v:nullptr;
+    case RigExecWireInputTag::Matrix4dArray:
+        return id<file.matrix4dArrays.size()?&file.matrix4dArrays[id].v:nullptr;
+    case RigExecWireInputTag::TokenArray: {
+        const auto found=state.tokenArrayPool.find(id);
+        return found==state.tokenArrayPool.end()?nullptr:&found->second;
+    }
+    case RigExecWireInputTag::BoolArray:
+        return id<file.boolArrays.size()?&file.boolArrays[id].v:nullptr;
     case RigExecWireInputTag::Vec2fArray: {
         const auto found = state.vec2Pool.find(id);
         return found == state.vec2Pool.end() ? nullptr : &found->second;
@@ -526,6 +588,7 @@ RrWireValueOf(const fb::RigExecWireValue &value)
     if (value.vec3d) {
         out.vec3d = *value.vec3d;
     }
+    if(value.vec3i) out.vec3i=*value.vec3i;
     if (value.vec3f) {
         out.vec3f = *value.vec3f;
     }
@@ -544,6 +607,7 @@ RrInputsOpen(RrProgram *program, const RigExecWireFile *file,
     state = RrInputState();
     state.file = file;
     state.stageArraySlots = RigExecStageArraySlots(*file);
+    state.stageTokenSlots = RigExecStageTokenSlots(*file);
     state.values.reserve(file->values.size());
     for (const fb::RigExecWireValue &value : file->values) {
         state.values.push_back(RrWireValueOf(value));
@@ -613,12 +677,41 @@ RrInputsOpen(RrProgram *program, const RigExecWireFile *file,
     const size_t slots = file->inputs.size();
     state.slotCurrent.resize(slots);
     state.slotHasValue.resize(slots);
+    state.slotBlocked.resize(slots);
+    state.slotProviderSource.assign(slots,0);
+    if(file->providerProgram) for(const auto &leaf:file->providerProgram->sampled)
+        if(leaf.inputSlot>=0) state.slotProviderSource[size_t(leaf.inputSlot)]=1;
+    // Declared external AtTime numeric sources can live outside the public
+    // input prefix. Keep their stage transport private and type-exact.
+    const auto externalSource = [&](uint32_t slot) {
+        const auto &input = file->inputs[slot];
+        if (!(input.flags() & uint8_t(RigExecWireInputSlotFlags::Animated)) ||
+            RigExecFormatIsArrayTag(input.type()) ||
+            input.type() == RigExecWireInputTag::Token) return;
+        state.slotProviderSource[slot] |= 4;
+    };
+    const auto externalWalk = [&](const RigExecWireInput &read) {
+        for (uint32_t slot : read.walk) externalSource(slot);
+        if (read.rawFallbackSlot >= 0) externalSource(uint32_t(read.rawFallbackSlot));
+    };
+    for (const auto &external : file->externalMovers)
+        for (const auto &input : external.declaredInputs) {
+            if (input.time != fb::ExternalInputTime::AtTime ||
+                input.flavour == fb::ExternalInputFlavour::Present) continue;
+            if (input.flavour == fb::ExternalInputFlavour::Raw) {
+                if (!input.read->walk.empty()) externalSource(input.read->walk.front());
+            } else {
+                externalWalk(*input.read);
+                if (input.bodyWalk) externalWalk(*input.bodyWalk);
+            }
+        }
     state.slotAuthored.assign(slots, 0);
     state.slotRanAuthored.assign(slots, 0);
     state.slotDefaultHasValue.resize(slots);
     for (size_t s = 0; s < slots; ++s) {
         const RigExecWireInputSlot &slot = file->inputs[s];
         state.slotCurrent[s] = state.values[slot.value()];
+        state.slotBlocked[s]=(slot.flags() & uint8_t(RigExecWireInputSlotFlags::SourceBlocked))!=0;
         state.slotDefaultHasValue[s] =
             (slot.flags() & uint8_t(RigExecWireInputSlotFlags::HasValue)) !=
                     0
@@ -654,6 +747,18 @@ RrInputsOpen(RrProgram *program, const RigExecWireFile *file,
     }
     // The array slots, each on its default: a pool entry here, a stored
     // layout's expansion once the geometry family built it.
+    state.extraTokenBase=uint32_t(file->paths.size());
+    for(size_t pool=0;pool<file->tokenArrays.size();++pool) {
+        auto &ids=state.tokenArrayPool[uint32_t(pool)];
+        for(const auto &text:file->tokenArrays[pool].v) {
+            auto found=state.tokenIds.find(text);
+            if(found==state.tokenIds.end()) {
+                const uint32_t id=state.extraTokenBase+uint32_t(state.extraTokens.size());
+                state.extraTokens.push_back(text); found=state.tokenIds.emplace(text,id).first;
+            }
+            ids.push_back(found->second);
+        }
+    }
     state.arrayOf.assign(slots, -1);
     for (size_t s = 0; s < slots; ++s) {
         const RigExecWireInputSlot &slot = file->inputs[s];
@@ -682,6 +787,381 @@ RrInputsOpen(RrProgram *program, const RigExecWireFile *file,
     return true;
 }
 
+namespace {
+void _RrEffectiveWireMemo(const RrProgram *program,const RrWireValue &v,std::string *key)
+{
+    const auto append=[&](const auto &x) { key->append(reinterpret_cast<const char *>(&x),sizeof(x)); };
+    append(uint8_t(v.tag));
+    switch(v.tag) {
+    case RigExecWireInputTag::Matrix4d: for(double x:v.matrix) append(x); break;
+    case RigExecWireInputTag::Vec3d: for(double x:v.vec3d) append(x); break;
+    case RigExecWireInputTag::Vec3f: for(float x:v.vec3f) append(x); break;
+    case RigExecWireInputTag::Vec3i: for(int32_t x:v.vec3i) append(x); break;
+    case RigExecWireInputTag::Token: {
+        const auto &text=program->TextOrEmpty(uint32_t(v.bits)); append(uint64_t(text.size())); key->append(text); break;
+    }
+    default: append(v.bits); break;
+    }
+}
+void _RrEffectiveArrayMemo(const RrProgram *program,const void *array,RigExecWireInputTag tag,std::string *key)
+{
+    const auto append=[&](const auto &x) { key->append(reinterpret_cast<const char *>(&x),sizeof(x)); };
+    append(uint8_t(tag)); append(bool(array)); if(!array) return;
+    const auto bytes=[&](const auto *v) { append(uint64_t(v->size()));
+        if(!v->empty()) key->append(reinterpret_cast<const char *>(v->data()),v->size()*sizeof((*v)[0])); };
+    switch(tag) {
+    case RigExecWireInputTag::IntArray: bytes(static_cast<const std::vector<int32_t> *>(array)); break;
+    case RigExecWireInputTag::FloatArray: bytes(static_cast<const std::vector<float> *>(array)); break;
+    case RigExecWireInputTag::DoubleArray: bytes(static_cast<const std::vector<double> *>(array)); break;
+    case RigExecWireInputTag::Vec2fArray: bytes(static_cast<const std::vector<RrVec2f> *>(array)); break;
+    case RigExecWireInputTag::Vec3fArray: bytes(static_cast<const std::vector<RrVec3f> *>(array)); break;
+    case RigExecWireInputTag::Vec3dArray: bytes(static_cast<const std::vector<RigExecWireVec3d> *>(array)); break;
+    case RigExecWireInputTag::Matrix4dArray: bytes(static_cast<const std::vector<RigExecWireMatrix4d> *>(array)); break;
+    case RigExecWireInputTag::BoolArray: bytes(static_cast<const std::vector<uint8_t> *>(array)); break;
+    case RigExecWireInputTag::TokenArray: {
+        const auto &tokens=*static_cast<const std::vector<uint32_t> *>(array); append(uint64_t(tokens.size()));
+        for(uint32_t token:tokens) { const auto &text=program->TextOrEmpty(token); append(uint64_t(text.size())); key->append(text); } break;
+    }
+    default: break;
+    }
+}
+void _RrCoveredRead(const RigExecWireInput &read,std::vector<uint32_t> *covered)
+{
+    for(const auto *segment:{&read.propertyCandidates,&read.doubleCandidates})
+        for(const auto &hop:*segment) if(hop.version>=0) covered->push_back(uint32_t(hop.version));
+}
+}
+
+void RrEffectiveReadMemo(const RrProgram *program,const RigExecWireInput &read,std::string *key)
+{
+    if(RigExecFormatIsArrayTag(read.tag))
+        _RrEffectiveArrayMemo(program,RrArrayReadValue(program,read,read.tag),read.tag,key);
+    else _RrEffectiveWireMemo(program,RrReadInput(program,read),key);
+}
+
+bool RrEffectiveInputMemo(const RrProgram *program,uint32_t stepIndex,std::string *key,
+                         std::vector<uint32_t> *covered,
+                         std::vector<std::pair<uint32_t,uint32_t>> *coveredTyped)
+{
+    if(stepIndex>=program->steps->size()) return false;
+    const auto &step=(*program->steps)[stepIndex];
+    if (step.kind == RigExecWireStepKind::ComposeSubtree) {
+        const auto *pose = static_cast<const RrPoseScratch *>(program->pose.get());
+        if (!pose) return false;
+        const auto append = [&](const auto &value) {
+            key->append(reinterpret_cast<const char *>(&value), sizeof(value));
+        };
+        // Preserve complete Ladder semantics for other consumers. Compose
+        // observes this projection: restRoundTrip is not read by its body.
+        for (const auto &range : step.reads) {
+            if (range.domain() != RigExecWireSlotDomain::Ladder) continue;
+            if (range.begin() > range.end()) return false;
+            for (uint32_t slot = range.begin(); slot < range.end(); ++slot) {
+                if (slot >= pose->selfD.size() || slot >= pose->parentDinv.size() ||
+                    slot >= pose->defaultRoundTrip.size() || slot >= pose->rotOrder.size() ||
+                    slot >= pose->posedAuthored.size() || slot >= pose->posedAuthoredM.size() ||
+                    slot >= pose->posedD.size() || slot >= pose->parentSpaceM.size() ||
+                    slot >= pose->parentSpaceAuthored.size() || slot >= pose->rotationSign.size())
+                    return false;
+                append(uint32_t(RigExecWireSlotDomain::Ladder)); append(slot);
+                append(pose->selfD[slot]); append(pose->parentDinv[slot]);
+                append(pose->defaultRoundTrip[slot]); append(pose->rotOrder[slot]);
+                append(pose->posedAuthored[slot]); append(pose->posedAuthoredM[slot]);
+                append(pose->posedD[slot]); append(pose->parentSpaceM[slot]);
+                append(pose->parentSpaceAuthored[slot]); append(pose->rotationSign[slot]);
+                if (coveredTyped)
+                    coveredTyped->push_back({uint32_t(RigExecWireSlotDomain::Ladder), slot});
+            }
+        }
+        // Continue through ordinary active-switch input fingerprints below.
+        // All other declared typed inputs retain independent revision reasons.
+    }
+    if(step.kind==RigExecWireStepKind::WeightField)
+        return RrWeightFieldEffectiveInputMemo(program,uint32_t(step.object),key,covered);
+    if(step.kind==RigExecWireStepKind::SpaceExpression)
+        return RrProviderEffectiveInputMemo(program,step,key,covered);
+    if(step.kind==RigExecWireStepKind::ProviderRefresh) {
+        const auto &refresh=program->poses->providerRefreshes[size_t(step.object)];
+        for(const auto &carry:refresh.carries) for(int slot:carry.blockingSlots) {
+            const auto &input=program->RegisteredInput(program->ladderRead[size_t(slot)][RrLadderParentSpace]);
+            _RrCoveredRead(input,covered);
+            _RrEffectiveWireMemo(program,RrReadProviderRefreshBlocker(program,slot),key);
+        }
+        // The adapter independently appends all entering frame, provider frame
+        // and CommitTable semantic revisions, including did-commit guards.
+        return true;
+    }
+    const bool crossCoverage=coveredTyped && (step.kind==RigExecWireStepKind::PropertyRevision ||
+        step.kind==RigExecWireStepKind::AvarInputs);
+    const auto read=[&](const RigExecWireInput &input) {
+        _RrCoveredRead(input,covered); RrEffectiveReadMemo(program,input,key);
+        if(!crossCoverage) return;
+        const auto add=[&](RigExecWireSlotDomain domain,uint32_t slot) {
+            coveredTyped->push_back({uint32_t(domain),slot});
+        };
+        for(const auto *segment:{&input.propertyCandidates,&input.doubleCandidates})
+            for(const auto &hop:*segment) if(hop.crossDomain>=0) {
+                const auto &cross=program->file->crossDomainReads[size_t(hop.crossDomain)];
+                if(cross.kind==fb::CrossDomainReadKind::SpaceValue) add(RigExecWireSlotDomain::SpaceValue,uint32_t(cross.spaceValue));
+                else if(cross.kind==fb::CrossDomainReadKind::PropertyResult) add(RigExecWireSlotDomain::PropertyResult,cross.propertyVersion);
+                else if(cross.kind==fb::CrossDomainReadKind::PoseFrame)
+                    for(uint32_t version:cross.frames) add(cross.baseFrame?RigExecWireSlotDomain::PoseBase:RigExecWireSlotDomain::PoseFin,version);
+                else for(const auto &point:cross.points) {
+                    if(cross.finalPoints) add(RigExecWireSlotDomain::ChainPoints,uint32_t(point.first));
+                    else if(point.second==0) add(RigExecWireSlotDomain::ChainBase,uint32_t(point.first));
+                    else {
+                        const uint32_t revision=uint32_t(program->geometry->chainRevisionBegin[size_t(point.first)])+uint32_t(point.second)-1;
+                        add(RigExecWireSlotDomain::RevisionDone,revision); add(RigExecWireSlotDomain::ChainDirty,revision);
+                    }
+                }
+            }
+    };
+    const auto sites=[&](const auto &rows) {
+        for(const auto &site:rows) {
+            if(site.exactVersion>=0) covered->push_back(uint32_t(site.exactVersion));
+            if(site.bodyWalk) _RrCoveredRead(*site.bodyWalk,covered);
+            if(RigExecFormatIsArrayTag(site.read->tag)) {
+                // Authored raw Default values stand on the canonical rest
+                // snapshot even when their bytes equal the numeric bake sample.
+                if(site.time==fb::ExternalInputTime::AtDefault &&
+                   site.flavour==fb::ExternalInputFlavour::Raw && !site.read->walk.empty()) {
+                    const bool authored=RrInputArrayAuthored(program,site.read->walk.front());
+                    key->append(reinterpret_cast<const char *>(&authored),sizeof(authored));
+                }
+                _RrEffectiveArrayMemo(program,RrReadExternalArray(program,site),site.read->tag,key);
+            } else { RrWireValue value; const bool have=RrReadExternalScalar(program,site,&value);
+                key->append(reinterpret_cast<const char *>(&have),sizeof(have));
+                if(have) _RrEffectiveWireMemo(program,value,key); }
+        }
+    };
+    if(step.kind==RigExecWireStepKind::PropertyRevision && step.object>=0) {
+        const auto &chain=program->file->propertyChains[size_t(step.object)];
+        if(step.part==0) {
+            RigExecWireInput raw; raw.tag=program->file->inputs[chain.target].type();
+            raw.mode=RigExecWireReadMode::Raw; raw.walk={chain.target};
+            raw.constant=program->file->inputs[chain.target].value();
+            RrSourceReadMemo(program,raw,key);
+        } else {
+            const auto &revision=chain.revisions[size_t(step.part)-1];
+            for(const auto *input:{revision.enabled.get(),revision.defaultWeight.get(),revision.value.get(),revision.min.get(),revision.max.get()})
+                if(input) read(*input);
+        }
+        return true;
+    }
+    if(step.kind==RigExecWireStepKind::AvarInputs) {
+        for(const auto *ids:{&program->inputState.avarBindingReads,&program->inputState.avarConstantReads})
+            for(uint32_t id:*ids) { const auto &binding=program->registeredReads[id];
+                if(binding.avar>=0 && binding.avar/11==step.object) read(*binding.read); }
+        return true;
+    }
+    const RigExecWireRevision *owner=nullptr;
+    bool layout=false;
+    if(step.kind==RigExecWireStepKind::RevisionStatic && step.object>=0) {
+        const auto &id=program->geometry->revisionIndex[size_t(step.object)];
+        owner=&program->geometry->chains[size_t(id.first)].revisions[size_t(id.second)];
+    } else if(step.kind==RigExecWireStepKind::Derived && step.object>=0) {
+        const auto &id=program->geometry->derivedIndex[size_t(step.object)];
+        owner=program->geometry->chains[size_t(id.first)].derived[size_t(id.second)].revision.get();
+    } else if(step.kind==RigExecWireStepKind::SkinTopology && step.object>=0) {
+        layout=true; const size_t index=size_t(step.object);
+        if(index<program->geometry->revisionIndex.size()) {
+            const auto &id=program->geometry->revisionIndex[index];
+            owner=&program->geometry->chains[size_t(id.first)].revisions[size_t(id.second)];
+        } else {
+            const auto &id=program->geometry->derivedIndex[index-program->geometry->revisionIndex.size()];
+            owner=program->geometry->chains[size_t(id.first)].derived[size_t(id.second)].revision.get();
+        }
+    }
+    if(owner) { sites(layout?owner->layoutLeafSites:owner->leafSites); return true; }
+    if(!step.headInputReads.empty()) {
+        for(const auto &input:step.headInputReads) read(input);
+        return step.headInputSlots.empty();
+    }
+    if (!step.headInputSlots.empty() || !step.overrideInputs.empty()) return false;
+    // These bodies consume only their declared typed values and immutable epoch facts.
+    // The adapter independently compares every typed read revision.
+    switch (step.kind) {
+    case RigExecWireStepKind::ComposeSubtree:
+    case RigExecWireStepKind::FrameMatrix:
+    case RigExecWireStepKind::ProviderMatrix:
+    case RigExecWireStepKind::SolverCommit:
+    case RigExecWireStepKind::CommitDelta:
+    case RigExecWireStepKind::PropagateChunk:
+    case RigExecWireStepKind::CommitApply:
+    case RigExecWireStepKind::InfluenceFold:
+    case RigExecWireStepKind::RevisionChunk:
+    case RigExecWireStepKind::RevisionFuse:
+    case RigExecWireStepKind::ChainStatus:
+    case RigExecWireStepKind::ChainInputs:
+    case RigExecWireStepKind::VolumePlacements:
+    case RigExecWireStepKind::SpaceCheckpoint:
+    case RigExecWireStepKind::ProviderRefresh:
+        return true;
+    default:
+        return false;
+    }
+}
+
+void RrSourceReadMemo(const RrProgram *program,const RigExecWireInput &read,std::string *key)
+{
+    const auto &state=program->inputState;
+    const auto append=[&](const auto &v) { key->append(reinterpret_cast<const char *>(&v),sizeof(v)); };
+    const auto text=[&](const std::string &v) { append(uint64_t(v.size())); key->append(v); };
+    const auto scalar=[&](const RrWireValue &v) {
+        append(uint8_t(v.tag)); append(v.bits);
+        for(double x:v.matrix) append(x);
+        for(double x:v.vec3d) append(x);
+        for(float x:v.vec3f) append(x);
+        for(int32_t x:v.vec3i) append(x);
+        if(v.tag==RigExecWireInputTag::Token) text(program->TextOrEmpty(uint32_t(v.bits)));
+    };
+    const auto array=[&](const void *data,RigExecWireInputTag tag) {
+        const auto bytes=[&](const auto *v) {
+            append(uint64_t(v->size()));
+            if(!v->empty()) key->append(reinterpret_cast<const char *>(v->data()),v->size()*sizeof((*v)[0]));
+        };
+        switch(tag) {
+        case RigExecWireInputTag::IntArray: bytes(static_cast<const std::vector<int32_t> *>(data)); break;
+        case RigExecWireInputTag::FloatArray: bytes(static_cast<const std::vector<float> *>(data)); break;
+        case RigExecWireInputTag::DoubleArray: bytes(static_cast<const std::vector<double> *>(data)); break;
+        case RigExecWireInputTag::Vec2fArray: bytes(static_cast<const std::vector<RrVec2f> *>(data)); break;
+        case RigExecWireInputTag::Vec3fArray: bytes(static_cast<const std::vector<RrVec3f> *>(data)); break;
+        case RigExecWireInputTag::Vec3dArray: bytes(static_cast<const std::vector<RigExecWireVec3d> *>(data)); break;
+        case RigExecWireInputTag::Matrix4dArray: bytes(static_cast<const std::vector<RigExecWireMatrix4d> *>(data)); break;
+        case RigExecWireInputTag::BoolArray: bytes(static_cast<const std::vector<uint8_t> *>(data)); break;
+        case RigExecWireInputTag::TokenArray:
+            for(uint32_t token:*static_cast<const std::vector<uint32_t> *>(data)) text(program->TextOrEmpty(token));
+            append(uint64_t(static_cast<const std::vector<uint32_t> *>(data)->size())); break;
+        default: break;
+        }
+    };
+    append(read.sampleTime); append(uint8_t(read.tag));
+    scalar(state.values[read.constant]);
+    std::vector<uint32_t> slots=read.walk;
+    if(read.rawFallbackSlot>=0) slots.push_back(uint32_t(read.rawFallbackSlot));
+    for(const auto *segment:{&read.propertyCandidates,&read.doubleCandidates})
+        for(const auto &hop:*segment) if(hop.raw) slots.push_back(hop.slot);
+    std::sort(slots.begin(),slots.end()); slots.erase(std::unique(slots.begin(),slots.end()),slots.end());
+    for(uint32_t slot:slots) {
+        const bool authored=RigExecFormatIsArrayTag(state.file->inputs[slot].type())
+            ? RrInputArrayAuthored(program,slot) : state.slotAuthored[slot]!=0;
+        const bool defaultRead=read.sampleTime==1 && !authored;
+        const bool have=defaultRead?state.slotDefaultHasValue[slot]!=0:state.slotHasValue[slot]!=0;
+        append(slot); append(have); append(authored);
+        append(uint8_t(defaultRead?0:state.slotBlocked[slot]));
+        const auto tag=state.file->inputs[slot].type(); append(uint8_t(tag));
+        if(!have) continue;
+        if(RigExecFormatIsArrayTag(tag)) {
+            const void *value=defaultRead?RrInputArrayDefault(program,slot,tag):RrInputArrayValue(program,slot,tag);
+            append(bool(value)); if(value) array(value,tag);
+        } else scalar(defaultRead?state.values[state.file->inputs[slot].value()]:state.slotCurrent[slot]);
+    }
+}
+
+bool
+RrReadExternalScalar(const RrProgram *program,
+                     const RigExecWireExternalDeclaredInput &declaration,
+                     RrWireValue *out)
+{
+    const auto &read=*declaration.read;
+    const auto &state=program->inputState;
+    if (declaration.exactVersion >= 0 && declaration.flavour != fb::ExternalInputFlavour::Raw) {
+        const size_t version=size_t(declaration.exactVersion);
+        const bool published=program->store.propertyVersionValid[version] &&
+            (declaration.exactRecord < 0 ||
+             !program->store.propertyRecordStoodAside[size_t(declaration.exactRecord)]);
+        bool typed=false;
+        RrWireValue produced;
+        if (published) {
+            const auto &value=program->store.propertyVersions[version];
+            typed=_RrPropertyWire(value,read.tag,&produced);
+            if (!typed && declaration.allowFloatToDouble && read.tag==RigExecWireInputTag::Double && value.tag==RrPropertyValue::Tag::Float) {
+                produced.tag=read.tag; const double widened=double(value.f32);
+                std::memcpy(&produced.bits,&widened,sizeof(widened)); typed=true;
+            } else if (!typed && read.tag==RigExecWireInputTag::Float && value.tag==RrPropertyValue::Tag::Double) {
+                produced=_RrFloatValue(float(value.f64)); typed=true;
+            }
+        }
+        if (declaration.flavour == fb::ExternalInputFlavour::Present) {
+            // Runtime SetInput is an authored raw layer, not the native
+            // interactive publication overlay observed by Present.
+            out->tag=RigExecWireInputTag::Bool; out->bits=uint64_t(published);
+            return true;
+        }
+        if (typed) { *out=produced; return true; }
+        if (published && read.tag==RigExecWireInputTag::Double && !declaration.allowFloatToDouble &&
+            declaration.bodyWalk && _RrCandidates(*program,*declaration.bodyWalk,out,false,nullptr,
+                declaration.time==fb::ExternalInputTime::AtDefault)) return true;
+        if (declaration.flavour == fb::ExternalInputFlavour::ResolvedOnly) {
+            if (declaration.fallbackHasValue) { *out=state.values[read.constant]; return true; }
+            return false;
+        }
+        // Invalid producers retain the current raw sample fallback, never a
+        // previous generation's producer or a different publication at this path.
+    } else if (declaration.bodyWalk && declaration.flavour != fb::ExternalInputFlavour::Raw && declaration.flavour != fb::ExternalInputFlavour::Present) {
+        // Declared candidates identify current graph values; publication
+        // slots are populated only after all consuming operations complete.
+        if (_RrCandidates(*program,*declaration.bodyWalk,out,false,nullptr,declaration.time == fb::ExternalInputTime::AtDefault)) return true;
+        if (declaration.flavour == fb::ExternalInputFlavour::ResolvedOnly) {
+            if (declaration.fallbackHasValue) { *out=state.values[read.constant]; return true; }
+            return false;
+        }
+    }
+    bool have=false;
+    // Raw/default reads never consult computed publication. A sampled Default
+    // value remains the captured default unless an authored raw layer replaces it.
+    if (declaration.time == fb::ExternalInputTime::AtDefault && declaration.flavour != fb::ExternalInputFlavour::Raw && declaration.flavour != fb::ExternalInputFlavour::Present &&
+        (!read.propertyCandidates.empty() || !read.doubleCandidates.empty())) {
+        have=_RrCandidates(*program,read,out,false,nullptr,true);
+    } else if (declaration.flavour == fb::ExternalInputFlavour::Raw) {
+        if (!read.walk.empty()) {
+            const uint32_t slot=read.walk.front();
+            const bool authored=state.slotAuthored[slot]!=0;
+            const bool present=declaration.time == fb::ExternalInputTime::AtDefault && !authored
+                ? state.slotDefaultHasValue[slot]!=0
+                : state.slotHasValue[slot]!=0;
+            if (present && state.file->inputs[slot].type()==read.tag) {
+                *out=declaration.time == fb::ExternalInputTime::AtDefault && !authored ? state.values[state.file->inputs[slot].value()] : state.slotCurrent[slot];
+                have=true;
+            }
+        }
+    } else if (declaration.flavour == fb::ExternalInputFlavour::Present) {
+        // No exact producer means no declared current publication. Raw
+        // authored values do not manufacture an interactive overlay.
+        out->tag=RigExecWireInputTag::Bool; out->bits=0; have=true;
+    } else {
+        const bool candidates=!read.propertyCandidates.empty() || !read.doubleCandidates.empty();
+        if (candidates) have=_RrCandidates(*program,read,out);
+        else {
+            _RrWalkAnswer answer;
+            have=_RrLongWay(*program,read.walk,0,read.tag,&answer,declaration.time == fb::ExternalInputTime::AtDefault);
+            if (have) *out=answer.value;
+        }
+
+    }
+    if (!have && (declaration.flavour == fb::ExternalInputFlavour::Resolved ||
+                  declaration.flavour == fb::ExternalInputFlavour::OverlayThenRaw) &&
+        !read.walk.empty()) {
+        // Native Resolved retries Get on the consuming attribute when
+        // the connected typed walk fails. This is its own exact raw head,
+        // not another Float hop in an unsuccessful Double tail.
+        const uint32_t slot=read.walk.front();
+        const bool atDefault=declaration.time == fb::ExternalInputTime::AtDefault &&
+                             !state.slotAuthored[slot];
+        const bool present=atDefault ? state.slotDefaultHasValue[slot]!=0
+                                     : state.slotHasValue[slot]!=0;
+        if (present && state.file->inputs[slot].type()==read.tag) {
+            *out=atDefault ? state.values[state.file->inputs[slot].value()]
+                           : state.slotCurrent[slot];
+            have=true;
+        }
+    }
+    if (!have && declaration.fallbackHasValue) {
+        *out=state.values[read.constant]; have=true;
+    }
+    return have;
+}
+
 RrWireValue
 RrReadInput(const RrProgram *program, const RigExecWireInput &input)
 {
@@ -690,7 +1170,7 @@ RrReadInput(const RrProgram *program, const RigExecWireInput &input)
     switch (input.mode) {
     case RigExecWireReadMode::Baked: {
         // RigExecBakedRead: an override reads the long way; a fixed input
-        // is its folded constant; a long-way input walks; otherwise the
+        // is its folded constant unless explicitly source-backed; a long-way input walks; otherwise the
         // query pinned at Build reads its own attribute, or the constant
         // when that read fails.
         const std::vector<char> &overridden = program->store.overridden;
@@ -699,8 +1179,8 @@ RrReadInput(const RrProgram *program, const RigExecWireInput &input)
             overridden[size_t(input.overrideIndex)]) {
             return _RrWalkValue(*program, input);
         }
-        if ((input.flags & uint8_t(RigExecWireInputReadFlags::Varying)) ==
-            0) {
+        if ((input.flags & (uint8_t(RigExecWireInputReadFlags::Varying) |
+                            uint8_t(RigExecWireInputReadFlags::SourceBacked))) == 0) {
             return fallback;
         }
         if ((input.flags & uint8_t(RigExecWireInputReadFlags::LongWay)) !=
@@ -709,7 +1189,7 @@ RrReadInput(const RrProgram *program, const RigExecWireInput &input)
         }
         if (input.selected >= 0) {
             const uint32_t slot = input.walk[size_t(input.selected)];
-            if (state.slotHasValue[slot] &&
+            if (state.slotHasValue[slot] && !state.slotBlocked[slot] &&
                 state.file->inputs[slot].type() == input.tag) {
                 return _RrSlotValue(state, slot);
             }
@@ -741,6 +1221,21 @@ RrReadInput(const RrProgram *program, const RigExecWireInput &input)
         return _RrHeadValue(state, input);
     }
     return fallback;
+}
+
+RrWireValue RrReadProviderRefreshBlocker(const RrProgram *program,int provider)
+{
+    const auto &input=program->RegisteredInput(program->ladderRead[size_t(provider)][RrLadderParentSpace]);
+    const auto &state=program->inputState;
+    const int slot=input.rawFallbackSlot>=0 ? input.rawFallbackSlot :
+        input.walk.empty() ? -1 : int(input.walk.front());
+    if(slot>=0 && state.slotHasValue[size_t(slot)] && !state.slotBlocked[size_t(slot)] &&
+       state.file->inputs[size_t(slot)].type()==RigExecWireInputTag::Matrix4d)
+        return _RrSlotValue(state,uint32_t(slot));
+    RrWireValue identity; identity.tag=RigExecWireInputTag::Matrix4d;
+    identity.matrix.fill(0.0);
+    for(size_t axis=0;axis<4;++axis)identity.matrix[axis*4+axis]=1.0;
+    return identity;
 }
 
 RrWireValue
@@ -776,6 +1271,15 @@ RrReadResolvedFloat(const RrProgram *program, const RigExecWireInput &input,
     return RrWireValueFloat(answer.value);
 }
 
+float
+RrReadOracleFloat(const RrProgram *program, const RigExecWireInput &input,
+                  const RrOracleReadContext &context, float fallback)
+{
+    RrWireValue value;
+    return _RrCandidates(*program, input, &value, false, &context)
+               ? RrWireValueFloat(value) : fallback;
+}
+
 namespace {
 
 using _RrFamily = RrReadFamily;
@@ -793,6 +1297,12 @@ _RrLadderField(const RigExecWireLadder &ladder, int field)
         return ladder.posedSpace.get();
     case RrLadderRotationOrder:
         return ladder.rotationOrder.get();
+    case RrLadderParentSpace: return ladder.parentSpace.get();
+    case RrLadderParentDefaultSpace: return ladder.parentDefaultSpace.get();
+    case RrLadderAvarDefaultSpace: return ladder.avarDefaultSpace.get();
+    case RrLadderPosedDefaultSpace: return ladder.posedDefaultSpace.get();
+    case RrLadderRotationSign: return ladder.rotationSign.get();
+    case RrLadderInterveningSpace: return ladder.interveningSpace.get();
     default:
         break;
     }
@@ -1125,6 +1635,15 @@ RrInputsBindReads(RrProgram *program, std::string *error)
         state.nameIndex.emplace(program->TextOrEmpty(file.inputs[s].name()),
                                 uint32_t(s));
     }
+    // Bit 1 retains provider-sampled membership; bit 2 marks only the
+    // strictly validated source-backed registered direct numeric sites.
+    // Bit 4 marks animated numeric sources of exact External AtTime declarations.
+    // These are raw sampling channels, never additional public controls.
+    for (const auto &registered : program->registeredReads) {
+        const auto &read = *registered.read;
+        if ((read.flags & uint8_t(RigExecWireInputReadFlags::SourceBacked)) != 0)
+            state.slotProviderSource[read.walk[size_t(read.selected)]] |= 2;
+    }
     // The listed inputs, as the input API reports them.
     const size_t listed = std::min<size_t>(file.listedInputs, slots);
     state.inputInfo.clear();
@@ -1352,6 +1871,7 @@ _RrStoreSlot(RrInputState &state, uint32_t slot, const RrWireValue &value,
 {
     state.slotCurrent[slot] = value;
     state.slotHasValue[slot] = has ? 1 : 0;
+    state.slotBlocked[slot]=0;
     if (slot < state.inputValues.size()) {
         state.inputValues[slot] = RrValueFromWire(value);
     }
@@ -1362,6 +1882,42 @@ _RrStoreSlot(RrInputState &state, uint32_t slot, const RrWireValue &value,
 }
 
 }  // namespace
+
+bool
+RrStageScalarSet(RrProgram *program,size_t slot,const RrInputValue &value,std::string *error)
+{
+    auto &state=program->inputState;
+    if(slot>=state.slotProviderSource.size() || !state.slotProviderSource[slot])
+        return _RrFail(error,"not a declared provider raw source");
+    const auto tag=state.file->inputs[slot].type();
+    if(RigExecFormatIsArrayTag(tag) || tag==RigExecWireInputTag::Token ||
+       uint8_t(value.tag)!=uint8_t(tag)) return _RrFail(error,"wrong provider scalar type");
+    RrWireValue wire; wire.tag=tag;
+    switch(tag) {
+    case RigExecWireInputTag::Double: std::memcpy(&wire.bits,&value.f64,sizeof(double)); break;
+    case RigExecWireInputTag::Float: {uint32_t bits; std::memcpy(&bits,&value.f32,sizeof(float));wire.bits=bits;break;}
+    case RigExecWireInputTag::Bool: wire.bits=value.boolean?1:0;break;
+    case RigExecWireInputTag::Int: wire.bits=uint32_t(value.i32);break;
+    case RigExecWireInputTag::Vec3d: for(size_t k=0;k<3;++k) wire.vec3d[k]=value.vec[k];break;
+    case RigExecWireInputTag::Vec3f: for(size_t k=0;k<3;++k) wire.vec3f[k]=value.vec3f[k];break;
+    case RigExecWireInputTag::Vec3i: for(size_t k=0;k<3;++k) wire.vec3i[k]=value.vec3i[k];break;
+    case RigExecWireInputTag::Matrix4d:
+        for(size_t k=0;k<16;++k) wire.matrix[k]=value.matrix[k/4][k%4];break;
+    default: return _RrFail(error,"unsupported provider scalar type");
+    }
+    state.slotAuthored[slot]=0; _RrStoreSlot(state,uint32_t(slot),wire,true);return true;
+}
+bool
+RrStageScalarClear(RrProgram *program,size_t slot,std::string *error)
+{
+    auto &state=program->inputState;
+    if(slot>=state.slotProviderSource.size() || !state.slotProviderSource[slot] ||
+       RigExecFormatIsArrayTag(state.file->inputs[slot].type()))
+        return _RrFail(error,"not a declared provider scalar source");
+    state.slotAuthored[slot]=0;
+    _RrStoreSlot(state,uint32_t(slot),state.values[state.file->inputs[slot].value()],false);
+    return true;
+}
 
 bool
 RrInputsSet(RrProgram *program, size_t index, const RrInputValue &value,
@@ -1551,6 +2107,26 @@ RrStageArraySet(RrProgram *program, size_t slot,
     return _RrSetArraySlot(program, slot, value, false, error);
 }
 
+bool RrStageTokenArraySet(RrProgram *program,size_t slot,
+    const std::vector<std::string> &texts,std::string *error)
+{
+    auto &state=program->inputState;
+    if(slot>=state.file->inputs.size() || state.file->inputs[slot].type()!=RigExecWireInputTag::TokenArray)
+        return _RrFail(error,"sampled token array has incompatible slot type");
+    std::vector<uint32_t> ids; ids.reserve(texts.size());
+    for(const auto &text:texts) {
+        auto found=state.tokenIds.find(text);
+        if(found==state.tokenIds.end()) {
+            const uint32_t id=state.extraTokenBase+uint32_t(state.extraTokens.size());
+            state.extraTokens.push_back(text); found=state.tokenIds.emplace(text,id).first;
+        }
+        ids.push_back(found->second);
+    }
+    RigExecRuntimeArray value;
+    value.tag=RrInputTag::TokenArray; value.data=ids.data(); value.count=ids.size();
+    return RrStageArraySet(program,slot,value,error);
+}
+
 bool
 RrStageArrayClear(RrProgram *program, size_t slot, std::string *error)
 {
@@ -1653,6 +2229,16 @@ RrInputArrayAuthored(const RrProgram *program, uint32_t slot)
 }
 
 bool
+RrStageInputBlockedSet(RrProgram *program,size_t slot,bool blocked,std::string *error)
+{
+    auto &state=program->inputState;
+    if(slot>=state.slotProviderSource.size() || !state.slotProviderSource[slot])
+        return _RrFail(error,"not a declared provider raw source");
+    state.slotBlocked[slot]=blocked?1:0;
+    return true;
+}
+
+bool
 RrInputHasValue(const RrProgram *program, uint32_t slot)
 {
     const RrInputState &state = program->inputState;
@@ -1694,6 +2280,50 @@ RrArrayReadSlot(const RrProgram *program, const RigExecWireInput &read)
         }
     }
     return -1;
+}
+
+const void *
+RrReadExternalArray(const RrProgram *program,
+                    const RigExecWireExternalDeclaredInput &declaration)
+{
+    const auto &read=*declaration.read;
+    const auto &state=program->inputState;
+    std::set<uint32_t> unavailableProducerPaths;
+    const auto slotValue=[&](uint32_t slot)->const void * {
+        if(unavailableProducerPaths.count(state.file->inputs[slot].name())) return nullptr;
+        if(state.file->inputs[slot].type()!=read.tag) return nullptr;
+        const bool authored=RrInputArrayAuthored(program,slot);
+        if(declaration.time == fb::ExternalInputTime::AtDefault && !authored)
+            return state.slotDefaultHasValue[slot] ? RrInputArrayDefault(program,slot,read.tag) : nullptr;
+        return state.slotHasValue[slot] ? RrInputArrayValue(program,slot,read.tag) : nullptr;
+    };
+    if (declaration.bodyWalk && read.tag==RigExecWireInputTag::Vec3fArray &&
+        declaration.flavour != fb::ExternalInputFlavour::Raw && declaration.flavour != fb::ExternalInputFlavour::Present) {
+        bool computedCandidate=false;
+        for (const auto &hop:declaration.bodyWalk->propertyCandidates) {
+            if (hop.crossDomain < 0) continue;
+            const auto &cross=program->file->crossDomainReads[size_t(hop.crossDomain)];
+            if (cross.kind!=fb::CrossDomainReadKind::Points) continue;
+            computedCandidate=true;
+            if (const auto *points=RrReadCrossDomainPoints(program,cross)) return points;
+            if(!cross.points.empty()) unavailableProducerPaths.insert(cross.source);
+        }
+        if (computedCandidate && declaration.flavour == fb::ExternalInputFlavour::ResolvedOnly)
+            return declaration.fallbackHasValue ? _RrPoolVector(state,read.tag,state.file->values[read.constant].array) : nullptr;
+    }
+    const void *answer=nullptr;
+    if(declaration.flavour != fb::ExternalInputFlavour::Present) {
+        if(declaration.flavour == fb::ExternalInputFlavour::Raw) {
+            if(!read.walk.empty()) answer=slotValue(read.walk.front());
+        } else {
+            for(size_t k=read.walk.size();k-- >0;) {
+                answer=slotValue(read.walk[k]); if(answer) break;
+            }
+        }
+    }
+    if(!answer && declaration.fallbackHasValue)
+        answer=_RrPoolVector(state,read.tag,state.file->values[read.constant].array);
+    return answer;
 }
 
 const void *
@@ -1767,6 +2397,32 @@ RrInputsSetToken(RrProgram *program, size_t index, const std::string &text,
     return true;
 }
 
+bool
+RrStageTokenSet(RrProgram *program, size_t slot, const std::string &text,
+                bool hasValue, std::string *error)
+{
+    auto &state = program->inputState;
+    if (!std::binary_search(state.stageTokenSlots.begin(),
+                            state.stageTokenSlots.end(), slot))
+        return _RrFail(error, "no sampled token at slot " + std::to_string(slot));
+    uint32_t id = 0;
+    if (hasValue) {
+        const auto found = state.tokenIds.find(text);
+        if (found != state.tokenIds.end()) id = found->second;
+        else {
+            id = state.extraTokenBase + uint32_t(state.extraTokens.size());
+            state.extraTokens.push_back(text);
+            state.tokenIds.emplace(text, id);
+        }
+    }
+    RrWireValue value;
+    value.tag = RigExecWireInputTag::Token;
+    value.bits = id;
+    state.slotAuthored[slot] = 0;
+    _RrStoreSlot(state, uint32_t(slot), value, hasValue);
+    return true;
+}
+
 void
 RrInputsReset(RrProgram *program, size_t index)
 {
@@ -1788,6 +2444,9 @@ RrInputsReset(RrProgram *program, size_t index)
         return;
     }
     const RigExecWireInputSlot &slot = state.file->inputs[index];
+    if ((state.slotProviderSource[index] & 2) != 0)
+        state.slotBlocked[index] =
+            (slot.flags() & uint8_t(RigExecWireInputSlotFlags::SourceBlocked)) != 0;
     _RrStoreSlot(state, uint32_t(index), state.values[slot.value()],
                  state.slotDefaultHasValue[index] != 0);
 }
@@ -1927,14 +2586,11 @@ RrChainBase(const RrProgram *program, size_t chain, RigExecWireInputTag tag,
 }
 
 bool
-RrPathValueFromRead(const RigExecWirePathRead &row, const RrWireValue &value,
+RrPathValueFromWire(RigExecWireInputTag tag, const RrWireValue &value,
                     RrPathValue *out)
 {
     using Tag = RrPathValue::Tag;
-    if (!row.read) {
-        return false;
-    }
-    switch (row.read->tag) {
+    switch (tag) {
     case RigExecWireInputTag::Bool:
         out->tag = Tag::Bool;
         out->boolean = value.bits != 0;
@@ -1959,6 +2615,8 @@ RrPathValueFromRead(const RigExecWirePathRead &row, const RrWireValue &value,
         out->tag = Tag::Matrix4d;
         out->matrix = value.matrix;
         return true;
+    case RigExecWireInputTag::Vec3i:
+        out->tag=Tag::Vec3i; out->vec3i=value.vec3i; return true;
     case RigExecWireInputTag::Vec3d:
         out->tag = Tag::Vec3d;
         out->vec = value.vec3d;
@@ -1966,6 +2624,11 @@ RrPathValueFromRead(const RigExecWirePathRead &row, const RrWireValue &value,
     default:
         return false;
     }
+}
+
+bool RrPathValueFromRead(const RigExecWirePathRead &row,const RrWireValue &value,RrPathValue *out)
+{
+    return row.read && RrPathValueFromWire(row.read->tag,value,out);
 }
 
 namespace {
@@ -2003,8 +2666,23 @@ RrReadBlendWeight(const RrProgram *program, size_t chain, size_t revision,
         return 0.0f;
     }
     const RigExecWireBlendChannel &bound = wire->blendChannels[channel];
-    if (bound.poseWeight >= 0 &&
-        !RrInputsPublished(program, bound.weightPath)) {
+    // The owning weight's exact producer takes precedence over the pose
+    // channel. Publication path maps are output views, not body-read authority.
+    bool held = false;
+    for (const auto &candidate : bound.weightRead->propertyCandidates) {
+        if (candidate.version < 0 ||
+            program->file->inputs[candidate.slot].name() != bound.weightPath) continue;
+        const size_t version = size_t(candidate.version);
+        if (version >= program->store.propertyVersionValid.size() ||
+            !program->store.propertyVersionValid[version]) continue;
+        RrWireValue value;
+        if (_RrPropertyWire(program->store.propertyVersions[version],
+                            RigExecWireInputTag::Float, &value)) {
+            held = true;
+            break;
+        }
+    }
+    if (bound.poseWeight >= 0 && !held) {
         const std::vector<float> &weights = program->store.poseWeights;
         return size_t(bound.poseWeight) < weights.size()
                    ? weights[size_t(bound.poseWeight)]

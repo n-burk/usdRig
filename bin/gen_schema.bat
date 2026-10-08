@@ -21,7 +21,7 @@ rem The generated plugInfo names a LibraryPath that a codeless schema has no
 rem library for, and Plug refuses to load the plugin while it is present.
 "%PY%" -c "import io; p=r'..\..\plugin\rigExecSchema\resources\plugInfo.json'; s=io.open(p,encoding='utf-8').read(); s=s.replace('\"LibraryPath\": \"@PLUG_INFO_LIBRARY_PATH@\", ',''); s=s.replace('\"@PLUG_INFO_RESOURCE_PATH@\"','\".\"'); s=s.replace('\"@PLUG_INFO_ROOT@\"','\".\"'); io.open(p,'w',encoding='utf-8').write('\n'.join(line.rstrip() for line in s.splitlines())+'\n')"
 if errorlevel 1 exit /b 1
-"%PY%" -c "from pathlib import Path; p=Path(r'../../plugin/rigExecSchema/resources/generatedSchema.usda'); p.write_text(p.read_text(encoding='utf-8').replace('DCC apps', 'applications'), encoding='utf-8')"
+"%PY%" -c "from pathlib import Path; p=Path(r'../../plugin/rigExecSchema/resources/generatedSchema.usda'); s=p.read_text(encoding='utf-8').replace('DCC apps', 'applications'); p.write_text('\n'.join(line.rstrip() for line in s.splitlines())+'\n', encoding='utf-8')"
 if errorlevel 1 exit /b 1
 
 echo regenerated plugin\rigExecSchema\resources -- review the diff before committing

@@ -1714,9 +1714,10 @@ _RrRunConstraintStep(RrProgram *program, size_t step,
             }
             return false;
         }
-        if (!RrResolveWeightOracle(program, size_t(c.weightObjectIndex), 1,
-                                   nullptr, &envelope, &envelopeError) ||
-            envelope.size() != 1) {
+        const auto &field = store.weightFieldResults[size_t(c.weightField)];
+        envelope = field.values;
+        envelopeError = field.error;
+        if (!field.ok || envelope.size() != 1) {
             output.diagnostics.push_back(
                 cpath + ": " + envelopeError +
                 "; constraint passed through");
@@ -1794,7 +1795,48 @@ _RrRunConstraintStep(RrProgram *program, size_t step,
         }
         return false;
     }
-    const RrConstraintArraysLive &arrays = store.arrays[size_t(c.arrays)];
+    RrConstraintArraysLive &arrays = store.arrays[size_t(c.arrays)];
+    const auto &arrayWire=program->poses->constraintArrays[size_t(c.arrays)];
+    const auto arrayPath=program->TextOrEmpty(arrayWire.prim);
+    arrays.diagnostics.clear(); arrays.poleDiagnostics.clear();
+    const auto weights=[&](size_t channel,size_t count,const char *name,
+                          std::vector<std::string> *lines,std::vector<double> *values) {
+        const int slot=arrayWire.rawSlots[channel];
+        const auto *raw=slot>=0 && RrInputHasValue(program,uint32_t(slot))
+            ? RrInputArray<float>(program,uint32_t(slot)) : nullptr;
+        if(raw && !raw->empty() && raw->size()!=count) {
+            lines->push_back(arrayPath+" "+name+" has "+std::to_string(raw->size())+
+                             " entries for "+std::to_string(count)+" sources");
+            return false;
+        }
+        values->assign(count,1.0);
+        if(raw) for(size_t k=0;k<raw->size();++k) (*values)[k]=(*raw)[k];
+        return true;
+    };
+    const auto offsets=[&](size_t channel,const char *name,std::vector<RrVec3d> *values) {
+        const int slot=arrayWire.rawSlots[channel];
+        const auto *raw=slot>=0 && RrInputHasValue(program,uint32_t(slot))
+            ? RrInputArray<RigExecWireVec3d>(program,uint32_t(slot)) : nullptr;
+        if(raw && !raw->empty() && raw->size()!=arrayWire.sourceCount) {
+            arrays.diagnostics.push_back(arrayPath+" "+name+" has "+std::to_string(raw->size())+
+                             " entries for "+std::to_string(arrayWire.sourceCount)+" sources");
+            return false;
+        }
+        values->assign(size_t(arrayWire.sourceCount),RrVec3d(0));
+        if(raw) for(size_t k=0;k<raw->size();++k)
+            (*values)[k]=RrVec3d((*raw)[k][0],(*raw)[k][1],(*raw)[k][2]);
+        return true;
+    };
+    arrays.ok=weights(0,size_t(arrayWire.sourceCount),"inputs:sourceWeights",&arrays.diagnostics,&arrays.weights);
+    if(arrayWire.parentOffsets)
+        arrays.ok=arrays.ok && offsets(1,"inputs:translationOffsets",&arrays.translationOffsets) &&
+                              offsets(2,"inputs:rotationOffsets",&arrays.rotationOffsets);
+    else {
+        arrays.translationOffsets.assign(size_t(arrayWire.sourceCount),RrVec3d(0));
+        arrays.rotationOffsets.assign(size_t(arrayWire.sourceCount),RrVec3d(0));
+    }
+    if(arrayWire.readPole)
+        arrays.poleOk=weights(3,size_t(arrayWire.poleCount),"inputs:poleVectorWeights",&arrays.poleDiagnostics,&arrays.poleWeights);
 
     if (c.singleChainIk) {
         if (wireCommit.targetReads.size() != c.targetSlots.size() ||

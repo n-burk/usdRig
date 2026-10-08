@@ -1,6 +1,8 @@
 // Runtime pose-step dispatch, commit deltas, and propagation.
 
 #include "poseInternal.h"
+#include "spaces.h"
+#include "rigExecGraph/poseArithmetic.h"
 #include <algorithm>
 #include <limits>
 #include <utility>
@@ -11,11 +13,39 @@ using namespace runtimePoseDetail;
 
 namespace {
 
+struct RrSpaceSwitchMath {
+    using Matrix=RrMat4d;
+    static Matrix RoundTrip(const Matrix &m) { return RrRoundTrip(m); }
+    static Matrix Filter(const Matrix &m,const RrVec3d &axis,int filter) {
+        return RrFilterSpaceRotation(m,axis,RrRotationFilter(filter));
+    }
+    static Matrix Blend(const Matrix &a,const Matrix &b,double t) { return RrBlendTransforms(a,b,t); }
+    static Matrix Mask(const Matrix &m,const bool *t,const bool *r,const bool *scale) {
+        return RrMaskTransform(m,t,r,scale);
+    }
+};
+
+struct RrPoseInterpolatorMath {
+    using Quaternion=RrQuatd; using Vector=RrVec3d;
+    static bool FrameRotation(const RrPointFrame &f,Quaternion *q) { return RrFrameRotation(f,q); }
+    static bool FrameTranslation(const RrPointFrame &f,const RrPointFrame &rest,
+        const RrPointFrame *parent,const RrPointFrame *parentRest,Vector *v) {
+        return RrFrameTranslation(f,rest,parent,parentRest,v);
+    }
+    static Vector EulerFromQuaternion(const Quaternion &q) { return _RrRbfEulerFromQuaternion(q); }
+};
+
+struct RrPosePropagateMath {
+    static bool Usable(const RrPointFrame &frame) { return RrFrameUsable(frame); }
+    static RrPointFrame Carry(const RrPointFrame &frame,const RrMat4d &delta) {
+        return RrMatrixToPoints(frame.points,delta);
+    }
+};
+
 // Propagation outcomes, in RigExecBakedPropagateOutcome order.
 enum _RrPropagateOutcome : uint8_t {
     _RrStaged = 0,
     _RrSkipped = 1,
-    _RrNoCandidate = 2,
     _RrUnusableDescendant = 3,
     _RrSingularDelta = 4,
     _RrInvalidResult = 5,
@@ -59,81 +89,33 @@ _RrKindName(RigExecWireStepKind kind)
         return "SnapshotFinals";
     case RigExecWireStepKind::PoseInterpolator:
         return "PoseInterpolator";
+    case RigExecWireStepKind::FrameMatrix:
+        return "FrameMatrix";
     default:
         return "Unknown";
     }
 }
 
-// The phased-read store's pose-half record (RecordFrame, bakedPose.cpp).
+// Whether a frame record's writer recorded its provider this run
+// (RigExecBakedEvalFrameRecord, bakedPose.cpp). A solver commit records a
+// slot only when its batch published an element for it, which is that
+// position's present byte; a constraint commit records behind the exit
+// flags its constraint step set this run, a target past the first only
+// while the every-target flag is set.
 bool
-_RrRecordFrame(RrProgram *program, size_t step,
-               const RigExecWireConstraint &constraint,
-               const RigExecWireCommit &commit, RrStepOutput *output,
-               std::string *error)
+_RrFrameRecorded(const RrProgram &program, const RrPoseScratch &scratch,
+                 const RigExecWireFrameRecord &record)
 {
-    RrStore &store = program->store;
-    RrPoseScratch *scratch = _RrScratch(program);
-    if (!constraint.snapshotAfter) {
-        return true;
+    const size_t commitIndex = size_t(record.commit());
+    if (program.poses->commits[commitIndex].solverOutput) {
+        const std::vector<char> &present =
+            program.store.commits[commitIndex].present;
+        return record.position() >= 0 &&
+               size_t(record.position()) < present.size() &&
+               present[size_t(record.position())];
     }
-    const size_t commitIndex = size_t((*program->steps)[step].object);
-    const bool everyTarget =
-        commitIndex < scratch->recordEveryTarget.size() &&
-        scratch->recordEveryTarget[commitIndex];
-    const size_t count =
-        everyTarget ? constraint.targetSlots.size()
-                    : std::min<size_t>(1, constraint.targetSlots.size());
-    for (size_t k = 0; k < count; ++k) {
-        if (k >= constraint.snapshotTargets.size() ||
-            !constraint.snapshotTargets[k]) {
-            continue;
-        }
-        if (k >= constraint.targetSlots.size() ||
-            k >= commit.targetReads.size()) {
-            if (error) {
-                *error = _RrStepHead(program, step) +
-                         " names no record target";
-            }
-            return false;
-        }
-        const int32_t target = constraint.targetSlots[k];
-        const size_t slot = size_t(target);
-        const auto found = std::lower_bound(commit.slots.begin(),
-                                            commit.slots.end(), target);
-        const uint32_t version =
-            found != commit.slots.end() && *found == target
-                ? (size_t(found - commit.slots.begin()) <
-                           commit.slotWrites.size()
-                       ? commit.slotWrites[size_t(found -
-                                                  commit.slots.begin())]
-                       : commit.targetReads[k])
-                : commit.targetReads[k];
-        if (size_t(version) >= store.fin.size() ||
-            slot >= scratch->restFrames.size() ||
-            slot >= program->slotMeta->paths.size()) {
-            if (error) {
-                *error = _RrStepHead(program, step) +
-                         " names no record target";
-            }
-            return false;
-        }
-        const RrPointFrame &frame = store.fin[size_t(version)];
-        if (!frame.IsValid()) {
-            continue;
-        }
-        const RrPointFrame &rest = scratch->restFrames[slot];
-        const std::array<RrVec3d, 4> landmarks =
-            rest.IsValid() ? rest.points : RrIdentityLandmarks();
-        RrMat4d matrix = _RrIdentity();
-        if (RrPointsToMatrix(landmarks, frame.points, &matrix)) {
-            RrSnapshotValue value;
-            value.tag = RrSnapshotValue::Tag::Matrix;
-            value.matrix = matrix;
-            output->snapshots.Record(
-                program->slotMeta->paths[slot], constraint.path, value);
-        }
-    }
-    return true;
+    return scratch.recordAfter[commitIndex] &&
+           !(record.target() > 0 && !scratch.recordEveryTarget[commitIndex]);
 }
 
 // Whether slot \p i's avars and ladder rows are there to compose.
@@ -143,7 +125,8 @@ _RrComposable(const RrProgram &program, const RrPoseScratch &scratch,
 {
     return i * 11 + 11 <= program.store.avars.size() &&
            i < scratch.noScaleAvars.size() && i < scratch.rotOrder.size() &&
-           i < scratch.selfD.size() && i < scratch.parentDinv.size() &&
+           i < scratch.posedD.size() && i < scratch.parentSpaceM.size() &&
+           i < scratch.parentSpaceAuthored.size() && i < scratch.parentDinv.size() &&
            i < scratch.posedAuthored.size() &&
            i < scratch.posedAuthoredM.size();
 }
@@ -169,21 +152,6 @@ _RrComposeAvarsOf(const RrProgram &program, const RrPoseScratch &scratch,
         a[9] * signX, program.TextOrEmpty(scratch.rotOrder[i]));
 }
 
-// The ordinary compose of slot \p i against \p parentPosed
-// (_ComposeUnswitched). An authored posed:space is the pose: it reads
-// neither the avars nor the parent.
-RrPointFrame
-_RrComposeUnswitched(const RrProgram &program, const RrPoseScratch &scratch,
-                     size_t i, const RrMat4d &parentPosed)
-{
-    if (scratch.posedAuthored[i]) {
-        return RrFrameFromMatrix(scratch.posedAuthoredM[i]);
-    }
-    return RrFrameFromMatrix(_RrComposeAvarsOf(program, scratch, i) *
-                             scratch.selfD[i] * scratch.parentDinv[i] *
-                             parentPosed);
-}
-
 // _SpaceOfFrame: an unusable frame selects the NaN sentinel, so the
 // failure survives into every descendant instead of being scrubbed into a
 // plausible identity.
@@ -204,34 +172,27 @@ bool
 _RrVersionReadable(const RrProgram &program, const RrPoseScratch &scratch,
                    const RigExecWireFrameVersion &read)
 {
+    if (read.context >= 0) {
+        return size_t(read.context) < program.store.switchFrames.size();
+    }
     if (read.anchor >= 0 &&
         size_t(read.anchor) >= program.store.posedM.size()) {
         return false;
     }
-    for (const int32_t at : read.recompose) {
-        if (at < 0 || !_RrComposable(program, scratch, size_t(at))) {
-            return false;
-        }
-    }
-    return true;
+    return read.recompose.empty();
 }
 
-// The frame a switch reads at its bound version (_ReadFrameVersion,
-// bakedPose.cpp): the anchor's last version, or identity, composed
-// unswitched through each recompose slot top down. Recomposes into locals
-// only: the slots on the way keep their last versions for every other
-// reader.
+// Read an explicit checkpoint output or the bound current provider matrix.
 RrMat4d
 _RrReadFrameVersion(const RrProgram &program, const RrPoseScratch &scratch,
                     const RigExecWireFrameVersion &read)
 {
+    if (read.context >= 0) {
+        return program.store.switchFrames[size_t(read.context)];
+    }
     RrMat4d posed = read.anchor >= 0
                         ? program.store.posedM[size_t(read.anchor)]
                         : _RrIdentity();
-    for (const int32_t at : read.recompose) {
-        posed = _RrSpaceOfFrame(
-            _RrComposeUnswitched(program, scratch, size_t(at), posed));
-    }
     return posed;
 }
 
@@ -314,9 +275,19 @@ _RrStageCommitPairs(RrProgram *program, size_t step,
             return false;
         }
         const int pos = commit.closestPos[k];
-        if (pos < 0 || size_t(pos) >= scratch->present.size() ||
+        bool parentBlocked = false;
+        const auto *pose = _RrScratch(program);
+        for (int slot = commit.propagate[k].first;
+             slot >= 0 && slot != commit.propagate[k].second;
+             slot = program->slotMeta->propParent[size_t(slot)]) {
+            if (pose->parentSpaceAuthored[size_t(slot)]) {
+                parentBlocked = true;
+                break;
+            }
+        }
+        if (parentBlocked || pos < 0 || size_t(pos) >= scratch->present.size() ||
             !scratch->present[size_t(pos)]) {
-            scratch->outcome[k] = _RrNoCandidate;
+            scratch->outcome[k] = _RrSkipped;
             continue;
         }
         const uint32_t descendantRead = commit.descendantReads[k];
@@ -334,28 +305,12 @@ _RrStageCommitPairs(RrProgram *program, size_t step,
         const RrPointFrame &current =
             store.fin[size_t(descendantRead)];
         const RrPointFrame &before = store.fin[size_t(closestRead)];
-        if (commit.solverOutput &&
-            (!RrFrameUsable(current) || !RrFrameUsable(before) ||
-             !RrFrameUsable(scratch->frames[size_t(pos)]))) {
-            scratch->outcome[k] = _RrSkipped;
-            continue;
-        }
-        if (!RrFrameUsable(current)) {
-            scratch->outcome[k] = _RrUnusableDescendant;
-            continue;
-        }
-        if (scratch->deltaOk[size_t(pos)] != 1) {
-            scratch->outcome[k] = _RrSingularDelta;
-            continue;
-        }
-        const RrPointFrame frame = RrMatrixToPoints(
-            current.points, scratch->deltas[size_t(pos)]);
-        if (!RrFrameUsable(frame)) {
-            scratch->outcome[k] = _RrInvalidResult;
-            continue;
-        }
-        scratch->staged[k] = frame;
-        scratch->outcome[k] = _RrStaged;
+        RrPointFrame frame;
+        const auto outcome=RigExecPropagatePoseArithmetic<RrPosePropagateMath>(
+            current,before,scratch->frames[size_t(pos)],scratch->deltas[size_t(pos)],
+            scratch->deltaOk[size_t(pos)]==1,commit.solverOutput,false,true,&frame);
+        scratch->outcome[k]=uint8_t(outcome);
+        if(outcome==RigExecPosePropagateOutcome::Staged) scratch->staged[k]=frame;
     }
     return true;
 }
@@ -367,32 +322,10 @@ _RrFinishCommit(RrProgram *program, size_t step, size_t commitIndex,
                 std::string *error)
 {
     RrStore &store = program->store;
-    RrPoseScratch *scratch = _RrScratch(program);
     const RigExecWireCommit &commit =
         program->poses->commits[commitIndex];
     RrCommitScratch &live = store.commits[commitIndex];
     RrStepOutput &output = store.stepOutputs[step];
-    const RigExecWireConstraint *constraint = nullptr;
-    if (!commit.solverOutput) {
-        const size_t walk = size_t((*program->steps)[step].object);
-        if (walk >= program->poses->walkSteps.size()) {
-            if (error) {
-                *error = _RrStepHead(program, step) +
-                         " names no walk step";
-            }
-            return false;
-        }
-        const int index = program->poses->walkSteps[walk].index;
-        if (index < 0 ||
-            size_t(index) >= program->poses->constraints.size()) {
-            if (error) {
-                *error = _RrStepHead(program, step) +
-                         " names no constraint";
-            }
-            return false;
-        }
-        constraint = &program->poses->constraints[size_t(index)];
-    }
     const auto carry = [&](size_t pos, size_t k, bool candidates,
                            bool descendants, std::string *fail) {
         if (candidates) {
@@ -471,19 +404,8 @@ _RrFinishCommit(RrProgram *program, size_t step, size_t commitIndex,
         }
         return true;
     };
-    const auto record = [&]() {
-        if (constraint && commitIndex < scratch->recordAfter.size() &&
-            scratch->recordAfter[commitIndex]) {
-            return _RrRecordFrame(program, step, *constraint, commit,
-                                  &output, error);
-        }
-        return true;
-    };
     if (live.abandoned) {
-        if (!carryEverything(error)) {
-            return false;
-        }
-        return record();
+        return carryEverything(error);
     }
     const std::string mover = program->TextOrEmpty(commit.moverPath);
     for (size_t k = 0; k < commit.propagate.size(); ++k) {
@@ -501,12 +423,6 @@ _RrFinishCommit(RrProgram *program, size_t step, size_t commitIndex,
             continue;
         }
         switch (outcome) {
-        case _RrNoCandidate:
-            if (!carryEverything(error)) {
-                return false;
-            }
-            output.bail = true;
-            return true;
         case _RrUnusableDescendant:
             output.diagnostics.push_back(
                 mover + " could not propagate its pose revision through " +
@@ -529,10 +445,7 @@ _RrFinishCommit(RrProgram *program, size_t step, size_t commitIndex,
                 "; constraint passed through");
             break;
         }
-        if (!carryEverything(error)) {
-            return false;
-        }
-        return record();
+        return carryEverything(error);
     }
     for (size_t pos = 0; pos < commit.slots.size(); ++pos) {
         if (pos >= live.present.size() || pos >= live.frames.size()) {
@@ -608,7 +521,7 @@ _RrFinishCommit(RrProgram *program, size_t step, size_t commitIndex,
                 live.staged[k];
         }
     }
-    return record();
+    return true;
 }
 
 } // namespace runtimePoseDetail
@@ -661,6 +574,15 @@ RrRunPoseStep(RrProgram *program, size_t step, std::string *error)
                 RigExecWireSlotKind::FirstFramePose) {
                 continue;
             }
+            if (!meta.providerActive.empty() && !meta.providerActive[size_t(i)]) {
+                RrMat4d unavailable(1);
+                unavailable[3][0] = std::numeric_limits<double>::quiet_NaN();
+                store.base[size_t(i)] = RrFrameFromMatrix(RrMat4d(1));
+                store.base[size_t(i)].flags = 0;
+                store.fin[size_t(i)] = store.base[size_t(i)];
+                store.posedM[size_t(i)] = unavailable;
+                continue;
+            }
             if (scratch->posedAuthored[size_t(i)]) {
                 store.base[size_t(i)] = RrFrameFromMatrix(
                     scratch->posedAuthoredM[size_t(i)]);
@@ -688,8 +610,10 @@ RrRunPoseStep(RrProgram *program, size_t step, std::string *error)
                         parent >= 0 ? store.posedM[size_t(parent)]
                                     : _RrIdentity();
                     store.base[size_t(i)] = RrFrameFromMatrix(
-                        avars * scratch->selfD[size_t(i)] *
-                        scratch->parentDinv[size_t(i)] * parentPosed);
+                        avars * scratch->posedD[size_t(i)] *
+                        scratch->parentDinv[size_t(i)] *
+                        (scratch->parentSpaceAuthored[size_t(i)]
+                            ? scratch->parentSpaceM[size_t(i)] : parentPosed));
                 } else {
                     // A switched slot composes against the SELECTED
                     // source's pair of spaces instead of its namespace
@@ -737,234 +661,44 @@ RrRunPoseStep(RrProgram *program, size_t step, std::string *error)
                         parent >= 0
                             ? scratch->defaultRoundTrip[size_t(parent)]
                             : _RrIdentity();
-                    const RrMat4d unswitched =
-                        RrRoundTrip(avars * scratch->selfD[size_t(i)] *
-                                    scratch->parentDinv[size_t(i)] *
-                                    parentPosed);
-                    const RrMat4d local =
-                        unswitched * parentPosed.GetInverse() * parentDefault;
-                    const RrMat4d localInverse = local.GetInverse();
-                    const int count = int(sw.sourceSlots.size());
-                    if (count <= 0) {
-                        if (error) {
-                            *error = _RrStepHead(program, step) +
-                                     " names no space";
+                    RigExecSpaceSwitchRecordT<RrVec3d> record;
+                    record.filters.assign(sw.filters.begin(),sw.filters.end());
+                    record.twistAxis=RrVec3d(sw.twistAxis[0],sw.twistAxis[1],sw.twistAxis[2]);
+                    std::copy(sw.affectTranslation.begin(),sw.affectTranslation.end(),record.affectTranslation.begin());
+                    std::copy(sw.affectRotation.begin(),sw.affectRotation.end(),record.affectRotation.begin());
+                    std::copy(sw.affectScale.begin(),sw.affectScale.end(),record.affectScale.begin());
+                    RigExecSpaceSwitchInputsT<RrMat4d> input;
+                    input.avars=avars; input.posedDefault=scratch->posedD[size_t(i)];
+                    input.parentDefaultInverse=scratch->parentDinv[size_t(i)];
+                    input.parentPosed=parentPosed; input.parentDefault=parentDefault;
+                    const auto selector=program->ReadSpaceSwitch(size_t(switchIndex));
+                    input.active=selector.f64;
+                    if(sw.tokenIndex) {
+                        input.active=0.0;
+                        const auto text=program->TextOrEmpty(selector.token);
+                        const auto found=std::find(sw.labels.begin(),sw.labels.end(),text);
+                        if(found!=sw.labels.end()) input.active=double(found-sw.labels.begin());
+                    }
+                    input.hasCarry=sw.spaceSlot>=0;
+                    if(input.hasCarry) {
+                        input.spaceDefault=scratch->defaultRoundTrip[size_t(sw.spaceSlot)];
+                        input.spacePosed=_RrReadFrameVersion(*program,*scratch,*sw.spaceRead);
+                    }
+                    for(size_t source=0;source<sw.sourceSlots.size();++source) {
+                        RigExecSpaceSwitchSourceT<RrMat4d> value;
+                        const int slot=sw.sourceSlots[source]; value.world=slot<0;
+                        if(slot>=0) {
+                            value.defaultSpace=scratch->defaultRoundTrip[size_t(slot)];
+                            value.posedSpace=_RrReadFrameVersion(*program,*scratch,sw.sourceReads[source]);
                         }
+                        input.sources.push_back(value);
+                    }
+                    RrMat4d output;
+                    if(!RigExecRunSpaceSwitchArithmetic<RrSpaceSwitchMath>(record,input,&output)) {
+                        if(error) *error=_RrStepHead(program,step)+" names no space";
                         return false;
                     }
-                    double active =
-                        program->ReadSpaceSwitch(size_t(switchIndex)).f64;
-                    if (!std::isfinite(active)) active = 0.0;
-                    active = RrClamp(active, 0.0, double(count - 1));
-                    const int lower = int(std::floor(active));
-                    const int upper = std::min(lower + 1, count - 1);
-                    const double blend = active - double(lower);
-                    const RrVec3d twistAxis(sw.twistAxis[0],
-                                            sw.twistAxis[1],
-                                            sw.twistAxis[2]);
-                    // rigExec:space. `local` composes over the target's
-                    // DEFAULT ancestors, so a master's motion reaches a
-                    // switched control only inside the source's motion --
-                    // and a twist or swing filter drops that carry along
-                    // with the part it was asked to drop. Strip the master
-                    // map off before the filter and put it back after.
-                    // Identity when no space is named, which is every
-                    // binary baked before the field existed.
-                    // The branches below must be UNTOUCHED when no space is
-                    // named, not multiplied by an identity: the round trip
-                    // through `local` is identity in exact arithmetic and a
-                    // few ulps off it in doubles, and this path is compared
-                    // against the baked one bit for bit.
-                    const bool hasCarry = sw.spaceSlot >= 0;
-                    RrMat4d carry = _RrIdentity();
-                    RrMat4d carryInverse = _RrIdentity();
-                    if (hasCarry) {
-                        carry = scratch->defaultRoundTrip[size_t(sw.spaceSlot)]
-                                    .GetInverse() *
-                                _RrReadFrameVersion(*program, *scratch,
-                                                    *sw.spaceRead);
-                        carryInverse = carry.GetInverse();
-                    }
-                    const auto rawDeltaOf = [&](int index) {
-                        const int slot = sw.sourceSlots[size_t(index)];
-                        if (slot < 0) {
-                            // World: the source never moves, so the only
-                            // motion left is the space's own carry -- and
-                            // with no space named there is none.
-                            return hasCarry ? local * carry * localInverse
-                                            : _RrIdentity();
-                        }
-                        // defaultRoundTrip, not selfD: a space source has
-                        // to be read the same way a namespace parent
-                        // would be, or the two paths disagree in the last
-                        // few digits on every descendant. Filtered while
-                        // the motion is still measured against the
-                        // SOURCE's rest, because the twist axis is the
-                        // source's.
-                        const RrMat4d sourceDefault =
-                            scratch->defaultRoundTrip[size_t(slot)];
-                        const RrRotationFilter filter =
-                            sw.filters.empty()
-                                ? RrRotationFilter::All
-                                : RrRotationFilter(sw.filters[size_t(index)]);
-                        const RrVec3d axis =
-                            sourceDefault.TransformDir(twistAxis);
-                        const RrMat4d moved =
-                            sourceDefault.GetInverse() *
-                            _RrReadFrameVersion(
-                                *program, *scratch,
-                                sw.sourceReads[size_t(index)]);
-                        const RrMat4d motion =
-                            hasCarry
-                                ? RrFilterSpaceRotation(moved * carryInverse,
-                                                        axis, filter) *
-                                      carry
-                                : RrFilterSpaceRotation(moved, axis, filter);
-                        return local * motion * localInverse;
-                    };
-                    // An `orient` source turns the control with the space
-                    // and keeps it where its namespace parent carries it.
-                    const auto deltaOf = [&](int index) {
-                        const RrMat4d d = rawDeltaOf(index);
-                        if (sw.filters.empty() ||
-                            RrRotationFilter(sw.filters[size_t(index)]) !=
-                                RrRotationFilter::Orient) {
-                            return d;
-                        }
-                        return RrOrientSpaceDelta(d, local, localInverse,
-                                                  unswitched);
-                    };
-                    RrMat4d delta = deltaOf(lower);
-                    if (upper != lower && blend > 0.0) {
-                        delta = RrBlendTransforms(delta, deltaOf(upper),
-                                                  blend);
-                    }
-                    delta = RrMaskTransform(delta,
-                                            sw.affectTranslation.data(),
-                                            sw.affectRotation.data(),
-                                            sw.affectScale.data());
-                    store.base[size_t(i)] =
-                        RrFrameFromMatrix(delta * local);
-                }
-            }
-            // An auto clavicle on this slot: the composed (and switched)
-            // frame translated before any descendant reads it, with the
-            // first FK control composed against the unshifted frame, as
-            // bakedPose.cpp's ApplyAutoClavicle does.
-            if (const int clavicleIndex =
-                    program->autoClavicleBySlot.empty()
-                        ? -1 : program->autoClavicleBySlot[size_t(i)];
-                clavicleIndex >= 0) {
-                const RigExecWireAutoClavicle &ac =
-                    program->poses->autoClavicles[size_t(clavicleIndex)];
-                RrMat4d target;
-                const int u = ac.fkSlot[0];
-                if (store.base[size_t(i)].IsValid() &&
-                    !store.base[size_t(i)].IsDegenerate() &&
-                    RrPointsToMatrix(RrIdentityLandmarks(),
-                                     store.base[size_t(i)].points, &target)) {
-                    RrPointFrame fkFrame;
-                    if (scratch->posedAuthored[size_t(u)]) {
-                        fkFrame =
-                            RrFrameFromMatrix(scratch->posedAuthoredM[size_t(u)]);
-                    } else {
-                        const double *a = &store.avars[size_t(u) * 11];
-                        const double units = a[10];
-                        const bool noScale =
-                            scratch->noScaleAvars[size_t(u)] != 0;
-                        const unsigned sign =
-                            size_t(u) < scratch->rotationSign.size()
-                                ? scratch->rotationSign[size_t(u)] : 0u;
-                        const double signX = _RrRotationSign(sign, 0);
-                        const RrMat4d avars = _RrComposeAvars(
-                            a[0] * units, a[1] * units, a[2] * units,
-                            noScale ? 1.0 : a[3], noScale ? 1.0 : a[4],
-                            noScale ? 1.0 : a[5], a[6] * signX,
-                            a[7] * _RrRotationSign(sign, 1),
-                            a[8] * _RrRotationSign(sign, 2), a[9] * signX,
-                            program->TextOrEmpty(
-                                scratch->rotOrder[size_t(u)]));
-                        fkFrame = RrFrameFromMatrix(
-                            avars * scratch->selfD[size_t(u)] *
-                            scratch->parentDinv[size_t(u)] * target);
-                    }
-                    RrMat4d fk;
-                    if (fkFrame.IsValid() && !fkFrame.IsDegenerate() &&
-                        RrPointsToMatrix(RrIdentityLandmarks(),
-                                         fkFrame.points, &fk)) {
-                        const auto row = [](const RrMat4d &m) {
-                            return &m[0][0];
-                        };
-                        RigExecAutoClavicleFrames f;
-                        f.anchorPosed = row(store.posedM[size_t(ac.anchorSlot)]);
-                        f.anchorDefault =
-                            row(scratch->defaultRoundTrip[size_t(ac.anchorSlot)]);
-                        f.pivotPosed = row(store.posedM[size_t(ac.pivotSlot)]);
-                        f.targetPosed = row(target);
-                        f.fkPosed = row(fk);
-                        for (int k = 0; k < 3; ++k) {
-                            f.fkDefault[k] = row(
-                                scratch->defaultRoundTrip[size_t(ac.fkSlot[k])]);
-                        }
-                        if (ac.ikTargetSlot >= 0) {
-                            f.ikTargetPosed =
-                                row(store.posedM[size_t(ac.ikTargetSlot)]);
-                        }
-                        if (ac.poleSlot >= 0) {
-                            f.polePosed = row(store.posedM[size_t(ac.poleSlot)]);
-                        }
-                        // The channel in its own type: the IK/FK dial is
-                        // float.
-                        const auto scalar = [](const RrInputValue &v) {
-                            return v.tag == RigExecWireInput::Tag::Float
-                                       ? double(v.f32) : v.f64;
-                        };
-                        f.ikBlend = scalar(program->ReadAutoClavicle(
-                            size_t(clavicleIndex), 0));
-                        f.amount = scalar(program->ReadAutoClavicle(
-                            size_t(clavicleIndex), 1));
-                        const int32_t limb =
-                            program->autoClavicleLimb.empty()
-                                ? -1
-                                : program->autoClavicleLimb[size_t(
-                                      clavicleIndex)];
-                        if (limb >= 0) {
-                            const RigExecWireLimbSolver &l =
-                                program->poses->limbSolvers[size_t(limb)];
-                            const auto value = [&](size_t which) {
-                                const RrInputValue v = program->ReadLimb(
-                                    size_t(limb), which);
-                                return v.tag == RigExecWireInput::Tag::Double
-                                           ? v.f64
-                                           : double(v.f32);
-                            };
-                            f.hasLimb = true;
-                            f.limb.stretch = double(
-                                program->ReadSolver(size_t(l.solver),
-                                                    RrSolverStretch).f32);
-                            f.limb.pin = value(0);
-                            f.limb.upperScale = value(1);
-                            f.limb.lowerScale = value(2);
-                            f.limb.softDistance = value(3);
-                            f.limb.scaleCalibration = l.scaleCalibration;
-                            f.twistRadians = value(4) * std::acos(-1.0) / 180.0;
-                            const RigExecWireSolver &ws =
-                                program->poses->solvers[size_t(l.solver)];
-                            f.limbRestUpper = ws.ikParams.upperLength;
-                            f.limbRestLower = ws.ikParams.lowerLength;
-                        }
-                        double delta[3];
-                        RigExecAutoClavicleShift(
-                            program->autoClavicleConstants[size_t(clavicleIndex)],
-                            f, delta);
-                        if (delta[0] != 0.0 || delta[1] != 0.0 ||
-                            delta[2] != 0.0) {
-                            for (int k = 0; k < 3; ++k) {
-                                target[3][k] = target[3][k] + delta[k];
-                            }
-                            store.base[size_t(i)] = RrFrameFromMatrix(target);
-                        }
-                    }
+                    store.base[size_t(i)]=RrFrameFromMatrix(output);
                 }
             }
             store.fin[size_t(i)] = store.base[size_t(i)];
@@ -1064,6 +798,7 @@ RrRunPoseStep(RrProgram *program, size_t step, std::string *error)
         RrMat4d matrix = _RrIdentity();
         if (wire.part) {
             if (size_t(store.finLast[slot]) >= store.fin.size() ||
+                size_t(store.baseLast[slot]) >= store.base.size() ||
                 slot >= scratch->restPts.size()) {
                 if (error) {
                     *error = _RrStepHead(program, step) +
@@ -1073,10 +808,23 @@ RrRunPoseStep(RrProgram *program, size_t step, std::string *error)
             }
             const RrPointFrame &frame =
                 store.fin[size_t(store.finLast[slot])];
-            if (RrFrameUsable(scratch->restFrames[slot]) &&
-                RrFrameUsable(frame)) {
-                RrPointsToMatrix(scratch->restPts[slot], frame.points,
-                                 &matrix);
+            const bool converted = RrFrameUsable(scratch->restFrames[slot]) &&
+                RrFrameUsable(frame) &&
+                RrPointsToMatrix(scratch->restPts[slot], frame.points, &matrix);
+            // Mirror the native provider admission: an unavailable final
+            // frame retains identity rather than entering the base fallback.
+            if (!converted && RrFrameUsable(frame)) {
+                const RrPointFrame &base = store.base[size_t(store.baseLast[slot])];
+                RrMat4d execM = _RrIdentity();
+                if (scratch->restFrames[slot].IsValid() && base.IsValid())
+                    RrPointsToMatrix(scratch->restPts[slot], base.points, &execM);
+                matrix = execM;
+                const auto &jointSlots = program->slotMeta->jointSlots;
+                if (std::find(jointSlots.begin(), jointSlots.end(), int32_t(slot)) != jointSlots.end()) {
+                    RrMat4d delta = _RrIdentity();
+                    if (RrPointsToMatrix(base.points, frame.points, &delta))
+                        matrix = execM * delta;
+                }
             }
             store.finalMatrix[slot] = matrix;
         } else {
@@ -1100,6 +848,110 @@ RrRunPoseStep(RrProgram *program, size_t step, std::string *error)
         return true;
     }
 
+    case RigExecWireStepKind::FrameMatrix: {
+        // RigExecBakedEvalFrameRecord: the record's provider frame, as its
+        // writer left it, converted against the slot's rest landmarks (the
+        // identity landmarks where the rest is unusable). Identity and 0
+        // where the writer did not record this run or its frame does not
+        // convert. Both fields every run, so a reader never sees a valid
+        // byte from another run beside this run's matrix.
+        const std::vector<RigExecWireFrameRecord> &records =
+            program->poses->frameRecords;
+        if (wire.object < 0 || size_t(wire.object) >= records.size() ||
+            size_t(wire.object) >= store.frameMatrix.size() ||
+            size_t(wire.object) >= store.frameMatrixValid.size()) {
+            if (error) {
+                *error = _RrStepHead(program, step) +
+                         " names no frame record";
+            }
+            return false;
+        }
+        const size_t object = size_t(wire.object);
+        const RigExecWireFrameRecord &record = records[object];
+        const size_t commitIndex = size_t(record.commit());
+        if (commitIndex >= program->poses->commits.size() ||
+            commitIndex >= store.commits.size() ||
+            commitIndex >= scratch->recordAfter.size() ||
+            commitIndex >= scratch->recordEveryTarget.size()) {
+            if (error) {
+                *error = _RrStepHead(program, step) + " names no commit";
+            }
+            return false;
+        }
+        if (size_t(record.version()) >= store.fin.size()) {
+            if (error) {
+                *error = _RrStepHead(program, step) +
+                         " names no fin version";
+            }
+            return false;
+        }
+        if (size_t(record.slot()) >= scratch->restFrames.size()) {
+            if (error) {
+                *error = _RrStepHead(program, step) + " names no slot";
+            }
+            return false;
+        }
+        RrMat4d matrix = _RrIdentity();
+        bool valid = false;
+        const RrPointFrame &frame = store.fin[size_t(record.version())];
+        if (_RrFrameRecorded(*program, *scratch, record) &&
+            frame.IsValid()) {
+            const RrPointFrame &rest =
+                scratch->restFrames[size_t(record.slot())];
+            const std::array<RrVec3d, 4> landmarks =
+                rest.IsValid() ? rest.points : RrIdentityLandmarks();
+            valid = RrPointsToMatrix(landmarks, frame.points, &matrix);
+        }
+        store.frameMatrix[object] = matrix;
+        store.frameMatrixValid[object] = valid ? 1 : 0;
+        return true;
+    }
+
+    case RigExecWireStepKind::SpaceCheckpoint: {
+        if(wire.object<0 || size_t(wire.object)>=program->poses->spaceCheckpoints.size()) return false;
+        const auto &context=program->poses->spaceCheckpoints[size_t(wire.object)];
+        struct CheckpointMath {
+            using Matrix=RrMat4d;
+            static Matrix RoundTripCheckpoint(const Matrix &matrix) {
+                return _RrSpaceOfFrame(RrFrameFromMatrix(matrix));
+            }
+        };
+        auto &inputs=scratch->checkpointInputs[size_t(wire.object)];
+        for(size_t position=0;position<context.recompose.size();++position) {
+            const size_t i=size_t(context.recompose[position]);
+            auto &input=inputs[position];
+            input.avars=_RrComposeAvarsOf(*program,*scratch,i);
+            input.posedDefault=scratch->posedD[i];
+            input.parentDefaultInverse=scratch->parentDinv[i];
+            input.parentExpression=scratch->parentSpaceM[i];
+            input.posedAuthoredMatrix=scratch->posedAuthoredM[i];
+            input.parentExpressionAuthored=scratch->parentSpaceAuthored[i]!=0;
+            input.posedAuthored=scratch->posedAuthored[i]!=0;
+        }
+        const RrMat4d ancestor=context.anchor>=0 ? program->store.posedM[size_t(context.anchor)] : _RrIdentity();
+        program->store.switchFrames[size_t(wire.object)]=
+            RigExecRunSpaceCheckpointArithmetic<CheckpointMath>(ancestor,inputs);
+        return true;
+    }
+    case RigExecWireStepKind::AvarInputs: {
+        const auto readBindings=[&](const std::vector<uint32_t> &reads) {
+            for(const uint32_t read:reads) {
+                const int avar=program->registeredReads[read].avar;
+                if(avar>=0 && avar/11==wire.object)
+                    store.avars[size_t(avar)]=program->ReadRegistered(int32_t(read)).f64;
+            }
+        };
+        readBindings(program->inputState.avarBindingReads);
+        readBindings(program->inputState.avarConstantReads);
+        return true;
+    }
+
+    case RigExecWireStepKind::ProviderRefresh:
+        return RrRunProviderRefresh(program,wire,error);
+
+    case RigExecWireStepKind::SpaceExpression:
+        return RrRunSpaceExpression(program, wire, error);
+
     case RigExecWireStepKind::PoseInterpolator: {
         if (wire.object < 0 ||
             size_t(wire.object) >= program->poses->poseInterpolators
@@ -1115,6 +967,14 @@ RrRunPoseStep(RrProgram *program, size_t step, std::string *error)
         }
         const RigExecWirePoseInterpolator &interp =
             program->poses->poseInterpolators[size_t(wire.object)];
+        // Resolve current producer outputs in the consuming graph body.
+        const size_t object = size_t(wire.object);
+        scratch->interpEnabled[object] =
+            program->ReadInterp(object).boolean ? 1 : 0;
+        for (size_t v = 0; v < interp.valueInputs.size() && v < 3; ++v) {
+            scratch->interpValues[object][v] =
+                program->ReadInterpValue(object, v).f64;
+        }
         for (int slot = interp.weightBegin; slot < interp.weightEnd;
              ++slot) {
             if (slot < 0 ||
@@ -1159,77 +1019,41 @@ RrRunPoseStep(RrProgram *program, size_t step, std::string *error)
             }
             return false;
         }
-        RrQuatd driverFinal(1.0), driverRest(1.0);
-        RrQuatd parentFinal(1.0), parentRest(1.0);
-        bool usable = numeric ||
-            (RrFrameRotation(store.fin[size_t(store.finLast[d])],
-                             &driverFinal) &&
-             RrFrameRotation(scratch->restFrames[d], &driverRest));
-        if (!numeric && usable && interp.parentSlot >= 0) {
-            const size_t p = size_t(interp.parentSlot);
-            if (size_t(store.finLast[p]) >= store.fin.size()) {
-                if (error) {
-                    *error = _RrStepHead(program, step) +
-                             " names no fin version";
+        RigExecPoseInterpolatorInputsT<RrPointFrame> input;
+        input.enabled=true;
+        if (numeric) {
+            for(size_t k=0;k<interp.valueInputs.size() && k<3;++k)
+                input.numeric.push_back(scratch->interpValues[object][k]);
+        } else {
+            input.driverFinal=&store.fin[size_t(store.finLast[d])];
+            input.driverRest=&scratch->restFrames[d];
+            if(interp.parentSlot>=0) {
+                const size_t p=size_t(interp.parentSlot);
+                if(size_t(store.finLast[p])>=store.fin.size()) {
+                    if(error) *error=_RrStepHead(program,step)+" names no fin version";
+                    return false;
                 }
-                return false;
+                input.parentFinal=&store.fin[size_t(store.finLast[p])];
+                input.parentRest=&scratch->restFrames[p];
             }
-            usable = RrFrameRotation(store.fin[size_t(store.finLast[p])],
-                                     &parentFinal) &&
-                     RrFrameRotation(scratch->restFrames[p], &parentRest);
         }
-        if (!usable) {
-            output.diagnostics.push_back(
-                "pose interpolator " +
-                program->TextOrEmpty(interp.path) +
-                " has no usable frame for its driver " +
-                program->TextOrEmpty(program->slotMeta->paths[d]) +
-                " after the pose walk; its weights are zero this "
-                "generation");
+        auto &solver=scratch->interpSolvers[object];
+        RigExecPoseInterpolatorRecordT<decltype(solver)> record{
+            solver,interp.enableTranslation,interp.allowNegativeWeights,interp.poseSlots.size()};
+        std::vector<double> &interpScratch=scratch->interpScratch[object];
+        const auto status=RigExecRunPoseInterpolatorArithmetic<RrPoseInterpolatorMath>(
+            record,input,&interpScratch);
+        if(status==RigExecPoseInterpolatorStatus::UnusableRotation) {
+            output.diagnostics.push_back("pose interpolator "+program->TextOrEmpty(interp.path)+
+                " has no usable frame for its driver "+program->TextOrEmpty(program->slotMeta->paths[d])+
+                " after the pose walk; its weights are zero this generation");
             return true;
         }
-        const RrQuatd local = parentFinal.GetInverse() * driverFinal;
-        const RrQuatd restLocal = parentRest.GetInverse() * driverRest;
-        const RrQuatd delta =
-            (restLocal.GetInverse() * local).GetNormalized();
-        // The translation channel, in metres for the solver: a numeric
-        // driver's dials stand in for it directly, and a transform-driven
-        // one measures its driver's local translation against its rest.
-        RrVec3d translation(0.0);
-        const RrVec3d *translationPtr = nullptr;
-        if (numeric) {
-            const std::array<double, 3> &values =
-                scratch->interpValues[size_t(wire.object)];
-            for (size_t i = 0; i < interp.valueInputs.size() && i < 3; ++i) {
-                translation[i] = values[i];
-            }
-            translation /= 100.0;
-            translationPtr = &translation;
-        } else if (interp.enableTranslation) {
-            const RrPointFrame *pf = nullptr, *pr = nullptr;
-            if (interp.parentSlot >= 0) {
-                const size_t p = size_t(interp.parentSlot);
-                pf = &store.fin[size_t(store.finLast[p])];
-                pr = &scratch->restFrames[p];
-            }
-            if (!RrFrameTranslation(store.fin[size_t(store.finLast[d])],
-                                    scratch->restFrames[d], pf, pr,
-                                    &translation)) {
-                output.diagnostics.push_back(
-                    "pose interpolator " +
-                    program->TextOrEmpty(interp.path) +
-                    " could not measure its driver's translation; its "
-                    "weights are zero this generation");
-                return true;
-            }
-            translation /= 100.0;
-            translationPtr = &translation;
+        if(status==RigExecPoseInterpolatorStatus::UnusableTranslation) {
+            output.diagnostics.push_back("pose interpolator "+program->TextOrEmpty(interp.path)+
+                " could not measure its driver's translation; its weights are zero this generation");
+            return true;
         }
-        std::vector<double> &interpScratch =
-            scratch->interpScratch[size_t(wire.object)];
-        scratch->interpSolvers[size_t(wire.object)].Evaluate(
-            _RrRbfEulerFromQuaternion(delta), translationPtr, &interpScratch,
-            interp.allowNegativeWeights);
         if (interpScratch.size() != interp.poseSlots.size()) {
             output.diagnostics.push_back(
                 "pose interpolator " +
@@ -1249,38 +1073,6 @@ RrRunPoseStep(RrProgram *program, size_t step, std::string *error)
             }
             store.poseWeights[size_t(interp.poseSlots[i])] =
                 static_cast<float>(interpScratch[i]);
-        }
-        return true;
-    }
-
-    case RigExecWireStepKind::SnapshotFinals: {
-        const size_t slots = program->slotMeta->paths.size();
-        for (size_t i = 0; i < slots; ++i) {
-            if (i >= store.finLast.size() ||
-                size_t(store.finLast[i]) >= store.fin.size() ||
-                i >= scratch->restFrames.size() ||
-                i >= scratch->restPts.size()) {
-                if (error) {
-                    *error = _RrStepHead(program, step) +
-                             " names no slot";
-                }
-                return false;
-            }
-            const RrPointFrame &frame =
-                store.fin[size_t(store.finLast[i])];
-            if (!RrFrameUsable(scratch->restFrames[i]) ||
-                !RrFrameUsable(frame)) {
-                continue;
-            }
-            RrMat4d matrix = _RrIdentity();
-            if (RrPointsToMatrix(scratch->restPts[i], frame.points,
-                                 &matrix)) {
-                RrSnapshotValue value;
-                value.tag = RrSnapshotValue::Tag::Matrix;
-                value.matrix = matrix;
-                output.snapshots.RecordFinal(
-                    program->slotMeta->paths[i], value);
-            }
         }
         return true;
     }

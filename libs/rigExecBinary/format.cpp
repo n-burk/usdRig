@@ -1,17 +1,22 @@
+#include "rigExecBinary/transport.h"
 // The .rigexec FlatBuffer: Open refuses, bounds, verifies, unpacks and
 // validates; Write validates and packs; the validator holds every rule a
 // file must satisfy that the file alone can decide.
 #include "rigExecBinary/format.h"
 
 #include "rigExecBinary/stepGraph.h"
+#include "rigExecGraph/providerRecords.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <new>
+#include <map>
+#include <set>
 #include <string_view>
 #include <tuple>
 #include <unordered_set>
+#include <unordered_map>
 #include <utility>
 
 namespace rigExec {
@@ -500,8 +505,8 @@ _Has(const Table &table, int64_t index)
 
 // The step rules, the step labels and the step graph's domain names cover
 // every kind and domain up to these; an appended one needs its own.
-static_assert(fb::StepKind::MAX == fb::StepKind::SkinTopology &&
-                  fb::SlotDomain::MAX == fb::SlotDomain::SkinTopology,
+static_assert(fb::StepKind::MAX == fb::StepKind::ProviderRefresh &&
+                  fb::SlotDomain::MAX == fb::SlotDomain::RequiredStageFramesAdmission,
               "a step kind or slot domain was appended: give it its rules");
 // The array tags and sources are frozen; the runtime mirrors the numbers.
 static_assert(uint8_t(fb::InputTag::IntArray) == 8 &&
@@ -509,7 +514,7 @@ static_assert(uint8_t(fb::InputTag::IntArray) == 8 &&
                   uint8_t(fb::InputTag::DoubleArray) == 10 &&
                   uint8_t(fb::InputTag::Vec2fArray) == 11 &&
                   uint8_t(fb::InputTag::Vec3fArray) == 12 &&
-                  fb::InputTag::MAX == fb::InputTag::Vec3fArray,
+                  fb::InputTag::MAX == fb::InputTag::Vec3i,
               "the array input tags are frozen");
 static_assert(uint8_t(fb::ArraySource::Pool) == 0 &&
                   uint8_t(fb::ArraySource::SkinIndices) == 1 &&
@@ -535,7 +540,7 @@ private:
         return _Root() && _Paths() && _Values() && _Pools() && _Slots() &&
                _SlotMeta() && _Constants() && _Steps() && _Cones() &&
                _Pose() && _Geometry() && _LayoutValues() &&
-               _PhaseBindings() && _PropertyChains() && _HeadChecks() && _StepGraph() &&
+               _PhaseBindings() && _PropertyChains() && _CrossDomainTables() && _ConsumerLeafSites() && _WeightFieldTables() && _ProviderTables() && _PoseBodyDeclarations() && _HeadChecks() && _StepGraph() && _SolverSemanticRequirements() && _RequiredStageFrames() &&
                _External() && _Overrides() &&
                _Presentation();
     }
@@ -673,6 +678,82 @@ private:
     /// only on Baked reads, a Raw read over one slot, and an array read Raw
     /// or Resolved, crossing no chain, with a pool constant. \p tag and
     /// \p modes are what the site admits.
+    // File-owned proof index: no cross-file cache and no source queries.
+    void _IndexSourceBackedOwners()
+    {
+        if(_sourceBackedIndexed)return;
+        _sourceBackedIndexed=true;
+        if(!_f.pose || !_f.slotMeta)return;
+        using Key=std::tuple<uint8_t,uint32_t,int32_t,uint32_t>;
+        struct Owners {std::set<size_t> rests,signs,constraints;};
+        std::map<Key,Owners> sites;
+        const auto direct=[&](const RigExecWireInput *read) {
+            return read && read->flags==_Flags(fb::InputReadFlags::SourceBacked) && read->mode==ReadMode::Baked &&
+                read->sampleTime==0 && read->selected==0 && read->walk.size()==1 &&
+                read->walk[0]<_f.inputs.size() && _f.inputs[read->walk[0]].type()==read->tag &&
+                (read->tag==InputTag::Double || read->tag==InputTag::Vec3d) &&
+                read->propertyCandidates.empty() && read->doubleCandidates.empty() && read->rawFallbackSlot==-1;
+        };
+        const auto key=[](const RigExecWireInput &read) {
+            return Key{uint8_t(read.tag),read.constant,read.overrideIndex,read.walk[0]};
+        };
+        const char *names[]={"rest:tx","rest:ty","rest:tz","rest:rx","rest:ry","rest:rz"};
+        for(size_t slot=0;slot<_f.pose->ladders.size() && slot<_f.slotMeta->paths.size();++slot) {
+            const uint32_t path=_f.slotMeta->paths[slot];
+            if(path>=_f.paths.size())continue;
+            for(size_t k=0;k<_f.pose->ladders[slot].restAvars.size() && k<6;++k) {
+                const auto *body=&_f.pose->ladders[slot].restAvars[k];
+                if(direct(body) && body->tag==InputTag::Double && _SlotIs(int32_t(body->walk[0]),path,names[k])) {
+                    _sourceBackedOwners.insert(body);sites[key(*body)].rests.insert(slot);
+                }
+            }
+            const auto *sign=_f.pose->ladders[slot].rotationSign.get();
+            if(direct(sign) && sign->tag==InputTag::Vec3d &&
+               _SlotIs(int32_t(sign->walk[0]),path,"avars:rotationSign") &&
+               sign->constant<_f.values.size() && _f.values[sign->constant].tag==InputTag::Vec3d &&
+               _f.values[sign->constant].vec3d &&
+               (*_f.values[sign->constant].vec3d)[0]==1.0 &&
+               (*_f.values[sign->constant].vec3d)[1]==1.0 &&
+               (*_f.values[sign->constant].vec3d)[2]==1.0) {
+                _sourceBackedOwners.insert(sign);sites[key(*sign)].signs.insert(slot);
+            }
+        }
+        for(size_t index=0;index<_f.pose->constraints.size();++index) {
+            const auto &constraint=_f.pose->constraints[index];
+            const auto *body=constraint.offset.get();
+            if(constraint.path<_f.paths.size() && direct(body) && body->tag==InputTag::Vec3d &&
+               _SlotIs(int32_t(body->walk[0]),constraint.path,"inputs:translationOffset")) {
+                _sourceBackedOwners.insert(body);sites[key(*body)].constraints.insert(index);
+            }
+        }
+        for(const auto &step:_f.steps) {
+            if(step.object<0)continue;
+            for(const auto &read:step.headInputReads) {
+                if(!direct(&read))continue;
+                const auto found=sites.find(key(read));if(found==sites.end())continue;
+                bool eligible=false;
+                if(step.kind==fb::StepKind::RestCompose && size_t(step.object)<_f.pose->composeGroups.size()) {
+                    const auto &group=_f.pose->composeGroups[size_t(step.object)];
+                    if(group.begin>=0 && group.end>=group.begin) {
+                        const auto at=found->second.rests.lower_bound(size_t(group.begin));
+                        eligible=at!=found->second.rests.end() && *at<size_t(group.end);
+                    }
+                } else if(step.kind==fb::StepKind::LadderCompose && size_t(step.object)<_f.pose->composeGroups.size()) {
+                    const auto &group=_f.pose->composeGroups[size_t(step.object)];
+                    if(group.begin>=0 && group.end>=group.begin) {
+                        const auto at=found->second.signs.lower_bound(size_t(group.begin));
+                        eligible=at!=found->second.signs.end() && *at<size_t(group.end);
+                    }
+                } else if(step.kind==fb::StepKind::Constraint && size_t(step.object)<_f.pose->walkSteps.size()) {
+                    const auto &walk=_f.pose->walkSteps[size_t(step.object)];
+                    eligible=!walk.solverBatch && walk.index>=0 && size_t(walk.index)<_f.pose->constraints.size() &&
+                        found->second.constraints.count(size_t(walk.index))!=0;
+                }
+                if(eligible)_sourceBackedOwners.insert(&read);
+            }
+        }
+    }
+
     bool _Read(const RigExecWireInput *input, int tag, unsigned modes,
                const std::string &row, const char *field, long index = -1)
     {
@@ -680,10 +761,16 @@ private:
         if (!input) {
             return _Bad(where() + ": missing");
         }
-        if (input->tag > InputTag::MAX || input->mode > ReadMode::MAX ||
+        if (input->tag > InputTag::MAX || input->mode > ReadMode::MAX || input->sampleTime > 1 ||
             (input->flags & ~_Flags(fb::InputReadFlags::ANY)) != 0) {
             return _Bad(where() + ": tag, mode or flags out of range");
         }
+        if((input->flags&_Flags(fb::InputReadFlags::SourceBacked))!=0 &&
+           (input->flags!=_Flags(fb::InputReadFlags::SourceBacked) || input->mode!=ReadMode::Baked ||
+            input->sampleTime!=0 || input->selected!=0 || input->walk.size()!=1 ||
+            (input->tag!=InputTag::Double && input->tag!=InputTag::Vec3d) ||
+            !input->propertyCandidates.empty() || !input->doubleCandidates.empty() || input->rawFallbackSlot!=-1))
+            return _Bad(where()+": invalid source-backed direct read");
         const bool array = RigExecFormatIsArrayTag(input->tag);
         if (tag == _AnyTag && array) {
             return _Bad(where() + ": tag " + _N(size_t(input->tag)) +
@@ -736,6 +823,22 @@ private:
                     candidate.kind > uint8_t(fb::PropertyCandidateKind::PhasedRecord) ||
                     (kind == fb::PropertyCandidateKind::SlotOnly ? candidate.version != -1 : candidate.version < 0))
                     return _Bad(where() + ": malformed property candidate");
+                if(candidate.poseWeight < -1 || (candidate.poseWeight>=0 &&
+                    size_t(candidate.poseWeight)>=_f.pose->poseWeightPaths.size()) ||
+                    candidate.crossDomain < -1 || (candidate.crossDomain>=0 &&
+                    size_t(candidate.crossDomain)>=_f.crossDomainReads.size()))
+                    return _Bad(where()+": candidate typed source index out of range");
+                if(candidate.poseWeight>=0 && input->tag!=InputTag::Float)
+                    return _Bad(where()+": pose weight candidate requires Float read");
+                if(candidate.poseWeight>=0 && candidate.crossDomain>=0)
+                    return _Bad(where()+": incompatible pose and cross-domain candidates");
+                if(candidate.crossDomain>=0) {
+                    const auto &cross=_f.crossDomainReads[size_t(candidate.crossDomain)];
+                    if((cross.kind==fb::CrossDomainReadKind::PointElement && input->tag!=InputTag::Vec3f) ||
+                       (cross.kind==fb::CrossDomainReadKind::Points && input->tag!=InputTag::Vec3fArray) ||
+                       (cross.kind==fb::CrossDomainReadKind::PoseFrame && input->tag!=InputTag::Matrix4d))
+                        return _Bad(where()+": cross-domain candidate type differs from read");
+                }
                 const auto &slot = _f.inputs[candidate.slot];
                 if (kind == fb::PropertyCandidateKind::ChainFinal) {
                     if (slot.chain() < 0 || size_t(slot.chain()) >= _f.propertyChains.size())
@@ -752,6 +855,8 @@ private:
             return true;
         };
         if (!candidates(input->propertyCandidates) || !candidates(input->doubleCandidates)) return false;
+        for(const auto &candidate:input->doubleCandidates) if(candidate.poseWeight>=0)
+            return _Bad(where()+": Double traversal cannot use Float pose publication");
         if (input->rawFallbackSlot < -1 ||
             (input->rawFallbackSlot >= 0 && size_t(input->rawFallbackSlot) >= _f.inputs.size()) ||
             (!input->doubleCandidates.empty() && input->tag != InputTag::Float) ||
@@ -780,10 +885,22 @@ private:
             (input->flags & _Flags(fb::InputReadFlags::Varying)) != 0;
         const bool longWay =
             (input->flags & _Flags(fb::InputReadFlags::LongWay)) != 0;
+        const bool sourceBacked=(input->flags & _Flags(fb::InputReadFlags::SourceBacked))!=0;
+        if(sourceBacked) {
+            if(input->flags!=_Flags(fb::InputReadFlags::SourceBacked) || !baked || input->sampleTime!=0 ||
+               input->selected!=0 || input->walk.size()!=1 ||
+               (input->tag!=InputTag::Double && input->tag!=InputTag::Vec3d) ||
+               !input->propertyCandidates.empty() || !input->doubleCandidates.empty() || input->rawFallbackSlot!=-1 ||
+               _f.inputs[input->walk[0]].type()!=input->tag)
+                return _Bad(where()+": invalid source-backed direct read");
+            _IndexSourceBackedOwners();
+            const bool owner=_sourceBackedOwners.count(input)!=0;
+            if(!owner)return _Bad(where()+": source-backed read has no eligible numeric owner");
+        }
         if (input->selected < -1 ||
             (input->selected >= 0 &&
              (size_t(input->selected) >= input->walk.size() || !baked ||
-              !varying || longWay))) {
+              (!varying && !sourceBacked) || longWay))) {
             return _Bad(where() + ": selected " +
                         std::to_string(input->selected) +
                         " is not a pinned hop of a Baked varying read");
@@ -832,6 +949,14 @@ private:
         if (!read) {
             return _Bad(where + ": missing");
         }
+        if (!_Index(read->context, _f.pose->spaceCheckpoints.size(), true, where, "context")) return false;
+        if (read->context >= 0) {
+            if (read->anchor != -1 || !read->recompose.empty())
+                return _Bad(where + ": checkpoint read also carries an inline version");
+            return true;
+        }
+        if (!read->recompose.empty())
+            return _Bad(where + ": inline recomposition requires a checkpoint operation");
         if (!_Index(read->anchor, _slots, true, where, "anchor") ||
             !_Indices(read->recompose, _slots, false, where, "recompose")) {
             return false;
@@ -851,31 +976,19 @@ private:
     bool _UnreadVersion(const fb::RigExecWireFrameVersion &read,
                         const std::string &where)
     {
-        if (read.anchor != -1 || !read.recompose.empty()) {
+        if (read.context != -1 || read.anchor != -1 || !read.recompose.empty()) {
             return _Bad(where + ": reads no slot, so its version is "
                                 "{-1, []}");
         }
         return true;
     }
 
-    /// Switches are stored in resolution order: an anchor that is itself
-    /// a switched slot reads the version its switch produces, so that
-    /// switch is stored before the reading one (\p reader).
-    bool _ResolvedAnchor(const fb::RigExecWireFrameVersion &read,
-                         const std::vector<int32_t> &switchOf, size_t reader,
-                         const std::string &where)
+    /// Scheduling belongs to the serialized typed producer graph. Switch
+    /// descriptor enumeration does not choose a provider version.
+    bool _ResolvedAnchor(const fb::RigExecWireFrameVersion &,
+                         const std::vector<int32_t> &, size_t,
+                         const std::string &)
     {
-        if (read.anchor < 0) {
-            return true;
-        }
-        const int32_t producer = switchOf[size_t(read.anchor)];
-        if (producer != -1 && size_t(producer) >= reader) {
-            return _Bad(where + ".anchor: slot " +
-                        _N(size_t(read.anchor)) +
-                        " is switched by pose.space_switches[" +
-                        _N(size_t(producer)) +
-                        "], which is not stored before this switch");
-        }
         return true;
     }
 
@@ -907,7 +1020,7 @@ private:
                         "; this reader reads " + _N(RigExecFormatVersion));
         }
         if (!_f.slotMeta || !_f.constants || !_f.clustering || !_f.cones ||
-            !_f.pose || !_f.geometry) {
+            !_f.pose || !_f.geometry || !_f.commonGraph) {
             return _Bad("a required root table is missing");
         }
         _slots = _f.slotMeta->paths.size();
@@ -1073,7 +1186,8 @@ private:
             }
             if (bool(value.matrix) != (value.tag == InputTag::Matrix4d) ||
                 bool(value.vec3d) != (value.tag == InputTag::Vec3d) ||
-                bool(value.vec3f) != (value.tag == InputTag::Vec3f)) {
+                bool(value.vec3f) != (value.tag == InputTag::Vec3f) ||
+                bool(value.vec3i) != (value.tag == InputTag::Vec3i)) {
                 return _Bad(where + ": its members do not match its tag");
             }
             if (value.arraySource > fb::ArraySource::MAX) {
@@ -1134,6 +1248,10 @@ private:
             return _f.vec2fArrays.size();
         case InputTag::Vec3fArray:
             return _f.vec3fArrays.size();
+        case InputTag::Vec3dArray: return _f.vec3dArrays.size();
+        case InputTag::Matrix4dArray: return _f.matrix4dArrays.size();
+        case InputTag::TokenArray: return _f.tokenArrays.size();
+        case InputTag::BoolArray: return _f.boolArrays.size();
         default:
             return 0;
         }
@@ -1203,7 +1321,14 @@ private:
                first(_f.floatArrays, "float_arrays") &&
                first(_f.doubleArrays, "double_arrays") &&
                first(_f.vec2fArrays, "vec2f_arrays") &&
-               first(_f.vec3fArrays, "vec3f_arrays");
+               first(_f.vec3fArrays, "vec3f_arrays") &&
+               first(_f.vec3dArrays, "vec3d_arrays") &&
+               first(_f.matrix4dArrays, "matrix4d_arrays") &&
+               first(_f.tokenArrays, "token_arrays") &&
+               first(_f.boolArrays, "bool_arrays") &&
+               std::all_of(_f.boolArrays.begin(),_f.boolArrays.end(),[](const auto &row) {
+                   return std::all_of(row.v.begin(),row.v.end(),[](uint8_t value){return value<=1;});
+               });
     }
 
     /// The input list: typed defaults, back references to the chains and
@@ -1226,6 +1351,8 @@ private:
                             RigExecFormatPathText(_f, slot.name()));
             }
             named[slot.name()] = 1;
+            if(slot.type()>=InputTag::Vec3dArray && i<_f.listedInputs)
+                return _Bad(where+": provider-only values cannot be public");
             const bool listed =
                 (slot.flags() & uint8_t(fb::InputSlotFlags::Listed)) != 0;
             if (slot.type() > InputTag::MAX ||
@@ -1269,6 +1396,7 @@ private:
         const std::string row = "slot_meta";
         if (!_PathIds(m.paths, _Prim, row, "paths") ||
             !_Size(m.slotKind.size(), _slots, row, "slot_kind") ||
+            !_Size(m.providerActive.size(), _slots, row, "provider_active") ||
             !_Size(m.parent.size(), _slots, row, "parent") ||
             !_Size(m.propParent.size(), _slots, row, "prop_parent") ||
             !_Size(m.needFinal.size(), _slots, row, "need_final") ||
@@ -1279,6 +1407,7 @@ private:
             !_Bools(m.needBase, row, "need_base")) {
             return false;
         }
+        if(!_Bools(m.providerActive,row,"provider_active"))return false;
         for (size_t k = 0; k < m.slotKind.size(); ++k) {
             if (m.slotKind[k] > fb::SlotKind::MAX) {
                 return _Bad(_At(row, "slot_kind", long(k)) +
@@ -1305,6 +1434,14 @@ private:
                       "solver_array_paths")) {
             return false;
         }
+        if (!_Size(m.publicationRoles.size(), _slots, row, "publication_roles") ||
+            !_Indices(m.solverArrayElements, _f.pose->solvers.size(), false,
+                      row, "solver_array_elements")) return false;
+        std::vector<uint8_t> roles(_slots, 0);
+        for (int slot : m.jointSlots) roles[size_t(slot)] |= uint8_t(1);
+        for (int slot : m.controlSlots) roles[size_t(slot)] |= uint8_t(2);
+        if (roles != m.publicationRoles)
+            return _Bad(row + ": publication_roles differs from actual joint/control membership");
         const auto permutation = [&](const std::vector<int32_t> &order,
                                      size_t count, const char *field) {
             if (!_Size(order.size(), count, row, field)) {
@@ -1377,7 +1514,7 @@ private:
     bool _VolumePlacement(size_t i, std::vector<int64_t> *placer)
     {
         const fb::RigExecWireStep &step = _f.steps[i];
-        if (step.part != 1) {
+        if (step.part != 1 && step.part != 2) {
             return _Bad(_StepName(i) +
                         (step.part == -1
                              ? " is the retired whole-map placement (part -1)"
@@ -1391,8 +1528,10 @@ private:
                         ", which is no volume slot");
         }
         const uint32_t slot = uint32_t(step.object);
+        const auto domain = step.part == 2 ? fb::SlotDomain::WeightFramesBase
+                                           : fb::SlotDomain::WeightFrames;
         if (step.writes.size() != 1 ||
-            step.writes[0].domain() != fb::SlotDomain::WeightFrames ||
+            step.writes[0].domain() != domain ||
             step.writes[0].begin() != slot ||
             step.writes[0].end() != slot + 1) {
             return _Bad(_StepName(i) + " writes other than WeightFrames[" +
@@ -1414,7 +1553,7 @@ private:
         // volume and no other writer of WeightFrames, the step graph's
         // producer check puts each volume's step before every reader of its
         // slot.
-        std::vector<int64_t> placer(_slots, -1);
+        std::vector<int64_t> placer(_slots, -1), basePlacer(_slots, -1);
         for (size_t i = 0; i < _f.steps.size(); ++i) {
             const fb::RigExecWireStep &step = _f.steps[i];
             const std::string row = "steps[" + _N(i) + "]";
@@ -1451,13 +1590,14 @@ private:
                             "weight object");
             }
             if (step.kind == fb::StepKind::VolumePlacements) {
-                if (!_VolumePlacement(i, &placer)) {
+                if (!_VolumePlacement(i, step.part == 2 ? &basePlacer : &placer)) {
                     return false;
                 }
                 continue;
             }
             for (const fb::SlotRange &range : step.writes) {
-                if (range.domain() == fb::SlotDomain::WeightFrames) {
+                if (range.domain() == fb::SlotDomain::WeightFrames ||
+                    range.domain() == fb::SlotDomain::WeightFramesBase) {
                     return _Bad(_StepName(i) +
                                 " writes WeightFrames, which only a "
                                 "VolumePlacements step writes");
@@ -1466,7 +1606,9 @@ private:
         }
         const std::vector<uint8_t> &volumes = _f.constants->noScaleAvars;
         for (size_t slot = 0; slot < volumes.size(); ++slot) {
-            if (volumes[slot] && placer[slot] < 0) {
+            if (volumes[slot] &&
+                ((placer[slot] < 0 && !_ExcludedValue(fb::SlotDomain::WeightFrames,uint32_t(slot))) ||
+                 (basePlacer[slot] < 0 && !_ExcludedValue(fb::SlotDomain::WeightFramesBase,uint32_t(slot))))) {
                 return _Bad("volume slot " + _N(slot) + " (" +
                             RigExecFormatPathText(
                                 _f, _f.slotMeta->paths[slot]) +
@@ -1481,11 +1623,1367 @@ private:
     /// reader applies, in its words. It runs after the phase bindings, so a
     /// reader ordered before what it is bound to is named by the binding's
     /// own rule rather than as an unproduced read.
+    bool _ExcludedValue(fb::SlotDomain domain,uint32_t slot) const
+    {
+        if(!_f.commonGraph) return false;
+        for(uint64_t id:_f.commonGraph->excludedValues) {
+            if(id>=_f.commonGraph->valueSpecs.size()) continue;
+            const auto &spec=_f.commonGraph->valueSpecs[size_t(id)];
+            if(spec.domain==uint32_t(domain) && spec.slot==slot) return true;
+        }
+        return false;
+    }
+
+    bool _CrossDomainTables()
+    {
+        for(size_t i=0;i<_f.crossDomainReads.size();++i) {
+            const auto &read=_f.crossDomainReads[i];
+            const std::string row="cross_domain_reads["+_N(i)+"]";
+            if(!_Phase(read.phase,row,"phase")) return false;
+            if(read.kind>fb::CrossDomainReadKind::Points ||
+               !_PathId(read.consumer,_Property|_Prim,row,"consumer") ||
+               !_PathId(read.source,_Property|_Prim,row,"source") ||
+               !_PathId(read.reader,_Property|_Prim|_Zero,row,"reader"))
+                return _Bad(row+": invalid kind/owning paths");
+            if(read.kind==fb::CrossDomainReadKind::PointElement || read.kind==fb::CrossDomainReadKind::Points) {
+                if(read.kind==fb::CrossDomainReadKind::PointElement && read.element<0)
+                    return _Bad(row+": selected element is negative");
+                for(const auto &candidate:read.points)
+                    if(candidate.first<0 || size_t(candidate.first)>=_f.geometry->chains.size() ||
+                       candidate.second<0 || size_t(candidate.second)>_f.geometry->chains[size_t(candidate.first)].revisions.size())
+                        return _Bad(row+": points candidate exceeds actual chain versions");
+                for(const auto &candidate:read.points) {
+                    if(_f.geometry->chains[size_t(candidate.first)].target!=read.source)
+                        return _Bad(row+": point candidate belongs to another source");
+                    if(read.phase.kind==uint8_t(fb::ReadPhaseKind::Base) && candidate.second!=0)
+                        return _Bad(row+": Base point candidate is not version zero");
+                }
+                if(read.finalPoints!=(read.phase.kind==uint8_t(fb::ReadPhaseKind::Final)))
+                    return _Bad(row+": point final selection differs from phase");
+                if(read.rawSlot < -1 || (read.rawSlot>=0 &&
+                    (size_t(read.rawSlot)>=_f.inputs.size() || _f.inputs[size_t(read.rawSlot)].type()!=InputTag::Vec3fArray)))
+                    return _Bad(row+": raw points fallback has incompatible slot");
+            } else if(read.kind==fb::CrossDomainReadKind::PoseFrame) {
+                if(read.provider<0 || size_t(read.provider)>=_slots)
+                    return _Bad(row+": provider slot exceeds actual pose");
+                if(RigExecFormatPathText(_f,read.source)!=RigExecFormatPathText(_f,_f.slotMeta->paths[size_t(read.provider)])+".posed:space")
+                    return _Bad(row+": pose frame source belongs to another provider");
+                if(read.baseFrame!=(read.phase.kind==uint8_t(fb::ReadPhaseKind::Base)))
+                    return _Bad(row+": pose frame pool differs from phase");
+                std::set<uint32_t> ownedFrames{uint32_t(read.provider)};
+                const auto note=[&](const auto &values,size_t index) { if(index<values.size()) ownedFrames.insert(values[index]); };
+                bool written=false;
+                for(const auto &commit:_f.pose->commits) {
+                    if(read.baseFrame && !commit.solverOutput) continue;
+                    for(size_t k=0;k<commit.slots.size();++k) if(commit.slots[k]==read.provider) {
+                        const auto &writes=read.baseFrame?commit.slotBaseWrites:commit.slotWrites;
+                        const auto &carry=read.baseFrame?commit.slotBaseCarry:commit.slotCarry;
+                        note(writes,k); note(carry,k); written=written || k<writes.size();
+                    }
+                    for(size_t k=0;k<commit.propagate.size();++k) if(commit.propagate[k].first==read.provider) {
+                        const auto &writes=read.baseFrame?commit.descendantBaseWrites:commit.descendantWrites;
+                        const auto &carry=read.baseFrame?commit.descendantBaseCarry:commit.descendantCarry;
+                        note(writes,k); note(carry,k); written=written || k<writes.size();
+                    }
+                }
+                for(const auto &refresh:_f.pose->providerRefreshes) {
+                    if(refresh.slot==read.provider) {
+                        ownedFrames.insert(read.baseFrame?refresh.baseWrite:refresh.finWrite);
+                        ownedFrames.insert(read.baseFrame?refresh.baseRead:refresh.finRead);
+                    }
+                    for(const auto &carry:refresh.carries)if(carry.slot==read.provider) {
+                        ownedFrames.insert(read.baseFrame?carry.baseWrite:carry.finWrite);
+                        ownedFrames.insert(read.baseFrame?carry.baseRead:carry.finRead);
+                    }
+                }
+                if(written) ownedFrames.insert(uint32_t(_slots)+uint32_t(read.provider));
+                for(uint32_t version:read.frames) if(!ownedFrames.count(version))
+                    return _Bad(row+": frame version belongs to another provider");
+                for(uint32_t version:read.frames)
+                    if(!_GraphValueSlot(uint32_t(read.baseFrame?fb::SlotDomain::PoseBase:fb::SlotDomain::PoseFin),version))
+                        return _Bad(row+": frame candidate exceeds actual version storage");
+            } else if(read.kind==fb::CrossDomainReadKind::SpaceValue) {
+                if(read.spaceValue<0 || !_GraphValueSlot(uint32_t(fb::SlotDomain::SpaceValue),uint32_t(read.spaceValue)))
+                    return _Bad(row+": provider expression value exceeds actual storage");
+            } else if(read.kind==fb::CrossDomainReadKind::PropertyResult) {
+                if(read.propertyChain<0 || size_t(read.propertyChain)>=_f.propertyChains.size())
+                    return _Bad(row+": property candidate has no chain owner");
+                const auto &chain=_f.propertyChains[size_t(read.propertyChain)];
+                if(_f.inputs[chain.target].name()!=read.source)
+                    return _Bad(row+": property source belongs to another chain");
+                if(read.phase.kind==uint8_t(fb::ReadPhaseKind::Base) && read.propertyVersion!=chain.versionBase)
+                    return _Bad(row+": Base property source is not version zero");
+                if(read.phase.kind==uint8_t(fb::ReadPhaseKind::Final) && read.propertyVersion!=chain.versionBase+chain.revisions.size())
+                    return _Bad(row+": Final property source is not final version");
+                if(read.propertyVersion<chain.versionBase ||
+                   uint64_t(read.propertyVersion)>uint64_t(chain.versionBase)+chain.revisions.size())
+                    return _Bad(row+": property candidate version differs from actual owner");
+            }
+        }
+        return true;
+    }
+
+    bool _RequireCandidateReads(size_t owner,const RigExecWireInput &input)
+    {
+        const auto require=[&](fb::SlotDomain domain,uint32_t slot) {
+            return _BodyRead(owner,domain,slot) || _Bad(_StepName(owner)+": nested input omitted typed producer read");
+        };
+        for(const auto *segment:{&input.propertyCandidates,&input.doubleCandidates})
+            for(const auto &hop:*segment) {
+                if(hop.version>=0 && !require(fb::SlotDomain::PropertyResult,uint32_t(hop.version))) return false;
+                if(hop.poseWeight>=0 && !require(fb::SlotDomain::PoseWeight,uint32_t(hop.poseWeight))) return false;
+                if(hop.crossDomain<0) continue;
+                const auto &cross=_f.crossDomainReads[size_t(hop.crossDomain)];
+                if(cross.kind==fb::CrossDomainReadKind::PropertyResult) {
+                    if(!require(fb::SlotDomain::PropertyResult,cross.propertyVersion)) return false;
+                } else if(cross.kind==fb::CrossDomainReadKind::SpaceValue) {
+                    if(!require(fb::SlotDomain::SpaceValue,uint32_t(cross.spaceValue))) return false;
+                } else if(cross.kind==fb::CrossDomainReadKind::PoseFrame) {
+                    for(uint32_t version:cross.frames) if(!require(cross.baseFrame?fb::SlotDomain::PoseBase:fb::SlotDomain::PoseFin,version)) return false;
+                } else for(const auto &point:cross.points) {
+                    if(cross.finalPoints) { if(!require(fb::SlotDomain::ChainPoints,uint32_t(point.first))) return false; }
+                    else if(point.second==0) { if(!require(fb::SlotDomain::ChainBase,uint32_t(point.first))) return false; }
+                    else {
+                        const uint32_t revision=uint32_t(_f.geometry->chainRevisionBegin[size_t(point.first)])+uint32_t(point.second)-1;
+                        if(!require(fb::SlotDomain::RevisionDone,revision) || !require(fb::SlotDomain::ChainDirty,revision)) return false;
+                    }
+                }
+            }
+        return true;
+    }
+
+    bool _SolverSemanticRequirements()
+    {
+        const auto &solvers=_f.pose->solvers;
+        std::vector<int64_t> active(solvers.size(),-1);
+        std::map<std::string,size_t> solverKeys;
+        for(size_t i=0;i<solvers.size();++i) {
+            const auto &solver=solvers[i];
+            if(!solver.solveDescriptorKey.empty()) {
+                const std::string prefix=RigExecFormatPathText(_f,solver.path)+"/category:"+std::to_string(int(fb::StepKind::Solve))+"/";
+                if(solver.solveDescriptorKey.compare(0,prefix.size(),prefix)!=0 ||
+                    !solverKeys.emplace(solver.solveDescriptorKey,i).second)
+                    return _Bad("pose.solvers: invalid or duplicate canonical Solve identity");
+            }
+        }
+        for(size_t step=0;step<_f.steps.size();++step) {
+            const auto &body=_f.steps[step];
+            if(body.kind!=fb::StepKind::Solve) {
+                if(!body.semanticPredecessorKeys.empty())return _Bad(_StepName(step)+": semantic prerequisites on a non-Solve body");
+                continue;
+            }
+            if(!_Has(solvers,body.object))return _Bad(_StepName(step)+": invalid semantic Solve owner");
+            const size_t owner=size_t(body.object);
+            if(active[owner]>=0)return _Bad(_StepName(step)+": duplicate semantic Solve owner");
+            active[owner]=int64_t(step);
+            if(!solvers[owner].solveDescriptorKey.empty() && body.descriptorKey!=solvers[owner].solveDescriptorKey)
+                return _Bad(_StepName(step)+": canonical Solve identity differs from its solver");
+        }
+        std::unordered_map<std::string,size_t> commonKeys;
+        commonKeys.reserve(_f.commonGraph->ops.size());
+        for(size_t i=0;i<_f.commonGraph->ops.size();++i)
+            if(!commonKeys.emplace(_f.commonGraph->ops[i].key,i).second)return _Bad("common_graph: duplicate semantic operation identity");
+        for(size_t i=0;i<solvers.size();++i) {
+            const auto &solver=solvers[i];
+            const std::string type=RigExecFormatPathText(_f,solver.type);
+            const auto supported=[&](const std::string &port) {
+                if(type=="RigExecFkChain")return port=="rigExec:controls" || port=="rigExec:startFrame";
+                if(type=="RigExecTwoBoneIk")return port=="rigExec:rootControl" || port=="rigExec:effectorControl" || port=="rigExec:poleControl" || port=="rigExec:space";
+                if(type=="RigExecBlendPointFrames")return port=="rigExec:inputA" || port=="rigExec:inputB";
+                if(type=="RigExecTwistDistribution")return port=="rigExec:start" || port=="rigExec:end";
+                if(type=="RigExecRibbon")return port=="rigExec:driverCurve" || port=="rigExec:startFrame" ||
+                    port=="rigExec:endFrame" || port=="rigExec:twistFrames";
+                if(type=="RigExecSplineIk")return port=="rigExec:rootControl" || port=="rigExec:midControl" || port=="rigExec:endControl" || port=="rigExec:space";
+                return false;
+            };
+            std::set<std::pair<std::string,int32_t>> facts;
+            std::set<std::string> expected;
+            std::set<std::string> singlePorts;
+            for(const auto &requirement:solver.relationshipRequirements) {
+                if(!supported(requirement.port) || !_Has(solvers,requirement.solver) ||
+                    !facts.emplace(requirement.port,requirement.solver).second ||
+                    (!(type=="RigExecFkChain" && requirement.port=="rigExec:controls") &&
+                     !(type=="RigExecRibbon" && requirement.port!="rigExec:driverCurve") &&
+                     !singlePorts.insert(requirement.port).second))
+                    return _Bad("pose.solvers["+_N(i)+"]: invalid or duplicate solver relationship requirement");
+                if(type=="RigExecBlendPointFrames" &&
+                   ((requirement.port=="rigExec:inputA" && requirement.solver!=solver.inA) ||
+                    (requirement.port=="rigExec:inputB" && requirement.solver!=solver.inB)))
+                    return _Bad("pose.solvers["+_N(i)+"]: relationship target differs from its numerical solver binding");
+                const size_t target=size_t(requirement.solver);
+                const auto &key=solvers[target].solveDescriptorKey;
+                if(key.empty())return _Bad("pose.solvers["+_N(i)+"]: relationship target has no canonical Solve identity");
+                expected.insert(key);
+                if(active[target]<0 && (!_ExcludedValue(fb::SlotDomain::Aggregate,uint32_t(target)) ||
+                    !_ExcludedValue(fb::SlotDomain::Candidates,uint32_t(target))))
+                    return _Bad("pose.solvers["+_N(i)+"]: relationship target has no Solve producer or typed exclusion");
+            }
+            if(type=="RigExecBlendPointFrames" &&
+               ((solver.inA>=0 && !facts.count({"rigExec:inputA",solver.inA})) ||
+                (solver.inB>=0 && !facts.count({"rigExec:inputB",solver.inB}))))
+                return _Bad("pose.solvers["+_N(i)+"]: numerical solver binding has no relationship requirement");
+            if(active[i]<0) {
+                if(!expected.empty() && (!_ExcludedValue(fb::SlotDomain::Aggregate,uint32_t(i)) ||
+                    !_ExcludedValue(fb::SlotDomain::Candidates,uint32_t(i))))
+                    return _Bad("pose.solvers["+_N(i)+"]: required solver has no Solve producer or typed exclusion");
+                continue;
+            }
+            const size_t step=size_t(active[i]);const auto &body=_f.steps[step];
+            const std::set<std::string> actual(body.semanticPredecessorKeys.begin(),body.semanticPredecessorKeys.end());
+            if(actual.size()!=body.semanticPredecessorKeys.size() || actual!=expected ||
+               !std::is_sorted(body.semanticPredecessorKeys.begin(),body.semanticPredecessorKeys.end()))
+                return _Bad(_StepName(step)+": semantic prerequisites differ from supported solver relationships");
+            for(const auto &key:expected) {
+                const size_t target=solverKeys.at(key);
+                if(active[target]<0) {
+                    // A surviving solver may read an excluded aggregate through
+                    // its explicit typed fallback, exactly as runtime closure does.
+                    if(!_ExcludedValue(fb::SlotDomain::Aggregate,uint32_t(target)) ||
+                       !_ExcludedValue(fb::SlotDomain::Candidates,uint32_t(target)))
+                        return _Bad(_StepName(step)+": excluded semantic prerequisite lacks typed fallback");
+                    continue;
+                }
+                if(std::find(body.preds.begin(),body.preds.end(),int32_t(active[target]))==body.preds.end())
+                    return _Bad(_StepName(step)+": generated graph omitted semantic solver prerequisite");
+                const auto after=commonKeys.find(body.descriptorKey),before=commonKeys.find(key);
+                if(after==commonKeys.end() || before==commonKeys.end() ||
+                    std::find(_f.commonGraph->ops[after->second].predecessors.begin(),_f.commonGraph->ops[after->second].predecessors.end(),uint32_t(before->second))==_f.commonGraph->ops[after->second].predecessors.end())
+                    return _Bad(_StepName(step)+": common graph omitted semantic solver prerequisite");
+            }
+        }
+        // Reconstruct edges from typed producers plus declared relationships.
+        // Serialized predecessor lists are outputs of this proof, never its inputs.
+        if(!_f.commonGraph->ops.empty()) {
+            const auto &ops=_f.commonGraph->ops;
+            if(ops.size()!=_f.steps.size())return _Bad("common_graph: semantic projection body count differs");
+            using Run=std::tuple<uint32_t,uint64_t,uint64_t>;
+            const auto normalize=[](std::vector<Run> runs) {
+                std::sort(runs.begin(),runs.end());std::vector<Run> result;
+                for(const auto &run:runs) {
+                    if(std::get<1>(run)==std::get<2>(run))continue;
+                    if(!result.empty() && std::get<0>(result.back())==std::get<0>(run) && std::get<2>(result.back())>=std::get<1>(run))
+                        std::get<2>(result.back())=std::max(std::get<2>(result.back()),std::get<2>(run));
+                    else result.push_back(run);
+                }
+                return result;
+            };
+            std::unordered_map<uint64_t,size_t> producers;
+            producers.reserve(_f.commonGraph->valueSpecs.size());
+            std::unordered_map<std::string,size_t> bodyKeys;
+            bodyKeys.reserve(_f.steps.size());
+            for(size_t i=0;i<_f.steps.size();++i)
+                if(!bodyKeys.emplace(_f.steps[i].descriptorKey,i).second)return _Bad("steps: duplicate semantic body identity");
+            for(size_t i=0;i<ops.size();++i) {
+                const auto &op=ops[i];const auto body=bodyKeys.find(op.key);
+                if(body==bodyKeys.end() || op.kind!=uint32_t(_f.steps[body->second].kind))
+                    return _Bad("common_graph: invalid semantic body or imported predecessor authority");
+                const auto project=[&](const std::vector<uint64_t> &ids,std::vector<Run> *runs) {
+                    for(uint64_t id:ids) {
+                        if(id>=_f.commonGraph->valueSpecs.size())return false;
+                        const auto &value=_f.commonGraph->valueSpecs[size_t(id)];
+                        runs->emplace_back(value.domain,uint64_t(value.slot),uint64_t(value.slot)+1);
+                    }
+                    return true;
+                };
+                for(const auto *ids:{&op.reads,&op.writes}) {
+                    std::vector<Run> actual,wanted;
+                    if(!project(*ids,&actual))return _Bad("common_graph: semantic projection value out of range");
+                    const auto &ranges=ids==&op.reads?_f.steps[body->second].reads:_f.steps[body->second].writes;
+                    for(const auto &range:ranges)wanted.emplace_back(uint32_t(range.domain()),range.begin(),range.end());
+                    if(normalize(std::move(actual))!=normalize(std::move(wanted)))return _Bad("common_graph: semantic typed projection differs from body");
+                }
+                for(uint64_t value:op.writes)
+                    if(!producers.emplace(value,i).second)return _Bad("common_graph: duplicate semantic typed producer");
+            }
+            for(size_t i=0;i<ops.size();++i) {
+                const auto &op=ops[i];const size_t body=bodyKeys.at(op.key);
+                std::set<uint32_t> expected;
+                for(uint64_t value:op.reads) {
+                    const auto producer=producers.find(value);
+                    if(producer!=producers.end())expected.insert(uint32_t(producer->second));
+                }
+                for(const auto &key:_f.steps[body].semanticPredecessorKeys) {
+                    const auto producer=commonKeys.find(key);
+                    if(producer==commonKeys.end()) {
+                        const auto solver=solverKeys.find(key);
+                        if(solver==solverKeys.end() ||
+                           !_ExcludedValue(fb::SlotDomain::Aggregate,uint32_t(solver->second)) ||
+                           !_ExcludedValue(fb::SlotDomain::Candidates,uint32_t(solver->second)))
+                            return _Bad("common_graph: semantic prerequisite has no active producer or typed fallback");
+                        continue;
+                    }
+                    expected.insert(uint32_t(producer->second));
+                }
+                std::set<uint32_t> described;
+                for(uint32_t predecessor:op.descriptorPredecessors)
+                    if(!expected.count(predecessor) || !described.insert(predecessor).second)
+                        return _Bad("common_graph: imported predecessor is not a typed or semantic requirement");
+                const std::set<uint32_t> actual(op.predecessors.begin(),op.predecessors.end());
+                if(actual.size()!=op.predecessors.size() || actual!=expected)
+                    return _Bad("common_graph: predecessors differ from typed and semantic producers");
+                std::set<int32_t> bodyExpected;
+                for(uint32_t before:expected)bodyExpected.insert(int32_t(bodyKeys.at(ops[before].key)));
+                const auto &preds=_f.steps[body].preds;
+                if(std::set<int32_t>(preds.begin(),preds.end())!=bodyExpected)
+                    return _Bad(_StepName(body)+": predecessors differ from typed and semantic producers");
+            }
+        }
+        return true;
+    }
+
+    bool _ConsumerLeafSites()
+    {
+        const auto validate = [&](const fb::RigExecWireExternalDeclaredInput &site,
+                                  const std::string &row) {
+            if (!_PathId(site.path, _Property, row, "path") || site.time > fb::ExternalInputTime::AtDefault || site.flavour > fb::ExternalInputFlavour::Present)
+                return _Bad(row + ": invalid owning leaf descriptor");
+            if (!_ReadPtr(site.read, site.read ? int(site.read->tag) : _AnyTag, _AnyMode, row, "read")) return false;
+            if (site.allowFloatToDouble && site.read->tag!=RigExecWireInputTag::Double)
+                return _Bad(row + ": float widening requires a Double transport tag");
+            if (site.read->overrideIndex >= 0 || site.exactVersion < -1 ||
+                site.exactRecord < -1 || site.exactValueType < -1 || site.exactValueType > 3)
+                return _Bad(row + ": invalid owning leaf producer metadata");
+            if (site.exactVersion >= 0 &&
+                !_GraphValueSlot(uint32_t(fb::SlotDomain::PropertyResult),uint32_t(site.exactVersion)))
+                return _Bad(row + ": exact producer version exceeds property storage");
+            if (site.exactRecord >= 0) {
+                if (size_t(site.exactRecord) >= _f.phasedConsumers.size() ||
+                    int32_t(_f.phasedConsumers[size_t(site.exactRecord)].version) != site.exactVersion)
+                    return _Bad(row + ": record does not own the exact producer version");
+            }
+            if (site.exactVersion >= 0) {
+                int actual=-1;
+                if (site.exactRecord >= 0)
+                    actual=int(_f.phasedConsumers[size_t(site.exactRecord)].consumerType);
+                else for (const auto &chain:_f.propertyChains)
+                    if (uint32_t(site.exactVersion)>=chain.versionBase &&
+                        uint64_t(site.exactVersion)<=uint64_t(chain.versionBase)+chain.revisions.size()) {
+                        actual=int(chain.valueType); break;
+                    }
+                if (actual<0 || actual!=site.exactValueType)
+                    return _Bad(row + ": exact producer arm differs from its actual owner");
+            }
+            if (site.exactVersion < 0 && (site.exactRecord >= 0 || site.exactValueType >= 0))
+                return _Bad(row + ": typed producer metadata has no exact version");
+            if (site.bodyWalk && ((site.exactVersion >= 0 &&
+                (site.read->tag!=RigExecWireInputTag::Double || site.allowFloatToDouble)) ||
+                !_ReadPtr(site.bodyWalk, int(site.read->tag), _AnyMode, row, "body_walk")))
+                return _Bad(row + ": invalid owning bound walk");
+            for (const auto *segment : {&site.read->propertyCandidates,&site.read->doubleCandidates})
+                for (const auto &hop : *segment)
+                    if (hop.kind != uint8_t(fb::PropertyCandidateKind::SlotOnly) ||
+                        hop.version != -1 || hop.crossDomain >= 0 || hop.poseWeight >= 0)
+                        return _Bad(row + ": sampled fallback contains a computed producer");
+            _sampledLeafReads.insert(site.read.get());
+            if(site.bodyWalk) _boundWalkReads.insert(site.bodyWalk.get());
+            return true;
+        };
+        for (size_t c=0;c<_f.geometry->chains.size();++c) {
+            const auto &chain=_f.geometry->chains[c];
+            const auto check=[&](const fb::RigExecWireRevision &rev,const std::string &row,
+                                 size_t revision,bool derived) {
+                int ordinary=-1,layout=-1;
+                const auto &indices=derived?_f.geometry->derivedIndex:_f.geometry->revisionIndex;
+                for(size_t i=0;i<indices.size();++i)
+                    if(indices[i].first==int32_t(c) && indices[i].second==int32_t(revision)) {
+                        ordinary=int(i); layout=int(_revisions*(derived?1:0)+i); break;
+                    }
+                for (const auto *sites : {&rev.leafSites,&rev.layoutLeafSites}) {
+                    const bool isLayout=sites==&rev.layoutLeafSites;
+                    std::vector<size_t> owners;
+                    for(size_t step=0;step<_f.steps.size();++step) {
+                        const auto &body=_f.steps[step];
+                        if(isLayout ? (body.kind==fb::StepKind::SkinTopology && body.object==layout)
+                            : (body.kind==(derived?fb::StepKind::Derived:fb::StepKind::RevisionStatic) && body.object==ordinary))
+                            owners.push_back(step);
+                    }
+                    for (size_t k=0;k<sites->size();++k) {
+                        const auto &site=(*sites)[k];
+                        if (!validate(site,row+".leaf_sites["+_N(k)+"]")) return false;
+                        std::vector<int32_t> versions;
+                        if(site.exactVersion>=0) versions.push_back(site.exactVersion);
+                        if(site.bodyWalk) for(const auto *segment:{&site.bodyWalk->propertyCandidates,&site.bodyWalk->doubleCandidates})
+                            for(const auto &candidate:*segment) if(candidate.version>=0) versions.push_back(candidate.version);
+                        if(site.bodyWalk) for(size_t owner:owners)
+                            if(!_RequireCandidateReads(owner,*site.bodyWalk)) return false;
+                        for(size_t owner:owners) for(int32_t version:versions)
+                            if(!_Declares(owner,fb::SlotDomain::PropertyResult,uint32_t(version)))
+                                return _Bad(_StepName(owner)+": owning leaf omitted exact PropertyResult dependency");
+                    }
+                }
+                // Sparse normalization consumes the shape's raw Default opinions,
+                // not the serialized normalized layout or a produced point version.
+                std::map<std::string,const fb::RigExecWireExternalDeclaredInput *> sparseSites;
+                std::set<std::string> repeatedSparseSites;
+                for (const auto &site:rev.leafSites) {
+                    const std::string path=RigExecFormatPathText(_f,site.path);
+                    if (!sparseSites.emplace(path,&site).second) repeatedSparseSites.insert(path);
+                }
+                bool haveSparse=false;
+                for (const auto &channel:rev.blendChannels) for (const auto &sample:channel.samples) {
+                    if (!sample.blendShape) {
+                        if (sample.shapeValid) return _Bad(row+": dense blend sample has sparse shape fact");
+                        continue;
+                    }
+                    haveSparse=true;
+                    if (!_PathId(sample.blendShape,_Prim,row,"blend_shape")) return false;
+                    const auto requireSparse=[&](const char *attribute,InputTag tag) {
+                        const std::string path=RigExecFormatPathText(_f,sample.blendShape)+"."+attribute;
+                        if (repeatedSparseSites.count(path)) return _Bad(row+": sparse blend source has duplicate owning leaf site");
+                        const auto at=sparseSites.find(path);
+                        const auto *found=at==sparseSites.end()?nullptr:at->second;
+                        if (!found || !found->read || found->read->tag!=tag ||
+                            found->time!=fb::ExternalInputTime::AtDefault ||
+                            found->flavour!=fb::ExternalInputFlavour::Raw ||
+                            found->exactVersion!=-1 || found->exactRecord!=-1 || found->exactValueType!=-1)
+                            return _Bad(row+": sparse blend source requires exact Raw Default owning leaf site");
+                        const auto &read=*found->read;
+                        const bool source=read.mode==ReadMode::Raw && read.walk.size()==1 && read.sampleTime==1 &&
+                            _f.inputs[read.walk.front()].name()==found->path;
+                        const bool missing=read.mode==ReadMode::Resolved && read.walk.empty() &&
+                            read.propertyCandidates.empty() && read.doubleCandidates.empty() && read.rawFallbackSlot==-1;
+                        if (found->bodyWalk || (!source && !missing))
+                            return _Bad(row+": sparse blend source requires raw Default head or missing-source fallback");
+                        if (missing) {
+                            const auto &fallback=_f.values[read.constant];
+                            const bool empty=tag==InputTag::Vec3fArray ? _f.vec3fArrays[fallback.array].v.empty() : _f.intArrays[fallback.array].v.empty();
+                            if (!empty) return _Bad(row+": missing sparse blend source requires empty typed fallback");
+                        }
+                        return true;
+                    };
+                    if (!requireSparse("offsets",InputTag::Vec3fArray) ||
+                        !requireSparse("pointIndices",InputTag::IntArray)) return false;
+                }
+                if (haveSparse) for (size_t step=0;step<_f.steps.size();++step) {
+                    const auto &body=_f.steps[step];
+                    if (body.kind==(derived?fb::StepKind::Derived:fb::StepKind::RevisionStatic) && body.object==ordinary &&
+                        !_Declares(step,fb::SlotDomain::ChainBase,uint32_t(c)))
+                        return _Bad(_StepName(step)+": sparse blend layout omitted raw chain cardinality read");
+                }
+                return true;
+            };
+            for (size_t r=0;r<chain.revisions.size();++r)
+                if (!check(chain.revisions[r],"geometry.chain["+_N(c)+"].revision["+_N(r)+"]",r,false)) return false;
+            for (size_t r=0;r<chain.derived.size();++r)
+                if (!check(*chain.derived[r].revision,"geometry.chain["+_N(c)+"].derived["+_N(r)+"]",r,true)) return false;
+        }
+        for (size_t m=0;m<_f.externalMovers.size();++m)
+            for (size_t k=0;k<_f.externalMovers[m].declaredInputs.size();++k)
+                if (!validate(_f.externalMovers[m].declaredInputs[k],"external_movers["+_N(m)+"].declared_inputs["+_N(k)+"]")) return false;
+        return true;
+    }
+
+    bool _GraphValueSlot(uint32_t domain, uint32_t slot) const
+    {
+        using D = fb::SlotDomain;
+        uint64_t width = 0;
+        switch (D(domain)) {
+        case D::Avars: case D::PosedM: case D::FinalMatrix: case D::BaseMatrix:
+        case D::WeightFrames: case D::WeightFramesBase: case D::Rest: case D::Ladder:
+            width = _slots; break;
+        case D::PoseBase: width = _basePool; break;
+        case D::PoseFin: width = _finPool; break;
+        case D::Aggregate: case D::SolverPoints: case D::Candidates:
+            width = _f.pose->solvers.size(); break;
+        case D::CommitTable: case D::CommitDelta: width = _f.pose->commits.size(); break;
+        case D::CommitStaging:
+            for (const auto &commit : _f.pose->commits)
+                if (commit.stagingBase >= 0 && slot >= uint32_t(commit.stagingBase) &&
+                    uint64_t(slot) - uint32_t(commit.stagingBase) < commit.propagate.size()) return true;
+            return false;
+        case D::ConstraintDelta: width = _f.geometry->deltaBasePaths.size(); break;
+        case D::PropertyResult:
+            width = _f.phasedConsumers.size();
+            for (const auto &chain : _f.propertyChains) width += chain.revisions.size() + 1;
+            break;
+        case D::ChainBase: case D::ChainPoints: case D::ChainInput: width = _chains; break;
+        case D::RevisionPacket: case D::RevisionTransforms: case D::RevisionDone:
+        case D::ChainDirty: width = _revisions; break;
+        case D::RevisionOut:
+            for (size_t i = 0; i < _f.geometry->revisionChunkBase.size(); ++i)
+                if (_f.geometry->revisionChunkBase[i] >= 0 &&
+                    slot >= uint32_t(_f.geometry->revisionChunkBase[i]) &&
+                    uint64_t(slot) - uint32_t(_f.geometry->revisionChunkBase[i]) <
+                        uint64_t(_f.geometry->revisionChunkCount[i])) return true;
+            return false;
+        case D::DerivedOut: case D::DerivedBase: width = _derived; break;
+        case D::WeightPacket: width = _weights; break;
+        case D::PoseWeight: width = _f.pose->poseWeightPaths.size(); break;
+        case D::FrameMatrix: width = _f.pose->frameRecords.size(); break;
+        case D::SkinTopology: width = _revisions + _derived; break;
+        case D::WeightField: width = _f.geometry->weightFields.size(); break;
+        case D::SpaceValue: width = _f.providerProgram ? _f.providerProgram->valueKeys.size() : 0; break;
+        case D::SpaceLeaf: width = _f.providerProgram ? _f.providerProgram->sampled.size() : 0; break;
+        case D::ConstraintInputs: width = _f.pose->constraintArrays.size(); break;
+        case D::SwitchFrame: width = _f.pose->spaceCheckpoints.size(); break;
+        case D::RequiredStageFramesAdmission: width = 1; break;
+        case D::Snapshots: default: return false;
+        }
+        return uint64_t(slot) < width;
+    }
+
     bool _StepGraph()
     {
+        if (_f.commonGraph) {
+            std::set<std::pair<uint32_t,uint32_t>> typedValues;
+            for (size_t i = 0; i < _f.commonGraph->valueSpecs.size(); ++i) {
+                const auto &spec = _f.commonGraph->valueSpecs[i];
+                if(!typedValues.insert({spec.domain,spec.slot}).second)
+                    return _Bad("common_graph.value_specs: duplicate typed storage identity");
+                if (!_GraphValueSlot(spec.domain, spec.slot))
+                    return _Bad("common_graph.value_specs[" + _N(i) + "]: typed slot exceeds its owning storage");
+            }
+        }
+        std::vector<RigExecStepGraphRange> sampledPoseSeeds;
+        if(_f.commonGraph) for(uint64_t id:_f.commonGraph->leaves) {
+            const auto &graph=*_f.commonGraph;
+            if(id>=graph.valueSpecs.size()) return _Bad("common_graph.leaves: value ID out of range");
+            if(std::find(graph.excludedValues.begin(),graph.excludedValues.end(),id)!=graph.excludedValues.end()) continue;
+            const auto &spec=graph.valueSpecs[size_t(id)];
+            const auto domain=fb::SlotDomain(spec.domain);
+            const bool source=domain==fb::SlotDomain::SolverPoints || domain==fb::SlotDomain::SpaceLeaf ||
+                domain==fb::SlotDomain::DerivedBase || domain==fb::SlotDomain::ChainInput || domain==fb::SlotDomain::ConstraintInputs ||
+                domain==fb::SlotDomain::RequiredStageFramesAdmission;
+            const bool poseSeed=(domain==fb::SlotDomain::PoseBase || domain==fb::SlotDomain::PoseFin) &&
+                spec.slot<_f.slotMeta->paths.size() &&
+                std::find(_f.slotMeta->xformSlots.begin(),_f.slotMeta->xformSlots.end(),int32_t(spec.slot))!=_f.slotMeta->xformSlots.end();
+            if(!source && !poseSeed) return _Bad("common_graph.leaves: produced domain has no active producer or exclusion");
+            if(poseSeed) sampledPoseSeeds.push_back({uint8_t(domain),spec.slot,spec.slot+1});
+        }
+        std::vector<RigExecStepGraphRange> excluded = std::move(sampledPoseSeeds);
+        if(_f.commonGraph) for(uint64_t id:_f.commonGraph->excludedValues) {
+            const auto &graph=*_f.commonGraph;
+            if(id>=graph.valueSpecs.size() ||
+               std::find(graph.leaves.begin(),graph.leaves.end(),id)==graph.leaves.end())
+                return _Bad("common_graph.excluded_values: not a declared value leaf");
+            const auto &spec=graph.valueSpecs[size_t(id)];
+            if(spec.domain>uint32_t(fb::SlotDomain::MAX) || spec.slot==UINT32_MAX)
+                return _Bad("common_graph.excluded_values: invalid typed value");
+            for(const auto &step:_f.steps) for(const auto &write:step.writes)
+                if(uint32_t(write.domain())==spec.domain && spec.slot>=write.begin() && spec.slot<write.end())
+                    return _Bad("common_graph.excluded_values: active writer remains");
+            excluded.push_back({uint8_t(spec.domain),spec.slot,spec.slot+1});
+        }
         const std::string why =
-            RigExecStepGraphError(_f.steps, *_f.clustering, _GraphRange);
+            RigExecStepGraphError(_f.steps, *_f.clustering, _GraphRange,excluded);
         return why.empty() || _Bad(why);
+    }
+
+    bool _WeightFieldTables()
+    {
+        std::vector<int64_t> producers(_f.geometry->weightFields.size(), -1);
+        for (size_t i = 0; i < _f.steps.size(); ++i) {
+            const auto &step = _f.steps[i];
+            if (step.kind == fb::StepKind::WeightField) {
+                if (!_Has(_f.geometry->weightFields, step.object) || step.part != -1)
+                    return _Bad(_StepName(i) + ": invalid WeightField descriptor");
+                const size_t field = size_t(step.object);
+                if (producers[field] >= 0)
+                    return _Bad(_StepName(i) + ": duplicate WeightField producer");
+                producers[field] = int64_t(i);
+                if (step.writes.size() != 1 ||
+                    step.writes[0].domain() != fb::SlotDomain::WeightField ||
+                    step.writes[0].begin() != uint32_t(field) ||
+                    step.writes[0].end() != uint32_t(field + 1))
+                    return _Bad(_StepName(i) + ": WeightField output ownership differs");
+            } else {
+                for (const auto &range : step.writes)
+                    if (range.domain() == fb::SlotDomain::WeightField)
+                        return _Bad(_StepName(i) + ": non-WeightField producer writes a field");
+            }
+        }
+        for (size_t f = 0; f < _f.geometry->weightFields.size(); ++f) {
+            const auto &field = _f.geometry->weightFields[f];
+            const std::string who = "WeightField " + _N(f);
+            if (producers[f] < 0 && !_ExcludedValue(fb::SlotDomain::WeightField,uint32_t(f))) return _Bad(who + ": no producer");
+            if (field.form > fb::WeightFieldForm::MAX ||
+                field.placementPhase > fb::WeightFieldPlacementPhase::MAX ||
+                !_Has(_f.geometry->weightObjects, field.object))
+                return _Bad(who + ": invalid form, placement phase or object");
+            if (field.form == fb::WeightFieldForm::EnvelopeProperty) {
+                if (!_Has(_f.propertyChains, field.consumer) || field.part <= 0 ||
+                    size_t(field.part) > _f.propertyChains[size_t(field.consumer)].revisions.size())
+                    return _Bad(who + ": property consumer out of range");
+                const auto &revision = _f.propertyChains[size_t(field.consumer)].revisions[size_t(field.part - 1)];
+                if (revision.weightField != int32_t(f) || revision.envelope != field.object)
+                    return _Bad(who + ": property consumer backlink or object differs");
+            } else if (field.form == fb::WeightFieldForm::EnvelopeConstraint) {
+                if (!_Has(_f.pose->walkSteps, field.consumer) || field.part != 0)
+                    return _Bad(who + ": constraint consumer out of range");
+                const auto &walk = _f.pose->walkSteps[size_t(field.consumer)];
+                if (walk.solverBatch || !_Has(_f.pose->constraints, walk.index))
+                    return _Bad(who + ": consumer is not a constraint walk");
+                const auto &constraint = _f.pose->constraints[size_t(walk.index)];
+                if (constraint.weightField != int32_t(f) ||
+                    constraint.weightObjectIndex != field.object || constraint.pointsTarget != 0)
+                    return _Bad(who + ": constraint consumer backlink or object differs");
+            } else {
+                if (!_Has(_f.geometry->revisionIndex, field.consumer) || field.part != 0)
+                    return _Bad(who + ": revision consumer out of range");
+                const auto &entry = _f.geometry->revisionIndex[size_t(field.consumer)];
+                const auto &revision = _f.geometry->chains[size_t(entry.first)].revisions[size_t(entry.second)];
+                if (revision.weightField != int32_t(f) || revision.weightObject != field.object)
+                    return _Bad(who + ": revision consumer backlink or object differs");
+            }
+            std::vector<int32_t> reachable,pending{field.object};
+            std::set<int32_t> seen;
+            while(!pending.empty()) {
+                const int32_t object=pending.back();pending.pop_back();
+                if(!seen.insert(object).second) continue;
+                if(!_Has(_f.geometry->weightObjects,object)) return _Bad(who+": closure object out of range");
+                reachable.push_back(object);
+                const auto &weight=_f.geometry->weightObjects[size_t(object)];
+                if(weight.base>=0) pending.push_back(weight.base);
+                pending.insert(pending.end(),weight.inputs.begin(),weight.inputs.end());
+            }
+            if (!std::is_sorted(field.availableChains.begin(), field.availableChains.end()) ||
+                std::adjacent_find(field.availableChains.begin(), field.availableChains.end()) !=
+                    field.availableChains.end())
+                return _Bad(who + ": publication context is not canonical");
+            for (int32_t chain : field.availableChains)
+                if (!_Has(_f.propertyChains, chain))
+                    return _Bad(who + ": publication context chain out of range");
+            std::vector<int32_t> expectedContext;
+            const size_t contextEnd=field.form==fb::WeightFieldForm::EnvelopeProperty
+                ? size_t(field.consumer) : _f.propertyChains.size();
+            for(size_t c=0;c<contextEnd;++c) expectedContext.push_back(int32_t(c));
+            if(field.availableChains!=expectedContext)
+                return _Bad(who+": publication context differs from its consumer");
+            if (field.scalarReads.size() != field.scalarObjects.size() ||
+                field.scalarReads.size() != field.scalarMembers.size())
+                return _Bad(who + ": scalar descriptor cardinality differs");
+            std::set<std::pair<int32_t, uint8_t>> members;
+            for (size_t r = 0; r < field.scalarReads.size(); ++r) {
+                if (!_Has(_f.geometry->weightObjects, field.scalarObjects[r]) ||
+                    field.scalarMembers[r] > fb::WeightFieldScalarMember::MAX ||
+                    !members.emplace(field.scalarObjects[r],
+                                     uint8_t(field.scalarMembers[r])).second)
+                    return _Bad(who + ": invalid or duplicate scalar member");
+                if (field.scalarReads[r].tag != InputTag::Float ||
+                    field.scalarReads[r].mode != ReadMode::Resolved)
+                    return _Bad(who + ": scalar read has a non-oracle origin");
+                _oracleScalarContexts.emplace(&field.scalarReads[r], &field.availableChains);
+                if (!_Read(&field.scalarReads[r], -1, _Resolved, who,
+                           "scalar_reads", long(r))) return false;
+                if(producers[f]>=0 && !_RequireCandidateReads(size_t(producers[f]),field.scalarReads[r])) return false;
+                if(producers[f]>=0) for(const auto *segment:{&field.scalarReads[r].propertyCandidates,&field.scalarReads[r].doubleCandidates})
+                    for(const auto &candidate:*segment) for(int32_t available:field.availableChains) {
+                        if(!_Has(_f.propertyChains,available)) return _Bad(who+": publication context chain out of range");
+                        const auto &chain=_f.propertyChains[size_t(available)];
+                        const uint32_t path=_f.inputs[candidate.slot].name();
+                        if(_f.inputs[chain.target].name()==path && !_BodyRead(size_t(producers[f]),fb::SlotDomain::PropertyResult,chain.versionBase+uint32_t(chain.revisions.size())))
+                            return _Bad(who+": missing contextual oracle chain read");
+                        for(const auto &record:_f.phasedConsumers)
+                            if(record.chain==available && _f.inputs[record.consumer].name()==path &&
+                               !_BodyRead(size_t(producers[f]),fb::SlotDomain::PropertyResult,record.version))
+                                return _Bad(who+": missing contextual oracle record read");
+                    }
+            }
+            for (int32_t slot : field.volumes)
+                if (slot < 0 || size_t(slot) >= _f.slotMeta->paths.size())
+                    return _Bad(who + ": placement slot out of range");
+            if(producers[f]>=0) for(int32_t slot:field.volumes)
+                if(!_BodyRead(size_t(producers[f]),field.placementPhase==fb::WeightFieldPlacementPhase::Base?
+                    fb::SlotDomain::WeightFramesBase:fb::SlotDomain::WeightFrames,uint32_t(slot)))
+                    return _Bad(who+": missing selected placement producer read");
+            for(const auto &point:field.pointReads) {
+                if(!_Has(_f.geometry->weightObjects,point.object) || point.leaf<0 || point.leaf>2 || !point.binding)
+                    return _Bad(who+": malformed point read owner");
+                if(!_Phase(point.binding->phase,who,"point_read.phase")) return false;
+                for(const auto &candidate:point.binding->candidates) {
+                    if(candidate.chain()<0 || size_t(candidate.chain())>=_f.geometry->chains.size() ||
+                       candidate.version()<0 || size_t(candidate.version())>_f.geometry->chains[size_t(candidate.chain())].revisions.size())
+                        return _Bad(who+": point read version out of range");
+                    if(producers[f]<0) continue;
+                    const size_t owner=size_t(producers[f]);
+                    if(point.binding->finalRead) {
+                        if(!_BodyRead(owner,fb::SlotDomain::ChainPoints,uint32_t(candidate.chain()))) return _Bad(who+": missing phased points producer read");
+                    } else if(candidate.version()==0) {
+                        if(!_BodyRead(owner,fb::SlotDomain::ChainBase,uint32_t(candidate.chain()))) return _Bad(who+": missing phased base producer read");
+                    } else {
+                        const uint32_t revision=uint32_t(_f.geometry->chainRevisionBegin[size_t(candidate.chain())])+uint32_t(candidate.version())-1;
+                        if(!_BodyRead(owner,fb::SlotDomain::RevisionDone,revision) || !_BodyRead(owner,fb::SlotDomain::ChainDirty,revision))
+                            return _Bad(who+": missing phased revision producer read");
+                    }
+                }
+            }
+        }
+        for (size_t c = 0; c < _f.propertyChains.size(); ++c) {
+            const auto &chain = _f.propertyChains[c];
+            for (size_t r = 0; r < chain.revisions.size(); ++r) {
+                const auto &revision = chain.revisions[r];
+                if ((revision.envelope >= 0) != (revision.weightField >= 0) ||
+                    (revision.weightField >= 0 &&
+                     !_Has(_f.geometry->weightFields, revision.weightField)))
+                    return _Bad("PropertyRevision chain " + _N(c) + " part " +
+                                _N(r + 1) + ": missing or foreign WeightField");
+            }
+        }
+        for (size_t c = 0; c < _f.pose->constraints.size(); ++c) {
+            const auto &constraint = _f.pose->constraints[c];
+            const bool envelope = constraint.weightObject != 0 &&
+                                  constraint.pointsTarget == 0;
+            if (envelope != (constraint.weightField >= 0) ||
+                (constraint.weightField >= 0 &&
+                 !_Has(_f.geometry->weightFields, constraint.weightField)))
+                return _Bad("Constraint " + _N(c) + ": missing or foreign WeightField");
+        }
+        return true;
+    }
+
+    bool _ProviderTables()
+    {
+        if (!_f.providerProgram) {
+            for (size_t i=0;i<_f.steps.size();++i)
+                if (_f.steps[i].kind == fb::StepKind::SpaceExpression)
+                    return _Bad(_StepName(i)+": missing provider program");
+            return true;
+        }
+        const auto &p=*_f.providerProgram;
+        const size_t n=p.valueKeys.size();
+        if (p.defaults.size()!=n) return _Bad("provider default/value cardinality differs");
+        std::set<std::string> keys;
+        for (size_t i=0;i<n;++i) {
+            if (p.valueKeys[i].empty() || !keys.insert(p.valueKeys[i]).second)
+                return _Bad("provider value keys are empty or duplicated");
+            const auto &v=p.defaults[i];
+            using Kind=fb::ProviderValueKind;
+            if (v.kind>Kind::Vec3i ||
+                bool(v.scalarDouble)!=(v.kind==Kind::Double) ||
+                bool(v.scalarFloat)!=(v.kind==Kind::Float) ||
+                bool(v.vector)!=(v.kind==Kind::Vector) ||
+                bool(v.matrix)!=(v.kind==Kind::Matrix) ||
+                bool(v.vec3f)!=(v.kind==Kind::Vec3f) ||
+                bool(v.vec2f)!=(v.kind==Kind::Vec2f) ||
+                bool(v.vec3i)!=(v.kind==Kind::Vec3i) ||
+                (v.kind==Kind::Frame && (v.framePoints.size()!=4 || (v.frameFlags&~uint32_t(31)))) ||
+                (v.kind!=Kind::Frame && (!v.framePoints.empty() || v.frameFlags)) ||
+                (v.kind!=Kind::FloatArray && !v.floats.empty()) ||
+                (v.kind!=Kind::DoubleArray && !v.doubles.empty()) ||
+                (v.kind!=Kind::Vec3fArray && !v.vec3fs.empty()) ||
+                (v.kind!=Kind::Vec3dArray && !v.vec3ds.empty()) ||
+                (v.kind!=Kind::IntArray && !v.ints.empty()) ||
+                (v.kind!=Kind::MatrixArray && !v.matrices.empty()) ||
+                (v.kind!=Kind::TokenArray && !v.tokens.empty()) ||
+                (v.kind!=Kind::BoolArray && !v.bools.empty()) ||
+                (v.kind!=Kind::Vec2fArray && !v.vec2fs.empty()))
+                return _Bad("provider value "+_N(i)+": malformed typed state");
+            for(uint8_t bit:v.bools) if(bit>1)
+                return _Bad("provider value "+_N(i)+": invalid bool array byte");
+            uint64_t count=1;
+            switch(v.kind) {
+            case Kind::Empty:count=0;break;
+            case Kind::FloatArray:count=v.floats.size();break;
+            case Kind::DoubleArray:count=v.doubles.size();break;
+            case Kind::Vec3fArray:count=v.vec3fs.size();break;
+            case Kind::Vec3dArray:count=v.vec3ds.size();break;
+            case Kind::IntArray:count=v.ints.size();break;
+            case Kind::MatrixArray:count=v.matrices.size();break;
+            case Kind::TokenArray:count=v.tokens.size();break;
+            case Kind::BoolArray:count=v.bools.size();break;
+            case Kind::Vec2fArray:count=v.vec2fs.size();break;
+            default:break;
+            }
+            if(v.initialized && v.count!=count)
+                return _Bad("provider value "+_N(i)+": typed count differs from payload");
+        }
+        size_t propertyVersions=_f.phasedConsumers.size();
+        for(const auto &chain:_f.propertyChains) propertyVersions+=chain.revisions.size()+1;
+        std::vector<int> writers(n,-1);
+        for (size_t i=0;i<p.ops.size();++i) {
+            const auto &op=p.ops[i];
+            if(op.kind>11 || op.kind==8 || op.kind==9 || op.output>=n || op.owner.empty())
+                return _Bad("provider op "+_N(i)+": invalid kind/output/owner");
+            if(writers[size_t(op.output)]>=0)
+                return _Bad("provider op "+_N(i)+": duplicate output producer");
+            writers[size_t(op.output)]=int(i);
+            for(auto input:op.inputs)
+                if(input!=UINT64_MAX && input>=n)
+                    return _Bad("provider op "+_N(i)+": input out of range");
+        }
+        for (auto value:p.leaves)
+            if(value>=n) return _Bad("provider leaf value out of range");
+        const auto leaves=[&](const auto &rows,bool sampled) {
+            for(size_t i=0;i<rows.size();++i) {
+                const auto &leaf=rows[i];
+                if(leaf.value>=n || leaf.path.empty()) return _Bad("provider bridge value/path invalid");
+                if(writers[size_t(leaf.value)]>=0) return _Bad("provider bridge duplicates producer");
+                writers[size_t(leaf.value)]=int(p.ops.size()+i);
+                if(sampled) {
+                    if(leaf.inputSlot < -1 || (leaf.inputSlot>=0 && size_t(leaf.inputSlot)>=_f.inputs.size()))
+                        return _Bad("provider sampled input slot out of range");
+                    if(leaf.propertyVersion < -1 || (leaf.propertyVersion>=0 &&
+                       size_t(leaf.propertyVersion)>=propertyVersions))
+                        return _Bad("provider sampled property version out of range");
+                } else {
+                    if(leaf.providerSlot<0 || size_t(leaf.providerSlot)>=_f.slotMeta->paths.size() ||
+                       RigExecFormatPathText(_f,_f.slotMeta->paths[size_t(leaf.providerSlot)])!=leaf.path)
+                        return _Bad("provider external slot out of range");
+                    if(leaf.interveningRead && !_Read(leaf.interveningRead.get(), int(InputTag::Matrix4d), _Baked, "provider external", "intervening_read")) return false;
+                }
+            }
+            return true;
+        };
+        if(!leaves(p.sampled,true) || !leaves(p.externalInputs,false)) return false;
+        for(size_t i=0;i<p.routedInputs.size();++i) {
+            const auto &route=p.routedInputs[i];
+            if(route.value>=n || route.consumer.empty() || route.source.empty() ||
+               route.readPhase.empty() || !_Has(_f.crossDomainReads,route.crossRead))
+                return _Bad("provider routed input "+_N(i)+": invalid value/context/cross read");
+            if(writers[size_t(route.value)]>=0)
+                return _Bad("provider routed input "+_N(i)+": duplicate output producer");
+            writers[size_t(route.value)]=int(p.ops.size()+p.sampled.size()+p.externalInputs.size()+i);
+            const auto &read=_f.crossDomainReads[size_t(route.crossRead)];
+            if(RigExecFormatPathText(_f,read.consumer)!=route.consumer ||
+               RigExecFormatPathText(_f,read.source)!=route.source)
+                return _Bad("provider routed input "+_N(i)+": cross read ownership differs");
+        }
+        std::vector<uint8_t> bodyOps(p.ops.size()),bodySampled(p.sampled.size()),
+            bodyExternal(p.externalInputs.size()),bodyRouted(p.routedInputs.size()),
+            bodyFrames(_f.pose->providerFrameInputs.size());
+        for(size_t i=0;i<_f.steps.size();++i) {
+            const auto &step=_f.steps[i];
+            if(step.kind!=fb::StepKind::SpaceExpression) continue;
+            const auto contains=[&](const auto &,fb::SlotDomain domain,uint64_t slot) {
+                return _BodyRead(i,domain,slot);
+            };
+            uint64_t output=UINT64_MAX;
+            const std::string who=_StepName(i);
+            if(step.object<0) return _Bad(who+": negative provider body index");
+            const size_t object=size_t(step.object);
+            if(step.part==0) {
+                if(object>=p.ops.size() || bodyOps[object]++) return _Bad(who+": missing or duplicate provider op body");
+                const auto &op=p.ops[object]; output=op.output;
+                for(uint64_t input:op.inputs) if(input!=UINT64_MAX &&
+                    !contains(step.reads,fb::SlotDomain::SpaceValue,input))
+                    return _Bad(who+": missing SpaceValue operand read");
+            } else if(step.part==2) {
+                if(object>=p.sampled.size() || bodySampled[object]++) return _Bad(who+": missing or duplicate provider sampled body");
+                const auto &leaf=p.sampled[object]; output=leaf.value;
+                if(!contains(step.reads,fb::SlotDomain::SpaceLeaf,object)) return _Bad(who+": missing SpaceLeaf read");
+                if(leaf.propertyVersion!=-1) return _Bad(who+": raw provider source cannot select a property version");
+            } else if(step.part==1) {
+                if(object>=p.externalInputs.size() || bodyExternal[object]++) return _Bad(who+": missing or duplicate provider external body");
+                const auto &leaf=p.externalInputs[object]; output=leaf.value;
+                if(leaf.computation=="computeRestFrame") {
+                    if(leaf.providerSlot>=0 && !contains(step.reads,fb::SlotDomain::Rest,uint32_t(leaf.providerSlot)))
+                        return _Bad(who+": missing provider Rest read");
+                } else if(leaf.computation=="computePointFrame" || leaf.computation=="computeBasePointFrame") {
+                    uint32_t expected=uint32_t(leaf.providerSlot);
+                    if(leaf.frameVersion!=int32_t(expected)) return _Bad(who+": provider frame version belongs to another phase or owner");
+                    if(leaf.providerSlot>=0 && (leaf.frameVersion<0 || !_GraphValueSlot(uint32_t(fb::SlotDomain::PoseBase),uint32_t(leaf.frameVersion)) ||
+                        !contains(step.reads,fb::SlotDomain::PoseBase,uint32_t(leaf.frameVersion))))
+                        return _Bad(who+": missing or invalid provider PoseBase read");
+                } else {
+                    if(leaf.computation!="interveningSpace" || !leaf.interveningRead)
+                        return _Bad(who+": unsupported provider external computation");
+                    if(!_RequireCandidateReads(i,*leaf.interveningRead)) return false;
+                    for(const auto *segment:{&leaf.interveningRead->propertyCandidates,&leaf.interveningRead->doubleCandidates})
+                        for(const auto &candidate:*segment) if(candidate.version>=0 &&
+                            !contains(step.reads,fb::SlotDomain::PropertyResult,uint32_t(candidate.version)))
+                            return _Bad(who+": missing intervening property read");
+                    for(const auto *segment:{&leaf.interveningRead->propertyCandidates,&leaf.interveningRead->doubleCandidates})
+                        for(const auto &candidate:*segment) if(candidate.crossDomain>=0) {
+                            const auto &cross=_f.crossDomainReads[size_t(candidate.crossDomain)];
+                            if(cross.kind==fb::CrossDomainReadKind::PropertyResult &&
+                               !contains(step.reads,fb::SlotDomain::PropertyResult,cross.propertyVersion))
+                                return _Bad(who+": missing intervening routed property read");
+                            if(cross.kind==fb::CrossDomainReadKind::SpaceValue &&
+                               !contains(step.reads,fb::SlotDomain::SpaceValue,uint32_t(cross.spaceValue)))
+                                return _Bad(who+": missing intervening SpaceValue read");
+                            if(cross.kind==fb::CrossDomainReadKind::PoseFrame)
+                                for(uint32_t frame:cross.frames) if(!contains(step.reads,
+                                    cross.baseFrame?fb::SlotDomain::PoseBase:fb::SlotDomain::PoseFin,frame))
+                                    return _Bad(who+": missing intervening pose frame read");
+                        }
+                }
+            } else if(step.part==3) {
+                if(object>=p.routedInputs.size() || bodyRouted[object]++) return _Bad(who+": missing or duplicate provider routed body");
+                const auto &route=p.routedInputs[object]; output=route.value;
+                const auto &read=_f.crossDomainReads[size_t(route.crossRead)];
+                if(read.kind==fb::CrossDomainReadKind::PropertyResult &&
+                    !contains(step.reads,fb::SlotDomain::PropertyResult,read.propertyVersion))
+                    return _Bad(who+": missing routed PropertyResult read");
+                if(read.kind==fb::CrossDomainReadKind::SpaceValue &&
+                    !contains(step.reads,fb::SlotDomain::SpaceValue,uint32_t(read.spaceValue)))
+                    return _Bad(who+": missing routed SpaceValue read");
+                if(read.kind==fb::CrossDomainReadKind::PoseFrame)
+                    for(uint32_t frame:read.frames) if(!contains(step.reads,
+                        read.baseFrame?fb::SlotDomain::PoseBase:fb::SlotDomain::PoseFin,frame))
+                        return _Bad(who+": missing routed pose frame read");
+                if(read.kind==fb::CrossDomainReadKind::Points || read.kind==fb::CrossDomainReadKind::PointElement)
+                    for(const auto &point:read.points) {
+                        const uint32_t chain=uint32_t(point.first);
+                        if(read.finalPoints && !contains(step.reads,fb::SlotDomain::ChainPoints,chain))
+                            return _Bad(who+": missing routed ChainPoints read");
+                        if(!read.finalPoints && point.second==0 && !contains(step.reads,fb::SlotDomain::ChainBase,chain))
+                            return _Bad(who+": missing routed ChainBase read");
+                        if(!read.finalPoints && point.second>0) {
+                            const uint32_t revision=uint32_t(_f.geometry->chainRevisionBegin[chain])+uint32_t(point.second)-1;
+                            if(!contains(step.reads,fb::SlotDomain::RevisionDone,revision) ||
+                               !contains(step.reads,fb::SlotDomain::ChainDirty,revision))
+                                return _Bad(who+": missing routed point-version read");
+                        }
+                    }
+            } else if(step.part==4) {
+                if(object>=_f.pose->providerFrameInputs.size() || bodyFrames[object]++)
+                    return _Bad(who+": missing or duplicate provider frame body");
+                const auto &frame=_f.pose->providerFrameInputs[object]; output=frame.value;
+                if(frame.slot<0 || size_t(frame.slot)>=_slots || output>=n ||
+                   !_PathId(frame.reader,_Prim,who,"reader") ||
+                   (p.defaults[size_t(output)].kind!=fb::ProviderValueKind::Frame && p.defaults[size_t(output)].kind!=fb::ProviderValueKind::Empty) ||
+                   !_GraphValueSlot(uint32_t(frame.base?fb::SlotDomain::PoseBase:fb::SlotDomain::PoseFin),frame.version) ||
+                   !contains(step.reads,frame.base?fb::SlotDomain::PoseBase:fb::SlotDomain::PoseFin,frame.version))
+                    return _Bad(who+": invalid or undeclared contextual provider frame");
+                std::set<uint32_t> owned{uint32_t(frame.slot)};
+                for(const auto &commit:_f.pose->commits) {
+                    if(frame.base && !commit.solverOutput)continue;
+                    const auto &target=frame.base?commit.slotBaseWrites:commit.slotWrites;
+                    const auto &carry=frame.base?commit.slotBaseCarry:commit.slotCarry;
+                    for(size_t k=0;k<commit.slots.size();++k)if(commit.slots[k]==frame.slot) {
+                        if(k<target.size())owned.insert(target[k]);
+                        if(k<carry.size())owned.insert(carry[k]);
+                    }
+                    const auto &desc=frame.base?commit.descendantBaseWrites:commit.descendantWrites;
+                    const auto &descCarry=frame.base?commit.descendantBaseCarry:commit.descendantCarry;
+                    for(size_t k=0;k<commit.propagate.size();++k)if(commit.propagate[k].first==frame.slot) {
+                        if(k<desc.size())owned.insert(desc[k]);
+                        if(k<descCarry.size())owned.insert(descCarry[k]);
+                    }
+                }
+                for(const auto &refresh:_f.pose->providerRefreshes) {
+                    if(refresh.slot==frame.slot)owned.insert(frame.base?refresh.baseWrite:refresh.finWrite);
+                    for(const auto &carry:refresh.carries)if(carry.slot==frame.slot)
+                        owned.insert(frame.base?carry.baseWrite:carry.finWrite);
+                }
+                if(!owned.count(frame.version))return _Bad(who+": provider frame version belongs to another owner");
+                if(writers[size_t(output)]>=0)return _Bad(who+": provider frame output has another producer");
+                writers[size_t(output)]=int(p.ops.size()+p.sampled.size()+p.externalInputs.size()+p.routedInputs.size()+object);
+            } else return _Bad(who+": unsupported provider body part");
+            if(step.writes.size()!=1 || step.writes[0].domain()!=fb::SlotDomain::SpaceValue ||
+                step.writes[0].begin()!=output || step.writes[0].end()!=output+1)
+                return _Bad(who+": provider output ownership differs");
+        }
+        const auto complete=[&](const auto &rows,const auto &seen) {
+            for(size_t i=0;i<rows.size();++i) if(!seen[i] &&
+                !_ExcludedValue(fb::SlotDomain::SpaceValue,uint32_t(rows[i].output))) return false;
+            return true;
+        };
+        if(!complete(p.ops,bodyOps)) return _Bad("provider op has no body or excluded output");
+        const auto bridges=[&](const auto &rows,const auto &seen) {
+            for(size_t i=0;i<rows.size();++i) if(!seen[i] &&
+                !_ExcludedValue(fb::SlotDomain::SpaceValue,uint32_t(rows[i].value))) return false;
+            return true;
+        };
+        if(!bridges(p.sampled,bodySampled) || !bridges(p.externalInputs,bodyExternal) || !bridges(p.routedInputs,bodyRouted) ||
+           !bridges(_f.pose->providerFrameInputs,bodyFrames))
+            return _Bad("provider bridge has no body or excluded output");
+        return true;
+    }
+
+    // The common graph proves its rows against Step declarations. This
+    // separate check proves those declarations contain the actual body SSA
+    // bindings, so a self-consistent graph cannot hide a body dependency.
+    bool _PoseBodyDeclarations()
+    {
+        using D=fb::SlotDomain;
+        using K=fb::StepKind;
+        const auto &pose=*_f.pose;
+        // Count exact kind/object identities once for this immutable file.
+        // Invalid objects remain subject to the unchanged body/range checks.
+        std::vector<size_t> checkpointProducers(pose.spaceCheckpoints.size(),0);
+        std::vector<size_t> refreshProducers(pose.providerRefreshes.size(),0);
+        for(const auto &step:_f.steps) {
+            if(step.object<0)continue;
+            if(step.kind==K::SpaceCheckpoint && size_t(step.object)<checkpointProducers.size())
+                ++checkpointProducers[size_t(step.object)];
+            else if(step.kind==K::ProviderRefresh && size_t(step.object)<refreshProducers.size())
+                ++refreshProducers[size_t(step.object)];
+        }
+        std::vector<uint32_t> finLast(_slots),baseLast(_slots);
+        for(size_t slot=0;slot<_slots;++slot) finLast[slot]=baseLast[slot]=uint32_t(slot);
+        for(const auto &commit:pose.commits) {
+            for(int32_t slot:commit.slots) {
+                finLast[size_t(slot)]=uint32_t(_slots+size_t(slot));
+                if(commit.solverOutput) baseLast[size_t(slot)]=uint32_t(_slots+size_t(slot));
+            }
+            for(const auto &entry:commit.propagate) {
+                finLast[size_t(entry.first)]=uint32_t(_slots+size_t(entry.first));
+                if(commit.solverOutput) baseLast[size_t(entry.first)]=uint32_t(_slots+size_t(entry.first));
+            }
+        }
+        for(const auto &refresh:pose.providerRefreshes) {
+            finLast[size_t(refresh.slot)]=baseLast[size_t(refresh.slot)]=uint32_t(_slots+size_t(refresh.slot));
+            for(const auto &carry:refresh.carries)
+                finLast[size_t(carry.slot)]=baseLast[size_t(carry.slot)]=uint32_t(_slots+size_t(carry.slot));
+        }
+        _bodyFinLast=finLast; _bodyBaseLast=baseLast;
+        for (size_t context=0;context<pose.spaceCheckpoints.size();++context) {
+            const auto &record=pose.spaceCheckpoints[context];
+            const std::string label="pose.space_checkpoints["+_N(context)+"]";
+            if(record.key.empty()) return _Bad(label+": empty key");
+            if(!_Index(record.anchor,_slots,true,label,"anchor") ||
+               !_Indices(record.recompose,_slots,false,label,"recompose")) return false;
+            for(int slot:record.recompose)
+                if(_f.slotMeta->slotKind[size_t(slot)]!=fb::SlotKind::FirstFramePose)
+                    return _Bad(label+": recompose is not a provider");
+            const size_t producers=checkpointProducers[context];
+            if(producers>1 || (producers==0 && !_ExcludedValue(D::SwitchFrame,uint32_t(context))))
+                return _Bad("pose.space_checkpoints["+_N(context)+"]: missing or duplicate producer");
+        }
+        for(size_t context=0;context<pose.providerRefreshes.size();++context) {
+            const auto &refresh=pose.providerRefreshes[context];
+            const size_t producers=refreshProducers[context];
+            bool excluded=_ExcludedValue(D::PoseBase,refresh.baseWrite) && _ExcludedValue(D::PoseFin,refresh.finWrite);
+            for(const auto &carry:refresh.carries)
+                excluded=excluded && _ExcludedValue(D::PoseBase,carry.baseWrite) && _ExcludedValue(D::PoseFin,carry.finWrite);
+            if(producers>1 || (!producers && !excluded))
+                return _Bad("pose.provider_refreshes["+_N(context)+"]: missing or duplicate producer");
+        }
+        for(size_t owner=0;owner<_f.steps.size();++owner) {
+            const auto &step=_f.steps[owner];
+            std::set<std::pair<D,uint32_t>> reads,writes;
+            const auto read=[&](D domain,uint32_t value) { reads.emplace(domain,value); };
+            const auto readAll=[&](D domain,const auto &values) { for(auto value:values) read(domain,uint32_t(value)); };
+            const auto writeAll=[&](D domain,const auto &values) { for(auto value:values) writes.emplace(domain,uint32_t(value)); };
+            if(step.kind==K::RestCompose || step.kind==K::LadderCompose) {
+                if(!_Has(pose.composeGroups,step.object))return _Bad(_StepName(owner)+": invalid compose group");
+                const auto &group=pose.composeGroups[size_t(step.object)];
+                for(int32_t slot=group.begin;slot<group.end;++slot) {
+                    if(_f.slotMeta->slotKind[size_t(slot)]!=fb::SlotKind::FirstFramePose)continue;
+                    const auto &values=pose.ladders[size_t(slot)].spaceValues;
+                    for(size_t channel=0;channel<values.size();++channel)
+                        if((step.kind==K::RestCompose ? channel==0 : channel!=0) && values[channel]>=0)
+                            read(D::SpaceValue,uint32_t(values[channel]));
+                }
+            } else if(step.kind==K::SpaceCheckpoint) {
+                if(step.object<0 || size_t(step.object)>=pose.spaceCheckpoints.size() || step.part!=-1)
+                    return _Bad(_StepName(owner)+": invalid checkpoint body");
+                const auto &checkpoint=pose.spaceCheckpoints[size_t(step.object)];
+                if(checkpoint.key.empty() || !_Index(checkpoint.anchor,_slots,true,_StepName(owner),"anchor") ||
+                   !_Indices(checkpoint.recompose,_slots,false,_StepName(owner),"recompose")) return false;
+                if(checkpoint.anchor>=0) read(D::PosedM,uint32_t(checkpoint.anchor));
+                for(int slot:checkpoint.recompose) {
+                    if(pose.ladders.size()<=size_t(slot) || _f.slotMeta->slotKind[size_t(slot)]!=fb::SlotKind::FirstFramePose)
+                        return _Bad(_StepName(owner)+": checkpoint recompose is not a provider");
+                    read(D::Avars,uint32_t(slot)); read(D::Ladder,uint32_t(slot));
+                }
+                writes.emplace(D::SwitchFrame,uint32_t(step.object));
+            } else if(step.kind==K::ProviderRefresh) {
+                if(step.part!=0 || step.object<0 || size_t(step.object)>=pose.providerRefreshes.size())
+                    return _Bad(_StepName(owner)+": invalid provider refresh body");
+                const auto &refresh=pose.providerRefreshes[size_t(step.object)];
+                if(!_f.providerProgram || refresh.baseValue>=_f.providerProgram->valueKeys.size() ||
+                   refresh.currentValue>=_f.providerProgram->valueKeys.size() ||
+                   (_f.providerProgram->defaults[size_t(refresh.baseValue)].kind!=fb::ProviderValueKind::Frame &&
+                    _f.providerProgram->defaults[size_t(refresh.baseValue)].kind!=fb::ProviderValueKind::Empty) ||
+                   (_f.providerProgram->defaults[size_t(refresh.currentValue)].kind!=fb::ProviderValueKind::Frame &&
+                    _f.providerProgram->defaults[size_t(refresh.currentValue)].kind!=fb::ProviderValueKind::Empty))
+                    return _Bad(_StepName(owner)+": provider refresh has invalid expression values");
+                const auto expressionOwned=[&](uint64_t value) {
+                    size_t producers=0;
+                    for(const auto &op:_f.providerProgram->ops)
+                        if(op.output==value && op.kind==uint32_t(RigExecProviderOpKind::PosedFrame) &&
+                           op.owner==RigExecFormatPathText(_f,_f.slotMeta->paths[size_t(refresh.slot)]))++producers;
+                    return producers==1;
+                };
+                if(!expressionOwned(refresh.baseValue) || !expressionOwned(refresh.currentValue))
+                    return _Bad(_StepName(owner)+": provider refresh expression belongs to another owner or kind");
+                read(D::SpaceValue,uint32_t(refresh.baseValue));read(D::SpaceValue,uint32_t(refresh.currentValue));
+                read(D::PoseBase,refresh.baseRead);read(D::PoseFin,refresh.finRead);
+                writes.emplace(D::PoseBase,refresh.baseWrite);writes.emplace(D::PoseFin,refresh.finWrite);
+                for(const auto &carry:refresh.carries) {
+                    read(D::PoseBase,carry.baseRead);read(D::PoseFin,carry.finRead);
+                    writes.emplace(D::PoseBase,carry.baseWrite);writes.emplace(D::PoseFin,carry.finWrite);
+                    for(int32_t blocker:carry.blockingSlots) {
+                        if(!_Has(pose.ladders,blocker) || !pose.ladders[size_t(blocker)].parentSpace)
+                            return _Bad(_StepName(owner)+": provider refresh blocker lacks parent-space binding");
+                        if(!_RequireCandidateReads(owner,*pose.ladders[size_t(blocker)].parentSpace))return false;
+                        const std::string rawPath=RigExecFormatPathText(_f,_f.slotMeta->paths[size_t(blocker)])+".parent:space";
+                        size_t rawRow=0,rawMatches=0;
+                        for(size_t index=0;index<_f.providerProgram->sampled.size();++index)
+                            if(_f.providerProgram->sampled[index].path==rawPath){rawRow=index;++rawMatches;}
+                        if(rawMatches!=1)return _Bad(_StepName(owner)+": provider refresh blocker lacks exact raw source");
+                        const auto &raw=_f.providerProgram->sampled[rawRow];
+                        if(raw.propertyVersion!=-1 || raw.inputSlot<0 || size_t(raw.inputSlot)>=_f.inputs.size() ||
+                           _f.inputs[size_t(raw.inputSlot)].type()!=InputTag::Matrix4d ||
+                           RigExecFormatPathText(_f,_f.inputs[size_t(raw.inputSlot)].name())!=rawPath)
+                            return _Bad(_StepName(owner)+": provider refresh blocker raw source type or identity differs");
+                        read(D::SpaceLeaf,uint32_t(rawRow));
+                    }
+                }
+                for(const auto &guard:refresh.priorConstraints)read(D::CommitTable,guard.first);
+                std::set<std::pair<D,uint32_t>> declared;
+                for(const auto &range:step.writes)
+                    for(uint32_t slot=range.begin();slot<range.end();++slot)declared.emplace(range.domain(),slot);
+                if(declared!=writes)return _Bad(_StepName(owner)+": provider refresh write ownership differs");
+            } else if(step.kind==K::ComposeSubtree) {
+                if(step.object<0 || size_t(step.object)>=pose.composeGroups.size())
+                    return _Bad(_StepName(owner)+": invalid compose group");
+                const auto &group=pose.composeGroups[size_t(step.object)];
+                for(const auto &sw:pose.spaceSwitches) if(sw.slot>=int32_t(group.begin) && sw.slot<int32_t(group.end)) {
+                    const auto version=[&](const fb::RigExecWireFrameVersion &value) {
+                        if(value.context>=0) read(D::SwitchFrame,uint32_t(value.context));
+                    };
+                    version(*sw.parentRead); version(*sw.spaceRead);
+                    for(const auto &value:sw.sourceReads) version(value);
+                }
+            } else if(step.kind==K::Solve) {
+                if(!_Has(pose.solvers,step.object)) return _Bad(_StepName(owner)+": solver body object out of range");
+                const auto &solver=pose.solvers[size_t(step.object)];
+                readAll(D::PoseFin,solver.controlReads);
+                for(const auto binding:{std::make_pair(solver.start,solver.startRead),
+                    std::make_pair(solver.root,solver.rootRead),std::make_pair(solver.mid,solver.midRead),
+                    std::make_pair(solver.end,solver.endRead),std::make_pair(solver.pole,solver.poleRead),
+                    std::make_pair(solver.spaceSlot,uint32_t(solver.spaceRead))})
+                    if(binding.first>=0) read(D::PoseFin,binding.second);
+                for(size_t k=0;k<solver.restReads.size();++k)
+                    if(k<solver.restIsLive.size() && solver.restIsLive[k]) read(D::PoseFin,solver.restReads[k]);
+            } else if(step.kind==K::FrameMatrix) {
+                if(!_Has(pose.frameRecords,step.object)) return _Bad(_StepName(owner)+": frame body object out of range");
+                read(D::PoseFin,pose.frameRecords[size_t(step.object)].version());
+            } else if(step.kind==K::ProviderMatrix) {
+                if(step.object<0 || size_t(step.object)>=_slots) return _Bad(_StepName(owner)+": provider body object out of range");
+                const size_t slot=size_t(step.object);
+                if(step.part) read(D::PoseFin,finLast[slot]);
+                read(D::PoseBase,baseLast[slot]);
+            } else if(step.kind==K::PoseInterpolator) {
+                if(!_Has(pose.poseInterpolators,step.object)) return _Bad(_StepName(owner)+": interpolator body object out of range");
+                const auto &interp=pose.poseInterpolators[size_t(step.object)];
+                if(interp.driverSlot>=0) read(D::PoseFin,finLast[size_t(interp.driverSlot)]);
+                if(interp.parentSlot>=0) read(D::PoseFin,finLast[size_t(interp.parentSlot)]);
+            } else if(step.kind==K::Constraint || step.kind==K::SolverCommit ||
+                      step.kind==K::CommitDelta || step.kind==K::PropagateChunk || step.kind==K::CommitApply) {
+                if(!_Has(pose.commits,step.object)) return _Bad(_StepName(owner)+": commit body object out of range");
+                const auto &commit=pose.commits[size_t(step.object)];
+                if(step.kind==K::Constraint) {
+                    if(!_Has(pose.walkSteps,step.object) || pose.walkSteps[size_t(step.object)].solverBatch ||
+                       !_Has(pose.constraints,pose.walkSteps[size_t(step.object)].index))
+                        return _Bad(_StepName(owner)+": constraint body object out of range");
+                    const auto &c=pose.constraints[size_t(pose.walkSteps[size_t(step.object)].index)];
+                    if(commit.sourceReads.size()<c.sources.size() || commit.poleReads.size()<c.poleObjects.size())
+                        return _Bad(_StepName(owner)+": incomplete constraint body SSA bindings");
+                    for(size_t k=0;k<c.sources.size();++k) if(c.sources[k]>=0) read(D::PoseFin,commit.sourceReads[k]);
+                    if(c.target>=0) read(D::PoseFin,commit.targetRead);
+                    readAll(D::PoseFin,commit.targetReads);
+                    if(c.worldUpObject>=0) read(D::PoseFin,commit.worldUpRead);
+                    if(c.effector>=0) read(D::PoseFin,commit.effectorRead);
+                    for(size_t k=0;k<c.poleObjects.size();++k) if(c.poleObjects[k]>=0) read(D::PoseFin,commit.poleReads[k]);
+                    const auto ancestors=[&](const auto &values) { for(const auto &value:values) { read(D::PoseFin,value.fin); read(D::PoseBase,value.base); } };
+                    for(const auto &values:commit.sourceAncestors) ancestors(values.v);
+                    for(const auto &values:commit.poleAncestors) ancestors(values.v);
+                    ancestors(commit.worldUpAncestors); ancestors(commit.effectorAncestors);
+                }
+                const bool apply=step.kind==K::CommitApply || (!commit.split && (step.kind==K::Constraint || step.kind==K::SolverCommit));
+                if(step.kind==K::CommitDelta || (apply && !commit.split)) readAll(D::PoseFin,commit.slotReads);
+                if(step.kind==K::PropagateChunk || (apply && !commit.split)) {
+                    const size_t begin=step.kind==K::PropagateChunk ? size_t(step.part)*64 : 0;
+                    const size_t end=step.kind==K::PropagateChunk ? std::min(begin+64,commit.propagate.size()) : commit.propagate.size();
+                    if(commit.descendantReads.size()<end || commit.closestReads.size()<end)
+                        return _Bad(_StepName(owner)+": incomplete propagation body SSA bindings");
+                    for(size_t k=begin;k<end;++k) { read(D::PoseFin,commit.descendantReads[k]); read(D::PoseFin,commit.closestReads[k]); }
+                }
+                if(apply) {
+                    writeAll(D::PoseFin,commit.slotWrites); writeAll(D::PoseFin,commit.descendantWrites);
+                    writeAll(D::PoseBase,commit.slotBaseWrites); writeAll(D::PoseBase,commit.descendantBaseWrites);
+                    const auto carries=[&](D domain,const auto &values) { for(auto value:values) {
+                        if(!writes.count({domain,uint32_t(value)})) read(domain,uint32_t(value));
+                    } };
+                    carries(D::PoseFin,commit.slotCarry); carries(D::PoseFin,commit.descendantCarry);
+                    carries(D::PoseBase,commit.slotBaseCarry); carries(D::PoseBase,commit.descendantBaseCarry);
+                }
+            }
+            for(const auto &value:reads)
+                if(!_BodyRead(owner,value.first,value.second))
+                    return _Bad(_StepName(owner)+": body SSA missing read "+fb::EnumNameSlotDomain(value.first)+"["+_N(value.second)+"]");
+            for(const auto &value:writes) {
+                const bool declared=std::any_of(step.writes.begin(),step.writes.end(),[&](const auto &range) {
+                    return range.domain()==value.first && range.begin()<=value.second && value.second<range.end();
+                });
+                if(!declared) return _Bad(_StepName(owner)+": body SSA missing write "+fb::EnumNameSlotDomain(value.first)+"["+_N(value.second)+"]");
+            }
+        }
+        return true;
+    }
+
+    void _CollectGeometryBodyReads()
+    {
+        using D=fb::SlotDomain; using K=fb::StepKind;
+        const auto &g=*_f.geometry;
+        for(size_t i=0;i<_f.steps.size();++i) {
+            const auto &step=_f.steps[i];
+            const auto read=[&](D domain,uint32_t slot) { _bodyReads[i].emplace(domain,slot); };
+            const auto point=[&](uint32_t chain,uint32_t version) {
+                if(version==0)read(D::ChainBase,chain);
+                else {const uint32_t revision=uint32_t(g.chainRevisionBegin[chain])+version-1;
+                    read(D::RevisionDone,revision);read(D::ChainDirty,revision);}
+            };
+            if(step.kind==K::WeightPacket && _Has(g.weightObjects,step.object)) {
+                const auto &weight=g.weightObjects[size_t(step.object)];
+                if(weight.base>=0)read(D::WeightPacket,uint32_t(weight.base));
+                for(int32_t input:weight.inputs)read(D::WeightPacket,uint32_t(input));
+                if(weight.providerSlot>=0 && size_t(weight.providerSlot)<_bodyBaseLast.size())
+                    read(D::PoseBase,_bodyBaseLast[size_t(weight.providerSlot)]);
+                continue;
+            }
+            if(step.kind==K::WeightField && _Has(g.weightFields,step.object)) {
+                const auto &field=g.weightFields[size_t(step.object)];
+                if(field.form==fb::WeightFieldForm::Revision && _Has(g.revisionIndex,field.consumer)) {
+                    const auto &index=g.revisionIndex[size_t(field.consumer)];
+                    read(D::ChainBase,uint32_t(index.first));
+                    if(index.second>0) {
+                        read(D::ChainDirty,uint32_t(field.consumer)-1);
+                        for(int32_t k=0;k<index.second;++k)
+                            read(D::RevisionDone,uint32_t(g.chainRevisionBegin[size_t(index.first)])+uint32_t(k));
+                    }
+                }
+                for(int32_t slot:field.volumes)
+                    read(field.placementPhase==fb::WeightFieldPlacementPhase::Base?D::WeightFramesBase:D::WeightFrames,uint32_t(slot));
+                continue;
+            }
+            if(step.kind==K::VolumePlacements && step.object>=0) {
+                if(size_t(step.object)<_bodyFinLast.size() && step.part==1)read(D::PoseFin,_bodyFinLast[size_t(step.object)]);
+                else if(size_t(step.object)<_bodyBaseLast.size() && step.part==2)read(D::PoseBase,_bodyBaseLast[size_t(step.object)]);
+                continue;
+            }
+            if(step.kind==K::Constraint && _Has(_f.pose->walkSteps,step.object)) {
+                const auto &walk=_f.pose->walkSteps[size_t(step.object)];
+                if(!walk.solverBatch && _Has(_f.pose->constraints,walk.index)) {
+                    const auto &constraint=_f.pose->constraints[size_t(walk.index)];
+                    if(constraint.weightField>=0)read(D::WeightField,uint32_t(constraint.weightField));
+                }
+            }
+            if(step.kind==K::ChainStatus && _Has(g.chains,step.object)) {
+                const size_t chain=size_t(step.object);read(D::ChainBase,uint32_t(chain));
+                for(int32_t revision=g.chainRevisionBegin[chain];revision<g.chainRevisionEnd[chain];++revision)
+                    read(D::RevisionDone,uint32_t(revision));
+                continue;
+            }
+            const bool derived=step.kind==K::Derived;
+            const bool regular=step.kind==K::InfluenceFold || step.kind==K::RevisionStatic ||
+                step.kind==K::RevisionChunk || step.kind==K::RevisionFuse;
+            if(!derived && !regular)continue;
+            const auto &indices=derived?g.derivedIndex:g.revisionIndex;
+            if(!_Has(indices,step.object))continue;
+            const auto &index=indices[size_t(step.object)];
+            const auto &chain=g.chains[size_t(index.first)];
+            const auto &revision=derived?*chain.derived[size_t(index.second)].revision:
+                chain.revisions[size_t(index.second)];
+            const uint32_t id=uint32_t(step.object),c=uint32_t(index.first);
+            const bool skin=revision.op==uint8_t(fb::RevisionOp::Skin);
+            read(D::ChainBase,c);
+            if(derived || step.kind==K::InfluenceFold) {
+                const D own=revision.finalPhase?D::FinalMatrix:D::BaseMatrix;
+                const bool both=revision.op==uint8_t(fb::RevisionOp::SurfaceProjector) ||
+                    revision.op==uint8_t(fb::RevisionOp::ShaderDials);
+                for(int32_t slot:{revision.transformSlot,revision.transformSpaceSlot,revision.carrySpaceSlot})
+                    if(slot>=0) {if(both){read(D::BaseMatrix,uint32_t(slot));read(D::FinalMatrix,uint32_t(slot));}
+                        else read(own,uint32_t(slot));}
+                for(int32_t slot:revision.influenceSlots)if(slot>=0)read(own,uint32_t(slot));
+            }
+            if(derived) {read(D::ChainPoints,c);read(D::DerivedBase,id);continue;}
+            if(step.kind==K::InfluenceFold) {
+                if(revision.constraintDelta>=0)read(D::ConstraintDelta,uint32_t(revision.constraintDelta));
+                if(skin)read(D::RevisionPacket,id);
+            } else if(step.kind==K::RevisionStatic) {
+                if(!skin)read(D::RevisionTransforms,id);
+                if(revision.weightObject>=0)read(D::WeightPacket,uint32_t(revision.weightObject));
+                if(revision.weightField>=0)read(D::WeightField,uint32_t(revision.weightField));
+                if(revision.driverFramesSolver>=0)read(D::Aggregate,uint32_t(revision.driverFramesSolver));
+                for(const auto &channel:revision.blendChannels)
+                    if(channel.poseWeight>=0)read(D::PoseWeight,uint32_t(channel.poseWeight));
+            } else if(step.kind==K::RevisionChunk) {
+                read(D::RevisionPacket,id);point(c,uint32_t(index.second));
+                if(revision.chunked && _Has(revision.chunks,step.part)) {
+                    const D own=revision.finalPhase?D::FinalMatrix:D::BaseMatrix;
+                    for(int32_t position:revision.chunks[size_t(step.part)].key)
+                        if(_Has(revision.influenceSlots,position) && revision.influenceSlots[size_t(position)]>=0)
+                            read(own,uint32_t(revision.influenceSlots[size_t(position)]));
+                } else if(skin)read(D::RevisionTransforms,id);
+            } else {
+                read(D::RevisionPacket,id);read(D::RevisionTransforms,id);point(c,uint32_t(index.second));
+                if(revision.weightObject>=0)read(D::WeightPacket,uint32_t(revision.weightObject));
+                for(size_t k=0;k<revision.chunks.size();++k)read(D::RevisionOut,uint32_t(revision.chunkBase)+uint32_t(k));
+            }
+        }
+    }
+
+    bool _RequiredStageFrames()
+    {
+        using D=fb::SlotDomain; using K=fb::StepKind;
+        _CollectGeometryBodyReads();
+        const auto *admission=_f.pose->requiredStageFramesAdmission.get();
+        if(!admission || admission->admitted>1 || (admission->admitted ? admission->firstBadTarget!=-1 :
+           admission->firstBadTarget<0 || size_t(admission->firstBadTarget)>=_f.slotMeta->xformSlots.size()))
+            return _Bad("pose.required_stage_frames_admission: invalid admission or first failed target");
+        for(uint64_t id:_f.commonGraph->excludedValues)
+            if(id<_f.commonGraph->valueSpecs.size() &&
+               _f.commonGraph->valueSpecs[size_t(id)].domain==uint32_t(D::RequiredStageFramesAdmission))
+                return _Bad("common_graph.excluded_values: required stage-frame admission cannot be excluded");
+        const auto prep=[](K kind) { return kind==K::PropertyRevision || kind==K::RestCompose ||
+            kind==K::LadderCompose || kind==K::SkinTopology; };
+        std::map<std::pair<D,uint32_t>,std::vector<size_t>> producers;
+        std::vector<size_t> pending;
+        for(size_t i=0;i<_f.steps.size();++i) {
+            const auto &step=_f.steps[i];
+            for(const auto &range:step.writes) {
+                if(range.domain()==D::RequiredStageFramesAdmission)
+                    return _Bad(_StepName(i)+": required stage-frame admission is source-only");
+
+            }
+            if(!prep(step.kind))continue;
+            pending.push_back(i);
+            if(step.kind==K::PropertyRevision && step.part>0) {
+                const auto &chain=_f.propertyChains[size_t(step.object)];
+                const auto &revision=chain.revisions[size_t(step.part-1)];
+                if(!_BodyRead(i,D::PropertyResult,chain.versionBase+uint32_t(step.part)-1))return false;
+                if(revision.weightField>=0 && !_BodyRead(i,D::WeightField,uint32_t(revision.weightField)))
+                    return _Bad(_StepName(i)+": missing actual property weight-field read");
+                for(const auto *read:{revision.enabled.get(),revision.defaultWeight.get(),revision.value.get(),revision.min.get(),revision.max.get()})
+                    if(read && !_RequireCandidateReads(i,*read))return false;
+            }
+            // These memo bindings were checked against the exact body bindings above.
+            for(const auto &read:step.headInputReads)
+                if(!_RequireCandidateReads(i,read))return false;
+        }
+        // Only actual body reads can be queried by ancestry. Intersect each
+        // writer range with those keys instead of expanding unused slots.
+        std::set<std::pair<D,uint32_t>> actualReads;
+        for(const auto &owner:_bodyReads)
+            actualReads.insert(owner.second.begin(),owner.second.end());
+        for(size_t i=0;i<_f.steps.size();++i)
+            for(const auto &range:_f.steps[i].writes) {
+                auto read=actualReads.lower_bound(std::make_pair(range.domain(),range.begin()));
+                for(;read!=actualReads.end() && read->first==range.domain() &&
+                     read->second<range.end();++read)
+                    producers[*read].push_back(i);
+            }
+        std::set<size_t> ancestors;
+        while(!pending.empty()) {
+            const size_t owner=pending.back();pending.pop_back();
+            if(!ancestors.insert(owner).second)continue;
+            const auto found=_bodyReads.find(owner);
+            if(found==_bodyReads.end())continue;
+            for(const auto &read:found->second) {
+                const auto producer=producers.find(read);
+                if(producer!=producers.end())pending.insert(pending.end(),producer->second.begin(),producer->second.end());
+            }
+        }
+        for(size_t i=0;i<_f.steps.size();++i) {
+            const auto &step=_f.steps[i];
+            const bool helper=step.kind==K::WeightField || step.kind==K::SpaceExpression;
+            const bool required=step.kind!=K::SnapshotFinals && !prep(step.kind) &&
+                step.kind!=K::AvarInputs && !(helper && ancestors.count(i));
+            size_t count=0;
+            for(const auto &range:step.reads)if(range.domain()==D::RequiredStageFramesAdmission) {
+                if(range.begin()!=0 || range.end()!=1)
+                    return _Bad(_StepName(i)+": required stage-frame admission must read exactly source slot zero");
+                ++count;
+            }
+            if(count!=size_t(required))
+                return _Bad(_StepName(i)+": required stage-frame admission read differs from actual preparation role");
+        }
+        return true;
     }
 
     bool _HeadChecks()
@@ -1504,22 +3002,23 @@ private:
                 return _Bad("PropertyRevision record " + _N(r) + ": noncanonical version");
         std::vector<int64_t> writers(versions, -1);
         std::vector<int64_t> rest(slots, -1), ladder(slots, -1), topology(layouts, -1);
-        bool region = false;
         const auto producerDomain = [](fb::SlotDomain domain) {
             return domain == fb::SlotDomain::PropertyResult || domain == fb::SlotDomain::Rest ||
                    domain == fb::SlotDomain::Ladder || domain == fb::SlotDomain::SkinTopology;
         };
         for (size_t i = 0; i < _f.steps.size(); ++i) {
             const auto &step = _f.steps[i];
-            const bool kindHead = step.kind >= fb::StepKind::PropertyRevision;
-            if (step.isHead != kindHead || (step.isHead && region))
-                return _Bad(_StepName(i) + ": heads must form the contiguous prefix with head kinds");
-            region = region || !step.isHead;
+            const bool kindHead =
+                (step.kind >= fb::StepKind::PropertyRevision &&
+                 step.kind <= fb::StepKind::SkinTopology) ||
+                (step.kind == fb::StepKind::WeightField && step.object >= 0 &&
+                 size_t(step.object) < _f.geometry->weightFields.size() &&
+                 _f.geometry->weightFields[size_t(step.object)].form !=
+                     fb::WeightFieldForm::Revision);
+            if (step.isHead != kindHead)
+                return _Bad(_StepName(i) + ": head category differs from its body kind");
             if (step.isHead && (step.isSource || step.externalReads))
                 return _Bad(_StepName(i) + ": a head is never a source or always region step");
-            for (const auto pred : step.preds)
-                if (step.isHead && (pred < 0 || size_t(pred) >= i || !_f.steps[size_t(pred)].isHead))
-                    return _Bad(_StepName(i) + ": head depends on a non-head or later producer");
             for (const auto &range : step.writes) {
                 if (!producerDomain(range.domain())) continue;
                 if (!step.isHead) return _Bad(_StepName(i) + ": region writes a head domain");
@@ -1574,9 +3073,6 @@ private:
             if (!std::is_sorted(step.headInputSlots.begin(), step.headInputSlots.end()) ||
                 std::adjacent_find(step.headInputSlots.begin(), step.headInputSlots.end()) != step.headInputSlots.end())
                 return _Bad(_StepName(i) + ": memo slots are not sorted unique");
-            if (!step.isHead && (!step.headInputSlots.empty() || !step.headInputReads.empty() ||
-                                 step.headVaryingLeaves || step.headAlwaysRuns))
-                return _Bad(_StepName(i) + ": region carries head memo metadata");
             if (step.kind == fb::StepKind::PropertyRevision) {
                 const auto &chain = _f.propertyChains[size_t(step.object)];
                 std::set<uint32_t> expectedSlots;
@@ -1584,25 +3080,8 @@ private:
                 if (step.part == 0) expectedSlots.insert(chain.target);
                 else {
                     const auto &revision = chain.revisions[size_t(step.part - 1)];
-                    volatileBody = revision.envelope >= 0;
-                    if (volatileBody) {
-                        std::vector<int32_t> pending{revision.envelope};
-                        std::unordered_set<int32_t> visited;
-                        while (!pending.empty()) {
-                            const int32_t object = pending.back();
-                            pending.pop_back();
-                            if (!visited.insert(object).second) continue;
-                            if (!_Has(_f.geometry->weightObjects, object))
-                                return _Bad(_StepName(i) + ": property envelope object out of range");
-                            const auto &weight = _f.geometry->weightObjects[size_t(object)];
-                            const std::string type = RigExecFormatPathText(_f, weight.type);
-                            if (type == "RigExecSphereWeight" || type == "RigExecPlaneWeight" ||
-                                type == "RigExecCurveWeight")
-                                return _Bad(_StepName(i) + ": property envelope contains a volume");
-                            if (weight.base >= 0) pending.push_back(weight.base);
-                            pending.insert(pending.end(), weight.inputs.begin(), weight.inputs.end());
-                        }
-                    }
+                    volatileBody = false;
+
                     for (const auto *input : {revision.enabled.get(), revision.defaultWeight.get(),
                                              revision.value.get(), revision.min.get(), revision.max.get()}) {
                         if (!input) continue;
@@ -1626,8 +3105,8 @@ private:
                                             : _f.geometry->revisionIndex[layout];
                 const auto &revision = derived ? *_f.geometry->chains[size_t(index.first)].derived[size_t(index.second)].revision
                                               : _f.geometry->chains[size_t(index.first)].revisions[size_t(index.second)];
-                if (!revision.skinTopologyFixed)
-                    return _Bad(_StepName(i) + ": topology head has no fixed layout body");
+                if (revision.op!=uint8_t(fb::RevisionOp::Skin))
+                    return _Bad(_StepName(i) + ": topology head has no Skin layout body");
                 std::set<uint32_t> expected;
                 for (size_t slot = 0; slot < _f.inputs.size(); ++slot)
                     if (_SlotIs(int32_t(slot), revision.moverPath, "rigExec:jointIndices") ||
@@ -1651,9 +3130,15 @@ private:
                     if (restBody) {
                         for (const auto &read : ladderBody.restAvars) expected.push_back(&read);
                         expected.push_back(ladderBody.restSpace.get());
+                        expected.push_back(ladderBody.interveningSpace.get());
                     } else {
                         expected.push_back(ladderBody.posedSpace.get());
                         expected.push_back(ladderBody.defaultSpace.get());
+                        expected.push_back(ladderBody.parentSpace.get());
+                        expected.push_back(ladderBody.parentDefaultSpace.get());
+                        expected.push_back(ladderBody.avarDefaultSpace.get());
+                        expected.push_back(ladderBody.posedDefaultSpace.get());
+                        expected.push_back(ladderBody.rotationSign.get());
                         for (const auto &read : ladderBody.defaultAvars) expected.push_back(&read);
                         expected.push_back(ladderBody.rotationOrder.get());
                     }
@@ -1683,7 +3168,7 @@ private:
                     return _Bad(_StepName(i) + ": invalid shadowed property read");
             const size_t registered = _overrideUses.size();
             for (size_t r = 0; r < step.headInputReads.size(); ++r)
-                if (!_Read(&step.headInputReads[r], -1, _Baked,
+                if (!_Read(&step.headInputReads[r], int(step.headInputReads[r].tag), _AnyMode,
                            _StepName(i), "head_input_reads", long(r))) return false;
             _overrideUses.resize(registered);
         }
@@ -1699,23 +3184,79 @@ private:
         for (const auto &[input, label] : _readUses) {
             if (input->mode == ReadMode::Raw) continue;
             const auto owner = owners.find(input);
-            const int chainLimit = owner != owners.end() &&
-                _f.steps[owner->second].kind == fb::StepKind::PropertyRevision
-                ? _f.steps[owner->second].object : int(_f.propertyChains.size());
-            for (const uint32_t slotId : input->walk) {
+            // Bound property reads use per-consumer typed phase authority;
+            // producer chain discovery order does not constrain visibility.
+            const int readerChain = owner!=owners.end() && _f.steps[owner->second].kind==fb::StepKind::PropertyRevision
+                ? _f.steps[owner->second].object : -1;
+            // Property revisions own entering phases and suppress later target overlays.
+            // Ordinary readers retain conditional Final fallbacks after typed records.
+            const auto oracle = _oracleScalarContexts.find(input);
+            const auto oracleKind = [&](uint32_t slot) {
+                auto kind = fb::PropertyCandidateKind::SlotOnly;
+                if (oracle == _oracleScalarContexts.end()) return kind;
+                // Oracle overlays are per-consumer publication contexts, in
+                // chain target/record order, distinct from ordinary bindings.
+                for (int32_t c : *oracle->second) {
+                    if (_f.propertyChains[size_t(c)].target == slot)
+                        kind = fb::PropertyCandidateKind::ChainFinal;
+                    for (const auto &record : _f.phasedConsumers)
+                        if (record.chain == uint32_t(c) && record.consumer == slot)
+                            kind = fb::PropertyCandidateKind::PhasedRecord;
+                }
+                return kind;
+            };
+            // Resolved oracle/path reads consult the publication overlay at
+            // every hop; their target Final remains a valid later fallback.
+            using CandidateKind = fb::PropertyCandidateKind;
+            std::map<uint32_t,CandidateKind> expectedProperty, expectedDouble;
+            std::set<uint32_t> selected;
+            const bool sourceOnly = _sampledLeafReads.count(input) != 0;
+            const bool boundWalk = owner!=owners.end() || input->mode==ReadMode::Baked ||
+                _boundWalkReads.count(input)!=0;
+            const auto derive = [&](uint32_t slotId, InputTag readAs) {
                 const auto &slot = _f.inputs[slotId];
-                const bool chain = slot.chain() >= 0 && slot.chain() < chainLimit;
-                const bool record = slot.phased() >= 0 &&
-                    _f.phasedConsumers[size_t(slot.phased())].chain < uint32_t(chainLimit);
-                if (!chain && !record) continue;
-                const auto expected = chain ? fb::PropertyCandidateKind::ChainFinal : fb::PropertyCandidateKind::PhasedRecord;
-                bool found = false;
-                for (const auto *list : {&input->propertyCandidates, &input->doubleCandidates})
-                    for (const auto &candidate : *list)
-                        found = found || (candidate.slot == slotId && candidate.kind == uint8_t(expected));
-                if (!found) return _Bad((owner == owners.end() ? label : _StepName(owner->second)) +
-                                        ": chain crossing lacks its property candidate");
+                const bool ownEntering = boundWalk && readerChain>=0 && slot.chain()==readerChain &&
+                    input->mode==ReadMode::Pinned && !input->walk.empty() && input->walk.front()==slotId;
+                const bool chain = slot.chain()>=0 && !ownEntering && (readerChain<0 || !selected.count(uint32_t(slot.chain())));
+                const bool record = slot.phased()>=0 && (!boundWalk || input->mode!=ReadMode::Pinned);
+                const auto kind = oracle!=_oracleScalarContexts.end() ? oracleKind(slotId) :
+                    sourceOnly ? CandidateKind::SlotOnly : chain ? CandidateKind::ChainFinal :
+                    record ? CandidateKind::PhasedRecord : CandidateKind::SlotOnly;
+                if(readerChain>=0 && record && _ChainTargetTag(_f.phasedConsumers[size_t(slot.phased())].consumerType)==readAs)
+                    selected.insert(_f.phasedConsumers[size_t(slot.phased())].chain);
+                return kind;
+            };
+            size_t typedDoubleStart = input->walk.size();
+            if(!input->doubleCandidates.empty()) {
+                for(size_t k=0;k<input->walk.size();++k)
+                    if(_f.inputs[input->walk[k]].type()==InputTag::Double) {typedDoubleStart=k;break;}
+                if(typedDoubleStart==input->walk.size())return _Bad(label+": Double traversal has no Double hop");
             }
+            // The Float prefix includes the first Double hop; the Double
+            // suffix revisits it with its exact type and carries selected records.
+            const size_t prefixEnd = typedDoubleStart<input->walk.size() ? typedDoubleStart+1 : input->walk.size();
+            if(!input->propertyCandidates.empty() || input->doubleCandidates.empty())
+                for(size_t k=0;k<prefixEnd;++k)
+                    expectedProperty.emplace(input->walk[k],derive(input->walk[k],input->tag));
+            for(size_t k=typedDoubleStart;k<input->walk.size();++k)
+                expectedDouble.emplace(input->walk[k],derive(input->walk[k],InputTag::Double));
+            auto requiredDouble = expectedDouble;
+            // DoubleTail starts a fresh cycle guard at its Double boundary.
+            // A cycle can revisit the Float prefix after the required suffix.
+            // Those optional hops retain exact typed phase and version checks.
+            if(typedDoubleStart<input->walk.size())
+                for(size_t k=0;k<typedDoubleStart;++k)
+                    expectedDouble.emplace(input->walk[k],derive(input->walk[k],InputTag::Double));
+            if(!sourceOnly) for(const auto &segment : {std::make_pair(&expectedProperty,&input->propertyCandidates),
+                                                     std::make_pair(&requiredDouble,&input->doubleCandidates)})
+                for(const auto &[slotId,expected] : *segment.first) {
+                    if(expected==CandidateKind::SlotOnly)continue;
+                    bool found=false;
+                    for(const auto &candidate:*segment.second)
+                        found=found || (candidate.slot==slotId && candidate.kind==uint8_t(expected));
+                    if(!found)return _Bad((owner==owners.end()?label:_StepName(owner->second))+
+                        ": chain crossing lacks its property candidate at input slot "+std::to_string(slotId));
+                }
             size_t doubleStart = 0;
             if (!input->doubleCandidates.empty()) {
                 if (input->walk.empty()) return _Bad(label + ": double segment has no walk");
@@ -1737,14 +3278,15 @@ private:
                 size_t previous = 0;
                 bool first = true;
                 for (const auto &candidate : *list) {
-                    const auto &slot = _f.inputs[candidate.slot];
-                    const bool chain = slot.chain() >= 0 && slot.chain() < chainLimit;
-                    const bool record = slot.phased() >= 0 &&
-                        _f.phasedConsumers[size_t(slot.phased())].chain < uint32_t(chainLimit);
-                    const auto expected = chain ? fb::PropertyCandidateKind::ChainFinal :
-                        record ? fb::PropertyCandidateKind::PhasedRecord : fb::PropertyCandidateKind::SlotOnly;
+                    const auto &expectedSegment = list==&input->doubleCandidates ? expectedDouble : expectedProperty;
+                    const auto typed = expectedSegment.find(candidate.slot);
+                    if(typed==expectedSegment.end())return _Bad(label+": candidate is outside its typed walk segment");
+                    const auto expected = typed->second;
                     if (candidate.kind != uint8_t(expected))
-                        return _Bad(label + ": candidate kind disagrees with its reader phase");
+                        return _Bad(label + ": candidate kind disagrees with its reader phase at input slot " +
+                            std::to_string(candidate.slot) + " (kind " + std::to_string(candidate.kind) +
+                            ", expected " + std::to_string(uint8_t(expected)) + ", version " +
+                            std::to_string(candidate.version) + ", cross-domain " + std::to_string(candidate.crossDomain) + ")");
                     const bool raw = list == &input->doubleCandidates || input->doubleCandidates.empty();
                     if (candidate.raw != raw)
                         return _Bad(label + ": candidate raw flag disagrees with its segment");
@@ -1765,7 +3307,7 @@ private:
                 return _Bad(label + ": own raw fallback is not its head slot");
         }
         for (size_t v = 0; v < writers.size(); ++v)
-            if (writers[v] < 0) return _Bad("PropertyRevision version " + _N(v) + ": no writer");
+            if (writers[v] < 0 && !_ExcludedValue(fb::SlotDomain::PropertyResult,uint32_t(v))) return _Bad("PropertyRevision version " + _N(v) + ": no writer");
         for (size_t i = 0; i < _f.steps.size(); ++i) {
             const auto &step = _f.steps[i];
             for (const auto &range : step.reads) {
@@ -1775,12 +3317,15 @@ private:
                     : range.domain() == fb::SlotDomain::Ladder ? &ladder : &topology;
                 if (range.end() > table->size()) return _Bad(_StepName(i) + ": head read out of range");
                 for (uint32_t v = range.begin(); v < range.end(); ++v)
-                    if ((*table)[v] < 0 || size_t((*table)[v]) >= i)
+                    if (((*table)[v] < 0 && !_ExcludedValue(range.domain(),v)) ||
+                        ((*table)[v] >= 0 && size_t((*table)[v]) >= i))
                         return _Bad(_StepName(i) + ": head read has no earlier producer");
             }
             const auto require = [&](fb::SlotDomain domain, int slot) {
                 if (slot < 0 || size_t(slot) >= slots) return true;
-                return _Declares(i, domain, uint32_t(slot)) ||
+                if ((domain==fb::SlotDomain::Rest || domain==fb::SlotDomain::Ladder) &&
+                    _f.slotMeta->slotKind[size_t(slot)]!=fb::SlotKind::FirstFramePose) return true;
+                return _BodyRead(i, domain, uint32_t(slot)) ||
                     _Bad(_StepName(i) + ": missing " + rigExecStepGraphDetail::DomainName(uint8_t(domain)) +
                          "[" + _N(size_t(slot)) + "] read");
             };
@@ -1837,7 +3382,7 @@ private:
                 if (actual != expected)
                     return _Bad(_StepName(i) + ": chunk matrix reads differ from its influence key");
             }
-            if (bodyRevision && bodyRevision->skinTopologyFixed &&
+            if (bodyRevision && bodyRevision->op==uint8_t(fb::RevisionOp::Skin) &&
                 !_Declares(i, fb::SlotDomain::SkinTopology, uint32_t(layoutId)))
                 return _Bad(_StepName(i) + ": missing SkinTopology[" + _N(layoutId) + "] read");
             if (step.kind == fb::StepKind::ProviderMatrix && !require(fb::SlotDomain::Rest, step.object)) return false;
@@ -1892,8 +3437,9 @@ private:
             const auto &chain = _f.geometry->chains[size_t(index.first)];
             const auto *revision = derived ? chain.derived[size_t(index.second)].revision.get()
                                            : &chain.revisions[size_t(index.second)];
-            if (revision && revision->skinTopologyFixed && topology[layout] < 0)
-                return _Bad("SkinTopology layout " + _N(layout) + ": fixed layout body has no producer");
+            if (revision && revision->op==uint8_t(fb::RevisionOp::Skin) && topology[layout] < 0 &&
+                !_ExcludedValue(fb::SlotDomain::SkinTopology,uint32_t(layout)))
+                return _Bad("SkinTopology layout " + _N(layout) + ": Skin layout body has no producer");
         }
         return true;
     }
@@ -1909,20 +3455,14 @@ private:
     {
         const fb::RigExecWireCones &c = *_f.cones;
         const std::string row = "cones";
-        if (!_Size(c.cone.size(), _clusters, row, "cone") ||
-            !_ClusterSet(c.always.get(), "cones.always") ||
+        if (!_ClusterSet(c.always.get(), "cones.always") ||
             !_ClusterSet(c.poseClusters.get(), "cones.pose_clusters")) {
             return false;
         }
-        for (size_t k = 0; k < c.cone.size(); ++k) {
-            if (!_ClusterSet(&c.cone[k], "cones.cone[" + _N(k) + "]")) {
-                return false;
-            }
-        }
-        // Every slot's avars and every revision's static step belong to a
-        // cluster: the runtime dirties it without a -1 check.
+        // Ordinary producer metadata names a real cluster. An explicitly
+        // excluded Avars producer has no active cluster in the common graph.
         if (!_Size(c.avarCluster.size(), _slots, row, "avar_cluster") ||
-            !_Indices(c.avarCluster, _clusters, false, row, "avar_cluster") ||
+            !_Indices(c.avarCluster, _clusters, true, row, "avar_cluster") ||
             !_Size(c.chainBaseClusters.size(), _chains, row,
                    "chain_base_clusters") ||
             !_Size(c.revisionClusters.size(), _revisions, row,
@@ -1936,6 +3476,9 @@ private:
                       "override_steps")) {
             return false;
         }
+        for (size_t slot=0;slot<c.avarCluster.size();++slot)
+            if(c.avarCluster[slot]<0 && !_ExcludedValue(fb::SlotDomain::Avars,uint32_t(slot)))
+                return _Bad("cones.avar_cluster["+_N(slot)+"]: missing active Avars producer without an excluded value");
         for (const auto *lists : {&c.chainBaseClusters, &c.revisionClusters}) {
             for (size_t k = 0; k < lists->size(); ++k) {
                 if (!_Indices((*lists)[k].v, _clusters, false,
@@ -2072,7 +3615,7 @@ private:
             if (!_Indices(sw.sourceSlots, _slots, true, row,
                           "source_slots") ||
                 !_Index(sw.spaceSlot, _slots, true, row, "space_slot") ||
-                !_ReadPtr(sw.active, int(InputTag::Double), _Baked, row,
+                !_ReadPtr(sw.active, int(sw.tokenIndex?InputTag::Token:InputTag::Double), _Baked, row,
                           "active")) {
                 return false;
             }
@@ -2126,6 +3669,12 @@ private:
             }
             avarSeen[binding.flat] = 1;
         }
+        for (size_t i = 0; i < p.xformFrames.size(); ++i) {
+            if (p.xformFrames[i].flags & ~uint32_t(31))
+                return _Bad("pose.xform_frames[" + _N(i) + "]: unknown frame flags");
+        }
+        if (!_Size(p.xformFrames.size(), _f.slotMeta->xformSlots.size(),
+                   "pose", "xform_frames")) return false;
         return _Size(p.xformBase.size(), _f.slotMeta->xformSlots.size(),
                      "pose", "xform_base");
     }
@@ -2133,11 +3682,22 @@ private:
     bool _Ladder(const fb::RigExecWireLadder &ladder, const std::string &row)
     {
         const int matrix = int(InputTag::Matrix4d);
+        if(!ladder.spaceValues.empty() && ladder.spaceValues.size()!=7)
+            return _Bad(row+": space_values must be empty or contain the seven declared space channels");
+        for(int32_t value:ladder.spaceValues)
+            if(value < -1 || (value>=0 && (!_f.providerProgram || size_t(value)>=_f.providerProgram->valueKeys.size())))
+                return _Bad(row+": space_values references an unknown provider value");
         if (!_ReadPtr(ladder.restSpace, matrix, _Baked, row, "rest_space") ||
             !_ReadPtr(ladder.defaultSpace, matrix, _Baked, row,
                       "default_space") ||
             !_ReadPtr(ladder.posedSpace, matrix, _Baked, row,
                       "posed_space") ||
+            !_ReadPtr(ladder.parentSpace,matrix,_Baked,row,"parent_space") ||
+            !_ReadPtr(ladder.parentDefaultSpace,matrix,_Baked,row,"parent_default_space") ||
+            !_ReadPtr(ladder.avarDefaultSpace,matrix,_Baked,row,"avar_default_space") ||
+            !_ReadPtr(ladder.posedDefaultSpace,matrix,_Baked,row,"posed_default_space") ||
+            !_ReadPtr(ladder.interveningSpace,matrix,_Baked,row,"intervening_space") ||
+            !_ReadPtr(ladder.rotationSign,int(InputTag::Vec3d),_Baked,row,"rotation_sign") ||
             !_ReadPtr(ladder.rotationOrder, int(InputTag::Token), _Baked, row,
                       "rotation_order") ||
             !_Size(ladder.restAvars.size(), 6, row, "rest_avars") ||
@@ -2327,6 +3887,17 @@ private:
         if (!_PathId(a.prim, _PrimOrZero, row, "prim")) {
             return false;
         }
+        if (!_Size(a.rawSlots.size(),4,row,"raw_slots")) return false;
+        for(size_t k=0;k<4;++k) {
+            const int slot=a.rawSlots[k];
+            if(slot < -1 || (slot>=0 && size_t(slot)>=_f.inputs.size()))
+                return _Bad(_At(row,"raw_slots",long(k))+": out of range");
+            if(slot>=0) {
+                const auto expected=(k==1 || k==2)?fb::InputTag::Vec3dArray:fb::InputTag::FloatArray;
+                if(_f.inputs[size_t(slot)].type()!=expected)
+                    return _Bad(_At(row,"raw_slots",long(k))+": wrong raw array type");
+            }
+        }
         if (a.ok && !_Size(a.weights.size(), a.sourceCount, row, "weights")) {
             return false;
         }
@@ -2477,6 +4048,99 @@ private:
                 fin(solver.spaceRead);
             }
         }
+        std::set<std::string> refreshKeys;
+        for(size_t i=0;i<p.providerRefreshes.size();++i) {
+            const auto &refresh=p.providerRefreshes[i];
+            const std::string row="pose.provider_refreshes["+_N(i)+"]";
+            if(refresh.key.empty() || !refreshKeys.insert(refresh.key).second ||
+               refresh.slot<0 || size_t(refresh.slot)>=_slots ||
+               refresh.checkpoint>p.walkSteps.size() ||
+               !_PathId(refresh.reader,_Prim,row,"reader"))
+                return _Bad(row+": invalid or duplicate provider refresh context");
+            uint32_t reader=_f.rig;
+            if(refresh.checkpoint<p.walkSteps.size()) {
+                const auto &walk=p.walkSteps[size_t(refresh.checkpoint)];
+                if(walk.solverBatch) {
+                    if(walk.batchSolvers.empty() || !_Has(p.solvers,walk.batchSolvers.back()))return _Bad(row+": invalid solver reader context");
+                    reader=p.solvers[size_t(walk.batchSolvers.back())].path;
+                } else {
+                    if(!_Has(p.constraints,walk.index))return _Bad(row+": invalid constraint reader context");
+                    reader=p.constraints[size_t(walk.index)].path;
+                }
+            }
+            if(refresh.reader!=reader || refresh.key!="providerRefresh:"+RigExecFormatPathText(_f,reader)+":"+
+                std::to_string(refresh.checkpoint)+":"+RigExecFormatPathText(_f,_f.slotMeta->paths[size_t(refresh.slot)]))
+                return _Bad(row+": provider refresh key or reader differs from canonical context");
+            const auto frames=[&](int32_t slot,uint32_t br,uint32_t fr,uint32_t bw,uint32_t fw) {
+                if(slot<0 || size_t(slot)>=_slots || br==bw || fr==fw ||
+                   bw<_slots || fw<_slots)return false;
+                ++baseWrites[size_t(slot)];++finWrites[size_t(slot)];
+                base(br);base(bw);fin(fr);fin(fw);return true;
+            };
+            if(!frames(refresh.slot,refresh.baseRead,refresh.finRead,refresh.baseWrite,refresh.finWrite))
+                return _Bad(row+": refresh target lacks fresh owned frame versions");
+            std::set<int32_t> carrySlots;
+            for(const auto &carry:refresh.carries) {
+                if(carry.slot==refresh.slot || !carrySlots.insert(carry.slot).second ||
+                   !frames(carry.slot,carry.baseRead,carry.finRead,carry.baseWrite,carry.finWrite))
+                    return _Bad(row+": invalid or duplicate refresh carry");
+                int32_t ancestor=carry.slot;
+                while(ancestor>=0 && ancestor!=refresh.slot)ancestor=_f.slotMeta->propParent[size_t(ancestor)];
+                if(ancestor!=refresh.slot)return _Bad(row+": refresh carry is outside its provider subtree");
+                std::set<int32_t> blockers;
+                for(int32_t blocker:carry.blockingSlots)
+                    if(blocker<0 || size_t(blocker)>=_slots || !blockers.insert(blocker).second)
+                        return _Bad(row+": invalid or duplicate carry blocker");
+                std::vector<int32_t> expectedBlockers;
+                for(int32_t at=carry.slot;at>=0 && at!=refresh.slot;at=_f.slotMeta->propParent[size_t(at)])
+                    if(_f.slotMeta->slotKind[size_t(at)]==fb::SlotKind::FirstFramePose)expectedBlockers.push_back(at);
+                if(carry.blockingSlots!=expectedBlockers)return _Bad(row+": carry blocker ancestry differs");
+            }
+            std::set<std::pair<uint32_t,uint32_t>> guards;
+            for(const auto &guard:refresh.priorConstraints)
+                if(guard.first>=refresh.checkpoint || guard.first>=p.commits.size() ||
+                   p.commits[guard.first].solverOutput || guard.second>=p.commits[guard.first].slots.size() ||
+                   p.commits[guard.first].slots[guard.second]!=refresh.slot ||
+                   !guards.emplace(guard.first,guard.second).second)
+                    return _Bad(row+": invalid or duplicate prior constraint guard");
+        }
+        for(const auto &frame:p.providerFrameInputs) {
+            if(frame.base)base(frame.version);else fin(frame.version);
+        }
+        std::map<uint32_t,int32_t> baseOwners,finOwners;
+        for(size_t slot=0;slot<_slots;++slot) {
+            baseOwners[uint32_t(slot)]=finOwners[uint32_t(slot)]=int32_t(slot);
+            if(baseWrites[slot])baseOwners[uint32_t(_slots+slot)]=int32_t(slot);
+            if(finWrites[slot])finOwners[uint32_t(_slots+slot)]=int32_t(slot);
+        }
+        const auto assign=[&](auto &owners,uint32_t version,int32_t slot) {
+            const auto found=owners.find(version);
+            if(found!=owners.end() && found->second!=slot)return false;
+            owners[version]=slot;return true;
+        };
+        for(const auto &commit:p.commits) {
+            for(size_t k=0;k<commit.slots.size();++k) {
+                if(k<commit.slotWrites.size() && !assign(finOwners,commit.slotWrites[k],commit.slots[k]))return _Bad("pose: frame version has multiple provider owners");
+                if(commit.solverOutput && k<commit.slotBaseWrites.size() && !assign(baseOwners,commit.slotBaseWrites[k],commit.slots[k]))return _Bad("pose: frame version has multiple provider owners");
+            }
+            for(size_t k=0;k<commit.propagate.size();++k) {
+                if(k<commit.descendantWrites.size() && !assign(finOwners,commit.descendantWrites[k],commit.propagate[k].first))return _Bad("pose: frame version has multiple provider owners");
+                if(commit.solverOutput && k<commit.descendantBaseWrites.size() && !assign(baseOwners,commit.descendantBaseWrites[k],commit.propagate[k].first))return _Bad("pose: frame version has multiple provider owners");
+            }
+        }
+        for(const auto &refresh:p.providerRefreshes) {
+            if(!assign(baseOwners,refresh.baseWrite,refresh.slot) || !assign(finOwners,refresh.finWrite,refresh.slot))return _Bad("pose: refresh frame belongs to another provider");
+            for(const auto &carry:refresh.carries)
+                if(!assign(baseOwners,carry.baseWrite,carry.slot) || !assign(finOwners,carry.finWrite,carry.slot))return _Bad("pose: refresh carry frame belongs to another provider");
+        }
+        const auto owned=[&](const auto &owners,uint32_t version,int32_t slot) {
+            const auto found=owners.find(version);return found!=owners.end() && found->second==slot;
+        };
+        for(const auto &refresh:p.providerRefreshes) {
+            if(!owned(baseOwners,refresh.baseRead,refresh.slot) || !owned(finOwners,refresh.finRead,refresh.slot))return _Bad("pose: refresh entering frame belongs to another provider");
+            for(const auto &carry:refresh.carries)
+                if(!owned(baseOwners,carry.baseRead,carry.slot) || !owned(finOwners,carry.finRead,carry.slot))return _Bad("pose: refresh carry entering frame belongs to another provider");
+        }
         uint64_t finArena = 0, baseArena = 0;
         for (size_t s = 0; s < _slots; ++s) {
             finArena += finWrites[s] > 0 ? finWrites[s] - 1 : 0;
@@ -2490,6 +4154,7 @@ private:
                         "pools");
         }
         _finPool = finPool;
+        _basePool = basePool;
         return true;
     }
 
@@ -2789,6 +4454,44 @@ private:
     /// at most one range, with no key.
     bool _Chunks(const fb::RigExecWireRevision &r, const std::string &row)
     {
+        using ProducerKey=std::pair<uint8_t,uint32_t>;
+        std::set<std::vector<ProducerKey>> distinct;
+        size_t minimum=SIZE_MAX,maximum=0;
+        for (size_t set=0;set<r.partitionProducerSets.size();++set) {
+            std::vector<ProducerKey> keys;
+            for (const auto &value:r.partitionProducerSets[set].values) {
+                if (value.end()!=uint64_t(value.begin())+1 ||
+                    !_GraphValueSlot(uint32_t(value.domain()),value.begin()))
+                    return _Bad(row+": partition producer set has invalid typed identity");
+                keys.emplace_back(uint8_t(value.domain()),value.begin());
+            }
+            if (!std::is_sorted(keys.begin(),keys.end()) ||
+                std::adjacent_find(keys.begin(),keys.end())!=keys.end())
+                return _Bad(row+": partition producer set is not sorted and unique");
+            minimum=std::min(minimum,keys.size()); maximum=std::max(maximum,keys.size());
+            distinct.insert(keys);
+            if(r.chunked) {
+                if(set>=r.chunks.size()) return _Bad(row+": partition producer set has no natural chunk");
+                std::vector<ProducerKey> expected;
+                const auto domain=r.finalPhase?fb::SlotDomain::FinalMatrix:fb::SlotDomain::BaseMatrix;
+                for(int position:r.chunks[set].key) {
+                    if(position<0 || size_t(position)>=r.influenceSlots.size())
+                        return _Bad(row+": partition producer influence position exceeds bindings");
+                    const int slot=r.influenceSlots[size_t(position)];
+                    if(slot>=0) expected.emplace_back(uint8_t(domain),uint32_t(slot));
+                }
+                std::sort(expected.begin(),expected.end());
+                expected.erase(std::unique(expected.begin(),expected.end()),expected.end());
+                if(keys!=expected) return _Bad(row+": partition producer set differs from actual influence bindings");
+            }
+        }
+        if(minimum==SIZE_MAX) minimum=0;
+        if(r.partitionProducerMin<0 || r.partitionProducerMax<0 ||
+            uint64_t(r.partitionProducerMin)!=minimum || uint64_t(r.partitionProducerMax)!=maximum ||
+            r.partitionDistinctReads!=distinct.size() ||
+            (r.chunked && r.partitionProducerSets.size()!=r.chunks.size()))
+            return _Bad(row+": partition producer summary differs from exact natural sets");
+
         const uint64_t width = r.partitionElementSize < 1
                                    ? 0
                                    : uint64_t(r.partitionElementSize);
@@ -3254,9 +4957,18 @@ private:
                                 ": its default is not a pool array");
                 }
             }
+            for (const auto &entry : {
+                     std::make_pair(w.oraclePlaneAxisSlot, "rigExec:planeAxis"),
+                     std::make_pair(w.oraclePlaneBoundsSlot, "rigExec:planeBounds")}) {
+                const int32_t slot = entry.first;
+                if (!_InputSlotOf(slot, InputTag::Token, row, entry.second)) return false;
+                if (slot >= 0 && (!_SlotIs(slot, w.path, entry.second) ||
+                    (_f.inputs[size_t(slot)].flags() & uint8_t(fb::InputSlotFlags::Listed))))
+                    return _Bad(row + ": oracle token must be its private raw attribute slot");
+            }
             // Dependency order bounds the oracle's recursion.
-            if (!_Index(w.base, i, true, row, "base") ||
-                !_Indices(w.inputs, i, false, row, "inputs")) {
+            if (!_Index(w.base, _weights, true, row, "base") ||
+                !_Indices(w.inputs, _weights, false, row, "inputs")) {
                 return false;
             }
             const unsigned mode = w.envelopeOnly ? _Resolved : _Baked;
@@ -3481,6 +5193,14 @@ private:
     std::string _SlotText(size_t slot) const
     {
         return RigExecFormatPathText(_f, _f.slotMeta->paths[slot]);
+    }
+
+    // Record only reads reconstructed from validated body fields, never extra declarations.
+    bool _BodyRead(size_t step, fb::SlotDomain domain, uint64_t slot)
+    {
+        if (!_Declares(step,domain,slot)) return false;
+        _bodyReads[step].emplace(domain,uint32_t(slot));
+        return true;
     }
 
     /// Whether step \p step declares a read of slot \p slot of \p domain.
@@ -3759,11 +5479,11 @@ private:
                                       : _StepName(size_t(head)) +
                                             " writes at or after it"));
             }
-            if (!_Declares(reader, fb::SlotDomain::PoseFin, record.slot())) {
+            if (!_BodyRead(reader, fb::SlotDomain::PoseFin, record.version())) {
                 return _Bad(step() + " does not declare PoseFin[" +
-                            _N(record.slot()) + "]");
+                            _N(record.version()) + "]");
             }
-            if (!_Declares(reader, fb::SlotDomain::CommitTable,
+            if (!_BodyRead(reader, fb::SlotDomain::CommitTable,
                            record.commit())) {
                 return _Bad(step() + " does not declare CommitTable[" +
                             _N(record.commit()) + "]");
@@ -4032,7 +5752,7 @@ private:
     bool _DeclaresRecords(size_t step, const fb::RigExecWireRevision &r)
     {
         const auto declared = [&](uint32_t k) {
-            return _Declares(step, fb::SlotDomain::FrameMatrix, k) ||
+            return _BodyRead(step, fb::SlotDomain::FrameMatrix, k) ||
                    _Bad(_StepName(step) + " does not declare FrameMatrix[" +
                         _N(k) + "]");
         };
@@ -4060,7 +5780,7 @@ private:
     {
         const auto declared = [&](const RigExecWirePointsBinding &binding) {
             const auto need = [&](fb::SlotDomain domain, uint64_t slot) {
-                return _Declares(step, domain, slot) ||
+                return _BodyRead(step, domain, slot) ||
                        _Bad(_StepName(step) + " does not declare " +
                             rigExecStepGraphDetail::DomainName(
                                 uint8_t(domain)) +
@@ -4256,6 +5976,20 @@ private:
                     return false;
                 }
             }
+            for(size_t k=0;k<mover.declaredInputs.size();++k) {
+                const auto &declaration=mover.declaredInputs[k];
+                const auto at=_At(row,"declared_inputs",long(k));
+                if(declaration.time > fb::ExternalInputTime::AtDefault || declaration.flavour > fb::ExternalInputFlavour::Present)
+                    return _Bad(at+": invalid read time/flavour");
+                if(!_ReadPtr(declaration.read,declaration.read ? int(declaration.read->tag) : _AnyTag,_AnyMode,at,"read")) return false;
+                const bool raw=declaration.flavour == fb::ExternalInputFlavour::Raw || declaration.flavour == fb::ExternalInputFlavour::OverlayThenRaw || declaration.flavour == fb::ExternalInputFlavour::Present;
+                if(raw && declaration.read->mode!=ReadMode::Raw)
+                    return _Bad(at+": raw/present declaration requires raw read metadata");
+                if(!raw && declaration.read->mode!=ReadMode::Resolved)
+                    return _Bad(at+": resolved declaration requires resolved read metadata");
+                if(declaration.read->overrideIndex>=0)
+                    return _Bad(at+": external declaration cannot own a native interactive override");
+            }
             for (size_t k = 0; k < mover.inputs.size(); ++k) {
                 if (!_Read(&mover.inputs[k], _AnyTag, _AnyMode, row,
                            "inputs", long(k))) {
@@ -4318,6 +6052,10 @@ private:
         return true;
     }
 
+    bool _sourceBackedIndexed=false;
+    std::unordered_set<const RigExecWireInput *> _sourceBackedOwners;
+    std::vector<uint32_t> _bodyFinLast,_bodyBaseLast;
+    std::map<size_t,std::set<std::pair<fb::SlotDomain,uint32_t>>> _bodyReads;
     const RigExecWireFile &_f;
     std::string _error;
     size_t _slots = 0;
@@ -4332,8 +6070,12 @@ private:
     /// The PoseFin versions the commits size: version references are
     /// below it.
     uint64_t _finPool = 0;
+    uint64_t _basePool = 0;
     std::vector<uint32_t> _overrideUses;
     std::vector<std::pair<const RigExecWireInput *, std::string>> _readUses;
+    std::set<const RigExecWireInput *> _sampledLeafReads;
+    std::set<const RigExecWireInput *> _boundWalkReads;
+    std::map<const RigExecWireInput *, const std::vector<int32_t> *> _oracleScalarContexts;
     /// Per path node: 0 for paths[0], else its parent's depth plus one.
     std::vector<uint32_t> _depth;
     /// The steps in playback order, and each step's position in it.
@@ -4364,11 +6106,11 @@ namespace {
 std::string
 _VersionRefusal(uint32_t version)
 {
-    static_assert(RigExecFormatVersion == 10,
+    static_assert(RigExecFormatVersion == 17,
                   "name what the previous format version lacks");
     return "unsupported .rigexec format version " + _N(version) +
            " (this reader reads " + _N(RigExecFormatVersion) + "); " +
-           (version < RigExecFormatVersion ? "re-export: S3 head tier"
+           (version < RigExecFormatVersion ? "re-export: required stage-frame admission"
                                               : "rebake");
 }
 
@@ -4435,8 +6177,19 @@ RigExecFormatOpen(const uint8_t *bytes, size_t size,
     if (!file) {
         return _Fail(error, "no file to open into");
     }
+#if defined(__cpp_exceptions) || defined(_CPPUNWIND)
+    try {
+#endif
     if (!bytes || size < 8) {
         return _Fail(error, "not a .rigexec file (" + _N(size) + " bytes)");
+    }
+    transport::Buffer decoded;
+    if (transport::IsEnvelope(bytes, size)) {
+        if (!transport::Decode(bytes, size, &decoded, error)) return false;
+        bytes = decoded.data.get();
+        size = decoded.size;
+        if (size < 8) return _Fail(error, "not a .rigexec file (decoded payload too short)");
+        // Exactly one transport layer; raw identifier validation follows.
     }
     if (std::memcmp(bytes, RigExecFormatIdentifier, 4) == 0) {
         // "v4" names the FlatBuffer generation of the format, not
@@ -4452,20 +6205,12 @@ RigExecFormatOpen(const uint8_t *bytes, size_t size,
         return _Fail(error, "malformed .rigexec: " + _N(size) +
                                 " bytes is past the FlatBuffers limit");
     }
+    return _OpenAligned(bytes, size, file, error);
 #if defined(__cpp_exceptions) || defined(_CPPUNWIND)
-    // Allocation failures (the aligned copy, UnPack, the validator) refuse
-    // the file rather than escape.
-    try {
-        return _OpenAligned(bytes, size, file, error);
     } catch (const std::bad_alloc &) {
         file->reset();
-        return _Fail(error, "cannot open .rigexec: out of memory (" +
-                                _N(size) + " bytes)");
+        return _Fail(error, "cannot open .rigexec: out of memory");
     }
-#else
-    // Built without exceptions (game engines), an allocation failure ends
-    // the process as every other allocation there does.
-    return _OpenAligned(bytes, size, file, error);
 #endif
 }
 
@@ -4476,16 +6221,31 @@ RigExecFormatWrite(const fb::RigExecWireFile &file,
     if (!bytes) {
         return _Fail(error, "no buffer to write into");
     }
-    bytes->clear();
+    bytes->clear(); // Preserve the public clear-on-failure contract.
+#if defined(__cpp_exceptions) || defined(_CPPUNWIND)
+    try {
+#endif
     std::string why;
     if (!RigExecFormatValidate(file, &why)) {
         return _Fail(error, "invalid .rigexec: " + why);
     }
-    flatbuffers::FlatBufferBuilder builder(1u << 16);
-    fb::FinishFileBuffer(builder, fb::File::Pack(builder, &file));
-    bytes->assign(builder.GetBufferPointer(),
-                  builder.GetBufferPointer() + builder.GetSize());
-    return true;
+        flatbuffers::FlatBufferBuilder builder(1u << 16);
+        fb::FinishFileBuffer(builder, fb::File::Pack(builder, &file));
+        if (builder.GetSize() >= FLATBUFFERS_MAX_BUFFER_SIZE)
+            return _Fail(error, "cannot write .rigexec: past the FlatBuffers limit");
+        std::vector<uint8_t> candidate;
+        if (!transport::Encode(builder.GetBufferPointer(), builder.GetSize(),
+                               &candidate, error)) return false;
+        if (candidate.empty())
+            candidate.assign(builder.GetBufferPointer(),
+                             builder.GetBufferPointer() + builder.GetSize());
+        bytes->swap(candidate);
+        return true;
+#if defined(__cpp_exceptions) || defined(_CPPUNWIND)
+    } catch (const std::bad_alloc &) {
+        return _Fail(error, "cannot write .rigexec: out of memory");
+    }
+#endif
 }
 
 std::string
@@ -4554,6 +6314,9 @@ _StepKindName(fb::StepKind kind)
     case fb::StepKind::RestCompose: return "RestCompose";
     case fb::StepKind::LadderCompose: return "LadderCompose";
     case fb::StepKind::SkinTopology: return "SkinTopology";
+    case fb::StepKind::WeightField: return "WeightField";
+    case fb::StepKind::SpaceCheckpoint: return "SpaceCheckpoint";
+    case fb::StepKind::ProviderRefresh: return "ProviderRefresh";
     }
     return "unknown";
 }
@@ -4633,6 +6396,25 @@ _StepObject(const RigExecWireFile &file, const fb::RigExecWireStep &step,
         *out = text(meta->paths[size_t(first)]);
         return true;
     }
+    case fb::StepKind::SpaceCheckpoint: {
+        if (!pose || !_Has(pose->spaceCheckpoints, object)) return false;
+        *out = pose->spaceCheckpoints[size_t(object)].key;
+        return true;
+    }
+    case fb::StepKind::ProviderRefresh:
+        if(!pose || !_Has(pose->providerRefreshes,object))return false;
+        *out=pose->providerRefreshes[size_t(object)].key;
+        return true;
+    case fb::StepKind::WeightField: {
+        if (!geometry || !_Has(geometry->weightFields, object)) return false;
+        const auto &field = geometry->weightFields[size_t(object)];
+        if (!_Has(geometry->weightObjects, field.object)) return false;
+        *out = text(geometry->weightObjects[size_t(field.object)].path) +
+               " form " + std::to_string(int(field.form)) +
+               " consumer " + std::to_string(field.consumer) +
+               " part " + std::to_string(field.part);
+        return true;
+    }
     case fb::StepKind::SkinTopology: {
         if (!geometry || object < 0) return false;
         const size_t layout = size_t(object);
@@ -4672,8 +6454,8 @@ _StepObject(const RigExecWireFile &file, const fb::RigExecWireStep &step,
     case fb::StepKind::VolumePlacements:
         // part 1 places one volume, at slot `object`; any other form has
         // no slot to name.
-        if (step.part == 1 && meta && _Has(meta->paths, object)) {
-            *out = text(meta->paths[size_t(object)]);
+        if ((step.part == 1 || step.part == 2) && meta && _Has(meta->paths, object)) {
+            *out = text(meta->paths[size_t(object)]) + (step.part == 2 ? " base" : "");
         } else {
             *out = "every volume weight";
         }

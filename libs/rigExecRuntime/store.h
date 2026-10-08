@@ -18,6 +18,8 @@
 #include "rigExecBinary/format.h"
 #include "rigExecRuntime/inputs.h"
 #include "rigExecRuntime/values.h"
+#include "rigExecGraph/opValues.h"
+#include "rigExecGraph/providerRecords.h"
 
 #include <array>
 #include <cstdint>
@@ -41,7 +43,13 @@ enum RrLadderField : int {
     RrLadderDefaultAvar0 = 9,
     // RrLadderDefaultAvar0 + k, k in 0..5.
     RrLadderRotationOrder = 15,
-    RrLadderFieldCount = 16,
+    RrLadderParentSpace = 16,
+    RrLadderParentDefaultSpace = 17,
+    RrLadderAvarDefaultSpace = 18,
+    RrLadderPosedDefaultSpace = 19,
+    RrLadderRotationSign = 20,
+    RrLadderInterveningSpace = 21,
+    RrLadderFieldCount = 22,
 };
 
 enum RrSolverField : int {
@@ -123,10 +131,46 @@ struct RrLadderLive {
 
 // One revision's publish row, filled by the geometry steps for the
 // epilogue's weight-field and moved-property publication.
+// Completed arrays are immutable snapshots. A writable spare becomes the next
+// snapshot; an unshared old buffer may be recycled, while retained publications
+// keep their old payload intact across later executions and workspace clones.
+template <class T> class RrRetainedArray {
+    std::shared_ptr<std::vector<T>> _data;
+public:
+    const std::vector<T> &Read() const {
+        return _data ? *_data : Empty();
+    }
+    static const std::vector<T> &Empty();
+    bool empty() const { return Read().empty(); }
+    size_t size() const { return Read().size(); }
+    const T *data() const { return Read().data(); }
+    void clear() { _data.reset(); }
+    std::vector<T> &Write() {
+        if (!_data) _data=std::make_shared<std::vector<T>>();
+        else if (!_data.unique()) _data=std::make_shared<std::vector<T>>(*_data);
+        return *_data;
+    }
+    void swap(std::vector<T> &spare) {
+        if (_data && _data.unique()) { _data->swap(spare); return; }
+        auto next = std::make_shared<std::vector<T>>();
+        next->swap(spare);
+        if (_data && _data.unique()) spare.swap(*_data);
+        _data = std::move(next);
+    }
+};
+// Namespace-owned empty storage avoids worker-local static initialization.
+inline const std::vector<RrVec3f> RrEmptyRetainedPoints;
+template <> inline const std::vector<RrVec3f> &
+RrRetainedArray<RrVec3f>::Empty() { return RrEmptyRetainedPoints; }
+
+inline const std::vector<float> RrEmptyRetainedWeights;
+template <> inline const std::vector<float> &
+RrRetainedArray<float>::Empty() { return RrEmptyRetainedWeights; }
+
 struct RrRevisionPublish {
     bool weightFieldPublished = false;
     uint32_t weightFieldTarget = 0;
-    std::vector<float> weightField;
+    RrRetainedArray<float> weightField;
     std::string resultStatus;
     uint32_t target = 0;
 };
@@ -136,10 +180,24 @@ struct RrRevisionPublish {
 struct RrChainPublish {
     bool haveBase = false;
     uint32_t target = 0;
-    std::vector<RrVec3f> result;
+    RrRetainedArray<RrVec3f> result;
 };
 
 // One resolved weight field publication.
+// Per-consumer pure weight field result, preserved when its producer skips.
+struct RrOracleReadContext {
+    std::map<uint32_t, std::vector<int32_t>> versionsBySlot;
+    std::map<std::pair<int32_t, int32_t>, size_t> scalarReadIndices;
+    std::map<std::pair<int32_t, int32_t>, size_t> pointReadIndices;
+};
+
+struct RrWeightFieldResult {
+    size_t count = 0;
+    std::vector<float> values;
+    bool ok = false;
+    std::string error;
+};
+
 struct RrWeightFieldPublish {
     uint32_t target = 0;
     std::vector<float> weights;
@@ -149,7 +207,7 @@ struct RrWeightFieldPublish {
 struct RrDerivedPublish {
     bool haveBase = false;
     uint32_t target = 0;
-    std::vector<RrVec3f> result;
+    RrRetainedArray<RrVec3f> result;
     /// A surface projector target publishes a matrix primvar instead,
     /// when this run measured one.
     bool matrixTarget = false;
@@ -164,7 +222,24 @@ struct RrWeightScratch;
 
 // The frame's working state. Sized once at Open from the decoded tables;
 // a run mutates values, never sizes.
+// Conversion storage belongs to one provider op. All slots are sized at Open,
+// so Read* pointers stay stable while that op evaluates, including repeated IDs.
+struct RrProviderConversionScratch {
+    std::vector<RrMat4d> matrices;
+    std::vector<RrPointFrame> frames;
+    std::vector<RrVec3d> vectors;
+    std::vector<double> scalars;
+};
+
+struct RrProviderRefreshScratch {
+    std::vector<RrPointFrame> baseInputs,finInputs,baseOutputs,finOutputs;
+    std::vector<uint8_t> blocked;
+};
+
 struct RrStore {
+    RigExecOpWorkspace opWorkspace;
+    RigExecOpExecution opExecution;
+    RigExecOpAdapterState opAdapter;
     std::vector<double> avars, lastAvars;
     std::vector<RrPointFrame> base, fin;
     std::vector<uint32_t> finLast, baseLast;
@@ -197,12 +272,17 @@ struct RrStore {
     std::vector<char> restChanged, ladderChanged, topologyChanged;
     std::vector<std::vector<std::string>> headLines;
     std::vector<std::string> headMemoKeys;
+    std::vector<std::string> opInputScratch;
+    std::vector<RigExecProviderPlainState> providerValues;
+    std::vector<RrProviderConversionScratch> providerConversionScratch;
+    std::vector<RrProviderRefreshScratch> providerRefreshScratch;
     std::vector<char> propertyPublished;
     std::vector<char> chainHaveBase, chainBaseDirty, lastHaveBase;
     std::vector<char> derivedHaveBase;
     std::vector<RrPointFrame> nativeFrames;
     std::vector<char> nativeFrameOk;
     std::vector<RrMat4d> xformBase, lastXformBase;
+    std::vector<RrMat4d> switchFrames;
     std::vector<RrMat4d> deltaBaseMatrix;
     std::vector<char> deltaBaseOk;
     // Per-frame solved constraint deltas, published by the pose family for
@@ -251,6 +331,11 @@ struct RrStore {
     /// Matrix primvars a surface projector published, by property.
     std::map<uint32_t, RrMat4d> movedMatrices;
     std::map<uint32_t, RrWeightFieldPublish> weightFields;
+    std::vector<RrWeightFieldResult> weightFieldResults;
+    std::vector<char> weightFieldChanged;
+    std::vector<RrOracleReadContext> weightFieldContexts;
+    std::vector<RrMat4d> volumePlacementBase;
+    std::vector<char> volumePlacedBase;
     std::vector<char> jointMatrixPublished;
     std::vector<RrStepOutput> stepOutputs;
     std::vector<uint64_t> closedWords, closedSteps;
@@ -391,6 +476,11 @@ struct RrGeoSettings {
 // The opened program plus its working state. The table pointers borrow
 // from `file`; the store is sized at Open.
 struct RrProgram {
+    // Explicit captured source state; no runtime Stage lookup or inferred frame validity.
+    fb::RigExecWireRequiredStageFramesAdmission requiredStageFramesAdmission;
+    bool requiredStageFramesFullOwed=false;
+    RigExecCompiledGraph opGraph;
+    RigExecProviderPlainProgram providerProgram;
     /// What Open decoded. A program a test assembles by hand leaves it
     /// null and points the tables below at its own.
     std::unique_ptr<RigExecWireFile> file;
@@ -468,7 +558,6 @@ struct RrProgram {
     // Test-only family mask: bit 0 pose, 1 weights, 2 geometry. All set
     // outside tests; a masked family's steps are skipped, which is how
     // one family's outputs are compared while another is still landing.
-    unsigned runMask = 0x7u;
 
     // The file's compile notices, replayed ahead of the program lines on
     // the first Execute, then drained.
@@ -528,6 +617,22 @@ struct RrProgram {
 
     RrInputValue ReadLadder(size_t slot, int field) const
     {
+        const auto &ladder=poses->ladders[slot];
+        const int channel=field<=2?field:field==RrLadderParentSpace?3:
+            field==RrLadderParentDefaultSpace?4:field==RrLadderAvarDefaultSpace?5:
+            field==RrLadderPosedDefaultSpace?6:-1;
+        if(channel>=0 && size_t(channel)<ladder.spaceValues.size()) {
+            const int id=ladder.spaceValues[size_t(channel)];
+            if(id>=0 && size_t(id)<store.providerValues.size()) {
+                const auto &state=store.providerValues[size_t(id)];
+                const auto *matrix=std::get_if<std::array<double,16>>(&state.value);
+                if(state.initialized && !state.blocked && matrix) {
+                    RrInputValue value; value.tag=RrInputTag::Matrix4d;
+                    std::memcpy(value.matrix._mtx,matrix->data(),sizeof(double)*16);
+                    return value;
+                }
+            }
+        }
         return ReadRegistered(ladderRead[slot][size_t(field)]);
     }
     RrInputValue ReadSolver(size_t solver, int field) const
@@ -592,8 +697,6 @@ bool RrRunPropertyPart(RrProgram *program, size_t chain, size_t part,
 void RrPropertyBegin(RrProgram *program);
 void RrPropertyPublish(RrProgram *program);
 void RrPropertyPublishFinished(RrProgram *program, const std::vector<char> &finished);
-bool RrRunHeadSteps(RrProgram *program, std::vector<std::string> *diagnostics,
-                    std::string *error);
 bool RrRunRestHead(RrProgram *program, size_t group, bool ladder);
 bool RrRunTopologyHead(RrProgram *program, size_t revision);
 bool RrRunPropertyChains(RrProgram *program,
@@ -612,7 +715,15 @@ bool RrPrologueGeometry(RrProgram *program,
 // Step bodies by family.
 bool RrRunPoseStep(RrProgram *program, size_t step, std::string *error);
 bool RrRunGeometryStep(RrProgram *program, size_t step, std::string *error);
+bool RrWeightFieldEffectiveInputMemo(const RrProgram *, uint32_t, std::string *, std::vector<uint32_t> *);
 bool RrRunWeightStep(RrProgram *program, size_t step, std::string *error);
+bool RrRevisionWeightFieldInput(const RrProgram *, size_t, const RrVec3f **, size_t *);
+bool RrRunRevisionWeightField(RrProgram *program, size_t fieldIndex);
+// Evaluate one compiled per-consumer field without stage or publication-map
+// lookup. The graph producer supplies the actual entering point count.
+bool RrResolveDeclaredWeightField(RrProgram *program, size_t fieldIndex,
+                                  size_t count,
+                                  const std::vector<RrVec3f> *current);
 void RrSkipGeometryStep(RrProgram *program, size_t step);
 
 /// RigExecRigEvaluator::_ResolveWeights (rigEvaluatorGeometry.cpp) over the
@@ -630,7 +741,6 @@ bool RrResolveWeightOracle(const RrProgram *program, size_t object,
 // Executor and epilogue (framework). The closure dirties what the inputs
 // set since the last run reach; RrStore::animatedTouched stands for a
 // change of time.
-void RrComputeClosure(RrProgram *program, bool force);
 bool RrRunSteps(RrProgram *program, bool force, std::string *error);
 bool RrPublishPose(RrProgram *program,
                    std::vector<std::string> *poseDiagnostics,

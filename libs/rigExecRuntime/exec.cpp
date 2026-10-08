@@ -1,9 +1,4 @@
-// rigExecRuntime driver (M2 framework).
-// The input API writes slot values; Execute applies the inputs set since
-// the last run, runs the property chains, then the prologues over the
-// file's static data, the region and the epilogue, then assembles the
-// outputs.
-// Failures name the step and keep the previous outputs.
+// Runtime driver: sample sources, execute the common graph, then publish outputs.
 #include "rigExecRuntime/runtime.h"
 #include "stageArrayInputs.h"
 
@@ -61,6 +56,96 @@ RigExecRuntimeStageArrayInputs::ClearSample(RigExecRuntimeReader &reader,
     size_t slot, std::string *error)
 {
     return RrStageArrayClear(reader._program.get(), slot, error);
+}
+
+bool
+RigExecRuntimeStageArrayInputs::CanSampleProviderValue(
+    const RigExecRuntimeReader &reader, size_t slot)
+{
+    const auto &sources=reader._program->inputState.slotProviderSource;
+    return slot<sources.size() && sources[slot];
+}
+
+bool
+RigExecRuntimeStageArrayInputs::SetSampleBlocked(
+    RigExecRuntimeReader &reader,size_t slot,bool blocked,std::string *error)
+{
+    return RrStageInputBlockedSet(reader._program.get(),slot,blocked,error);
+}
+
+std::vector<RigExecStageArrayInputInfo>
+RigExecRuntimeStageArrayInputs::EnumerateProviderValues(
+    const RigExecRuntimeReader &reader)
+{
+    std::vector<RigExecStageArrayInputInfo> result;
+    const auto &state=reader._program->inputState;
+    for (size_t slot=0;slot<state.slotProviderSource.size();++slot) {
+        if (!state.slotProviderSource[slot]) continue;
+        const auto &input=state.file->inputs[slot];
+        const auto tag=RrInputTag(uint8_t(input.type()));
+        const bool sourceBacked = (state.slotProviderSource[slot] & 2) != 0;
+        if ((!sourceBacked && !(input.flags() & uint8_t(RigExecWireInputSlotFlags::Animated))) ||
+            tag==RrInputTag::Token || RrInputTagIsArray(tag)) continue;
+        result.push_back({slot,reader._program->TextOrEmpty(input.name()),tag,
+                          (input.flags() & uint8_t(RigExecWireInputSlotFlags::Animated)) != 0});
+    }
+    return result;
+}
+
+bool
+RigExecRuntimeStageArrayInputs::SetScalarSample(
+    RigExecRuntimeReader &reader,size_t slot,const RrInputValue &value,std::string *error)
+{
+    return RrStageScalarSet(reader._program.get(),slot,value,error);
+}
+
+bool
+RigExecRuntimeStageArrayInputs::ClearScalarSample(
+    RigExecRuntimeReader &reader,size_t slot,std::string *error)
+{
+    return RrStageScalarClear(reader._program.get(),slot,error);
+}
+
+bool
+RigExecRuntimeStageArrayInputs::CanSampleToken(
+    const RigExecRuntimeReader &reader, size_t slot)
+{
+    const auto &slots = reader._program->inputState.stageTokenSlots;
+    return std::binary_search(slots.begin(), slots.end(), slot);
+}
+
+std::vector<RigExecStageArrayInputInfo>
+RigExecRuntimeStageArrayInputs::EnumerateTokens(const RigExecRuntimeReader &reader)
+{
+    std::vector<RigExecStageArrayInputInfo> result;
+    const auto &state = reader._program->inputState;
+    for (size_t slot : state.stageTokenSlots)
+        result.push_back({slot, reader._program->TextOrEmpty(state.file->inputs[slot].name()),
+                          RrInputTag::Token});
+    return result;
+}
+
+bool
+RigExecRuntimeStageArrayInputs::SetTokenSample(
+    RigExecRuntimeReader &reader, size_t slot, const std::string &text,
+    std::string *error)
+{
+    return RrStageTokenSet(reader._program.get(), slot, text, true, error);
+}
+
+bool
+RigExecRuntimeStageArrayInputs::ClearTokenSample(
+    RigExecRuntimeReader &reader, size_t slot, std::string *error)
+{
+    return RrStageTokenSet(reader._program.get(), slot, {}, false, error);
+}
+
+bool
+RigExecRuntimeStageArrayInputs::SetTokenArraySample(
+    RigExecRuntimeReader &reader, size_t slot,
+    const std::vector<std::string> &texts, std::string *error)
+{
+    return RrStageTokenArraySet(reader._program.get(), slot, texts, error);
 }
 
 size_t
@@ -253,16 +338,15 @@ RigExecRuntimeReader::GetTokenText(uint32_t token) const
     return _program->TextOrEmpty(token);
 }
 
-void
-RigExecRuntimeReader::SetRunMaskForTesting(unsigned mask)
-{
-    _program->runMask = mask;
-}
-
 std::string
 RigExecRuntimeReader::GetStepLabelForTesting(size_t step) const
 {
-    return RrStepLabel(*_program, step);
+    if (!_program->file || step >= _program->file->steps.size())
+        return std::to_string(step);
+    const auto &key = _program->file->steps[step].descriptorKey;
+    // Compile appends this suffix to the exact native display label.
+    const auto suffix = key.rfind("/category:");
+    return suffix == std::string::npos ? key : key.substr(0, suffix);
 }
 
 size_t
@@ -304,14 +388,7 @@ RigExecRuntimeReader::GetStepRanForTesting(size_t step) const
     if (step >= _program->steps->size() || !store.everRan) {
         return false;
     }
-    const RigExecWireStep &wire = (*_program->steps)[step];
-    if (wire.isHead)
-        return std::find(store.runTrace.begin(), store.runTrace.end(), int32_t(step)) != store.runTrace.end();
-    if (wire.isSource) {
-        return true;
-    }
-    return step / 64 < store.closedSteps.size() &&
-           ((store.closedSteps[step / 64] >> (step % 64)) & 1u) != 0;
+    return step < store.opExecution.ran.size() && store.opExecution.ran[step];
 }
 
 std::vector<RigExecRuntimeJointMatrix>
@@ -405,50 +482,55 @@ RigExecRuntimeReader::Execute(std::string *error)
     // TouchAnimatedInputs, dirties what a change of time dirties.
     RrInputsApplyTouched(&program);
 
-    // The property chains run first, as the baked prologue runs them: their
-    // lines open the generation and their results are what every later
-    // read of a chain target sees.
     std::vector<std::string> poseDiagnostics;
-    if (!RrRunHeadSteps(&program, &poseDiagnostics, error)) {
-        if (error) {
-            *error = "the property chains disagree with the file";
-        }
-        return false;
-    }
-
-    if ((program.runMask & 0x1u) != 0 &&
-        !RrProloguePose(&program, &poseDiagnostics, error)) {
-        return false;
-    }
-    if ((program.runMask & 0x4u) != 0 &&
-        !RrPrologueGeometry(&program, &poseDiagnostics, error)) {
-        return false;
-    }
+    if (!RrProloguePose(&program, &poseDiagnostics, error)) return false;
+    if (!RrPrologueGeometry(&program, &poseDiagnostics, error)) return false;
     if (!RrRunSteps(&program, false, error)) {
         return false;
     }
+
+    if(!program.requiredStageFramesAdmission.admitted) {
+        std::vector<size_t> propertySteps;
+        for(size_t i=0;i<program.steps->size();++i)
+            if((*program.steps)[i].kind==RigExecWireStepKind::PropertyRevision)propertySteps.push_back(i);
+        std::sort(propertySteps.begin(),propertySteps.end(),[&](size_t a,size_t b) {
+            const auto &left=(*program.steps)[a]; const auto &right=(*program.steps)[b];
+            return std::make_pair(left.object,left.part)<std::make_pair(right.object,right.part);
+        });
+        for(size_t i:propertySteps) {
+            poseDiagnostics.insert(poseDiagnostics.end(),store.headLines[i].begin(),store.headLines[i].end());
+        }
+        const size_t target=size_t(program.requiredStageFramesAdmission.firstBadTarget);
+        const size_t slot=size_t(program.slotMeta->xformSlots[target]);
+        const std::string refusal="could not resolve constraint target "+
+            program.TextOrEmpty(program.slotMeta->paths[slot])+" relative to the asset root";
+        poseDiagnostics.push_back(refusal);
+        _jointMatrices.clear(); _points.clear(); _matrixPrimvars.clear();
+        _weightFrames.clear(); _weightFields.clear(); _providerXforms.clear();
+        _diagnostics=std::move(poseDiagnostics);
+        _counters=RigExecRuntimeCounters();
+        _counters.executedOpCount=store.opExecution.executed;
+        if(error)*error=refusal;
+        return false;
+    }
+
     if (!RrPublishPose(&program, &poseDiagnostics, error)) {
         return false;
     }
     RrPublishGeometry(&program, &poseDiagnostics);
 
-    RigExecRuntimeCounters counters;
-    for (size_t s = 0; s < store.stepOutputs.size(); ++s) {
-        const RrStepOutput &output = store.stepOutputs[s];
-        counters.revisionsExecuted += output.counters.revisionsExecuted;
-        counters.revisionsCreated += output.counters.revisionsCreated;
-        counters.schedulesBuilt += output.counters.schedulesBuilt;
-        counters.chainsBuilt += output.counters.chainsBuilt;
-        counters.revisionsBuilt += output.counters.revisionsBuilt;
+    for (const auto &loop : program.opGraph.cycles) {
+        std::string message = "operation cycle: ";
+        for (size_t i = 0; i < loop.size(); ++i) {
+            if (i) message += " -> ";
+            message += loop[i];
+        }
+        if (std::find(poseDiagnostics.begin(), poseDiagnostics.end(), message) == poseDiagnostics.end())
+            poseDiagnostics.push_back(std::move(message));
     }
-    poseDiagnostics.push_back(
-        "mover graph: " + std::to_string(counters.chainsBuilt) +
-        " chain(s), " + std::to_string(counters.revisionsBuilt) +
-        " revision(s); " +
-        std::to_string(counters.revisionsCreated) + " created, " +
-        std::to_string(counters.revisionsExecuted) + " executed, " +
-        std::to_string(counters.schedulesBuilt) +
-        " schedule(s) built");
+
+    RigExecRuntimeCounters counters;
+    counters.executedOpCount=store.opExecution.executed;
 
     // A plugin mover this runtime has no kernel for is a no-op, said on
     // every frame it is one, beside the lines of the step it sat in.

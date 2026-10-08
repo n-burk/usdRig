@@ -21,6 +21,7 @@ using RigExecWireMatrix4d = std::array<double, 16>;
 /// Point-frame landmarks: the origin, then the X, Y and Z tips.
 using RigExecWireLandmarks = std::array<RigExecWireVec3d, 4>;
 using RigExecWireIntPair = std::pair<int32_t, int32_t>;
+using RigExecWireUIntPair = std::pair<uint32_t, uint32_t>;
 using RigExecWireBool3 = std::array<bool, 3>;
 
 struct RigExecWirePropertyInputCandidate {
@@ -28,9 +29,11 @@ struct RigExecWirePropertyInputCandidate {
     uint8_t kind = 0;
     int32_t version = -1;
     bool raw = false;
+    int32_t poseWeight = -1;
+    int32_t crossDomain = -1;
     bool operator==(const RigExecWirePropertyInputCandidate &other) const {
         return slot == other.slot && kind == other.kind &&
-               version == other.version && raw == other.raw;
+               version == other.version && raw == other.raw && poseWeight == other.poseWeight && crossDomain == other.crossDomain;
     }
 };
 

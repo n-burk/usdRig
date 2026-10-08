@@ -1,6 +1,7 @@
 // RigExec mover registry storage and shared stage-reading helpers.
 #include "moverRegistry.h"
 #include "moverExecCommon.h"
+#include "rigExecGraph/geometryProgram.h"
 
 #include "pxr/base/plug/plugin.h"
 #include "pxr/base/plug/registry.h"
@@ -88,10 +89,10 @@ RigExecRegisterMoverHandler(RigExecMoverHandler handler, std::string *error)
         handler.resolveOp(TfToken()) == RigExecRevisionOp::External;
     if (external || handler.assembleExternal || handler.applyExternal) {
         if (!external || handler.domain != RigExecMoverDomain::Points ||
-            !handler.assembleExternal || !handler.applyExternal) {
+            !handler.declareExternalInputs || !handler.compileScene || !handler.assembleExternal || !handler.applyExternal) {
             return fail(std::string(handler.schemaType) +
                 ": external movers require the External points operation "
-                "and both assembleExternal and applyExternal callbacks");
+                "and declareExternalInputs, compileScene, assembleExternal and applyExternal callbacks");
         }
         if (!handler.oracle) {
             handler.hasScalarOracle = false;
@@ -242,15 +243,15 @@ RigExecReadPhasedPoints(
         return;
     }
     if (!phase.IsBase()) {
-        if (const VtValue *v = ctx.snapshots.Lookup(
-                pointsPath, phase, ctx.moverPath)) {
+        if (const VtValue *v = ctx.phasedPoints ? ctx.phasedPoints(
+                pointsPath, phase, ctx.moverPath) : nullptr) {
             if (v->IsHolding<VtVec3fArray>()) {
                 *out = v->UncheckedGet<VtVec3fArray>();
                 return;
             }
         }
     }
-    if (const UsdAttribute a = ctx.stage->GetAttributeAtPath(pointsPath)) {
+    if (const RigExecOracleAttribute a = ctx.stage->GetAttributeAtPath(pointsPath)) {
         a.Get(out, ctx.time);
     }
 }
@@ -411,31 +412,7 @@ RigExecResolveBlendSampleLayout(
     offsetsAttr.Get(&offsets);
     indicesAttr.Get(&indices);
 
-    // An empty pointIndices means the offsets are dense and parallel to the
-    // base points -- UsdSkelBlendShape's own convention, kept rather than
-    // invented so an authored blend shape from anywhere else reads correctly.
-    if (!indices.empty()) {
-        if (indices.size() != offsets.size()) {
-            return cacheable;   // stable and wrong; cached as invalid
-        }
-        for (int index : indices) {
-            if (index < 0 || size_t(index) >= pointCount) {
-                return cacheable;
-            }
-        }
-    } else if (!offsets.empty() && offsets.size() != pointCount) {
-        return cacheable;
-    }
-    for (const GfVec3f &offset : offsets) {
-        if (!std::isfinite(offset[0]) || !std::isfinite(offset[1]) ||
-            !std::isfinite(offset[2])) {
-            return cacheable;
-        }
-    }
-
-    layout->offsets.assign(offsets.begin(), offsets.end());
-    layout->indices.assign(indices.begin(), indices.end());
-    layout->valid = true;
+    RigExecBuildGeometryBlendLayout(offsets,indices,pointCount,layout);
     return cacheable;
 }
 

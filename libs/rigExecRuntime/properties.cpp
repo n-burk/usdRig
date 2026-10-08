@@ -294,15 +294,15 @@ _RrRunPart(RrProgram *program, RrPropertyScratch *scratch, size_t c, size_t part
         }
         float envelope = 1.0f;
         if (revision.envelope >= 0) {
-            std::string error;
-            if (!RrResolveWeightOracle(program, size_t(revision.envelope), 1,
-                                       nullptr, &scratch->weights, &error) ||
-                scratch->weights.size() != 1) {
-                diagnostics->push_back("diag " + bound.mover + ": " + error +
+            const auto &field = store.weightFieldResults[
+                size_t(revision.weightField)];
+            if (!field.ok || field.values.size() != 1) {
+                diagnostics->push_back("diag " + bound.mover + ": " +
+                                       field.error +
                                        "; revision passed through");
                 break;
             }
-            envelope = scratch->weights[0];
+            envelope = field.values[0];
         } else {
             envelope =
                 RrWireValueFloat(RrReadInput(program, *revision.defaultWeight));

@@ -14,6 +14,8 @@
 #include "rigExecRuntime/runtime.h"
 
 #include "rigExecRuntime/store.h"
+#include "rigExecRuntime/spaces.h"
+#include "rigExecRuntime/opGraph.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -55,31 +57,12 @@ RrGeoGetenvBool(const char *name, bool fallback)
     return fallback;
 }
 
-int
-RrGeoGetenvInt(const char *name, int fallback)
-{
-#ifdef _MSC_VER
-#pragma warning(push)
-#pragma warning(disable : 4996)
-#endif
-    const char *value = std::getenv(name);
-#ifdef _MSC_VER
-#pragma warning(pop)
-#endif
-    return value && *value ? std::atoi(value) : fallback;
-}
-
-// The baked program's defaults and clamps: SIMD on, 4096 vertices a chunk,
-// 32 chunks; a count below 1 is 1.
+// The baked program's default: SIMD on.
 RrGeoSettings
 RrGeoSettingsFromEnvironment()
 {
     RrGeoSettings settings;
     settings.useSimd = RrGeoGetenvBool("RIGEXEC_ENABLE_SIMD", true);
-    const int target = RrGeoGetenvInt("RIGEXEC_BAKED_CHUNK_VERTS", 4096);
-    settings.chunkVertexTarget = target < 1 ? size_t(1) : size_t(target);
-    const int cap = RrGeoGetenvInt("RIGEXEC_BAKED_MAX_CHUNKS", 32);
-    settings.chunkCap = cap < 1 ? size_t(1) : size_t(cap);
     return settings;
 }
 
@@ -118,6 +101,7 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
     program.slotMeta = file.slotMeta.get();
     program.constants = file.constants.get();
     program.poses = file.pose.get();
+    program.requiredStageFramesAdmission = *file.pose->requiredStageFramesAdmission;
     program.geometry = file.geometry.get();
     program.statics.file = &file;
     program.geoSettings = RrGeoSettingsFromEnvironment();
@@ -394,6 +378,35 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
             noteFin(solver.spaceRead);
         }
     }
+    // Refresh is a real Base/Fin writer family, just like a commit. Its
+    // target and inherited carries need arena slots even when the value
+    // later passes through; admission has already proved their ownership.
+    const auto refreshFrames = [&](int32_t slot, uint32_t baseRead,
+                                   uint32_t finRead, uint32_t baseWrite,
+                                   uint32_t finWrite) {
+        if (slot < 0 || size_t(slot) >= slots) return false;
+        ++baseWriteCount[size_t(slot)];
+        ++finWriteCount[size_t(slot)];
+        noteBase(baseRead); noteBase(baseWrite);
+        noteFin(finRead); noteFin(finWrite);
+        return true;
+    };
+    for (const auto &refresh : poses.providerRefreshes) {
+        if (!refreshFrames(refresh.slot, refresh.baseRead, refresh.finRead,
+                           refresh.baseWrite, refresh.finWrite)) {
+            return fail("a provider refresh write names no slot");
+        }
+        for (const auto &carry : refresh.carries) {
+            if (!refreshFrames(carry.slot, carry.baseRead, carry.finRead,
+                               carry.baseWrite, carry.finWrite)) {
+                return fail("a provider refresh carry write names no slot");
+            }
+        }
+    }
+    for (const auto &frame : poses.providerFrameInputs) {
+        if (frame.base) noteBase(frame.version);
+        else noteFin(frame.version);
+    }
     size_t finArena = 0, baseArena = 0;
     for (size_t i = 0; i < slots; ++i) {
         if (finWriteCount[i] > 0) {
@@ -416,11 +429,10 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
     store.fin.assign(finPool, RrPointFrame());
     store.base.assign(basePool, RrPointFrame());
 
-    // Cone table shapes, indexed blindly by the closure.
+    // Retained producer lookup metadata must match the admitted program.
     const RigExecWireCones &cones = *file.cones;
     const size_t words = (clusters + 63) / 64;
-    if (cones.cone.size() != clusters ||
-        cones.always->words.size() != words ||
+    if (cones.always->words.size() != words ||
         cones.poseClusters->words.size() != words ||
         cones.avarCluster.size() != slots ||
         cones.chainBaseClusters.size() != geometry.chains.size() ||
@@ -428,13 +440,7 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
         cones.revisionStaticCluster.size() != revisions) {
         return fail("cone lookup tables do not match the program");
     }
-    for (const RigExecWireClusterSet &set : cones.cone) {
-        if (set.words.size() != words) {
-            return fail("a cone closure has the wrong word count");
-        }
-    }
-    // The clusters the dirty sources name, which the closure sets blindly.
-    // The program fills every one from a step's cluster.
+    // Preserve admission checks for producer lookup cluster identities.
     const auto clusterInRange = [clusters](int32_t cluster) {
         return cluster >= 0 && size_t(cluster) < clusters;
     };
@@ -493,10 +499,16 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
         default: break;
         }
     }
-    if (!std::all_of(program.revisionStaticStep.begin(),
-                     program.revisionStaticStep.end(),
-                     [](int32_t step) { return step >= 0; })) {
-        return fail("a revision has no RevisionStatic step");
+    for(size_t revision=0;revision<program.revisionStaticStep.size();++revision) {
+        if(program.revisionStaticStep[revision]>=0) continue;
+        bool excluded=false;
+        if(file.commonGraph) for(uint64_t id:file.commonGraph->excludedValues) {
+            if(id>=file.commonGraph->valueSpecs.size()) continue;
+            const auto &spec=file.commonGraph->valueSpecs[size_t(id)];
+            if(spec.domain==uint32_t(RigExecWireSlotDomain::RevisionPacket) && spec.slot==revision)
+                excluded=true;
+        }
+        if(!excluded) return fail("a revision has no RevisionStatic step or explicit excluded packet");
     }
     for (int index : cones.varyingSteps) {
         if (index < 0 || size_t(index) >= file.steps.size()) {
@@ -581,6 +593,7 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
     store.nativeFrames.assign(poses.nativeSources.size(),
                               RrPointFrame());
     store.nativeFrameOk.assign(poses.nativeSources.size(), 0);
+    store.switchFrames.assign(poses.spaceCheckpoints.size(), identity);
     store.xformBase.assign(file.slotMeta->xformSlots.size(), identity);
     store.lastXformBase.assign(file.slotMeta->xformSlots.size(),
                                identity);
@@ -615,6 +628,12 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
                 .target;
     }
     store.weightPackets.assign(program.stepWeightObjects, RrWeightPacket());
+    store.volumePlacement.assign(slots, identity);
+    store.volumePlaced.assign(slots, 0);
+    store.volumePlacementBase.assign(slots, identity);
+    store.volumePlacedBase.assign(slots, 0);
+    store.frameMatrix.assign(poses.frameRecords.size(), identity);
+    store.frameMatrixValid.assign(poses.frameRecords.size(), 0);
     store.poseWeights.assign(poses.poseWeightPaths.size(), 0.0f);
     store.stepOutputs.assign(file.steps.size(), RrStepOutput());
     store.runTrace.reserve(file.steps.size());
@@ -655,6 +674,10 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
     if (!RrPropertySizeScratch(&program, error)) {
         return fail(error ? *error
                           : std::string("property chain sizing failed"));
+    }
+    if (!RrOpenProviderProgram(&program, error) ||
+        !RrCompileOpGraph(&program, error)) {
+        return fail(error ? *error : std::string("common graph initialization failed"));
     }
     return self;
 }
@@ -722,6 +745,47 @@ RigExecRuntimeReader::GetMissingExternalKernels() const
         }
     }
     return std::vector<std::string>(types.begin(), types.end());
+}
+
+std::vector<RigExecRuntimeProviderFrames>
+RigExecRuntimeReader::GetProviderFramePublications() const
+{
+    std::vector<RigExecRuntimeProviderFrames> result;
+    if(!_program || !_program->slotMeta) return result;
+    const auto &meta=*_program->slotMeta;
+    const auto &store=_program->store;
+    result.reserve(meta.paths.size());
+    for(size_t slot=0;slot<meta.paths.size();++slot) {
+        RigExecRuntimeProviderFrames value;
+        value.path=_program->TextOrEmpty(meta.paths[slot]);
+        value.kind=uint8_t(meta.slotKind[slot]);
+        value.publicationRole=meta.publicationRoles[slot];
+        value.baseVersion=store.baseLast[slot]; value.finalVersion=store.finLast[slot];
+        value.base=store.base[value.baseVersion]; value.final=store.fin[value.finalVersion];
+        result.push_back(std::move(value));
+    }
+    return result;
+}
+
+std::vector<RigExecRuntimeSolverFrames>
+RigExecRuntimeReader::GetSolverFramePublications() const
+{
+    std::vector<RigExecRuntimeSolverFrames> result;
+    if (!_program || !_program->slotMeta || !_program->slotMeta->solverGuidesEnabled) return result;
+    const auto &meta = *_program->slotMeta;
+    std::vector<char> aliveSolver(_program->poses->solvers.size(), 0);
+    for (const RigExecWireStep &step : *_program->steps)
+        if (step.kind == RigExecWireStepKind::Solve)
+            aliveSolver[size_t(step.object)] = 1;
+    for (int index : meta.solverPublishOrder) {
+        if (!aliveSolver[size_t(meta.solverArrayElements[size_t(index)])]) continue;
+        RigExecRuntimeSolverFrames value;
+        value.path = _program->TextOrEmpty(meta.solverArrayPaths[size_t(index)]);
+        value.aggregate = uint32_t(meta.solverArrayElements[size_t(index)]);
+        value.frames = _program->store.aggregates[value.aggregate].frames;
+        result.push_back(std::move(value));
+    }
+    return result;
 }
 
 }  // namespace rigExec

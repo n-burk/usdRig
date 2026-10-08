@@ -7,8 +7,16 @@
 #include <algorithm>
 #include <cmath>
 #include <set>
+#include <tuple>
 
 namespace rigExec {
+
+// Cold owning-thread prewarm of retained source-sampler keys only.
+// The deleted frozen body/scheduler owns no tokens or execution here.
+void RigExecFrozenGeometryTouchTokens()
+{
+    (void)frozenDetail::_frozenWeightTokens.Get();
+}
 
 using namespace frozenDetail;
 
@@ -102,7 +110,7 @@ _SampleBinding(const RigExecBakedInput<T> &input,
                RigExecFrameInputs *out,
                const std::map<SdfPath, VtValue> *layer = nullptr)
 {
-    if (!input.varying || input.walk >= 0) {
+    if ((!input.varying && !input.sourceBacked) || input.walk >= 0) {
         return;
     }
     VtValue value;
@@ -208,15 +216,11 @@ _SampleHeadLeaves(const RigExecRigEvaluator &evaluator,
                   RigExecFrameInputs *out,
                   const std::map<SdfPath, VtValue> *layer = nullptr)
 {
-    bool any = false;
-    RigExecForEachHeadLeaf(B, [&any](const RigExecBakedHeadLeaf &) {
-        any = true;
-    });
-    if (!any) {
+    out->headLeafConstants = _HeadLeafConstants(evaluator, B, time);
+    if (out->headLeafConstants->keys.empty()) {
         out->headLeafConstants.reset();
         return;
     }
-    out->headLeafConstants = _HeadLeafConstants(evaluator, B, time);
     const RigExecHeadLeafConstants &constants = *out->headLeafConstants;
     size_t j = 0;
     RigExecForEachHeadLeaf(B, [&](const RigExecBakedHeadLeaf &leaf) {
@@ -287,7 +291,7 @@ bool
 _BurstInputNeedsVisit(const RigExecBakedInput<T> &input,
                       const std::vector<char> &flags)
 {
-    return input.varying || _IsOverridden(flags, input.overrideIndex);
+    return input.varying || input.sourceBacked || _IsOverridden(flags, input.overrideIndex);
 }
 
 bool
@@ -387,7 +391,7 @@ _SampleBindingWithOverrides(const RigExecBakedInput<T> &input,
     if (!input.head.IsValid() || input.walk >= 0) {
         return;
     }
-    T value = input.constant;
+    T value = input.sourceBacked ? input.sourceFallback : input.constant;
     if (refreshed) {
         refreshed->GetAttributeOverStageLayer(input.head, time, layer,
                                               &value);
@@ -511,6 +515,13 @@ _SampleWeightArrays(const RigExecBakedProgramImpl::WeightObject &object,
             out->Add(_FrozenWeightArrayKey(object.path, role),
                      VtValue(gathered), /*hasValue=*/true);
         };
+    for (size_t k=0;k<object.oracleLeaves.decl.keys.size();++k) {
+        const auto &key = object.oracleLeaves.decl.keys[k];
+        if (key.path.IsEmpty()) continue;
+        const VtValue value = RigExecSampleRevisionLeaf(key,
+            object.oracleLeaves.attributes[k],nullptr,time,layer);
+        out->Add(object.oracleFrozenKeys[k],value,!value.IsEmpty());
+    }
     gatherPoints(object.targetPoints, _frozenWeightTokens->targetPointsKey);
     gatherPoints(object.samplePoints, _frozenWeightTokens->samplePointsKey);
     gatherPoints(object.curvePoints, _frozenWeightTokens->curvePointsKey);
@@ -673,7 +684,8 @@ _SampleAttribute(const SdfPath &key, const UsdAttribute &attribute,
     }
     VtValue value;
     const bool hasValue = attribute.Get(&value, time);
-    out->Add(key, value, hasValue);
+    const bool blocked = attribute.GetResolveInfo(time).ValueIsBlocked();
+    out->Add(key, value, hasValue, false, blocked);
 }
 
 // Samples one dense blend sample's target points: the refreshed inputs
@@ -703,8 +715,8 @@ _SampleBlendPoints(const SdfPath &key, const UsdAttribute &attribute,
 // Samples the stage-frame seeds at the job's time through the program's
 // hook (bakedProgram.cpp: the stageFrames of Run, read-only) and carries
 // them on the vector. Both sampler routes call this identically: the seeds
-// are per-frame stage reads, so no burst memo serves them. False names an
-// unresolvable target, at which live gives the generation back.
+// are per-frame stage reads, so no burst memo serves them. Unresolved
+// targets carry explicit typed refusal; false denotes malformed transport.
 bool
 _SampleStageFrameSeeds(const RigExecBakedProgram &program, UsdTimeCode time,
                        RigExecFrameInputs *sampled, std::string *error)
@@ -717,21 +729,15 @@ _SampleStageFrameSeeds(const RigExecBakedProgram &program, UsdTimeCode time,
     return true;
 }
 
-// One path leaf as the live prologue reads it, through the job's upstream
-// \p layer where live reads its own, or empty for a key with a reader walk:
-// the worker resolves that one after its head tier, which the refreshed
-// inputs here do not run.
+// Resolve authored connections against explicit source overrides only.
+// Produced property versions and walks resolve in their consuming graph body.
 VtValue
 _SampleRevisionLeaf(const RigExecBakedPathLeaves &leaves, size_t k,
                     const RigExecResolvedInputs *refreshed, UsdTimeCode time,
                     const std::map<SdfPath, VtValue> *layer)
 {
-    if (k < leaves.walks.size() && leaves.walks[k] >= 0) {
-        return VtValue();
-    }
-    return RigExecSampleRevisionLeaf(leaves.decl.keys[k],
-                                     leaves.attributes[k], refreshed, time,
-                                     layer);
+    return RigExecSampleRevisionLeaf(leaves.decl.keys[k], leaves.attributes[k],
+                                     refreshed, time, layer);
 }
 
 // The path leaves of every chain revision the worker assembles from leaves,
@@ -748,6 +754,26 @@ _SampleRevisionLeaves(const RigExecBakedProgramImpl &B,
                       const std::map<SdfPath, VtValue> *layer)
 {
     using Role = RigExecRevisionLeafRole;
+    // Identical raw reads share one answer only within this sample call.
+    // Fallback and resolved routes remain independently evaluated.
+    using RawKey = std::tuple<SdfPath, RigExecRevisionLeafType,
+                              RigExecRevisionLeafTime, bool>;
+    std::map<RawKey, VtValue> rawSamples;
+    const auto sampleLeaf = [&](const RigExecBakedPathLeaves &leaves, size_t k) {
+        const auto &key = leaves.decl.keys[k];
+        if (key.flavour != RigExecRevisionLeafFlavour::Raw ||
+            key.type == RigExecRevisionLeafType::Dial ||
+            !key.fallback.IsEmpty()) {
+            return _SampleRevisionLeaf(leaves, k, refreshed, time, layer);
+        }
+        const RawKey identity(key.path, key.type, key.time,
+                              leaves.attributes[k].IsValid());
+        const auto found = rawSamples.find(identity);
+        if (found != rawSamples.end()) return found->second;
+        VtValue value = _SampleRevisionLeaf(leaves, k, refreshed, time, layer);
+        rawSamples.emplace(identity, value);
+        return value;
+    };
     sampled->revisionLeaves.assign(B.revisionIndex.size(),
                                    std::vector<VtValue>());
     for (size_t r = 0; r < B.revisionIndex.size(); ++r) {
@@ -773,7 +799,7 @@ _SampleRevisionLeaves(const RigExecBakedProgramImpl &B,
                 continue;
             }
             values.push_back(
-                _SampleRevisionLeaf(leaves, k, refreshed, time, layer));
+                sampleLeaf(leaves, k));
         }
     }
     // Every derived target's, parallel to derivedIndex.
@@ -792,60 +818,36 @@ _SampleRevisionLeaves(const RigExecBakedProgramImpl &B,
         values.reserve(leaves.decl.keys.size());
         for (size_t k = 0; k < leaves.decl.keys.size(); ++k) {
             values.push_back(
-                _SampleRevisionLeaf(leaves, k, refreshed, time, layer));
+                sampleLeaf(leaves, k));
         }
     }
 }
 
-// The layout leaves of every SkinTopology op whose layout live holds as
-// fixed, parallel to RigExecBakedLayoutRevision's index and empty for the
-// rest: read by the live sampler's reads through the refreshed inputs, or
-// live's own sample, shared, where nothing that can move it differs -- no
-// value edit or stamp move pending, and the same overlay entry and the same
-// upstream value (live's last placed table against the job's \p layer) at
-// each path. A fixed layout reads the same at every time.
+// Every SkinTopology operation receives source leaves at the job's time.
+// Layout preparation remains in the graph body.
 void
 _SampleLayoutLeaves(const RigExecBakedProgramImpl &B,
                     const RigExecResolvedInputs *refreshed, UsdTimeCode time,
                     RigExecFrameInputs *sampled,
                     const std::map<SdfPath, VtValue> *layer)
 {
-    const auto sameUpstream = [&B, layer](const SdfPath &path) {
-        const auto live = B.lastUpstream.find(path);
-        const bool liveHas = live != B.lastUpstream.end();
-        const auto job =
-            layer ? layer->find(path)
-                  : std::map<SdfPath, VtValue>::const_iterator();
-        const bool jobHas = layer && job != layer->end();
-        return liveHas == jobHas && (!liveHas || live->second == job->second);
-    };
     const size_t count = B.revisionIndex.size() + B.derivedIndex.size();
     sampled->layoutLeaves.assign(count, std::vector<VtValue>());
+    sampled->layoutSourcePaths.assign(count, std::vector<SdfPath>());
     for (size_t r = 0; r < count; ++r) {
         const RigExecBakedProgramImpl::GeomRevision *revision =
             RigExecBakedLayoutRevision(B, r);
-        if (!revision->skinTopologyFixed || !revision->layoutFixed) {
+        if (revision->op != RigExecRevisionOp::Skin) {
             continue;
         }
         const RigExecBakedPathLeaves &leaves = revision->layoutLeaves;
         const size_t n = leaves.decl.keys.size();
-        bool reuse = leaves.sampled && leaves.stamp == B.programStamp;
-        for (size_t k = 0; reuse && k < n; ++k) {
-            const VtValue *entry =
-                refreshed ? refreshed->Find(leaves.decl.keys[k].path)
-                          : nullptr;
-            reuse = !leaves.mustSample[k] &&
-                    (entry ? revision->layoutOverlay[k] == *entry
-                           : revision->layoutOverlay[k].IsEmpty()) &&
-                    sameUpstream(leaves.decl.keys[k].path);
-        }
         std::vector<VtValue> &values = sampled->layoutLeaves[r];
-        if (reuse) {
-            values = leaves.values;
-            continue;
-        }
+        auto &paths = sampled->layoutSourcePaths[r];
         values.reserve(n);
+        paths.reserve(n);
         for (size_t k = 0; k < n; ++k) {
+            paths.push_back(leaves.decl.keys[k].path);
             values.push_back(RigExecSampleRevisionLeaf(
                 leaves.decl.keys[k], leaves.attributes[k], refreshed, time,
                 layer));
@@ -853,69 +855,45 @@ _SampleLayoutLeaves(const RigExecBakedProgramImpl &B,
     }
 }
 
-// Resolves every sparse blend sample's layout through the live cache,
-// exactly as the geometry prologue does (bakedGeometry.cpp
-// resolveBlendLayouts): the worker cannot take the cache's lock, so the
-// layout travels with the job, parallel to revisionIndex. pointCount is
-// the chain's base size at the job's time -- the same query the prologue
-// sizes from, read again rather than looked up, because a dense sample
-// may target the chain's own base path and its refreshed-first sample
-// would win the lookup over the raw base. Epoch data, like the skin
-// packets: deliberately excluded from the digest.
+// Named auxiliary rows cover sparse Raw Default arrays in the whole-pose
+// digest without issuing another source read or replacing ordinary routes.
 bool
-_SampleBlendLayouts(const RigExecBakedProgramImpl &B, UsdTimeCode time,
-                    RigExecFrameInputs *sampled, std::string *error)
+_AppendSparseLayoutSources(const RigExecBakedProgramImpl &B,
+                          RigExecFrameInputs *sampled)
 {
-    sampled->blendLayouts.resize(B.revisionIndex.size());
-    for (size_t r = 0; r < B.revisionIndex.size(); ++r) {
-        const auto &[chainIndex, revisionIndex] = B.revisionIndex[r];
-        const RigExecBakedProgramImpl::GeomChain &chain =
-            B.chains[size_t(chainIndex)];
-        const RigExecBakedProgramImpl::GeomRevision &revision =
-            chain.revisions[size_t(revisionIndex)];
-        if (revision.blendChannels.empty()) {
-            continue;
-        }
-        VtVec3fArray base;
-        if (!chain.baseQuery.IsValid() ||
-            !chain.baseQuery.Get(&base, time)) {
-            continue;  // no base: live skips the chain before resolving
-        }
-        if (!B.blendSampleShapes || !B.resolveBlendSample) {
-            if (error) {
-                *error = "blend layouts have no live cache to resolve "
-                         "through; the frozen job cannot assemble them";
-            }
-            return false;
-        }
-        sampled->blendLayouts[r].resize(revision.blendChannels.size());
-        for (size_t c = 0; c < revision.blendChannels.size(); ++c) {
-            const RigExecBakedProgramImpl::GeomBlendChannel &channel =
-                revision.blendChannels[c];
-            sampled->blendLayouts[r][c].resize(channel.samples.size());
-            for (size_t s = 0; s < channel.samples.size(); ++s) {
-                const RigExecBakedProgramImpl::GeomBlendChannel::Sample
-                    &sample = channel.samples[s];
-                if (sample.blendShape.IsEmpty()) {
-                    continue;  // dense: points rode the sampled values
+    const size_t prefix = B.revisionIndex.size() + B.derivedIndex.size();
+    if (sampled->layoutLeaves.size() != prefix ||
+        sampled->layoutSourcePaths.size() != prefix) return false;
+    for (size_t r = 0; r < prefix; ++r) {
+        const auto &revision = *RigExecBakedLayoutRevision(B, r);
+        std::vector<VtValue> values;
+        std::vector<SdfPath> paths;
+        const auto &owners = r < B.revisionIndex.size() ?
+            sampled->revisionLeaves : sampled->derivedLeaves;
+        const size_t owner = r < B.revisionIndex.size() ? r :
+            r - B.revisionIndex.size();
+        for (const auto &channel : revision.blendChannels)
+            for (const auto &sample : channel.samples) {
+                if (sample.blendShape.IsEmpty()) continue;
+                const int ids[] = {sample.offsetsLeaf, sample.indicesLeaf};
+                const RigExecRevisionLeafType types[] = {
+                    RigExecRevisionLeafType::Vec3fArray,
+                    RigExecRevisionLeafType::IntArray};
+                for (size_t k = 0; k < 2; ++k) {
+                    if (ids[k] < 0 || size_t(ids[k]) >= revision.leaves.decl.keys.size() ||
+                        owner >= owners.size() || size_t(ids[k]) >= owners[owner].size())
+                        return false;
+                    const auto &key = revision.leaves.decl.keys[size_t(ids[k])];
+                    if (key.flavour != RigExecRevisionLeafFlavour::Raw ||
+                        key.time != RigExecRevisionLeafTime::AtDefault ||
+                        key.type != types[k] || key.path.IsEmpty()) return false;
+                    paths.push_back(key.path);
+                    values.push_back(owners[owner][size_t(ids[k])]);
                 }
-                std::shared_ptr<const RigExecBlendSampleLayout> layout =
-                    B.blendSampleShapes->Resolve(
-                        sample.samplePath,
-                        [&](RigExecBlendSampleLayout *built) {
-                            return B.resolveBlendSample(sample.blendShape,
-                                                        base.size(), built);
-                        });
-                if (!layout) {
-                    // Refused the cache: read per frame, as the prologue.
-                    auto perFrame =
-                        std::make_shared<RigExecBlendSampleLayout>();
-                    B.resolveBlendSample(sample.blendShape, base.size(),
-                                         perFrame.get());
-                    layout = perFrame;
-                }
-                sampled->blendLayouts[r][c][s] = std::move(layout);
             }
+        if (!paths.empty()) {
+            sampled->layoutLeaves.push_back(std::move(values));
+            sampled->layoutSourcePaths.push_back(std::move(paths));
         }
     }
     return true;
@@ -1495,7 +1473,8 @@ _FrozenPlaceOverrides(const RigExecBakedProgramImpl &B,
             }
             continue;
         }
-        if (B.resolvedRoutedPrims.count(o.prim)) {
+        if (B.resolvedRoutedPrims.count(o.prim) ||
+            RigExecBakedHasExternalInputRoute(B,path)) {
             continue;
         }
         placeable = false;
@@ -1663,6 +1642,43 @@ _SampleUpstreamConstantAvars(const RigExecBakedProgramImpl &B,
 // RigExecChainSampleBindingsStillCurrent check: on for every caller that
 // cannot otherwise prove its bindings fresh, off for one that tracks their
 // currency from stage notices (see the trusted entry point below).
+void _SampleOracleReference(const RigExecRigEvaluator &evaluator,
+    const RigExecBakedProgramImpl &B,UsdTimeCode time,
+    const std::vector<RigExecValueOverride> &overrides,
+    const std::map<SdfPath,VtValue> &upstream,const std::vector<char> &overrideFlags,
+    RigExecFrameInputs *out) {
+    out->oraclePublications.reset();
+    out->oracleWeightInputs.clear();
+    if(!evaluator.cpuReference)return;
+    RigExecResolvedInputs original;
+    for(const auto &value:upstream)original.SetProperty(value.first,value.second);
+    _PlaceOverridesIntoResolved(overrides,&original);
+    std::vector<SdfPath> roots;std::set<SdfPath> produced,protectedPaths;
+    for(const auto &chain:B.propertyChains) {
+        roots.push_back(chain.target.GetPrimPath());produced.insert(chain.target);
+        for(const auto &revision:chain.revisions)roots.push_back(revision.mover);
+        for(uint32_t r:chain.records) {
+            const auto &record=B.propertyRecords[r];
+            roots.push_back(record.consumer.GetPrimPath());produced.insert(record.consumer);
+            for(int slot:record.hopSlots)if(slot>=0 && size_t(slot)<overrideFlags.size() && overrideFlags[size_t(slot)]) {
+                protectedPaths.insert(record.consumer);break;
+            }
+        }
+    }
+    for(const auto &chain:B.chains) {
+        roots.push_back(chain.target.GetPrimPath());
+        for(const auto &revision:chain.revisions)roots.push_back(revision.moverPath);
+    }
+    for(const auto &weight:B.weightObjects)roots.push_back(weight.path);
+    auto scene=RigExecCaptureOracleInputs(B.stage,original,time,0,roots,upstream,
+        RigExecOracleCaptureMode::PublicationFacts);
+    out->oraclePublications.emplace();
+    out->oraclePublications->Begin(0,std::move(scene),B.propertyChains.size(),produced,protectedPaths);
+    const auto noPlacement=[](const SdfPath &) -> const GfMatrix4d * {return nullptr;};
+    for(const auto &weight:B.weightObjects)out->oracleWeightInputs.emplace(weight.path,
+        RigExecCaptureWeightReference(B.stage,weight.path,original,upstream,time,noPlacement));
+}
+
 bool
 _SampleWithPinnedChainBindings(
     const RigExecRigEvaluator &evaluator, UsdTimeCode time,
@@ -1692,11 +1708,7 @@ _SampleWithPinnedChainBindings(
     }
     const RigExecBakedProgram *program = evaluator.GetBakedProgram();
     if (!program) {
-        // D7, sampler half: a rig with no program is evaluated dynamically
-        // on the UI thread, and its results memoize through the same publish
-        // path -- but there is nothing to sample FOR, so no background job.
-        return fail("no baked program: dynamic/refusal rigs take the D7 UI-"
-                    "thread memo path, never a background job");
+        return fail("rig has no valid compiled program for frozen sampling");
     }
     const RigExecBakedProgramImpl &B = program->GetStepGraph();
     // No shape gate on xform slots, native sources, or delta bases: the
@@ -1737,6 +1749,7 @@ _SampleWithPinnedChainBindings(
     // Every head leaf the property ops and the reader walks read: the
     // worker runs the head tier and resolves the walks from these.
     _SampleHeadLeaves(evaluator, B, time, &sampled, layer);
+    _SampleOracleReference(evaluator,B,time,overrides,upstreamLayer,overrideFlags,&sampled);
 
     for (const RigExecBakedProgramImpl::AvarBinding &binding :
          B.avarBindings) {
@@ -1875,11 +1888,19 @@ _SampleWithPinnedChainBindings(
     // thread samples these too.
     for (const RigExecBakedProgramImpl::GeomChain &chain : B.chains) {
         if (!_SampleUpstreamBase(chain.target, layer, &sampled)) {
-            _SampleQuery(chain.target, chain.baseQuery, time, &sampled);
+            // A lost source remains a declared row. The worker distinguishes
+            // unavailable data from a required row missing in transport.
+            if (!chain.baseQuery.IsValid())
+                sampled.Add(chain.target, VtValue(), /*hasValue=*/false);
+            else
+                _SampleQuery(chain.target, chain.baseQuery, time, &sampled);
         }
         for (const RigExecBakedProgramImpl::GeomChain::Derived &derived :
              chain.derived) {
-            _SampleQuery(derived.target, derived.baseQuery, time, &sampled);
+            if (!derived.matrixTarget && !derived.baseQuery.IsValid())
+                sampled.Add(derived.target, VtValue(), /*hasValue=*/false);
+            else
+                _SampleQuery(derived.target, derived.baseQuery, time, &sampled);
         }
     }
     // Mover scalars the packet assembly reads per frame (enabled,
@@ -2004,13 +2025,11 @@ _SampleWithPinnedChainBindings(
     // The skin layouts the worker's SkinTopology ops build from, then every
     // revision's assembly reads.
     _SampleLayoutLeaves(B, &refreshed, time, &sampled, layer);
+    for(size_t k=0;k<B.providerFrozenKeys.size();++k)
+        _SampleAttribute(B.providerFrozenKeys[k],B.providerLeaves.attributes[k],time,&sampled);
     _SampleRevisionLeaves(B, &refreshed, time, &sampled, layer);
-    {
-        std::string layoutError;
-        if (!_SampleBlendLayouts(B, time, &sampled, &layoutError)) {
-            return fail(layoutError);
-        }
-    }
+    if (!_AppendSparseLayoutSources(B, &sampled))
+        return fail("sparse layout source census differs from compiled leaves");
     // Stage-frame seeds at the job's time, through the program's hook. A
     // decline names an unresolvable target, at which live gives the
     // generation back -- so the frame has no frozen job.
@@ -2269,6 +2288,16 @@ RigExecSampleFrameInputsWithBurstCache(
                     "re-prepare");
     }
     const RigExecBakedProgramImpl &B = cache->program->GetStepGraph();
+    const RigExecProfiler &sampleProfiler = evaluator.GetProfiler();
+    const bool profileSample = sampleProfiler.IsEnabled();
+    uint64_t sampleStart = profileSample ? RigExecProfiler::NowUs() : 0;
+    const auto samplePhase = [&](const char *name) {
+        if (profileSample) {
+            const uint64_t end = RigExecProfiler::NowUs();
+            sampleProfiler.Record(name, "frozenSample", sampleStart, end);
+            sampleStart = end;
+        }
+    };
     // No currency re-verification (verified at prepare), no decline checks
     // (the build failed on them), no override placement (cached flags).
     // Everything below mirrors the plain sampler above: the same tables,
@@ -2290,7 +2319,9 @@ RigExecSampleFrameInputsWithBurstCache(
     // As in the plain sampler: the varying leaves every frame, the
     // constant ones by the shared table.
     _SampleHeadLeaves(evaluator, B, time, &sampled, layer);
+    _SampleOracleReference(evaluator,B,time,overrides,cache->upstreamLayer,cache->overrideFlags,&sampled);
 
+    samplePhase("Sample.HeadOracle");
     for (const RigExecBakedProgramImpl::AvarBinding &binding :
          B.avarBindings) {
         _SampleFlaggedBinding(binding.input, &refreshed, readFlags, time,
@@ -2336,6 +2367,7 @@ RigExecSampleFrameInputsWithBurstCache(
         _SampleConstraintBindings(B.constraints[i], &refreshed, readFlags,
                                   time, &sampled, layer);
     }
+    samplePhase("Sample.ScalarBindings");
     // Per object, bindings then arrays, exactly as the plain sampler
     // emits them: the sites list is table-ordered, so a merge walk visits
     // the same objects in the same positions. (A bindings loop followed by
@@ -2366,6 +2398,7 @@ RigExecSampleFrameInputsWithBurstCache(
     // scalars with the gather's fallback inits, dense points under the
     // sample-prim synthetic key, and a pose-driven weight only when the
     // refreshed inputs hold its path.
+    samplePhase("Sample.WeightRibbon");
     for (const RigExecBakedProgramImpl::GeomChain &chain : B.chains) {
         for (const RigExecBakedProgramImpl::GeomRevision &revision :
              chain.revisions) {
@@ -2421,15 +2454,23 @@ RigExecSampleFrameInputsWithBurstCache(
                                    time, &sampled, cache);
         }
     }
+    samplePhase("Sample.BlendConstraintArrays");
     for (const RigExecBakedProgramImpl::GeomChain &chain : B.chains) {
         if (!_SampleUpstreamBase(chain.target, layer, &sampled)) {
-            _SampleQueryCached(chain.target, chain.baseQuery, time, &sampled,
-                               cache);
+            // Check current availability before serving a memoized value.
+            if (!chain.baseQuery.IsValid())
+                sampled.Add(chain.target, VtValue(), /*hasValue=*/false);
+            else
+                _SampleQueryCached(chain.target, chain.baseQuery, time, &sampled,
+                                   cache);
         }
         for (const RigExecBakedProgramImpl::GeomChain::Derived &derived :
              chain.derived) {
-            _SampleQueryCached(derived.target, derived.baseQuery, time,
-                               &sampled, cache);
+            if (!derived.matrixTarget && !derived.baseQuery.IsValid())
+                sampled.Add(derived.target, VtValue(), /*hasValue=*/false);
+            else
+                _SampleQueryCached(derived.target, derived.baseQuery, time,
+                                   &sampled, cache);
         }
     }
     for (const auto &[chainIndex, revisionIndex] : B.revisionIndex) {
@@ -2538,14 +2579,30 @@ RigExecSampleFrameInputsWithBurstCache(
                                    &sampled, layer);
         }
     }
+    samplePhase("Sample.LegacyGeometry");
     _SampleLayoutLeaves(B, &refreshed, time, &sampled, layer);
-    _SampleRevisionLeaves(B, &refreshed, time, &sampled, layer);
-    {
-        std::string layoutError;
-        if (!_SampleBlendLayouts(B, time, &sampled, &layoutError)) {
-            return fail(layoutError);
+    samplePhase("Sample.LayoutLeaves");
+    std::set<SdfPath> providerPaths;
+    size_t providerGets = 0;
+    for(size_t k=0;k<B.providerFrozenKeys.size();++k) {
+        if (profileSample && B.providerLeaves.attributes[k].IsValid() &&
+            !B.providerFrozenKeys[k].IsEmpty()) {
+            providerPaths.insert(B.providerLeaves.attributes[k].GetPath());
+            ++providerGets;
         }
+        _SampleAttribute(B.providerFrozenKeys[k],B.providerLeaves.attributes[k],time,&sampled);
     }
+    samplePhase("Sample.ProviderRawGetBlocked");
+    if (profileSample) sampleProfiler.RecordInstant("Sample.ProviderInventory",
+        "frozenSample", RigExecProfiler::NowUs(),
+        {{"total",std::to_string(B.providerFrozenKeys.size())},
+         {"uniqueAttributes",std::to_string(providerPaths.size())},
+         {"getCalls",std::to_string(providerGets)},
+         {"blockedFactCalls",std::to_string(providerGets)}});
+    _SampleRevisionLeaves(B, &refreshed, time, &sampled, layer);
+    if (!_AppendSparseLayoutSources(B, &sampled))
+        return fail("sparse layout source census differs from compiled leaves");
+    samplePhase("Sample.RevisionLeaves");
     {
         std::string seedsError;
         if (!_SampleStageFrameSeeds(*cache->program, time, &sampled,
@@ -2553,6 +2610,7 @@ RigExecSampleFrameInputsWithBurstCache(
             return fail(seedsError);
         }
     }
+    samplePhase("Sample.StageFrameSeeds");
     for (const RigExecValueOverride &o : overrides) {
         SdfPath key = o.prim;
         if (!o.attribute.IsEmpty()) {
@@ -2566,6 +2624,7 @@ RigExecSampleFrameInputsWithBurstCache(
         }
     }
 
+    samplePhase("Sample.OverrideFinish");
     *out = std::move(sampled);
     return true;
 }
@@ -2580,6 +2639,7 @@ RigExecFrozenControlDigest(const RigExecFrameInputs &inputs, bool *exact)
     for (const RigExecSampledInput &sampled : inputs.values) {
         hash = _HashString(hash, sampled.path.GetString().c_str());
         hash = _HashBytes(hash, &sampled.hasValue, sizeof(sampled.hasValue));
+        hash = _HashBytes(hash, &sampled.valueBlocked, sizeof(sampled.valueBlocked));
         if (sampled.hasValue) {
             named = _HashVtValue(&hash, sampled.value) && named;
         } else {
@@ -2601,6 +2661,25 @@ RigExecFrozenControlDigest(const RigExecFrameInputs &inputs, bool *exact)
             if (hasValue) {
                 named = _HashVtValue(&hash, value) && named;
             }
+        }
+    }
+    hash = _HashString(hash,"layout-sources");
+    const size_t layoutCount=inputs.layoutLeaves.size();
+    hash = _HashBytes(hash,&layoutCount,sizeof(layoutCount));
+    named = inputs.layoutSourcePaths.size()==layoutCount && named;
+    for(size_t row=0;row<layoutCount;++row) {
+        const auto &values=inputs.layoutLeaves[row];
+        const size_t size=values.size();
+        hash = _HashBytes(hash,&size,sizeof(size));
+        if(row>=inputs.layoutSourcePaths.size() || inputs.layoutSourcePaths[row].size()!=size) {
+            named=false;
+            continue;
+        }
+        for(size_t k=0;k<size;++k) {
+            hash = _HashString(hash,inputs.layoutSourcePaths[row][k].GetString().c_str());
+            const bool present=!values[k].IsEmpty();
+            hash = _HashBytes(hash,&present,sizeof(present));
+            if(present) named = _HashVtValue(&hash,values[k]) && named;
         }
     }
     {
@@ -2640,6 +2719,10 @@ RigExecFrozenControlDigest(const RigExecFrameInputs &inputs, bool *exact)
                 hash = _HashBytes(hash, oks.data(), oks.size());
             }
         };
+        hash = _HashBytes(hash, &seeds.requiredStageFramesAdmission.admitted,
+                          sizeof(seeds.requiredStageFramesAdmission.admitted));
+        hash = _HashBytes(hash, &seeds.requiredStageFramesAdmission.firstBadTarget,
+                          sizeof(seeds.requiredStageFramesAdmission.firstBadTarget));
         foldMatrices(seeds.xformBase);
         foldFrames(seeds.xformFrames);
         foldOk(seeds.deltaOk);

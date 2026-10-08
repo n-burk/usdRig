@@ -20,7 +20,9 @@
 // joint's rest frame and its posed frame together and comparing the two
 // halves against each other proves nothing.
 // argv[1] = path to the examples directory.
+#include "rigExec/inputReplay.h"
 #include "rigExec/rigEvaluator.h"
+#include "rigExec/bakedProgramImpl.h"
 
 #include "pxr/base/plug/registry.h"
 #include "pxr/base/tf/pathUtils.h"
@@ -31,6 +33,7 @@
 #include "pxr/usd/usd/relationship.h"
 #include "pxr/usd/usd/stage.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <functional>
 #include <map>
@@ -236,7 +239,8 @@ TestATimeSampledRestIsPulledPerFrame(const std::string &examplesDir)
             CHECK(restTx.ValueMightBeTimeVarying());
         },
         &epochRests);
-    CHECK(epochRests == 0);
+    // Seg2 and its two joint descendants vary; four controls and Seg1 stay static.
+    CHECK(epochRests == 5);
     if (subject.size() != kFrames.size()) return;
 
     const double sampled[] = {0.0, 3.0, 6.0};
@@ -293,13 +297,13 @@ TestARestThatBecomesTimeSampledAfterCompile(const std::string &examplesDir)
     }
     // It came off the epoch path, and the wiring never changed, so the
     // rebuild that took it off is not a new binding epoch.
-    CHECK(rig.GetEpochRestFrameCount() == 0);
+    CHECK(rig.GetEpochRestFrameCount() == 5);
     CHECK(rig.GetBindingEpochDigest() == digest);
 }
 
-// A connected rest channel. A connection can reach anything, so it is refused
-// without being followed -- but exec still follows it, and the rig has to
-// agree with the value at the other end.
+// A connected rest channel with a constant driver remains a captured
+// constant in the shared graph. All eight provider rest closures stay static;
+// the numeric answer must still agree with the plainly authored reference.
 void
 TestAConnectedRestIsPulledPerFrame(const std::string &examplesDir)
 {
@@ -317,7 +321,7 @@ TestAConnectedRestIsPulledPerFrame(const std::string &examplesDir)
             CHECK(restTx.HasAuthoredConnections());
         },
         &epochRests);
-    CHECK(epochRests == 0);
+    CHECK(epochRests == 8);
     if (subject.size() != kFrames.size()) return;
 
     size_t referenceRests = 0;
@@ -358,7 +362,7 @@ TestAConnectedRestSpaceIsPulledPerFrame(const std::string &examplesDir)
             CHECK(restSpace.HasAuthoredConnections());
         },
         &epochRests);
-    CHECK(epochRests == 0);
+    CHECK(epochRests == 8);
     if (subject.size() != kFrames.size()) return;
 
     size_t referenceRests = 0;
@@ -391,37 +395,74 @@ TestAConnectedRestSpaceIsPulledPerFrame(const std::string &examplesDir)
     }
 }
 
-// The boundary of that walk, and the reason the case above is a rule and not
-// a blanket permission: a connection that ENDS at one of the six computed
-// spaces reaches a COMPUTATION -- here the space expression that follows the
-// namespace parent -- and the walk would read the target's raw authored
-// value instead. The program must hand that rig back rather than answer it.
-// Bakeability only: this suite's ctest entries require the bake, so a case
-// that EVALUATED an unbakeable rig would fail them by design.
+// A computed parent:space is a real producer of the connected rest value.
+// ORIGINAL's reference evaluator agrees with an independently authored matrix
+// for this identity -> translation -> held translation -> identity history.
 void
-TestARestSpaceConnectedToAComputedSpaceRefusesTheBake(
-    const std::string &examplesDir)
+TestARestSpaceConnectedToAComputedSpaceHasAProducer(const std::string &examplesDir)
 {
-    UsdStageRefPtr stage = UsdStage::Open(StagePath(examplesDir));
-    CHECK(stage);
-    if (!stage) return;
-    EditInSession(stage);
-    const UsdPrim parent = stage->GetPrimAtPath(kJoint.GetParentPath());
-    CHECK(parent);
-    if (!parent) return;
-    RestSpace(stage).SetConnections(
-        {parent.GetPath().AppendProperty(TfToken("parent:space"))});
-    RigExecRigEvaluator rig(stage, kRig);
-    std::vector<std::string> errors;
-    CHECK(rig.Compile(&errors));
-    std::vector<std::string> reasons;
-    CHECK(!rig.IsBakeable(&reasons));
-    bool named = false;
-    for (const std::string &reason : reasons) {
-        named = named ||
-                reason.find("connected rest:space") != std::string::npos;
+    const auto stage=UsdStage::Open(StagePath(examplesDir));
+    const auto referenceStage=UsdStage::Open(StagePath(examplesDir));
+    CHECK(stage && referenceStage);
+    if(!stage || !referenceStage)return;
+    EditInSession(stage);EditInSession(referenceStage);
+    const SdfPath parent=kJoint.GetParentPath();
+    const auto source=stage->GetPrimAtPath(parent).CreateAttribute(
+        TfToken("parent:space"),SdfValueTypeNames->Matrix4d);
+    const auto referenceSource=referenceStage->GetPrimAtPath(parent).CreateAttribute(
+        TfToken("parent:space"),SdfValueTypeNames->Matrix4d);
+    CHECK(source.Set(GfMatrix4d(1.0)));
+    CHECK(referenceSource.Set(GfMatrix4d(1.0)));
+    CHECK(RestSpace(stage).SetConnections({source.GetPath()}));
+    CHECK(RestSpace(referenceStage).Set(GfMatrix4d(1.0)));
+    RigExecRigEvaluator rig(stage,kRig),reference(referenceStage,kRig);
+    std::vector<std::string> errors,reasons;
+    CHECK(rig.Compile(&errors));CHECK(reference.Compile(&errors));
+    CHECK(rig.IsBakeable(&reasons));
+    const size_t digest=rig.GetBindingEpochDigest();
+    std::vector<RigExecRigPose> initial;
+    for(double x:{0.0,7.0,7.0,0.0}) {
+        const auto matrix=Translation(x);
+        CHECK(source.Set(matrix));CHECK(referenceSource.Set(matrix));
+        CHECK(RestSpace(referenceStage).Set(matrix));
+        std::string before;CHECK(stage->GetSessionLayer()->ExportToString(&before));
+        for(size_t frame=0;frame<kFrames.size();++frame) {
+            const auto expected=reference.Evaluate(UsdTimeCode(kFrames[frame]));
+            const auto actual=rig.Evaluate(UsdTimeCode(kFrames[frame]));
+            CHECK(expected.valid && actual.valid);
+            ComparePoses("computed rest versus independently authored matrix",expected,actual);
+            CHECK(rig.GetBindingEpochDigest()==digest);
+            if(initial.size()<kFrames.size())initial.push_back(actual);
+            if(x==7.0) {
+                const auto changed=actual.jointMatricesFinal.find(kJoint);
+                const auto unchanged=initial[frame].jointMatricesFinal.find(kJoint);
+                CHECK(changed!=actual.jointMatricesFinal.end() &&
+                      unchanged!=initial[frame].jointMatricesFinal.end());
+                if(changed!=actual.jointMatricesFinal.end() && unchanged!=initial[frame].jointMatricesFinal.end())
+                    CHECK(changed->second!=unchanged->second);
+            } else if(initial.size()==kFrames.size())
+                ComparePoses("computed rest recovery",initial[frame],actual);
+        }
+        std::string after;CHECK(stage->GetSessionLayer()->ExportToString(&after));
+        CHECK(before==after);
     }
-    CHECK(named);
+    const auto *program=rig.GetBakedProgram();CHECK(program);
+    if(!program)return;
+    const auto &B=program->GetStepGraph();const auto slot=B.index.find(kJoint);
+    CHECK(slot!=B.index.end());if(slot==B.index.end())return;
+    const auto contains=[](const auto &ranges,RigExecBakedSlotDomain domain,uint32_t value) {
+        for(const auto &range:ranges)if(range.domain==domain && range.begin<=value && value<range.end)return true;
+        return false;
+    };
+    bool produced=false;
+    for(size_t rest=0;rest<B.steps.size();++rest)if(B.steps[rest].kind==RigExecBakedStepKind::RestCompose &&
+        contains(B.steps[rest].writes,RigExecBakedSlotDomain::Rest,uint32_t(slot->second)))
+        for(size_t sourceOp=0;sourceOp<B.steps.size();++sourceOp)if(B.steps[sourceOp].kind==RigExecBakedStepKind::SpaceExpression)
+            for(const auto &write:B.steps[sourceOp].writes)if(write.domain==RigExecBakedSlotDomain::SpaceValue)
+                for(uint32_t value=write.begin;value<write.end;++value)
+                    if(contains(B.steps[rest].reads,RigExecBakedSlotDomain::SpaceValue,value) &&
+                       std::find(B.opGraph.ops[rest].predecessors.begin(),B.opGraph.ops[rest].predecessors.end(),uint32_t(sourceOp))!=B.opGraph.ops[rest].predecessors.end())produced=true;
+    CHECK(produced);
 }
 
 // A rest that moves while nothing else in the rig does.
@@ -502,9 +543,7 @@ void
 TestAPropertyChainOnARestRefusesTheEpochPath(const std::string &examplesDir)
 {
     size_t epochRests = 1;
-    const std::vector<RigExecRigPose> subject = Run(
-        examplesDir,
-        [](const UsdStageRefPtr &stage) {
+    const auto addRestOffset = [](const UsdStageRefPtr &stage) {
             EditInSession(stage);
             // Under the rig's Movers scope, which is where the mover walk
             // composes a rig's mover stack from.
@@ -527,10 +566,95 @@ TestAPropertyChainOnARestRefusesTheEpochPath(const std::string &examplesDir)
                 .Set(1.0f);
             prim.CreateRelationship(TfToken("rigExec:moves"))
                 .SetTargets({kJoint.AppendProperty(TfToken("rest:space"))});
-        },
-        &epochRests);
-    CHECK(epochRests == 0);
+        };
+    const std::vector<RigExecRigPose> subject =
+        Run(examplesDir, addRestOffset, &epochRests);
+    // Seg2 and its two joint descendants vary; four controls and Seg1 stay static.
+    CHECK(epochRests == 5);
     CHECK(subject.size() == kFrames.size());
+    // Independent authored rest: the property head must reach the ladder,
+    // rather than being bypassed by its sampled raw provider value.
+    size_t referenceRests = 0;
+    const auto reference = Run(
+        examplesDir, [](const UsdStageRefPtr &stage) {
+            EditInSession(stage);
+            GfMatrix4d authored(1.0);
+            CHECK(RestSpace(stage).Get(&authored));
+            CHECK(RestSpace(stage).Set(authored * Translation(3.0)));
+        }, &referenceRests);
+    CHECK(referenceRests > 0);
+    CHECK(reference.size() == subject.size());
+    if (reference.size() == subject.size()) {
+        for (size_t i = 0; i < subject.size(); ++i) {
+            CHECK(reference[i].valid && subject[i].valid);
+            CHECK(reference[i].jointMatricesFinal ==
+                  subject[i].jointMatricesFinal);
+        }
+    }
+    // The same own revision must win on a connected head, without changing
+    // the authored source. Reuse one compiled owner through edit/hold/recovery.
+    const auto stage = UsdStage::Open(StagePath(examplesDir));
+    const auto referenceStage = UsdStage::Open(StagePath(examplesDir));
+    CHECK(stage && referenceStage);
+    if (!stage || !referenceStage) return;
+    EditInSession(stage);
+    EditInSession(referenceStage);
+    GfMatrix4d rawRest(1.0);
+    CHECK(RestSpace(stage).Get(&rawRest));
+    const auto driver = stage->GetPrimAtPath(kJoint).CreateAttribute(
+        TfToken("inputs:ownRestDriver"), SdfValueTypeNames->Matrix4d);
+    CHECK(driver.Set(rawRest));
+    CHECK(RestSpace(stage).SetConnections({driver.GetPath()}));
+    addRestOffset(stage);
+    CHECK(RestSpace(referenceStage).Set(rawRest * Translation(3.0)));
+    RigExecRigEvaluator rig(stage, kRig), authored(referenceStage, kRig);
+    std::vector<std::string> errors;
+    CHECK(rig.Compile(&errors));
+    CHECK(authored.Compile(&errors));
+    const auto *program = rig.GetBakedProgram();
+    CHECK(program);
+    if (!program) return;
+    const auto &B = program->GetStepGraph();
+    const auto slot = B.index.find(kJoint);
+    CHECK(slot != B.index.end());
+    if (slot == B.index.end()) return;
+    const SdfPath target = RestSpace(stage).GetPath();
+    const auto shared = B.providerProgram.attributeValues.find(target);
+    CHECK(shared != B.providerProgram.attributeValues.end());
+    if (shared == B.providerProgram.attributeValues.end()) return;
+    const int ownValue = B.ladders[slot->second].spaceValues[0];
+    CHECK(ownValue >= 0);
+    CHECK(uint32_t(ownValue) != shared->second);
+    bool ownFinal = false;
+    for (const auto &route : B.providerProgram.routedInputs)
+        if (route.value == uint32_t(ownValue))
+            ownFinal = route.consumer == target && route.source == target &&
+                       route.readPhase == TfToken("final");
+    CHECK(ownFinal);
+    const size_t digest = rig.GetBindingEpochDigest();
+    const auto offsetInput = stage->GetPrimAtPath(
+        kRig.AppendChild(TfToken("Movers")).AppendChild(TfToken("RestOffset")))
+        .GetAttribute(TfToken("inputs:value"));
+    std::vector<RigExecRigPose> initial;
+    for (double x : {3.0, 7.0, 7.0, 0.0, 3.0}) {
+        CHECK(offsetInput.Set(Translation(x)));
+        CHECK(RestSpace(referenceStage).Set(rawRest * Translation(x)));
+        for (size_t frame = 0; frame < kFrames.size(); ++frame) {
+            const auto expected = authored.Evaluate(UsdTimeCode(kFrames[frame]));
+            const auto actual = rig.Evaluate(UsdTimeCode(kFrames[frame]));
+            CHECK(expected.valid && actual.valid);
+            CHECK(expected.jointMatricesFinal == actual.jointMatricesFinal);
+            CHECK(rig.GetBindingEpochDigest() == digest);
+            GfMatrix4d unchanged(1.0);
+            CHECK(driver.Get(&unchanged));
+            CHECK(unchanged == rawRest);
+            if (initial.size() < kFrames.size()) initial.push_back(actual);
+            else if (x == 7.0)
+                CHECK(actual.jointMatricesFinal != initial[frame].jointMatricesFinal);
+            else if (x == 3.0)
+                CHECK(actual.jointMatricesFinal == initial[frame].jointMatricesFinal);
+        }
+    }
 }
 
 // An interactive override standing on a rest channel.
@@ -646,116 +770,55 @@ TestAnOverrideElsewhereLeavesTheRestsAlone(const std::string &examplesDir)
                  rig.Evaluate(UsdTimeCode(kFrames[1])));
 }
 
-// A rest pull that fails fails the compile, wherever the pull ran.
-// A baked compile pulls its epoch rests on the exec lane, beside its commit
-// and its bake, and only learns the verdict at the rest join behind the bake
-// -- by which time the epoch is committed and a program may have been built
-// from it. The failure has to come out exactly as it did when the pull ran
-// ahead of the commit: Compile false with the same error, no program, and a
-// rig that is not compiled, so the next evaluate asks again instead of
-// running the program of an epoch whose rests it never got.
-// The pull is made to fail by aiming a constraint at a RigExecControl that
-// is inactive: it is still a frame provider by type, so it is seeded into
-// the rest request, and exec cannot compute a rest frame for it. A baked
-// epoch reaches the rest pull with nothing else failing first (a dynamic one
-// trips earlier, on the pose-provider prepare). Both a cold compile and a
-// recompile over a good epoch are checked, the second because it is the one
-// with a previous epoch's prepared requests to retire while the pull runs;
-// then the edit is taken back, and the rig has to come back to exactly what
-// a fresh evaluator gives.
+// Failure to prepare a required first-frame/rest provider refuses Compile.
+// Both a cold epoch and a warm replacement withdraw the compiled program;
+// clearing the unavailable-provider edit restores the original numeric pose.
 void
-TestARestPullThatFailsBehindTheBakeFailsTheCompile(
-    const std::string &examplesDir)
+TestAnUnavailableRequiredProviderRefusesCompile(const std::string &examplesDir)
 {
-    const std::string path = examplesDir + "/08_AimEyes.usda";
-    const SdfPath rigPath("/EyesAsset/Rig");
-    const SdfPath aim("/EyesAsset/Rig/Movers/Pose/AimL");
+    const std::string path=examplesDir+"/08_AimEyes.usda";
+    const SdfPath rigPath("/EyesAsset/Rig"),aim("/EyesAsset/Rig/Movers/Pose/AimL");
     const SdfPath ghost("/EyesAsset/Rig/Controls/Ghost");
     const UsdTimeCode frame(1016.0);
-    const auto aimAtAnInactiveControl = [&](const UsdStageRefPtr &stage) {
-        EditInSession(stage);
-        UsdPrim control = stage->DefinePrim(ghost, TfToken("RigExecControl"));
-        CHECK(control);
-        control.SetActive(false);
-        const UsdRelationship target =
-            stage->GetPrimAtPath(aim).GetRelationship(
-                TfToken("rigExec:aimTarget"));
-        CHECK(target);
-        CHECK(target.SetTargets({ghost}));
+    const auto breakSource=[&](const UsdStageRefPtr &stage) {
+        EditInSession(stage);auto control=stage->DefinePrim(ghost,TfToken("RigExecControl"));
+        CHECK(control);CHECK(control.SetActive(false));
+        const auto target=stage->GetPrimAtPath(aim).GetRelationship(TfToken("rigExec:aimTarget"));
+        CHECK(target);CHECK(target.SetTargets({ghost}));
     };
-    const auto failedOnRests = [](const std::vector<std::string> &errors) {
-        for (const std::string &error : errors) {
-            if (error.find("failed to evaluate the rig's rest frames") !=
-                std::string::npos) {
-                return true;
-            }
+    const auto referenceStage=UsdStage::Open(path);CHECK(referenceStage);if(!referenceStage)return;
+    RigExecRigEvaluator reference(referenceStage,rigPath);std::vector<std::string> errors;
+    CHECK(reference.Compile(&errors));const auto expected=reference.Evaluate(frame);
+    CHECK(expected.valid);CHECK(reference.GetBakedProgram());
+    const std::vector<std::string> refusal{"failed to prepare pose provider inputs"};
+    for(bool warm:{false,true}) {
+        const auto stage=UsdStage::Open(path);CHECK(stage);if(!stage)continue;
+        RigExecRigEvaluator rig(stage,rigPath);
+        if(warm) {
+            errors.clear();CHECK(rig.Compile(&errors));CHECK(rig.GetEpochRestFrameCount()>0);
+            CHECK(rig.GetBakedProgram());
+            ComparePoses("before unavailable required provider edit",expected,rig.Evaluate(frame));
         }
-        return false;
-    };
-
-    // Cold: the first compile of the evaluator is the failing one.
-    {
-        UsdStageRefPtr stage = UsdStage::Open(path);
-        CHECK(stage);
-        if (!stage) return;
-        aimAtAnInactiveControl(stage);
-        RigExecRigEvaluator rig(stage, rigPath);
-        rig.SetEvaluationMode(RigExecEvaluationMode::Baked);
-        std::vector<std::string> errors;
-        CHECK(!rig.Compile(&errors));
-        CHECK(failedOnRests(errors));
-        CHECK(rig.GetBakedProgram() == nullptr);
-        CHECK(!rig.Evaluate(frame).valid);
-        CHECK(rig.GetBakedProgram() == nullptr);
+        breakSource(stage);
+        std::string before;CHECK(stage->GetSessionLayer()->ExportToString(&before));
+        errors.clear();CHECK(!rig.Compile(&errors));CHECK(errors==refusal);
+        CHECK(rig.GetBakedProgram()==nullptr);
+        for(int held=0;held<2;++held) {
+            const auto actual=rig.Evaluate(frame);CHECK(!actual.valid);
+            CHECK(std::find(actual.diagnostics.begin(),actual.diagnostics.end(),refusal[0])!=actual.diagnostics.end());
+            CHECK(rig.GetBakedProgram()==nullptr);
+        }
+        std::string after;CHECK(stage->GetSessionLayer()->ExportToString(&after));CHECK(before==after);
+        RigExecInputReplayClearLayer(stage->GetSessionLayer());errors.clear();CHECK(rig.Compile(&errors));
+        CHECK(rig.GetEpochRestFrameCount()>0);CHECK(rig.GetBakedProgram());
+        ComparePoses("unavailable required provider recovery",expected,rig.Evaluate(frame));
     }
-
-    // What the rig has to come back to once the edit is gone.
-    UsdStageRefPtr referenceStage = UsdStage::Open(path);
-    CHECK(referenceStage);
-    if (!referenceStage) return;
-    RigExecRigEvaluator reference(referenceStage, rigPath);
-    reference.SetEvaluationMode(RigExecEvaluationMode::Baked);
-    std::vector<std::string> referenceErrors;
-    CHECK(reference.Compile(&referenceErrors));
-    const RigExecRigPose expected = reference.Evaluate(frame);
-    CHECK(expected.valid);
-    CHECK(reference.GetBakedProgram() != nullptr);
-
-    // Warm: a good epoch, with its program, then the failing recompile.
-    UsdStageRefPtr stage = UsdStage::Open(path);
-    CHECK(stage);
-    if (!stage) return;
-    RigExecRigEvaluator rig(stage, rigPath);
-    rig.SetEvaluationMode(RigExecEvaluationMode::Baked);
-    std::vector<std::string> errors;
-    CHECK(rig.Compile(&errors));
-    CHECK(rig.GetEpochRestFrameCount() > 0);
-    ComparePoses("before the failing edit", expected, rig.Evaluate(frame));
-    CHECK(rig.GetBakedProgram() != nullptr);
-
-    aimAtAnInactiveControl(stage);
-    errors.clear();
-    CHECK(!rig.Compile(&errors));
-    CHECK(failedOnRests(errors));
-    CHECK(rig.GetBakedProgram() == nullptr);
-    // Not compiled, so the evaluate compiles again, fails again, and hands
-    // back nothing rather than a pose from the withdrawn program.
-    CHECK(!rig.Evaluate(frame).valid);
-    CHECK(rig.GetBakedProgram() == nullptr);
-
-    stage->GetSessionLayer()->Clear();
-    errors.clear();
-    CHECK(rig.Compile(&errors));
-    CHECK(rig.GetEpochRestFrameCount() > 0);
-    ComparePoses("after the failing edit was taken back", expected,
-                 rig.Evaluate(frame));
-    CHECK(rig.GetBakedProgram() != nullptr);
 }
 
 // Opens the tail, applies \p edit, and evaluates \p kFrames in \p mode.
 std::vector<RigExecRigPose>
-RunInMode(const std::string &examplesDir, const _Edit &edit,
-          RigExecEvaluationMode mode)
+RunWithReferenceChecks(const std::string &examplesDir, const _Edit &edit,
+          bool referenceChecks)
 {
     std::vector<RigExecRigPose> poses;
     UsdStageRefPtr stage = UsdStage::Open(StagePath(examplesDir));
@@ -763,7 +826,7 @@ RunInMode(const std::string &examplesDir, const _Edit &edit,
     if (!stage) return poses;
     if (edit) edit(stage);
     RigExecRigEvaluator rig(stage, kRig);
-    rig.SetEvaluationMode(mode);
+    rig.cpuReference = referenceChecks;
     std::vector<std::string> errors;
     CHECK(rig.Compile(&errors));
     for (double frame : kFrames) {
@@ -803,9 +866,9 @@ CheckARestValueEditAfterCompile(const std::string &examplesDir,
         CHECK(attribute.Set(value));
     };
     const std::vector<RigExecRigPose> bakedReference =
-        RunInMode(examplesDir, author, RigExecEvaluationMode::Baked);
+        RunWithReferenceChecks(examplesDir, author, false);
     const std::vector<RigExecRigPose> oracleReference =
-        RunInMode(examplesDir, author, RigExecEvaluationMode::ExecReference);
+        RunWithReferenceChecks(examplesDir, author, true);
     if (bakedReference.size() != kFrames.size() ||
         oracleReference.size() != kFrames.size()) {
         return;
@@ -815,7 +878,6 @@ CheckARestValueEditAfterCompile(const std::string &examplesDir,
     CHECK(stage);
     if (!stage) return;
     RigExecRigEvaluator rig(stage, kRig);
-    rig.SetEvaluationMode(RigExecEvaluationMode::Baked);
     std::vector<std::string> errors;
     CHECK(rig.Compile(&errors));
     const size_t digest = rig.GetBindingEpochDigest();
@@ -843,7 +905,7 @@ CheckARestValueEditAfterCompile(const std::string &examplesDir,
     CHECK(rig.GetBindingEpochDigest() == digest);
     CHECK(rig.GetEpochRestFrameCount() == epochRests);
 
-    rig.SetEvaluationMode(RigExecEvaluationMode::ExecReference);
+    rig.cpuReference = true;
     for (size_t i = 0; i < kFrames.size(); ++i) {
         const RigExecRigPose pose = rig.Evaluate(UsdTimeCode(kFrames[i]));
         CHECK(pose.valid);
@@ -867,9 +929,9 @@ CheckARestValueEditAfterCompile(const std::string &examplesDir,
 }
 
 // The same rest VALUE edit, with the program kept for the whole epoch and
-// the oracle run beside it on every frame: BakedWithParityCheck.
+// the oracle run beside it on every frame: cpuReference.
 // The program stands, so the settle does not re-pull the epoch's rests; the
-// dynamic walk the mode runs after the program is their one reader and has
+// scalar reference the mode runs after the program is their one reader and has
 // to re-pull them itself, before it reads them. A walk that read the rests
 // the epoch pulled at the compile would publish the pre-edit pose and count
 // the program's (correct) answer as a parity mismatch. Compared with the
@@ -893,10 +955,10 @@ CheckARestValueEditUnderTheParityCheck(const std::string &examplesDir,
         }
         CHECK(attribute.Set(value));
     };
-    const RigExecEvaluationMode mode =
-        RigExecEvaluationMode::BakedWithParityCheck;
+    const bool mode =
+        true;
     const std::vector<RigExecRigPose> reference =
-        RunInMode(examplesDir, author, mode);
+        RunWithReferenceChecks(examplesDir, author, mode);
     if (reference.size() != kFrames.size()) {
         return;
     }
@@ -905,7 +967,7 @@ CheckARestValueEditUnderTheParityCheck(const std::string &examplesDir,
     CHECK(stage);
     if (!stage) return;
     RigExecRigEvaluator rig(stage, kRig);
-    rig.SetEvaluationMode(mode);
+    rig.cpuReference = true;
     std::vector<std::string> errors;
     CHECK(rig.Compile(&errors));
     const size_t digest = rig.GetBindingEpochDigest();
@@ -915,7 +977,7 @@ CheckARestValueEditUnderTheParityCheck(const std::string &examplesDir,
     for (double frame : kFrames) {
         before.push_back(rig.Evaluate(UsdTimeCode(frame)));
         CHECK(before.back().valid);
-        CHECK(before.back().bakedParityMismatches == 0);
+        CHECK(before.back().referenceMismatches == 0);
     }
     CHECK(rig.GetBakedProgram() != nullptr);
 
@@ -923,7 +985,7 @@ CheckARestValueEditUnderTheParityCheck(const std::string &examplesDir,
     for (size_t i = 0; i < kFrames.size(); ++i) {
         const RigExecRigPose pose = rig.Evaluate(UsdTimeCode(kFrames[i]));
         CHECK(pose.valid);
-        CHECK(pose.bakedParityMismatches == 0);
+        CHECK(pose.referenceMismatches == 0);
         for (const std::string &diagnostic : pose.diagnostics) {
             CHECK(diagnostic.find("epoch rebuilt") == std::string::npos);
         }
@@ -1010,12 +1072,12 @@ main(int argc, char **argv)
     TestARestThatBecomesTimeSampledAfterCompile(examplesDir);
     TestAConnectedRestIsPulledPerFrame(examplesDir);
     TestAConnectedRestSpaceIsPulledPerFrame(examplesDir);
-    TestARestSpaceConnectedToAComputedSpaceRefusesTheBake(examplesDir);
+    TestARestSpaceConnectedToAComputedSpaceHasAProducer(examplesDir);
     TestARestThatMovesAloneStillRecomposes(examplesDir);
     TestAPropertyChainOnARestRefusesTheEpochPath(examplesDir);
     TestAnInteractiveOverrideOnARestIsFollowed(examplesDir);
     TestAnOverrideElsewhereLeavesTheRestsAlone(examplesDir);
-    TestARestPullThatFailsBehindTheBakeFailsTheCompile(examplesDir);
+    TestAnUnavailableRequiredProviderRefusesCompile(examplesDir);
     TestARestValueEditAfterCompileReachesTheOracle(examplesDir);
     TestARestValueEditOnAnAncestorReachesTheOracle(examplesDir);
     TestARestValueEditAfterCompileReachesTheParityOracle(examplesDir);

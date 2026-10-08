@@ -1,0 +1,19 @@
+#usda 1.0
+(
+    doc = "A real geometry-to-Ribbon-pose-to-geometry cycle. The shared producer graph sets aside its complete SCC; independent Lift pose and raw selected property reads still evaluate."
+    subLayers = [@oneloop_s9_reads.usda@]
+    defaultPrim = "S9Asset"
+)
+over "S9Asset"
+{
+    over "Rig"
+    {
+        over "Geometry"
+        {
+            over "Lift"
+            {
+                rel rigExec:transform = </S9Asset/Rig/Joints/RibbonA> (rigExecReadPhase = "final")
+            }
+        }
+    }
+}

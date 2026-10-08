@@ -119,13 +119,14 @@ _HashVtValue(uint64_t *hash, const VtValue &value)
 
 void
 RigExecFrameInputs::Add(const SdfPath &path, const VtValue &value,
-                        bool hasValue, bool viaChain)
+                        bool hasValue, bool viaChain, bool valueBlocked)
 {
     RigExecSampledInput sampled;
     sampled.path = path;
     sampled.value = value;
     sampled.hasValue = hasValue;
     sampled.viaChain = viaChain;
+    sampled.valueBlocked = valueBlocked;
     values.push_back(sampled);
 }
 
@@ -164,43 +165,26 @@ RigExecFrozenPurityAudit()
          "bakedVerify.cpp)",
          RigExecFrozenPurity::Pure,
          "a step reads declared slots and writes declared slots; per-step "
-         "diagnostics and counters merge in step order, and BeginRun resets "
-         "them, so no result survives into the next run; no body reads USD "
-         "or the resolved-input overlay (enforced by RIGEXEC_PURITY_CHECK, "
-         "bodyPurity.h), except the volatile oracle callers and the stage "
-         "assembly of a plugin revision bound to region values; settings "
-         "and token tables are read and touched at Build"},
-        {"baked head tier (bakedProperties.cpp property revisions)",
-         RigExecFrozenPurity::LiveOnly,
-         "runs in the live prologue, serially on the owning thread, from "
-         "head leaves sampled there; a body reads leaves, overrides and "
-         "earlier versions and no USD (enforced by RIGEXEC_PURITY_CHECK), "
-         "except a weight-object envelope's volatile oracle, which refuses "
-         "the freeze"},
-        {"baked head tier in a frozen job (frozenWorker.cpp _FrozenPrologue)",
+         "diagnostics merge in canonical order; outputs persist between "
+         "jobs and exact value keys control propagation. Bodies consume "
+         "copied source facts and typed values without USD queries; API4 "
+         "plugins receive immutable compile data and declared typed inputs"},
+        {"property operations (bakedProperties.cpp)",
          RigExecFrozenPurity::Pure,
-         "runs from sampled leaves; no USD: the sampler reads every head "
-         "leaf on the UI thread under its Build-time synthetic key (the "
-         "varying ones per frame, the rest into a shared constant table), "
-         "the worker writes them into its clone's leaves (whose attribute "
-         "handles are dead and unread) and runs the same bodies serially, "
-         "with no cone verifier and a disabled profiler; override slots "
-         "are found by (prim, attribute), with no path built"},
+         "ordinary shared-graph operations over sampled leaves, explicit "
+         "overrides, and bound property versions; no separate head executor"},
         {"reader walks (bakedProperties.cpp RigExecBakedResolveReaderWalk)",
          RigExecFrozenPurity::Pure,
-         "every read after the head tier that a chain result or a record "
+         "every declared read that a chain result or a record "
          "can answer -- a chain-routed binding, a path leaf read through "
          "the resolved inputs -- resolves from head leaves, override slots, "
          "chain finals and records: no USD, no path built, no lock; live "
          "and a frozen job call the same function"},
-        {"baked schedule serial executor",
+        {"shared operation graph executor",
          RigExecFrozenPurity::Pure,
-         "program order on one thread; the reference every frozen run uses"},
-        {"baked schedule parallel executor",
-         RigExecFrozenPurity::LiveOnly,
-         "WorkDispatcher + per-run atomics on the shared arena at normal "
-         "priority; the frozen serial scope exists to keep workers out of "
-         "it (proposed hook in RigExecBakedRunSteps)"},
+         "one readiness and value-cutoff loop for native, frozen, and runtime; "
+         "caller-owned workspaces retain exact semantic state. Dispatch "
+         "callbacks choose serial or parallel execution without changing dependencies"},
         {"per-point geometry kernels (moverGraph.cpp parallel regions)",
          RigExecFrozenPurity::Pure,
          "range-independent per-point math; the per-context serial hook "
@@ -213,19 +197,13 @@ RigExecFrozenPurityAudit()
          "never as a live read of per-frame working state"},
         {"skin layout handles (bakedGeometry.cpp SkinTopology ops)",
          RigExecFrozenPurity::Pure,
-         "op-written: each fixed skin layout is built from its layout "
-         "leaves by RigExecBuildSkinTopology, serially, under the body "
-         "purity mark -- in the live prologue from leaves sampled on the "
-         "owning thread, and in a frozen job's prologue from the job's "
-         "layout leaves written over the clone's; an unmoved layout keeps "
-         "its handle, which the prologue adopts"},
+         "each layout operation consumes current sampled leaves and declared "
+         "property versions; unchanged semantic layouts retain their handle. "
+         "Geometry adopts the handle inside its owning operation"},
         {"ladder tables (restM through rotOrder)",
          RigExecFrozenPurity::Pure,
-         "op-written: the RestCompose and LadderCompose head ops compose "
-         "them from sampled ladder leaves, serially, under the body purity "
-         "mark -- in the live prologue on the owning thread, and in a "
-         "frozen job's prologue over the clone's tables from the job's "
-         "patched ladder leaves"},
+         "RestCompose and LadderCompose are graph operations over copied "
+         "source facts and declared provider values; each owns its output slot"},
         {"upstream layer (upstream, lastUpstream, upstreamOn, "
          "upstreamChanged)",
          RigExecFrozenPurity::Pure,
@@ -254,16 +232,15 @@ RigExecFrozenPurityAudit()
          "live state by definition; the program's captured pointers to it "
          "are why workers run a private arena, never the live program"},
         {"RigExecBakedProgramImpl live pointers (evaluator, stage, "
-         "resolvedInputs, chainSnapshots, blendSampleShapes, profiler, "
+         "resolvedInputs, profiler, "
          "guideTaps)",
          RigExecFrozenPurity::LiveOnly,
-         "read-what-the-evaluator-holds-now by design; a worker-owned "
-         "program copy would still point at the live evaluator, so the "
-         "region-only frozen entry is a program-side hook, not a copy"},
+         "snapshot construction clears live pointers; each frozen lane "
+         "rebinds only its private resolver, profiler, and copied epoch tables"},
         {"ExecUsdSystem / TapSet / Snapshot (dynamic path)",
          RigExecFrozenPurity::LiveOnly,
-         "OpenExec against the live stage; cannot run concurrently with "
-         "stage edits, which is why refusal rigs take the D7 memo path"},
+         "owning-thread source capture and optional reference checks only; "
+         "workers consume fresh detached facts and compiled operations"},
         {"wire-basis memo (moverGraph.h RigExecWireBasisCache, per owner)",
          RigExecFrozenPurity::Pure,
          "one per revision (GeomRevision::wireBasis) and one per dynamic "
@@ -442,8 +419,12 @@ RigExecPatchFrozenAvarConstants(const RigExecFrozenProgram &base,
     }
     // The epoch's side-tables, unchanged by a constant patch.
     snapshot->jointSolverBinding = base.jointSolverBinding;
-    snapshot->guideTapsPresent = base.guideTapsPresent;
+    snapshot->solverGuidesPresent = base.solverGuidesPresent;
     snapshot->inputHeadPaths = base.inputHeadPaths;
+    _ForEachPatchableInput(P,[&](const auto &input) {
+        snapshot->inputConstants.push_back(VtValue(
+            input.sourceBacked ? input.sourceFallback : input.constant));
+    }, /*includeIntervening=*/false);
     snapshot->arrayKeys = base.arrayKeys;
     snapshot->chainBaseQueryValid = base.chainBaseQueryValid;
     snapshot->derivedBaseQueryValid = base.derivedBaseQueryValid;

@@ -5,7 +5,8 @@
 // same names; the schema's math and POD structs map onto the value types
 // of rigExecBinary/wireTypes.h through the Pack/UnPack pairs declared
 // here. Open is the decoder and Write the encoder: there is no
-// hand-written codec. USD-free.
+// hand-written schema codec. An optional versioned lossless transport wraps
+// the same validated FlatBuffer; raw files remain accepted. USD-free.
 #ifndef RIGEXEC_BINARY_FORMAT_H
 #define RIGEXEC_BINARY_FORMAT_H
 
@@ -28,6 +29,7 @@ struct Matrix4d;
 struct Landmarks;
 struct Frame;
 struct IntPair;
+struct UIntPair;
 struct Bool3;
 struct F64;
 struct F32;
@@ -67,6 +69,10 @@ inline rigExec::fb::IntPair
 PackIntPair(const rigExec::RigExecWireIntPair &value);
 inline rigExec::RigExecWireIntPair
 UnPackIntPair(const rigExec::fb::IntPair &value);
+inline rigExec::fb::UIntPair
+PackUIntPair(const rigExec::RigExecWireUIntPair &value);
+inline rigExec::RigExecWireUIntPair
+UnPackUIntPair(const rigExec::fb::UIntPair &value);
 inline rigExec::fb::Bool3 PackBool3(const rigExec::RigExecWireBool3 &value);
 inline rigExec::RigExecWireBool3 UnPackBool3(const rigExec::fb::Bool3 &value);
 inline rigExec::fb::F64 PackF64(const double &value);
@@ -98,6 +104,9 @@ PackSplineIkParams(const rigExec::RigExecWireSplineIkParams &value);
 inline rigExec::RigExecWireSplineIkParams
 UnPackSplineIkParams(const rigExec::fb::SplineIkParams &value);
 
+inline rigExec::fb::F64 Pack(const double &value);
+inline rigExec::fb::F32 Pack(const float &value);
+inline rigExec::fb::Vec2f Pack(const rigExec::RigExecWireVec2f &value);
 inline rigExec::fb::Vec3d Pack(const rigExec::RigExecWireVec3d &value);
 inline rigExec::fb::Vec3f Pack(const rigExec::RigExecWireVec3f &value);
 inline rigExec::fb::Vec3i Pack(const rigExec::RigExecWireVec3i &value);
@@ -227,6 +236,18 @@ UnPackIntPair(const rigExec::fb::IntPair &value)
     return {value.first(), value.second()};
 }
 
+inline rigExec::fb::UIntPair
+PackUIntPair(const rigExec::RigExecWireUIntPair &value)
+{
+    return rigExec::fb::UIntPair(value.first, value.second);
+}
+
+inline rigExec::RigExecWireUIntPair
+UnPackUIntPair(const rigExec::fb::UIntPair &value)
+{
+    return {value.first(), value.second()};
+}
+
 inline rigExec::fb::Bool3
 PackBool3(const rigExec::RigExecWireBool3 &value)
 {
@@ -263,17 +284,21 @@ UnPackF32(const rigExec::fb::F32 &value)
     return value.v();
 }
 
+inline rigExec::fb::F64 Pack(const double &value) { return PackF64(value); }
+inline rigExec::fb::F32 Pack(const float &value) { return PackF32(value); }
+inline rigExec::fb::Vec2f Pack(const rigExec::RigExecWireVec2f &value) { return PackVec2f(value); }
+
 inline rigExec::fb::PropertyInputCandidate
 PackPropertyInputCandidate(const rigExec::RigExecWirePropertyInputCandidate &value)
 {
     return rigExec::fb::PropertyInputCandidate(value.slot,
-        rigExec::fb::PropertyCandidateKind(value.kind), value.version, value.raw);
+        rigExec::fb::PropertyCandidateKind(value.kind), value.version, value.raw, value.poseWeight, value.crossDomain);
 }
 
 inline rigExec::RigExecWirePropertyInputCandidate
 UnPackPropertyInputCandidate(const rigExec::fb::PropertyInputCandidate &value)
 {
-    return {value.slot(), uint8_t(value.kind()), value.version(), value.raw()};
+    return {value.slot(), uint8_t(value.kind()), value.version(), value.raw(), value.poseWeight(), value.crossDomain()};
 }
 
 inline rigExec::fb::ReadPhase
@@ -433,6 +458,9 @@ using RigExecWireFrameVersion = fb::RigExecWireFrameVersion;
 using RigExecWireSpaceSwitch = fb::RigExecWireSpaceSwitch;
 using RigExecWireAvarBinding = fb::RigExecWireAvarBinding;
 using RigExecWireDomainPose = fb::RigExecWireDomainPose;
+using RigExecWireProviderFrameInput = fb::RigExecWireProviderFrameInput;
+using RigExecWireProviderRefreshCarry = fb::RigExecWireProviderRefreshCarry;
+using RigExecWireProviderRefresh = fb::RigExecWireProviderRefresh;
 using RigExecWireBlendSampleBinding = fb::RigExecWireBlendSampleBinding;
 using RigExecWireBlendSampleBindingList =
     fb::RigExecWireBlendSampleBindingList;
@@ -447,6 +475,7 @@ using RigExecWireRevision = fb::RigExecWireRevision;
 using RigExecWireDerived = fb::RigExecWireDerived;
 using RigExecWireChain = fb::RigExecWireChain;
 using RigExecWireWeightObject = fb::RigExecWireWeightObject;
+using RigExecWireWeightField = fb::RigExecWireWeightField;
 using RigExecWireDomainGeometry = fb::RigExecWireDomainGeometry;
 using RigExecWirePropertyRevision = fb::RigExecWirePropertyRevision;
 using RigExecWirePropertyChain = fb::RigExecWirePropertyChain;
@@ -468,6 +497,7 @@ using RigExecWireSlotKind = fb::SlotKind;
 using RigExecWireInputTag = fb::InputTag;
 using RigExecWireArraySource = fb::ArraySource;
 using RigExecWireReadMode = fb::ReadMode;
+using RigExecWireExternalDeclaredInput = fb::RigExecWireExternalDeclaredInput;
 using RigExecWireInputReadFlags = fb::InputReadFlags;
 using RigExecWireInputSlotFlags = fb::InputSlotFlags;
 using RigExecWirePathKind = fb::PathKind;
@@ -486,14 +516,14 @@ inline constexpr uint8_t RigExecWireConstraintRadialBlend =
 /// The format version this code reads and writes; every change to
 /// rigexec.fbs bumps it. Open refuses all older versions with an S3
 /// re-export message; unknown future versions receive a rebake message.
-inline constexpr uint32_t RigExecFormatVersion = 10;
+inline constexpr uint32_t RigExecFormatVersion = 17;
 
 /// Whether \p tag is one of the array tags (IntArray and after).
 inline constexpr bool
 RigExecFormatIsArrayTag(fb::InputTag tag)
 {
     return uint8_t(tag) >= uint8_t(fb::InputTag::IntArray) &&
-           uint8_t(tag) <= uint8_t(fb::InputTag::Vec3fArray);
+           uint8_t(tag) <= uint8_t(fb::InputTag::BoolArray);
 }
 
 /// The file identifier, bytes 4-7 of every .rigexec file.

@@ -81,13 +81,20 @@ public:
             const auto &revision =
                 program.chains[entry.chain].revisions[entry.revision];
             const RigExecMoverParameters &parameters = revision.parameters;
+            if(entry.handler->encodeExternalEpoch &&
+               !entry.handler->encodeExternalEpoch(revision.binding,&entry.epoch)) {
+                *error="external mover "+revision.moverPath.GetString()+" could not encode its immutable epoch";
+                return false;
+            }
             if (!parameters.valid || parameters.externalData.IsEmpty()) {
                 continue;
             }
             char number[32];
+            std::vector<uint8_t> sampledEpoch;
+            auto *epoch = entry.handler->encodeExternalEpoch ? &sampledEpoch : &entry.epoch;
             if (!entry.handler->encodeExternal(parameters.externalData,
                                                revision.binding,
-                                               &entry.epoch, &entry.frame)) {
+                                               epoch, &entry.frame)) {
                 *error = "external mover " + revision.moverPath.GetString() +
                          " could not encode its payload at time " +
                          _FormatDouble(time, number, sizeof(number));
@@ -103,6 +110,7 @@ public:
     // failed there), and per declared phase the points authored at
     // \p time, 0 when nothing is read.
     void Fill(const RigExecBakedProgramImpl &program, double time,
+              const RigExecBakeInputs &inputs,
               RigExecBakePathTable *paths, RigExecBakePools *pools,
               std::vector<fb::RigExecWireExternalMover> *out) const
     {
@@ -114,9 +122,34 @@ public:
             mover.chain = entry.chain;
             mover.revision = entry.revision;
             mover.type = paths->Token(revision.moverPrim.GetTypeName());
+            const auto declarations=inputs.externalInputs.find({entry.chain,entry.revision});
+            if(declarations!=inputs.externalInputs.end()) {
+                mover.declaredInputs=declarations->second.reads;
+                for(size_t k=0;k<mover.declaredInputs.size();++k) {
+                    auto &row=mover.declaredInputs[k];
+                    const auto &fallback=declarations->second.fallbacks[k];
+                    if(!RigExecFormatIsArrayTag(row.read->tag)) continue;
+                    fb::RigExecWireValue value;
+                    value.tag=row.read->tag;
+                    if(fallback.IsHolding<VtIntArray>()) {
+                        const auto &v=fallback.UncheckedGet<VtIntArray>(); value.array=pools->Ints(v.cdata(),v.size());
+                    } else if(fallback.IsHolding<VtFloatArray>()) {
+                        const auto &v=fallback.UncheckedGet<VtFloatArray>(); value.array=pools->Floats(v.cdata(),v.size());
+                    } else if(fallback.IsHolding<VtDoubleArray>()) {
+                        const auto &v=fallback.UncheckedGet<VtDoubleArray>(); value.array=pools->Doubles(v.cdata(),v.size());
+                    } else if(fallback.IsHolding<VtVec2fArray>()) {
+                        const auto &v=fallback.UncheckedGet<VtVec2fArray>();
+                        value.array=pools->Vec2fs(v.empty()?nullptr:v.cdata()->data(),v.size());
+                    } else if(fallback.IsHolding<VtVec3fArray>()) {
+                        const auto &v=fallback.UncheckedGet<VtVec3fArray>();
+                        value.array=pools->Vec3fs(v.empty()?nullptr:v.cdata()->data(),v.size());
+                    }
+                    row.read->constant=pools->Value(value);
+                }
+            }
             mover.v2FrameValid = entry.valid;
+            mover.epoch = entry.epoch;
             if (entry.valid) {
-                mover.epoch = entry.epoch;
                 mover.v2Frame = entry.frame;
             }
             mover.phasedFallback.reserve(revision.binding.phases.size());
@@ -315,7 +348,7 @@ RigExecBakeToBinary(RigExecRigEvaluator &evaluator,
                                    &paths, &pools, &file, &why)) {
         return Fail("cannot build the .rigexec file: " + why);
     }
-    external.Fill(program, bakeTime, &paths, &pools, &file.externalMovers);
+    external.Fill(program, bakeTime, inputs.GetInputs(), &paths, &pools, &file.externalMovers);
     file.formatVersion = RigExecFormatVersion;
     file.rig = paths.Path(evaluator.GetRigPath());
     file.bakeTime = bakeTime;

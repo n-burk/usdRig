@@ -5,7 +5,7 @@
 //     predecessor finished before its executed successor, under whichever
 //     executor RIGEXEC_BAKED_SCHEDULE picked;
 //   * it lists exactly the steps the run executed: the sources plus the
-//     closed steps;
+//     executed common graph operations;
 //   * a first run reaches every evaluation domain the rig has;
 //   * a repeated time executes nothing, in the sense the cone suite uses;
 //   * the op graph it is checked against is acyclic and mirrors itself;
@@ -31,6 +31,7 @@
 
 #include "rigExecOpTrace.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <memory>
 #include <set>
@@ -70,7 +71,7 @@ struct LiveRig {
 };
 
 LiveRig
-OpenRig(const std::string &stagePath, RigExecEvaluationMode mode)
+OpenRig(const std::string &stagePath, bool referenceChecks = false)
 {
     LiveRig rig;
     rig.stage = UsdStage::Open(stagePath);
@@ -82,7 +83,7 @@ OpenRig(const std::string &stagePath, RigExecEvaluationMode mode)
         return rig;
     }
     rig.evaluator = std::make_unique<RigExecRigEvaluator>(rig.stage, rigPath);
-    rig.evaluator->SetEvaluationMode(mode);
+    rig.evaluator->cpuReference = referenceChecks;
     std::vector<std::string> errors;
     if (!rig.evaluator->Compile(&errors)) {
         rig.evaluator.reset();
@@ -105,9 +106,7 @@ Report(const std::string &what, const std::vector<std::string> &violations)
     return false;
 }
 
-/// The trace lists exactly the steps the run executed: every source, and
-/// every closed step. Read off the program's own closure, so it holds under
-/// either executor.
+/// The trace lists exactly the common engine's executed operations.
 void
 CheckTraceMatchesClosure(const RigExecRigEvaluator &E,
                          const std::vector<RigExecOpTraceEntry> &trace,
@@ -119,30 +118,17 @@ CheckTraceMatchesClosure(const RigExecRigEvaluator &E,
         std::printf("FAIL %s: no program\n", what.c_str());
         return;
     }
-    // Under RIGEXEC_BAKED_VERIFY_CONES the forced second pass leaves
-    // `closedSteps` describing itself while the trace is restored to the
-    // cone run, so there is no set to compare against.
-    if (RigExecBakedVerifyConesRequested()) {
-        return;
-    }
     const RigExecBakedProgramImpl &B = program->GetStepGraph();
     std::set<size_t> traced;
     for (const RigExecOpTraceEntry &entry : trace) {
         CHECK(entry.step < B.steps.size());
         if (entry.step >= B.steps.size()) continue;
-        CHECK(B.steps[entry.step].runSeq == entry.seq);
+        CHECK(B.opExecution.completion[entry.step] == entry.seq);
         traced.insert(entry.step);
     }
     size_t mismatches = 0;
     for (size_t k = 0; k < B.steps.size(); ++k) {
-        if (B.steps[k].isHead) {
-            CHECK(!B.steps[k].isSource);
-            CHECK(!B.closedSteps.Test(int(k)));
-            CHECK(B.steps[k].startUs == 0 && B.steps[k].endUs == 0);
-        }
-        const bool ran =
-            B.steps[k].isHead ? B.steps[k].runSeq != 0
-                              : B.steps[k].isSource || B.closedSteps.Test(int(k));
+        const bool ran = k < B.opExecution.ran.size() && B.opExecution.ran[k];
         if (ran != (traced.count(k) != 0)) {
             if (mismatches < 5) {
                 std::printf("    %s: step %zu (%s) %s\n", what.c_str(), k,
@@ -160,24 +146,19 @@ CheckTraceMatchesClosure(const RigExecRigEvaluator &E,
     }
 }
 
-/// Under RIGEXEC_TRACE_ALL_STEPS every timed step that ran is replayed, so
-/// the step events' seq arguments are exactly the ordinary non-source
-/// seqs. Memo heads share body dispatch and stamps but retain untimed profiling.
+/// Profiler rows report every timed body with its common completion sequence.
 void
 CheckProfilerReplay(const RigExecRigEvaluator &E,
                     const std::vector<RigExecOpTraceEntry> &trace,
                     const std::string &what)
 {
-    const RigExecBakedProgramImpl &B = E.GetBakedProgram()->GetStepGraph();
     std::multiset<std::string> expected, recorded;
     for (const RigExecOpTraceEntry &entry : trace) {
-        if (!B.steps[entry.step].isHead && !B.steps[entry.step].isSource) {
-            expected.insert(std::to_string(entry.seq));
-        }
+        expected.insert(std::to_string(entry.seq));
     }
     size_t missingArgs = 0;
     for (const RigExecProfileEvent &event : E.GetProfiler().GetEvents()) {
-        if (event.category != "step") {
+        if (event.category != "op") {
             continue;
         }
         const auto kind = event.args.find("kind");
@@ -200,10 +181,10 @@ CheckProfilerReplay(const RigExecRigEvaluator &E,
 
 void
 TestStage(const std::string &examplesDir, const std::string &file,
-          double t0, double t1)
+          double t0, double t1, bool expectTimeChange = true)
 {
     const std::string path = examplesDir + "/" + file;
-    LiveRig rig = OpenRig(path, RigExecEvaluationMode::Baked);
+    LiveRig rig = OpenRig(path);
     if (!rig.evaluator) {
         ++failures;
         std::printf("FAIL %s: does not compile\n", file.c_str());
@@ -226,13 +207,11 @@ TestStage(const std::string &examplesDir, const std::string &file,
     CHECK(!graph.empty());
     CHECK(!trace0.empty());
     const auto &B = E.GetBakedProgram()->GetStepGraph();
-    size_t headCount = 0;
-    while (headCount < B.steps.size() && B.steps[headCount].isHead) ++headCount;
-    CHECK(headCount > 0);
+    CHECK(graph.size() == B.opGraph.ops.size());
     for (size_t i = 0; i < graph.size(); ++i) {
-        CHECK(B.steps[i].isHead == (i < headCount));
-        CHECK((graph[i].domain == "head") == B.steps[i].isHead);
-        if (B.steps[i].isHead) CHECK(!B.steps[i].isSource);
+        CHECK(B.opGraph.ops[i].originalIndex == i);
+        CHECK(B.opGraph.canonicalIndex[i] == int32_t(i));
+        CHECK(graph[i].step == i);
     }
     Report(file + " op graph", rigExecTest::CheckOpGraphIsAcyclic(graph));
     Report(file + " first trace",
@@ -263,7 +242,15 @@ TestStage(const std::string &examplesDir, const std::string &file,
     CHECK(second.valid);
     CHECK(E.GetBakedGenerationCount() == 2);
     const std::vector<RigExecOpTraceEntry> trace1 = E.GetLastOpTrace();
-    CHECK(!trace1.empty());
+    if (expectTimeChange) {
+        CHECK(!trace1.empty());
+    } else {
+        // ArmRig is the static rig beneath ArmShotAnim. Moving time alone
+        // changes no typed source; its cold first run above remains the
+        // meaningful body/ordering/profiler proof, followed by literal idle.
+        CHECK(trace1.empty());
+        CHECK(second.executedOpCount == 0);
+    }
     Report(file + " second trace",
            rigExecTest::CheckTraceRespectsEdges(trace1, graph));
     CheckTraceMatchesClosure(E, trace1, file + " second trace");
@@ -276,9 +263,9 @@ TestStage(const std::string &examplesDir, const std::string &file,
     const RigExecRigPose third = E.Evaluate(UsdTimeCode(t1));
     CHECK(third.valid);
     CHECK(E.GetBakedGenerationCount() == 3);
-    CHECK(third.moverGraphRevisionsExecuted == 0);
-    CHECK(third.moverGraphRevisionsCreated == 0);
     const std::vector<RigExecOpTraceEntry> trace2 = E.GetLastOpTrace();
+    CHECK(third.executedOpCount == trace2.size());
+    CHECK(trace2.empty());
     Report(file + " repeated trace",
            rigExecTest::CheckTraceRespectsEdges(trace2, graph));
     CheckTraceMatchesClosure(E, trace2, file + " repeated trace");
@@ -298,63 +285,48 @@ TestStage(const std::string &examplesDir, const std::string &file,
                 E.GetBakedClusterCount());
 }
 
-/// The accessors answer for the program only: a generation the walk
-/// answered has no op trace and no op graph.
+/// Scalar reference checks validate the production graph without replacing it.
 void
-TestAWalkGenerationHasNoTrace(const std::string &examplesDir)
+TestReferenceChecksUseProductionGraph(const std::string &examplesDir)
 {
-    LiveRig rig = OpenRig(examplesDir + "/ArmRig.usda",
-                          RigExecEvaluationMode::ExecReference);
-    if (!rig.evaluator) {
-        ++failures;
-        std::printf("FAIL ArmRig (reference): does not compile\n");
-        return;
-    }
+    LiveRig rig = OpenRig(examplesDir + "/ArmRig.usda", true);
+    CHECK(rig.evaluator != nullptr);
+    if (!rig.evaluator) return;
     const RigExecRigPose pose = rig.evaluator->Evaluate(UsdTimeCode(1001));
     CHECK(pose.valid);
-    CHECK(rig.evaluator->GetBakedGenerationCount() == 0);
-    CHECK(rig.evaluator->GetLastOpTrace().empty());
-    CHECK(rig.evaluator->GetOpGraph().empty());
+    CHECK(pose.referenceMismatches == 0);
+    CHECK(pose.referenceAgreements > 0);
+    CHECK(!rig.evaluator->GetOpGraph().empty());
+    CHECK(rig.evaluator->GetLastOpTrace().size() == pose.executedOpCount);
+    CheckTraceMatchesClosure(*rig.evaluator, rig.evaluator->GetLastOpTrace(),
+                             "reference checks");
 }
 
-/// A program the evaluator holds but that did not answer the last
-/// generation has no trace and no graph to report: switching a clean epoch
-/// to the parity mode rebuilds the program, and the rebuilt one has run
-/// nothing until the next generation.
+/// A newly compiled artifact is observable before its first execution.
 void
 TestARebuiltProgramHasNoTraceUntilItRuns(const std::string &examplesDir)
 {
-    LiveRig rig = OpenRig(examplesDir + "/ArmRig.usda",
-                          RigExecEvaluationMode::Baked);
-    if (!rig.evaluator) {
-        ++failures;
-        std::printf("FAIL ArmRig (rebuild): does not compile\n");
-        return;
-    }
+    LiveRig rig = OpenRig(examplesDir + "/ArmRig.usda");
+    CHECK(rig.evaluator != nullptr);
+    if (!rig.evaluator) return;
     RigExecRigEvaluator &E = *rig.evaluator;
-    CHECK(E.Evaluate(UsdTimeCode(1001)).valid);
-    CHECK(E.GetBakedGenerationCount() == 1);
-    CHECK(!E.GetLastOpTrace().empty());
-    CHECK(!E.GetOpGraph().empty());
-
-    E.SetEvaluationMode(RigExecEvaluationMode::BakedWithParityCheck);
     CHECK(E.GetBakedProgram() != nullptr);
     CHECK(E.GetLastOpTrace().empty());
-    CHECK(E.GetOpGraph().empty());
-
+    CHECK(!E.GetOpGraph().empty());
+    CHECK(E.Evaluate(UsdTimeCode(1001)).valid);
+    CHECK(!E.GetLastOpTrace().empty());
+    std::vector<std::string> errors;
+    CHECK(E.Compile(&errors));
+    CHECK(E.GetLastOpTrace().empty());
+    CHECK(!E.GetOpGraph().empty());
     CHECK(E.Evaluate(UsdTimeCode(1024)).valid);
     CHECK(!E.GetLastOpTrace().empty());
-    CHECK(!E.GetOpGraph().empty());
 }
 
-/// A run that gives the generation back at the stage frames executes no
-/// step, so the program's own trace is empty rather than the previous
-/// run's. The rig is the dispatch suite's: the ribbon spine with an aim
-/// constraint moving a plain Xform whose type then stops being a transform.
-/// The live path recompiles before it can reach this bail, so the program
-/// is run directly between the edit and the settle.
+/// An unresolved plain constraint target publishes invalid source state.
+/// The graph records ordinary pure callback outcomes while publication is withheld.
 void
-TestAStageFramesBailLeavesNoTrace(const std::string &examplesDir)
+TestInvalidTargetStillExecutesUnrelatedOperations(const std::string &examplesDir)
 {
     const UsdStageRefPtr stage =
         UsdStage::Open(examplesDir + "/05_TwistRibbonSpine.usda");
@@ -377,7 +349,6 @@ TestAStageFramesBailLeavesNoTrace(const std::string &examplesDir)
     CHECK(aim.CreateRelationship(TfToken("rigExec:moves"))
               .SetTargets({target}));
     RigExecRigEvaluator rig(stage, rigPath);
-    rig.SetEvaluationMode(RigExecEvaluationMode::Baked);
     std::vector<std::string> errors;
     CHECK(rig.Compile(&errors));
     const std::unique_ptr<RigExecBakedProgram> program =
@@ -390,9 +361,35 @@ TestAStageFramesBailLeavesNoTrace(const std::string &examplesDir)
 
     CHECK(targetPrim.SetTypeName(TfToken("Scope")));
     RigExecRigPose given;
+    const size_t callerExecutedOpCount = 91;
+    given.executedOpCount = callerExecutedOpCount;
     CHECK(!program->Run(UsdTimeCode(1024.0), &given));
     CHECK(program->GetLastBail() == RigExecBakedBail::StageFrames);
-    CHECK(program->GetLastOpTrace().empty());
+    CHECK(!given.valid && given.jointMatricesFinal.empty());
+    CHECK(given.providerXforms.empty() && given.providerBaseXforms.empty());
+    const auto trace=program->GetLastOpTrace();
+    CHECK(!trace.empty());
+    CHECK(std::any_of(trace.begin(),trace.end(),[](const auto &entry) {
+        return entry.kind=="Solve";
+    }));
+    CHECK(!given.diagnostics.empty() && given.diagnostics.back() ==
+        "could not resolve constraint target " + target.GetString() +
+        " relative to the asset root");
+    const auto &state = program->GetStepGraph();
+    // Refusal preserves caller metadata; the trace describes actual callbacks.
+    CHECK(given.executedOpCount == callerExecutedOpCount);
+    CHECK(trace.size() == size_t(std::count_if(
+        state.opExecution.ran.begin(), state.opExecution.ran.end(),
+        [](const auto ran) { return bool(ran); })));
+    for (const auto &entry : trace) {
+        CHECK(entry.step < state.opExecution.ran.size());
+        if (entry.step < state.opExecution.ran.size())
+            CHECK(state.opExecution.ran[entry.step]);
+    }
+    CHECK(targetPrim.SetTypeName(TfToken("Xform")));
+    RigExecRigPose recovered;
+    CHECK(program->Run(UsdTimeCode(1024.0), &recovered));
+    CHECK(recovered.valid && program->GetLastBail() == RigExecBakedBail::None);
     CHECK(!program->GetOpGraph().empty());
 }
 
@@ -477,15 +474,15 @@ main(int argc, char **argv)
                     ? "parallel"
                     : "serial");
     TestTheHelpersReadTheTrace();
-    TestStage(examplesDir, "ArmRig.usda", 1001, 1024);
+    TestStage(examplesDir, "ArmRig.usda", 1001, 1024, false);
     TestStage(examplesDir, "ArmShotAnim.usda", 1001, 1024);
     TestStage(examplesDir, "13_ReadPhases.usda", 1001, 1024);
     TestStage(examplesDir, "11_VolumeWeights.usda", 1001, 1024);
     TestStage(examplesDir, "04_BlendShapeFace.usda", 1001, 1024);
     TestStage(examplesDir, "biped/Biped_anim.usda", 1, 5);
-    TestAWalkGenerationHasNoTrace(examplesDir);
+    TestReferenceChecksUseProductionGraph(examplesDir);
     TestARebuiltProgramHasNoTraceUntilItRuns(examplesDir);
-    TestAStageFramesBailLeavesNoTrace(examplesDir);
+    TestInvalidTargetStillExecutesUnrelatedOperations(examplesDir);
     if (failures) {
         std::printf("%d FAILURE(S)\n", failures);
         return 1;

@@ -14,6 +14,7 @@
 // (and the small one deliberately smaller), because a threshold that is never
 // crossed in a test is a threshold that is never tested.
 #include "rigExec/moverGraph.h"
+#include "rigExecRevisionProgramTest.h"
 #include "rigExec/parallel.h"
 #include "rigExec/types.h"
 
@@ -26,7 +27,6 @@
 #include "pxr/base/tf/getenv.h"
 #include "pxr/base/vt/array.h"
 #include "pxr/base/work/threadLimits.h"
-#include "pxr/exec/exec/typeRegistry.h"
 #include "pxr/usd/sdf/path.h"
 
 #include <cstdio>
@@ -189,9 +189,9 @@ Identical(const VtVec3fArray &a, const VtVec3fArray &b, const char *what)
 VtVec3fArray
 RunSkin(const VtVec3fArray &base, const RigExecMoverParameters &params)
 {
-    RigExecMoverGraph graph;
-    const VdfMaskedOutput source = graph.AddPointSource(kTarget, base);
-    const VdfMaskedOutput head = graph.AddRevision(
+    rigExecTest::RevisionProgram graph;
+    const rigExecTest::RevisionValue source = graph.AddPointSource(kTarget, base);
+    const rigExecTest::RevisionValue head = graph.AddRevision(
         RigExecRevisionOp::Skin, source, params, OkStatus());
     const VtVec3fArray out = graph.Evaluate(head);
     CHECK(graph.GetRevisionStatus(head).state == "ok");
@@ -279,9 +279,6 @@ TestSerialAndParallelAgree()
 int
 main()
 {
-    // As in testRigExecMoverGraph: this suite talks to VDF directly, so the
-    // exec type registry has to be forced to run.
-    ExecTypeRegistry::GetInstance();
 
     // Below the threshold, just above it, and far above it.
     TestSkinMatchesTheScalarReference(

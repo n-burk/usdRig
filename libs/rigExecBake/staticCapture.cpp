@@ -270,6 +270,7 @@ _ArrayDefaults(const RigExecBakedProgramImpl &program, double time,
         VtDoubleArray doubles;
         VtVec2fArray pairs;
         VtVec3fArray points;
+        VtVec3dArray vectors; VtMatrix4dArray matrices; VtTokenArray tokens; VtBoolArray bools;
         switch (entry.tag) {
         case fb::InputTag::IntArray:
             has = a && a.Get(&ints, at);
@@ -286,6 +287,10 @@ _ArrayDefaults(const RigExecBakedProgramImpl &program, double time,
         case fb::InputTag::Vec3fArray:
             has = a && a.Get(&points, at);
             break;
+        case fb::InputTag::Vec3dArray: has=a && a.Get(&vectors,at); break;
+        case fb::InputTag::Matrix4dArray: has=a && a.Get(&matrices,at); break;
+        case fb::InputTag::TokenArray: has=a && a.Get(&tokens,at); break;
+        case fb::InputTag::BoolArray: has=a && a.Get(&bools,at); break;
         default:
             *error = "input " + name + " is no array input";
             return false;
@@ -337,6 +342,18 @@ _ArrayDefaults(const RigExecBakedProgramImpl &program, double time,
                     reinterpret_cast<const float *>(pairs.cdata()),
                     pairs.size());
                 break;
+            case fb::InputTag::Vec3dArray:
+                value.array=pools->Vec3ds(reinterpret_cast<const double *>(vectors.cdata()),vectors.size()); break;
+            case fb::InputTag::Matrix4dArray:
+                value.array=pools->Matrices(reinterpret_cast<const double *>(matrices.cdata()),matrices.size()); break;
+            case fb::InputTag::TokenArray: {
+                std::vector<std::string> text; for(const auto &token:tokens) text.push_back(token.GetString());
+                value.array=pools->Tokens(text); break;
+            }
+            case fb::InputTag::BoolArray: {
+                std::vector<uint8_t> bits; for(bool bit:bools) bits.push_back(bit?1:0);
+                value.array=pools->Bools(bits.data(),bits.size()); break;
+            }
             default:
                 value.array = pools->Vec3fs(
                     reinterpret_cast<const float *>(points.cdata()),
@@ -380,6 +397,9 @@ RigExecBakeValueKey(const fb::RigExecWireValue &value)
     case fb::InputTag::Vec3d:
         _AppendMember(value.vec3d, &key);
         break;
+    case fb::InputTag::Vec3i:
+        _AppendMember(value.vec3i,&key);
+        break;
     case fb::InputTag::Vec3f:
         _AppendMember(value.vec3f, &key);
         break;
@@ -406,6 +426,7 @@ RigExecBakePools::RigExecBakePools()
     Doubles(nullptr, 0);
     Vec2fs(&none, 0);
     Vec3fs(&none, 0);
+    Vec3ds(nullptr,0); Matrices(nullptr,0); Tokens({}); Bools(nullptr,0);
 }
 
 uint32_t
@@ -428,6 +449,9 @@ RigExecBakePools::Value(const fb::RigExecWireValue &value)
             break;
         case fb::InputTag::Vec3f:
             out.vec3f = _CopyMember(value.vec3f);
+            break;
+        case fb::InputTag::Vec3i:
+            out.vec3i = _CopyMember(value.vec3i);
             break;
         default:
             break;
@@ -488,6 +512,43 @@ RigExecBakePools::Seed(const RigExecBakeInputs &inputs, std::string *error)
     return true;
 }
 
+uint32_t RigExecBakePools::Vec3ds(const double *data,size_t count) {
+    std::string key(1,char(13));
+    if(count) key.append(reinterpret_cast<const char *>(data),count*3*sizeof(double));
+    const auto found=_extraIds.find(key); if(found!=_extraIds.end()) return found->second;
+    fb::RigExecWireVec3dArray row;
+    row.v.resize(count);
+    for(size_t i=0;i<count;++i) std::copy(data+i*3,data+(i+1)*3,row.v[i].begin());
+    const uint32_t id=uint32_t(_vec3ds.size()); _vec3ds.push_back(std::move(row));
+    _extraIds.emplace(std::move(key),id); return id;
+}
+uint32_t RigExecBakePools::Matrices(const double *data,size_t count) {
+    std::string key(1,char(14));
+    if(count) key.append(reinterpret_cast<const char *>(data),count*16*sizeof(double));
+    const auto found=_extraIds.find(key); if(found!=_extraIds.end()) return found->second;
+    fb::RigExecWireMatrix4dArray row;
+    row.v.resize(count);
+    for(size_t i=0;i<count;++i) std::copy(data+i*16,data+(i+1)*16,row.v[i].begin());
+    const uint32_t id=uint32_t(_matrices.size()); _matrices.push_back(std::move(row));
+    _extraIds.emplace(std::move(key),id); return id;
+}
+uint32_t RigExecBakePools::Tokens(const std::vector<std::string> &data) {
+    std::string key(1,char(15));
+    for(const auto &text:data) { const uint64_t count=text.size();
+        key.append(reinterpret_cast<const char *>(&count),sizeof(count)); key.append(text); }
+    const auto found=_extraIds.find(key); if(found!=_extraIds.end()) return found->second;
+    fb::RigExecWireTokenArray row; row.v=data;
+    const uint32_t id=uint32_t(_tokens.size()); _tokens.push_back(std::move(row));
+    _extraIds.emplace(std::move(key),id); return id;
+}
+uint32_t RigExecBakePools::Bools(const uint8_t *data,size_t count) {
+    std::string key(1,char(16)); if(count) key.append(reinterpret_cast<const char *>(data),count);
+    const auto found=_extraIds.find(key); if(found!=_extraIds.end()) return found->second;
+    fb::RigExecWireBoolArray row; if(count) row.v.assign(data,data+count);
+    const uint32_t id=uint32_t(_bools.size()); _bools.push_back(std::move(row));
+    _extraIds.emplace(std::move(key),id); return id;
+}
+
 void
 RigExecBakePools::MoveInto(fb::RigExecWireFile *file)
 {
@@ -497,6 +558,8 @@ RigExecBakePools::MoveInto(fb::RigExecWireFile *file)
     file->doubleArrays = std::move(_doubles);
     file->vec2fArrays = std::move(_vec2fs);
     file->vec3fArrays = std::move(_vec3fs);
+    file->vec3dArrays=std::move(_vec3ds); file->matrix4dArrays=std::move(_matrices);
+    file->tokenArrays=std::move(_tokens); file->boolArrays=std::move(_bools);
     _values.clear();
     _ints.clear();
     _floats.clear();
@@ -535,6 +598,11 @@ RigExecBakeCaptureStatics(
     pose.xformBase.reserve(program.xformBase.size());
     for (const GfMatrix4d &m : program.xformBase) {
         pose.xformBase.push_back(_ToMatrix(m));
+    }
+    pose.xformFrames.clear();
+    pose.xformFrames.reserve(program.xformSlots.size());
+    for (int slot : program.xformSlots) {
+        pose.xformFrames.push_back(_ToFrame(program.base[size_t(slot)]));
     }
     if (pose.nativeSources.size() != program.nativeFrames.size() ||
         program.nativeFrameOk.size() != program.nativeFrames.size()) {

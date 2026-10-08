@@ -1,89 +1,12 @@
-// rigExecPose -- evaluate a rig and print what came out.
-// The test suites assert against fixtures they own. This is the tool for the
-// other case: an arbitrary stage carrying a RigExecRoot, evaluated at chosen
-// frames so an author can see whether the rig they just wrote compiles, what
-// the compiler objected to, where the joints ended up, and how far each moved
-// property actually travelled.
-//   rigExecPose <stage> [--rig <primPath>] [--frames 1001,1024,1048]
-//               [--joints] [--targets] [--joints-out <file.usda>]
-//               [--pose-out <file.txt>] [--repeat N]
-//               [--profile <file.trace>]
-//               [--mode dynamic|baked|parity|reference]
-//               [--guides] [--require-baked]
-//               [--drag <prim> <attr> <steps>]
-// With no --frames it evaluates the stage's start time code (or Default when
-// the stage has no time range). Exit status is non-zero when the rig fails to
-// compile or an evaluation comes back invalid, so it can gate a build.
-// --mode is a request, and giving it takes the decision away from everything
-// else: without it the tool leaves the evaluator to decide for itself, which
-// is RIGEXEC_EVALUATION_MODE if the session set one and the stage's own
-// `uniform bool rigExec:baked` otherwise. The compile line reports the mode
-// that resulted and who chose it, so a run that expected the program and got
-// the dynamic path says so in its first three lines rather than in an
-// accounting total at the end. `reference` is the exec-authoritative oracle
-// alone (RigExecEvaluationMode::ExecReference): it never builds a program,
-// so like dynamic it prints no bake reasons and no accounting.
-// --guides re-enables the observational solver-guide request, which is off
-// by default here. pose.solverFrames is one of the domains the parity check
-// compares, and with guides off both paths fill it with nothing -- so a
-// ctest built on this tool compares an empty map unless it asks for them.
-// --require-baked turns a fallback into a failure: it sets
-// RIGEXEC_BAKE_REQUIRED for the evaluator, fails when a mode that asks for
-// the program finds the rig unbakeable, and fails when fewer generations
-// came from the program than frames were asked for. The second half is the
-// one that catches a silent fallback that is not a refusal -- an
-// interactive override the program cannot place, or a Run that handed the
-// generation back.
-// --profile records scoped phase timings (compile, property chains, pose
-// seed, each solver batch and constraint, the exec snapshot, each geometry
-// chain, derived maintenance) across every evaluated frame, writes them as
-// Chrome Trace Event JSON to <file.trace> -- openable in Perfetto
-// (ui.perfetto.dev) or chrome://tracing -- and prints a per-phase summary.
-// --repeat N cycles the frame list N times instead of once. Only the last
-// pass reports: the N-1 before it evaluate and throw the pose away, so the
-// printed output of `--repeat 1` -- and of a command line that never names
-// the option -- is exactly what it always was, while the wall clock of the
-// process divides by N frames instead of one. It exists because the frames
-// of this rig cost a few hundred microseconds each and a process start
-// costs half a second; timing one frame means timing the process.
-// --drag <prim> <attr> <steps> ramps one attribute through <steps> values
-// with SetInteractiveOverrides, evaluating after each one, and prints the
-// wall clock of every step plus the median and the minimum. It is the
-// manipulator's frame: an override placed, a generation asked for, a pose
-// drawn, over and over on one control. Nothing else about the run changes --
-// the drag happens after the reported frames, so every line above it is the
-// line a command line without the option prints.
-// --pose-out writes every published domain of every evaluated generation in
-// a canonical text form (%.17g doubles, %.9g floats), so two runs -- two
-// builds, two modes -- can be compared byte for byte with `cmp`.
-// --verify-binary <file.rigexec> gates the zero-USD runtime against the
-// evaluator in parity mode (dynamic==baked, enforced internally), bit for bit
-// over joint matrices, moved points, matrix primvars, weight frames and
-// fields, provider transforms, diagnostics and work counters. It needs
-// --frames. First the binary's defaults: a fresh reader's run against the
-// generation at the bake time. Then every frame: the binary's Animated
-// inputs take the stage's values at that time (RigExecInputSampler), the
-// binary runs, and each sampled value is also checked against the program's
-// own read of that attribute. Then, at the bake time, each
-// --drag-input <prim>.<attr> (repeatable) is set on the binary to its
-// default + 0.25 and then - 0.5, against a fresh evaluator compiled on the
-// stage and then handed the same value authored in the session layer:
-// outputs and diagnostics, but not the counters its first run moves (nor
-// what a rebuild adds to the diagnostics); the session layer is then put
-// back as it was. Every generation must come from the
-// program, as with --require-baked. It replaces the reporting loop and still
-// honors --pose-out/--joints-out (from the parity poses of the frames);
-// --repeat/--drag/--profile are ignored with a note, and --drag-input
-// outside it likewise.
-// --joints-out writes the evaluated joint frames, as asset-space matrices
-// sampled at every requested frame, to a plain USD layer. It is deliberately
-// schema-neutral -- a joint path list and a parallel matrix array per time
-// sample, nothing else -- because its point is to hand the rig's own answer to
-// something that is not RigExec: a converter to another skinning schema, or a
-// comparison against one. It is a diagnostic export of what the evaluator
-// computed, not a baked character.
+// rigExecPose evaluates the compiled native program and preserves exact pose/golden output.
+// Optional --cpu-reference checks point chains; --exec-crosscheck verifies builtin rows.
+#include "rigExec/frozenContext.h"
+#include "rigExecSampler/runtimePoseProjection.h"
 #include "rigExec/bakedProgramImpl.h"
 #include "rigExec/frameExtraction.h"
+#include "rigExec/goldenPose.h"
+#include "rigExec/inputReplay.h"
+#include "rigExec/bakedExecCrossCheckRows.h"
 #include "rigExec/frozenContextInternal.h"
 #include "rigExec/rigEvaluator.h"
 #include "rigExec/types.h"
@@ -116,6 +39,8 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <filesystem>
+#include <iterator>
 #include <cstdlib>
 #include <map>
 #include <string>
@@ -125,6 +50,49 @@
 PXR_NAMESPACE_USING_DIRECTIVE
 
 namespace {
+bool gCpuReference=false,gExecCrossCheck=false;
+struct CheckVisitState {uint64_t serial=0;const rigExec::RigExecBakedProgram *program=nullptr;};
+std::map<const rigExec::RigExecRigEvaluator *,CheckVisitState> checkVisits;
+rigExec::RigExecRigPose EvaluateChecked(rigExec::RigExecRigEvaluator &evaluator,UsdTimeCode time) {
+    evaluator.cpuReference=gCpuReference;
+    if(gExecCrossCheck) {
+        auto &state=checkVisits[&evaluator];
+        if(!evaluator.GetBakedProgram() || (state.program && state.serial!=evaluator.GetStageEditSerial())) {
+            std::vector<std::string> errors;
+            if(!evaluator.Compile(&errors)) {
+                rigExec::RigExecRigPose failed;failed.time=time;failed.diagnostics=std::move(errors);return failed;
+            }
+        }
+        const auto *program=evaluator.GetBakedProgram();std::string error;
+        if(!program || (!rigExec::RigExecBakedProgramTesting::ExecCrossCheckRows(*program) &&
+            !rigExec::RigExecBakedProgramTesting::EnableExecCrossCheck(*program,&error))) {
+            rigExec::RigExecRigPose failed;failed.time=time;
+            failed.diagnostics.push_back("exec crosscheck preparation failed: "+error);return failed;
+        }
+        state={evaluator.GetStageEditSerial(),program};
+    }
+    auto pose=evaluator.Evaluate(time);
+    if(gExecCrossCheck) {
+        const auto *program=evaluator.GetBakedProgram();
+        const auto rows=program?rigExec::RigExecBakedProgramTesting::ExecCrossCheckRows(*program):nullptr;
+        if(!rows) {pose.valid=false;pose.diagnostics.push_back("exec crosscheck rows unavailable after generation");}
+        else {
+            const auto report=rows->Evaluate(time);
+            pose.diagnostics.insert(pose.diagnostics.end(),report.diagnostics.begin(),report.diagnostics.end());
+            if(!report.Passed() || (!rows->Descriptors().empty() && !report.checked)) {
+                pose.valid=false;pose.diagnostics.push_back("exec crosscheck failed or checked no declared rows");
+            }
+        }
+    }
+    if(gCpuReference && pose.valid) {
+        const auto *program=evaluator.GetBakedProgram();size_t expected=0;
+        if(program)for(const auto &chain:program->GetStepGraph().chains)if(chain.haveBase && chain.haveResult)++expected;
+        if(pose.referenceAgreements+pose.referenceMismatches!=expected) {
+            pose.valid=false;pose.diagnostics.push_back("scalar reference did not check every published point chain");
+        }
+    }
+    return pose;
+}
 
 // The generated resource directory is the one that carries the LibraryPath
 // implementsComputeExtent needs; the source-tree copy is a data-only
@@ -306,18 +274,8 @@ WritePoseDump(FILE *out, const rigExec::RigExecRigPose &pose, double frame)
     for (const std::string &d : pose.diagnostics) {
         std::fprintf(out, "diagnostic %s\n", d.c_str());
     }
-    std::fprintf(out,
-                 "counters parityMismatches=%zu parityAgreements=%zu "
-                 "bakedParityMismatches=%zu solverOverrideRounds=%zu "
-                 "solverOverridesConverged=%d solverEvaluations=%zu "
-                 "revisionsCreated=%zu revisionsExecuted=%zu "
-                 "schedulesBuilt=%zu\n",
-                 pose.moverGraphParityMismatches,
-                 pose.moverGraphParityAgreements, pose.bakedParityMismatches,
-                 pose.solverOverrideRounds, int(pose.solverOverridesConverged),
-                 pose.solverEvaluations, pose.moverGraphRevisionsCreated,
-                 pose.moverGraphRevisionsExecuted,
-                 pose.moverGraphSchedulesBuilt);
+    std::fprintf(out,"counters referenceMismatches=%zu referenceAgreements=%zu comparisonMismatches=%zu executedOpCount=%zu\n",
+        pose.referenceMismatches,pose.referenceAgreements,pose.comparisonMismatches,pose.executedOpCount);
 }
 
 // A moved property is only interesting as a change: printing 1864 points
@@ -532,48 +490,9 @@ ParseFrames(const std::string &text)
     return frames;
 }
 
-// The two halves of "which path is answering this rig", for the compile
-// line. Spelled the way --mode spells them, so a reader can paste the
-// reported mode back onto the command line and pin what they just saw.
-const char *
-ModeName(rigExec::RigExecEvaluationMode mode)
-{
-    switch (mode) {
-    case rigExec::RigExecEvaluationMode::Baked: return "baked";
-    case rigExec::RigExecEvaluationMode::BakedWithParityCheck: return "parity";
-    case rigExec::RigExecEvaluationMode::ExecReference: return "reference";
-    case rigExec::RigExecEvaluationMode::Dynamic: break;
-    }
-    return "dynamic";
-}
-
-const char *
-ModeSourceName(rigExec::RigExecEvaluationModeSource source)
-{
-    switch (source) {
-    case rigExec::RigExecEvaluationModeSource::Explicit: return "--mode";
-    case rigExec::RigExecEvaluationModeSource::Environment:
-        return "RIGEXEC_EVALUATION_MODE";
-    case rigExec::RigExecEvaluationModeSource::Attribute:
-        return "rigExec:baked";
-    case rigExec::RigExecEvaluationModeSource::Default: break;
-    }
-    return "the default";
-}
-
-
-// The zero-USD runtime gate: every generation runs in parity mode (so a
-// dynamic==baked disagreement already fails it) and the binary's run is
-// compared with it bit for bit.
-
-std::string
-_FormatDouble(double value)
-{
-    char buffer[32];
-    std::snprintf(buffer, sizeof(buffer), "%.17g", value);
-    return std::string(buffer);
-}
-
+// Verify every published pose value, status, and ordered diagnostic through
+// the exact common encoding. Work counters and opt-in oracle rows are outside
+// the published output contract.
 void
 _VerifyPush(std::vector<std::string> *diffs, const std::string &line)
 {
@@ -583,352 +502,30 @@ _VerifyPush(std::vector<std::string> *diffs, const std::string &line)
 }
 
 void
-_VerifyJoints(const std::map<SdfPath, GfMatrix4d> &baked,
-              const std::vector<rigExec::RigExecRuntimeJointMatrix> &rt,
-              std::vector<std::string> *diffs)
-{
-    if (baked.size() != rt.size()) {
-        _VerifyPush(diffs, "joint count baked " +
-                                std::to_string(baked.size()) + " binary " +
-                                std::to_string(rt.size()));
-    }
-    std::map<std::string, const rigExec::RrMat4d *> byPath;
-    for (const auto &joint : rt) {
-        byPath[joint.path] = &joint.matrix;
-    }
-    for (const auto &[path, matrix] : baked) {
-        const auto found = byPath.find(path.GetString());
-        if (found == byPath.end()) {
-            _VerifyPush(diffs, "joint " + path.GetString() +
-                                    " missing from the binary");
-            continue;
-        }
-        for (int r = 0; r < 4; ++r) {
-            for (int c = 0; c < 4; ++c) {
-                if (matrix[r][c] != (*found->second)[r][c]) {
-                    _VerifyPush(diffs,
-                                "joint " + path.GetString() + " [" +
-                                    std::to_string(r) + "][" +
-                                    std::to_string(c) + "] baked " +
-                                    _FormatDouble(matrix[r][c]) +
-                                    " binary " +
-                                    _FormatDouble((*found->second)[r][c]));
-                    r = 4;
-                    break;
-                }
-            }
-        }
-    }
-}
-
-// Entries the baked pose carries that hold anything other than a point
-// array (a float dial, a matrix, a lone vector -- fixture 09 has all
-// three) are SKIPPED, counted into skippedScalars, and reported once
-// per run: the runtime publishes no scalar moved properties (there is
-// no GetMovedFloats), so they sit outside the output contract the gate
-// can hold it to, and playback documents the same gap. What the gate
-// does hold: every baked point array has a binary twin, and the
-// binary owns no array the baked pose lacks.
-void
-_VerifyMoved(const std::map<SdfPath, VtValue> &baked,
-             const std::vector<rigExec::RigExecRuntimePoints> &rt,
-             std::vector<std::string> *diffs, size_t *skippedScalars)
-{
-    std::map<std::string, const std::vector<rigExec::RrVec3f> *> byPath;
-    for (const auto &moved : rt) {
-        byPath[moved.path] = &moved.points;
-    }
-    size_t bakedPoints = 0;
-    for (const auto &[path, value] : baked) {
-        if (!value.IsHolding<VtVec3fArray>()) {
-            ++(*skippedScalars);
-            continue;
-        }
-        ++bakedPoints;
-        const auto found = byPath.find(path.GetString());
-        if (found == byPath.end()) {
-            _VerifyPush(diffs, "moved " + path.GetString() +
-                                    " missing from the binary");
-            continue;
-        }
-        const VtVec3fArray &array = value.UncheckedGet<VtVec3fArray>();
-        if (array.size() != found->second->size()) {
-            _VerifyPush(diffs, "moved " + path.GetString() + " count " +
-                                    std::to_string(array.size()) +
-                                    " vs " +
-                                    std::to_string(found->second->size()));
-            continue;
-        }
-        for (size_t i = 0; i < array.size(); ++i) {
-            const GfVec3f &a = array[i];
-            const rigExec::RrVec3f &b = (*found->second)[i];
-            if (a[0] != b[0] || a[1] != b[1] || a[2] != b[2]) {
-                _VerifyPush(diffs, "moved " + path.GetString() +
-                                        " point " + std::to_string(i) +
-                                        " differs");
-                break;
-            }
-        }
-    }
-    if (bakedPoints != byPath.size()) {
-        _VerifyPush(diffs, "moved-property count baked " +
-                                std::to_string(bakedPoints) +
-                                " binary " +
-                                std::to_string(byPath.size()));
-    }
-    for (const auto &[path, points] : byPath) {
-        if (baked.find(SdfPath(path)) == baked.end()) {
-            _VerifyPush(diffs, "moved " + path +
-                                    " missing from the baked pose");
-        }
-    }
-}
-
-// Matrix primvars (a surface projector's frame and dials), bit for bit:
-// a moved property holding a matrix against the binary's matrix primvars.
-void
-_VerifyMatrixPrimvars(
-    const std::map<SdfPath, VtValue> &baked,
-    const std::vector<rigExec::RigExecRuntimeMatrixPrimvar> &rt,
-    std::vector<std::string> *diffs)
-{
-    std::map<std::string, const rigExec::RrMat4d *> byPath;
-    for (const auto &primvar : rt) {
-        byPath[primvar.path] = &primvar.matrix;
-    }
-    // Only `primvars:` matrices: a property-domain matrix mover's result is
-    // a rig input, outside the runtime's output contract like other scalars.
-    static const std::string prefix("primvars:");
-    size_t bakedMatrices = 0;
-    for (const auto &[path, value] : baked) {
-        if (!value.IsHolding<GfMatrix4d>() ||
-            path.GetName().compare(0, prefix.size(), prefix) != 0) {
-            continue;
-        }
-        ++bakedMatrices;
-        const auto found = byPath.find(path.GetString());
-        if (found == byPath.end()) {
-            _VerifyPush(diffs, "matrix primvar " + path.GetString() +
-                                   " missing from the binary");
-            continue;
-        }
-        const GfMatrix4d &m = value.UncheckedGet<GfMatrix4d>();
-        for (int i = 0; i < 4; ++i) {
-            for (int j = 0; j < 4; ++j) {
-                if (m[i][j] != (*found->second)[i][j]) {
-                    _VerifyPush(diffs, "matrix primvar " + path.GetString() +
-                                           " differs");
-                    i = 4;
-                    break;
-                }
-            }
-        }
-    }
-    if (bakedMatrices != byPath.size()) {
-        _VerifyPush(diffs, "matrix primvar count baked " +
-                               std::to_string(bakedMatrices) + " binary " +
-                               std::to_string(byPath.size()));
-    }
-}
-
-void
-_VerifyWeightFrames(
-    const std::map<SdfPath, GfMatrix4d> &baked,
-    const std::vector<rigExec::RigExecRuntimeWeightFrame> &rt,
-    std::vector<std::string> *diffs)
-{
-    std::map<std::string, const rigExec::RrMat4d *> byPath;
-    for (const auto &placed : rt) {
-        byPath[placed.path] = &placed.matrix;
-    }
-    if (baked.size() != byPath.size()) {
-        _VerifyPush(diffs, "weight-frame count baked " +
-                                std::to_string(baked.size()) + " binary " +
-                                std::to_string(byPath.size()));
-    }
-    for (const auto &[path, matrix] : baked) {
-        const auto found = byPath.find(path.GetString());
-        if (found == byPath.end()) {
-            _VerifyPush(diffs, "weight frame " + path.GetString() +
-                                    " missing from the binary");
-            continue;
-        }
-        for (int r = 0; r < 4; ++r) {
-            for (int c = 0; c < 4; ++c) {
-                if (matrix[r][c] != (*found->second)[r][c]) {
-                    _VerifyPush(diffs, "weight frame " + path.GetString() +
-                                            " differs");
-                    r = 4;
-                    break;
-                }
-            }
-        }
-    }
-}
-
-void
-_VerifyWeightFields(
-    const std::map<SdfPath, rigExec::RigExecResolvedWeightField> &baked,
-    const std::vector<rigExec::RigExecRuntimeWeightField> &rt,
-    std::vector<std::string> *diffs)
-{
-    std::map<std::string, const rigExec::RigExecRuntimeWeightField *>
-        byPath;
-    for (const auto &field : rt) {
-        byPath[field.path] = &field;
-    }
-    if (baked.size() != byPath.size()) {
-        _VerifyPush(diffs, "weight-field count baked " +
-                                std::to_string(baked.size()) + " binary " +
-                                std::to_string(byPath.size()));
-    }
-    for (const auto &[path, field] : baked) {
-        const auto found = byPath.find(path.GetString());
-        if (found == byPath.end()) {
-            _VerifyPush(diffs, "weight field " + path.GetString() +
-                                    " missing from the binary");
-            continue;
-        }
-        if (field.target.GetString() != found->second->target) {
-            _VerifyPush(diffs, "weight field " + path.GetString() +
-                                    " targets " + found->second->target);
-            continue;
-        }
-        if (field.weights.size() != found->second->weights.size()) {
-            _VerifyPush(diffs, "weight field " + path.GetString() +
-                                    " count differs");
-            continue;
-        }
-        for (size_t i = 0; i < field.weights.size(); ++i) {
-            if (field.weights[i] != found->second->weights[i]) {
-                _VerifyPush(diffs, "weight field " + path.GetString() +
-                                        " weight " + std::to_string(i) +
-                                        " differs");
-                break;
-            }
-        }
-    }
-}
-
-// Constraint-revised transforms: the baked pose's providerXforms and
-// providerBaseXforms pair against the runtime's, path for path, both
-// matrices bit for bit.
-void
-_VerifyProviderXforms(
-    const std::map<SdfPath, GfMatrix4d> &baked,
-    const std::map<SdfPath, GfMatrix4d> &bakedBases,
-    const std::vector<rigExec::RigExecRuntimeProviderXform> &rt,
-    std::vector<std::string> *diffs)
-{
-    std::map<std::string, const rigExec::RigExecRuntimeProviderXform *>
-        byPath;
-    for (const auto &revised : rt) {
-        byPath[revised.path] = &revised;
-    }
-    if (baked.size() != byPath.size()) {
-        _VerifyPush(diffs, "provider-xform count baked " +
-                                std::to_string(baked.size()) + " binary " +
-                                std::to_string(byPath.size()));
-    }
-    const auto same = [](const GfMatrix4d &a, const rigExec::RrMat4d &b) {
-        for (int r = 0; r < 4; ++r) {
-            for (int c = 0; c < 4; ++c) {
-                if (a[r][c] != b[r][c]) {
-                    return false;
-                }
-            }
-        }
-        return true;
-    };
-    for (const auto &[path, matrix] : baked) {
-        const auto found = byPath.find(path.GetString());
-        if (found == byPath.end()) {
-            _VerifyPush(diffs, "provider xform " + path.GetString() +
-                                    " missing from the binary");
-            continue;
-        }
-        if (!same(matrix, found->second->matrix)) {
-            _VerifyPush(diffs, "provider xform " + path.GetString() +
-                                    " differs");
-            continue;
-        }
-        const auto base = bakedBases.find(path);
-        if (base == bakedBases.end() ||
-            !same(base->second, found->second->base)) {
-            _VerifyPush(diffs, "provider base xform " + path.GetString() +
-                                    " differs");
-        }
-    }
-}
-
-void
-_VerifyDiagnostics(const std::vector<std::string> &baked,
-                   const std::vector<std::string> &rt,
-                   std::vector<std::string> *diffs)
-{
-    if (baked.size() != rt.size()) {
-        _VerifyPush(diffs, "diagnostic count baked " +
-                                std::to_string(baked.size()) + " binary " +
-                                std::to_string(rt.size()));
-    }
-    const size_t common = std::min(baked.size(), rt.size());
-    for (size_t i = 0; i < common; ++i) {
-        if (baked[i] != rt[i]) {
-            _VerifyPush(diffs, "diagnostic " + std::to_string(i) +
-                                    " baked [" + baked[i].substr(0, 160) +
-                                    "] binary [" + rt[i].substr(0, 160) +
-                                    "]");
-        }
-    }
-    // The first line only one side has.
-    if (baked.size() > common) {
-        _VerifyPush(diffs, "diagnostic " + std::to_string(common) +
-                               " baked [" + baked[common].substr(0, 160) +
-                               "] binary (none)");
-    } else if (rt.size() > common) {
-        _VerifyPush(diffs, "diagnostic " + std::to_string(common) +
-                               " baked (none) binary [" +
-                               rt[common].substr(0, 160) + "]");
-    }
-}
-
-// The seven output domains of one generation against the binary's last
-// run: joints, moved points, matrix primvars, weight frames and fields, and
-// provider transforms. Diagnostics and counters are compared by the caller.
-void
-_VerifyOutputs(const rigExec::RigExecRigPose &pose,
+_VerifyOutputs(const rigExec::RigExecRigPose &native,
                const rigExec::RigExecRuntimeReader &reader,
-               std::vector<std::string> *diffs, size_t *skippedScalars)
+               std::vector<std::string> *diffs)
 {
-    _VerifyJoints(pose.jointMatricesFinal, reader.GetJointMatrices(), diffs);
-    _VerifyMoved(pose.movedProperties, reader.GetPoints(), diffs,
-                 skippedScalars);
-    _VerifyMatrixPrimvars(pose.movedProperties, reader.GetMatrixPrimvars(),
-                          diffs);
-    _VerifyWeightFrames(pose.weightFrames, reader.GetWeightFrames(), diffs);
-    _VerifyWeightFields(pose.weightFields, reader.GetWeightFields(), diffs);
-    _VerifyProviderXforms(pose.providerXforms, pose.providerBaseXforms,
-                          reader.GetProviderXforms(), diffs);
-}
-
-void
-_VerifyCounters(const rigExec::RigExecRigPose &pose,
-                const rigExec::RigExecRuntimeReader &reader,
-                std::vector<std::string> *diffs)
-{
-    const rigExec::RigExecRuntimeCounters counters = reader.GetCounters();
-    if (pose.moverGraphRevisionsExecuted != counters.revisionsExecuted ||
-        pose.moverGraphRevisionsCreated != counters.revisionsCreated ||
-        pose.moverGraphSchedulesBuilt != counters.schedulesBuilt) {
-        _VerifyPush(diffs, "work counters differ");
+    rigExec::RigExecRigPose runtime;
+    std::string error;
+    if (!rigExec::RigExecProjectRuntimePose(reader,native.time,true,&runtime,&error)) {
+        _VerifyPush(diffs,error); return;
     }
+    std::vector<rigExec::RigExecGoldenValue> expected,actual;
+    if (!rigExec::RigExecEncodeGoldenPose(native,&expected,&error) ||
+        !rigExec::RigExecEncodeGoldenPose(runtime,&actual,&error)) {
+        _VerifyPush(diffs,error); return;
+    }
+    const auto a=rigExec::RigExecGoldenVisit("verify",0,native,expected);
+    const auto b=rigExec::RigExecGoldenVisit("verify",0,runtime,actual);
+    if (!rigExec::RigExecCompareGolden(a,b,&error)) _VerifyPush(diffs,error);
 }
 
 bool
 _InvalidLeg(const rigExec::RigExecRigPose &pose)
 {
-    return !pose.valid || pose.moverGraphParityMismatches ||
-           pose.bakedParityMismatches;
+    return !pose.valid || pose.referenceMismatches ||
+           pose.comparisonMismatches;
 }
 
 // An input value as FormatValue prints the stage's: type, then value.
@@ -1146,37 +743,12 @@ _VerifySampledInputs(const rigExec::RigExecRigEvaluator &evaluator,
     return check;
 }
 
-// A drag's diagnostics: without the summary line, whose counters the
-// reference's first run moves, and without what an edit the evaluator
-// takes for structural adds ahead of the generation's own lines -- its
-// compile notices again and the rebuild's announcement -- since the binary
-// never rebuilds (and replays its notices once, on its first run).
-std::vector<std::string>
-_DragDiagnostics(std::vector<std::string> lines,
-                 const std::vector<std::string> &notices)
-{
-    if (!notices.empty() && lines.size() >= notices.size() &&
-        std::equal(notices.begin(), notices.end(), lines.begin())) {
-        lines.erase(lines.begin(),
-                    lines.begin() + std::ptrdiff_t(notices.size()));
-    }
-    if (!lines.empty() && lines.front() == "structural edit: epoch rebuilt") {
-        lines.erase(lines.begin());
-    }
-    lines.erase(std::remove_if(lines.begin(), lines.end(),
-                               [](const std::string &line) {
-                                   return line.rfind("mover graph:", 0) == 0;
-                               }),
-                lines.end());
-    return lines;
-}
-
 int
 RunVerifyBinary(const UsdStageRefPtr &stage, const SdfPath &rigPath,
                 const std::vector<UsdTimeCode> &frames,
                 const std::vector<std::string> &dragInputs,
                 const std::string &binaryPath, const std::string &poseOut,
-                const std::string &jointsOut, bool solverGuides)
+                const std::string &jointsOut)
 {
     std::ifstream stream(binaryPath, std::ios::binary);
     const std::vector<char> raw(
@@ -1198,9 +770,7 @@ RunVerifyBinary(const UsdStageRefPtr &stage, const SdfPath &rigPath,
     }
 
     rigExec::RigExecRigEvaluator evaluator(stage, rigPath);
-    evaluator.SetSolverGuidesEnabled(solverGuides);
-    evaluator.SetEvaluationMode(
-        rigExec::RigExecEvaluationMode::BakedWithParityCheck);
+    evaluator.SetSolverGuidesEnabled(true);
     std::vector<std::string> errors;
     if (!evaluator.Compile(&errors)) {
         std::printf("  FAIL: verify leg did not compile\n");
@@ -1211,7 +781,7 @@ RunVerifyBinary(const UsdStageRefPtr &stage, const SdfPath &rigPath,
     }
     std::vector<std::string> reasons;
     if (!evaluator.IsBakeable(&reasons)) {
-        std::printf("  FAIL: not bakeable; the binary has no baked leg\n");
+        std::printf("  FAIL: native program cannot be exported faithfully\n");
         for (const std::string &reason : reasons) {
             std::printf("    %s\n", reason.c_str());
         }
@@ -1240,36 +810,33 @@ RunVerifyBinary(const UsdStageRefPtr &stage, const SdfPath &rigPath,
         }
     }
     JointExport jointExport;
-    size_t skippedScalars = 0;
     // The explicit Compile above consumed what a fresh session's first
     // generation would have settled: notices (inert movers, purpose
     // warnings) the runtime replays ahead of its first Execute. They are
     // attached to the first run the runtime completes, restoring exactly
     // the no-precompile flow.
     bool seedAttached = errors.empty();
-    const auto expectedDiagnostics =
+    const auto expectedPose =
         [&](const rigExec::RigExecRigPose &pose) {
-            std::vector<std::string> expected = pose.diagnostics;
+            rigExec::RigExecRigPose expected = pose;
             if (!seedAttached) {
                 seedAttached = true;
-                expected.insert(expected.begin(), errors.begin(),
-                                errors.end());
+                expected.diagnostics.insert(expected.diagnostics.begin(), errors.begin(),
+                                            errors.end());
             }
             return expected;
         };
 
     // The defaults: a fresh reader's run is the bake time's generation, in
-    // every output, the diagnostics and the counters. Not counted below.
+    // every published output and ordered diagnostic. Not counted below.
     const double bakeTime = reader->GetBakeTime();
     // What the drags are measured against: whether a value moved anything.
-    rigExec::RigExecRigPose defaultsPose;
     {
         const rigExec::RigExecRigPose pose =
-            evaluator.Evaluate(UsdTimeCode(bakeTime));
-        defaultsPose = pose;
+            EvaluateChecked(evaluator,UsdTimeCode(bakeTime));
         if (_InvalidLeg(pose)) {
-            std::printf("  defaults t=%g: parity leg INVALID "
-                        "(dynamic==baked failed)\n",
+            std::printf("  defaults t=%g: native leg INVALID "
+                        "(native generation or requested checks failed)\n",
                         bakeTime);
             status = 1;
         } else if (!reader->Execute(&error)) {
@@ -1278,13 +845,10 @@ RunVerifyBinary(const UsdStageRefPtr &stage, const SdfPath &rigPath,
             status = 1;
         } else {
             std::vector<std::string> diffs;
-            size_t scalars = 0;
-            _VerifyOutputs(pose, *reader, &diffs, &scalars);
-            _VerifyDiagnostics(expectedDiagnostics(pose),
-                               reader->GetDiagnostics(), &diffs);
-            _VerifyCounters(pose, *reader, &diffs);
+            _VerifyOutputs(expectedPose(pose), *reader, &diffs);
+
             if (diffs.empty()) {
-                std::printf("  defaults t=%g: binary==baked (%zu joints, "
+                std::printf("  defaults t=%g: runtime==native (%zu joints, "
                             "%zu moved, %zu weight frames, %zu fields, "
                             "%zu provider xforms, %zu diagnostics)\n",
                             bakeTime, reader->GetJointMatrices().size(),
@@ -1305,15 +869,15 @@ RunVerifyBinary(const UsdStageRefPtr &stage, const SdfPath &rigPath,
     }
 
     // Every frame: the stage's values of the binary's Animated inputs at
-    // t, then the run, against the parity evaluator's generation at t.
+    // t, then the run, against the native evaluator's generation at t.
     size_t matched = 0;
     _SampledCheck sampled;
     for (UsdTimeCode frame : frames) {
         const double t = frame.GetValue();
-        const rigExec::RigExecRigPose pose = evaluator.Evaluate(frame);
+        const rigExec::RigExecRigPose pose = EvaluateChecked(evaluator,frame);
         if (_InvalidLeg(pose)) {
-            std::printf("\n  frame %g: parity leg INVALID "
-                        "(dynamic==baked failed)\n",
+            std::printf("\n  frame %g: native leg INVALID "
+                        "(native generation or requested checks failed)\n",
                         t);
             status = 1;
             continue;
@@ -1325,10 +889,8 @@ RunVerifyBinary(const UsdStageRefPtr &stage, const SdfPath &rigPath,
             continue;
         }
         std::vector<std::string> diffs;
-        _VerifyOutputs(pose, *reader, &diffs, &skippedScalars);
-        _VerifyDiagnostics(expectedDiagnostics(pose),
-                           reader->GetDiagnostics(), &diffs);
-        _VerifyCounters(pose, *reader, &diffs);
+        _VerifyOutputs(expectedPose(pose), *reader, &diffs);
+
         const _SampledCheck frameSampled =
             _VerifySampledInputs(evaluator, *reader, frame, &diffs);
         sampled.compared += frameSampled.compared;
@@ -1336,7 +898,7 @@ RunVerifyBinary(const UsdStageRefPtr &stage, const SdfPath &rigPath,
         sampled.own += frameSampled.own;
         if (diffs.empty()) {
             ++matched;
-            std::printf("  frame %g: binary==baked (%zu joints, "
+            std::printf("  frame %g: runtime==native (%zu joints, "
                         "%zu moved, %zu weight frames, %zu fields, "
                         "%zu provider xforms, %zu diagnostics)\n",
                         t, reader->GetJointMatrices().size(),
@@ -1377,22 +939,20 @@ RunVerifyBinary(const UsdStageRefPtr &stage, const SdfPath &rigPath,
                 sampled.matched, sampled.compared, sampled.own);
 
     // The drags, at the bake time: the binary's input set to a value
-    // against the same value authored in the session layer, then both put
-    // back. The runtime first returns to the bake time's samples. Each
-    // value's reference is a fresh evaluator compiled before the edit, so
-    // it answers the first edit after a compile, as the binary answers a
+    // against the admitted native typed value or a connected head's authored
+    // fallback in an isolated session, then both put back. The runtime first returns to the bake time's samples. Each
+    // value's reference is a fresh evaluator compiled before the override, so
+    // it answers the first override after a compile, as the binary answers a
     // set on its bake, whatever drags came before.
     const UsdTimeCode dragTime(bakeTime);
     size_t dragsMatched = 0;
     size_t dragsTried = 0;
-    size_t dragsMoved = 0;
-    size_t dragGenerations = 0;
     if (!dragInputs.empty() &&
         !sampler.Apply(dragTime, reader.get(), &error)) {
         std::printf("  drag: FAIL: %s\n", error.c_str());
         status = 1;
     }
-    // Each drag puts the session layer back exactly as it was, not merely
+    // Preserve the session-layer restoration guard for each drag, not merely
     // cleared: a spec left behind changes how the evaluator takes the next
     // edit.
     const SdfLayerHandle session = stage->GetSessionLayer();
@@ -1433,39 +993,68 @@ RunVerifyBinary(const UsdStageRefPtr &stage, const SdfPath &rigPath,
             bool authored = false;
             bool compiled = false;
             std::vector<std::string> notices;
+            std::string sourceBefore, sessionBeforeDrag;
+            const bool capturedLayers = stage->GetRootLayer()->ExportToString(&sourceBefore) &&
+                session->ExportToString(&sessionBeforeDrag);
             rigExec::RigExecRigPose pose;
             {
-                // Compiled on the stage as baked, then handed the value as
-                // an edit, as the binary is.
-                rigExec::RigExecRigEvaluator reference(stage, rigPath);
-                reference.SetSolverGuidesEnabled(solverGuides);
-                reference.SetEvaluationMode(
-                    rigExec::RigExecEvaluationMode::BakedWithParityCheck);
-                compiled = reference.Compile(&notices);
-                {
-                    UsdEditContext context(stage, stage->GetSessionLayer());
-                    authored = isFloat ? attribute.Set(float(value))
-                                       : attribute.Set(value);
+                // Preserve source wiring through the admitted native channel.
+                // Connected heads instead retain their authored fallback in an
+                // isolated session; the input stage stays intact.
+                const SdfLayerRefPtr referenceSession = SdfLayer::CreateAnonymous();
+                referenceSession->TransferContent(sessionBefore);
+                const UsdStageRefPtr referenceStage = UsdStage::Open(
+                    stage->GetRootLayer(), referenceSession,
+                    stage->GetPathResolverContext());
+                if (referenceStage) {
+                    rigExec::RigExecRigEvaluator reference(referenceStage, rigPath);
+                    reference.SetSolverGuidesEnabled(true);
+                    compiled = reference.Compile(&notices);
+                    const UsdAttribute referenceAttribute =
+                        referenceStage->GetAttributeAtPath(attribute.GetPath());
+                    reference.SetUpstreamInputs({rigExec::RigExecValueOverride{
+                        attribute.GetPrimPath(), TfToken(), attribute.GetName(),
+                        isFloat ? VtValue(float(value)) : VtValue(value)}});
+                    const auto admitted = reference.GetUpstreamInputPaths();
+                    authored = std::find(admitted.begin(), admitted.end(),
+                                         attribute.GetPath()) != admitted.end();
+                    SdfPathVector referenceConnections;
+                    if (!authored && referenceAttribute)
+                        referenceAttribute.GetConnections(&referenceConnections);
+                    if (!authored && !referenceConnections.empty()) {
+                        // A connected head is not an admitted upstream input.
+                        // Its own authored fallback retains SetInput semantics.
+                        reference.SetUpstreamInputs({});
+                        UsdEditContext edit(referenceStage, referenceSession);
+                        authored = isFloat ? referenceAttribute.Set(float(value))
+                                           : referenceAttribute.Set(value);
+                    }
+                    pose = EvaluateChecked(reference,dragTime);
                 }
-                pose = reference.Evaluate(dragTime);
-                dragGenerations += reference.GetBakedGenerationCount();
+
             }
             std::vector<std::string> diffs;
+            std::string sourceAfter, sessionAfterDrag;
+            if (!capturedLayers || !stage->GetRootLayer()->ExportToString(&sourceAfter) ||
+                !session->ExportToString(&sessionAfterDrag) || sourceBefore != sourceAfter ||
+                sessionBeforeDrag != sessionAfterDrag) {
+                _VerifyPush(&diffs, "native input override changed the source stage");
+            }
             if (!compiled) {
                 _VerifyPush(&diffs, "the reference did not compile");
             }
             if (!authored) {
-                _VerifyPush(&diffs, "the session layer refused the value");
+                _VerifyPush(&diffs, "the native upstream channel refused the value");
             }
             if (_InvalidLeg(pose)) {
                 _VerifyPush(&diffs,
                             TfStringPrintf(
-                                "parity leg INVALID (valid=%d, %zu parity "
-                                "mismatch(es), %zu baked-parity "
+                                "native leg INVALID (valid=%d, %zu reference "
+                                "mismatch(es), %zu comparison "
                                 "mismatch(es))",
                                 int(pose.valid),
-                                pose.moverGraphParityMismatches,
-                                pose.bakedParityMismatches));
+                                pose.referenceMismatches,
+                                pose.comparisonMismatches));
                 for (const std::string &line : pose.diagnostics) {
                     _VerifyPush(&diffs, "  " + line.substr(0, 200));
                 }
@@ -1473,26 +1062,15 @@ RunVerifyBinary(const UsdStageRefPtr &stage, const SdfPath &rigPath,
                        !reader->Execute(&error)) {
                 _VerifyPush(&diffs, error);
             } else {
-                size_t scalars = 0;
-                _VerifyOutputs(pose, *reader, &diffs, &scalars);
-                _VerifyDiagnostics(
-                    _DragDiagnostics(pose.diagnostics, notices),
-                    _DragDiagnostics(reader->GetDiagnostics(), {}), &diffs);
+                _VerifyOutputs(pose, *reader, &diffs);
             }
-            // Reported, not required: a drag that moves nothing compares
-            // two copies of the defaults.
-            std::vector<std::string> fromDefaults;
-            size_t ignored = 0;
-            _VerifyOutputs(defaultsPose, *reader, &fromDefaults, &ignored);
-            const bool moved = !fromDefaults.empty();
-            session->TransferContent(sessionBefore);
+            // The reference edits only its isolated session; the original
+            // session is unchanged, as the exact guards above require.
             reader->ResetInput(name, nullptr);
             if (diffs.empty()) {
                 ++dragsMatched;
-                dragsMoved += moved ? 1 : 0;
-                std::printf("  drag %s = %.17g: binary==baked, %s\n",
-                            name.c_str(), value,
-                            moved ? "moved" : "outputs unmoved");
+                std::printf("  drag %s = %.17g: runtime==native exact published pose\n",
+                            name.c_str(), value);
             } else {
                 std::printf("  drag %s = %.17g: MISMATCH (%zu differences)\n",
                             name.c_str(), value, diffs.size());
@@ -1505,28 +1083,252 @@ RunVerifyBinary(const UsdStageRefPtr &stage, const SdfPath &rigPath,
     }
     std::printf("  verify-binary: %zu of %zu drag(s) match\n", dragsMatched,
                 dragsTried);
-    if (dragsTried > 0) {
-        std::printf("  drags: %zu of %zu matching value(s) moved the "
-                    "outputs off the defaults\n",
-                    dragsMoved, dragsMatched);
-    }
-
-    // One generation for the defaults, one per frame, two per drag input.
-    const size_t generations = frames.size() + 1 + 2 * dragInputs.size();
-    const size_t fromProgram =
-        evaluator.GetBakedGenerationCount() + dragGenerations;
-    if (fromProgram != generations) {
-        std::printf("  FAIL: %zu of %zu generation(s) came from the "
-                    "program\n",
-                    fromProgram, generations);
-        status = 1;
-    }
-    if (skippedScalars > 0) {
-        std::printf("  note: %zu scalar moved propert%s skipped "
-                    "(outside the runtime output contract)\n",
-                    skippedScalars, skippedScalars == 1 ? "y" : "ies");
-    }
     return status;
+}
+
+
+struct GoldenAction {
+    std::string source;
+    SdfPath path;
+    double displacement = 0;
+};
+
+int
+RunGoldenProtocol(const UsdStageRefPtr &stage, const SdfPath &rigPath,
+                  rigExec::RigExecRigEvaluator &evaluator,
+                  const std::vector<UsdTimeCode> &frames,
+                  const std::string &fixture, const std::string &output,
+                  const std::string &check, bool compact,
+                  const std::vector<GoldenAction> &actions,
+                  const std::string &backend,
+                  const std::string &programPath)
+{
+    if (backend != "native" && backend != "frozen" && backend != "runtime") {
+        std::printf("golden: unknown backend %s\n", backend.c_str());
+        return 2;
+    }
+    if (backend == "frozen" && gExecCrossCheck) {
+        std::printf("golden: --exec-crosscheck currently requires --golden-backend native\n");
+        return 2;
+    }
+    std::vector<uint8_t> runtimeBytes;
+    if (backend=="runtime") {
+        if (programPath.empty()) {
+            std::printf("golden: runtime backend requires --golden-program\n"); return 2;
+        }
+        if (gExecCrossCheck || gCpuReference) {
+            std::printf("golden: runtime backend does not support native reference or exec-row checks\n"); return 2;
+        }
+        for(const auto &action:actions) if(action.source=="interactive") {
+            std::printf("golden: runtime binary has no distinct interactive-input semantics\n"); return 2;
+        }
+        std::ifstream stream(programPath,std::ios::binary);
+        const std::vector<char> raw{std::istreambuf_iterator<char>(stream),std::istreambuf_iterator<char>()};
+        runtimeBytes.assign(raw.begin(),raw.end());
+        if(runtimeBytes.empty()) {
+            std::printf("golden: cannot read runtime program %s\n",programPath.c_str()); return 2;
+        }
+    }
+    std::string bytes = "rigexec-golden 2\nfixture " +
+        rigExec::RigExecGoldenEscape(fixture) + " rig " +
+        rigExec::RigExecGoldenEscape(rigPath.GetString()) +
+        "\nprotocol exact-bits guides=1 fields=1 visits=first,held,forward,reverse,cold,actions\n";
+    std::vector<std::string> layerDigests;
+    for (const SdfLayerHandle &layer : stage->GetUsedLayers()) {
+        std::string contents;
+        if (!layer->ExportToString(&contents)) {
+            std::printf("golden: cannot encode source layer\n"); return 1;
+        }
+        layerDigests.push_back(rigExec::RigExecGoldenHex(
+            rigExec::RigExecGoldenDigest(contents)));
+    }
+    std::sort(layerDigests.begin(), layerDigests.end());
+    bytes += "layers";
+    for (const std::string &digest : layerDigests) bytes += " " + digest;
+    bytes += "\n";
+    size_t visits = 0;
+    std::shared_ptr<const rigExec::RigExecFrozenProgram> frozen;
+    std::unique_ptr<rigExec::RigExecFrozenWorkspace> workspace;
+    rigExec::RigExecRigEvaluator *frozenSource = nullptr;
+    uint64_t frozenSerial = 0;
+    std::vector<rigExec::RigExecValueOverride> frozenOverrides;
+    std::unique_ptr<rigExec::RigExecRuntimeReader> runtimeReader;
+    rigExec::RigExecInputSampler runtimeSampler;
+    std::map<SdfPath,VtValue> runtimeUpstream;
+    std::set<SdfPath> runtimeTouched;
+
+    const auto visit = [&](rigExec::RigExecRigEvaluator &source,
+                           const std::string &leg, size_t ordinal, UsdTimeCode time) {
+        rigExec::RigExecRigPose pose;
+        if (backend == "native") pose = EvaluateChecked(source,time);
+        else if (backend=="runtime") {
+            std::string error;
+            if(!runtimeReader) {
+                runtimeReader=rigExec::RigExecRuntimeReader::Open(runtimeBytes.data(),runtimeBytes.size(),&error);
+                if(!runtimeReader || !runtimeSampler.Bind(stage,*runtimeReader,&error)) {
+                    std::printf("golden runtime open: %s\n",error.c_str()); return false;
+                }
+                if(!runtimeSampler.GetWarnings().empty()) {
+                    for(const auto &warning:runtimeSampler.GetWarnings())
+                        std::printf("golden runtime input: %s\n",warning.c_str());
+                    return false;
+                }
+            }
+            if(!runtimeSampler.Apply(time,runtimeReader.get(),&error)) {
+                std::printf("golden runtime sample: %s\n",error.c_str()); return false;
+            }
+            for(const auto &path:runtimeTouched) {
+                size_t index=0;
+                if(!runtimeReader->FindInput(path.GetString(),&index)) {
+                    std::printf("golden runtime: action names no declared input %s\n",path.GetText()); return false;
+                }
+                const auto &info=runtimeReader->GetInputInfo(index);
+                const auto upstream=runtimeUpstream.find(path);
+                if(upstream==runtimeUpstream.end()) {
+                    if(!rigExec::RigExecSampleInputAt(stage->GetAttributeAtPath(path),index,path.GetString(),
+                            info.type,time,runtimeReader.get(),&error)) {
+                        std::printf("golden runtime restore: %s\n",error.c_str()); return false;
+                    }
+                } else {
+                    rigExec::RrInputValue value;
+                    if(!rigExec::RigExecInputValueFrom(upstream->second,info.type,&value) ||
+                       !runtimeReader->SetInputAt(index,value,&error)) {
+                        std::printf("golden runtime upstream: %s\n",error.c_str()); return false;
+                    }
+                }
+            }
+            const bool valid=runtimeReader->Execute(&error);
+            if(!valid || !rigExec::RigExecProjectRuntimePose(*runtimeReader,time,valid,&pose,&error)) {
+                std::printf("golden runtime execute: %s\n",error.c_str()); return false;
+            }
+        } else {
+            source.cpuReference = gCpuReference;
+            std::string error;
+            const bool changed = frozenSource != &source ||
+                frozenSerial != source.GetStageEditSerial();
+            if (changed || !workspace) {
+                std::vector<std::string> errors;
+                if (!source.Compile(&errors) ||
+                    !rigExec::RigExecFreezeProgram(source,&frozen,&error)) {
+                    for (const auto &line : errors) std::printf("golden frozen: %s\n",line.c_str());
+                    std::printf("golden frozen: %s\n",error.c_str()); return false;
+                }
+                workspace = rigExec::RigExecCreateFrozenWorkspace(frozen);
+                frozenSource = &source;
+                frozenSerial = source.GetStageEditSerial();
+            }
+            rigExec::RigExecFrameInputs inputs;
+            std::vector<rigExec::RigExecUpstreamValue> frozenUpstream;
+            for(const auto &value:source.GetUpstreamInputs())
+                frozenUpstream.push_back({value.prim.AppendProperty(value.attribute),value.value});
+            if (!rigExec::RigExecSampleFrameInputs(source,time,frozenOverrides,
+                    frozenUpstream,&inputs,&error)) {
+                std::printf("golden frozen sample: %s\n",error.c_str()); return false;
+            }
+            rigExec::RigExecFrozenEvalContext context;
+            context.epochDigest = source.GetBindingEpochDigest();
+            context.programDigest = context.epochDigest ^
+                (uint64_t(source.GetBakedProgram()->GetBoundInputCount()) << 32) ^
+                source.GetBakedProgram()->GetVaryingInputCount();
+            context.slotCount = source.GetBakedProgram()->GetProviderCount();
+            context.varyingInputCount = inputs.values.size();
+            context.flags = rigExec::kRigExecFrozenSolverGuidesEnabled |
+                            rigExec::kRigExecFrozenPublishWeightFields;
+            context.frozen = frozen.get(); context.workspace = workspace.get();
+            pose = rigExec::RigExecEvaluateFrozen(context,inputs,
+                rigExec::RigExecMakeProductionStepRunner(),nullptr,rigPath);
+        }
+        std::vector<rigExec::RigExecGoldenValue> values;
+        std::string error;
+        if (!rigExec::RigExecEncodeGoldenPose(pose, &values, &error)) {
+            std::printf("golden: %s\n", error.c_str()); return false;
+        }
+        bytes += rigExec::RigExecGoldenVisit(leg, ordinal, pose, values, compact);
+        ++visits;
+        if (!pose.valid) {
+            std::printf("golden: invalid visit %s[%zu]\n", leg.c_str(), ordinal);
+            return false;
+        }
+        return true;
+    };
+    if (!visit(evaluator, "first", 0, frames.front()) ||
+        !visit(evaluator, "held", 0, frames.front())) return 1;
+    for (size_t i = 0; i < frames.size(); ++i)
+        if (!visit(evaluator, "forward", i, frames[i])) return 1;
+    for (size_t i = 0; i < frames.size(); ++i)
+        if (!visit(evaluator, "reverse", i, frames[frames.size() - i - 1])) return 1;
+    for (size_t i = 0; i < frames.size(); ++i) {
+        if(backend=="runtime") {
+            runtimeReader.reset();
+            if(!visit(evaluator,"cold",i,frames[i])) return 1;
+            continue;
+        }
+        rigExec::RigExecRigEvaluator cold(stage, rigPath);
+        cold.SetSolverGuidesEnabled(true);
+
+        std::vector<std::string> errors;
+        if (!cold.Compile(&errors)) {
+            for (const auto &error : errors) std::printf("golden cold: %s\n", error.c_str());
+            return 1;
+        }
+        workspace.reset(); frozen.reset(); frozenSource = nullptr;
+        if (!visit(cold, "cold", i, frames[i])) return 1;
+    }
+    const auto session = stage->GetSessionLayer();
+    std::string originalSession;
+    if (!session->ExportToString(&originalSession)) return 1;
+    for (size_t i = 0; i < actions.size(); ++i) {
+        const GoldenAction &action = actions[i];
+        const UsdAttribute attribute = stage->GetAttributeAtPath(action.path);
+        VtValue value;
+        if (!DisplacedValue(attribute, frames.front(), action.displacement, &value)) {
+            std::printf("golden: action requires a readable float/double: %s\n", action.path.GetText());
+            return 1;
+        }
+        const rigExec::RigExecValueOverride input{action.path.GetPrimPath(), TfToken(),
+            action.path.GetNameToken(), value};
+        const std::string leg = action.source + ":" + action.path.GetString() +
+            "@" + rigExec::RigExecGoldenDouble(action.displacement);
+        if(backend=="runtime") {
+            runtimeTouched.insert(action.path);
+            if(action.source=="upstream") runtimeUpstream[action.path]=value;
+        }
+        if (action.source == "upstream") evaluator.SetUpstreamInputs({input});
+        else if (action.source == "interactive") {
+            evaluator.SetInteractiveOverrides({input}); frozenOverrides = {input};
+        }
+        else {
+            UsdEditContext edit(stage, session);
+            if (!attribute.Set(value, frames.front())) return 1;
+        }
+        const bool placed = visit(evaluator, leg + ":place", i, frames.front()) &&
+                            visit(evaluator, leg + ":held", i, frames.front());
+        if(backend=="runtime") runtimeUpstream.erase(action.path);
+        if (action.source == "upstream") evaluator.SetUpstreamInputs({});
+        else if (action.source == "interactive") {
+            evaluator.ClearInteractiveOverrides(); frozenOverrides.clear();
+        }
+        else if (!session->ImportFromString(originalSession)) return 1;
+        if (!placed || !visit(evaluator, leg + ":lift", i, frames.front())) return 1;
+    }
+    if (!check.empty()) {
+        std::ifstream input(check, std::ios::binary);
+        if (!input) { std::printf("golden: cannot read %s\n", check.c_str()); return 1; }
+        const std::string expected{std::istreambuf_iterator<char>(input),
+                                   std::istreambuf_iterator<char>()};
+        std::string error;
+        if (!rigExec::RigExecCompareGolden(expected, bytes, &error)) {
+            std::printf("golden: %s\n", error.c_str()); return 1;
+        }
+    }
+    if (!output.empty()) {
+        std::ofstream stream(output, std::ios::binary);
+        stream.write(bytes.data(), std::streamsize(bytes.size()));
+        if (!stream) { std::printf("golden: cannot write %s\n", output.c_str()); return 1; }
+    }
+    std::printf("golden: %zu explicit visits, %s\n", visits,
+                check.empty() ? "captured" : "exact match");
+    return 0;
 }
 
 }  // namespace
@@ -1540,8 +1342,9 @@ main(int argc, char **argv)
             "[--frames a,b,c] [--joints] [--targets] "
             "[--joints-out <file.usda>] [--pose-out <file.txt>] "
             "[--profile <file.trace>] "
-            "[--mode dynamic|baked|parity|reference] "
-            "[--guides] [--require-baked] "
+            "[--golden-out file|--golden-check file] [--golden-compact] [--golden-backend native|frozen|runtime] [--golden-program file.rigexec] "
+            "[--cpu-reference] [--exec-crosscheck] "
+            "[--guides] "
             "[--drag <prim> <attr> <steps>] "
             "[--verify-binary <file.rigexec> --frames a,b,c "
             "[--drag-input <prim.attr>]...]\n");
@@ -1551,16 +1354,13 @@ main(int argc, char **argv)
     std::string rigArg;
     std::string jointsOut;
     std::string poseOut;
+    std::string goldenOut, goldenCheck, goldenFixture;
+    std::string goldenBackend = "native", goldenProgram;
+    bool goldenCompact = false;
+    std::vector<GoldenAction> goldenActions;
     std::string profileOut;
     std::string verifyBinary;
-    // Two facts, not one: which mode --mode named, and whether it was given
-    // at all. An absent --mode is not a request for Dynamic -- it is this
-    // tool declining to make the choice, which is what lets a stage carrying
-    // rigExec:baked be opened through the program by running the tool the
-    // way an author would.
-    rigExec::RigExecEvaluationMode mode =
-        rigExec::RigExecEvaluationMode::Dynamic;
-    bool modeGiven = false;
+    bool cpuReference=false,execCrossCheck=false;
     std::vector<UsdTimeCode> frames;
     std::vector<std::string> dragInputs;
     std::string dragPrim, dragAttr;
@@ -1569,7 +1369,6 @@ main(int argc, char **argv)
     bool showJoints = false;
     bool showTargets = false;
     bool solverGuides = false;
-    bool requireBaked = false;
     for (int i = 2; i < argc; ++i) {
         const std::string arg = argv[i];
         if (arg == "--rig" && i + 1 < argc) {
@@ -1582,12 +1381,39 @@ main(int argc, char **argv)
             showTargets = true;
         } else if (arg == "--guides") {
             solverGuides = true;
-        } else if (arg == "--require-baked") {
-            requireBaked = true;
+        } else if (arg == "--cpu-reference") {
+            cpuReference=true;
+        } else if (arg == "--exec-crosscheck") {
+            execCrossCheck=true;
         } else if (arg == "--joints-out" && i + 1 < argc) {
             jointsOut = argv[++i];
         } else if (arg == "--pose-out" && i + 1 < argc) {
             poseOut = argv[++i];
+        } else if (arg == "--golden-out" && i + 1 < argc) {
+            goldenOut = argv[++i];
+        } else if (arg == "--golden-check" && i + 1 < argc) {
+            goldenCheck = argv[++i];
+        } else if (arg == "--golden-program" && i + 1 < argc) {
+            goldenProgram = argv[++i];
+        } else if (arg == "--golden-backend" && i + 1 < argc) {
+            goldenBackend = argv[++i];
+        } else if (arg == "--golden-fixture" && i + 1 < argc) {
+            goldenFixture = argv[++i];
+        } else if (arg == "--golden-compact") {
+            goldenCompact = true;
+        } else if ((arg == "--golden-upstream" || arg == "--golden-edit" ||
+                    arg == "--golden-interactive") && i + 2 < argc) {
+            const std::string source = arg == "--golden-upstream" ? "upstream" :
+                arg == "--golden-edit" ? "authored" : "interactive";
+            const SdfPath path(argv[++i]);
+            char *end = nullptr;
+            const char *text = argv[++i];
+            const double delta = std::strtod(text, &end);
+            if (!path.IsPropertyPath() || end == text || *end) {
+                std::printf("golden action needs a property path and numeric displacement\n");
+                return 2;
+            }
+            goldenActions.push_back({source, path, delta});
         } else if (arg == "--repeat" && i + 1 < argc) {
             repeat = std::atoi(argv[++i]);
             if (repeat < 1) {
@@ -1608,27 +1434,21 @@ main(int argc, char **argv)
             verifyBinary = argv[++i];
         } else if (arg == "--drag-input" && i + 1 < argc) {
             dragInputs.push_back(argv[++i]);
-        } else if (arg == "--mode" && i + 1 < argc) {
-            const std::string value = argv[++i];
-            modeGiven = true;
-            if (value == "dynamic") {
-                mode = rigExec::RigExecEvaluationMode::Dynamic;
-            } else if (value == "baked") {
-                mode = rigExec::RigExecEvaluationMode::Baked;
-            } else if (value == "parity") {
-                mode = rigExec::RigExecEvaluationMode::BakedWithParityCheck;
-            } else if (value == "reference") {
-                mode = rigExec::RigExecEvaluationMode::ExecReference;
-            } else {
-                std::printf("unknown mode: %s "
-                            "(dynamic | baked | parity | reference)\n",
-                            value.c_str());
-                return 2;
-            }
         } else {
             std::printf("unknown argument: %s\n", arg.c_str());
             return 2;
         }
+    }
+
+    const bool golden = !goldenOut.empty() || !goldenCheck.empty();
+    if (golden) {
+        solverGuides = true;
+        if (repeat != 1 || dragSteps || !verifyBinary.empty() || !profileOut.empty()) {
+            std::printf("golden protocol cannot be combined with benchmark/drag/binary/profile runs\n");
+            return 2;
+        }
+    } else if (goldenCompact || !goldenActions.empty() || !goldenFixture.empty()) {
+        std::printf("golden options need --golden-out or --golden-check\n"); return 2;
     }
 
     // The binary holds one time; the frames to verify it at are the
@@ -1636,18 +1456,6 @@ main(int argc, char **argv)
     if (!verifyBinary.empty() && frames.empty()) {
         std::printf("FATAL: --verify-binary needs --frames\n");
         return 2;
-    }
-
-    // The evaluator reads RIGEXEC_BAKE_REQUIRED once, into a function-local
-    // static, so it has to be in the environment before the first evaluator
-    // exists -- which is why this sits above the stage open rather than
-    // beside the IsBakeable check it belongs with. It makes the evaluator
-    // report a generation that fell back to the dynamic path as a baked
-    // parity mismatch; the two checks below are this tool's own, independent
-    // half, so --require-baked still means something in a build whose
-    // evaluator does not honour the variable.
-    if (requireBaked) {
-        ArchSetEnv("RIGEXEC_BAKE_REQUIRED", "1", /* overwrite = */ true);
     }
 
     const std::string resources = SchemaResourceDir();
@@ -1672,76 +1480,34 @@ main(int argc, char **argv)
                 rigPath.GetText());
 
     rigExec::RigExecRigEvaluator evaluator(stage, rigPath);
-    // This tool reports joints, targets, and diagnostics; it never reads
-    // pose.solverFrames, so the observational guide request is skipped --
-    // unless --guides asks for it, which is what a parity run needs: the
-    // guide frames are a compared domain, and two empty maps compare equal
-    // no matter what the program would have put in them.
+    // Ordinary reports publish guides when requested. Golden and binary
+    // verification enable guide publication explicitly for full coverage.
     evaluator.SetSolverGuidesEnabled(solverGuides);
     // Enabled before Compile so the trace holds the compile itself plus
     // every evaluated frame.
     if (!profileOut.empty()) {
         evaluator.SetProfilingEnabled(true);
     }
-    // Before Compile, so the bake happens inside it rather than on the first
-    // frame; the mode is a request either way.
-    // Only when --mode was GIVEN. SetEvaluationMode is the top of the
-    // precedence ladder and setting it unasked would pin every run of this
-    // tool to Dynamic -- which would make the tool the one place a rig's
-    // own rigExec:baked can never be honoured, and the attribute untestable
-    // through it.
-    if (modeGiven) {
-        evaluator.SetEvaluationMode(mode);
-    }
+    gCpuReference=cpuReference;gExecCrossCheck=execCrossCheck;
+    evaluator.cpuReference=cpuReference;
     std::vector<std::string> errors;
     const bool compiled = evaluator.Compile(&errors);
     for (const std::string &error : errors) {
         std::printf("  %s\n", error.c_str());
     }
-    // The mode is READ BACK rather than reported from the parsed argument:
-    // Compile is where the rig's own rigExec:baked is consulted, so the
-    // evaluator is the only thing that knows which path this run ended up
-    // on, and printing what was asked for instead would name Dynamic on
-    // every attribute-driven run.
-    std::printf("  compile: %s (%zu mover applications, digest %zu, "
-                "mode %s from %s)\n",
-                compiled ? "ok" : "FAILED",
-                evaluator.GetMoverOrder().size(),
-                evaluator.GetBindingEpochDigest(),
-                ModeName(evaluator.GetEvaluationMode()),
-                ModeSourceName(evaluator.GetEvaluationModeSource()));
-    if (!compiled) {
-        return 1;
-    }
-    // Everything below asks the evaluator rather than the command line, for
-    // the reason the compile line does.
-    const rigExec::RigExecEvaluationMode resolvedMode =
-        evaluator.GetEvaluationMode();
-    int status = 0;
-    // Only in a mode that asks for the program: the reasons are the
-    // actionable half of a fallback, and printing them unasked would change
-    // every existing run.
-    const bool wantsProgram =
-        rigExec::RigExecEvaluationModeWantsProgram(resolvedMode);
-    // The accounting below is wider: it is printed wherever the program
-    // answers, which includes Dynamic under RIGEXEC_DYNAMIC_RUNS_PROGRAM --
-    // a run that silently took the walk there is exactly what it is for.
-    const bool runsProgram = rigExec::RigExecEvaluationModeRunsProgram(
-        resolvedMode, evaluator.GetEvaluationModeSource());
-    if (wantsProgram) {
-        std::vector<std::string> reasons;
-        if (!evaluator.IsBakeable(&reasons)) {
-            std::printf("  not bakeable; evaluating dynamically\n");
-            for (const std::string &reason : reasons) {
-                std::printf("    %s\n", reason.c_str());
-            }
-            // A fallback is a correct answer, so it is only a failure when
-            // the caller said the bake was the point.
-            if (requireBaked) {
-                std::printf("  FAIL: not bakeable\n");
-                status = 1;
-            }
+    std::printf("  compile: %s (%zu mover applications, digest %zu)\n",
+        compiled?"ok":"FAILED",evaluator.GetMoverOrder().size(),evaluator.GetBindingEpochDigest());
+    if(!compiled)return 1;
+    int status=0;
+    if(execCrossCheck && evaluator.GetBakedProgram()) {
+        std::string error;
+        if(!rigExec::RigExecBakedProgramTesting::EnableExecCrossCheck(*evaluator.GetBakedProgram(),&error)) {
+            std::printf("  exec crosscheck preparation failed: %s\n",error.c_str());return 1;
         }
+        checkVisits[&evaluator]={evaluator.GetStageEditSerial(),evaluator.GetBakedProgram()};
+    }
+    if(!evaluator.GetBakedProgram()) {
+        std::printf("  native program unavailable\n");return 1;
     }
     if (showTargets) {
         for (const rigExec::RigExecMoverRecord &record :
@@ -1761,8 +1527,7 @@ main(int argc, char **argv)
                         "--repeat/--drag/--profile\n");
         }
         return RunVerifyBinary(stage, rigPath, frames, dragInputs,
-                               verifyBinary, poseOut, jointsOut,
-                               solverGuides);
+                               verifyBinary, poseOut, jointsOut);
     }
     if (!dragInputs.empty()) {
         std::printf("  note: --drag-input applies to --verify-binary "
@@ -1780,6 +1545,12 @@ main(int argc, char **argv)
                              : UsdTimeCode::Default());
     }
 
+    if (golden) {
+        return RunGoldenProtocol(stage, rigPath, evaluator, frames,
+            goldenFixture.empty() ? std::filesystem::path(stagePath).filename().string() : goldenFixture,
+            goldenOut, goldenCheck, goldenCompact, goldenActions, goldenBackend, goldenProgram);
+    }
+
     // Rest values, so displacements are reported against the authored
     // geometry rather than against the previous frame.
     std::map<SdfPath, VtVec3fArray> rest;
@@ -1789,14 +1560,8 @@ main(int argc, char **argv)
     // `repeat` times, so first-visit cost is amortized anyway; the pose
     // returned here is discarded (the reporting pass feeds the gate).
     for (UsdTimeCode frame : frames) {
-        (void)evaluator.Evaluate(frame);
+        (void)EvaluateChecked(evaluator,frame);
     }
-    // The baseline for the --require-baked accounting below: the warmup
-    // served a generation per frame before the counted loops ran, the same
-    // generations-before snapshot the drag section takes for its own steps.
-    const size_t generationsBeforeCounted =
-        evaluator.GetBakedGenerationCount();
-
     // The silent passes. They are the same call the reporting loop makes,
     // so they cost what a frame costs -- including the pose the evaluator
     // returns by value, which is most of what a caller pays for. Timed here
@@ -1806,9 +1571,9 @@ main(int argc, char **argv)
         const auto began = std::chrono::steady_clock::now();
         for (int pass = 1; pass < repeat; ++pass) {
             for (UsdTimeCode frame : frames) {
-                const rigExec::RigExecRigPose pose = evaluator.Evaluate(frame);
-                if (!pose.valid || pose.moverGraphParityMismatches ||
-                    pose.bakedParityMismatches) {
+                const rigExec::RigExecRigPose pose = EvaluateChecked(evaluator,frame);
+                if (!pose.valid || pose.referenceMismatches ||
+                    pose.comparisonMismatches) {
                     status = 1;
                 }
             }
@@ -1831,24 +1596,18 @@ main(int argc, char **argv)
         }
     }
     for (UsdTimeCode frame : frames) {
-        const rigExec::RigExecRigPose pose = evaluator.Evaluate(frame);
+        const rigExec::RigExecRigPose pose = EvaluateChecked(evaluator,frame);
         if (!jointsOut.empty()) {
             jointExport.Add(pose, frame.GetValue());
         }
         if (poseDump) {
             WritePoseDump(poseDump, pose, frame.GetValue());
         }
-        std::printf("\n  frame %g: %s  (%zu moved properties, "
-                    "%zu parity agreements / %zu mismatches, "
-                    "%zu override rounds%s)\n",
-                    frame.GetValue(), pose.valid ? "valid" : "INVALID",
-                    pose.movedProperties.size(),
-                    pose.moverGraphParityAgreements,
-                    pose.moverGraphParityMismatches,
-                    pose.solverOverrideRounds,
-                    pose.solverOverridesConverged ? "" : ", NOT CONVERGED");
-        if (!pose.valid || pose.moverGraphParityMismatches ||
-            pose.bakedParityMismatches) {
+        std::printf("\n  frame %g: %s (%zu moved properties, %zu reference agreements / %zu mismatches, %zu executed ops)\n",
+            frame.GetValue(),pose.valid?"valid":"INVALID",pose.movedProperties.size(),
+            pose.referenceAgreements,pose.referenceMismatches,pose.executedOpCount);
+        if (!pose.valid || pose.referenceMismatches ||
+            pose.comparisonMismatches) {
             status = 1;
         }
         for (const std::string &diagnostic : pose.diagnostics) {
@@ -1888,43 +1647,12 @@ main(int argc, char **argv)
         }
     }
 
-    // The accounting, in every mode that runs the program. A run that
-    // reports a mode it never took is the failure this tool used to print as
-    // success, and a human reading the output should see the same fact a
-    // ctest asserts.
-    if (runsProgram) {
-        // frames.size() * repeat, which is frames.size() itself unless
-        // --repeat asked for more: the line a reader has always seen.
-        const size_t evaluated = frames.size() * size_t(repeat);
-        const size_t bakedGenerations =
-            evaluator.GetBakedGenerationCount() - generationsBeforeCounted;
-        std::printf("\n  baked: %zu/%zu generation(s), %zu build(s), "
-                    "%zu attempt(s)\n",
-                    bakedGenerations, evaluated,
-                    evaluator.GetBakedProgramBuildCount(),
-                    evaluator.GetBakedProgramBuildAttemptCount());
-        // Asked after the loop rather than per frame: an in-epoch rebuild is
-        // legal and still answers its generation from the program. This is
-        // the half that catches a fallback which is NOT a refusal -- an
-        // override the program cannot place, or a Run that declined -- since
-        // neither of those makes IsBakeable false.
-        if (requireBaked && bakedGenerations != evaluated) {
-            std::printf("  FAIL: only %zu of %zu generation(s) came from the "
-                        "program\n",
-                        bakedGenerations, evaluated);
-            status = 1;
-        }
-    }
-
     // A drag is not a frame change: the time stands still and one attribute
     // moves, over and over, with a pose drawn between each pair of values.
     // That is the generation the interactive path has to be quick at, and it
     // is a different shape from an animation frame -- no time moved, so
     // every input that is a function of time is unchanged and only the cone
     // below the dragged control has anything to do.
-    // Measured AFTER the accounting above, so the generation counts a reader
-    // (and --require-baked) sees still describe the requested frames alone;
-    // what the drag itself did with the program is reported here instead.
     if (dragSteps > 0) {
         const SdfPath dragPath(dragPrim);
         const UsdPrim prim = stage->GetPrimAtPath(dragPath);
@@ -1944,12 +1672,11 @@ main(int argc, char **argv)
             // Away from zero for a value near it, back towards it for one
             // that is not, for the same reason.
             const double direction = original > 0.5 ? -1.0 : 1.0;
-            const size_t generationsBefore =
-                evaluator.GetBakedGenerationCount();
+
             // One generation at this time before the first measured step, so
             // that what every step measures is a drag and not the first
             // frame's cold caches.
-            evaluator.Evaluate(dragFrame);
+            EvaluateChecked(evaluator,dragFrame);
             std::vector<double> stepUs;
             stepUs.reserve(size_t(dragSteps));
             for (int k = 0; k < dragSteps; ++k) {
@@ -1970,13 +1697,13 @@ main(int argc, char **argv)
                     {rigExec::RigExecValueOverride{
                         dragPath, TfToken(), TfToken(dragAttr), value}});
                 const rigExec::RigExecRigPose pose =
-                    evaluator.Evaluate(dragFrame);
+                    EvaluateChecked(evaluator,dragFrame);
                 stepUs.push_back(
                     std::chrono::duration<double>(
                         std::chrono::steady_clock::now() - began).count() *
                     1e6);
-                if (!pose.valid || pose.moverGraphParityMismatches ||
-                    pose.bakedParityMismatches) {
+                if (!pose.valid || pose.referenceMismatches ||
+                    pose.comparisonMismatches) {
                     status = 1;
                 }
             }
@@ -1990,12 +1717,6 @@ main(int argc, char **argv)
                         dragPrim.c_str(), dragAttr.c_str(), stepUs.size(),
                         median, sorted.empty() ? 0.0 : sorted.front(),
                         sorted.empty() ? 0.0 : sorted.back());
-            if (runsProgram) {
-                std::printf("    baked: %zu of %zu drag generation(s)\n",
-                            evaluator.GetBakedGenerationCount() -
-                                generationsBefore,
-                            stepUs.size() + 1);
-            }
             for (size_t k = 0; k < stepUs.size(); ++k) {
                 std::printf("    step %3zu %8.1fus\n", k, stepUs[k]);
             }
