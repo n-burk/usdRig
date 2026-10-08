@@ -248,6 +248,7 @@ add_library(rigExecImaging SHARED
     # The 1.4 warm-frame index: shared-owned per-frame completions.
     libs/rigExecImaging/warmIndex.cpp
     libs/rigExecImaging/profilerApi.cpp
+    libs/rigExecImaging/liveDebug.cpp
     # Pulled upstream scene-index inputs (rigExecInputs).
     libs/rigExecImaging/upstreamTable.cpp
 )
@@ -1161,6 +1162,15 @@ endforeach()
 # The baked op trace: completion order against the step graph, under both
 # executors.
 add_executable(testRigExecOpTrace tests/testRigExecOpTrace.cpp)
+add_executable(testRigExecLiveDebug tests/testRigExecLiveDebug.cpp)
+target_link_libraries(testRigExecLiveDebug PRIVATE rigExecImaging)
+foreach(_schedule serial parallel)
+    add_test(NAME testRigExecLiveDebug_${_schedule} COMMAND testRigExecLiveDebug
+        "${CMAKE_CURRENT_SOURCE_DIR}/examples"
+        "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
+    set_tests_properties(testRigExecLiveDebug_${_schedule} PROPERTIES
+        ENVIRONMENT "RIGEXEC_BAKED_SCHEDULE=${_schedule};RIGEXEC_ENABLE_PARALLEL_EVAL=1;RIGEXEC_FRAME_CACHE=off")
+endforeach()
 target_link_libraries(testRigExecOpTrace PRIVATE rigExec)
 target_compile_definitions(testRigExecOpTrace PRIVATE ${_rigexec_schema_resource_define})
 foreach(_schedule serial parallel)

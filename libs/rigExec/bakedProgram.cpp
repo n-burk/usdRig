@@ -3897,6 +3897,7 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
     _lastBail = RigExecBakedBail::None;
     RigExecBakedProgramImpl &B = *_impl;
     RigExecRigEvaluator &E = *B.evaluator;
+    B.recordOpTimings = E.GetOpTimingEnabled();
     if (E.cpuReference) { if (!B.oraclePublications) B.oraclePublications.emplace(); }
     else { B.oraclePublications.reset(); B.oracleWeightInputs.clear(); }
     RIGEXEC_PROFILE_SCOPE_CAT(*B.profiler, "Baked", "baked");

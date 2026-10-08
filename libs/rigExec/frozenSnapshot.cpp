@@ -32,6 +32,7 @@ _CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst)
     D.assetRootPath = src.assetRootPath;
     D.resolvedInputs = nullptr;
     D.profiler = nullptr;
+    D.recordOpTimings = false;
     D.interactiveOverrides = nullptr;
     D.jointSolverBinding = nullptr;
     D.ownedJointSolverBinding = src.ownedJointSolverBinding;

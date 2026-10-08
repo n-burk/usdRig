@@ -83,12 +83,19 @@ def TestTheTraceRespectsTheGraph():
             assert isinstance(domain,str) and first<=last
     for entry in trace:
         assert set(entry) == {"step", "kind", "domain", "label", "seq",
-                              "cluster"}, entry
+                              "cluster", "start_us", "duration_us", "thread"}, entry
         assert entry["kind"] == by_id[entry["step"]]["kind"]
         assert entry["domain"] == by_id[entry["step"]]["domain"]
     _CheckTrace(trace, graph)
+    assert all(e['start_us'] == 0 and not e['thread'] for e in trace)
     rig.evaluate(1024.0)
     _CheckTrace(rig.last_op_trace(), graph)
+    _, timed_rig = _Open("graph")
+    timed_rig.op_timing_enabled = True
+    timed_rig.evaluate(1001.0)
+    timed = timed_rig.last_op_trace()
+    _CheckTrace(timed, timed_rig.op_graph())
+    assert timed and all(e['start_us'] > 0 and e['duration_us'] >= 0 and e['thread'] for e in timed)
 
 
 def TestReferenceKeepsTheProductionGraph():

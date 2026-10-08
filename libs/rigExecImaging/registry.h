@@ -214,6 +214,12 @@ public:
     /// Cache hits are not pulls and are not counted.
     size_t GetSessionEvaluationCount(const SdfPath &rigPath);
 
+    /// Read the existing live evaluator on the stage owner thread. Never
+    /// evaluates, compiles, changes time, or constructs a second evaluator.
+    std::string LiveDebugJson(const SdfPath &rig, const std::string &knownGraph,
+                              const std::string &knownGeneration);
+    bool SetLiveOpTiming(const SdfPath &rig, bool enabled);
+
     /// The primary warming trigger: call on drag release / value commit, on
     /// the UI thread. Enqueues the scrub neighbors (+-1..N of the playhead)
     /// plus the nearest-frame-first sweep of the surrounding range for every
@@ -667,6 +673,10 @@ private:
         bool readRootsDirty = true;
         bool dirty = true;
         size_t evaluationCount = 0;
+        const RigExecBakedProgram *debugProgram = nullptr;
+        uint64_t debugEpoch = 0;
+        size_t debugBuildCount = 0;
+        std::string debugGraphKey;
         // The session's single-entry frozen snapshot cache, keyed by the
         // program object, the binding epoch, and the patchable avar
         // region's digest. Refreshed once per warming burst, in
@@ -976,6 +986,7 @@ private:
     /// (the compute-extent callback runs on arbitrary threads).
     const std::shared_ptr<RigExecSnapshotStore> _store;
     RigSessions _sessions;
+    uint64_t _nextDebugGraph = 0;
     /// The active stage (strong while active, reset by Deactivate).
     UsdStageRefPtr _stage;
     /// The stage a preview in progress resolves on (see BeginPreview).

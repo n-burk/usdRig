@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <map>
 #include <set>
+#include <sstream>
 
 namespace rigExec {
 
@@ -66,6 +67,13 @@ RigExecBakedLastRunTrace(const RigExecBakedProgramImpl &B)
         entry.domain=RigExecBakedStepDomainName(step.kind); entry.label=step.label;
         entry.seq=uint32_t(B.opExecution.completion[canonical]);
         entry.cluster=canonical<B.opGraph.opClusters.size() ? int(B.opGraph.opClusters[canonical]) : -1;
+        if (step.startUs && step.endUs >= step.startUs) {
+            entry.startUs = step.startUs;
+            entry.durationUs = step.endUs - step.startUs;
+            std::ostringstream thread;
+            thread << step.runner;
+            entry.thread = thread.str();
+        }
         trace.push_back(std::move(entry));
     }
     std::sort(trace.begin(), trace.end(),

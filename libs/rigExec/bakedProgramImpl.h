@@ -1685,6 +1685,7 @@ struct RigExecBakedProgramImpl {
     // the evaluator holds NOW and can never answer from a stale copy.
     RigExecResolvedInputs *resolvedInputs = nullptr;
     RigExecProfiler *profiler = nullptr;
+    bool recordOpTimings = false;
     const std::vector<RigExecValueOverride> *interactiveOverrides = nullptr;
     /// Joint -> the ordered stack of (solver, element) that write it, which
     /// is where the epilogue recovers the ELEMENT a writer that published

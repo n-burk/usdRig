@@ -33,6 +33,9 @@ struct RigExecOpTraceEntry {
     uint32_t seq = 0;
     /// The cluster the step belongs to, -1 when unclustered.
     int cluster = -1;
+    /// Last-run body interval and actual runner; empty when timing is off.
+    uint64_t startUs = 0, durationUs = 0;
+    std::string thread;
 };
 
 /// One declared slot range of a step. `first` and `last` are inclusive.

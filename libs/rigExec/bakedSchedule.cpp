@@ -2125,7 +2125,7 @@ void
 RigExecBakedRunStepBody(RigExecBakedProgramImpl *B,
                                 RigExecBakedStep *step, UsdTimeCode time)
 {
-    const bool profiling=B->profiler && B->profiler->IsEnabled();
+    const bool profiling=B->recordOpTimings || (B->profiler && B->profiler->IsEnabled());
     const bool measuring=B->opAdapter.measuring && !B->measurementSuspended;
     const uint64_t began=profiling ? RigExecProfiler::NowUs() : 0;
     const uint64_t beganNs=measuring ? NowNs() : 0;

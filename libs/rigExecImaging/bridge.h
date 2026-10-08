@@ -531,6 +531,7 @@ public:
     }
     /// The evaluator owning the compiled operation graph.
     const RigExecRigEvaluator &GetEvaluator() const { return *_evaluator; }
+    void SetOpTimingEnabled(bool enabled) { _evaluator->SetOpTimingEnabled(enabled); }
 
     /// Forgets every cached guide input. Called for any stage notice that
     /// touches the rig and on every recompile: the caches hold AUTHORED

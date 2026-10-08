@@ -600,6 +600,11 @@ public:
     /// Disabled for interactive use so every deformation runs only once.
     bool cpuReference = false;
 
+    /// Owner-thread opt-in to bounded, last-run operation timings. No
+    /// profiler events or locks are introduced in computation bodies.
+    void SetOpTimingEnabled(bool enabled) { _opTimingEnabled = enabled; }
+    bool GetOpTimingEnabled() const { return _opTimingEnabled; }
+
     /// When set, Compile and Evaluate record scoped phase timings (property
     /// chains, first-frame pose, each solver batch and constraint, the exec
     /// snapshot, each geometry chain, derived maintenance, parity) into the
@@ -1619,6 +1624,7 @@ private:
     /// Scoped phase timings for Compile and Evaluate. Off unless profiling
     /// is enabled; see SetProfilingEnabled.
     RigExecProfiler _profiler;
+    bool _opTimingEnabled = false;
 
     /// The program is built from the compiled epoch tables above, which are
     /// private because they are not a published surface -- not because the

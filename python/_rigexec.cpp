@@ -827,6 +827,9 @@ PYBIND11_MODULE(_rigexec, m) {
                      d["label"] = entry.label;
                      d["seq"] = entry.seq;
                      d["cluster"] = entry.cluster;
+                     d["start_us"] = entry.startUs;
+                     d["duration_us"] = entry.durationUs;
+                     d["thread"] = entry.thread;
                      out.push_back(d);
                  }
                  return out;
@@ -835,6 +838,9 @@ PYBIND11_MODULE(_rigexec, m) {
              "order: dicts of step, kind, domain ('pose', 'weight' or\n"
              "'geometry'), label, seq (1-based) and cluster. Empty when the\n"
              "graph has not been compiled.")
+        .def_property("op_timing_enabled",
+            [] (const _Rig &r) { return r.evaluator->GetOpTimingEnabled(); },
+            [] (_Rig &r, bool enabled) { r.evaluator->SetOpTimingEnabled(enabled); })
         .def("op_graph", [](const _Rig &r) {
                  const auto ranges =
                      [](const std::vector<rigExec::RigExecOpSlotRange> &in) {

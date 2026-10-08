@@ -99,6 +99,7 @@ The [biped](examples/biped/README.md) is the full character example.
 - [Viewport tools](docs/specs/viewport-gizmos.md) and [graph editor](docs/specs/graph-editor.md)
 - [Bake and inverse APIs](docs/specs/python-bake-inverse.md)
 - [Build and register external movers](docs/concepts/external-movers.md)
+- [Inspect the live evaluator graph and thread trace](docs/concepts/live-evaluator-inspection.md)
 - [Standalone runtime](docs/specs/standalone-runtime.md)
 - [Public method references](docs/references.md)
 - [Agent and contributor guide](AGENTS.md)
