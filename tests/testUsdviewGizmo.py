@@ -472,9 +472,29 @@ def _TestGroupSelection(d, controller, stage, session, frame):
     d.Pump()
     _Check(controller.GroupPivot() == gizmoMath.GROUP_PIVOT_CENTER,
            "three clicks wrap: %r" % controller.GroupPivot())
-    d.Key(d.QtCore.Qt.Key_P)
+    # Bare P is the hover picker's: it toggles that (and back again,
+    # leaving the user's saved layout as it was), not the pivot.
+    import pickerHoverUI
+    settings = d.QtCore.QSettings(pickerHoverUI._SETTINGS_ORG,
+                                  pickerHoverUI._SETTINGS_APP)
+    saved = settings.value(pickerHoverUI._SETTINGS_KEY, None)
+    try:
+        hover = pickerHoverUI.InstallHoverPicker(controller.usdviewApi)
+        before = hover.IsVisible()
+        d.Key(d.QtCore.Qt.Key_P)
+        _Check(hover.IsVisible() != before, "bare P toggles the hover picker")
+        d.Key(d.QtCore.Qt.Key_P)
+        _Check(hover.IsVisible() == before, "and back")
+    finally:
+        if saved is None:
+            settings.remove(pickerHoverUI._SETTINGS_KEY)
+        else:
+            settings.setValue(pickerHoverUI._SETTINGS_KEY, saved)
+    _Check(controller.GroupPivot() == gizmoMath.GROUP_PIVOT_CENTER,
+           "bare P leaves the pivot alone: %r" % controller.GroupPivot())
+    d.Key(d.QtCore.Qt.Key_P, d.QtCore.Qt.ShiftModifier)
     _Check(controller.GroupPivot() == gizmoMath.GROUP_PIVOT_LEAD,
-           "P is the keyboard twin: %r" % controller.GroupPivot())
+           "Shift+P is the keyboard twin: %r" % controller.GroupPivot())
     controller.SetGroupPivot(gizmoMath.GROUP_PIVOT_CENTER)
     controller.SetTool(gizmoUI.TOOL_TRANSLATE)
     d.Pump()

@@ -771,7 +771,7 @@ class ViewportToolbar(QtWidgets.QToolBar):
             self._GROUP_GLYPHS.get(mode, "groupCentre")))
         if not choices:
             self._groupAction.setToolTip(
-                "Group Pivot (P): where several selected controls move, "
+                "Group Pivot (Shift+P): where several selected controls move, "
                 "turn and scale about. Not used by Select.")
             return
         if tool == TOOL_TRANSLATE:
@@ -790,7 +790,7 @@ class ViewportToolbar(QtWidgets.QToolBar):
                       "selected.")
             self._groupAction.setToolTip(
                 "Group Pivot: %s, several selected controls %s. %s "
-                "Click or press P for the next one."
+                "Click or press Shift+P for the next one."
                 % (gizmoSettings.GroupPivotLabel(mode), meaning, active))
             return
         meaning = {
@@ -809,7 +809,7 @@ class ViewportToolbar(QtWidgets.QToolBar):
                   else "Inert until more than one control is selected.")
         self._groupAction.setToolTip(
             "Group Pivot: %s, several selected controls turn %s. %s "
-            "Click or press P for the next one."
+            "Click or press Shift+P for the next one."
             % (gizmoSettings.GroupPivotLabel(mode), meaning, active))
 
     def _onGroupPivotCycle(self, checked=False):
@@ -1703,7 +1703,8 @@ class GizmoController(QtCore.QObject):
         return True
 
     def CycleGroupPivot(self):
-        """Centre -> Last Selected -> Individual Origins, wrapping (P)."""
+        """Centre -> Last Selected -> Individual Origins, wrapping
+        (Shift+P)."""
         return self.SetGroupPivot(gizmoSettings.NextGroupPivot(
             self.GroupPivot(), self._tool))
 
@@ -3199,6 +3200,7 @@ class GizmoController(QtCore.QObject):
             return False              # leave usdview's Ctrl+... alone
         if not (self._CursorOverView() or receiver is self._view):
             return False
+        self._keyModifiers = event.modifiers()
         return self._Claim(event, self._Act(kind, key, self._ToolKey))
 
     @staticmethod
@@ -3294,11 +3296,13 @@ class GizmoController(QtCore.QObject):
             # with must go back to usdview rather than be swallowed.
             return self.ToggleOrientation()
         if key == QtCore.Qt.Key_P:
-            # The group pivot cycle, the toolbar button's keyboard twin.
-            # Free like L: usdview binds bare C, F, I, J, V and W
-            # (mainWindowUI.py), and P is not among them. Returns its
-            # result for the same reason L does -- Move and Select offer
-            # no group pivot, so the key stays usdview's there.
+            # The group pivot cycle, the toolbar button's keyboard twin,
+            # on Shift+P: bare P toggles the hover picker. Returns its
+            # result for the same reason L does -- Select offers no group
+            # pivot, so the key stays usdview's there.
+            if not (getattr(self, "_keyModifiers", QtCore.Qt.NoModifier)
+                    & QtCore.Qt.ShiftModifier):
+                return False
             return self.CycleGroupPivot()
         if key in self._PIVOT_KEYS:
             self.SetChannels(
