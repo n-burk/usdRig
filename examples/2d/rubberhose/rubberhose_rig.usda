@@ -5,6 +5,9 @@
     framesPerSecond = 24
     metersPerUnit = 0.1
     startTimeCode = 1
+    subLayers = [
+        @./rubberhose_picker.usda@
+    ]
     timeCodesPerSecond = 24
     upAxis = "Y"
 )
@@ -2591,3 +2594,4 @@ def Xform "Pip" (
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
 }
+
