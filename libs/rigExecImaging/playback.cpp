@@ -158,7 +158,7 @@ RigExecBakedPlayback::Open(const std::string &resolvedPath,
     _reader = std::move(reader);
     _assetPath = resolvedPath;
     // Admission condition 3 in playback: a listed input, holding its tag's
-    // type. A file lists scalar inputs only until it carries array slots.
+    // type, including the evaluator's admitted arrays.
     _listedInputs.clear();
     for (size_t i = 0; i < _reader->GetInputCount(); ++i) {
         const RigExecRuntimeInputInfo &info = _reader->GetInputInfo(i);
@@ -215,7 +215,8 @@ RigExecBakedPlayback::_AdmitUpstream(UsdTimeCode time)
             continue;
         }
         std::string reason = RigExecUpstreamDropReason(
-            _stage, &_listedInputs, entry.path, entry.value, time);
+            _stage, &_listedInputs, entry.path, entry.value, time, nullptr,
+            &_listedInputs);
         size_t index = 0;
         if (reason.empty() &&
             !_reader->FindInput(entry.path.GetString(), &index)) {
@@ -288,8 +289,12 @@ RigExecBakedPlayback::_ApplyUpstream(UsdTimeCode time, bool sampled,
             // its text, which the reader interns when the file lacks it.
             RrInputValue value;
             std::string why;
+            RigExecRuntimeArray array;
             const bool set =
-                key.tag == RrInputTag::Token
+                RrInputTagIsArray(key.tag)
+                    ? RigExecInputArrayFrom(key.value, key.tag, &array) &&
+                          _reader->SetInputArrayAt(key.index, array, &why)
+                    : key.tag == RrInputTag::Token
                     ? _reader->SetInputToken(
                           key.name,
                           key.value.UncheckedGet<TfToken>().GetString(),
@@ -305,8 +310,7 @@ RigExecBakedPlayback::_ApplyUpstream(UsdTimeCode time, bool sampled,
                                  : why) +
                     "; ignored");
                 refused.push_back(path);
-                if (was != _upstreamApplied.end() &&
-                    !_LiftUpstream(key, time, sampled, error)) {
+                if (!_LiftUpstream(key, time, sampled, error)) {
                     return false;
                 }
                 continue;

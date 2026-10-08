@@ -135,11 +135,11 @@ _CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst)
     // under it, and reads as a parity mismatch on 1509 control
     // frames of a rig that is standing in the same place.
     D.spaceSwitches = src.spaceSwitches;
+    D.autoClavicles = src.autoClavicles;
+    D.autoClavicleBySlot = src.autoClavicleBySlot;
     D.switchFrameContexts = src.switchFrameContexts;
     D.switchFrames = src.switchFrames;
     D.spaceSwitchBySlot = src.spaceSwitchBySlot;
-    D.autoClavicles = src.autoClavicles;
-    D.autoClavicleBySlot = src.autoClavicleBySlot;
     D.commits = src.commits;
     D.revisionIndex = src.revisionIndex;
     D.derivedIndex = src.derivedIndex;

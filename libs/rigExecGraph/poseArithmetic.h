@@ -137,9 +137,9 @@ bool RigExecRunSpaceSwitchArithmetic(const Record &record,const Input &input,
     using M=typename Math::Matrix;
     if(!output || input.sources.empty() ||
        (!record.filters.empty() && record.filters.size()!=input.sources.size()))return false;
-    const M local=Math::RoundTrip(input.avars*input.posedDefault*
-        input.parentDefaultInverse*input.parentPosed)*
-        input.parentPosed.GetInverse()*input.parentDefault;
+    const M unswitched=Math::RoundTrip(input.avars*input.posedDefault*
+        input.parentDefaultInverse*input.parentPosed);
+    const M local=unswitched*input.parentPosed.GetInverse()*input.parentDefault;
     const M localInverse=local.GetInverse();
     double active=std::isfinite(input.active)?input.active:0.0;
     active=std::max(0.0,std::min(active,double(input.sources.size()-1)));
@@ -151,16 +151,23 @@ bool RigExecRunSpaceSwitchArithmetic(const Record &record,const Input &input,
         carry=input.spaceDefault.GetInverse()*input.spacePosed;
         carryInverse=carry.GetInverse();
     }
-    const auto deltaOf=[&](size_t index) {
+    const auto rawDeltaOf=[&](size_t index) {
         const auto &source=input.sources[index];
         if(source.world)return input.hasCarry?local*carry*localInverse:M(1.0);
         const int filter=record.filters.empty()?0:record.filters[index];
         const auto axis=source.defaultSpace.TransformDir(record.twistAxis);
         const M moved=source.defaultSpace.GetInverse()*source.posedSpace;
         const M motion=input.hasCarry?
-            Math::Filter(moved*carryInverse,axis,filter)*carry:
-            Math::Filter(moved,axis,filter);
+            Math::Filter(moved*carryInverse,axis,filter==3?0:filter)*carry:
+            Math::Filter(moved,axis,filter==3?0:filter);
         return local*motion*localInverse;
+    };
+    const auto deltaOf=[&](size_t index) {
+        const M delta=rawDeltaOf(index);
+        if(record.filters.empty() || record.filters[index]!=3)return delta;
+        M oriented=delta*local;
+        for(int axis=0;axis<3;++axis)oriented[3][axis]=unswitched[3][axis];
+        return oriented*localInverse;
     };
     M delta=deltaOf(lower);
     if(upper!=lower && blend>0.0)delta=Math::Blend(delta,deltaOf(upper),blend);

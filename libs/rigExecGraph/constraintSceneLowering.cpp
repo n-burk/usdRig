@@ -50,7 +50,7 @@ bool RigExecLowerSceneConstraint(const RigExecSceneDescriptors &scene,const SdfP
         if(route!=RigExecSceneReadRoute::Raw) {
             const std::string field(name);
             const auto requested=field=="inputs:enabled" || field.rfind("inputs:affect",0)==0?SdfValueTypeNames->Bool:
-                field=="inputs:defaultWeight"?SdfValueTypeNames->Float:
+                (field=="inputs:defaultWeight" || field=="inputs:stretch")?SdfValueTypeNames->Float:
                 field=="inputs:twistDegrees"?SdfValueTypeNames->Double:SdfValueTypeNames->Double3;
             RigExecSceneTypedRead typed;
             if(!RigExecBindSceneTypedRead(scene,property,requested,&typed,error))return false;
@@ -93,6 +93,7 @@ bool RigExecLowerSceneConstraint(const RigExecSceneDescriptors &scene,const SdfP
                         (attribute->fact.hasAuthoredConnections && !attribute->fact.connections.empty());
         }
         result.useAnimatedTs=token=="alwaysTS" || (token=="autoDetect" && animated);
+        if(!bind("inputs:stretch"))return false;
         if(result.record.singleChain.mode==RigExecSingleChainIkMode::RotatePlane) {
             if(!bind("inputs:poleVector") || !bind("inputs:twistDegrees"))return false;
             if(result.poleModeObject && !result.poleObjects.empty() &&
@@ -167,6 +168,8 @@ bool RigExecRefreshConstraintParameters(RigExecSceneConstraintDescriptor *descri
     if(!*enabled)return true;
     auto &record=descriptor->record;
     if(record.kind==RigExecConstraintKind::SingleChainIk) {
+        float stretch=0;if(!read("inputs:stretch",0.0f,&stretch))return false;
+        record.singleChain.stretch=stretch;
         if(record.singleChain.mode==RigExecSingleChainIkMode::RotatePlane)
             if(!read("inputs:poleVector",GfVec3d(0,1,0),&record.singleChain.pole) ||
                !read("inputs:twistDegrees",0.0,&record.singleChain.twistDegrees))return false;

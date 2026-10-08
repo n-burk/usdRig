@@ -906,6 +906,7 @@ struct _RrSingleChainIkParams {
     _RrSingleChainIkMode mode = _RrSingleChainIkMode::RotatePlane;
     RrVec3d pole{0.0, 1.0, 0.0};
     double twistDegrees = 0.0;
+    double stretch=0;
     double weight = 1.0;
 };
 
@@ -1413,8 +1414,12 @@ _RrSolveSingleChainIk(const std::vector<RrPointFrame> &currentFrames,
         }
     }
 
+    if(!std::isfinite(params.stretch) || params.stretch<0 || params.stretch>1)return _RrIkDegenerate(currentFrames);
+    double totalLength=0;for(double length:lengths)totalLength+=length;
+    const double growth=1+params.stretch*std::max(0.0,(effectorFrame.points[0]-original.front()).GetLength()/totalLength-1);
+    auto solveLengths=lengths;for(double &length:solveLengths)length*=growth;
     const std::vector<RrVec3d> solved = _RrIkSolvePositions(
-        original, lengths, bases, effectorBasis,
+        original, solveLengths, bases, effectorBasis,
         effectorFrame.points[0], params, positionEpsilon,
         angularEpsilon);
     if (solved.size() != currentFrames.size()) {
@@ -1461,7 +1466,7 @@ _RrSolveSingleChainIk(const std::vector<RrPointFrame> &currentFrames,
             const RrVec3d direction = _RrIkBlendDirection(
                 currentDirection, solvedDirection, weight, bases[i].up,
                 angularEpsilon);
-            blended[i + 1] = blended[i] + direction * lengths[i];
+            blended[i + 1] = blended[i] + direction * lengths[i] * (1+weight*(growth-1));
         }
         for (size_t i = 0; i < result.size(); ++i) {
             result[i] = _RrIkBlendEndFrame(
@@ -1470,6 +1475,10 @@ _RrSolveSingleChainIk(const std::vector<RrPointFrame> &currentFrames,
         }
     }
 
+    if(growth!=1)for(size_t i=0;i+1<result.size();++i) {
+        const auto bone=result[i+1].points[0]-result[i].points[0];
+        RigExecScaleFrameAlong(result[i].points.data(),bone.GetNormalized(),bone.GetLength()/lengths[i]);
+    }
     for (const RrPointFrame &frame : result) {
         if (!_RrIkFrameFinite(frame)) {
             return _RrIkDegenerate(currentFrames);
@@ -1870,6 +1879,7 @@ _RrRunConstraintStep(RrProgram *program, size_t step,
             inputsValid = false;
         }
         _RrSingleChainIkParams params;
+        params.stretch=c.stretch?program->ReadConstraint(ci,RrConstraintStretch).f32:0;
         params.mode = _RrSingleChainIkMode(c.ikMode);
         params.weight = weight;
         if (c.ikMode == 0) {

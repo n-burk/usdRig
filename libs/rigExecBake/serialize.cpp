@@ -693,6 +693,12 @@ _FileFill::_Solver(size_t index, fb::RigExecWireSolver *out)
     out->twistTurns = read(11);
     out->ribbonSampleCount = read(12);
     out->ikSpace = read(13);
+    out->pin=read(14);out->upperScale=read(15);out->lowerScale=read(16);
+    out->softDistance=read(17);out->limbTwist=read(18);
+    out->scaleSegments=solver.scaleSegments;
+    out->softDistancePolicy=solver.ikParams.softDistancePolicy;
+    out->ikScaleSegments=solver.ikParams.scaleSegments;
+    out->scaleCalibration=solver.ikParams.limb.scaleCalibration;
     out->upperLengthBase = solver.upperLengthBase;
     out->lowerLengthBase = solver.lowerLengthBase;
     out->spaceSlot = int32_t(solver.spaceSlot);
@@ -815,6 +821,7 @@ _FileFill::_Constraint(size_t index, fb::RigExecWireConstraint *out)
     out->worldUpVector = read(18);
     out->poleVector = read(19);
     out->twistDegrees = read(20);
+    out->stretch=read(21);
     out->order = uint8_t(constraint.order);
     out->aimAxisFallback = _ToVec3d(constraint.aimAxisFallback);
     out->aimVectorAuthored = constraint.aimVectorAuthored;
@@ -1072,6 +1079,25 @@ _FileFill::_Pose(fb::RigExecWireDomainPose *pose)
     pose->hasPropertyChains = program.hasPropertyChains;
     pose->publishWeightFields = program.publishWeightFields;
     // In program order: resolution round, then discovery.
+    pose->autoClavicles.resize(program.autoClavicles.size());
+    for(size_t i=0;i<program.autoClavicles.size();++i) {
+        const auto &ac=program.autoClavicles[i];auto &out=pose->autoClavicles[i];
+        const auto &c=ac.operation.constants;
+        out.slot=ac.slot;out.basis.assign(c.basis,c.basis+9);out.ikValue=c.ikValue;out.gain=c.gain;
+        out.kernel=c.kernel;out.normalize=c.normalize;out.swings=c.swings;out.widths=c.widths;
+        out.gains=c.gains;out.weights=c.weights;out.hasLimb=ac.operation.hasLimb;
+        out.frames.resize(13);out.frames[0].slot=ac.slot;
+        for(size_t k=1;k<13;++k)for(const auto &read:ac.frames)if(read.value==ac.operation.frames[k]) {
+            out.frames[k].slot=read.slot;
+            out.frames[k].computation=read.computation=="computeDefaultFrame"?1:read.computation=="computeRestFrame"?2:0;
+            out.frames[k].recompose.assign(read.recompose.begin(),read.recompose.end());
+        }
+        for(size_t k=0;k<ac.scalars.size();++k)out.scalars.push_back(_RegisteredValue(_Family::AutoClavicle,i,k));
+        out.scalarIndices.assign(11,-1);
+        for(size_t k=0;k<11;++k)if(!ac.operation.scalars[k].hops.empty())
+            for(size_t j=0;j<ac.scalars.size();++j)if(ac.scalars[j].value==ac.operation.scalars[k].hops.front().raw)
+                out.scalarIndices[k]=int(j);
+    }
     pose->spaceSwitches.resize(program.spaceSwitches.size());
     for (size_t i = 0; i < program.spaceSwitches.size(); ++i) {
         const RigExecBakedProgramImpl::SpaceSwitch &sw =

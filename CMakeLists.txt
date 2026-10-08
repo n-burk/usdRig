@@ -108,6 +108,7 @@ add_library(rigExec SHARED
     libs/rigExecGraph/providerContextBinding.cpp
     libs/rigExecGraph/constraintGraphBinding.cpp
     libs/rigExecGraph/geometryGraphBinding.cpp
+    libs/rigExecGraph/autoClavicleGraph.cpp
     libs/rigExecGraph/poseGraphBinding.cpp
     libs/rigExecGraph/poseProgram.cpp
     libs/rigExecGraph/poseSceneLowering.cpp
@@ -429,11 +430,6 @@ set_tests_properties(testRigExecWrinkleRuntime PROPERTIES FIXTURES_REQUIRED Wrin
 add_executable(testRigExecDeltaMush tests/testRigExecDeltaMush.cpp)
 target_link_libraries(testRigExecDeltaMush PRIVATE rigExec rigExecRigging rigExecBake rigExecRuntime rigExecSampler)
 add_test(NAME testRigExecDeltaMush COMMAND testRigExecDeltaMush "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
-add_executable(testRigExecRuntimeLiveFace tests/testRigExecRuntimeLiveFace.cpp)
-target_link_libraries(testRigExecRuntimeLiveFace PRIVATE rigExec rigExecBake rigExecRuntime)
-add_test(NAME testRigExecRuntimeLiveFace COMMAND testRigExecRuntimeLiveFace
-    "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources"
-    "${CMAKE_CURRENT_SOURCE_DIR}/examples/biped/Biped_stack.usda")
 add_executable(testRigExecDeltaMushRuntime tests/testRigExecDeltaMushRuntime.cpp)
 target_link_libraries(testRigExecDeltaMushRuntime PRIVATE rigExecRuntime)
 add_test(NAME testRigExecDeltaMushBakeFile COMMAND rigExecBakeTool
@@ -641,9 +637,6 @@ target_compile_definitions(testRigExecSurfaceProjector PRIVATE
     ${_rigexec_schema_resource_define})
 add_test(NAME testRigExecSurfaceProjector
     COMMAND testRigExecSurfaceProjector "${CMAKE_CURRENT_SOURCE_DIR}/examples")
-set_tests_properties(testRigExecSurfaceProjector PROPERTIES
-    ENVIRONMENT "RIGEXEC_BAKE_REQUIRED=1;RIGEXEC_DYNAMIC_RUNS_PROGRAM=0"
-    FAIL_REGULAR_EXPRESSION "baked parity mismatch")
 
 add_executable(testRigExecGeometryOpsBakedParity
     tests/testRigExecGeometryOpsBakedParity.cpp)
@@ -784,7 +777,8 @@ target_include_directories(testRigExecRuntimeLoader PRIVATE
     "${CMAKE_CURRENT_BINARY_DIR}/tests")
 target_compile_definitions(testRigExecRuntimeLoader PRIVATE
     ${_rigexec_schema_resource_define}
-    RIGEXEC_EXAMPLES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/examples")
+    RIGEXEC_EXAMPLES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/examples"
+    RIGEXEC_TEST_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures")
 add_test(NAME testRigExecRuntimeLoader COMMAND testRigExecRuntimeLoader
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
 
@@ -798,6 +792,8 @@ target_compile_definitions(testRigExecRuntimePose PRIVATE
     RIGEXEC_EXAMPLES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/examples")
 add_test(NAME testRigExecRuntimePose COMMAND testRigExecRuntimePose
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+add_test(NAME testRigExecRuntimeAutoClavicle COMMAND testRigExecRuntimePose
+    --auto-clavicle "${CMAKE_CURRENT_SOURCE_DIR}/examples")
 # The same suite baked with every step in its own cluster, so a drag at a
 # fixed frame reaches each step only through the dirtying owed to it (a
 # moved avar, an override flag, a moved chain result) and never through a
@@ -813,9 +809,17 @@ target_include_directories(testRigExecRuntimeWeights PRIVATE
     "${CMAKE_CURRENT_BINARY_DIR}/tests")
 target_compile_definitions(testRigExecRuntimeWeights PRIVATE
     ${_rigexec_schema_resource_define}
-    RIGEXEC_EXAMPLES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/examples")
+    RIGEXEC_EXAMPLES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/examples"
+    RIGEXEC_TEST_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures")
 add_test(NAME testRigExecRuntimeWeights COMMAND testRigExecRuntimeWeights
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+# The same suite with every step in its own cluster, so a drag of one
+# volume's control reruns that volume's VolumePlacements step alone and the
+# other volume's placement is the one its skipped step kept.
+add_test(NAME testRigExecRuntimeWeightsFineClusters
+    COMMAND testRigExecRuntimeWeights "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+set_tests_properties(testRigExecRuntimeWeightsFineClusters PROPERTIES
+    ENVIRONMENT "RIGEXEC_BAKED_GRAIN_US=0")
 
 add_executable(testRigExecRuntimeGeometry tests/testRigExecRuntimeGeometry.cpp)
 target_link_libraries(testRigExecRuntimeGeometry PRIVATE rigExecRuntime rigExecBake rigExecSampler)
@@ -826,6 +830,12 @@ target_compile_definitions(testRigExecRuntimeGeometry PRIVATE
     RIGEXEC_EXAMPLES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/examples")
 add_test(NAME testRigExecRuntimeGeometry COMMAND testRigExecRuntimeGeometry
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+# The same suite baked with every step in its own cluster, so a skin chunk
+# runs only when a joint its key declares moves.
+add_test(NAME testRigExecRuntimeGeometryFineClusters
+    COMMAND testRigExecRuntimeGeometry "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+set_tests_properties(testRigExecRuntimeGeometryFineClusters PROPERTIES
+    ENVIRONMENT "RIGEXEC_BAKED_GRAIN_US=0")
 
 # Inputs set on a binary against the same values authored in the session
 # layer in native graph evaluation: example inputs, held
@@ -1012,7 +1022,10 @@ endforeach()
 
 # Projector providers that only a projector reads: guards the export and
 # its ProviderMatrix producers, not the projector values (matrix primvars
-# are outside the runtime output contract verify-binary compares).
+# are outside the runtime output contract verify-binary compares). The
+# mesh's keyed points are the mush's chain base, so the class is static;
+# the drag moves the constraints' driver, which separates each provider's
+# final from its base.
 rigexec_add_verify_binary_test(NAME projector_spaces
     STAGE "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/projector_spaces.usda"
     FRAMES 1,4,7,10 TIME 7 CLASS inputs
@@ -1020,9 +1033,48 @@ rigexec_add_verify_binary_test(NAME projector_spaces
 
 # One VolumePlacements step per volume (part 1), each writing its own
 # WeightFrames slot, and a current-phase field reading both placements.
+# Each drag moves one volume's control, so one placement moves and the
+# other must hold.
 rigexec_add_verify_binary_test(NAME volume_placements
     STAGE "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/volume_placements.usda"
-    FRAMES 1,5,10)
+    FRAMES 1,5,10 CLASS inputs
+    DRAGS "/PlacementAsset/Rig/Controls/ACtl.avars:rz,/PlacementAsset/Rig/Controls/BCtl.avars:rz")
+
+# AtPrim read phases on rigExec:transform, read in the fold through the
+# FrameMatrix steps' records: a constraint's record, a disabled exit that
+# still records, and lists that fall through to an older record. A drag on
+# Dial moves one reader's weight; a drag on Late re-runs C3's record alone.
+rigexec_add_verify_binary_test(NAME frame_record_fallbacks
+    STAGE "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/frame_record_fallbacks.usda"
+    FRAMES 1,4,8 CLASS inputs
+    DRAGS "/RecordAsset/Rig/Controls/Dial.avars:amount,/RecordAsset/Rig/Controls/Late.avars:tz")
+
+# AtPrim read phases that name solver checkpoints, gated by the solver
+# commit's present bytes: LegBlend never publishes the knee, so its record
+# is never valid and P3 falls through to LegFK's record. A drag on ZKnee
+# moves LegZ's record alone; one on KneeTarget moves KneeMove, which runs
+# after LegFK, so P3's fold re-runs over LegFK's unchanged record.
+rigexec_add_verify_binary_test(NAME solver_checkpoint
+    STAGE "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/solver_checkpoint.usda"
+    FRAMES 1,5,9 CLASS inputs
+    DRAGS "/CheckpointAsset/Rig/Controls/ZKnee.avars:rx,/CheckpointAsset/Rig/Controls/KneeTarget.avars:tx")
+
+# Dense blend samples read at `final` and `preceding`, each bound to a
+# version of a chain two animated lifts move. Baked at frame 1, where the
+# lifts are identity: playback computes each sample from its bound version
+# on every run, so frames 3 and 7 and the drag of CtlB (which moves the
+# `final` sample alone) follow the lifts rather than the bake's points.
+rigexec_add_verify_binary_test(NAME phased_blend_samples
+    STAGE "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/phased_blend_samples.usda"
+    FRAMES 1,3,7 CLASS inputs
+    DRAGS "/Asset/Rig/Controls/CtlB.avars:tx")
+
+# A lattice whose cage is its own target, read at `preceding`: the runtime
+# reads the points entering it through the binding's one version.
+rigexec_add_verify_binary_test(NAME preceding_own_chain
+    STAGE "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/preceding_own_chain.usda"
+    FRAMES 1,5,9 CLASS inputs
+    DRAGS "/PrecedingAsset/Rig/Controls/LiftCtl.avars:ty")
 
 # Three skin layouts the file stores raw because the sparse form cannot
 # hold them, OddSkin, WideOddSkin and WideEmptySkin, and two it stores

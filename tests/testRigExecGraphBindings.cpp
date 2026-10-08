@@ -1,4 +1,6 @@
 #include "rigExecGraph/solverGraphBinding.h"
+#include "rigExecGraph/autoClavicleGraph.h"
+#include "pxr/base/gf/rotation.h"
 #include "rigExec/frameExtraction.h"
 #include "rigExecGraph/constraintGraphBinding.h"
 #include <cstdio>
@@ -162,5 +164,53 @@ int main() {
     CHECK(RigExecRunConstraintGraph(binding,&values,&error));
     CHECK(values.Read<RigExecPointFrame>(4)->Origin()==GfVec3d(8,0,0));
     CHECK(values.values[4].error.empty());
+    {
+        RigExecSceneDescriptors scene;scene.identities={UsdTimeCode::Default()};
+        const SdfPath owner("/Rig/Carry"),target("/Rig/Shoulder");
+        auto provider=[&](const char *path) {
+            const SdfPath p(path);auto &n=scene.nodes[p];n.fact.path=p;
+            n.fact.active=true;n.transformProvider=true;n.domain=RigExecSceneDomain::Provider;
+            return p;
+        };
+        provider("/Rig/Shoulder");
+        const auto pivot=provider("/Rig/Pivot"),anchor=provider("/Rig/Anchor");
+        const auto upper=provider("/Rig/Shoulder/Upper"),lower=provider("/Rig/Shoulder/Upper/Lower"),end=provider("/Rig/Shoulder/Upper/Lower/End");
+        auto relationship=[&](const char *name,SdfPathVector targets) {
+            scene.relationships[owner.AppendProperty(TfToken(name))].forwardedTargets=targets;
+        };
+        relationship("rigExec:target",{target});relationship("rigExec:pivot",{pivot});
+        relationship("rigExec:anchor",{anchor});relationship("rigExec:fkControls",{upper,lower,end});
+        RigExecSceneGraphBindingContext context;
+        std::vector<RigExecSceneGraphReadRequest> reads;
+        context.resolve=[&](const auto &request,RigExecValueId *id,std::string *) {
+            *id=reads.size()+1;reads.push_back(request);return true;
+        };
+        RigExecBoundAutoClavicle operation;std::string error;
+        CHECK(RigExecBindAutoClavicle(scene,owner,context,0,8,&operation,&error));
+        CHECK(reads.size()==7);
+        for(const auto &request:reads) {
+            CHECK(request.phase==TfToken(request.source.HasPrefix(target)?"preceding":"final"));
+            CHECK(request.reader==owner);
+        }
+        RigExecTypedValueStore values(9);
+        values.Publish(0,Translated(1));
+        for(size_t i=0;i<reads.size();++i)values.Publish(i+1,Translated(0));
+        values.Publish(operation.frames[5],Translated(1));
+        values.Publish(operation.frames[6],Translated(2));
+        values.Publish(operation.frames[7],Translated(3));
+        GfMatrix4d raised(1.0);raised.SetRotate(GfRotation(GfVec3d(0,0,1),90));raised.SetTranslateOnly(GfVec3d(1,0,0));
+        values.Publish(operation.frames[4],RigExecFrameFromMatrix(raised));
+        operation.constants.gain=1;operation.constants.swings={1,0,0,0};
+        operation.constants.widths={10};operation.constants.gains={1};operation.constants.weights={1};
+        CHECK(RigExecRunAutoClavicle(operation,&values,&error));
+        CHECK(values.Read<RigExecPointFrame>(8)->Origin()[1]>0.5);
+        values.values[size_t(operation.frames[1])].blocked=true;
+        CHECK(RigExecRunAutoClavicle(operation,&values,&error));
+        CHECK(values.Read<RigExecPointFrame>(8)->Origin()==GfVec3d(1,0,0));
+        CHECK(!values.values[8].error.empty());
+        values.values[size_t(operation.frames[1])].blocked=false;
+        CHECK(RigExecRunAutoClavicle(operation,&values,&error));
+        CHECK(values.values[8].error.empty());
+    }
     return 0;
 }

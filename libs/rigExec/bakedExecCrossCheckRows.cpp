@@ -25,7 +25,7 @@ const std::map<std::string,TfToken,std::less<>> _tokens = [] {
         "rest:space","rest:tx","rest:ty","rest:tz","rest:rx","rest:ry","rest:rz",
         "default:tx","default:ty","default:tz","default:rx","default:ry","default:rz",
         "rigExec:controlSpace","world","parentRelative","rigExec:spaceMatrix","rigExec:upperLengthOffset","rigExec:lowerLengthOffset","rigExec:preferredBendRadians",
-        "inputs:stretch","inputs:softness","inputs:weight","rigExec:scaleBlend","log","linear","rigExec:rotationBlend","shortestArc","inputs:twistTurns","rigExec:count","rigExec:weights","rigExec:jointElements",
+        "inputs:stretch","inputs:softness","inputs:pin","inputs:upperScale","inputs:lowerScale","inputs:softDistance","inputs:twist","rigExec:stretchPolicy","rigExec:segmentScale","rigExec:scaleCalibration","softDistance","uniformSegments","toChild","none","inputs:weight","rigExec:scaleBlend","log","linear","rigExec:rotationBlend","shortestArc","inputs:twistTurns","rigExec:count","rigExec:weights","rigExec:jointElements",
         "inputs:preserveVolume","inputs:midFollowWeight","inputs:roll","inputs:twist","inputs:minLengthRatio","rigExec:rootTangent","aim","rigid","rigExec:volumeWeights","rigExec:restLength","curve","chain",
         "rigExec:representation","rigExec:rangePolicy","rigExec:defaultWeight","rigExec:values","rigExec:indices","inputs:driver","inputs:scale","inputs:bias","rigExec:combineMode",
         "inputs:strength","inputs:invert","inputs:falloffMin","inputs:falloffMax","rigExec:planeAxis","rigExec:planeBounds","inputs:extentU","inputs:extentV",
@@ -161,7 +161,10 @@ Input LadderInputs(const B &b, int slot)
     const int parent = b.parent[s];
     if (parent >= 0) Put(in, b.paths[size_t(parent)], "computeRestFrame", VtValue(b.restFrames[size_t(parent)]));
     const auto raw = RigExecBakedLeafRead(b, l.parentDefaultSpace);
-    const auto parentDefault = Authoritative(b,l.parentDefaultSpace,l.parentDefaultSpaceConnected) || raw != GfMatrix4d(1.0)
+    const auto *expression = l.spaceValues[4] >= 0
+        ? b.providerValues.Read<GfMatrix4d>(RigExecValueId(l.spaceValues[4])) : nullptr;
+    const auto parentDefault = expression ? *expression :
+        Authoritative(b,l.parentDefaultSpace,l.parentDefaultSpaceConnected) || raw != GfMatrix4d(1.0)
         ? raw : parent >= 0 ? b.defaultRoundTrip[size_t(parent)] : GfMatrix4d(1.0);
     Attr(in, path, "parent:defaultSpace", VtValue(parentDefault));
     const char *names[] = {"default:tx", "default:ty", "default:tz", "default:rx", "default:ry", "default:rz"};
@@ -202,6 +205,7 @@ Input SolveInputs(const B &b, int index)
         for (size_t i = 0; i < s.controls.size(); ++i)
             SolverFrame(in, b, s.controls[i], s.controlReads[i]);
         SolverFrame(in,b,s.start,s.startRead);
+        Attr(in,path,"rigExec:segmentScale",VtValue(Token(s.scaleSegments?"toChild":"none")));
         Attr(in,path,"rigExec:controlSpace",VtValue(Token(s.parentRelative ? "parentRelative" : "world")));
     } else if (s.type == "RigExecTwoBoneIk") {
         SolverFrame(in,b,s.root,s.rootRead); SolverFrame(in,b,s.end,s.endRead); SolverFrame(in,b,s.pole,s.poleRead);
@@ -211,6 +215,12 @@ Input SolveInputs(const B &b, int index)
         Leaf(in,b,path,"rigExec:lowerLengthOffset",s.lowerOffset);
         Leaf(in,b,path,"rigExec:preferredBendRadians",s.bend);
         Leaf(in,b,path,"inputs:stretch",s.stretch); Leaf(in,b,path,"inputs:softness",s.softness);
+        Leaf(in,b,path,"inputs:pin",s.pin);Leaf(in,b,path,"inputs:upperScale",s.upperScale);
+        Leaf(in,b,path,"inputs:lowerScale",s.lowerScale);Leaf(in,b,path,"inputs:softDistance",s.softDistance);
+        Leaf(in,b,path,"inputs:twist",s.limbTwist);
+        Attr(in,path,"rigExec:stretchPolicy",VtValue(Token(s.ikParams.softDistancePolicy?"softDistance":"uniformSegments")));
+        Attr(in,path,"rigExec:segmentScale",VtValue(Token(s.ikParams.scaleSegments?"toChild":"none")));
+        Attr(in,path,"rigExec:scaleCalibration",VtValue(s.ikParams.limb.scaleCalibration));
     } else if (s.type == "RigExecBlendPointFrames") {
         if (s.inA >= 0) Put(in,b.solvers[size_t(s.inA)].path,"computePointFrameArray",VtValue(b.aggregates[size_t(s.inA)]));
         if (s.inB >= 0) Put(in,b.solvers[size_t(s.inB)].path,"computePointFrameArray",VtValue(b.aggregates[size_t(s.inB)]));

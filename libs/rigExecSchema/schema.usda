@@ -1605,8 +1605,8 @@ class RigExecAutoClavicle "RigExecAutoClavicle" (
     doc = """Carries a limb's root with the limb's own swing, as a clavicle
     lifts when the arm is raised.
 
-    It runs where space switches run: after the controls compose and before
-    any solver reads them. It moves rigExec:target -- the control the limb
+    Its declared frame and control dependencies determine when it runs in
+    the shared graph. It moves rigExec:target -- the control the limb
     hangs from -- by translation only, and its namespace descendants follow,
     so the FK chain and the root of the IK solve move together and keep
     their orientation.

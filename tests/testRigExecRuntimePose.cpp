@@ -5493,11 +5493,42 @@ TestRunTraceOrder()
     }
 }
 
+static void
+TestAnimatedAutoClavicle(const std::string &examplesDir)
+{
+    const auto stage=UsdStage::Open(examplesDir+"/biped/Biped_stack.usda");
+    CHECK(stage);
+    if (!stage) return;
+    stage->SetEditTarget(stage->GetSessionLayer());
+    const std::string controls="/Biped/Rig/Main/Shot/Aux/Controls";
+    const std::string shoulder=controls+"/M_Body/M_Torso/M_Chest/M_ChestTop/L_Shldr";
+    const auto key=[&](const std::string &path,const std::array<double,4> &values) {
+        const auto attribute=stage->GetAttributeAtPath(SdfPath(path));
+        CHECK(attribute);
+        for (size_t k=0; attribute && k<values.size(); ++k) {
+            const auto time=UsdTimeCode(double(k+1));
+            CHECK(attribute.GetTypeName()==SdfValueTypeNames->Float
+                ? attribute.Set(float(values[k]),time) : attribute.Set(values[k],time));
+        }
+    };
+    key(shoulder+"/L_UpArmSwing/L_UpArm.avars:ry",{0,-80,-60,0});
+    key(shoulder+".avars:autoClav",{1,1,0.5,1});
+    key(controls+"/L_Arm.avars:ikfk",{0,0,0.5,1});
+    key(controls+"/L_ArmIK.avars:ty",{0,0,30,40});
+    key(controls+"/L_Arm.avars:stretchTop",{1,1.2,1.1,1});
+    key(controls+"/L_Arm.avars:twist",{0,0,15,30});
+    _TestStage("animated auto clavicle FK/IK and limb inputs",stage,{1,2,3,4,2,1});
+}
+
 int
 main(int argc, char **argv)
 {
     PlugRegistry::GetInstance().RegisterPlugins(
         RIGEXEC_SCHEMA_RESOURCE_DIR);
+    if (argc>1 && std::string(argv[1])=="--auto-clavicle") {
+        TestAnimatedAutoClavicle(argc>2?argv[2]:RIGEXEC_EXAMPLES_DIR);
+        return failures?1:0;
+    }
     TestComputedEnvelopes();
     TestStaticWeightEnvelope();
     TestAvarDrivenDynamicEnvelope();

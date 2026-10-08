@@ -47,8 +47,8 @@ struct RigExecSceneDescriptors;
 struct RigExecOpExclusionProof;
 
 /// Whether a value of \p typeName fits a .rigexec input slot: a scalar,
-/// token, 4x4 double matrix or 3-vector of either precision, any role. No
-/// array does. Upstream admission condition 2.
+/// token, 4x4 double matrix or 3-vector of either precision, any role.
+/// Array types use RigExecUpstreamArraySlotType. Admission condition 2.
 bool RigExecUpstreamSlotType(const SdfValueTypeName &typeName);
 
 /// Whether \p typeName is an array type an upstream value may hold while
@@ -58,8 +58,8 @@ bool RigExecUpstreamSlotType(const SdfValueTypeName &typeName);
 bool RigExecUpstreamArraySlotType(const SdfValueTypeName &typeName);
 
 /// Whether upstream array values are admitted (the array part of
-/// admission conditions 2 and 3). Off unless
-/// RigExecSetUpstreamArrayAdmissionForTesting turned it on.
+/// admission conditions 2 and 3). On by default; tests can temporarily
+/// change it with RigExecSetUpstreamArrayAdmissionForTesting.
 bool RigExecUpstreamArrayAdmission();
 
 /// Admission condition 4's memo, per array attribute: its stage element
@@ -358,19 +358,14 @@ public:
     /// layer metadata, for a field other than a value, for a property the
     /// bake named but no step declares, and for an input no reader re-reads.
     /// The caller then bumps the stamp.
-    /// \p skipPatchableAvars leaves the transform channels the in-place
-    /// avar patch takes (ApplyAvarValueEdits) to that patch, so one notice
-    /// can carry both: the patch moves those, and this routes the rest.
-    bool ApplyValueEdits(const UsdNotice::ObjectsChanged &notice,
-                         bool skipPatchableAvars = false);
+    bool ApplyValueEdits(const UsdNotice::ObjectsChanged &notice);
 
     /// The read-only half of ApplyValueEdits: whether it would route
     /// \p notice, and in \p readPaths the property paths the notice names
     /// that anything in the program can read -- the paths a frame cache must
     /// still retire for. A path read by nothing is left out.
     bool DryRunValueEdits(const UsdNotice::ObjectsChanged &notice,
-                          std::vector<SdfPath> *readPaths,
-                          bool skipPatchableAvars = false) const;
+                          std::vector<SdfPath> *readPaths) const;
 
     /// Places the standing interactive overrides for the generations that
     /// follow, returning false when one of them names something the program

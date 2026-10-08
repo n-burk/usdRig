@@ -5,7 +5,6 @@
 #include "rigEvaluatorPropertyBindings.h"
 #include "rigEvaluatorDependencies.h"
 #include "rigEvaluatorConstraints.h"
-#include "bakedProgramImpl.h"
 
 #include "pxr/base/tf/diagnostic.h"
 #include "pxr/base/tf/getenv.h"
@@ -100,70 +99,6 @@ _NoticeIsAvarValuesOnly(const UsdNotice::ObjectsChanged &notice)
     return sawAvar;
 }
 
-// Whether \p notice is nothing but new values (or a value's own spec
-// appearing or going away) on avar channels: the numeric transform channels
-// _NoticeIsAvarValuesOnly accepts, and the animator channels the bake reads
-// live (RigExecIsLiveAvarName). The epoch digest reads none of their values
-// -- a switch's index, an IK/FK blend, a dial -- so such a notice cannot
-// move it, and recomputing it whole cost ~150 ms per click on the biped.
-bool
-_NoticeIsAvarChannelValuesOnly(const UsdNotice::ObjectsChanged &notice)
-{
-    static const std::string kChannels[] = {
-        "avars:tx", "avars:ty", "avars:tz", "avars:sx", "avars:sy",
-        "avars:sz", "avars:rx", "avars:ry", "avars:rz", "avars:rspin",
-        "avars:unitScaleFactor"};
-    const auto channel = [](const std::string &name) {
-        if (RigExecIsLiveAvarName(name)) {
-            return true;
-        }
-        for (const std::string &avar : kChannels) {
-            if (name == avar) {
-                return true;
-            }
-        }
-        return false;
-    };
-    if (!notice.GetResolvedAssetPathsResyncedPaths().empty()) {
-        return false;
-    }
-    static const TfToken kDefault("default");
-    static const TfToken kTimeSamples("timeSamples");
-    static const TfToken kSpline("spline");
-    static const TfToken kTypeName("typeName");
-    static const TfToken kCustom("custom");
-    bool sawAvar = false;
-    // A new spec restates the type and, for a custom attribute, that it is
-    // custom; neither changes what is read.
-    const auto valueFields = [&](const SdfPath &path, bool resync) {
-        for (const TfToken &field : notice.GetChangedFields(path)) {
-            if (field != kDefault && field != kTimeSamples &&
-                field != kSpline &&
-                !(resync && (field == kTypeName || field == kCustom))) {
-                return false;
-            }
-        }
-        return true;
-    };
-    for (const SdfPath &path : notice.GetResyncedPaths()) {
-        if (!path.IsPropertyPath() || !channel(path.GetName()) ||
-            !valueFields(path, true)) {
-            return false;
-        }
-        sawAvar = true;
-    }
-    for (const SdfPath &path : notice.GetChangedInfoOnlyPaths()) {
-        if (path.IsPrimPath()) {
-            continue;  // ancestor info around the edit
-        }
-        if (!channel(path.GetName()) || !valueFields(path, false)) {
-            return false;
-        }
-        sawAvar = true;
-    }
-    return sawAvar;
-}
-
 // The types whose prims the digest writes the path of for the type alone,
 // wherever under the rig they sit: the discovered joints, controls, volume
 // weights and pose interpolators, and every aggregate solver.
@@ -221,23 +156,12 @@ RigExecRigEvaluator::ClassifyNoticeDisposition(
         return RigExecNoticeDisposition::None;
     }
     std::vector<SdfPath> paths;
-    const bool transformOnly = _NoticeIsAvarValuesOnly(notice);
-    if ((transformOnly || _NoticeIsAvarChannelValuesOnly(notice)) &&
+    if (_NoticeIsAvarValuesOnly(notice) &&
         _bakedProgram->DryRunAvarValueEdits(notice, &paths)) {
-        // Transform channels patched in place; any live channel in the same
-        // edit (an IK/FK blend keyed with what it switches) routes as a
-        // value edit, and its paths join the patched ones so every cached
-        // frame that read either is retired.
-        std::vector<SdfPath> routed;
-        if (transformOnly ||
-            _bakedProgram->DryRunValueEdits(notice, &routed,
-                                            /* skipPatchableAvars = */ true)) {
-            paths.insert(paths.end(), routed.begin(), routed.end());
-            if (patchedPaths) {
-                *patchedPaths = std::move(paths);
-            }
-            return RigExecNoticeDisposition::Patched;
+        if (patchedPaths) {
+            *patchedPaths = std::move(paths);
         }
+        return RigExecNoticeDisposition::Patched;
     }
     if (_bakedProgram->IsInvalidatedBy(notice)) {
         return RigExecNoticeDisposition::Stale;
@@ -647,7 +571,7 @@ RigExecRigEvaluator::_OnObjectsChanged(
         // still skips the skin layouts, the blend samples and the rest.
         _propertyChainBindings.reset();
     }
-    if (!avarValuesOnly && !_NoticeIsAvarChannelValuesOnly(notice)) {
+    if (!avarValuesOnly) {
         if (_NoticeIsDigestSuspect(notice)) {
             _structureDirty = true;
             _NoteCertainStructuralCandidates(notice);
@@ -691,12 +615,6 @@ RigExecRigEvaluator::_OnObjectsChanged(
             // (impossible on this thread, but fail-closed) falls back to
             // the stamp bump.
             if (!_bakedProgram->ApplyAvarValueEdits(notice)) {
-                _bakedProgram->BumpProgramStamp();
-            } else if (!_NoticeIsAvarValuesOnly(notice) &&
-                       !_bakedProgram->ApplyValueEdits(
-                           notice, /* skipPatchableAvars = */ true)) {
-                // The live channels the classification routed beside the
-                // patch; fail-closed as above.
                 _bakedProgram->BumpProgramStamp();
             }
         } else if (_lastNoticeDisposition ==

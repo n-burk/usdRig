@@ -93,6 +93,8 @@ bool RigExecLowerSceneSolver(const RigExecSceneDescriptors &scene,const SdfPath 
     if(s.kind==RigExecSolverKind::FkChain) {
         TfToken mode;if(!token("rigExec:controlSpace","",&mode))return false;
         s.parentRelative=mode=="parentRelative";
+        if(!token("rigExec:segmentScale","none",&mode))return false;
+        s.scaleSegments=mode=="toChild";
         for(const auto &control:targets("rigExec:controls"))if(providerExists(control)) {
             result.controls.push_back(control);s.controlRests.push_back(rest(control).points);
         }
@@ -112,7 +114,14 @@ bool RigExecLowerSceneSolver(const RigExecSceneDescriptors &scene,const SdfPath 
         result.space=first("rigExec:space",true);
         if(!bind("rigExec:spaceMatrix",GfMatrix4d(1.0)) || !bind("rigExec:preferredBendRadians",0.0) ||
            !bind("rigExec:upperLengthOffset",0.0) || !bind("rigExec:lowerLengthOffset",0.0) ||
-           !bind("inputs:stretch",1.0f) || !bind("inputs:softness",0.0f))return false;
+           !bind("inputs:stretch",1.0f) || !bind("inputs:softness",0.0f) ||
+           !bind("inputs:pin",0.0f) || !bind("inputs:upperScale",1.0) || !bind("inputs:lowerScale",1.0) ||
+           !bind("inputs:softDistance",0.0f) || !bind("inputs:twist",0.0f))return false;
+        TfToken policy,scaling;
+        if(!token("rigExec:stretchPolicy","uniformSegments",&policy) ||
+           !token("rigExec:segmentScale","none",&scaling) ||
+           !read(path.AppendProperty(TfToken("rigExec:scaleCalibration")),UsdTimeCode::Default(),&s.ikParams.limb.scaleCalibration,true))return false;
+        s.ikParams.softDistancePolicy=policy=="softDistance";s.ikParams.scaleSegments=scaling=="toChild";
         s.ikParams.preferredBendRadians=initial("rigExec:preferredBendRadians",0.0);
         s.ikParams.stretch=initial("inputs:stretch",1.0f);
         s.ikParams.softness=initial("inputs:softness",0.0f);
@@ -299,7 +308,10 @@ bool RigExecRefreshSolverParameters(RigExecSolverKind kind,
             value("rigExec:preferredBendRadians",0.0,&input.bend) &&
             value("rigExec:upperLengthOffset",0.0,&input.upperOffset) &&
             value("rigExec:lowerLengthOffset",0.0,&input.lowerOffset) &&
-            value("inputs:stretch",1.0f,&input.stretch) && value("inputs:softness",0.0f,&input.softness);
+            value("inputs:stretch",1.0f,&input.stretch) && value("inputs:softness",0.0f,&input.softness) &&
+            value("inputs:pin",0.0f,&input.pin) && value("inputs:upperScale",1.0,&input.upperScale) &&
+            value("inputs:lowerScale",1.0,&input.lowerScale) && value("inputs:softDistance",0.0f,&input.softDistance) &&
+            value("inputs:twist",0.0f,&input.limbTwist);
     case RigExecSolverKind::BlendPointFrames: {
         float weight=0;
         if(!value("inputs:weight",0.0f,&weight))return false;

@@ -46,14 +46,12 @@ def _Check(condition, message):
 class _Session(object):
     """A compiled biped and an evaluate(overrides, time) over a base pose."""
 
-    def __init__(self, mode=None):
+    def __init__(self):
         import _rigexec
         self.stage = Usd.Stage.Open(os.path.join(
             _ROOT, "examples", "biped", "Biped_stack.usda"))
         self.rig = _rigexec.Rig(self.stage, "/Biped/Rig")
         self.rig.compile()
-        if mode is not None:
-            self.rig.evaluation_mode = mode
         self.rig.publish_weight_fields = False
         self.base = {}
 
@@ -241,14 +239,12 @@ def TestPlanPicksTheOtherHalf(session, limbs):
 def main():
     session = _Session()
     limbs = TestDiscovery(session)
-    TestRandomPoses(session, limbs, session.rig.evaluation_mode)
+    TestRandomPoses(session, limbs, "graph")
     TestRoundTrip(session, limbs)
     TestStretch(session, limbs)
     TestFootRollKept(session, limbs)
     TestRigWrittenUntouched(session, limbs)
     TestPlanPicksTheOtherHalf(session, limbs)
-    dynamic = _Session("dynamic")
-    TestRandomPoses(dynamic, ikfkMatch.FindLimbs(dynamic.stage), "dynamic")
     if _failures:
         print("%d failure(s)" % len(_failures))
         return 1

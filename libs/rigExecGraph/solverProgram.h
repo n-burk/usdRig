@@ -28,7 +28,7 @@ using RigExecSolverRest = std::array<GfVec3d,4>;
 /// never this record. All rest data is in rig-common row-vector space.
 struct RigExecSolverRecord {
     RigExecSolverKind kind = RigExecSolverKind::FkChain;
-    bool degenerate=false, parentRelative=false, hasStart=false;
+    bool degenerate=false, parentRelative=false, hasStart=false, scaleSegments=false;
     std::vector<RigExecSolverRest> controlRests, jointRests;
     std::vector<bool> restIsLive;
     RigExecSolverRest startRest{};
@@ -59,7 +59,8 @@ struct RigExecSolverInputs {
     int ribbonSampleCount=0;
     bool refreshIkParams=false;
     double bend=0,upperOffset=0,lowerOffset=0;
-    float stretch=1,softness=0;
+    float stretch=1,softness=0,pin=0,softDistance=0,limbTwist=0;
+    double upperScale=1,lowerScale=1;
     GfMatrix4d ikSpace=GfMatrix4d(1.0);
     bool hasSpace=false;
     RigExecSolverRest spaceRest{};

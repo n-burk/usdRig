@@ -2915,6 +2915,9 @@ def "Biped"
             )
             {
                 double inputs:lowerScale.connect = </Biped/Rig/Main/Shot/Aux/Controls/L_Arm.avars:stretchBottom>
+                float inputs:pin (
+                    rigExecReadPhase = "final"
+                )
                 float inputs:pin.connect = </Biped/Rig/Main/Shot/Aux/Controls/L_Arm.limb:pinWeight>
                 float inputs:softDistance.connect = </Biped/Rig/Main/Shot/Aux/Controls/L_Arm.avars:softStretch>
                 float inputs:stretch.connect = </Biped/Rig/Main/Shot/Aux/Controls/L_Arm.avars:stretch>
@@ -2976,6 +2979,9 @@ def "Biped"
             )
             {
                 double inputs:lowerScale.connect = </Biped/Rig/Main/Shot/Aux/Controls/R_Arm.avars:stretchBottom>
+                float inputs:pin (
+                    rigExecReadPhase = "final"
+                )
                 float inputs:pin.connect = </Biped/Rig/Main/Shot/Aux/Controls/R_Arm.limb:pinWeight>
                 float inputs:softDistance.connect = </Biped/Rig/Main/Shot/Aux/Controls/R_Arm.avars:softStretch>
                 float inputs:stretch.connect = </Biped/Rig/Main/Shot/Aux/Controls/R_Arm.avars:stretch>
@@ -3037,6 +3043,9 @@ def "Biped"
             )
             {
                 double inputs:lowerScale.connect = </Biped/Rig/Main/Shot/Aux/Controls/L_Leg.avars:stretchBottom>
+                float inputs:pin (
+                    rigExecReadPhase = "final"
+                )
                 float inputs:pin.connect = </Biped/Rig/Main/Shot/Aux/Controls/L_Leg.limb:pinWeight>
                 float inputs:softDistance.connect = </Biped/Rig/Main/Shot/Aux/Controls/L_Leg.avars:softStretch>
                 float inputs:stretch.connect = </Biped/Rig/Main/Shot/Aux/Controls/L_Leg.avars:stretch>
@@ -3099,6 +3108,9 @@ def "Biped"
             )
             {
                 double inputs:lowerScale.connect = </Biped/Rig/Main/Shot/Aux/Controls/R_Leg.avars:stretchBottom>
+                float inputs:pin (
+                    rigExecReadPhase = "final"
+                )
                 float inputs:pin.connect = </Biped/Rig/Main/Shot/Aux/Controls/R_Leg.limb:pinWeight>
                 float inputs:softDistance.connect = </Biped/Rig/Main/Shot/Aux/Controls/R_Leg.avars:softStretch>
                 float inputs:stretch.connect = </Biped/Rig/Main/Shot/Aux/Controls/R_Leg.avars:stretch>

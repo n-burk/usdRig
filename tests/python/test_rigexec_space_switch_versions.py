@@ -292,11 +292,14 @@ class _Biped(object):
         neck.GetRelationship("rigExec:sources").SetTargets([
             _BIPED_CONTROLS + "M_Body/M_Torso/M_Chest/M_ChestTop", world,
             _UPFACE])
+        head.GetAttribute("rigExec:spaceLabels").Set(["local", "world"])
+        head.GetAttribute("rigExec:rotationFilters").Set(["all", "all"])
+        neck.GetAttribute("rigExec:rotationFilters").Set(["all", "all", "all"])
         neck.GetAttribute("rigExec:spaceLabels").Set(
             ["local", "world", "face"])
         _Key(self.stage.GetPrimAtPath(_NECK).GetAttribute("avars:space"),
              (0.0, 2.0, 1.5, 0.0))
-        _Key(self.stage.GetPrimAtPath(_SKULL).GetAttribute("avars:space"),
+        _Key(self.stage.GetAttributeAtPath(head.GetRelationship("rigExec:activeSpaceAttribute").GetTargets()[0]),
              (1.0, 0.0, 0.5, 1.0))
         _Key(_Avar(self.stage, _NECK, "rx"), (0.0, 20.0, -15.0, 10.0))
         _Key(_Avar(self.stage, _BIPED_CONTROLS + "M_Body", "tx"),

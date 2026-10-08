@@ -417,6 +417,39 @@ bool RigExecBakedBindOwnPropertySpaces(RigExecBakedProgramImpl *program,
             B.ladders[slot].spaceValues[channel]=int(value);
         }
     }
+    // A provider consumes the final revisions of its own default channels.
+    // Keep each property's raw value available to the mover that produces it.
+    const char *defaults[]={"default:tx","default:ty","default:tz",
+        "default:rx","default:ry","default:rz"};
+    for (size_t index=0; index<B.providerProgram.ops.size(); ++index) {
+        auto &op=B.providerProgram.ops[index];
+        if (op.kind != RigExecProviderOpKind::DefaultSpace) continue;
+        for (size_t channel=0; channel<6; ++channel) {
+            const SdfPath consumer=op.owner.AppendProperty(TfToken(defaults[channel]));
+            const auto chain=std::find_if(B.propertyChains.begin(),B.propertyChains.end(),
+                [&](const auto &item){return item.target==consumer && !item.revisions.empty();});
+            if (chain==B.propertyChains.end()) continue;
+            const auto prior=op.inputs[3+channel];
+            const std::string key="provider:ownDefaultFinal:"+consumer.GetString();
+            const auto existing=B.providerProgram.valueIds.find(key);
+            if (existing!=B.providerProgram.valueIds.end()) {
+                op.inputs[3+channel]=existing->second;
+                continue;
+            }
+            const auto value=RigExecValueId(B.providerProgram.valueKeys.size());
+            B.providerProgram.valueKeys.push_back(key);
+            B.providerProgram.valueIds.emplace(key,value);
+            const auto seed=B.providerValues.values[size_t(prior)];
+            B.providerValues.values.push_back(seed);
+            B.providerProgram.routedInputs.push_back({value,consumer,consumer,TfToken("final")});
+            op.inputs[3+channel]=value;
+        }
+        auto &reads=B.providerProgram.descriptors[index].reads;
+        reads.clear();
+        for (auto value : op.inputs) if (value!=UINT64_MAX) reads.push_back(value);
+        std::sort(reads.begin(),reads.end());
+        reads.erase(std::unique(reads.begin(),reads.end()),reads.end());
+    }
     return true;
 }
 

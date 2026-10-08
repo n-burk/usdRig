@@ -1774,6 +1774,11 @@ _SampleWithPinnedChainBindings(
                                   &sampled, layer);
         });
     }
+    for(const auto &operation:B.autoClavicles) {
+        _VisitAutoClavicleInputs(operation,[&](const auto &input) {
+            _SampleFlaggedBinding(input,&refreshed,readFlags,time,&sampled,layer);
+        });
+    }
     for (const RigExecBakedProgramImpl::SpaceSwitch &spaceSwitch :
          B.spaceSwitches) {
         _VisitSpaceSwitchInputs(spaceSwitch, [&](const auto &input) {
@@ -1788,10 +1793,6 @@ _SampleWithPinnedChainBindings(
                                   &sampled, layer);
         });
     }
-    _VisitComposeInputs(B, [&](const auto &input) {
-        _SampleFlaggedBinding(input, resolved, &refreshed, overrideFlags,
-                              time, &sampled, chainFresh);
-    });
     for (const RigExecBakedProgramImpl::Solver &solver : B.solvers) {
         _SampleSolverBindings(solver, &refreshed, readFlags, time, &sampled,
                               layer);
@@ -2341,6 +2342,11 @@ RigExecSampleFrameInputsWithBurstCache(
                                   &sampled, layer);
         });
     }
+    for(const auto &operation:B.autoClavicles) {
+        _VisitAutoClavicleInputs(operation,[&](const auto &input) {
+            _SampleFlaggedBinding(input,&refreshed,readFlags,time,&sampled,layer);
+        });
+    }
     for (size_t i : cache->spaceSwitchSites) {
         _VisitSpaceSwitchInputs(B.spaceSwitches[i], [&](const auto &input) {
             _SampleFlaggedBinding(input, &refreshed, readFlags, time,
@@ -2354,11 +2360,6 @@ RigExecSampleFrameInputsWithBurstCache(
                                   &sampled, layer);
         });
     }
-    _VisitComposeInputs(B, [&](const auto &input) {
-        _SampleFlaggedBinding(input, resolved, &refreshed,
-                              cache->overrideFlags, time, &sampled,
-                              chainFresh);
-    });
     for (size_t i : cache->solverSites) {
         _SampleSolverBindings(B.solvers[i], &refreshed, readFlags, time,
                               &sampled, layer);

@@ -14,6 +14,7 @@ Storm viewport with the rig guides on.
 | ![How operators fire](../icons/concept.png) | [How operators fire](concepts/how-operators-fire.md) | The mental model and the evaluation order behind every UsdRig rig — who reads what, who writes what, and when. |
 | ![Evaluation and independent checks](../icons/concept.png) | [Evaluation and independent checks](concepts/baked-vs-dynamic.md) | One production operation graph for native, frozen and runtime evaluation, with optional independent judges. |
 | ![What warming does](../icons/concept.png) | [What warming does](concepts/frame-cache-warming.md) | The per-frame cache in one page: what warms, what you see, what it costs, and the switches. |
+| ![Tutorial: a rolling ball rig](../icons/concept.png) | [Tutorial: a rolling ball rig](concepts/tutorial-rolling-ball.md) | Build the classic bouncing-ball rig in usdview, node by node, and make the roll a consequence of the travel instead of a channel to key. |
 | ![Compression-driven wrinkles](../icons/concept.png) | [Compression-driven wrinkles](concepts/wrinkle-deformation.md) | How compression and a stable fold guide produce quasistatic wrinkles, with pins, attachment bounds, and local collision planes. |
 | ![Tutorial: Godot and baked rigs](../icons/concept.png) | [Tutorial: Godot and baked rigs](concepts/tutorial-godot-baked-rig.md) | Build the ball in usdview, bake one self-contained rig asset, and drive its exposed controllers in Godot, with GIF checkpoints. |
 | ![External mover plugins](../icons/concept.png) | [External mover plugins](concepts/external-movers.md) | Build and register point movers from a separate repository for native, frozen and .rigexec playback. |
@@ -31,6 +32,7 @@ Storm viewport with the rig guides on.
 | ![Control](../icons/control.png) | [Control](nodes/control.md) | The animator's handle: animation is authored on its avars. |
 | ![Joint](../icons/joint.png) | [Joint](nodes/joint.md) | A posed output of the rig: solvers write it, movers read it. |
 | ![Space Switch](../icons/concept.png) | [Space Switch](nodes/space_switch.md) | Gives a control a labelled list of parent spaces, selected or blended by an index. |
+| ![Auto Clavicle](../icons/concept.png) | [Auto Clavicle](nodes/auto_clavicle.md) | Carries the shoulder with the arm's swing in FK or IK. |
 
 ## Solvers
 

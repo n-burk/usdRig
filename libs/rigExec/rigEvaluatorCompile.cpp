@@ -2254,7 +2254,12 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
             }
         }
         UsdGeomXformCache meshXforms(UsdTimeCode::Default());
-        const GfMatrix4d meshWorldInverse =
+        const UsdPrim assetRoot =
+            _stage->GetPrimAtPath(_rigPath.GetParentPath());
+        const GfMatrix4d assetWorld = assetRoot && !assetRoot.IsPseudoRoot()
+            ? meshXforms.GetLocalToWorldTransform(assetRoot)
+            : GfMatrix4d(1.0);
+        const GfMatrix4d assetToMesh = assetWorld *
             meshXforms.GetLocalToWorldTransform(mesh).GetInverse();
         // Source, its sibling space and the rig's space, each at most one
         // frame provider: bound as the transform, transformSpace and carry
@@ -2285,7 +2290,7 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
             meshPath.AppendProperty(TfToken("faceVertexCounts"));
         base.binding.topologyIndices =
             meshPath.AppendProperty(TfToken("faceVertexIndices"));
-        base.binding.meshWorldInverse = meshWorldInverse;
+        base.binding.meshWorldInverse = assetToMesh;
         if (!oneProvider("rigExec:sources", &base.binding.transform) ||
             !oneProvider("rigExec:sourceSpace",
                          &base.binding.transformSpace) ||
@@ -2343,6 +2348,34 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
                 derived.binding.shaderDials.push_back(dial);
             }
             newGraphDerivedChains[projector.target].push_back(derived);
+        }
+    }
+
+    // One output cannot be both a spatial frame and packed scalar dials.
+    // Same-semantic overwrites retain their existing ordered behavior.
+    std::map<SdfPath, std::pair<RigExecRevisionOp, SdfPath>> matrixOutputs;
+    for (const auto &[pointsTarget, revisions] : newGraphDerivedChains) {
+        for (const _GraphRevision &revision : revisions) {
+            if (revision.op != RigExecRevisionOp::SurfaceProjector &&
+                revision.op != RigExecRevisionOp::ShaderDials) {
+                continue;
+            }
+            const auto [found, inserted] = matrixOutputs.emplace(
+                revision.target, std::make_pair(revision.op, revision.moverPath));
+            if (!inserted && found->second.first != revision.op) {
+                const SdfPath spatial =
+                    revision.op == RigExecRevisionOp::SurfaceProjector
+                        ? revision.moverPath : found->second.second;
+                const SdfPath dials =
+                    revision.op == RigExecRevisionOp::ShaderDials
+                        ? revision.moverPath : found->second.second;
+                return fail("shader matrix output " + revision.target.GetString() +
+                            " is a spatial SurfaceProjector frame from " +
+                            spatial.GetString() + " and packed ShaderDials from " +
+                            dials.GetString() + "; choose different "
+                            "rigExec:shaderPrimvar and "
+                            "rigExec:shaderDialPrimvar names", {spatial, dials});
+            }
         }
     }
 

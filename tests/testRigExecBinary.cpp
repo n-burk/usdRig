@@ -783,7 +783,42 @@ _ComputedRunChains(const fb::RigExecWireFile &file,
 {
     using Tag = _ChainValue::Tag;
     overlay->clear();
+    // Final reads may point forward in the serialized chain table. Order
+    // this independent reference evaluator by those declared dependencies.
+    std::vector<size_t> order;
+    std::vector<uint8_t> visited(file.propertyChains.size(), 0);
+    std::function<bool(size_t)> visit = [&](size_t c) {
+        if (visited[c] == 2) return true;
+        if (visited[c] == 1) return false;
+        visited[c] = 1;
+        for (const auto &revision : file.propertyChains[c].revisions) {
+            for (const auto *read : {revision.enabled.get(),
+                    revision.defaultWeight.get(), revision.value.get(),
+                    revision.min.get(), revision.max.get()}) {
+                for (const auto *candidates : {&read->propertyCandidates,
+                                               &read->doubleCandidates}) {
+                    for (const auto &candidate : *candidates) {
+                        if (candidate.version < 0) continue;
+                        for (size_t other = 0; other < file.propertyChains.size(); ++other) {
+                            const auto &source = file.propertyChains[other];
+                            if (other != c && candidate.slot == source.target &&
+                                uint32_t(candidate.version) > source.versionBase &&
+                                !visit(other)) return false;
+                        }
+                    }
+                }
+            }
+        }
+        visited[c] = 2;
+        order.push_back(c);
+        return true;
+    };
     for (size_t c = 0; c < file.propertyChains.size(); ++c) {
+        const bool ordered = visit(c);
+        CHECK(ordered);
+        if (!ordered) return false;
+    }
+    for (size_t c : order) {
         const fb::RigExecWirePropertyChain &chain = file.propertyChains[c];
         const fb::InputSlot &target = file.inputs[chain.target];
         const std::string targetText = _BinaryText(file, target.name());
@@ -1121,7 +1156,7 @@ _BinaryCheckInputs(const RigExecBakedProgramImpl &program,
     std::string previous;
     for (size_t s = 0; s < file.inputs.size(); ++s) {
         const std::string name = _BinaryText(file, file.inputs[s].name());
-        CHECK(s == 0 || previous < name);
+        CHECK(s == 0 || s == file.listedInputs || previous < name);
         previous = name;
     }
     size_t registered = 0, crossing = 0;

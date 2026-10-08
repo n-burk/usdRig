@@ -248,6 +248,33 @@ The avar pose is avars * posed:defaultSpace * inverse(parent:defaultSpace)
 
 ### Node parameters
 
+#### `rigExec:channelSpaces`
+
+*Relationship.*
+
+Optional ordered pair of control providers publishing the
+rotation and translation channel bases in asset space. This is an
+explicit editing contract for a connected posed:space computation
+that consumes this control's unconnected TRS avars: rotation is
+S * R * rotationSpace, and position is translationSpace.Transform(T).
+A channel-independent scale multiplier before R is allowed. Hosts
+must read all three frames from the same evaluated publication and
+refuse editing if the providers are missing or singular. The pair
+does not replace evaluation or authorize editing an arbitrary solver
+output. Pivot edits are unavailable for this contract.
+
+#### `rigExec:translationEnabled`
+
+*Type:* `uniform bool`. *Default:* `true`.
+
+Whether a channelSpaces control accepts translation edits. Rotation and scale remain editable when false.
+
+#### `guide:source`
+
+*Relationship.*
+
+Optional single rig control or joint whose evaluated frame places the guide. Picking still selects the owning control.
+
 #### `avars:sx`
 
 *Type:* `double`. *Default:* `1`.

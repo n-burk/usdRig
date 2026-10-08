@@ -344,8 +344,8 @@ RigExecBakeToBinary(RigExecRigEvaluator &evaluator,
     RigExecBakePools pools;
     if (!RigExecBakeFillFile(program, inputs.GetInputs(), &paths, &pools,
                              &file, &why) ||
-        !RigExecBakeCaptureStatics(program, inputs.GetInputs(), enumerated,
-                                   &paths, &pools, &file, &why)) {
+        !RigExecBakeCaptureStatics(program, bakeTime, inputs.GetInputs(),
+                                   enumerated, &paths, &pools, &file, &why)) {
         return Fail("cannot build the .rigexec file: " + why);
     }
     external.Fill(program, bakeTime, inputs.GetInputs(), &paths, &pools, &file.externalMovers);

@@ -54,13 +54,14 @@ enum class RigExecBakeReadFamily : uint8_t {
     Solver,
     Constraint,
     WeightObject,
+    AutoClavicle,
 };
 
 /// A registered program read and the table field it fills. Fields are
 /// numbered in each table's field order: ladder 0-15 (rest, default and
 /// posed space, six rest avars, six default avars, rotation order), space
 /// switch 0 (active), interpolator 0 (enabled) then 1 + k (the k-th dial),
-/// solver 0-13, constraint 0-20, weight object 0-18, avar binding 0.
+/// solver 0-18, constraint 0-21, weight object 0-18, avar binding 0.
 struct RigExecBakeRegisteredRead {
     RigExecBakeReadFamily family = RigExecBakeReadFamily::Ladder;
     uint32_t object = 0;

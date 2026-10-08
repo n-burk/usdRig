@@ -16,6 +16,7 @@
 #include "rigExecGraph/weightProgram.h"
 #include "rigExecGraph/geometrySceneLowering.h"
 #include "bakedProgram.h"
+#include "rigExecGraph/autoClavicleGraph.h"
 #include "frameExtraction.h"
 #include "moverGraph.h"
 #include "crossDomainInputs.h"
@@ -33,7 +34,6 @@
 #include "rigExecGraph/constraintProgram.h"
 #include "rigExecGraph/poseProgram.h"
 
-#include "rigExecMath/autoClavicleKernel.h"
 #include "rigExecMath/avarScale.h"
 #include "rigExecMath/dualQuat.h"
 #include "rigExecMath/pointFrame.h"
@@ -65,7 +65,6 @@
 #include <cmath>
 #include <cstdint>
 #include <functional>
-#include <limits>
 #include <map>
 #include <memory>
 #include <set>
@@ -2142,19 +2141,8 @@ struct RigExecBakedProgramImpl {
         int root = -1, mid = -1, end = -1, pole = -1;
         // TwoBoneIk: rests and the measured bone lengths, both epoch-constant
         RigExecBakedInput<double> bend, upperOffset, lowerOffset;
-        RigExecBakedInput<float> stretch, softness;
-        /// stretchPolicy softDistance: the limb inputs (inputs:pin,
-        /// upperScale, lowerScale, softDistance) and inputs:twist, degrees.
-        RigExecBakedInput<float> pin, softDistance, limbTwist;
+        RigExecBakedInput<float> stretch, softness, pin, softDistance, limbTwist;
         RigExecBakedInput<double> upperScale, lowerScale;
-        /// rigExec:segmentScale "toChild" on an FK chain.
-        bool fkScaleSegments = false;
-        /// What the LimbSolvers binary section carries for this solver.
-        bool HasLimbOptions() const
-        {
-            return ikParams.softDistancePolicy || ikParams.scaleSegments ||
-                   fkScaleSegments;
-        }
         double upperLengthBase = 0, lowerLengthBase = 0;
         /// rigExec:spaceMatrix: an explicit factor, composed after the
         /// space prim below.
@@ -2359,7 +2347,7 @@ struct RigExecBakedProgramImpl {
         /// reads them.
         RigExecBakedInput<GfVec3d> poleVector;
         RigExecBakedInput<double> twistDegrees;
-        RigExecBakedInput<float> ikStretch;
+        RigExecBakedInput<float> stretch;
     };
     std::vector<Constraint> constraints;
 
@@ -2452,42 +2440,32 @@ struct RigExecBakedProgramImpl {
     };
     std::vector<SpaceCheckpoint> switchFrameContexts;
     std::vector<GfMatrix4d> switchFrames;
+    struct AutoClavicle {
+        struct FrameRead {
+            RigExecValueId value=UINT64_MAX;
+            int slot=-1;
+            std::string computation;
+            std::vector<int> recompose;
+        };
+        struct ScalarRead {
+            RigExecValueId value=UINT64_MAX;
+            bool isFloat=false;
+            RigExecBakedInput<float> narrow;
+            RigExecBakedInput<double> wide;
+        };
+        int slot=-1;
+        RigExecBoundAutoClavicle operation;
+        RigExecTypedValueStore values;
+        std::vector<FrameRead> frames;
+        std::vector<ScalarRead> scalars;
+    };
+    std::vector<AutoClavicle> autoClavicles;
+    std::vector<int> autoClavicleBySlot;
     std::vector<SpaceSwitch> spaceSwitches;
     /// Per provider slot: its switch's index, or -1. Read once per slot by
     /// the compose, so the ordinary rig pays one array lookup and nothing
     /// else for a feature it does not use.
     std::vector<int> spaceSwitchBySlot;
-
-    /// One compiled RigExecAutoClavicle, in the program's own terms. The
-    /// compose applies it to its target slot right after the slot's own
-    /// compose (and space switch), translating the frame by
-    /// RigExecAutoClavicleShift before any descendant reads it. The first FK
-    /// control is a direct child of the target and is composed inline from
-    /// its avars for the direction, exactly as its own compose will later.
-    struct AutoClavicle {
-        int slot = -1;
-        int pivotSlot = -1;
-        int anchorSlot = -1;
-        int fkSlot[3] = {-1, -1, -1};
-        int ikTargetSlot = -1;
-        int poleSlot = -1;
-        RigExecAutoClavicleConstants constants;
-        /// The two channels, bound in the attribute's own type (the
-        /// biped's IK/FK dial is float, its other avars double).
-        RigExecBakedInput<double> ikBlendInput;
-        RigExecBakedInput<float> ikBlendFloat;
-        bool ikBlendIsFloat = false;
-        RigExecBakedInput<double> amountInput;
-        RigExecBakedInput<float> amountFloat;
-        bool amountIsFloat = false;
-        /// Index into solvers of the two-bone IK whose effector and pole are
-        /// this clavicle's IK target and pole, when that IK stretches and
-        /// pins; -1 otherwise. Its limb inputs shape the IK estimate.
-        int limbSolver = -1;
-    };
-    std::vector<AutoClavicle> autoClavicles;
-    /// Per provider slot: its auto clavicle's index, or -1.
-    std::vector<int> autoClavicleBySlot;
 
     /// Set when the compose groups could not be put in dependency order.
     /// With every switch read bound to its version this never happens on a
@@ -4131,31 +4109,6 @@ std::vector<int> RigExecBakedMergeCommitShards(
     RigExecBakedProgramImpl *program,
     std::vector<RigExecBakedCommitShard> *shards);
 
-/// Whether \p name is an animator's channel the bake reads live rather
-/// than folding: an `avars:` property that is neither a transform channel
-/// (those patch in place) nor one of the avars that choose how a frame
-/// composes (structure). The same names are value-only for the epoch
-/// digest, which reads none of their values.
-inline bool
-RigExecIsLiveAvarName(const std::string &name)
-{
-    static const std::string kAvars("avars:");
-    if (!TfStringStartsWith(name, kAvars)) {
-        return false;
-    }
-    static const char *const kNotLive[] = {
-        "avars:tx", "avars:ty", "avars:tz", "avars:sx", "avars:sy",
-        "avars:sz", "avars:rx", "avars:ry", "avars:rz", "avars:rspin",
-        "avars:unitScaleFactor", "avars:rotationOrder", "avars:rotationSign",
-        "avars:defaultSpace"};
-    for (const char *other : kNotLive) {
-        if (name == other) {
-            return false;
-        }
-    }
-    return true;
-}
-
 /// Registers \p input, read as \p name on \p prim through \p walk, into
 /// \p sink: the bound/varying counts, the invalidation index, and -- for an
 /// input with a head -- an override number and the paths an override on it
@@ -4165,28 +4118,6 @@ void
 RigExecBakedRecordBind(Sink *sink, const UsdPrim &prim, const char *name,
                        RigExecBakedInput<T> *input, const SdfPathVector &walk)
 {
-    // An input that resolves to an avar is an animator's channel -- an IK/FK
-    // blend, a space index, a dial -- and is edited interactively. Read live
-    // the long way, as a keyed avar is (RigExecProgramAvarPatch), rather than
-    // folded as a constant: a folded value can only change by rebuilding the
-    // program, and that rebuild is what made every such edit stall the UI.
-    // Live, an edit routes as a value edit and re-runs only its cone.
-    // The transform channels keep their in-place patch (patchableAvars),
-    // and the avars that choose how a frame composes stay folded.
-    if (input->head && !input->varying) {
-        const auto live = [](const std::string &name) {
-            return RigExecIsLiveAvarName(name);
-        };
-        bool avar = live(input->head.GetName());
-        for (const SdfPath &path : walk) {
-            avar = avar || (path.IsPropertyPath() && live(path.GetName()));
-        }
-        if (avar) {
-            input->varying = true;
-            input->query = UsdAttributeQuery();
-            input->resolvedAttr = input->head;
-        }
-    }
     if (prim && prim.GetAttribute(TfToken(name))) {
         sink->Bound(input->varying);
     }

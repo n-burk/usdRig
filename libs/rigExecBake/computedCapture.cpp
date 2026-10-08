@@ -1259,6 +1259,10 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
             place(&ladder.rotationSign, Family::Ladder, i, 20);
             place(&ladder.interveningSpace, Family::Ladder, i, 21);
         }
+        for(size_t i=0;i<B.autoClavicles.size();++i)for(size_t k=0;k<B.autoClavicles[i].scalars.size();++k) {
+            const auto &read=B.autoClavicles[i].scalars[k];
+            place(read.isFloat?static_cast<const void *>(&read.narrow):static_cast<const void *>(&read.wide),Family::AutoClavicle,i,k);
+        }
         for (size_t i = 0; i < B.spaceSwitches.size(); ++i) {
             if(B.spaceSwitches[i].tokenIndex)
                 place(&B.spaceSwitches[i].activeTokenInput, Family::SpaceSwitch, i, 0);
@@ -1278,7 +1282,7 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
                 &s.stretch,        &s.softness,       &s.blendWeight,
                 &s.preserveVolume, &s.midFollowWeight, &s.roll,
                 &s.twist,          &s.minLengthRatio, &s.twistTurns,
-                &s.ribbonSampleCount, &s.ikSpace};
+                &s.ribbonSampleCount, &s.ikSpace, &s.pin, &s.upperScale, &s.lowerScale, &s.softDistance, &s.limbTwist};
             for (size_t f = 0; f < std::size(fields); ++f) {
                 place(fields[f], Family::Solver, i, f);
             }
@@ -1292,7 +1296,7 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
                 &c.rX,        &c.rY,            &c.rZ,
                 &c.sX,        &c.sY,            &c.sZ,
                 &c.aimVector, &c.upVector,      &c.rotationOffset,
-                &c.worldUpVector, &c.poleVector, &c.twistDegrees};
+                &c.worldUpVector, &c.poleVector, &c.twistDegrees, &c.stretch};
             for (size_t f = 0; f < std::size(fields); ++f) {
                 place(fields[f], Family::Constraint, i, f);
             }

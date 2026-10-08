@@ -45,10 +45,9 @@ RigExecUpstreamSlotType(const SdfValueTypeName &typeName)
 
 namespace {
 
-// The array part of admission. Off until the .rigexec format carries array
-// slots (AI); a test turns it on. Read on the owning thread and the
-// sampler's, set only by a test between evaluations.
-std::atomic<bool> _upstreamArrays{false};
+// Read on the owning thread and the sampler's; a test may suspend array
+// admission between evaluations.
+std::atomic<bool> _upstreamArrays{true};
 
 }  // namespace
 

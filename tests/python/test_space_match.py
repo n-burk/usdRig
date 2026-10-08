@@ -14,7 +14,7 @@ Biped_spaces.usda) and plugin/rigExecUsdview/spaceMatch.py:
      chest carries it (its position matches local) and keeps its rest
      rotation. The auto clavicles are held off for this, since they move
      the swing on purpose.
-  3. The dynamic evaluator and the baked program agree on those frames.
+  3. Independent shared-graph evaluations agree on those frames.
   4. A space switch planned by spaceMatch leaves the control's posed frame
      where it was, for a rotation-only space and for a full one.
 
@@ -61,14 +61,12 @@ def _Attr(path, name):
 class _Session(object):
     """A compiled biped and an evaluate(overrides, time) over a base pose."""
 
-    def __init__(self, mode=None):
+    def __init__(self):
         import _rigexec
         self.stage = Usd.Stage.Open(os.path.join(
             _ROOT, "examples", "biped", "Biped_stack.usda"))
         self.rig = _rigexec.Rig(self.stage, "/Biped/Rig")
         self.rig.compile()
-        if mode is not None:
-            self.rig.evaluation_mode = mode
         self.rig.publish_weight_fields = False
         self.base = {}
 
@@ -157,7 +155,7 @@ def TestRotationOnly(session):
                "%s in local turns with the chest" % control)
 
 
-def TestParity(baked, dynamic):
+def TestParity(baked, fresh):
     turned = {_Attr(CHEST, "avars:rz"): -30.0, _Attr(CHEST, "avars:ry"): 20.0,
               _Attr(C + "/M_Body", "avars:ry"): 25.0}
     for control in (SWING, NECK, HEAD):
@@ -165,9 +163,9 @@ def TestParity(baked, dynamic):
         for index in (0, 1, 2):
             pose = _With(turned, space, index)
             a = baked.Frame(control, pose)
-            b = dynamic.Frame(control, pose)
+            b = fresh.Frame(control, pose)
             _Check(_Max(a, b) < _PARITY,
-                   "%s space %d: baked and dynamic agree (%.3g)"
+                   "%s space %d: reused and fresh graphs agree (%.3g)"
                    % (control, index, _Max(a, b)))
 
 
@@ -209,9 +207,8 @@ def main():
     baked = _Session()
     TestSpaceLists(baked)
     TestRotationOnly(baked)
-    dynamic = _Session("dynamic")
-    TestRotationOnly(dynamic)
-    TestParity(baked, dynamic)
+    fresh = _Session()
+    TestParity(baked, fresh)
     TestMatch(baked)
     if _failures:
         print("%d failure(s)" % len(_failures))

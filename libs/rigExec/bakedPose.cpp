@@ -305,6 +305,13 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
             s.lowerOffset = bind(prim, "rigExec:lowerLengthOffset", 0.0);
             s.stretch = bind(prim, "inputs:stretch", 1.0f);
             s.softness = bind(prim, "inputs:softness", 0.0f);
+            s.pin=bind(prim,"inputs:pin",0.0f);s.softDistance=bind(prim,"inputs:softDistance",0.0f);
+            s.limbTwist=bind(prim,"inputs:twist",0.0f);
+            s.upperScale=bind(prim,"inputs:upperScale",1.0);s.lowerScale=bind(prim,"inputs:lowerScale",1.0);
+            s.ikParams.softDistancePolicy=readToken(prim,"rigExec:stretchPolicy","")=="softDistance";
+            s.ikParams.scaleSegments=readToken(prim,"rigExec:segmentScale","")=="toChild";
+            fold(prim,"rigExec:scaleCalibration");
+            readFact(solverPath.AppendProperty(TfToken("rigExec:scaleCalibration")),UsdTimeCode::Default(),&s.ikParams.limb.scaleCalibration);
             s.ikParams.preferredBendRadians = s.bend.constant;
             s.ikParams.stretch = s.stretch.constant;
             s.ikParams.softness = s.softness.constant;
@@ -789,6 +796,7 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
         // inspects are folded for their SHAPE so that authoring one rebuilds
         // the program rather than silently changing the answer.
         if (c.singleChainIk) {
+            c.stretch=bind(prim,"inputs:stretch",0.0f);
             c.preserveJointOrientation =
                 readToken(prim, "rigExec:orientationMode", "aimX") == "preserve";
             c.ikMode = readToken(prim, "rigExec:solverMode", "rotatePlane") ==
@@ -844,7 +852,7 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
             RigExecBakedProgramImpl::ConstraintArrays &arrays =
                 B.constraintArrays[size_t(c.arrays)];
             arrays.readPole =
-                c.ikMode == RigExecSingleChainIkMode::RotatePlane &&
+            c.ikMode == RigExecSingleChainIkMode::RotatePlane &&
                 c.poleModeObject && !c.poleObjects.empty();
             arrays.poleCount = c.poleObjects.size();
             arrays.poleWeights.assign(arrays.poleCount, 1.0);
@@ -1777,6 +1785,18 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
             // The index itself is declared by
             // RigExecBakedDeclareInputDependencies.
         }
+        for(int slot=group.begin;slot<group.end;++slot) {
+            const int index=(size_t(slot)<B.autoClavicleBySlot.size()?B.autoClavicleBySlot[size_t(slot)]:-1);if(index<0)continue;
+            const auto &ac=B.autoClavicles[size_t(index)];
+            for(const auto &read:ac.frames) {
+                if(read.computation=="computeRestFrame")step.reads.push_back(RigExecBakedOne(RigExecBakedSlotDomain::Rest,read.slot));
+                else if(read.computation=="computeDefaultFrame")step.reads.push_back(RigExecBakedOne(RigExecBakedSlotDomain::Ladder,read.slot));
+                for(int child:read.recompose) {
+                    step.reads.push_back(RigExecBakedOne(RigExecBakedSlotDomain::Avars,child));
+                    step.reads.push_back(RigExecBakedOne(RigExecBakedSlotDomain::Ladder,child));
+                }
+            }
+        }
         step.writes.push_back(RigExecBakedRange(
             RigExecBakedSlotDomain::PoseBase, group.begin, group.end));
         step.writes.push_back(RigExecBakedRange(
@@ -2172,6 +2192,18 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
     // Before the matrices, which read the LAST version of a slot: the table
     // that says which entry that is comes out of this sweep.
     BindPoseVersions(&B);
+    for (auto &step : B.steps) {
+        if (step.kind!=RigExecBakedStepKind::ComposeSubtree) continue;
+        const auto &group=B.composeGroups[size_t(step.object)];
+        for (const auto &ac : B.autoClavicles) {
+            if (ac.slot<group.begin || ac.slot>=group.end) continue;
+            for (const auto &read : ac.frames)
+                if (read.computation.empty() && read.recompose.empty() && read.slot!=ac.slot)
+                    step.reads.push_back(RigExecBakedOne(RigExecBakedSlotDomain::PoseFin,
+                        B.finLast[size_t(read.slot)]));
+        }
+    }
+
     if(!B.providerRefreshError.empty())return;
     for(size_t index=0;index<B.providerRefreshes.size();++index) {
         const auto &refresh=B.providerRefreshes[index];
@@ -2484,6 +2516,8 @@ NoteSolverInputs(const RigExecBakedProgramImpl::Solver &solver,
     NoteInput(solver.lowerOffset, sink);
     NoteInput(solver.stretch, sink);
     NoteInput(solver.softness, sink);
+    NoteInput(solver.pin,sink);NoteInput(solver.upperScale,sink);NoteInput(solver.lowerScale,sink);
+    NoteInput(solver.softDistance,sink);NoteInput(solver.limbTwist,sink);
     NoteInput(solver.blendWeight, sink);
     NoteInput(solver.preserveVolume, sink);
     NoteInput(solver.midFollowWeight, sink);
@@ -2528,6 +2562,7 @@ NoteConstraintInputs(const RigExecBakedProgramImpl::Constraint &constraint,
     // deal harder to forget.
     NoteInput(constraint.poleVector, sink);
     NoteInput(constraint.twistDegrees, sink);
+    NoteInput(constraint.stretch,sink);
     // The authored source-weight, offset and pole-weight tables are NOT
     // noted here: they are not inputs the step reads at all. The prologue
     // re-reads them off the stage each run and compares them by value, and
@@ -2581,6 +2616,10 @@ void NoteStepInputs(const RigExecBakedProgramImpl &B, RigExecBakedDependencySink
         const RigExecBakedComposeGroup &group =
             B.composeGroups[size_t(step.object)];
         for (int slot = group.begin; slot < group.end; ++slot) {
+            const int ac=(size_t(slot)<B.autoClavicleBySlot.size()?B.autoClavicleBySlot[size_t(slot)]:-1);
+            if(ac>=0)for(const auto &read:B.autoClavicles[size_t(ac)].scalars) {
+                if(read.isFloat)NoteInput(read.narrow,sink);else NoteInput(read.wide,sink);
+            }
             const int switchIndex =
                 slot < 0 || size_t(slot) >= B.spaceSwitchBySlot.size()
                     ? -1 : B.spaceSwitchBySlot[size_t(slot)];
@@ -2868,6 +2907,8 @@ RigExecBakedNumberLeaves(RigExecBakedProgramImpl *program)
             for(int slot=group.begin;slot<group.end;++slot) {
                 const int sw=B.spaceSwitchBySlot[size_t(slot)];
                 if(sw>=0) directBindings(&step,[&](const auto &fn) { frozenDetail::_VisitSpaceSwitchInputs(B.spaceSwitches[size_t(sw)],fn); });
+                const int ac=(size_t(slot)<B.autoClavicleBySlot.size()?B.autoClavicleBySlot[size_t(slot)]:-1);
+                if(ac>=0)directBindings(&step,[&](const auto &fn){frozenDetail::_VisitAutoClavicleInputs(B.autoClavicles[size_t(ac)],fn);});
             }
         }
         if(step.kind==RigExecBakedStepKind::RevisionStatic) {
@@ -3379,6 +3420,14 @@ RigExecBakedRequiredRestReads(const RigExecBakedProgramImpl &B,
                 B.composeGroups[size_t(step.object)];
             for (int slot = std::max(0, group.begin); slot < std::min(N, group.end); ++slot) {
                 ladder(slot);
+            }
+            for (const auto &ac : B.autoClavicles) {
+                if (ac.slot < group.begin || ac.slot >= group.end) continue;
+                for (const auto &read : ac.frames) {
+                    if (read.computation == "computeRestFrame") rest(read.slot);
+                    if (read.computation == "computeDefaultFrame") ladder(read.slot);
+                    for (int child : read.recompose) ladder(child);
+                }
             }
             for (const int parent : group.parentSlots) {
                 ladder(parent);
@@ -4100,6 +4149,28 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
                     step->diagnostics.push_back("space switch has no source for "+B.paths[size_t(i)].GetString());
                 }
             }
+            const int autoIndex=(size_t(i)<B.autoClavicleBySlot.size()?B.autoClavicleBySlot[size_t(i)]:-1);
+            if(autoIndex>=0) {
+                auto &ac=B.autoClavicles[size_t(autoIndex)];
+                ac.values.Publish(0,B.base[size_t(i)]);
+                for(const auto &read:ac.frames) {
+                    RigExecPointFrame frame;
+                    if(read.computation=="computeRestFrame")frame=B.restFrames[size_t(read.slot)];
+                    else if(read.computation=="computeDefaultFrame")frame=RigExecFrameFromMatrix(B.defaultRoundTrip[size_t(read.slot)]);
+                    else if(B.paths[size_t(read.slot)].HasPrefix(B.paths[size_t(i)])) {
+                        frame=B.base[size_t(i)];
+                        for(int child:read.recompose)frame=_ComposeUnswitched(B,child,_SpaceOfFrame(frame));
+                    } else frame=B.fin[B.finLast[size_t(read.slot)]];
+                    ac.values.Publish(read.value,frame);
+                }
+                for(const auto &read:ac.scalars) {
+                    if(read.isFloat)ac.values.Publish(read.value,rd(read.narrow),false,true);
+                    else ac.values.Publish(read.value,rd(read.wide),false,true);
+                }
+                std::string invalid;
+                if(!RigExecRunAutoClavicle(ac.operation,&ac.values,&invalid))step->diagnostics.push_back(invalid);
+                if(const auto *frame=ac.values.Read<RigExecPointFrame>(ac.operation.output))B.base[size_t(i)]=*frame;
+            }
             B.fin[size_t(i)] = B.base[size_t(i)];
             B.posedM[size_t(i)] = _SpaceOfFrame(B.base[size_t(i)]);
         }
@@ -4152,8 +4223,9 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
         } else if(s.type=="RigExecTwoBoneIk") {
             s.kind=RigExecSolverKind::TwoBoneIk;
             input.ikSpace=rd(s.ikSpace);
-            input.refreshIkParams=live(s.bend)||live(s.stretch)||live(s.softness)||
-                live(s.upperOffset)||live(s.lowerOffset)||live(s.ikSpace);
+            input.refreshIkParams=true;
+            input.pin=rd(s.pin);input.softDistance=rd(s.softDistance);input.limbTwist=rd(s.limbTwist);
+            input.upperScale=rd(s.upperScale);input.lowerScale=rd(s.lowerScale);
             input.bend=rd(s.bend); input.stretch=rd(s.stretch);input.softness=rd(s.softness);
             input.upperOffset=rd(s.upperOffset);input.lowerOffset=rd(s.lowerOffset);
         } else if(s.type=="RigExecBlendPointFrames") {
@@ -4430,6 +4502,7 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
                 inputsValid = false;
             }
             RigExecSingleChainIkParams params;
+            params.stretch=rd(c.stretch);
             params.mode = c.ikMode;
             params.preserveJointOrientation = c.preserveJointOrientation;
             params.weight = weight;
@@ -4443,7 +4516,7 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
                 params.twistDegrees = rd(c.twistDegrees);
             }
             if (inputsValid &&
-                c.ikMode == RigExecSingleChainIkMode::RotatePlane &&
+            c.ikMode == RigExecSingleChainIkMode::RotatePlane &&
                 c.poleModeObject) {
                 if (c.poleObjects.empty()) {
                     step->diagnostics.push_back(

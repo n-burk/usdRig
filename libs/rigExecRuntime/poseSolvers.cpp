@@ -229,22 +229,16 @@ _RrSolveTwoBoneIk(
                                         (endPos - mid).GetLength() / l2);
     }
 
-    // The space carries into the root and mid frames' axis handles, which
-    // is the scale a child that is not solver-posed inherits. The effector
-    // frame copies a control, which already carries its scale.
     if (params.space != RrMat4d(1.0)) {
         for (size_t f = 0; f < 2; ++f) {
             const RrVec3d origin = out[f].points[0];
             for (size_t a = 1; a < 4; ++a) {
                 const RrVec3d handle = out[f].points[a] - origin;
-                const double len = handle.GetLength();
-                if (len < 1e-12) {
-                    continue;
-                }
-                const RrVec3d dir = handle / len;
-                const double factor =
-                    params.space.TransformDir(dir).GetLength();
-                out[f].points[a] = origin + dir * (len * factor);
+                const double length = handle.GetLength();
+                if (length < 1e-12) continue;
+                const RrVec3d direction = handle / length;
+                const double factor = params.space.TransformDir(direction).GetLength();
+                out[f].points[a] = origin + direction * (length * factor);
             }
         }
     }
@@ -554,6 +548,21 @@ _RrRefreshSolverRests(RrProgram *program, size_t step, size_t solver,
             return false;
         }
     }
+    // The space target's rest, read where the file's space_rest was read:
+    // the composed rest table, never a live ref.
+    const auto refreshSpaceRest = [&]() {
+        if (wire.spaceSlot < 0) {
+            return true;
+        }
+        if (size_t(wire.spaceSlot) >= scratch->restPts.size()) {
+            if (error) {
+                *error = _RrStepHead(program, step) + " names no rest slot";
+            }
+            return false;
+        }
+        s.spaceRest = scratch->restPts[size_t(wire.spaceSlot)];
+        return true;
+    };
     const std::string type = program->TextOrEmpty(wire.type);
     if (type == "RigExecFkChain") {
         for (size_t k = 0; k < wire.controls.size(); ++k) {
@@ -614,6 +623,9 @@ _RrRefreshSolverRests(RrProgram *program, size_t step, size_t solver,
                             constant(RrSolverUpperOffset).f64,
                             constant(RrSolverLowerOffset).f64,
                             &s.ikParams.upperLength, &s.ikParams.lowerLength);
+        if (!refreshSpaceRest()) {
+            return false;
+        }
     } else if (type == "RigExecSplineIk") {
         std::vector<RrPointFrame> restJoints(size_t(wire.splineCount));
         for (size_t k = 0; k < wire.restRefs.size(); ++k) {
@@ -656,6 +668,9 @@ _RrRefreshSolverRests(RrProgram *program, size_t step, size_t solver,
             wire.end >= 0 ? scratch->restFrames[size_t(wire.end)]
                           : noFrame,
             wire.splineRestWeights, wire.splineRestMode);
+        if (!refreshSpaceRest()) {
+            return false;
+        }
     } else if (type == "RigExecTwistDistribution") {
         if (wire.root >= 0 && wire.end >= 0 &&
             size_t(wire.root) < scratch->restPts.size() &&
@@ -1527,38 +1542,14 @@ _RrRunSolveStep(RrProgram *program, size_t step, std::string *error)
                 ws.parentRelative ? int(base) - 1 : int(k) + int(base) - 1;
         }
         aggregate.frames = _RrSolveFkChain(s.elements);
-        const int32_t limb =
-            program->limbBySolver.empty()
-                ? -1 : program->limbBySolver[size_t(wire.object)];
-        if (limb >= 0 &&
-            (program->poses->limbSolvers[size_t(limb)].flags & 2) != 0) {
-            // RigExecScaleFkSegments: each element scales along the bone
-            // to the next by posed over rest length.
-            const size_t n = s.elements.size();
-            std::vector<RrVec3d> dirs(n, RrVec3d(0.0));
-            std::vector<double> factors(n, 1.0);
-            for (size_t i = 0; i + 1 < n && i + 1 < aggregate.frames.size();
-                 ++i) {
-                const auto &ri = s.elements[i].hasOutRest
-                                     ? s.elements[i].outRestPoints
-                                     : s.elements[i].restPoints;
-                const auto &rc = s.elements[i + 1].hasOutRest
-                                     ? s.elements[i + 1].outRestPoints
-                                     : s.elements[i + 1].restPoints;
-                const double rest = rigExec::RigExecBoneLengthUnderFrame(
-                    ri.data(), aggregate.frames[i].points.data(),
-                    RrVec3d(rc[0] - ri[0]));
-                const RrVec3d bone = aggregate.frames[i + 1].points[0] -
-                                     aggregate.frames[i].points[0];
-                const double posed = bone.GetLength();
-                if (rest > 1e-12 && posed > 1e-12) {
-                    dirs[i] = bone;
-                    factors[i] = posed / rest;
-                }
-            }
-            for (size_t i = 0; i < n && i < aggregate.frames.size(); ++i) {
-                rigExec::RigExecScaleFrameAlong(
-                    aggregate.frames[i].points.data(), dirs[i], factors[i]);
+        if(ws.scaleSegments) {
+            for(size_t k=0;k+1<s.elements.size() && k+1<aggregate.frames.size();++k) {
+                const auto &a=s.elements[k];const auto &b=s.elements[k+1];
+                const auto &ra=a.hasOutRest?a.outRestPoints:a.restPoints;
+                const auto &rb=b.hasOutRest?b.outRestPoints:b.restPoints;
+                const double rest=RigExecBoneLengthUnderFrame(ra.data(),aggregate.frames[k].points.data(),RrVec3d(rb[0]-ra[0]));
+                const auto bone=aggregate.frames[k+1].points[0]-aggregate.frames[k].points[0];
+                if(rest>1e-12 && bone.GetLength()>1e-12)RigExecScaleFrameAlong(aggregate.frames[k].points.data(),bone,bone.GetLength()/rest);
             }
         }
         if (base && !aggregate.frames.empty()) {
@@ -1583,12 +1574,7 @@ _RrRunSolveStep(RrProgram *program, size_t step, std::string *error)
                 spaceMoved = true;
             }
         }
-        if (_RrLiveSolver(program, solver, RrSolverBend) ||
-            _RrLiveSolver(program, solver, RrSolverStretch) ||
-            _RrLiveSolver(program, solver, RrSolverSoftness) ||
-            _RrLiveSolver(program, solver, RrSolverUpperOffset) ||
-            _RrLiveSolver(program, solver, RrSolverLowerOffset) ||
-            _RrLiveSolver(program, solver, RrSolverIkSpace) || spaceMoved) {
+        {
             params.preferredBendRadians =
                 program->ReadSolver(solver, RrSolverBend).f64;
             params.stretch =
@@ -1602,33 +1588,25 @@ _RrRunSolveStep(RrProgram *program, size_t step, std::string *error)
                 program->ReadSolver(solver, RrSolverLowerOffset).f64,
                 &params.upperLength, &params.lowerLength);
         }
+        params.softDistancePolicy=ws.softDistancePolicy;params.scaleSegments=ws.ikScaleSegments;
+        params.limb.stretch=params.stretch;
+        params.limb.pin=ws.pin?program->ReadSolver(solver,RrSolverPin).f32:0;
+        params.limb.upperScale=ws.upperScale?program->ReadSolver(solver,RrSolverUpperScale).f64:1;
+        params.limb.lowerScale=ws.lowerScale?program->ReadSolver(solver,RrSolverLowerScale).f64:1;
+        params.limb.scaleCalibration=ws.scaleCalibration;
+        double rawUpper=0,rawLower=0,upper=0,lower=0;
+        _RrTwoBoneIkLengths(s.ikRests,RrMat4d(1.0),0,0,&rawUpper,&rawLower);
+        _RrTwoBoneIkLengths(s.ikRests,ikSpace,0,0,&upper,&lower);
+        const double rawLength=rawUpper+rawLower;
+        const double spaceFactor=rawLength>1e-12?(upper+lower)/rawLength:1;
+        params.limb.softDistance=ws.softDistance?program->ReadSolver(solver,RrSolverSoftDistance).f32*spaceFactor:0;
+        params.twistRadians=ws.limbTwist?program->ReadSolver(solver,RrSolverLimbTwist).f32*_RrPi/180.0:0;
         const RrPointFrame *root = nullptr;
         const RrPointFrame *end = nullptr;
         const RrPointFrame *pole = nullptr;
         if (!finAt(ws.rootRead, &root) ||
             !finAt(ws.endRead, &end) || !finAt(ws.poleRead, &pole)) {
             return false;
-        }
-        const int32_t limb =
-            program->limbBySolver.empty()
-                ? -1 : program->limbBySolver[size_t(wire.object)];
-        if (limb >= 0) {
-            const RigExecWireLimbSolver &l =
-                program->poses->limbSolvers[size_t(limb)];
-            const auto value = [&](size_t which) {
-                const RrInputValue v = program->ReadLimb(size_t(limb), which);
-                return v.tag == RigExecWireInput::Tag::Double ? v.f64
-                                                              : double(v.f32);
-            };
-            params.softDistancePolicy = (l.flags & 1) != 0;
-            params.scaleSegments = (l.flags & 2) != 0;
-            params.limb.stretch = params.stretch;
-            params.limb.pin = value(0);
-            params.limb.upperScale = value(1);
-            params.limb.lowerScale = value(2);
-            params.limb.softDistance = value(3);
-            params.limb.scaleCalibration = l.scaleCalibration;
-            params.twistRadians = value(4) * _RrPi / 180.0;
         }
         const std::array<RrPointFrame, 3> frames =
             _RrSolveTwoBoneIk(*root, *end, *pole, s.ikRests, params);

@@ -1475,10 +1475,10 @@ TestOpenRefusals()
     wildRoot[3] = 0x0f;
     CHECK(!_Open(wildRoot, &why) && _Contains(why, "malformed"));
 
-    static_assert(RigExecFormatVersion == 17,
-                  "required stage-frame admission pins format17");
-    // Every prior format requires re-export to the compact graph layout and must
-    // be re-exported. Future versions require a supported exporter.
+    static_assert(RigExecFormatVersion == 18,
+                  "graph clavicle and limb records pin format18");
+    // Every prior format requires re-export to the compact graph layout.
+    // Future versions require a supported exporter.
     RigExecWireFile versioned = _RichFile();
     for (uint32_t version = 0; version <= RigExecFormatVersion + 1; ++version) {
         if (version == RigExecFormatVersion) continue;
@@ -1487,7 +1487,7 @@ TestOpenRefusals()
         const std::string expected = "unsupported .rigexec format version " +
             std::to_string(version) + " (this reader reads " +
             std::to_string(RigExecFormatVersion) + "); " +
-            (version < RigExecFormatVersion ? "re-export: required stage-frame admission" : "rebake");
+            (version < RigExecFormatVersion ? "re-export: graph clavicle and limb records" : "rebake");
         CHECK(!_Open(_PackUnchecked(versioned), &why) && why == expected);
     }
     _context = "open refusals";

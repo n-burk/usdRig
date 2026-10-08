@@ -150,20 +150,6 @@ struct _Lister {
                 }
             }
         }
-        // The points inputs a read phase answers: live takes the phase
-        // overlay there before the leaf, and the file's binding answers
-        // alike on every run. One the phase leaves unanswered reads its
-        // leaf.
-        std::set<SdfPath> phased;
-        for (const RigExecBakedPointsBinding &binding :
-             revision.pointBindings) {
-            const GfVec3f *points = nullptr;
-            size_t count = 0;
-            if (RigExecBakedResolvePoints(program, binding, &points,
-                                          &count)) {
-                phased.insert(binding.input);
-            }
-        }
         const bool fixed = !derived && revision.skinTopologyFixed;
         const int transformDrivers = revision.binding.driverTransformCount;
         for (size_t k = 0; k < decl.keys.size(); ++k) {
@@ -213,9 +199,6 @@ struct _Lister {
             case Role::JointWeights:
                 // A layout the epoch does not fix is read per frame from
                 // the bake's arrays.
-                if (!fixed) {
-                    continue;
-                }
                 break;
             case Role::CurveLive:
                 if (transformDrivers > 0) {
@@ -230,11 +213,6 @@ struct _Lister {
                 break;
             default:
                 break;
-            }
-            if (tag == fb::InputTag::Vec3fArray &&
-                key.flavour == RigExecRevisionLeafFlavour::OverlayThenRaw &&
-                phased.count(key.path)) {
-                continue;
             }
             RigExecBakeArrayRead read;
             if (!Hops(key, tag, &read)) {

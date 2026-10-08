@@ -10,7 +10,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
-#include <mutex>
 #include <numeric>
 #include <set>
 #include <stdexcept>
@@ -20,8 +19,6 @@ PXR_NAMESPACE_USING_DIRECTIVE
 namespace {
 using namespace rigExec;
 using Clock = std::chrono::steady_clock;
-std::mutex snapshotMutex;
-std::set<long long> snapshots;
 UsdStageRefPtr Stage(long long id) {
     return UsdUtilsStageCache::Get().Find(UsdStageCache::Id::FromLongInt(static_cast<long>(id)));
 }
@@ -107,39 +104,41 @@ JsObject Report(const UsdStageRefPtr &source,const char *rootPath,int samples,co
         {"threads",JsValue(Threads(evaluator.GetProfiler()))}};
     evaluator.SetProfilingEnabled(false);
     auto first=evaluator.Evaluate(UsdTimeCode(0));Check(first);
-    JsObject levels;std::map<size_t,JsArray> grouped;size_t deepest=0,widest=0;
-    for(const auto &[path,level]:evaluator.GetSolverBatchLevels()) {grouped[level].emplace_back(path.GetName());deepest=std::max(deepest,level);}
-    for(const auto &[level,names]:grouped) {levels[std::to_string(level)]=JsValue(names);widest=std::max(widest,names.size());}
-    int constraints=0,math=0,chains=0;JsArray chainLevels;
-    for(const auto &m:evaluator.GetMoverOrder()) {
-        auto type=m.schemaType.GetString();if(type.size()>=10 && type.substr(type.size()-10)=="Constraint")++constraints;
-        if(type=="RigExecFloatMathMover")++math;
+    const auto graph=evaluator.GetOpGraph();
+    std::map<size_t,size_t> depths,remaining;
+    std::map<size_t,std::vector<size_t>> successors;
+    std::map<std::string,int> domains;std::set<int> clusters;
+    std::vector<size_t> ready;size_t longest=0,completed=0;
+    for(const auto &op:graph) {
+        remaining[op.step]=op.preds.size();depths[op.step]=1;
+        if(op.preds.empty())ready.push_back(op.step);
+        for(auto pred:op.preds)successors[pred].push_back(op.step);
+        ++domains[op.domain];if(op.cluster>=0)clusters.insert(op.cluster);
     }
-    for(size_t level=0;level<evaluator.GetChainLevelCount();++level) {
-        JsArray targets;for(const auto &p:evaluator.GetChainLevelTargets(level))targets.emplace_back(p.GetString());
-        chains+=int(targets.size());const bool parallel=evaluator.IsChainLevelParallel(level);
-        chainLevels.emplace_back(JsObject{{"targets",JsValue(targets)},{"parallel",JsValue(parallel)},
-            {"why_not",JsValue(parallel?"":targets.size()<3?"fewer than 3 chains in the level":"chains share inputs or are otherwise not independent")}});
+    while(!ready.empty()) {
+        const auto id=ready.back();ready.pop_back();++completed;
+        longest=std::max(longest,depths[id]);
+        for(auto next:successors[id]) {
+            depths[next]=std::max(depths[next],depths[id]+1);
+            if(--remaining[next]==0)ready.push_back(next);
+        }
     }
+    if(completed!=graph.size())throw std::runtime_error("compiled operation graph contains a cycle");
+    JsObject domainCounts;for(const auto &[name,count]:domains)domainCounts[name]=JsValue(count);
     std::vector<std::string> reasons;const bool bakeable=evaluator.IsBakeable(&reasons);
-    const char *modes[]={"dynamic","baked","parity","reference"};
-    const char *sources[]={"default","attribute","environment","api"};
     std::string sourceName=source->GetRootLayer()->GetIdentifier();
     auto metadata=source->GetRootLayer()->GetCustomLayerData();auto it=metadata.find("rigExecProfilerSourcePath");
     if(it!=metadata.end() && it->second.IsHolding<std::string>())sourceName=it->second.Get<std::string>();
     JsObject result{{"ok",JsValue(true)},{"samples",JsValue(samples)},
         {"measured_through",JsValue("native evaluator snapshot; viewport rendering excluded")},
         {"stage",JsValue(JsObject{{"path",JsValue(sourceName)},{"rig_root",JsValue(root.GetString())},
-            {"mode",JsValue(modes[int(evaluator.GetEvaluationMode())])},
-            {"mode_source",JsValue(sources[int(evaluator.GetEvaluationModeSource())])},
             {"bakeable",JsValue(bakeable)},{"bakeability_reasons",JsValue(Strings(reasons))},
             {"parallel_enabled",JsValue(RigExecParallelEvaluationEnabled())},
             {"cores",JsValue(int(std::thread::hardware_concurrency()))},{"thread_limit",JsValue(std::string(std::getenv("PXR_WORK_THREAD_LIMIT")?std::getenv("PXR_WORK_THREAD_LIMIT"):""))}})},
-        {"compile",JsValue(compile)},{"chains",JsValue(chainLevels)},
-        {"shape",JsValue(JsObject{{"solver_count",JsValue(int(evaluator.GetSolverBatchLevels().size()))},
-            {"deepest_solver_level",JsValue(int(deepest))},{"widest_solver_level",JsValue(int(widest))},
-            {"solver_levels",JsValue(levels)},{"frame_constraints",JsValue(constraints)},
-            {"float_math_movers",JsValue(math)},{"mover_chains",JsValue(chains)}})},
+        {"compile",JsValue(compile)},
+        {"shape",JsValue(JsObject{{"op_count",JsValue(int(graph.size()))},
+            {"longest_path",JsValue(int(longest))},{"cluster_count",JsValue(int(clusters.size()))},
+            {"domains",JsValue(domainCounts)}})},
         {"driven",JsValue(JsObject{{"control",JsValue(attr.GetPrimPath().GetString())},{"avar",JsValue(attr.GetName().GetString())}})}};
     JsObject costs;RigExecRigPose last=first;
     for(const char *workload:{"replay","drag","author"}) {
@@ -179,12 +178,19 @@ extern "C" long long RigExecIntrospect_CreateSnapshot(long long id) {
         auto metadata=layer->GetCustomLayerData();metadata["rigExecProfilerSourcePath"]=VtValue(source->GetRootLayer()->GetIdentifier());layer->SetCustomLayerData(metadata);
         auto stage=UsdStage::Open(layer);if(!stage)return -1;
         const long long snapshot=UsdUtilsStageCache::Get().Insert(stage).ToLongInt();
-        std::lock_guard<std::mutex> lock(snapshotMutex);snapshots.insert(snapshot);return snapshot;
+        auto ownership=stage->GetSessionLayer()->GetCustomLayerData();
+        ownership["rigExecProfilerSnapshotId"]=VtValue(std::to_string(snapshot));
+        stage->GetSessionLayer()->SetCustomLayerData(ownership);return snapshot;
     } catch(...) {return -1;}
 }
 extern "C" void RigExecIntrospect_ReleaseSnapshot(long long id) {
-    std::lock_guard<std::mutex> lock(snapshotMutex);
-    if(snapshots.erase(id))UsdUtilsStageCache::Get().Erase(UsdStageCache::Id::FromLongInt(static_cast<long>(id)));
+    const auto stage=Stage(id);
+    if(!stage)return;
+    const auto ownership=stage->GetSessionLayer()->GetCustomLayerData();
+    const auto found=ownership.find("rigExecProfilerSnapshotId");
+    if(found!=ownership.end() && found->second.IsHolding<std::string>() &&
+       found->second.UncheckedGet<std::string>()==std::to_string(id))
+        UsdUtilsStageCache::Get().Erase(UsdStageCache::Id::FromLongInt(static_cast<long>(id)));
 }
 extern "C" int RigExecIntrospect_ScheduleReportJson(long long id,const char *root,int samples,const char *control,const char *avar,char *out,int cap) {
     const auto source=Stage(id);if(!source)return -1;

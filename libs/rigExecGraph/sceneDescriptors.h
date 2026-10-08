@@ -7,7 +7,7 @@
 namespace rigExec {
 enum class RigExecSceneDomain {
     Data, Provider, Solver, PropertyMover, GeometryMover, Weight,
-    Constraint, SpaceSwitch, PoseInterpolator, UnknownRigExec
+    Constraint, SpaceSwitch, PoseInterpolator, UnknownRigExec, AutoClavicle
 };
 enum class RigExecSceneInputState { Raw, Connected, Computed, Empty, Unavailable, Cycle };
 struct RigExecSceneInput {

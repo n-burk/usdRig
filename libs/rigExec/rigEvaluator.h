@@ -516,6 +516,8 @@ public:
     /// The rig prim this evaluator was constructed with, for tools that
     /// report on the bake (a .rigexec file's rig field names it).
     const SdfPath &GetRigPath() const { return _rigPath; }
+    /// Target-local spatial matrix primvars in this compiled epoch.
+    std::vector<SdfPath> GetSurfaceProjectorTargets() const;
 
     /// Composed mover-stack applications: descendants before their mover
     /// parent, sibling branches in reverse composed child order (the bottom

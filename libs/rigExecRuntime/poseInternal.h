@@ -4,6 +4,7 @@
 #define RIGEXEC_RUNTIME_POSE_INTERNAL_H
 
 #include "store.h"
+#include "rigExecMath/autoClavicleKernel.h"
 #include "rigExecGraph/poseArithmetic.h"
 #include <array>
 #include <cmath>
@@ -220,6 +221,9 @@ struct RrPoseTwoBoneIkParams {
     double stretch = 1;
     double softness = 0;
     double preferredBendRadians = 0;
+    bool softDistancePolicy=false,scaleSegments=false;
+    RigExecLimbStretch limb;
+    double twistRadians=0;
     RrMat4d space = RrMat4d(1.0);
 };
 
@@ -293,7 +297,9 @@ struct RrPoseScratch {
     std::vector<std::vector<double>> interpScratch;
     // Solver live rests and per-run elements.
     std::vector<RrPoseSolverState> solvers;
-    // Commit record flags, written by the head and read by CommitApply.
+    // A constraint commit's exit flags, written by its constraint step on
+    // every run and read by the commit's FrameMatrix steps. Set to 1 at
+    // Open and never reset at the head of a run.
     std::vector<char> recordAfter, recordEveryTarget;
     // Constraint envelope scratch, one step's own storage.
     std::vector<std::vector<float>> weightScratch;

@@ -487,6 +487,25 @@ _CheckArraySets(const std::string &label, const UsdStageRefPtr &stage,
     if (!reader || !defaults) {
         return;
     }
+    bool crafted = false;
+    for (const RigExecTestArraySet &set : sets) {
+        size_t index = 0;
+        if (!reader->FindInput(set.name, &index)) {
+            std::string refusal;
+            CHECK(!reader->SetInputArray(set.name,
+                                        RigExecTestArrayView(set.value),
+                                        &refusal));
+            crafted = true;
+        }
+    }
+    if (crafted) {
+        reader = _OpenRun(label + ": crafted public storage",
+                         RigExecTestListPrivateArraySlots(bytes));
+        CHECK(reader);
+        if (!reader) {
+            return;
+        }
+    }
     const double t = reader->GetBakeTime();
     std::string error;
     if (!RigExecTestApplyArraySets(reader.get(), sets, &error) ||
@@ -727,8 +746,7 @@ _TestArraysAgainstOverrides(const std::string &fixtures)
 
 // The lattice of examples/13_ReadPhases.usda reads its live cage through
 // a `final` read phase on the cage's chain. Where the phase answers, live
-// takes the chain's points there and never the cage, and the export binds
-// that read to nothing. With the cage blocked at the bake time the chain
+// takes the chain's points there and the bound raw fallback is unused. With the cage blocked at the bake time the chain
 // reads no base, the phase answers nothing, and live reads the cage
 // itself: the export binds that read to the cage's input beside the rest
 // read, the binary plays the bake time as live does, and a sampled set
@@ -828,7 +846,7 @@ _TestUnansweredPhaseArray(const std::string &examples)
     std::vector<uint8_t> answered;
     bool live = false, rest = false;
     CHECK(_BakeArrays(label, stage, rigPath, 1002.0, &answered) &&
-          rows(answered, &live, &rest) && !live && rest);
+          rows(answered, &live, &rest) && live && rest);
 
     VtVec3fArray authored;
     const UsdAttribute attribute = stage->GetAttributeAtPath(SdfPath(cage));
@@ -879,8 +897,8 @@ _TestUnansweredPhaseArray(const std::string &examples)
     }
     CHECK(moved);
     stage->GetSessionLayer()->Clear();
-    std::printf("%s: live read bound only where its read phase answers "
-                "nothing; blocked at t=1002 %s live, a sampled set %s\n",
+    std::printf("%s: raw fallback bound beside the phase; blocked at "
+                "t=1002 %s live, a sampled set %s\n",
                 label.c_str(), same ? "==" : "differs from",
                 moved ? "moves the lattice" : "does not move it");
 }
@@ -1051,6 +1069,28 @@ _TestLatticeArray(const UsdStageRefPtr &stage)
                       &error) &&
                   s->Execute(&error));
             CHECK(!_SameOutputs(*a, *s));
+            // Identical bytes still change the Default read when the set
+            // switches between sampled and authored. Compare both directions
+            // with independently executed readers holding each kind.
+            std::unique_ptr<RigExecRuntimeReader> authored =
+                _OpenRun(label, listed);
+            CHECK(authored && authored->SetInputArrayAt(
+                      index, RigExecTestArrayView(VtValue(scaled)), &error) &&
+                  authored->Execute(&error));
+            CHECK(a->SetSampledInputArrayAt(
+                      index, RigExecTestArrayView(VtValue(scaled)), &error) &&
+                  a->Execute(&error) && _SameOutputs(*a, *s));
+            CHECK(a->SetInputArrayAt(
+                      index, RigExecTestArrayView(VtValue(scaled)), &error) &&
+                  a->Execute(&error) && authored &&
+                  _SameOutputs(*a, *authored) && !_SameOutputs(*a, *s));
+            CHECK(s->SetInputArrayAt(
+                      index, RigExecTestArrayView(VtValue(scaled)), &error) &&
+                  s->Execute(&error) && authored &&
+                  _SameOutputs(*s, *authored));
+            CHECK(s->SetSampledInputArrayAt(
+                      index, RigExecTestArrayView(VtValue(scaled)), &error) &&
+                  s->Execute(&error) && !_SameOutputs(*s, *a));
             CHECK(a->ResetInput(cage, &error) && a->Execute(&error) &&
                   _SameOutputs(*plain, *a));
         }
@@ -1378,9 +1418,9 @@ _TestLayoutArrays(const UsdStageRefPtr &stage)
     }
 }
 
-// Painted weights of examples/01_FkChainTail.usda: Seg1W's dense values
-// and Seg4W's sparse values and indices, listed as inputs whose defaults
-// are the arrays the file stored. An authored set reaches the packet; a
+// Painted arrays remain private storage with the authored defaults. A
+// crafted file exposes them to exercise the runtime API independently of
+// the exporter's admission contract. An authored set reaches the packet; a
 // sampled one does not, as a time sample does not; a repeated sparse index
 // fails the consumers as live fails them.
 static void
@@ -1437,7 +1477,24 @@ _TestPaintedArrays(const UsdStageRefPtr &stage)
     if (listedObjects != 2) {
         return;
     }
-    const std::vector<uint8_t> &listed = bytes;
+    std::unique_ptr<RigExecRuntimeReader> privateReader =
+        _OpenRun(label + ": private defaults", bytes);
+    CHECK(privateReader);
+    if (!privateReader) {
+        return;
+    }
+    for (const std::string &input : {seg1, seg4, seg4Indices}) {
+        size_t index = 0;
+        CHECK(!privateReader->FindInput(input, &index));
+        const auto file = RigExecTestUnpack(bytes);
+        CHECK(file);
+        const int64_t slot = file ? RigExecTestSlotOf(*file, input) : -1;
+        CHECK(slot >= 0 && uint64_t(slot) >= file->listedInputs);
+        RigExecRuntimeArray value;
+        CHECK(!privateReader->GetInputArrayAt(size_t(slot), &value));
+    }
+    const std::vector<uint8_t> listed =
+        RigExecTestListPrivateArraySlots(bytes);
     VtFloatArray values;
     CHECK(stage->GetAttributeAtPath(SdfPath(seg1)).Get(&values));
     for (float &w : values) {

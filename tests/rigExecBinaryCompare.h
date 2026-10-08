@@ -3482,7 +3482,8 @@ _BinaryForEachRead(const _BinaryFile &file,
                  {&s.bend, &s.upperOffset, &s.lowerOffset, &s.stretch,
                   &s.softness, &s.blendWeight, &s.preserveVolume,
                   &s.midFollowWeight, &s.roll, &s.twist, &s.minLengthRatio,
-                  &s.twistTurns, &s.ribbonSampleCount, &s.ikSpace}) {
+                  &s.twistTurns, &s.ribbonSampleCount, &s.ikSpace,
+                  &s.pin, &s.upperScale, &s.lowerScale, &s.softDistance, &s.limbTwist}) {
                 one(*read);
             }
         }
@@ -3492,10 +3493,12 @@ _BinaryForEachRead(const _BinaryFile &file,
                   &c.affectY, &c.affectZ, &c.tX, &c.tY, &c.tZ, &c.rX, &c.rY,
                   &c.rZ, &c.sX, &c.sY, &c.sZ, &c.aimVector, &c.upVector,
                   &c.rotationOffset, &c.worldUpVector, &c.poleVector,
-                  &c.twistDegrees}) {
+                  &c.twistDegrees, &c.stretch}) {
                 one(*read);
             }
         }
+        for (const auto &ac : pose.autoClavicles)
+            for (const auto &read : ac.scalars) visit(read);
         for (const auto &sw : pose.spaceSwitches) {
             one(sw.active);
         }

@@ -24,6 +24,7 @@ RigExecSceneDomain Domain(const TfToken &type) {
     if (name == "RigExecFkChain" || name == "RigExecTwoBoneIk" || name == "RigExecBlendPointFrames" ||
         name == "RigExecTwistDistribution" || name == "RigExecRibbon" || name == "RigExecSplineIk") return RigExecSceneDomain::Solver;
     if (name == "RigExecFloatMathMover" || name == "RigExecVec3fMathMover" || name == "RigExecMatrixMathMover") return RigExecSceneDomain::PropertyMover;
+    if (name == "RigExecAutoClavicle") return RigExecSceneDomain::AutoClavicle;
     if (name == "RigExecSpaceSwitch") return RigExecSceneDomain::SpaceSwitch;
     if (name == "RigExecPoseInterpolator") return RigExecSceneDomain::PoseInterpolator;
     if (name == "RigExecSurfaceProjector") return RigExecSceneDomain::GeometryMover;
@@ -209,7 +210,7 @@ bool RigExecCaptureSceneDescriptors(const RigExecSceneAccess &source,
                 canonical = target.AppendProperty(TfToken("points"));
             scene.applications.push_back({path,target,node.domain,node.stackOrdinal,canonical,targetIndex});
         }
-        if (node.domain == RigExecSceneDomain::SpaceSwitch) {
+        if (node.domain == RigExecSceneDomain::SpaceSwitch || node.domain == RigExecSceneDomain::AutoClavicle) {
             const auto target = scene.relationships.find(path.AppendProperty(TfToken("rigExec:target")));
             if (target != scene.relationships.end()) for (size_t targetIndex=0;targetIndex<target->second.forwardedTargets.size();++targetIndex) {
                 const auto &provider=target->second.forwardedTargets[targetIndex];

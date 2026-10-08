@@ -1,14 +1,6 @@
-// .rigexec array inputs: the array reads a bake lists as input slots, chosen
-// in one function (RigExecBakeListArrayReads) so that the evaluator's own
-// admission set can replace the choice without touching the capture.
-// The reads are the program's array leaves: a revision's assembly arrays,
-// a fixed skin revision's layout, every dense blend sample's points, every
-// weight object's point gathers and painted values and indices, the points
-// the weight oracle samples (at the attribute it resolves its relationship
-// to), and every chain's base. A read the phase overlay answers (a points
-// input whose read phase resolves to a chain's points) reads no slot, nor
-// does one that crosses an attribute of another type. Internal to
-// rigExecBake.
+// .rigexec array storage and consumer bindings. Public admission comes
+// from the evaluator; structural defaults retain private typed slots.
+// Internal to rigExecBake.
 #ifndef RIGEXEC_BAKE_ARRAY_READS_H
 #define RIGEXEC_BAKE_ARRAY_READS_H
 
@@ -47,7 +39,7 @@ enum class RigExecBakeArrayConsumer : uint8_t {
     Declared,
 };
 
-/// One array read the file lists an input slot for.
+/// One array read backed by a typed storage slot.
 struct RigExecBakeArrayRead {
     RigExecBakeArrayConsumer consumer = RigExecBakeArrayConsumer::Row;
     fb::InputTag tag = fb::InputTag::FloatArray;

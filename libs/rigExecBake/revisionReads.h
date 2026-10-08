@@ -12,9 +12,9 @@
 // same key, the same rest flag (read at Default), the same fallback, the
 // same value type, and Absent where the site finds no attribute. A
 // connection-following site reads through the overlay the run's steps read
-// through (the program's property results, and a revision's declared read
-// phases looked up in the run's snapshot store), so an enumeration follows
-// a run of the program at the same time.
+// through (the program's property results, and what each of a revision's
+// point bindings resolves to), so an enumeration follows a run of the
+// program at the same time.
 #ifndef RIGEXEC_BAKE_REVISION_READS_H
 #define RIGEXEC_BAKE_REVISION_READS_H
 
@@ -46,8 +46,8 @@ struct RigExecBakeRevisionRead {
     /// it. Empty for a known-absent attribute.
     PXR_NS::VtValue value;
     /// The site takes a value the run's overlay holds at the key itself (a
-    /// property result, or a phase's snapshot), which the runtime
-    /// recomputes rather than reads.
+    /// property result, or the points a phased read is bound to), which the
+    /// runtime recomputes rather than reads.
     bool overlaid = false;
 };
 

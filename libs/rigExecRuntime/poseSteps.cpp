@@ -579,7 +579,8 @@ RrRunPoseStep(RrProgram *program, size_t step, std::string *error)
                 unavailable[3][0] = std::numeric_limits<double>::quiet_NaN();
                 store.base[size_t(i)] = RrFrameFromMatrix(RrMat4d(1));
                 store.base[size_t(i)].flags = 0;
-                store.fin[size_t(i)] = store.base[size_t(i)];
+
+            store.fin[size_t(i)] = store.base[size_t(i)];
                 store.posedM[size_t(i)] = unavailable;
                 continue;
             }
@@ -699,6 +700,57 @@ RrRunPoseStep(RrProgram *program, size_t step, std::string *error)
                         return false;
                     }
                     store.base[size_t(i)]=RrFrameFromMatrix(output);
+                }
+            }
+            for(size_t acIndex=0;acIndex<program->poses->autoClavicles.size();++acIndex) {
+                const auto &ac=program->poses->autoClavicles[acIndex];if(ac.slot!=i)continue;
+                std::array<RrMat4d,13> matrices;matrices[0]=_RrSpaceOfFrame(store.base[size_t(i)]);
+                bool usable=(store.base[size_t(i)].flags&RrPointFrameValid) && !(store.base[size_t(i)].flags&RrPointFrameDegenerate);
+                for(size_t k=1;k<13;++k) {
+                    const auto &read=ac.frames[k];if(read.slot<0)continue;
+                    if(read.computation==1)matrices[k]=scratch->defaultRoundTrip[size_t(read.slot)];
+                    else if(read.computation==2)matrices[k]=_RrSpaceOfFrame(scratch->restFrames[size_t(read.slot)]);
+                    else if(!read.recompose.empty() || read.slot==i) {
+                        matrices[k]=matrices[0];
+                        for(int child:read.recompose) {
+                            if(scratch->posedAuthored[size_t(child)])matrices[k]=scratch->posedAuthoredM[size_t(child)];
+                            else matrices[k]=RrRoundTrip(_RrComposeAvarsOf(*program,*scratch,size_t(child))*scratch->posedD[size_t(child)]*
+                                scratch->parentDinv[size_t(child)]*(scratch->parentSpaceAuthored[size_t(child)]?scratch->parentSpaceM[size_t(child)]:matrices[k]));
+                        }
+                    } else matrices[k]=_RrSpaceOfFrame(store.fin[store.finLast[size_t(read.slot)]]);
+                    for(int row=0;row<4;++row)for(int col=0;col<4;++col)usable=usable && std::isfinite(matrices[k][row][col]);
+                }
+                if(!usable)continue;
+                RigExecAutoClavicleConstants constants;
+                std::copy(ac.basis.begin(),ac.basis.end(),constants.basis);
+                constants.ikValue=ac.ikValue;constants.gain=ac.gain;constants.kernel=ac.kernel;
+                constants.normalize=ac.normalize;constants.swings=ac.swings;constants.widths=ac.widths;
+                constants.gains=ac.gains;constants.weights=ac.weights;
+                const auto scalar=[&](size_t k,double fallback) {
+                    const int index=ac.scalarIndices[k];if(index<0)return fallback;
+                    const auto value=program->ReadRegistered(program->autoClavicleRead[acIndex][size_t(index)]);
+                    return value.tag==RrInputTag::Float?double(value.f32):value.f64;
+                };
+                RigExecAutoClavicleFrames frames;
+                frames.targetPosed=&matrices[0]._mtx[0][0];frames.pivotPosed=&matrices[1]._mtx[0][0];
+                frames.anchorPosed=&matrices[2]._mtx[0][0];frames.anchorDefault=&matrices[3]._mtx[0][0];
+                frames.fkPosed=&matrices[4]._mtx[0][0];
+                for(size_t k=0;k<3;++k)frames.fkDefault[k]=&matrices[5+k]._mtx[0][0];
+                if(ac.frames[8].slot>=0)frames.ikTargetPosed=&matrices[8]._mtx[0][0];
+                if(ac.frames[9].slot>=0)frames.polePosed=&matrices[9]._mtx[0][0];
+                frames.ikBlend=scalar(0,1-constants.ikValue);frames.amount=scalar(1,1);frames.hasLimb=ac.hasLimb;
+                if(frames.hasLimb) {
+                    frames.limb.stretch=scalar(2,1);frames.limb.pin=scalar(3,0);
+                    frames.limb.upperScale=scalar(4,1);frames.limb.lowerScale=scalar(5,1);
+                    frames.limb.softDistance=scalar(6,0);frames.limb.scaleCalibration=scalar(7,0);
+                    frames.twistRadians=scalar(8,0)*_RrPi/180.0;
+                    frames.limbRestUpper=(matrices[11].ExtractTranslation()-matrices[10].ExtractTranslation()).GetLength()+scalar(9,0);
+                    frames.limbRestLower=(matrices[12].ExtractTranslation()-matrices[11].ExtractTranslation()).GetLength()+scalar(10,0);
+                }
+                double delta[3];RigExecAutoClavicleShift(constants,frames,delta);
+                if(delta[0]!=0 || delta[1]!=0 || delta[2]!=0) {
+                    auto shifted=matrices[0];shifted.SetTranslateOnly(shifted.ExtractTranslation()+RrVec3d(delta[0],delta[1],delta[2]));
+                    store.base[size_t(i)]=RrFrameFromMatrix(shifted);
                 }
             }
             store.fin[size_t(i)] = store.base[size_t(i)];

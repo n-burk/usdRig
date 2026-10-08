@@ -576,7 +576,8 @@ RigExecBakePools::MoveInto(fb::RigExecWireFile *file)
 
 bool
 RigExecBakeCaptureStatics(
-    const RigExecBakedProgramImpl &program, const RigExecBakeInputs &inputs,
+    const RigExecBakedProgramImpl &program, double time,
+    const RigExecBakeInputs &inputs,
     const std::vector<RigExecBakeRevisionRead> &enumerated,
     RigExecBakePathTable *paths, RigExecBakePools *pools,
     fb::RigExecWireFile *file, std::string *error)
@@ -655,9 +656,13 @@ RigExecBakeCaptureStatics(
     if (geometry.chains.size() != program.chains.size()) {
         return fail("the geometry chains and the program disagree");
     }
-    // Every blend sample's dense points as the run's assembly consumed
-    // them, and the layout its prologue resolved, a cache-refused one
-    // included.
+    // Every blend sample's dense points as its resolved input at the bake
+    // time, and the layout its prologue resolved, a cache-refused one
+    // included. Where the sample has no point binding, or its binding
+    // answered nothing, that input is what the run's assembly consumed. A
+    // binding that answered read a computed chain version, which playback
+    // computes from the same binding on every run; the file holds the
+    // resolved input beside it, read only when the binding answers nothing.
     const auto samples =
         [&](const RigExecBakedProgramImpl::GeomRevision &revision,
             fb::RigExecWireRevision &out) {
@@ -677,8 +682,24 @@ RigExecBakeCaptureStatics(
                 for (size_t s = 0; s < channel.samples.size(); ++s) {
                     const auto &sample = channel.samples[s];
                     fb::RigExecWireBlendSample &wireSample = wire.samples[s];
-                    wireSample.pointsValue =
-                        _PoolPoints(pools, sample.lastPoints);
+                    const GfVec3f *bound = nullptr;
+                    size_t boundCount = 0;
+                    if (sample.pointBinding.id >= 0 &&
+                        RigExecBakedResolvePoints(program, sample.pointBinding,
+                                                  &bound, &boundCount)) {
+                        if (!program.resolvedInputs) {
+                            return fail("no resolved inputs to read the "
+                                        "points of " +
+                                        sample.samplePath.GetString());
+                        }
+                        VtVec3fArray tail;
+                        program.resolvedInputs->GetAttribute(
+                            sample.points, UsdTimeCode(time), &tail);
+                        wireSample.pointsValue = _PoolPoints(pools, tail);
+                    } else {
+                        wireSample.pointsValue =
+                            _PoolPoints(pools, sample.lastPoints);
+                    }
                     if (!sample.layoutRefused) {
                         continue;
                     }
@@ -785,10 +806,11 @@ RigExecBakeCaptureStatics(
         rows.push_back(std::move(row));
     }
     for (const RigExecBakeRevisionRead &candidate : enumerated) {
-        if (candidate.overlaid) {
+        const uint32_t path = paths->Path(candidate.path);
+        if (candidate.overlaid &&
+            !bound.count(std::make_pair(path, candidate.rest))) {
             continue;
         }
-        const uint32_t path = paths->Path(candidate.path);
         if (!keys.emplace(path, candidate.rest).second) {
             continue;
         }
@@ -820,7 +842,7 @@ RigExecBakeCaptureStatics(
     // A gather whose read answered nothing at the bake time is no key of
     // the enumeration; its row reads its input all the same.
     for (const RigExecBakeArrayRow &gather : inputs.arrayRows) {
-        if (!gather.gather || gather.rest ||
+        if (gather.rest ||
             !keys.emplace(gather.path, false).second) {
             continue;
         }

@@ -67,7 +67,8 @@ enum RrSolverField : int {
     RrSolverTwistTurns = 11,
     RrSolverRibbonSampleCount = 12,
     RrSolverIkSpace = 13,
-    RrSolverFieldCount = 14,
+    RrSolverPin=14,RrSolverUpperScale=15,RrSolverLowerScale=16,RrSolverSoftDistance=17,RrSolverLimbTwist=18,
+    RrSolverFieldCount = 19,
 };
 
 enum RrConstraintField : int {
@@ -92,7 +93,8 @@ enum RrConstraintField : int {
     RrConstraintWorldUpVector = 18,
     RrConstraintPoleVector = 19,
     RrConstraintTwistDegrees = 20,
-    RrConstraintFieldCount = 21,
+    RrConstraintStretch=21,
+    RrConstraintFieldCount = 22,
 };
 
 enum RrWeightField : int {
@@ -449,6 +451,7 @@ enum class RrReadFamily : uint8_t {
     Solver = 5,
     Constraint = 6,
     WeightObject = 7,
+    AutoClavicle = 8,
 };
 
 // One program-registered read (a RigExecBakedInput the program holds),
@@ -529,6 +532,7 @@ struct RrProgram {
     // binds, by row and field number.
     std::vector<std::array<int32_t, RrLadderFieldCount>> ladderRead;
     std::vector<int32_t> spaceSwitchRead;
+    std::vector<std::vector<int32_t>> autoClavicleRead;
     std::vector<int32_t> interpRead;
     // Per interpolator, one read per numeric dial. Three because the
     // compile reads at most three, one per axis, and refuses a fourth.

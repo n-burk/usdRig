@@ -359,9 +359,8 @@ _Revision(const RigExecBakedProgramImpl &program,
         _Enabled(E, prim, at);
         _ResolvedOrRaw(E, prim, _readTokens->skinningMethod,
                        _readTokens->classicLinear, at);
-        // The per-frame layout, read when the topology cache refuses the
-        // mover. A chain revision whose fixed layout the run resolved
-        // carries that layout instead, and no input reaches its arrays.
+        // Fixed main-chain layouts are captured from their layout leaves;
+        // other skins enumerate their joint arrays here.
         if (derived || !revision.skinTopologyFixed ||
             !revision.topologyResolved || !revision.topology) {
             _Array<int>(

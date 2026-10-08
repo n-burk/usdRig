@@ -8,6 +8,7 @@
 #include "geometryGraphBinding.h"
 #include "poseGraphBinding.h"
 #include "poseCommit.h"
+#include "autoClavicleGraph.h"
 #include <variant>
 namespace rigExec {
 struct RigExecSceneGeometryOp {
@@ -27,7 +28,7 @@ struct RigExecSceneUnavailableFrameOp { RigExecValueId output=UINT64_MAX; };
 struct RigExecSceneCopyOp { RigExecValueId input=UINT64_MAX,output=UINT64_MAX;bool authoritative=false; };
 struct RigExecSceneSwitchOp { RigExecBoundSpaceSwitch binding;RigExecValueId output=UINT64_MAX; };
 using RigExecSceneOperation=std::variant<RigExecPropertyGraphBinding,RigExecSolverGraphBinding,
-    RigExecSceneWeightOp,RigExecSceneGeometryOp,RigExecSceneExtractOp,RigExecSceneSwitchOp,RigExecBoundPoseInterpolator,RigExecConstraintGraphBinding,RigExecSceneCopyOp,RigExecSceneFieldOp,RigExecPoseCommitBinding,RigExecSceneProviderOp,RigExecSceneEffectiveReadOp,RigExecSceneBlendChannelOp,RigExecSceneUnavailableFrameOp>;
+    RigExecSceneWeightOp,RigExecSceneGeometryOp,RigExecSceneExtractOp,RigExecSceneSwitchOp,RigExecBoundPoseInterpolator,RigExecConstraintGraphBinding,RigExecSceneCopyOp,RigExecSceneFieldOp,RigExecPoseCommitBinding,RigExecSceneProviderOp,RigExecSceneEffectiveReadOp,RigExecSceneBlendChannelOp,RigExecSceneUnavailableFrameOp,RigExecBoundAutoClavicle>;
 /// Shared typed production operation table. Native capture and SceneDb compile
 /// into this table; the same producer compiler/executor owns every operation.
 class RigExecSceneProgram {

@@ -2728,6 +2728,22 @@ private:
                     version(*sw.parentRead); version(*sw.spaceRead);
                     for(const auto &value:sw.sourceReads) version(value);
                 }
+                for (const auto &ac : pose.autoClavicles) {
+                    if (ac.slot < group.begin || ac.slot >= group.end) continue;
+                    for (const auto &frame : ac.frames) {
+                        if (frame.slot < 0) continue;
+                        if (frame.computation == 2) read(D::Rest, uint32_t(frame.slot));
+                        else if (frame.computation == 1) read(D::Ladder, uint32_t(frame.slot));
+                        else if (frame.recompose.empty() && frame.slot != ac.slot)
+                            read(D::PoseFin, finLast[size_t(frame.slot)]);
+                        for (int child : frame.recompose) {
+                            read(D::Avars, uint32_t(child));
+                            read(D::Ladder, uint32_t(child));
+                        }
+                    }
+                    for (const auto &input : ac.scalars)
+                        if (!_RequireCandidateReads(owner, input)) return false;
+                }
             } else if(step.kind==K::Solve) {
                 if(!_Has(pose.solvers,step.object)) return _Bad(_StepName(owner)+": solver body object out of range");
                 const auto &solver=pose.solvers[size_t(step.object)];
@@ -3592,6 +3608,33 @@ private:
             return _Bad("pose.has_property_chains disagrees with "
                         "property_chains");
         }
+        std::set<int> clavicleTargets;
+        for(size_t i=0;i<p.autoClavicles.size();++i) {
+            const auto &ac=p.autoClavicles[i];const auto row="pose.auto_clavicles["+_N(i)+"]";
+            if(!_Index(ac.slot,_slots,false,row,"slot") || !clavicleTargets.insert(ac.slot).second ||
+               !_Size(ac.basis.size(),9,row,"basis") || !_Size(ac.frames.size(),13,row,"frames") ||
+               !_Size(ac.scalarIndices.size(),11,row,"scalar_indices") || ac.kernel<0 || ac.kernel>1)return _Bad(row+": malformed clavicle record");
+            const auto count=ac.widths.size();
+            if(ac.swings.size()/4!=count || ac.swings.size()%4 || ac.gains.size()!=count ||
+               (count && (ac.weights.size()/count!=count || ac.weights.size()%count)) || (!count && !ac.weights.empty()))return _Bad(row+": invalid swing dimensions");
+            for(size_t k=0;k<13;++k) {
+                const auto &read=ac.frames[k];const bool optional=k==8 || k==9 || (k>=10 && !ac.hasLimb);
+                if(!_Index(read.slot,_slots,optional,row,"frame.slot") || read.computation>2 ||
+                   !_Indices(read.recompose,_slots,false,row,"frame.recompose"))return _Bad(row+": invalid frame read");
+                int parent=ac.slot;
+                for(int child:read.recompose) {
+                    if(_f.slotMeta->parent[size_t(child)]!=parent)return _Bad(row+": invalid entering subtree");
+                    parent=child;
+                }
+                if(!read.recompose.empty() && parent!=read.slot)return _Bad(row+": entering subtree ends at wrong provider");
+            }
+            if(ac.frames[0].slot!=ac.slot)return _Bad(row+": target frame mismatch");
+            if(!_Indices(ac.scalarIndices,ac.scalars.size(),true,row,"scalar_indices"))return false;
+            for(const auto &input:ac.scalars) {
+                if(input.tag!=InputTag::Float && input.tag!=InputTag::Double)return _Bad(row+": scalar type must be float or double");
+                if(!_Read(&input,int(input.tag),_Baked,row,"scalars"))return false;
+            }
+        }
         // Slot -> the switch storing it. The runtime looks a switch up by
         // its slot, so a slot is switched at most once.
         std::vector<int32_t> switchOf(_slots, -1);
@@ -3801,6 +3844,11 @@ private:
                _ReadPtr(s.lowerOffset, dbl, _Baked, row, "lower_offset") &&
                _ReadPtr(s.stretch, flt, _Baked, row, "stretch") &&
                _ReadPtr(s.softness, flt, _Baked, row, "softness") &&
+               (!s.pin || _ReadPtr(s.pin,flt,_Baked,row,"pin")) &&
+               (!s.upperScale || _ReadPtr(s.upperScale,dbl,_Baked,row,"upper_scale")) &&
+               (!s.lowerScale || _ReadPtr(s.lowerScale,dbl,_Baked,row,"lower_scale")) &&
+               (!s.softDistance || _ReadPtr(s.softDistance,flt,_Baked,row,"soft_distance")) &&
+               (!s.limbTwist || _ReadPtr(s.limbTwist,flt,_Baked,row,"limb_twist")) &&
                _ReadPtr(s.ikSpace, int(InputTag::Matrix4d), _Baked, row,
                         "ik_space") &&
                _ReadPtr(s.blendWeight, flt, _Baked, row, "blend_weight") &&
@@ -3878,7 +3926,8 @@ private:
                         "world_up_vector") &&
                _ReadPtr(c.poleVector, v, _Baked, row, "pole_vector") &&
                _ReadPtr(c.twistDegrees, int(InputTag::Double), _Baked, row,
-                        "twist_degrees");
+                        "twist_degrees") &&
+               (!c.stretch || _ReadPtr(c.stretch,int(InputTag::Float),_Baked,row,"stretch"));
     }
 
     bool _ConstraintArrays(const fb::RigExecWireConstraintArrays &a,
@@ -6106,11 +6155,11 @@ namespace {
 std::string
 _VersionRefusal(uint32_t version)
 {
-    static_assert(RigExecFormatVersion == 17,
+    static_assert(RigExecFormatVersion == 18,
                   "name what the previous format version lacks");
     return "unsupported .rigexec format version " + _N(version) +
            " (this reader reads " + _N(RigExecFormatVersion) + "); " +
-           (version < RigExecFormatVersion ? "re-export: required stage-frame admission"
+           (version < RigExecFormatVersion ? "re-export: graph clavicle and limb records"
                                               : "rebake");
 }
 

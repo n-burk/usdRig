@@ -90,11 +90,7 @@ _VisitSolverInputs(Obj &solver, Fn &&fn)
     fn(solver.lowerOffset);
     fn(solver.stretch);
     fn(solver.softness);
-    fn(solver.pin);
-    fn(solver.upperScale);
-    fn(solver.lowerScale);
-    fn(solver.softDistance);
-    fn(solver.limbTwist);
+    fn(solver.pin);fn(solver.upperScale);fn(solver.lowerScale);fn(solver.softDistance);fn(solver.limbTwist);
     fn(solver.blendWeight);
     fn(solver.preserveVolume);
     fn(solver.midFollowWeight);
@@ -132,7 +128,7 @@ _VisitConstraintInputs(
     fn(constraint.worldUpVector);
     fn(constraint.poleVector);
     fn(constraint.twistDegrees);
-    fn(constraint.ikStretch);
+    fn(constraint.stretch);
 }
 
 template <class Obj, class Fn>
@@ -144,6 +140,13 @@ _VisitInterpolatorInputs(
     // A numeric driver's dials, in rigExec:driverAttributes order.
     for (auto &value : interp.valueInputs) {
         fn(value);
+    }
+}
+
+template <class Obj, class Fn>
+void _VisitAutoClavicleInputs(Obj &operation,Fn &&fn) {
+    for(auto &read:operation.scalars) {
+        if(read.isFloat)fn(read.narrow);else fn(read.wide);
     }
 }
 
@@ -273,22 +276,6 @@ _HashVtValue(uint64_t *hash, const VtValue &value);
 
 
 
-// Visits each auto clavicle's IK/FK blend and dial, which the compose reads
-// beside the avars (space switches have their own visitor above). They are
-// read live (RigExecIsLiveAvarName), so they must key the frame cache and be
-// patched into a frozen run like any other varying input.
-template <class Impl, class Fn>
-void
-_VisitComposeInputs(Impl &B, Fn &&fn)
-{
-    for (auto &ac : B.autoClavicles) {
-        fn(ac.ikBlendInput);
-        fn(ac.ikBlendFloat);
-        fn(ac.amountInput);
-        fn(ac.amountFloat);
-    }
-}
-
 // The report RigExecEvaluateFrozen's caller asked for, set for the span of
 // its runner call on the calling thread, else null. _RunFrozen fills it.
 extern thread_local RigExecFrozenRunReport *_frozenRunReport;
@@ -320,6 +307,7 @@ _ForEachPatchableInput(Impl &B, Fn &&fn, bool includeIntervening = true)
     for (auto &ladder : B.ladders) {
         _VisitLadderInputs(ladder, fn, includeIntervening);
     }
+    for(auto &operation:B.autoClavicles)_VisitAutoClavicleInputs(operation,fn);
     for (auto &spaceSwitch : B.spaceSwitches) {
         _VisitSpaceSwitchInputs(spaceSwitch, fn);
     }
@@ -335,7 +323,6 @@ _ForEachPatchableInput(Impl &B, Fn &&fn, bool includeIntervening = true)
     for (auto &object : B.weightObjects) {
         _VisitWeightInputs(object, fn);
     }
-    _VisitComposeInputs(B, fn);
 }
 
 void

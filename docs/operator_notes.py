@@ -12,7 +12,7 @@ rendered for it (such a page still links a stage if it sets "example_key").
 
 CATEGORIES = [
     ("Rig", ["rig_root"]),
-    ("Transform providers", ["control", "joint", "space_switch"]),
+    ("Transform providers", ["control", "joint", "space_switch", "auto_clavicle"]),
     ("Solvers", ["fk_chain", "two_bone_ik", "spline_ik",
                  "blend_point_frames", "twist_distribution", "ribbon"]),
     ("Constraints", ["aim_constraint", "position_constraint",
@@ -285,6 +285,38 @@ for the whole loop and the only motion in frame comes from the one driver.""",
             ("matrix_mover", "Matrix Mover"),
         ],
     },
+    "auto_clavicle": {
+        "title": "Auto Clavicle",
+        "schema": "RigExecAutoClavicle",
+        "summary": "Carries the shoulder with the arm's swing in FK or IK.",
+        "no_gif": True,
+        "description": """Auto Clavicle translates the limb's root control according
+to its swing. The controls and joints below that root follow the translation.
+The authored swing poses determine how far the shoulder carries the arm.""",
+        "how_it_works": """Frame and scalar reads declare dependencies in the existing
+evaluation graph. The target's compose operation applies the shared numerical
+kernel; there is no separate clavicle evaluation pass. Descendants of the
+target are measured against its entering pose, preventing feedback from the
+translation being calculated. Independent providers retain their producer
+dependencies. Native, frozen and binary playback use the same swing kernel.""",
+        "wiring": [
+            ("`rigExec:target`", "The one transform provider to translate.", "yes"),
+            ("`rigExec:pivot`, `rigExec:anchor`", "Providers defining the pivot and reference axes.", "yes"),
+            ("`rigExec:fkControls`", "Three controls in upper, lower and terminal order.", "yes"),
+            ("`rigExec:ikTarget`, `rigExec:poleControl`", "IK effector and bend-plane control.", "no"),
+            ("`rigExec:ikBlendAttribute`, `rigExec:amountAttribute`", "Float or double controls for blending and strength.", "no"),
+        ],
+        "example": """The biped's `Biped_autoclav.usda` layer carries the shoulder
+when its arm rises. Setting the shoulder's `avars:autoClav` to zero disables
+that translation; intermediate values reduce it.""",
+        "tips": [
+            "Use one Auto Clavicle per target provider.",
+            "The native graph currently rejects an independently space-switched descendant used as an entering-pose input.",
+            "Use explicit input read phases when a scalar depends on a property mover.",
+        ],
+        "see_also": [("two_bone_ik", "Two Bone IK"), ("fk_chain", "FK Chain"), ("space_switch", "Space Switch")],
+    },
+
     "space_switch": {
         "title": "Space Switch",
         "schema": "RigExecSpaceSwitch",

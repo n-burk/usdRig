@@ -160,7 +160,7 @@ enum RbfKernel : ubyte { Gaussian = 0, Linear }
 /// RigExecRbfPoseType.
 enum RbfPoseType : ubyte { Whole = 0, Swing, Twist }
 /// RigExecRotationFilter.
-enum RotationFilter : ubyte { All = 0, Twist, Swing }
+enum RotationFilter : ubyte { All = 0, Twist, Swing, Orient }
 /// Bits of Constraint.flags.
 enum ConstraintFlags : ubyte (bit_flags) {
   /// rigExec:blendShear on a Scale or Parent constraint.
@@ -648,6 +648,16 @@ table Solver {
   relationship_requirements: [SolverRelationshipRequirement] (native_inline);
   /// Canonical Solve identity, retained even when common SCC excludes its body.
   solve_descriptor_key: string;
+  scale_segments: bool;
+  soft_distance_policy: bool;
+  ik_scale_segments: bool;
+  scale_calibration: F64 (native_inline);
+  pin: Input;
+  upper_scale: Input;
+  lower_scale: Input;
+  soft_distance: Input;
+  limb_twist: Input;
+
 }
 table Constraint {
   path: uint;
@@ -717,6 +727,8 @@ table Constraint {
   pole_vector: Input (required);
   twist_degrees: Input (required);
   weight_field: int = -1;
+  stretch: Input;
+
 }
 table WalkStep {
   solver_batch: bool;
@@ -885,6 +897,29 @@ table RequiredStageFramesAdmission {
   first_bad_target: int = -1;
 }
 
+table AutoClavicleFrame {
+  slot: int = -1;
+  /// 0 posed, 1 default, 2 rest.
+  computation: ubyte;
+  recompose: [int];
+}
+table AutoClavicle {
+  slot: int = -1;
+  basis: [double];
+  ik_value: F64 (native_inline);
+  gain: F64 (native_inline);
+  kernel: int;
+  normalize: bool;
+  swings: [double];
+  widths: [double];
+  gains: [double];
+  weights: [double];
+  has_limb: bool;
+  frames: [AutoClavicleFrame] (native_inline);
+  scalar_indices: [int];
+  scalars: [Input] (native_inline);
+}
+
 table DomainPose {
   required_stage_frames_admission: RequiredStageFramesAdmission (required);
   /// One per slot.
@@ -915,6 +950,7 @@ table DomainPose {
   /// One per switched provider, in resolution order: every switch's reads
   /// refer only to versions produced by switches stored before it.
   space_switches: [SpaceSwitch] (native_inline);
+  auto_clavicles: [AutoClavicle] (native_inline);
   avar_bindings: [AvarBinding] (native_inline);
   /// The xform bases at bake_time, one per slot_meta.xform_slots entry.
   xform_base: [Matrix4d];

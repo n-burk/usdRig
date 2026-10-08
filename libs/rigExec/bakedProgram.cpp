@@ -3409,6 +3409,53 @@ RigExecBakedProgram::_BuildWithSceneCaptureAttempt(RigExecRigEvaluator *evaluato
         B.spaceSwitchBySlot[size_t(out.slot)] = int(B.spaceSwitches.size());
         B.spaceSwitches.push_back(std::move(out));
     }
+    B.autoClavicleBySlot.assign(B.paths.size(),-1);
+    for(const auto &[path,node]:B.sceneDescriptors->nodes) {
+        if(node.domain!=RigExecSceneDomain::AutoClavicle || !node.fact.active || !path.HasPrefix(E._rigPath))continue;
+        RigExecSceneCompileInputs source(*B.sceneDescriptors);
+        const auto prim=B.stage->GetPrimAtPath(path);
+        for (const char *name : {"rigExec:ikValue", "inputs:gain", "rigExec:basis",
+                 "rigExec:poseRotations", "rigExec:poseFalloffs", "rigExec:poseGains",
+                 "rigExec:kernel", "rigExec:regularization"}) ctx.Fold(prim,name);
+        const auto targets=source.Targets(path.AppendProperty(TfToken("rigExec:target")));
+        if(targets.size()!=1 || slotOf(targets.front())<0){refuse("auto clavicle requires one provider target",path);return nullptr;}
+        RigExecBakedProgramImpl::AutoClavicle ac;ac.slot=slotOf(targets.front());
+        if(B.autoClavicleBySlot[size_t(ac.slot)]>=0){refuse("multiple auto clavicles target the same provider",path);return nullptr;}
+        RigExecValueId next=1;
+        RigExecSceneGraphBindingContext link;
+        link.resolve=[&](const RigExecSceneGraphReadRequest &request,RigExecValueId *id,std::string *why) {
+            *id=next++;
+            if(request.domain==RigExecSceneValueDomain::Pose) {
+                const int slot=slotOf(request.source);
+                if(slot<0){if(why)*why="missing auto clavicle frame: "+request.source.GetString();return false;}
+                RigExecBakedProgramImpl::AutoClavicle::FrameRead read;
+                read.value=*id;read.slot=slot;read.computation=request.computation;
+                if(read.computation.empty() && request.source.HasPrefix(targets.front())) {
+                    for(int at=slot;at!=ac.slot;at=B.parent[size_t(at)]) {
+                        if(at<0){if(why)*why="auto clavicle descendant has no target ancestor";return false;}
+                        if(B.spaceSwitchBySlot[size_t(at)]>=0){if(why)*why="auto clavicle entering descendant has an independent space switch";return false;}
+                        read.recompose.push_back(at);
+                    }
+                    std::reverse(read.recompose.begin(),read.recompose.end());
+                }
+                ac.frames.push_back(std::move(read));return true;
+            }
+            const auto attribute=B.stage->GetAttributeAtPath(request.source);
+            if(!attribute)return false;
+            RigExecBakedProgramImpl::AutoClavicle::ScalarRead read;read.value=*id;
+            read.isFloat=attribute.GetTypeName()==SdfValueTypeNames->Float;
+            if(read.isFloat)read.narrow=ctx.Bind<float>(attribute.GetPrim(),attribute.GetName().GetText(),0.0f);
+            else read.wide=ctx.Bind<double>(attribute.GetPrim(),attribute.GetName().GetText(),0.0);
+            ac.scalars.push_back(std::move(read));return true;
+        };
+        std::string invalid;
+        if(!RigExecBindAutoClavicle(*B.sceneDescriptors,path,link,0,UINT64_MAX,&ac.operation,&invalid)) {
+            refuse(invalid,path);return nullptr;
+        }
+        ac.operation.output=next++;ac.values=RigExecTypedValueStore(size_t(next));
+        B.autoClavicleBySlot[size_t(ac.slot)]=int(B.autoClavicles.size());
+        B.autoClavicles.push_back(std::move(ac));
+    }
     // Once every switched slot is known: which version of each frame a
     // switch reads depends on which controls above it are switched.
     {

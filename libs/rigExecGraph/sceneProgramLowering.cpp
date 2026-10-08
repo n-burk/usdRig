@@ -24,7 +24,7 @@ static bool LowerSceneProgramOnce(const RigExecSceneDescriptors &captured,
         [&](const auto &binding){return excludedPoseWriters.count(binding.solver)!=0;}),scene.jointBindings.end());
     scene.applications.erase(std::remove_if(scene.applications.begin(),scene.applications.end(),
         [&](const auto &application){return excludedPoseWriters.count(application.owner)!=0 &&
-            application.domain==RigExecSceneDomain::Constraint;}),scene.applications.end());
+            (application.domain==RigExecSceneDomain::Constraint || application.domain==RigExecSceneDomain::AutoClavicle);}),scene.applications.end());
     // Authored stack scope and external input closure are separate: dependency
     // capture never imports the external source's mover application stack.
     std::set<SdfPath> needed;std::vector<SdfPath> pending;
@@ -565,6 +565,10 @@ static bool LowerSceneProgramOnce(const RigExecSceneDescriptors &captured,
                        carry==switchCarryCheckpoints.end()?UINT64_MAX:carry->second);
                })())return false;
             op.output=application.candidate;if(!program.Append(key,std::move(op),error))return false;
+        } else if(a.domain==RigExecSceneDomain::AutoClavicle) {
+            RigExecBoundAutoClavicle op;
+            if(!RigExecBindAutoClavicle(scene,a.owner,context,application.incoming,
+                application.candidate,&op,error) || !program.Append(key,std::move(op),error))return false;
         } else if(a.domain==RigExecSceneDomain::Constraint) {
             RigExecSceneConstraintDescriptor source;RigExecConstraintGraphBinding bound;RigExecConstraintGraphTarget target;
             if(!RigExecLowerSceneConstraint(scene,a.owner,{a.target},&source,error))return false;
@@ -682,7 +686,7 @@ bool RigExecLowerSceneProgram(const RigExecSceneDescriptors &captured,
                 const auto node=captured.nodes.find(owner);
                 if(!owner.IsPrimPath() || node==captured.nodes.end() ||
                    (solver?node->second.domain!=RigExecSceneDomain::Solver:
-                    node->second.domain!=RigExecSceneDomain::Constraint))
+                    (node->second.domain!=RigExecSceneDomain::Constraint && node->second.domain!=RigExecSceneDomain::AutoClavicle)))
                     return Fail(error,"excluded commit owner is missing or ambiguous");
                 const bool bound=solver?
                     std::any_of(captured.jointBindings.begin(),captured.jointBindings.end(),[&](const auto &binding){return binding.solver==owner;}):
@@ -712,8 +716,9 @@ bool RigExecLowerSceneProgram(const RigExecSceneDescriptors &captured,
                     }
             } else if(std::holds_alternative<RigExecConstraintGraphBinding>(operation) ||
                       std::holds_alternative<RigExecSceneSwitchOp>(operation) ||
+                      std::holds_alternative<RigExecBoundAutoClavicle>(operation) ||
                       std::holds_alternative<RigExecSceneFieldOp>(operation)) {
-                for(const auto &application:captured.applications)if(application.domain==RigExecSceneDomain::Constraint) {
+                for(const auto &application:captured.applications)if(application.domain==RigExecSceneDomain::Constraint || application.domain==RigExecSceneDomain::AutoClavicle) {
                     const auto revision="revision:"+application.owner.GetString()+":"+application.canonicalTarget.GetString();
                     if(key==revision || key=="field:"+revision)removableOwners.emplace(key,application.owner);
                 }

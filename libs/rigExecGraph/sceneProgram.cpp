@@ -75,6 +75,7 @@ bool RigExecSceneProgramRuntime::Run(const RigExecSceneProgram &program,uint32_t
             const bool available=RigExecReadGraphTypedRead(op.read,values,&selected,&diagnostic);
             values.PublishSource(op.output,selected,!available,true,diagnostic);return true;
         }
+        else if constexpr(std::is_same_v<T,RigExecBoundAutoClavicle>)return RigExecRunAutoClavicle(op,&values,error);
         else if constexpr(std::is_same_v<T,RigExecSceneProviderOp>)return RigExecRunProviderOp(program.layout.providers,op.originalIndex,&values,error);
         else if constexpr(std::is_same_v<T,RigExecPoseCommitBinding>)return RigExecRunPoseCommit(op,&values,&workspace.poseCommit,error);
         else if constexpr(std::is_same_v<T,RigExecPropertyGraphBinding>)return RigExecRunBoundProperty(op,&values,error);

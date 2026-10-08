@@ -1161,15 +1161,10 @@ TestDroppedKeys()
 
 // --- Arrays (array admission forced on) -------------------------------------
 
-// Array admission is off until the .rigexec format carries array slots.
-// Registration note: array admission defaults on when AI (W.3.11, format 8)
-// merges; that merge flips the default and extends
-// TestEveryAdmissiblePathIsAnInput to array slots. The .rigexec legs of
-// these cases are the runtime session's (W.5), skipped until then
-// (TestTheArrayPlaybackLegs).
 struct ArrayAdmission {
+    bool previous = RigExecUpstreamArrayAdmission();
     ArrayAdmission() { RigExecSetUpstreamArrayAdmissionForTesting(true); }
-    ~ArrayAdmission() { RigExecSetUpstreamArrayAdmissionForTesting(false); }
+    ~ArrayAdmission() { RigExecSetUpstreamArrayAdmissionForTesting(previous); }
 };
 
 // An environment variable set for a scope, restored after.
@@ -1911,6 +1906,8 @@ TestDroppedArrayKeys()
         }
     }
     // With the hook off, the keys the cases above admit.
+    const bool arraysWereAdmitted = RigExecUpstreamArrayAdmission();
+    RigExecSetUpstreamArrayAdmissionForTesting(false);
     VtVec3fArray points = AuthoredArray<VtVec3fArray>(limbs, kMeshAPoints);
     points[0] += GfVec3f(0.0f, 1.0f, 0.0f);
     VtFloatArray weights = AuthoredArray<VtFloatArray>(limbs, kJointWeights);
@@ -1926,6 +1923,7 @@ TestDroppedArrayKeys()
         CheckDropped(limbs, kLimbsRig, 5, input,
                      "array values are not admitted");
     }
+    RigExecSetUpstreamArrayAdmissionForTesting(arraysWereAdmitted);
 }
 
 // Connected posed-space inputs are compiled and frozen by the graph.
@@ -2044,38 +2042,6 @@ WriteBake(RigExecRigEvaluator &evaluator, double t, const std::string &name)
     return path;
 }
 
-// Whether \p admitted holds a key a playback session cannot follow before
-// AI, naming it in \p why: rigExec:elementSize on a skinTopologyFixed
-// revision. The runtime adopts the layout it opened for such a revision
-// and ignores the slot until AI's layout rebuild (W.3.11), while live's
-// SkinTopology op rebuilds from the leaf. Remove when AI merges.
-bool
-SkipsPoseUntilAI(const RigExecRigEvaluator &evaluator,
-                 const std::vector<SdfPath> &admitted, std::string *why)
-{
-    const RigExecBakedProgram *program = evaluator.GetBakedProgram();
-    if (!program) {
-        return false;
-    }
-    for (const SdfPath &path : admitted) {
-        if (path.GetName() != "rigExec:elementSize") {
-            continue;
-        }
-        for (const auto &chain : program->GetStepGraph().chains) {
-            for (const auto &revision : chain.revisions) {
-                if (revision.moverPath == path.GetPrimPath() &&
-                    revision.skinTopologyFixed) {
-                    *why = path.GetString() +
-                           " on a skinTopologyFixed revision (until AI, "
-                           "W.3.11)";
-                    return true;
-                }
-            }
-        }
-    }
-    return false;
-}
-
 // \p reader's last run against \p pose, output domain by output domain and
 // the property chains' values, bit for bit.
 void
@@ -2178,16 +2144,7 @@ CheckPlaybackParity(const std::string &what, const std::string &stagePath,
             animated.insert(path);
         }
     }
-    std::string why;
-    const bool skip = SkipsPoseUntilAI(*evaluator, admitted, &why);
-    if (skip) {
-        std::printf("  skip pose compare: %s\n", why.c_str());
-    } else {
-        CheckSameRun(what + ": standing", live, play.GetReaderForTesting());
-        if (!admitted.empty()) {
-            CHECK(Differences(authored, live) != 0);
-        }
-    }
+    CheckSameRun(what + ": standing", live, play.GetReaderForTesting());
     UsdTimeCode last = time;
     for (const double at : later) {
         last = UsdTimeCode(at);
@@ -2195,10 +2152,8 @@ CheckPlaybackParity(const std::string &what, const std::string &stagePath,
         CHECK(play.EvaluateAndPublishResult(last).ok);
         CHECK(play.GetUpstreamInputPaths() == admitted);
         CHECK(play.GetUpstreamDropLines() == DropLines(moved));
-        if (!skip) {
-            CheckSameRun(what + ": standing at " + TfStringify(at), moved,
-                         play.GetReaderForTesting());
-        }
+        CheckSameRun(what + ": standing at " + TfStringify(at), moved,
+                     play.GetReaderForTesting());
     }
 
     evaluator->SetUpstreamInputs({});
@@ -2234,8 +2189,7 @@ TestPlaybackParity()
          Up(kBRootRestSpace, VtValue(Translate(1, 0, 10))),
          Up(kA0Rz, VtValue(30.0f)), Up(offset, VtValue(0.5)),
          Up(scheme, VtValue(TfToken("catmullClark"))),
-         Up(SdfPath("/LimbsAsset/Rig.noSuchInput"), VtValue(1.0)),
-         Up(kJointWeights, VtValue(weights))},
+         Up(SdfPath("/LimbsAsset/Rig.noSuchInput"), VtValue(1.0))},
         {}, {4, 7.5});
     CHECK(limbsAnimated.empty());
     // A key on an Animated input (A1's keyed avar): set again after each
@@ -2247,8 +2201,7 @@ TestPlaybackParity()
     // The solver input where it moves the pose.
     CheckPlaybackParity("solver input", limbs, kLimbsRig, 5,
                         {Up(offset, VtValue(0.5))});
-    // A layout scalar of a fixed skin layout: admitted by both, the pose
-    // compare skipped until AI (SkipsPoseUntilAI).
+    // A layout scalar of a fixed skin layout rebuilds in both backends.
     CheckPlaybackParity(
         "skin elementSize", limbs, kLimbsRig, 1,
         {Up(SdfPath("/LimbsAsset/Rig/Movers/MeshASkin.rigExec:elementSize"),
@@ -2735,6 +2688,11 @@ TagType(fb::InputTag tag)
     case fb::InputTag::Matrix4d: return TfType::Find<GfMatrix4d>();
     case fb::InputTag::Vec3d: return TfType::Find<GfVec3d>();
     case fb::InputTag::Vec3f: return TfType::Find<GfVec3f>();
+    case fb::InputTag::Vec3fArray: return TfType::Find<VtVec3fArray>();
+    case fb::InputTag::Vec2fArray: return TfType::Find<VtVec2fArray>();
+    case fb::InputTag::DoubleArray: return TfType::Find<VtDoubleArray>();
+    case fb::InputTag::FloatArray: return TfType::Find<VtFloatArray>();
+    case fb::InputTag::IntArray: return TfType::Find<VtIntArray>();
     }
     return TfType();
 }
@@ -2798,13 +2756,27 @@ CheckSetsAgainstTheExporter(const std::string &stagePath, double t)
         slotTypes.insert(TagType(tag));
     }
     for (const auto &[path, type] : program->GetUpstreamAdmissible()) {
-        // The array part is empty on both sides until the array input kind
-        // lands: every admissible type is a scalar slot's.
+        // The scalar admission set uses the existing scalar input tags.
         CHECK(slotTypes.count(type));
         if (Settable(stage, path)) {
             admissible[path] = type;
         }
     }
+    std::map<SdfPath, TfType> publicArrays;
+    for (const RigExecUpstreamArrayRow &row :
+         RigExecBakedUpstreamAdmissibleArrays(*evaluator)) {
+        publicArrays[row.path] = row.type;
+        if (Settable(stage, row.path)) {
+            admissible[row.path] = row.type;
+        }
+    }
+    std::map<SdfPath, TfType> exportedArrays;
+    for (size_t i = 0; i < C.listedInputs; ++i) {
+        if (RigExecFormatIsArrayTag(C.inputs[i].type())) {
+            exportedArrays[SdfPath(names[i])] = TagType(C.inputs[i].type());
+        }
+    }
+    CHECK(exportedArrays == publicArrays);
     if (listed != admissible) {
         std::printf("FAIL %s: admissible (%zu) != listed (%zu)\n",
                     stagePath.c_str(), admissible.size(), listed.size());

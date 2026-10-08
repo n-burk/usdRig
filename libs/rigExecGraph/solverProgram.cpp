@@ -37,6 +37,7 @@ bool RigExecRunSolver(const RigExecSolverRecord &s,const RigExecSolverInputs &in
             element.parentIndex=s.parentRelative?base-1:int(k)+base-1;
         }
         aggregate.frames=RigExecSolveFkChain(elements);
+        if(s.scaleSegments)RigExecScaleFkSegments(elements,&aggregate.frames);
         if(base && !aggregate.frames.empty())aggregate.frames.erase(aggregate.frames.begin());
         return true;
     }
@@ -56,6 +57,9 @@ bool RigExecRunSolver(const RigExecSolverRecord &s,const RigExecSolverInputs &in
             RigExecTwoBoneIkLengths(s.ikRests,space,input.upperOffset,input.lowerOffset,
                 &params.upperLength,&params.lowerLength);
         }
+        if(input.refreshIkParams || spaceMoved)
+            RigExecSetTwoBoneLimbParams(s.ikRests,space,input.stretch,input.pin,input.upperScale,
+                input.lowerScale,input.softDistance,input.limbTwist,&params);
         const auto frames=RigExecSolveTwoBoneIk(input.root,input.end,input.pole,s.ikRests,params);
         aggregate.frames.assign(frames.begin(),frames.end());
         aggregate.rests.assign(s.ikRests.begin(),s.ikRests.end());

@@ -2362,6 +2362,19 @@ _TestPaintedEnvelopeSet()
         CHECK(false);
         return;
     }
+    size_t publicIndex = 0;
+    CHECK(!reader->FindInput(values, &publicIndex));
+    const auto privateFile = RigExecTestUnpack(bytes);
+    CHECK(privateFile &&
+          uint64_t(RigExecTestSlotOf(*privateFile, values)) >=
+              privateFile->listedInputs);
+    const std::vector<uint8_t> crafted =
+        RigExecTestListPrivateArraySlots(bytes);
+    reader = RigExecRuntimeReader::Open(crafted.data(), crafted.size(), &error);
+    CHECK(reader && reader->Execute(&error));
+    if (!reader) {
+        return;
+    }
     const std::vector<RigExecRuntimeJointMatrix> before =
         reader->GetJointMatrices();
     const std::vector<RigExecTestArraySet> sets = {

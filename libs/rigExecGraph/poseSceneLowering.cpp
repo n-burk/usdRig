@@ -53,9 +53,9 @@ bool RigExecLowerSceneSpaceSwitch(const RigExecSceneDescriptors &scene,const Sdf
         result.sources.push_back(Provider(source,sources[k])?sources[k]:SdfPath{});
         result.labels.push_back(labels.empty()?TfToken(sources[k].GetName()):labels[k]);
         const TfToken filter=filters.empty()?TfToken("all"):filters[k];
-        if(!filter.IsEmpty() && filter!="all" && filter!="twist" && filter!="swing")
+        if(!filter.IsEmpty() && filter!="all" && filter!="twist" && filter!="swing" && filter!="orient")
             return Fail(error,"unknown space switch rotation filter: "+filter.GetString());
-        result.record.filters.push_back(filter=="twist"?1:filter=="swing"?2:0);
+        result.record.filters.push_back(filter=="twist"?1:filter=="swing"?2:filter=="orient"?3:0);
     }
     const auto spaces=source.Targets(property("rigExec:space"));
     if(spaces.size()>1)return Fail(error,"space switch has more than one rigExec:space: "+path.GetString());

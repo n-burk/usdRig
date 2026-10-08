@@ -1343,8 +1343,12 @@ _RrSolverField(const RigExecWireSolver &s, int field)
         return s.twistTurns.get();
     case RrSolverRibbonSampleCount:
         return s.ribbonSampleCount.get();
-    default:
-        return s.ikSpace.get();
+    case RrSolverPin:return s.pin.get();
+    case RrSolverUpperScale:return s.upperScale.get();
+    case RrSolverLowerScale:return s.lowerScale.get();
+    case RrSolverSoftDistance:return s.softDistance.get();
+    case RrSolverLimbTwist:return s.limbTwist.get();
+    default:return s.ikSpace.get();
     }
 }
 
@@ -1393,6 +1397,7 @@ _RrConstraintField(const RigExecWireConstraint &c, int field)
         return c.worldUpVector.get();
     case RrConstraintPoleVector:
         return c.poleVector.get();
+    case RrConstraintStretch:return c.stretch.get();
     default:
         return c.twistDegrees.get();
     }
@@ -1520,6 +1525,12 @@ RrInputsBindReads(RrProgram *program, std::string *error)
             }
         }
     }
+    program->autoClavicleRead.resize(poses.autoClavicles.size());
+    for(size_t i=0;i<poses.autoClavicles.size();++i) {
+        const auto &ac=poses.autoClavicles[i];program->autoClavicleRead[i].assign(ac.scalars.size(),-1);
+        for(size_t k=0;k<ac.scalars.size();++k)if(!bind(&ac.scalars[k],_RrFamily::AutoClavicle,i,k,&program->autoClavicleRead[i][k]))
+            return unbound("pose.auto_clavicles",i);
+    }
     for (size_t i = 0; i < poses.spaceSwitches.size(); ++i) {
         if (!bind(poses.spaceSwitches[i].active.get(), _RrFamily::SpaceSwitch,
                   i, 0, &program->spaceSwitchRead[i])) {
@@ -1543,6 +1554,7 @@ RrInputsBindReads(RrProgram *program, std::string *error)
     }
     for (size_t i = 0; i < poses.solvers.size(); ++i) {
         for (int field = 0; field < RrSolverFieldCount; ++field) {
+            if(field>=14 && !_RrSolverField(poses.solvers[i],field))continue;
             if (!bind(_RrSolverField(poses.solvers[i], field),
                       _RrFamily::Solver, i, size_t(field),
                       &program->solverRead[i][size_t(field)])) {
@@ -1552,6 +1564,7 @@ RrInputsBindReads(RrProgram *program, std::string *error)
     }
     for (size_t i = 0; i < poses.constraints.size(); ++i) {
         for (int field = 0; field < RrConstraintFieldCount; ++field) {
+            if(field==RrConstraintStretch && !poses.constraints[i].stretch)continue;
             if (!bind(_RrConstraintField(poses.constraints[i], field),
                       _RrFamily::Constraint, i, size_t(field),
                       &program->constraintRead[i][size_t(field)])) {

@@ -57,8 +57,9 @@ element count. An authored set reaches every read of the attribute, the
 Default-time ones included. `SetSampledInputArrayAt` takes a stage's own
 value at a sampled time, of any count: only the reads at the evaluation time
 take it, and each reader judges the count as the evaluators do. A fixed skin
-layout's arrays, a chain's base points, painted weights and the weight
-oracle's points read through such inputs; `ResetInput` returns each to the
+layout's arrays, a chain's base points and admitted weight-oracle points
+read through such inputs. Structural painted arrays and excluded point reads
+keep private storage slots, inaccessible to the public input APIs; `ResetInput` returns each to the
 file's value, and a skin layout to the one `Open` expanded unless the layout
 standing equals it by value, which stays, as the evaluator's layout op keeps
 it. The input sampler does not sample array inputs.

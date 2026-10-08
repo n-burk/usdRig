@@ -114,7 +114,7 @@ public:
     /// that input's type, and on the stage the attribute is unconnected and
     /// has a value; every other key is ignored with live's line, "upstream
     /// input <path>: <reason>; ignored" (GetUpstreamDropLines). Array values
-    /// are never listed inputs until the format carries array slots.
+    /// require the stage's count; a runtime count refusal lifts the key.
     void SetUpstreamInputs(std::vector<RigExecUpstreamValue> values);
 
     /// The list SetUpstreamInputs last received.
