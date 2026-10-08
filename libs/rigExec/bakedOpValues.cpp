@@ -1,11 +1,13 @@
 #include "bakedOpValues.h"
 #include "bakedProgramImpl.h"
+#include "pathText.h"
 #include "weightField.h"
 #include "movers/moverRegistry.h"
 #include "pxr/base/tf/diagnostic.h"
 #include <algorithm>
 #include <cstring>
 #include <type_traits>
+#include <typeinfo>
 
 namespace rigExec {
 namespace {
@@ -23,11 +25,30 @@ bool SourceSame(const GfMatrix4d&a,const GfMatrix4d&b) {
     for(int r=0;r<4;++r) for(int c=0;c<4;++c) if(!SourceSame(a[r][c],b[r][c])) return false;
     return true;
 }
+// Padding-free element types whose SourceSame is their bytes: one shared
+// buffer, or one memcmp, decides the whole array.
+template<class T> constexpr bool kBitwiseElement=
+    std::is_same_v<T,double> || std::is_same_v<T,float> || std::is_same_v<T,int> ||
+    std::is_same_v<T,GfVec2f> || std::is_same_v<T,GfVec3f> || std::is_same_v<T,GfVec3d> ||
+    std::is_same_v<T,GfVec3i> || std::is_same_v<T,GfMatrix4d>;
+static_assert(sizeof(GfVec2f)==2*sizeof(float) && sizeof(GfVec3f)==3*sizeof(float) &&
+              sizeof(GfVec3d)==3*sizeof(double) && sizeof(GfVec3i)==3*sizeof(int) &&
+              sizeof(GfMatrix4d)==16*sizeof(double),"array memcmp needs padding-free elements");
+template<class T> bool SourceArraySame(const VtArray<T> &x,const VtArray<T> &y) {
+    if constexpr(kBitwiseElement<T>) {
+        return x.IsIdentical(y) || (x.size()==y.size() &&
+            (x.empty() || std::memcmp(x.cdata(),y.cdata(),x.size()*sizeof(T))==0));
+    } else {
+        if(x.size()!=y.size()) return false;
+        for(size_t i=0;i<x.size();++i) if(!SourceSame(x[i],y[i])) return false;
+        return true;
+    }
+}
 }
 bool RigExecExactSourceValueEqual(const VtValue &a,const VtValue &b) {
     if(a.IsEmpty() || b.IsEmpty()) return a.IsEmpty() && b.IsEmpty();
 #define SAME(T) if(a.IsHolding<T>()) return b.IsHolding<T>() && SourceSame(a.UncheckedGet<T>(),b.UncheckedGet<T>()); \
-    if(a.IsHolding<VtArray<T>>()) { if(!b.IsHolding<VtArray<T>>()) return false; const auto&x=a.UncheckedGet<VtArray<T>>(); const auto&y=b.UncheckedGet<VtArray<T>>(); if(x.size()!=y.size()) return false; for(size_t i=0;i<x.size();++i) if(!SourceSame(x[i],y[i])) return false; return true; }
+    if(a.IsHolding<VtArray<T>>()) return b.IsHolding<VtArray<T>>() && SourceArraySame(a.UncheckedGet<VtArray<T>>(),b.UncheckedGet<VtArray<T>>());
     SAME(double) SAME(float) SAME(int) SAME(bool) SAME(TfToken) SAME(std::string)
     SAME(GfVec2f) SAME(GfVec3f) SAME(GfVec3d) SAME(GfVec3i) SAME(GfMatrix4d)
 #undef SAME
@@ -47,8 +68,12 @@ void Put(std::string *out, const std::string &value)
 {
     Put(out, uint64_t(value.size())); out->append(value);
 }
-void Put(std::string *out, const TfToken &value) { Put(out, value.GetString()); }
-void Put(std::string *out, const SdfPath &value) { Put(out, value.GetString()); }
+// The same bytes as its string; GetString() on an empty token reads a
+// function-local static.
+void Put(std::string *out, const TfToken &value)
+{
+    Put(out, uint64_t(value.size())); out->append(value.GetText(), value.size());
+}
 void Put(std::string *out, const GfVec2f &v) { for (int i=0;i<2;++i) Put(out,v[i]); }
 void Put(std::string *out, const GfVec3f &v) { for (int i=0;i<3;++i) Put(out,v[i]); }
 void Put(std::string *out, const GfVec3d &v) { for (int i=0;i<3;++i) Put(out,v[i]); }
@@ -69,21 +94,85 @@ bool BoxExact(const VtValue &v)
 #undef KNOWN
     return v.IsHolding<SdfPath>();
 }
+// Closed tags for the types Box encodes, in place of VtValue::GetTypeName(),
+// which demangles through shared statics. Keys never leave the process and
+// meet only keys this code made, so a tag need only be injective.
+enum class BoxTag : uint8_t {
+    Double=1, Float, Int, Bool, Token, String, Path, Vec2f, Vec3f, Vec3d,
+    Vec3i, Matrix4d, DoubleArray, FloatArray, IntArray, BoolArray,
+    TokenArray, StringArray, Vec2fArray, Vec3fArray, Vec3dArray, Vec3iArray,
+    Matrix4dArray, PathElements, Opaque=255
+};
+// A path whose text RigExecSpellPathText cannot spell (relative, under a
+// variant selection, or a target, mapper or expression path) keys by its
+// elements: one self-delimiting record per prefix, read from nodes \p path
+// keeps alive. Equal paths give equal bytes and distinct paths distinct
+// bytes, as their texts would, without Sdf's text tables.
+void PutPathElements(std::string *out, const SdfPath &path)
+{
+    Put(out,uint8_t(path.IsEmpty() ? 0 : path.IsAbsolutePath() ? 1 : 2));
+    if(path.IsEmpty()) return;
+    std::vector<SdfPath> prefixes; path.GetPrefixes(&prefixes);
+    Put(out,uint64_t(prefixes.size()));
+    for(const SdfPath &prefix:prefixes) {
+        if(prefix.IsPrimVariantSelectionPath()) {
+            const auto selection=prefix.GetVariantSelection();
+            Put(out,uint8_t(1)); Put(out,selection.first); Put(out,selection.second);
+        } else if(!prefix.ContainsPropertyElements()) {
+            Put(out,uint8_t(2)); Put(out,prefix.GetNameToken());
+        } else if(prefix.IsPrimPropertyPath()) {
+            Put(out,uint8_t(3)); Put(out,prefix.GetNameToken());
+        } else if(prefix.IsRelationalAttributePath()) {
+            Put(out,uint8_t(4)); Put(out,prefix.GetNameToken());
+        } else if(prefix.IsMapperArgPath()) {
+            Put(out,uint8_t(5)); Put(out,prefix.GetNameToken());
+        } else if(prefix.IsTargetPath()) {
+            Put(out,uint8_t(6)); PutPathElements(out,prefix.GetTargetPath());
+        } else if(prefix.IsMapperPath()) {
+            Put(out,uint8_t(7)); PutPathElements(out,prefix.GetTargetPath());
+        } else {
+            // Sdf's one remaining property node kind.
+            Put(out,uint8_t(8));
+        }
+    }
+}
+// An opaque value keeps its type's identity, so a non-exact output key still
+// separates two types. The ABI name is a field of type_info; MSVC's name()
+// undecorates into a shared cache.
+void PutTypeIdentity(std::string *out, const std::type_info &type)
+{
+#if defined(_MSC_VER)
+    const char *name=type.raw_name();
+#else
+    const char *name=type.name();
+#endif
+    const size_t size=std::strlen(name);
+    Put(out,uint64_t(size)); out->append(name,size);
+}
 bool Box(std::string *out, const VtValue &v)
 {
     Put(out,v.IsEmpty()); if(v.IsEmpty()) return true;
-    Put(out,v.GetTypeName());
-#define SCALAR(T) if(v.IsHolding<T>()) { Put(out,v.UncheckedGet<T>()); return true; }
-    SCALAR(double) SCALAR(float) SCALAR(int) SCALAR(bool)
-    SCALAR(TfToken) SCALAR(std::string) SCALAR(SdfPath)
-    SCALAR(GfVec2f) SCALAR(GfVec3f) SCALAR(GfVec3d) SCALAR(GfVec3i)
-    SCALAR(GfMatrix4d)
+#define SCALAR(T,TAG) if(v.IsHolding<T>()) { Put(out,BoxTag::TAG); Put(out,v.UncheckedGet<T>()); return true; }
+    SCALAR(double,Double) SCALAR(float,Float) SCALAR(int,Int) SCALAR(bool,Bool)
+    SCALAR(TfToken,Token) SCALAR(std::string,String)
+    SCALAR(GfVec2f,Vec2f) SCALAR(GfVec3f,Vec3f) SCALAR(GfVec3d,Vec3d) SCALAR(GfVec3i,Vec3i)
+    SCALAR(GfMatrix4d,Matrix4d)
 #undef SCALAR
-#define VECTOR(T) if(v.IsHolding<VtArray<T>>()) { const auto &a=v.UncheckedGet<VtArray<T>>(); Put(out,uint64_t(a.size())); for(size_t i=0;i<a.size();++i) Put(out,T(a[i])); return true; }
-    VECTOR(double) VECTOR(float) VECTOR(int) VECTOR(bool)
-    VECTOR(TfToken) VECTOR(std::string) VECTOR(GfVec2f) VECTOR(GfVec3f)
-    VECTOR(GfVec3d) VECTOR(GfVec3i) VECTOR(GfMatrix4d)
+    if(v.IsHolding<SdfPath>()) {
+        // The text GetString() would give, spelled without its token table.
+        const SdfPath &path=v.UncheckedGet<SdfPath>();
+        std::string text;
+        if(RigExecSpellPathText(path,&text)) { Put(out,BoxTag::Path); Put(out,text); }
+        else { Put(out,BoxTag::PathElements); PutPathElements(out,path); }
+        return true;
+    }
+#define VECTOR(T,TAG) if(v.IsHolding<VtArray<T>>()) { Put(out,BoxTag::TAG); const auto &a=v.UncheckedGet<VtArray<T>>(); Put(out,uint64_t(a.size())); for(size_t i=0;i<a.size();++i) Put(out,T(a[i])); return true; }
+    VECTOR(double,DoubleArray) VECTOR(float,FloatArray) VECTOR(int,IntArray) VECTOR(bool,BoolArray)
+    VECTOR(TfToken,TokenArray) VECTOR(std::string,StringArray) VECTOR(GfVec2f,Vec2fArray)
+    VECTOR(GfVec3f,Vec3fArray) VECTOR(GfVec3d,Vec3dArray) VECTOR(GfVec3i,Vec3iArray)
+    VECTOR(GfMatrix4d,Matrix4dArray)
 #undef VECTOR
+    Put(out,BoxTag::Opaque); PutTypeIdentity(out,v.GetTypeid());
     return false;
 }
 void Put(std::string *out, const RigExecPointFrame &v)
@@ -225,7 +314,15 @@ void RigExecBakedOpValueKey(const RigExecBakedProgramImpl &B,
             Array(out,v.ribbonPointsVarying ? v.ribbonPoints : v.ribbonConstantPoints); return; } break;
     case D::Candidates:
         if(slot<B.solvers.size()) { const auto &v=B.solvers[slot];
-            Array(out,v.outFrames); Array(out,v.outPresent); Array(out,v.fallbackJoints); return; } break;
+            Array(out,v.outFrames); Array(out,v.outPresent);
+            // Each joint's text as Build spelled it, never SdfPath's tables.
+            const size_t spelled=B.pathTexts ? B.pathTexts->size() : 0;
+            Put(out,uint64_t(v.fallbackSlots.size()));
+            for(const int joint:v.fallbackSlots) {
+                if(joint<0 || size_t(joint)>=spelled) { bad(); return; }
+                Put(out,(*B.pathTexts)[size_t(joint)]);
+            }
+            return; } break;
     case D::CommitTable:
         if(slot<B.commits.size()) { const auto &v=B.commits[slot];
             Put(out,v.abandoned); Array(out,v.present); Array(out,v.frames);

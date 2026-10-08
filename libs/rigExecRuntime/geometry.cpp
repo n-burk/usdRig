@@ -2475,12 +2475,9 @@ RrGeoWireTakesSparseEnvelope(const RrGeoWeightPacket &w)
 
 bool RrGeoPointBitsEqual(const std::vector<RrVec3f> &a,const std::vector<RrVec3f> &b)
 {
-    if(a.size()!=b.size())return false;
-    for(size_t i=0;i<a.size();++i)for(int axis=0;axis<3;++axis) {
-        const float x=a[i][axis],y=b[i][axis];
-        if(std::memcmp(&x,&y,sizeof(float)))return false;
-    }
-    return true;
+    static_assert(sizeof(RrVec3f)==3*sizeof(float),"points compare as packed floats");
+    return a.size()==b.size() &&
+        (a.empty() || std::memcmp(a.data(),b.data(),a.size()*sizeof(RrVec3f))==0);
 }
 struct RrGeoWireBasisEntry {
     std::vector<RrVec2f> binds;

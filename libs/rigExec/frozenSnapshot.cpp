@@ -41,6 +41,7 @@ _CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst)
     D.solverGuidesEnabled = nullptr;
     D.hasPropertyChains = src.hasPropertyChains;
     D.paths = src.paths;
+    D.pathTexts = src.pathTexts;
     D.index = src.index;
     D.slotKind = src.slotKind;
     D.providerActive = src.providerActive;
@@ -481,6 +482,15 @@ RigExecFreezeProgram(const RigExecRigEvaluator &evaluator,
         evaluator.GetBakedProgram()->GetStepGraph();
     auto snapshot = std::make_shared<RigExecFrozenProgram>();
     _CloneImpl(B, &snapshot->program);
+    // Workers clone this snapshot and index its spelled slot paths unchecked.
+    if (!TF_VERIFY(snapshot->program.pathTexts &&
+                   snapshot->program.pathTexts->size() ==
+                       snapshot->program.paths.size())) {
+        if (error) {
+            *error = "slot path texts do not match the slot table";
+        }
+        return false;
+    }
     if (evaluator.cpuReference) {
         // Freeze is an owning-thread source boundary. Enabling the judge
         // after Evaluate must capture its independent inputs here, rather

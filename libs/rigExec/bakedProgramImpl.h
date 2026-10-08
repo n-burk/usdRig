@@ -246,9 +246,11 @@ RigExecBakedClassifyInput(const UsdAttribute &attribute, UsdTimeCode time,
     }
 }
 
+/// \p name pre-interned: the parallel resolve lanes pass file-scope tokens,
+/// because TfToken(const char *) takes the token registry's lock.
 template <class T>
 inline RigExecBakedInput<T>
-RigExecBakedBindInput(const UsdPrim &prim, const char *name, T fallback,
+RigExecBakedBindInput(const UsdPrim &prim, const TfToken &name, T fallback,
                       UsdTimeCode time,
                       const std::set<SdfPath> &chainTargets,
                       SdfPathVector *walk = nullptr)
@@ -258,7 +260,7 @@ RigExecBakedBindInput(const UsdPrim &prim, const char *name, T fallback,
     if (!prim) {
         return input;
     }
-    const UsdAttribute attribute = prim.GetAttribute(TfToken(name));
+    const UsdAttribute attribute = prim.GetAttribute(name);
     if (!attribute) {
         return input;
     }
@@ -969,6 +971,9 @@ struct RigExecBakedPointsBinding {
     bool finalRead = false;
     /// `phases` reads other than `preceding`; never a blend sample.
     bool diagnoseMiss = false;
+    /// The miss diagnostic, spelled at Build: a body may not ask SdfPath for
+    /// text, which interns it under Sdf's table locks.
+    std::string missDiagnostic;
     /// Dense over every binding of the program, for the test capture.
     int id = -1;
 };
@@ -1564,6 +1569,8 @@ struct RigExecBakedCommit {
     };
     /// Empty for a solver batch, whose diagnostics carry no mover path.
     SdfPath moverPath;
+    /// moverPath spelled at Build, for the body's diagnostics.
+    std::string moverPathText;
     bool solverOutput = false;
     /// Sorted, unique.
     std::vector<int> slots;
@@ -1714,6 +1721,10 @@ struct RigExecBakedProgramImpl {
     // namespace DFS pre-order, so a provider's parent always has a lower slot
     // than it does and one forward pass composes the whole hierarchy.
     std::vector<SdfPath> paths;
+    /// `paths` spelled once at Build on the owning thread, one text per slot.
+    /// Step bodies and worker-side keys read this text: SdfPath::GetString
+    /// interns under Sdf's table locks. Immutable, so clones share it.
+    std::shared_ptr<const std::vector<std::string>> pathTexts;
     std::map<SdfPath, int> index;
     std::vector<RigExecBakedSlotKind> slotKind;
     /// Captured prim activity, distinct from individual attribute availability.
@@ -1758,6 +1769,8 @@ struct RigExecBakedProgramImpl {
     struct ConstraintArrays {
         UsdPrim prim;
         SdfPath path;
+        /// `path` spelled at Build, for the body's diagnostics.
+        std::string pathText;
         std::array<VtValue,4> raw; ///< source weights/translation/rotation/pole raw samples
         size_t sourceCount = 0;
         bool parentOffsets = false;
@@ -1953,6 +1966,8 @@ struct RigExecBakedProgramImpl {
     // driver leaves every corrective it drives untouched.
     struct PoseInterpolator : RigExecPoseInterpolatorRecord {
         SdfPath path;
+        /// `path` spelled at Build, for the body's diagnostics.
+        std::string pathText;
         int driverSlot = -1;
         /// The nearest frame-publishing ancestor the driver's local rotation
         /// is measured against, or -1 when its local rotation is its world
@@ -2078,6 +2093,8 @@ struct RigExecBakedProgramImpl {
         RigExecSolverInputs kernelInputs;
         RigExecSolverWorkspace kernelWorkspace;
         SdfPath path;
+        /// `path` spelled at Build, for the body's diagnostics.
+        std::string pathText;
         TfToken type;
         /// Exact supported schema port and compiled target solver identity.
         /// This is a structural prerequisite, not a fabricated numerical read.
@@ -2227,9 +2244,9 @@ struct RigExecBakedProgramImpl {
         std::vector<char> outPresent;
         /// Where each output lands in its commit's slot-ordered table.
         std::vector<int> outPosition;
-        /// Joints this solver published no element for. Merged with every
-        /// other solver's list into one ordered set by the epilogue.
-        std::vector<SdfPath> fallbackJoints;
+        /// Slots of the joints this solver published no element for. Their
+        /// key spells each as `pathTexts` holds it.
+        std::vector<int> fallbackSlots;
         /// FkChain's element table, so the solve allocates nothing.
         /// The `fin` versions this solve reads: one per control, then the
         /// four named controls. Decided at Build like every other read
@@ -2251,6 +2268,11 @@ struct RigExecBakedProgramImpl {
         RigExecConstraintInputs kernelInputs;
         RigExecConstraintResult kernelResult;
         SdfPath path;
+        /// `path`, `sourcePaths` and `deltaBasePath` spelled at Build, for
+        /// the body's diagnostics.
+        std::string pathText;
+        std::vector<std::string> sourcePathTexts;
+        std::string deltaBasePathText;
         TfToken type;
         /// rigExec:weightObject, empty when the constraint binds none.
         ///
@@ -2761,6 +2783,9 @@ struct RigExecBakedProgramImpl {
         RigExecGeometryRecord kernelRecord;
         RigExecSceneGeometryDescriptor sceneGeometry;
         SdfPath moverPath;
+        /// moverPath spelled at Build, for the bodies' diagnostics and
+        /// status addresses.
+        std::string moverPathText;
         SdfPath target;
         UsdPrim moverPrim;
         RigExecRevisionOp op = RigExecRevisionOp::Skin;
@@ -3088,6 +3113,8 @@ struct RigExecBakedProgramImpl {
         // Derived maintenance reads this chain's FINAL points.
         struct Derived {
             SdfPath target;
+            /// `target` spelled at Build, for the body's diagnostic.
+            std::string targetText;
             UsdAttributeQuery baseQuery;
             GeomRevision revision;
             VtVec3fArray sampledBase;
@@ -3878,6 +3905,19 @@ void RigExecBakedFinishPropertyStep(RigExecBakedProgramImpl *program,
 /// payload is a difference); empty equals only empty.
 bool RigExecBakedHeadValueSame(const VtValue &a, const VtValue &b);
 
+/// Each of \p paths spelled once, on the owning thread, for
+/// RigExecBakedProgramImpl::pathTexts.
+inline std::shared_ptr<const std::vector<std::string>>
+RigExecBakedSpellPathTexts(const std::vector<SdfPath> &paths)
+{
+    auto texts = std::make_shared<std::vector<std::string>>();
+    texts->reserve(paths.size());
+    for (const SdfPath &path : paths) {
+        texts->push_back(path.GetString());
+    }
+    return texts;
+}
+
 /// What reader walk \p walk answers after this run's head tier and
 /// publication: RigExecResolvedInputs::GetAttribute over the published
 /// overlay, restated over head leaves, override slots, chain finals and
@@ -4116,10 +4156,10 @@ std::vector<int> RigExecBakedMergeCommitShards(
 /// can stand on. What CommitBind records, for either sink.
 template <class Sink, class T>
 void
-RigExecBakedRecordBind(Sink *sink, const UsdPrim &prim, const char *name,
+RigExecBakedRecordBind(Sink *sink, const UsdPrim &prim, const TfToken &name,
                        RigExecBakedInput<T> *input, const SdfPathVector &walk)
 {
-    if (prim && prim.GetAttribute(TfToken(name))) {
+    if (prim && prim.GetAttribute(name)) {
         sink->Bound(input->varying);
     }
     if (prim) {
@@ -4127,7 +4167,7 @@ RigExecBakedRecordBind(Sink *sink, const UsdPrim &prim, const char *name,
         // Named even when absent: a resync that CREATES this property is
         // an input appearing, and the bake captured the default it did
         // not find.
-        sink->Named(prim.GetPath().AppendProperty(TfToken(name)));
+        sink->Named(prim.GetPath().AppendProperty(name));
     }
     // The registration proper: an input with no head has nothing an
     // override could stand on, and no number.
@@ -4167,6 +4207,15 @@ RigExecBakedRecordBind(Sink *sink, const UsdPrim &prim, const char *name,
     for (const SdfPath &path : walk) {
         sink->Rebuild(path);
     }
+}
+
+/// The serial commit's spelling; the parallel lanes pass interned tokens.
+template <class Sink, class T>
+void
+RigExecBakedRecordBind(Sink *sink, const UsdPrim &prim, const char *name,
+                       RigExecBakedInput<T> *input, const SdfPathVector &walk)
+{
+    RigExecBakedRecordBind(sink, prim, TfToken(name), input, walk);
 }
 
 /// Records \p name on \p prim as read for its VALUE into \p sink; see
@@ -4365,10 +4414,20 @@ struct RigExecBakedBuildContext {
     /// merged by RigExecBakedMergeCommitShards. Skipping that leaves the
     /// input unregistered -- no override index, nothing in the invalidation
     /// index -- which is a silently wrong program rather than a failure.
+    ///
+    /// Concurrent callers pass \p name as an interned token: TfToken(const
+    /// char *) takes the token registry's lock on every construction.
+    template <class T>
+    RigExecBakedInput<T> ResolveBind(const UsdPrim &prim, const TfToken &name,
+                                     T fallback, SdfPathVector *walk,
+                                     bool sourceValue = false) const;
     template <class T>
     RigExecBakedInput<T> ResolveBind(const UsdPrim &prim, const char *name,
                                      T fallback, SdfPathVector *walk,
-                                     bool sourceValue = false) const;
+                                     bool sourceValue = false) const
+    {
+        return ResolveBind(prim, TfToken(name), fallback, walk, sourceValue);
+    }
 
     /// The RECORDING half: the counters, the invalidation index and the
     /// override index.
@@ -4407,7 +4466,7 @@ RigExecBakedBuildContext::Bind(const UsdPrim &prim, const char *name,
 
 template <class T>
 RigExecBakedInput<T>
-RigExecBakedBuildContext::ResolveBind(const UsdPrim &prim, const char *name,
+RigExecBakedBuildContext::ResolveBind(const UsdPrim &prim, const TfToken &name,
                                       T fallback, SdfPathVector *walk,
                                       bool sourceValue) const
 {
@@ -4432,12 +4491,12 @@ RigExecBakedBuildContext::ResolveBind(const UsdPrim &prim, const char *name,
     if (input.varying && input.query.IsValid()) {
         bool viaChain = false, varying = false;
         UsdAttribute atProbe;
-        RigExecBakedClassifyInput<T>(prim.GetAttribute(TfToken(name)), probe,
+        RigExecBakedClassifyInput<T>(prim.GetAttribute(name), probe,
                                      chainTargets, &viaChain, &varying,
                                      &atProbe);
         if (atProbe.GetPath() != input.query.GetAttribute().GetPath()) {
             input.query = UsdAttributeQuery();
-            input.resolvedAttr = prim.GetAttribute(TfToken(name));
+            input.resolvedAttr = prim.GetAttribute(name);
         }
     }
     // And a SPLINE is read the long way for the same reason, one step
@@ -4464,7 +4523,7 @@ RigExecBakedBuildContext::ResolveBind(const UsdPrim &prim, const char *name,
     if (input.varying && input.query.IsValid() &&
         input.query.GetAttribute().HasSpline()) {
         input.query = UsdAttributeQuery();
-        input.resolvedAttr = prim.GetAttribute(TfToken(name));
+        input.resolvedAttr = prim.GetAttribute(name);
     }
     return input;
 }
@@ -5137,7 +5196,7 @@ struct RigExecBakedRunShadow {
     struct SolverState {
         std::vector<RigExecPointFrame> outFrames;
         std::vector<char> outPresent;
-        std::vector<SdfPath> fallbackJoints;
+        std::vector<int> fallbackSlots;
     };
     struct CommitState {
         std::vector<char> present, deltaOk;

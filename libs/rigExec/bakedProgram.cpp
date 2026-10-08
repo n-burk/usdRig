@@ -71,6 +71,34 @@ namespace rigExec {
 
 namespace {
 
+// The channels Build's parallel resolve lanes bind, interned at load:
+// TfToken from text takes the token registry's lock on every construction.
+const TfToken kPosedSpace("posed:space");
+const TfToken kRestSpace("rest:space");
+const TfToken kDefaultSpace("default:space");
+const TfToken kParentSpace("parent:space");
+const TfToken kParentDefaultSpace("parent:defaultSpace");
+const TfToken kAvarDefaultSpace("avars:defaultSpace");
+const TfToken kPosedDefaultSpace("posed:defaultSpace");
+const TfToken kRotationSign("avars:rotationSign");
+const TfToken kRotationOrder("avars:rotationOrder");
+const TfToken kRestAvarTokens[6] = {
+    TfToken("rest:tx"), TfToken("rest:ty"), TfToken("rest:tz"),
+    TfToken("rest:rx"), TfToken("rest:ry"), TfToken("rest:rz")};
+const TfToken kDefaultAvarTokens[6] = {
+    TfToken("default:tx"), TfToken("default:ty"), TfToken("default:tz"),
+    TfToken("default:rx"), TfToken("default:ry"), TfToken("default:rz")};
+// RigExecBakedAvarNames, in its order.
+static_assert(std::size(RigExecBakedAvarNames) == 11,
+              "kAvarTokens interns every avar name");
+const TfToken kAvarTokens[11] = {
+    TfToken(RigExecBakedAvarNames[0]), TfToken(RigExecBakedAvarNames[1]),
+    TfToken(RigExecBakedAvarNames[2]), TfToken(RigExecBakedAvarNames[3]),
+    TfToken(RigExecBakedAvarNames[4]), TfToken(RigExecBakedAvarNames[5]),
+    TfToken(RigExecBakedAvarNames[6]), TfToken(RigExecBakedAvarNames[7]),
+    TfToken(RigExecBakedAvarNames[8]), TfToken(RigExecBakedAvarNames[9]),
+    TfToken(RigExecBakedAvarNames[10])};
+
 // A plain attribute read with no time and no resolution walk, for the
 // uniform tokens the dynamic path reads exactly this way
 // (rigExec:rotationOrder, rigExec:worldUpType, rigExec:aimAxis, ...).
@@ -2303,6 +2331,11 @@ RigExecBakedProgram::_BuildWithSceneCapture(RigExecRigEvaluator *evaluator,
                 if (reasons) reasons->push_back("normalized cycle writer still has an application");
                 return nullptr;
             }
+            // Bodies index the spelled slot paths without a check.
+            if (!TF_VERIFY(B.pathTexts && B.pathTexts->size() == B.paths.size())) {
+                if (reasons) reasons->push_back("slot path texts do not match the slot table");
+                return nullptr;
+            }
             return candidate;
         }
         std::map<SdfPath, SdfPath> switchOwners;
@@ -2593,6 +2626,7 @@ RigExecBakedProgram::_BuildWithSceneCaptureAttempt(RigExecRigEvaluator *evaluato
                 prim && _IsVolumeWeightTypeName(prim.GetTypeName()) ? 1 : 0);
             B.rotationSign.push_back(0);
         }
+        B.pathTexts = RigExecBakedSpellPathTexts(B.paths);
     }
     const int N = int(B.paths.size());
     B.parent.assign(N, -1);
@@ -2654,12 +2688,6 @@ RigExecBakedProgram::_BuildWithSceneCaptureAttempt(RigExecRigEvaluator *evaluato
     B.defaultRoundTrip.assign(N, GfMatrix4d(1.0));
     B.ladders.resize(size_t(N));
     for (auto &ladder : B.ladders) ladder.interveningSpace.constant = GfMatrix4d(1.0);
-    static const char *const kRestAvars[6] = {
-        "rest:tx", "rest:ty", "rest:tz",
-        "rest:rx", "rest:ry", "rest:rz"};
-    static const char *const kDefaultAvars[6] = {
-        "default:tx", "default:ty", "default:tz",
-        "default:rx", "default:ry", "default:rz"};
     // Fifteen composed-stage resolutions per provider slot, and on a
     // character this loop is the other of the two places Build spends most
     // of its time -- see the input binding table below, which is the same
@@ -2728,30 +2756,30 @@ RigExecBakedProgram::_BuildWithSceneCaptureAttempt(RigExecRigEvaluator *evaluato
                 }
                 const UsdPrim prim = B.stage->GetPrimAtPath(B.paths[i]);
                 _LadderResolution &out = ladderResolved[i];
-                out.posedSpace = ctx.ResolveBind(prim, "posed:space",
+                out.posedSpace = ctx.ResolveBind(prim, kPosedSpace,
                                                  GfMatrix4d(1.0),
                                                  &out.posedSpaceWalk);
-                out.restSpace = ctx.ResolveBind(prim, "rest:space",
+                out.restSpace = ctx.ResolveBind(prim, kRestSpace,
                                                 GfMatrix4d(1.0),
                                                 &out.restSpaceWalk);
-                out.defaultSpace = ctx.ResolveBind(prim, "default:space",
+                out.defaultSpace = ctx.ResolveBind(prim, kDefaultSpace,
                                                    GfMatrix4d(1.0),
                                                    &out.defaultSpaceWalk);
-                out.parentSpace = ctx.ResolveBind(prim, "parent:space", GfMatrix4d(1.0), &out.parentSpaceWalk);
-                out.parentDefaultSpace = ctx.ResolveBind(prim, "parent:defaultSpace", GfMatrix4d(1.0), &out.parentDefaultSpaceWalk);
-                out.avarDefaultSpace = ctx.ResolveBind(prim, "avars:defaultSpace", GfMatrix4d(1.0), &out.avarDefaultSpaceWalk);
-                out.posedDefaultSpace = ctx.ResolveBind(prim, "posed:defaultSpace", GfMatrix4d(1.0), &out.posedDefaultSpaceWalk);
-                out.rotationSign = ctx.ResolveBind(prim, "avars:rotationSign", GfVec3d(1.0), &out.rotationSignWalk,
+                out.parentSpace = ctx.ResolveBind(prim, kParentSpace, GfMatrix4d(1.0), &out.parentSpaceWalk);
+                out.parentDefaultSpace = ctx.ResolveBind(prim, kParentDefaultSpace, GfMatrix4d(1.0), &out.parentDefaultSpaceWalk);
+                out.avarDefaultSpace = ctx.ResolveBind(prim, kAvarDefaultSpace, GfMatrix4d(1.0), &out.avarDefaultSpaceWalk);
+                out.posedDefaultSpace = ctx.ResolveBind(prim, kPosedDefaultSpace, GfMatrix4d(1.0), &out.posedDefaultSpaceWalk);
+                out.rotationSign = ctx.ResolveBind(prim, kRotationSign, GfVec3d(1.0), &out.rotationSignWalk,
                     /*sourceValue=*/true);
                 out.rotationOrder = ctx.ResolveBind(
-                    prim, "avars:rotationOrder", TfToken("XYZ"),
+                    prim, kRotationOrder, B.xyzToken,
                     &out.rotationOrderWalk);
                 for (int c = 0; c < 6; ++c) {
                     out.restAvars[c] = ctx.ResolveBind(
-                        prim, kRestAvars[c], 0.0, &out.restAvarWalks[c],
+                        prim, kRestAvarTokens[c], 0.0, &out.restAvarWalks[c],
                         /*sourceValue=*/true);
                     out.defaultAvars[c] = ctx.ResolveBind(
-                        prim, kDefaultAvars[c], 0.0,
+                        prim, kDefaultAvarTokens[c], 0.0,
                         &out.defaultAvarWalks[c]);
                 }
                 shard.Prim(B.paths[i]);
@@ -2759,26 +2787,26 @@ RigExecBakedProgram::_BuildWithSceneCaptureAttempt(RigExecRigEvaluator *evaluato
                 // rotationOrder/avar sequence the serial commit bound them
                 // in: the shard numbers in recording order, so this is the
                 // order the override indices come out in.
-                RigExecBakedRecordBind(&shard, prim, "posed:space",
+                RigExecBakedRecordBind(&shard, prim, kPosedSpace,
                                        &out.posedSpace, out.posedSpaceWalk);
-                RigExecBakedRecordBind(&shard, prim, "rest:space",
+                RigExecBakedRecordBind(&shard, prim, kRestSpace,
                                        &out.restSpace, out.restSpaceWalk);
-                RigExecBakedRecordBind(&shard, prim, "default:space",
+                RigExecBakedRecordBind(&shard, prim, kDefaultSpace,
                                        &out.defaultSpace,
                                        out.defaultSpaceWalk);
-                RigExecBakedRecordBind(&shard, prim, "parent:space", &out.parentSpace, out.parentSpaceWalk);
-                RigExecBakedRecordBind(&shard, prim, "parent:defaultSpace", &out.parentDefaultSpace, out.parentDefaultSpaceWalk);
-                RigExecBakedRecordBind(&shard, prim, "avars:defaultSpace", &out.avarDefaultSpace, out.avarDefaultSpaceWalk);
-                RigExecBakedRecordBind(&shard, prim, "posed:defaultSpace", &out.posedDefaultSpace, out.posedDefaultSpaceWalk);
-                RigExecBakedRecordBind(&shard, prim, "avars:rotationSign", &out.rotationSign, out.rotationSignWalk);
-                RigExecBakedRecordBind(&shard, prim, "avars:rotationOrder",
+                RigExecBakedRecordBind(&shard, prim, kParentSpace, &out.parentSpace, out.parentSpaceWalk);
+                RigExecBakedRecordBind(&shard, prim, kParentDefaultSpace, &out.parentDefaultSpace, out.parentDefaultSpaceWalk);
+                RigExecBakedRecordBind(&shard, prim, kAvarDefaultSpace, &out.avarDefaultSpace, out.avarDefaultSpaceWalk);
+                RigExecBakedRecordBind(&shard, prim, kPosedDefaultSpace, &out.posedDefaultSpace, out.posedDefaultSpaceWalk);
+                RigExecBakedRecordBind(&shard, prim, kRotationSign, &out.rotationSign, out.rotationSignWalk);
+                RigExecBakedRecordBind(&shard, prim, kRotationOrder,
                                        &out.rotationOrder,
                                        out.rotationOrderWalk);
                 for (int c = 0; c < 6; ++c) {
-                    RigExecBakedRecordBind(&shard, prim, kRestAvars[c],
+                    RigExecBakedRecordBind(&shard, prim, kRestAvarTokens[c],
                                            &out.restAvars[c],
                                            out.restAvarWalks[c]);
-                    RigExecBakedRecordBind(&shard, prim, kDefaultAvars[c],
+                    RigExecBakedRecordBind(&shard, prim, kDefaultAvarTokens[c],
                                            &out.defaultAvars[c],
                                            out.defaultAvarWalks[c]);
                 }
@@ -3043,10 +3071,9 @@ RigExecBakedProgram::_BuildWithSceneCaptureAttempt(RigExecRigEvaluator *evaluato
                 for (int c = 0; c < 11; ++c) {
                     _AvarResolution &out = resolved[i * 11 + size_t(c)];
                     out.input = ctx.ResolveBind(
-                        prim, RigExecBakedAvarNames[c],
+                        prim, kAvarTokens[c],
                         RigExecBakedAvarDefaults[c], &out.walk);
-                    RigExecBakedRecordBind(&shard, prim,
-                                           RigExecBakedAvarNames[c],
+                    RigExecBakedRecordBind(&shard, prim, kAvarTokens[c],
                                            &out.input, out.walk);
                     if (out.input.varying || out.input.overrideIndex < 0) {
                         continue;
@@ -3055,8 +3082,8 @@ RigExecBakedProgram::_BuildWithSceneCaptureAttempt(RigExecRigEvaluator *evaluato
                     // itself. A walk longer than one captured it upstream,
                     // through a connection, and an edit on the head would
                     // not be the value the slot holds.
-                    out.property = prim.GetPath().AppendProperty(
-                        TfToken(RigExecBakedAvarNames[c]));
+                    out.property =
+                        prim.GetPath().AppendProperty(kAvarTokens[c]);
                     out.patchable = out.walk.size() <= 1 && out.input.head &&
                                     out.input.head.GetPath() == out.property;
                 }
@@ -3306,6 +3333,7 @@ RigExecBakedProgram::_BuildWithSceneCaptureAttempt(RigExecRigEvaluator *evaluato
         RigExecBakedProgramImpl::PoseInterpolator out;
         static_cast<RigExecPoseInterpolatorRecord &>(out)=captured.record;
         out.path = record.prim;
+        out.pathText = record.prim.GetString();
         // A numeric driver reads dials, not a frame: it names no driver prim
         // and needs no slot.
         const bool numeric = !captured.driverAttributes.empty();

@@ -53,10 +53,11 @@ bool RunDiscardableGeometry(RigExecRevisionOp,const RigExecMoverParameters &,
 }
 bool RigExecRunGeometryDerived(RigExecRevisionOp,const RigExecMoverParameters &,
     const GfVec3f *authored,size_t authoredCount,std::vector<GfVec3f> *result);
+/// \p who: the mover's path text for diagnostics, spelled before dispatch.
 bool RigExecRunGeometryMatrix(RigExecRevisionOp,const RigExecRevisionBinding &,
     const RigExecSurfaceProjectorFrames &,const RigExecProjectorReads &,
     const std::vector<GfVec3f> &base,const std::vector<GfVec3f> &final,
-    GfMatrix4d *,std::vector<std::string> *diagnostics,
+    const std::string &who,GfMatrix4d *,std::vector<std::string> *diagnostics,
     RigExecSurfaceKernelCache<GfVec3f,GfVec3d> *);
 bool RigExecRunGeometryMatrix(const RigExecGeometryRecord &,
     const RigExecSurfaceProjectorFrames &,const RigExecProjectorReads &,

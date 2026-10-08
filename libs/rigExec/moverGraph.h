@@ -933,6 +933,10 @@ RigExecMoverParameters RigExecAssembleSkinParameters(
 /// first bad canonical address.
 RigExecMoverStatus RigExecStatusForParameters(
     const RigExecMoverParameters &parameters, const SdfPath &moverPath);
+/// The same, with the mover's path already spelled: a step body passes the
+/// text Build captured rather than asking SdfPath for it.
+RigExecMoverStatus RigExecStatusForParameters(
+    const RigExecMoverParameters &parameters, const std::string &moverText);
 
 /// Applies the matrix operation of \p p to \p pts in place, returning false
 /// when the packet fails atomically (the envelope does not resolve to the
@@ -1671,12 +1675,15 @@ void RigExecReadProjectorTarget(
 /// Runs a surface projector target (SurfaceProjector or ShaderDials) on its
 /// gathered reads: the shared kernel on \p finalPoints against the authored
 /// \p basePoints. False, with diagnostics, when no matrix is published.
+/// \p who is the mover's path text the diagnostics name; a step body passes
+/// the text Build spelled.
 bool RigExecRunProjectorTarget(
     RigExecRevisionOp op, const RigExecRevisionBinding &binding,
     const RigExecSurfaceProjectorFrames &frames,
     const RigExecProjectorReads &reads,
     const std::vector<GfVec3f> &basePoints,
-    const std::vector<GfVec3f> &finalPoints, GfMatrix4d *matrix,
+    const std::vector<GfVec3f> &finalPoints, const std::string &who,
+    GfMatrix4d *matrix,
     std::vector<std::string> *diagnostics,
     RigExecSurfaceKernelCache<GfVec3f,GfVec3d> *cache = nullptr);
 

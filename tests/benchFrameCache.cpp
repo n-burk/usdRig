@@ -370,7 +370,7 @@ MeasureArenaBytes(const RigExecBakedProgramImpl &B, const char *rig)
                        VecBytes(solver.outPosition) +
                        VecBytes(solver.kernelWorkspace.fkElements) +
                        VecBytes(solver.controlReads) +
-                       solver.fallbackJoints.size() * sizeof(SdfPath) +
+                       VecBytes(solver.fallbackSlots) +
                        VecBytes(solver.ribbonPoints) +
                        VecBytes(solver.lastRibbonPoints);
         // The rest description is rebuilt per frame only for a solver whose

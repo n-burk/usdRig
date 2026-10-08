@@ -9,6 +9,7 @@
 #include <limits>
 #include <set>
 #include <string_view>
+#include <unordered_map>
 
 namespace rigExec {
 namespace {
@@ -44,7 +45,8 @@ struct GfProviderStore {
     const double *ReadScalar(uint64_t id) const {return store.Read<double>(id);}
     const GfVec3d *ReadVector(uint64_t id) const {return store.Read<GfVec3d>(id);}
     std::string_view ReadToken(uint64_t id) const {
-        const auto *token=store.Read<TfToken>(id);return token?std::string_view(token->GetString()):std::string_view();
+        // A field read: GetString() on an empty token reads a function-local static.
+        const auto *token=store.Read<TfToken>(id);return token?std::string_view(token->GetText(),token->size()):std::string_view();
     }
     bool ResetXformStack(uint64_t id) const {
         if(id>=store.values.size() || !store.values[size_t(id)].initialized ||
@@ -286,7 +288,20 @@ bool RigExecBuildProviderProgram(const RigExecSceneDescriptors &scene,bool compo
     }
     std::sort(program.leaves.begin(),program.leaves.end());
     program.leaves.erase(std::unique(program.leaves.begin(),program.leaves.end()),program.leaves.end());
+    RigExecSpellProviderOwners(&program);
     *output=std::move(program);return true;
+}
+void RigExecSpellProviderOwners(RigExecProviderProgram *program) {
+    if(!program)return;
+    std::unordered_map<SdfPath,uint32_t,SdfPath::Hash> spelled;
+    for(const auto &op:program->ops)
+        if(op.ownerText<program->ownerTexts.size())spelled.emplace(op.owner,op.ownerText);
+    for(auto &op:program->ops) {
+        if(op.ownerText<program->ownerTexts.size())continue;
+        const auto entry=spelled.emplace(op.owner,uint32_t(program->ownerTexts.size()));
+        if(entry.second)program->ownerTexts.push_back(op.owner.GetString());
+        op.ownerText=entry.first->second;
+    }
 }
 
 bool RigExecCloneProviderContext(RigExecProviderProgram *program,RigExecValueId result,
@@ -355,12 +370,17 @@ bool RigExecRunProviderOp(const RigExecProviderProgram &program,uint32_t index,
             return Fail(error,"unsupported provider arithmetic operation kind");
         return true;
     }
+    // The owner as the build spelled it, for the failure diagnostics below.
+    const std::string *spelled=op.ownerText<program.ownerTexts.size()?&program.ownerTexts[op.ownerText]:nullptr;
+    if(!spelled && (op.kind==RigExecProviderOpKind::LocalXform || op.kind==RigExecProviderOpKind::InterveningXform))
+        return Fail(error,"provider operation owner was not spelled at build");
     switch(op.kind) {
     case RigExecProviderOpKind::LocalXform: {
+        const std::string &owner=*spelled;
         GfMatrix4d result(1.0);
         const auto *order=raw(id(0));
         if((!order || !order->IsHolding<VtTokenArray>()) && !op.xforms.empty())
-            return unavailable(id(0),"xform order unavailable: "+op.owner.GetString());
+            return unavailable(id(0),"xform order unavailable: "+owner);
         if(order && order->IsHolding<VtTokenArray>()) {
             const auto &tokens=order->UncheckedGet<VtTokenArray>();
             for(size_t reverse=tokens.size();reverse>0;--reverse) {
@@ -376,10 +396,10 @@ bool RigExecRunProviderOp(const RigExecProviderProgram &program,uint32_t index,
                     if(name==next && inverse!=nextInverse){--reverse;continue;}
                 }
                 const auto input=std::find_if(op.xforms.begin(),op.xforms.end(),[&](const auto &candidate){return candidate.name.GetString()==name;});
-                if(input==op.xforms.end())return unavailable(id(0),"xform order names an uncaptured operation: "+op.owner.GetString()+":"+token.GetString());
+                if(input==op.xforms.end())return unavailable(id(0),"xform order names an uncaptured operation: "+owner+":"+token.GetString());
                 const auto *value=raw(input->raw);
                 if(!value || value->IsEmpty())
-                    return unavailable(input->raw,"xform operation unavailable: "+op.owner.GetString()+":"+token.GetString());
+                    return unavailable(input->raw,"xform operation unavailable: "+owner+":"+token.GetString());
                 const auto transform=UsdGeomXformOp::GetOpTransform(UsdGeomXformOp::Type(input->type),*value,inverse);
                 if(transform!=GfMatrix4d(1.0))result*=transform;
             }
@@ -387,6 +407,7 @@ bool RigExecRunProviderOp(const RigExecProviderProgram &program,uint32_t index,
         store->Publish(op.output,result);break;
     }
     case RigExecProviderOpKind::InterveningXform: {
+        const std::string &owner=*spelled;
         GfMatrix4d result(1.0);
         bool resets=false;
         for(size_t i=0;i<op.inputs.size();i+=2) {
@@ -394,7 +415,7 @@ bool RigExecRunProviderOp(const RigExecProviderProgram &program,uint32_t index,
             if(order && order->IsHolding<VtTokenArray>())for(const auto &token:order->UncheckedGet<VtTokenArray>())
                 if(token=="!resetXformStack!")resets=true;
             const auto *local=store->Read<GfMatrix4d>(id(i));
-            if(!local)return unavailable(id(i),"intervening xform input unavailable: "+op.owner.GetString());
+            if(!local)return unavailable(id(i),"intervening xform input unavailable: "+owner);
             result=result*(*local);
         }
         if(resets)store->Publish(op.output,GfMatrix4d(1.0),false,false,1,"resetXformStack in intervening provider ancestry");

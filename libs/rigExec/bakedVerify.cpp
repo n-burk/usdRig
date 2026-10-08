@@ -702,7 +702,7 @@ RigExecBakedRunShadow::Capture(const RigExecBakedProgramImpl &program)
     for (size_t s = 0; s < program.solvers.size(); ++s) {
         solvers[s].outFrames = program.solvers[s].outFrames;
         solvers[s].outPresent = program.solvers[s].outPresent;
-        solvers[s].fallbackJoints = program.solvers[s].fallbackJoints;
+        solvers[s].fallbackSlots = program.solvers[s].fallbackSlots;
     }
     commits.resize(program.commits.size());
     for (size_t c = 0; c < program.commits.size(); ++c) {
@@ -835,7 +835,7 @@ RigExecBakedRunShadow::Restore(RigExecBakedProgramImpl *program) const
     for (size_t s = 0; s < B.solvers.size() && s < solvers.size(); ++s) {
         B.solvers[s].outFrames = solvers[s].outFrames;
         B.solvers[s].outPresent = solvers[s].outPresent;
-        B.solvers[s].fallbackJoints = solvers[s].fallbackJoints;
+        B.solvers[s].fallbackSlots = solvers[s].fallbackSlots;
     }
     for (size_t c = 0; c < B.commits.size() && c < commits.size(); ++c) {
         B.commits[c].present = commits[c].present;
@@ -1129,8 +1129,8 @@ RigExecBakedRunShadow::Compare(const RigExecBakedProgramImpl &program,
         CompareVector(differences, &count, where + " outPresent",
                       solvers[s].outPresent, program.solvers[s].outPresent);
         CompareVector(differences, &count, where + " fallbackJoints",
-                      solvers[s].fallbackJoints,
-                      program.solvers[s].fallbackJoints);
+                      solvers[s].fallbackSlots,
+                      program.solvers[s].fallbackSlots);
     }
     for (size_t c = 0; c < program.commits.size() && c < commits.size(); ++c) {
         const std::string where = "commit " + std::to_string(c);

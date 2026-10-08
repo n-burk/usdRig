@@ -165,6 +165,7 @@ bool RigExecBakedBuildSpaces(RigExecBakedProgramImpl *program,UsdTimeCode captur
         B.providerRefreshTemplateOps.push_back(p.ops.size());
         p.ops.push_back(std::move(op));p.descriptors.push_back(std::move(descriptor));
     }
+    RigExecSpellProviderOwners(&B.providerProgram);
     B.providerValues.values.resize(B.providerProgram.valueKeys.size());
     RigExecBakedSampleSpaces(&B,capture,true);
     return true;
@@ -367,7 +368,11 @@ void RigExecBakedRunProviderRefresh(RigExecBakedProgramImpl *program,RigExecBake
     for(size_t k=0;k<r.carries.size();++k) {
         B.base[r.carries[k].baseWrite]=r.baseOutputs[k];B.fin[r.carries[k].finWrite]=r.finOutputs[k];
     }
-    const std::string &path=B.paths[size_t(r.slot)].GetString();
+    // Build spelled the paths. `failed` names a carry only on the two
+    // descendant outcomes, so that text is looked up there alone.
+    const auto &texts=*B.pathTexts;
+    const std::string &path=texts[size_t(r.slot)];
+    const auto carry=[&]() -> const std::string & {return texts[size_t(r.carries[failed].slot)];};
     if(outcome==RigExecProviderRefreshOutcome::MissingBase)
         step->diagnostics.push_back("connected base pose input incomplete: "+path);
     else if(outcome==RigExecProviderRefreshOutcome::MissingCurrent)
@@ -377,9 +382,9 @@ void RigExecBakedRunProviderRefresh(RigExecBakedProgramImpl *program,RigExecBake
     else if(outcome==RigExecProviderRefreshOutcome::SingularCurrent)
         step->diagnostics.push_back(path+" produced a singular hierarchy delta; constraint passed through");
     else if(outcome==RigExecProviderRefreshOutcome::InvalidDescendant)
-        step->diagnostics.push_back(path+" could not propagate its pose revision through "+B.paths[size_t(r.carries[failed].slot)].GetString()+"; constraint passed through");
+        step->diagnostics.push_back(path+" could not propagate its pose revision through "+carry()+"; constraint passed through");
     else if(outcome==RigExecProviderRefreshOutcome::InvalidTransformedDescendant)
-        step->diagnostics.push_back(path+" produced an invalid descendant frame for "+B.paths[size_t(r.carries[failed].slot)].GetString()+"; constraint passed through");
+        step->diagnostics.push_back(path+" produced an invalid descendant frame for "+carry()+"; constraint passed through");
 }
 // A ladder reads its own property revision before following connections,
 // while other consumers keep

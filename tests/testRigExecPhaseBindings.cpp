@@ -2085,6 +2085,7 @@ TestFrameRecordGates()
 {
     RigExecBakedProgramImpl B;
     B.paths = {SdfPath("/A")};
+    B.pathTexts = RigExecBakedSpellPathTexts(B.paths);
     RigExecPointFrame rest;
     rest.points = {GfVec3d(0, 1, 0), GfVec3d(1, 1, 0), GfVec3d(0, 2, 0),
                    GfVec3d(0, 1, 1)};

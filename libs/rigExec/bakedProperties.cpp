@@ -12,10 +12,27 @@
 
 #include "rigExecMath/propertyMath.h"
 
+#include "pxr/base/gf/half.h"
+#include "pxr/base/gf/matrix2d.h"
+#include "pxr/base/gf/matrix2f.h"
+#include "pxr/base/gf/matrix3d.h"
+#include "pxr/base/gf/matrix3f.h"
+#include "pxr/base/gf/matrix4f.h"
+#include "pxr/base/gf/quatd.h"
+#include "pxr/base/gf/quatf.h"
+#include "pxr/base/gf/quath.h"
+#include "pxr/base/gf/vec2d.h"
 #include "pxr/base/gf/vec2f.h"
+#include "pxr/base/gf/vec2h.h"
 #include "pxr/base/gf/vec3d.h"
+#include "pxr/base/gf/vec3h.h"
+#include "pxr/base/gf/vec3i.h"
+#include "pxr/base/gf/vec4d.h"
+#include "pxr/base/gf/vec4f.h"
+#include "pxr/base/gf/vec4h.h"
 #include "pxr/base/tf/type.h"
 #include "pxr/base/vt/array.h"
+#include "pxr/base/vt/types.h"
 #include "pxr/usd/sdf/types.h"
 #include "pxr/usd/usd/relationship.h"
 
@@ -25,6 +42,7 @@
 #include <limits>
 #include <map>
 #include <set>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
 
@@ -52,6 +70,43 @@ bool
 BitSame(const T &a, const T &b)
 {
     return std::memcmp(&a, &b, sizeof(T)) == 0;
+}
+
+// The Gf payloads compared by their bytes hold their components and nothing
+// else, so equal bytes are equal values.
+static_assert(sizeof(GfVec2f) == 2 * sizeof(float) &&
+              sizeof(GfVec3f) == 3 * sizeof(float) &&
+              sizeof(GfVec4f) == 4 * sizeof(float) &&
+              sizeof(GfVec2d) == 2 * sizeof(double) &&
+              sizeof(GfVec3d) == 3 * sizeof(double) &&
+              sizeof(GfVec4d) == 4 * sizeof(double) &&
+              sizeof(GfVec2h) == 2 * sizeof(GfHalf) &&
+              sizeof(GfVec3h) == 3 * sizeof(GfHalf) &&
+              sizeof(GfVec4h) == 4 * sizeof(GfHalf) &&
+              sizeof(GfQuatf) == 4 * sizeof(float) &&
+              sizeof(GfQuatd) == 4 * sizeof(double) &&
+              sizeof(GfQuath) == 4 * sizeof(GfHalf) &&
+              sizeof(GfMatrix2f) == 4 * sizeof(float) &&
+              sizeof(GfMatrix3f) == 9 * sizeof(float) &&
+              sizeof(GfMatrix4f) == 16 * sizeof(float) &&
+              sizeof(GfMatrix2d) == 4 * sizeof(double) &&
+              sizeof(GfMatrix3d) == 9 * sizeof(double) &&
+              sizeof(GfMatrix4d) == 16 * sizeof(double) &&
+              sizeof(GfVec3i) == 3 * sizeof(int),
+              "a bytes compare needs padding-free payloads");
+
+/// One shared buffer, or one memcmp. Callers pass padding-free scalar and
+/// Gf vector, quaternion or matrix elements.
+template <class T>
+bool
+BitSameArray(const VtArray<T> &a, const VtArray<T> &b)
+{
+    static_assert(std::is_trivially_copyable_v<T>,
+                  "a bytes compare needs plain elements");
+    return a.IsIdentical(b) ||
+           (a.size() == b.size() &&
+            (a.empty() ||
+             std::memcmp(a.cdata(), b.cdata(), a.size() * sizeof(T)) == 0));
 }
 
 bool
@@ -689,40 +744,54 @@ RigExecBakedHeadValueSame(const VtValue &a, const VtValue &b)
     if (a.GetTypeid() != b.GetTypeid()) {
         return false;
     }
-    if (a.IsHolding<float>()) {
-        return BitSame(a.UncheckedGet<float>(), b.UncheckedGet<float>());
-    }
-    if (a.IsHolding<double>()) {
-        return BitSame(a.UncheckedGet<double>(), b.UncheckedGet<double>());
-    }
     if (a.IsHolding<bool>()) {
         return a.UncheckedGet<bool>() == b.UncheckedGet<bool>();
-    }
-    if (a.IsHolding<GfVec3f>()) {
-        return BitSame(a.UncheckedGet<GfVec3f>(), b.UncheckedGet<GfVec3f>());
-    }
-    if (a.IsHolding<GfVec3d>()) {
-        return BitSame(a.UncheckedGet<GfVec3d>(), b.UncheckedGet<GfVec3d>());
     }
     if (a.IsHolding<int>()) {
         return a.UncheckedGet<int>() == b.UncheckedGet<int>();
     }
-    if (a.IsHolding<GfMatrix4d>()) {
-        return BitSame(a.UncheckedGet<GfMatrix4d>(),
-                       b.UncheckedGet<GfMatrix4d>());
+    // Every floating-point scalar, vector, quaternion and matrix, alone or
+    // in an array, by its bytes, as the operation keys box it: a signed zero
+    // or a NaN payload that moved is a change, and an equal NaN is not.
+    // Integral, text and path values fall through to operator==, which is
+    // already exact for them.
+#define RIGEXEC_HEAD_BITS(T)                                                 \
+    if (a.IsHolding<T>()) {                                                  \
+        return BitSame(a.UncheckedGet<T>(), b.UncheckedGet<T>());            \
+    }                                                                        \
+    if (a.IsHolding<VtArray<T>>()) {                                         \
+        return BitSameArray(a.UncheckedGet<VtArray<T>>(),                    \
+                            b.UncheckedGet<VtArray<T>>());                   \
     }
-    if (a.IsHolding<VtVec3fArray>()) {
-        const auto &x = a.UncheckedGet<VtVec3fArray>();
-        const auto &y = b.UncheckedGet<VtVec3fArray>();
-        return x.size() == y.size() && (x.empty() ||
-            std::memcmp(x.cdata(),y.cdata(),x.size() * sizeof(GfVec3f)) == 0);
+    RIGEXEC_HEAD_BITS(float)
+    RIGEXEC_HEAD_BITS(double)
+    RIGEXEC_HEAD_BITS(GfVec3f)
+    RIGEXEC_HEAD_BITS(GfVec3d)
+    RIGEXEC_HEAD_BITS(GfMatrix4d)
+    RIGEXEC_HEAD_BITS(GfVec2f)
+    RIGEXEC_HEAD_BITS(GfVec2d)
+    RIGEXEC_HEAD_BITS(GfVec4f)
+    RIGEXEC_HEAD_BITS(GfVec4d)
+    RIGEXEC_HEAD_BITS(GfQuatf)
+    RIGEXEC_HEAD_BITS(GfQuatd)
+    RIGEXEC_HEAD_BITS(GfMatrix2d)
+    RIGEXEC_HEAD_BITS(GfMatrix3d)
+    RIGEXEC_HEAD_BITS(GfMatrix2f)
+    RIGEXEC_HEAD_BITS(GfMatrix3f)
+    RIGEXEC_HEAD_BITS(GfMatrix4f)
+    RIGEXEC_HEAD_BITS(GfHalf)
+    RIGEXEC_HEAD_BITS(GfVec2h)
+    RIGEXEC_HEAD_BITS(GfVec3h)
+    RIGEXEC_HEAD_BITS(GfVec4h)
+    RIGEXEC_HEAD_BITS(GfQuath)
+#undef RIGEXEC_HEAD_BITS
+    if (a.IsHolding<VtIntArray>()) {
+        return BitSameArray(a.UncheckedGet<VtIntArray>(),
+                            b.UncheckedGet<VtIntArray>());
     }
-    if (a.IsHolding<VtArray<GfVec2f>>()) {
-        const VtArray<GfVec2f> &x = a.UncheckedGet<VtArray<GfVec2f>>();
-        const VtArray<GfVec2f> &y = b.UncheckedGet<VtArray<GfVec2f>>();
-        return x.size() == y.size() &&
-               (x.empty() || std::memcmp(x.cdata(), y.cdata(),
-                                         x.size() * sizeof(GfVec2f)) == 0);
+    if (a.IsHolding<VtVec3iArray>()) {
+        return BitSameArray(a.UncheckedGet<VtVec3iArray>(),
+                            b.UncheckedGet<VtVec3iArray>());
     }
     return a == b;
 }

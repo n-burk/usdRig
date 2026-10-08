@@ -3171,6 +3171,7 @@ TestProviderRefreshFailureBoundaries()
         auto program = std::make_unique<RigExecBakedProgramImpl>();
         auto &B = *program;
         B.paths = {SdfPath("/Rig/P"), SdfPath("/Rig/P/A"), SdfPath("/Rig/P/B")};
+        B.pathTexts = RigExecBakedSpellPathTexts(B.paths);
         B.base.resize(6); B.fin.resize(6);
         for (size_t slot = 0; slot < 3; ++slot) {
             B.base[slot] = translated(double(slot + 1));
@@ -3472,6 +3473,7 @@ TestAPlacementReadNeedsItsVolumesStep()
                          std::vector<RigExecBakedSlotRange> placementReads,
                          std::string *compileError=nullptr) {
         B->paths = {SdfPath("/Rig/Joint"),SdfPath("/Rig/Joint/SphereA"),SdfPath("/Rig/SphereB")};
+        B->pathTexts = RigExecBakedSpellPathTexts(B->paths);
         B->xformSlots = {1,2};
         B->slotKind.assign(3,RigExecBakedSlotKind::XformDerived);
         B->base.resize(3); B->fin.resize(3);

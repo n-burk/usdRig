@@ -4827,6 +4827,7 @@ TestFrameMatrixGates()
     unusable.flags = 0;
     RigExecBakedProgramImpl B;
     B.paths = {SdfPath("/A")};
+    B.pathTexts = RigExecBakedSpellPathTexts(B.paths);
     B.fin = {posed, unusable};
     B.commits.resize(2);
     B.commits[1].solverOutput = true;

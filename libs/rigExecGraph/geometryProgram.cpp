@@ -70,11 +70,11 @@ bool RunDiscardableGeometry(RigExecRevisionOp op,const RigExecMoverParameters &p
 bool RigExecRunGeometryMatrix(RigExecRevisionOp op,const RigExecRevisionBinding &binding,
     const RigExecSurfaceProjectorFrames &frames,const RigExecProjectorReads &reads,
     const std::vector<GfVec3f> &base,const std::vector<GfVec3f> &final,
-    GfMatrix4d *matrix,std::vector<std::string> *diagnostics,
+    const std::string &who,GfMatrix4d *matrix,std::vector<std::string> *diagnostics,
     RigExecSurfaceKernelCache<GfVec3f,GfVec3d> *cache)
 {
     return matrix && RigExecRunProjectorTarget(op,binding,frames,reads,base,final,
-                                              matrix,diagnostics,cache);
+                                              who,matrix,diagnostics,cache);
 }
 bool RigExecRunGeometryMatrix(const RigExecGeometryRecord &record,
     const RigExecSurfaceProjectorFrames &frames,const RigExecProjectorReads &reads,
@@ -82,8 +82,11 @@ bool RigExecRunGeometryMatrix(const RigExecGeometryRecord &record,
     RigExecGeometryWorkspace *workspace,GfMatrix4d *matrix,
     std::vector<std::string> *diagnostics)
 {
+    // Only the surface projector names its mover in a diagnostic.
+    const std::string who=record.op==RigExecRevisionOp::SurfaceProjector?
+        record.binding.moverPath.GetString():std::string();
     return workspace && matrix && RigExecRunProjectorTarget(record.op,record.binding,
-        frames,reads,base,final,matrix,diagnostics,&workspace->surface);
+        frames,reads,base,final,who,matrix,diagnostics,&workspace->surface);
 }
 bool RigExecRunGeometry(const RigExecGeometryRecord &record,
     const RigExecMoverParameters &parameters,RigExecGeometryWorkspace *workspace,

@@ -126,6 +126,7 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
             return slot;
         };
         s.path = solverPath;
+        s.pathText = solverPath.GetString();
         const UsdPrim prim = B.stage->GetPrimAtPath(solverPath);
         const auto *node=compileInputs.Node(solverPath);
         s.type = node?node->fact.type:TfToken();
@@ -665,6 +666,7 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
     auto bakeConstraint = [&](const RigExecBakedConstraintSpec &fc) {
         RigExecBakedProgramImpl::Constraint c;
         c.path = fc.moverPath;
+        c.pathText = fc.moverPath.GetString();
         c.type = fc.schemaType;
         c.singleChainIk = fc.schemaType == "RigExecSingleChainIkConstraint";
         const UsdPrim prim = B.stage->GetPrimAtPath(fc.moverPath);
@@ -716,6 +718,7 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
             c.sources.push_back(slot);
             c.sourceNatives.push_back(native);
             c.sourcePaths.push_back(fc.sources[k]);
+            c.sourcePathTexts.push_back(fc.sources[k].GetString());
         }
         c.enabled = bind(prim, "inputs:enabled", true);
         c.defaultWeight = bind(prim, "inputs:defaultWeight", 1.0f);
@@ -752,6 +755,7 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
             RigExecBakedProgramImpl::ConstraintArrays arrays;
             arrays.prim = prim;
             arrays.path=fc.moverPath;
+            arrays.pathText=c.pathText;
             arrays.sourceCount = c.sources.size();
             // An unconsumed table has the same neutral shape as a missing
             // authored array. Admitted bodies still validate and replace it
@@ -784,6 +788,7 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
         c.pointsTarget = fc.pointsTarget;
         if (!fc.pointsTarget.IsEmpty() && !fc.targets.empty()) {
             c.deltaBasePath = fc.targets[0];
+            c.deltaBasePathText = fc.targets[0].GetString();
             c.deltaBase = int(B.deltaBasePaths.size());
             B.deltaBasePaths.push_back(fc.targets[0]);
             B.prims.insert(fc.targets[0]);
@@ -1856,6 +1861,7 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
             const RigExecBakedProgramImpl::Constraint &constraint =
                 B.constraints[size_t(walk.index)];
             commit.moverPath = constraint.path;
+            commit.moverPathText = constraint.pathText;
             if (constraint.target >= 0 && constraint.pointsTarget.IsEmpty()) {
                 if (constraint.singleChainIk) {
                     // The one multi-target built-in: every chain joint is a
@@ -3729,9 +3735,8 @@ FinishCommit(RigExecBakedProgramImpl *program, RigExecBakedStep *step,
         carryEverything();
         return;
     }
-    // Spelled only for a diagnostic: this runs on every commit of every
-    // frame, and a commit that propagates cleanly reports nothing.
-    const auto mover = [commit]() { return commit->moverPath.GetAsString(); };
+    // Spelled at Build: a body may not ask SdfPath for text.
+    const std::string &mover = commit->moverPathText;
     for (size_t k = 0; k < commit->propagate.size(); ++k) {
         const auto outcome = RigExecBakedPropagateOutcome(commit->outcome[k]);
         if (outcome == RigExecBakedPropagateOutcome::Staged ||
@@ -3741,19 +3746,19 @@ FinishCommit(RigExecBakedProgramImpl *program, RigExecBakedStep *step,
         switch (outcome) {
         case RigExecBakedPropagateOutcome::UnusableDescendant:
             step->diagnostics.push_back(
-                mover() + " could not propagate its pose revision through " +
-                B.paths[size_t(commit->propagate[k].first)].GetString() +
+                mover + " could not propagate its pose revision through " +
+                (*B.pathTexts)[size_t(commit->propagate[k].first)] +
                 "; constraint passed through");
             break;
         case RigExecBakedPropagateOutcome::SingularDelta:
             step->diagnostics.push_back(
-                mover() + " produced a singular hierarchy delta; constraint "
+                mover + " produced a singular hierarchy delta; constraint "
                 "passed through");
             break;
         default:
             step->diagnostics.push_back(
-                mover() + " produced an invalid descendant frame for " +
-                B.paths[size_t(commit->propagate[k].first)].GetString() +
+                mover + " produced an invalid descendant frame for " +
+                (*B.pathTexts)[size_t(commit->propagate[k].first)] +
                 "; constraint passed through");
             break;
         }
@@ -4030,7 +4035,7 @@ void PrepareConstraintArrays(RigExecBakedProgramImpl::ConstraintArrays *arrays) 
         const auto *raw=a.raw[channel].IsHolding<VtFloatArray>()?
             &a.raw[channel].UncheckedGet<VtFloatArray>():nullptr;
         if(raw && !raw->empty() && raw->size()!=count) {
-            diagnostics->push_back(a.path.GetString()+" "+name+" has "+std::to_string(raw->size())+
+            diagnostics->push_back(a.pathText+" "+name+" has "+std::to_string(raw->size())+
                 " entries for "+std::to_string(count)+" sources");return false;
         }
         values->assign(count,1.0);
@@ -4041,7 +4046,7 @@ void PrepareConstraintArrays(RigExecBakedProgramImpl::ConstraintArrays *arrays) 
         const auto *raw=a.raw[channel].IsHolding<VtVec3dArray>()?
             &a.raw[channel].UncheckedGet<VtVec3dArray>():nullptr;
         if(raw && !raw->empty() && raw->size()!=a.sourceCount) {
-            a.diagnostics.push_back(a.path.GetString()+" "+name+" has "+std::to_string(raw->size())+
+            a.diagnostics.push_back(a.pathText+" "+name+" has "+std::to_string(raw->size())+
                 " entries for "+std::to_string(a.sourceCount)+" sources");return false;
         }
         values->assign(a.sourceCount,GfVec3d(0));
@@ -4146,7 +4151,7 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
                 }
                 if(!RigExecRunSpaceSwitch(sw.kernelRecord,input,&B.base[size_t(i)])) {
                     B.base[size_t(i)].flags=0;
-                    step->diagnostics.push_back("space switch has no source for "+B.paths[size_t(i)].GetString());
+                    step->diagnostics.push_back("space switch has no source for "+(*B.pathTexts)[size_t(i)]);
                 }
             }
             const int autoIndex=(size_t(i)<B.autoClavicleBySlot.size()?B.autoClavicleBySlot[size_t(i)]:-1);
@@ -4203,7 +4208,7 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
             }
         }
         RigExecPointFrameArray &aggregate = B.aggregates[size_t(step->object)];
-        s.fallbackJoints.clear();
+        s.fallbackSlots.clear();
         auto &input=s.kernelInputs;
         s.hasStart=s.start>=0;
         input.hasSpace=s.spaceSlot>=0;
@@ -4245,7 +4250,7 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
             else {
                 input.ribbonPoints=sampled;
                 if(!s.ribbonPointsBinding.candidates.empty()) step->diagnostics.push_back(
-                    "diag "+s.path.GetString()+": ribbon driver points are unavailable; using sampled base");
+                    "diag "+s.pathText+": ribbon driver points are unavailable; using sampled base");
             }
             input.ribbonSampleCount=rd(s.ribbonSampleCount);
         } else if(s.type=="RigExecSplineIk") {
@@ -4257,12 +4262,12 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
         }
         std::string error;
         if(!RigExecRunSolver(s,input,&s.kernelWorkspace,&aggregate,&error) && !error.empty())
-            step->diagnostics.push_back("diag "+s.path.GetString()+": "+error);
+            step->diagnostics.push_back("diag "+s.pathText+": "+error);
         for (size_t k = 0; k < s.outputs.size(); ++k) {
             const auto &[slot, element] = s.outputs[k];
             if (element < 0 || size_t(element) >= aggregate.GetSize()) {
                 s.outPresent[k] = 0;
-                s.fallbackJoints.push_back(B.paths[size_t(slot)]);
+                s.fallbackSlots.push_back(slot);
                 continue;
             }
             s.outFrames[k] =
@@ -4406,7 +4411,7 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
             const bool resolved = field.ok;
             if (!resolved || c.weightScratch.size() != 1) {
                 step->diagnostics.push_back(
-                    c.path.GetString() + ": " + c.weightError +
+                    c.pathText + ": " + c.weightError +
                     "; constraint passed through");
                 finish();
                 return;
@@ -4416,7 +4421,7 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
             weight = rd(c.defaultWeight);
             if (!std::isfinite(weight) || weight < 0.0 || weight > 1.0) {
                 step->diagnostics.push_back(
-                    c.path.GetString() +
+                    c.pathText +
                     " has inputs:defaultWeight outside finite [0, 1]; "
                     "constraint passed through");
                 finish();
@@ -4496,7 +4501,7 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
                                c.effectorNative, commit.effectorAncestors,
                                &effector)) {
                 step->diagnostics.push_back(
-                    c.path.GetString() +
+                    c.pathText +
                     " could not resolve its effector; constraint passed "
                     "through");
                 inputsValid = false;
@@ -4520,7 +4525,7 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
                 c.poleModeObject) {
                 if (c.poleObjects.empty()) {
                     step->diagnostics.push_back(
-                        c.path.GetString() +
+                        c.pathText +
                         " uses object pole mode with no pole-vector objects; "
                         "constraint passed through");
                     inputsValid = false;
@@ -4542,7 +4547,7 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
                         !std::isfinite(arrays.poleWeights[k]) ||
                         arrays.poleWeights[k] < 0) {
                         step->diagnostics.push_back(
-                            c.path.GetString() +
+                            c.pathText +
                             " has an invalid pole-vector source or weight; "
                             "constraint passed through");
                         inputsValid = false;
@@ -4553,7 +4558,7 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
                 }
                 if (inputsValid && total <= 0) {
                     step->diagnostics.push_back(
-                        c.path.GetString() +
+                        c.pathText +
                         " has zero total pole-vector weight; constraint "
                         "passed through");
                     inputsValid = false;
@@ -4579,7 +4584,7 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
                 if (!RigExecPrepareRestDerivedIkChain(
                         commit.ikChain, commit.ikRest, &commit.ikPrepared)) {
                     step->diagnostics.push_back(
-                        c.path.GetString() +
+                        c.pathText +
                         " could not prepare rest-derived IK inputs; "
                         "constraint passed through");
                     inputsValid = false;
@@ -4603,7 +4608,7 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
                                  return !RigExecBakedUsable(frame);
                              }))) {
                 step->diagnostics.push_back(
-                    c.path.GetString() +
+                    c.pathText +
                     " failed to solve its joint chain; constraint passed "
                     "through atomically");
                 inputsValid = false;
@@ -4649,8 +4654,8 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
                                c.sourceNatives[k], commit.sourceAncestors[k],
                                &frame)) {
                 step->diagnostics.push_back(
-                    c.path.GetString() + " could not resolve source " +
-                    c.sourcePaths[k].GetString());
+                    c.pathText + " could not resolve source " +
+                    c.sourcePathTexts[k]);
                 sourcesReady = false;
                 break;
             }
@@ -4663,7 +4668,7 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
         }
         if (!sourcesReady) {
             step->diagnostics.push_back(
-                c.path.GetString() +
+                c.pathText +
                 " has unusable constraint inputs; constraint passed through");
             finish();
             return;
@@ -4714,7 +4719,7 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
             GfMatrix4d transform(1.0);
             if (sources.empty() || !mapOf(0, &transform)) {
                 step->diagnostics.push_back(
-                    c.path.GetString() +
+                    c.pathText +
                     " could not resolve rigExec:transform; mover passed "
                     "through");
                 finish();
@@ -4724,7 +4729,7 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
                 GfMatrix4d space(1.0);
                 if (!mapOf(1, &space)) {
                     step->diagnostics.push_back(
-                        c.path.GetString() +
+                        c.pathText +
                         " could not resolve rigExec:transformSpace; mover "
                         "passed through");
                     finish();
@@ -4791,7 +4796,7 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
                 if (!std::isfinite(source.normalizedWeight) ||
                     source.normalizedWeight < 0) {
                     step->diagnostics.push_back(
-                        c.path.GetString() +
+                        c.pathText +
                         " has an invalid source weight; constraint passed "
                         "through");
                     candidateReady = false;
@@ -4829,7 +4834,7 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
                                               commit.worldUpAncestors,
                                               &upObject)) {
                         step->diagnostics.push_back(
-                            c.path.GetString() +
+                            c.pathText +
                             " could not resolve its world-up object; "
                             "constraint passed through");
                         candidateReady = false;
@@ -4851,7 +4856,7 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
                                            commit.worldUpAncestors,
                                            &upObject)) {
                             step->diagnostics.push_back(
-                                c.path.GetString() +
+                                c.pathText +
                                 " could not resolve its world-up object; "
                                 "constraint passed through");
                             candidateReady = false;
@@ -4861,7 +4866,7 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
                             !RigExecPointsToMatrix(RigExecIdentityLandmarks(),
                                                    upObject.points, &up)) {
                             step->diagnostics.push_back(
-                                c.path.GetString() +
+                                c.pathText +
                                 " has a degenerate world-up object");
                             candidateReady = false;
                         } else if (candidateReady) {
@@ -4908,8 +4913,8 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
                 B.deltaPresent[size_t(deltaBase)] = 1;
             } else {
                 step->diagnostics.push_back(
-                    c.path.GetString() + " could not measure its delta "
-                    "against " + c.deltaBasePath.GetString() +
+                    c.pathText + " could not measure its delta "
+                    "against " + c.deltaBasePathText +
                     "; constraint passed through");
             }
         } else if (candidateReady) {
@@ -4917,9 +4922,9 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
             // revision is diagnosed and the whole commit passes through.
             if (!RigExecBakedUsable(candidate)) {
                 step->diagnostics.push_back(
-                    c.path.GetString() +
+                    c.pathText +
                     " produced an invalid or degenerate frame for " +
-                    B.paths[size_t(c.target)].GetString() +
+                    (*B.pathTexts)[size_t(c.target)] +
                     "; constraint passed through");
             } else {
                 commit.frames[0] = candidate;
@@ -5042,18 +5047,18 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
         const auto status=RigExecRunPoseInterpolator(interpolator,inputs,&interpolator.scratch);
         using Status=RigExecPoseInterpolatorStatus;
         if(status==Status::UnusableRotation) {
-            step->diagnostics.push_back("pose interpolator "+interpolator.path.GetString()+
-                " has no usable frame for its driver "+B.paths[d].GetString()+
+            step->diagnostics.push_back("pose interpolator "+interpolator.pathText+
+                " has no usable frame for its driver "+(*B.pathTexts)[d]+
                 " after the pose walk; its weights are zero this generation");
             return;
         }
         if(status==Status::UnusableTranslation) {
-            step->diagnostics.push_back("pose interpolator "+interpolator.path.GetString()+
+            step->diagnostics.push_back("pose interpolator "+interpolator.pathText+
                 " could not measure its driver's translation; its weights are zero this generation");
             return;
         }
         if(status==Status::CountMismatch) {
-            step->diagnostics.push_back("pose interpolator "+interpolator.path.GetString()+
+            step->diagnostics.push_back("pose interpolator "+interpolator.pathText+
                 " solved "+std::to_string(interpolator.scratch.size())+" weights for "+
                 std::to_string(interpolator.poseSlots.size())+" poses");
             return;
@@ -5137,7 +5142,7 @@ RigExecBakedPublishPose(RigExecBakedProgramImpl *program, RigExecRigPose *pose)
     // to nothing. The two streams are compared verbatim, so neither half of
     // this may drift from the other.
     // The element comes from jointSolverBinding rather than from
-    // Solver::fallbackJoints, which holds slot paths only: widening it would
+    // Solver::fallbackSlots, which holds slots only: widening it would
     // change a serialized, round-trip-verified field for a diagnostic.
     std::vector<std::pair<SdfPath, std::pair<SdfPath, int>>> fallbackJoints;
     std::map<SdfPath, SdfPath> lastPublishingWriter;

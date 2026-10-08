@@ -63,7 +63,10 @@ GfMatrix4d RigExecRunSpaceCheckpoint(const GfMatrix4d &ancestor,
 }
 GfMatrix4d RigExecComposePoseAvars(double tx,double ty,double tz,double sx,double sy,double sz,
     double rx,double ry,double rz,double spin,const TfToken &order) {
-    return RigExecProviderComposeAvars<PoseMath>(tx,ty,tz,sx,sy,sz,rx,ry,rz,spin,order.GetString());
+    // The token's text as a field read: GetString() on an empty token reads a
+    // function-local static.
+    return RigExecProviderComposeAvars<PoseMath>(tx,ty,tz,sx,sy,sz,rx,ry,rz,spin,
+        std::string_view(order.GetText(),order.size()));
 }
 GfMatrix4d RigExecPoseRoundTrip(const GfMatrix4d &matrix) {return PoseMath::RoundTrip(matrix);}
 bool RigExecRunSpaceSwitch(const RigExecSpaceSwitchRecord &record,

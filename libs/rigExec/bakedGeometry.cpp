@@ -57,6 +57,7 @@ TF_DEFINE_PRIVATE_TOKENS(
     ((jointIndices, "rigExec:jointIndices"))
     ((elementSize, "rigExec:elementSize"))
     ((denseRepresentation, "dense"))
+    ((operationCycle, "operation cycle"))
 );
 
 namespace rigExec {
@@ -104,6 +105,13 @@ BindPointReads(RigExecBakedProgramImpl *program)
                          afterStatus);
                 bound.diagnoseMiss =
                     phase.kind != RigExecReadPhaseKind::Preceding;
+                if (bound.diagnoseMiss) {
+                    bound.missDiagnostic =
+                        "diag " + revision->moverPath.GetString() +
+                        ": read phase '" + bound.phase.GetAsString() +
+                        "' for " + bound.input.GetString() +
+                        " resolved to nothing; read the authored base";
+                }
                 revision->pointBindings.push_back(std::move(bound));
             }
             for (RigExecBakedProgramImpl::GeomBlendChannel &channel :
@@ -147,6 +155,7 @@ RigExecBakedBuildGeometry(RigExecBakedBuildContext *ctx,
     auto bakeRevision = [&](const RigExecBakedRevisionSpec &r) {
         RigExecBakedProgramImpl::GeomRevision out;
         out.moverPath = r.moverPath;
+        out.moverPathText = r.moverPath.GetString();
         out.target = r.target;
         out.moverPrim = B.stage->GetPrimAtPath(r.moverPath);
         out.op = r.op;
@@ -465,6 +474,7 @@ RigExecBakedBuildGeometry(RigExecBakedBuildContext *ctx,
         for (const RigExecBakedRevisionSpec &derived : spec.derived) {
             RigExecBakedProgramImpl::GeomChain::Derived d;
             d.target = derived.target;
+            d.targetText = derived.target.GetString();
             d.matrixTarget = RigExecIsDerivedMatrixOp(derived.op);
             B.prims.insert(derived.target.GetPrimPath());
             B.named.insert(derived.target);
@@ -1596,11 +1606,7 @@ RigExecBakedOverlayPointReads(RigExecBakedProgramImpl *program,
                     : VtValue(VtVec3fArray(points, points + count)));
         } else if (binding.diagnoseMiss) {
             // A `preceding` tail is silent, as it is in the dynamic walk.
-            diagnostics->push_back(
-                "diag " + revision->moverPath.GetString() +
-                ": read phase '" + binding.phase.GetAsString() + "' for " +
-                binding.input.GetString() +
-                " resolved to nothing; read the authored base");
+            diagnostics->push_back(binding.missDiagnostic);
         }
     }
 }
@@ -1978,7 +1984,7 @@ AssembleRevision(RigExecBakedProgramImpl &B,
     }
     RigExecMoverParameters invalid;
     invalid.valid = false;
-    step->diagnostics.push_back(revision->moverPath.GetString() +
+    step->diagnostics.push_back(revision->moverPathText +
         ": mover has no declared stage-free API4 assembly");
     return invalid;
 }
@@ -2186,7 +2192,7 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
             B, &revision, chain.result.cdata(), chain.result.size(), time,
             step,chain.lastBase.size());
         const RigExecMoverStatus status =
-            RigExecStatusForParameters(parameters, revision.moverPath);
+            RigExecStatusForParameters(parameters, revision.moverPathText);
         step->counters.revisionsBuilt = 1;
         // A selected derived operation computes its declared typed result.
         {
@@ -2231,7 +2237,7 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
         }
         if (revision.resultStatus == "moverFailed") {
             step->diagnostics.push_back(
-                "MoverFailed " + derived.target.GetString() +
+                "MoverFailed " + derived.targetText +
                 ": derived geometry input/cardinality validation failed");
         }
         derived.spare.resize(revision.output.size());
@@ -2261,7 +2267,7 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
                  chain.revisions) {
             if (revision.resultStatus == "moverFailed") {
                 step->diagnostics.push_back(
-                    "MoverFailed " + revision.moverPath.GetString() +
+                    "MoverFailed " + revision.moverPathText +
                     ": execution rejected its inputs; revision passed "
                     "through");
             }
@@ -2349,7 +2355,7 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
         // is where the two meet and where `moverFailed` is published.
         revision.status =
             RigExecStatusForParameters(revision.parameters,
-                                       revision.moverPath);
+                                       revision.moverPathText);
         step->counters.revisionsBuilt = 1;
         // Whether the revision has to run at all, by VALUE and never by
         // dirtiness: a control dragged back to where it started leaves an
@@ -2549,7 +2555,7 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
             const float scalar = revision.defaultWeight;
             if (!std::isfinite(scalar) || scalar < 0.0f || scalar > 1.0f) {
                 step->diagnostics.push_back(
-                    "MoverFailed " + revision.moverPath.GetString() +
+                    "MoverFailed " + revision.moverPathText +
                     ": inputs:defaultWeight must be finite and in "
                     "[0, 1]; revision passed through");
             }
@@ -2564,7 +2570,7 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
             // reads inputs:defaultWeight, so a rig whose scalar is out of
             // range and whose object is fine must stay silent.
             step->diagnostics.push_back(
-                "MoverFailed " + revision.moverPath.GetString() +
+                "MoverFailed " + revision.moverPathText +
                 ": rigExec:weightObject produced an invalid common "
                 "envelope; revision passed through");
         }
@@ -2883,7 +2889,7 @@ RigExecBakedRunProjectorTarget(
         RigExecBakedProjectorFrames(B, revision), reads,
         revision.surfaceCache.PointSamples(false,chain.lastBase.cdata(),chain.lastBase.size()),
         revision.surfaceCache.PointSamples(true,chain.result.cdata(),chain.result.size()),
-        matrix, diagnostics,&revision.surfaceCache);
+        revision.moverPathText, matrix, diagnostics,&revision.surfaceCache);
 }
 
 void
@@ -3478,7 +3484,7 @@ void RigExecBakedResetSetAsideGeometryValue(
     case RigExecBakedSlotDomain::ChainDirty:
         revision.ran = false;
         revision.executed = false;
-        revision.resultStatus = TfToken("operation cycle");
+        revision.resultStatus = _tokens->operationCycle;
         revision.currentSource = -1;
         break;
     case RigExecBakedSlotDomain::SkinTopology:

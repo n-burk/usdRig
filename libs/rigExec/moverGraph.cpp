@@ -1494,7 +1494,7 @@ RigExecAssembleMatrixParameters(
 
 RigExecMoverStatus
 RigExecStatusForParameters(
-    const RigExecMoverParameters &parameters, const SdfPath &moverPath)
+    const RigExecMoverParameters &parameters, const std::string &moverText)
 {
     RigExecMoverStatus status;
     if (!parameters.enabled) {
@@ -1505,9 +1505,20 @@ RigExecStatusForParameters(
         status.state = _valueTokens->moverFailed;
         // First bad canonical public address (spec §6.6): v0.1 reports the
         // failed mover's own path; per-input attribution is future work.
-        status.firstBadAddress = moverPath.GetString();
+        status.firstBadAddress = moverText;
     }
     return status;
+}
+
+RigExecMoverStatus
+RigExecStatusForParameters(
+    const RigExecMoverParameters &parameters, const SdfPath &moverPath)
+{
+    // Spelled only on the failure arm.
+    if (parameters.enabled && !parameters.valid) {
+        return RigExecStatusForParameters(parameters, moverPath.GetString());
+    }
+    return RigExecStatusForParameters(parameters, std::string());
 }
 
 namespace {
@@ -3525,8 +3536,8 @@ RigExecRunProjectorTarget(
     const RigExecSurfaceProjectorFrames &frames,
     const RigExecProjectorReads &reads,
     const std::vector<GfVec3f> &basePoints,
-    const std::vector<GfVec3f> &finalPoints, GfMatrix4d *matrix,
-    std::vector<std::string> *diagnostics,
+    const std::vector<GfVec3f> &finalPoints, const std::string &who,
+    GfMatrix4d *matrix, std::vector<std::string> *diagnostics,
     RigExecSurfaceKernelCache<GfVec3f,GfVec3d> *cache)
 {
     if (op == RigExecRevisionOp::ShaderDials) {
@@ -3556,7 +3567,7 @@ RigExecRunProjectorTarget(
     return RigExecSolveSurfaceProjectorT(
         in, basePoints, finalPoints, reads.faceVertexCounts,
         reads.faceVertexIndices, static_cast<RigExecVertexNormalsFn>(&RigExecComputeVertexNormals),
-        binding.moverPath.GetString(), matrix, diagnostics, cache);
+        who, matrix, diagnostics, cache);
 }
 
 bool
@@ -3575,8 +3586,12 @@ RigExecEvaluateProjectorTarget(
     RigExecProjectorReads reads;
     RigExecReadProjectorTarget(projectorPrim, op, binding, resolved, time,
                                &reads);
+    // Only the surface projector names its mover in a diagnostic.
+    const std::string who = op == RigExecRevisionOp::SurfaceProjector
+                                ? binding.moverPath.GetString()
+                                : std::string();
     return RigExecRunProjectorTarget(op, binding, frames, reads, basePoints,
-                                     finalPoints, matrix, diagnostics);
+                                     finalPoints, who, matrix, diagnostics);
 }
 
 }  // namespace rigExec

@@ -346,6 +346,7 @@ bool StaticMeshWorld(const RigExecSceneDescriptors &scene,const SdfPath &mesh,Gf
             op.xforms.push_back({TfToken(name),id,int(type)});
         }
         program.ops.push_back(std::move(op));
+        RigExecSpellProviderOwners(&program);
         if(!RigExecRunProviderOp(program,0,&values,error))return false;
         const auto *local=values.Read<GfMatrix4d>(0);
         if(!local)return Fail(error,"projector local transform unavailable");

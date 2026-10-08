@@ -13,6 +13,7 @@ struct RigExecProviderXformInput {
     RigExecValueId raw=RigExecNoProviderValue;
     int type=0;
 };
+constexpr uint32_t RigExecNoProviderOwnerText=std::numeric_limits<uint32_t>::max();
 struct RigExecProviderOp {
     RigExecProviderOpKind kind;
     SdfPath owner;
@@ -20,6 +21,8 @@ struct RigExecProviderOp {
     std::vector<RigExecValueId> inputs;
     std::vector<RigExecProviderXformInput> xforms;
     bool scaleAvars=true;
+    /// `owner`'s entry in RigExecProviderProgram::ownerTexts.
+    uint32_t ownerText=RigExecNoProviderOwnerText;
 };
 struct RigExecProviderLeaf {
     RigExecValueId value;
@@ -45,8 +48,16 @@ struct RigExecProviderProgram {
     std::vector<RigExecValueId> leaves;
     std::vector<RigExecProviderOp> ops;
     std::vector<RigExecOpDescriptor> descriptors;
+    /// Each distinct op owner, spelled once on the thread that builds or
+    /// extends the program. An op body names its owner only through this
+    /// table: SdfPath::GetString interns under Sdf's table locks.
+    std::vector<std::string> ownerTexts;
     RigExecValueId FindValue(const std::string &key) const;
 };
+/// Spells the owner of every op that has no text yet into ownerTexts, once
+/// per distinct owner. The owning thread calls it after adding ops; a copied
+/// op keeps its text.
+void RigExecSpellProviderOwners(RigExecProviderProgram *program);
 std::string RigExecProviderValueKey(const SdfPath &owner,const std::string &computation);
 std::string RigExecProviderRawKey(const SdfPath &attribute);
 std::string RigExecProviderAttributeKey(const SdfPath &attribute);

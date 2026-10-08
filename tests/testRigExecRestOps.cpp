@@ -641,6 +641,7 @@ TestComposeKeysTrackConsumedLadderFields()
 {
     RigExecBakedProgramImpl B;
     B.paths = {SdfPath("/Root"), SdfPath("/Source")};
+    B.pathTexts = RigExecBakedSpellPathTexts(B.paths);
     const GfMatrix4d identity(1.0);
     B.restRoundTrip.assign(2, identity); B.defaultRoundTrip.assign(2, identity);
     B.selfD.assign(2, identity); B.parentDinv.assign(2, identity);
