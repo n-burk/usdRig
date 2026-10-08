@@ -49,6 +49,11 @@ inline constexpr uint32_t RigExecBinaryMagic = 0x42584552u;
 /// MINOR 3 admits revision op 16 (a plugin mover) with the ExternalMovers
 /// section that carries its bytes (rigExecBinary/external.h). A file with
 /// no plugin mover is what minor 2 wrote; an earlier reader rejects op 16.
+///
+/// The same record layout also admits wire-only revision aliases 19, 20,
+/// and 21 for extended SurfaceProject, DeltaMush, and Lattice semantics.
+/// Older readers reject these opcodes. New readers normalize the operation
+/// but retain the semantic flag so re-encoding preserves this feature gate.
 inline constexpr uint32_t RigExecBinaryVersion = 0x00030003u;
 inline constexpr uint32_t RigExecBinaryMajor(uint32_t version)
 {

@@ -269,11 +269,13 @@ RigExecApplyDeltaMush(
     std::vector<GfVec3f> *points, const std::vector<GfVec3f> &rest,
     const std::vector<int> &counts, const std::vector<int> &indices,
     int iterations, double step, bool pinBorders,
-    double distanceWeight, double displacement)
+    double distanceWeight, double displacement,
+    const RigExecDeltaMushSettings &settings,
+    const GfMatrix4d &computationToTarget)
 {
-    return RigExecApplyDeltaMushKernel<GfVec3f, GfVec3d>(
+    return RigExecApplyDeltaMushInSpaceKernel<GfVec3f, GfVec3d, GfMatrix4d>(
         points, rest, counts, indices, iterations, step, pinBorders,
-        distanceWeight, displacement);
+        distanceWeight, displacement, settings, computationToTarget);
 }
 
 bool

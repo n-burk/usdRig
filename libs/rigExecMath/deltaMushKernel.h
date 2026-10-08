@@ -3,7 +3,9 @@
 // these kernels; Point/Wide only supply float/double vector storage and arithmetic.
 #ifndef RIGEXEC_MATH_DELTA_MUSH_KERNEL_H
 #define RIGEXEC_MATH_DELTA_MUSH_KERNEL_H
+#include "deltaMushSettings.h"
 #include <algorithm>
+#include <limits>
 #include <cmath>
 #include <map>
 #include <set>
@@ -147,18 +149,91 @@ RigExecTransportSurfaceOffsetsKernel(
     return true;
 }
 
+// Corner tangent transport reference: Blender MOD_correctivesmooth.cc,
+// calc_tangent_spaces; see docs/references.md for provenance.
+template<class Point, class Wide>
+bool
+RigExecTransportCornerOffsetsKernel(
+    const std::vector<Point> &rest, const std::vector<Point> &posed,
+    const std::vector<int> &counts, const std::vector<int> &indices,
+    const std::vector<Point> &deltas, std::vector<Point> *out)
+{
+    if (!out || rest.size() != posed.size() || rest.size() != deltas.size()) return false;
+    struct Basis { Wide x{0}, y{0}, z{0}; double weight = 0; };
+    const auto basis = [](const std::vector<Point> &points, int previous, int vertex, int next) {
+        const auto normalized = [](Wide v) {
+            const double length = v.GetLength();
+            return length > 0 ? v / length : Wide(0);
+        };
+        const Wide before = normalized(deltaMushDetail::Convert<Wide>(points[previous]) - deltaMushDetail::Convert<Wide>(points[vertex]));
+        const Wide after = normalized(deltaMushDetail::Convert<Wide>(points[vertex]) - deltaMushDetail::Convert<Wide>(points[next]));
+        Basis result;
+        bool equal = true;
+        for (int a = 0; a < 3; ++a)
+            equal = equal && std::abs(before[a] - after[a]) <= std::numeric_limits<float>::epsilon() * 10;
+        if (equal) { result.x = Wide(1,0,0); result.y = Wide(0,1,0); result.z = Wide(0,0,1); return result; }
+        result.z = normalized(deltaMushDetail::Cross(before, after));
+        result.x = normalized(before + after);
+        result.y = deltaMushDetail::Cross(result.z, result.x);
+        result.weight = std::acos(std::max(-1.0, std::min(1.0, deltaMushDetail::Dot(before, after))));
+        return result;
+    };
+    std::vector<Basis> restBasis, posedBasis;
+    std::vector<double> sums(rest.size(), 0);
+    size_t offset = 0;
+    for (int count : counts) {
+        if (count < 3 || size_t(count) > indices.size() - offset) return false;
+        for (int c = 0; c < count; ++c) {
+            const int previous = indices[offset + (c+count-1)%count];
+            const int vertex = indices[offset+c], next = indices[offset+(c+1)%count];
+            if (previous < 0 || vertex < 0 || next < 0 || size_t(previous) >= rest.size() ||
+                size_t(vertex) >= rest.size() || size_t(next) >= rest.size()) return false;
+            restBasis.push_back(basis(rest, previous, vertex, next));
+            posedBasis.push_back(basis(posed, previous, vertex, next));
+            sums[vertex] += posedBasis.back().weight;
+        }
+        offset += count;
+    }
+    if (offset != indices.size()) return false;
+    std::vector<Wide> result(rest.size(), Wide(0));
+    for (size_t corner = 0; corner < indices.size(); ++corner) {
+        const int vertex = indices[corner];
+        const auto &r = restBasis[corner], &p = posedBasis[corner];
+        if (!(sums[vertex] > 0) || !(p.weight > 0)) continue;
+        const Wide delta = deltaMushDetail::Convert<Wide>(deltas[vertex]);
+        result[vertex] += (deltaMushDetail::Dot(delta,r.x)*p.x + deltaMushDetail::Dot(delta,r.y)*p.y +
+            deltaMushDetail::Dot(delta,r.z)*p.z) * (p.weight / sums[vertex]);
+    }
+    std::vector<Point> converted;
+    converted.reserve(result.size());
+    for (const auto &p : result) {
+        for (int a = 0; a < 3; ++a) if (!std::isfinite(p[a])) return false;
+        converted.push_back(deltaMushDetail::Convert<Point>(p));
+    }
+    *out = std::move(converted); return true;
+}
+
 template<class Point, class Wide>
 bool
 RigExecApplyDeltaMushKernel(
     std::vector<Point> *points, const std::vector<Point> &rest,
     const std::vector<int> &counts, const std::vector<int> &indices,
     int iterations, double step, bool pinBorders,
-    double distanceWeight, double displacement)
+    double distanceWeight, double displacement,
+    const RigExecDeltaMushSettings &settings = {})
 {
     if (!points || points->size() != rest.size() || iterations < 0 ||
-        iterations > 1000 || !std::isfinite(step) || step < 0 || step > 1 ||
+        iterations > 1000 || !std::isfinite(step) ||
+        (settings.smoothing == RigExecDeltaMushSmoothing::Rest && (step < 0 || step > 1)) ||
         !std::isfinite(distanceWeight) || distanceWeight < 0 || distanceWeight > 10 ||
-        !std::isfinite(displacement) || displacement < 0 || displacement > 1) return false;
+        !std::isfinite(displacement) ||
+        (settings.smoothing == RigExecDeltaMushSmoothing::Rest && (displacement < 0 || displacement > 1)) ||
+        (settings.smoothing != RigExecDeltaMushSmoothing::Rest && settings.smoothing != RigExecDeltaMushSmoothing::Simple &&
+         settings.smoothing != RigExecDeltaMushSmoothing::LengthWeighted) ||
+        (settings.frameTransport != RigExecDeltaMushFrameTransport::Vertex &&
+         settings.frameTransport != RigExecDeltaMushFrameTransport::Corner) ||
+        (!settings.smoothWeights.empty() && settings.smoothWeights.size() != rest.size())) return false;
+    for (float w : settings.smoothWeights) if (!std::isfinite(w) || w < 0 || w > 1) return false;
     for (size_t i = 0; i < rest.size(); ++i)
         for (int a = 0; a < 3; ++a)
             if (!std::isfinite(rest[i][a]) || !std::isfinite((*points)[i][a])) return false;
@@ -174,12 +249,24 @@ RigExecApplyDeltaMushKernel(
         offset += count;
     }
     if (offset != indices.size() || (counts.empty() && !rest.empty())) return false;
+    if (settings.edges.size() % 2) return false;
+    // Keep polygon incidence for pinning even when explicit mesh edges include loose edges.
+    auto meshEdges = edges;
+    if (!settings.edges.empty()) {
+        meshEdges.clear();
+        for (size_t i = 0; i < settings.edges.size(); i += 2) {
+            const int a = settings.edges[i], b = settings.edges[i+1];
+            if (a < 0 || b < 0 || size_t(a) >= rest.size() || size_t(b) >= rest.size() || a == b ||
+                !meshEdges.emplace(std::minmax(a,b), 0).second) return false;
+        }
+        for (const auto &edge : edges) if (!meshEdges.count(edge.first)) return false;
+    }
     if (!iterations || step == 0 || rest.empty()) return true;
     std::vector<std::vector<std::pair<int,double>>> neighbors(rest.size());
     std::vector<bool> pinned(rest.size(), false);
-    for (const auto &edge : edges) {
+    for (const auto &edge : meshEdges) {
         int a = edge.first.first, b = edge.first.second;
-        if (edge.second == 1 && pinBorders) pinned[a] = pinned[b] = true;
+        if (edges[edge.first] == 1 && pinBorders) pinned[a] = pinned[b] = true;
         double length = (deltaMushDetail::Convert<Wide>(rest[a])-deltaMushDetail::Convert<Wide>(rest[b])).GetLength();
         double w = distanceWeight == 0 ? 1 : std::pow(std::max(length, 1e-12), -distanceWeight);
         if (!std::isfinite(w)) return false;
@@ -193,9 +280,25 @@ RigExecApplyDeltaMushKernel(
         for (int iteration = 0; iteration < iterations; ++iteration) {
             for (size_t i = 0; i < current.size(); ++i) {
                 if (pinned[i] || neighbors[i].empty()) continue;
+                const double influence = settings.smoothWeights.empty() ? 1 : settings.smoothWeights[i];
                 Wide sum(0); double total=0;
-                for (const auto &n : neighbors[i]) {sum += current[n.first]*n.second;total += n.second;}
-                next[i] = current[i] + step*(sum/total-current[i]);
+                if (settings.smoothing == RigExecDeltaMushSmoothing::LengthWeighted) {
+                    for (const auto &n : neighbors[i]) {
+                        const Wide edge = current[n.first] - current[i];
+                        const double length = edge.GetLength();
+                        sum += edge * length; total += length;
+                    }
+                    const double divisor = total * neighbors[i].size();
+                    next[i] = current[i];
+                    if (divisor > std::numeric_limits<float>::epsilon() * 10)
+                        next[i] += sum * (2 * step * influence / divisor);
+                } else {
+                    for (const auto &n : neighbors[i]) {
+                        const double w = settings.smoothing == RigExecDeltaMushSmoothing::Simple ? 1 : n.second;
+                        sum += current[n.first] * w; total += w;
+                    }
+                    next[i] = current[i] + step * influence * (sum / total - current[i]);
+                }
             }
             current.swap(next);
         }
@@ -204,16 +307,59 @@ RigExecApplyDeltaMushKernel(
         for (const auto &p : current) result.push_back(deltaMushDetail::Convert<Point>(p));
         return result;
     };
-    auto smoothRest = smooth(rest), smoothPosed = smooth(*points);
+    auto smoothPosed = smooth(*points);
+    if (settings.onlySmooth) {
+        for (const auto &p : smoothPosed) for (int a = 0; a < 3; ++a)
+            if (!std::isfinite(p[a])) return false;
+        *points = std::move(smoothPosed); return true;
+    }
+    auto smoothRest = smooth(rest);
     std::vector<Point> detail(rest.size()), rotated;
     for (size_t i=0; i<rest.size(); ++i) detail[i]=(rest[i]-smoothRest[i])*float(displacement);
-    if (!RigExecTransportSurfaceOffsetsKernel<Point, Wide>(smoothRest,smoothPosed,counts,indices,detail,&rotated)) return false;
+    if (settings.frameTransport == RigExecDeltaMushFrameTransport::Corner) {
+        if (!RigExecTransportCornerOffsetsKernel<Point, Wide>(smoothRest, smoothPosed, counts, indices, detail, &rotated)) return false;
+    } else if (!RigExecTransportSurfaceOffsetsKernel<Point, Wide>(smoothRest,smoothPosed,counts,indices,detail,&rotated)) return false;
     for (size_t i=0; i<rest.size(); ++i) {
         smoothPosed[i] += rotated[i];
         for (int a=0;a<3;++a) if (!std::isfinite(smoothPosed[i][a])) return false;
     }
     *points = std::move(smoothPosed);
     return true;
+}
+
+/// Row-vector affine adapter. Reference points are already in computation space.
+template<class Point, class Wide, class Matrix>
+bool RigExecApplyDeltaMushInSpaceKernel(
+    std::vector<Point> *points, const std::vector<Point> &rest,
+    const std::vector<int> &counts, const std::vector<int> &indices,
+    int iterations, double step, bool pinBorders, double distanceWeight,
+    double displacement, const RigExecDeltaMushSettings &settings,
+    const Matrix &computationToTarget)
+{
+    if (!points) return false;
+    for (int row = 0; row < 4; ++row) for (int col = 0; col < 4; ++col)
+        if (!std::isfinite(computationToTarget[row][col])) return false;
+    if (std::abs(computationToTarget[0][3]) > 1e-12 || std::abs(computationToTarget[1][3]) > 1e-12 ||
+        std::abs(computationToTarget[2][3]) > 1e-12 || std::abs(computationToTarget[3][3]-1) > 1e-12 ||
+        std::abs(computationToTarget.GetDeterminant()) < 1e-14) return false;
+    // Preserve the exact legacy arithmetic for the identity adapter.
+    if (computationToTarget == Matrix(1))
+        return RigExecApplyDeltaMushKernel<Point, Wide>(points, rest, counts, indices,
+            iterations, step, pinBorders, distanceWeight, displacement, settings);
+    Matrix affine = computationToTarget;
+    affine[0][3]=affine[1][3]=affine[2][3]=0; affine[3][3]=1;
+    Matrix targetToComputation = affine.GetInverse();
+    targetToComputation[0][3]=targetToComputation[1][3]=targetToComputation[2][3]=0; targetToComputation[3][3]=1;
+    auto local = *points;
+    for (auto &p : local)
+        p = deltaMushDetail::Convert<Point>(targetToComputation.TransformAffine(deltaMushDetail::Convert<Wide>(p)));
+    if (!RigExecApplyDeltaMushKernel<Point, Wide>(&local, rest, counts, indices,
+        iterations, step, pinBorders, distanceWeight, displacement, settings)) return false;
+    for (auto &p : local) {
+        p = deltaMushDetail::Convert<Point>(affine.TransformAffine(deltaMushDetail::Convert<Wide>(p)));
+        for (int axis = 0; axis < 3; ++axis) if (!std::isfinite(p[axis])) return false;
+    }
+    *points = std::move(local); return true;
 }
 
 } // namespace rigExec

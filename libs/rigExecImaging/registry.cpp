@@ -1,6 +1,7 @@
 // RigExec imaging registry and C activation surface.
 #include <fstream>
 #include "registry.h"
+#include "fallbackStage.h"
 #include "rigExec/frameCacheSparsity.h"
 
 #include "rigExecMath/avarScale.h"
@@ -9,6 +10,7 @@
 #include "pxr/base/gf/range3d.h"
 #include "pxr/base/gf/rotation.h"
 #include "pxr/base/tf/diagnostic.h"
+#include "pxr/base/tf/getenv.h"
 #include "pxr/base/tf/registryManager.h"
 #include "pxr/base/tf/type.h"
 #include "pxr/usd/usd/attribute.h"
@@ -777,6 +779,18 @@ RigExecImagingRegistry::_RefreshFrozenSnapshot(RigSession *session)
     const RigExecBakedProgram *program = evaluator.GetBakedProgram();
     const uint64_t epoch = evaluator.GetBindingEpochDigest();
     const uint64_t serial = evaluator.GetStageEditSerial();
+    if (!program) {
+        // Dynamic fallback has no frozen inputs to pin. Its private mirror
+        // captures source values independently; avoid a live chain walk.
+        session->frozen.reset();
+        session->frozenProgram = nullptr;
+        session->frozenEpoch = epoch;
+        session->frozenSerial = serial;
+        session->frozenAvarDigest = 0;
+        session->frozenValid = true;
+        session->frozenError.clear();
+        return;
+    }
     // The pins: the bridge's, which its notice tracking keeps current (a
     // constant edited mid-epoch moves no digest, but its notice drops them).
     // Re-verifying a private copy after every edit re-probed every chain
@@ -1457,6 +1471,20 @@ RigExecImagingRegistry::_Activate(
             _CancelGenerationLocked(session.rigPath);
         }
     }
+    if (_stage != stage) _fallbackSource.reset();
+    bool needsFallbackCapture = false;
+    if (RigExecBackgroundWarmingEnabled()) {
+        for (RigSession &session : _sessions) {
+            if (session.playback || !session.bridge) continue;
+            _RefreshFrozenSnapshot(&session);
+            needsFallbackCapture |= !session.frozen;
+        }
+    }
+    if (!_fallbackSource && needsFallbackCapture) {
+        RigExecProfileScope captureScope(_scheduler->MutableProfiler(),
+                                         "Imaging.FallbackCapture", "imaging");
+        _fallbackSource = std::make_shared<RigExecFallbackStageSource>(stage);
+    }
     _stage = stage;
     {
         // Nested _mutex -> _notedMutex: the documented lock order.
@@ -1594,6 +1622,9 @@ RigExecImagingRegistry::SetTime(UsdTimeCode time)
     // index's time trigger.
     std::unique_lock<std::mutex> lock(_mutex);
     if (_sessions.empty() || !_stage) {
+        // A plain stage has no evaluator, but its xform previews still
+        // compose against the host's displayed frame.
+        _lastTime = time;
         return false;
     }
     // A publish still dirties every prim in the generation through
@@ -1779,9 +1810,8 @@ RigExecImagingRegistry::BuildWarmWork(
         session->bridge->GetInteractiveOverrides();
     const RigExecBakedProgram *program = evaluator.GetBakedProgram();
     if (program == nullptr) {
-        // D7: a rig with no baked program evaluates dynamically against
-        // the live stage, which a worker must never touch. No job, ever;
-        // the rig still memoizes its own UI-thread results.
+        // No frozen job can touch the live stage. Idle warming uses the
+        // separate private-stage route for rigs without a baked program.
         return skip(RigExecWarmSkipReason::D7Exempt,
                     "no baked program (D7)");
     }
@@ -2151,17 +2181,20 @@ bool
 RigExecImagingRegistry::_WarmOneFallbackFrame(
     RigSession *session, UsdTimeCode playhead)
 {
-    if (!session || !session->warmRangeActive || !session->bridge ||
+    if (!session || !session->warmRangeActive || session->warmRange.empty() || !session->bridge ||
         session->playback || !_warmIndex || !_scheduler ||
         !session->bridge->GetInteractiveOverrides().empty()) {
         return false;
     }
-    const uint64_t serial =
-        session->bridge->GetEvaluator().GetStageEditSerial();
-    if (session->fallbackSerial != serial) {
-        session->fallbackSerial = serial;
-        session->fallbackDeclined.clear();
-    }
+    auto snapshot = _fallbackSource ? _fallbackSource->GetSnapshot() : nullptr;
+    const RigExecRigEvaluator &evaluator = session->bridge->GetEvaluator();
+    RigExecFallbackStageOptions options;
+    options.preferProgram = TfGetenvBool("RIGEXEC_DYNAMIC_RUNS_PROGRAM", true);
+    options.publishWeightFields = evaluator.GetPublishWeightFields();
+    options.solverGuidesEnabled = evaluator.GetSolverGuidesEnabled();
+    options.explicitMode = evaluator.GetEvaluationModeSource() ==
+        RigExecEvaluationModeSource::Explicit;
+    options.mode = evaluator.GetEvaluationMode();
     const auto states = _warmIndex->States(
         session->rigPath, session->warmRange,
         _scheduler->CurrentGeneration(session->rigPath),
@@ -2173,7 +2206,8 @@ RigExecImagingRegistry::_WarmOneFallbackFrame(
         const double time = session->warmRange[i];
         if (states[i] == RigExecWarmFrameState::Cached ||
             states[i] == RigExecWarmFrameState::Warming ||
-            session->fallbackDeclined.count(time)) {
+            (snapshot && session->fallbackMirror && session->fallbackMirror->HasFailed(
+                snapshot->revision, UsdTimeCode(time), options))) {
             continue;
         }
         const double distance = std::abs(time - playhead.GetValue());
@@ -2186,12 +2220,51 @@ RigExecImagingRegistry::_WarmOneFallbackFrame(
     if (!found) {
         return false;
     }
-    ++session->fallbackAttempts;
-    ++session->evaluationCount;
-    if (!session->bridge->WarmFrameOnCallingThread(UsdTimeCode(candidate))) {
-        session->fallbackDeclined.insert(candidate);
+    if (!_fallbackSource) {
+        // Capture only after finding an actual missing frame. Fully warmed
+        // frozen rigs never pay for a private-stage baseline.
+        RigExecProfileScope captureScope(_scheduler->MutableProfiler(),
+                                         "Imaging.FallbackCapture", "imaging");
+        _fallbackSource = std::make_shared<RigExecFallbackStageSource>(_stage);
+        snapshot = _fallbackSource->GetSnapshot();
     }
-    return true;
+    RigExecFrameCacheKey key;
+    const UsdTimeCode time(candidate);
+    if (!snapshot || !session->bridge->CapturePoseOnlyCacheKey(time, &key)) {
+        return false;
+    }
+    if (!session->fallbackMirror) {
+        session->fallbackMirror =
+            std::make_shared<RigExecFallbackStageMirror>(session->rigPath);
+    }
+    const auto mirror = session->fallbackMirror;
+    const auto cache = session->bridge->GetFrameCache();
+    const auto index = _warmIndex;
+    RigExecBackgroundScheduler *scheduler = _scheduler.get();
+    const SdfPath rig = session->rigPath;
+    const RigExecFrameGeneration generation = scheduler->CurrentGeneration(rig);
+    RigExecWarmWork work = [snapshot, mirror, options, cache, index, scheduler, key, rig](
+        const RigExecWarmRequest &request) {
+        RigExecRigPose pose;
+        if (!mirror->Evaluate(snapshot, request.time, &pose, options)) {
+            return scheduler->IsWarmRequestCurrent(rig, request.generation,
+                        request.time, request.fenceToken)
+                ? RigExecWarmOutcome::DeclinedInvalid
+                : RigExecWarmOutcome::DeclinedGeneration;
+        }
+        const bool published = RigExecPublishBackgroundCompletion(
+            cache, key, request.time, pose, request.generation, scheduler, rig,
+            request.fenceToken, {}, 0, nullptr, index.get());
+        if (published) return RigExecWarmOutcome::Published;
+        return scheduler->IsWarmRequestCurrent(rig, request.generation,
+                    request.time, request.fenceToken)
+            ? RigExecWarmOutcome::DeclinedInvalid
+            : RigExecWarmOutcome::DeclinedGeneration;
+    };
+    const bool queued = scheduler->Enqueue(rig, time, RigExecWarmPriority::Sweep,
+                                         generation, std::move(work));
+    if (queued) ++session->fallbackAttempts;
+    return queued;
 }
 
 size_t
@@ -2277,10 +2350,10 @@ RigExecImagingRegistry::OnIdle(RigExecFrozenStepRunner runner)
             rig, playhead, generation, std::move(sweepTimes),
             std::move(factory), budget);
     }
-    // Workers remain the preferred route. If they made no progress and
-    // have drained, fill one outstanding frame through the live evaluator.
+    // Frozen workers remain the preferred route. Once they drain, enqueue
+    // one outstanding frame against a privately owned captured stage.
     // This covers dynamic rigs and operations whose inputs cannot freeze,
-    // without maintaining another operation allowlist. Never run during a
+    // without maintaining another operation allowlist. Never enqueue during a
     // preview, when warming is disabled, or for an injected test runner.
     const auto background = scheduler->Stats();
     if (!runner && enqueued == 0 && background.queuedDepth == 0 &&
@@ -2290,6 +2363,7 @@ RigExecImagingRegistry::OnIdle(RigExecFrozenStepRunner runner)
             _warmSamplingMaxMs > 0.0) {
             for (RigSession &session : _sessions) {
                 if (_WarmOneFallbackFrame(&session, playhead)) {
+                    ++enqueued;
                     break;
                 }
             }
@@ -2749,7 +2823,7 @@ RigExecImagingRegistry::ClearFrameCache(const SdfPath &rig)
         _warmIndex->ResetRig(rig);
         for (RigSession &session : _sessions) {
             if (session.rigPath == rig) {
-                session.fallbackDeclined.clear();
+                if (session.fallbackMirror) session.fallbackMirror->ClearFailures();
             }
         }
     }
@@ -2776,7 +2850,7 @@ RigExecImagingRegistry::SetWarmRange(const SdfPath &rig,
                 std::unique(session.warmRange.begin(), session.warmRange.end()),
                 session.warmRange.end());
             session.warmRangeActive = true;
-            session.fallbackDeclined.clear();
+            if (session.fallbackMirror) session.fallbackMirror->ClearFailures();
             return true;
         }
     }
@@ -3116,14 +3190,20 @@ RigExecImagingRegistry::_ComposeXformDelta(
     const UsdTimeCode time = cache->GetTime();
     for (const UsdGeomXformOp &op : ops) {
         VtValue value;
-        if (!op.GetAttr().Get(&value, time)) {
-            // An op with no value at this time contributes its identity to
-            // both, which is what USD itself does with it.
+        const bool hasAuthoredValue = op.GetAttr().Get(&value, time);
+        if (hasAuthoredValue) {
+            authored =
+                op.GetOpTransform(op.GetOpType(), value, op.IsInverseOp()) *
+                authored;
+        }
+        // An inverse op shares its attribute with the forward op; the
+        // !invert! marker belongs to the order token, not the value key.
+        const auto found = opValues.find(op.GetAttr().GetName());
+        // A newly created ordered op has no authored value yet. It is an
+        // identity in the authored transform but its preview still applies.
+        if (found == opValues.end() && !hasAuthoredValue) {
             continue;
         }
-        authored = op.GetOpTransform(op.GetOpType(), value, op.IsInverseOp()) *
-                   authored;
-        const auto found = opValues.find(op.GetOpName());
         const VtValue &previewValue =
             found == opValues.end() ? value : found->second;
         previewed =
@@ -3353,8 +3433,17 @@ RigExecImagingRegistry::_NoticeSettlesPreview(
         }
         stashed.insert(entry.prim.AppendProperty(entry.attribute));
     }
-    // Every edit is a value (or the spec its first value creates) on one
-    // of the withdrawn attributes.
+    // A first opinion in a new edit layer also creates inert ancestor
+    // overs. USD reports those as changed-info prim paths with no fields;
+    // they change neither composition nor the pose. Real metadata and all
+    // prim resyncs still require evaluation.
+    const auto inertAncestor = [&](const SdfPath &path) {
+        return path.IsPrimPath() && notice.GetChangedFields(path).empty() &&
+            std::any_of(stashed.begin(), stashed.end(),
+                [&](const SdfPath &property) { return property.HasPrefix(path); });
+    };
+    // Every other edit is a value (or the spec its first value creates) on
+    // one of the withdrawn attributes.
     const auto valueEdit = [&](const SdfPath &path) {
         if (!stashed.count(path)) {
             return false;
@@ -3373,7 +3462,7 @@ RigExecImagingRegistry::_NoticeSettlesPreview(
         }
     }
     for (const SdfPath &path : notice.GetChangedInfoOnlyPaths()) {
-        if (!valueEdit(path)) {
+        if (!inertAncestor(path) && !valueEdit(path)) {
             return false;
         }
     }
@@ -3425,10 +3514,21 @@ RigExecImagingRegistry::_OnObjectsChanged(
             return;
         }
         readRoots = _readRoots;
+        if (_fallbackSource) {
+            RigExecProfileScope captureScope(scheduler ? scheduler->MutableProfiler() : nullptr,
+                                             "Imaging.FallbackPatchCapture", "imaging");
+            _fallbackSource->CaptureChanges(_stage, notice);
+        }
         // Pose-only keys include every stage edit. Retire their display
         // rows even when this notice misses the rig's known input roots.
         for (RigSession &session : _sessions) {
             if (!session.playback && session.bridge) {
+                // Pose-only keys include every edit, including edits outside
+                // known rig inputs. Fence old mirror completions as well as
+                // retiring their displayed cache rows.
+                if (session.fallbackMirror) {
+                    _CancelGenerationLocked(session.rigPath);
+                }
                 session.bridge->RetirePoseOnlyCacheEntries();
             }
         }
@@ -3476,6 +3576,7 @@ RigExecImagingRegistry::_OnObjectsChanged(
     }
     if (relevant) {
         UsdTimeCode time;
+        std::set<SdfPath> rejectedPreviews;
         {
             std::lock_guard<std::mutex> lock(_mutex);
             // A value-only edit keeps the cached dependency regions. Resyncs
@@ -3553,9 +3654,13 @@ RigExecImagingRegistry::_OnObjectsChanged(
                     const bool settled =
                         !session.settleOverrides.empty() &&
                         _NoticeSettlesPreview(session, notice);
-                    if (!settled) {
-                        session.settleOverrides.clear();
+                    if (!session.settleOverrides.empty() && !settled) {
+                        rejectedPreviews.insert(session.rigPath);
                     }
+                    // This notice consumes the released edit. Keeping its
+                    // overrides would mistake a later undo or unrelated edit
+                    // for another rejected release and recompile needlessly.
+                    session.settleOverrides.clear();
                     session.dirty = !settled;
                     session.readRootsDirty = session.readRootsDirty || _readRootsDirty;
                     // The bridge caches authored guide styling (shape, scale,
@@ -3626,6 +3731,20 @@ RigExecImagingRegistry::_OnObjectsChanged(
         if (fenceLock.owns_lock()) {
             fenceLock.unlock();
         }
+        // The baked evaluator's notice invalidation may still be pending.
+        // Rebuild this uncommon fallback from the composed stage rather than
+        // replaying inputs captured before the rejected commit. Resolve the
+        // sessions under lock so concurrent deactivation cannot destroy them.
+        // Accepted settlements retain their program and do no execution.
+        if (!rejectedPreviews.empty()) {
+            std::lock_guard<std::mutex> lock(_mutex);
+            if (_stage != sender) return;
+            for (RigSession &session : _sessions) {
+                if (rejectedPreviews.count(session.rigPath) && session.bridge) {
+                    session.bridge->Compile();
+                }
+            }
+        }
         SetTime(time);
     }
 }
@@ -3689,6 +3808,7 @@ RigExecImagingRegistry::_Deactivate(bool byHost)
         }
     }
     _sessions.clear();
+    _fallbackSource.reset();
     _active = false;
     // A library release is not a host decision: a later engine on the same
     // stage activates it again (EnsureActivated). A host deactivation of an

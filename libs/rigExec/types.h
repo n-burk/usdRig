@@ -6,6 +6,9 @@
 
 #include "rigExecMath/pointFrame.h"
 #include "rigExecMath/wrinkleSettings.h"
+#include "rigExecMath/deltaMushSettings.h"
+#include "rigExecMath/surfaceSnapKernel.h"
+#include "rigExecMath/latticeKernel.h"
 
 #include "pxr/base/gf/vec2f.h"
 #include "pxr/base/gf/vec3f.h"
@@ -284,7 +287,13 @@ struct RigExecMoverParameters {
     bool mushPinBorders = true;
     float mushDistanceWeight = 0.0f;
     float mushDisplacement = 1.0f;
+    RigExecDeltaMushSettings mushSettings;
+    GfMatrix4d mushComputationToTarget{1};
     RigExecWrinkleSettings wrinkleSettings;
+    RigExecSurfaceSnapSettings surfaceSettings;
+    GfMatrix4d targetToSurface{1.0}, surfaceToTarget{1.0}, surfaceToMetric{1.0};
+    RigExecLatticeSettings latticeSettings;
+    GfMatrix4d targetToLattice{1.0}, latticeToTarget{1.0}, cageToLattice{1.0};
 
     /// Standard topology for smooth/normals/surface kernels.
     std::vector<int> topologyCounts;
@@ -349,7 +358,13 @@ struct RigExecMoverParameters {
                mushIterations == o.mushIterations && mushStep == o.mushStep &&
                mushPinBorders == o.mushPinBorders &&
                mushDistanceWeight == o.mushDistanceWeight && mushDisplacement == o.mushDisplacement &&
+               mushSettings == o.mushSettings && mushComputationToTarget == o.mushComputationToTarget &&
                wrinkleSettings == o.wrinkleSettings &&
+               surfaceSettings == o.surfaceSettings &&
+               targetToSurface == o.targetToSurface && surfaceToTarget == o.surfaceToTarget &&
+               surfaceToMetric == o.surfaceToMetric &&
+               latticeSettings == o.latticeSettings && targetToLattice == o.targetToLattice &&
+               latticeToTarget == o.latticeToTarget && cageToLattice == o.cageToLattice &&
                topologyCounts == o.topologyCounts &&
                topologyIndices == o.topologyIndices &&
                auxPoints == o.auxPoints && auxPointsB == o.auxPointsB &&

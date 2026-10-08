@@ -12,14 +12,15 @@ rendered for it (such a page still links a stage if it sets "example_key").
 
 CATEGORIES = [
     ("Rig", ["rig_root"]),
-    ("Transform providers", ["control", "joint", "space_switch"]),
+    ("Transform providers", ["control", "joint", "space_switch", "bone_frame",
+                             "copy_frame", "mapped_frame", "skin_influence", "armature_parent"]),
     ("Solvers", ["fk_chain", "two_bone_ik", "spline_ik",
                  "blend_point_frames", "twist_distribution", "ribbon"]),
     ("Constraints", ["aim_constraint", "position_constraint",
                      "rotation_constraint", "scale_constraint",
-                     "parent_constraint", "single_chain_ik_constraint"]),
-    ("Geometry movers", ["matrix_mover", "skin_mover", "blendshape_mover",
-                         "curve_mover", "lattice_mover", "surface_mover",
+                     "parent_constraint", "single_chain_ik_constraint", "constraint_frame"]),
+    ("Geometry movers", ["matrix_mover", "skin_mover", "layered_skin_mover", "blendshape_mover",
+                         "curve_mover", "lattice_mover", "surface_mover", "surface_binding_mover",
                          "smooth_mover", "delta_mush_mover", "wrinkle_mover", "volume_correct_mover"]),
     ("Blend channels", ["blend_input", "blend_sample"]),
     ("Pose space", ["pose_interpolator", "pose"]),
@@ -1569,17 +1570,24 @@ joint and no driver curve in the file.""",
     "lattice_mover": {
         "title": "Lattice Mover",
         "schema": "RigExecLatticeMover",
-        "summary": "Deforms points through an animated Bernstein or B-spline cage.",
+        "summary": "Deforms points through a legacy cage or a regular interpolation grid.",
         "description": """Free-form deformation: a native Points or mesh cage surrounds the
 geometry, and posing the cage (default time is the bind, timeSamples are
 the posed cage) carries the moved points through tensor-product basis
 evaluation. Fewer cage points than mesh vertices drive broad, smooth
 shaping — bulges, bends, squash and stretch.""",
-        "how_it_works": """Each moved point is located in the bind cage's lattice coordinates,
-then re-evaluated in the posed cage under the `bernstein` or `bspline`
-basis. `rigExec:divisions` sets the cage resolution per axis with
-x-fastest point ordering; the cage is read at the `rigExecReadPhase`
-declared on `rigExec:cage` (`base`, the authored animation, when none is).""",
+        "how_it_works": """The default `rigExec:evaluation = legacy` preserves the existing
+Bernstein cage evaluator. `regularGrid` interpolates cage displacement from
+canonical `origin` and `spacing`, with separate linear, cardinal, B-spline or
+Catmull-Rom interpolation on each axis. `divisions` uses x-fastest ordering;
+single-point axes are supported. Outside coordinates retain their extrapolated
+basis weights while individual cage indices clamp at the boundary.
+
+`strength` and per-point `mask` scale the displacement before the common mover
+envelope. `cageMatrix` and `targetMatrix`, optionally followed by the two
+`frames` providers, define the coordinate spaces. `pointSpace = common` is for
+points already in a shared asset space; `local` is for object-local points.
+The cage relationship reads its selected base or final revision.""",
         "wiring": [
             ("`rigExec:cage`", "Native Points/mesh prim supplying cage points.", "yes"),
             ("`rigExec:moves`", "Exact points property to deform.", "yes"),
@@ -1601,6 +1609,59 @@ same point ordering.""",
             ("volume_correct_mover", "Volume Correct Mover"),
             ("matrix_mover", "Matrix Mover"),
         ],
+    },
+    "surface_binding_mover": {
+        "title": "Surface Binding Mover",
+        "schema": "RigExecSurfaceBindingMover",
+        "summary": "Follows fixed barycentric attachments with vector offsets.",
+        "description": """Each affected point blends one or more persistent surface bindings.
+The mover stores the binding indices, generalized barycentric weights and
+three-component offsets as attributes. It reads the driver's selected point
+revision and never searches again for a nearest point. Offsets rotate in a
+local tangent, bitangent, normal frame.""",
+        "how_it_works": """`vertexOffsets` groups bindings by affected vertex;
+`polygonOffsets` groups `pointIndices` and `barycentricWeights` by binding.
+`bindingWeights` combines their positions. Polygon mode uses a Newell normal
+and the first nonzero polygon edge as its tangent. Smooth normal mode uses
+area-weighted vertex normals interpolated by the binding weights, with the
+tangent projected into that normal's plane. Degenerate frames contribute
+zero in their collapsed offset directions. `deltaMultiplier` and optional
+per-target-point `deltaMultipliers` scale the transported three-component
+offset: zero binds directly to the surface, one preserves the saved offset,
+and negative finite values are allowed. These are independent of the envelope. Optional masks and strength blend
+the resulting position over the incoming point revision.
+
+Limit mode reads authored, factored control-point position and u/v derivative
+stencils (`limitOffsets`, `limitIndices`, `limitWeights`, `limitDuWeights`,
+`limitDvWeights`). These stencils must come from the chosen subdivision surface
+and parameter coordinates; ordinary polygon weights are not limit stencils.
+Geometric limit normals come from the derivative cross product. Topology edits
+require rebinding and regenerating limit stencils.
+
+With optional `frames`, `surfaceRestMatrix` times the first provider's
+rest-to-pose map converts driver points back to surface-local coordinates;
+`surfaceToBinding` maps them into binding space. `targetRestMatrix` times the
+second provider's map returns bound positions to target point space. Without
+frames, the authored matrices alone perform this conversion. Evaluation never
+writes to the stage. Dynamic and baked evaluation use the same immutable
+payload; binary `.rigexec` export currently rejects this mover because it has
+no external payload encoder.""",
+        "wiring": [
+            ("`rigExec:surface`", "Driver point-based prim; final phase follows its completed modifier chain.", "yes"),
+            ("`rigExec:moves`", "One exact native point3f[] points property.", "yes"),
+            ("`rigExec:frames`", "Optional surface and target rest-to-pose providers, in that order.", "no"),
+        ],
+        "no_gif": True,
+        "example": """For one triangle binding, author `vertices = [0]`,
+`vertexOffsets = [0, 1]`, `polygonOffsets = [0, 3]`,
+`pointIndices = [0, 1, 2]`, `barycentricWeights = [0.2, 0.3, 0.5]`,
+`bindingWeights = [1]` and `offsets = [(0.1, 0.2, 0.4)]`.
+Wire `rigExec:surface` to the driver mesh with a final read phase and
+`rigExec:moves` to the driven points property. Apply `RigExecMoverAPI`.""",
+        "tips": ["Use polygon/geometric settings for barycentric bindings on the control mesh.",
+                 "Limit mode requires position and derivative stencils; missing arrays are diagnosed.",
+                 "Surface binding does not replace modifiers that deform the driver cage."],
+        "see_also": [("surface_mover", "Surface Mover"), ("skin_mover", "Skin Mover")],
     },
     "surface_mover": {
         "title": "Surface Mover",
@@ -1624,7 +1685,15 @@ that candidate over the incoming revision, and the compiler re-synthesizes
 authored `normals` and `extent` afterwards. The search carries no
 frame-to-frame state, so a point roughly a facet away from the driver
 tracks it smoothly while a point far away can flip between near-tied
-facets and pop.""",
+facets and pop.
+
+`snapMode` supports `onSurface`, `inside`, `outside`, and `outsideSurface`.
+`offset` measures distance in surface-local space; `mask` blends each target
+point independently. Explicit `triangles` preserve a source application's
+tessellation. `surfaceMatrix` and `targetMatrix`, optionally followed by the
+two `frames` providers, define local/common point conversion and the nearest
+point metric. Directional projection and above-surface normal projection
+are not implemented by these nearest-surface settings.""",
         "wiring": [
             # rigEvaluator.cpp:8795-8797 (`if (surfaces.empty()) { continue; }`)
             # and moverKernels.cpp:795-796 (params.valid false without surface
@@ -1748,7 +1817,20 @@ and Wilson (2014), [Delta Mush](https://doi.org/10.1145/2614106.2614144).""",
         "how_it_works": """The shared kernel builds edge adjacency from mesh topology and applies
 the same smoothing settings to rest and incoming points. It transports the
 rest-to-smoothed offset into the deformed local surface frame. Dynamic,
-baked, and binary evaluation share `libs/rigExecMath/deltaMushKernel.h`.""",
+baked, frozen, and binary evaluation share `libs/rigExecMath/deltaMushKernel.h`.
+
+Defaults preserve the existing rest-weighted smoothing and vertex-frame
+transport. Choose `smoothing = simple` or `lengthWeighted` with
+`frameTransport = corner` for deformation-dependent smoothing and corner-frame
+detail restoration.
+`smoothWeights` participates inside every smoothing iteration, separate from
+the final envelope. Explicit `edges` preserve loose edges, `onlySmooth`
+disables detail restoration, and `displacement` scales restored detail.
+`restPoints` stores the actual reference or saved bind coordinates.
+
+`computationToTarget`, optionally followed by the `rigExec:frame` provider,
+keeps smoothing in the original object's coordinate space under nonuniform
+scale. Saved rest points stay in that computation space.""",
         "wiring": [("`rigExec:moves`", "Mesh points property to deform.", "yes")],
         "param_groups": [("Common mover envelope", "RigExecMoverAPI")],
         "example": "The animated mesh demonstrates smoothing with rest-detail restoration.",
@@ -3259,3 +3341,145 @@ follow the deformation for free because they index faces, not points.""",
         "example_key": "touch_region",
     },
 }
+
+
+# These value computations are ordinary core schemas. Their USD expressions
+# adapt to stage-free affineFrameKernels rather than a converter runtime.
+_AFFINE_DEPENDENCIES = """Connect `outputs:matrix` to a joint or control's
+`posed:space`. Declare every frame provider the expression reads in
+`rigExec:poseInputs`, including object frames, parents and multi-target inputs.
+The relationship supplies pose dependency ordering and invalidation; the
+specific source/parent relationships supply numerical inputs. Keep the
+provider's rest frame separate from its evaluated pose.
+
+These computations live in the shared runtime. A connected pose
+expression can make an epoch ineligible for the baked program; ordinary
+runtime evaluation then follows the existing dynamic fallback. This does not
+provide USD-free binary serialization of the expression graph."""
+
+OPERATORS.update({
+    "bone_frame": {
+        "title": "Bone Frame", "schema": "RigExecBoneFrame", "no_gif": True,
+        "summary": "Evaluates joint channels with explicit scale and location inheritance.",
+        "description": "Separate the rotation/scale parent map from the location map when a joint inherits them differently.",
+        "how_it_works": """XYZ channel rotations are degrees. `local` and `parentRest`
+are saved joint-space transforms; `sourceObject` places the evaluated frame in
+target space. Inheritance supports FULL, NONE, AVERAGE, ALIGNED, FIX_SHEAR and
+NONE_LEGACY. Connected joints suppress channel translation. `spaceKind`
+selects the full pose or the rotation/translation parent map.
+
+""" + _AFFINE_DEPENDENCIES,
+        "wiring": [("`rigExec:parent`", "Live parent joint frame.", "no"),
+                   ("`rigExec:sourceObject`", "Live object frame.", "no"),
+                   ("`rigExec:poseInputs`", "All consumed frame providers.", "yes")],
+        "see_also": [("joint", "Joint"), ("constraint_frame", "Constraint Frame")],
+    },
+    "copy_frame": {
+        "title": "Copy Frame", "schema": "RigExecCopyFrame", "no_gif": True,
+        "summary": "Copies a live frame, optionally retaining incoming translation.",
+        "description": "Use a source frame as the output while preserving location independently when required.",
+        "how_it_works": "`preserveLocation` copies the incoming translation over the source matrix. " + _AFFINE_DEPENDENCIES,
+        "wiring": [("`rigExec:source`", "Live source frame.", "yes"), ("`rigExec:poseInputs`", "All consumed frame providers.", "yes")],
+        "see_also": [("mapped_frame", "Mapped Frame")],
+    },
+    "mapped_frame": {
+        "title": "Mapped Frame", "schema": "RigExecMappedFrame", "no_gif": True,
+        "summary": "Transfers source rest-to-pose motion onto a target rest frame.",
+        "description": "A saved source/target rest pair makes the mapping explicit.",
+        "how_it_works": "The row-vector result is `targetRest * inverse(sourceRest) * source`. " + _AFFINE_DEPENDENCIES,
+        "wiring": [("`rigExec:source`", "Live source frame.", "yes"), ("`rigExec:poseInputs`", "All consumed frame providers.", "yes")],
+        "see_also": [("copy_frame", "Copy Frame")],
+    },
+    "skin_influence": {
+        "title": "Skin Influence", "schema": "RigExecSkinInfluence", "no_gif": True,
+        "summary": "Builds an explicit owner-follow and rest-to-pose skin matrix.",
+        "description": "Use a frame proxy when the influence map includes a distinct owner and source object.",
+        "how_it_works": """With `fromBind`, the prefix is `inverseMesh * owner`;
+otherwise it is identity. The full result is prefix times
+`inverse(sourceObject) * inverseBind * source`. `followOnly` returns the
+prefix alone.
+
+""" + _AFFINE_DEPENDENCIES,
+        "wiring": [("`rigExec:source`", "Live influence frame.", "yes"), ("`rigExec:owner`", "Live target owner frame.", "no"),
+                   ("`rigExec:sourceObject`", "Live source object frame.", "no"), ("`rigExec:poseInputs`", "All consumed frame providers.", "yes")],
+        "see_also": [("skin_mover", "Skin Mover"), ("layered_skin_mover", "Layered Skin Mover")],
+    },
+    "armature_parent": {
+        "title": "Armature Parent", "schema": "RigExecArmatureParent", "no_gif": True,
+        "summary": "Applies a source rest-to-pose map over an incoming owner frame.",
+        "description": "Retains owner channels while a source influence moves the owner.",
+        "how_it_works": """The incoming frame is either `inputs:incoming` or XYZ
+channels times `local` times the parent frame. The source map is
+`inverse(sourceObject) * inverseBind * source`. `preserveLocation` restores
+the incoming translation after applying that map.
+
+""" + _AFFINE_DEPENDENCIES,
+        "wiring": [("`rigExec:source`", "Live source frame.", "yes"), ("`rigExec:parent`", "Live parent frame.", "no"),
+                   ("`rigExec:sourceObject`", "Live source object frame.", "no"), ("`rigExec:poseInputs`", "All consumed frame providers.", "yes")],
+        "see_also": [("constraint_frame", "Constraint Frame")],
+    },
+    "constraint_frame": {
+        "title": "Constraint Frame", "schema": "RigExecConstraintFrame", "no_gif": True,
+        "summary": "Computes ordered affine constraints in explicit owner and target spaces.",
+        "description": "Connect each result to the next incoming matrix to author an ordered constraint stack.",
+        "how_it_works": """Operations include COPY_LOCATION, COPY_ROTATION,
+COPY_SCALE, COPY_TRANSFORMS, ARMATURE, ARMATURE_BLEND, DAMPED_TRACK,
+STRETCH_TO, PRESERVE_ORIGIN, the supported rotation-normalization operation
+LIMIT_ROTATION, and TRANSFORM_LOCATION. Copy and mapping operations use WORLD,
+POSE, LOCAL, LOCAL_OWNER_ORIENT or CUSTOM spaces as appropriate; local joint
+conversion uses the explicit rest and inheritance inputs. Influence blends
+in world space after the operation using affine stretch and quaternion
+rotation interpolation.
+
+TRANSFORM_LOCATION maps LOCATION, SCALE or XYZ Euler rotation (radians) into
+location. Per-axis source ranges clamp unless `mapExtrapolate`; zero-width
+ranges contribute zero. `mapAxes` selects normalized source axes for each
+output axis. `mapMix` supports ADD or REPLACE. Other rotation orders and
+rotation/scale output mappings are not provided by this operation.
+
+""" + _AFFINE_DEPENDENCIES,
+        "wiring": [("`inputs:incoming`", "Previous world-space matrix.", "yes"), ("`rigExec:source`", "Live source frame where used.", "no"),
+                   ("`rigExec:targets`, `rigExec:targetObjects`", "Frame lists for ARMATURE_BLEND.", "no"),
+                   ("`rigExec:poseInputs`", "All consumed frame providers.", "yes")],
+        "see_also": [("bone_frame", "Bone Frame"), ("armature_parent", "Armature Parent")],
+    },
+    "layered_skin_mover": {
+        "title": "Layered Skin Mover", "schema": "RigExecLayeredSkinMover", "no_gif": True,
+        "summary": "Applies masked linear or dual-quaternion skin over a point revision.",
+        "description": "Supports sequential skin revisions with explicit candidate and incoming point spaces.",
+        "how_it_works": """The influence palette skins incoming points, or base
+points when `useBaseInput`. `transformInput` separately maps incoming points
+through `rigExec:transform` before blending the candidate by `inputs:mask`.
+The common mover envelope then applies independently. Empty masks mean full
+strength; populated masks have one finite [0,1] value per point. Joint index
+and weight arrays follow the elementSize skin layout.
+
+The computation and handler live in core. The external revision has no binary payload
+encoder; `.rigexec` export rejects it rather than silently omitting it.
+Evaluation of USD stages remains supported without the converter plugin.""",
+        "wiring": [("`rigExec:moves`", "One exact point3f[] points property.", "yes"),
+                   ("`rigExec:influences`", "Native joint/control influence providers.", "yes"),
+                   ("`rigExec:transform`", "Incoming point map when transformInput is enabled.", "no")],
+        "param_groups": [("Common mover envelope", "RigExecMoverAPI")],
+        "see_also": [("skin_mover", "Skin Mover"), ("skin_influence", "Skin Influence")],
+    },
+})
+
+_AFFINE_EXAMPLES = {
+    "bone_frame": "Set local translation to (0,1,0), tx to 2, and sourceObject to an object translated 2 in X. With no parent, the full pose origin is (4,1,0). Connect the output to a joint's posed:space.",
+    "copy_frame": "Wire a source at (2,0,0). An incoming matrix at (0,3,0) with preserveLocation enabled keeps origin (0,3,0) while copying the source orientation and scale.",
+    "mapped_frame": "An identity sourceRest, a targetRest translated one unit in Y, and a live source translated two units in X produce origin (2,1,0).",
+    "skin_influence": "With identity owner/rest matrices and a source translated two units in X, the output translates points two units in X. Connect it through a joint with identity rest to retain that explicit influence map.",
+    "armature_parent": "An incoming owner at (0,3,0), identity inverseBind/sourceObject and a source at (2,0,0) produce (2,3,0). Enable useIncoming to bypass the channel composition.",
+    "constraint_frame": "TRANSFORM_LOCATION maps source X rotation from 0 to pi/3 radians onto output Z from 0 to 0.02. mapAxes=(0,0,0), mapMix=ADD and no extrapolation give 0.01 Z at 30 degrees and clamp at 0.02 beyond 60 degrees.",
+    "layered_skin_mover": "Two points with a single translation influence of two units in X and masks [0.25,0.75] move by 0.5 and 1.5 units. Apply RigExecMoverAPI and bind the exact points property.",
+}
+for _key, _example in _AFFINE_EXAMPLES.items():
+    OPERATORS[_key]["example"] = _example
+    OPERATORS[_key]["tips"] = [
+        "Keep rest and pose frames distinct; connecting a live matrix to rest:space changes the rest-to-pose map.",
+        "List every consumed provider in rigExec:poseInputs when using an affine frame expression."
+    ] if _key != "layered_skin_mover" else [
+        "The per-point mask and common mover envelope are independent.",
+        "This external revision has no USD-free binary payload encoder."
+    ]

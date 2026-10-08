@@ -1781,8 +1781,8 @@ class RigExecUsdviewContainer(PluginContainer):
                             "playing", False))
 
     def _IsNavigating(self):
-        # Dynamic warming may evaluate a whole pose on the calling thread.
-        # A recurring timer is not idle time while the viewport is dragging.
+        # Warming samples and captures inputs on the owner thread before
+        # worker evaluation. A timer tick must yield to viewport navigation.
         api = getattr(self, "_api", None)
         controller = getattr(api, "_UsdviewApi__appController", None)
         view = getattr(controller, "_stageView", None)

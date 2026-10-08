@@ -63,16 +63,45 @@ TestWrinkleWireExtensions()
             CHECK(decodedGeometry.chains[0].revisions[0].op == 15);
         }
     }
-    // 10 and 11 stay reserved and 19 is past the last op. 16, a plugin
+    // 10 and 11 stay reserved and 22 is past the last op. 16, a plugin
     // mover, decodes since minor 3; the runtime then requires its entry in
     // the ExternalMovers section (TestExternalMoversWire).
-    for (const uint8_t op : {10, 11, 19}) {
+    for (const uint8_t op : {10, 11, 22}) {
         geometry.chains[0].revisions[0].op = op;
         bytes.clear();
         CHECK(RigExecWireEncodeDomainGeometry(geometry, &bytes));
         RigExecWireReader unknownOp(bytes.data(), bytes.size());
         CHECK(!RigExecWireDecodeDomainGeometry(
             &unknownOp, &decodedGeometry, &error));
+    }
+    for (const uint8_t op : {5, 6, 14}) {
+        auto &revision = geometry.chains[0].revisions[0];
+        revision.op = op;
+        revision.extendedDeformerSemantics = true;
+        bytes.clear();
+        CHECK(RigExecWireEncodeDomainGeometry(geometry, &bytes));
+        RigExecWireReader reader(bytes.data(), bytes.size());
+        CHECK(RigExecWireDecodeDomainGeometry(&reader, &decodedGeometry, &error));
+        CHECK(decodedGeometry.chains[0].revisions[0].op == op);
+        CHECK(decodedGeometry.chains[0].revisions[0].extendedDeformerSemantics);
+        std::vector<uint8_t> roundtrip;
+        CHECK(RigExecWireEncodeDomainGeometry(decodedGeometry, &roundtrip));
+        CHECK(bytes == roundtrip);
+        revision.extendedDeformerSemantics = false;
+        std::vector<uint8_t> legacy;
+        CHECK(RigExecWireEncodeDomainGeometry(geometry, &legacy));
+        CHECK(bytes.size() == legacy.size());
+        size_t differences = 0;
+        for (size_t i = 0; i < bytes.size(); ++i) {
+            if (bytes[i] != legacy[i]) {
+                ++differences;
+                CHECK(legacy[i] == op);
+                CHECK(bytes[i] == (op == 6 ? 19 : op == 14 ? 20 : 21));
+                // Prior readers reject this exact opcode field (>18).
+                CHECK(bytes[i] > 18);
+            }
+        }
+        CHECK(differences == 1);
     }
     geometry.chains[0].revisions[0].op = RigExecWireExternalRevisionOp;
     bytes.clear();

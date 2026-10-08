@@ -716,6 +716,11 @@ RigExecBakeCapture::_Drain(const RigExecBakedProgramImpl &program,
             } else if (held.IsHolding<GfVec3d>()) {
                 value.tag = RigExecWirePathValue::Tag::Vec3d;
                 value.vec = _ToVec3d(held.UncheckedGet<GfVec3d>());
+            } else if (held.IsHolding<GfVec3f>()) {
+                // The wire scalar vector is double precision; widening a
+                // float3 preserves every component without changing layout.
+                value.tag = RigExecWirePathValue::Tag::Vec3d;
+                value.vec = _ToVec3d(GfVec3d(held.UncheckedGet<GfVec3f>()));
             } else if (held.IsHolding<VtIntArray>()) {
                 value.tag = RigExecWirePathValue::Tag::IntArray;
                 const VtIntArray &array =

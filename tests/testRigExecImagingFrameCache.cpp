@@ -114,6 +114,8 @@
 #include "pxr/base/tf/notice.h"
 #include "pxr/base/tf/weakBase.h"
 #include "pxr/usd/sdf/types.h"
+#include "pxr/usd/sdf/changeBlock.h"
+#include "pxr/usd/sdf/primSpec.h"
 #include "pxr/usd/usd/notice.h"
 #include "pxr/usd/usd/attribute.h"
 #include "pxr/usd/usd/relationship.h"
@@ -1031,6 +1033,125 @@ TestCommitOfPreviewedPoseSkipsEvaluation()
     registry.Deactivate();
 }
 
+// A first session-layer write creates empty ancestor overs as well as the
+// value spec. Those inert prim notices must not re-evaluate the final preview.
+// Real metadata, another value, or structural changes still do.
+void
+TestFirstSessionCommitOfPreviewedPose()
+{
+    std::printf("progress: TestFirstSessionCommitOfPreviewedPose\n");
+    SetEnv("RIGEXEC_FRAME_CACHE", "off");
+    const SdfPath rig("/Asset/Rig");
+    RigExecImagingRegistry &registry = RigExecImagingRegistry::GetInstance();
+    for (int variant = 0; variant != 7; ++variant) {
+        UsdStageRefPtr stage = MakeTinyRig();
+        const UsdAttribute shape = stage->GetPrimAtPath(SdfPath("/Asset/Rig/AlongX"))
+            .CreateAttribute(TfToken("guide:shape"), SdfValueTypeNames->Token);
+        shape.Set(TfToken("cube"));
+        stage->SetEditTarget(stage->GetSessionLayer());
+        std::vector<std::string> errors;
+        CHECK(registry.Activate(stage, rig, UsdTimeCode(2.0), &errors));
+        const UsdAttribute tx = stage->GetAttributeAtPath(
+            SdfPath("/Asset/Rig/AlongX.avars:tx"));
+        CHECK(registry.BeginPreview("/Asset/Rig/AlongX.avars:tx") == 1);
+        const double sample = 11.0;
+        CHECK(registry.UpdatePreview(&sample, 1));
+        const _GenerationGeometry previewed =
+            _CaptureGeometry(registry.GetStore()->Get());
+        const size_t pulls = registry.GetSessionEvaluationCount(rig);
+        CHECK(registry.EndPreview(/*publish=*/false));
+        {
+            SdfChangeBlock changes;
+            TsSpline spline(tx.GetTypeName().GetType());
+            TsKnot knot(tx.GetTypeName().GetType());
+            knot.SetTime(2.0);
+            knot.SetValue(variant == 4 ? 12.0 : sample);
+            spline.SetKnot(knot);
+            CHECK(tx.SetSpline(spline));
+            if (variant == 1) {
+                stage->GetPrimAtPath(rig).SetMetadata(TfToken("kind"),
+                                                     TfToken("assembly"));
+            } else if (variant == 2) {
+                tx.SetCustom(true);
+            } else if (variant == 3) {
+                stage->GetAttributeAtPath(SdfPath("/Asset/Rig/AlongY.avars:ty"))
+                    .Set(25.0, UsdTimeCode(2.0));
+            } else if (variant == 5) {
+                shape.Set(TfToken("sphere"));
+            } else if (variant == 6) {
+                const SdfPrimSpecHandle other = SdfCreatePrimInLayer(
+                    stage->GetSessionLayer(), SdfPath("/Asset/Rig/Other"));
+                other->SetSpecifier(SdfSpecifierDef);
+                other->SetTypeName("Scope");
+            }
+        }
+        const size_t committedPulls = registry.GetSessionEvaluationCount(rig);
+        if (committedPulls != pulls + (variant == 0 ? 0 : 1)) {
+            std::fprintf(stderr, "settlement variant %d: pulls %zu -> %zu\n",
+                         variant, pulls, committedPulls);
+        }
+        CHECK(committedPulls == pulls + (variant == 0 ? 0 : 1));
+        double authoredValue = 0.0;
+        CHECK(tx.Get(&authoredValue, UsdTimeCode(2.0)));
+        CHECK(authoredValue == (variant == 4 ? 12.0 : sample));
+        const _GenerationGeometry committed =
+            _CaptureGeometry(registry.GetStore()->Get());
+        RigExecImagingBridge fresh(stage, rig);
+        CHECK(fresh.Compile());
+        CHECK(fresh.EvaluateAndPublishResult(UsdTimeCode(2.0)).ok);
+        const _GenerationGeometry expected = _CaptureGeometry(fresh.GetStore()->Get());
+        if (!_SameGeometry(committed, expected)) {
+            std::fprintf(stderr, "settlement geometry variant %d\n", variant);
+            for (const auto &[path, points] : committed.points) {
+                const auto &reference = expected.points.at(path);
+                std::fprintf(stderr, "point0 live %.9g %.9g %.9g fresh %.9g %.9g %.9g\n",
+                    points[0][0], points[0][1], points[0][2],
+                    reference[0][0], reference[0][1], reference[0][2]);
+            }
+        }
+        CHECK(_SameGeometry(committed, expected));
+        if (variant == 0) {
+            CHECK(_SameGeometry(previewed, committed));
+            // Settlement is consumed once. An ordinary authored edit after
+            // it must not be mistaken for another released preview.
+            const size_t ordinaryPulls = registry.GetSessionEvaluationCount(rig);
+            tx.Set(12.0, UsdTimeCode(2.0));
+            CHECK(registry.GetSessionEvaluationCount(rig) == ordinaryPulls + 1);
+        } else if (variant == 3 || variant == 4) {
+            CHECK(!_SameGeometry(previewed, committed));
+        }
+        if (variant == 4) {
+            // A rebuilt baked program can be used again. A subsequent
+            // exact release still settles, and removing the session opinions
+            // (the undo of a first write) restores the original authored pose.
+            CHECK(registry.BeginPreview("/Asset/Rig/AlongX.avars:tx") == 1);
+            const double next = 13.0;
+            CHECK(registry.UpdatePreview(&next, 1));
+            const size_t nextPulls = registry.GetSessionEvaluationCount(rig);
+            CHECK(registry.EndPreview(/*publish=*/false));
+            TsSpline spline(tx.GetTypeName().GetType());
+            TsKnot knot(tx.GetTypeName().GetType());
+            knot.SetTime(2.0);
+            knot.SetValue(next);
+            spline.SetKnot(knot);
+            CHECK(tx.SetSpline(spline));
+            CHECK(registry.GetSessionEvaluationCount(rig) == nextPulls);
+            stage->GetSessionLayer()->Clear();
+            CHECK(registry.GetSessionEvaluationCount(rig) == nextPulls + 1);
+            CHECK(tx.Get(&authoredValue, UsdTimeCode(2.0)));
+            CHECK(authoredValue == 10.2);
+            RigExecImagingBridge restored(stage, rig);
+            CHECK(restored.Compile());
+            CHECK(restored.EvaluateAndPublishResult(UsdTimeCode(2.0)).ok);
+            CHECK(_SameGeometry(_CaptureGeometry(registry.GetStore()->Get()),
+                                _CaptureGeometry(restored.GetStore()->Get())));
+        }
+        registry.ClearFrameCache(rig);
+        registry.Deactivate();
+    }
+    SetEnv("RIGEXEC_FRAME_CACHE", "on");
+}
+
 // SETTLE, declined. A drag on a property a chain revises stands in for the
 // chain's final value, while the committed value is the base the chain
 // revises: the same number is a different pose, so the commit evaluates.
@@ -1358,15 +1479,16 @@ TestIdleFallbackWarmsCompletePoses()
         const auto snapshot = registry.GetStore()->Get();
         const size_t before = registry.GetSessionEvaluationCount(rig);
         for (int tick = 0; tick != 3; ++tick) {
-            CHECK(registry.OnIdle() == 0);
+            CHECK(registry.OnIdle() == 1);
+            registry.WaitUntilBackgroundIdle();
             CHECK(registry.GetStore()->Get() == snapshot);
-            CHECK(registry.GetSessionEvaluationCount(rig) == before + tick + 1);
+            CHECK(registry.GetSessionEvaluationCount(rig) == before);
         }
         for (const auto state : registry.GetFrameStates(rig, range)) {
             CHECK(state == RigExecWarmFrameState::Cached);
         }
         CHECK(registry.OnIdle() == 0);
-        CHECK(registry.GetSessionEvaluationCount(rig) == before + 3);
+        CHECK(registry.GetSessionEvaluationCount(rig) == before);
         // Exhaust the bounded proof table without evicting cached poses.
         // Serial-keyed entries remain directly reachable through the index.
         RigExecFrameInputs unrelatedInputs;
@@ -1380,7 +1502,7 @@ TestIdleFallbackWarmsCompletePoses()
             CHECK(registry.SetTime(UsdTimeCode(time)));
             CHECK(_SameGeometry(live[time], _CaptureGeometry(registry.GetStore()->Get())));
         }
-        CHECK(registry.GetSessionEvaluationCount(rig) == before + 3);
+        CHECK(registry.GetSessionEvaluationCount(rig) == before);
         std::string sourceAfter;
         stage->GetRootLayer()->ExportToString(&sourceAfter);
         CHECK(sourceAfter == sourceBefore);
@@ -1393,10 +1515,11 @@ TestIdleFallbackWarmsCompletePoses()
         const size_t progress = registry.GetWarmingProgressCount();
         const size_t factories = registry.GetBackgroundStats().factoryInvocations;
         for (int tick = 0; tick != 4; ++tick) {
-            CHECK(registry.OnIdle() == 0);
+            CHECK(registry.OnIdle() == 1);
+            registry.WaitUntilBackgroundIdle();
             CHECK(registry.GetStore()->Get() == clearedPlayhead);
         }
-        CHECK(registry.GetSessionEvaluationCount(rig) == cleared + 4);
+        CHECK(registry.GetSessionEvaluationCount(rig) == cleared);
         CHECK(registry.GetWarmingProgressCount() == progress + 4 +
               registry.GetBackgroundStats().factoryInvocations - factories);
         for (const auto state : registry.GetFrameStates(rig, range)) {
@@ -1404,7 +1527,7 @@ TestIdleFallbackWarmsCompletePoses()
         }
 
         // Disabling warming and an active manipulation each prevent the
-        // synchronous fallback, just as they prevent worker warming.
+        // private-stage fallback, just as they prevent frozen warming.
         registry.ClearFrameCache(rig);
         SetEnv("RIGEXEC_FRAME_CACHE", "warm-off");
         const size_t disabled = registry.GetSessionEvaluationCount(rig);
@@ -1419,6 +1542,7 @@ TestIdleFallbackWarmsCompletePoses()
         CHECK(registry.EndPreview());
         for (int tick = 0; tick != 3; ++tick) {
             registry.OnIdle();
+            registry.WaitUntilBackgroundIdle();
         }
         // Edit a frozen-unsupported input, then fill and read its revised
         // pose without either publishing the idle frame or pulling live.
@@ -1434,6 +1558,7 @@ TestIdleFallbackWarmsCompletePoses()
         const auto editedPlayhead = registry.GetStore()->Get();
         for (int tick = 0; tick != 3; ++tick) {
             registry.OnIdle();
+            registry.WaitUntilBackgroundIdle();
             CHECK(registry.GetStore()->Get() == editedPlayhead);
         }
         for (const auto state : registry.GetFrameStates(rig, range)) {
@@ -1456,15 +1581,16 @@ TestIdleFallbackWarmsCompletePoses()
             CHECK(state == RigExecWarmFrameState::Dirty);
         }
         for (int tick = 0; tick != 4; ++tick) {
-            CHECK(registry.OnIdle() == 0);
+            CHECK(registry.OnIdle() == 1);
+            registry.WaitUntilBackgroundIdle();
             CHECK(registry.GetStore()->Get() == beforeUnrelated);
         }
-        CHECK(registry.GetSessionEvaluationCount(rig) == beforeUnrelatedPulls + 4);
+        CHECK(registry.GetSessionEvaluationCount(rig) == beforeUnrelatedPulls);
         for (const auto state : registry.GetFrameStates(rig, range)) {
             CHECK(state == RigExecWarmFrameState::Cached);
         }
         CHECK(registry.SetTime(UsdTimeCode(1.0)));
-        CHECK(registry.GetSessionEvaluationCount(rig) == beforeUnrelatedPulls + 4);
+        CHECK(registry.GetSessionEvaluationCount(rig) == beforeUnrelatedPulls);
         registry.Deactivate();
     }
 }
@@ -4162,6 +4288,7 @@ main(int argc, char **argv)
     TestWarmFrameStreaks();
     TestCommitDuringPreviewExcludesPlayhead();
     TestCommitOfPreviewedPoseSkipsEvaluation();
+    TestFirstSessionCommitOfPreviewedPose();
     TestCommitOfAChainTargetEvaluates();
     TestProductionTriggerPathEnqueuesAndFences();
     TestWarmedCompletionServesWithoutEvaluating();

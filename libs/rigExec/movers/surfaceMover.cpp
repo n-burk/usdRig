@@ -21,6 +21,26 @@ PXR_NAMESPACE_USING_DIRECTIVE
 
 namespace {
 
+bool SetSettings(RigExecMoverParameters *p, const TfToken &snap, const TfToken &space,
+                 float offset, const std::vector<float> &mask, const std::vector<int> &triangles,
+                 const GfMatrix4d &surface, const GfMatrix4d &target)
+{
+    using namespace rigExec;
+    if(snap==TfToken("onSurface"))p->surfaceSettings.mode=RigExecSurfaceSnapMode::OnSurface;
+    else if(snap==TfToken("inside"))p->surfaceSettings.mode=RigExecSurfaceSnapMode::Inside;
+    else if(snap==TfToken("outside"))p->surfaceSettings.mode=RigExecSurfaceSnapMode::Outside;
+    else if(snap==TfToken("outsideSurface"))p->surfaceSettings.mode=RigExecSurfaceSnapMode::OutsideSurface;
+    else return false;
+    p->surfaceSettings.offset=offset;p->surfaceSettings.mask=mask;p->surfaceSettings.triangles=triangles;
+    if(!std::isfinite(offset) || !RigExecSurfaceSnapValidMatrix(surface) || !RigExecSurfaceSnapValidMatrix(target))return false;
+    if(space==TfToken("local")) {
+        p->targetToSurface=target*rigExec::RigExecSurfaceSnapAffineInverse(surface);p->surfaceToTarget=surface*rigExec::RigExecSurfaceSnapAffineInverse(target);
+    } else if(space==TfToken("common")) {
+        p->targetToSurface=rigExec::RigExecSurfaceSnapAffineInverse(surface);p->surfaceToMetric=rigExec::RigExecSurfaceSnapAffineInverse(surface);p->surfaceToTarget=surface;
+    } else return false;
+    return true;
+}
+
 RigExecMoverParameters
 _BuildSurfaceMoverParameters(const VdfContext &ctx)
 {
@@ -43,8 +63,22 @@ _BuildSurfaceMoverParameters(const VdfContext &ctx)
         ctx, RigExecMoverExecTokens->topologyCounts);
     params.topologyIndices = rigExec::RigExecMoverCollect<int>(
         ctx, RigExecMoverExecTokens->topologyIndices);
+    const auto read=[&](const char *name,auto fallback) {
+        using T=decltype(fallback);const T *value=ctx.GetInputValuePtr<T>(TfToken(name));return value?*value:fallback;
+    };
+    auto surface=read("rigExec:surfaceMatrix",GfMatrix4d(1.0)),target=read("rigExec:targetMatrix",GfMatrix4d(1.0));
+    if(!rigExec::RigExecSurfaceSnapValidMatrix(surface) || !rigExec::RigExecSurfaceSnapValidMatrix(target))return params;
+    const auto frames=rigExec::RigExecMoverCollect<GfMatrix4d>(ctx,TfToken("surfaceFrames"));
+    if(!frames.empty()) {
+        if(frames.size()!=2)return params;surface*=frames[0];target*=frames[1];
+        if(!rigExec::RigExecSurfaceSnapCanonicalComputedMatrix(&surface) || !rigExec::RigExecSurfaceSnapCanonicalComputedMatrix(&target))return params;
+    }
+    const auto mask=rigExec::RigExecMoverCollect<float>(ctx,TfToken("rigExec:mask"));
+    const auto triangles=rigExec::RigExecMoverCollect<int>(ctx,TfToken("rigExec:triangles"));
     params.valid = !params.auxPoints.empty() &&
-                   !params.topologyCounts.empty();
+                   (!params.topologyCounts.empty() || !triangles.empty()) &&
+        SetSettings(&params,read("rigExec:snapMode",TfToken("onSurface")),read("rigExec:pointSpace",TfToken("local")),
+                    read("rigExec:offset",0.f),mask,triangles,surface,target);
     return params;
 }
 
@@ -52,6 +86,7 @@ void
 _BindSurfaceMover(const rigExec::RigExecMoverBindContext &ctx)
 {
     rigExec::RigExecRevisionBinding &binding = *ctx.binding;
+    binding.base = ctx.target;
     const UsdPrim &moverPrim = ctx.moverPrim;
     const SdfPathVector surfaces = rigExec::RigExecRelationshipTargets(
         moverPrim, "rigExec:surface");
@@ -69,6 +104,12 @@ _BindSurfaceMover(const rigExec::RigExecMoverBindContext &ctx)
         binding.topologyIndices =
             surfacePrim.AppendProperty(TfToken("faceVertexIndices"));
     }
+    binding.influences=rigExec::RigExecRelationshipTargets(moverPrim,"rigExec:frames");
+    binding.transformPhase=rigExec::RigExecPhaseForInput(moverPrim,"rigExec:frames");
+    if(binding.transformPhase.kind==rigExec::RigExecReadPhaseKind::Final)
+        for(auto &provider:binding.influences) {
+            const auto head=ctx.frameChainHeads.find(provider);if(head!=ctx.frameChainHeads.end())provider=head->second;
+        }
 }
 
 rigExec::RigExecOracleResult
@@ -101,23 +142,79 @@ _OracleSurfaceMover(const rigExec::RigExecMoverOracleContext &ctx)
         s.GetAttribute(TfToken("faceVertexIndices"))
             .Get(&indices, time);
     }
-    if (surfacePoints.empty() || counts.empty()) {
+    VtIntArray explicitTriangles;
+    prim.GetAttribute(TfToken("rigExec:triangles")).Get(&explicitTriangles,time);
+    if (surfacePoints.empty() || (counts.empty() && explicitTriangles.empty())) {
         diagnostics->push_back(
             "MoverFailed " + moverPath.GetString() +
             ": surface has no points/topology");
         return RigExecOracleResult::PassThrough;
     }
     std::vector<GfVec3f> scratch(points.begin(), points.end());
-    // v0.1 attach/project both map fully; the mode token selects no
-    // numeric difference yet (_BuildSurfaceMoverParameters pins 1.0).
-    rigExec::RigExecApplySurfaceProject(
+    const auto read=[&](const char *name,auto fallback) {
+        const auto a=prim.GetAttribute(TfToken(name));if(a)ctx.resolved.GetAttribute(a,time,&fallback);return fallback;
+    };
+    auto surface=read("rigExec:surfaceMatrix",GfMatrix4d(1.0)),target=read("rigExec:targetMatrix",GfMatrix4d(1.0));
+    if(!rigExec::RigExecSurfaceSnapValidMatrix(surface) || !rigExec::RigExecSurfaceSnapValidMatrix(target))return RigExecOracleResult::PassThrough;
+    const auto frames=rigExec::RigExecRelationshipTargets(prim,"rigExec:frames");
+    if(!frames.empty()) {
+        if(frames.size()!=2)return RigExecOracleResult::PassThrough;
+        const auto &table=rigExec::RigExecPhaseForInput(prim,"rigExec:frames").kind==rigExec::RigExecReadPhaseKind::Final?
+            ctx.finalProviderMatrices:ctx.baseProviderMatrices;
+        const auto s=table.find(frames[0]),t=table.find(frames[1]);
+        if(s==table.end() || t==table.end())return RigExecOracleResult::PassThrough;
+        surface*=s->second;target*=t->second;
+        if(!rigExec::RigExecSurfaceSnapCanonicalComputedMatrix(&surface) || !rigExec::RigExecSurfaceSnapCanonicalComputedMatrix(&target))return RigExecOracleResult::PassThrough;
+    }
+    const auto mask=read("rigExec:mask",VtFloatArray());const auto triangles=read("rigExec:triangles",VtIntArray());
+    RigExecMoverParameters params;
+    if(!SetSettings(&params,read("rigExec:snapMode",TfToken("onSurface")),read("rigExec:pointSpace",TfToken("local")),
+                    read("rigExec:offset",0.f),{mask.begin(),mask.end()},{triangles.begin(),triangles.end()},surface,target))
+        return RigExecOracleResult::PassThrough;
+    if(rigExec::RigExecSurfaceSnapIsLegacy(params.surfaceSettings,params.targetToSurface,params.surfaceToTarget,params.surfaceToMetric)) {
+        rigExec::RigExecApplySurfaceProject(&scratch,{surfacePoints.begin(),surfacePoints.end()},
+            {counts.begin(),counts.end()},{indices.begin(),indices.end()},1.0);
+    } else if(!rigExec::RigExecApplySurfaceSnapKernel<GfVec3f,GfVec3d>(
         &scratch,
         std::vector<GfVec3f>(surfacePoints.begin(),
                              surfacePoints.end()),
         std::vector<int>(counts.begin(), counts.end()),
-        std::vector<int>(indices.begin(), indices.end()), 1.0f);
+        std::vector<int>(indices.begin(), indices.end()),params.surfaceSettings,
+        params.targetToSurface,params.surfaceToTarget,params.surfaceToMetric))return RigExecOracleResult::PassThrough;
     std::copy(scratch.begin(), scratch.end(), points.begin());
     return RigExecOracleResult::Blend;
+}
+
+bool ValidateSurface(const rigExec::RigExecMoverValidateContext &ctx,std::string *error)
+{
+    const auto &prim=ctx.prim;
+    const auto frames=rigExec::RigExecRelationshipTargets(prim,"rigExec:frames");
+    const auto surfaces=rigExec::RigExecRelationshipTargets(prim,"rigExec:surface");
+    const auto fail=[&]() {*error="invalid surface snap mode, topology, mask or coordinate frame";return false;};
+    if(surfaces.size()!=1 || (!frames.empty() && frames.size()!=2))return fail();
+    if(!frames.empty() && rigExec::RigExecPhaseForInput(prim,"rigExec:frames").kind==rigExec::RigExecReadPhaseKind::AtPrim) {
+        *error="surface frame providers require base or final read phase";return false;
+    }
+    const auto read=[&](const char *name,auto fallback) {
+        const auto a=prim.GetAttribute(TfToken(name));if(a)a.Get(&fallback);return fallback;
+    };
+    const auto mask=read("rigExec:mask",VtFloatArray());const auto triangles=read("rigExec:triangles",VtIntArray());
+    RigExecMoverParameters params;
+    if(!SetSettings(&params,read("rigExec:snapMode",TfToken("onSurface")),read("rigExec:pointSpace",TfToken("local")),
+                    read("rigExec:offset",0.f),{mask.begin(),mask.end()},{triangles.begin(),triangles.end()},
+                    read("rigExec:surfaceMatrix",GfMatrix4d(1.0)),read("rigExec:targetMatrix",GfMatrix4d(1.0))))return fail();
+    const auto surface=ctx.stage->GetPrimAtPath(surfaces[0].GetPrimPath());
+    if(!surface || !surface.GetAttribute(TfToken("points")))return fail();
+    for(float w:mask)if(!std::isfinite(w) || w<0 || w>1)return fail();
+    if(triangles.size()%3)return fail();
+    for(int i:triangles)if(i<0)return fail();
+    // Shape-dependent checks belong to the evaluated frame. Default points
+    // may be absent or degenerate in an otherwise valid animated surface.
+    for(const auto &target:ctx.targets) {
+        VtVec3fArray points;
+        if(!mask.empty() && ctx.stage->GetAttributeAtPath(target).Get(&points) && mask.size()!=points.size())return fail();
+    }
+    return true;
 }
 
 rigExec::RigExecMoverHandler
@@ -130,6 +227,8 @@ _MakeHandler()
         rigExec::RigExecMoverDomain::Points);
     handler.bind = &_BindSurfaceMover;
     handler.oracle = &_OracleSurfaceMover;
+    handler.validate = &ValidateSurface;
+    handler.frameRelationships={"rigExec:frames"};handler.transformRelationship="rigExec:frames";
     return handler;
 }
 
@@ -143,6 +242,15 @@ EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(RigExecSurfaceMover)
         .Callback<RigExecMoverParameters>(&_BuildSurfaceMoverParameters)
         .Inputs(
             RIGEXEC_MOVER_COMMON_INPUTS,
+            AttributeValue<TfToken>(TfToken("rigExec:snapMode")),
+            AttributeValue<TfToken>(TfToken("rigExec:pointSpace")),
+            AttributeValue<float>(TfToken("rigExec:offset")),
+            AttributeValue<float>(TfToken("rigExec:mask")),
+            AttributeValue<int>(TfToken("rigExec:triangles")),
+            AttributeValue<GfMatrix4d>(TfToken("rigExec:surfaceMatrix")),
+            AttributeValue<GfMatrix4d>(TfToken("rigExec:targetMatrix")),
+            Relationship(TfToken("rigExec:frames")).TargetedObjects<GfMatrix4d>(RigExecMoverExecTokens->computeMatrix)
+                .InputName(TfToken("surfaceFrames")),
             Relationship(RigExecMoverExecTokens->resolvedSurfacePoints)
                 .TargetedObjects<GfVec3f>(
                     ExecBuiltinComputations->computeValue)

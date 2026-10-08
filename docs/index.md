@@ -30,6 +30,11 @@ Storm viewport with the rig guides on.
 | ![Control](../icons/control.png) | [Control](nodes/control.md) | The animator's handle: animation is authored on its avars. |
 | ![Joint](../icons/joint.png) | [Joint](nodes/joint.md) | A posed output of the rig: solvers write it, movers read it. |
 | ![Space Switch](../icons/concept.png) | [Space Switch](nodes/space_switch.md) | Gives a control a labelled list of parent spaces, selected or blended by an index. |
+| ![Bone Frame](../icons/concept.png) | [Bone Frame](nodes/bone_frame.md) | Evaluates joint channels with explicit scale and location inheritance. |
+| ![Copy Frame](../icons/concept.png) | [Copy Frame](nodes/copy_frame.md) | Copies a live frame, optionally retaining incoming translation. |
+| ![Mapped Frame](../icons/concept.png) | [Mapped Frame](nodes/mapped_frame.md) | Transfers source rest-to-pose motion onto a target rest frame. |
+| ![Skin Influence](../icons/concept.png) | [Skin Influence](nodes/skin_influence.md) | Builds an explicit owner-follow and rest-to-pose skin matrix. |
+| ![Armature Parent](../icons/concept.png) | [Armature Parent](nodes/armature_parent.md) | Applies a source rest-to-pose map over an incoming owner frame. |
 
 ## Solvers
 
@@ -52,6 +57,7 @@ Storm viewport with the rig guides on.
 | ![Scale Constraint](../icons/scale_constraint.png) | [Scale Constraint](nodes/scale_constraint.md) | Copies blended source scale onto one target, per axis. |
 | ![Parent Constraint](../icons/parent_constraint.png) | [Parent Constraint](nodes/parent_constraint.md) | Carries a target with its sources — position and rotation — under a per-source offset; weight attaches and releases. |
 | ![Single-Chain IK Constraint](../icons/single_chain_ik_constraint.png) | [Single-Chain IK Constraint](nodes/single_chain_ik_constraint.md) | Re-poses an existing joint chain of any length onto an effector goal. |
+| ![Constraint Frame](../icons/concept.png) | [Constraint Frame](nodes/constraint_frame.md) | Computes ordered affine constraints in explicit owner and target spaces. |
 
 ## Geometry movers
 
@@ -59,10 +65,12 @@ Storm viewport with the rig guides on.
 |---|---|---|
 | ![Matrix Mover](../icons/matrix_mover.png) | [Matrix Mover](nodes/matrix_mover.md) | Carries points by a provider's rigid delta under a weight field. |
 | ![Skin Mover](../icons/skin_mover.png) | [Skin Mover](nodes/skin_mover.md) | Blends many influences per point in one pass, UsdSkel-style. |
+| ![Layered Skin Mover](../icons/concept.png) | [Layered Skin Mover](nodes/layered_skin_mover.md) | Applies masked linear or dual-quaternion skin over a point revision. |
 | ![Blendshape Mover](../icons/blendshape_mover.png) | [Blendshape Mover](nodes/blendshape_mover.md) | Sums sculpted blend channels into one delta pass. |
 | ![Curve Mover](../icons/curve_mover.png) | [Curve Mover](nodes/curve_mover.md) | Transports points through a solver's frame array, or emits its frame origins. |
-| ![Lattice Mover](../icons/lattice_mover.png) | [Lattice Mover](nodes/lattice_mover.md) | Deforms points through an animated Bernstein or B-spline cage. |
+| ![Lattice Mover](../icons/lattice_mover.png) | [Lattice Mover](nodes/lattice_mover.md) | Deforms points through a legacy cage or a regular interpolation grid. |
 | ![Surface Mover](../icons/surface_mover.png) | [Surface Mover](nodes/surface_mover.md) | Drapes points onto an animated driver surface. |
+| ![Surface Binding Mover](../icons/concept.png) | [Surface Binding Mover](nodes/surface_binding_mover.md) | Follows fixed barycentric attachments with vector offsets. |
 | ![Smooth Mover](../icons/smooth_mover.png) | [Smooth Mover](nodes/smooth_mover.md) | Relaxes points with uniform Laplacian smoothing. |
 | ![Delta Mush Mover](../icons/concept.png) | [Delta Mush Mover](nodes/delta_mush_mover.md) | Smooths deformation and restores transported rest detail. |
 | ![Wrinkle Mover](../icons/concept.png) | [Wrinkle Mover](nodes/wrinkle_mover.md) | Solves coherent compression-driven folds on an already deformed mesh. |

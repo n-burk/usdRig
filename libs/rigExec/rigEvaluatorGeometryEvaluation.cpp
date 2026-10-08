@@ -529,6 +529,7 @@ RigExecRigEvaluator::_EvaluateGeometry(
                 revision.op == RigExecRevisionOp::Wrinkle ||
                 revision.op == RigExecRevisionOp::External ||
                 revision.op == RigExecRevisionOp::Lattice ||
+                revision.op == RigExecRevisionOp::SurfaceProject ||
                 revision.op == RigExecRevisionOp::RecomputeNormals ||
                 revision.op == RigExecRevisionOp::RecomputeExtent;
             if (needsBasePoints) {

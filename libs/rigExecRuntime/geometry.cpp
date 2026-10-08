@@ -11,6 +11,8 @@
 #include "rigExecMath/deltaMushKernel.h"
 #include "rigExecMath/wrinkleKernel.h"
 #include "rigExecMath/surfaceProjectorKernel.h"
+#include "rigExecMath/surfaceSnapKernel.h"
+#include "rigExecMath/latticeKernel.h"
 #include "poseInternal.h"
 
 #include <algorithm>
@@ -440,7 +442,13 @@ struct RrGeoMoverParameters {
     bool mushPinBorders = true;
     float mushDistanceWeight = 0.0f;
     float mushDisplacement = 1.0f;
+    RigExecDeltaMushSettings mushSettings;
+    RrMat4d mushComputationToTarget{1.0};
     RigExecWrinkleSettings wrinkleSettings;
+    RigExecSurfaceSnapSettings surfaceSettings;
+    RrMat4d targetToSurface{1.0}, surfaceToTarget{1.0}, surfaceToMetric{1.0};
+    RigExecLatticeSettings latticeSettings;
+    RrMat4d targetToLattice{1.0},latticeToTarget{1.0},cageToLattice{1.0};
     std::vector<int> topologyCounts;
     std::vector<int> topologyIndices;
     std::vector<RrVec3f> auxPoints;
@@ -490,7 +498,12 @@ struct RrGeoMoverParameters {
                mushPinBorders == o.mushPinBorders &&
                mushDistanceWeight == o.mushDistanceWeight &&
                mushDisplacement == o.mushDisplacement &&
+               mushSettings == o.mushSettings && mushComputationToTarget == o.mushComputationToTarget &&
                wrinkleSettings == o.wrinkleSettings &&
+               surfaceSettings == o.surfaceSettings && targetToSurface == o.targetToSurface &&
+               surfaceToTarget == o.surfaceToTarget && surfaceToMetric == o.surfaceToMetric &&
+               latticeSettings == o.latticeSettings && targetToLattice == o.targetToLattice &&
+               latticeToTarget == o.latticeToTarget && cageToLattice == o.cageToLattice &&
                topologyCounts == o.topologyCounts &&
                topologyIndices == o.topologyIndices &&
                auxPoints == o.auxPoints && auxPointsB == o.auxPointsB &&
@@ -2593,15 +2606,18 @@ RrGeoApplyRevisionKernel(
             pts, p.topologyCounts, p.topologyIndices, p.strength);
         return true;
     case RrGeoOpDeltaMush:
-        return RigExecApplyDeltaMushKernel<RrVec3f, RrVec3d>(
+        return RigExecApplyDeltaMushInSpaceKernel<RrVec3f, RrVec3d, RrMat4d>(
             pts, p.restPoints, p.topologyCounts, p.topologyIndices,
             p.mushIterations, p.mushStep, p.mushPinBorders,
-            p.mushDistanceWeight, p.mushDisplacement);
+            p.mushDistanceWeight, p.mushDisplacement, p.mushSettings, p.mushComputationToTarget);
     case RrGeoOpWrinkle:
         return RigExecApplyWrinkleKernel<RrVec3f, RrVec3d>(
             pts, p.restPoints, p.topologyCounts, p.topologyIndices,
             p.wrinkleSettings);
     case RrGeoOpLattice:
+        if(p.latticeSettings.regularGrid)
+            return RigExecApplyLatticeGridKernel<RrVec3f,RrVec3d>(pts,p.auxPointsB,p.divisions,p.latticeSettings,
+                p.targetToLattice,p.latticeToTarget,p.cageToLattice);
         if (p.restPoints.size() != pts->size()) {
             return false;  // cardinality mismatch fails atomically
         }
@@ -2609,10 +2625,12 @@ RrGeoApplyRevisionKernel(
             pts, p.restPoints, p.auxPoints, p.auxPointsB, p.divisions);
         return true;
     case RrGeoOpSurfaceProject:
-        RrGeoApplySurfaceProject(
-            pts, p.auxPoints, p.topologyCounts, p.topologyIndices,
-            p.strength);
-        return true;
+        if(RigExecSurfaceSnapIsLegacy(p.surfaceSettings,p.targetToSurface,p.surfaceToTarget,p.surfaceToMetric)) {
+            RrGeoApplySurfaceProject(pts,p.auxPoints,p.topologyCounts,p.topologyIndices,p.strength);return true;
+        }
+        return RigExecApplySurfaceSnapKernel<RrVec3f,RrVec3d>(
+            pts,p.auxPoints,p.topologyCounts,p.topologyIndices,
+            p.surfaceSettings,p.targetToSurface,p.surfaceToTarget,p.surfaceToMetric);
     case RrGeoOpEmitGuidePoints:
         if (p.frames.frames.size() != pts->size()) {
             return false;
@@ -3786,6 +3804,43 @@ RrGeoAssembleLattice(const RrGeoAssembleInputs &in,
                      const std::vector<RrVec3f> &base,
                      RrGeoMoverParameters *params)
 {
+    const auto attr=[&](const char *name) {return RrGeoMoverAttrId(in.program,in.scratch,*in.wire,name);};
+    const auto token=[&](const char *name,const char *fallback) {return RrGeoReadToken(in.program,in.scratch,attr(name),false,fallback);};
+    const auto evaluation=token("rigExec:evaluation","legacy");
+    if(evaluation!="legacy" && evaluation!="regularGrid")return;
+    params->latticeSettings.regularGrid=evaluation=="regularGrid";
+    if(params->latticeSettings.regularGrid) {
+        const char *names[]={"rigExec:interpolationU","rigExec:interpolationV","rigExec:interpolationW"};
+        for(int a=0;a<3;++a)if(!RigExecLatticeInterpolationFromString(token(names[a],"bspline"),&params->latticeSettings.interpolation[a]))return;
+        const auto vector=[&](const char *name,float fallback) {
+            RrVec3f v(fallback);if(const auto *read=RrGeoPathRead(in.scratch,attr(name),false))
+                if(read->tag==RigExecWirePathValue::Tag::Vec3d)v=RrVec3f(read->vec[0],read->vec[1],read->vec[2]);
+            const auto prop=in.program->store.propertyResults.find(attr(name));
+            if(prop!=in.program->store.propertyResults.end() && prop->second.tag==RrPropertyValue::Tag::Vec3f)v=prop->second.vec;
+            return v;
+        };
+        const auto origin=vector("rigExec:origin",-.5f),spacing=vector("rigExec:spacing",1);
+        for(int a=0;a<3;++a) {params->latticeSettings.origin[a]=origin[a];params->latticeSettings.spacing[a]=spacing[a];}
+        params->latticeSettings.strength=RrGeoReadFloat(in.program,in.scratch,attr("rigExec:strength"),false,1.f);
+        RrGeoReadFloatArray(in.program,in.scratch,attr("rigExec:mask"),false,false,&params->latticeSettings.mask);
+        const auto matrix=[&](const char *name) {
+            RrMat4d m(1.0);if(const auto *read=RrGeoPathRead(in.scratch,attr(name),false))
+                if(read->tag==RigExecWirePathValue::Tag::Matrix4d)
+                    for(int i=0;i<4;++i)for(int j=0;j<4;++j)m[i][j]=read->matrix[size_t(i*4+j)];
+            const auto prop=in.program->store.propertyResults.find(attr(name));
+            if(prop!=in.program->store.propertyResults.end() && prop->second.tag==RrPropertyValue::Tag::Matrix4d)m=prop->second.matrix;
+            return m;
+        };
+        auto cage=matrix("rigExec:cageMatrix"),target=matrix("rigExec:targetMatrix");
+        if(!RigExecSurfaceSnapValidMatrix(cage) || !RigExecSurfaceSnapValidMatrix(target))return;
+        if(!in.wire->binding.influences.empty()) {
+            if(in.rev->influences.size()!=2)return;
+            cage*=in.rev->influences[0];target*=in.rev->influences[1];
+            if(!RigExecSurfaceSnapCanonicalComputedMatrix(&cage) || !RigExecSurfaceSnapCanonicalComputedMatrix(&target))return;
+        }
+        if(!RigExecLatticeCoordinateMaps(token("rigExec:pointSpace","local"),cage,target,
+            &params->targetToLattice,&params->latticeToTarget,&params->cageToLattice))return;
+    }
     params->restPoints = base;
     RrGeoReadBindingVec3fArray(in, in.wire->binding.cagePoints, true,
                                &params->auxPoints);
@@ -3799,11 +3854,11 @@ RrGeoAssembleLattice(const RrGeoAssembleInputs &in,
     const size_t cageCount = size_t(params->divisions[0]) *
                              size_t(params->divisions[1]) *
                              size_t(params->divisions[2]);
-    params->valid = params->divisions[0] >= 2 && params->divisions[1] >= 2 &&
-                    params->divisions[2] >= 2 &&
-                    params->auxPoints.size() == cageCount &&
-                    params->auxPointsB.size() == cageCount &&
-                    !params->restPoints.empty();
+    const int minimum=params->latticeSettings.regularGrid?1:2;
+    params->valid = params->divisions[0] >= minimum && params->divisions[1] >= minimum &&
+                    params->divisions[2] >= minimum &&
+                    (params->latticeSettings.regularGrid || params->auxPoints.size() == cageCount) &&
+                    params->auxPointsB.size() == cageCount && !params->restPoints.empty();
 }
 
 void
@@ -4113,7 +4168,30 @@ RrGeoAssembleRevision(const RrGeoAssembleInputs &in)
         };
         RrGeoReadBindingVec3fArray(in, attr("inputs:restPoints"), true,
                                  &params.restPoints);
-        if (params.restPoints.empty()) params.restPoints = base;
+        const auto smoothing = RrGeoReadToken(in.program, in.scratch, attr("inputs:smoothing"), true, "rest");
+        const auto transport = RrGeoReadToken(in.program, in.scratch, attr("inputs:frameTransport"), true, "vertex");
+        if (!RigExecParseDeltaMushSmoothing(smoothing, &params.mushSettings.smoothing) ||
+            !RigExecParseDeltaMushFrameTransport(transport, &params.mushSettings.frameTransport)) break;
+        RrGeoReadFloatArray(in.program, in.scratch, attr("inputs:smoothWeights"), false, false, &params.mushSettings.smoothWeights);
+        RrGeoReadIntArray(in.scratch, attr("inputs:edges"), true, &params.mushSettings.edges);
+        params.mushSettings.onlySmooth = RrGeoReadBool(in.program, in.scratch, attr("inputs:onlySmooth"), false, false);
+        const auto matrixPath = attr("inputs:computationToTarget");
+        const auto property = in.program->store.propertyResults.find(matrixPath);
+        if (property != in.program->store.propertyResults.end() && property->second.tag == RrPropertyValue::Tag::Matrix4d)
+            params.mushComputationToTarget = property->second.matrix;
+        else if (const auto *read = RrGeoPathRead(in.scratch, matrixPath, false))
+            if (read->tag == RigExecWirePathValue::Tag::Matrix4d)
+                for (int i = 0; i < 4; ++i) for (int j = 0; j < 4; ++j)
+                    params.mushComputationToTarget[i][j] = read->matrix[size_t(i*4+j)];
+        const bool needsRest = params.mushComputationToTarget != RrMat4d(1.0) || !in.wire->binding.influences.empty();
+        if (!in.wire->binding.influences.empty()) {
+            if (in.rev->influences.size() != 1) break;
+            params.mushComputationToTarget *= in.rev->influences[0];
+        }
+        if (params.restPoints.empty()) {
+            if (needsRest && !params.mushSettings.onlySmooth) break;
+            params.restPoints = base;
+        }
         RrGeoReadIntArray(in.scratch, in.wire->binding.topologyCounts,
                          false, &params.topologyCounts);
         RrGeoReadIntArray(in.scratch, in.wire->binding.topologyIndices,
@@ -4185,7 +4263,7 @@ RrGeoAssembleRevision(const RrGeoAssembleInputs &in)
     case RrGeoOpLattice:
         RrGeoAssembleLattice(in, base, &params);
         break;
-    case RrGeoOpSurfaceProject:
+    case RrGeoOpSurfaceProject: {
         params.strength = 1.0f;
         RrGeoReadBindingVec3fArray(in, in.wire->binding.surfacePoints,
                                    false, &params.auxPoints);
@@ -4193,9 +4271,46 @@ RrGeoAssembleRevision(const RrGeoAssembleInputs &in)
                           false, &params.topologyCounts);
         RrGeoReadIntArray(in.scratch, in.wire->binding.topologyIndices,
                           false, &params.topologyIndices);
-        params.valid =
-            !params.auxPoints.empty() && !params.topologyCounts.empty();
+        const auto attr=[&](const char *name) {return RrGeoMoverAttrId(in.program,in.scratch,*in.wire,name);};
+        const auto snap=RrGeoReadToken(in.program,in.scratch,attr("rigExec:snapMode"),false,"onSurface");
+        if(snap=="onSurface")params.surfaceSettings.mode=RigExecSurfaceSnapMode::OnSurface;
+        else if(snap=="inside")params.surfaceSettings.mode=RigExecSurfaceSnapMode::Inside;
+        else if(snap=="outside")params.surfaceSettings.mode=RigExecSurfaceSnapMode::Outside;
+        else if(snap=="outsideSurface")params.surfaceSettings.mode=RigExecSurfaceSnapMode::OutsideSurface;
+        else break;
+        params.surfaceSettings.offset=RrGeoReadFloat(in.program,in.scratch,attr("rigExec:offset"),false,0.f);
+        RrGeoReadFloatArray(in.program,in.scratch,attr("rigExec:mask"),false,false,&params.surfaceSettings.mask);
+        RrGeoReadIntArray(in.scratch,attr("rigExec:triangles"),false,&params.surfaceSettings.triangles);
+        const auto matrix=[&](const char *name) {
+            RrMat4d m(1.0);
+            const auto property=in.program->store.propertyResults.find(attr(name));
+            if(property!=in.program->store.propertyResults.end() && property->second.tag==RrPropertyValue::Tag::Matrix4d)
+                return property->second.matrix;
+            if(const auto *read=RrGeoPathRead(in.scratch,attr(name),false))
+                if(read->tag==RigExecWirePathValue::Tag::Matrix4d)
+                    for(int i=0;i<4;++i)for(int j=0;j<4;++j)m[i][j]=read->matrix[size_t(i*4+j)];
+            return m;
+        };
+        RrMat4d surface=matrix("rigExec:surfaceMatrix"),target=matrix("rigExec:targetMatrix");
+        if(!RigExecSurfaceSnapValidMatrix(surface) || !RigExecSurfaceSnapValidMatrix(target))break;
+        if(!in.wire->binding.influences.empty()) {
+            if(in.rev->influences.size()!=2)break;
+            surface*=in.rev->influences[0];target*=in.rev->influences[1];
+            if(!RigExecSurfaceSnapCanonicalComputedMatrix(&surface) || !RigExecSurfaceSnapCanonicalComputedMatrix(&target))break;
+        }
+        if(!RigExecSurfaceSnapValidMatrix(surface) || !RigExecSurfaceSnapValidMatrix(target))break;
+        const auto space=RrGeoReadToken(in.program,in.scratch,attr("rigExec:pointSpace"),false,"local");
+        if(space=="local") {
+            params.targetToSurface=target*rigExec::RigExecSurfaceSnapAffineInverse(surface);params.surfaceToTarget=surface*rigExec::RigExecSurfaceSnapAffineInverse(target);
+        } else if(space=="common") {
+            params.targetToSurface=rigExec::RigExecSurfaceSnapAffineInverse(surface);params.surfaceToMetric=rigExec::RigExecSurfaceSnapAffineInverse(surface);params.surfaceToTarget=surface;
+        } else break;
+        params.valid = !params.auxPoints.empty() &&
+            (!params.topologyCounts.empty() || !params.surfaceSettings.triangles.empty()) &&
+            std::isfinite(params.surfaceSettings.offset) &&
+            (params.surfaceSettings.mask.empty() || params.surfaceSettings.mask.size()==base.size());
         break;
+    }
     case RrGeoOpRibbon:
         RrGeoAssembleRibbon(in, false, &params);
         break;

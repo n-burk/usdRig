@@ -113,6 +113,10 @@ struct RigExecWireRevision {
     uint32_t moverPrim = 0;
     /// The stable RigExecRevisionOp value; reserved values are rejected.
     uint8_t op = 1;
+    /// Encode extended built-in deformation semantics with wire-only aliases
+    /// 19 (surface), 20 (Delta Mush), 21 (lattice). Older readers reject them
+    /// instead of accepting a file whose authored settings they would ignore.
+    bool extendedDeformerSemantics = false;
     RigExecWireRevisionBinding binding;
     std::vector<RigExecWireBlendChannel> blendChannels;
     std::vector<int32_t> influenceSlots;

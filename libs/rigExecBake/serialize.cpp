@@ -1144,6 +1144,34 @@ _ToRevision(const RigExecBakedProgramImpl::GeomRevision &revision,
                         ? _PathRef(revision.moverPrim.GetPath(), writer)
                         : 0;
     out.op = uint8_t(revision.op);
+    // Schema fallbacks alone preserve old wire opcodes. Authored settings,
+    // including connections and time samples, require a feature-aware reader.
+    const auto authored = [&](const char *name) {
+        const auto attr = revision.moverPrim.GetAttribute(TfToken(name));
+        return attr && (attr.HasAuthoredValueOpinion() || attr.HasAuthoredConnections());
+    };
+    const auto related = [&](const char *name) {
+        const auto rel = revision.moverPrim.GetRelationship(TfToken(name));
+        SdfPathVector targets;
+        return rel && rel.GetTargets(&targets) && !targets.empty();
+    };
+    if (revision.moverPrim && revision.op == RigExecRevisionOp::SurfaceProject) {
+        for (const char *name : {"rigExec:snapMode", "rigExec:offset", "rigExec:mask",
+             "rigExec:triangles", "rigExec:pointSpace", "rigExec:surfaceMatrix", "rigExec:targetMatrix"})
+            out.extendedDeformerSemantics |= authored(name);
+        out.extendedDeformerSemantics |= related("rigExec:frames");
+    } else if (revision.moverPrim && revision.op == RigExecRevisionOp::DeltaMush) {
+        for (const char *name : {"inputs:smoothing", "inputs:frameTransport", "inputs:smoothWeights",
+             "inputs:edges", "inputs:onlySmooth", "inputs:computationToTarget"})
+            out.extendedDeformerSemantics |= authored(name);
+        out.extendedDeformerSemantics |= related("rigExec:frame");
+    } else if (revision.moverPrim && revision.op == RigExecRevisionOp::Lattice) {
+        for (const char *name : {"rigExec:evaluation", "rigExec:interpolationU", "rigExec:interpolationV",
+             "rigExec:interpolationW", "rigExec:origin", "rigExec:spacing", "rigExec:strength",
+             "rigExec:mask", "rigExec:pointSpace", "rigExec:cageMatrix", "rigExec:targetMatrix"})
+            out.extendedDeformerSemantics |= authored(name);
+        out.extendedDeformerSemantics |= related("rigExec:frames");
+    }
     out.binding = _ToBinding(revision.binding, writer);
     out.blendChannels.reserve(revision.blendChannels.size());
     for (const RigExecBakedProgramImpl::GeomBlendChannel &channel :

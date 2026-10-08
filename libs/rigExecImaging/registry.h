@@ -98,6 +98,8 @@
 #include <vector>
 
 namespace rigExec {
+class RigExecFallbackStageSource;
+class RigExecFallbackStageMirror;
 
 class RigExecImagingDirectory;
 
@@ -216,12 +218,13 @@ public:
     /// The secondary warming trigger: call from the frame loop when the UI
     /// is idle. Enqueues the sweep only (neighbors belong to the commit
     /// trigger) with the same runner, gate, and generation rules. Once
-    /// workers drain, production fills at most one missing explicit-range
-    /// frame on this thread without changing the published viewport.
+    /// workers drain, production queues at most one missing explicit-range
+    /// frame on a private stage for rigs that cannot freeze their program.
+    /// This never evaluates the live stage or changes the published viewport.
     size_t OnIdle(
         RigExecFrozenStepRunner runner = RigExecFrozenStepRunner());
 
-    /// Factory calls plus calling-thread fill attempts. Idle drivers use
+    /// Factory calls plus private-stage job submissions. Idle drivers use
     /// this to distinguish advancing past failed frames from no work.
     size_t GetWarmingProgressCount();
 
@@ -663,11 +666,10 @@ private:
         /// playhead-relative sweep instead.
         std::vector<double> warmRange;
         bool warmRangeActive = false;
-        // Failed calling-thread fills retry after an edit or range request.
-        // Frozen-worker declines do not suppress this generic fallback.
-        uint64_t fallbackSerial = ~uint64_t(0);
-        std::set<double> fallbackDeclined;
+        // Private-stage failures retry after an edit or range request;
+        // frozen-worker declines never suppress this independent route.
         size_t fallbackAttempts = 0;
+        std::shared_ptr<RigExecFallbackStageMirror> fallbackMirror;
         // The session's epoch-pinned chain bindings, refreshed with the
         // snapshot and verified per burst (a constant edited mid-epoch
         // moves no digest, so the pins are re-read, not trusted -- once,
@@ -887,6 +889,7 @@ private:
     RigSessions _sessions;
     /// The active stage (strong while active, reset by Deactivate).
     UsdStageRefPtr _stage;
+    std::shared_ptr<RigExecFallbackStageSource> _fallbackSource;
     /// The stage a preview in progress resolves on (see BeginPreview).
     /// Weak: the directory holds this context until its stage dies, so a
     /// preview abandoned mid-drag must not keep that stage alive.

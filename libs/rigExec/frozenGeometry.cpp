@@ -375,9 +375,8 @@ _FrozenAssembleIterativeMover(
                           &params->topologyIndices)) {
         return false;
     }
-    if (params->restPoints.empty()) {
-        params->restPoints.assign(basePoints.begin(), basePoints.end());
-    }
+    const bool explicitRest = !params->restPoints.empty();
+    if (!explicitRest) params->restPoints.assign(basePoints.begin(), basePoints.end());
     bool validSamples = true;
     const auto scalar = [&](const char *name, auto fallback, auto &value) {
         value = fallback;
@@ -396,6 +395,25 @@ _FrozenAssembleIterativeMover(
         }
     };
     _VisitIterativeMoverScalars(revision.op, *params, scalar);
+    if (revision.op == RigExecRevisionOp::DeltaMush) {
+        TfToken smoothing, transport;
+        scalar("inputs:smoothing", TfToken("rest"), smoothing);
+        scalar("inputs:frameTransport", TfToken("vertex"), transport);
+        if (!RigExecParseDeltaMushSmoothing(smoothing.GetString(), &params->mushSettings.smoothing) ||
+            !RigExecParseDeltaMushFrameTransport(transport.GetString(), &params->mushSettings.frameTransport)) return validSamples;
+        scalar("inputs:onlySmooth", false, params->mushSettings.onlySmooth);
+        scalar("inputs:computationToTarget", GfMatrix4d(1), params->mushComputationToTarget);
+        const SdfPath weights = revision.moverPath.AppendProperty(TfToken("inputs:smoothWeights"));
+        const SdfPath edges = revision.moverPath.AppendProperty(TfToken("inputs:edges"));
+        if (!_FrozenSideArray(revision, weights, weights, index, inputs, &params->mushSettings.smoothWeights) ||
+            !_FrozenSideArray(revision, edges, edges, index, inputs, &params->mushSettings.edges)) return false;
+        if (!explicitRest && !params->mushSettings.onlySmooth &&
+            (params->mushComputationToTarget != GfMatrix4d(1) || !revision.binding.influences.empty())) return validSamples;
+        if (!revision.binding.influences.empty()) {
+            if (revision.influences.size() != 1) return validSamples;
+            params->mushComputationToTarget *= revision.influences[0];
+        }
+    }
     if (revision.op == RigExecRevisionOp::Wrinkle) {
         TfToken topology;
         scalar("inputs:topology", TfToken("cloth"), topology);
@@ -938,15 +956,60 @@ _FrozenAssembleLattice(
             return false;
         }
     }
+    bool validSamples = true;
+    const auto scalar = [&](const char *name, auto fallback) {
+        auto value = fallback;
+        const SdfPath path = moverPath.AppendProperty(TfToken(name));
+        if (const VtValue *phased = _FrozenPhasedValue(revision, path)) {
+            if (_SampleHolds(*phased, &value)) return value;
+        }
+        const auto found = index.find(path);
+        if (found != index.end()) {
+            const RigExecSampledInput &sample = inputs.values[found->second];
+            if (sample.hasValue && !_SampleHolds(sample.value, &value)) validSamples = false;
+        }
+        return value;
+    };
+    const TfToken evaluation = scalar("rigExec:evaluation", TfToken("legacy"));
+    if (evaluation != "legacy" && evaluation != "regularGrid") return true;
+    params->latticeSettings.regularGrid = evaluation == "regularGrid";
+    if (params->latticeSettings.regularGrid) {
+        const char *names[] = {"rigExec:interpolationU", "rigExec:interpolationV", "rigExec:interpolationW"};
+        for (int axis = 0; axis < 3; ++axis) {
+            if (!RigExecLatticeInterpolationFromString(scalar(names[axis], TfToken("bspline")).GetString(),
+                    &params->latticeSettings.interpolation[axis])) return true;
+        }
+        const GfVec3f origin = scalar("rigExec:origin", GfVec3f(-0.5f));
+        const GfVec3f spacing = scalar("rigExec:spacing", GfVec3f(1.0f));
+        for (int axis = 0; axis < 3; ++axis) {
+            params->latticeSettings.origin[axis] = origin[axis];
+            params->latticeSettings.spacing[axis] = spacing[axis];
+        }
+        params->latticeSettings.strength = scalar("rigExec:strength", 1.0f);
+        const SdfPath mask = moverPath.AppendProperty(TfToken("rigExec:mask"));
+        if (!_FrozenSideArray(revision, mask, mask, index, inputs, &params->latticeSettings.mask)) return false;
+        GfMatrix4d cage = scalar("rigExec:cageMatrix", GfMatrix4d(1.0));
+        GfMatrix4d target = scalar("rigExec:targetMatrix", GfMatrix4d(1.0));
+        if (!RigExecSurfaceSnapValidMatrix(cage) || !RigExecSurfaceSnapValidMatrix(target)) return true;
+        if (!latticeBinding.influences.empty()) {
+            if (revision.influences.size() != 2) return true;
+            cage *= revision.influences[0];
+            target *= revision.influences[1];
+        }
+        if (!RigExecSurfaceSnapCanonicalComputedMatrix(&cage) ||
+            !RigExecSurfaceSnapCanonicalComputedMatrix(&target)) return true;
+        if (!RigExecLatticeCoordinateMaps(scalar("rigExec:pointSpace", TfToken("local")).GetString(),
+                cage, target, &params->targetToLattice, &params->latticeToTarget,
+                &params->cageToLattice)) return true;
+    }
     const size_t cageCount = size_t(params->divisions[0]) *
                              size_t(params->divisions[1]) *
                              size_t(params->divisions[2]);
-    params->valid = params->divisions[0] >= 2 &&
-                    params->divisions[1] >= 2 &&
-                    params->divisions[2] >= 2 &&
-                    params->auxPoints.size() == cageCount &&
-                    params->auxPointsB.size() == cageCount &&
-                    !params->restPoints.empty();
+    const int minimum = params->latticeSettings.regularGrid ? 1 : 2;
+    params->valid = validSamples && params->divisions[0] >= minimum &&
+                    params->divisions[1] >= minimum && params->divisions[2] >= minimum &&
+                    (params->latticeSettings.regularGrid || params->auxPoints.size() == cageCount) &&
+                    params->auxPointsB.size() == cageCount && !params->restPoints.empty();
     return true;
 }
 
@@ -958,7 +1021,8 @@ bool
 _FrozenAssembleSurfaceProject(
     const RigExecBakedProgramImpl &B,
     const RigExecBakedProgramImpl::GeomRevision &revision,
-    float defaultWeight, const std::map<SdfPath, size_t> &index,
+    float defaultWeight, const VtVec3fArray &basePoints,
+    const std::map<SdfPath, size_t> &index,
     const RigExecFrameInputs &inputs, RigExecMoverParameters *params)
 {
     const RigExecRevisionBinding &binding = revision.binding;
@@ -983,8 +1047,58 @@ _FrozenAssembleSurfaceProject(
                              &params->topologyIndices)) {
         return false;
     }
-    params->valid =
-        !params->auxPoints.empty() && !params->topologyCounts.empty();
+    bool validSamples = true;
+    const auto scalar = [&](const char *name, auto fallback) {
+        auto value = fallback;
+        const SdfPath path = revision.moverPath.AppendProperty(TfToken(name));
+        if (const VtValue *phased = _FrozenPhasedValue(revision, path)) {
+            if (_SampleHolds(*phased, &value)) return value;
+        }
+        const auto found = index.find(path);
+        if (found != index.end()) {
+            const RigExecSampledInput &sample = inputs.values[found->second];
+            if (sample.hasValue && !_SampleHolds(sample.value, &value))
+                validSamples = false;
+        }
+        return value;
+    };
+    const TfToken mode = scalar("rigExec:snapMode", TfToken("onSurface"));
+    if (mode == "onSurface") params->surfaceSettings.mode = RigExecSurfaceSnapMode::OnSurface;
+    else if (mode == "inside") params->surfaceSettings.mode = RigExecSurfaceSnapMode::Inside;
+    else if (mode == "outside") params->surfaceSettings.mode = RigExecSurfaceSnapMode::Outside;
+    else if (mode == "outsideSurface") params->surfaceSettings.mode = RigExecSurfaceSnapMode::OutsideSurface;
+    else return true;
+    params->surfaceSettings.offset = scalar("rigExec:offset", 0.0f);
+    const auto arrayPath = [&](const char *name) {
+        return revision.moverPath.AppendProperty(TfToken(name));
+    };
+    if (!_FrozenSideArray(revision, arrayPath("rigExec:mask"), arrayPath("rigExec:mask"),
+                          index, inputs, &params->surfaceSettings.mask) ||
+        !_FrozenSideArray(revision, arrayPath("rigExec:triangles"), arrayPath("rigExec:triangles"),
+                          index, inputs, &params->surfaceSettings.triangles)) return false;
+    GfMatrix4d surface = scalar("rigExec:surfaceMatrix", GfMatrix4d(1.0));
+    GfMatrix4d target = scalar("rigExec:targetMatrix", GfMatrix4d(1.0));
+    if (!RigExecSurfaceSnapValidMatrix(surface) || !RigExecSurfaceSnapValidMatrix(target)) return true;
+    if (!binding.influences.empty()) {
+        if (revision.influences.size() != 2) return true;
+        surface *= revision.influences[0];
+        target *= revision.influences[1];
+    }
+    if (!RigExecSurfaceSnapCanonicalComputedMatrix(&surface) ||
+        !RigExecSurfaceSnapCanonicalComputedMatrix(&target)) return true;
+    const TfToken pointSpace = scalar("rigExec:pointSpace", TfToken("local"));
+    if (pointSpace == "local") {
+        params->targetToSurface = target * RigExecSurfaceSnapAffineInverse(surface);
+        params->surfaceToTarget = surface * RigExecSurfaceSnapAffineInverse(target);
+    } else if (pointSpace == "common") {
+        params->targetToSurface = RigExecSurfaceSnapAffineInverse(surface);
+        params->surfaceToMetric = RigExecSurfaceSnapAffineInverse(surface);
+        params->surfaceToTarget = surface;
+    } else return true;
+    params->valid = validSamples && !params->auxPoints.empty() &&
+        (!params->topologyCounts.empty() || !params->surfaceSettings.triangles.empty()) &&
+        std::isfinite(params->surfaceSettings.offset) &&
+        (params->surfaceSettings.mask.empty() || params->surfaceSettings.mask.size() == basePoints.size());
     return true;
 }
 
@@ -1208,7 +1322,7 @@ _FrozenRevisionStatic(_FrozenWorker *worker, RigExecBakedStep *step,
         }
     } else if (revision.op == RigExecRevisionOp::SurfaceProject) {
         if (!_FrozenAssembleSurfaceProject(B, revision, revision.defaultWeight,
-                                           index, inputs,
+                                           chain.lastBase, index, inputs,
                                            &revision.parameters)) {
             return false;
         }

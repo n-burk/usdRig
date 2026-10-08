@@ -51,6 +51,7 @@ set(CMAKE_INSTALL_RPATH_USE_LINK_PATH ON)
 
 # rigExecMath: pure point-frame and solver kernels (spec §5).
 add_library(rigExecMath STATIC
+    libs/rigExecMath/affineFrameKernels.cpp
     libs/rigExecMath/pointFrame.cpp
     libs/rigExecMath/solvers.cpp
     libs/rigExecMath/singleChainIk.cpp
@@ -73,18 +74,21 @@ add_library(rigExec SHARED
     libs/rigExec/types.cpp
     libs/rigExec/parallel.cpp
     libs/rigExec/computations.cpp
+    libs/rigExec/affineFrameComputations.cpp
     libs/rigExec/moverKernels.cpp
     libs/rigExec/solverKernels.cpp
     libs/rigExec/weightPackets.cpp
     libs/rigExec/movers/moverRegistry.cpp
     libs/rigExec/movers/matrixMover.cpp
     libs/rigExec/movers/skinMover.cpp
+    libs/rigExec/movers/armatureMover.cpp
     libs/rigExec/movers/blendShapeMover.cpp
     libs/rigExec/movers/smoothMover.cpp
     libs/rigExec/movers/deltaMushMover.cpp
     libs/rigExec/movers/wrinkleMover.cpp
     libs/rigExec/movers/volumeCorrectMover.cpp
     libs/rigExec/movers/latticeMover.cpp
+    libs/rigExec/movers/surfaceBindingMover.cpp
     libs/rigExec/movers/surfaceMover.cpp
     libs/rigExec/movers/curveMover.cpp
     libs/rigExec/movers/mathMovers.cpp
@@ -159,6 +163,7 @@ target_link_libraries(rigExecRigging PUBLIC
 add_library(rigExecImaging SHARED
     libs/rigExecImaging/sceneIndices.cpp
     libs/rigExecImaging/bridge.cpp
+    libs/rigExecImaging/fallbackStage.cpp
     libs/rigExecImaging/registry.cpp
     libs/rigExecImaging/playback.cpp
     libs/rigExecImaging/sceneIndexPlugin.cpp
@@ -304,6 +309,11 @@ target_link_libraries(testRigExecWrinkleRuntime PRIVATE rigExecRuntime)
 add_test(NAME testRigExecWrinkleRuntime COMMAND testRigExecWrinkleRuntime
     "${CMAKE_CURRENT_BINARY_DIR}/wrinkle_test.rigexec")
 set_tests_properties(testRigExecWrinkleRuntime PROPERTIES FIXTURES_REQUIRED WrinkleBinary)
+add_executable(testRigExecAffineFrames tests/testRigExecAffineFrames.cpp)
+target_link_libraries(testRigExecAffineFrames PRIVATE rigExec)
+add_test(NAME testRigExecAffineFrames COMMAND testRigExecAffineFrames "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
+set_tests_properties(testRigExecAffineFrames PROPERTIES ENVIRONMENT "PXR_PLUGINPATH_NAME=${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
+
 add_executable(testRigExecDeltaMush tests/testRigExecDeltaMush.cpp)
 target_link_libraries(testRigExecDeltaMush PRIVATE rigExec rigExecRigging rigExecBake rigExecRuntime)
 add_test(NAME testRigExecDeltaMush COMMAND testRigExecDeltaMush "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
@@ -494,6 +504,23 @@ foreach(_schedule serial parallel)
         "RIGEXEC_BAKED_SCHEDULE=${_schedule}"
         "RIGEXEC_BAKED_GRAIN_US=0")
 endforeach()
+
+add_executable(testRigExecSurfaceSnap tests/testRigExecSurfaceSnap.cpp)
+target_link_libraries(testRigExecSurfaceSnap PRIVATE rigExec rigExecBake rigExecRuntime)
+target_compile_definitions(testRigExecSurfaceSnap PRIVATE ${_rigexec_schema_resource_define})
+add_test(NAME testRigExecSurfaceSnap COMMAND testRigExecSurfaceSnap)
+set_tests_properties(testRigExecSurfaceSnap PROPERTIES ENVIRONMENT "RIGEXEC_DYNAMIC_RUNS_PROGRAM=0")
+
+add_executable(testRigExecSurfaceBinding tests/testRigExecSurfaceBinding.cpp)
+target_link_libraries(testRigExecSurfaceBinding PRIVATE rigExec)
+target_compile_definitions(testRigExecSurfaceBinding PRIVATE ${_rigexec_schema_resource_define})
+add_test(NAME testRigExecSurfaceBinding COMMAND testRigExecSurfaceBinding)
+set_tests_properties(testRigExecSurfaceBinding PROPERTIES ENVIRONMENT "RIGEXEC_DYNAMIC_RUNS_PROGRAM=0")
+add_executable(testRigExecLattice tests/testRigExecLattice.cpp)
+target_link_libraries(testRigExecLattice PRIVATE rigExec rigExecBake rigExecRuntime)
+target_compile_definitions(testRigExecLattice PRIVATE ${_rigexec_schema_resource_define})
+add_test(NAME testRigExecLattice COMMAND testRigExecLattice)
+set_tests_properties(testRigExecLattice PROPERTIES ENVIRONMENT "RIGEXEC_DYNAMIC_RUNS_PROGRAM=0")
 
 add_executable(testRigExecSurfaceProjector
     tests/testRigExecSurfaceProjector.cpp)
@@ -893,6 +920,10 @@ target_link_libraries(testRigExecFrameCacheCones_Verify PRIVATE rigExec)
 add_test(NAME testRigExecFrameCacheCones_Verify COMMAND testRigExecFrameCacheCones_Verify "${CMAKE_CURRENT_SOURCE_DIR}/examples")
 
 add_executable(testRigExecImagingFrameCache tests/testRigExecImagingFrameCache.cpp)
+add_executable(testRigExecFallbackStage tests/testRigExecFallbackStage.cpp)
+target_link_libraries(testRigExecFallbackStage PRIVATE rigExecImaging)
+add_test(NAME testRigExecFallbackStage COMMAND testRigExecFallbackStage
+    "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
 target_link_libraries(testRigExecImagingFrameCache PRIVATE rigExecImaging rigExecBake)
 target_include_directories(testRigExecImagingFrameCache PRIVATE
     "${CMAKE_CURRENT_BINARY_DIR}/tests")
@@ -907,6 +938,7 @@ add_test(NAME testRigExecImagingFrameCacheDefault COMMAND "${CMAKE_COMMAND}" -E 
     "${CMAKE_CURRENT_SOURCE_DIR}/examples" --default-mode)
 
 foreach(_rigexec_plugin_test testRigExecFrameCacheCones_Verify
+        testRigExecFallbackStage
         testRigExecFrozenContext
         testRigExecImagingFrameCache
         testRigExecImagingFrameCacheDefault)
@@ -1340,6 +1372,14 @@ if (RIGEXEC_BUILD_PYTHON AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
     add_test(NAME testGizmoPreview
         COMMAND ${Python3_EXECUTABLE}
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_gizmo_preview.py")
+    add_test(NAME testGizmoDeferredRelease
+        COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_gizmo_deferred_release.py")
+    set_tests_properties(testGizmoDeferredRelease PROPERTIES SKIP_RETURN_CODE 77)
+    add_test(NAME testGizmoOwnCommit
+        COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_gizmo_own_commit.py")
+    set_tests_properties(testGizmoOwnCommit PROPERTIES SKIP_RETURN_CODE 77)
     add_test(NAME testGizmoScreen
         COMMAND ${Python3_EXECUTABLE}
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_gizmo_screen.py")
@@ -1405,7 +1445,7 @@ if (RIGEXEC_BUILD_PYTHON AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
                          testMoverChainOrder testIkFkMatch testSpaceMatch
                          testAutoClavicle
                          testAvarEditorModel
-                         testGizmoPreview
+                         testGizmoPreview testGizmoDeferredRelease testGizmoOwnCommit
                          testGizmoSettings testGizmoDrag testGizmoSnap
                          testViewCubeMath testRigExecStageEdits
                          testGraphModel testGraphScreen testCacheStripModel

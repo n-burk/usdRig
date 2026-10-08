@@ -4392,9 +4392,9 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
     compileBlocks.Close();
     stampCompileRegion("Compile.SolverSchedule");
     compileBlocks.Next("PrepareRequests.ConnectedPoseTaps");
-    // Prepare refresh requests on demand. Bound their stock execution graphs
-    // to 16 partitions: overrides invalidate downstream nodes outside the
-    // request, while an executor per output duplicates too much upstream state.
+    // Refreshes run sequentially and copy out each result. Share their graph
+    // to avoid duplicating upstream state. Overrides may invalidate sibling
+    // caches, so TapSet primes the unmodified request before each override.
     // Partition 1 holds the complete seed; partition 0 serves other requests.
     std::map<SdfPath, std::set<SdfPath>> newPoseProviderInputs;
     std::map<SdfPath, std::unique_ptr<RigExecTapSet>> newConnectedPoseTaps;
@@ -4429,7 +4429,7 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
         newConnectedPoseOverrideInputs[provider].assign(
             attributes.begin(), attributes.end());
         if (info.connectedPose && !newJointBinding.count(provider)) {
-            auto taps = std::make_unique<RigExecTapSet>(_stage, 2 + newConnectedPoseTaps.size() % 16);
+            auto taps = std::make_unique<RigExecTapSet>(_stage, 2);
             taps->Add(RigExecValueAddress::Prim(provider, _computePointFrame));
             newConnectedPoseTaps[provider] = std::move(taps);
         }
@@ -4442,7 +4442,7 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
             if (paths.size() < 2) continue;
             for (size_t start = 0; start < paths.size(); start += 64) {
                 _ConnectedPoseBatch batch;
-                batch.taps = std::make_unique<RigExecTapSet>(_stage, 2 + newConnectedPoseBatches.size() % 16);
+                batch.taps = std::make_unique<RigExecTapSet>(_stage, 2);
                 const size_t index = newConnectedPoseBatches.size();
                 for (size_t i = start; i < std::min(start + 64, paths.size()); ++i) {
                     batch.outputs[paths[i]] = batch.taps->Add(
@@ -4567,7 +4567,10 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
         }
     }
 
-    const bool mainPrepared = deferExecPrep ? true : execCall([&]() {
+    // Connected poses supply their resolved frames to the authoritative
+    // snapshot. Only its residual request is evaluated; preparing the full
+    // request here builds and retains an otherwise unused execution graph.
+    const bool mainPrepared = deferExecPrep || !newConnectedPoseTaps.empty() ? true : execCall([&]() {
         RIGEXEC_PROFILE_SCOPE_CAT(
             _profiler, "TapPrepare main", "compile");
         return newTaps->Prepare();
@@ -5291,7 +5294,7 @@ RigExecRigEvaluator::_RealizeDeferredExecPrep(RigExecRigPose *pose)
             "failed to prepare pose provider inputs");
         return false;
     }
-    if (_taps) {
+    if (_taps && _connectedPoseTaps.empty()) {
         RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "DeferredExecPrep.PrepareMain",
                                   "compile");
         prepared = _taps->Prepare();

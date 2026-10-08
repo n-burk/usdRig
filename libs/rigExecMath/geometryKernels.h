@@ -8,6 +8,7 @@
 
 #include "pointFrame.h"
 #include "wrinkleSettings.h"
+#include "deltaMushSettings.h"
 
 #include "pxr/base/gf/vec2f.h"
 #include "pxr/base/gf/vec3f.h"
@@ -25,7 +26,9 @@ bool RigExecApplyDeltaMush(
     std::vector<GfVec3f> *points, const std::vector<GfVec3f> &rest,
     const std::vector<int> &counts, const std::vector<int> &indices,
     int iterations = 10, double step = 0.5, bool pinBorders = true,
-    double distanceWeight = 0.0, double displacement = 1.0);
+    double distanceWeight = 0.0, double displacement = 1.0,
+    const RigExecDeltaMushSettings &settings = {},
+    const GfMatrix4d &computationToTarget = GfMatrix4d(1));
 
 /// Resolve phase-guided rest-length constraints inside attachment balls about
 /// incoming points. A material phase field stabilizes the folds. Quasistatic:

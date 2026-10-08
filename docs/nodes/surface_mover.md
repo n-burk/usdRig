@@ -48,6 +48,14 @@ frame-to-frame state, so a point roughly a facet away from the driver
 tracks it smoothly while a point far away can flip between near-tied
 facets and pop.
 
+`snapMode` supports `onSurface`, `inside`, `outside`, and `outsideSurface`.
+`offset` measures distance in surface-local space; `mask` blends each target
+point independently. Explicit `triangles` preserve a source application's
+tessellation. `surfaceMatrix` and `targetMatrix`, optionally followed by the
+two `frames` providers, define local/common point conversion and the nearest
+point metric. Directional projection and above-surface normal projection
+are not implemented by these nearest-surface settings.
+
 ## Wiring
 
 | Relationship | Points to | Required |
@@ -108,6 +116,54 @@ Native mesh prim supplying the driver surface.
 *Type:* `uniform token`. *Default:* `"attach"`.
 
 Valid values: `attach`, `project`.
+
+#### `rigExec:snapMode`
+
+*Type:* `uniform token`. *Default:* `"onSurface"`.
+
+Valid values: `onSurface`, `inside`, `outside`, `outsideSurface`.
+
+Nearest-triangle snap policy. Inside/outside retain points already on the required side with at least the declared clearance.
+
+#### `rigExec:offset`
+
+*Type:* `float`. *Default:* `0`.
+
+Side clearance measured in surface metric coordinates, independent of the mover envelope and binding delta multiplier.
+
+#### `rigExec:mask`
+
+*Type:* `float[]`. *Default:* `[]`.
+
+Optional target-vertex weights in [0,1]; empty affects every vertex.
+
+#### `rigExec:triangles`
+
+*Type:* `int[]`. *Default:* `[]`.
+
+Optional explicit surface vertex-index triples. Empty uses each polygon's legacy fan triangulation.
+
+#### `rigExec:pointSpace`
+
+*Type:* `uniform token`. *Default:* `"local"`.
+
+Valid values: `local`, `common`.
+
+Local arrays use their respective matrices. Common arrays already share coordinates and are both mapped into the surface metric before querying.
+
+#### `rigExec:surfaceMatrix`
+
+*Type:* `matrix4d`. *Default:* `((1,0,0,0),(0,1,0,0),(0,0,1,0),(0,0,0,1))`.
+
+#### `rigExec:targetMatrix`
+
+*Type:* `matrix4d`. *Default:* `((1,0,0,0),(0,1,0,0),(0,0,1,0),(0,0,0,1))`.
+
+#### `rigExec:frames`
+
+*Relationship.*
+
+Optional surface and target rest-to-pose providers, in that order, applied after their local-to-common matrices.
 
 ## Example
 

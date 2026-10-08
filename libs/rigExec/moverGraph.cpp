@@ -939,11 +939,14 @@ RigExecApplyRevisionKernel(RigExecRevisionOp op,
     case RigExecRevisionOp::DeltaMush:
         return RigExecApplyDeltaMush(pts, p.restPoints, p.topologyCounts,
             p.topologyIndices, p.mushIterations, p.mushStep, p.mushPinBorders,
-            p.mushDistanceWeight, p.mushDisplacement);
+            p.mushDistanceWeight, p.mushDisplacement, p.mushSettings, p.mushComputationToTarget);
     case RigExecRevisionOp::Wrinkle:
         return RigExecApplyWrinkle(pts, p.restPoints, p.topologyCounts,
             p.topologyIndices, p.wrinkleSettings);
     case RigExecRevisionOp::Lattice:
+        if(p.latticeSettings.regularGrid)
+            return RigExecApplyLatticeGridKernel<GfVec3f,GfVec3d>(pts,p.auxPointsB,p.divisions,p.latticeSettings,
+                p.targetToLattice,p.latticeToTarget,p.cageToLattice);
         if (p.restPoints.size() != pts->size()) {
             return false;  // cardinality mismatch fails atomically
         }
@@ -951,10 +954,12 @@ RigExecApplyRevisionKernel(RigExecRevisionOp op,
             pts, p.restPoints, p.auxPoints, p.auxPointsB, p.divisions);
         return true;
     case RigExecRevisionOp::SurfaceProject:
-        RigExecApplySurfaceProject(
+        if(RigExecSurfaceSnapIsLegacy(p.surfaceSettings,p.targetToSurface,p.surfaceToTarget,p.surfaceToMetric)) {
+            RigExecApplySurfaceProject(pts,p.auxPoints,p.topologyCounts,p.topologyIndices,p.strength);return true;
+        }
+        return RigExecApplySurfaceSnapKernel<GfVec3f,GfVec3d>(
             pts, p.auxPoints, p.topologyCounts, p.topologyIndices,
-            p.strength);
-        return true;
+            p.surfaceSettings,p.targetToSurface,p.surfaceToTarget,p.surfaceToMetric);
     case RigExecRevisionOp::EmitGuidePoints:
         if (p.frames.GetSize() != pts->size()) {
             return false;
@@ -2214,9 +2219,25 @@ RigExecAssembleParameters(
         params.valid = !params.topologyCounts.empty();
         break;
 
-    case RigExecRevisionOp::DeltaMush:
+    case RigExecRevisionOp::DeltaMush: {
         params.restPoints = _Array<GfVec3f>(moverPrim, moverPrim.GetPath().AppendProperty(TfToken("inputs:restPoints")), UsdTimeCode::Default(), values.resolved, _RecorderOf(values.resolved));
-        if (params.restPoints.empty()) params.restPoints = values.basePoints;
+        const auto smoothing = _RecordedInput<TfToken>(moverPrim, TfToken("inputs:smoothing"), TfToken("rest"), UsdTimeCode::Default(), values.resolved);
+        const auto transport = _RecordedInput<TfToken>(moverPrim, TfToken("inputs:frameTransport"), TfToken("vertex"), UsdTimeCode::Default(), values.resolved);
+        if (!RigExecParseDeltaMushSmoothing(smoothing.GetString(), &params.mushSettings.smoothing) ||
+            !RigExecParseDeltaMushFrameTransport(transport.GetString(), &params.mushSettings.frameTransport)) break;
+        params.mushSettings.smoothWeights = _Array<float>(moverPrim, moverPrim.GetPath().AppendProperty(TfToken("inputs:smoothWeights")), time, values.resolved, _RecorderOf(values.resolved));
+        params.mushSettings.edges = _Array<int>(moverPrim, moverPrim.GetPath().AppendProperty(TfToken("inputs:edges")), UsdTimeCode::Default(), values.resolved, _RecorderOf(values.resolved));
+        params.mushSettings.onlySmooth = _RecordedInput<bool>(moverPrim, TfToken("inputs:onlySmooth"), false, time, values.resolved);
+        params.mushComputationToTarget = _RecordedInput<GfMatrix4d>(moverPrim, TfToken("inputs:computationToTarget"), GfMatrix4d(1), time, values.resolved);
+        const bool needsRest = params.mushComputationToTarget != GfMatrix4d(1) || !binding.influences.empty();
+        if (!binding.influences.empty()) {
+            if (!values.influenceTransforms || values.influenceTransforms->size() != 1) break;
+            params.mushComputationToTarget *= (*values.influenceTransforms)[0];
+        }
+        if (params.restPoints.empty()) {
+            if (needsRest && !params.mushSettings.onlySmooth) break;
+            params.restPoints = values.basePoints;
+        }
         params.topologyCounts = _Array<int>(moverPrim, binding.topologyCounts, time, values.resolved, _RecorderOf(values.resolved));
         params.topologyIndices = _Array<int>(moverPrim, binding.topologyIndices, time, values.resolved, _RecorderOf(values.resolved));
         params.mushIterations = _RecordedInput<int>(moverPrim, TfToken("inputs:iterations"), 10, time, values.resolved);
@@ -2226,6 +2247,7 @@ RigExecAssembleParameters(
         params.mushDisplacement = _RecordedInput<float>(moverPrim, TfToken("inputs:displacement"), 1.0f, time, values.resolved);
         params.valid = !params.restPoints.empty() && !params.topologyCounts.empty();
         break;
+    }
     case RigExecRevisionOp::Wrinkle: {
         params.restPoints = _Array<GfVec3f>(moverPrim,
             moverPrim.GetPath().AppendProperty(_attrTokens->restPoints),
@@ -2283,6 +2305,31 @@ RigExecAssembleParameters(
     }
 
     case RigExecRevisionOp::Lattice: {
+        const auto read=[&](const char *name,auto fallback) {
+            return _RecordedInput(moverPrim,TfToken(name),fallback,time,values.resolved);
+        };
+        const auto evaluation=read("rigExec:evaluation",TfToken("legacy"));
+        if(evaluation!=TfToken("legacy") && evaluation!=TfToken("regularGrid"))break;
+        params.latticeSettings.regularGrid=evaluation==TfToken("regularGrid");
+        if(params.latticeSettings.regularGrid) {
+            for(int axis=0;axis<3;++axis) {
+                const char *names[]={"rigExec:interpolationU","rigExec:interpolationV","rigExec:interpolationW"};
+                if(!RigExecLatticeInterpolationFromString(read(names[axis],TfToken("bspline")).GetString(),&params.latticeSettings.interpolation[axis]))return params;
+            }
+            const auto origin=read("rigExec:origin",GfVec3f(-.5f)),spacing=read("rigExec:spacing",GfVec3f(1));
+            for(int axis=0;axis<3;++axis) {params.latticeSettings.origin[axis]=origin[axis];params.latticeSettings.spacing[axis]=spacing[axis];}
+            params.latticeSettings.strength=read("rigExec:strength",1.f);
+            const auto mask=read("rigExec:mask",VtFloatArray());params.latticeSettings.mask.assign(mask.begin(),mask.end());
+            GfMatrix4d cage=read("rigExec:cageMatrix",GfMatrix4d(1)),target=read("rigExec:targetMatrix",GfMatrix4d(1));
+            if(!RigExecSurfaceSnapValidMatrix(cage) || !RigExecSurfaceSnapValidMatrix(target))break;
+            if(!binding.influences.empty()) {
+                if(!values.influenceTransforms || values.influenceTransforms->size()!=2)break;
+                cage*=(*values.influenceTransforms)[0];target*=(*values.influenceTransforms)[1];
+                if(!RigExecSurfaceSnapCanonicalComputedMatrix(&cage) || !RigExecSurfaceSnapCanonicalComputedMatrix(&target))break;
+            }
+            if(!RigExecLatticeCoordinateMaps(read("rigExec:pointSpace",TfToken("local")).GetString(),cage,target,
+                &params.targetToLattice,&params.latticeToTarget,&params.cageToLattice))break;
+        }
         params.restPoints = values.basePoints;
         // Operand order matters and is not symmetric: the shared applier is
         // RigExecApplyLattice(points, restPoints, restCage, posedCage, divs),
@@ -2317,15 +2364,16 @@ RigExecAssembleParameters(
         const size_t cageCount = size_t(params.divisions[0]) *
                                  size_t(params.divisions[1]) *
                                  size_t(params.divisions[2]);
-        params.valid = params.divisions[0] >= 2 && params.divisions[1] >= 2 &&
-                       params.divisions[2] >= 2 &&
-                       params.auxPoints.size() == cageCount &&
+        const int minimum=params.latticeSettings.regularGrid?1:2;
+        params.valid = params.divisions[0] >= minimum && params.divisions[1] >= minimum &&
+                       params.divisions[2] >= minimum &&
+                       (params.latticeSettings.regularGrid || params.auxPoints.size() == cageCount) &&
                        params.auxPointsB.size() == cageCount &&
                        !params.restPoints.empty();
         break;
     }
 
-    case RigExecRevisionOp::SurfaceProject:
+    case RigExecRevisionOp::SurfaceProject: {
         // Fixed at full, matching _BuildSurfaceMoverParameters: v0.1
         // attach/project maps fully. RigExecSurfaceMover declares no
         // inputs:strength, so reading one here silently applied a 0.5
@@ -2335,9 +2383,42 @@ RigExecAssembleParameters(
         params.topologyCounts = _Array<int>(moverPrim, binding.topologyCounts, time, values.resolved, _RecorderOf(values.resolved));
         params.topologyIndices =
             _Array<int>(moverPrim, binding.topologyIndices, time, values.resolved, _RecorderOf(values.resolved));
-        params.valid =
-            !params.auxPoints.empty() && !params.topologyCounts.empty();
+        const auto read = [&](const char *name, auto fallback) {
+            return _RecordedInput(moverPrim,TfToken(name),fallback,time,values.resolved);
+        };
+        const TfToken snap=read("rigExec:snapMode",TfToken("onSurface"));
+        if(snap==TfToken("onSurface"))params.surfaceSettings.mode=RigExecSurfaceSnapMode::OnSurface;
+        else if(snap==TfToken("inside"))params.surfaceSettings.mode=RigExecSurfaceSnapMode::Inside;
+        else if(snap==TfToken("outside"))params.surfaceSettings.mode=RigExecSurfaceSnapMode::Outside;
+        else if(snap==TfToken("outsideSurface"))params.surfaceSettings.mode=RigExecSurfaceSnapMode::OutsideSurface;
+        else break;
+        params.surfaceSettings.offset=read("rigExec:offset",0.f);
+        const auto mask=read("rigExec:mask",VtFloatArray());
+        params.surfaceSettings.mask.assign(mask.begin(),mask.end());
+        const auto triangles=read("rigExec:triangles",VtIntArray());
+        params.surfaceSettings.triangles.assign(triangles.begin(),triangles.end());
+        GfMatrix4d surface=read("rigExec:surfaceMatrix",GfMatrix4d(1.0));
+        GfMatrix4d target=read("rigExec:targetMatrix",GfMatrix4d(1.0));
+        if(!RigExecSurfaceSnapValidMatrix(surface) || !RigExecSurfaceSnapValidMatrix(target))break;
+        if(!binding.influences.empty()) {
+            if(!values.influenceTransforms || values.influenceTransforms->size()!=2)break;
+            surface*=(*values.influenceTransforms)[0];target*=(*values.influenceTransforms)[1];
+            if(!RigExecSurfaceSnapCanonicalComputedMatrix(&surface) || !RigExecSurfaceSnapCanonicalComputedMatrix(&target))break;
+        }
+        if(!RigExecSurfaceSnapValidMatrix(surface) || !RigExecSurfaceSnapValidMatrix(target))break;
+        const auto pointSpace=read("rigExec:pointSpace",TfToken("local"));
+        if(pointSpace==TfToken("local")) {
+            params.targetToSurface=target*rigExec::RigExecSurfaceSnapAffineInverse(surface);
+            params.surfaceToTarget=surface*rigExec::RigExecSurfaceSnapAffineInverse(target);
+        } else if(pointSpace==TfToken("common")) {
+            params.targetToSurface=rigExec::RigExecSurfaceSnapAffineInverse(surface);params.surfaceToMetric=rigExec::RigExecSurfaceSnapAffineInverse(surface);params.surfaceToTarget=surface;
+        } else break;
+        params.valid = !params.auxPoints.empty() &&
+            (!params.topologyCounts.empty() || !params.surfaceSettings.triangles.empty()) &&
+            std::isfinite(params.surfaceSettings.offset) &&
+            (params.surfaceSettings.mask.empty() || params.surfaceSettings.mask.size()==values.basePoints.size());
         break;
+    }
 
     case RigExecRevisionOp::Ribbon:
     case RigExecRevisionOp::EmitGuidePoints: {

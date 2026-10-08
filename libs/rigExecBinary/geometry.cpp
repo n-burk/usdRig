@@ -377,7 +377,13 @@ _PutRevision(std::vector<uint8_t> *out, const RigExecWireRevision &revision)
     RigExecWirePutU32(out, revision.moverPath);
     RigExecWirePutU32(out, revision.target);
     RigExecWirePutU32(out, revision.moverPrim);
-    RigExecWirePutU8(out, revision.op);
+    uint8_t wireOp = revision.op;
+    if (revision.extendedDeformerSemantics) {
+        if (wireOp == 6) wireOp = 19;
+        else if (wireOp == 14) wireOp = 20;
+        else if (wireOp == 5) wireOp = 21;
+    }
+    RigExecWirePutU8(out, wireOp);
     _PutBinding(out, revision.binding);
     RigExecWirePutU32(out, uint32_t(revision.blendChannels.size()));
     for (const RigExecWireBlendChannel &channel : revision.blendChannels) {
@@ -453,12 +459,16 @@ _ReadRevision(RigExecWireReader *reader, RigExecWireRevision *revision)
     if (!reader->ReadU32(&revision->moverPath) ||
         !reader->ReadU32(&revision->target) ||
         !reader->ReadU32(&revision->moverPrim) ||
-        !reader->ReadU8(&revision->op) || revision->op > 18 ||
+        !reader->ReadU8(&revision->op) || revision->op > 21 ||
         revision->op == 10 || revision->op == 11 ||
         !_ReadBinding(reader, &revision->binding) ||
         !reader->ReadU32(&count)) {
         return false;
     }
+    revision->extendedDeformerSemantics = revision->op >= 19;
+    if (revision->op == 19) revision->op = 6;
+    else if (revision->op == 20) revision->op = 14;
+    else if (revision->op == 21) revision->op = 5;
     revision->blendChannels.resize(count);
     for (uint32_t i = 0; i < count; ++i) {
         RigExecWireBlendChannel &channel = revision->blendChannels[i];

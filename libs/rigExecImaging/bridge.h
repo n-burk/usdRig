@@ -247,6 +247,11 @@ public:
     const std::shared_ptr<RigExecFrameCache> &GetFrameCache() const {
         return _frameCache;
     }
+    /// Capture the live namespace for a privately owned fallback worker.
+    /// The worker publishes with this key, never its mirror's serial.
+    bool CapturePoseOnlyCacheKey(UsdTimeCode time, RigExecFrameCacheKey *key) const {
+        return _ComputePoseOnlyCacheKey(time, key);
+    }
 
     /// Drops every cached frame and every freshness proof. The next
     /// publication evaluates live. Called when the overlay selection moves

@@ -319,8 +319,9 @@ discover those additional libraries.
 
 External point callbacks work in stage-backed dynamic and baked evaluation,
 and in `.rigexec` export and playback for plugins that provide the callbacks
-above. Frozen evaluation and background frame-cache warming reject rigs
-containing external movers; use live evaluation for those rigs. Independent
+above. Frozen evaluation rejects rigs containing external movers. Background
+frame-cache warming can instead evaluate them on a privately owned stage;
+callbacks must support invocation from a worker thread. Independent
 property-mover callbacks and frozen payload snapshots are not part of this API.
 
 A plugin's tests can export and replay its rigs by linking
