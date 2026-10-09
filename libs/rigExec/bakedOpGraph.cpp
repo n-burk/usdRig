@@ -645,6 +645,7 @@ bool RigExecBakedCompileOpGraph(RigExecBakedProgramImpl *B,std::string *error)
     // Calibration fits what a measurement accumulates, so it measures too.
     B->opAdapter.measuring=RigExecBakedStepTimingRequested() ||
         RigExecBakedScheduleCalibrationRequested();
+    B->measureColdRuns=RigExecBakedScheduleCalibrationRequested();
     B->opAdapter.inputRevisions.assign(B->steps.size(),0);
     B->opAdapter.inputKeys.resize(B->steps.size());
     B->opAdapter.inputScratch.resize(B->steps.size());
@@ -694,13 +695,18 @@ bool RigExecBakedExecuteOpGraph(RigExecBakedProgramImpl *program,UsdTimeCode tim
     force=force || B.programStamp!=B.lastProgramStamp;
     const bool first=!state.everRan;
     const bool profiling=B.profiler && B.profiler->IsEnabled();
+    // A cold run -- the program's first or a forced one -- runs nearly every
+    // op once, so a measurement leaves it out unless calibration asked for
+    // it. RigExecBakedRunStepBody reads the same flag.
+    if(state.measuring && !B.measurementSuspended)
+        B.coldRunExcluded=(first || force) && !B.measureColdRuns;
     // Op stamps are plain clock reads into op-owned fields by the thread
     // running the op; the owner reads them only after the join. Decided
-    // once here, so every op of the run agrees and runStamped covers them.
-    const bool measuring=state.measuring && !B.measurementSuspended;
+    // once here, so every op of the run agrees; the owner lists the stamped
+    // steps after the join.
+    const bool measuring=state.measuring && !B.measurementSuspended && !B.coldRunExcluded;
     const bool timing=B.recordOpTimings || profiling;
     const bool stamping=measuring || timing;
-    if(stamping) B.runStamped=true;
     // Only a profiled run folds cluster times (below), so only one leaves
     // any to clear.
     if(B.clustering.lastRunTimed) for(auto &cluster:B.clustering.clusters) {
@@ -860,6 +866,10 @@ bool RigExecBakedExecuteOpGraph(RigExecBakedProgramImpl *program,UsdTimeCode tim
             callbacks.wait=[&]{dispatcher.Wait();}; execute();
         });
     } else execute();
+    // Only a candidate takes a stamp, failed run or not.
+    if(stamping)
+        for(uint32_t c=0;c<B.opGraph.ops.size() && c<B.opExecution.candidates.size();++c)
+            if(B.opExecution.candidates[c]) B.stampedSteps.push_back(B.opGraph.ops[c].originalIndex);
     RigExecOpGatherChanges(&state,B.opGraph,B.opExecution.ran);
     if(verifyVersions)
         for(uint32_t c=0;c<state.leafVersionMismatch.size();++c)

@@ -1336,7 +1336,7 @@ struct RigExecBakedStep {
     /// while op timing, the profiler or a measurement is on; memo end and
     /// body end only for a measurement. The op holds its thread from
     /// memoStartNs to publishEndNs. Cleared with the body interval at the
-    /// start of the run after any run that stamped (`runStamped`).
+    /// start of the next run when a run listed it (`stampedSteps`).
     uint64_t memoStartNs = 0, memoEndNs = 0, bodyEndNs = 0, publishEndNs = 0;
     /// What the step is called in the report and the trace, built once at
     /// Build so that neither costs a string per step per frame.
@@ -1347,7 +1347,7 @@ struct RigExecBakedStep {
     /// that a step that is skipped keeps last run's lines for the epilogue
     /// to replay. The timestamps are NOT cleared here for that same reason:
     /// a skipped step never reaches this, so RigExecBakedClearRunStamps
-    /// clears every step's interval at the start of the run instead.
+    /// clears the stamped steps' intervals at the start of the run instead.
     void BeginRun() {
         diagnostics.clear();
         counters.Clear();
@@ -2820,6 +2820,20 @@ struct RigExecBakedProgramImpl {
     double timedRegionUs = 0;
     double timedEpilogueUs = 0;
     size_t timedFrames = 0;
+    /// The same sums for the cold runs a measurement leaves out
+    /// (`coldRunExcluded`), which the table reports on a line of their own.
+    double coldPrologueUs = 0, coldRegionUs = 0, coldEpilogueUs = 0;
+    size_t coldFrames = 0;
+    /// Whether a cold run -- the program's first, or a forced one (a
+    /// requested full run or a moved program stamp), which runs nearly every
+    /// op -- folds into the per-step accumulators. Set at Build: only
+    /// calibration asks for it, because its fit has to cover a first frame.
+    bool measureColdRuns = false;
+    /// Whether the last measured run was cold and so left out of the
+    /// per-step accumulators and the step timing's frame sums. Set by the
+    /// executor's owner before dispatch on every measured run (never on the
+    /// cone verifier's second pass) and read by the bodies and by Run.
+    bool coldRunExcluded = false;
     /// Set while the cone verifier's second, whole-program pass runs --
     /// always, not only when a step timing asked, so that the flag means
     /// one thing -- and read by both executors. That pass is the
@@ -2827,12 +2841,15 @@ struct RigExecBakedProgramImpl {
     /// would make every step of a verified frame report two runs, and the
     /// table would describe a frame nobody asked for.
     bool measurementSuspended = false;
-    /// Whether a step may hold a nonzero stamp (startUs/endUs or an op
-    /// stamp). The owner sets it before any run whose ops stamp;
+    /// The steps that may hold a nonzero stamp (startUs/endUs or an op
+    /// stamp): the candidates of every run since the last clear whose ops
+    /// stamped, listed by the owner after the join. Only a candidate takes a
+    /// stamp, so every other step's stamps are zero. Indices into `steps`,
+    /// whose order Build fixes before any run;
     /// RigExecBakedRunStatistics::Restore only puts back stamps such a run
-    /// wrote since the last clear. RigExecBakedClearRunStamps zeroes the
-    /// stamps and resets it.
-    bool runStamped = false;
+    /// wrote since the last clear. RigExecBakedClearRunStamps zeroes these
+    /// steps' stamps and empties the list.
+    std::vector<uint32_t> stampedSteps;
 
     /// Per joint, whether this run's final frame earned a published matrix.
     /// Written by the diagnostic pass, read by the fill pass; sized at

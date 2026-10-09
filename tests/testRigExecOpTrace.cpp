@@ -13,7 +13,10 @@
 //     sequence number;
 //   * each timed op's memo and publication stamps bracket its body, whether
 //     the profiler or op timing alone asked for them, and a measurement
-//     (step timing or calibration alone) folds all three.
+//     (step timing or calibration alone) folds all three;
+//   * a measurement leaves a cold run out of the per-op sums unless
+//     calibration keeps it, the step timing table reports it on its own
+//     line, and a clear zeroes exactly the steps a run stamped.
 // argv[1] = path to the examples directory.
 #include "rigExec/bakedProgram.h"
 #include "rigExec/bakedProgramImpl.h"
@@ -477,6 +480,131 @@ TestMeasurementFoldsOperationPhases(const std::string &examplesDir)
                 bodies, memos, publications);
 }
 
+/// A cold run -- the program's first, or a forced one -- runs nearly every
+/// op, so a measurement leaves it out of the per-op sums and the step timing
+/// table describes warm frames, with the cold run's phases on a last line of
+/// their own. Calibration keeps it. A run lists the steps it stamped and the
+/// next clear zeroes exactly those. The measurement is switched on in the
+/// program itself, so no environment variable is needed.
+void
+TestStepTimingLeavesOutColdRuns(const std::string &examplesDir)
+{
+    const UsdStageRefPtr stage =
+        UsdStage::Open(examplesDir + "/ArmShotAnim.usda");
+    CHECK(stage);
+    if (!stage) return;
+    RigExecRigEvaluator rig(stage, FindRig(stage));
+    std::vector<std::string> errors;
+    CHECK(rig.Compile(&errors));
+    const std::unique_ptr<RigExecBakedProgram> program =
+        RigExecBakedProgram::Build(&rig, nullptr);
+    CHECK(program);
+    if (!program) return;
+    RigExecBakedProgramImpl &B =
+        const_cast<RigExecBakedProgramImpl &>(program->GetStepGraph());
+    B.opAdapter.measuring = true;
+    B.measureColdRuns = false;
+    // (body runs, memo runs) summed over every step.
+    const auto sums = [&B] {
+        std::pair<size_t, size_t> runs{0, 0};
+        for (const RigExecBakedStep &step : B.steps) {
+            runs.first += step.measuredRuns;
+            runs.second += step.measuredMemoRuns;
+        }
+        return runs;
+    };
+    const auto candidates = [&B] {
+        return size_t(std::count(B.opExecution.candidates.begin(),
+                                 B.opExecution.candidates.end(), char(1)));
+    };
+    const auto stamped = [](const RigExecBakedStep &step) {
+        return step.startUs || step.endUs || step.memoStartNs ||
+               step.memoEndNs || step.bodyEndNs || step.publishEndNs;
+    };
+
+    // The first run is cold: nothing folds, and with neither op timing nor
+    // the profiler on, nothing is stamped.
+    RigExecRigPose first;
+    CHECK(program->Run(UsdTimeCode(1001), &first) && first.valid);
+    CHECK(first.executedOpCount > 0);
+    CHECK(B.coldRunExcluded);
+    CHECK(sums() == std::make_pair(size_t(0), size_t(0)));
+    CHECK(B.stampedSteps.empty());
+
+    // A warm run folds exactly its own bodies and memos and lists exactly
+    // its candidates; no other step holds a stamp.
+    RigExecRigPose warm;
+    CHECK(program->Run(UsdTimeCode(1024), &warm) && warm.valid);
+    CHECK(!B.coldRunExcluded);
+    CHECK(warm.executedOpCount > 0);
+    CHECK(sums() == std::make_pair(warm.executedOpCount, candidates()));
+    CHECK(B.stampedSteps.size() == candidates());
+    std::vector<char> listed(B.steps.size(), 0);
+    for (const uint32_t index : B.stampedSteps) {
+        CHECK(index < listed.size());
+        if (index < listed.size()) listed[index] = 1;
+    }
+    size_t listedStamps = 0, unlistedStamps = 0;
+    for (size_t k = 0; k < B.steps.size(); ++k) {
+        if (stamped(B.steps[k])) ++(listed[k] ? listedStamps : unlistedStamps);
+    }
+    CHECK(listedStamps > 0 && unlistedStamps == 0);
+
+    // The table: the frame phases fold only under RIGEXEC_BAKED_STEP_TIMING,
+    // so the test supplies them; the per-kind lines come from the steps.
+    B.timedPrologueUs = B.timedRegionUs = B.timedEpilogueUs = 10.0;
+    B.timedFrames = 1;
+    B.coldPrologueUs = B.coldRegionUs = B.coldEpilogueUs = 20.0;
+    B.coldFrames = 1;
+    const std::string table = RigExecBakedStepTimingTable(B);
+    std::vector<std::string> lines;
+    for (size_t at = 0; at < table.size();) {
+        const size_t end = table.find('\n', at);
+        if (end == std::string::npos) break;
+        lines.push_back(table.substr(at, end - at));
+        at = end + 1;
+    }
+    CHECK(lines.size() >= 5);
+    if (lines.size() >= 5) {
+        // The lines a parser reads by position keep their place and form.
+        CHECK(lines[0] == "rigExec baked step timing over 1 frame(s), us/frame");
+        CHECK(lines[1].rfind("  prologue ", 0) == 0);
+        CHECK(lines[2].rfind("  step bodies ", 0) == 0);
+        size_t kindLines = 0, bodyRuns = 0;
+        for (size_t i = 3; i < lines.size(); ++i) {
+            const size_t at = lines[i].find(" per run, ");
+            if (at == std::string::npos) continue;
+            CHECK(i == 3 + kindLines);
+            ++kindLines;
+            bodyRuns += size_t(std::stoul(lines[i].substr(at + 10)));
+        }
+        // Per frame over the one warm frame: the cold run is not in them.
+        CHECK(kindLines > 0 && bodyRuns == warm.executedOpCount);
+        CHECK(3 + kindLines < lines.size() &&
+              lines[3 + kindLines].rfind("  op phases: ", 0) == 0);
+        CHECK(lines.back() == "  cold runs left out: 1 (prologue 20.0  "
+                              "region 20.0  epilogue 20.0 us/run)");
+    }
+
+    RigExecBakedClearRunStamps(&B);
+    CHECK(B.stampedSteps.empty());
+    CHECK(std::none_of(B.steps.begin(), B.steps.end(), stamped));
+
+    // A forced run is cold too, and calibration keeps one.
+    const std::pair<size_t, size_t> before = sums();
+    program->RequestFullRun();
+    RigExecRigPose forced;
+    CHECK(program->Run(UsdTimeCode(1024), &forced) && forced.valid);
+    CHECK(B.coldRunExcluded && sums() == before);
+    B.measureColdRuns = true;
+    program->RequestFullRun();
+    RigExecRigPose kept;
+    CHECK(program->Run(UsdTimeCode(1024), &kept) && kept.valid);
+    CHECK(!B.coldRunExcluded);
+    CHECK(sums() == std::make_pair(before.first + kept.executedOpCount,
+                                   before.second + candidates()));
+}
+
 /// An unresolved plain constraint target publishes invalid source state.
 /// The graph records ordinary pure callback outcomes while publication is withheld.
 void
@@ -641,6 +769,7 @@ main(int argc, char **argv)
     TestOpTimingAloneStampsOperationPhases(examplesDir,
                                            "biped/Biped_anim.usda", 1, 5);
     TestMeasurementFoldsOperationPhases(examplesDir);
+    TestStepTimingLeavesOutColdRuns(examplesDir);
     TestInvalidTargetStillExecutesUnrelatedOperations(examplesDir);
     if (failures) {
         std::printf("%d FAILURE(S)\n", failures);

@@ -4272,11 +4272,20 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
         // Counted here, at the one exit that published a pose: a frame that
         // bailed or fell back did not run the epilogue this is measuring,
         // and its prologue and region are dropped with it so that every
-        // term of the table is divided by the frames that produced it.
-        B.timedPrologueUs += prologueUs;
-        B.timedRegionUs += regionUs;
-        B.timedEpilogueUs += now() - phaseMark;
-        ++B.timedFrames;
+        // term of the table is divided by the frames that produced it. A
+        // cold run the per-step sums left out goes to sums of its own.
+        const double epilogueUs = now() - phaseMark;
+        if (B.coldRunExcluded) {
+            B.coldPrologueUs += prologueUs;
+            B.coldRegionUs += regionUs;
+            B.coldEpilogueUs += epilogueUs;
+            ++B.coldFrames;
+        } else {
+            B.timedPrologueUs += prologueUs;
+            B.timedRegionUs += regionUs;
+            B.timedEpilogueUs += epilogueUs;
+            ++B.timedFrames;
+        }
         RigExecBakedStepTimingReport(&B);
     }
     return true;

@@ -141,8 +141,8 @@ void RigExecBakedFinishHeadOp(RigExecBakedProgramImpl *, const RigExecBakedStep 
 bool RigExecBakedHeadValueChanged(const RigExecBakedProgramImpl &,
     RigExecBakedSlotDomain, uint32_t slot);
 
-/// Zeroes the last execution's flags, completion numbers and counts and, when
-/// a run since the last clear stamped (`runStamped`), every step's stamps.
+/// Zeroes the last execution's flags, completion numbers and counts, and the
+/// stamps of the steps runs since the last clear listed (`stampedSteps`).
 void RigExecBakedClearRunStamps(RigExecBakedProgramImpl *program);
 
 /// Runs every step of \p program, returning false when one of them gave the
@@ -222,11 +222,19 @@ bool RigExecBakedStepTimingRequested();
 ///
 /// The frame count and the phases come only from a frame that published a
 /// pose, and the cone verifier's second pass is excluded from everything.
+/// A cold run -- the program's first, or a forced one -- runs nearly every
+/// op, so it is left out of every sum and its phases are averaged on a last
+/// line of their own; it still counts toward the frames watched. Under
+/// calibration, whose fit keeps cold frames, it is summed like any other.
 /// The per-op sums are not gated on publication: a body is summed whenever
 /// it ran, and a memo or a publication whenever its run's op graph
 /// completed, so frames whose generation a step or the publication gave
 /// back overstate the per-kind lines against the divisor.
 void RigExecBakedStepTimingReport(RigExecBakedProgramImpl *program);
+
+/// The table RigExecBakedStepTimingReport prints, from what \p program has
+/// accumulated so far.
+std::string RigExecBakedStepTimingTable(const RigExecBakedProgramImpl &program);
 
 }  // namespace rigExec
 

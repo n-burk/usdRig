@@ -2124,7 +2124,8 @@ RigExecBakedRunStepBody(RigExecBakedProgramImpl *B,
                                 RigExecBakedStep *step, UsdTimeCode time,
                                 bool profiling)
 {
-    const bool measuring=B->opAdapter.measuring && !B->measurementSuspended;
+    const bool measuring=B->opAdapter.measuring && !B->measurementSuspended &&
+        !B->coldRunExcluded;
     const uint64_t began=profiling ? RigExecProfiler::NowUs() : 0;
     const uint64_t beganNs=measuring ? RigExecBakedNowNs() : 0;
     const size_t index=size_t(step-B->steps.data());
@@ -2143,13 +2144,15 @@ RigExecBakedRunStepBody(RigExecBakedProgramImpl *B,
 void
 RigExecBakedClearRunStamps(RigExecBakedProgramImpl *program)
 {
-    if (program->runStamped) {
-        for (RigExecBakedStep &step : program->steps) {
-            step.startUs = step.endUs = 0;
-            step.memoStartNs = step.memoEndNs = step.bodyEndNs = step.publishEndNs = 0;
-        }
-        program->runStamped = false;
+    // Only a listed step can hold a stamp, so a frame's clear costs its
+    // candidates rather than the whole program.
+    for (const uint32_t index : program->stampedSteps) {
+        if (index >= program->steps.size()) continue;
+        RigExecBakedStep &step = program->steps[index];
+        step.startUs = step.endUs = 0;
+        step.memoStartNs = step.memoEndNs = step.bodyEndNs = step.publishEndNs = 0;
     }
+    program->stampedSteps.clear();
     auto &execution = program->opExecution;
     std::fill(execution.ran.begin(), execution.ran.end(), char(0));
     std::fill(execution.candidates.begin(), execution.candidates.end(), char(0));
@@ -2301,7 +2304,6 @@ StepTimingFrames()
 void
 RigExecBakedStepTimingReport(RigExecBakedProgramImpl *program)
 {
-    RigExecBakedProgramImpl &B = *program;
     static int framesSeen = 0;
     if (framesSeen >= StepTimingFrames()) {
         return;
@@ -2309,6 +2311,13 @@ RigExecBakedStepTimingReport(RigExecBakedProgramImpl *program)
     if (++framesSeen < StepTimingFrames()) {
         return;
     }
+    const std::string out = RigExecBakedStepTimingTable(*program);
+    std::fwrite(out.data(), 1, out.size(), stderr);
+}
+
+std::string
+RigExecBakedStepTimingTable(const RigExecBakedProgramImpl &B)
+{
     const double frames = double(std::max<size_t>(B.timedFrames, 1));
     std::array<double, kStepKindCount> byKind{};
     std::array<size_t, kStepKindCount> runsByKind{};
@@ -2390,7 +2399,18 @@ RigExecBakedStepTimingReport(RigExecBakedProgramImpl *program)
             publishByKind[kind] / frames);
         out += line;
     }
-    std::fwrite(out.data(), 1, out.size(), stderr);
+    // Last, so that every line above keeps its position: the cold runs the
+    // sums leave out.
+    if (B.coldFrames) {
+        const double cold = double(B.coldFrames);
+        std::snprintf(line, sizeof(line),
+                      "  cold runs left out: %zu (prologue %.1f  region %.1f  "
+                      "epilogue %.1f us/run)\n",
+                      B.coldFrames, B.coldPrologueUs / cold,
+                      B.coldRegionUs / cold, B.coldEpilogueUs / cold);
+        out += line;
+    }
+    return out;
 }
 
 // The report.

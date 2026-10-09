@@ -201,9 +201,13 @@ _CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst)
     D.timedRegionUs = 0;
     D.timedEpilogueUs = 0;
     D.timedFrames = 0;
+    D.coldPrologueUs = D.coldRegionUs = D.coldEpilogueUs = 0;
+    D.coldFrames = 0;
+    D.measureColdRuns = src.measureColdRuns;
+    D.coldRunExcluded = false;
     D.measurementSuspended = false;
     // The steps above carry the source's stamps; the clone clears them too.
-    D.runStamped = src.runStamped;
+    D.stampedSteps = src.stampedSteps;
     D.jointMatrixPublished = src.jointMatrixPublished;
     D.chains = src.chains;
     // Per-consumer overlays borrow the live source layer only during a body.
