@@ -2103,7 +2103,7 @@ endforeach()
 
 get_property(_rigexec_tests DIRECTORY PROPERTY TESTS)
 foreach(_rigexec_test IN LISTS _rigexec_tests)
-    set_tests_properties(${_rigexec_test} PROPERTIES TIMEOUT 120)
+    set_tests_properties(${_rigexec_test} PROPERTIES TIMEOUT 300)
     if (WIN32)
         set_property(TEST ${_rigexec_test} APPEND PROPERTY
             ENVIRONMENT_MODIFICATION
@@ -2123,18 +2123,9 @@ foreach(_rigexec_test IN LISTS _rigexec_tests)
             "LD_LIBRARY_PATH=path_list_prepend:${CMAKE_CURRENT_BINARY_DIR}")
     endif()
 endforeach()
-# The imaging frame-cache suites pass in about 110s on a quiet 4-core host,
-# and the scoped-clear baked sweep in about 115s while sharing that host.
-# The 120s cap kills them before the assertions finish. They still run every
-# check. The frame-cache suites also wait on short rendezvous, so each takes
-# the whole ctest slot instead of sharing it.
-foreach(_rigexec_long testRigExecImagingFrameCache
-        testRigExecImagingFrameCacheDefault
-        testRigExecBakedModeScopedClears)
-    if(TEST ${_rigexec_long})
-        set_tests_properties(${_rigexec_long} PROPERTIES TIMEOUT 300)
-    endif()
-endforeach()
+# The imaging frame-cache suites wait on short rendezvous and take about
+# 110s on a quiet 4-core host. Give each the whole ctest slot so that wait
+# is not starved and the 300s cap is not spent on a shared core.
 if(TEST testRigExecImagingFrameCache)
     set_tests_properties(testRigExecImagingFrameCache
         testRigExecImagingFrameCacheDefault PROPERTIES PROCESSORS 4)

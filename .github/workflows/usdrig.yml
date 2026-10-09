@@ -18,7 +18,7 @@
 #     display / usdview. None of those are in this first gate.
 #   * CTest has no T0/T1 labels here. The gate is the C++ suite
 #     (`^testRigExec`) minus cone-verify doubles and the example-parity
-#     sweep, which are workstation-scale relative to the 120 s per-test
+#     sweep, which are workstation-scale relative to the per-test
 #     TIMEOUT in CMakeLists.txt.
 #
 # Jobs:
@@ -262,7 +262,7 @@ jobs:
   # --------------------------------------------------------------------------
   # C++ CTest gate. -R is a regex on the test name; there are no T0/T1
   # labels in this tree. Cone-verify doubles and the example-parity sweep
-  # stay out of the first gate (TIMEOUT 120 s, 4 vCPU).
+  # stay out of the first gate (4 vCPU).
   # --------------------------------------------------------------------------
   ctest-cpp:
     name: ctest (C++)
