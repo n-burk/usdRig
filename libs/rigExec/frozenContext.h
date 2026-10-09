@@ -162,6 +162,21 @@ struct RigExecFrameInputs {
     /// Actual source paths, parallel to layoutLeaves. Separate route rows
     /// preserve distinct reads of a path already present in values.
     std::vector<std::vector<SdfPath>> layoutSourcePaths;
+    /// The transport values no sample in `values` covers that can move with
+    /// the time, which the control digests fold: each layoutLeaves row
+    /// whose skin layout is not fixed (RigExecBakedLayoutFixedNow), and
+    /// each (revisionLeaves row, key) of an external revision's declared
+    /// input whose read can vary (RigExecBakedLeafVaryingNow). Ascending.
+    /// Both take the program's answers while they are current and ask the
+    /// stage again in the window between an edit and the next live run's
+    /// re-ask (a routed edit marks the reads it reached; a notice the
+    /// program could not route moves the program stamp), so a key sampled
+    /// in that window counts what the edit made time-varying. A fixed
+    /// layout reads one value at every time, and the sparse rows read at
+    /// Default, so neither is listed; both lists empty fold nothing,
+    /// leaving such a rig's digests as they were.
+    std::vector<uint32_t> varyingLayoutRows;
+    std::vector<std::pair<uint32_t, uint32_t>> varyingRevisionLeaves;
     /// Per-chain-revision path leaves (GeomRevision::leaves), parallel to
     /// the baked program's revisionIndex: one value per key, read on the UI
     /// thread at sample time by the live sampler's own reads
@@ -172,7 +187,9 @@ struct RigExecFrameInputs {
     /// layout keys travel separately in layoutLeaves.
     /// Transport-only: every value is a pure function of digest-covered
     /// samples (the same attributes, sampled by path in `values`, and the
-    /// head-leaf samples), so the leaves are EXCLUDED from the digest.
+    /// head-leaf samples), repeats a skin's layoutLeaves row, or reads one
+    /// value at every time, so the leaves are EXCLUDED from the digest --
+    /// except the external inputs `varyingRevisionLeaves` names.
     std::vector<std::vector<VtValue>> revisionLeaves;
     /// The same for every derived target (normals, extent and a projector's
     /// matrix targets), parallel to the baked program's derivedIndex.

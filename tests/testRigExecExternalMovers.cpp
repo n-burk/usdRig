@@ -1,6 +1,7 @@
 #include "rigExec/bakedProgramImpl.h"
 #include "rigExec/movers/moverRegistry.h"
 #include "rigExec/rigEvaluator.h"
+#include "rigExec/frameCache.h"
 #include "rigExec/frozenContext.h"
 #include "rigExecBake/bake.h"
 #include "rigExecBinary/format.h"
@@ -297,6 +298,102 @@ void TestEvaluation()
                 file->externalMovers.front();
             CHECK(mover.v2FrameValid);
             CHECK(!mover.epoch.empty() && !mover.v2Frame.empty());
+        }
+    }
+}
+
+// The frame-cache key over an external mover. Its declared inputs reach the
+// worker as revision leaves, which no sample in `values` covers, so with
+// every control static a time-sampled inputs:gain must key each frame apart
+// (one shared key would serve one frame's points at another), and the same
+// input held static must leave the key standing across frames. A static
+// gain connected in session to an animated source is an edit the program
+// cannot route: until its next run asks the leaf's variance again, the key
+// must already count the gain as varying, and an unroutable edit that
+// leaves the gain static must not. The plain and burst digests agree.
+void TestTimeVaryingInputsKeyFramesApart()
+{
+    enum class Gain { Animated, Static, ConnectedInSession };
+    for (const Gain mode :
+         {Gain::Animated, Gain::Static, Gain::ConnectedInSession}) {
+        const auto stage = UsdStage::CreateInMemory();
+        RigExecRigBuilder::Create(stage, kRig);
+        CHECK(UsdGeomPoints::Define(stage, kTarget.GetPrimPath())
+                  .CreatePointsAttr().Set(kBase));
+        const UsdPrim mover = stage->DefinePrim(
+            SdfPath("/Rig/External"), TfToken("ExternalQuadraticMover"));
+        CHECK(mover.AddAppliedSchema(TfToken("RigExecMoverAPI")));
+        CHECK(mover.CreateRelationship(TfToken("rigExec:moves"), false)
+                  .SetTargets({kTarget}));
+        const UsdAttribute gain = mover.CreateAttribute(
+            TfToken("inputs:gain"), SdfValueTypeNames->Float);
+        const UsdAttribute source =
+            stage->DefinePrim(SdfPath("/Src"))
+                .CreateAttribute(TfToken("value"), SdfValueTypeNames->Float);
+        CHECK(source.Set(0.5f, UsdTimeCode(1)) &&
+              source.Set(1.5f, UsdTimeCode(3)));
+        if (mode == Gain::Animated) {
+            CHECK(gain.Set(0.5f, UsdTimeCode(1)) &&
+                  gain.Set(1.5f, UsdTimeCode(3)));
+        } else {
+            CHECK(gain.Set(0.5f));
+        }
+        RigExecRigEvaluator evaluator(stage, kRig);
+        Compile(&evaluator);
+        CheckPose(evaluator.Evaluate(UsdTimeCode(1)), 0.5f, 1.0f);
+        if (mode == Gain::ConnectedInSession) {
+            CHECK(gain.SetConnections({source.GetPath()}));
+            CHECK(evaluator.GetLastNoticeDisposition() ==
+                  RigExecNoticeDisposition::StampBumped);
+        } else if (mode == Gain::Static) {
+            // Unroutable too, but the gain stays static when asked again.
+            CHECK(mover.SetDocumentation("a static gain"));
+            CHECK(evaluator.GetLastNoticeDisposition() ==
+                  RigExecNoticeDisposition::StampBumped);
+        }
+        std::string error;
+        CHECK(RigExecCanFreezeProgram(evaluator, &error));
+        const std::vector<RigExecValueOverride> none;
+        const bool varies = mode != Gain::Static;
+        // Sampled before any later run, then again after one.
+        for (const bool afterRun : {false, true}) {
+            if (afterRun) {
+                CheckPose(evaluator.Evaluate(UsdTimeCode(3)),
+                          mode == Gain::Static ? 0.5f : 1.5f, 1.0f);
+            }
+            RigExecChainSampleBindings pinned;
+            CHECK(RigExecBindChainSampleInputs(evaluator, &pinned, &error));
+            RigExecBurstSampleCache burst;
+            CHECK(evaluator.GetBakedProgram() &&
+                  RigExecBuildBurstSampleCache(
+                      *evaluator.GetBakedProgram(), pinned, none,
+                      RigExecFrameCacheEpochDigest(evaluator), &burst,
+                      &error));
+            std::vector<uint64_t> digests;
+            for (int frame : {1, 2, 3}) {
+                RigExecFrameInputs inputs, burstInputs;
+                CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(frame),
+                                               none, &inputs, &error));
+                CHECK(RigExecSampleFrameInputsWithBurstCache(
+                    evaluator, UsdTimeCode(frame), none, &burst,
+                    &burstInputs, &error));
+                CHECK(RigExecControlStateDigestible(inputs, none));
+                const uint64_t digest = RigExecControlStateDigest(inputs, none);
+                CHECK(RigExecControlStateDigestWithBurstCache(
+                          burstInputs, none, &burst) == digest);
+                digests.push_back(digest);
+                // Only a gain that can vary is listed; a static one is not.
+                CHECK(inputs.varyingRevisionLeaves.size() == (varies ? 1u : 0u));
+                CHECK(burstInputs.varyingRevisionLeaves ==
+                      inputs.varyingRevisionLeaves);
+                CHECK(inputs.varyingLayoutRows.empty());
+            }
+            if (varies) {
+                CHECK(digests[0] != digests[1] && digests[0] != digests[2] &&
+                      digests[1] != digests[2]);
+            } else {
+                CHECK(digests[0] == digests[1] && digests[1] == digests[2]);
+            }
         }
     }
 }
@@ -1008,6 +1105,7 @@ int main(int argc, char **argv)
         TestExternalFailureAtomicAndStagingRecovery();
         TestDeclaredScalarPublicCensus();
         TestEvaluation();
+        TestTimeVaryingInputsKeyFramesApart();
         TestDetachedExternalProgram();
         TestExport();
         TestPhasedReferenceIsBound();

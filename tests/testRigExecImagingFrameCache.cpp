@@ -4388,6 +4388,295 @@ TestOverlayMidWarmingServesNoStalePose()
     registry.Deactivate();
 }
 
+// MakeTinyRig over frames 1-3 with every control static (AlongX's tx held
+// at a default too): no sample in `values` moves between frames.
+UsdStageRefPtr
+MakeStaticTinyRig()
+{
+    UsdStageRefPtr stage = MakeTinyRig(/*staticY=*/true);
+    stage->SetStartTimeCode(1.0);
+    stage->SetEndTimeCode(3.0);
+    UsdAttribute tx =
+        stage->GetAttributeAtPath(SdfPath("/Asset/Rig/AlongX.avars:tx"));
+    tx.Clear();
+    tx.Set(10.0);
+    return stage;
+}
+
+// Every point's weights on AlongX and AlongY.
+VtFloatArray
+TinyWeights(float alongX, float alongY)
+{
+    VtFloatArray out(kTinyPointCount * 2);
+    for (size_t i = 0; i < kTinyPointCount; ++i) {
+        out[i * 2] = alongX;
+        out[i * 2 + 1] = alongY;
+    }
+    return out;
+}
+
+// rigExec:jointWeights time samples at 1, 2 and 3 that put the points of
+// each frame somewhere else.
+void
+AuthorWeightSamples(const UsdStageRefPtr &stage)
+{
+    const UsdAttribute layout = stage->GetAttributeAtPath(
+        SdfPath("/Asset/Rig/Movers/Skin_0.rigExec:jointWeights"));
+    layout.Set(TinyWeights(1.0f, 0.0f), UsdTimeCode(1.0));
+    layout.Set(TinyWeights(0.0f, 1.0f), UsdTimeCode(2.0));
+    layout.Set(TinyWeights(0.5f, 0.5f), UsdTimeCode(3.0));
+}
+
+// MakeStaticTinyRig with rigExec:jointWeights time-sampled (and a default,
+// at which compile validates the layout): the layout is not epoch state,
+// and the weights are all that moves.
+UsdStageRefPtr
+MakeAnimatedWeightsRig()
+{
+    UsdStageRefPtr stage = MakeStaticTinyRig();
+    stage->GetAttributeAtPath(
+             SdfPath("/Asset/Rig/Movers/Skin_0.rigExec:jointWeights"))
+        .Set(TinyWeights(1.0f, 0.0f));
+    AuthorWeightSamples(stage);
+    return stage;
+}
+
+// D1 for a time-varying skin layout. With every control static, no sample
+// in `values` moves between frames; the weights do, so the control digest
+// must fold them or every frame shares one key and a revisit serves the
+// points the last frame published under it. Visiting 1, 2, 1, 3, 2, each
+// visit equals the cache-off session's, and the two revisits hit. The
+// plain and burst digests key the three frames apart and agree.
+void
+TestTimeSampledSkinWeightsKeyFramesApart()
+{
+    std::printf("progress: TestTimeSampledSkinWeightsKeyFramesApart\n");
+    std::fflush(stdout);
+    const SdfPath rig("/Asset/Rig");
+    const std::vector<double> visits = {1.0, 2.0, 1.0, 3.0, 2.0};
+    const auto drive = [&](std::vector<_GenerationGeometry> *out,
+                           size_t *pulls, RigExecFrameCacheStats *stats) {
+        UsdStageRefPtr stage = MakeAnimatedWeightsRig();
+        RigExecImagingRegistry &registry =
+            RigExecImagingRegistry::GetInstance();
+        std::vector<std::string> errors;
+        CHECK(registry.Activate(stage, rig, UsdTimeCode(visits[0]), &errors));
+        out->push_back(_CaptureGeometry(registry.GetStore()->Get()));
+        for (size_t i = 1; i < visits.size(); ++i) {
+            CHECK(registry.SetTime(UsdTimeCode(visits[i])));
+            out->push_back(_CaptureGeometry(registry.GetStore()->Get()));
+        }
+        *pulls = registry.GetSessionEvaluationCount(rig);
+        *stats = registry.GetFrameCacheStats(rig);
+        registry.Deactivate();
+    };
+
+    SetEnv("RIGEXEC_FRAME_CACHE", "off");
+    std::vector<_GenerationGeometry> reference;
+    size_t pulls = 0;
+    RigExecFrameCacheStats stats;
+    drive(&reference, &pulls, &stats);
+    CHECK(reference.size() == visits.size());
+    if (reference.size() != visits.size()) {
+        return;
+    }
+    // The weights move the points: frames 1, 2 and 3 all differ.
+    CHECK(!reference[0].points.empty());
+    CHECK(!_SameGeometry(reference[0], reference[1]));
+    CHECK(!_SameGeometry(reference[0], reference[3]));
+    CHECK(!_SameGeometry(reference[1], reference[3]));
+
+    SetEnv("RIGEXEC_FRAME_CACHE", "on");
+    SetEnv("RIGEXEC_FRAME_CACHE_VERIFY", "0");
+    std::vector<_GenerationGeometry> cached;
+    drive(&cached, &pulls, &stats);
+    CHECK(cached.size() == visits.size());
+    for (size_t i = 0; i < visits.size() && i < cached.size(); ++i) {
+        if (!_SameGeometry(reference[i], cached[i])) {
+            std::printf("visit %zu: cache-on served another frame's points "
+                        "at %g\n", i, visits[i]);
+            CHECK(false);
+        }
+    }
+    if (RigExecFrameCacheModeFromEnvironment() !=
+            RigExecFrameCacheMode::Off &&
+        !RigExecFrameCacheVerifyRequested()) {
+        // Three distinct frames evaluate; both revisits are served.
+        CHECK(pulls == 3);
+        CHECK(stats.hits == 2);
+    }
+
+    // The keys themselves, on the plain and the burst routes.
+    UsdStageRefPtr stage = MakeAnimatedWeightsRig();
+    RigExecRigEvaluator evaluator(stage, rig);
+    std::vector<std::string> errors;
+    CHECK(evaluator.Compile(&errors));
+    CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
+    CHECK(evaluator.GetBakedProgram() != nullptr);
+    if (!evaluator.GetBakedProgram()) {
+        return;
+    }
+    const std::vector<RigExecValueOverride> none;
+    RigExecChainSampleBindings pinned;
+    std::string error;
+    CHECK(RigExecBindChainSampleInputs(evaluator, &pinned, &error));
+    RigExecBurstSampleCache burst;
+    CHECK(RigExecBuildBurstSampleCache(
+        *evaluator.GetBakedProgram(), pinned, none,
+        RigExecFrameCacheEpochDigest(evaluator), &burst, &error));
+    std::vector<uint64_t> digests;
+    for (double frame : {1.0, 2.0, 3.0}) {
+        RigExecFrameInputs plain, burstInputs;
+        CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(frame), none,
+                                       &plain, &error));
+        CHECK(RigExecSampleFrameInputsWithBurstCache(
+            evaluator, UsdTimeCode(frame), none, &burst, &burstInputs,
+            &error));
+        CHECK(RigExecControlStateDigestible(plain, none));
+        const uint64_t digest = RigExecControlStateDigest(plain, none);
+        CHECK(RigExecControlStateDigestWithBurstCache(burstInputs, none,
+                                                      &burst) == digest);
+        digests.push_back(digest);
+        // The one skin's row is listed and is key material.
+        CHECK(plain.varyingLayoutRows == std::vector<uint32_t>{0});
+        CHECK(plain.varyingRevisionLeaves.empty());
+        CHECK(burstInputs.varyingLayoutRows == plain.varyingLayoutRows);
+    }
+    CHECK(digests.size() == 3 && digests[0] != digests[1] &&
+          digests[0] != digests[2] && digests[1] != digests[2]);
+
+    // A fixed layout lists nothing and keys exactly as before: its row is
+    // not key material (it reads one value at every time).
+    const auto perturbedLayoutDigest = [&](RigExecFrameInputs inputs) {
+        for (std::vector<VtValue> &row : inputs.layoutLeaves) {
+            for (VtValue &value : row) {
+                if (value.IsHolding<VtFloatArray>()) {
+                    VtFloatArray weights = value.UncheckedGet<VtFloatArray>();
+                    if (!weights.empty()) {
+                        weights[0] += 0.25f;
+                    }
+                    value = VtValue(weights);
+                }
+            }
+        }
+        return RigExecControlStateDigest(inputs, none);
+    };
+    RigExecFrameInputs animatedInputs;
+    CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(2.0), none,
+                                   &animatedInputs, &error));
+    CHECK(perturbedLayoutDigest(animatedInputs) !=
+          RigExecControlStateDigest(animatedInputs, none));
+    UsdStageRefPtr fixedStage = MakeTinyRig(/*staticY=*/true);
+    RigExecRigEvaluator fixed(fixedStage, rig);
+    CHECK(fixed.Compile(&errors));
+    CHECK(fixed.Evaluate(UsdTimeCode(1.0)).valid);
+    RigExecFrameInputs fixedInputs;
+    CHECK(RigExecSampleFrameInputs(fixed, UsdTimeCode(2.0), none,
+                                   &fixedInputs, &error));
+    CHECK(fixedInputs.layoutLeaves.size() == 1 &&
+          !fixedInputs.layoutLeaves[0].empty());
+    CHECK(fixedInputs.varyingLayoutRows.empty());
+    CHECK(fixedInputs.varyingRevisionLeaves.empty());
+    CHECK(perturbedLayoutDigest(fixedInputs) ==
+          RigExecControlStateDigest(fixedInputs, none));
+
+    // A notice the program cannot route (prim metadata on the skin) moves
+    // the program stamp; fixedness, asked again before the next run, still
+    // holds, so the row stays unlisted and the key stands.
+    fixedStage->GetPrimAtPath(SdfPath("/Asset/Rig/Movers/Skin_0"))
+        .SetDocumentation("weights painted once");
+    CHECK(fixed.GetLastNoticeDisposition() ==
+          RigExecNoticeDisposition::StampBumped);
+    RigExecFrameInputs bumpedInputs;
+    CHECK(RigExecSampleFrameInputs(fixed, UsdTimeCode(2.0), none,
+                                   &bumpedInputs, &error));
+    CHECK(bumpedInputs.varyingLayoutRows.empty());
+    CHECK(RigExecControlStateDigest(bumpedInputs, none) ==
+          RigExecControlStateDigest(fixedInputs, none));
+}
+
+// D1 across an in-session edit that makes a fixed layout time-varying.
+// Under static controls frames 1-3 share one key, and the program asks
+// layout fixedness again only on its next run: every lookup or warm job
+// sampled before that run must already key the layout as varying, or the
+// notice path's playhead re-evaluation hits the pre-edit entry and so does
+// every later visit. Routed (the samples alone: Edited, which marks the
+// layout's reads) and stamp-bumped (the same samples and prim metadata in
+// one change block: StampBumped, which marks nothing), every capture after
+// the edit equals the cache-off session's.
+void
+TestInSessionWeightSamplesKeyFramesApart()
+{
+    std::printf("progress: TestInSessionWeightSamplesKeyFramesApart\n");
+    std::fflush(stdout);
+    const SdfPath rig("/Asset/Rig");
+    const std::vector<double> visits = {1.0, 2.0, 3.0, 1.0, 2.0};
+    for (const bool bumped : {false, true}) {
+        const auto drive = [&](std::vector<_GenerationGeometry> *out) {
+            UsdStageRefPtr stage = MakeStaticTinyRig();
+            RigExecImagingRegistry &registry =
+                RigExecImagingRegistry::GetInstance();
+            std::vector<std::string> errors;
+            CHECK(registry.Activate(stage, rig, UsdTimeCode(1.0), &errors));
+            CHECK(registry.SetTime(UsdTimeCode(2.0)));
+            CHECK(registry.SetTime(UsdTimeCode(3.0)));
+            {
+                SdfChangeBlock changes;
+                AuthorWeightSamples(stage);
+                if (bumped) {
+                    stage->GetPrimAtPath(SdfPath("/Asset/Rig/Movers/Skin_0"))
+                        .SetDocumentation("weights painted per frame");
+                }
+            }
+            RigExecImagingBridge *bridge = registry.GetBridge(rig);
+            CHECK(bridge != nullptr);
+            if (bridge) {
+                CHECK(bridge->GetEvaluator().GetLastNoticeDisposition() ==
+                      (bumped ? RigExecNoticeDisposition::StampBumped
+                              : RigExecNoticeDisposition::Edited));
+            }
+            // The playhead the notice path re-evaluated, then each visit.
+            out->push_back(_CaptureGeometry(registry.GetStore()->Get()));
+            for (double time : visits) {
+                CHECK(registry.SetTime(UsdTimeCode(time)));
+                out->push_back(_CaptureGeometry(registry.GetStore()->Get()));
+            }
+            registry.Deactivate();
+        };
+
+        SetEnv("RIGEXEC_FRAME_CACHE", "off");
+        std::vector<_GenerationGeometry> reference;
+        drive(&reference);
+        CHECK(reference.size() == visits.size() + 1);
+        if (reference.size() != visits.size() + 1) {
+            return;
+        }
+        // The samples move the points: the playhead (3), 1 and 2 differ.
+        CHECK(!reference[0].points.empty());
+        CHECK(!_SameGeometry(reference[0], reference[1]));
+        CHECK(!_SameGeometry(reference[0], reference[2]));
+        CHECK(!_SameGeometry(reference[1], reference[2]));
+
+        SetEnv("RIGEXEC_FRAME_CACHE", "on");
+        SetEnv("RIGEXEC_FRAME_CACHE_VERIFY", "0");
+        std::vector<_GenerationGeometry> cached;
+        drive(&cached);
+        CHECK(cached.size() == reference.size());
+        size_t stale = 0;
+        for (size_t i = 0; i < reference.size() && i < cached.size(); ++i) {
+            if (!_SameGeometry(reference[i], cached[i])) {
+                ++stale;
+            }
+        }
+        if (stale != 0) {
+            std::printf("%s edit: %zu of %zu captures served another "
+                        "frame's points\n", bumped ? "stamp-bumped" : "routed",
+                        stale, reference.size());
+            CHECK(false);
+        }
+    }
+}
+
 }  // namespace
 
 
@@ -4559,6 +4848,8 @@ main(int argc, char **argv)
     TestClearWhileWarmingKeepsCacheEmpty();
     TestFencedClearSerializesAfterPausedInsert();
     TestOverlayMidWarmingServesNoStalePose();
+    TestTimeSampledSkinWeightsKeyFramesApart();
+    TestInSessionWeightSamplesKeyFramesApart();
     TestLiveChainBindingsFollowNotices();
     if (failures == 0) {
         std::printf("testRigExecImagingFrameCache: all tests passed\n");

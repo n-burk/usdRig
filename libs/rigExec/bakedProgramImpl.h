@@ -492,6 +492,34 @@ struct RigExecBakedPathLeaves {
     bool overrides = false;
     uint64_t chainSerial = 0;
 
+    /// Whether the variance answers for key \p k (`varying[k]`, and for a
+    /// skin's layout leaves GeomRevision::layoutFixed) may predate an edit:
+    /// a notice the program could not route moved \p programStamp since the
+    /// last sample, or a routed edit or a skipped sample marked the key.
+    /// The next sample asks them again (RigExecBakedSamplePathLeaves,
+    /// RigExecBakedSampleLayoutLeaves); a reader before it asks too
+    /// (RigExecBakedLeafVaryingNow, RigExecBakedLayoutFixedNow). The bind
+    /// answers them as well, so a table not yet sampled is current unless
+    /// one of these holds.
+    bool VarianceStale(uint64_t programStamp, size_t k) const
+    {
+        return stamp != programStamp ||
+               (k < mustSample.size() && mustSample[k] != 0);
+    }
+    /// VarianceStale for any key.
+    bool AnyVarianceStale(uint64_t programStamp) const
+    {
+        if (stamp != programStamp) {
+            return true;
+        }
+        for (const char marked : mustSample) {
+            if (marked != 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /// Key \p k's value as \p T, or \p fallback when \p k is out of range or
     /// holds another type.
     template <class T>
@@ -3881,6 +3909,15 @@ void RigExecBakedSamplePathLeaves(RigExecBakedProgramImpl *program,
                                   UsdTimeCode time, bool all,
                                   const std::vector<int> &skip = {});
 
+/// Whether key \p k of \p leaves can read another value at another time,
+/// as the next sample answers it: `varying[k]` while that answer is current
+/// (RigExecBakedPathLeaves::VarianceStale false), else the rebind's own
+/// question (RigExecRevisionLeafHops) asked again without storing it.
+/// Owning thread.
+bool RigExecBakedLeafVaryingNow(const RigExecBakedProgramImpl &program,
+                                const RigExecBakedPathLeaves &leaves,
+                                size_t k);
+
 /// Re-reads, through RigExecBakedRead at \p time, every leaf that one of
 /// these says can have moved since it was last sampled, and sets its
 /// `changed` byte by bitwise comparison:
@@ -4895,6 +4932,14 @@ void RigExecBakedSampleLayoutLeaves(
     RigExecBakedProgramImpl *program,
     RigExecBakedProgramImpl::GeomRevision *revision, UsdTimeCode time,
     bool all);
+
+/// Whether \p revision's skin layout is fixed, as the next sample answers
+/// it: GeomRevision::layoutFixed while that answer is current (its layout
+/// leaves' AnyVarianceStale false), else RigExecSkinLayoutIsFixed asked
+/// again, without storing it. Owning thread.
+bool RigExecBakedLayoutFixedNow(
+    const RigExecBakedProgramImpl &program,
+    const RigExecBakedProgramImpl::GeomRevision &revision);
 
 /// The SkinTopology op's body over \p revision's leaves: a null handle while
 /// the layout is not fixed, else RigExecBuildSkinTopology of the leaves,

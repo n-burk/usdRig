@@ -776,6 +776,7 @@ _SampleRevisionLeaves(const RigExecBakedProgramImpl &B,
     };
     sampled->revisionLeaves.assign(B.revisionIndex.size(),
                                    std::vector<VtValue>());
+    sampled->varyingRevisionLeaves.clear();
     for (size_t r = 0; r < B.revisionIndex.size(); ++r) {
         const auto &[chainIndex, revisionIndex] = B.revisionIndex[r];
         const RigExecBakedProgramImpl::GeomRevision &revision =
@@ -783,6 +784,24 @@ _SampleRevisionLeaves(const RigExecBakedProgramImpl &B,
         const RigExecBakedPathLeaves &leaves = revision.leaves;
         if (!leaves.decl.assembles) {
             continue;
+        }
+        if (revision.op == RigExecRevisionOp::External &&
+            leaves.decl.externalBegin >= 0) {
+            // An external mover's declared inputs reach the worker only as
+            // these leaves, so no sample in `values` reads them: the
+            // control digests fold each one whose read can vary with the
+            // time, asked again where an edit since the live prologue's
+            // last sample may have moved the answer.
+            const size_t begin = size_t(leaves.decl.externalBegin);
+            const size_t end =
+                std::min(begin + revision.binding.externalInputs.size(),
+                         leaves.decl.keys.size());
+            for (size_t k = begin; k < end; ++k) {
+                if (RigExecBakedLeafVaryingNow(B, leaves, k)) {
+                    sampled->varyingRevisionLeaves.emplace_back(
+                        uint32_t(r), uint32_t(k));
+                }
+            }
         }
         const bool heldLayout = revision.op == RigExecRevisionOp::Skin &&
                                 revision.skinTopologyFixed &&
@@ -834,6 +853,7 @@ _SampleLayoutLeaves(const RigExecBakedProgramImpl &B,
     const size_t count = B.revisionIndex.size() + B.derivedIndex.size();
     sampled->layoutLeaves.assign(count, std::vector<VtValue>());
     sampled->layoutSourcePaths.assign(count, std::vector<SdfPath>());
+    sampled->varyingLayoutRows.clear();
     for (size_t r = 0; r < count; ++r) {
         const RigExecBakedProgramImpl::GeomRevision *revision =
             RigExecBakedLayoutRevision(B, r);
@@ -851,6 +871,13 @@ _SampleLayoutLeaves(const RigExecBakedProgramImpl &B,
             values.push_back(RigExecSampleRevisionLeaf(
                 leaves.decl.keys[k], leaves.attributes[k], refreshed, time,
                 layer));
+        }
+        // A layout that is not fixed can read another value at another
+        // time, and no sample in `values` reads it: the control digests
+        // fold the row. Fixedness is asked again where an edit since the
+        // live prologue's last sample, routed or not, may have moved it.
+        if (!RigExecBakedLayoutFixedNow(B, *revision)) {
+            sampled->varyingLayoutRows.push_back(uint32_t(r));
         }
     }
 }

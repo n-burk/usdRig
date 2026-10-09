@@ -273,6 +273,38 @@ RigExecChangedControls(const RigExecRetainedFrameState &cached,
     return changed;
 }
 
+namespace {
+
+// Whether two samples list the same external inputs the control digest
+// folds (RigExecFrameInputs::varyingRevisionLeaves) with the same values.
+bool
+_SameVaryingRevisionLeaves(const RigExecFrameInputs &a,
+                           const RigExecFrameInputs &b)
+{
+    if (a.varyingRevisionLeaves != b.varyingRevisionLeaves) {
+        return false;
+    }
+    const auto leaf = [](const RigExecFrameInputs &inputs, uint32_t row,
+                         uint32_t key) -> const VtValue * {
+        return row < inputs.revisionLeaves.size() &&
+                       key < inputs.revisionLeaves[row].size()
+                   ? &inputs.revisionLeaves[row][key]
+                   : nullptr;
+    };
+    for (const auto &[row, key] : a.varyingRevisionLeaves) {
+        const VtValue *was = leaf(a, row, key);
+        const VtValue *is = leaf(b, row, key);
+        if (!was || !is ||
+            !RigExecSameSourceValue(*was, !was->IsEmpty(), *is,
+                                    !is->IsEmpty())) {
+            return false;
+        }
+    }
+    return true;
+}
+
+}  // namespace
+
 bool
 RigExecCanReuseRetainedPose(const RigExecOutputAffectedIndex &index,
                            const RigExecRetainedFrameState &cached,
@@ -280,10 +312,13 @@ RigExecCanReuseRetainedPose(const RigExecOutputAffectedIndex &index,
                            const RigExecFrameInputs &requested,
                            const std::vector<RigExecValueOverride> &overrides)
 {
+    // The external inputs the control digest folds have no control id the
+    // index routes, so any difference among them misses, like upstream.
     if (index.Empty() || index.EpochDigest() != requestEpoch ||
         cached.epochDigest != requestEpoch ||
         cached.clusterCount != index.ClusterCount() ||
-        !RigExecSameUpstream(cached.inputs.upstream, requested.upstream)) {
+        !RigExecSameUpstream(cached.inputs.upstream, requested.upstream) ||
+        !_SameVaryingRevisionLeaves(cached.inputs, requested)) {
         return false;
     }
     const auto completeLayouts=[](const RigExecFrameInputs &inputs) {

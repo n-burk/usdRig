@@ -115,6 +115,8 @@ RigExecFrameInputs::Clear()
     values.clear();
     layoutLeaves.clear();
     layoutSourcePaths.clear();
+    varyingLayoutRows.clear();
+    varyingRevisionLeaves.clear();
     revisionLeaves.clear();
     derivedLeaves.clear();
     stageSeeds = RigExecStageFrameSeeds();

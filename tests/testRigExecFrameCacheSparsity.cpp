@@ -535,6 +535,48 @@ TestUpstreamMissesSparseReuse()
     CHECK(arrays.RetainedBytes() > authored.RetainedBytes());
 }
 
+// A frame retained under other values of a listed external input
+// (varyingRevisionLeaves, which the control digest folds) is never reused:
+// no control id names them, so at a standing time with every sampled
+// source equal the plan still misses. Unlisted leaves stay transport only.
+void
+TestVaryingRevisionLeavesMissSparseReuse()
+{
+    const RigExecBakedProgramImpl program = MakeDiamond(false);
+    RigExecOutputAffectedIndex index;
+    index.Build(program, 7);
+    index.MapControl("/Ctl/A", {1});
+    const std::vector<RigExecValueOverride> noOverrides;
+    RigExecRetainedFrameState cached =
+        MakeRetained(7, 6, UsdTimeCode(1.0), {{"/Ctl/A", 1.0}});
+    cached.inputs.revisionLeaves = {{VtValue(), VtValue(0.5f)}};
+    cached.inputs.varyingRevisionLeaves = {{0u, 1u}};
+
+    RigExecFrameInputs same = cached.inputs;
+    CHECK(RigExecCanReuseRetainedPose(index, cached, 7, same, noOverrides));
+    RigExecFrameInputs moved = cached.inputs;
+    moved.revisionLeaves[0][1] = VtValue(1.0f);
+    CHECK(RigExecChangedControls(cached, moved, noOverrides).empty());
+    CHECK(!RigExecCanReuseRetainedPose(index, cached, 7, moved, noOverrides));
+    // Listed on one side only, or listed past the leaves: a miss.
+    RigExecFrameInputs unlisted = cached.inputs;
+    unlisted.varyingRevisionLeaves.clear();
+    CHECK(!RigExecCanReuseRetainedPose(index, cached, 7, unlisted,
+                                       noOverrides));
+    RigExecRetainedFrameState absent = cached;
+    absent.inputs.varyingRevisionLeaves = {{0u, 2u}};
+    RigExecFrameInputs absentSame = absent.inputs;
+    CHECK(!RigExecCanReuseRetainedPose(index, absent, 7, absentSame,
+                                       noOverrides));
+    // An unlisted leaf that moved is not compared.
+    RigExecRetainedFrameState transport = cached;
+    transport.inputs.varyingRevisionLeaves.clear();
+    RigExecFrameInputs transportMoved = transport.inputs;
+    transportMoved.revisionLeaves[0][1] = VtValue(1.0f);
+    CHECK(RigExecCanReuseRetainedPose(index, transport, 7, transportMoved,
+                                      noOverrides));
+}
+
 // At a moved time the always-dirty steps re-run even when every compared
 // source agrees (§7's time rule, cross-frame); at a standing time the same
 // request is a hit.
@@ -1200,6 +1242,7 @@ main()
     TestPlanSparseReuse();
     TestPlanTimeRule();
     TestUpstreamMissesSparseReuse();
+    TestVaryingRevisionLeavesMissSparseReuse();
     TestRetainedPublishAndEpochEviction();
     TestCandidateIndex();
     TestUnionToleratesMismatchedWidths();

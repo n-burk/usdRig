@@ -131,6 +131,13 @@ struct RigExecFrameCacheStats {
 /// the values, in program order: they are fresh stage reads, so a moved
 /// constraint target moves the digest.
 ///
+/// Before the seeds, as a tagged block ("vary"), the transport values no
+/// sample covers that can move with the time
+/// (RigExecFrameInputs::varyingLayoutRows and varyingRevisionLeaves): a
+/// skin layout that is not fixed, an external mover's varying input. Each
+/// folds its row (and key) and its values bitwise, with no type name. Both
+/// lists empty fold nothing, so a rig without such inputs keys as before.
+///
 /// Upstream values fold after the seeds, as a tagged block ("ups"), sorted
 /// by path: each entry's path and type, then the value
 /// (RigExecUpstreamValue): a scalar through its bits, an array through its
@@ -203,8 +210,9 @@ uint64_t RigExecControlStateDigestWithBurstCache(
     const std::vector<RigExecUpstreamValue> &upstream,
     RigExecBurstSampleCache *cache);
 
-/// Whether every value in \p inputs (its upstream values included) and
-/// \p overrides can be digested exactly.
+/// Whether every value in \p inputs (its upstream values and the varying
+/// transport values included) and \p overrides can be digested exactly; a
+/// varying transport row or key the vector does not hold answers false.
 /// An unhashable held type (one VtValue cannot hash and the digest has no
 /// bitwise fold for) answers false, and the frame must bypass the cache --
 /// the digest still folds the type name so it stays defined, but two

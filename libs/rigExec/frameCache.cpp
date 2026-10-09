@@ -20,6 +20,7 @@
 #include "pxr/base/gf/vec3d.h"
 #include "pxr/base/gf/vec3f.h"
 #include "pxr/base/gf/vec3h.h"
+#include "pxr/base/gf/vec3i.h"
 #include "pxr/base/gf/vec4d.h"
 #include "pxr/base/gf/vec4f.h"
 #include "pxr/base/gf/vec4h.h"
@@ -360,6 +361,86 @@ _FoldVtValue(uint64_t hash, const VtValue &value)
     return _FoldBytes(hash, "unhashable", 10);
 }
 
+// One transport leaf, by the holders RigExecSampleRevisionLeaf answers: a
+// holder tag, then its storage bitwise. Folds no type name, so it neither
+// allocates nor demangles; any other holder (none is sampled) takes the
+// general fold under a tag of its own.
+uint64_t
+_FoldLeafValue(uint64_t hash, const VtValue &value)
+{
+    if (value.IsEmpty()) {
+        return _FoldU64(hash, 0);
+    }
+#define _RIGEXEC_FOLD_LEAF(tag, type, expr)            \
+    if (value.IsHolding<type>()) {                     \
+        const type &held = value.UncheckedGet<type>(); \
+        hash = _FoldU64(hash, tag);                    \
+        return expr;                                   \
+    }
+    _RIGEXEC_FOLD_LEAF(1, VtIntArray, _FoldArray(hash, held));
+    _RIGEXEC_FOLD_LEAF(2, VtFloatArray, _FoldArray(hash, held));
+    _RIGEXEC_FOLD_LEAF(3, int, _FoldScalar(hash, held));
+    _RIGEXEC_FOLD_LEAF(4, float, _FoldScalar(hash, held));
+    _RIGEXEC_FOLD_LEAF(5, double, _FoldScalar(hash, held));
+    _RIGEXEC_FOLD_LEAF(6, bool, _FoldScalar(hash, held));
+    _RIGEXEC_FOLD_LEAF(7, GfVec3f, _FoldBytes(hash, held.data(), 3 * sizeof(float)));
+    _RIGEXEC_FOLD_LEAF(8, GfVec3d, _FoldBytes(hash, held.data(), 3 * sizeof(double)));
+    _RIGEXEC_FOLD_LEAF(9, GfVec3i, _FoldBytes(hash, held.data(), 3 * sizeof(int)));
+    _RIGEXEC_FOLD_LEAF(10, GfMatrix4d, _FoldBytes(hash, held.data(), 16 * sizeof(double)));
+    _RIGEXEC_FOLD_LEAF(11, VtArray<GfVec2f>, _FoldArray(hash, held));
+    _RIGEXEC_FOLD_LEAF(12, VtVec3fArray, _FoldArray(hash, held));
+    _RIGEXEC_FOLD_LEAF(13, VtDoubleArray, _FoldArray(hash, held));
+    // The token's own string, length first; an empty token reads no
+    // string at all.
+    _RIGEXEC_FOLD_LEAF(14, TfToken,
+                       held.IsEmpty()
+                           ? _FoldU64(hash, 0)
+                           : _FoldString(_FoldU64(hash, held.size()),
+                                         held.GetString()));
+#undef _RIGEXEC_FOLD_LEAF
+    return _FoldVtValue(_FoldU64(hash, 15), value);
+}
+
+// The transport values no sample covers that can move with the time
+// (RigExecFrameInputs::varyingLayoutRows, varyingRevisionLeaves): a tag, then
+// per list its count and per entry its coordinates and values. A coordinate
+// the vector does not hold folds a marker (RigExecControlStateDigestible
+// refuses it). Both lists empty fold nothing.
+uint64_t
+_FoldVaryingTransport(uint64_t hash, const RigExecFrameInputs &inputs)
+{
+    if (inputs.varyingLayoutRows.empty() &&
+        inputs.varyingRevisionLeaves.empty()) {
+        return hash;
+    }
+    constexpr uint64_t kAbsent = ~uint64_t(0);
+    hash = _FoldBytes(hash, "vary\x1f", 5);
+    hash = _FoldU64(hash,
+                    static_cast<uint64_t>(inputs.varyingLayoutRows.size()));
+    for (const uint32_t row : inputs.varyingLayoutRows) {
+        hash = _FoldU64(hash, row);
+        if (row >= inputs.layoutLeaves.size()) {
+            hash = _FoldU64(hash, kAbsent);
+            continue;
+        }
+        const std::vector<VtValue> &values = inputs.layoutLeaves[row];
+        hash = _FoldU64(hash, static_cast<uint64_t>(values.size()));
+        for (const VtValue &value : values) {
+            hash = _FoldLeafValue(hash, value);
+        }
+    }
+    hash = _FoldU64(hash,
+                    static_cast<uint64_t>(inputs.varyingRevisionLeaves.size()));
+    for (const auto &[row, key] : inputs.varyingRevisionLeaves) {
+        hash = _FoldU64(hash, (uint64_t(row) << 32) | uint64_t(key));
+        hash = row < inputs.revisionLeaves.size() &&
+                       key < inputs.revisionLeaves[row].size()
+                   ? _FoldLeafValue(hash, inputs.revisionLeaves[row][key])
+                   : _FoldU64(hash, kAbsent);
+    }
+    return hash;
+}
+
 // Payload bytes of one VtValue, by the bench's counting: array payloads and
 // scalar sizes; unknown types count the shell (the report says so).
 size_t
@@ -559,6 +640,7 @@ RigExecControlStateDigest(const RigExecFrameInputs &inputs,
         hash = _FoldU64(hash, RigExecSampleDigest(*kv.second));
     }
     hash = _FoldHeadLeafConstants(hash, inputs);
+    hash = _FoldVaryingTransport(hash, inputs);
     hash = _FoldStageSeeds(hash, inputs.stageSeeds);
     hash = _FoldUpstream(hash, upstream);
 
@@ -644,6 +726,8 @@ RigExecControlStateDigestWithBurstCache(
         hash = _FoldU64(hash, level1);
     }
     hash = _FoldHeadLeafConstants(hash, inputs);
+    // Per-frame values with no memo, folded as the plain digest folds them.
+    hash = _FoldVaryingTransport(hash, inputs);
     // The seeds fold fresh every frame, exactly as in the plain digest:
     // they are per-frame stage reads, so no static memo serves them.
     hash = _FoldStageSeeds(hash, inputs.stageSeeds);
@@ -707,6 +791,24 @@ RigExecControlStateDigestible(
     }
     if (inputs.headLeafConstants && !inputs.headLeafConstants->digestible) {
         return false;
+    }
+    for (const uint32_t row : inputs.varyingLayoutRows) {
+        if (row >= inputs.layoutLeaves.size()) {
+            return false;
+        }
+        for (const VtValue &value : inputs.layoutLeaves[row]) {
+            if (_ClassifyVtValue(value) == _ValueFold::Unhashable) {
+                return false;
+            }
+        }
+    }
+    for (const auto &[row, key] : inputs.varyingRevisionLeaves) {
+        if (row >= inputs.revisionLeaves.size() ||
+            key >= inputs.revisionLeaves[row].size() ||
+            _ClassifyVtValue(inputs.revisionLeaves[row][key]) ==
+                _ValueFold::Unhashable) {
+            return false;
+        }
     }
     for (const RigExecUpstreamValue &value : inputs.upstream) {
         if (_ClassifyVtValue(value.value) == _ValueFold::Unhashable) {

@@ -107,7 +107,10 @@ std::vector<RigExecControlId> RigExecChangedControls(
     const std::vector<RigExecValueOverride> &requestedOverrides);
 
 /// Whether the sampled request proves the retained whole pose reusable.
-/// Any affected output falls through to normal graph evaluation.
+/// Any affected output falls through to normal graph evaluation, and so
+/// does any difference in the upstream values or in the listed external
+/// inputs (RigExecFrameInputs::varyingRevisionLeaves), which no control id
+/// names.
 bool RigExecCanReuseRetainedPose(
     const RigExecOutputAffectedIndex &index,
     const RigExecRetainedFrameState &cached, uint64_t requestEpoch,

@@ -3105,7 +3105,7 @@ RigExecBakedSamplePathLeaves(RigExecBakedProgramImpl *program,
     RigExecBakedProgramImpl &B = *program;
     const bool overrides =
         B.interactiveOverrides && !B.interactiveOverrides->empty();
-    all = all || !leaves->sampled || leaves->stamp != B.programStamp;
+    all = all || !leaves->sampled;
     const bool overridden = overrides || leaves->overrides;
     const bool chainsMoved = leaves->chainSerial != B.pathLeafChainSerial;
     const bool timeMoved = !leaves->sampled || time != leaves->time;
@@ -3130,7 +3130,7 @@ RigExecBakedSamplePathLeaves(RigExecBakedProgramImpl *program,
             continue;
         }
         const RigExecRevisionLeafKey &key = leaves->decl.keys[k];
-        const bool rebind = all || leaves->mustSample[k];
+        const bool rebind = all || leaves->VarianceStale(B.programStamp, k);
         const bool atTime = key.time == RigExecRevisionLeafTime::AtTime;
         if (!rebind && !overridden && !chainsMoved &&
             !(atTime && timeMoved && (leaves->varying[k] || defaultMoved))) {
@@ -3173,6 +3173,23 @@ RigExecBakedSamplePathLeaves(RigExecBakedProgramImpl *program,
     leaves->stamp = B.programStamp;
     leaves->overrides = overrides;
     leaves->chainSerial = B.pathLeafChainSerial;
+}
+
+bool
+RigExecBakedLeafVaryingNow(const RigExecBakedProgramImpl &B,
+                           const RigExecBakedPathLeaves &leaves, size_t k)
+{
+    if (k >= leaves.decl.keys.size() || k >= leaves.attributes.size()) {
+        return false;
+    }
+    if (!leaves.VarianceStale(B.programStamp, k)) {
+        return k < leaves.varying.size() && leaves.varying[k] != 0;
+    }
+    std::vector<SdfPath> hops;
+    bool varying = false;
+    RigExecRevisionLeafHops(leaves.decl.keys[k], leaves.attributes[k], &hops,
+                            &varying);
+    return varying;
 }
 
 // The skin layouts.
@@ -3270,13 +3287,20 @@ RigExecBakedSampleLayoutLeaves(RigExecBakedProgramImpl *program,
     revision->layoutFixedChanged = false;
     // Variance can change on a retained program after an authored layout edit.
     // Capture source metadata only when its owning-thread bindings refresh.
-    if (all || !leaves.sampled || leaves.stamp != B.programStamp ||
-        std::any_of(leaves.mustSample.begin(), leaves.mustSample.end(),
-                    [](char marked) { return marked != 0; })) {
-        revision->layoutFixed = RigExecSkinLayoutIsFixed(revision->moverPrim);
-    }
+    revision->layoutFixed = all || !leaves.sampled
+        ? RigExecSkinLayoutIsFixed(revision->moverPrim)
+        : RigExecBakedLayoutFixedNow(B, *revision);
     RigExecBakedSamplePathLeaves(&B, &leaves, time, all);
 
+}
+
+bool
+RigExecBakedLayoutFixedNow(const RigExecBakedProgramImpl &B,
+                           const RigExecBakedProgramImpl::GeomRevision &revision)
+{
+    return revision.layoutLeaves.AnyVarianceStale(B.programStamp)
+        ? RigExecSkinLayoutIsFixed(revision.moverPrim)
+        : revision.layoutFixed;
 }
 
 void
