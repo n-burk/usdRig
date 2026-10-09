@@ -6348,8 +6348,9 @@ TestARangeChainCutsOffUnmovedRanges()
     CHECK(B.chainVersionMismatches == 0);
 }
 
-/// Three matrix movers over 10,000 points authored Zeta, Middle, Alpha, so
-/// the chain runs them in that order while their paths sort the other way.
+/// Three matrix movers over 10,000 points authored Alpha, Middle, Zeta;
+/// mover discovery runs siblings bottom to top, so the chain runs Zeta,
+/// Middle, Alpha while their paths sort the other way.
 /// Zeta's and Alpha's inputs:defaultWeight leave [0, 1] at frame 2, so both
 /// joins emit a line there.
 UsdStageRefPtr
@@ -6374,7 +6375,7 @@ MakeReversedLinesStage()
         .GetAttribute(TfToken("points"))
         .Set(base);
     stage->DefinePrim(SdfPath("/Asset/Rig/Movers"), TfToken("Scope"));
-    for (const char *name : {"Zeta", "Middle", "Alpha"}) {
+    for (const char *name : {"Alpha", "Middle", "Zeta"}) {
         const UsdPrim mover = stage->DefinePrim(
             SdfPath("/Asset/Rig/Movers").AppendChild(TfToken(name)),
             TfToken("RigExecMatrixMover"));
