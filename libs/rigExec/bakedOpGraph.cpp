@@ -333,6 +333,10 @@ void CopySkinBodyOutputs(RigExecBakedProgramImpl::GeomRevision *a,
     a->fullStrength=b.fullStrength;a->partitionStale=b.partitionStale;a->acceptance=b.acceptance;
     a->currentPhasePacket=b.currentPhasePacket;a->publishedWeightValues=b.publishedWeightValues;
     a->weightFieldPublished=b.weightFieldPublished;a->topology=b.topology;a->topologyResolved=b.topologyResolved;
+    // The arrays' content versions the copied RevisionPacket key carries.
+    // The overlay's reuse claim names the outgoing program's op value and
+    // is not carried.
+    a->envelopeVersion=b.envelopeVersion;a->weightValuesVersion=b.weightValuesVersion;
     a->stagingOutput=b.stagingOutput;a->output=b.output;a->resultStatus=b.resultStatus;
     a->currentSource=b.currentSource;a->ran=b.ran;a->lastStatus=b.lastStatus;
     // The buffers' roles and the published points' version, with the
@@ -422,6 +426,8 @@ void RigExecBakedAdoptSkinOpState(RigExecBakedProgramImpl *program,const RigExec
             destination.initialized=true;destination.changed=0;
             if(mapped<B.chainContentKeys.size() && size_t(id)<P.chainContentKeys.size())
                 B.chainContentKeys[mapped]=P.chainContentKeys[size_t(id)];
+            if(mapped<B.packetContentKeys.size() && size_t(id)<P.packetContentKeys.size())
+                B.packetContentKeys[mapped]=P.packetContentKeys[size_t(id)];
         }
         // MarkSkipped preserves program-size facts on the retained body.
         auto &retainedStep=B.steps[op.originalIndex];
@@ -492,6 +498,30 @@ void VerifyChainVersion(RigExecBakedProgramImpl *program,RigExecValueId id)
         ++B.chainVersionMismatches;
         TF_VERIFY(false,"domain %u slot %u: the point content version and the "
                   "points' bytes disagree on a change",value.domain,value.slot);
+    }
+    last.swap(content);
+}
+
+// RIGEXEC_VERIFY_PACKET_VERSIONS, owner thread, after \p id published: a
+// RevisionPacket whose float arrays key by content version must tell the
+// change their bytes tell. An inexact packet's key also carries its inputs,
+// which the bytes do not, so it is not checked.
+void VerifyPacketVersion(RigExecBakedProgramImpl *program,RigExecValueId id)
+{
+    auto &B=*program;
+    if(size_t(id)>=B.packetContentKeys.size()) return;
+    const auto &value=B.opAdapter.values[size_t(id)];
+    if(value.domain!=uint32_t(RigExecBakedSlotDomain::RevisionPacket)) return;
+    auto &last=B.packetContentKeys[size_t(id)];
+    std::string content;
+    if(!RigExecBakedOpValueKeyIsExact(B,RigExecBakedSlotDomain::RevisionPacket,value.slot) ||
+       !RigExecBakedPacketContentKey(B,value.slot,&content)) {
+        last.clear(); return;
+    }
+    if(!last.empty() && (last!=content)!=(value.changed!=0)) {
+        ++B.packetVersionMismatches;
+        TF_VERIFY(false,"RevisionPacket slot %u: the arrays' content versions and "
+                  "their bytes disagree on a change",value.slot);
     }
     last.swap(content);
 }
@@ -671,6 +701,27 @@ bool RigExecBakedCompileOpGraph(RigExecBakedProgramImpl *B,std::string *error)
     B->verifyChainVersions=TfGetenvBool("RIGEXEC_VERIFY_CHAIN_VERSIONS",false);
     B->chainContentKeys.assign(B->verifyChainVersions?state.values.size():0,std::string());
     B->chainVersionMismatches=0;
+    B->verifyPacketVersions=TfGetenvBool("RIGEXEC_VERIFY_PACKET_VERSIONS",false);
+    B->packetContentKeys.assign(B->verifyPacketVersions?state.values.size():0,std::string());
+    B->packetVersionMismatches=0;
+    // Each chain revision's WeightPacket op value, whose revision its
+    // overlay reuse is keyed by. Ids are this compile's, so no earlier
+    // claim stands.
+    {
+        std::vector<int> packetValue;
+        for(size_t i=0;i<state.values.size();++i) {
+            const auto &value=state.values[i];
+            if(value.domain!=uint32_t(RigExecBakedSlotDomain::WeightPacket)) continue;
+            if(value.slot>=packetValue.size()) packetValue.resize(size_t(value.slot)+1,-1);
+            packetValue[value.slot]=int(i);
+        }
+        for(auto &chain:B->chains) for(auto &revision:chain.revisions) {
+            revision.weightPacketValue=revision.weightObject>=0 &&
+                size_t(revision.weightObject)<packetValue.size()
+                ? packetValue[size_t(revision.weightObject)] : -1;
+            revision.weightValuesHeld=false;
+        }
+    }
     BuildSpaceLeafIndex(B);
     // The skip callback below changes state only through MarkSkipped, whose
     // counters only geometry bodies set, SkipGeometryStep on geometry kinds
@@ -887,10 +938,13 @@ bool RigExecBakedExecuteOpGraph(RigExecBakedProgramImpl *program,UsdTimeCode tim
                 "op %u: a path-leaf version key and its content key disagree on a change",c);
     // After the join, so the workers do no verification: nothing a run
     // writes later moves the points a published value describes.
-    if(B.verifyChainVersions)
+    if(B.verifyChainVersions || B.verifyPacketVersions)
         for(uint32_t c=0;c<B.opGraph.ops.size() && c<B.opExecution.ran.size();++c)
             if(B.opExecution.ran[c])
-                for(const auto id:B.opGraph.ops[c].descriptor.writes) VerifyChainVersion(&B,id);
+                for(const auto id:B.opGraph.ops[c].descriptor.writes) {
+                    if(B.verifyChainVersions) VerifyChainVersion(&B,id);
+                    if(B.verifyPacketVersions) VerifyPacketVersion(&B,id);
+                }
     if(!ok) {
         state.retainedFirst.clear();
         B.everRan=false;

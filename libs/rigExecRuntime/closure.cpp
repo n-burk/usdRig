@@ -741,6 +741,21 @@ bool RrExecuteOpGraph(RrProgram *p,bool force,std::string *error)
         if(!last.empty() && (last!=content)!=(value.changed!=0) && chainMismatch<0) chainMismatch=int64_t(id);
         last.swap(content);
     };
+    // RIGEXEC_VERIFY_PACKET_VERSIONS: the same for a RevisionPacket's
+    // envelope and weight-field versions.
+    const bool verifyPackets=p->verifyPacketVersions;
+    if(verifyPackets) s.packetContentKeys.resize(state.values.size());
+    int64_t packetMismatch=-1;
+    const auto verifyPacket=[&](RigExecValueId id) {
+        if(!verifyPackets) return;
+        const auto &value=state.values[size_t(id)];
+        if(value.domain!=uint32_t(RigExecWireSlotDomain::RevisionPacket)) return;
+        std::string content;
+        if(!RrGeometryPacketContentKey(p,value.slot,&content)) return;
+        auto &last=s.packetContentKeys[size_t(id)];
+        if(!last.empty() && (last!=content)!=(value.changed!=0) && packetMismatch<0) packetMismatch=int64_t(id);
+        last.swap(content);
+    };
     const auto publish=[&](RigExecValueId id) {
         // A fixed-size value compares in place; any other through its key.
         auto &value=state.values[size_t(id)];
@@ -876,7 +891,7 @@ bool RrExecuteOpGraph(RrProgram *p,bool force,std::string *error)
             if(done && v.slot==done->slot && v.domain==uint32_t(RigExecWireSlotDomain::ChainDirty))
                 RigExecOpPublishValue(&v,[&](uint32_t,uint32_t,std::string *key){key->append(done->key);});
             else if(!RrPublishSmallValue(p,&v)) RigExecOpPublishValue(&v,sample);
-            verifyChain(id);
+            verifyChain(id); verifyPacket(id);
             if(v.domain==uint32_t(RigExecWireSlotDomain::RevisionDone)) done=&v;
             if(v.domain==uint32_t(RigExecWireSlotDomain::PropertyResult)) s.propertyVersionChanged[v.slot]=v.changed;
             if(v.domain==uint32_t(RigExecWireSlotDomain::WeightField)) s.weightFieldChanged[v.slot]=v.changed;
@@ -899,6 +914,12 @@ bool RrExecuteOpGraph(RrProgram *p,bool force,std::string *error)
     if(chainMismatch>=0) {
         if(error) *error="value "+std::to_string(chainMismatch)+
             ": its point content version and its points' bytes disagree on a change";
+        state.everRan=false; s.everRan=false;
+        return false;
+    }
+    if(packetMismatch>=0) {
+        if(error) *error="value "+std::to_string(packetMismatch)+
+            ": its packet's array content versions and their bytes disagree on a change";
         state.everRan=false; s.everRan=false;
         return false;
     }

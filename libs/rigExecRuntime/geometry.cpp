@@ -2606,7 +2606,8 @@ RrGeoPacketMatches(int op, const RrGeoMoverParameters &p)
 // \p count entering points.
 RrGeoAcceptance
 RrGeoRevisionKernelAcceptance(int op, const RrGeoMoverParameters &p,
-                              size_t count)
+                              size_t count,
+                              const bool *envelopeResolves = nullptr)
 {
     if (!RrGeoPacketMatches(op, p)) {
         return RrGeoAcceptance::Refuses;
@@ -2632,7 +2633,8 @@ RrGeoRevisionKernelAcceptance(int op, const RrGeoMoverParameters &p,
         // revision fails, whatever the kernel answered.
         if (RrGeoRevisionTakesSeparateBlend(op, p.weights) &&
             !RrGeoEnvelopeIsFullStrength(p.weights) &&
-            !p.weights.ResolvesAll(count)) {
+            !(envelopeResolves ? *envelopeResolves
+                               : p.weights.ResolvesAll(count))) {
             return RrGeoAcceptance::Refuses;
         }
         return wire;
@@ -2648,6 +2650,16 @@ bool RrGeoPointBitsEqual(const std::vector<RrVec3f> &a,const std::vector<RrVec3f
     static_assert(sizeof(RrVec3f)==3*sizeof(float),"points compare as packed floats");
     return a.size()==b.size() &&
         (a.empty() || std::memcmp(a.data(),b.data(),a.size()*sizeof(RrVec3f))==0);
+}
+// RigExecBakedNoteFloats: \p field takes \p scratch's floats and \p version
+// moves, unless the two hold the same bytes.
+void RrGeoNoteFloats(std::vector<float> *field,std::vector<float> *scratch,uint64_t *version)
+{
+    if(field->size()==scratch->size() && (field->empty() ||
+       std::memcmp(field->data(),scratch->data(),field->size()*sizeof(float))==0))
+        return;
+    field->swap(*scratch);
+    ++*version;
 }
 // The program's CopyMovedPoints: \p output takes \p staging's points, block
 // by block where the bytes differ; returns whether any did.
@@ -3204,6 +3216,16 @@ struct RrGeometryScratch {
         RrGeoWeightPacket currentPhasePacket;
         RrRetainedArray<float> weightField;
         bool weightFieldPublished = false;
+        // As GeomRevision's: the content versions the RevisionPacket key
+        // carries for `envelope` and `weightField`, bumped exactly when
+        // their bytes move; and the packet arrays `weightField` was last
+        // resolved from at `weightFieldCount` points, held so that an equal
+        // handle out of RrGeoStorePacket is an equal packet (it allocates
+        // new arrays whenever the packet differs from its cache).
+        uint64_t envelopeVersion = 0, weightFieldVersion = 0;
+        std::shared_ptr<const RrGeoWeightPacket::Arrays> weightFieldArrays;
+        size_t weightFieldCount = 0;
+        std::vector<float> resolveScratch;
         std::vector<RrVec3f> lastAuxPoints;
         std::string resultStatus;
         // Per entry of the wire revision's point_bindings, the chain
@@ -6268,6 +6290,19 @@ RrGeoRunInfluenceFoldStep(RrProgram *program, RrGeometryScratch *scratch,
     return true;
 }
 
+void
+RrGeoResolveEnvelope(RrGeometryScratch::Revision *rev, size_t count)
+{
+    // As ResolveAll into `envelope` leaves it (unchanged when it fails),
+    // with its content version (bakedGeometry.cpp, ResolveEnvelope).
+    rev->envelopeOk =
+        rev->parameters.weights.ResolveAll(count, &rev->resolveScratch);
+    if (rev->envelopeOk) {
+        RrGeoNoteFloats(&rev->envelope, &rev->resolveScratch,
+                        &rev->envelopeVersion);
+    }
+}
+
 bool
 RrGeoRunRevisionStaticStep(RrProgram *program, RrGeometryScratch *scratch,
                            size_t chainIndex, size_t revisionIndex,
@@ -6364,15 +6399,36 @@ RrGeoRunRevisionStaticStep(RrProgram *program, RrGeometryScratch *scratch,
             const size_t logicalCount = wire.weightOperationDomain
                 ? size_t(1)
                 : chain.lastBase.size();
-            if(id>=0 && size_t(id)<store.revisionPublish.size())
-                store.revisionPublish[size_t(id)].weightField.clear();
-            auto &fieldValues=rev.weightField.Write();
-            if (!packet.ResolveAll(logicalCount, &fieldValues)) {
-                fieldValues.assign(logicalCount, 0.0f);
-                for (size_t i = 0; i < logicalCount; ++i) {
-                    const float w = packet.Resolve(i, logicalCount);
-                    fieldValues[i] = w < 0.0f ? 0.0f : w;
+            // The field is a function of the packet and the count alone:
+            // reused while RrGeoStorePacket hands back the arrays it was
+            // resolved from (held, so no other packet can take their
+            // address). A current-phase packet patches its arrays in.
+            const bool shared =
+                !wire.weightCurrentPhase && packet.arrays != nullptr;
+            if (!shared || packet.arrays != rev.weightFieldArrays ||
+                rev.weightFieldCount != logicalCount) {
+                std::vector<float> &resolved = rev.resolveScratch;
+                if (!packet.ResolveAll(logicalCount, &resolved)) {
+                    resolved.assign(logicalCount, 0.0f);
+                    for (size_t i = 0; i < logicalCount; ++i) {
+                        const float w = packet.Resolve(i, logicalCount);
+                        resolved[i] = w < 0.0f ? 0.0f : w;
+                    }
                 }
+                const std::vector<float> &held = rev.weightField.Read();
+                if (held.size() != resolved.size() ||
+                    (!held.empty() &&
+                     std::memcmp(held.data(), resolved.data(),
+                                 held.size() * sizeof(float)) != 0)) {
+                    // Dropped first, so the swap reuses the buffer unless
+                    // a reader still holds it.
+                    if(id>=0 && size_t(id)<store.revisionPublish.size())
+                        store.revisionPublish[size_t(id)].weightField.clear();
+                    rev.weightField.swap(resolved);
+                    ++rev.weightFieldVersion;
+                }
+                rev.weightFieldArrays = shared ? packet.arrays : nullptr;
+                rev.weightFieldCount = logicalCount;
             }
             rev.weightFieldPublished = true;
         }
@@ -6405,21 +6461,21 @@ RrGeoRunRevisionStaticStep(RrProgram *program, RrGeometryScratch *scratch,
             rev.fullStrength =
                 RrGeoEnvelopeIsFullStrength(rev.parameters.weights);
             if (!rev.fullStrength) {
-                rev.envelopeOk =
-                    rev.parameters.weights.ResolveAll(count, &rev.envelope);
+                RrGeoResolveEnvelope(&rev, count);
             }
         }
         // From the validation the chunk's kernel runs first, over the count
-        // it is applied to.
+        // it is applied to; a wire's envelope validation is the resolve
+        // above, under the same predicates.
         rev.acceptance = RrGeoRevisionKernelAcceptance(int(wire.op),
-                                                       rev.parameters, count);
+                                                       rev.parameters, count,
+                                                       &rev.envelopeOk);
         return true;
     }
     rev.layoutUsable = RrGeoSkinLayoutIsUsable(rev.parameters, count);
     rev.fullStrength = RrGeoEnvelopeIsFullStrength(rev.parameters.weights);
     if (!rev.fullStrength) {
-        rev.envelopeOk =
-            rev.parameters.weights.ResolveAll(count, &rev.envelope);
+        RrGeoResolveEnvelope(&rev, count);
     }
     rev.acceptance = RrGeoSkinAcceptance(rev);
     if (rev.chunked) {
@@ -6953,7 +7009,30 @@ void RrOpParametersKey(std::string *key, const RrGeoMoverParameters &p)
     const bool frame = bool(p.externalFrame); RrOpBytes(key, frame);
     if (frame) RrOpBytes(key, *p.externalFrame);
 }
+// The RevisionPacket key: with \p content, the envelope's and the field's
+// bytes in place of their content versions.
+void RrOpPacketKey(std::string *key, const RrGeometryScratch::Revision &rev, bool content)
+{
+    RrOpParametersKey(key,rev.parameters); RrOpBytes(key,rev.status.state);
+    RrOpBytes(key,rev.status.firstBadAddress);
+    RrOpBytes(key,rev.layoutUsable); RrOpBytes(key,rev.envelopeOk);
+    if (content) RrOpBytes(key,rev.envelope); else RrOpBytes(key,rev.envelopeVersion);
+    RrOpBytes(key,rev.fullStrength); RrOpBytes(key,rev.precedingCount); RrOpBytes(key,rev.partitionStale);
+    RrOpBytes(key,rev.weightFieldPublished);
+    if (content) RrOpBytes(key,rev.weightField.Read()); else RrOpBytes(key,rev.weightFieldVersion);
+    RrOpBytes(key,uint8_t(rev.acceptance));
+}
 } // namespace
+
+bool RrGeometryPacketContentKey(const RrProgram *program, uint32_t slot, std::string *key)
+{
+    const auto *scratch = static_cast<const RrGeometryScratch *>(program->geo.get());
+    key->clear();
+    if (!scratch || slot >= program->geometry->revisionIndex.size()) return false;
+    const auto &id=program->geometry->revisionIndex[slot];
+    RrOpPacketKey(key,scratch->chains[size_t(id.first)].revisions[size_t(id.second)],true);
+    return true;
+}
 
 bool RrGeometryChainContentKey(const RrProgram *program, RigExecWireSlotDomain domain,
     uint32_t slot, std::string *key)
@@ -7056,13 +7135,11 @@ void RrGeometryOpValueKey(const RrProgram *program, RigExecWireSlotDomain domain
     }
     if (!rev) return;
     switch(domain) {
+    // Its two resolved float arrays key by the content versions
+    // RevisionStatic bumps exactly when their bytes move;
+    // RrGeometryPacketContentKey is the same key over the bytes.
     case RigExecWireSlotDomain::RevisionPacket:
-        RrOpParametersKey(key,rev->parameters); RrOpBytes(key,rev->status.state);
-        RrOpBytes(key,rev->status.firstBadAddress);
-        RrOpBytes(key,rev->layoutUsable); RrOpBytes(key,rev->envelopeOk); RrOpBytes(key,rev->envelope);
-        RrOpBytes(key,rev->fullStrength); RrOpBytes(key,rev->precedingCount); RrOpBytes(key,rev->partitionStale);
-        RrOpBytes(key,rev->weightFieldPublished); RrOpBytes(key,rev->weightField.Read());
-        RrOpBytes(key,uint8_t(rev->acceptance)); break;
+        RrOpPacketKey(key,*rev,false); break;
     case RigExecWireSlotDomain::RevisionTransforms:
         RrOpBytes(key,rev->influences); RrOpBytes(key,rev->influencesValid);
         RrOpBytes(key,rev->transform); RrOpBytes(key,rev->haveTransform);

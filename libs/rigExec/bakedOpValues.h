@@ -68,6 +68,19 @@ bool RigExecBakedSamePoints(const PXR_NS::GfVec3f *a, size_t aCount,
 /// RIGEXEC_VERIFY_CHAIN_VERSIONS check and tests.
 bool RigExecBakedChainContentKey(const RigExecBakedProgramImpl &,
     RigExecBakedSlotDomain, uint32_t slot, std::string *key);
+/// Replaces \p field with \p scratch's floats and bumps \p version, unless
+/// the two hold the same bytes (signed zeros and NaN payloads included), in
+/// which case nothing moves: how the RevisionPacket's `envelope` and
+/// `publishedWeightValues` versions move. \p scratch is left unspecified.
+void RigExecBakedNoteFloats(std::vector<float> *field,
+    std::vector<float> *scratch, uint64_t *version);
+/// The RevisionPacket key of revision \p slot as it was before its two
+/// float arrays were keyed by content version: the same fields with the
+/// arrays' bytes in place of the versions. False, and an empty key, for a
+/// missing revision. Owner thread; for RIGEXEC_VERIFY_PACKET_VERSIONS and
+/// tests.
+bool RigExecBakedPacketContentKey(const RigExecBakedProgramImpl &,
+    uint32_t slot, std::string *key);
 /// Whether \p key, the value's stored key, still describes the state it is
 /// keyed from: RigExecBakedOpValueKey's answer now, or, for the RevisionOut
 /// of an unchunked revision whose fuse swapped staging into `output`, the

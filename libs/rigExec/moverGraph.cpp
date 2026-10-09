@@ -1204,7 +1204,8 @@ RigExecRevisionTakesSeparateBlend(RigExecRevisionOp op,
 
 RigExecRevisionAcceptance
 RigExecRevisionKernelAcceptance(RigExecRevisionOp op,
-                                const RigExecMoverParameters &p, size_t count)
+                                const RigExecMoverParameters &p, size_t count,
+                                const bool *envelopeResolves)
 {
     using Acceptance = RigExecRevisionAcceptance;
     if (!_PacketMatches(op, p)) {
@@ -1230,7 +1231,8 @@ RigExecRevisionKernelAcceptance(RigExecRevisionOp op,
         // revision fails, whatever the kernel answered.
         if (RigExecRevisionTakesSeparateBlend(op, p.weights) &&
             !RigExecEnvelopeIsFullStrength(p.weights) &&
-            !p.weights.ResolvesAll(count)) {
+            !(envelopeResolves ? *envelopeResolves
+                               : p.weights.ResolvesAll(count))) {
             return Acceptance::Refuses;
         }
         return wire;

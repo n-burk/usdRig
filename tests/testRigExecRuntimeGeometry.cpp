@@ -1217,6 +1217,103 @@ TestChainPointVersions()
     TfSetenv("RIGEXEC_VERIFY_EPILOGUE_LISTS", "0");
 }
 
+// One matrix mover on a control that moves every frame, weighted by a
+// sparse RigExecDynamicWeight (clamp) over a sparse static base naming all
+// three points with weight 1 and defaulting to 0.25. inputs:driver is 2 at
+// frames 1 and 2, 3 at frame 3 and 0.5 at frame 4: the weight packet stands
+// at frame 2, moves only its default at frame 3 (no point reads it, every
+// value clamps to 1) and moves its values at frame 4.
+static UsdStageRefPtr
+_WeightOverlayStage()
+{
+    const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    stage->DefinePrim(SdfPath("/Asset"), TfToken("Scope"));
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    const UsdPrim moving = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Moving"), TfToken("RigExecControl"));
+    for (int frame = 1; frame <= 4; ++frame) {
+        moving.GetAttribute(TfToken("avars:tx"))
+            .Set(double(frame), UsdTimeCode(frame));
+    }
+    const SdfPath target("/Asset/Shape.points");
+    const UsdPrim shape =
+        stage->DefinePrim(target.GetPrimPath(), TfToken("Points"));
+    shape.GetAttribute(TfToken("points"))
+        .Set(VtVec3fArray{GfVec3f(0), GfVec3f(1, 0, 0), GfVec3f(0, 2, 0)});
+    const UsdPrim base = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Weights/Base"), TfToken("RigExecStaticWeight"));
+    base.CreateRelationship(TfToken("rigExec:weightTarget"), false)
+        .SetTargets({target});
+    base.CreateAttribute(TfToken("rigExec:representation"),
+                         SdfValueTypeNames->Token, false)
+        .Set(TfToken("sparse"));
+    base.CreateAttribute(TfToken("rigExec:indices"),
+                         SdfValueTypeNames->IntArray, false)
+        .Set(VtIntArray{0, 1, 2});
+    base.CreateAttribute(TfToken("rigExec:values"),
+                         SdfValueTypeNames->FloatArray, false)
+        .Set(VtFloatArray{1.0f, 1.0f, 1.0f});
+    base.CreateAttribute(TfToken("rigExec:defaultWeight"),
+                         SdfValueTypeNames->Float, false)
+        .Set(0.25f);
+    const UsdPrim weight = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Weights/W"), TfToken("RigExecDynamicWeight"));
+    weight.CreateRelationship(TfToken("rigExec:weightTarget"), false)
+        .SetTargets({target});
+    weight.CreateRelationship(TfToken("rigExec:baseWeight"), false)
+        .SetTargets({base.GetPath()});
+    weight.CreateAttribute(TfToken("rigExec:representation"),
+                           SdfValueTypeNames->Token, false)
+        .Set(TfToken("sparse"));
+    weight.CreateAttribute(TfToken("rigExec:rangePolicy"),
+                           SdfValueTypeNames->Token, false)
+        .Set(TfToken("clamp"));
+    weight.CreateAttribute(TfToken("rigExec:indices"),
+                           SdfValueTypeNames->IntArray, false)
+        .Set(VtIntArray{0, 1, 2});
+    UsdAttribute driver = weight.CreateAttribute(
+        TfToken("inputs:driver"), SdfValueTypeNames->Float, false);
+    driver.Set(2.0f, UsdTimeCode(1.0));
+    driver.Set(2.0f, UsdTimeCode(2.0));
+    driver.Set(3.0f, UsdTimeCode(3.0));
+    driver.Set(0.5f, UsdTimeCode(4.0));
+    stage->DefinePrim(SdfPath("/Asset/Rig/Movers"), TfToken("Scope"));
+    const UsdPrim mover = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Movers/M0"), TfToken("RigExecMatrixMover"));
+    mover.ApplyAPI(TfToken("RigExecMoverAPI"));
+    mover.GetRelationship(TfToken("rigExec:moves")).SetTargets({target});
+    mover.GetRelationship(TfToken("rigExec:transform"))
+        .SetTargets({moving.GetPath()});
+    mover.CreateRelationship(TfToken("rigExec:weightObject"), false)
+        .SetTargets({weight.GetPath()});
+    return stage;
+}
+
+// RevisionStatic reuses its weight field while the packet it was resolved
+// from stands, and keys it and the envelope by content version: played
+// against the native program, points, fields, diagnostics and operation
+// counts bit for bit, with RIGEXEC_VERIFY_PACKET_VERSIONS on, read at Open,
+// which fails any run whose versions and arrays' bytes disagree on a change.
+static void
+TestPacketArrayVersions()
+{
+    TfSetenv("RIGEXEC_VERIFY_PACKET_VERSIONS", "1");
+    const char *const name = "weight field reused while its packet stands";
+    const std::vector<double> frames = {1, 2, 3, 4, 1, 3};
+    _TestStage(name, _WeightOverlayStage(), frames);
+    std::vector<std::vector<float>> fields;
+    CHECK(_FieldsMatchNative(name, _WeightOverlayStage(), frames,
+                              "/Asset/Rig/Weights/W", "/Asset/Shape.points",
+                              &fields));
+    TfSetenv("RIGEXEC_VERIFY_PACKET_VERSIONS", "0");
+    CHECK(fields.size() == frames.size());
+    if (fields.size() == frames.size()) {
+        const std::vector<float> full(3, 1.0f), half(3, 0.5f);
+        CHECK(fields[0] == full && fields[1] == full && fields[2] == full);
+        CHECK(fields[3] == half && fields[4] == full && fields[5] == full);
+    }
+}
+
 static void
 TestGeometryDomainArm()
 {
@@ -3608,6 +3705,7 @@ main(int argc, char **argv)
         RIGEXEC_SCHEMA_RESOURCE_DIR);
     TestComputedCurrentPhase();
     TestChainPointVersions();
+    TestPacketArrayVersions();
     TestGeometryDomainArm();
     TestCurrentPhaseThroughCombine();
     TestCurrentPhaseFailure();

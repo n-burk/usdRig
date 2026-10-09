@@ -400,6 +400,11 @@ CaptureRevision(const RigExecBakedProgramImpl::GeomRevision &revision,
     state->publishedWeightValues = revision.publishedWeightValues;
     state->currentPhasePacket = revision.currentPhasePacket;
     state->weightFieldPublished = revision.weightFieldPublished;
+    state->envelopeVersion = revision.envelopeVersion;
+    state->weightValuesVersion = revision.weightValuesVersion;
+    state->weightValuesHeld = revision.weightValuesHeld;
+    state->weightValuesPacketRevision = revision.weightValuesPacketRevision;
+    state->weightValuesCount = revision.weightValuesCount;
     state->layoutUsable = revision.layoutUsable;
     state->topology = revision.topology;
     state->partitionTopology = revision.partitionTopology;
@@ -474,6 +479,11 @@ RestoreRevision(const RigExecBakedRunShadow::RevisionState &state,
     revision->publishedWeightValues = state.publishedWeightValues;
     revision->currentPhasePacket = state.currentPhasePacket;
     revision->weightFieldPublished = state.weightFieldPublished;
+    revision->envelopeVersion = state.envelopeVersion;
+    revision->weightValuesVersion = state.weightValuesVersion;
+    revision->weightValuesHeld = state.weightValuesHeld;
+    revision->weightValuesPacketRevision = state.weightValuesPacketRevision;
+    revision->weightValuesCount = state.weightValuesCount;
     revision->layoutUsable = state.layoutUsable;
     revision->topology = state.topology;
     revision->partitionTopology = state.partitionTopology;
@@ -583,6 +593,12 @@ CompareRevision(std::vector<std::string> *differences, size_t *count,
                   revision.palette);
     CompareVector(differences, count, where + " envelope", shadow.envelope,
                   revision.envelope);
+    // The versions the packet key carries for the envelope and the overlay;
+    // the overlay's reuse claim is a cache and is not compared.
+    CompareValue(differences, count, where + " envelopeVersion",
+                 shadow.envelopeVersion, revision.envelopeVersion);
+    CompareValue(differences, count, where + " weightValuesVersion",
+                 shadow.weightValuesVersion, revision.weightValuesVersion);
     CompareValue(differences, count, where + " parameters", shadow.parameters,
                  revision.parameters);
     CompareValue(differences, count, where + " status", shadow.status,
@@ -727,6 +743,7 @@ RigExecBakedRunShadow::Capture(const RigExecBakedProgramImpl &program)
     switchFrames = program.switchFrames;
     opAdapter = program.opAdapter;
     chainContentKeys = program.chainContentKeys;
+    packetContentKeys = program.packetContentKeys;
     opExecution = program.opExecution;
     oraclePublications = program.oraclePublications;
     oracleWeightInputs = program.oracleWeightInputs;
@@ -867,6 +884,7 @@ RigExecBakedRunShadow::Restore(RigExecBakedProgramImpl *program) const
     B.switchFrames = switchFrames;
     B.opAdapter = opAdapter;
     B.chainContentKeys = chainContentKeys;
+    B.packetContentKeys = packetContentKeys;
     B.opExecution = opExecution;
     B.oraclePublications = oraclePublications;
     B.oracleWeightInputs = oracleWeightInputs;

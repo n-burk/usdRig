@@ -411,12 +411,15 @@ void RigExecBakedOpValueKey(const RigExecBakedProgramImpl &B,
     case D::ChainPoints:
         if(slot<B.chains.size()) { const auto &v=B.chains[slot];
             Put(out,v.haveResult); Put(out,v.resultVersion); return; } break;
+    // Its two resolved float arrays key by the content versions
+    // RevisionStatic bumps exactly when their bytes move;
+    // RigExecBakedPacketContentKey is the same key over the bytes.
     case D::RevisionPacket:
         if(const auto *v=Revision(B,slot)) {
             Put(out,v->parameters); Put(out,v->status); Put(out,v->layoutUsable);
-            Put(out,v->envelopeOk); Array(out,v->envelope); Put(out,v->fullStrength);
+            Put(out,v->envelopeOk); Put(out,v->envelopeVersion); Put(out,v->fullStrength);
             Put(out,uint64_t(v->precedingCount)); Put(out,v->partitionStale);
-            Put(out,v->weightFieldPublished); Array(out,v->publishedWeightValues);
+            Put(out,v->weightFieldPublished); Put(out,v->weightValuesVersion);
             Put(out,uint8_t(v->acceptance)); return;
         } break;
     case D::RevisionTransforms:
@@ -641,6 +644,30 @@ bool RigExecBakedSamePoints(const GfVec3f *a,size_t aCount,const GfVec3f *b,size
     // GfVec3f is three floats with no padding (asserted above).
     return aCount==bCount && (aCount==0 || a==b ||
         std::memcmp(a,b,aCount*sizeof(GfVec3f))==0);
+}
+void RigExecBakedNoteFloats(std::vector<float> *field,std::vector<float> *scratch,
+    uint64_t *version)
+{
+    if(field->size()==scratch->size() && (field->empty() ||
+       std::memcmp(field->data(),scratch->data(),field->size()*sizeof(float))==0))
+        return;
+    field->swap(*scratch);
+    ++*version;
+}
+bool RigExecBakedPacketContentKey(const RigExecBakedProgramImpl &B,uint32_t slot,
+    std::string *out)
+{
+    if(!TF_VERIFY(out)) return false;
+    out->clear();
+    const auto *v=Revision(B,slot);
+    if(!v) return false;
+    Put(out,uint8_t(1)); Put(out,RigExecBakedSlotDomain::RevisionPacket);
+    Put(out,v->parameters); Put(out,v->status); Put(out,v->layoutUsable);
+    Put(out,v->envelopeOk); Array(out,v->envelope); Put(out,v->fullStrength);
+    Put(out,uint64_t(v->precedingCount)); Put(out,v->partitionStale);
+    Put(out,v->weightFieldPublished); Array(out,v->publishedWeightValues);
+    Put(out,uint8_t(v->acceptance));
+    return true;
 }
 bool RigExecBakedOpValueKeyStands(const RigExecBakedProgramImpl &B,
     RigExecBakedSlotDomain domain,uint32_t slot,const std::string &key)

@@ -1624,9 +1624,12 @@ bool RigExecRevisionTakesSeparateBlend(RigExecRevisionOp op,
 /// definition each, shared with the kernel) and, for a wire that blends
 /// separately, its envelope. Every other operation is Deferred once its
 /// packet passes; a skin's answer is the baked program's, from the halves
-/// RevisionStatic and the fold hold.
+/// RevisionStatic and the fold hold. \p envelopeResolves, when given, is
+/// `p.weights.ResolvesAll(count)` already answered by a resolve of the
+/// envelope at \p count, so it is not validated a second time.
 RigExecRevisionAcceptance RigExecRevisionKernelAcceptance(
-    RigExecRevisionOp op, const RigExecMoverParameters &p, size_t count);
+    RigExecRevisionOp op, const RigExecMoverParameters &p, size_t count,
+    const bool *envelopeResolves = nullptr);
 
 /// Provider results a revision needs that only evaluation can supply.
 ///

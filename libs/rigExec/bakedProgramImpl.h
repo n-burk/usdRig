@@ -3090,6 +3090,24 @@ struct RigExecBakedProgramImpl {
         /// to consume -- and drained by the epilogue in chain order.
         std::vector<float> publishedWeightValues;
         bool weightFieldPublished = false;
+        /// The content versions the RevisionPacket key carries in place of
+        /// `envelope`'s and `publishedWeightValues`' bytes: RevisionStatic
+        /// bumps each exactly when it leaves its array holding other bytes
+        /// than it published last (RigExecBakedNoteFloats).
+        uint64_t envelopeVersion = 0, weightValuesVersion = 0;
+        /// `publishedWeightValues` holds the resolve of WeightPacket op
+        /// value `weightPacketValue` at its revision
+        /// `weightValuesPacketRevision` over `weightValuesCount` points
+        /// (`weightValuesHeld`), which RevisionStatic reuses while both
+        /// stand. Never held for a current-phase revision. The value id is
+        /// set at compile, which drops the claim.
+        int weightPacketValue = -1;
+        bool weightValuesHeld = false;
+        uint64_t weightValuesPacketRevision = 0;
+        size_t weightValuesCount = 0;
+        /// RevisionStatic's resolve buffer: compared with the published
+        /// array before it replaces it. Contents are not state.
+        std::vector<float> resolveScratch;
 
         /// Every influence matrix finite and affine. For a skin revision the
         /// packet cannot answer this -- it is assembled before the matrices
@@ -3404,6 +3422,12 @@ struct RigExecBakedProgramImpl {
     bool verifyChainVersions = false;
     std::vector<std::string> chainContentKeys;
     size_t chainVersionMismatches = 0;
+    /// RIGEXEC_VERIFY_PACKET_VERSIONS, read at compile: the same check for
+    /// the RevisionPacket's array versions (RigExecBakedPacketContentKey),
+    /// with `packetContentKeys` the last such key per value id.
+    bool verifyPacketVersions = false;
+    std::vector<std::string> packetContentKeys;
+    size_t packetVersionMismatches = 0;
     std::shared_ptr<RigExecBakedExecCheckRows> execCheckRows;
     std::function<void(uint32_t)> opBeforeBody, opAfterBody; ///< opt-in test observation
     std::vector<WeightField> weightFields;
@@ -5417,6 +5441,10 @@ struct RigExecBakedRunShadow {
         std::vector<float> publishedWeightValues;
         RigExecWeightPacket currentPhasePacket;
         bool weightFieldPublished = false;
+        uint64_t envelopeVersion = 0, weightValuesVersion = 0;
+        bool weightValuesHeld = false;
+        uint64_t weightValuesPacketRevision = 0;
+        size_t weightValuesCount = 0;
     };
     struct DerivedState {
         RevisionState revision;
@@ -5453,7 +5481,7 @@ struct RigExecBakedRunShadow {
     RigExecTypedValueStore providerValues{0};
     std::vector<GfMatrix4d> switchFrames;
     RigExecOpAdapterState opAdapter;
-    std::vector<std::string> chainContentKeys;
+    std::vector<std::string> chainContentKeys, packetContentKeys;
     RigExecOpExecution opExecution;
     std::vector<double> avars;
     std::vector<float> poseWeights;

@@ -137,6 +137,9 @@ _CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst)
     D.verifyChainVersions = src.verifyChainVersions;
     D.chainContentKeys = src.chainContentKeys;
     D.chainVersionMismatches = 0;
+    D.verifyPacketVersions = src.verifyPacketVersions;
+    D.packetContentKeys = src.packetContentKeys;
+    D.packetVersionMismatches = 0;
     D.composeGroups = src.composeGroups;
     // The space switches, and the per-slot index the compose step
     // asks before it takes the switched branch. Left out, the

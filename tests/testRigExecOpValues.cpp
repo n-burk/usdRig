@@ -10,6 +10,7 @@
 #include "pxr/base/vt/value.h"
 #include <array>
 #include <climits>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -320,6 +321,62 @@ void TestPacketStatusAndOpaqueBoundary()
     CHECK(RigExecBakedOpValueKeyIsExact(B,RigExecBakedSlotDomain::RevisionPacket,0));
     revision.parameters.externalData=VtValue(std::string("plugin-owned payload"));
     CHECK(!RigExecBakedOpValueKeyIsExact(B,RigExecBakedSlotDomain::RevisionPacket,0));
+}
+// The RevisionPacket keys its envelope and published weight field by their
+// content versions, which RigExecBakedNoteFloats moves exactly when the
+// bytes do; RigExecBakedPacketContentKey is the key over the bytes.
+void TestPacketArrayVersions()
+{
+    RigExecBakedProgramImpl B;
+    B.chains.resize(1); B.chains[0].revisions.resize(1); B.revisionIndex={{0,0}};
+    auto &revision=B.chains[0].revisions[0];
+    revision.parameters.valid=true; revision.parameters.kind=TfToken("skin");
+    revision.envelope={0.25f,0.5f}; revision.publishedWeightValues={1.0f};
+    std::string content;
+    CHECK(RigExecBakedPacketContentKey(B,0,&content));
+    const auto key=Key(B,RigExecBakedSlotDomain::RevisionPacket);
+    // The value key no longer reads the arrays: only a version moves it.
+    revision.envelope[0]=0.75f;
+    CHECK(Key(B,RigExecBakedSlotDomain::RevisionPacket)==key);
+    std::string moved;
+    CHECK(RigExecBakedPacketContentKey(B,0,&moved) && moved!=content);
+    ++revision.envelopeVersion;
+    CHECK(Key(B,RigExecBakedSlotDomain::RevisionPacket)!=key);
+    --revision.envelopeVersion; revision.envelope[0]=0.25f;
+    ++revision.weightValuesVersion;
+    CHECK(Key(B,RigExecBakedSlotDomain::RevisionPacket)!=key);
+    --revision.weightValuesVersion;
+    CHECK(Key(B,RigExecBakedSlotDomain::RevisionPacket)==key);
+    // The content key is the old layout: the same fields with each array's
+    // count and bytes where its version now sits.
+    CHECK(RigExecBakedPacketContentKey(B,0,&moved) && moved==content);
+    CHECK(content.size()==key.size()-2*sizeof(uint64_t)+
+          (sizeof(uint64_t)+2*sizeof(float))+(sizeof(uint64_t)+sizeof(float)));
+    std::string missing="stale";
+    CHECK(!RigExecBakedPacketContentKey(B,1,&missing) && missing.empty());
+
+    // Equal bytes keep the version and the array; any other bytes, a size,
+    // a signed zero or a NaN payload, replace the array and bump it.
+    std::vector<float> field={0.5f,1.0f}, scratch={0.5f,1.0f};
+    uint64_t version=7;
+    RigExecBakedNoteFloats(&field,&scratch,&version);
+    CHECK(version==7 && field==(std::vector<float>{0.5f,1.0f}));
+    scratch={0.5f,1.0f,0.0f};
+    RigExecBakedNoteFloats(&field,&scratch,&version);
+    CHECK(version==8 && field.size()==3);
+    scratch={0.5f,1.0f,-0.0f};
+    RigExecBakedNoteFloats(&field,&scratch,&version);
+    CHECK(version==9 && std::signbit(field[2]));
+    scratch={0.5f,1.0f,-0.0f};
+    RigExecBakedNoteFloats(&field,&scratch,&version);
+    CHECK(version==9);
+    field={FloatBits(0x7fc00001u)}; scratch={FloatBits(0x7fc00002u)};
+    RigExecBakedNoteFloats(&field,&scratch,&version);
+    uint32_t bits=0; std::memcpy(&bits,field.data(),sizeof(bits));
+    CHECK(version==10 && bits==0x7fc00002u);
+    field.clear(); scratch.clear();
+    RigExecBakedNoteFloats(&field,&scratch,&version);
+    CHECK(version==10);
 }
 void TestAvarEffectiveSelection()
 {
@@ -1224,7 +1281,8 @@ int main()
     TestConstantSourceKeys(); TestPathLeafContentVersions(); TestSpaceLeafIndexOverlay();
     TestSkinEffectiveSelectedTopology(); TestFloatPayloadBits(); TestFieldValidityCountError(); TestPropertyValidityAndLadderState();
     TestChunkRangeIsolation(); TestConstraintSourceAndPropertyAliasKeys();
-    TestPacketStatusAndOpaqueBoundary(); TestRawInputAndProviderKeys(); TestAvarEffectiveSelection();
+    TestPacketStatusAndOpaqueBoundary(); TestPacketArrayVersions();
+    TestRawInputAndProviderKeys(); TestAvarEffectiveSelection();
     TestAvarBindingIndex();
     TestPathTextSpelling(); TestBoxTags(); TestHeadValueBits(); TestCandidateFallbackBytes();
     TestProviderOwnerText(); TestBulkValueKeyBytes(); TestSharedKeyRunsAndPlainValues();

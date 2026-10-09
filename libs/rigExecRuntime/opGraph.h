@@ -11,6 +11,10 @@ bool RrGeometryChainContentKey(const RrProgram *, RigExecWireSlotDomain, uint32_
 /// Moves each ChainInput's content version where the base its prologues
 /// sampled differs from the one it last published; before the leaves publish.
 void RrGeometryPublishChainInputs(RrProgram *);
+/// Revision \p slot's RevisionPacket key as it was before its envelope and
+/// weight field were keyed by content version: their bytes in place of the
+/// versions. False for a missing revision.
+bool RrGeometryPacketContentKey(const RrProgram *, uint32_t, std::string *);
 void RrResetExcludedGeometryValue(RrProgram *, RigExecWireSlotDomain, uint32_t);
 /// The key the executor publishes value (\p domain, \p slot) by.
 void RrOpValueKey(const RrProgram *, uint32_t domain, uint32_t slot, std::string *);

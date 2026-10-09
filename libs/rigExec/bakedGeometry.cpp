@@ -2144,6 +2144,20 @@ AssembleRevision(RigExecBakedProgramImpl &B,
     return invalid;
 }
 
+/// The packet's envelope resolved at the full \p count, as ResolveAll into
+/// `envelope` would leave it (unchanged when it fails), with
+/// `envelopeVersion` moved exactly when the bytes did.
+void
+ResolveEnvelope(RigExecBakedProgramImpl::GeomRevision *revision, size_t count)
+{
+    revision->envelopeOk = revision->parameters.weights.ResolveAll(
+        count, &revision->resolveScratch);
+    if (revision->envelopeOk) {
+        RigExecBakedNoteFloats(&revision->envelope, &revision->resolveScratch,
+                               &revision->envelopeVersion);
+    }
+}
+
 /// The skin revision over its whole array, out of the fuse.
 ///
 /// The path where the partition no longer describes the layout the packet
@@ -2588,18 +2602,42 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
                 const size_t logicalCount =
                     revision.weightOperationDomain ? size_t(1)
                                                    : chain.lastBase.size();
-                // One scatter rather than a search per point: Resolve()
-                // binary-searches a sparse packet's indices, which for a
-                // face cluster on a body is tens of thousands of searches
-                // to find a few hundred weights. An unresolvable packet
-                // publishes what the per-point loop did: zero wherever
-                // Resolve() answered out of range.
-                if (!packet.ResolveAll(logicalCount, &revision.publishedWeightValues)) {
-                    revision.publishedWeightValues.assign(logicalCount, 0.0f);
-                    for (size_t i = 0; i < logicalCount; ++i) {
-                        const float w = packet.Resolve(i, logicalCount);
-                        revision.publishedWeightValues[i] = w < 0.0f ? 0.0f : w;
+                // The field is a function of the packet and the count alone.
+                // The shared packet's op value is a declared read whose
+                // producer published before this step was dispatched, so its
+                // revision is final here, and an equal revision is an equal
+                // exact key: the packet the held field was resolved from.
+                const bool shared = !revision.weightCurrentPhase &&
+                    revision.weightPacketValue >= 0 &&
+                    size_t(revision.weightPacketValue) <
+                        B.opAdapter.values.size();
+                const uint64_t packetRevision = shared
+                    ? B.opAdapter.values[size_t(revision.weightPacketValue)]
+                          .revision
+                    : 0;
+                if (!shared || !revision.weightValuesHeld ||
+                    revision.weightValuesPacketRevision != packetRevision ||
+                    revision.weightValuesCount != logicalCount) {
+                    // One scatter rather than a search per point: Resolve()
+                    // binary-searches a sparse packet's indices, which for a
+                    // face cluster on a body is tens of thousands of
+                    // searches to find a few hundred weights. An
+                    // unresolvable packet publishes what the per-point loop
+                    // did: zero wherever Resolve() answered out of range.
+                    std::vector<float> &resolved = revision.resolveScratch;
+                    if (!packet.ResolveAll(logicalCount, &resolved)) {
+                        resolved.assign(logicalCount, 0.0f);
+                        for (size_t i = 0; i < logicalCount; ++i) {
+                            const float w = packet.Resolve(i, logicalCount);
+                            resolved[i] = w < 0.0f ? 0.0f : w;
+                        }
                     }
+                    RigExecBakedNoteFloats(&revision.publishedWeightValues,
+                                           &resolved,
+                                           &revision.weightValuesVersion);
+                    revision.weightValuesHeld = shared;
+                    revision.weightValuesPacketRevision = packetRevision;
+                    revision.weightValuesCount = logicalCount;
                 }
                 revision.weightFieldPublished = true;
             }
@@ -2635,15 +2673,17 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
                 revision.fullStrength =
                     RigExecEnvelopeIsFullStrength(revision.parameters.weights);
                 if (!revision.fullStrength) {
-                    revision.envelopeOk =
-                        revision.parameters.weights.ResolveAll(
-                            count, &revision.envelope);
+                    ResolveEnvelope(&revision, count);
                 }
             }
             // From the validation the chunk's kernel runs first, over the
-            // count it is applied to.
+            // count it is applied to. A wire's envelope validation is the
+            // resolve above: wherever the acceptance asks for it, the wire
+            // branch took the same predicates and `envelopeOk` holds its
+            // answer.
             revision.acceptance = RigExecRevisionKernelAcceptance(
-                revision.op, revision.parameters, count);
+                revision.op, revision.parameters, count,
+                &revision.envelopeOk);
             return;
         }
         revision.layoutUsable =
@@ -2651,8 +2691,7 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
         revision.fullStrength =
             RigExecEnvelopeIsFullStrength(revision.parameters.weights);
         if (!revision.fullStrength) {
-            revision.envelopeOk = revision.parameters.weights.ResolveAll(
-                count, &revision.envelope);
+            ResolveEnvelope(&revision, count);
         }
         revision.acceptance = SkinAcceptance(revision);
         if (revision.chunked) {

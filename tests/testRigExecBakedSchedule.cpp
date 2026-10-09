@@ -5652,6 +5652,165 @@ TestTheEpilogueVisitsTheStepsHoldingLines()
     finish();
 }
 
+/// One matrix mover on a control that moves every frame, weighted by a
+/// sparse RigExecDynamicWeight (clamp) over a sparse static base that names
+/// all three points with weight 1 and defaults to 0.25. inputs:driver is 2
+/// at frames 1 and 2, 3 at frame 3 and 0.5 at frame 4: the packet stands at
+/// frame 2, moves only its default at frame 3 (every value clamps to 1, and
+/// no point reads the default), and moves its values at frame 4.
+UsdStageRefPtr
+MakeWeightOverlayStage()
+{
+    const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    stage->DefinePrim(SdfPath("/Asset"), TfToken("Scope"));
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    const UsdPrim moving = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Moving"), TfToken("RigExecControl"));
+    for (int frame = 1; frame <= 4; ++frame) {
+        moving.GetAttribute(TfToken("avars:tx"))
+            .Set(double(frame), UsdTimeCode(frame));
+    }
+    const SdfPath target("/Asset/Shape.points");
+    const UsdPrim shape =
+        stage->DefinePrim(target.GetPrimPath(), TfToken("Points"));
+    shape.GetAttribute(TfToken("points"))
+        .Set(VtVec3fArray{GfVec3f(0), GfVec3f(1, 0, 0), GfVec3f(0, 2, 0)});
+    const UsdPrim base = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Weights/Base"), TfToken("RigExecStaticWeight"));
+    base.CreateRelationship(TfToken("rigExec:weightTarget"), false)
+        .SetTargets({target});
+    base.CreateAttribute(TfToken("rigExec:representation"),
+                         SdfValueTypeNames->Token, false)
+        .Set(TfToken("sparse"));
+    base.CreateAttribute(TfToken("rigExec:indices"),
+                         SdfValueTypeNames->IntArray, false)
+        .Set(VtIntArray{0, 1, 2});
+    base.CreateAttribute(TfToken("rigExec:values"),
+                         SdfValueTypeNames->FloatArray, false)
+        .Set(VtFloatArray{1.0f, 1.0f, 1.0f});
+    base.CreateAttribute(TfToken("rigExec:defaultWeight"),
+                         SdfValueTypeNames->Float, false)
+        .Set(0.25f);
+    const UsdPrim weight = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Weights/W"), TfToken("RigExecDynamicWeight"));
+    weight.CreateRelationship(TfToken("rigExec:weightTarget"), false)
+        .SetTargets({target});
+    weight.CreateRelationship(TfToken("rigExec:baseWeight"), false)
+        .SetTargets({base.GetPath()});
+    weight.CreateAttribute(TfToken("rigExec:representation"),
+                           SdfValueTypeNames->Token, false)
+        .Set(TfToken("sparse"));
+    weight.CreateAttribute(TfToken("rigExec:rangePolicy"),
+                           SdfValueTypeNames->Token, false)
+        .Set(TfToken("clamp"));
+    weight.CreateAttribute(TfToken("rigExec:indices"),
+                           SdfValueTypeNames->IntArray, false)
+        .Set(VtIntArray{0, 1, 2});
+    UsdAttribute driver = weight.CreateAttribute(
+        TfToken("inputs:driver"), SdfValueTypeNames->Float, false);
+    driver.Set(2.0f, UsdTimeCode(1.0));
+    driver.Set(2.0f, UsdTimeCode(2.0));
+    driver.Set(3.0f, UsdTimeCode(3.0));
+    driver.Set(0.5f, UsdTimeCode(4.0));
+    stage->DefinePrim(SdfPath("/Asset/Rig/Movers"), TfToken("Scope"));
+    const UsdPrim mover = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Movers/M0"), TfToken("RigExecMatrixMover"));
+    mover.ApplyAPI(TfToken("RigExecMoverAPI"));
+    mover.GetRelationship(TfToken("rigExec:moves")).SetTargets({target});
+    mover.GetRelationship(TfToken("rigExec:transform"))
+        .SetTargets({moving.GetPath()});
+    mover.CreateRelationship(TfToken("rigExec:weightObject"), false)
+        .SetTargets({weight.GetPath()});
+    return stage;
+}
+
+/// RevisionStatic reuses its published weight field while the WeightPacket
+/// op value it was resolved from keeps its revision and the count stands,
+/// and keys the field by a content version that moves exactly when the
+/// bytes do. Under RIGEXEC_VERIFY_PACKET_VERSIONS every published packet is
+/// also keyed over the bytes and both must tell the same change.
+void
+TestTheWeightOverlayIsReusedByVersion()
+{
+    TfSetenv("RIGEXEC_VERIFY_PACKET_VERSIONS", "1");
+    const BuiltProgram built = BuildStage(MakeWeightOverlayStage());
+    TfSetenv("RIGEXEC_VERIFY_PACKET_VERSIONS", "0");
+    CHECK(built.program != nullptr);
+    if (!built.program) {
+        return;
+    }
+    const RigExecBakedProgramImpl &B = built.program->GetStepGraph();
+    CHECK(B.verifyPacketVersions);
+    // Found by path, never by position.
+    int object = -1;
+    const RigExecBakedProgramImpl::GeomRevision *found = nullptr;
+    for (size_t o = 0; o < B.revisionIndex.size(); ++o) {
+        const auto &[c, r] = B.revisionIndex[o];
+        const auto &candidate = B.chains[size_t(c)].revisions[size_t(r)];
+        if (candidate.moverPath == SdfPath("/Asset/Rig/Movers/M0")) {
+            object = int(o);
+            found = &candidate;
+        }
+    }
+    CHECK(found != nullptr);
+    if (!found) {
+        return;
+    }
+    const RigExecBakedProgramImpl::GeomRevision &revision = *found;
+    CHECK(revision.weightObject >= 0 && !revision.weightCurrentPhase);
+    CHECK(revision.weightPacketValue >= 0 &&
+          size_t(revision.weightPacketValue) < B.opAdapter.values.size());
+    if (revision.weightPacketValue < 0 ||
+        size_t(revision.weightPacketValue) >= B.opAdapter.values.size()) {
+        return;
+    }
+    const RigExecOpValueState &packet =
+        B.opAdapter.values[size_t(revision.weightPacketValue)];
+    CHECK(packet.domain == uint32_t(RigExecBakedSlotDomain::WeightPacket) &&
+          int(packet.slot) == revision.weightObject);
+    const auto field = [&](float w) {
+        return revision.weightFieldPublished &&
+               revision.publishedWeightValues == std::vector<float>(3, w);
+    };
+    using K = RigExecBakedStepKind;
+    RigExecRigPose pose;
+    CHECK(built.program->Run(UsdTimeCode(1.0), &pose));
+    CHECK(pose.comparisonMismatches == 0);
+    CHECK(field(1.0f) && revision.weightValuesHeld);
+    CHECK(revision.weightValuesPacketRevision == packet.revision);
+    const uint64_t version = revision.weightValuesVersion;
+    const uint64_t standing = packet.revision;
+
+    // The control moved, so the packet was reassembled; the weight packet
+    // did not, so the field is the held one and keeps its version.
+    CHECK(built.program->Run(UsdTimeCode(2.0), &pose));
+    CHECK(pose.comparisonMismatches == 0);
+    CHECK(RanLast(B, K::RevisionStatic, object));
+    CHECK(packet.revision == standing);
+    CHECK(field(1.0f) && revision.weightValuesVersion == version);
+
+    // A new packet whose field resolves to the same bytes: resolved again
+    // (the claim follows the new revision), and the version stands.
+    CHECK(built.program->Run(UsdTimeCode(3.0), &pose));
+    CHECK(pose.comparisonMismatches == 0);
+    CHECK(RanLast(B, K::RevisionStatic, object));
+    CHECK(packet.revision != standing);
+    CHECK(revision.weightValuesPacketRevision == packet.revision);
+    CHECK(field(1.0f) && revision.weightValuesVersion == version);
+
+    // Real changes bump it, back to bytes it held before included.
+    CHECK(built.program->Run(UsdTimeCode(4.0), &pose));
+    CHECK(pose.comparisonMismatches == 0);
+    CHECK(field(0.5f) && revision.weightValuesVersion == version + 1);
+    CHECK(built.program->Run(UsdTimeCode(1.0), &pose));
+    CHECK(pose.comparisonMismatches == 0);
+    CHECK(field(1.0f) && revision.weightValuesVersion == version + 2);
+    const auto published = pose.weightFields.find(SdfPath("/Asset/Rig/Weights/W"));
+    CHECK(published != pose.weightFields.end() &&
+          published->second.weights.size() == 3);
+    CHECK(B.packetVersionMismatches == 0);
+}
+
 /// A rebuilt program's retained skin ops compare the keys the outgoing
 /// program published with this one's: every point-carrying value the
 /// adoption copied is republished unchanged at the same time, which holds
@@ -5901,6 +6060,9 @@ main(int argc, char **argv)
     TestAChainRevisionRecoversAcrossAFailure();
     TestUnmovedPointsKeepTheirVersion();
     TestTheEpilogueVisitsTheStepsHoldingLines();
+    // RevisionStatic's weight field reused by its packet's revision and
+    // keyed, with the envelope, by content version.
+    TestTheWeightOverlayIsReusedByVersion();
     {
         const std::string fixtures = examplesDir + "/../tests/fixtures";
         size_t kept = 0;

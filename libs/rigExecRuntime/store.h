@@ -297,6 +297,9 @@ struct RrStore {
     /// verifyChainVersions: per value id, the last published key of a
     /// point-carrying value over its points' bytes.
     std::vector<std::string> chainContentKeys;
+    /// verifyPacketVersions: per value id, the last published RevisionPacket
+    /// key over its float arrays' bytes.
+    std::vector<std::string> packetContentKeys;
     std::vector<RigExecProviderPlainState> providerValues;
     std::vector<RrProviderConversionScratch> providerConversionScratch;
     std::vector<RrProviderRefreshScratch> providerRefreshScratch;
@@ -566,6 +569,9 @@ struct RrProgram {
         bool verify = false;
         size_t mismatches = 0;
     } epilogue;
+    /// RIGEXEC_VERIFY_PACKET_VERSIONS, read at Open: the same check for the
+    /// RevisionPacket's envelope and weight-field versions.
+    bool verifyPacketVersions = false;
     /// The leaves whose keys read input slots alone (provider leaves and
     /// constraint input arrays), by the slots they read:
     /// slotLeaves[slotLeafBegin[s], slotLeafBegin[s + 1]). slotKeyedLeaves
