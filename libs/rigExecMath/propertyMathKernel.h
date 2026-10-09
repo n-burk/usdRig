@@ -194,7 +194,17 @@ RigExecApplyFloatMathKernel(
 
 /// The vec3f peer, component-wise in every operation including the bounds;
 /// curve leaves the base (compile refuses curve on a vec3f mover).
+///
+/// noinline: the Gf entry point and a plain-type instantiation must return
+/// the same bits, including NaN signs. Inlining lets a caller fold this
+/// arithmetic with the argument expressions, and that rewrite does not
+/// preserve a NaN's sign.
 template <class V3, class Key>
+#if defined(_MSC_VER)
+__declspec(noinline)
+#else
+__attribute__((noinline))
+#endif
 V3
 RigExecApplyVec3fMathKernel(
     const V3 &base, const RigExecPropertyMathKernelParams<V3, Key> &params)

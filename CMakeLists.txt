@@ -2185,6 +2185,22 @@ foreach(_rigexec_test IN LISTS _rigexec_tests)
             "LD_LIBRARY_PATH=path_list_prepend:${CMAKE_CURRENT_BINARY_DIR}")
     endif()
 endforeach()
+# The imaging frame-cache suites pass in about 110s on a quiet 4-core host,
+# and the scoped-clear baked sweep in about 115s while sharing that host.
+# The 120s cap kills them before the assertions finish. They still run every
+# check. The frame-cache suites also wait on short rendezvous, so each takes
+# the whole ctest slot instead of sharing it.
+foreach(_rigexec_long testRigExecImagingFrameCache
+        testRigExecImagingFrameCacheDefault
+        testRigExecBakedModeScopedClears)
+    if(TEST ${_rigexec_long})
+        set_tests_properties(${_rigexec_long} PROPERTIES TIMEOUT 300)
+    endif()
+endforeach()
+if(TEST testRigExecImagingFrameCache)
+    set_tests_properties(testRigExecImagingFrameCache
+        testRigExecImagingFrameCacheDefault PROPERTIES PROCESSORS 4)
+endif()
 
 # Precompiled headers: the stable OpenUSD and standard headers nearly every
 # translation unit parses, compiled once. Never a project header, so editing

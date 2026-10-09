@@ -103,10 +103,21 @@ bool RigExecLowerSceneConstraint(const RigExecSceneDescriptors &scene,const SdfP
         const bool parent=result.record.kind==RigExecConstraintKind::Parent;
         const char *channel=result.record.kind==RigExecConstraintKind::Position?"Translation":
             result.record.kind==RigExecConstraintKind::Scale?"Scale":"Rotation";
-        for(const char *name:parent?std::initializer_list<const char*>{"Translation","Rotation","Scale"}:
-                std::initializer_list<const char*>{channel})
-            for(const char *axis:{"X","Y","Z"}) {
-                const std::string property=std::string("inputs:affect")+name+axis;
+        // A ternary of initializer_list temporaries dangles in a range-for:
+        // the list object is kept and the backing array is not, so the name
+        // pointer is null and building "inputs:affect…" calls strlen on it.
+        const char *channels[3];
+        int channelCount=1;
+        if(parent) {
+            channels[0]="Translation"; channels[1]="Rotation"; channels[2]="Scale";
+            channelCount=3;
+        } else {
+            channels[0]=channel;
+        }
+        const char *axes[3]={"X","Y","Z"};
+        for(int n=0;n<channelCount;++n)
+            for(int a=0;a<3;++a) {
+                const std::string property=std::string("inputs:affect")+channels[n]+axes[a];
                 if(!bind(property.c_str()))return false;
             }
         if(parent) {
