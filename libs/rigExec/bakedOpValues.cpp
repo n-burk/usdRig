@@ -276,6 +276,20 @@ void Invalid(std::string *out, RigExecBakedSlotDomain domain, uint32_t slot)
 }
 }
 
+bool RigExecBakedSpaceLeafKey(const RigExecBakedProgramImpl &B,uint32_t slot,std::string *out)
+{
+    out->clear(); Put(out,uint8_t(1)); Put(out,RigExecBakedSlotDomain::SpaceLeaf);
+    if(slot>=B.providerLeaves.values.size() || slot>=B.providerProgram.sampled.size() ||
+       slot>=B.providerLeafBlocked.size()) {
+        Invalid(out,RigExecBakedSlotDomain::SpaceLeaf,slot); return false;
+    }
+    const auto *overlay=RigExecBakedSpaceLeafOverlay(B,size_t(slot));
+    const bool useOverlay=overlay!=nullptr;
+    Put(out,useOverlay); Put(out,bool(!useOverlay && B.providerLeafBlocked[slot]));
+    // Box answers exactly when BoxExact does.
+    return Box(out,useOverlay ? *overlay : B.providerLeaves.values[slot]);
+}
+
 bool RigExecBakedOpValueKeyIsExact(const RigExecBakedProgramImpl &B,
     RigExecBakedSlotDomain domain, uint32_t slot)
 {
@@ -512,13 +526,7 @@ void RigExecBakedOpValueKey(const RigExecBakedProgramImpl &B,
                 Put(out,v.sampledHaveBase); Array(out,v.sampledBase); return;
             }
         } break;
-    case D::SpaceLeaf:
-        if(slot<B.providerLeaves.values.size() && slot<B.providerProgram.sampled.size() && slot<B.providerLeafBlocked.size()) {
-            const auto *overlay=RigExecBakedSpaceLeafOverlay(B,size_t(slot));
-            const bool useOverlay=overlay!=nullptr;
-            Put(out,useOverlay); Put(out,bool(!useOverlay && B.providerLeafBlocked[slot]));
-            Box(out,useOverlay ? *overlay : B.providerLeaves.values[slot]); return;
-        } break;
+    case D::SpaceLeaf: RigExecBakedSpaceLeafKey(B,slot,out); return;
     case D::ConstraintInputs:
         if(slot<B.constraintArrays.size()) {
             for(const auto &value:B.constraintArrays[slot].raw) Box(out,value);

@@ -191,10 +191,26 @@ bool RigExecBakedBuildSpaces(RigExecBakedProgramImpl *program,UsdTimeCode captur
 const VtValue *RigExecBakedSpaceLeafOverlay(const RigExecBakedProgramImpl &B,size_t k)
 {
     const auto &path=B.providerProgram.sampled[k].attribute;
-    const auto drag=B.routedOverrides.find(path);
-    if(drag!=B.routedOverrides.end()) return &drag->second;
-    const auto upstream=B.upstream.find(path);
-    if(upstream!=B.upstream.end()) return &upstream->second;
+    if(!B.routedOverrides.empty()) {
+        const auto drag=B.routedOverrides.find(path);
+        if(drag!=B.routedOverrides.end()) return &drag->second;
+    }
+    if(!B.upstream.empty()) {
+        const auto upstream=B.upstream.find(path);
+        if(upstream!=B.upstream.end()) return &upstream->second;
+    }
+    // The index holds the two Build-only lookups below, per leaf.
+    if(const auto *index=B.spaceLeafIndex.get(); index && k<index->headSlot.size()) {
+        const int slot=index->headSlot[k];
+        if(slot>=0 && size_t(slot)<B.headOverrides.size() && !B.headOverrides[size_t(slot)].IsEmpty())
+            return &B.headOverrides[size_t(slot)];
+        for(uint32_t i=index->numberBegin[k];i<index->numberBegin[k+1];++i) {
+            const int number=index->numbers[i];
+            if(number>=0 && size_t(number)<B.overridden.size() && B.overridden[size_t(number)])
+                return B.resolvedInputs?B.resolvedInputs->Find(path):nullptr;
+        }
+        return nullptr;
+    }
     const auto head=B.headOverrideSlots.find(path);
     if(head!=B.headOverrideSlots.end() && head->second<B.headOverrides.size() &&
        !B.headOverrides[head->second].IsEmpty()) return &B.headOverrides[head->second];
@@ -230,6 +246,7 @@ void RigExecBakedSampleSpaces(RigExecBakedProgramImpl *program,UsdTimeCode time,
         if(attribute) attribute.Get(&value,time);
         leaves.changed[k]=!RigExecBakedHeadValueSame(value,leaves.values[k]) ||
             bool(B.providerLeafBlocked[k])!=blocked;
+        if(leaves.changed[k]) RigExecBakedNoteSpaceLeafSampled(&B,k);
         leaves.values[k]=std::move(value);
         B.providerLeafBlocked[k]=blocked;
     }

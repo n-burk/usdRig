@@ -355,6 +355,12 @@ RigExecRuntimeReader::GetClosedClusterCountForTesting() const
     return _program->store.lastClosedClusters;
 }
 
+size_t
+RigExecRuntimeReader::GetSlotLeafKeysForTesting() const
+{
+    return _program->store.slotLeafKeys;
+}
+
 bool
 RigExecRuntimeReader::GetSimdEnabledForTesting() const
 {

@@ -528,6 +528,43 @@ struct RigExecBakedPathLeafRef {
     uint32_t key = 0;
 };
 
+/// The provider leaves' publication tables, built with the operation graph
+/// from Build-only state and shared, immutable, by every clone. A provider
+/// leaf's key reads its sample and the overlay RigExecBakedSpaceLeafOverlay
+/// selects; these name, per leaf, every table that overlay reads, so a run
+/// re-keys only leaves whose key can have moved and the overlay skips the
+/// map finds.
+struct RigExecBakedSpaceLeafIndex {
+    /// Provider leaf k is operation value `first + k`. The program's other
+    /// leaves, re-keyed on every run, fall below or above that range.
+    RigExecValueId first = 0;
+    std::vector<RigExecValueId> before, after;
+    /// Per leaf: its `headOverrideSlots` slot, or -1, and the override
+    /// numbers `overridableInputs` files at its path, in that order:
+    /// numbers[numberBegin[k], numberBegin[k + 1]).
+    std::vector<int> headSlot;
+    std::vector<uint32_t> numberBegin;
+    std::vector<int> numbers;
+    /// The same facts the other way round: (path, leaf) sorted by path, for
+    /// the routed and upstream maps, and (number, leaf) and (slot, leaf).
+    std::vector<std::pair<SdfPath, uint32_t>> byPath;
+    std::vector<std::pair<uint32_t, uint32_t>> byNumber, byHeadSlot;
+    /// RIGEXEC_VERIFY_SPARSE_LEAVES, read at Build: every leaf a run skips
+    /// is re-keyed anyway and verified unchanged.
+    bool verify = false;
+};
+
+/// Bits of RigExecBakedProgramImpl::spaceLeafRekey.
+enum : uint8_t {
+    /// The sampler moved the leaf's value or blocked flag since its key.
+    kRigExecSpaceLeafSampled = 1,
+    /// Its last key had an overlay in reach or was not exact, so the same
+    /// sample can key differently.
+    kRigExecSpaceLeafHeld = 2,
+    /// An overlay can stand on it in this publication.
+    kRigExecSpaceLeafOverlaid = 4,
+};
+
 /// Publishes \p value at \p key into \p map, in one comparison when the
 /// caller walks its keys in ascending order.
 ///
@@ -1861,6 +1898,16 @@ struct RigExecBakedProgramImpl {
     RigExecTypedValueStore providerValues{0};
     RigExecBakedPathLeaves providerLeaves;
     std::vector<uint8_t> providerLeafBlocked;
+    /// Built by RigExecBakedCompileOpGraph; null when the provider leaves
+    /// are not one dense run of values, and every run re-keys them all.
+    std::shared_ptr<const RigExecBakedSpaceLeafIndex> spaceLeafIndex;
+    /// Per provider leaf, the kRigExecSpaceLeaf* reasons its next
+    /// publication re-keys it; sized with spaceLeafIndex. The sampler sets
+    /// Sampled and publication rewrites the byte, so it outlives a sample
+    /// that no run published.
+    std::vector<uint8_t> spaceLeafRekey;
+    /// How many provider leaves the last publication re-keyed.
+    size_t spaceLeafKeys = 0;
     std::vector<RigExecValueId> providerLeafValues;
     std::vector<int> providerLeafChains;
     std::vector<int> providerRoutedReads;
@@ -3693,6 +3740,16 @@ RigExecBakedPathLeavesOf(const RigExecBakedProgramImpl &program,
         const_cast<RigExecBakedProgramImpl *>(&program), ref);
 }
 
+/// Every writer of a provider leaf's value or blocked flag calls this when
+/// either moved, so the next publication re-keys leaf \p k.
+inline void
+RigExecBakedNoteSpaceLeafSampled(RigExecBakedProgramImpl *program, size_t k)
+{
+    if (k < program->spaceLeafRekey.size()) {
+        program->spaceLeafRekey[k] |= kRigExecSpaceLeafSampled;
+    }
+}
+
 /// Sets leaf \p id's `mustSample` byte, so the next sample re-reads it. An
 /// id past the binding leaves names a path leaf.
 inline void
@@ -5131,7 +5188,8 @@ void RigExecBakedDeclareInputDependencies(RigExecBakedProgramImpl *program);
 ///    `lastOverridden`, `edited`/`anyEdited` (the first pass consumes them
 ///    and the forced second pass needs none),
 ///    `lastHaveBase`, `lastTime`, `everRan`,
-///    `lastProgramStamp`. The second pass is FORCED, so its closure differs
+///    `lastProgramStamp`, and the provider leaves' `spaceLeafRekey`. The
+///    second pass is FORCED, so its closure differs
 ///    from the first's on purpose; comparing them would report the mode
 ///    rather than the program. The run statistics that observers read are
 ///    put back by RigExecBakedRunStatistics instead.
@@ -5148,7 +5206,8 @@ void RigExecBakedDeclareInputDependencies(RigExecBakedProgramImpl *program);
 ///    not compared.
 ///  * the RUN STATISTICS, which are restored rather than compared, because
 ///    the second pass is forced and so writes different ones by
-///    construction: `lastClosedClusters`, `lastClosedSteps`, the
+///    construction: `lastClosedClusters`, `lastClosedSteps`,
+///    `spaceLeafKeys`, the
 ///    clustering's `lastRunTimed`
 ///    the closed-operation sets and full-run flag,
 ///    and each `RigExecBakedCluster`'s `readyUs`/`startUs`/`endUs`, and each
@@ -5347,6 +5406,7 @@ struct RigExecBakedRunStatistics {
     bool closureFull = false;
     size_t closedClusters = 0;
     size_t closedSteps = 0;
+    size_t spaceLeafKeys = 0;
     bool timed = false;
 };
 

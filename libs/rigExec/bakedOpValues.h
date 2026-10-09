@@ -22,6 +22,10 @@ struct RigExecBakedOpIdentityRemap {
 /// typed equality or conservative change propagation in the graph adapter.
 void RigExecBakedOpValueKey(const RigExecBakedProgramImpl &,
     RigExecBakedSlotDomain, uint32_t slot, std::string *key);
+/// RigExecBakedOpValueKey of provider leaf \p slot, returning what
+/// RigExecBakedOpValueKeyIsExact answers for it, from one overlay lookup.
+bool RigExecBakedSpaceLeafKey(const RigExecBakedProgramImpl &, uint32_t slot,
+    std::string *key);
 /// False means an unsupported boxed type or invalid declaration: seed conservatively.
 /// A geometry path leaf keys as its content version (RigExecBakedSetPathLeaf),
 /// which only this program's keys compare against; \p contentLeaves, or a

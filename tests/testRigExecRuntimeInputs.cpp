@@ -23,7 +23,8 @@
 // points and a volume's gathered curve. Then array sets live baked takes as
 // interactive overrides, against which the work counters agree too, and a
 // lattice whose live cage read is bound where its read phase answers
-// nothing.
+// nothing. Last, every input write route re-keys the leaves keyed from
+// the slot it writes, and a run after no write re-keys none.
 #include "rigExec/rigEvaluator.h"
 #include "rigExecBake/bake.h"
 #include "rigExecBake/staticReport.h"
@@ -40,6 +41,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <limits>
@@ -1771,6 +1773,107 @@ _TestExampleArrays(const std::string &examples)
     }
 }
 
+// Sparse leaf publication: a leaf keyed from input slots alone (a provider
+// leaf, a constraint's arrays) is re-keyed only after a write to a slot it
+// reads. Under RIGEXEC_VERIFY_SPARSE_LEAVES every Execute also re-keys the
+// leaves it skipped and fails if one moved, so each write route below has
+// to mark its slot: the sampler over time, a sampled set and its repeat, a
+// blocked flag, a sampled clear, an authored set, a clear, a reset. A run
+// after no write re-keys none, and one write re-keys fewer than all.
+static void
+_TestSparseSlotLeaves(const std::string &examples)
+{
+    const UsdStageRefPtr stage = _Open(examples + "/biped/Biped_anim.usda");
+    if (!stage) return;
+    std::vector<uint8_t> bytes;
+    std::string error;
+    {
+        RigExecRigEvaluator evaluator(stage, _FindRig(stage));
+        if (!RigExecTestBakeAt(evaluator, 1.0, &bytes, &error)) {
+            std::printf("sparse leaves: bake: %s\n", error.c_str());
+            CHECK(false);
+            return;
+        }
+    }
+    // The runtime reads its knobs through the C runtime's environment.
+    const auto setKnob = [](const char *value) {
+#if defined(_WIN32)
+        _putenv_s("RIGEXEC_VERIFY_SPARSE_LEAVES", value);
+#else
+        if (*value) setenv("RIGEXEC_VERIFY_SPARSE_LEAVES", value, 1);
+        else unsetenv("RIGEXEC_VERIFY_SPARSE_LEAVES");
+#endif
+    };
+    RigExecTestPlayer player;
+    setKnob("1");
+    const bool opened = player.Open(bytes, stage, &error);
+    setKnob("");
+    if (!opened) {
+        std::printf("sparse leaves: open: %s\n", error.c_str());
+        CHECK(false);
+        return;
+    }
+    RigExecRuntimeReader &reader = player.Reader();
+    const auto run = [&](const char *what) {
+        error.clear();
+        const bool ok = reader.Execute(&error);
+        if (!ok) std::printf("sparse leaves, %s: %s\n", what, error.c_str());
+        CHECK(ok);
+        return reader.GetSlotLeafKeysForTesting();
+    };
+    CHECK(player.Play(1.0, &error));
+    const size_t all = reader.GetSlotLeafKeysForTesting();
+    CHECK(all > 0);
+    CHECK(run("held") == 0);
+    CHECK(player.Play(2.0, &error));
+    const size_t sampled = reader.GetSlotLeafKeysForTesting();
+    CHECK(run("held after time") == 0);
+
+    // A provider leaf's own source slot, scalar and listed.
+    const RigExecStageArrayInputInfo *source = nullptr;
+    const auto providers =
+        RigExecRuntimeStageArrayInputs::EnumerateProviderValues(reader);
+    for (const RigExecStageArrayInputInfo &info : providers) {
+        if (info.tag == RrInputTag::Double && info.slot < reader.GetInputCount()) {
+            source = &info;
+            break;
+        }
+    }
+    CHECK(source);
+    if (!source) return;
+    const size_t slot = source->slot;
+    RrInputValue value;
+    value.tag = RrInputTag::Double;
+    value.f64 = 0.375;
+    CHECK(RigExecRuntimeStageArrayInputs::SetScalarSample(reader, slot, value, &error));
+    const size_t one = run("sampled set");
+    CHECK(one > 0 && one < all);
+    std::printf("sparse slot leaves: %zu, re-keyed after a time step %zu, "
+                "after one input %zu\n", all, sampled, one);
+    CHECK(RigExecRuntimeStageArrayInputs::SetScalarSample(reader, slot, value, &error));
+    CHECK(run("repeated sampled set") == one);
+    CHECK(RigExecRuntimeStageArrayInputs::SetSampleBlocked(reader, slot, true, &error));
+    CHECK(run("blocked") == one);
+    CHECK(RigExecRuntimeStageArrayInputs::SetSampleBlocked(reader, slot, false, &error));
+    CHECK(run("unblocked") == one);
+    CHECK(RigExecRuntimeStageArrayInputs::ClearScalarSample(reader, slot, &error));
+    CHECK(run("sampled clear") == one);
+    value.f64 = -1.25;
+    CHECK(reader.SetInputAt(slot, value, &error));
+    CHECK(run("authored set") == one);
+    CHECK(reader.ClearInputAt(slot, &error));
+    CHECK(run("clear") == one);
+    CHECK(reader.SetInputAt(slot, value, &error));
+    run("authored set again");
+    CHECK(reader.ResetInput(reader.GetInputInfo(slot).name, &error));
+    CHECK(run("reset") == one);
+    CHECK(run("held after reset") == 0);
+    reader.ResetInputs();
+    run("reset all");
+    CHECK(player.Play(3.0, &error));
+    CHECK(run("held at the end") == 0);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -1988,6 +2091,7 @@ main(int argc, char **argv)
     CHECK(overrideMatched == overrideRuns && overrideRuns == 9);
     _TestUnansweredPhaseArray(examples);
     _TestRetainedPointFinalAvailability(examples);
+    _TestSparseSlotLeaves(examples);
     if (failures == 0) {
         std::printf("testRigExecRuntimeInputs: all tests passed\n");
         return 0;

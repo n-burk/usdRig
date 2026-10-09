@@ -369,6 +369,10 @@ struct RrStore {
     // what a change of time dirties in the program, then clears it.
     bool animatedTouched = false;
     size_t lastClosedClusters = 0;
+    // The slot-keyed leaves (RrProgram::slotKeyedLeaves) a run re-keys:
+    // scratch, and how many the last run re-keyed.
+    std::vector<RigExecValueId> leafQueue;
+    size_t slotLeafKeys = 0;
 };
 
 // The static data the steps read besides the tables and the input slots:
@@ -537,6 +541,16 @@ struct RrProgram {
     /// each source memo over array contents and fails if the two disagree
     /// on a change.
     bool verifyLeafVersions = false;
+    /// RIGEXEC_VERIFY_SPARSE_LEAVES, read at Open: every run re-keys the
+    /// slot-keyed leaves it skips and fails if one moved.
+    bool verifySparseLeaves = false;
+    /// The leaves whose keys read input slots alone (provider leaves and
+    /// constraint input arrays), by the slots they read:
+    /// slotLeaves[slotLeafBegin[s], slotLeafBegin[s + 1]). slotKeyedLeaves
+    /// lists them and otherLeaves every other leaf, each in id order. Built
+    /// with the op graph; an empty slotLeafBegin re-keys every leaf per run.
+    std::vector<uint32_t> slotLeafBegin;
+    std::vector<RigExecValueId> slotLeaves, slotKeyedLeaves, otherLeaves;
 
     /// One plugin revision's playback state, in external_movers order. No
     /// prepared state means no kernel here: the revision passes through.

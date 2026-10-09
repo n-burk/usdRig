@@ -293,6 +293,7 @@ _FrozenPrologue(_FrozenWorker *worker, const RigExecFrozenProgram &snapshot,
         const bool blocked=found!=index.end() && inputs.values[found->second].valueBlocked;
         B.providerLeaves.changed[k]=!RigExecBakedHeadValueSame(value,B.providerLeaves.values[k]) ||
             bool(B.providerLeafBlocked[k])!=blocked;
+        if(B.providerLeaves.changed[k]) RigExecBakedNoteSpaceLeafSampled(&B,k);
         B.providerLeaves.values[k]=value;
         B.providerLeafBlocked[k]=blocked;
     }

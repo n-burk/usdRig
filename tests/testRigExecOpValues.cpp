@@ -697,6 +697,49 @@ void TestPathLeafContentVersions()
     CHECK(!RigExecBakedOpInputKey(B,step,&first));
 }
 
+// A provider leaf's key and exactness from RigExecBakedSpaceLeafKey are
+// RigExecBakedOpValueKey's and RigExecBakedOpValueKeyIsExact's, and the
+// overlay through the publication index is the one the Build maps find,
+// whichever table stands on the leaf.
+void TestSpaceLeafIndexOverlay()
+{
+    RigExecBakedProgramImpl B;
+    const SdfPath a("/Rig/A.avars:tx"),b("/Rig/B.avars:tx"),c("/Rig/C.avars:tx");
+    B.providerProgram.sampled.resize(3);
+    B.providerProgram.sampled[0].attribute=a; B.providerProgram.sampled[1].attribute=b;
+    B.providerProgram.sampled[2].attribute=c;
+    B.providerLeaves.values={VtValue(1.0),VtValue(2.0f),VtValue(GfVec4f(0.0f))};
+    B.providerLeafBlocked={0,1,0};
+    B.headOverrideSlots={{b,0u}}; B.headOverrides.resize(1);
+    B.overridableInputs={{a,{0,1}},{c,{2}}}; B.overridden.assign(3,0);
+    RigExecResolvedInputs resolved; resolved.SetProperty(a,VtValue(7.0));
+    B.resolvedInputs=&resolved;
+    auto index=std::make_shared<RigExecBakedSpaceLeafIndex>();
+    index->headSlot={-1,0,-1}; index->numberBegin={0,2,2,3}; index->numbers={0,1,2};
+    using D=RigExecBakedSlotDomain;
+    const auto check=[&](const char *what) {
+        for(uint32_t k=0;k<3;++k) {
+            B.spaceLeafIndex.reset();
+            const VtValue *found=RigExecBakedSpaceLeafOverlay(B,k);
+            const bool exact=RigExecBakedOpValueKeyIsExact(B,D::SpaceLeaf,k);
+            const std::string key=Key(B,D::SpaceLeaf,k);
+            B.spaceLeafIndex=index;
+            std::string fast;
+            const bool same=RigExecBakedSpaceLeafOverlay(B,k)==found &&
+                RigExecBakedSpaceLeafKey(B,k,&fast)==exact && fast==key;
+            if(!same) std::printf("  %s, leaf %u\n",what,k);
+            CHECK(same);
+        }
+    };
+    check("no overlay");
+    B.overridden[1]=1; check("override number");
+    B.overridden[2]=1; check("override number without a resolved value");
+    B.headOverrides[0]=VtValue(3.0f); check("head override");
+    B.upstream[b]=VtValue(4.0); check("upstream");
+    B.routedOverrides[c]=VtValue(5.0); check("routed");
+    B.resolvedInputs=nullptr; check("no resolved inputs");
+}
+
 // The executor never rebuilds a source key the classifier calls constant,
 // so that key must hold its bytes whatever sampled, overridden, published or
 // provider state holds, and every gate the classifier tests must key state.
@@ -963,7 +1006,7 @@ void TestSharedKeyRunsAndPlainValues()
 }
 int main()
 {
-    TestConstantSourceKeys(); TestPathLeafContentVersions();
+    TestConstantSourceKeys(); TestPathLeafContentVersions(); TestSpaceLeafIndexOverlay();
     TestSkinEffectiveSelectedTopology(); TestFloatPayloadBits(); TestFieldValidityCountError(); TestPropertyValidityAndLadderState();
     TestChunkRangeIsolation(); TestConstraintSourceAndPropertyAliasKeys();
     TestPacketStatusAndOpaqueBoundary(); TestRawInputAndProviderKeys(); TestAvarEffectiveSelection();

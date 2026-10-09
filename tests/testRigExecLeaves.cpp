@@ -5,6 +5,7 @@
 // body-purity checks. Every registered example participates.
 // argv[1] = path to the examples directory.
 #include "rigExec/inputReplay.h"
+#include "rigExec/bakedOpValues.h"
 #include "rigExec/bakedProgram.h"
 #include "rigExec/bakedProgramImpl.h"
 #include "rigExec/bodyPurity.h"
@@ -23,6 +24,7 @@
 #include "pxr/base/gf/vec3d.h"
 #include "pxr/base/gf/vec3f.h"
 #include "pxr/base/plug/registry.h"
+#include "pxr/base/tf/errorMark.h"
 #include "pxr/base/tf/pathUtils.h"
 #include "pxr/base/tf/stringUtils.h"
 #include "pxr/base/tf/type.h"
@@ -2934,6 +2936,118 @@ TestTheWireBasisMemoIsOwned()
 
 }  // namespace
 
+// Provider leaves a run will skip, whose key a full publication would
+// change now: every leaf no kRigExecSpaceLeaf* reason marks must still hold
+// the key it would be given, or the next run keeps a stale one.
+size_t
+StaleProviderLeaves(const RigExecBakedProgramImpl &B, const std::string &what)
+{
+    const RigExecBakedSpaceLeafIndex *index = B.spaceLeafIndex.get();
+    if (!index) {
+        return 1;
+    }
+    size_t stale = 0;
+    std::string key;
+    for (size_t k = 0; k < B.spaceLeafRekey.size(); ++k) {
+        if (B.spaceLeafRekey[k]) {
+            continue;
+        }
+        const RigExecOpValueState &value =
+            B.opAdapter.values[size_t(index->first + k)];
+        const bool exact = RigExecBakedSpaceLeafKey(B, uint32_t(k), &key);
+        if (!value.initialized || !exact || key != value.key) {
+            if (stale < 4) {
+                std::printf("FAIL %s: provider leaf %s kept a stale key\n",
+                            what.c_str(),
+                            B.providerProgram.sampled[k].attribute.GetText());
+            }
+            ++stale;
+        }
+    }
+    return stale;
+}
+
+// Sparse provider-leaf publication over every route that moves a provider
+// leaf's key: time, a drag on a provider input and its release, an upstream
+// value, its move and its lift, and a value edit at a held frame. After each
+// run the skipped leaves' keys are what a full publication would give; under
+// RIGEXEC_VERIFY_SPARSE_LEAVES each run also re-keys the leaves it skips and
+// verifies them unchanged. A held frame re-keys only the leaves that must.
+void
+TestSparseProviderLeaves(const std::string &examples)
+{
+    const Fixture f = FixtureNamed(Fixtures(examples), "biped");
+    const UsdStageRefPtr stage = UsdStage::Open(f.stage);
+    CHECK(stage);
+    if (!stage) {
+        return;
+    }
+    ArchSetEnv("RIGEXEC_VERIFY_SPARSE_LEAVES", "1", /*overwrite=*/true);
+    auto evaluator = MakeEvaluator(stage, f.rig);
+    ArchRemoveEnv("RIGEXEC_VERIFY_SPARSE_LEAVES");
+    const RigExecBakedProgramImpl *B = Program(*evaluator);
+    CHECK(B && B->spaceLeafIndex && B->spaceLeafIndex->verify);
+    if (!B || !B->spaceLeafIndex) {
+        return;
+    }
+    const auto avar = [&](const char *prim, const char *name) {
+        for (const UsdPrim &p : stage->Traverse()) {
+            if (p.GetName() == prim) {
+                return p.GetPath().AppendProperty(TfToken(name));
+            }
+        }
+        return SdfPath();
+    };
+    const SdfPath body = avar("M_Body", "avars:ry");
+    const SdfPath shoulder = avar("L_Shldr", "avars:rz");
+    CHECK(!body.IsEmpty() && !shoulder.IsEmpty());
+    const size_t all = B->spaceLeafRekey.size();
+    TfErrorMark mark;
+    const auto step = [&](double time, const std::string &what) {
+        const RigExecRigPose pose = evaluator->Evaluate(UsdTimeCode(time));
+        CHECK(pose.valid);
+        const RigExecBakedProgramImpl *P = Program(*evaluator);
+        CHECK(P);
+        CHECK(P && StaleProviderLeaves(*P, what) == 0);
+        return P ? P->spaceLeafKeys : 0;
+    };
+    CHECK(step(1, "first") == all);
+    const size_t held = step(1, "held");
+    CHECK(held < all);
+    step(2, "time");
+    CHECK(step(2, "held after time") == held);
+    evaluator->SetInteractiveOverrides({DragOf(body, 20.0)});
+    const size_t drag = step(2, "drag");
+    CHECK(drag > held && drag < all);
+    evaluator->SetInteractiveOverrides({DragOf(body, 25.0)});
+    CHECK(step(2, "drag moved") == drag);
+    evaluator->ClearInteractiveOverrides();
+    CHECK(step(2, "drag released") == drag);
+    CHECK(step(2, "held after release") == held);
+    evaluator->SetUpstreamInputs({DragOf(shoulder, 30.0)});
+    const size_t upstream = step(2, "upstream");
+    CHECK(upstream > held && upstream < all);
+    evaluator->SetUpstreamInputs({DragOf(shoulder, 35.0)});
+    CHECK(step(2, "upstream moved") == upstream);
+    evaluator->SetUpstreamInputs({});
+    CHECK(step(2, "upstream lifted") == upstream);
+    CHECK(step(2, "held after upstream") == held);
+    std::printf("sparse provider leaves: %zu, re-keyed held %zu, dragged %zu, "
+                "upstream %zu\n", all, held, drag, upstream);
+    // An authored value edit, patched in place at the held frame.
+    CHECK(!B->patchableAvars.empty());
+    if (!B->patchableAvars.empty()) {
+        UsdAttribute attribute =
+            stage->GetAttributeAtPath(B->patchableAvars.begin()->first);
+        double value = 0.0;
+        attribute.Get(&value, UsdTimeCode::Default());
+        CHECK(attribute.Set(value + 0.5));
+        step(2, "value edit");
+    }
+    step(3, "time after the edits");
+    CHECK(mark.IsClean());
+}
+
 int
 main(int argc, char **argv)
 {
@@ -2960,6 +3074,7 @@ main(int argc, char **argv)
     TestAFrozenCloneKeepsTheBuildSettings(examples);
     TestTheWireBasisMemoIsOwned();
     TestNoBodyReadsTheStage(examples);
+    TestSparseProviderLeaves(examples);
     std::printf("testRigExecLeaves: %d failure(s)\n", failures);
     return failures ? 1 : 0;
 }

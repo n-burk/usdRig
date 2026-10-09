@@ -722,6 +722,8 @@ RrInputsOpen(RrProgram *program, const RigExecWireFile *file,
     state.slotRan = state.slotCurrent;
     state.slotRanHasValue = state.slotHasValue;
     state.touchedFlag.assign(slots, 0);
+    state.writtenFlag.assign(slots, 0);
+    state.written.clear();
     state.slotChangedSinceRun.assign(slots, 0);
     // The float2 and float3 pool entries an array value names, converted
     // once; the other pools are read in place.
@@ -1880,6 +1882,7 @@ _RrTagName(RrInputTag tag)
 void
 _RrTouchArray(RrInputState &state, uint32_t slot, RrArraySlot &a)
 {
+    RrInputsMarkWritten(state, slot);
     if (state.touchedFlag[slot]) {
         return;
     }
@@ -1913,6 +1916,7 @@ void
 _RrStoreSlot(RrInputState &state, uint32_t slot, const RrWireValue &value,
              bool has)
 {
+    RrInputsMarkWritten(state, slot);
     state.slotCurrent[slot] = value;
     state.slotHasValue[slot] = has ? 1 : 0;
     state.slotBlocked[slot]=0;
@@ -2101,6 +2105,8 @@ _RrSetArraySlot(RrProgram *program, size_t index,
     const uint32_t slot = uint32_t(index);
     RrArraySlot &a = state.arrays[size_t(state.arrayOf[slot])];
     const RigExecWireInputTag tag = a.tag;
+    // Even a repeat writes the set's kind.
+    RrInputsMarkWritten(state, slot);
     // Compared bit for bit: a repeat only takes the set's kind.
     if (state.slotHasValue[slot] &&
         _RrSameElements(tag, _RrArrayView(a), value.data, value.count)) {
@@ -2179,6 +2185,7 @@ RrStageArrayClear(RrProgram *program, size_t slot, std::string *error)
         return _RrFail(error, "no sampled array at slot " + std::to_string(slot));
     }
     auto &state = program->inputState;
+    RrInputsMarkWritten(state, slot);
     if (state.slotHasValue[slot]) {
         auto &array = state.arrays[size_t(state.arrayOf[slot])];
         _RrTouchArray(state, uint32_t(slot), array);
@@ -2287,6 +2294,7 @@ RrStageInputBlockedSet(RrProgram *program,size_t slot,bool blocked,std::string *
     auto &state=program->inputState;
     if(slot>=state.slotProviderSource.size() || !state.slotProviderSource[slot])
         return _RrFail(error,"not a declared provider raw source");
+    RrInputsMarkWritten(state,slot);
     state.slotBlocked[slot]=blocked?1:0;
     return true;
 }
@@ -2480,6 +2488,7 @@ void
 RrInputsReset(RrProgram *program, size_t index)
 {
     RrInputState &state = program->inputState;
+    RrInputsMarkWritten(state, index);
     if (index < state.slotAuthored.size()) state.slotAuthored[index] = 0;
     if (index >= state.inputInfo.size()) {
         return;

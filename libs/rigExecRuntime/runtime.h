@@ -243,6 +243,11 @@ public:
     // source steps run outside it.
     size_t GetClosedClusterCountForTesting() const;
 
+    // Test-only: how many leaves keyed from input slots alone (provider
+    // leaves, constraint input arrays) the last Execute re-keyed; a run
+    // after no input write re-keys none.
+    size_t GetSlotLeafKeysForTesting() const;
+
     // Test-only: whether the skin and matrix kernels take the SIMD path,
     // as RIGEXEC_ENABLE_SIMD said when this reader opened.
     bool GetSimdEnabledForTesting() const;

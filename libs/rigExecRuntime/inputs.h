@@ -330,6 +330,11 @@ struct RrInputState {
     /// Slots set or reset since the last run, each listed once.
     std::vector<uint32_t> touched;
     std::vector<char> touchedFlag;
+    /// Slots whose value, presence, authorship or blocked flag any call
+    /// wrote, moved or not, since the op graph's leaf publication last
+    /// consumed them (RrInputsMarkWritten), each listed once.
+    std::vector<uint32_t> written;
+    std::vector<char> writtenFlag;
     /// Per listed input (index = slot id < file->listedInputs): what
     /// GetInputInfo reports, and the value GetInputValue reports.
     std::vector<RigExecRuntimeInputInfo> inputInfo;
@@ -548,6 +553,19 @@ bool RrInputsClear(RrProgram *program, size_t index, std::string *error);
 /// slotChangedSinceRun; an array slot does nothing else, since every
 /// reader of an array runs on every Execute or compares by value.
 void RrInputsApplyTouched(RrProgram *program);
+
+/// Lists slot \p slot in RrInputState::written. Every write to a slot's
+/// value, HasValue, authored mark or blocked flag calls it, whether or not
+/// anything moved, so a leaf keyed from input slots alone keeps its key
+/// exactly until a slot it reads is written.
+inline void
+RrInputsMarkWritten(RrInputState &state, size_t slot)
+{
+    if (slot < state.writtenFlag.size() && !state.writtenFlag[slot]) {
+        state.writtenFlag[slot] = 1;
+        state.written.push_back(uint32_t(slot));
+    }
+}
 
 /// Whether the resolved inputs hold a value at attribute \p path this run:
 /// a property-chain result (RigExecResolvedInputs::Find).

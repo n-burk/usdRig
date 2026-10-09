@@ -284,6 +284,11 @@ _CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst)
     D.providerValues = src.providerValues;
     D.providerLeaves = src.providerLeaves;
     D.providerLeafBlocked = src.providerLeafBlocked;
+    // The leaf keys in opAdapter answer for these samples only together
+    // with the reasons publication has not yet consumed.
+    D.spaceLeafIndex = src.spaceLeafIndex;
+    D.spaceLeafRekey = src.spaceLeafRekey;
+    D.spaceLeafKeys = src.spaceLeafKeys;
     D.providerLeafValues = src.providerLeafValues;
     D.providerLeafChains = src.providerLeafChains;
     D.providerRoutedReads = src.providerRoutedReads;

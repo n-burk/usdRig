@@ -1267,6 +1267,7 @@ RigExecBakedRunStatistics::RigExecBakedRunStatistics(
     closureFull = program.closureFull;
     closedClusters = program.lastClosedClusters;
     closedSteps = program.lastClosedSteps;
+    spaceLeafKeys = program.spaceLeafKeys;
     timed = program.clustering.lastRunTimed;
     clusters.resize(program.clustering.clusters.size());
     for (size_t c = 0; c < clusters.size(); ++c) {
@@ -1296,6 +1297,7 @@ RigExecBakedRunStatistics::Restore(RigExecBakedProgramImpl *program) const
     B.closureFull = closureFull;
     B.lastClosedClusters = closedClusters;
     B.lastClosedSteps = closedSteps;
+    B.spaceLeafKeys = spaceLeafKeys;
     B.clustering.lastRunTimed = timed;
     for (size_t c = 0;
          c < B.clustering.clusters.size() && c < clusters.size(); ++c) {

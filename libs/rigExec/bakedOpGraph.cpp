@@ -9,8 +9,10 @@
 #include "pxr/base/work/dispatcher.h"
 #include "pxr/base/work/withScopedParallelism.h"
 #include <algorithm>
+#include <cstring>
 #include <limits>
 #include <map>
+#include <memory>
 #include <tuple>
 #include <type_traits>
 
@@ -424,6 +426,129 @@ void RigExecBakedAdoptSkinOpState(RigExecBakedProgramImpl *program,const RigExec
     }
 }
 
+namespace {
+// Indexes the provider leaves for sparse publication, from the compiled
+// leaves and the Build-only override tables; owner thread, once per compile.
+void BuildSpaceLeafIndex(RigExecBakedProgramImpl *program)
+{
+    auto &B=*program; const auto &state=B.opAdapter;
+    B.spaceLeafIndex.reset(); B.spaceLeafRekey.clear(); B.spaceLeafKeys=0;
+    const size_t count=B.providerProgram.sampled.size();
+    if(!count || B.providerLeaves.values.size()!=count || B.providerLeafBlocked.size()!=count) return;
+    auto index=std::make_shared<RigExecBakedSpaceLeafIndex>();
+    size_t found=0;
+    for(const auto id:state.leaves) {
+        const auto &value=state.values[size_t(id)];
+        if(value.domain!=uint32_t(RigExecBakedSlotDomain::SpaceLeaf)) {
+            (found?index->after:index->before).push_back(id); continue;
+        }
+        if(!found) index->first=id;
+        // Leaf k must be value first + k for publication to walk them in id order.
+        if(value.slot!=found || id!=index->first+found) return;
+        ++found;
+    }
+    if(found!=count) return;
+    index->headSlot.assign(count,-1); index->numberBegin.assign(count+1,0);
+    for(size_t k=0;k<count;++k) {
+        const SdfPath &path=B.providerProgram.sampled[k].attribute;
+        index->byPath.emplace_back(path,uint32_t(k));
+        const auto head=B.headOverrideSlots.find(path);
+        if(head!=B.headOverrideSlots.end()) {
+            if(head->second>uint32_t(std::numeric_limits<int>::max())) return;
+            index->headSlot[k]=int(head->second);
+            index->byHeadSlot.emplace_back(head->second,uint32_t(k));
+        }
+        const auto numbers=B.overridableInputs.find(path);
+        if(numbers!=B.overridableInputs.end()) for(const int number:numbers->second) {
+            index->numbers.push_back(number);
+            if(number>=0) index->byNumber.emplace_back(uint32_t(number),uint32_t(k));
+        }
+        index->numberBegin[k+1]=uint32_t(index->numbers.size());
+    }
+    std::sort(index->byPath.begin(),index->byPath.end());
+    index->verify=TfGetenvBool("RIGEXEC_VERIFY_SPARSE_LEAVES",false);
+    B.spaceLeafIndex=std::move(index);
+    B.spaceLeafRekey.assign(count,0);
+}
+
+// Re-keys the sampled leaves into changedLeaves, in id order. Unless \p all,
+// a provider leaf is re-keyed only for a kRigExecSpaceLeaf* reason; any other
+// keeps the key an equal compare would keep, unchanged. Owner thread, before
+// the region.
+void PublishLeaves(RigExecBakedProgramImpl *program,bool all)
+{
+    auto &B=*program; auto &state=B.opAdapter;
+    const auto publish=[&](RigExecValueId id) {
+        auto &value=state.values[size_t(id)];
+        RigExecOpPublishValue(&value,[&](uint32_t d,uint32_t slot,std::string *key) {
+            RigExecBakedOpValueKey(B,RigExecBakedSlotDomain(d),slot,key);
+            // An unsupported sampled source has no equality proof.
+            if(!RigExecBakedOpValueKeyIsExact(B,RigExecBakedSlotDomain(d),slot))
+                RigExecOpKeyAppend(key,value.revision+1);
+        });
+        if(value.changed) state.changedLeaves.push_back(id);
+    };
+    const auto *index=B.spaceLeafIndex.get();
+    auto &rekey=B.spaceLeafRekey;
+    if(!index || rekey.size()+1!=index->numberBegin.size()) {
+        for(const auto id:state.leaves) publish(id);
+        return;
+    }
+    // Every leaf an overlay can stand on now: RigExecBakedSpaceLeafOverlay
+    // answers only from these four tables.
+    const auto overlaid=[&](uint32_t k) { rekey[k]|=kRigExecSpaceLeafOverlaid; };
+    const auto atPath=[&](const SdfPath &path) {
+        auto at=std::lower_bound(index->byPath.begin(),index->byPath.end(),path,
+            [](const std::pair<SdfPath,uint32_t> &entry,const SdfPath &p) { return entry.first<p; });
+        for(;at!=index->byPath.end() && at->first==path;++at) overlaid(at->second);
+    };
+    for(const auto &entry:B.routedOverrides) atPath(entry.first);
+    for(const auto &entry:B.upstream) atPath(entry.first);
+    for(const auto &[slot,k]:index->byHeadSlot)
+        if(slot<B.headOverrides.size() && !B.headOverrides[slot].IsEmpty()) overlaid(k);
+    // anyOverridden is false exactly when no override flag is set.
+    if(B.anyOverridden) for(const auto &[number,k]:index->byNumber)
+        if(number<B.overridden.size() && B.overridden[number]) overlaid(k);
+    size_t keyed=0;
+    const auto publishSpace=[&](size_t k) {
+        const RigExecValueId id=index->first+k;
+        auto &value=state.values[size_t(id)];
+        bool exact=true;
+        RigExecOpPublishValue(&value,[&](uint32_t,uint32_t slot,std::string *key) {
+            exact=RigExecBakedSpaceLeafKey(B,slot,key);
+            if(!exact) RigExecOpKeyAppend(key,value.revision+1);
+        });
+        if(value.changed) state.changedLeaves.push_back(id);
+        rekey[k]=(rekey[k]&kRigExecSpaceLeafOverlaid) || !exact ? kRigExecSpaceLeafHeld : 0;
+        ++keyed;
+    };
+    for(const auto id:index->before) publish(id);
+    const size_t count=rekey.size();
+    if(all) for(size_t k=0;k<count;++k) publishSpace(k);
+    else if(index->verify) {
+        std::string scratch;
+        for(size_t k=0;k<count;++k) {
+            if(rekey[k]) { publishSpace(k); continue; }
+            const auto &value=state.values[size_t(index->first+k)];
+            const bool exact=RigExecBakedSpaceLeafKey(B,uint32_t(k),&scratch);
+            TF_VERIFY(value.initialized && exact && scratch==value.key,
+                      "sparse publication skipped provider leaf %zu, whose key moved",k);
+        }
+    } else for(size_t k=0;k<count;) {
+        // Most bytes are clear: step over eight at a time.
+        uint64_t word=0;
+        if(k+sizeof(word)<=count) {
+            std::memcpy(&word,rekey.data()+k,sizeof(word));
+            if(!word) { k+=sizeof(word); continue; }
+        }
+        if(rekey[k]) publishSpace(k);
+        ++k;
+    }
+    for(const auto id:index->after) publish(id);
+    B.spaceLeafKeys=keyed;
+}
+}
+
 bool RigExecBakedCompileOpGraph(RigExecBakedProgramImpl *B,std::string *error)
 {
     RigExecBakedDeclareStageFramesAdmission(B);
@@ -506,6 +631,7 @@ bool RigExecBakedCompileOpGraph(RigExecBakedProgramImpl *B,std::string *error)
     }
     state.verifyConstantSources=TfGetenvBool("RIGEXEC_VERIFY_CONSTANT_KEYS",false);
     state.verifyLeafVersions=TfGetenvBool("RIGEXEC_VERIFY_LEAF_VERSIONS",false);
+    BuildSpaceLeafIndex(B);
     // The skip callback below changes state only through MarkSkipped, whose
     // counters only geometry bodies set, SkipGeometryStep on geometry kinds
     // and FinishHeadOp on property revisions; every other skip is a no-op.
@@ -568,21 +694,13 @@ bool RigExecBakedExecuteOpGraph(RigExecBakedProgramImpl *program,UsdTimeCode tim
     const auto sample=[&](uint32_t d,uint32_t slot,std::string *key) {
         RigExecBakedOpValueKey(B,RigExecBakedSlotDomain(d),slot,key);
     };
-    for(const auto id:state.leaves) {
-        auto &value=state.values[size_t(id)];
-        RigExecOpPublishValue(&value,[&](uint32_t d,uint32_t slot,std::string *key) {
-            sample(d,slot,key);
-            // An unsupported sampled source has no equality proof.
-            if(!RigExecBakedOpValueKeyIsExact(B,RigExecBakedSlotDomain(d),slot))
-                RigExecOpKeyAppend(key,value.revision+1);
-        });
-        if(value.changed) state.changedLeaves.push_back(id);
-    }
     // A constant source key keeps the bytes and exactness of its last build,
     // so it yields what an equal-key compare does: exact and unchanged. Keys
     // are rebuilt on a first run, an adoption or a new program stamp; a run
     // that rebuilds none visits only the ops that can seed or change.
     const bool rebuildSources=first || !state.retainedFirst.empty() || B.programStamp!=B.lastProgramStamp;
+    // Provider leaves trust last run's keys on the same terms, and not under force.
+    PublishLeaves(&B,rebuildSources || force);
     // The keys below read the path leaves' versions: a write from here on
     // compares against what this run read.
     ++B.pathLeafRun;

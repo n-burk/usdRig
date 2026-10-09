@@ -52,6 +52,45 @@ _RrIndexSkipEffects(RrProgram *p)
             skipEffects.push_back(c);
 }
 
+// The leaves RrOpValue keys from input slots alone, by the slots it reads
+// for them: a provider leaf its input slot, a constraint's arrays their raw
+// slots. A slot past the inputs keys as undeclared, a constant.
+void
+_RrIndexSlotLeaves(RrProgram *p)
+{
+    p->slotLeafBegin.clear(); p->slotLeaves.clear();
+    p->slotKeyedLeaves.clear(); p->otherLeaves.clear();
+    const auto &state = p->store.opAdapter;
+    if (!p->file || !p->file->providerProgram || !p->file->pose) return;
+    const auto &sampled = p->file->providerProgram->sampled;
+    const auto &arrays = p->file->pose->constraintArrays;
+    const size_t slots = p->inputState.slotHasValue.size();
+    std::vector<std::pair<uint32_t, RigExecValueId>> reads;
+    const auto read = [&](int slot, RigExecValueId id) {
+        if (slot >= 0 && size_t(slot) < slots) reads.emplace_back(uint32_t(slot), id);
+    };
+    using D = RigExecWireSlotDomain;
+    for (const RigExecValueId id : state.leaves) {
+        const auto &value = state.values[size_t(id)];
+        if (value.domain == uint32_t(D::SpaceLeaf) && value.slot < sampled.size()) {
+            read(sampled[value.slot].inputSlot, id);
+        } else if (value.domain == uint32_t(D::ConstraintInputs) && value.slot < arrays.size()) {
+            for (const int slot : arrays[value.slot].rawSlots) read(slot, id);
+        } else {
+            p->otherLeaves.push_back(id);
+            continue;
+        }
+        p->slotKeyedLeaves.push_back(id);
+    }
+    std::sort(reads.begin(), reads.end());
+    reads.erase(std::unique(reads.begin(), reads.end()), reads.end());
+    p->slotLeafBegin.assign(slots + 1, 0);
+    for (const auto &entry : reads) ++p->slotLeafBegin[entry.first + 1];
+    for (size_t s = 0; s < slots; ++s) p->slotLeafBegin[s + 1] += p->slotLeafBegin[s];
+    p->slotLeaves.reserve(reads.size());
+    for (const auto &entry : reads) p->slotLeaves.push_back(entry.second);
+}
+
 }  // namespace
 
 namespace {
@@ -588,6 +627,7 @@ bool RrCompileOpGraph(RrProgram *p,std::string *error)
         state.constantSource[c]=_RrInputMemoIsConstant(step)?1:0;
         if(!state.constantSource[c] || step.headAlwaysRuns) state.sourceVisits.push_back(c);
     }
+    _RrIndexSlotLeaves(p);
     return true;
 }
 
@@ -613,8 +653,42 @@ bool RrExecuteOpGraph(RrProgram *p,bool force,std::string *error)
     }
     RigExecOpClearChanges(&state);
     const auto sample=[&](uint32_t d,uint32_t slot,std::string *key){RrOpValue(p,d,slot,key);};
-    for(const auto id:state.leaves) { RigExecOpPublishValue(&state.values[size_t(id)],sample);
-        if(state.values[size_t(id)].changed) state.changedLeaves.push_back(id); }
+    const auto publish=[&](RigExecValueId id) {
+        auto &value=state.values[size_t(id)]; RigExecOpPublishValue(&value,sample);
+        if(value.changed) state.changedLeaves.push_back(id);
+    };
+    // A slot-keyed leaf keeps the key an equal compare would keep until a
+    // slot it reads is written; the run consumes the written slots.
+    auto &inputs=p->inputState;
+    if(first || force || p->slotLeafBegin.empty()) {
+        for(const auto id:state.leaves) publish(id);
+        s.slotLeafKeys=p->slotKeyedLeaves.size();
+    } else {
+        for(const auto id:p->otherLeaves) publish(id);
+        auto &queue=s.leafQueue; queue.clear();
+        for(const uint32_t slot:inputs.written) if(size_t(slot)+1<p->slotLeafBegin.size())
+            queue.insert(queue.end(),p->slotLeaves.begin()+p->slotLeafBegin[slot],
+                         p->slotLeaves.begin()+p->slotLeafBegin[slot+1]);
+        std::sort(queue.begin(),queue.end()); queue.erase(std::unique(queue.begin(),queue.end()),queue.end());
+        const size_t others=state.changedLeaves.size();
+        for(const auto id:queue) publish(id);
+        std::inplace_merge(state.changedLeaves.begin(),state.changedLeaves.begin()+others,state.changedLeaves.end());
+        s.slotLeafKeys=queue.size();
+        if(p->verifySparseLeaves) {
+            std::string scratch;
+            for(const auto id:p->slotKeyedLeaves) {
+                if(std::binary_search(queue.begin(),queue.end(),id)) continue;
+                const auto &value=state.values[size_t(id)];
+                scratch.clear(); sample(value.domain,value.slot,&scratch);
+                if(value.initialized && scratch==value.key) continue;
+                if(error) *error="sparse publication skipped leaf "+std::to_string(id)+", whose key moved";
+                state.everRan=false; s.everRan=false;
+                return false;
+            }
+        }
+    }
+    for(const uint32_t slot:inputs.written) inputs.writtenFlag[slot]=0;
+    inputs.written.clear();
     // A constant source memo is empty on every run, which an equal compare
     // reports unchanged. It is built on a first run; a later run visits only
     // the steps that can seed or change.
