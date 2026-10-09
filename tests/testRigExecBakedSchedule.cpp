@@ -8725,6 +8725,373 @@ TestAFreshProgramChecksItsPins()
     std::printf("  a fresh program checks its pins on its first run\n");
 }
 
+/// \p text as an in-memory stage.
+UsdStageRefPtr
+StageFromText(const char *text)
+{
+    const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    const bool imported = stage->GetRootLayer()->ImportFromString(text);
+    CHECK(imported);
+    return imported ? stage : UsdStageRefPtr();
+}
+
+/// \p stage's program built with RIGEXEC_BAKED_CHUNK_VERTS and
+/// RIGEXEC_BAKED_GROUP_VERTS at 2, so 8 points are cut into 4 groups, and
+/// with RIGEXEC_BAKED_RANGE_CHAINS off when \p whole; RIGEXEC_VERIFY_CHAIN_
+/// VERSIONS on otherwise.
+BuiltProgram
+BuildFourGroupStage(const UsdStageRefPtr &stage, bool whole)
+{
+    TfSetenv("RIGEXEC_BAKED_CHUNK_VERTS", "2");
+    TfSetenv("RIGEXEC_BAKED_GROUP_VERTS", "2");
+    TfSetenv(whole ? "RIGEXEC_BAKED_RANGE_CHAINS"
+                   : "RIGEXEC_VERIFY_CHAIN_VERSIONS",
+             whole ? "0" : "1");
+    BuiltProgram built;
+    built.stage = stage;
+    if (stage) {
+        built.evaluator =
+            std::make_unique<RigExecRigEvaluator>(stage, FindRig(stage));
+        std::vector<std::string> errors;
+        std::vector<std::string> reasons;
+        if (!built.evaluator->Compile(&errors)) {
+            for (const std::string &error : errors) {
+                std::printf("    compile: %s
+", error.c_str());
+            }
+        } else {
+            built.program =
+                RigExecBakedProgram::Build(built.evaluator.get(), &reasons);
+        }
+        for (const std::string &reason : reasons) {
+            std::printf("    not bakeable: %s
+", reason.c_str());
+        }
+    }
+    TfUnsetenv(whole ? "RIGEXEC_BAKED_RANGE_CHAINS"
+                     : "RIGEXEC_VERIFY_CHAIN_VERSIONS");
+    TfUnsetenv("RIGEXEC_BAKED_GROUP_VERTS");
+    TfUnsetenv("RIGEXEC_BAKED_CHUNK_VERTS");
+    return built;
+}
+
+/// The chain index of \p mover in \p B's only chain, or -1.
+int
+ChainPositionOf(const RigExecBakedProgramImpl &B, const char *mover)
+{
+    if (B.chains.size() != 1) {
+        return -1;
+    }
+    for (size_t r = 0; r < B.chains[0].revisions.size(); ++r) {
+        if (B.chains[0].revisions[r].moverPath == SdfPath(mover)) {
+            return int(r);
+        }
+    }
+    return -1;
+}
+
+/// Shift, a full-strength matrix mover, then Blend, whose one sample reads
+/// the chain's points as of Blend itself: a cycle through Blend's packet,
+/// its group steps and its join, which the cycle handling sets aside, so
+/// Blend passes the base through and its join's ids are published before
+/// ChainInputs takes the base. The 8 base points move at frames 2 and 3.
+const char *const kSetAsideChain = R"USDA(#usda 1.0
+(
+    startTimeCode = 1
+    endTimeCode = 3
+)
+
+def Scope "Asset"
+{
+    def RigExecRoot "Rig"
+    {
+        def RigExecControl "Still"
+        {
+            double avars:ty = 1
+        }
+
+        def Scope "BlendInputs"
+        {
+            def RigExecBlendInput "Self"
+            {
+                float inputs:weight = 0.5
+                rel rigExec:samples = </Asset/Rig/BlendInputs/Self/Own>
+
+                def RigExecBlendSample "Own"
+                {
+                    float rigExec:activation = 1
+                    rel rigExec:targetPoints = </Asset/Geom/Body.points> (
+                        rigExecReadPhase = "/Asset/Rig/Movers/Blend"
+                    )
+                }
+            }
+        }
+
+        def Scope "Movers"
+        {
+            def RigExecBlendShapeMover "Blend" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                float inputs:defaultWeight = 1
+                rel rigExec:blendInputs = </Asset/Rig/BlendInputs/Self>
+                rel rigExec:moves = </Asset/Geom/Body.points>
+            }
+
+            def RigExecMatrixMover "Shift" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                float inputs:defaultWeight = 1
+                rel rigExec:moves = </Asset/Geom/Body.points>
+                rel rigExec:transform = </Asset/Rig/Still>
+            }
+        }
+    }
+
+    def Scope "Geom"
+    {
+        def Points "Body"
+        {
+            point3f[] points.timeSamples = {
+                1: [(0, 0, 0), (1, 0, 0), (2, 0, 1), (3, 0, 2), (4, 1, 0), (5, 1, 1), (6, 1, 2), (7, 1, 0)],
+                2: [(0, 0.5, 0), (1, 0.5, 0), (2, 0.5, 1), (3, 0.5, 2), (4, 1.5, 0), (5, 1.5, 1), (6, 1.5, 2), (7, 1.5, 0)],
+                3: [(0, 1, 0), (1, 1, 0), (2, 1, 1), (3, 1, 2), (4, 2, 0), (5, 2, 1), (6, 2, 2), (7, 2, 0)],
+            }
+        }
+    }
+}
+)USDA";
+
+/// A join a cycle sets aside publishes its group ids on the owner thread
+/// before the region, from the base as the previous run left it; the chain
+/// status must resolve version n past it to the base groups as ChainInputs
+/// left them. Over visits where the base stands for one run and then moves
+/// ({1,2,2,3,3,1}), the chain's points, every version, the status lines
+/// and the content-version judge agree with the chain built whole.
+void
+TestASetAsideJoinFollowsTheBase()
+{
+    const BuiltProgram ranged =
+        BuildFourGroupStage(StageFromText(kSetAsideChain), false);
+    const BuiltProgram whole =
+        BuildFourGroupStage(StageFromText(kSetAsideChain), true);
+    CHECK(ranged.program != nullptr && whole.program != nullptr);
+    if (!ranged.program || !whole.program) {
+        return;
+    }
+    const RigExecBakedProgramImpl &R = ranged.program->GetStepGraph();
+    const RigExecBakedProgramImpl &W = whole.program->GetStepGraph();
+    const int blend = ChainPositionOf(R, "/Asset/Rig/Movers/Blend");
+    const int shift = ChainPositionOf(R, "/Asset/Rig/Movers/Shift");
+    CHECK(shift == 0 && blend == 1);
+    if (shift != 0 || blend != 1 || W.chains.size() != 1) {
+        std::printf("FAIL set-aside chain: not built as the fixture "
+                    "intends\n");
+        return;
+    }
+    const RigExecBakedProgramImpl::GeomChain &chain = R.chains[0];
+    CHECK(chain.groupBounds.size() == 5);
+    CHECK(chain.revisions[size_t(blend)].role ==
+          RigExecBakedRevisionRole::Range);
+    for (const double frame : {1.0, 2.0, 2.0, 3.0, 3.0, 1.0}) {
+        RigExecRigPose rangedPose, wholePose;
+        CHECK(ranged.program->Run(UsdTimeCode(frame), &rangedPose));
+        CHECK(whole.program->Run(UsdTimeCode(frame), &wholePose));
+        CHECK(chain.revisions[size_t(blend)].rangeSetAside);
+        if (!SameBits(chain.result, W.chains[0].result)) {
+            ++failures;
+            std::printf("FAIL set-aside chain frame %g: the chain's points "
+                        "differ from the chain built whole\n", frame);
+        }
+        CHECK(EveryVersionAgrees(R, W));
+        CHECK(rangedPose.diagnostics == wholePose.diagnostics);
+    }
+    CHECK(R.chainVersionMismatches == 0);
+    std::printf("  set-aside join: the status follows the base\n");
+}
+
+/// Shift, a full-strength matrix mover on an animated control; Pull, a
+/// matrix mover weighted by a sphere measured against the points entering
+/// it (a current-phase weight field); Raise, a target-space blend shape
+/// whose dense sample is the chain's own points as of Shift (a phased
+/// sample read); and Picked, a property mover reading point 5 of the chain
+/// as of Pull (a cross-domain points read). Every read version is held in
+/// Range group buffers, so each reader gathers.
+const char *const kWholeReaderChain = R"USDA(#usda 1.0
+(
+    startTimeCode = 1
+    endTimeCode = 3
+)
+
+def Scope "Asset"
+{
+    def RigExecRoot "Rig"
+    {
+        def RigExecControl "Move"
+        {
+            double avars:tx.timeSamples = {
+                1: 0.5,
+                2: 1,
+                3: 1.5,
+            }
+        }
+
+        def RigExecControl "Lift"
+        {
+            double avars:ty = 0.25
+        }
+
+        def Scope "Channels"
+        {
+            custom float3 picked = (0, 0, 0)
+        }
+
+        def Scope "Weights"
+        {
+            def RigExecSphereWeight "Near"
+            {
+                float inputs:falloffMax = 3
+                float inputs:falloffMin = 0
+                uniform token rigExec:falloffProfile = "linear"
+                rel rigExec:weightTarget = </Asset/Geom/Body.points> (
+                    rigExecReadPhase = "preceding"
+                )
+            }
+        }
+
+        def Scope "BlendInputs"
+        {
+            def RigExecBlendInput "Raise"
+            {
+                float inputs:weight = 0.5
+                rel rigExec:samples = </Asset/Rig/BlendInputs/Raise/Shifted>
+
+                def RigExecBlendSample "Shifted"
+                {
+                    float rigExec:activation = 1
+                    rel rigExec:targetPoints = </Asset/Geom/Body.points> (
+                        rigExecReadPhase = "/Asset/Rig/Movers/Shift"
+                    )
+                }
+            }
+        }
+
+        def Scope "Movers"
+        {
+            def RigExecVec3fMathMover "Picked" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                float3 inputs:value = (99, 99, 99) (
+                    rigExecInputElement = 5
+                    rigExecReadPhase = "/Asset/Rig/Movers/Pull"
+                )
+                float3 inputs:value.connect = </Asset/Geom/Body.points>
+                rel rigExec:moves = </Asset/Rig/Channels.picked>
+                uniform token rigExec:operation = "add"
+            }
+
+            def RigExecBlendShapeMover "Raise" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                float inputs:defaultWeight = 1
+                rel rigExec:blendInputs = </Asset/Rig/BlendInputs/Raise>
+                rel rigExec:moves = </Asset/Geom/Body.points>
+            }
+
+            def RigExecMatrixMover "Pull" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                float inputs:defaultWeight = 1
+                rel rigExec:moves = </Asset/Geom/Body.points>
+                rel rigExec:transform = </Asset/Rig/Lift>
+                rel rigExec:weightObject = </Asset/Rig/Weights/Near>
+            }
+
+            def RigExecMatrixMover "Shift" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                float inputs:defaultWeight = 1
+                rel rigExec:moves = </Asset/Geom/Body.points>
+                rel rigExec:transform = </Asset/Rig/Move>
+            }
+        }
+    }
+
+    def Scope "Geom"
+    {
+        def Points "Body"
+        {
+            point3f[] points = [(0, 0, 0), (0.5, 0, 0), (1, 0, 0.5), (1.5, 0, 1), (2, 0.5, 0), (2.5, 0.5, 0.5), (3, 0.5, 1), (3.5, 0.5, 0)]
+        }
+    }
+}
+)USDA";
+
+/// Whole readers after Range revisions (F15): a current-phase weight field
+/// gathers the version entering its mover into the field's own scratch, a
+/// phased dense blend sample into its binding's, and a cross-domain points
+/// read into a local binding's. Over {1,2,3,2,1,3} the chain's points,
+/// every version, the published values (the picked point among them) and
+/// the lines agree with the chain built whole.
+void
+TestWholeReadersGatherAfterRangeRevisions()
+{
+    const BuiltProgram ranged =
+        BuildFourGroupStage(StageFromText(kWholeReaderChain), false);
+    const BuiltProgram whole =
+        BuildFourGroupStage(StageFromText(kWholeReaderChain), true);
+    CHECK(ranged.program != nullptr && whole.program != nullptr);
+    if (!ranged.program || !whole.program) {
+        return;
+    }
+    const RigExecBakedProgramImpl &R = ranged.program->GetStepGraph();
+    const RigExecBakedProgramImpl &W = whole.program->GetStepGraph();
+    const char *const movers[] = {"/Asset/Rig/Movers/Shift",
+                                  "/Asset/Rig/Movers/Pull",
+                                  "/Asset/Rig/Movers/Raise"};
+    bool shaped = R.chains.size() == 1 && W.chains.size() == 1 &&
+                  R.chains[0].groupBounds.size() == 5;
+    for (size_t r = 0; shaped && r < 3; ++r) {
+        shaped = ChainPositionOf(R, movers[r]) == int(r) &&
+                 R.chains[0].revisions[r].role ==
+                     RigExecBakedRevisionRole::Range;
+    }
+    CHECK(shaped);
+    if (!shaped) {
+        std::printf("FAIL whole readers: the chain is not built as the "
+                    "fixture intends\n");
+        return;
+    }
+    const RigExecBakedProgramImpl::GeomChain &chain = R.chains[0];
+    const SdfPath picked("/Asset/Rig/Channels.picked");
+    for (const double frame : {1.0, 2.0, 3.0, 2.0, 1.0, 3.0}) {
+        RigExecRigPose rangedPose, wholePose;
+        CHECK(ranged.program->Run(UsdTimeCode(frame), &rangedPose));
+        CHECK(whole.program->Run(UsdTimeCode(frame), &wholePose));
+        // Shift's groups are buffers of their own: no version past the
+        // base is one buffer, so every reader above gathered.
+        const auto &groups = chain.revisions[0].groups;
+        CHECK(groups.size() == 4 && groups[0].published.owner &&
+              groups[0].published.owner != groups[1].published.owner);
+        if (!SameBits(chain.result, W.chains[0].result)) {
+            ++failures;
+            std::printf("FAIL whole readers frame %g: the chain's points "
+                        "differ from the chain built whole\n", frame);
+        }
+        CHECK(EveryVersionAgrees(R, W));
+        CHECK(rangedPose.movedProperties.count(picked) == 1);
+        CHECK(rangedPose.movedProperties == wholePose.movedProperties);
+        CHECK(rangedPose.diagnostics == wholePose.diagnostics);
+    }
+    CHECK(R.chainVersionMismatches == 0);
+    std::printf("  whole readers gather after Range revisions\n");
+}
+
 /// The Whole keyed skin's speculative buffers (F5). An override repainting
 /// Dual's joint indices stales its partition: the fuse publishes the
 /// whole-array skin from a fresh group buffer while the chunks keep their
@@ -9099,6 +9466,8 @@ main(int argc, char **argv)
         TestTheWeightFieldIsSharedNotCopied();
         TestAnAdoptedRangeChainRemapsItsGroupIds();
         TestARangeSkinAgreesWithTheJudge();
+        TestASetAsideJoinFollowsTheBase();
+        TestWholeReadersGatherAfterRangeRevisions();
     }
     if (failures) {
         std::printf("%d FAILURE(S)\n", failures);

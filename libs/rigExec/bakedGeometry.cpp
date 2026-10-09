@@ -4023,14 +4023,21 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
         step->counters.chainsBuilt = 1;
         const size_t last = chain.revisions.size();
         if (chain.groupBounds.size() >= 2 && last > 0) {
-            // A chain cut into groups: the last revision's group ids name
-            // version n's content exactly. Ids `result` was gathered from
-            // that still stand leave it in place, identity and all.
+            // A chain cut into groups: the content ids of version n's groups
+            // name its content exactly. They are resolved here, not read
+            // from the last join's `groupIds`: a join a cycle set aside
+            // published its ids before ChainInputs moved the base, and
+            // RigExecBakedGroupSourceAt resolves past it to the base groups
+            // as they stand now. Ids `result` was gathered from that still
+            // stand leave it in place, identity and all.
             const size_t groups = chain.groupBounds.size() - 1;
-            const std::vector<RigExecGroupSource> &ids =
-                chain.revisions[last - 1].groupIds;
-            const bool known = ids.size() == groups;
-            if (chain.haveResult && known && chain.resultIds == ids) {
+            const int chainIndex = step->object;
+            bool same = chain.haveResult && chain.resultIds.size() == groups;
+            for (size_t g = 0; same && g < groups; ++g) {
+                same = chain.resultIds[g] ==
+                       RigExecBakedGroupSourceAt(B, chainIndex, last, g);
+            }
+            if (same) {
                 return;
             }
             size_t total = 0;
@@ -4056,10 +4063,11 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
             }
             chain.result.swap(chain.spare);
             chain.spareIds.swap(chain.resultIds);
-            if (known) {
-                chain.resultIds = ids;
-            } else {
-                chain.resultIds.clear();
+            // Sized at Build, so steady state reuses the swapped storage.
+            chain.resultIds.resize(groups);
+            for (size_t g = 0; g < groups; ++g) {
+                chain.resultIds[g] =
+                    RigExecBakedGroupSourceAt(B, chainIndex, last, g);
             }
             chain.haveResult = true;
             return;
@@ -5619,8 +5627,10 @@ RigExecBakedVerifyRangeChains(RigExecBakedProgramImpl *program)
             }
         }
     }
-    // Gate and partition holes the bodies counted this run.
-    const uint64_t holes = B.gateViolations.load(std::memory_order_relaxed);
+    // Gate and partition holes the bodies counted this run, taken so the
+    // next run's judge counts only its own.
+    const uint64_t holes =
+        B.gateViolations.exchange(0, std::memory_order_relaxed);
     if (holes) {
         mismatches += size_t(holes);
         TF_VERIFY(false, "%llu gated or Range-skin group step(s) met a pin "
