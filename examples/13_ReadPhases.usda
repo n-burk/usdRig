@@ -175,7 +175,6 @@ def Xform "ReadPhaseAsset"
                     prepend apiSchemas = ["RigExecMoverAPI"]
                 )
                 {
-                    uniform token rigExec:basis = "bernstein"
                     rel rigExec:cage = </ReadPhaseAsset/Geom/Cage> (
                         rigExecReadPhase = "final"
                     )

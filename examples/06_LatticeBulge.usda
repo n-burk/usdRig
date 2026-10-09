@@ -60,7 +60,6 @@ def Xform "LatticeAsset"
                             prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
                         )
                         {
-                            uniform token rigExec:basis = "bernstein"
                             rel rigExec:cage = </LatticeAsset/Geom/Cage>
                             int3 rigExec:divisions = (2, 2, 3)
                             rel rigExec:moves = </LatticeAsset/Geom/Slab.points>

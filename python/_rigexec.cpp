@@ -1941,7 +1941,6 @@ PYBIND11_MODULE(_rigexec, m) {
 
     py::class_<rigExec::RigExecLatticeMoverHandle, rigExec::RigExecMoverHandle>(m, "LatticeMover")
         .def("set_cage", [](rigExec::RigExecLatticeMoverHandle &h, py::object p) { h.SetCage(_PythonToDependencyPath(p, h.GetStage(), TfToken(), false)); }, py::arg("path"))
-        .def("set_basis", [](rigExec::RigExecLatticeMoverHandle &h, std::string v) { h.SetBasis(TfToken(v)); }, py::arg("basis"))
         .def("set_divisions", &rigExec::RigExecLatticeMoverHandle::SetDivisions,
              py::arg("x"), py::arg("y"), py::arg("z"))
         .def("set_read_phase", [](rigExec::RigExecLatticeMoverHandle &h,
@@ -2095,14 +2094,13 @@ PYBIND11_MODULE(_rigexec, m) {
            py::arg("target") = py::none(), py::arg("read_phase") = "base")
         .def("add_lattice_mover", [](rigExec::RigExecMoverChain &c, std::string name,
                                       py::object cagePrim, int dx, int dy, int dz,
-                                      std::string basis, py::object target,
-                                      std::string readPhase) {
+                                      py::object target, std::string readPhase) {
             return c.AddLatticeMover(
                 name, _PythonToDependencyPath(cagePrim, c.GetStage(), TfToken(), false),
-                dx, dy, dz, TfToken(basis),
+                dx, dy, dz,
                 _PythonToDependencyPath(target, c.GetStage()), TfToken(readPhase));
         }, py::arg("name"), py::arg("cage_prim"), py::arg("div_x"), py::arg("div_y"), py::arg("div_z"),
-           py::arg("basis") = "bspline", py::arg("target") = py::none(), py::arg("read_phase") = "base")
+           py::arg("target") = py::none(), py::arg("read_phase") = "base")
         .def("add_blend_shape_mover", [](rigExec::RigExecMoverChain &c,
                                           std::string name, py::object weightObject,
                                           py::object target) {

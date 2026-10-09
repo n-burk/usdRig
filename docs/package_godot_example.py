@@ -13,11 +13,10 @@ Windows x86-64 binaries, Godot 4.7+. Open demo/project.godot and press F5.
 The prebuilt game does not need USD. Walkthrough:
 docs/concepts/tutorial-godot-baked-rig.md in the usdRig checkout.
 
-The shipped rolling_ball.rigexec still embeds the older textured presentation.
-The checkout's tutorial_rolling_ball.usda is a displayColor stripe with no
-UVs or preview-surface material, so tools/export_ball_assets.py fails its
-material asserts against that stage. Playing the prebuilt file does not
-rebuild it.
+The shipped rolling_ball.rigexec presentation is painted from the striped
+stage's vertex displayColor. tools/export_ball_assets.py does that when
+the stage has no face-varying st and no preview-surface texture. Playing
+the prebuilt file does not need USD.
 
 For a native addon build, extract godot_rigExec beside a directory named
 usdRig and beside usd-install. Close the Godot editor first. Fetch godot-cpp:
@@ -38,8 +37,8 @@ Space hops, Shift brakes, and R resets. Collect six rings and reach the exit.
 
 rolling_ball.tscn owns a collision body and RigExecPlayer. The player loads
 rolling_ball.rigexec. That file embeds the execution program and a
-presentation section (deformed-point bindings, subdivision stencils, UVs,
-material, PNG, and public controller names). No Godot skeleton or loose
+presentation section (deformed-point bindings, cage stencils, UVs,
+a stripe PNG, and public controller names). No Godot skeleton or loose
 mesh, material, or texture files are required to play.
 
 rolling_ball.gd drives Move.tx, Move.ty, Move.tz, Roll.rx, Roll.ry, and
@@ -52,13 +51,13 @@ rigExec:exposedAvars and rigExec:publicName on Move and Roll. The legacy
 skeleton adapter remains available for older program-only files; this
 example does not use it.
 
-The file in this archive was baked while the ball still had a texture.
-Its embedded material uses diffuse scale 0.75, emission scale 0.5,
-roughness 0.5, metallic 0, specular 0.35, repeat on S, and clamp on T.
-The stage now checked in at docs/examples/tutorial_rolling_ball.usda is a
-yellow sphere with a black equatorial displayColor stripe. It has no UVs
-and no UsdPreviewSurface, so export_ball_assets.py rejects it. Playing
-this project uses the baked file already here.
+The presentation PNG is a latitude stripe sampled from the stage's vertex
+displayColor. The player still uses its UsdPreviewSurface shader: diffuse
+scale 1, emission scale 0, roughness 0.5, metallic 0, specular 0.35,
+repeat on S, and clamp on T. The render mesh is the control cage. The
+stage checked in at docs/examples/tutorial_rolling_ball.usda has no UVs
+and no preview surface; export_ball_assets.py builds this presentation
+from displayColor. Playing this project uses the baked file already here.
 
 setup_rolling.py looks for a sibling directory named usdRig and for
 usd-install. Close the Godot editor before running it. The bake command

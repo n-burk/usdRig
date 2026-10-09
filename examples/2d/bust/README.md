@@ -100,8 +100,8 @@ Movers/Geometry/Body       Lean (matrix) -> BodyWarp (lattice)
   `rigExec:enableTranslation` is set. The vowel pad is a joystick (swing)
   with translation measurement left off.
 - `RigExecLatticeMover` in the default `legacy` evaluation uses the bound
-  Bernstein cage and does not read `rigExec:basis`, recomputing it with
-  `std::pow` per cage point per point per frame. `regularGrid` instead
-  interpolates with `rigExec:interpolationU/V/W` (`linear`, `cardinal`,
-  `bspline`, or `catmullRom`). The cage is fitted rather than hand-placed
-  precisely because the Bernstein basis is global.
+  Bernstein cage, recomputing it with `std::pow` per cage point per point
+  per frame. `regularGrid` instead interpolates with
+  `rigExec:interpolationU/V/W` (`linear`, `cardinal`, `bspline`, or
+  `catmullRom`). The cage is fitted rather than hand-placed precisely
+  because the Bernstein basis is global.

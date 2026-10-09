@@ -17,11 +17,11 @@ geometry, and an embedded texture. The core runtime never decodes the tag,
 so a program that carries it still loads. The Godot player reads it.
 
 The [free-variant wrapper](../examples/tutorial_rolling_ball_free.usda)
-references the striped ball in this checkout. The `rolling_ball.rigexec`
-shipped in the Godot archive was baked earlier, while that ball still had
-UVs and a preview-surface material, and its presentation section still
-holds that older render data. The exporter's material asserts do not pass
-on the striped stage.
+references the striped ball in this checkout. That stage has vertex
+`displayColor` and no UV primvar or preview surface. The tutorial exporter
+paints a PNG from those colors and appends it. A stage that does author
+face-varying `st` and a bound UsdPreviewSurface still takes the
+OpenSubdiv path.
 
 That example's platform binaries and external addon source have their own
 dependency and licensing requirements. Use source builds for other platforms

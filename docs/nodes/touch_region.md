@@ -76,13 +76,13 @@ The UsdGeomMesh whose faces these regions index.
 
 One ramp shared by every region, indexed by the
 region's own order. On the scope rather than per region: the
-overlay needs the whole ramp in a single read.
+Storm highlight reads the whole ramp as one colour table.
 
 #### `rigExec:touch:alpha`
 
 *Type:* `uniform float`. *Default:* `1`.
 
-Opacity the overlay draws the regions at.
+Opacity the Storm highlight uses when it tints a region.
 
 #### `rigExec:touch:layerName`
 

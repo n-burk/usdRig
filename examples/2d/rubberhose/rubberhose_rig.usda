@@ -1431,7 +1431,6 @@ def Xform "Pip" (
                         prepend apiSchemas = ["RigExecMoverAPI"]
                     )
                     {
-                        uniform token rigExec:basis = "bernstein"
                         rel rigExec:cage = </Pip/Rig/Cages/HeadCage> (
                             rigExecReadPhase = "final"
                         )
@@ -1446,7 +1445,6 @@ def Xform "Pip" (
                         prepend apiSchemas = ["RigExecMoverAPI"]
                     )
                     {
-                        uniform token rigExec:basis = "bernstein"
                         rel rigExec:cage = </Pip/Rig/Cages/HeadCage> (
                             rigExecReadPhase = "final"
                         )
@@ -1473,7 +1471,6 @@ def Xform "Pip" (
                         prepend apiSchemas = ["RigExecMoverAPI"]
                     )
                     {
-                        uniform token rigExec:basis = "bernstein"
                         rel rigExec:cage = </Pip/Rig/Cages/HeadCage> (
                             rigExecReadPhase = "final"
                         )
@@ -1500,7 +1497,6 @@ def Xform "Pip" (
                         prepend apiSchemas = ["RigExecMoverAPI"]
                     )
                     {
-                        uniform token rigExec:basis = "bernstein"
                         rel rigExec:cage = </Pip/Rig/Cages/HeadCage> (
                             rigExecReadPhase = "final"
                         )
@@ -1538,7 +1534,6 @@ def Xform "Pip" (
                         prepend apiSchemas = ["RigExecMoverAPI"]
                     )
                     {
-                        uniform token rigExec:basis = "bernstein"
                         rel rigExec:cage = </Pip/Rig/Cages/HeadCage> (
                             rigExecReadPhase = "final"
                         )
@@ -1576,7 +1571,6 @@ def Xform "Pip" (
                         prepend apiSchemas = ["RigExecMoverAPI"]
                     )
                     {
-                        uniform token rigExec:basis = "bernstein"
                         rel rigExec:cage = </Pip/Rig/Cages/HeadCage> (
                             rigExecReadPhase = "final"
                         )
@@ -1614,7 +1608,6 @@ def Xform "Pip" (
                         prepend apiSchemas = ["RigExecMoverAPI"]
                     )
                     {
-                        uniform token rigExec:basis = "bernstein"
                         rel rigExec:cage = </Pip/Rig/Cages/HeadCage> (
                             rigExecReadPhase = "final"
                         )
@@ -1641,7 +1634,6 @@ def Xform "Pip" (
                         prepend apiSchemas = ["RigExecMoverAPI"]
                     )
                     {
-                        uniform token rigExec:basis = "bernstein"
                         rel rigExec:cage = </Pip/Rig/Cages/HeadCage> (
                             rigExecReadPhase = "final"
                         )
@@ -1691,7 +1683,6 @@ def Xform "Pip" (
                         prepend apiSchemas = ["RigExecMoverAPI"]
                     )
                     {
-                        uniform token rigExec:basis = "bernstein"
                         rel rigExec:cage = </Pip/Rig/Cages/HeadCage> (
                             rigExecReadPhase = "final"
                         )
@@ -1729,7 +1720,6 @@ def Xform "Pip" (
                         prepend apiSchemas = ["RigExecMoverAPI"]
                     )
                     {
-                        uniform token rigExec:basis = "bernstein"
                         rel rigExec:cage = </Pip/Rig/Cages/HeadCage> (
                             rigExecReadPhase = "final"
                         )

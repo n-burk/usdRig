@@ -1832,13 +1832,6 @@ RigExecLatticeMoverHandle::SetCage(const SdfPath &path)
 }
 
 void
-RigExecLatticeMoverHandle::SetBasis(const TfToken &basis)
-{
-    _AuthorAttr(
-        GetPrim(), "rigExec:basis", SdfValueTypeNames->Token, VtValue(basis));
-}
-
-void
 RigExecLatticeMoverHandle::SetDivisions(int x, int y, int z)
 {
     _AuthorAttr(
@@ -2123,8 +2116,7 @@ RigExecMoverChain::AddSkinMover(
 RigExecLatticeMoverHandle
 RigExecMoverChain::AddLatticeMover(
     const std::string &name, const SdfPath &cagePrim, int divX, int divY,
-    int divZ, const TfToken &basis, const SdfPath &target,
-    const TfToken &readPhase)
+    int divZ, const SdfPath &target, const TfToken &readPhase)
 {
     _RequireTargetPath(cagePrim, "lattice mover cage");
     if (divX < 2 || divY < 2 || divZ < 2) {
@@ -2133,9 +2125,6 @@ RigExecMoverChain::AddLatticeMover(
     }
     RigExecLatticeMoverHandle handle(_stage, _AddMoverPrim("RigExecLatticeMover", name, target));
     handle.SetCage(cagePrim);
-    if (!basis.IsEmpty()) {
-        handle.SetBasis(basis);
-    }
     handle.SetDivisions(divX, divY, divZ);
     if (!readPhase.IsEmpty()) {
         handle.RigExecMoverHandle::SetReadPhase(

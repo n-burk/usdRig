@@ -170,7 +170,7 @@ def build(out_path):
     chain.add_volume_correct_mover("VolumeCorrect", 0.35, SLAB_POINTS_ATTR)
     chain.add_smooth_mover("Smooth", 0.6, SLAB_POINTS_ATTR)
     chain.add_lattice_mover(
-        "CageDeform", CAGE, 2, 2, 3, "bernstein", SLAB_POINTS_ATTR)
+        "CageDeform", CAGE, 2, 2, 3, SLAB_POINTS_ATTR)
 
     stage.Export(str(out_path))
 

@@ -697,7 +697,6 @@ class Builder(object):
 
         def lattice(path, target, cage, div):
             m = mover(path, "RigExecLatticeMover")
-            attr(m, "rigExec:basis", T.Token, "bernstein", uniform=True)
             rel(m, "rigExec:cage", [CAGES + "/" + cage], phase="final")
             attr(m, "rigExec:divisions", T.Int3, Gf.Vec3i(*div))
             rel(m, "rigExec:moves", [target + ".points"])

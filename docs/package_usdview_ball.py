@@ -35,8 +35,8 @@ Scrub 1001-1049 for travel-driven rolling.
 Open docs/examples/tutorial_rolling_ball_free.usda for the Godot bake source.
 
 The ball carries no texture. Its stripe is per-point displayColor on this
-stage and on the free variant that references it. The Godot archive's
-prebuilt file still embeds an older textured presentation.
+stage and on the free variant that references it. The Godot archive paints
+its presentation PNG from that same stripe.
 The stage's rig, controllers and colors remain editable.
 
 Live rig evaluation requires the RigExec schema and imaging plugins.

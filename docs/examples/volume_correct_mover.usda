@@ -41,7 +41,6 @@ def Xform "VolumeAsset"
                     prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
                 )
                 {
-                    uniform token rigExec:basis = "bernstein"
                     rel rigExec:cage = </VolumeAsset/Geom/Cage>
                     int3 rigExec:divisions = (2, 3, 2)
                     rel rigExec:moves = </VolumeAsset/Geom/Raw.points>
@@ -60,7 +59,6 @@ def Xform "VolumeAsset"
                         prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
                     )
                     {
-                        uniform token rigExec:basis = "bernstein"
                         rel rigExec:cage = </VolumeAsset/Geom/Cage>
                         int3 rigExec:divisions = (2, 3, 2)
                         rel rigExec:moves = </VolumeAsset/Geom/Fixed.points>

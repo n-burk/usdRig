@@ -2986,9 +2986,6 @@ class RigExecLatticeMover "RigExecLatticeMover" (
     rel rigExec:cage (
         doc = "Native mesh/points prim supplying cage control points."
     )
-    uniform token rigExec:basis = "bspline" (
-        allowedTokens = ["bspline", "bernstein"]
-    )
     int3 rigExec:divisions = (2, 2, 2)
     uniform token rigExec:evaluation = "legacy" (
         allowedTokens = ["legacy", "regularGrid"]
@@ -3627,18 +3624,14 @@ class RigExecTouchRegions "RigExecTouchRegions" (
     nothing and keeps the door open for anything drawable parented under
     it later.
 
-    THE HIGHLIGHT OVERLAY IS NOT HERE, and that is measured rather than
-    chosen. It is a real rprim, and a prim inside the asset is inside the
-    rig's read roots: authoring the hover array there cost 184.89 ms per
-    region crossing against 3.99 ms at the stage root, with a 16.7 ms
-    frame. It also cannot carry its own schema type -- a concrete type
-    with no UsdImaging adapter never becomes an rprim at all. So the
-    overlay is a plain Mesh at the stage root, named for its asset so a
-    shot full of characters does not share one.
+    The hover highlight is not a prim. TouchPose publishes a per-face
+    region id and a colour table as Hydra primvars and mixes them in a
+    Storm shader on the mesh named by rigExec:touch:mesh. That edit
+    authors nothing: no points, no visibility, and no session-layer
+    opinion.
 
     Found BY TYPE, so the regions may be parented anywhere -- beside the
-    geometry they annotate, or inside the RigExecRoot for a studio that
-    ships one prim holding the whole rig deliverable. The mesh is named
+    geometry they annotate, or inside the RigExecRoot. The mesh is named
     by relationship rather than by position, which is what makes that
     placement free."""
 )
@@ -3649,10 +3642,10 @@ class RigExecTouchRegions "RigExecTouchRegions" (
     uniform color3f[] rigExec:touch:palette = [] (
         doc = """One ramp shared by every region, indexed by the
         region's own order. On the scope rather than per region: the
-        overlay needs the whole ramp in a single read."""
+        Storm highlight reads the whole ramp as one colour table."""
     )
     uniform float rigExec:touch:alpha = 1 (
-        doc = "Opacity the overlay draws the regions at."
+        doc = "Opacity the Storm highlight uses when it tints a region."
     )
     uniform token rigExec:touch:layerName = "" (
         doc = """This scope's name as a LAYER, for the editor's switch.
@@ -3682,36 +3675,25 @@ class RigExecTouchOverlay "RigExecTouchOverlay" (
     customData = {
         string className = "TouchOverlay"
     }
-    doc = """The surface TouchPose lights the hovered region on.
+    doc = """An empty mesh declaration shipped beside a RigExecTouchRegions
+    scope. The live highlight does not use it.
 
-    SHIPPED WITH THE ASSET, one per RigExecTouchRegions scope. The
-    alternative was a single prim at the stage root, which is a global:
-    two characters in a shot author into the same prim and fight over
-    it. An asset that carries its own overlay works beside any number of
-    others, and a shot gains no prims it did not open with.
+    TouchPose tints the body with a Storm shader
+    (libs/rigExecImaging/touchPoseHighlight.h) and authors no points,
+    visibility, or session-layer opinion on this prim. It stays empty
+    and invisible. The exporter still declares one per scope so an
+    asset keeps a stable prim name beside its regions.
 
-    A Mesh, because Hydra has to draw it, and unbound on purpose -- an
-    unbound mesh gets the fallback material, which is the only surface
-    that reads displayColor and displayOpacity. Those two arrays are the
-    whole mechanism: a face is lit in the hover, lead, selected or edit
-    colour, or its opacity is zero and it is not lit at all.
-
-    INHERITING Mesh IS NOT ENOUGH TO DRAW IT. UsdImaging binds adapters
-    by concrete type name, so this type needs one of its own;
-    rigExecImaging registers it (touchOverlayAdapter.cpp) and without
-    that registration the prim composes perfectly and changes zero
-    pixels.
-
-    It ships EMPTY and invisible. The points are the mesh's own deformed
-    points for the painted faces, which do not exist until a rig has
-    been evaluated, so the runtime fills them in a session layer and
-    nothing about a hover is ever saved into the asset. What ships is
-    the declaration: the prim, its type, and where it sits."""
+    It inherits Mesh so the concrete type can image. UsdImaging binds
+    adapters by concrete type name, and touchOverlayAdapter.cpp
+    registers this one as the stock mesh adapter. Without that
+    registration the prim would not be an rprim if something else
+    made it visible."""
 )
 {
     token visibility = "invisible" (
-        doc = """Hidden until TouchPose lights it. An asset opened by
-        anything else sees an empty invisible mesh and draws nothing."""
+        doc = """Authored invisible. TouchPose does not draw this mesh.
+        The highlight is a Storm shader on the body."""
     )
 }
 

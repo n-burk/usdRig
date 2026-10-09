@@ -24,22 +24,23 @@ still in the player and is unused by this scene.
 
 `rigExecBake` writes the program. It does not write render geometry. The
 tutorial exporter then appends binary section tag 13, `Presentation`, as
-JSON: version 1, public controls, subdivided mesh indices, UVs, subdivision
-stencils, and a base64 PNG. `libs/rigExecBinary` names that tag and the core
-runtime never decodes it, so playback of the program still succeeds. The
-Godot player reads the section itself.
+JSON: version 1, public controls, mesh indices, UVs, stencils, and a base64
+PNG. `libs/rigExecBinary` names that tag and the core runtime never decodes
+it, so playback of the program still succeeds. The Godot player reads the
+section itself.
 
 `set_control(name, value)` looks up the USD property path stored for that
 public name and calls `RigExecRuntimeReader::SetAvar`. With a presentation
 section present, `set_avar()` is refused. `get_controls()` lists the public
 names and hides the USD paths. `reset_controls()` clears the overrides.
 
-The file shipped in the zip was baked from an earlier textured stage. Its
-embedded presentation still carries that texture, face-varying UVs, and a
-UsdPreviewSurface-style material (diffuse scale 0.75, emission scale 0.5,
-roughness 0.5, metallic 0, specular 0.35, repeat on S, clamp on T). Playing
-the zip shows that embedded data. It does not read
-`docs/examples/tutorial_rolling_ball.usda`.
+The presentation in the zip is rebuilt from the striped stage. The player
+still samples a PNG through its UsdPreviewSurface shader, so the exporter
+paints that PNG from vertex `displayColor`, assigns a spherical UV per
+corner, and binds one stencil per control point. Diffuse scale is 1,
+emission scale is 0, roughness is 0.5, metallic is 0, specular is 0.35,
+wrap S is repeat, and wrap T is clamp. The render mesh is the control
+cage. Playing the zip does not read the USDA again.
 
 ## The stage in this checkout
 
@@ -114,21 +115,14 @@ not pass it. Frame 1001 is the only sample. The free variant is the one on
 the wrapper, so the travel-driven roll mover stays off.
 
 `python tools/export_ball_assets.py` is the second phase. It opens the same
-free stage and requires all of the following on `/BallAsset/Geom/Ball`:
+free stage. If `/BallAsset/Geom/Ball` has face-varying `st` and a bound
+UsdPreviewSurface, the exporter subdivides that graph with OpenSubdiv. The
+stage in this checkout has neither. It has vertex `displayColor`, so the
+exporter builds the presentation from that stripe instead and does not
+need a texture or UV primvar on the stage.
 
-- `subdivisionScheme` of `catmullClark`
-- face-varying primvar `st`
-- a bound `UsdPreviewSurface` whose diffuse and emissive colors are
-  `UsdUVTexture` nodes, wrap S `repeat`, wrap T `clamp`, sharing one PNG
-
-The current ball is `catmullClark` and has vertex `displayColor`. It has no
-`st` primvar and no material, so those asserts fail. `python demo/setup_rolling.py`
-therefore cannot rebuild the packaged asset against this checkout. The
-Windows libraries and `demo/rolling_ball.rigexec` already in the zip are
-what the game plays.
-
-Native rebuilds of the addon, once a stage satisfies the exporter, also need
-SCons, a C++ toolchain, OpenSubdiv, and this pin of godot-cpp:
+Native rebuilds of the addon also need SCons, a C++ toolchain, and this
+pin of godot-cpp. OpenSubdiv is used only for the preview-surface path:
 
 ```text
 git clone https://github.com/godotengine/godot-cpp.git thirdparty/godot-cpp
@@ -137,5 +131,8 @@ git -C thirdparty/godot-cpp submodule update --init --recursive
 python demo/setup_rolling.py --build
 ```
 
-This environment has no OpenUSD install and no Godot, so the playable zip
-was inspected and not launched, and the bake was not re-run.
+The program section in the zip is the previous bake. Its 482 stored
+points already match this mesh in order, so the presentation was replaced
+in place. `setup_rolling.py` is the path that runs a fresh `rigExecBake`
+and then this exporter when OpenUSD and Godot are available. The Godot
+player was not launched against the rebuilt presentation.

@@ -229,20 +229,14 @@ def _write_region(out_stage, scope, name, control, color, hilight, faces):
 
 
 def _write_overlay(out_stage, scope):
-    """Ship the highlight surface with the regions it lights.
+    """Declare an empty invisible RigExecTouchOverlay beside the regions.
 
-    Empty and invisible. The geometry is the deformed mesh's, which does
-    not exist until a rig has been evaluated, so the runtime fills the
-    points in a session layer; what ships is the declaration, so a shot
-    never creates one and two assets never share one.
+    The live highlight does not fill it. TouchPose tints the body with a
+    Storm shader and authors nothing on this prim. The declaration keeps
+    a stable prim name next to the scope.
     """
     prim = out_stage.DefinePrim(
         scope.GetPath().AppendChild(OVERLAY_NAME), "RigExecTouchOverlay")
-    # The points the runtime writes are already in WORLD space, out of
-    # the terminal scene index. Nothing above this is Xformable on a
-    # RigExec asset, but an asset whose root IS an Xform would double
-    # transform the highlight, and resetting costs nothing where it was
-    # never going to happen.
     UsdGeom.Xformable(prim).SetResetXformStack(True)
     return prim
 

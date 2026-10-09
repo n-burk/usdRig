@@ -1072,7 +1072,6 @@ class Pip(object):
                          path + ".points")
         self.a.rel(lat, "rigExec:cage", self.cage).SetMetadata(
             "rigExecReadPhase", "final")
-        self.a.attr(lat, "rigExec:basis", T.Token, "bernstein", uniform=True)
         self.a.attr(lat, "rigExec:divisions", T.Int3, Gf.Vec3i(3, 3, 2))
         if slide:
             self.matrix_mover(base + "/FaceSlide", path + ".points",

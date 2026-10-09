@@ -100,12 +100,6 @@ every application of the atomic mover.
 
 Native mesh/points prim supplying cage control points.
 
-#### `rigExec:basis`
-
-*Type:* `uniform token`. *Default:* `"bspline"`.
-
-Valid values: `bspline`, `bernstein`.
-
 #### `rigExec:divisions`
 
 *Type:* `int3`. *Default:* `(2, 2, 2)`.
@@ -195,7 +189,7 @@ python docs/render_media.py --page lattice_mover
 
 - Hide the cage (`visibility = invisible`): it is scaffolding, not geometry.
 - Follow a bulge with a Smooth mover to settle the lattice falloff or a Volume Correct mover to hold girth.
-- `rigExec:basis` (`bspline` or `bernstein`) is stored on the prim and is not read. `legacy` always uses Bernstein weights. `regularGrid` uses `rigExec:interpolationU`, `rigExec:interpolationV`, and `rigExec:interpolationW`.
+- `legacy` always uses Bernstein weights. `regularGrid` uses `rigExec:interpolationU`, `rigExec:interpolationV`, and `rigExec:interpolationW` (`linear`, `cardinal`, `bspline`, or `catmullRom`).
 
 ## See also
 

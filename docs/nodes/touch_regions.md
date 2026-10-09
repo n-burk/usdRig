@@ -48,18 +48,14 @@ annotations on drawable geometry, and an imageable container costs
 nothing and keeps the door open for anything drawable parented under
 it later.
 
-THE HIGHLIGHT OVERLAY IS NOT HERE, and that is measured rather than
-chosen. It is a real rprim, and a prim inside the asset is inside the
-rig's read roots: authoring the hover array there cost 184.89 ms per
-region crossing against 3.99 ms at the stage root, with a 16.7 ms
-frame. It also cannot carry its own schema type -- a concrete type
-with no UsdImaging adapter never becomes an rprim at all. So the
-overlay is a plain Mesh at the stage root, named for its asset so a
-shot full of characters does not share one.
+The hover highlight is not a prim. TouchPose publishes a per-face
+region id and a colour table as Hydra primvars and mixes them in a
+Storm shader on the mesh named by rigExec:touch:mesh. That edit
+authors nothing: no points, no visibility, and no session-layer
+opinion.
 
 Found BY TYPE, so the regions may be parented anywhere -- beside the
-geometry they annotate, or inside the RigExecRoot for a studio that
-ships one prim holding the whole rig deliverable. The mesh is named
+geometry they annotate, or inside the RigExecRoot. The mesh is named
 by relationship rather than by position, which is what makes that
 placement free.
 
@@ -137,13 +133,13 @@ The UsdGeomMesh whose faces these regions index.
 
 One ramp shared by every region, indexed by the
 region's own order. On the scope rather than per region: the
-overlay needs the whole ramp in a single read.
+Storm highlight reads the whole ramp as one colour table.
 
 #### `rigExec:touch:alpha`
 
 *Type:* `uniform float`. *Default:* `1`.
 
-Opacity the overlay draws the regions at.
+Opacity the Storm highlight uses when it tints a region.
 
 #### `rigExec:touch:layerName`
 

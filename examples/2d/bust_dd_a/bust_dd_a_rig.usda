@@ -7614,7 +7614,6 @@ def Xform "Kaede"
                         prepend apiSchemas = ["RigExecMoverAPI"]
                     )
                     {
-                        uniform token rigExec:basis = "bernstein"
                         rel rigExec:cage = </Kaede/Cages/HeadCage> (
                             rigExecReadPhase = "final"
                         )
@@ -7666,7 +7665,6 @@ def Xform "Kaede"
                         prepend apiSchemas = ["RigExecMoverAPI"]
                     )
                     {
-                        uniform token rigExec:basis = "bernstein"
                         rel rigExec:cage = </Kaede/Cages/BodyCage> (
                             rigExecReadPhase = "final"
                         )
@@ -7678,7 +7676,6 @@ def Xform "Kaede"
                         prepend apiSchemas = ["RigExecMoverAPI"]
                     )
                     {
-                        uniform token rigExec:basis = "bernstein"
                         rel rigExec:cage = </Kaede/Cages/HeadCage> (
                             rigExecReadPhase = "final"
                         )
@@ -7712,7 +7709,6 @@ def Xform "Kaede"
                         prepend apiSchemas = ["RigExecMoverAPI"]
                     )
                     {
-                        uniform token rigExec:basis = "bernstein"
                         rel rigExec:cage = </Kaede/Cages/BodyCage> (
                             rigExecReadPhase = "final"
                         )
@@ -7738,7 +7734,6 @@ def Xform "Kaede"
                         prepend apiSchemas = ["RigExecMoverAPI"]
                     )
                     {
-                        uniform token rigExec:basis = "bernstein"
                         rel rigExec:cage = </Kaede/Cages/BodyCage> (
                             rigExecReadPhase = "final"
                         )
@@ -7764,7 +7759,6 @@ def Xform "Kaede"
                         prepend apiSchemas = ["RigExecMoverAPI"]
                     )
                     {
-                        uniform token rigExec:basis = "bernstein"
                         rel rigExec:cage = </Kaede/Cages/BodyCage> (
                             rigExecReadPhase = "final"
                         )
@@ -7802,7 +7796,6 @@ def Xform "Kaede"
                         prepend apiSchemas = ["RigExecMoverAPI"]
                     )
                     {
-                        uniform token rigExec:basis = "bernstein"
                         rel rigExec:cage = </Kaede/Cages/HeadCage> (
                             rigExecReadPhase = "final"
                         )
@@ -7828,7 +7821,6 @@ def Xform "Kaede"
                         prepend apiSchemas = ["RigExecMoverAPI"]
                     )
                     {
-                        uniform token rigExec:basis = "bernstein"
                         rel rigExec:cage = </Kaede/Cages/HeadCage> (
                             rigExecReadPhase = "final"
                         )
@@ -7862,7 +7854,6 @@ def Xform "Kaede"
                         prepend apiSchemas = ["RigExecMoverAPI"]
                     )
                     {
-                        uniform token rigExec:basis = "bernstein"
                         rel rigExec:cage = </Kaede/Cages/HeadCage> (
                             rigExecReadPhase = "final"
                         )
@@ -7907,7 +7898,6 @@ def Xform "Kaede"
                         prepend apiSchemas = ["RigExecMoverAPI"]
                     )
                     {
-                        uniform token rigExec:basis = "bernstein"
                         rel rigExec:cage = </Kaede/Cages/HeadCage> (
                             rigExecReadPhase = "final"
                         )
@@ -7948,7 +7938,6 @@ def Xform "Kaede"
                         prepend apiSchemas = ["RigExecMoverAPI"]
                     )
                     {
-                        uniform token rigExec:basis = "bernstein"
                         rel rigExec:cage = </Kaede/Cages/HeadCage> (
                             rigExecReadPhase = "final"
                         )
@@ -7993,7 +7982,6 @@ def Xform "Kaede"
                         prepend apiSchemas = ["RigExecMoverAPI"]
                     )
                     {
-                        uniform token rigExec:basis = "bernstein"
                         rel rigExec:cage = </Kaede/Cages/HeadCage> (
                             rigExecReadPhase = "final"
                         )
@@ -8042,7 +8030,6 @@ def Xform "Kaede"
                         prepend apiSchemas = ["RigExecMoverAPI"]
                     )
                     {
-                        uniform token rigExec:basis = "bernstein"
                         rel rigExec:cage = </Kaede/Cages/HeadCage> (
                             rigExecReadPhase = "final"
                         )
@@ -8086,7 +8073,6 @@ def Xform "Kaede"
                         prepend apiSchemas = ["RigExecMoverAPI"]
                     )
                     {
-                        uniform token rigExec:basis = "bernstein"
                         rel rigExec:cage = </Kaede/Cages/HeadCage> (
                             rigExecReadPhase = "final"
                         )
@@ -8130,7 +8116,6 @@ def Xform "Kaede"
                         prepend apiSchemas = ["RigExecMoverAPI"]
                     )
                     {
-                        uniform token rigExec:basis = "bernstein"
                         rel rigExec:cage = </Kaede/Cages/HeadCage> (
                             rigExecReadPhase = "final"
                         )
@@ -8179,7 +8164,6 @@ def Xform "Kaede"
                         prepend apiSchemas = ["RigExecMoverAPI"]
                     )
                     {
-                        uniform token rigExec:basis = "bernstein"
                         rel rigExec:cage = </Kaede/Cages/HeadCage> (
                             rigExecReadPhase = "final"
                         )
@@ -8219,7 +8203,6 @@ def Xform "Kaede"
                         prepend apiSchemas = ["RigExecMoverAPI"]
                     )
                     {
-                        uniform token rigExec:basis = "bernstein"
                         rel rigExec:cage = </Kaede/Cages/HeadCage> (
                             rigExecReadPhase = "final"
                         )
@@ -8259,7 +8242,6 @@ def Xform "Kaede"
                         prepend apiSchemas = ["RigExecMoverAPI"]
                     )
                     {
-                        uniform token rigExec:basis = "bernstein"
                         rel rigExec:cage = </Kaede/Cages/HeadCage> (
                             rigExecReadPhase = "final"
                         )
@@ -8308,7 +8290,6 @@ def Xform "Kaede"
                         prepend apiSchemas = ["RigExecMoverAPI"]
                     )
                     {
-                        uniform token rigExec:basis = "bernstein"
                         rel rigExec:cage = </Kaede/Cages/HeadCage> (
                             rigExecReadPhase = "final"
                         )
@@ -8347,7 +8328,6 @@ def Xform "Kaede"
                         prepend apiSchemas = ["RigExecMoverAPI"]
                     )
                     {
-                        uniform token rigExec:basis = "bernstein"
                         rel rigExec:cage = </Kaede/Cages/HeadCage> (
                             rigExecReadPhase = "final"
                         )
@@ -8399,7 +8379,6 @@ def Xform "Kaede"
                         prepend apiSchemas = ["RigExecMoverAPI"]
                     )
                     {
-                        uniform token rigExec:basis = "bernstein"
                         rel rigExec:cage = </Kaede/Cages/HeadCage> (
                             rigExecReadPhase = "final"
                         )
@@ -8451,7 +8430,6 @@ def Xform "Kaede"
                         prepend apiSchemas = ["RigExecMoverAPI"]
                     )
                     {
-                        uniform token rigExec:basis = "bernstein"
                         rel rigExec:cage = </Kaede/Cages/HeadCage> (
                             rigExecReadPhase = "final"
                         )
@@ -8493,7 +8471,6 @@ def Xform "Kaede"
                         prepend apiSchemas = ["RigExecMoverAPI"]
                     )
                     {
-                        uniform token rigExec:basis = "bernstein"
                         rel rigExec:cage = </Kaede/Cages/HeadCage> (
                             rigExecReadPhase = "final"
                         )
@@ -8547,7 +8524,6 @@ def Xform "Kaede"
                         prepend apiSchemas = ["RigExecMoverAPI"]
                     )
                     {
-                        uniform token rigExec:basis = "bernstein"
                         rel rigExec:cage = </Kaede/Cages/HeadCage> (
                             rigExecReadPhase = "final"
                         )
@@ -8573,7 +8549,6 @@ def Xform "Kaede"
                         prepend apiSchemas = ["RigExecMoverAPI"]
                     )
                     {
-                        uniform token rigExec:basis = "bernstein"
                         rel rigExec:cage = </Kaede/Cages/HeadCage> (
                             rigExecReadPhase = "final"
                         )
@@ -8620,7 +8595,6 @@ def Xform "Kaede"
                         prepend apiSchemas = ["RigExecMoverAPI"]
                     )
                     {
-                        uniform token rigExec:basis = "bernstein"
                         rel rigExec:cage = </Kaede/Cages/HeadCage> (
                             rigExecReadPhase = "final"
                         )
@@ -8661,7 +8635,6 @@ def Xform "Kaede"
                         prepend apiSchemas = ["RigExecMoverAPI"]
                     )
                     {
-                        uniform token rigExec:basis = "bernstein"
                         rel rigExec:cage = </Kaede/Cages/HeadCage> (
                             rigExecReadPhase = "final"
                         )
@@ -8687,7 +8660,6 @@ def Xform "Kaede"
                         prepend apiSchemas = ["RigExecMoverAPI"]
                     )
                     {
-                        uniform token rigExec:basis = "bernstein"
                         rel rigExec:cage = </Kaede/Cages/BodyCage> (
                             rigExecReadPhase = "final"
                         )

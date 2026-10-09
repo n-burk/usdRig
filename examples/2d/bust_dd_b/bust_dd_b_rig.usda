@@ -12307,7 +12307,6 @@ def Xform "Shion"
                         prepend apiSchemas = ["RigExecMoverAPI"]
                     )
                     {
-                        uniform token rigExec:basis = "bernstein"
                         rel rigExec:cage = </Shion/Cages/HeadCage> (
                             rigExecReadPhase = "final"
                         )
@@ -12363,7 +12362,6 @@ def Xform "Shion"
                         prepend apiSchemas = ["RigExecMoverAPI"]
                     )
                     {
-                        uniform token rigExec:basis = "bernstein"
                         rel rigExec:cage = </Shion/Cages/BodyCage> (
                             rigExecReadPhase = "final"
                         )
@@ -12391,7 +12389,6 @@ def Xform "Shion"
                         prepend apiSchemas = ["RigExecMoverAPI"]
                     )
                     {
-                        uniform token rigExec:basis = "bernstein"
                         rel rigExec:cage = </Shion/Cages/BodyCage> (
                             rigExecReadPhase = "final"
                         )
@@ -12431,7 +12428,6 @@ def Xform "Shion"
                         prepend apiSchemas = ["RigExecMoverAPI"]
                     )
                     {
-                        uniform token rigExec:basis = "bernstein"
                         rel rigExec:cage = </Shion/Cages/BodyCage> (
                             rigExecReadPhase = "final"
                         )
@@ -12489,7 +12485,6 @@ def Xform "Shion"
                         prepend apiSchemas = ["RigExecMoverAPI"]
                     )
                     {
-                        uniform token rigExec:basis = "bernstein"
                         rel rigExec:cage = </Shion/Cages/HeadCage> (
                             rigExecReadPhase = "final"
                         )
@@ -12531,7 +12526,6 @@ def Xform "Shion"
                         prepend apiSchemas = ["RigExecMoverAPI"]
                     )
                     {
-                        uniform token rigExec:basis = "bernstein"
                         rel rigExec:cage = </Shion/Cages/HeadCage> (
                             rigExecReadPhase = "final"
                         )
@@ -12602,7 +12596,6 @@ def Xform "Shion"
                         prepend apiSchemas = ["RigExecMoverAPI"]
                     )
                     {
-                        uniform token rigExec:basis = "bernstein"
                         rel rigExec:cage = </Shion/Cages/HeadCage> (
                             rigExecReadPhase = "final"
                         )
@@ -12665,7 +12658,6 @@ def Xform "Shion"
                         prepend apiSchemas = ["RigExecMoverAPI"]
                     )
                     {
-                        uniform token rigExec:basis = "bernstein"
                         rel rigExec:cage = </Shion/Cages/HeadCage> (
                             rigExecReadPhase = "final"
                         )
@@ -12731,7 +12723,6 @@ def Xform "Shion"
                         prepend apiSchemas = ["RigExecMoverAPI"]
                     )
                     {
-                        uniform token rigExec:basis = "bernstein"
                         rel rigExec:cage = </Shion/Cages/HeadCage> (
                             rigExecReadPhase = "final"
                         )
@@ -12787,7 +12778,6 @@ def Xform "Shion"
                         prepend apiSchemas = ["RigExecMoverAPI"]
                     )
                     {
-                        uniform token rigExec:basis = "bernstein"
                         rel rigExec:cage = </Shion/Cages/HeadCage> (
                             rigExecReadPhase = "final"
                         )
@@ -12843,7 +12833,6 @@ def Xform "Shion"
                         prepend apiSchemas = ["RigExecMoverAPI"]
                     )
                     {
-                        uniform token rigExec:basis = "bernstein"
                         rel rigExec:cage = </Shion/Cages/HeadCage> (
                             rigExecReadPhase = "final"
                         )
@@ -12885,7 +12874,6 @@ def Xform "Shion"
                         prepend apiSchemas = ["RigExecMoverAPI"]
                     )
                     {
-                        uniform token rigExec:basis = "bernstein"
                         rel rigExec:cage = </Shion/Cages/HeadCage> (
                             rigExecReadPhase = "final"
                         )
@@ -12970,7 +12958,6 @@ def Xform "Shion"
                         prepend apiSchemas = ["RigExecMoverAPI"]
                     )
                     {
-                        uniform token rigExec:basis = "bernstein"
                         rel rigExec:cage = </Shion/Cages/BodyCage> (
                             rigExecReadPhase = "final"
                         )
@@ -13023,7 +13010,6 @@ def Xform "Shion"
                         prepend apiSchemas = ["RigExecMoverAPI"]
                     )
                     {
-                        uniform token rigExec:basis = "bernstein"
                         rel rigExec:cage = </Shion/Cages/BodyCage> (
                             rigExecReadPhase = "final"
                         )
@@ -13072,7 +13058,6 @@ def Xform "Shion"
                         prepend apiSchemas = ["RigExecMoverAPI"]
                     )
                     {
-                        uniform token rigExec:basis = "bernstein"
                         rel rigExec:cage = </Shion/Cages/BodyCage> (
                             rigExecReadPhase = "final"
                         )
@@ -13125,7 +13110,6 @@ def Xform "Shion"
                         prepend apiSchemas = ["RigExecMoverAPI"]
                     )
                     {
-                        uniform token rigExec:basis = "bernstein"
                         rel rigExec:cage = </Shion/Cages/BodyCage> (
                             rigExecReadPhase = "final"
                         )
@@ -13174,7 +13158,6 @@ def Xform "Shion"
                         prepend apiSchemas = ["RigExecMoverAPI"]
                     )
                     {
-                        uniform token rigExec:basis = "bernstein"
                         rel rigExec:cage = </Shion/Cages/HeadCage> (
                             rigExecReadPhase = "final"
                         )
@@ -13200,7 +13183,6 @@ def Xform "Shion"
                         prepend apiSchemas = ["RigExecMoverAPI"]
                     )
                     {
-                        uniform token rigExec:basis = "bernstein"
                         rel rigExec:cage = </Shion/Cages/BodyCage> (
                             rigExecReadPhase = "final"
                         )

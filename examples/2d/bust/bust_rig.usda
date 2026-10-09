@@ -2534,7 +2534,6 @@ def Xform "Bust"
                         prepend apiSchemas = ["RigExecMoverAPI"]
                     )
                     {
-                        uniform token rigExec:basis = "bernstein"
                         rel rigExec:cage = </Bust/Cages/HeadCage> (
                             rigExecReadPhase = "final"
                         )
@@ -2574,7 +2573,6 @@ def Xform "Bust"
                         prepend apiSchemas = ["RigExecMoverAPI"]
                     )
                     {
-                        uniform token rigExec:basis = "bernstein"
                         rel rigExec:cage = </Bust/Cages/HeadCage> (
                             rigExecReadPhase = "final"
                         )
@@ -2617,7 +2615,6 @@ def Xform "Bust"
                         prepend apiSchemas = ["RigExecMoverAPI"]
                     )
                     {
-                        uniform token rigExec:basis = "bernstein"
                         rel rigExec:cage = </Bust/Cages/HeadCage> (
                             rigExecReadPhase = "final"
                         )
@@ -2660,7 +2657,6 @@ def Xform "Bust"
                         prepend apiSchemas = ["RigExecMoverAPI"]
                     )
                     {
-                        uniform token rigExec:basis = "bernstein"
                         rel rigExec:cage = </Bust/Cages/HeadCage> (
                             rigExecReadPhase = "final"
                         )
@@ -2702,7 +2698,6 @@ def Xform "Bust"
                         prepend apiSchemas = ["RigExecMoverAPI"]
                     )
                     {
-                        uniform token rigExec:basis = "bernstein"
                         rel rigExec:cage = </Bust/Cages/HeadCage> (
                             rigExecReadPhase = "final"
                         )
@@ -2770,7 +2765,6 @@ def Xform "Bust"
                         prepend apiSchemas = ["RigExecMoverAPI"]
                     )
                     {
-                        uniform token rigExec:basis = "bernstein"
                         rel rigExec:cage = </Bust/Cages/HeadCage> (
                             rigExecReadPhase = "final"
                         )
@@ -2810,7 +2804,6 @@ def Xform "Bust"
                         prepend apiSchemas = ["RigExecMoverAPI"]
                     )
                     {
-                        uniform token rigExec:basis = "bernstein"
                         rel rigExec:cage = </Bust/Cages/BodyCage> (
                             rigExecReadPhase = "final"
                         )
@@ -2822,7 +2815,6 @@ def Xform "Bust"
                         prepend apiSchemas = ["RigExecMoverAPI"]
                     )
                     {
-                        uniform token rigExec:basis = "bernstein"
                         rel rigExec:cage = </Bust/Cages/HeadCage> (
                             rigExecReadPhase = "final"
                         )
@@ -2856,7 +2848,6 @@ def Xform "Bust"
                         prepend apiSchemas = ["RigExecMoverAPI"]
                     )
                     {
-                        uniform token rigExec:basis = "bernstein"
                         rel rigExec:cage = </Bust/Cages/BodyCage> (
                             rigExecReadPhase = "final"
                         )
@@ -2882,7 +2873,6 @@ def Xform "Bust"
                         prepend apiSchemas = ["RigExecMoverAPI"]
                     )
                     {
-                        uniform token rigExec:basis = "bernstein"
                         rel rigExec:cage = </Bust/Cages/HeadCage> (
                             rigExecReadPhase = "final"
                         )
@@ -2908,7 +2898,6 @@ def Xform "Bust"
                         prepend apiSchemas = ["RigExecMoverAPI"]
                     )
                     {
-                        uniform token rigExec:basis = "bernstein"
                         rel rigExec:cage = </Bust/Cages/BodyCage> (
                             rigExecReadPhase = "final"
                         )

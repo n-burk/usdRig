@@ -690,8 +690,6 @@ public:
 
     /// Native mesh/points prim supplying the cage control points.
     void SetCage(const SdfPath &path);
-    /// bspline | bernstein.
-    void SetBasis(const TfToken &basis);
     void SetDivisions(int x, int y, int z);
     /// base | preceding | final, as rigExecReadPhase metadata on
     /// rigExec:cage.
@@ -875,7 +873,6 @@ public:
         const std::string &name,
         const SdfPath &cagePrim,
         int divX, int divY, int divZ,
-        const TfToken &basis = TfToken("bspline"),
         const SdfPath &target = {},
         const TfToken &readPhase = TfToken("base"));
 

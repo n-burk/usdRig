@@ -1,25 +1,13 @@
-// A UsdImaging prim adapter for RigExecTouchOverlay.
-// WHY THIS FILE EXISTS. `RigExecTouchOverlay` inherits Mesh in the
-// schema, and that is not enough to draw. UsdImaging binds an adapter to
-// a prim by its CONCRETE type name, and a concrete type nobody has
-// registered an adapter for produces a prim with no imaging
-// representation at all: it composes perfectly, reports the right
-// points, counts, extent, visibility and purpose, and changes zero
-// pixels. Measured on the biped, the identical overlay carrying 17,466
-// points at opacity 0.85 moved 0 of 80,730 sampled pixels as a
-// RigExecTouchOverlay and lit its region immediately as a plain Mesh.
-// Nothing in USD reports this; the prim is simply not an rprim.
-// So the type is declared to Hydra here, and the declaration is the
-// whole adapter: a RigExecTouchOverlay IS a mesh, drawn by exactly the
-// stock mesh adapter, with no behaviour of its own. Subclassing rather
-// than aliasing is the sanctioned route -- it is what UsdGeom's own
-// derived gprim types do -- and it means the overlay gains every
-// improvement the stock adapter ever gets for free.
-// The point of paying for this at all is that the overlay then lives in
-// the asset, under the RigExecTouchRegions scope that owns it, instead
-// of at the stage root. A shot with three characters gets three
-// overlays inside three assets, each shipped with the regions it lights,
-// and no global prim for them to fight over.
+// UsdImaging prim adapter for RigExecTouchOverlay.
+// The live TouchPose highlight is not this prim. It is a Storm shader
+// tint on the body mesh (touchPoseHighlight.h): Hydra primvars carry the
+// per-face region id and the colour table, and nothing is authored on the
+// stage or in the session layer.
+// RigExecTouchOverlay remains an empty, invisible Mesh shipped beside a
+// RigExecTouchRegions scope. UsdImaging binds an adapter by concrete type
+// name, so a type with no adapter is not an rprim at all. This file only
+// registers the type as the stock mesh adapter. It does not build points,
+// write a session layer, or light a region.
 #include "pxr/base/tf/registryManager.h"
 #include "pxr/base/tf/type.h"
 #include "pxr/usdImaging/usdImaging/meshAdapter.h"
@@ -27,7 +15,7 @@
 
 PXR_NAMESPACE_OPEN_SCOPE
 
-/// Draws a RigExecTouchOverlay as the mesh it is.
+/// Draws a RigExecTouchOverlay as the mesh it is, if anything makes it visible.
 class RigExecTouchOverlayAdapter final : public UsdImagingMeshAdapter {
 public:
     using BaseAdapter = UsdImagingMeshAdapter;
