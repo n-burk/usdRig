@@ -7920,8 +7920,6 @@ SchemaResourceDir(const std::string &examplesDir)
 
 /// What MakeGroupBuildStage authors besides its default movers.
 struct GroupStageOptions {
-    /// The gate weight's rigExec:defaultWeight reads 0 through a connection.
-    bool connectedDefault = false;
     /// L1's rigExec:skinningMethod holds two (equal) time samples.
     bool animatedMethod = false;
     /// A surface-frame blend shape runs last.
@@ -7965,14 +7963,31 @@ MakeGroupBuildStage(const GroupStageOptions &options)
         SdfPath("/Asset/Rig/Still"), TfToken("RigExecControl"));
     still.GetAttribute(TfToken("avars:ty")).Set(1.0);
     const SdfPath target("/Asset/Shape.points");
-    const UsdPrim shape =
-        stage->DefinePrim(target.GetPrimPath(), TfToken("Points"));
+    // A surface-frame blend moves a mesh only (the blend shape mover's
+    // validation): then the shape is a quad grid over the points' rows.
+    const UsdPrim shape = stage->DefinePrim(
+        target.GetPrimPath(),
+        TfToken(options.surfaceFrameBlend ? "Mesh" : "Points"));
     VtVec3fArray base(points);
     for (size_t i = 0; i < points; ++i) {
         base[i] = GfVec3f(float(i % 101) * 0.25f, float(i / 101) * 0.125f,
                           1.0f + float(i % 7));
     }
     shape.GetAttribute(TfToken("points")).Set(base);
+    if (options.surfaceFrameBlend) {
+        VtIntArray counts, corners;
+        for (int row = 0; row + 1 < int(points / 101); ++row) {
+            for (int col = 0; col + 1 < 101; ++col) {
+                const int at = row * 101 + col;
+                counts.push_back(4);
+                for (const int corner : {at, at + 1, at + 102, at + 101}) {
+                    corners.push_back(corner);
+                }
+            }
+        }
+        shape.GetAttribute(TfToken("faceVertexCounts")).Set(counts);
+        shape.GetAttribute(TfToken("faceVertexIndices")).Set(corners);
+    }
     stage->DefinePrim(SdfPath("/Asset/Rig/Movers"), TfToken("Scope"));
     const auto skin = [&](const char *name, const char *method, bool pairs) {
         const UsdPrim mover = stage->DefinePrim(
@@ -8089,17 +8104,9 @@ MakeGroupBuildStage(const GroupStageOptions &options)
     weight.CreateAttribute(TfToken("rigExec:values"),
                            SdfValueTypeNames->FloatArray, false)
         .Set(VtFloatArray(named.size(), 1.0f));
-    const UsdAttribute defaultWeight = weight.CreateAttribute(
-        TfToken("rigExec:defaultWeight"), SdfValueTypeNames->Float, false);
-    if (options.connectedDefault) {
-        const UsdPrim zero =
-            stage->DefinePrim(SdfPath("/Asset/Zero"), TfToken("Scope"));
-        zero.CreateAttribute(TfToken("inputs:zero"), SdfValueTypeNames->Float)
-            .Set(0.0f);
-        defaultWeight.AddConnection(SdfPath("/Asset/Zero.inputs:zero"));
-    } else {
-        defaultWeight.Set(0.0f);
-    }
+    weight.CreateAttribute(TfToken("rigExec:defaultWeight"),
+                           SdfValueTypeNames->Float, false)
+        .Set(0.0f);
     // Authored last to first.
     if (options.surfaceFrameBlend) {
         blend("BS", "surfaceFrame");
@@ -8579,8 +8586,8 @@ TestTheRolesStandWhileTheirPinsHold()
 /// they rest on is a bakeable constant, and GetExportPinnedPaths holds
 /// exactly those reads (each Range skin's method, element size and joint
 /// indices, the gate weight's default), none of them admissible upstream.
-/// A method in the keep-set leaves its skin Whole and unpinned; a connected
-/// default leaves the gate off in Export and on in Live.
+/// A method in the keep-set leaves its skin Whole and unpinned; a gate
+/// default in the keep-set leaves the gate off in Export and on in Live.
 void
 TestExportModeBakesOnlyConstants()
 {
@@ -8655,12 +8662,14 @@ TestExportModeBakesOnlyConstants()
               pinned.count(SdfPath(movers + "L2.rigExec:skinningMethod")) == 1);
     }
 
-    // A connected default: gated Live, ungated Export.
-    GroupStageOptions connected;
-    connected.connectedDefault = true;
-    const BuiltProgram connectedLive = BuildGroupStage(connected);
+    // A default the keep-set names (an admitted upstream or presentation
+    // input): gated Live, ungated Export. A static weight's default cannot
+    // be connected or animated, so the keep-set is what leaves it listed.
+    const SdfPath gateDefault("/Asset/Rig/Weights/Gate.rigExec:defaultWeight");
+    const BuiltProgram connectedLive = BuildGroupStage(GroupStageOptions());
     const BuiltProgram connectedExport =
-        BuildGroupStage(connected, {}, RigExecBakedRoleMode::Export);
+        BuildGroupStage(GroupStageOptions(), {}, RigExecBakedRoleMode::Export,
+                        {gateDefault});
     CHECK(connectedLive.program && connectedExport.program);
     if (connectedLive.program && connectedExport.program) {
         const auto *a = GroupChain(connectedLive.program->GetStepGraph());
@@ -8678,8 +8687,7 @@ TestExportModeBakesOnlyConstants()
                   b->revisions[size_t(gb)].pins.empty());
         }
         CHECK(connectedExport.program->GetExportPinnedPaths().count(
-                  SdfPath("/Asset/Rig/Weights/Gate.rigExec:defaultWeight")) ==
-              0);
+                  gateDefault) == 0);
     }
     std::printf("  export roles: %zu pinned reads\n", expected.size());
 }
