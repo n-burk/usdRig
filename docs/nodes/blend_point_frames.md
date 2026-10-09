@@ -152,7 +152,8 @@ not the average of the two skeletons' joint positions.
 
 Open it live with:
 
-```bat
+```
+bin/usdview.sh docs/examples/blend_point_frames.usda
 bin\launch_usdview.bat docs\examples\blend_point_frames.usda
 ```
 
@@ -176,4 +177,4 @@ python docs/render_media.py --page blend_point_frames
 
 ---
 
-[UsdRig](../index.md)
+[RigExec](../index.md)

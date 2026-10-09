@@ -168,7 +168,8 @@ The animated mesh demonstrates smoothing with rest-detail restoration.
 
 Open it live with:
 
-```bat
+```
+bin/usdview.sh docs/examples/delta_mush_mover.usda
 bin\launch_usdview.bat docs\examples\delta_mush_mover.usda
 ```
 
@@ -184,4 +185,4 @@ bin\launch_usdview.bat docs\examples\delta_mush_mover.usda
 
 ---
 
-[UsdRig](../index.md)
+[RigExec](../index.md)

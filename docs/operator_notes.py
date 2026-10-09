@@ -1,4 +1,4 @@
-"""Hand-written prose for the UsdRig node pages (see build_pages.py).
+"""Hand-written prose for the RigExec node pages (see build_pages.py).
 
 Each entry supplies the user-facing description, wiring table, example
 story, tips, and cross-links for one operator. Parameter reference comes
@@ -14,7 +14,7 @@ CATEGORIES = [
     ("Rig", ["rig_root"]),
     ("Transform providers", ["control", "joint", "space_switch", "bone_frame",
                              "copy_frame", "mapped_frame", "skin_influence", "armature_parent"]),
-    ("Solvers", ["fk_chain", "two_bone_ik", "spline_ik",
+    ("Solvers", ["fk_chain", "two_bone_ik", "auto_clavicle", "spline_ik",
                  "blend_point_frames", "twist_distribution", "ribbon"]),
     ("Constraints", ["aim_constraint", "position_constraint",
                      "rotation_constraint", "scale_constraint",
@@ -43,8 +43,7 @@ OPERATORS = {
         "description": """Every rig is one `RigExecRoot` prim and everything composed
 beneath it. The root declares no membership lists: a `RigExecControl` under it
 is a control, a `RigExecJoint` is a joint output, a placed volume prim is a
-weight field, and a prim carrying `rigExec:moves` under the root's `Movers`
-child is a mover. It is what a host activates — one rig, or every
+weight field, and any prim carrying `rigExec:moves` is a mover. It is what a host activates — one rig, or every
 `RigExecRoot` on the stage — and it is the unit that compiles, publishes a
 generation, and carries the pose diagnostics. It is Imageable but deliberately
 not Xformable, so guide bounds propagate up to the enclosing asset for camera
@@ -56,11 +55,14 @@ interpolators, placed volume weights, and aggregate solvers by prim type
 anywhere under it, then walks the WHOLE RIG in reverse-sibling post-order —
 descendants before their parent, and the *bottom* sibling branch in usdview
 first — to number ONE pose stack of joint-writing solvers and frame
-constraints, of which the `<rig>/Movers` mover stack is a restriction; the walk uses the standard
+constraints. A mover is any prim in that walk that carries `rigExec:moves`;
+`<rig>/Movers` is the usual scope, the same way `<rig>/Solvers` is for
+solvers, and a mover under another scope is discovered the same way. The walk uses the standard
 `UsdPrimRange` predicate, so a deactivated or unloaded branch is simply not
 part of the rig and changing that is a structural (epoch-rebuilding) edit
 rather than a value edit. A rig that finds no controls, joints, volume weights,
-and no movers at all is a compile error ("Rig publishes no outputs"), and every
+and no movers at all — including an inert mover whose `rigExec:moves`
+relationship is present but empty — is a compile error ("Rig publishes no outputs"), and every
 mover target is checked against the root's *parent* prim, which is the rig
 asset and the boundary of what the rig may write. `uniform bool rigExec:baked`
 is re-read at the tail of each compile and only asks for the baked program: an
@@ -75,12 +77,11 @@ with a note on the published pose, and both paths publish the same values.""",
             # relationship on the root itself.
             ("(namespace)", "Everything composed beneath the root is the rig; controls, "
              "joints, solvers, and weight volumes are discovered by prim type.", "-"),
-            # The one child NAME the compiler looks up: rigEvaluator.cpp:3540 (and
-            # the matching digest walk at :2559). Absent Movers scope is legal --
-            # a rig of controls and joints alone compiles (:4436 only fails when
-            # nothing at all was found).
-            ("`Movers` child", "The scope the mover stack is walked from: only prims under "
-             "`<rig>/Movers` are compiled as movers.", "no"),
+            # Movers is a convention. Discovery is any prim under the root that
+            # carries rigExec:moves (_GetMoverExecutionOrder).
+            ("`rigExec:moves`", "Any prim under the root that carries this "
+             "relationship is a mover. `<rig>/Movers` is the usual scope, not a "
+             "name the compiler requires.", "no"),
             # assetRoot = _rigPath.GetParentPath() (rigEvaluator.cpp:3596) and the
             # HasPrefix check that rejects anything outside it (:3609).
             ("(parent prim)", "The rig root's parent is the asset: movers may only target "
@@ -90,8 +91,9 @@ with a note on the published pose, and both paths publish the same values.""",
         "example": """Every shipped example is one of these: `two_bone_ik.usda` puts a
 `RigExecRoot` named `Rig` inside the `IkAsset` Xform, with `Controls`,
 `Solvers`, `Joints`, `Weights`, and `Movers` scopes beneath it and the deformed
-cards in a sibling `Geom` scope. Only `Movers` is a name the compiler knows —
-the rest are ordinary `Scope` prims kept for readability — and the geometry sits
+cards in a sibling `Geom` scope. `Movers`, `Controls`, `Solvers`, `Joints`,
+and `Weights` are ordinary scopes kept for readability — a mover is discovered
+by carrying `rigExec:moves`, wherever it sits — and the geometry sits
 under `IkAsset` because that parent is what bounds the rig's write set.""",
         "tips": [
             "Keep the deformed geometry inside the same asset prim as the rig: a "
@@ -114,6 +116,9 @@ under `IkAsset` because that parent is what bounds the rig's write set.""",
             "requests pin dependency frames and omit upstream overrides. "
             "Other rigs retain complete override reads; "
             "`RIGEXEC_CONNECTED_POSE_SEED_REUSE=0` disables the optimization.",
+            "`RIGEXEC_EVALUATION_MODE`, when set, is `dynamic`, `baked`, "
+            "`parity`, or `reference`. Any other value warns and evaluates "
+            "dynamically.",
         ],
         "see_also": [
             ("control", "Control"),
@@ -513,6 +518,61 @@ bend; the pole above the elbow keeps the bend plane facing the camera.""",
             ("aim_constraint", "Aim Constraint"),
         ],
     },
+    "auto_clavicle": {
+        "title": "Auto Clavicle",
+        "schema": "RigExecAutoClavicle",
+        "no_gif": True,
+        "summary": "Translates a limb-root control as the limb swings, turning it about the clavicle.",
+        "description": """Carries a limb's root with the limb's own swing, the way a clavicle
+lifts when the arm is raised. It runs with the space switches: after the
+controls compose and before any solver reads them. It moves
+`rigExec:target` by translation only, and that control's namespace
+descendants follow, so the FK chain and the IK root move together and keep
+their orientation.
+
+The biped authors one per shoulder in `examples/biped/Biped_autoclav.usda`.""",
+        "how_it_works": """Each frame, in row-vector convention and the anchor's axes, the limb
+direction is the first FK control's rest bone axis carried by its posed
+frame, or an estimated two-bone reach from the target's moved origin to
+`rigExec:ikTarget`, bending toward `rigExec:poleControl`. Those two
+directions blend by `rigExec:ikBlendAttribute` against `rigExec:ikValue`.
+Pose weights of that direction, measured as the swing that takes the basis
+X axis onto it, are summed with `rigExec:poseGains` and scaled by
+`inputs:gain` and the optional amount attribute. The target's origin then
+turns by that weight about `rigExec:pivot`.
+
+The rest direction and the bone lengths come from the default frames, so
+at rest the node moves nothing. The IK root moves with the shift it helps
+decide, so the solve and the shift iterate to a fixed point. A matched
+IK/FK pair therefore does not jump when the blend switches.""",
+        "wiring": [
+            ("`rigExec:target`", "The limb-root control that is translated. Exactly one.", "yes"),
+            ("`rigExec:pivot`", "The clavicle control whose posed origin the root turns about. Exactly one.", "yes"),
+            ("`rigExec:anchor`", "The control the limb direction is measured in. It must not be moved by the target. Exactly one.", "yes"),
+            ("`rigExec:fkControls`", "The FK chain's three controls, root to end.", "yes"),
+            ("`rigExec:ikTarget`", "Optional prim the IK half reaches for. Without it the FK direction is used.", "no"),
+            ("`rigExec:poleControl`", "Optional pole the IK estimate bends toward.", "no"),
+            ("`rigExec:ikBlendAttribute`", "Optional float or double selecting FK versus IK. Absent reads as FK.", "no"),
+            ("`rigExec:amountAttribute`", "Optional float or double scaling the effect. Absent reads as 1.", "no"),
+        ],
+        "example": """Open `examples/biped/Biped_autoclav.usda` over the biped stack. Each
+shoulder is a `RigExecAutoClavicle`: `rigExec:target` is the upper-arm
+swing control, `rigExec:pivot` is the shoulder, and `avars:autoClav` on
+the shoulder is the amount dial (1 by default). Dropping the sublayer
+removes the prims and that channel.""",
+        "tips": [
+            "`inputs:gain` defaults to 0.4 and scales the summed pose weights.",
+            "`rigExec:kernel` is `gaussian` or `linear`, the same choice as a pose interpolator.",
+            "`rigExec:basis` may carry a reflection so a right limb can share a left limb's poses. Only its rotation is read.",
+            "A pose with gain 0 still shapes the interpolation and does not add lift.",
+        ],
+        "see_also": [
+            ("two_bone_ik", "Two-Bone IK"),
+            ("fk_chain", "FK Chain"),
+            ("space_switch", "Space Switch"),
+            ("pose_interpolator", "Pose Interpolator"),
+        ],
+    },
     "spline_ik": {
         "title": "Spline IK",
         "schema": "RigExecSplineIk",
@@ -892,7 +952,7 @@ owns the translation channel only. It is how a prop is pinned between two
 hands, how a hip rides between two feet, and — with an animated weight
 array — how either of those hands off to the other.""",
         "how_it_works": """Every source-blending constraint runs in the pose phase, in the
-composed order of the `Movers` namespace, so it revises a provider that
+composed namespace order under the rig root (reverse-sibling post-order), so it revises a provider that
 earlier solvers and constraints have already posed. Each evaluation it
 resolves the current frame of every `rigExec:sources` target, reads
 `inputs:sourceWeights` raw off the attribute at that frame's time, and
@@ -1203,7 +1263,7 @@ home.""",
         "title": "Single-Chain IK Constraint",
         "schema": "RigExecSingleChainIkConstraint",
         "summary": "Re-poses an existing joint chain of any length onto an effector goal.",
-        "description": """FBX-style single-chain IK, and the only IK in UsdRig that is a
+        "description": """FBX-style single-chain IK, and the only IK in RigExec that is a
 **constraint** rather than a solver: it does not publish a frame array that
 joints extract from, it revises the joint frames that are already there —
 whatever the last solver in each joint's stack committed.
@@ -1212,10 +1272,11 @@ chain between them is inferred from namespace nesting, so the same node drives
 a two-joint chain or a ten-joint one. The first joint's origin stays planted,
 segments keep their lengths by default, and the end joint lands on the effector
 whenever the goal is in reach.""",
-        "how_it_works": """The constraint runs in the pose phase, ordered BELOW the
-geometry movers in the Movers stack — the hierarchy runs bottom-up, so the
-chain is solved before the skin movers read it at their `final` transform
-read phase. At compile time it walks `endJoint`'s ancestors up to
+        "how_it_works": """The constraint runs in the pose phase with the other
+frame constraints and solvers, in composed namespace order. Geometry movers,
+including skin, run afterward and read the posed joints at their authored
+transform read phase (`final` when that is what the relationship asks for).
+At compile time it walks `endJoint`'s ancestors up to
 `firstJoint` to infer the ordered chain, and `rigExec:moves` must restate that
 complete set. Each evaluation it reads the chain's current frames and the
 effector's frame, solves the positions with deterministic FABRIK inside the
@@ -1347,15 +1408,14 @@ stays at 1, so the follow is full strength over every point of the card.""",
             "SOLVER wrote it, which is not the same as \"before every "
             "constraint\" — a constraint that sits below the last solver is "
             "folded into `base` through that solver. Name a prim if you want a "
-            "specific moment: the `Solvers` scope means \"after the last "
-            "solver\", the `Movers` scope \"after the last constraint\" "
-            "(moverGraph.cpp:1366-1379, schema.usda:1685).",
+            "specific moment: a grouping scope means after everything composed "
+            "beneath it, because the walk visits a parent last. `Solvers` and "
+            "`Movers` are the usual scopes, not names the compiler looks up.",
             "Same-target movers are an ordinary stack ordered by the composed "
             "namespace: reverse-sibling post-order, so descendants run before "
             "their parent and the bottom sibling before the top (spec section "
             "4.2). Stacking is how you layer rigid follows, not how you blend "
-            "influences on one point — use the Skin Mover for that "
-            "(schema.usda:1700-1705).",
+            "influences on one point — use the Skin Mover for that.",
             "`rigExec:weightBlend = \"radial\"` blends a fraction of the "
             "rotation instead of the chord, so a partly weighted point keeps "
             "its distance from the driver's pivot; the default `linear` is the "
@@ -1603,6 +1663,10 @@ same point ordering.""",
             "geometry.",
             "Follow a bulge with a Smooth mover to settle the lattice falloff "
             "or a Volume Correct mover to hold girth.",
+            "`rigExec:basis` (`bspline` or `bernstein`) is stored on the prim "
+            "and is not read. `legacy` always uses Bernstein weights. "
+            "`regularGrid` uses `rigExec:interpolationU`, "
+            "`rigExec:interpolationV`, and `rigExec:interpolationW`.",
         ],
         "see_also": [
             ("smooth_mover", "Smooth Mover"),
@@ -2056,11 +2120,11 @@ at the `bent` hold.""",
             "its rest in its nearest frame-publishing ancestor's frame, so the "
             "parent subtracts its own share back out. Measuring against anything "
             "other than the immediate namespace parent is reported as a warning.",
-            "`rigExec:enableTranslation` is not measured by this phase — it warns "
-            "and judges the poses on rotation alone "
-            "(`rigEvaluator.cpp:2852-2862`). Disabling a whole interpolator "
-            "publishes zeros, while disabling one pose drops it out of the solve "
-            "entirely so the other poses' weights change.",
+            "`rigExec:enableTranslation` measures the driver's translation in its "
+            "own frame and combines it with rotation. A failed measurement "
+            "publishes zero weights for that generation. Disabling a whole "
+            "interpolator publishes zeros, while disabling one pose drops it "
+            "out of the solve entirely so the other poses' weights change.",
             "A radius wider than the pose spacing makes the Gaussian rows overlap "
             "enough that the inverse pushes a far pose negative between two near "
             "ones. `rigExec:allowNegativeWeights = 0` clamps that lobe; leave it on "
@@ -2093,9 +2157,11 @@ and `inputs:enabled` all feed that solve, and those same six are the
 pose's share of the epoch digest, so editing any of them recompiles the
 interpolator. The other three — `rigExec:falloff`,
 `rigExec:poseControls` and `rigExec:poseControlValues` — are provenance
-that evaluation never reads, and the translation pair is dropped unless
-the interpolator sets `rigExec:enableTranslation`, which the evaluation
-phase warns it does not measure. Evaluation happens in the pose-interpolator
+that evaluation never reads. The translation pair is used when the
+interpolator sets `rigExec:enableTranslation`: the driver's translation, in
+its own frame, is divided by the translation radius and combined with the
+rotation term. If that translation cannot be measured, the generation
+publishes zero weights and a diagnostic. Evaluation happens in the pose-interpolator
 phase — after the complete pose walk, every constraint included, and
 before the geometry chains that consume the weights — where the
 interpolator measures its driver's final local rotation against every
@@ -3182,7 +3248,10 @@ without them, or with half of them unpainted. They are deliberately *not*
 `GeomSubset`s — hdSt collects every face subset under a mesh whatever its
 `familyName`, so a touch set collided with the `materialBind` subset owning
 the same face (16,739 warnings on open), and the sets were moved into a
-scope of their own.""",
+scope of their own.
+
+The hover drawn in usdview is a Storm shader tint on the touched mesh. It
+authors no overlay mesh and no session-layer fill.""",
         "how_it_works": """Touch regions belong to no compile or evaluation phase: `rigExec:touch:*`
 appears nowhere under `libs/rigExec`, so they add nothing to the pose walk.
 They are read at UI time by the usdview TouchPose plugin, which traverses
@@ -3248,6 +3317,10 @@ skin.""",
             "A region with no `rigExec:touch:control` is skipped by the reader "
             "rather than drawn dead — an unbound set must not swallow the click "
             "that would otherwise reach usdview's own picking.",
+            "The exporter may also declare an empty invisible "
+            "`RigExecTouchOverlay` mesh under the scope. Live highlighting does "
+            "not fill that mesh or the session layer: TouchPose tints the body "
+            "with a Storm shader.",
             "Face indices are scattered against the mesh's live face count and "
             "anything out of range is dropped without a word, so a region set "
             "exported against different topology fails quietly: re-export the "
@@ -3272,7 +3345,7 @@ shoulder's control is selected, with no picker window and no knowledge of where
 the rig parked its controls. Regions are *not* `GeomSubset`s — hdSt collects
 every face subset under a mesh whatever its `familyName`, so touch sets living
 there collided with the material-bind sets sharing the same faces
-(schema.usda:2532-2536); they sit in their own `RigExecTouchRegions` scope
+(the touch-regions note in `schema.usda`); they sit in their own `RigExecTouchRegions` scope
 instead, found by type rather than by position.""",
         "how_it_works": """Nothing about a touch region runs in an evaluation
 phase — the rig evaluator never reads a `rigExec:touch:*` token at all (no
@@ -3362,11 +3435,12 @@ OPERATORS.update({
         "title": "Bone Frame", "schema": "RigExecBoneFrame", "no_gif": True,
         "summary": "Evaluates joint channels with explicit scale and location inheritance.",
         "description": "Separate the rotation/scale parent map from the location map when a joint inherits them differently.",
-        "how_it_works": """XYZ channel rotations are degrees. `local` and `parentRest`
-are saved joint-space transforms; `sourceObject` places the evaluated frame in
-target space. Inheritance supports FULL, NONE, AVERAGE, ALIGNED, FIX_SHEAR and
-NONE_LEGACY. Connected joints suppress channel translation. `spaceKind`
-selects the full pose or the rotation/translation parent map.
+        "how_it_works": """XYZ channel rotations are degrees. `inputs:local` and
+`inputs:parentRest` are saved joint-space transforms; `rigExec:sourceObject`
+places the evaluated frame in target space. `inputs:inheritScale` is FULL,
+NONE, AVERAGE, ALIGNED, FIX_SHEAR, or NONE_LEGACY. Connected joints suppress
+channel translation. `inputs:spaceKind` is `pose` (the full map), `rotation`,
+or `translation`.
 
 """ + _AFFINE_DEPENDENCIES,
         "wiring": [("`rigExec:parent`", "Live parent joint frame.", "no"),
@@ -3378,7 +3452,7 @@ selects the full pose or the rotation/translation parent map.
         "title": "Copy Frame", "schema": "RigExecCopyFrame", "no_gif": True,
         "summary": "Copies a live frame, optionally retaining incoming translation.",
         "description": "Use a source frame as the output while preserving location independently when required.",
-        "how_it_works": "`preserveLocation` copies the incoming translation over the source matrix. " + _AFFINE_DEPENDENCIES,
+        "how_it_works": "`inputs:preserveLocation` copies the incoming translation over the source matrix. " + _AFFINE_DEPENDENCIES,
         "wiring": [("`rigExec:source`", "Live source frame.", "yes"), ("`rigExec:poseInputs`", "All consumed frame providers.", "yes")],
         "see_also": [("mapped_frame", "Mapped Frame")],
     },
@@ -3409,8 +3483,8 @@ prefix alone.
         "summary": "Applies a source rest-to-pose map over an incoming owner frame.",
         "description": "Retains owner channels while a source influence moves the owner.",
         "how_it_works": """The incoming frame is either `inputs:incoming` or XYZ
-channels times `local` times the parent frame. The source map is
-`inverse(sourceObject) * inverseBind * source`. `preserveLocation` restores
+channels times `inputs:local` times the parent frame. The source map is
+`inverse(sourceObject) * inverseBind * source`. `inputs:preserveLocation` restores
 the incoming translation after applying that map.
 
 """ + _AFFINE_DEPENDENCIES,
@@ -3422,19 +3496,19 @@ the incoming translation after applying that map.
         "title": "Constraint Frame", "schema": "RigExecConstraintFrame", "no_gif": True,
         "summary": "Computes ordered affine constraints in explicit owner and target spaces.",
         "description": "Connect each result to the next incoming matrix to author an ordered constraint stack.",
-        "how_it_works": """Operations include COPY_LOCATION, COPY_ROTATION,
-COPY_SCALE, COPY_TRANSFORMS, ARMATURE, ARMATURE_BLEND, DAMPED_TRACK,
-STRETCH_TO, PRESERVE_ORIGIN, the supported rotation-normalization operation
-LIMIT_ROTATION, and TRANSFORM_LOCATION. Copy and mapping operations use WORLD,
+        "how_it_works": """Operations the kernel implements are COPY_LOCATION,
+COPY_ROTATION, COPY_SCALE, COPY_TRANSFORMS, ARMATURE, ARMATURE_BLEND,
+DAMPED_TRACK, PRESERVE_ORIGIN, LIMIT_ROTATION, and TRANSFORM_LOCATION.
+Copy and mapping operations use WORLD,
 POSE, LOCAL, LOCAL_OWNER_ORIENT or CUSTOM spaces as appropriate; local joint
 conversion uses the explicit rest and inheritance inputs. Influence blends
 in world space after the operation using affine stretch and quaternion
 rotation interpolation.
 
 TRANSFORM_LOCATION maps LOCATION, SCALE or XYZ Euler rotation (radians) into
-location. Per-axis source ranges clamp unless `mapExtrapolate`; zero-width
-ranges contribute zero. `mapAxes` selects normalized source axes for each
-output axis. `mapMix` supports ADD or REPLACE. Other rotation orders and
+location. Per-axis source ranges clamp unless `inputs:mapExtrapolate`; zero-width
+ranges contribute zero. `inputs:mapAxes` selects normalized source axes for each
+output axis. `inputs:mapMix` supports ADD or REPLACE. Other rotation orders and
 rotation/scale output mappings are not provided by this operation.
 
 """ + _AFFINE_DEPENDENCIES,

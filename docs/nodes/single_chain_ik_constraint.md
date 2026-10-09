@@ -21,7 +21,7 @@ On this page:
 
 ![Single-Chain IK Constraint effect](../gifs/single_chain_ik_constraint.gif)
 
-FBX-style single-chain IK, and the only IK in UsdRig that is a
+FBX-style single-chain IK, and the only IK in RigExec that is a
 **constraint** rather than a solver: it does not publish a frame array that
 joints extract from, it revises the joint frames that are already there —
 whatever the last solver in each joint's stack committed.
@@ -39,10 +39,11 @@ rigExec:sources.
 
 ## How it works
 
-The constraint runs in the pose phase, ordered BELOW the
-geometry movers in the Movers stack — the hierarchy runs bottom-up, so the
-chain is solved before the skin movers read it at their `final` transform
-read phase. At compile time it walks `endJoint`'s ancestors up to
+The constraint runs in the pose phase with the other
+frame constraints and solvers, in composed namespace order. Geometry movers,
+including skin, run afterward and read the posed joints at their authored
+transform read phase (`final` when that is what the relationship asks for).
+At compile time it walks `endJoint`'s ancestors up to
 `firstJoint` to infer the ordered chain, and `rigExec:moves` must restate that
 complete set. Each evaluation it reads the chain's current frames and the
 effector's frame, solves the positions with deterministic FABRIK inside the
@@ -284,7 +285,8 @@ at the elbow ring.
 
 Open it live with:
 
-```bat
+```
+bin/usdview.sh docs/examples/single_chain_ik_constraint.usda
 bin\launch_usdview.bat docs\examples\single_chain_ik_constraint.usda
 ```
 
@@ -309,4 +311,4 @@ python docs/render_media.py --page single_chain_ik_constraint
 
 ---
 
-[UsdRig](../index.md)
+[RigExec](../index.md)

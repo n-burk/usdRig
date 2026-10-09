@@ -225,7 +225,8 @@ place while its centre never moves.
 
 Open it live with:
 
-```bat
+```
+bin/usdview.sh docs/examples/scale_constraint.usda
 bin\launch_usdview.bat docs\examples\scale_constraint.usda
 ```
 
@@ -249,4 +250,4 @@ python docs/render_media.py --page scale_constraint
 
 ---
 
-[UsdRig](../index.md)
+[RigExec](../index.md)

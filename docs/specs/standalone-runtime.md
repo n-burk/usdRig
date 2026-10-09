@@ -36,9 +36,11 @@ if (snapshot.valid) {
 }
 ```
 
-`RigExecStandaloneResult::valid` means that every requested value was extracted
-without an execution error. It has the completeness meaning of the existing
-`RigExecSnapshot`; it does not override a typed packet's semantic failure flags.
+`RigExecStandaloneResult::valid` means every requested tap returned a
+non-empty value and execution reported no error. `RigExecSnapshot::IsValid()`
+only means evaluation ran; `IsComplete()` is the snapshot flag for every tap
+having a value. Standalone `valid` does not override a typed packet's
+semantic failure flags.
 An empty tap list produces a valid, empty generation. Results own their copied
 `VtValue` payloads and survive later evaluation, dirty edits and runtime teardown.
 

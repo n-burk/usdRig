@@ -1,10 +1,10 @@
 ---
 title: Baked and dynamic evaluation
-summary: The two ways UsdRig computes a frame, how to switch between them, and what each one is for.
+summary: The two ways RigExec computes a frame, how to switch between them, and what each one is for.
 order: 20
 ---
 
-UsdRig computes the same rig two ways. Both answer with the same numbers — that
+RigExec computes the same rig two ways. Both answer with the same numbers — that
 is the whole point — but they get there differently. There is also a third
 thing that sounds like the second and is not: *exporting* a bake, which
 produces a file rather than a mode.
@@ -65,14 +65,16 @@ Three things this buys that the straight line could not:
 
 ## Switching modes, and parity
 
-Every evaluator starts in `dynamic`. Four things can change that, in strength
+Every evaluator starts in `dynamic`. Three things can change that, in strength
 order:
 
 1. `SetEvaluationMode` — in Python, the `evaluation_mode` property on a `Rig`,
-   set to `"dynamic"`, `"baked"` or `"parity"`. Strongest.
-2. `RIGEXEC_EVALUATION_MODE=baked|parity` — sets the initial mode of every
-   evaluator in the process. It is read **once per process**, when the first
-   evaluator is constructed; changing the environment afterwards has no effect.
+   set to `"dynamic"`, `"baked"`, `"parity"`, or `"reference"`. Strongest.
+2. `RIGEXEC_EVALUATION_MODE` set to `dynamic`, `baked`, `parity`, or
+   `reference` — sets the initial mode of every evaluator in the process. It
+   is read **once per process**, when the first evaluator is constructed;
+   changing the environment afterwards has no effect. Any other value warns
+   and stays on `dynamic`.
 3. `uniform bool rigExec:baked = true` on the `RigExecRoot` — the rig asking
    for the program itself. Weakest, consulted only where neither stronger
    request was made. `examples/biped` authors it.
@@ -119,7 +121,7 @@ control and revised-provider frames written as plain local
 metadata survive the flattened copy; joint and control prims become `Xform`,
 other execution prims become inert `Scope`s, and the runtime schemas, their
 properties and connections into them are removed. The result renders anywhere,
-with no UsdRig plugin.
+with no RigExec plugin.
 
 ```python
 import rigexec

@@ -415,7 +415,8 @@ def render_page(key, note, classes):
     if stage:
         lines.append("Open it live with:")
         lines.append("")
-        lines.append("```bat")
+        lines.append("```")
+        lines.append("bin/usdview.sh docs/examples/%s.usda" % stage)
         lines.append("bin\\launch_usdview.bat docs\\examples\\%s.usda" % stage)
         lines.append("```")
         lines.append("")
@@ -438,19 +439,19 @@ def render_page(key, note, classes):
     lines.append("")
     lines.append("---")
     lines.append("")
-    lines.append("[UsdRig](../index.md)")
+    lines.append("[RigExec](../index.md)")
     lines.append("")
     return "\n".join(lines)
 
 
 def render_index(concepts=()):
     lines = []
-    lines.append("# UsdRig")
+    lines.append("# RigExec")
     lines.append("")
     lines.append("One page per operator: what it does, how to wire it, every")
     lines.append("parameter, and a minimal animated example. Each example stage")
     lines.append("lives in [examples](examples/) and plays in `usdview` via")
-    lines.append("`bin\\launch_usdview.bat`; the GIF on each page is rendered")
+    lines.append("`bin/usdview.sh` or `bin\\launch_usdview.bat`; the GIF on each page is rendered")
     lines.append("live from that stage by `docs/render_media.py`, an offscreen")
     lines.append("Storm viewport with the rig guides on.")
     lines.append("")

@@ -1,15 +1,21 @@
 # RigExec examples
 
-Every file is a self-contained, animated stage (frames 1001-1048) with one
-`RigExecRoot`. View any of them live with:
+The numbered series and `ArmShotAnim.usda` are self-contained animated stages
+on frames 1001-1048, each with one `RigExecRoot`. Other examples use their
+own frame ranges: the biped animation is frames 1-200, and the 2D characters
+are longer. View any of them live with:
 
 ```
-bin/launch_usdview.bat examples\<file>.usda
+bin/usdview.sh examples/<file>.usda
+bin\launch_usdview.bat examples\<file>.usda
 ```
 
 The rigExecUsdview plugin activates automatically for stages carrying a
-`RigExecRoot` prim and republishes OpenExec-evaluated results on every
-timeline change.
+`RigExecRoot` prim. An empty activation path turns on every root on the
+stage. usdview evaluates through the baked program by default
+(`RIGEXEC_DYNAMIC_RUNS_PROGRAM`, default on). Set that variable to `0`, or
+choose `reference` with `RIGEXEC_EVALUATION_MODE`, to pull OpenExec instead.
+Results are republished on every timeline change.
 
 Joints and aggregate solvers draw as **guide geometry**: each joint draws a
 sphere at its posed origin and a cone to every nested child joint, while
@@ -138,11 +144,13 @@ performance or `2d/bust_dd_b/bust_dd_b_rig.usda` for the neutral rig.
 
 ## Authoring conventions the engine expects
 
-- One `RigExecRoot` per stage (the usdview plugin and imaging bridge
-  activate the first one found). The rig declares no membership lists:
+- The examples use one `RigExecRoot`. The imaging bridge can activate every
+  root it finds. The rig declares no membership lists:
   controls, joints, and movers are discovered from the namespace beneath
-  it. At least one `RigExecJoint` must exist under the rig — that is what
-  the rig publishes.
+  it. A rig must publish something — a joint, a driven transform, a revised
+  property, or a mover — or compile fails with "Rig publishes no outputs".
+  A joint is one of those outputs, not a requirement; `rigexec_flat.usda`
+  has none.
 - Solvers live under `<rig>/Solvers`, movers under `<rig>/Movers`; mover
   order is a reverse-sibling post-order walk: descendants apply before their
   mover parent and sibling rows apply bottom-to-top. For example,

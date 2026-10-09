@@ -516,7 +516,8 @@ w = 0, red is w = 1, and the ramp between them is the fold.
 
 Open it live with:
 
-```bat
+```
+bin/usdview.sh docs/examples/plane_weight.usda
 bin\launch_usdview.bat docs\examples\plane_weight.usda
 ```
 
@@ -540,4 +541,4 @@ python docs/render_media.py --page plane_weight
 
 ---
 
-[UsdRig](../index.md)
+[RigExec](../index.md)

@@ -53,9 +53,11 @@ and `inputs:enabled` all feed that solve, and those same six are the
 pose's share of the epoch digest, so editing any of them recompiles the
 interpolator. The other three — `rigExec:falloff`,
 `rigExec:poseControls` and `rigExec:poseControlValues` — are provenance
-that evaluation never reads, and the translation pair is dropped unless
-the interpolator sets `rigExec:enableTranslation`, which the evaluation
-phase warns it does not measure. Evaluation happens in the pose-interpolator
+that evaluation never reads. The translation pair is used when the
+interpolator sets `rigExec:enableTranslation`: the driver's translation, in
+its own frame, is divided by the translation radius and combined with the
+rotation term. If that translation cannot be measured, the generation
+publishes zero weights and a diagnostic. Evaluation happens in the pose-interpolator
 phase — after the complete pose walk, every constraint included, and
 before the geometry chains that consume the weights — where the
 interpolator measures its driver's final local rotation against every
@@ -368,7 +370,8 @@ at frame 1008 when the elbow reaches the pose exactly.
 
 Open it live with:
 
-```bat
+```
+bin/usdview.sh docs/examples/pose_interpolator.usda
 bin\launch_usdview.bat docs\examples\pose_interpolator.usda
 ```
 
@@ -392,4 +395,4 @@ python docs/render_media.py --page pose
 
 ---
 
-[UsdRig](../index.md)
+[RigExec](../index.md)

@@ -6,12 +6,12 @@ under its own EULA; see [third-party notices](../../THIRD_PARTY_NOTICES.md).
 
 ## Open a stage
 
-```bat
-bin\launch_usdview.bat examples\biped\Biped_everything.usda
+```
+bin/usdview.sh examples/biped/Biped_stack.usda
+bin\launch_usdview.bat examples\biped\Biped_stack.usda
 ```
 
-On Linux or macOS, use `bin/usdview.sh` with the same stage path. Open
-`Biped_layered.usda` for the body rig, or `Biped_stack.usda` for the composed
+Open `Biped_body.usda` for the body rig, or `Biped_stack.usda` for the composed
 body and face layers. The [asset README](../../examples/biped/README.md)
 lists the available layers and their composition.
 

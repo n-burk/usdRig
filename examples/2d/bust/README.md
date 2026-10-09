@@ -96,11 +96,12 @@ Movers/Geometry/Body       Lean (matrix) -> BodyWarp (lattice)
   math mover's own connected `inputs:value`.
 - `RigExecBlendSample` activations must be positive (there is an implicit
   zero sample at 0), so a parameter that runs both ways needs two channels.
-- `RigExecPoseInterpolator` evaluation measures rotation only; a
-  translation-driven pad (`enableTranslation`) compiles with a warning and
-  is judged on rotation. The vowel pad is therefore a joystick (swing).
-- `RigExecLatticeMover` evaluates a Bernstein basis whatever
-  `rigExec:basis` says, recomputing it with `std::pow` per cage point per
-  point per frame; caching the per-point basis (it depends only on rest
-  points) would make this rig several times faster. The cage is fitted
-  rather than hand-placed precisely because the Bernstein basis is global.
+- `RigExecPoseInterpolator` measures rotation, and translation as well when
+  `rigExec:enableTranslation` is set. The vowel pad is a joystick (swing)
+  with translation measurement left off.
+- `RigExecLatticeMover` in the default `legacy` evaluation uses the bound
+  Bernstein cage and does not read `rigExec:basis`, recomputing it with
+  `std::pow` per cage point per point per frame. `regularGrid` instead
+  interpolates with `rigExec:interpolationU/V/W` (`linear`, `cardinal`,
+  `bspline`, or `catmullRom`). The cage is fitted rather than hand-placed
+  precisely because the Bernstein basis is global.

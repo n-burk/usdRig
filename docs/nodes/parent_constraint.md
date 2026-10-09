@@ -257,7 +257,8 @@ home.
 
 Open it live with:
 
-```bat
+```
+bin/usdview.sh docs/examples/parent_constraint.usda
 bin\launch_usdview.bat docs\examples\parent_constraint.usda
 ```
 
@@ -281,4 +282,4 @@ python docs/render_media.py --page parent_constraint
 
 ---
 
-[UsdRig](../index.md)
+[RigExec](../index.md)

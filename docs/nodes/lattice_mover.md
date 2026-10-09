@@ -180,7 +180,8 @@ same point ordering.
 
 Open it live with:
 
-```bat
+```
+bin/usdview.sh docs/examples/lattice_mover.usda
 bin\launch_usdview.bat docs\examples\lattice_mover.usda
 ```
 
@@ -194,6 +195,7 @@ python docs/render_media.py --page lattice_mover
 
 - Hide the cage (`visibility = invisible`): it is scaffolding, not geometry.
 - Follow a bulge with a Smooth mover to settle the lattice falloff or a Volume Correct mover to hold girth.
+- `rigExec:basis` (`bspline` or `bernstein`) is stored on the prim and is not read. `legacy` always uses Bernstein weights. `regularGrid` uses `rigExec:interpolationU`, `rigExec:interpolationV`, and `rigExec:interpolationW`.
 
 ## See also
 
@@ -203,4 +205,4 @@ python docs/render_media.py --page lattice_mover
 
 ---
 
-[UsdRig](../index.md)
+[RigExec](../index.md)

@@ -192,4 +192,4 @@ Wire `rigExec:surface` to the driver mesh with a final read phase and
 
 ---
 
-[UsdRig](../index.md)
+[RigExec](../index.md)

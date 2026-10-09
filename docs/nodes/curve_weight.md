@@ -462,7 +462,8 @@ geometry it weights.
 
 Open it live with:
 
-```bat
+```
+bin/usdview.sh docs/examples/curve_weight.usda
 bin\launch_usdview.bat docs\examples\curve_weight.usda
 ```
 
@@ -486,4 +487,4 @@ python docs/render_media.py --page curve_weight
 
 ---
 
-[UsdRig](../index.md)
+[RigExec](../index.md)

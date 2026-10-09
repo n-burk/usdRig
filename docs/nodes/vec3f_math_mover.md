@@ -140,7 +140,8 @@ stretches tall around the handle while its authored scale stays
 
 Open it live with:
 
-```bat
+```
+bin/usdview.sh docs/examples/vec3f_math_mover.usda
 bin\launch_usdview.bat docs\examples\vec3f_math_mover.usda
 ```
 
@@ -165,4 +166,4 @@ python docs/render_media.py --page vec3f_math_mover
 
 ---
 
-[UsdRig](../index.md)
+[RigExec](../index.md)

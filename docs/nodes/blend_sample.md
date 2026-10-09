@@ -91,7 +91,8 @@ curved path instead of a straight slide.
 
 Open it live with:
 
-```bat
+```
+bin/usdview.sh docs/examples/blend_sample.usda
 bin\launch_usdview.bat docs\examples\blend_sample.usda
 ```
 
@@ -114,4 +115,4 @@ python docs/render_media.py --page blend_sample
 
 ---
 
-[UsdRig](../index.md)
+[RigExec](../index.md)

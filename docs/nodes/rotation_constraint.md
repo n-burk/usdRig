@@ -212,7 +212,8 @@ never leaves the post — only the roll crosses the constraint.
 
 Open it live with:
 
-```bat
+```
+bin/usdview.sh docs/examples/rotation_constraint.usda
 bin\launch_usdview.bat docs\examples\rotation_constraint.usda
 ```
 
@@ -236,4 +237,4 @@ python docs/render_media.py --page rotation_constraint
 
 ---
 
-[UsdRig](../index.md)
+[RigExec](../index.md)

@@ -108,7 +108,8 @@ up, all under a constant mask.
 
 Open it live with:
 
-```bat
+```
+bin/usdview.sh docs/examples/blendshape_mover.usda
 bin\launch_usdview.bat docs\examples\blendshape_mover.usda
 ```
 
@@ -131,4 +132,4 @@ python docs/render_media.py --page blendshape_mover
 
 ---
 
-[UsdRig](../index.md)
+[RigExec](../index.md)

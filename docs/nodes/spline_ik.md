@@ -271,7 +271,8 @@ it. Nothing but that one control is keyed.
 
 Open it live with:
 
-```bat
+```
+bin/usdview.sh docs/examples/spline_ik.usda
 bin\launch_usdview.bat docs\examples\spline_ik.usda
 ```
 
@@ -295,4 +296,4 @@ python docs/render_media.py --page spline_ik
 
 ---
 
-[UsdRig](../index.md)
+[RigExec](../index.md)

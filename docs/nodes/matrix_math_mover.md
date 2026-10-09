@@ -126,7 +126,8 @@ the rest pose the pair departs from.
 
 Open it live with:
 
-```bat
+```
+bin/usdview.sh docs/examples/matrix_math_mover.usda
 bin\launch_usdview.bat docs\examples\matrix_math_mover.usda
 ```
 
@@ -150,4 +151,4 @@ python docs/render_media.py --page matrix_math_mover
 
 ---
 
-[UsdRig](../index.md)
+[RigExec](../index.md)

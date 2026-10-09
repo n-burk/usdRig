@@ -45,6 +45,8 @@ runtime stores their bytes and calls the kernel a host installs with
 [External mover plugins](../../docs/concepts/external-movers.md)). A type with
 no kernel passes its points through, with a warning in every `Execute`.
 
-The frozen frame-cache executor and the provider-only `.rigpack` runtime
-remain separate subsets and reject Wrinkle movers. The `.rigexec` binary
-runtime supports them.
+The frozen frame-cache executor implements Wrinkle, with the other
+whitelisted geometry ops, and still rejects external and other unlisted
+revision ops. The provider-only `.rigpack` exporter rejects mover
+applications entirely, so a packed rig does not carry Wrinkle. The
+`.rigexec` binary runtime supports Wrinkle.

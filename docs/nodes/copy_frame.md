@@ -24,7 +24,7 @@ Copies a source provider frame, optionally preserving the incoming translation.
 
 ## How it works
 
-`preserveLocation` copies the incoming translation over the source matrix. Connect `outputs:matrix` to a joint or control's
+`inputs:preserveLocation` copies the incoming translation over the source matrix. Connect `outputs:matrix` to a joint or control's
 `posed:space`. Declare every frame provider the expression reads in
 `rigExec:poseInputs`, including object frames, parents and multi-target inputs.
 The relationship supplies pose dependency ordering and invalidation; the
@@ -84,4 +84,4 @@ Wire a source at (2,0,0). An incoming matrix at (0,3,0) with preserveLocation en
 
 ---
 
-[UsdRig](../index.md)
+[RigExec](../index.md)

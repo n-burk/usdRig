@@ -74,18 +74,29 @@ Build target: OpenUSD PR #4156 (usdNoodles branch), installed to the
 
 ```usda
 uniform token guide:shape = "circle" (
-    allowedTokens = ["sphere", "circle", "box", "cube", "diamond", "pyramid"]
+    allowedTokens = ["sphere", "circle", "box", "cube", "diamond", "pyramid", "custom"]
+)
+point3f[] guide:points = []
+int[] guide:curveVertexCounts = []
+uniform token guide:planeNormal = "Y" (
+    allowedTokens = ["X", "Y", "Z"]
 )
 uniform token guide:drawMode = "wire" (
     allowedTokens = ["wire", "geometry"]
 )
+double guide:wireWidth = 0.05
 double guide:scaleX = 1.0
 double guide:scaleY = 1.0
 double guide:scaleZ = 1.0
-double guide:wireWidth = 0.05
+double3 guide:offset = (0, 0, 0)
+quatf guide:orient = (1, 0, 0, 0)
 color3f guide:displayColor = (1.0, 0.85, 0.2)
 float guide:displayOpacity = 1.0
 ```
+
+`custom` draws the polylines in `guide:points` / `guide:curveVertexCounts`.
+`guide:planeNormal` applies to `circle` and `box`. `guide:offset` and
+`guide:orient` place the drawn shape in the control's local frame.
 
 Each attribute carries a doc string in the style of the `RigExecJoint` guide
 attrs (see `guide:radius` there). The codeless plugin
@@ -144,7 +155,9 @@ the structural (resync) arm; frame/scale/color/opacity changes set
     circle 1×33-pt ring; sphere 3 orthogonal 33-pt rings; box 1×5-pt ring;
     cube 2×5-pt rings + 4×2-pt pillars; diamond 3 orthogonal 5-pt rings
     through the axis vertices (the exact octahedron edge set);
-    pyramid 1×5-pt base ring + 4×2-pt apex edges. No widths authored.
+    pyramid 1×5-pt base ring + 4×2-pt apex edges. A positive
+    `guide:wireWidth` authors constant curve widths and
+    `displayStyle.refineLevel = 1`. Zero or negative authors no widths.
   - `geometry` → implicit `sphere` (radius 1) and `cube` (size 2) reuse the
     Hydra implicits exactly as joint guides do; `circle` (one 32-vert face),
     `box` (one quad), `diamond` (8 tris), `pyramid` (4 tris + base quad) are
@@ -157,7 +170,8 @@ the structural (resync) arm; frame/scale/color/opacity changes set
   frames; asset root, not the guide's namespace parent). Signed avar scale
   affects frame handedness; the synthesized guide uses positive dimensions
   and a proper rigid placement.
-- Style/pick parity with `_BuildGuidePrim`: purpose `guide` render tag,
+- Style/pick parity with `_BuildGuidePrim`: purpose comes from the parent
+  control's `UsdGeomImageable` purpose (inherited `default` unless authored),
   constant `displayColor`/`displayOpacity` primvars, hand-inherited
   visibility and `primOrigin` from the parent control.
 - Dirtying: `RigExecChangeGuides` on a control entry dirties/resyncs its
@@ -261,17 +275,16 @@ time forwarding):
    Controls are the rig's interaction surface: their guides publish
    purpose `default` (geometry render tag) so they draw whenever the rig
    draws — no viewer setting involved, and the plugin stops flipping
-   `displayGuide`. A new `uniform token guide:purpose = "default"`
-   (allowedTokens `default`, `guide`) on `RigExecControl` lets pipelines
-   opt back into guide-tag behavior per control. Joint/solver guides stay
-   purpose `guide` (diagnostics).
+   `displayGuide`. The purpose is the stock `UsdGeomImageable` attribute,
+   read with `ComputePurpose()`. There is no `guide:purpose` token.
+   Joint/solver guides stay purpose `guide` (diagnostics).
 
 ## Tests (`tests/testRigExecImaging.cpp` + example)
 
 - A control-guides section: author each shape × mode on controls of an
   example rig; assert synthesized child exists with the expected prim type,
   curve-count/vertex-count or face-count topology, evaluated-axis magnitude ×
-  authored guide scale visible in the xform's basis lengths, purpose guide,
+  authored guide scale visible in the xform's basis lengths, purpose `default`,
   constant color/opacity, parent visibility inheritance, and `primOrigin`
   resolving to the control path.
 - Zero, signed zero, and sub-`1e-4` avar scales resolve to the signed floor and

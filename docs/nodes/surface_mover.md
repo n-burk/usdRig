@@ -183,7 +183,8 @@ namespace order with descendants ahead of their parent.
 
 Open it live with:
 
-```bat
+```
+bin/usdview.sh docs/examples/surface_mover.usda
 bin\launch_usdview.bat docs\examples\surface_mover.usda
 ```
 
@@ -207,4 +208,4 @@ python docs/render_media.py --page surface_mover
 
 ---
 
-[UsdRig](../index.md)
+[RigExec](../index.md)

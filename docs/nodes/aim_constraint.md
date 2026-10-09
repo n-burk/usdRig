@@ -280,7 +280,8 @@ closer the ball comes the more their lines of sight cross.
 
 Open it live with:
 
-```bat
+```
+bin/usdview.sh docs/examples/aim_constraint.usda
 bin\launch_usdview.bat docs\examples\aim_constraint.usda
 ```
 
@@ -304,4 +305,4 @@ python docs/render_media.py --page aim_constraint
 
 ---
 
-[UsdRig](../index.md)
+[RigExec](../index.md)

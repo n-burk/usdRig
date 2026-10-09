@@ -304,7 +304,7 @@ its windows, and the plugins keep their state per session.
   API therefore still reaches the one session's stage, exactly as before, for
   callers outside the plugins such as a script in usdview's interpreter or
   another plugin. In a host, the current context is the stage activated last,
-  and no usdRig plugin code reads it. Deactivation is `DeactivateForStage` for
+  and no RigExec plugin code reads it. Deactivation is `DeactivateForStage` for
   the container's own stage only; a container never deactivates another
   session's stage.
 - **Per-session state** (`plugin/rigExecUsdview/sessionRegistry.py`). A

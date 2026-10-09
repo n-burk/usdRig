@@ -25,8 +25,8 @@ Applies a source rest-to-pose map over incoming channels or a supplied incoming 
 ## How it works
 
 The incoming frame is either `inputs:incoming` or XYZ
-channels times `local` times the parent frame. The source map is
-`inverse(sourceObject) * inverseBind * source`. `preserveLocation` restores
+channels times `inputs:local` times the parent frame. The source map is
+`inverse(sourceObject) * inverseBind * source`. `inputs:preserveLocation` restores
 the incoming translation after applying that map.
 
 Connect `outputs:matrix` to a joint or control's
@@ -147,4 +147,4 @@ An incoming owner at (0,3,0), identity inverseBind/sourceObject and a source at 
 
 ---
 
-[UsdRig](../index.md)
+[RigExec](../index.md)

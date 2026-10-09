@@ -155,7 +155,8 @@ intersection.
 
 Open it live with:
 
-```bat
+```
+bin/usdview.sh docs/examples/combine_weight.usda
 bin\launch_usdview.bat docs\examples\combine_weight.usda
 ```
 
@@ -179,4 +180,4 @@ python docs/render_media.py --page combine_weight
 
 ---
 
-[UsdRig](../index.md)
+[RigExec](../index.md)

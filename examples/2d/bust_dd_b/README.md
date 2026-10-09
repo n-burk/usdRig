@@ -21,7 +21,7 @@ the default camera light for the painted colours. The animation is 240 frames at
 320 frames. Both layers animate controls only. There is no recorded dialogue;
 the mouth controls provide speech articulation for animation or external input.
 
-Open **RigExec → Picker** to find Shion's Face, Body, Hands and Secondary
+Open **RigExec → Animation Editors → Control Picker** to find Shion's Face, Body, Hands and Secondary
 panels. Picker buttons select controls; edit their labelled channels in the
 Avar Editor or use the viewport manipulator. Soft slider ranges favour normal
 acting. Numeric entry can push the jaw to `-1.5` for stronger expressions.

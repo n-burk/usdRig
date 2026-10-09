@@ -24,11 +24,12 @@ Joint channels with separate rotation/scale and location inheritance. Channel ro
 
 ## How it works
 
-XYZ channel rotations are degrees. `local` and `parentRest`
-are saved joint-space transforms; `sourceObject` places the evaluated frame in
-target space. Inheritance supports FULL, NONE, AVERAGE, ALIGNED, FIX_SHEAR and
-NONE_LEGACY. Connected joints suppress channel translation. `spaceKind`
-selects the full pose or the rotation/translation parent map.
+XYZ channel rotations are degrees. `inputs:local` and
+`inputs:parentRest` are saved joint-space transforms; `rigExec:sourceObject`
+places the evaluated frame in target space. `inputs:inheritScale` is FULL,
+NONE, AVERAGE, ALIGNED, FIX_SHEAR, or NONE_LEGACY. Connected joints suppress
+channel translation. `inputs:spaceKind` is `pose` (the full map), `rotation`,
+or `translation`.
 
 Connect `outputs:matrix` to a joint or control's
 `posed:space`. Declare every frame provider the expression reads in
@@ -156,4 +157,4 @@ Set local translation to (0,1,0), tx to 2, and sourceObject to an object transla
 
 ---
 
-[UsdRig](../index.md)
+[RigExec](../index.md)

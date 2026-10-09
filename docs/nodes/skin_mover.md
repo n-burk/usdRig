@@ -177,7 +177,8 @@ holds 1.500 at every column.
 
 Open it live with:
 
-```bat
+```
+bin/usdview.sh docs/examples/skin_mover.usda
 bin\launch_usdview.bat docs\examples\skin_mover.usda
 ```
 
@@ -201,4 +202,4 @@ python docs/render_media.py --page skin_mover
 
 ---
 
-[UsdRig](../index.md)
+[RigExec](../index.md)

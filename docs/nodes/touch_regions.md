@@ -37,6 +37,9 @@ without them, or with half of them unpainted. They are deliberately *not*
 the same face (16,739 warnings on open), and the sets were moved into a
 scope of their own.
 
+The hover drawn in usdview is a Storm shader tint on the touched mesh. It
+authors no overlay mesh and no session-layer fill.
+
 A mesh's touch regions: the shared palette, and one
 RigExecTouchRegion child per named set.
 
@@ -182,7 +185,8 @@ skin.
 
 Open it live with:
 
-```bat
+```
+bin/usdview.sh docs/examples/touch_regions.usda
 bin\launch_usdview.bat docs\examples\touch_regions.usda
 ```
 
@@ -190,6 +194,7 @@ bin\launch_usdview.bat docs\examples\touch_regions.usda
 
 - Keep regions disjoint. The lookup is one flat `face -> region` array built by scattering each region's faces in namespace order, so a face claimed twice silently belongs to whichever region is written last; the painting tools maintain the partition for you.
 - A region with no `rigExec:touch:control` is skipped by the reader rather than drawn dead — an unbound set must not swallow the click that would otherwise reach usdview's own picking.
+- The exporter may also declare an empty invisible `RigExecTouchOverlay` mesh under the scope. Live highlighting does not fill that mesh or the session layer: TouchPose tints the body with a Storm shader.
 - Face indices are scattered against the mesh's live face count and anything out of range is dropped without a word, so a region set exported against different topology fails quietly: re-export the regions whenever the mesh's face count changes.
 
 ## See also
@@ -200,4 +205,4 @@ bin\launch_usdview.bat docs\examples\touch_regions.usda
 
 ---
 
-[UsdRig](../index.md)
+[RigExec](../index.md)

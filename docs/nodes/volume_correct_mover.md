@@ -94,7 +94,8 @@ corrector, so the pair shows exactly what the correction takes away.
 
 Open it live with:
 
-```bat
+```
+bin/usdview.sh docs/examples/volume_correct_mover.usda
 bin\launch_usdview.bat docs\examples\volume_correct_mover.usda
 ```
 
@@ -117,4 +118,4 @@ python docs/render_media.py --page volume_correct_mover
 
 ---
 
-[UsdRig](../index.md)
+[RigExec](../index.md)

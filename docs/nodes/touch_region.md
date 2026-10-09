@@ -26,7 +26,7 @@ shoulder's control is selected, with no picker window and no knowledge of where
 the rig parked its controls. Regions are *not* `GeomSubset`s — hdSt collects
 every face subset under a mesh whatever its `familyName`, so touch sets living
 there collided with the material-bind sets sharing the same faces
-(schema.usda:2532-2536); they sit in their own `RigExecTouchRegions` scope
+(the touch-regions note in `schema.usda`); they sit in their own `RigExecTouchRegions` scope
 instead, found by type rather than by position.
 
 One named touch set: the faces it owns and the control a
@@ -149,7 +149,8 @@ follow the deformation for free because they index faces, not points.
 
 Open it live with:
 
-```bat
+```
+bin/usdview.sh docs/examples/touch_region.usda
 bin\launch_usdview.bat docs\examples\touch_region.usda
 ```
 
@@ -167,4 +168,4 @@ bin\launch_usdview.bat docs\examples\touch_region.usda
 
 ---
 
-[UsdRig](../index.md)
+[RigExec](../index.md)

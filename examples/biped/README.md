@@ -1,7 +1,6 @@
 # Biped -- the ported character
 
-Onboarding: [docs/human](../../docs/human/). Spec:
-[docs/specs/biped-rig.md](../../docs/specs/biped-rig.md).
+Spec: [docs/specs/biped-rig.md](../../docs/specs/biped-rig.md).
 
 **Open `Biped_stack.usda`.** That is the whole character: skeleton, rig,
 face, skinned mesh, correctives, picker and touch regions, composed as a
@@ -13,6 +12,7 @@ the materials and every rest transform are authored directly into these
 files; the only asset paths in the whole stack are the relative sublayers
 below.
 
+    bin/usdview.sh examples/biped/Biped_stack.usda
     bin\launch_usdview.bat examples\biped\Biped_stack.usda
 
 The stack has two branches, the face over the body. Each branch carries
@@ -96,7 +96,7 @@ nose and ear clusters. `Biped_body.usda` is the body alone.
 
 ## Driving it
 
-Select a control and open **RigExec → Avar Editor**. The controls worth
+Select a control and open **RigExec → General Editors → Avar Editor**. The controls worth
 starting with:
 
 - `hips_ctl` -- the master; moves the whole character
@@ -156,7 +156,7 @@ starting with:
 - the lip tweak controls (`lip_center_up`, `lip_up_?`, `lip_corner_?`,
   `lip_low_?`, `lip_center_low`) ride lip main and shape the lips locally
 
-**RigExec → Viewport Tools** gives move/rotate/scale gizmos that write
+**RigExec → Viewport → Viewport Tools** gives move/rotate/scale gizmos that write
 avars directly, if you would rather drag than type.
 
 ## Why it is fast
@@ -174,7 +174,7 @@ dynamic path and says so on the pose. Delete the line, or pass an explicit
 `--mode dynamic`, to drive it the other way.
 ## Touching it
 
-**RigExec → TouchPose** lets you pick controls by touching the character
+**RigExec → Animation Editors → TouchPose** lets you pick controls by touching the character
 instead of hunting for them. Tick the box, hover the body, and the painted
 region under the cursor lights up; click it and the control that owns that
 region becomes the selection -- so the Avar Editor and the gizmo follow

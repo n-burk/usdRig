@@ -41,7 +41,7 @@ resolve from the current binary directory. The default root is
 The target property `RIGEXEC_PLUGIN_RESOURCE_DIR` contains its generated
 resources path, including a CMake configuration generator expression.
 
-To include that repository in the main usdRig build, set its actual location
+To include that repository in the main RigExec build, set its actual location
 before invoking the existing helper. For example, in PowerShell:
 
 ```powershell
@@ -326,7 +326,7 @@ property-mover callbacks and frozen payload snapshots are not part of this API.
 
 A plugin's tests can export and replay its rigs by linking
 `rigExec::rigExecBake` and `rigExec::rigExecRuntime`, which are available both
-inside the usdRig build and from an installed SDK.
+inside the RigExec build and from an installed SDK.
 
 When integrating a mover, verify dynamic/baked parity, animated and connected
 inputs, override updates, envelope weights, disabled behavior, and failure

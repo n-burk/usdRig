@@ -111,7 +111,8 @@ fewer neighbors to average.
 
 Open it live with:
 
-```bat
+```
+bin/usdview.sh docs/examples/smooth_mover.usda
 bin\launch_usdview.bat docs\examples\smooth_mover.usda
 ```
 
@@ -135,4 +136,4 @@ python docs/render_media.py --page smooth_mover
 
 ---
 
-[UsdRig](../index.md)
+[RigExec](../index.md)

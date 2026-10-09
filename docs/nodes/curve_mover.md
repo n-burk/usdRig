@@ -286,7 +286,8 @@ joint and no driver curve in the file.
 
 Open it live with:
 
-```bat
+```
+bin/usdview.sh docs/examples/curve_mover.usda
 bin\launch_usdview.bat docs\examples\curve_mover.usda
 ```
 
@@ -310,4 +311,4 @@ python docs/render_media.py --page curve_mover
 
 ---
 
-[UsdRig](../index.md)
+[RigExec](../index.md)

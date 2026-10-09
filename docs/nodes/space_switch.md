@@ -310,7 +310,8 @@ closes where it began.
 
 Open it live with:
 
-```bat
+```
+bin/usdview.sh docs/examples/space_switch.usda
 bin\launch_usdview.bat docs\examples\space_switch.usda
 ```
 
@@ -336,4 +337,4 @@ python docs/render_media.py --page space_switch
 
 ---
 
-[UsdRig](../index.md)
+[RigExec](../index.md)

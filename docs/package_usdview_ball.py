@@ -30,15 +30,16 @@ with ZipFile(archive_path, "w", ZIP_DEFLATED, compresslevel=9) as archive:
     archive.writestr("README.txt", """USD rolling ball: yellow sphere with a black equatorial stripe
 
 Extract the entire archive. Keep docs/ and icons/ beside one another.
-Open docs/examples/tutorial_rolling_ball.usda in a usdRig-enabled usdview.
+Open docs/examples/tutorial_rolling_ball.usda in a RigExec-enabled usdview.
 Scrub 1001-1049 for travel-driven rolling.
 Open docs/examples/tutorial_rolling_ball_free.usda for the Godot bake source.
 
-The ball carries no texture; its stripe is per-point displayColor shared by
-both variants and the Godot bake.
+The ball carries no texture. Its stripe is per-point displayColor on this
+stage and on the free variant that references it. The Godot archive's
+prebuilt file still embeds an older textured presentation.
 The stage's rig, controllers and colors remain editable.
 
-Live rig evaluation requires the usdRig schema and imaging plugins.
+Live rig evaluation requires the RigExec schema and imaging plugins.
 """)
 for path in files:
     relative = path.relative_to(ROOT)

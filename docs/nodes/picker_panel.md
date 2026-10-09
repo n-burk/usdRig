@@ -95,7 +95,8 @@ fitted view and the declaration agree.
 
 Open it live with:
 
-```bat
+```
+bin/usdview.sh docs/examples/picker.usda
 bin\launch_usdview.bat docs\examples\picker.usda
 ```
 
@@ -112,4 +113,4 @@ bin\launch_usdview.bat docs\examples\picker.usda
 
 ---
 
-[UsdRig](../index.md)
+[RigExec](../index.md)

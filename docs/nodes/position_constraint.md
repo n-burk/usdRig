@@ -37,7 +37,7 @@ envelope.
 ## How it works
 
 Every source-blending constraint runs in the pose phase, in the
-composed order of the `Movers` namespace, so it revises a provider that
+composed namespace order under the rig root (reverse-sibling post-order), so it revises a provider that
 earlier solvers and constraints have already posed. Each evaluation it
 resolves the current frame of every `rigExec:sources` target, reads
 `inputs:sourceWeights` raw off the attribute at that frame's time, and
@@ -216,7 +216,8 @@ between that line and the joint, which is the whole of "maintain offset" here
 
 Open it live with:
 
-```bat
+```
+bin/usdview.sh docs/examples/position_constraint.usda
 bin\launch_usdview.bat docs\examples\position_constraint.usda
 ```
 
@@ -240,4 +241,4 @@ python docs/render_media.py --page position_constraint
 
 ---
 
-[UsdRig](../index.md)
+[RigExec](../index.md)

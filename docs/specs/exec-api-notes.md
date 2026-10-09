@@ -111,8 +111,14 @@ TfType ExecTypeRegistry::CheckForRegistration() const;  // fatal error if not re
 
 Correct registry-function tag is exactly `TF_REGISTRY_FUNCTION(ExecTypeRegistry)`:
 
+The struct below is an illustration of the registration pattern. It is not a
+type in this repository. `libs/rigExec/types.cpp` registers
+`RigExecPointFrame`, `RigExecPointFrameArray`, `RigExecPointsPacket`,
+`RigExecWeightPacket`, `RigExecFalloffLut`, `RigExecBlendSampleData`,
+`RigExecBlendChannel`, `RigExecMoverParameters`, and `RigExecMoverStatus`.
+
 ```cpp
-// rigExec/types.h
+// Illustration only — not a type in libs/rigExec/types.h.
 struct RigExecBezierSegment {
     std::array<GfVec3d, 4> cps;
     uint32_t flags = 0;
@@ -131,7 +137,8 @@ struct RigExecBezierSegment {
     }
 };
 
-// rigExec/types.cpp
+// Illustration of the registry function. See libs/rigExec/types.cpp for the
+// types this repository actually registers.
 #include "pxr/exec/exec/typeRegistry.h"
 TF_REGISTRY_FUNCTION(ExecTypeRegistry)
 {

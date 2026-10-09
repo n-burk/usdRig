@@ -504,7 +504,8 @@ rather than a plateau with an edge.
 
 Open it live with:
 
-```bat
+```
+bin/usdview.sh docs/examples/sphere_weight.usda
 bin\launch_usdview.bat docs\examples\sphere_weight.usda
 ```
 
@@ -528,4 +529,4 @@ python docs/render_media.py --page sphere_weight
 
 ---
 
-[UsdRig](../index.md)
+[RigExec](../index.md)

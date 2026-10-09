@@ -257,7 +257,8 @@ no part of it is a rigid slab hanging off the last one.
 
 Open it live with:
 
-```bat
+```
+bin/usdview.sh docs/examples/fk_chain.usda
 bin\launch_usdview.bat docs\examples\fk_chain.usda
 ```
 
@@ -281,4 +282,4 @@ python docs/render_media.py --page fk_chain
 
 ---
 
-[UsdRig](../index.md)
+[RigExec](../index.md)

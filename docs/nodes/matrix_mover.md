@@ -251,7 +251,8 @@ stays at 1, so the follow is full strength over every point of the card.
 
 Open it live with:
 
-```bat
+```
+bin/usdview.sh docs/examples/matrix_mover.usda
 bin\launch_usdview.bat docs\examples\matrix_mover.usda
 ```
 
@@ -264,8 +265,8 @@ python docs/render_media.py --page matrix_mover
 ## Tips
 
 - The provider may be a control as readily as a joint: those are the only two types `rigExec:transform` accepts (rigEvaluator.cpp:7221-7231).
-- `final` binds the provider's frame-chain head, so every pose step above it is included; the default `base` is the joint after the LAST SOLVER wrote it, which is not the same as "before every constraint" — a constraint that sits below the last solver is folded into `base` through that solver. Name a prim if you want a specific moment: the `Solvers` scope means "after the last solver", the `Movers` scope "after the last constraint" (moverGraph.cpp:1366-1379, schema.usda:1685).
-- Same-target movers are an ordinary stack ordered by the composed namespace: reverse-sibling post-order, so descendants run before their parent and the bottom sibling before the top (spec section 4.2). Stacking is how you layer rigid follows, not how you blend influences on one point — use the Skin Mover for that (schema.usda:1700-1705).
+- `final` binds the provider's frame-chain head, so every pose step above it is included; the default `base` is the joint after the LAST SOLVER wrote it, which is not the same as "before every constraint" — a constraint that sits below the last solver is folded into `base` through that solver. Name a prim if you want a specific moment: a grouping scope means after everything composed beneath it, because the walk visits a parent last. `Solvers` and `Movers` are the usual scopes, not names the compiler looks up.
+- Same-target movers are an ordinary stack ordered by the composed namespace: reverse-sibling post-order, so descendants run before their parent and the bottom sibling before the top (spec section 4.2). Stacking is how you layer rigid follows, not how you blend influences on one point — use the Skin Mover for that.
 - `rigExec:weightBlend = "radial"` blends a fraction of the rotation instead of the chord, so a partly weighted point keeps its distance from the driver's pivot; the default `linear` is the classic cluster. A frame mover blends its landmark points the same way (examples/15_TransformMatrixMover.usda).
 
 ## See also
@@ -276,4 +277,4 @@ python docs/render_media.py --page matrix_mover
 
 ---
 
-[UsdRig](../index.md)
+[RigExec](../index.md)

@@ -147,7 +147,8 @@ turns half as far, swinging the fin card it skins.
 
 Open it live with:
 
-```bat
+```
+bin/usdview.sh docs/examples/twist_distribution.usda
 bin\launch_usdview.bat docs\examples\twist_distribution.usda
 ```
 
@@ -170,4 +171,4 @@ python docs/render_media.py --page twist_distribution
 
 ---
 
-[UsdRig](../index.md)
+[RigExec](../index.md)

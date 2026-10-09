@@ -273,7 +273,8 @@ bend; the pole above the elbow keeps the bend plane facing the camera.
 
 Open it live with:
 
-```bat
+```
+bin/usdview.sh docs/examples/two_bone_ik.usda
 bin\launch_usdview.bat docs\examples\two_bone_ik.usda
 ```
 
@@ -297,4 +298,4 @@ python docs/render_media.py --page two_bone_ik
 
 ---
 
-[UsdRig](../index.md)
+[RigExec](../index.md)

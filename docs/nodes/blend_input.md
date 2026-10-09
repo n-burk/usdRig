@@ -63,7 +63,8 @@ blend channel.
 
 Open it live with:
 
-```bat
+```
+bin/usdview.sh docs/examples/blend_input.usda
 bin\launch_usdview.bat docs\examples\blend_input.usda
 ```
 
@@ -86,4 +87,4 @@ python docs/render_media.py --page blend_input
 
 ---
 
-[UsdRig](../index.md)
+[RigExec](../index.md)

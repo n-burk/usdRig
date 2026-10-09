@@ -210,7 +210,8 @@ One displacement-smoothing pass softens the transition to pinned borders.
 
 Open it live with:
 
-```bat
+```
+bin/usdview.sh docs/examples/wrinkle_mover.usda
 bin\launch_usdview.bat docs\examples\wrinkle_mover.usda
 ```
 
@@ -231,4 +232,4 @@ bin\launch_usdview.bat docs\examples\wrinkle_mover.usda
 
 ---
 
-[UsdRig](../index.md)
+[RigExec](../index.md)

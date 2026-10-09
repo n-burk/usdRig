@@ -22,8 +22,7 @@ On this page:
 Every rig is one `RigExecRoot` prim and everything composed
 beneath it. The root declares no membership lists: a `RigExecControl` under it
 is a control, a `RigExecJoint` is a joint output, a placed volume prim is a
-weight field, and a prim carrying `rigExec:moves` under the root's `Movers`
-child is a mover. It is what a host activates — one rig, or every
+weight field, and any prim carrying `rigExec:moves` is a mover. It is what a host activates — one rig, or every
 `RigExecRoot` on the stage — and it is the unit that compiles, publishes a
 generation, and carries the pose diagnostics. It is Imageable but deliberately
 not Xformable, so guide bounds propagate up to the enclosing asset for camera
@@ -51,11 +50,14 @@ interpolators, placed volume weights, and aggregate solvers by prim type
 anywhere under it, then walks the WHOLE RIG in reverse-sibling post-order —
 descendants before their parent, and the *bottom* sibling branch in usdview
 first — to number ONE pose stack of joint-writing solvers and frame
-constraints, of which the `<rig>/Movers` mover stack is a restriction; the walk uses the standard
+constraints. A mover is any prim in that walk that carries `rigExec:moves`;
+`<rig>/Movers` is the usual scope, the same way `<rig>/Solvers` is for
+solvers, and a mover under another scope is discovered the same way. The walk uses the standard
 `UsdPrimRange` predicate, so a deactivated or unloaded branch is simply not
 part of the rig and changing that is a structural (epoch-rebuilding) edit
 rather than a value edit. A rig that finds no controls, joints, volume weights,
-and no movers at all is a compile error ("Rig publishes no outputs"), and every
+and no movers at all — including an inert mover whose `rigExec:moves`
+relationship is present but empty — is a compile error ("Rig publishes no outputs"), and every
 mover target is checked against the root's *parent* prim, which is the rig
 asset and the boundary of what the rig may write. `uniform bool rigExec:baked`
 is re-read at the tail of each compile and only asks for the baked program: an
@@ -68,7 +70,7 @@ with a note on the published pose, and both paths publish the same values.
 | Relationship | Points to | Required |
 |---|---|---|
 | (namespace) | Everything composed beneath the root is the rig; controls, joints, solvers, and weight volumes are discovered by prim type. | - |
-| `Movers` child | The scope the mover stack is walked from: only prims under `<rig>/Movers` are compiled as movers. | no |
+| `rigExec:moves` | Any prim under the root that carries this relationship is a mover. `<rig>/Movers` is the usual scope, not a name the compiler requires. | no |
 | (parent prim) | The rig root's parent is the asset: movers may only target prims under it, and geometry lives there too. | - |
 
 ## Parameters
@@ -128,13 +130,15 @@ so, rather than rendering a rig it did not evaluate.
 Every shipped example is one of these: `two_bone_ik.usda` puts a
 `RigExecRoot` named `Rig` inside the `IkAsset` Xform, with `Controls`,
 `Solvers`, `Joints`, `Weights`, and `Movers` scopes beneath it and the deformed
-cards in a sibling `Geom` scope. Only `Movers` is a name the compiler knows —
-the rest are ordinary `Scope` prims kept for readability — and the geometry sits
+cards in a sibling `Geom` scope. `Movers`, `Controls`, `Solvers`, `Joints`,
+and `Weights` are ordinary scopes kept for readability — a mover is discovered
+by carrying `rigExec:moves`, wherever it sits — and the geometry sits
 under `IkAsset` because that parent is what bounds the rig's write set.
 
 Open it live with:
 
-```bat
+```
+bin/usdview.sh docs/examples/two_bone_ik.usda
 bin\launch_usdview.bat docs\examples\two_bone_ik.usda
 ```
 
@@ -144,6 +148,7 @@ bin\launch_usdview.bat docs\examples\two_bone_ik.usda
 - Order two movers that write the same target — or a solver against a constraint, or two solvers against each other, which are all steps of ONE pose stack — by arranging them in namespace: nesting, or `reorder nameChildren` on their parent. The bottom composed sibling executes first, the compiler reads the final composed order and nothing about how it arose, and nothing else breaks a tie. Put `Solvers` at the bottom of the rig root for the classic "solve, then revise" shape.
 - `rigExec:baked` has to be *authored* to be heard (the check is `HasAuthoredValue`), it is only a request, and it is the weakest of the three ways the mode is chosen.
 - An importer that has validated its connected frame and attribute input closures may set boolean custom data `rigExec:connectedPoseSeedReuse` on the root. This lets refresh requests pin dependency frames and omit upstream overrides. Other rigs retain complete override reads; `RIGEXEC_CONNECTED_POSE_SEED_REUSE=0` disables the optimization.
+- `RIGEXEC_EVALUATION_MODE`, when set, is `dynamic`, `baked`, `parity`, or `reference`. Any other value warns and evaluates dynamically.
 
 ## See also
 
@@ -153,4 +158,4 @@ bin\launch_usdview.bat docs\examples\two_bone_ik.usda
 
 ---
 
-[UsdRig](../index.md)
+[RigExec](../index.md)

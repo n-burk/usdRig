@@ -44,9 +44,10 @@ re-evaluation.
 
 ## What it costs
 
-- **Memory, bounded per rig:** 256 MiB by default — about 80 full biped
-  frames (the ±8 neighborhood plus a ±32 sweep) — with least-recently-used
-  eviction past the cap. Long sessions cannot grow it.
+- **Memory, bounded per rig:** 1280 MiB by default. That holds the 200-frame
+  biped stack (retained state measured at about 5.4 MB per frame) with
+  headroom, and least-recently-used eviction applies past the cap. Long
+  sessions cannot grow it.
 - **CPU:** two background workers at below-normal priority. They run hot
   while the UI is idle and yield while it is busy.
 - **Dynamic fallback:** one captured stage per context and one private

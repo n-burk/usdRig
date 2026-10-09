@@ -24,19 +24,19 @@ Ordered affine constraint computation. Incoming and provider frames are row-vect
 
 ## How it works
 
-Operations include COPY_LOCATION, COPY_ROTATION,
-COPY_SCALE, COPY_TRANSFORMS, ARMATURE, ARMATURE_BLEND, DAMPED_TRACK,
-STRETCH_TO, PRESERVE_ORIGIN, the supported rotation-normalization operation
-LIMIT_ROTATION, and TRANSFORM_LOCATION. Copy and mapping operations use WORLD,
+Operations the kernel implements are COPY_LOCATION,
+COPY_ROTATION, COPY_SCALE, COPY_TRANSFORMS, ARMATURE, ARMATURE_BLEND,
+DAMPED_TRACK, PRESERVE_ORIGIN, LIMIT_ROTATION, and TRANSFORM_LOCATION.
+Copy and mapping operations use WORLD,
 POSE, LOCAL, LOCAL_OWNER_ORIENT or CUSTOM spaces as appropriate; local joint
 conversion uses the explicit rest and inheritance inputs. Influence blends
 in world space after the operation using affine stretch and quaternion
 rotation interpolation.
 
 TRANSFORM_LOCATION maps LOCATION, SCALE or XYZ Euler rotation (radians) into
-location. Per-axis source ranges clamp unless `mapExtrapolate`; zero-width
-ranges contribute zero. `mapAxes` selects normalized source axes for each
-output axis. `mapMix` supports ADD or REPLACE. Other rotation orders and
+location. Per-axis source ranges clamp unless `inputs:mapExtrapolate`; zero-width
+ranges contribute zero. `inputs:mapAxes` selects normalized source axes for each
+output axis. `inputs:mapMix` supports ADD or REPLACE. Other rotation orders and
 rotation/scale output mappings are not provided by this operation.
 
 Connect `outputs:matrix` to a joint or control's
@@ -342,4 +342,4 @@ TRANSFORM_LOCATION maps source X rotation from 0 to pi/3 radians onto output Z f
 
 ---
 
-[UsdRig](../index.md)
+[RigExec](../index.md)

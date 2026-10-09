@@ -180,7 +180,8 @@ ribbon.
 
 Open it live with:
 
-```bat
+```
+bin/usdview.sh docs/examples/ribbon.usda
 bin\launch_usdview.bat docs\examples\ribbon.usda
 ```
 
@@ -204,4 +205,4 @@ python docs/render_media.py --page ribbon
 
 ---
 
-[UsdRig](../index.md)
+[RigExec](../index.md)

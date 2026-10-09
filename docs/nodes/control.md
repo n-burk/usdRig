@@ -479,7 +479,8 @@ visible.
 
 Open it live with:
 
-```bat
+```
+bin/usdview.sh docs/examples/control.usda
 bin\launch_usdview.bat docs\examples\control.usda
 ```
 
@@ -503,4 +504,4 @@ python docs/render_media.py --page control
 
 ---
 
-[UsdRig](../index.md)
+[RigExec](../index.md)

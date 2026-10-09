@@ -395,7 +395,8 @@ at the `bent` hold.
 
 Open it live with:
 
-```bat
+```
+bin/usdview.sh docs/examples/pose_interpolator.usda
 bin\launch_usdview.bat docs\examples\pose_interpolator.usda
 ```
 
@@ -409,7 +410,7 @@ python docs/render_media.py --page pose_interpolator
 
 - Author a non-zero `rigExec:rotationRadius` on every pose, roughly the angle between neighbouring poses. A per-pose zero is used literally rather than fitted (`rbf.cpp:992-1001`, `rbf.cpp:407-413`), and an interpolator whose radii are all zero reads 1 only when the driver stands exactly on a pose and 0 everywhere else.
 - Drive from a joint whose parent already carries the motion you do not want measured: the phase measures the driver's rotation relative to its rest in its nearest frame-publishing ancestor's frame, so the parent subtracts its own share back out. Measuring against anything other than the immediate namespace parent is reported as a warning.
-- `rigExec:enableTranslation` is not measured by this phase — it warns and judges the poses on rotation alone (`rigEvaluator.cpp:2852-2862`). Disabling a whole interpolator publishes zeros, while disabling one pose drops it out of the solve entirely so the other poses' weights change.
+- `rigExec:enableTranslation` measures the driver's translation in its own frame and combines it with rotation. A failed measurement publishes zero weights for that generation. Disabling a whole interpolator publishes zeros, while disabling one pose drops it out of the solve entirely so the other poses' weights change.
 - A radius wider than the pose spacing makes the Gaussian rows overlap enough that the inverse pushes a far pose negative between two near ones. `rigExec:allowNegativeWeights = 0` clamps that lobe; leave it on only when a consumer wants the extrapolation.
 
 ## See also
@@ -420,4 +421,4 @@ python docs/render_media.py --page pose_interpolator
 
 ---
 
-[UsdRig](../index.md)
+[RigExec](../index.md)

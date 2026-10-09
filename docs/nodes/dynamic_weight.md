@@ -120,7 +120,8 @@ event.
 
 Open it live with:
 
-```bat
+```
+bin/usdview.sh docs/examples/dynamic_weight.usda
 bin\launch_usdview.bat docs\examples\dynamic_weight.usda
 ```
 
@@ -144,4 +145,4 @@ python docs/render_media.py --page dynamic_weight
 
 ---
 
-[UsdRig](../index.md)
+[RigExec](../index.md)

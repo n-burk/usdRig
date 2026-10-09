@@ -1,9 +1,9 @@
-# UsdRig
+# RigExec
 
 One page per operator: what it does, how to wire it, every
 parameter, and a minimal animated example. Each example stage
 lives in [examples](examples/) and plays in `usdview` via
-`bin\launch_usdview.bat`; the GIF on each page is rendered
+`bin/usdview.sh` or `bin\launch_usdview.bat`; the GIF on each page is rendered
 live from that stage by `docs/render_media.py`, an offscreen
 Storm viewport with the rig guides on.
 
@@ -11,10 +11,11 @@ Storm viewport with the rig guides on.
 
 | | Page | About |
 |---|---|---|
-| ![How operators fire](../icons/concept.png) | [How operators fire](concepts/how-operators-fire.md) | The mental model and the evaluation order behind every UsdRig rig — who reads what, who writes what, and when. |
-| ![Baked and dynamic evaluation](../icons/concept.png) | [Baked and dynamic evaluation](concepts/baked-vs-dynamic.md) | The two ways UsdRig computes a frame, how to switch between them, and what each one is for. |
+| ![How operators fire](../icons/concept.png) | [How operators fire](concepts/how-operators-fire.md) | The mental model and the evaluation order behind every RigExec rig — who reads what, who writes what, and when. |
+| ![Baked and dynamic evaluation](../icons/concept.png) | [Baked and dynamic evaluation](concepts/baked-vs-dynamic.md) | The two ways RigExec computes a frame, how to switch between them, and what each one is for. |
 | ![What warming does](../icons/concept.png) | [What warming does](concepts/frame-cache-warming.md) | The per-frame cache in one page: what warms, what you see, what it costs, and the switches. |
 | ![Compression-driven wrinkles](../icons/concept.png) | [Compression-driven wrinkles](concepts/wrinkle-deformation.md) | How compression and a stable fold guide produce quasistatic wrinkles, with pins, attachment bounds, and local collision planes. |
+| ![Tutorial: Godot and baked rigs](../icons/concept.png) | [Tutorial: Godot and baked rigs](concepts/tutorial-godot-baked-rig.md) | Play the packaged rolling-ball game, and see how its baked file relates to the current striped stage. |
 | ![External mover plugins](../icons/concept.png) | [External mover plugins](concepts/external-movers.md) | Build and register point movers from a separate repository for dynamic, baked and .rigexec playback. |
 
 ## Rig
@@ -42,6 +43,7 @@ Storm viewport with the rig guides on.
 |---|---|---|
 | ![FK Chain](../icons/fk_chain.png) | [FK Chain](nodes/fk_chain.md) | Composes per-control local animation down a joint hierarchy. |
 | ![Two-Bone IK](../icons/two_bone_ik.png) | [Two-Bone IK](nodes/two_bone_ik.md) | Aims a two-segment limb at an effector with pole-vector control. |
+| ![Auto Clavicle](../icons/concept.png) | [Auto Clavicle](nodes/auto_clavicle.md) | Translates a limb-root control as the limb swings, turning it about the clavicle. |
 | ![Spline IK](../icons/spline_ik.png) | [Spline IK](nodes/spline_ik.md) | Lays a joint chain along a curve built from three controls. |
 | ![Blend Point Frames](../icons/blend_point_frames.png) | [Blend Point Frames](nodes/blend_point_frames.md) | Blends two solver poses per joint under one weight. |
 | ![Twist Distribution](../icons/twist_distribution.png) | [Twist Distribution](nodes/twist_distribution.md) | Unwinds roll between two frames across N interpolated frames. |

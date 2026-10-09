@@ -1,10 +1,10 @@
 ---
 title: How operators fire
-summary: The mental model and the evaluation order behind every UsdRig rig — who reads what, who writes what, and when.
+summary: The mental model and the evaluation order behind every RigExec rig — who reads what, who writes what, and when.
 order: 10
 ---
 
-A UsdRig rig is not a pile of nodes with hidden wires. It is a piece of USD
+A RigExec rig is not a pile of nodes with hidden wires. It is a piece of USD
 namespace, and where a prim sits in that namespace is what decides when it
 runs. Once you can read the hierarchy, you can predict the frame.
 
@@ -18,8 +18,10 @@ Inside it there are four jobs:
 
 - **Controls carry the animation.** A [control](../nodes/control.md) is the
   animator's handle. Keys go on its `avars:*` channels, composed over its
-  `rest:space`. Nothing in the rig revises a control — its base frame *is* its
-  posed frame — so everything downstream simply follows it.
+  `rest:space`. Solvers read that composed frame. An
+  [auto clavicle](../nodes/auto_clavicle.md) is the exception: before solvers
+  run it translates the limb-root control, and that control's descendants
+  follow.
 - **Solvers and constraints pose joints.** An [FK chain](../nodes/fk_chain.md),
   a [two-bone IK](../nodes/two_bone_ik.md) or an
   [aim constraint](../nodes/aim_constraint.md) reads controls and writes frames
@@ -89,8 +91,10 @@ attribute for it. With none authored the input reads `base`.
 - `final` — the top of the chain, after every writer of that target.
 - **a checkpoint** — an absolute prim path in place of a token, meaning "the
   provider as it stood right after that named step". Naming the `Solvers` scope
-  means "after the last solver" (which is exactly `base`); naming the `Movers`
-  scope means "after the last constraint".
+  means "after the last solver" when that scope holds the solvers. Any grouping
+  scope means "after everything composed beneath it", because the walk visits
+  a parent last. `Movers` is the usual place to put constraints; the compiler
+  does not look the name up.
 
 ```usda
 def RigExecMatrixMover "HandSkin" (

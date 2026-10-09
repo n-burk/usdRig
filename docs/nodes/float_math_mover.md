@@ -158,7 +158,8 @@ and it drives nothing, the blendshape does all the work.
 
 Open it live with:
 
-```bat
+```
+bin/usdview.sh docs/examples/float_math_mover.usda
 bin\launch_usdview.bat docs\examples\float_math_mover.usda
 ```
 
@@ -183,4 +184,4 @@ python docs/render_media.py --page float_math_mover
 
 ---
 
-[UsdRig](../index.md)
+[RigExec](../index.md)

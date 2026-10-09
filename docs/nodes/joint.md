@@ -317,7 +317,8 @@ for the whole loop and the only motion in frame comes from the one driver.
 
 Open it live with:
 
-```bat
+```
+bin/usdview.sh docs/examples/joint.usda
 bin\launch_usdview.bat docs\examples\joint.usda
 ```
 
@@ -341,4 +342,4 @@ python docs/render_media.py --page joint
 
 ---
 
-[UsdRig](../index.md)
+[RigExec](../index.md)

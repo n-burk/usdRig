@@ -951,7 +951,7 @@ TOC_JS = """\
 def _sidebar(active, prefix, concepts=(), concept=None):
     chunks = ['<label class="toc-toggle" for="toc-switch">Contents</label>',
               '<div id="toc"><div id="toc-body">',
-              '<a class="tochome" href="%sindex.html">UsdRig</a>' % prefix]
+              '<a class="tochome" href="%sindex.html">RigExec</a>' % prefix]
     if concepts:
         chunks.append('<div class="navgroup">')
         chunks.append("<h3>Concepts</h3>")
@@ -993,7 +993,7 @@ def _shell(title, prefix, sidebar, header, body):
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
-<title>%s &mdash; UsdRig</title>
+<title>%s &mdash; RigExec</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="%s">
@@ -1004,7 +1004,7 @@ def _shell(title, prefix, sidebar, header, body):
 </head>
 <body>
 <nav id="topnav" role="navigation">
-<span class="brandname"><a href="%sindex.html">UsdRig</a>\
+<span class="brandname"><a href="%sindex.html">RigExec</a>\
 <span class="brandsub">&nbsp;node reference</span></span>
 <span id="navsearch"><input id="q" type="search" placeholder="Filter nodes"
  aria-label="Filter nodes" oninput="rigFilter(this.value)"></span>
@@ -1117,7 +1117,7 @@ def render_node(key, category, classes, concepts=()):
     note = OPERATORS[key]
     schema = classes[note["schema"]]
     stage = example_stage(key, note)
-    ancestors = ('<a href="../index.html">UsdRig</a>'
+    ancestors = ('<a href="../index.html">RigExec</a>'
                  '<i class="pathsep">&rsaquo;</i>'
                  '<a href="../index.html#%s">%s</a>'
                  '<i class="pathsep">&rsaquo;</i>'
@@ -1210,7 +1210,7 @@ def render_node(key, category, classes, concepts=()):
         inner.extend([
             '<div class="example-buttons">',
             '<span class="button" role="button" tabindex="0" '
-            'title="bin\\launch_usdview.bat docs\\examples\\%s.usda">'
+            'title="bin/usdview.sh docs/examples/%s.usda">'
             "Open in usdview</span>" % stage,
             '<a class="button primary" href="../examples/%s.usda" '
             'download>Download .usda</a>' % stage,
@@ -1221,8 +1221,9 @@ def render_node(key, category, classes, concepts=()):
     if stage:
         inner.extend([
             "<p>Open it live with:</p>",
-            "<pre><code>bin\\launch_usdview.bat docs\\examples\\%s.usda"
-            "</code></pre>" % stage])
+            "<pre><code>bin/usdview.sh docs/examples/%s.usda\n"
+            "bin\\launch_usdview.bat docs\\examples\\%s.usda"
+            "</code></pre>" % (stage, stage)])
     if not note.get("no_gif"):
         inner.extend([
             "<p>Re-render the GIF above with:</p>",
@@ -1254,7 +1255,7 @@ def render_node(key, category, classes, concepts=()):
                 if _category_of(k) == category]
     body.append(_section("more", "More %s nodes" % category.lower(),
                          _catlist(siblings, "../", "", current=key)))
-    body.append('<p class="footer"><a href="../index.html">UsdRig</a>'
+    body.append('<p class="footer"><a href="../index.html">RigExec</a>'
                 " node reference</p>")
     return _shell(note["title"], "../", _sidebar(key, "../", concepts),
                   header, "\n".join(body))
@@ -1299,7 +1300,7 @@ def _concept_html(body):
 def render_concept(page, concepts):
     body_md = _concept_links(page["body"])
     headings = concept_headings(page["body"])
-    ancestors = ('<a href="../index.html">UsdRig</a>'
+    ancestors = ('<a href="../index.html">RigExec</a>'
                  '<i class="pathsep">&rsaquo;</i>'
                  '<a href="../index.html#concepts">Concepts</a>'
                  '<i class="pathsep">&rsaquo;</i>')
@@ -1337,7 +1338,7 @@ def render_concept(page, concepts):
     if others:
         body.append(_section("more", "More concepts",
                              _concept_catlist(others, "../", "")))
-    body.append('<p class="footer"><a href="../index.html">UsdRig</a>'
+    body.append('<p class="footer"><a href="../index.html">RigExec</a>'
                 " node reference</p>")
     return _shell(page["title"], "../",
                   _sidebar(None, "../", concepts, page["slug"]),
@@ -1363,9 +1364,9 @@ def _concept_catlist(pages, icon_prefix, link_prefix, current=None):
 
 
 def render_index(concepts=()):
-    ancestors = ('<a href="index.html">UsdRig</a>'
+    ancestors = ('<a href="index.html">RigExec</a>'
                  '<i class="pathsep">&rsaquo;</i>')
-    header = _titleblock(None, "", ancestors, "UsdRig", "node reference",
+    header = _titleblock(None, "", ancestors, "RigExec", "node reference",
                          "Every rig operator, its wiring, its parameters, "
                          "and a minimal animated example.")
     body = []
@@ -1391,6 +1392,7 @@ def render_index(concepts=()):
                 "every parameter, and a minimal animated example. Each "
                 'example stage lives in <a href="examples/">examples/</a> '
                 "and plays in usdview via "
+                "<code>bin/usdview.sh</code> or "
                 "<code>bin\\launch_usdview.bat</code>; the GIF on each page "
                 "is rendered live from that stage by "
                 "<code>docs/render_media.py</code>, an offscreen Storm "
@@ -1403,8 +1405,8 @@ def render_index(concepts=()):
                              _catlist(keys, "", "nodes/")))
     body.append("<p>Implementation and design notes live in "
                 '<a href="specs/">specs/</a>.</p>')
-    body.append('<p class="footer">UsdRig node reference</p>')
-    return _shell("UsdRig", "", _sidebar(None, "", concepts), header,
+    body.append('<p class="footer">RigExec node reference</p>')
+    return _shell("RigExec", "", _sidebar(None, "", concepts), header,
                   "\n".join(body))
 
 
