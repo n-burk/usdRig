@@ -1,6 +1,7 @@
 // RigExec geometry mover kernels implementation.
 #include "geometryKernels.h"
 #include "deltaMushKernel.h"
+#include "latticeKernel.h"
 #include "spatialAccel.h"
 #include "wrinkleKernel.h"
 #include "pxr/base/gf/vec3d.h"
@@ -461,21 +462,6 @@ RigExecComputeExtent(
         points.data(), points.size(), widths.data(), widths.size());
 }
 
-namespace {
-
-double
-_Bernstein(int degree, int index, double t)
-{
-    double coefficient = 1.0;
-    for (int k = 0; k < index; ++k) {
-        coefficient *= double(degree - k) / double(index - k);
-    }
-    return coefficient * std::pow(t, index) *
-           std::pow(1.0 - t, degree - index);
-}
-
-}  // namespace
-
 void
 RigExecApplyLattice(
     std::vector<GfVec3f> *points,
@@ -484,75 +470,10 @@ RigExecApplyLattice(
     const GfVec3f *posedCage, size_t posedCageSize,
     const GfVec3i &divisions)
 {
-    const size_t cageCount = size_t(divisions[0]) * size_t(divisions[1]) *
-                             size_t(divisions[2]);
-    if (points->empty() || restPointsSize != points->size() ||
-        restCageSize != cageCount || posedCageSize != cageCount ||
-        divisions[0] < 2 || divisions[1] < 2 || divisions[2] < 2) {
-        return;  // invalid cage description: pass through
-    }
-    if ((restPointsSize > 0 && !restPoints) ||
-        (restCageSize > 0 && !restCage) ||
-        (posedCageSize > 0 && !posedCage)) {
-        return;  // a null range with a nonzero size: pass through
-    }
-
-    // Rest cage bound defines the bind space.
-    GfVec3f lo = restCage[0], hi = restCage[0];
-    for (size_t i = 0; i < restCageSize; ++i) {
-        for (int a = 0; a < 3; ++a) {
-            lo[a] = std::min(lo[a], restCage[i][a]);
-            hi[a] = std::max(hi[a], restCage[i][a]);
-        }
-    }
-    const GfVec3f size = hi - lo;
-    if (size[0] <= 0 || size[1] <= 0 || size[2] <= 0) {
-        return;
-    }
-
-    // Cage deltas preserve identity when the cage is at rest.
-    std::vector<GfVec3f> cageDeltas(cageCount);
-    for (size_t i = 0; i < cageCount; ++i) {
-        cageDeltas[i] = posedCage[i] - restCage[i];
-    }
-
-    const int dx = divisions[0], dy = divisions[1], dz = divisions[2];
-    // Axis-factor tables, filled once per point: the nesting below
-    // reuses each factor instead of recomputing Bernstein (with its
-    // coefficient loop and pow pair) per visit. Same values, same
-    // product order, same accumulation order: bit-identical.
-    std::vector<double> fa, fb, fc;
-    fa.resize(size_t(dx));
-    fb.resize(size_t(dy));
-    fc.resize(size_t(dz));
-    for (size_t i = 0; i < points->size(); ++i) {
-        // Bind coordinates from the REST point, clamped into the cage.
-        GfVec3f uvw;
-        for (int a = 0; a < 3; ++a) {
-            uvw[a] = std::min(
-                1.0f, std::max(0.0f, (restPoints[i][a] - lo[a]) / size[a]));
-        }
-        for (int a = 0; a < dx; ++a) {
-            fa[size_t(a)] = _Bernstein(dx - 1, a, uvw[0]);
-        }
-        for (int b = 0; b < dy; ++b) {
-            fb[size_t(b)] = _Bernstein(dy - 1, b, uvw[1]);
-        }
-        for (int c = 0; c < dz; ++c) {
-            fc[size_t(c)] = _Bernstein(dz - 1, c, uvw[2]);
-        }
-        GfVec3f delta(0);
-        for (int c = 0; c < dz; ++c) {
-            for (int b = 0; b < dy; ++b) {
-                for (int a = 0; a < dx; ++a) {
-                    delta += cageDeltas[(c * dy + b) * dx + a] *
-                             float(fa[size_t(a)] * fb[size_t(b)] *
-                                   fc[size_t(c)]);
-                }
-            }
-        }
-        (*points)[i] += delta;
-    }
+    RigExecApplyLatticeKernel(
+        points, restPoints, restPointsSize, restCage, restCageSize,
+        posedCage, posedCageSize, divisions[0], divisions[1], divisions[2],
+        static_cast<RigExecSurfaceKernelCache<GfVec3f, GfVec3d> *>(nullptr));
 }
 
 void
@@ -566,6 +487,21 @@ RigExecApplyLattice(
     RigExecApplyLattice(
         points, restPoints.data(), restPoints.size(), restCage.data(),
         restCage.size(), posedCage.data(), posedCage.size(), divisions);
+}
+
+void
+RigExecApplyLattice(
+    std::vector<GfVec3f> *points,
+    const std::vector<GfVec3f> &restPoints,
+    const std::vector<GfVec3f> &restCage,
+    const std::vector<GfVec3f> &posedCage,
+    const GfVec3i &divisions,
+    RigExecSurfaceKernelCache<GfVec3f, GfVec3d> *cache)
+{
+    RigExecApplyLatticeKernel(
+        points, restPoints.data(), restPoints.size(), restCage.data(),
+        restCage.size(), posedCage.data(), posedCage.size(), divisions[0],
+        divisions[1], divisions[2], cache);
 }
 
 namespace {

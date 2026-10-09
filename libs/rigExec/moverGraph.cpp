@@ -1043,7 +1043,7 @@ ApplyRevisionKernel(RigExecRevisionOp op,
             return false;  // cardinality mismatch fails atomically
         }
         RigExecApplyLattice(
-            pts, p.restPoints, p.auxPoints, p.auxPointsB, p.divisions);
+            pts, p.restPoints, p.auxPoints, p.auxPointsB, p.divisions, cache);
         return true;
     case RigExecRevisionOp::SurfaceProject:
         RigExecApplySurfaceProject(

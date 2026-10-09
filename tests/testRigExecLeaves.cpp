@@ -2369,6 +2369,15 @@ RoutedDeformerCases(const std::string &examples)
         return;
     }
     const SdfPath cage = lattice->binding.cagePoints;
+    // The bind's Bernstein factors are the revision's own epoch data: a
+    // frame that moves only the posed cage reuses them.
+    const size_t binds = lattice->surfaceCache.LatticeBuilds();
+    CHECK(binds > 0);
+    RunChecked(evaluator.get(), {}, UsdTimeCode(t.GetValue() + 1.0),
+               "lattice cage, next frame");
+    const RigExecBakedProgramImpl::GeomRevision *nextFrame =
+        FirstRevisionOf(*evaluator, RigExecRevisionOp::Lattice);
+    CHECK(nextFrame && nextFrame->surfaceCache.LatticeBuilds() == binds);
     UsdAttribute attribute = stage->GetAttributeAtPath(cage);
     VtVec3fArray rest;
     CHECK(attribute.Get(&rest, UsdTimeCode::Default()) && !rest.empty());
@@ -2380,6 +2389,10 @@ RoutedDeformerCases(const std::string &examples)
     CHECK(attribute.Set(moved));
     const RigExecRigPose pose =
         RunChecked(evaluator.get(), {}, t, "lattice cage, edited");
+    // A new bind cage moves the bound the factors were taken in.
+    const RigExecBakedProgramImpl::GeomRevision *edited =
+        FirstRevisionOf(*evaluator, RigExecRevisionOp::Lattice);
+    CHECK(edited && edited->surfaceCache.LatticeBuilds() > binds);
     ShadowChecked(*evaluator, {}, t, "lattice cage, edited");
     CHECK(evaluator->GetBakedProgramBuildCount() == builds);
     CHECK(PoseMismatches(FreshPose(stage, rig, t), pose,

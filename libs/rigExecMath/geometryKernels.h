@@ -283,6 +283,17 @@ void RigExecApplyLattice(
     const GfVec3f *posedCage, size_t posedCageSize,
     const GfVec3i &divisions);
 
+/// The vector form with the bind's per-point Bernstein factors retained in
+/// \p cache, the caller's own per-revision cache (null builds them for this
+/// call only). Bit-identical to the forms above (latticeKernel.h).
+void RigExecApplyLattice(
+    std::vector<GfVec3f> *points,
+    const std::vector<GfVec3f> &restPoints,
+    const std::vector<GfVec3f> &restCage,
+    const std::vector<GfVec3f> &posedCage,
+    const GfVec3i &divisions,
+    RigExecSurfaceKernelCache<GfVec3f, GfVec3d> *cache);
+
 /// A non-rational NURBS curve as UsdGeomNurbsCurves authors one: control
 /// points, order (degree + 1) and a knot vector of points.size() + order
 /// entries. Open and periodic curves differ only in their knots and in the

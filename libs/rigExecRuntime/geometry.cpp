@@ -1864,70 +1864,20 @@ RrGeoComputeExtent(const std::vector<RrVec3f> &points,
     return {lo, hi};
 }
 
-double
-RrGeoBernstein(int degree, int index, double t)
-{
-    double coefficient = 1.0;
-    for (int k = 0; k < index; ++k) {
-        coefficient *= double(degree - k) / double(index - k);
-    }
-    return coefficient * std::pow(t, index) *
-           std::pow(1.0 - t, degree - index);
-}
-
+// The shared lattice kernel (latticeKernel.h); \p cache, the revision's own,
+// retains the bind's Bernstein factors across frames.
 void
 RrGeoApplyLattice(std::vector<RrVec3f> *points,
                  const std::vector<RrVec3f> &restPoints,
                  const std::vector<RrVec3f> &restCage,
                  const std::vector<RrVec3f> &posedCage,
-                 const RrVec3i &divisions)
+                 const RrVec3i &divisions,
+                 RigExecSurfaceKernelCache<RrVec3f, RrVec3d> *cache)
 {
-    const size_t cageCount = size_t(divisions[0]) * size_t(divisions[1]) *
-                             size_t(divisions[2]);
-    if (points->empty() || restPoints.size() != points->size() ||
-        restCage.size() != cageCount || posedCage.size() != cageCount ||
-        divisions[0] < 2 || divisions[1] < 2 || divisions[2] < 2) {
-        return;  // invalid cage description: pass through
-    }
-
-    RrVec3f lo = restCage[0], hi = restCage[0];
-    for (const RrVec3f &c : restCage) {
-        for (int a = 0; a < 3; ++a) {
-            lo[a] = std::min(lo[a], c[a]);
-            hi[a] = std::max(hi[a], c[a]);
-        }
-    }
-    const RrVec3f size = hi - lo;
-    if (size[0] <= 0 || size[1] <= 0 || size[2] <= 0) {
-        return;
-    }
-
-    std::vector<RrVec3f> cageDeltas(cageCount);
-    for (size_t i = 0; i < cageCount; ++i) {
-        cageDeltas[i] = posedCage[i] - restCage[i];
-    }
-
-    const int dx = divisions[0], dy = divisions[1], dz = divisions[2];
-    for (size_t i = 0; i < points->size(); ++i) {
-        RrVec3f uvw;
-        for (int a = 0; a < 3; ++a) {
-            uvw[a] = std::min(
-                1.0f, std::max(0.0f, (restPoints[i][a] - lo[a]) / size[a]));
-        }
-        RrVec3f delta(0.0f);
-        for (int c = 0; c < dz; ++c) {
-            const double bc = RrGeoBernstein(dz - 1, c, uvw[2]);
-            for (int b = 0; b < dy; ++b) {
-                const double bb = RrGeoBernstein(dy - 1, b, uvw[1]);
-                for (int a = 0; a < dx; ++a) {
-                    const double ba = RrGeoBernstein(dx - 1, a, uvw[0]);
-                    delta += cageDeltas[(c * dy + b) * dx + a] *
-                             float(ba * bb * bc);
-                }
-            }
-        }
-        (*points)[i] += delta;
-    }
+    RigExecApplyLatticeKernel(
+        points, restPoints.data(), restPoints.size(), restCage.data(),
+        restCage.size(), posedCage.data(), posedCage.size(), divisions[0],
+        divisions[1], divisions[2], cache);
 }
 
 RrVec3f
@@ -3017,7 +2967,8 @@ RrGeoApplyRevisionKernel(
             return false;  // cardinality mismatch fails atomically
         }
         RrGeoApplyLattice(
-            pts, p.restPoints, p.auxPoints, p.auxPointsB, p.divisions);
+            pts, p.restPoints, p.auxPoints, p.auxPointsB, p.divisions,
+            surfaceCache);
         return true;
     case RrGeoOpSurfaceProject:
         RrGeoApplySurfaceProject(

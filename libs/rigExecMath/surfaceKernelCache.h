@@ -1,6 +1,7 @@
 #ifndef RIGEXEC_MATH_SURFACE_KERNEL_CACHE_H
 #define RIGEXEC_MATH_SURFACE_KERNEL_CACHE_H
 #include "deltaMushKernel.h"
+#include "latticeKernel.h"
 #include "spatialAccel.h"
 #include <cstring>
 #include <memory>
@@ -37,6 +38,10 @@ template<class Point,class Wide> class RigExecSurfaceKernelCache {
     std::shared_ptr<const Fan> fan;
     std::shared_ptr<const std::vector<Point>> pointSamples[2];
     std::vector<Point> invalidSamples;
+    struct Lattice { std::vector<Point> rest; Point lo,size; int divisions[3]={0,0,0};
+        RigExecLatticeBasis value; };
+    std::shared_ptr<const Lattice> lattice;
+    size_t latticeBuilds=0;
 public:
     /// A boxed-array caller can retain the vector adapter without converting
     /// unchanged source arrays every frame. No borrowed pointer survives here.
@@ -112,6 +117,32 @@ public:
         }
         return fan->value;
     }
+    /// The lattice bind of \p count rest points in the rest cage's bound
+    /// (\p lo, \p size) at \p dx x \p dy x \p dz divisions: everything the
+    /// basis reads, so a frame that only moves the posed cage is a compare.
+    const RigExecLatticeBasis *LatticeBasis(const Point *rest,size_t count,
+        const Point &lo,const Point &size,int dx,int dy,int dz) {
+        static_assert(sizeof(Point)==3*sizeof(float),"three packed floats per point");
+        if(count && !rest) return nullptr;
+        bool same=lattice && lattice->divisions[0]==dx && lattice->divisions[1]==dy &&
+            lattice->divisions[2]==dz && lattice->rest.size()==count;
+        for(int axis=0;axis<3 && same;++axis) {
+            const auto a=lattice->lo[axis],b=lo[axis],c=lattice->size[axis],d=size[axis];
+            same=!std::memcmp(&a,&b,sizeof(a)) && !std::memcmp(&c,&d,sizeof(c));
+        }
+        if(same && count) same=!std::memcmp(lattice->rest.data(),rest,count*sizeof(Point));
+        if(!same) {
+            auto entry=std::make_shared<Lattice>();
+            if(count) entry->rest.assign(rest,rest+count);
+            entry->lo=lo; entry->size=size;
+            entry->divisions[0]=dx; entry->divisions[1]=dy; entry->divisions[2]=dz;
+            RigExecBuildLatticeBasis(rest,count,lo,size,dx,dy,dz,&entry->value);
+            lattice=entry; ++latticeBuilds;
+        }
+        return &lattice->value;
+    }
+    /// Test observable: lattice binds built, counted across copies.
+    size_t LatticeBuilds() const { return latticeBuilds; }
 };
 }
 #endif

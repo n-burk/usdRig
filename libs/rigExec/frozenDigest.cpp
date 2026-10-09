@@ -249,6 +249,14 @@ RigExecFrozenPurityAudit()
          "rebuild on a miss); a frozen clone copies the revision's map, "
          "whose entries are immutable and shared, and memoizes into its "
          "own copy"},
+        {"revision kernel memo (rigExecMath/surfaceKernelCache.h: "
+         "adjacency, delta-mush rest, wrinkle topology, lattice basis)",
+         RigExecFrozenPurity::Pure,
+         "one per revision (GeomRevision::surfaceCache; the runtime's "
+         "revision scratch), touched only by the step that runs the "
+         "revision, so no lock; answer-preserving (raw-bit compare of every "
+         "input an entry reads, a pure rebuild on a miss); a frozen clone "
+         "shares the immutable entries and replaces only its own slots"},
         {"RigExecStaticInputCache / RigExecBlendSampleCache OBJECTS",
          RigExecFrozenPurity::LiveOnly,
          "single-threaded or notice-invalidated live state (THREAD rule); "
