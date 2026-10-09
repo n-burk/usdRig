@@ -541,11 +541,18 @@ private:
 struct RigExecFrozenRunReport {
     std::vector<RigExecOpTraceEntry> region;
     bool ran = false;
+    /// The worker program's source keys: how many this job built, and how
+    /// many kept keys RIGEXEC_VERIFY_SOURCE_KEYS found moved over the
+    /// lane's life (a workspace's jobs accumulate; a fresh clone starts at 0).
+    size_t sourceKeysBuilt = 0;
+    size_t sourceKeyMismatches = 0;
 
     void Clear()
     {
         region.clear();
         ran = false;
+        sourceKeysBuilt = 0;
+        sourceKeyMismatches = 0;
     }
 };
 

@@ -5543,6 +5543,9 @@ struct RigExecBakedRunShadow {
     RigExecTypedValueStore providerValues{0};
     std::vector<GfMatrix4d> switchFrames;
     RigExecOpAdapterState opAdapter;
+    /// Travels with opAdapter: its sourceWatchSerial names this watch's
+    /// generation, so a restore keeps the kept keys and their watch a pair.
+    RigExecBakedSourceWatch sourceWatch;
     std::vector<std::string> chainContentKeys, packetContentKeys;
     RigExecOpExecution opExecution;
     std::vector<double> avars;
@@ -5608,6 +5611,7 @@ struct RigExecBakedRunStatistics {
     size_t closedClusters = 0;
     size_t closedSteps = 0;
     size_t spaceLeafKeys = 0;
+    size_t sourceKeysBuilt = 0;
     bool timed = false;
 };
 

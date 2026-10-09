@@ -756,6 +756,8 @@ _RunFrozen(const RigExecFrozenEvalContext &context,
     if (RigExecFrozenRunReport *report = _frozenRunReport) {
         report->region = RigExecBakedLastRunTrace(B);
         report->ran = true;
+        report->sourceKeysBuilt = B.sourceKeysBuilt;
+        report->sourceKeyMismatches = B.sourceKeyMismatches;
     }
     release.complete = true;
     return true;

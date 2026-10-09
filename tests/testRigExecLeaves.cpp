@@ -3785,8 +3785,10 @@ KeyedSourceOps(const RigExecBakedProgramImpl &B)
 // time, a drag placed, moved and released, an upstream value placed, moved
 // and lifted, and a value edit patched at a held frame; and over the routes
 // that rebuild every key: the first run, a new program stamp, a failed
-// run's reset, the weight overlay toggled, and adapter state copied or
-// restored apart from its watch (a frozen clone, the verify-cones restore).
+// run's reset, the weight overlay toggled, and adapter state whose serial
+// is apart from its watch's (state copied or restored without the watch).
+// A frozen clone and the verify-cones restore carry the watch with the
+// state, so they stay sparse (TestAFrozenCloneKeepsSparseSourceKeys).
 // Under RIGEXEC_VERIFY_SOURCE_KEYS each run also rebuilds every key it
 // keeps, and none may have moved; a held frame rebuilds only the keys the
 // watch cannot vouch for. Last, a leaf moved behind the watch's back is
@@ -3947,6 +3949,124 @@ TestSparseSourceKeys(const std::string &examples)
     CHECK(mark.IsClean());
 }
 
+// A frozen clone copies the source watch with the keys (_CloneImpl), so its
+// worker runs sparse from its first job: a held job builds fewer keys than
+// a full pass. Under RIGEXEC_VERIFY_SOURCE_KEYS, which the clone inherits,
+// no job may keep a key a rebuild would change: held, at a moved time, and
+// on a snapshot patched after an avar value edit
+// (RigExecPatchFrozenAvarConstants), whose new constants the copied watch
+// has to catch.
+void
+TestAFrozenCloneKeepsSparseSourceKeys(const std::string &examples)
+{
+    const Fixture f = FixtureNamed(Fixtures(examples), "biped");
+    const UsdStageRefPtr stage = UsdStage::Open(f.stage);
+    CHECK(stage);
+    if (!stage) {
+        return;
+    }
+    ArchSetEnv("RIGEXEC_VERIFY_SOURCE_KEYS", "1", /*overwrite=*/true);
+    auto evaluator = MakeEvaluator(stage, f.rig);
+    ArchRemoveEnv("RIGEXEC_VERIFY_SOURCE_KEYS");
+    const RigExecBakedProgramImpl *B = Program(*evaluator);
+    CHECK(B && B->verifySourceKeys);
+    if (!B) {
+        return;
+    }
+    const size_t keyed = KeyedSourceOps(*B);
+    CHECK(keyed > 0);
+    CHECK(evaluator->Evaluate(UsdTimeCode(1)).valid);
+    std::string error;
+    std::shared_ptr<const RigExecFrozenProgram> frozen;
+    if (!RigExecFreezeProgram(*evaluator, &frozen, &error) || !frozen) {
+        std::printf("FAIL frozen source keys: freeze refused: %s\n",
+                    error.c_str());
+        CHECK(false);
+        return;
+    }
+    CHECK(frozen->program.verifySourceKeys);
+    TfErrorMark mark;
+    // One job at \p time on \p lane, a workspace of \p snapshot: the keys
+    // its worker built.
+    const auto job = [&](const std::shared_ptr<const RigExecFrozenProgram>
+                             &snapshot,
+                         RigExecFrozenWorkspace *lane, double time,
+                         const std::string &what) {
+        RigExecFrameInputs inputs;
+        const bool sampled = RigExecSampleFrameInputs(
+            *evaluator, UsdTimeCode(time), {}, &inputs, &error);
+        const RigExecBakedProgram *program = evaluator->GetBakedProgram();
+        CHECK(sampled && program);
+        if (!sampled || !program) {
+            std::printf("FAIL %s: not sampled: %s\n", what.c_str(),
+                        error.c_str());
+            return keyed;
+        }
+        RigExecFrozenEvalContext context;
+        context.epochDigest = evaluator->GetBindingEpochDigest();
+        context.slotCount = program->GetProviderCount();
+        context.varyingInputCount = inputs.values.size();
+        if (evaluator->GetPublishWeightFields()) {
+            context.flags |= kRigExecFrozenPublishWeightFields;
+        }
+        if (evaluator->GetSolverGuidesEnabled()) {
+            context.flags |= kRigExecFrozenSolverGuidesEnabled;
+        }
+        context.frozen = snapshot.get();
+        context.workspace = lane;
+        RigExecFrozenRunReport report;
+        const RigExecRigPose pose = RigExecEvaluateFrozen(
+            context, inputs, RigExecMakeProductionStepRunner(), nullptr,
+            f.rig, &report);
+        CHECK(pose.valid && report.ran);
+        if (report.sourceKeyMismatches) {
+            std::printf("FAIL %s: %zu kept source key(s) moved\n",
+                        what.c_str(), report.sourceKeyMismatches);
+        }
+        CHECK(report.sourceKeyMismatches == 0);
+        return report.sourceKeysBuilt;
+    };
+    auto workspace = RigExecCreateFrozenWorkspace(frozen);
+    CHECK(workspace);
+    if (!workspace) {
+        return;
+    }
+    const size_t held = job(frozen, workspace.get(), 1, "frozen, held");
+    std::printf("frozen source keys: %zu keyed, built held %zu\n", keyed,
+                held);
+    CHECK(held < keyed);
+    job(frozen, workspace.get(), 2, "frozen, moved");
+    CHECK(job(frozen, workspace.get(), 2, "frozen, held after time") < keyed);
+
+    const RigExecBakedProgramImpl *E = Program(*evaluator);
+    CHECK(E && !E->patchableAvars.empty());
+    if (!E || E->patchableAvars.empty()) {
+        return;
+    }
+    UsdAttribute attribute =
+        stage->GetAttributeAtPath(E->patchableAvars.begin()->first);
+    double value = 0.0;
+    attribute.Get(&value, UsdTimeCode::Default());
+    CHECK(attribute.Set(value + 0.5));
+    const RigExecBakedProgram *live = evaluator->GetBakedProgram();
+    std::shared_ptr<const RigExecFrozenProgram> patched;
+    CHECK(live && RigExecPatchFrozenAvarConstants(*frozen, *live, &patched,
+                                                  &error));
+    if (!patched) {
+        std::printf("FAIL frozen source keys: patch refused: %s\n",
+                    error.c_str());
+        return;
+    }
+    auto lane = RigExecCreateFrozenWorkspace(patched);
+    CHECK(lane);
+    if (!lane) {
+        return;
+    }
+    job(patched, lane.get(), 2, "patched, edited");
+    CHECK(job(patched, lane.get(), 2, "patched, held") < keyed);
+    CHECK(mark.IsClean());
+}
+
 int
 main(int argc, char **argv)
 {
@@ -3977,6 +4097,7 @@ main(int argc, char **argv)
     TestConstraintArraysAreEpochState();
     TestEqualLatticeBindsShareOneBasis();
     TestSparseSourceKeys(examples);
+    TestAFrozenCloneKeepsSparseSourceKeys(examples);
     std::printf("testRigExecLeaves: %d failure(s)\n", failures);
     return failures ? 1 : 0;
 }

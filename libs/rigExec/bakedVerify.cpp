@@ -742,6 +742,7 @@ RigExecBakedRunShadow::Capture(const RigExecBakedProgramImpl &program)
     providerValues = program.providerValues;
     switchFrames = program.switchFrames;
     opAdapter = program.opAdapter;
+    sourceWatch = program.sourceWatch;
     chainContentKeys = program.chainContentKeys;
     packetContentKeys = program.packetContentKeys;
     opExecution = program.opExecution;
@@ -883,6 +884,7 @@ RigExecBakedRunShadow::Restore(RigExecBakedProgramImpl *program) const
     B.providerValues = providerValues;
     B.switchFrames = switchFrames;
     B.opAdapter = opAdapter;
+    B.sourceWatch = sourceWatch;
     B.chainContentKeys = chainContentKeys;
     B.packetContentKeys = packetContentKeys;
     B.opExecution = opExecution;
@@ -1356,6 +1358,7 @@ RigExecBakedRunStatistics::RigExecBakedRunStatistics(
     closedClusters = program.lastClosedClusters;
     closedSteps = program.lastClosedSteps;
     spaceLeafKeys = program.spaceLeafKeys;
+    sourceKeysBuilt = program.sourceKeysBuilt;
     timed = program.clustering.lastRunTimed;
     clusters.resize(program.clustering.clusters.size());
     for (size_t c = 0; c < clusters.size(); ++c) {
@@ -1386,6 +1389,7 @@ RigExecBakedRunStatistics::Restore(RigExecBakedProgramImpl *program) const
     B.lastClosedClusters = closedClusters;
     B.lastClosedSteps = closedSteps;
     B.spaceLeafKeys = spaceLeafKeys;
+    B.sourceKeysBuilt = sourceKeysBuilt;
     B.clustering.lastRunTimed = timed;
     for (size_t c = 0;
          c < B.clustering.clusters.size() && c < clusters.size(); ++c) {
