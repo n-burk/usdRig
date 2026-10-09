@@ -363,6 +363,50 @@ CompareVector(std::vector<std::string> *differences, size_t *count,
     }
 }
 
+template <class T>
+void
+CompareArray(std::vector<std::string> *differences, size_t *count,
+             const std::string &what, const VtArray<T> &shadow,
+             const VtArray<T> &current)
+{
+    if (shadow.size() != current.size()) {
+        Differ(differences, count, what + " size");
+        return;
+    }
+    for (size_t i = 0; i < shadow.size(); ++i) {
+        if (!Same(shadow[i], current[i])) {
+            Differ(differences, count, what + "[" + std::to_string(i) + "]");
+            return;
+        }
+    }
+}
+
+/// Vertex groups: the published bytes (memcmp, so NaN payloads and signed
+/// zeros count, as the versions do), the content version and the answer.
+void
+CompareGroups(std::vector<std::string> *differences, size_t *count,
+              const std::string &what,
+              const std::vector<RigExecGroupState<GfVec3f>> &shadow,
+              const std::vector<RigExecGroupState<GfVec3f>> &current)
+{
+    if (shadow.size() != current.size()) {
+        Differ(differences, count, what + "s size");
+        return;
+    }
+    for (size_t g = 0; g < shadow.size(); ++g) {
+        const RigExecGroupState<GfVec3f> &a = shadow[g];
+        const RigExecGroupState<GfVec3f> &b = current[g];
+        const std::string at = what + " " + std::to_string(g);
+        if (!RigExecPointsBitsEqual(a.published.data, a.published.count,
+                                    b.published.data, b.published.count)) {
+            Differ(differences, count, at + " points");
+        }
+        CompareValue(differences, count, at + " version", a.version,
+                     b.version);
+        CompareValue(differences, count, at + " ok", a.ok, b.ok);
+    }
+}
+
 void
 CaptureRevision(const RigExecBakedProgramImpl::GeomRevision &revision,
                 RigExecBakedRunShadow::RevisionState *state)
@@ -439,14 +483,19 @@ CaptureRevision(const RigExecBakedProgramImpl::GeomRevision &revision,
         state->chunks[k].palette = revision.chunks[k].palette;
         state->chunks[k].keyChanged = revision.chunks[k].keyChanged;
         state->chunks[k].ok = revision.chunks[k].ok;
-        state->chunks[k].rangeVersion = revision.chunks[k].rangeVersion;
-        state->chunks[k].rangeCount = revision.chunks[k].rangeCount;
-        state->chunks[k].rangeRan = revision.chunks[k].rangeRan;
     }
     // A range-pipelined revision's join state; `rangeInputs` is a memo of
     // the packet that RevisionStatic derives, like the caches it names.
     state->joinSeen = revision.joinSeen;
     state->rangeRefusals = revision.rangeRefusals;
+    // Its vertex groups by handle: the refs and own buffers are shared,
+    // never written, so a later writer that finds a buffer held allocates.
+    state->groups = revision.groups;
+    state->groupIds = revision.groupIds;
+    state->deltasVersion = revision.deltasVersion;
+    state->restBaseHeld = revision.restBaseHeld;
+    state->restBaseVersion = revision.restBaseVersion;
+    state->layoutSerial = revision.layoutSerial;
 }
 
 void
@@ -524,12 +573,15 @@ RestoreRevision(const RigExecBakedRunShadow::RevisionState &state,
         revision->chunks[k].palette = state.chunks[k].palette;
         revision->chunks[k].keyChanged = state.chunks[k].keyChanged;
         revision->chunks[k].ok = state.chunks[k].ok;
-        revision->chunks[k].rangeVersion = state.chunks[k].rangeVersion;
-        revision->chunks[k].rangeCount = state.chunks[k].rangeCount;
-        revision->chunks[k].rangeRan = state.chunks[k].rangeRan;
     }
     revision->joinSeen = state.joinSeen;
     revision->rangeRefusals = state.rangeRefusals;
+    revision->groups = state.groups;
+    revision->groupIds = state.groupIds;
+    revision->deltasVersion = state.deltasVersion;
+    revision->restBaseHeld = state.restBaseHeld;
+    revision->restBaseVersion = state.restBaseVersion;
+    revision->layoutSerial = state.layoutSerial;
 }
 
 void
@@ -653,8 +705,8 @@ CompareRevision(std::vector<std::string> *differences, size_t *count,
     // comparator DOES compare on the pose: a cone that skipped the assemble
     // of a revision whose packet moved would publish last generation's field
     // beside this generation's points.
-    CompareVector(differences, count, where + " weightField",
-                  shadow.publishedWeightValues, revision.publishedWeightValues);
+    CompareArray(differences, count, where + " weightField",
+                 shadow.publishedWeightValues, revision.publishedWeightValues);
     CompareValue(differences, count, where + " currentPhasePacket",
                  shadow.currentPhasePacket, revision.currentPhasePacket);
     CompareValue(differences, count, where + " weightFieldPublished",
@@ -687,18 +739,25 @@ CompareRevision(std::vector<std::string> *differences, size_t *count,
                       shadow.chunks[k].rows, revision.chunks[k].rows);
         CompareVector(differences, count, what + " palette",
                       shadow.chunks[k].palette, revision.chunks[k].palette);
-        CompareValue(differences, count, what + " rangeVersion",
-                     shadow.chunks[k].rangeVersion,
-                     revision.chunks[k].rangeVersion);
-        CompareValue(differences, count, what + " rangeCount",
-                     shadow.chunks[k].rangeCount, revision.chunks[k].rangeCount);
-        CompareValue(differences, count, what + " rangeRan",
-                     shadow.chunks[k].rangeRan, revision.chunks[k].rangeRan);
     }
     CompareVector(differences, count, where + " joinSeen", shadow.joinSeen,
                   revision.joinSeen);
     CompareValue(differences, count, where + " rangeRefusals",
                  shadow.rangeRefusals, revision.rangeRefusals);
+    // The published groups, their versions and answers, and the ids the
+    // join or fuse published. A speculative writer's kept result and a
+    // pass-through's source are not compared: a forced pass may forget a
+    // result the cone kept and compute it again, which moves only those.
+    CompareGroups(differences, count, where + " group", shadow.groups,
+                  revision.groups);
+    CompareVector(differences, count, where + " groupIds", shadow.groupIds,
+                  revision.groupIds);
+    CompareValue(differences, count, where + " deltasVersion",
+                 shadow.deltasVersion, revision.deltasVersion);
+    CompareValue(differences, count, where + " restBaseHeld",
+                 shadow.restBaseHeld, revision.restBaseHeld);
+    CompareValue(differences, count, where + " restBaseVersion",
+                 shadow.restBaseVersion, revision.restBaseVersion);
 }
 
 }  // namespace
@@ -819,6 +878,10 @@ RigExecBakedRunShadow::Capture(const RigExecBakedProgramImpl &program)
         chains[c].haveBase = chain.haveBase;
         chains[c].baseDirty = chain.baseDirty;
         chains[c].scheduleDirty = chain.scheduleDirty;
+        chains[c].baseOwner = chain.baseOwner;
+        chains[c].baseGroups = chain.baseGroups;
+        chains[c].resultIds = chain.resultIds;
+        chains[c].spareIds = chain.spareIds;
         chains[c].revisions.resize(chain.revisions.size());
         for (size_t r = 0; r < chain.revisions.size(); ++r) {
             CaptureRevision(chain.revisions[r], &chains[c].revisions[r]);
@@ -958,6 +1021,10 @@ RigExecBakedRunShadow::Restore(RigExecBakedProgramImpl *program) const
         chain.haveBase = chains[c].haveBase;
         chain.baseDirty = chains[c].baseDirty;
         chain.scheduleDirty = chains[c].scheduleDirty;
+        chain.baseOwner = chains[c].baseOwner;
+        chain.baseGroups = chains[c].baseGroups;
+        chain.resultIds = chains[c].resultIds;
+        chain.spareIds = chains[c].spareIds;
         for (size_t r = 0;
              r < chain.revisions.size() && r < chains[c].revisions.size();
              ++r) {
@@ -1301,6 +1368,10 @@ RigExecBakedRunShadow::Compare(const RigExecBakedProgramImpl &program,
                      chains[c].baseVersion, chain.baseVersion);
         CompareValue(differences, &count, where + " points version",
                      chains[c].resultVersion, chain.resultVersion);
+        CompareGroups(differences, &count, where + " base group",
+                      chains[c].baseGroups, chain.baseGroups);
+        CompareVector(differences, &count, where + " result ids",
+                      chains[c].resultIds, chain.resultIds);
         for (size_t r = 0;
              r < chain.revisions.size() && r < chains[c].revisions.size();
              ++r) {

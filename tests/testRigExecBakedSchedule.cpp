@@ -6595,7 +6595,7 @@ TestTheWeightOverlayIsReusedByVersion()
           int(packet.slot) == revision.weightObject);
     const auto field = [&](float w) {
         return revision.weightFieldPublished &&
-               revision.publishedWeightValues == std::vector<float>(3, w);
+               revision.publishedWeightValues == VtFloatArray(3, w);
     };
     using K = RigExecBakedStepKind;
     RigExecRigPose pose;
@@ -6663,7 +6663,7 @@ TestADefaultOnlyMoveResolvesTheWeightField()
     const auto field = [&](float last) {
         return revision.weightFieldPublished &&
                revision.publishedWeightValues ==
-                   std::vector<float>{1.0f, 1.0f, last};
+                   VtFloatArray{1.0f, 1.0f, last};
     };
     RigExecRigPose pose;
     CHECK(built.program->Run(UsdTimeCode(1.0), &pose));
@@ -6752,6 +6752,397 @@ TestARebuildKeepsItsPointVersions(const std::string &stagePath,
     std::printf("  %s: %zu point value(s) kept their keys across a "
                 "rebuild\n", name, copied.size());
     return copied.size();
+}
+
+/// Every point version of \p ranged's only chain, read as one array through
+/// RigExecBakedVersionPoints, holds the bytes \p whole's does.
+bool
+EveryVersionAgrees(const RigExecBakedProgramImpl &ranged,
+                   const RigExecBakedProgramImpl &whole)
+{
+    if (ranged.chains.size() != 1 || whole.chains.size() != 1 ||
+        ranged.chains[0].revisions.size() !=
+            whole.chains[0].revisions.size()) {
+        return false;
+    }
+    std::vector<GfVec3f> rangedScratch, wholeScratch;
+    for (size_t v = 0; v <= ranged.chains[0].revisions.size(); ++v) {
+        const GfVec3f *a = nullptr;
+        const GfVec3f *b = nullptr;
+        size_t na = 0, nb = 0;
+        RigExecBakedVersionPoints(ranged.chains[0], v, &rangedScratch, &a, &na);
+        RigExecBakedVersionPoints(whole.chains[0], v, &wholeScratch, &b, &nb);
+        if (na == 0 || !RigExecBakedSamePoints(a, na, b, nb)) {
+            std::printf("FAIL version %zu of the range chain differs from "
+                        "the chain built whole\n", v);
+            return false;
+        }
+    }
+    return true;
+}
+
+/// ChainStatus of a chain cut into groups gathers only when a group id of
+/// its final version moved. Run again by hand with nothing moved, it keeps
+/// `result`: the same array and the same version. A frame that moves only
+/// M0's gated group 0 gathers once, into the other buffer, and bumps the
+/// version once. Every version, read whole, matches the chain built whole
+/// over the visits {1,2,3,2,1,3}.
+void
+TestTheChainStatusKeepsAnUnmovedResult()
+{
+    TfSetenv("RIGEXEC_VERIFY_CHAIN_VERSIONS", "1");
+    const BuiltProgram built =
+        BuildStage(MakeRangeChainStage(10000, true, false));
+    TfSetenv("RIGEXEC_BAKED_RANGE_CHAINS", "0");
+    const BuiltProgram whole =
+        BuildStage(MakeRangeChainStage(10000, true, false));
+    TfUnsetenv("RIGEXEC_BAKED_RANGE_CHAINS");
+    TfSetenv("RIGEXEC_VERIFY_CHAIN_VERSIONS", "0");
+    CHECK(built.program != nullptr && whole.program != nullptr);
+    if (!built.program || !whole.program) {
+        return;
+    }
+    RigExecBakedProgramImpl &B =
+        const_cast<RigExecBakedProgramImpl &>(built.program->GetStepGraph());
+    const RigExecBakedProgramImpl &W = whole.program->GetStepGraph();
+    CHECK(B.chains.size() == 1 && W.chains.size() == 1);
+    if (B.chains.size() != 1 || W.chains.size() != 1 ||
+        B.chains[0].revisions.empty()) {
+        return;
+    }
+    RigExecBakedProgramImpl::GeomChain &chain = B.chains[0];
+    CHECK(chain.groupBounds.size() >= 3);
+    CHECK(W.chains[0].groupBounds.empty());
+    RigExecBakedStep *status = nullptr;
+    for (RigExecBakedStep &step : B.steps) {
+        if (step.kind == RigExecBakedStepKind::ChainStatus &&
+            step.object == 0) {
+            status = &step;
+        }
+    }
+    CHECK(status != nullptr);
+    if (!status || chain.groupBounds.size() < 3) {
+        return;
+    }
+    RigExecRigPose pose, wholePose;
+    CHECK(built.program->Run(UsdTimeCode(1.0), &pose));
+    CHECK(whole.program->Run(UsdTimeCode(1.0), &wholePose));
+    CHECK(pose.comparisonMismatches == 0);
+    CHECK(SameBits(chain.result, W.chains[0].result));
+    CHECK(EveryVersionAgrees(B, W));
+    CHECK(chain.resultIds == chain.revisions.back().groupIds);
+
+    // Nothing moved since: the status step keeps the array it published.
+    const VtVec3fArray held = chain.result;
+    const uint64_t version = chain.resultVersion;
+    RigExecBakedRunGeometryStep(&B, status, UsdTimeCode(1.0));
+    CHECK(chain.haveResult);
+    CHECK(chain.result.IsIdentical(held));
+    CHECK(chain.resultVersion == version);
+
+    // Only group 0 moved: one gather, one bump, the held array untouched.
+    const VtVec3fArray before(held.cbegin(), held.cend());
+    CHECK(built.program->Run(UsdTimeCode(2.0), &pose));
+    CHECK(whole.program->Run(UsdTimeCode(2.0), &wholePose));
+    CHECK(pose.comparisonMismatches == 0);
+    CHECK(RanLast(B, RigExecBakedStepKind::ChainStatus, 0));
+    CHECK(chain.resultVersion == version + 1);
+    CHECK(!chain.result.IsIdentical(held));
+    CHECK(SameBits(held, before));
+    CHECK(SameBits(chain.result, W.chains[0].result));
+    CHECK(EveryVersionAgrees(B, W));
+    CHECK(chain.resultIds == chain.revisions.back().groupIds);
+    for (const double frame : {3.0, 2.0, 1.0, 3.0}) {
+        CHECK(built.program->Run(UsdTimeCode(frame), &pose));
+        CHECK(whole.program->Run(UsdTimeCode(frame), &wholePose));
+        CHECK(pose.comparisonMismatches == 0);
+        CHECK(SameBits(chain.result, W.chains[0].result));
+        CHECK(EveryVersionAgrees(B, W));
+        CHECK(pose.diagnostics == wholePose.diagnostics);
+    }
+    CHECK(B.chainVersionMismatches == 0);
+}
+
+/// The epilogue publishes a revision's weight field by sharing the array
+/// RevisionStatic holds, never a copy: a frame whose packet stood, and a
+/// frame where nothing moved, publish the very array frame 1 did; a frame
+/// that moves the field publishes its new array, and the one published
+/// before keeps its values.
+void
+TestTheWeightFieldIsSharedNotCopied()
+{
+    const BuiltProgram built = BuildStage(MakeWeightOverlayStage());
+    CHECK(built.program != nullptr);
+    if (!built.program) {
+        return;
+    }
+    const RigExecBakedProgramImpl &B = built.program->GetStepGraph();
+    int object = -1;
+    const RigExecBakedProgramImpl::GeomRevision *revision =
+        WeightOverlayRevision(B, &object);
+    CHECK(revision != nullptr);
+    if (!revision) {
+        return;
+    }
+    const SdfPath weight("/Asset/Rig/Weights/W");
+    const auto published = [&](const RigExecRigPose &pose) {
+        const auto found = pose.weightFields.find(weight);
+        return found == pose.weightFields.end() ? VtFloatArray()
+                                                : found->second.weights;
+    };
+    RigExecRigPose one, two, again, four;
+    CHECK(built.program->Run(UsdTimeCode(1.0), &one));
+    CHECK(built.program->Run(UsdTimeCode(2.0), &two));
+    CHECK(built.program->Run(UsdTimeCode(2.0), &again));
+    CHECK(one.comparisonMismatches == 0 && two.comparisonMismatches == 0 &&
+          again.comparisonMismatches == 0);
+    const VtFloatArray first = published(one);
+    CHECK(first == VtFloatArray(3, 1.0f));
+    CHECK(first.IsIdentical(revision->publishedWeightValues));
+    CHECK(published(two).IsIdentical(first));
+    CHECK(published(again).IsIdentical(first));
+    CHECK(built.program->Run(UsdTimeCode(4.0), &four));
+    CHECK(four.comparisonMismatches == 0);
+    const VtFloatArray moved = published(four);
+    CHECK(moved == VtFloatArray(3, 0.5f));
+    CHECK(moved.IsIdentical(revision->publishedWeightValues));
+    CHECK(!moved.IsIdentical(first));
+    CHECK(first == VtFloatArray(3, 1.0f));
+}
+
+/// MakeRangeChainStage(10000, true, false) beside a second chain on a
+/// four-point target that sorts first ("/Asset/Earlier.points"), moved by
+/// E0 and, with \p inserted, also by E1: inserting E1 shifts every revision
+/// id and group slot of the range chain without touching its revisions.
+UsdStageRefPtr
+MakeTwoChainStage(bool inserted)
+{
+    const UsdStageRefPtr stage = MakeRangeChainStage(10000, true, false);
+    const SdfPath earlier("/Asset/Earlier.points");
+    stage->DefinePrim(earlier.GetPrimPath(), TfToken("Points"))
+        .GetAttribute(TfToken("points"))
+        .Set(VtVec3fArray{GfVec3f(0), GfVec3f(1, 0, 0), GfVec3f(0, 1, 0),
+                          GfVec3f(0, 0, 1)});
+    for (const char *name : {"E0", "E1"}) {
+        if (!inserted && std::string(name) == "E1") {
+            continue;
+        }
+        const UsdPrim mover = stage->DefinePrim(
+            SdfPath("/Asset/Rig/Movers").AppendChild(TfToken(name)),
+            TfToken("RigExecMatrixMover"));
+        mover.ApplyAPI(TfToken("RigExecMoverAPI"));
+        mover.GetRelationship(TfToken("rigExec:moves")).SetTargets({earlier});
+        mover.GetRelationship(TfToken("rigExec:transform"))
+            .SetTargets({SdfPath("/Asset/Rig/Moving")});
+        mover.GetAttribute(TfToken("inputs:defaultWeight")).Set(1.0f);
+    }
+    return stage;
+}
+
+/// The chain of \p B whose target is \p target, or -1.
+int
+ChainOf(const RigExecBakedProgramImpl &B, const SdfPath &target)
+{
+    for (size_t c = 0; c < B.chains.size(); ++c) {
+        if (B.chains[c].target == target) {
+            return int(c);
+        }
+    }
+    return -1;
+}
+
+/// Adoption across a rebuild that renumbers a range chain (a revision
+/// inserted in an earlier chain): its groups, versions and group ids are
+/// carried, each id remapped to this program's slot of the same writer, so
+/// right after the adoption every revision's ids are exactly the content
+/// ids its version resolves to here. Run on, it matches a program built
+/// fresh bit for bit, and RIGEXEC_VERIFY_CHAIN_VERSIONS finds nothing.
+void
+TestAnAdoptedRangeChainRemapsItsGroupIds()
+{
+    const SdfPath shape("/Asset/Shape.points");
+    const SdfPath earlier("/Asset/Earlier.points");
+    TfSetenv("RIGEXEC_VERIFY_CHAIN_VERSIONS", "1");
+    const BuiltProgram outgoing = BuildStage(MakeTwoChainStage(false));
+    const BuiltProgram rebuilt = BuildStage(MakeTwoChainStage(true));
+    const BuiltProgram fresh = BuildStage(MakeTwoChainStage(true));
+    TfSetenv("RIGEXEC_VERIFY_CHAIN_VERSIONS", "0");
+    CHECK(outgoing.program && rebuilt.program && fresh.program);
+    if (!outgoing.program || !rebuilt.program || !fresh.program) {
+        return;
+    }
+    const RigExecBakedProgramImpl &O = outgoing.program->GetStepGraph();
+    const RigExecBakedProgramImpl &R = rebuilt.program->GetStepGraph();
+    const RigExecBakedProgramImpl &F = fresh.program->GetStepGraph();
+    const int oc = ChainOf(O, shape), rc = ChainOf(R, shape);
+    const int fc = ChainOf(F, shape), re = ChainOf(R, earlier);
+    CHECK(oc >= 0 && rc >= 0 && fc >= 0 && re >= 0);
+    if (oc < 0 || rc < 0 || fc < 0 || re < 0) {
+        return;
+    }
+    // The inserted revision comes first, so the range chain is renumbered.
+    CHECK(R.chainRevisionBegin[size_t(re)] < R.chainRevisionBegin[size_t(rc)]);
+    CHECK(R.chainRevisionBegin[size_t(rc)] ==
+          O.chainRevisionBegin[size_t(oc)] + 1);
+    const auto &chain = R.chains[size_t(rc)];
+    CHECK(chain.groupBounds.size() >= 3 &&
+          chain.groupBounds == O.chains[size_t(oc)].groupBounds);
+    RigExecRigPose pose;
+    for (const double frame : {1.0, 2.0}) {
+        CHECK(outgoing.program->Run(UsdTimeCode(frame), &pose));
+        CHECK(pose.comparisonMismatches == 0);
+    }
+    rebuilt.program->AdoptGeometryStateFrom(*outgoing.program);
+    // Every carried id names this program's writer of the group.
+    size_t ids = 0;
+    for (size_t r = 0; r < chain.revisions.size(); ++r) {
+        const auto &revision = chain.revisions[r];
+        CHECK(revision.groupIds.size() + 1 == chain.groupBounds.size());
+        for (size_t g = 0; g < revision.groupIds.size(); ++g) {
+            ++ids;
+            if (revision.groupIds[g] !=
+                RigExecBakedGroupSourceAt(R, rc, r + 1, g)) {
+                ++failures;
+                std::printf("FAIL adopted range chain: revision %zu group %zu "
+                            "names another writer's slot\n", r, g);
+            }
+        }
+    }
+    CHECK(ids > 0);
+    RigExecRigPose freshPose;
+    for (const double frame : {2.0, 3.0, 1.0, 2.0}) {
+        CHECK(rebuilt.program->Run(UsdTimeCode(frame), &pose));
+        CHECK(fresh.program->Run(UsdTimeCode(frame), &freshPose));
+        CHECK(pose.comparisonMismatches == 0);
+        CHECK(SameBits(chain.result, F.chains[size_t(fc)].result));
+        CHECK(SameBits(R.chains[size_t(re)].result,
+                       F.chains[size_t(ChainOf(F, earlier))].result));
+    }
+    CHECK(R.chainVersionMismatches == 0);
+}
+
+/// Eight points under one classicLinear skin of two joints, J0 (moving at
+/// frames 1-3) owning points 0-3 and J1 points 4-7, at half strength: with
+/// RIGEXEC_BAKED_CHUNK_VERTS=2 and RIGEXEC_BAKED_GROUP_VERTS=2 the chain is
+/// cut into four groups and the skin takes the Range role.
+UsdStageRefPtr
+MakeRangeSkinStage()
+{
+    const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    stage->DefinePrim(SdfPath("/Asset"), TfToken("Scope"));
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    const UsdPrim j0 = stage->DefinePrim(SdfPath("/Asset/Rig/J0"),
+                                         TfToken("RigExecControl"));
+    for (int frame = 1; frame <= 3; ++frame) {
+        j0.GetAttribute(TfToken("avars:tx"))
+            .Set(double(frame) * 10.0, UsdTimeCode(frame));
+    }
+    const UsdPrim j1 = stage->DefinePrim(SdfPath("/Asset/Rig/J1"),
+                                         TfToken("RigExecControl"));
+    j1.GetAttribute(TfToken("avars:ty")).Set(20.0);
+    const SdfPath target("/Asset/Geom/Mesh.points");
+    VtVec3fArray points(8);
+    for (size_t i = 0; i < points.size(); ++i) {
+        points[i] = GfVec3f(float(i), float(i) * 2.0f, float(i) * 3.0f);
+    }
+    stage->DefinePrim(target.GetPrimPath(), TfToken("Mesh"))
+        .GetAttribute(TfToken("points"))
+        .Set(points);
+    stage->DefinePrim(SdfPath("/Asset/Rig/Movers"), TfToken("Scope"));
+    const UsdPrim skin = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Movers/Skin"), TfToken("RigExecSkinMover"));
+    skin.ApplyAPI(TfToken("RigExecMoverAPI"));
+    skin.GetRelationship(TfToken("rigExec:moves")).SetTargets({target});
+    skin.GetAttribute(TfToken("inputs:defaultWeight")).Set(0.5f);
+    skin.GetAttribute(TfToken("rigExec:skinningMethod"))
+        .Set(TfToken("classicLinear"));
+    skin.CreateRelationship(TfToken("rigExec:influences"))
+        .SetTargets({j0.GetPath(), j1.GetPath()});
+    skin.CreateAttribute(TfToken("rigExec:elementSize"),
+                         SdfValueTypeNames->Int).Set(1);
+    skin.CreateAttribute(TfToken("rigExec:jointIndices"),
+                         SdfValueTypeNames->IntArray)
+        .Set(VtIntArray{0, 0, 0, 0, 1, 1, 1, 1});
+    skin.CreateAttribute(TfToken("rigExec:jointWeights"),
+                         SdfValueTypeNames->FloatArray)
+        .Set(VtFloatArray(8, 1.0f));
+    return stage;
+}
+
+/// A Range skin under the RIGEXEC_VERIFY_RANGE_CHAINS judge, which skins
+/// against the folded table and blends the envelope: zero mismatches over
+/// the visits, bits equal to the skin built whole, and the judge itself
+/// catches one wrong point in a published group.
+void
+TestARangeSkinAgreesWithTheJudge()
+{
+    const std::string chunkVerts = TfGetenv("RIGEXEC_BAKED_CHUNK_VERTS");
+    const std::string groupVerts = TfGetenv("RIGEXEC_BAKED_GROUP_VERTS");
+    TfSetenv("RIGEXEC_BAKED_CHUNK_VERTS", "2");
+    TfSetenv("RIGEXEC_BAKED_GROUP_VERTS", "2");
+    TfSetenv("RIGEXEC_VERIFY_RANGE_CHAINS", "1");
+    const BuiltProgram ranged = BuildStage(MakeRangeSkinStage());
+    TfSetenv("RIGEXEC_BAKED_RANGE_CHAINS", "0");
+    const BuiltProgram whole = BuildStage(MakeRangeSkinStage());
+    TfUnsetenv("RIGEXEC_BAKED_RANGE_CHAINS");
+    TfSetenv("RIGEXEC_VERIFY_RANGE_CHAINS", "0");
+    const auto restore = [](const char *knob, const std::string &value) {
+        if (value.empty()) {
+            TfUnsetenv(knob);
+        } else {
+            TfSetenv(knob, value);
+        }
+    };
+    restore("RIGEXEC_BAKED_CHUNK_VERTS", chunkVerts);
+    restore("RIGEXEC_BAKED_GROUP_VERTS", groupVerts);
+    CHECK(ranged.program != nullptr && whole.program != nullptr);
+    if (!ranged.program || !whole.program) {
+        return;
+    }
+    RigExecBakedProgramImpl &R =
+        const_cast<RigExecBakedProgramImpl &>(ranged.program->GetStepGraph());
+    const RigExecBakedProgramImpl &W = whole.program->GetStepGraph();
+    CHECK(R.verifyRangeChains);
+    CHECK(R.chains.size() == 1 && W.chains.size() == 1);
+    if (R.chains.size() != 1 || W.chains.size() != 1 ||
+        R.chains[0].revisions.size() != 1) {
+        return;
+    }
+    auto &skin = R.chains[0].revisions[0];
+    CHECK(skin.op == RigExecRevisionOp::Skin && skin.rangeRole);
+    CHECK(R.chains[0].groupBounds.size() == 5);
+    for (const double frame : {1.0, 2.0, 3.0, 2.0, 1.0, 3.0}) {
+        RigExecRigPose pose, wholePose;
+        CHECK(ranged.program->Run(UsdTimeCode(frame), &pose));
+        CHECK(whole.program->Run(UsdTimeCode(frame), &wholePose));
+        CHECK(pose.comparisonMismatches == 0);
+        CHECK(R.chains[0].result.size() == 8);
+        CHECK(SameBits(R.chains[0].result, W.chains[0].result));
+        CHECK(EveryVersionAgrees(R, W));
+        CHECK(pose.diagnostics == wholePose.diagnostics);
+    }
+    CHECK(R.rangeVerifyMismatches == 0);
+    CHECK(R.gateViolations.load() == 0);
+
+    // One wrong point in a published group is a mismatch; put back, none.
+    CHECK(skin.groups.size() == 4);
+    if (skin.groups.size() != 4 || skin.groups[1].published.count == 0) {
+        return;
+    }
+    RigExecGroupState<GfVec3f> &group = skin.groups[1];
+    const RigExecPointsRef<GfVec3f> kept = group.published;
+    auto poisoned = std::make_shared<std::vector<GfVec3f>>(
+        kept.data, kept.data + kept.count);
+    (*poisoned)[0][0] += 1.0f;
+    group.published.owner = poisoned;
+    group.published.data = poisoned->data();
+    {
+        TfErrorMark mark;
+        CHECK(RigExecBakedVerifyRangeChains(&R) == 1);
+        mark.Clear();
+    }
+    group.published = kept;
+    CHECK(RigExecBakedVerifyRangeChains(&R) == 0);
 }
 
 std::string
@@ -7023,6 +7414,15 @@ main(int argc, char **argv)
     TestANonFiniteValueIsNotAConeMismatch(
         examplesDir + "/biped/Biped.usda", TfToken("inputs:defaultWeight"),
         VtValue(std::nanf("")));
+    {
+        // Chains cut into vertex groups: the status step's gather, whole
+        // readers, weight-field sharing, adoption across a renumbering, and
+        // the Range-skin judge.
+        TestTheChainStatusKeepsAnUnmovedResult();
+        TestTheWeightFieldIsSharedNotCopied();
+        TestAnAdoptedRangeChainRemapsItsGroupIds();
+        TestARangeSkinAgreesWithTheJudge();
+    }
     if (failures) {
         std::printf("%d FAILURE(S)\n", failures);
         return 1;

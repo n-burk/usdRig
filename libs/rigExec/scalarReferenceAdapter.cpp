@@ -238,15 +238,18 @@ bool RigExecBakedRunScalarReference(RigExecBakedProgramImpl *program,UsdTimeCode
             },
             [&](size_t index,const SdfPath &reader,const VtVec3fArray &reference) {
                 if(!firstRevisionMismatch.empty() || index>=chain.revisions.size())return;
-                const auto &revision=chain.revisions[index];
-                if(reference.size()!=revision.output.size()) {
+                // Version index + 1, what this revision left, as one array.
+                std::vector<GfVec3f> scratch;
+                const GfVec3f *native=nullptr;size_t nativeCount=0;
+                RigExecBakedVersionPoints(chain,index+1,&scratch,&native,&nativeCount);
+                if(reference.size()!=nativeCount) {
                     firstRevisionMismatch="cpu reference first differing revision: "+reader.GetString()+
                         " count reference="+std::to_string(reference.size())+
-                        " native="+std::to_string(revision.output.size());
+                        " native="+std::to_string(nativeCount);
                     return;
                 }
                 for(size_t i=0;i<reference.size();++i) {
-                    const auto &expected=reference[i];const auto &actual=revision.output[i];
+                    const auto &expected=reference[i];const auto &actual=native[i];
                     if(GfIsClose(expected,actual,1e-4))continue;
                     firstRevisionMismatch="cpu reference first differing revision: "+reader.GetString()+
                         TfStringPrintf(" point %zu reference=(%.9g, %.9g, %.9g) native=(%.9g, %.9g, %.9g)",

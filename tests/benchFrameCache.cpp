@@ -296,7 +296,8 @@ GeomRevisionBytes(
     // derived revision. Counted anyway; the report notes the sharing.
     bytes += VtArrayVec3fBytes(revision.lastAuxPoints);
     bytes += StringBytes(revision.lastStatus.firstBadAddress);
-    bytes += VecBytes(revision.envelope) + VecBytes(revision.publishedWeightValues);
+    bytes += VecBytes(revision.envelope) +
+             revision.publishedWeightValues.size() * sizeof(float);
     bytes += VecBytes(revision.influences) + VecBytes(revision.rows) +
              VecBytes(revision.palette);
     bytes += WeightPacketBytes(revision.currentPhasePacket);

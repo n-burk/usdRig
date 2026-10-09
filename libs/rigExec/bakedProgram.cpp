@@ -826,6 +826,19 @@ void RigExecBakedProgram::AdoptGeometryStateFrom(
         }
         const bool sameSequence = divergence == chain.revisions.size() &&
                                   divergence == old.revisions.size();
+        // A chain cut into groups keeps its groups only where they are the
+        // same groups: the bounds of both programs agree.
+        const bool grouped =
+            chain.groupBounds.size() >= 2 || old.groupBounds.size() >= 2;
+        const bool sameBounds = chain.groupBounds.size() >= 2 &&
+                                chain.groupBounds == old.groupBounds;
+        const int chainIndex = int(&chain - B.chains.data());
+        const int oldChainIndex = int(&old - P.chains.data());
+        // A content id names its writer's group slot in its own program:
+        // the outgoing slot of every carried writer's group, to this
+        // program's slot of the same (moverPath, op, group).
+        std::map<int64_t, int64_t> slots;
+        std::vector<RigExecBakedProgramImpl::GeomRevision *> carried;
         for (size_t i = 0; i < chain.revisions.size(); ++i) {
             RigExecBakedProgramImpl::GeomRevision &revision =
                 chain.revisions[i];
@@ -834,7 +847,38 @@ void RigExecBakedProgram::AdoptGeometryStateFrom(
             if (node == retained.end()) {
                 continue;
             }
-            adopt(&revision, node->second, /* keepRun = */ i < divergence);
+            RigExecBakedProgramImpl::GeomRevision &source = *node->second;
+            // A grouped revision's run is its groups: kept only with the
+            // same role and written groups over the same bounds, else cold.
+            const bool carryGroups =
+                i < divergence && sameBounds && revision.role == source.role &&
+                revision.groupWritten == source.groupWritten;
+            adopt(&revision, &source,
+                  /* keepRun = */ i < divergence && (!grouped || carryGroups));
+            if (carryGroups) {
+                const int id = B.chainRevisionBegin[size_t(chainIndex)] + int(i);
+                const int oldId =
+                    P.chainRevisionBegin[size_t(oldChainIndex)] +
+                    int(&source - old.revisions.data());
+                for (size_t g = 0; g + 1 < chain.groupBounds.size(); ++g) {
+                    const int from = RigExecBakedGroupSlot(P, oldId, g);
+                    const int to = RigExecBakedGroupSlot(B, id, g);
+                    if (from >= 0 && to >= 0) {
+                        slots[from] = to;
+                    }
+                }
+                revision.groups = std::move(source.groups);
+                // A pass-through compares bytes on its next publication:
+                // the slot it shared is the outgoing program's.
+                for (auto &group : revision.groups) {
+                    group.passedFrom = RigExecGroupSource();
+                }
+                revision.groupIds = std::move(source.groupIds);
+                revision.deltasVersion = source.deltasVersion;
+                revision.restBaseHeld = source.restBaseHeld;
+                revision.restBaseVersion = source.restBaseVersion;
+                carried.push_back(&revision);
+            }
             // A range-pipelined revision's own buffer holds its version,
             // whatever the outgoing node's indirection named; its first run
             // republishes every range.
@@ -842,6 +886,23 @@ void RigExecBakedProgram::AdoptGeometryStateFrom(
                 revision.currentSource = int(i);
             }
             retained.erase(node);
+        }
+        // Each carried id to this program's slot of the same writer; an id
+        // whose writer was not carried names no source, so the next join
+        // or fuse compares it unequal and its version moves. The base's ids
+        // (slot -1 - g) need no map: the bounds are the same.
+        for (RigExecBakedProgramImpl::GeomRevision *revision : carried) {
+            for (RigExecGroupSource &id : revision->groupIds) {
+                if (id.slot == kRigExecNoGroupSource || id.slot < 0) {
+                    continue;
+                }
+                const auto mapped = slots.find(id.slot);
+                if (mapped == slots.end()) {
+                    id = RigExecGroupSource();
+                } else {
+                    id.slot = mapped->second;
+                }
+            }
         }
         // Insertion, removal and reordering rebuild the schedule; a rebind
         // only updates packets. Same rule, same words, as the dynamic walk.
@@ -851,6 +912,16 @@ void RigExecBakedProgram::AdoptGeometryStateFrom(
         chain.baseVersion = old.baseVersion;
         chain.resultVersion = old.resultVersion;
         chain.haveResult = old.haveResult;
+        // The base groups describe `lastBase`; carried with it over the same
+        // bounds. `resultIds` are not: ChainStatus gathers once and compares
+        // the bytes with the carried result.
+        if (sameBounds) {
+            chain.baseOwner = std::move(old.baseOwner);
+            chain.baseGroups = std::move(old.baseGroups);
+            for (auto &group : chain.baseGroups) {
+                group.passedFrom = RigExecGroupSource();
+            }
+        }
 
         std::map<SdfPath, RigExecBakedProgramImpl::GeomChain::Derived *>
             outgoingDerived;

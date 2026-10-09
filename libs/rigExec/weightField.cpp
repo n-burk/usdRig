@@ -286,12 +286,16 @@ bool RigExecBakedCaptureWeightFieldInputs(const Baked &B,int index,
         const auto [c,k] = B.revisionIndex[size_t(field.consumer)];
         const auto &chain = B.chains[size_t(c)];
         haveContext = chain.haveBase;
-        const int source = k > 0 ? chain.revisions[size_t(k-1)].currentSource : -1;
         if (haveContext) {
-            if(source>=0) {
-                const auto &points=chain.revisions[size_t(source)].output;
-                *entering={points.data(),points.size()};
-            } else *entering={chain.lastBase.data(),chain.lastBase.size()};
+            // The version entering the consumer as one array: in place, or
+            // gathered into the field's own scratch, which only its step and
+            // that step's key read, one after the other.
+            const GfVec3f *points = nullptr;
+            size_t pointCount = 0;
+            RigExecBakedVersionPoints(chain, size_t(k),
+                                      &const_cast<Field &>(field).enteringGather,
+                                      &points, &pointCount);
+            *entering = {points, pointCount};
         }
         *count = entering->count;
     }

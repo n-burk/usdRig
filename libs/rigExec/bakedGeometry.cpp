@@ -44,6 +44,7 @@
 #include <cstring>
 #include <iterator>
 #include <limits>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -1777,6 +1778,60 @@ CapturePointRead(RigExecBakedProgramImpl *program,
 
 }  // namespace
 
+void
+RigExecBakedVersionPoints(const RigExecBakedProgramImpl::GeomChain &chain,
+                          size_t version, std::vector<GfVec3f> *scratch,
+                          const GfVec3f **points, size_t *count)
+{
+    // The base, and every version of a chain without groups: one buffer.
+    if (version == 0 || chain.groupBounds.size() < 2) {
+        PointsAt(chain, version, points, count);
+        return;
+    }
+    // Group g of the version is the ref its writer published. Consecutive
+    // slices of one owner are one buffer, read in place; anything else is
+    // gathered into the reader's own scratch.
+    const size_t groups = chain.groupBounds.size() - 1;
+    size_t total = 0;
+    bool contiguous = true;
+    const void *owner = nullptr;
+    const GfVec3f *start = nullptr;
+    const GfVec3f *next = nullptr;
+    for (size_t g = 0; g < groups; ++g) {
+        const RigExecPointsRef<GfVec3f> &ref =
+            RigExecBakedGroupAt(chain, version, g);
+        total += ref.count;
+        if (!contiguous || ref.count == 0) {
+            continue;
+        }
+        if (!start) {
+            start = ref.data;
+            owner = ref.owner.get();
+        } else if (ref.owner.get() != owner || ref.data != next) {
+            contiguous = false;
+            continue;
+        }
+        next = ref.data + ref.count;
+    }
+    if (contiguous) {
+        *points = start;
+        *count = total;
+        return;
+    }
+    scratch->resize(total);
+    GfVec3f *out = scratch->data();
+    for (size_t g = 0; g < groups; ++g) {
+        const RigExecPointsRef<GfVec3f> &ref =
+            RigExecBakedGroupAt(chain, version, g);
+        if (ref.count) {
+            std::memcpy(out, ref.data, ref.count * sizeof(GfVec3f));
+        }
+        out += ref.count;
+    }
+    *points = scratch->data();
+    *count = total;
+}
+
 bool
 RigExecBakedResolvePoints(const RigExecBakedProgramImpl &B,
                           const RigExecBakedPointsBinding &binding,
@@ -1791,7 +1846,10 @@ RigExecBakedResolvePoints(const RigExecBakedProgramImpl &B,
             *count = chain.result.size();
         } else {
             if(!chain.haveBase)continue;
-            PointsAt(chain, size_t(candidate.version), points, count);
+            // A version cut into groups gathers into the binding's own
+            // buffer, which only its one reading step uses.
+            RigExecBakedVersionPoints(chain, size_t(candidate.version),
+                                      &binding.gather, points, count);
         }
         return true;
     }
@@ -2475,6 +2533,93 @@ void RigExecBakedAdoptRevisionLayout(RigExecBakedProgramImpl::GeomRevision *revi
     revision->topologyResolved = true;
     RigExecBakedAdoptPartition(revision);
 }
+namespace {
+/// ChainInputs, a chain cut into groups: `lastBase` as groups. One immutable
+/// owner shares the array's buffer and each base group is a ref into it, so
+/// publishing the base copies no point. Each group's version moves exactly
+/// when its bytes differ from the ones it last published, or on its first
+/// publication since a reset. While the bytes stand (\p moved false) the
+/// held refs already hold them and nothing is rebuilt.
+void
+PublishBaseGroups(RigExecBakedProgramImpl::GeomChain *chain, bool moved)
+{
+    if (chain->groupBounds.size() < 2) {
+        return;
+    }
+    const size_t groups = chain->groupBounds.size() - 1;
+    if (!moved && chain->baseOwner && chain->baseGroups.size() == groups) {
+        return;
+    }
+    chain->baseGroups.resize(groups);
+    auto owner = std::make_shared<const VtVec3fArray>(chain->lastBase);
+    const size_t count = owner->size();
+    for (size_t g = 0; g < groups; ++g) {
+        size_t begin = 0, end = 0;
+        RigExecPointRangeAt(chain->groupBounds[g], chain->groupBounds[g + 1],
+                            g + 1 == groups, count, &begin, &end);
+        RigExecPointsRef<GfVec3f> ref;
+        ref.owner = owner;
+        ref.data = owner->cdata() + begin;
+        ref.count = end - begin;
+        RigExecGroupState<GfVec3f> &state = chain->baseGroups[g];
+        if (!state.ran ||
+            !RigExecPointsBitsEqual(ref.data, ref.count, state.published.data,
+                                    state.published.count)) {
+            ++state.version;
+        }
+        state.published = std::move(ref);
+        state.ran = true;
+        state.ok = true;
+    }
+    chain->baseOwner = std::move(owner);
+}
+
+/// Group \p g of the base as a set-aside writer passes it through: \p state
+/// shares the base group's ref, its id the base group's.
+void
+PassSetAsideBaseGroup(const RigExecBakedProgramImpl::GeomChain &chain,
+                      size_t g, RigExecGroupState<GfVec3f> *state)
+{
+    if (g >= chain.baseGroups.size()) {
+        return;
+    }
+    const RigExecGroupState<GfVec3f> &base = chain.baseGroups[g];
+    RigExecGroupSource from;
+    from.slot = -1 - int64_t(g);
+    from.version = base.version;
+    RigExecPublishPassedGroup(state, base.published, from);
+}
+
+/// What a set-aside join or Whole fuse publishes without running (owner
+/// thread, before the region): every group it writes passes the base group
+/// through, and its ids are the base groups'. RevisionDone's version moves
+/// only when those ids differ from the ones it last published.
+void
+PassSetAsideBaseGroups(const RigExecBakedProgramImpl::GeomChain &chain,
+                       RigExecBakedProgramImpl::GeomRevision *revision)
+{
+    const size_t groups = chain.groupBounds.size() - 1;
+    bool moved = revision->groupIds.size() != groups;
+    revision->groupIds.resize(groups);
+    for (size_t g = 0; g < groups; ++g) {
+        if (g < revision->groupWritten.size() && revision->groupWritten[g] &&
+            g < revision->groups.size()) {
+            PassSetAsideBaseGroup(chain, g, &revision->groups[g]);
+        }
+        RigExecGroupSource id;
+        id.slot = -1 - int64_t(g);
+        id.version = g < chain.baseGroups.size() ? chain.baseGroups[g].version
+                                                 : 0;
+        if (revision->groupIds[g] != id) {
+            revision->groupIds[g] = id;
+            moved = true;
+        }
+    }
+    if (moved) {
+        ++revision->doneVersion;
+    }
+}
+}  // namespace
 void RigExecBakedRunChainInputs(RigExecBakedProgramImpl *program,RigExecBakedStep *step)
 {
     auto &chain = program->chains[size_t(step->object)];
@@ -2493,6 +2638,11 @@ void RigExecBakedRunChainInputs(RigExecBakedProgramImpl *program,RigExecBakedSte
             if (revision.rangeRole && !revision.rangeSetAside)
                 revision.currentSource = int(r);
         }
+        // The base groups too: each republishes with a bumped version, and
+        // ChainStatus gathers whatever ids it then reads.
+        for (auto &group : chain.baseGroups) RigExecResetGroup(&group);
+        chain.baseOwner.reset();
+        chain.resultIds.clear(); chain.spareIds.clear();
     }
     for (auto &revision : chain.revisions) if (revision.created) {
         ++step->counters.revisionsCreated; revision.created = false;
@@ -2501,8 +2651,10 @@ void RigExecBakedRunChainInputs(RigExecBakedProgramImpl *program,RigExecBakedSte
     chain.scheduleDirty = false;
     chain.baseDirty = !chain.haveResult || !RigExecBakedHeadValueSame(
         VtValue(chain.sampledBase),VtValue(chain.lastBase));
-    if (!SamePoints(chain.sampledBase, chain.lastBase)) ++chain.baseVersion;
+    const bool moved = !SamePoints(chain.sampledBase, chain.lastBase);
+    if (moved) ++chain.baseVersion;
     chain.lastBase = chain.sampledBase;
+    PublishBaseGroups(&chain, moved);
 }
 void RigExecBakedPrepareDerivedBase(RigExecBakedProgramImpl::GeomChain::Derived *derived,
                                     RigExecBakedStep *step)
@@ -2755,11 +2907,55 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
                     "through");
             }
         }
+        step->counters.chainsBuilt = 1;
+        const size_t last = chain.revisions.size();
+        if (chain.groupBounds.size() >= 2 && last > 0) {
+            // A chain cut into groups: the last revision's group ids name
+            // version n's content exactly. Ids `result` was gathered from
+            // that still stand leave it in place, identity and all.
+            const size_t groups = chain.groupBounds.size() - 1;
+            const std::vector<RigExecGroupSource> &ids =
+                chain.revisions[last - 1].groupIds;
+            const bool known = ids.size() == groups;
+            if (chain.haveResult && known && chain.resultIds == ids) {
+                return;
+            }
+            size_t total = 0;
+            for (size_t g = 0; g < groups; ++g) {
+                total += RigExecBakedGroupAt(chain, last, g).count;
+            }
+            // Gathered into the other half of the double buffer: cleared
+            // first, so a buffer a consumer still holds is let go rather
+            // than copied, and filled once.
+            chain.spare.clear();
+            chain.spare.resize(total, [&chain, last, groups](GfVec3f *out,
+                                                            GfVec3f *) {
+                for (size_t g = 0; g < groups; ++g) {
+                    const RigExecPointsRef<GfVec3f> &ref =
+                        RigExecBakedGroupAt(chain, last, g);
+                    out = std::uninitialized_copy(ref.data, ref.data + ref.count,
+                                                  out);
+                }
+            });
+            // ChainPoints' content version moves exactly when the bytes do.
+            if (!SamePoints(chain.spare, chain.result)) {
+                ++chain.resultVersion;
+            }
+            chain.result.swap(chain.spare);
+            chain.spareIds.swap(chain.resultIds);
+            if (known) {
+                chain.resultIds = ids;
+            } else {
+                chain.resultIds.clear();
+            }
+            chain.haveResult = true;
+            return;
+        }
         // Version n, the chain's final points; a chain of no revisions
         // publishes its base.
         const GfVec3f *points = nullptr;
         size_t count = 0;
-        PointsAt(chain, chain.revisions.size(), &points, &count);
+        PointsAt(chain, last, &points, &count);
         // ChainPoints' content version moves exactly when the bytes do.
         if (!RigExecBakedSamePoints(points, count, chain.result.cdata(),
                                     chain.result.size())) {
@@ -2767,12 +2963,14 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
         }
         // Double-buffered: publication is a refcount bump for the consumer
         // and the array one may still hold from last frame is never the one
-        // being written.
-        chain.spare.resize(count);
-        std::copy(points, points + count, chain.spare.data());
+        // being written. Cleared first, so a held buffer is let go, never
+        // copied.
+        chain.spare.clear();
+        chain.spare.resize(count, [points](GfVec3f *out, GfVec3f *end) {
+            std::uninitialized_copy(points, points + (end - out), out);
+        });
         chain.result.swap(chain.spare);
         chain.haveResult = true;
-        step->counters.chainsBuilt = 1;
         return;
     }
 
@@ -3413,8 +3611,9 @@ RigExecBakedPublishGeometry(RigExecBakedProgramImpl *program,
                     pose->weightFields[
                         B.weightObjects[size_t(revision.weightObject)].path];
                 field.target = revision.weightFieldTarget;
-                field.weights.assign(revision.publishedWeightValues.cbegin(),
-                                     revision.publishedWeightValues.cend());
+                // Shared, never copied: RevisionStatic replaces the array
+                // rather than writing into it.
+                field.weights = revision.publishedWeightValues;
             }
         } else if (step.kind == RigExecBakedStepKind::ChainStatus) {
             RigExecBakedProgramImpl::GeomChain &chain =
@@ -4148,7 +4347,7 @@ RigExecBakedVerifyRangeChains(RigExecBakedProgramImpl *program)
     // Its ranges hold that answer whether or not they ran this run.
     RigExecBakedProgramImpl &B = *program;
     size_t mismatches = 0;
-    std::vector<GfVec3f> whole;
+    std::vector<GfVec3f> whole, enteringGather, publishedGather;
     for (const RigExecBakedProgramImpl::GeomChain &chain : B.chains) {
         if (!chain.haveBase) {
             continue;
@@ -4163,22 +4362,52 @@ RigExecBakedVerifyRangeChains(RigExecBakedProgramImpl *program)
             }
             const GfVec3f *entering = nullptr;
             size_t count = 0;
-            PointsAt(chain, r, &entering, &count);
+            RigExecBakedVersionPoints(chain, r, &enteringGather, &entering,
+                                      &count);
             whole.assign(entering, entering + count);
-            const bool applied =
-                revision.parameters.valid &&
-                revision.status.AllowsApply() &&
-                RigExecRunRevisionKernel(revision.op, revision.parameters,
-                                         &whole, B.useSimd, nullptr, nullptr);
+            const bool decided = RigExecBakedRevisionApplies(revision);
+            bool applied = false;
+            if (revision.op == RigExecRevisionOp::Skin) {
+                // The packet carries identities for a skin's influences, so
+                // the judge skins against the table the fold wrote, then
+                // blends the envelope RevisionStatic resolved; the decision
+                // is the revision's own.
+                if (decided) {
+                    RigExecSkinTransformsView view;
+                    view.transforms = revision.influences.data();
+                    view.transformCount = revision.influences.size();
+                    applied = RigExecApplySkinKernelWithTransforms(
+                        revision.parameters, view, &whole, B.useSimd);
+                    if (applied && !revision.fullStrength) {
+                        applied = revision.envelopeOk &&
+                                  revision.envelope.size() == count;
+                        if (applied) {
+                            RigExecBlendEnvelopeAll(entering,
+                                                    revision.envelope.data(),
+                                                    count, whole.data());
+                        }
+                    }
+                }
+            } else {
+                applied = revision.parameters.valid &&
+                          revision.status.AllowsApply() &&
+                          RigExecRunRevisionKernel(revision.op,
+                                                   revision.parameters, &whole,
+                                                   B.useSimd, nullptr, nullptr);
+            }
             if (!applied) {
                 whole.assign(entering, entering + count);
             }
+            // The version the revision left, gathered from its groups: the
+            // written ones and, through the gates, the entering ones.
+            const GfVec3f *published = nullptr;
+            size_t publishedCount = 0;
+            RigExecBakedVersionPoints(chain, r + 1, &publishedGather,
+                                      &published, &publishedCount);
             const bool same =
-                applied == RigExecBakedRevisionApplies(revision) &&
-                revision.rangeRefusals == 0 &&
-                RigExecBakedSamePoints(whole.data(), whole.size(),
-                                       revision.output.data(),
-                                       revision.output.size());
+                applied == decided && revision.rangeRefusals == 0 &&
+                RigExecBakedSamePoints(whole.data(), whole.size(), published,
+                                       publishedCount);
             if (!same) {
                 ++mismatches;
                 TF_VERIFY(false, "%s: the range-pipelined revision's ranges "
@@ -4186,6 +4415,13 @@ RigExecBakedVerifyRangeChains(RigExecBakedProgramImpl *program)
                           revision.moverPathText.c_str());
             }
         }
+    }
+    // Gate and partition holes the bodies counted this run.
+    const uint64_t holes = B.gateViolations.load(std::memory_order_relaxed);
+    if (holes) {
+        mismatches += size_t(holes);
+        TF_VERIFY(false, "%llu gated or Range-skin group step(s) met a pin "
+                  "hole", static_cast<unsigned long long>(holes));
     }
     B.rangeVerifyMismatches += mismatches;
     return mismatches;
@@ -4205,10 +4441,17 @@ void RigExecBakedResetSetAsideGeometryValue(
             chain.haveBase = false;
             if (!chain.lastBase.empty()) ++chain.baseVersion;
             chain.lastBase.clear();
+            // The base groups go with it; their versions never go down.
+            for (auto &group : chain.baseGroups) {
+                RigExecResetGroup(&group);
+                group.published = RigExecPointsRef<GfVec3f>();
+            }
+            chain.baseOwner.reset();
         } else {
             chain.haveResult = false;
             if (!chain.result.empty()) ++chain.resultVersion;
             chain.result.clear();
+            chain.resultIds.clear();
         }
         return;
     }
@@ -4240,17 +4483,32 @@ void RigExecBakedResetSetAsideGeometryValue(
             const int count = B.revisionChunkCount[revisionIndex];
             if (slot < uint32_t(first) || slot >= uint32_t(first + count)) continue;
             const auto [chain, part] = B.revisionIndex[revisionIndex];
+            const auto &owner = B.chains[size_t(chain)];
             auto &revision = B.chains[size_t(chain)].revisions[size_t(part)];
+            const size_t at = size_t(slot - uint32_t(first));
             if (revision.rangeRole) {
-                // A set-aside range makes the revision pass the base through,
-                // as an excluded whole fuse does: its successors' ranges and
-                // every reader of its version read the live base through
-                // PointsAt, never this buffer, which a RevisionStatic outside
-                // the cycle may still resize. Its join publishes that version
-                // (RunJoin) and ChainInputs leaves the source alone.
-                auto &chunk = revision.chunks[size_t(slot - uint32_t(first))];
-                chunk.ok = false;
-                chunk.rangeRan = false;
+                // A set-aside group makes the revision pass the base through,
+                // as an excluded whole fuse does: every reader of a version
+                // past it resolves to the base groups (RigExecBakedGroupAt),
+                // never to this slot. The slot itself holds the base group,
+                // refused; its join publishes the base ids (RunJoin) and
+                // ChainInputs leaves the source alone.
+                if (at < revision.groups.size()) {
+                    revision.groups[at].ok = false;
+                    PassSetAsideBaseGroup(owner, at, &revision.groups[at]);
+                }
+                if (at < revision.chunks.size()) revision.chunks[at].ok = false;
+                revision.rangeSetAside = true;
+                revision.currentSource = -1;
+                return;
+            }
+            if (owner.groupBounds.size() >= 2 && at >= revision.chunks.size()) {
+                // A Whole revision's published group: its fuse is set aside,
+                // and passes the base groups through as a set-aside join does.
+                const size_t g = at - revision.chunks.size();
+                if (g < revision.groups.size()) {
+                    PassSetAsideBaseGroup(owner, g, &revision.groups[g]);
+                }
                 revision.rangeSetAside = true;
                 revision.currentSource = -1;
                 return;
@@ -4258,8 +4516,12 @@ void RigExecBakedResetSetAsideGeometryValue(
             revision.stagingOutput.clear();
             revision.stagingFresh = false;
             // The excluded writer owns the full retained staging output;
-            // invalidate every chunk opinion along with its cleared bytes.
+            // invalidate every chunk opinion along with its cleared bytes,
+            // and a Whole revision's speculative group answers with them.
             for (auto &chunk : revision.chunks) chunk.ok = false;
+            if (owner.groupBounds.size() >= 2) {
+                for (auto &group : revision.groups) group.ok = false;
+            }
             return;
         }
         return;
@@ -4282,14 +4544,23 @@ void RigExecBakedResetSetAsideGeometryValue(
         revision.ran = false;
         revision.executed = false;
         revision.resultStatus = _tokens->operationCycle;
+        revision.currentSource = -1;
+        const auto &owner = B.chains[size_t(chain)];
+        if (owner.groupBounds.size() >= 2) {
+            // A join or Whole fuse of a chain cut into groups, set aside:
+            // readers past it resolve to the base groups, and its version
+            // follows their ids, which is the base it passes through.
+            revision.rangeSetAside = true;
+            PassSetAsideBaseGroups(owner, &revision);
+            break;
+        }
         // A range-pipelined revision set aside passes the base through
         // exactly as a whole one does; its ranges' buffer is then read by
         // no one, and ChainInputs leaves the source alone.
         if (revision.rangeRole) revision.rangeSetAside = true;
         // An excluded fuse never runs, so the version follows the base it
         // passes through, against the copy of the base it last carried.
-        revision.currentSource = -1;
-        PassBaseThrough(B.chains[size_t(chain)].lastBase, &revision);
+        PassBaseThrough(owner.lastBase, &revision);
         break;
     }
     case RigExecBakedSlotDomain::SkinTopology:

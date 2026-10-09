@@ -4467,8 +4467,8 @@ static void TestSparseRawDefaultFrozenLifecycle()
  CHECK(stage->GetRootLayer()->ExportToString(&after));CHECK(before==after);
 }
 // Three matrix movers on one 10,000-point target, which the default vertex
-// target (4096) cuts into three ranges: M0 rides a driver that moves at
-// frames 1-3, M1 and M2 one that stands still.
+// targets make a range chain (vertex groups of 1,024 points): M0 rides a
+// driver that moves at frames 1-3, M1 and M2 one that stands still.
 UsdStageRefPtr
 MakeRangeChainRig()
 {
@@ -4508,9 +4508,10 @@ MakeRangeChainRig()
 }
 
 // A range-pipelined chain freezes: a snapshot taken after live frame 1
-// holds every range's RevisionOut key, so the job at frame 1 runs no op and
-// publishes live's points; the job at frame 2, whose ranges M0's driver
-// moves, matches live bit for bit.
+// shares every published vertex group with live and holds every group's
+// RevisionOut key, so the job at frame 1 runs no op and publishes live's
+// points; the job at frame 2, whose groups M0's driver moves, writes its own
+// buffers, leaves live's untouched and matches live bit for bit.
 static void
 TestRangeChainWarmsBitIdentical()
 {
@@ -4530,7 +4531,11 @@ TestRangeChainWarmsBitIdentical()
     size_t ranged = 0;
     for (const auto &chain : program->GetStepGraph().chains) {
         for (const auto &revision : chain.revisions) {
-            ranged += revision.rangeRole && revision.chunks.size() == 3 ? 1 : 0;
+            ranged += revision.rangeRole && chain.groupBounds.size() >= 3 &&
+                              revision.chunks.size() ==
+                                  chain.groupBounds.size() - 1
+                          ? 1
+                          : 0;
         }
     }
     CHECK(ranged == 3);
@@ -4543,6 +4548,72 @@ TestRangeChainWarmsBitIdentical()
                     error.c_str());
         return;
     }
+    // Right after the freeze every published group, and every base group,
+    // is the live one's: shared by refcount, never copied. The live bytes
+    // are kept aside to show no frozen job writes into them.
+    const RigExecBakedProgramImpl &live = program->GetStepGraph();
+    struct LiveGroup {
+        const GfVec3f *data = nullptr;
+        std::vector<GfVec3f> bytes;
+    };
+    std::vector<LiveGroup> liveGroups;
+    size_t sharedGroups = 0;
+    const auto collect = [&](const std::vector<RigExecGroupState<GfVec3f>> &a,
+                             const std::vector<RigExecGroupState<GfVec3f>> &b) {
+        CHECK(a.size() == b.size());
+        for (size_t g = 0; g < a.size() && g < b.size(); ++g) {
+            if (!a[g].published.data || a[g].published.count == 0) {
+                continue;
+            }
+            sharedGroups +=
+                a[g].published.data == b[g].published.data ? 1 : 0;
+            liveGroups.push_back(
+                {a[g].published.data,
+                 std::vector<GfVec3f>(a[g].published.data,
+                                      a[g].published.data +
+                                          a[g].published.count)});
+        }
+    };
+    CHECK(live.chains.size() == frozen->program.chains.size());
+    for (size_t c = 0;
+         c < live.chains.size() && c < frozen->program.chains.size(); ++c) {
+        const auto &a = live.chains[c];
+        const auto &b = frozen->program.chains[c];
+        collect(a.baseGroups, b.baseGroups);
+        CHECK(a.revisions.size() == b.revisions.size());
+        for (size_t r = 0; r < a.revisions.size() && r < b.revisions.size();
+             ++r) {
+            collect(a.revisions[r].groups, b.revisions[r].groups);
+        }
+    }
+    CHECK(!liveGroups.empty() && sharedGroups == liveGroups.size());
+    // The live groups of revisions, by pointer, as they stand now.
+    const auto liveUnchanged = [&]() {
+        size_t k = 0;
+        for (const auto &chain : live.chains) {
+            const auto check = [&](const RigExecGroupState<GfVec3f> &state) {
+                if (!state.published.data || state.published.count == 0) {
+                    return true;
+                }
+                if (k >= liveGroups.size()) {
+                    return false;
+                }
+                const LiveGroup &held = liveGroups[k++];
+                return state.published.data == held.data &&
+                       std::memcmp(held.data, held.bytes.data(),
+                                   held.bytes.size() * sizeof(GfVec3f)) == 0;
+            };
+            for (const auto &state : chain.baseGroups) {
+                if (!check(state)) return false;
+            }
+            for (const auto &revision : chain.revisions) {
+                for (const auto &state : revision.groups) {
+                    if (!check(state)) return false;
+                }
+            }
+        }
+        return k == liveGroups.size();
+    };
     RigExecBackgroundScheduler scheduler;
     const std::vector<RigExecValueOverride> noOverrides;
     RigExecFrameInputs at1;
@@ -4558,6 +4629,9 @@ TestRangeChainWarmsBitIdentical()
                                    &at2, &error));
     const RigExecRigPose warm2 =
         RunWarmingJob(&evaluator, rig, frozen, at2, &scheduler, nullptr);
+    // The frozen job wrote the groups M0's driver moved into its own
+    // buffers: live's published groups are where and what they were.
+    CHECK(liveUnchanged());
     const RigExecRigPose live2 = evaluator.Evaluate(UsdTimeCode(2.0));
     CHECK(live2.valid);
     CheckPosesBitIdentical("range chain frame 2", live2, warm2);

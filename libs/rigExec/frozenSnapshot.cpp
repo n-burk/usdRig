@@ -180,6 +180,13 @@ _CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst)
     D.chunkVertexTarget = src.chunkVertexTarget;
     D.chunkCap = src.chunkCap;
     D.rangeChains = src.rangeChains;
+    D.groupVertexTarget = src.groupVertexTarget;
+    D.groupCap = src.groupCap;
+    D.groupGates = src.groupGates;
+    D.roleMode = src.roleMode;
+    D.exportKeep = src.exportKeep;
+    D.exportPinnedPaths = src.exportPinnedPaths;
+    D.gateViolations.store(0, std::memory_order_relaxed);
     D.useSimd = src.useSimd;
     D.purityAudit = src.purityAudit;
     D.purityViolations.count.store(0, std::memory_order_relaxed);
@@ -229,8 +236,15 @@ _CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst)
     D.chains = src.chains;
     // Per-consumer overlays borrow the live source layer only during a body.
     // A frozen clone rebases them on its own source layer when consumed.
+    // Published and computed vertex groups stay shared with the source; the
+    // clone lets go of the spare buffers, so the source's writers still find
+    // their scratch unique and the clone allocates on its first write.
     for (auto &chain : D.chains) {
-        for (auto &revision : chain.revisions) revision.revisionInputs.Clear();
+        for (auto &revision : chain.revisions) {
+            revision.revisionInputs.Clear();
+            for (auto &group : revision.groups) RigExecDropGroupSpare(&group);
+        }
+        for (auto &group : chain.baseGroups) RigExecDropGroupSpare(&group);
         for (auto &derived : chain.derived) derived.revision.revisionInputs.Clear();
     }
     D.deltaValues = src.deltaValues;

@@ -592,8 +592,8 @@ _FrozenPublishGeometry(RigExecBakedProgramImpl &B, RigExecRigPose *pose)
                     pose->weightFields[
                         B.weightObjects[size_t(revision.weightObject)].path];
                 field.target = revision.weightFieldTarget;
-                field.weights.assign(revision.publishedWeightValues.cbegin(),
-                                     revision.publishedWeightValues.cend());
+                // Shared, never copied, as live publishes it.
+                field.weights = revision.publishedWeightValues;
             }
         } else if (step.kind == RigExecBakedStepKind::ChainStatus) {
             RigExecBakedProgramImpl::GeomChain &chain =

@@ -273,6 +273,9 @@ bool RigExecBakedReadCrossDomain(const RigExecBakedProgramImpl &B, int index,
     if ((read.kind == RigExecCrossDomainRead::Kind::PointElement || read.kind == RigExecCrossDomainRead::Kind::Points)) {
         const GfVec3f *points = nullptr;
         size_t count = 0;
+        // Local, never the read's own: many steps read one cross-domain read,
+        // and a version cut into groups gathers into the binding's buffer.
+        // Every use of `points` below copies out before it goes.
         RigExecBakedPointsBinding binding;
         binding.finalRead = read.finalPoints;
         for (const auto &candidate : read.points)
