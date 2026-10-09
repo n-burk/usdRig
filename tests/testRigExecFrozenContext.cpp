@@ -35,6 +35,9 @@
 #include "rigExecRuntime/runtime.h"
 #include "rigExecSampler/inputSampler.h"
 
+#include "pxr/base/tf/errorMark.h"
+#include "pxr/base/tf/getenv.h"
+#include "pxr/base/tf/setenv.h"
 #include "pxr/base/tf/stringUtils.h"
 #include "pxr/usd/sdf/layer.h"
 #include "pxr/usd/sdf/types.h"
@@ -3230,6 +3233,266 @@ TestConstantHeadLeavesRideASharedTable()
                                    &error));
     CHECK(after3.headLeafConstants != nullptr &&
           after3.headLeafConstants == edited3.headLeafConstants);
+}
+
+// The samplers serve every leaf read that cannot move with the time from
+// one table per program state (RigExecFrozenStaticSamples) and re-read the
+// rest, so a vector still holds what fresh reads answer: frames share the
+// table and the recorded fold order, and digest exactly as the plain fold.
+// An upstream value, an override, a value edit and added time samples each
+// reach the very next sample, through the plain and the burst route alike.
+// RIGEXEC_VERIFY_FROZEN_STATIC checks every served read against a fresh one
+// besides.
+void
+TestStaticLeavesFollowEdits()
+{
+    UsdStageRefPtr stage = MakeTinyRig();
+    const SdfPath rig("/Asset/Rig");
+    RigExecRigEvaluator evaluator(stage, rig);
+    TfErrorMark mark;
+    {
+        // Read at Build, so it stands for this program alone.
+        const std::string knob("RIGEXEC_VERIFY_FROZEN_STATIC");
+        const std::string saved = TfGetenv(knob);
+        TfSetenv(knob, "1");
+        CHECK(evaluator.Compile());
+        CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
+        if (saved.empty()) {
+            TfUnsetenv(knob);
+        } else {
+            TfSetenv(knob, saved);
+        }
+    }
+    const RigExecBakedProgram *program = evaluator.GetBakedProgram();
+    CHECK(program != nullptr);
+    if (!program) {
+        return;
+    }
+    const RigExecBakedProgramImpl &B = program->GetStepGraph();
+    CHECK(B.verifyFrozenStatic);
+    CHECK(B.revisionIndex.size() == 1);
+    if (B.revisionIndex.size() != 1) {
+        return;
+    }
+    const auto &[chainIndex, revisionIndex] = B.revisionIndex[0];
+    const RigExecBakedProgramImpl::GeomRevision &skin =
+        B.chains[size_t(chainIndex)].revisions[size_t(revisionIndex)];
+    const int weightKey =
+        skin.leaves.decl.Role(RigExecRevisionLeafRole::DefaultWeight);
+    const int layoutWeights =
+        skin.layoutLeaves.decl.Role(RigExecRevisionLeafRole::JointWeights);
+    const SdfPath restTzPath("/Asset/Rig/AlongX.rest:tz");
+    size_t restTz = B.providerFrozenKeys.size();
+    for (size_t k = 0; k < B.providerLeaves.decl.keys.size() &&
+                       k < B.providerFrozenKeys.size();
+         ++k) {
+        if (B.providerLeaves.decl.keys[k].path == restTzPath) {
+            restTz = k;
+        }
+    }
+    CHECK(weightKey >= 0);
+    CHECK(layoutWeights >= 0);
+    CHECK(restTz < B.providerFrozenKeys.size());
+    if (weightKey < 0 || layoutWeights < 0 ||
+        restTz >= B.providerFrozenKeys.size()) {
+        return;
+    }
+
+    std::string error;
+    const auto sample = [&](UsdTimeCode time,
+                            const std::vector<RigExecValueOverride> &overrides,
+                            const std::vector<RigExecUpstreamValue> &upstream) {
+        RigExecFrameInputs inputs;
+        CHECK(RigExecSampleFrameInputs(evaluator, time, overrides, upstream,
+                                       &inputs, &error));
+        return inputs;
+    };
+    // The control digest, checked against the plain fold of the same
+    // vector: every sample folded from its bytes, through a sorted map.
+    const auto digest = [](const RigExecFrameInputs &inputs) {
+        RigExecFrameInputs plain = inputs;
+        plain.staticSamples.reset();
+        plain.digestOrder.reset();
+        CHECK(RigExecControlStateDigestible(inputs, inputs.overrides) ==
+              RigExecControlStateDigestible(plain, plain.overrides));
+        const uint64_t value =
+            RigExecControlStateDigest(inputs, inputs.overrides);
+        CHECK(value == RigExecControlStateDigest(plain, plain.overrides));
+        return value;
+    };
+    const auto providerSample =
+        [&B](const RigExecFrameInputs &inputs,
+             size_t k) -> const RigExecSampledInput * {
+        for (const RigExecSampledInput &value : inputs.values) {
+            if (value.path == B.providerFrozenKeys[k]) {
+                return &value;
+            }
+        }
+        return nullptr;
+    };
+    // Every provider sample is a fresh read at the vector's time.
+    const auto checkProviders = [&](const RigExecFrameInputs &inputs) {
+        for (size_t k = 0; k < B.providerFrozenKeys.size(); ++k) {
+            const UsdAttribute &attribute = B.providerLeaves.attributes[k];
+            if (!attribute) {
+                continue;
+            }
+            const RigExecSampledInput *found = providerSample(inputs, k);
+            CHECK(found != nullptr);
+            if (!found) {
+                continue;
+            }
+            VtValue raw;
+            const bool hasValue = attribute.Get(&raw, inputs.time);
+            CHECK(found->hasValue == hasValue);
+            CHECK(found->valueBlocked ==
+                  attribute.GetResolveInfo(inputs.time).ValueIsBlocked());
+            CHECK(RigExecBakedHeadValueSame(found->value, raw));
+        }
+    };
+    const auto leafAt = [](const std::vector<std::vector<VtValue>> &rows,
+                           int key) {
+        return !rows.empty() && size_t(key) < rows[0].size()
+                   ? rows[0][size_t(key)]
+                   : VtValue();
+    };
+    const auto restTzAt = [&](const RigExecFrameInputs &inputs) {
+        const RigExecSampledInput *found = providerSample(inputs, restTz);
+        return found && found->value.IsHolding<double>()
+                   ? found->value.UncheckedGet<double>()
+                   : -1.0;
+    };
+
+    // Two frames share the table and the recorded order; the animated
+    // avars still move the digest.
+    const RigExecFrameInputs at1 = sample(UsdTimeCode(1.0), {}, {});
+    const RigExecFrameInputs at2 = sample(UsdTimeCode(2.0), {}, {});
+    CHECK(at1.staticSamples != nullptr);
+    CHECK(at1.staticSamples == at2.staticSamples);
+    CHECK(at1.digestOrder != nullptr);
+    CHECK(at1.digestOrder == at2.digestOrder);
+    const RigExecSampledInput *served = providerSample(at2, restTz);
+    CHECK(served != nullptr && served->staticSample >= 0);
+    checkProviders(at1);
+    checkProviders(at2);
+    const uint64_t digest2 = digest(at2);
+    CHECK(digest(at1) != digest2);
+    const VtValue authoredWeight = leafAt(at2.revisionLeaves, weightKey);
+    CHECK(authoredWeight.IsHolding<float>() &&
+          authoredWeight.UncheckedGet<float>() == 1.0f);
+    const VtValue authoredWeights = leafAt(at2.layoutLeaves, layoutWeights);
+    CHECK(authoredWeights.IsHolding<VtFloatArray>());
+    if (!authoredWeights.IsHolding<VtFloatArray>()) {
+        return;
+    }
+
+    // An upstream value on a static revision leaf's read is read through,
+    // and the next frame without it reads the stage again.
+    RigExecUpstreamValue up;
+    up.path = SdfPath("/Asset/Rig/Movers/Skin_0.inputs:defaultWeight");
+    up.value = VtValue(0.5f);
+    const RigExecFrameInputs upstreamed = sample(UsdTimeCode(2.0), {}, {up});
+    CHECK(upstreamed.upstream.size() == 1);
+    const VtValue upWeight = leafAt(upstreamed.revisionLeaves, weightKey);
+    CHECK(upWeight.IsHolding<float>() && upWeight.UncheckedGet<float>() == 0.5f);
+    CHECK(digest(upstreamed) != digest2);
+    const RigExecFrameInputs lifted = sample(UsdTimeCode(2.0), {}, {});
+    CHECK(RigExecBakedHeadValueSame(leafAt(lifted.revisionLeaves, weightKey),
+                                    authoredWeight));
+    CHECK(digest(lifted) == digest2);
+
+    // An override on a static layout leaf likewise.
+    VtFloatArray painted = authoredWeights.UncheckedGet<VtFloatArray>();
+    for (float &w : painted) {
+        w = 1.0f - w;
+    }
+    RigExecValueOverride paint;
+    paint.prim = SdfPath("/Asset/Rig/Movers/Skin_0");
+    paint.attribute = TfToken("rigExec:jointWeights");
+    paint.value = VtValue(painted);
+    const RigExecFrameInputs overridden = sample(UsdTimeCode(2.0), {paint}, {});
+    CHECK(RigExecBakedHeadValueSame(
+        leafAt(overridden.layoutLeaves, layoutWeights), VtValue(painted)));
+    CHECK(digest(overridden) != digest2);
+    const RigExecFrameInputs released = sample(UsdTimeCode(2.0), {}, {});
+    CHECK(RigExecBakedHeadValueSame(
+        leafAt(released.layoutLeaves, layoutWeights), authoredWeights));
+    CHECK(digest(released) == digest2);
+
+    // A value edit reaches the next sample: a new table, the edited value,
+    // a moved digest.
+    const UsdAttribute restTzAttr = stage->GetAttributeAtPath(restTzPath);
+    CHECK(restTzAttr.Set(0.75));
+    const RigExecFrameInputs edited = sample(UsdTimeCode(2.0), {}, {});
+    CHECK(edited.staticSamples != nullptr &&
+          edited.staticSamples != at2.staticSamples);
+    CHECK(restTzAt(edited) == 0.75);
+    checkProviders(edited);
+    CHECK(digest(edited) != digest2);
+    CHECK(stage->GetAttributeAtPath(
+                   SdfPath("/Asset/Rig/Movers/Skin_0.rigExec:jointWeights"))
+              .Set(painted));
+    const RigExecFrameInputs repainted = sample(UsdTimeCode(2.0), {}, {});
+    CHECK(RigExecBakedHeadValueSame(
+        leafAt(repainted.layoutLeaves, layoutWeights), VtValue(painted)));
+
+    // One time sample over the default: every numeric time reads it and
+    // Default reads the default, so a table stands per Default-ness. A
+    // second makes the read vary, and it is read at every sample.
+    CHECK(restTzAttr.Set(1.25, UsdTimeCode(3.0)));
+    const RigExecFrameInputs keyed = sample(UsdTimeCode(2.0), {}, {});
+    CHECK(restTzAt(keyed) == 1.25);
+    checkProviders(keyed);
+    digest(keyed);
+    const RigExecFrameInputs atDefault = sample(UsdTimeCode::Default(), {}, {});
+    CHECK(restTzAt(atDefault) == 0.75);
+    checkProviders(atDefault);
+    digest(atDefault);
+    CHECK(restTzAt(sample(UsdTimeCode(2.0), {}, {})) == 1.25);
+    CHECK(restTzAttr.Set(2.5, UsdTimeCode(4.0)));
+    for (const double t : {3.0, 3.5, 4.0}) {
+        const RigExecFrameInputs varying = sample(UsdTimeCode(t), {}, {});
+        const RigExecSampledInput *tz = providerSample(varying, restTz);
+        CHECK(tz != nullptr && tz->staticSample < 0);
+        checkProviders(varying);
+        digest(varying);
+    }
+
+    // The burst route serves the same table and digests the same.
+    RigExecChainSampleBindings bindings;
+    CHECK(RigExecBindChainSampleInputs(evaluator, &bindings, &error));
+    RigExecBurstSampleCache cache;
+    CHECK(RigExecBuildBurstSampleCache(*evaluator.GetBakedProgram(), bindings,
+                                       {}, RigExecFrameCacheEpochDigest(evaluator),
+                                       &cache, &error));
+    for (const double t : {3.0, 4.0, 3.0}) {
+        RigExecFrameInputs burst;
+        CHECK(RigExecSampleFrameInputsWithBurstCache(
+            evaluator, UsdTimeCode(t), {}, &cache, &burst, &error));
+        const RigExecFrameInputs plain = sample(UsdTimeCode(t), {}, {});
+        CHECK(burst.staticSamples == plain.staticSamples);
+        CHECK(burst.values.size() == plain.values.size());
+        for (size_t i = 0;
+             i < burst.values.size() && i < plain.values.size(); ++i) {
+            CHECK(burst.values[i].path == plain.values[i].path);
+            CHECK(burst.values[i].staticSample ==
+                  plain.values[i].staticSample);
+            CHECK(RigExecBakedHeadValueSame(burst.values[i].value,
+                                            plain.values[i].value));
+        }
+        CHECK(RigExecControlStateDigestWithBurstCache(burst, {}, &cache) ==
+              digest(plain));
+    }
+
+    size_t verifyFailures = 0;
+    for (auto it = mark.GetBegin(); it != mark.GetEnd(); ++it) {
+        if (it->GetCommentary().find("frozen static") != std::string::npos) {
+            std::printf("FAIL %s\n", it->GetCommentary().c_str());
+            ++verifyFailures;
+        }
+    }
+    CHECK(verifyFailures == 0);
+    mark.Clear();
 }
 
 // Every path a frozen worker would otherwise build travels with the job or
@@ -6963,6 +7226,7 @@ main(int argc, char **argv)
     TestBurstBuildDeclinesUnplaceable();
     TestStillCurrentDetectsConstantEdit();
     TestConstantHeadLeavesRideASharedTable();
+    TestStaticLeavesFollowEdits();
     TestOverridePathsTravelWithTheJob();
     TestPatchFrozenAvarConstants();
     if (argc > 1) {

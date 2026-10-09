@@ -95,7 +95,29 @@ struct RigExecSampledInput {
     int burstSampleRoute = RigExecBurstRouteFresh;
     /// True for an explicit authored source block, distinct from missing.
     bool valueBlocked = false;
+    /// The RigExecFrameInputs::staticSamples entry this sample copies
+    /// verbatim, or -1. Set only by the samplers, when they serve the entry;
+    /// the digests then fold the entry's memoized level-1, so a caller that
+    /// rewrites a marked sample must reset this.
+    int32_t staticSample = -1;
 };
+
+/// The time-invariant reads of a frozen job's provider and weight-oracle
+/// leaves: each sample a fresh read appends for a leaf whose read cannot
+/// move with the time (RigExecRevisionLeafHops, asked when the table is
+/// built), with its level-1 digest (RigExecSampleDigest) and whether the
+/// control digest folds it exactly (RigExecSampleDigestible). Read on the UI
+/// thread and shared, immutable, by every vector sampled while the program's
+/// stamp, the evaluator's stage edit serial and the Default-ness of the time
+/// stand: every stage notice advances the serial, so a standing table holds
+/// what a read would answer now. Each entry's `staticSample` is its index.
+struct RigExecFrozenStaticSamples {
+    std::vector<RigExecSampledInput> samples;
+    std::vector<uint64_t> level1;
+    std::vector<char> digestible;
+};
+
+struct RigExecFrameDigestOrder;
 
 /// One admitted upstream value at a frame's time: authored-level, so it
 /// stands where the stage value of \p path stood (RigExecRigEvaluator::
@@ -223,6 +245,13 @@ struct RigExecFrameInputs {
     /// program without property chains. Folded by every control digest
     /// through its own precomputed digest.
     std::shared_ptr<const RigExecHeadLeafConstants> headLeafConstants;
+    /// The static samples table the samples marked `staticSample` copy, and
+    /// the fold order recorded for this vector's path sequence: the
+    /// digests take the memoized level-1s and, while the recorded paths
+    /// still equal `values`' elementwise, the recorded order. Null for a
+    /// vector no sampler built; the digests then fold every sample.
+    std::shared_ptr<const RigExecFrozenStaticSamples> staticSamples;
+    std::shared_ptr<const RigExecFrameDigestOrder> digestOrder;
     /// The admitted upstream values the vector was sampled under, sorted by
     /// path: the worker's upstream layer, which it diffs against the
     /// snapshot's (rule 8). Every read they reach rides `values` and the

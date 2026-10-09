@@ -2518,6 +2518,7 @@ RigExecBakedProgram::_BuildWithSceneCaptureAttempt(RigExecRigEvaluator *evaluato
     B.chunkCap = RigExecBakedChunkCapFromEnvironment();
     B.useSimd = RigExecSimdEnabled();
     B.purityAudit = TfGetenvBool("RIGEXEC_PURITY_AUDIT", false);
+    B.verifyFrozenStatic = TfGetenvBool("RIGEXEC_VERIFY_FROZEN_STATIC", false);
     RigExecRevisionKernelTouchTokens();
     RigExecWeightPacketsTouchTokens();
     RigExecBakedGeometryTouchTokens();

@@ -25,8 +25,12 @@
 #include "rigExec/frameCache.h"
 #include "rigExec/frozenContext.h"
 
+#include "pxr/base/gf/matrix4d.h"
+#include "pxr/base/vt/types.h"
+
 #include <atomic>
 #include <cstdio>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
@@ -528,6 +532,132 @@ TestDigestibleFlagsUnhashableValues()
     CHECK(RigExecControlStateDigestible(plain, {MakeOverride("/Rig/C", 1.0)}));
 }
 
+// The recorded fold order and the static table's level-1s are a faster
+// route to the plain digest, never another fold: a vector carrying both
+// digests and classifies exactly as its copy without them, first-win
+// duplicates, valueless and blocked samples, overrides, upstream values and
+// the burst route included. A vector whose path sequence moved since the
+// order was recorded, or a mark the table does not hold at its path, folds
+// plainly; and a marked sample folds its entry's level-1, which is why the
+// samplers serve entries verbatim.
+void
+TestRecordedOrderAndStaticTableFoldAsPlain()
+{
+    auto table = std::make_shared<RigExecFrozenStaticSamples>();
+    const auto entry = [](RigExecFrozenStaticSamples *t, const char *path,
+                          const VtValue &value, bool hasValue, bool blocked) {
+        RigExecSampledInput sample;
+        sample.path = SdfPath(path);
+        sample.value = value;
+        sample.hasValue = hasValue;
+        sample.valueBlocked = blocked;
+        sample.staticSample = int32_t(t->samples.size());
+        t->level1.push_back(RigExecSampleDigest(sample));
+        t->digestible.push_back(RigExecSampleDigestible(sample) ? 1 : 0);
+        t->samples.push_back(sample);
+    };
+    entry(table.get(), "/Rig/B.rigExec:providerRaw:rest:tx", VtValue(0.5),
+          true, false);
+    entry(table.get(), "/Rig/A.rigExec:providerRaw:parent:space",
+          VtValue(GfMatrix4d(2.0)), true, false);
+    entry(table.get(), "/Rig/C.rigExec:providerRaw:avars:rotationOrder",
+          VtValue(TfToken("zxy")), true, false);
+    entry(table.get(), "/Rig/D.rigExec:providerRaw:rest:rz", VtValue(),
+          false, true);
+
+    RigExecFrameInputs inputs;
+    inputs.time = UsdTimeCode(3.0);
+    inputs.Add(SdfPath("/Rig/Z.avars:tx"), VtValue(1.25));
+    for (const RigExecSampledInput &sample : table->samples) {
+        inputs.values.push_back(sample);
+    }
+    inputs.Add(SdfPath("/Rig/A.avars:ty"),
+               VtValue(VtFloatArray{1.0f, -0.0f}));
+    // A later sample at a served path: the served one wins.
+    inputs.Add(SdfPath("/Rig/B.rigExec:providerRaw:rest:tx"), VtValue(9.0));
+    inputs.Add(SdfPath("/Rig/E.inputs:weight"), VtValue(),
+               /*hasValue=*/false);
+    inputs.staticSamples = table;
+    inputs.digestOrder = RigExecRecordFrameDigestOrder(inputs.values);
+    CHECK(RigExecFrameDigestOrderMatches(inputs.digestOrder.get(),
+                                         inputs.values));
+    CHECK(!RigExecFrameDigestOrderMatches(nullptr, inputs.values));
+
+    const auto plainOf = [](const RigExecFrameInputs &v) {
+        RigExecFrameInputs plain = v;
+        plain.staticSamples.reset();
+        plain.digestOrder.reset();
+        return plain;
+    };
+    const RigExecFrameInputs plain = plainOf(inputs);
+    const uint64_t plainDigest = RigExecControlStateDigest(plain);
+    const std::vector<RigExecValueOverride> held{MakeOverride("/Rig/Z", 4.0)};
+    RigExecUpstreamValue up;
+    up.path = SdfPath("/Rig/A.avars:tz");
+    up.value = VtValue(2.0);
+    CHECK(RigExecControlStateDigest(inputs) == plainDigest);
+    CHECK(RigExecControlStateDigest(inputs, held) ==
+          RigExecControlStateDigest(plain, held));
+    CHECK(RigExecControlStateDigest(inputs, held, {up}) ==
+          RigExecControlStateDigest(plain, held, {up}));
+    CHECK(RigExecControlStateDigestible(inputs));
+    CHECK(RigExecControlStateDigestible(plain));
+
+    // The burst route: its first frame records its own order and the next
+    // reuses it, with or without the sampler's.
+    RigExecBurstSampleCache cache;
+    cache.usable = true;
+    CHECK(RigExecControlStateDigestWithBurstCache(inputs, {}, &cache) ==
+          plainDigest);
+    CHECK(RigExecControlStateDigestWithBurstCache(inputs, {}, &cache) ==
+          plainDigest);
+    RigExecFrameInputs unordered = inputs;
+    unordered.digestOrder.reset();
+    CHECK(RigExecControlStateDigestWithBurstCache(unordered, {}, &cache) ==
+          plainDigest);
+
+    // A fresh sample's value moves the digest through the recorded order.
+    RigExecFrameInputs moved = inputs;
+    moved.values[0].value = VtValue(1.5);
+    CHECK(RigExecFrameDigestOrderMatches(moved.digestOrder.get(),
+                                         moved.values));
+    CHECK(RigExecControlStateDigest(moved) ==
+          RigExecControlStateDigest(plainOf(moved)));
+    CHECK(RigExecControlStateDigest(moved) != plainDigest);
+
+    // Another path sequence than the recorded one folds plainly.
+    RigExecFrameInputs grown = inputs;
+    grown.Add(SdfPath("/Rig/F.inputs:x"), VtValue(2.0));
+    CHECK(!RigExecFrameDigestOrderMatches(grown.digestOrder.get(),
+                                          grown.values));
+    CHECK(RigExecControlStateDigest(grown) ==
+          RigExecControlStateDigest(plainOf(grown)));
+    CHECK(RigExecControlStateDigest(grown) != plainDigest);
+
+    // A mark naming an entry at another path is not that entry's.
+    RigExecFrameInputs foreign = inputs;
+    foreign.values[0].staticSample = 1;
+    CHECK(RigExecControlStateDigest(foreign) == plainDigest);
+
+    // A marked sample folds its entry's level-1, never its own bytes.
+    auto skewed = std::make_shared<RigExecFrozenStaticSamples>(*table);
+    skewed->level1[0] ^= 1;
+    RigExecFrameInputs viaSkewed = inputs;
+    viaSkewed.staticSamples = skewed;
+    CHECK(RigExecControlStateDigest(viaSkewed) != plainDigest);
+
+    // An unhashable entry is undigestible through the table, as plainly.
+    auto opaque = std::make_shared<RigExecFrozenStaticSamples>(*table);
+    entry(opaque.get(), "/Rig/G.rigExec:providerRaw:custom",
+          VtValue(Unhashable{3}), true, false);
+    CHECK(!opaque->digestible.back());
+    RigExecFrameInputs undigestible = inputs;
+    undigestible.staticSamples = opaque;
+    undigestible.values.push_back(opaque->samples.back());
+    CHECK(!RigExecControlStateDigestible(undigestible));
+    CHECK(!RigExecControlStateDigestible(plainOf(undigestible)));
+}
+
 // The D7 fallback digest keys the frame plus the stage-edit serial plus the
 // standing overrides: the same frame re-digests equal, another frame digests
 // apart (Default most of all), an edit (a moved serial) digests apart at
@@ -985,6 +1115,7 @@ main()
     TestDigestSeesOverrides();
     TestDigestIgnoresTime();
     TestDigestibleFlagsUnhashableValues();
+    TestRecordedOrderAndStaticTableFoldAsPlain();
     TestRefusalDigestKeysTimeAndOverrides();
     TestDigestSeesUpstream();
     TestDigestFoldsUpstreamArrayHashes();

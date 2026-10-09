@@ -85,6 +85,7 @@ namespace rigExec {
 class RigExecRigEvaluator;
 struct RigExecRigPose;
 struct RigExecHeadLeafConstants;
+struct RigExecFrozenSamplerMemo;
 
 // Shared helpers.
 
@@ -3755,6 +3756,14 @@ struct RigExecBakedProgramImpl {
     mutable uint64_t headLeafConstantsStamp = 0;
     mutable uint64_t headLeafConstantsSerial = 0;
     mutable bool headLeafConstantsDefault = false;
+    /// The frozen samplers' memo of the leaf reads that cannot move with
+    /// the time and of recorded digest orders (RigExecFrozenSamplerMemo).
+    /// UI thread only and never cloned, like headLeafConstants.
+    mutable std::shared_ptr<RigExecFrozenSamplerMemo> frozenSamplerMemo;
+    /// RIGEXEC_VERIFY_FROZEN_STATIC, read at Build: the samplers re-read
+    /// every memoized leaf and check it, and the vector's digest, against
+    /// the unmemoized answer.
+    bool verifyFrozenStatic = false;
     /// The reads after the head tier that a chain result or a record can
     /// answer (RigExecBakedReaderWalk), bound at Build; per walk, whether
     /// something it depends on moved this run (RigExecBakedNoteReaderWalks)

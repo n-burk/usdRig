@@ -168,6 +168,28 @@ uint64_t RigExecControlStateDigest(
 /// rest per frame. Within-process only, like the key hash.
 uint64_t RigExecSampleDigest(const RigExecSampledInput &sample);
 
+/// Whether the control digest folds \p sample exactly: valueless, or a
+/// value of a type it folds bitwise or VtValue hashes.
+bool RigExecSampleDigestible(const RigExecSampledInput &sample);
+
+/// The fold order of one sample path sequence (defined in frameCache.cpp):
+/// per first-win path in sorted order, its index in the sequence and the
+/// level-1 state after the path (the "src" tag and the path's text, as
+/// RigExecSampleDigest folds them). Recorded on the owning thread and
+/// immutable after; a digest takes it only while the vector repeats the
+/// recorded path sequence elementwise.
+struct RigExecFrameDigestOrder;
+
+/// Records the fold order of \p values' path sequence.
+std::shared_ptr<const RigExecFrameDigestOrder> RigExecRecordFrameDigestOrder(
+    const std::vector<RigExecSampledInput> &values);
+
+/// Whether \p order was recorded from \p values' path sequence; false for a
+/// null order.
+bool RigExecFrameDigestOrderMatches(
+    const RigExecFrameDigestOrder *order,
+    const std::vector<RigExecSampledInput> &values);
+
 /// Folds an epoch-constant digest (plan D3: RigExecEpochConstantDigest, the
 /// value-sensitive avar-constant region the epoch digest no longer covers)
 /// into a control digest, under its own domain tag. The fold is

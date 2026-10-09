@@ -123,6 +123,8 @@ RigExecFrameInputs::Clear()
     overrides.clear();
     overridePaths.clear();
     headLeafConstants.reset();
+    staticSamples.reset();
+    digestOrder.reset();
     upstream.clear();
 }
 

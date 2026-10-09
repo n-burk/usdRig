@@ -4,8 +4,11 @@
 #include "frameCache.h"
 #include "movers/moverRegistry.h"
 #include "rigExecMath/geometryKernels.h"
+#include "pxr/base/tf/diagnostic.h"
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <memory>
 #include <set>
 #include <tuple>
 
@@ -17,6 +20,50 @@ void RigExecFrozenGeometryTouchTokens()
 {
     (void)frozenDetail::_frozenWeightTokens.Get();
 }
+
+/// The frozen samplers' memo on one program
+/// (RigExecBakedProgramImpl::frozenSamplerMemo), owning thread only.
+/// `stamp`, `serial` and `atDefault` name the state its reads were taken
+/// under: the program stamp, the evaluator's stage edit serial and the
+/// Default-ness of the time. Every stage notice advances the serial, so
+/// while the three stand a leaf whose read cannot move with the time
+/// (RigExecRevisionLeafHops, asked under that state) reads what it read
+/// then. The recorded digest orders depend on the sample path sequence
+/// alone and outlive the state.
+struct RigExecFrozenSamplerMemo {
+    /// A provider or oracle leaf read at every sample, or sampling nothing.
+    static constexpr int32_t kPerFrame = -1;
+    static constexpr int32_t kNoSample = -2;
+    /// A transport leaf's classification, made on first use under the state.
+    enum : uint8_t { kUnknown = 0, kVarying, kStatic, kStaticRead };
+
+    bool built = false;
+    uint64_t stamp = 0;
+    uint64_t serial = 0;
+    bool atDefault = false;
+    /// The provider and weight-oracle samples, read when the state changed.
+    std::shared_ptr<const RigExecFrozenStaticSamples> samples;
+    /// Per provider leaf, its `samples` entry, kPerFrame or kNoSample.
+    std::vector<int32_t> providerEntries;
+    /// Per weight object and oracle key, its entry or kPerFrame, and the
+    /// paths its read can reach (served only while no override or upstream
+    /// value stands on one).
+    std::vector<std::vector<int32_t>> oracleEntries;
+    std::vector<std::vector<std::vector<SdfPath>>> oracleHops;
+    /// Per revision, derived target and layout row: each key's
+    /// classification, its value once read, and the paths its read can
+    /// reach.
+    struct Row {
+        std::vector<uint8_t> state;
+        std::vector<VtValue> values;
+        std::vector<std::vector<SdfPath>> hops;
+    };
+    std::vector<Row> revisionRows;
+    std::vector<Row> derivedRows;
+    std::vector<Row> layoutRows;
+    /// Recorded digest orders, most recently used first.
+    std::array<std::shared_ptr<const RigExecFrameDigestOrder>, 4> orders;
+};
 
 using namespace frozenDetail;
 
@@ -452,6 +499,94 @@ _PlaceOverridesIntoResolved(
     }
 }
 
+// The paths the job's overrides and upstream values stand on, sorted: a
+// memoized leaf whose read reaches one is read fresh instead.
+std::vector<SdfPath>
+_TouchedPaths(const std::vector<SdfPath> &overridePaths,
+              const std::map<SdfPath, VtValue> *layer)
+{
+    std::vector<SdfPath> touched;
+    for (const SdfPath &path : overridePaths) {
+        if (!path.IsEmpty()) {
+            touched.push_back(path);
+        }
+    }
+    if (layer) {
+        for (const auto &entry : *layer) {
+            touched.push_back(entry.first);
+        }
+    }
+    std::sort(touched.begin(), touched.end());
+    touched.erase(std::unique(touched.begin(), touched.end()), touched.end());
+    return touched;
+}
+
+bool
+_HopsTouched(const std::vector<SdfPath> &hops,
+             const std::vector<SdfPath> &touched)
+{
+    if (touched.empty()) {
+        return false;
+    }
+    for (const SdfPath &hop : hops) {
+        if (std::binary_search(touched.begin(), touched.end(), hop)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// RIGEXEC_VERIFY_FROZEN_STATIC: a served sample against a fresh read.
+void
+_VerifyServedSample(const RigExecSampledInput &served,
+                    const RigExecSampledInput &fresh)
+{
+    TF_VERIFY(served.path == fresh.path &&
+                  served.hasValue == fresh.hasValue &&
+                  served.valueBlocked == fresh.valueBlocked &&
+                  RigExecBakedHeadValueSame(served.value, fresh.value),
+              "frozen static sample <%s> differs from a fresh read",
+              fresh.path.GetText());
+}
+
+// One transport leaf of \p leaves under the sampler memo's \p row. A key
+// whose read can move with the time, or reaches a \p touched path, is read
+// fresh by \p read; any other is read once under the memo's state and
+// served after, a refcounted copy of that read.
+template <class Read>
+VtValue
+_MemoLeafValue(RigExecFrozenSamplerMemo::Row *row,
+               const RigExecBakedPathLeaves &leaves, size_t k,
+               const std::vector<SdfPath> &touched, bool verify, Read &&read)
+{
+    using Memo = RigExecFrozenSamplerMemo;
+    const size_t n = leaves.decl.keys.size();
+    if (row->state.size() != n) {
+        row->state.assign(n, Memo::kUnknown);
+        row->values.assign(n, VtValue());
+        row->hops.assign(n, std::vector<SdfPath>());
+    }
+    uint8_t &state = row->state[k];
+    if (state == Memo::kUnknown) {
+        bool varying = false;
+        RigExecRevisionLeafHops(leaves.decl.keys[k], leaves.attributes[k],
+                                &row->hops[k], &varying);
+        state = varying ? Memo::kVarying : Memo::kStatic;
+    }
+    if (state == Memo::kVarying || _HopsTouched(row->hops[k], touched)) {
+        return read();
+    }
+    if (state == Memo::kStatic) {
+        row->values[k] = read();
+        state = Memo::kStaticRead;
+    } else if (verify) {
+        TF_VERIFY(RigExecBakedHeadValueSame(read(), row->values[k]),
+                  "frozen static leaf <%s> differs from a fresh read",
+                  leaves.decl.keys[k].path.GetText());
+    }
+    return row->values[k];
+}
+
 void
 _SampleWeightBindings(const RigExecBakedProgramImpl::WeightObject &object,
                       const RigExecResolvedInputs *refreshed,
@@ -490,11 +625,16 @@ _FrozenReadWeightArray(const RigExecResolvedInputs *refreshed,
 // packet build reads. Roles with no attributes sample nothing; the worker
 // answers those as empty, which is what the live gather yields. Failed
 // reads contribute nothing to a concatenation, matching the live arms.
+// The oracle leaves of weight object \p objectIndex that \p memo holds
+// time-invariant are served from it while no \p touched path stands on
+// their reads.
 void
 _SampleWeightArrays(const RigExecBakedProgramImpl::WeightObject &object,
                     const RigExecResolvedInputs *refreshed, UsdTimeCode time,
                     RigExecFrameInputs *out,
-                    const std::map<SdfPath, VtValue> *layer = nullptr)
+                    const std::map<SdfPath, VtValue> *layer,
+                    const RigExecFrozenSamplerMemo &memo, size_t objectIndex,
+                    const std::vector<SdfPath> &touched, bool verify)
 {
     const auto gatherPoints =
         [&](const std::vector<UsdAttribute> &attributes,
@@ -518,9 +658,29 @@ _SampleWeightArrays(const RigExecBakedProgramImpl::WeightObject &object,
     for (size_t k=0;k<object.oracleLeaves.decl.keys.size();++k) {
         const auto &key = object.oracleLeaves.decl.keys[k];
         if (key.path.IsEmpty()) continue;
+        const int32_t entry =
+            objectIndex < memo.oracleEntries.size() &&
+                    k < memo.oracleEntries[objectIndex].size()
+                ? memo.oracleEntries[objectIndex][k]
+                : RigExecFrozenSamplerMemo::kPerFrame;
+        const bool served =
+            entry >= 0 &&
+            !_HopsTouched(memo.oracleHops[objectIndex][k], touched);
+        if (served) {
+            out->values.push_back(memo.samples->samples[size_t(entry)]);
+            if (!verify) continue;
+        }
         const VtValue value = RigExecSampleRevisionLeaf(key,
             object.oracleLeaves.attributes[k],nullptr,time,layer);
-        out->Add(object.oracleFrozenKeys[k],value,!value.IsEmpty());
+        if (!served) {
+            out->Add(object.oracleFrozenKeys[k],value,!value.IsEmpty());
+            continue;
+        }
+        RigExecSampledInput fresh;
+        fresh.path = object.oracleFrozenKeys[k];
+        fresh.value = value;
+        fresh.hasValue = !value.IsEmpty();
+        _VerifyServedSample(out->values.back(), fresh);
     }
     gatherPoints(object.targetPoints, _frozenWeightTokens->targetPointsKey);
     gatherPoints(object.samplePoints, _frozenWeightTokens->samplePointsKey);
@@ -688,6 +848,176 @@ _SampleAttribute(const SdfPath &key, const UsdAttribute &attribute,
     out->Add(key, value, hasValue, false, blocked);
 }
 
+// \p B's sampler memo for the state \p time samples under (see
+// RigExecFrozenSamplerMemo). Past a change of that state the transport
+// rows are forgotten and the provider and weight-oracle reads are taken
+// again: each whose read cannot move with the time, asked as the live
+// samplers ask it (RigExecRevisionLeafHops), is read once here, at \p time
+// and with no override or upstream value, and becomes a table entry with
+// its level-1 digest. Owning thread only.
+RigExecFrozenSamplerMemo &
+_FrozenSamplerMemo(const RigExecRigEvaluator &evaluator,
+                   const RigExecBakedProgramImpl &B, UsdTimeCode time)
+{
+    using Memo = RigExecFrozenSamplerMemo;
+    if (!B.frozenSamplerMemo) {
+        B.frozenSamplerMemo = std::make_shared<Memo>();
+    }
+    Memo &memo = *B.frozenSamplerMemo;
+    const uint64_t serial = evaluator.GetStageEditSerial();
+    // Sized as the program's tables, so a reshaped program is read again
+    // rather than indexed past the memo's end.
+    const bool shaped =
+        memo.providerEntries.size() == B.providerFrozenKeys.size() &&
+        memo.oracleEntries.size() == B.weightObjects.size() &&
+        memo.revisionRows.size() == B.revisionIndex.size() &&
+        memo.derivedRows.size() == B.derivedIndex.size();
+    if (memo.built && shaped && memo.stamp == B.programStamp &&
+        memo.serial == serial && memo.atDefault == time.IsDefault()) {
+        return memo;
+    }
+    memo.built = true;
+    memo.stamp = B.programStamp;
+    memo.serial = serial;
+    memo.atDefault = time.IsDefault();
+    memo.revisionRows.assign(B.revisionIndex.size(), Memo::Row());
+    memo.derivedRows.assign(B.derivedIndex.size(), Memo::Row());
+    memo.layoutRows.assign(B.revisionIndex.size() + B.derivedIndex.size(),
+                           Memo::Row());
+    auto table = std::make_shared<RigExecFrozenStaticSamples>();
+    const auto add = [&table](RigExecSampledInput sample) {
+        const int32_t entry = int32_t(table->samples.size());
+        sample.staticSample = entry;
+        table->level1.push_back(RigExecSampleDigest(sample));
+        table->digestible.push_back(RigExecSampleDigestible(sample) ? 1 : 0);
+        table->samples.push_back(std::move(sample));
+        return entry;
+    };
+    RigExecFrameInputs read;
+    std::vector<SdfPath> hops;
+    const RigExecBakedPathLeaves &providers = B.providerLeaves;
+    memo.providerEntries.assign(B.providerFrozenKeys.size(), Memo::kPerFrame);
+    for (size_t k = 0; k < B.providerFrozenKeys.size(); ++k) {
+        const UsdAttribute &attribute = providers.attributes[k];
+        if (!attribute.IsValid() || B.providerFrozenKeys[k].IsEmpty()) {
+            memo.providerEntries[k] = Memo::kNoSample;
+            continue;
+        }
+        bool varying = false;
+        RigExecRevisionLeafHops(providers.decl.keys[k], attribute, &hops,
+                                &varying);
+        if (varying) {
+            continue;
+        }
+        read.values.clear();
+        _SampleAttribute(B.providerFrozenKeys[k], attribute, time, &read);
+        memo.providerEntries[k] = add(std::move(read.values.back()));
+    }
+    memo.oracleEntries.assign(B.weightObjects.size(), {});
+    memo.oracleHops.assign(B.weightObjects.size(), {});
+    for (size_t o = 0; o < B.weightObjects.size(); ++o) {
+        const RigExecBakedProgramImpl::WeightObject &object =
+            B.weightObjects[o];
+        const RigExecBakedPathLeaves &leaves = object.oracleLeaves;
+        const size_t n = leaves.decl.keys.size();
+        memo.oracleEntries[o].assign(n, Memo::kPerFrame);
+        memo.oracleHops[o].assign(n, std::vector<SdfPath>());
+        for (size_t k = 0; k < n; ++k) {
+            const RigExecRevisionLeafKey &key = leaves.decl.keys[k];
+            if (key.path.IsEmpty()) {
+                continue;
+            }
+            bool varying = false;
+            RigExecRevisionLeafHops(key, leaves.attributes[k],
+                                    &memo.oracleHops[o][k], &varying);
+            if (varying) {
+                continue;
+            }
+            const VtValue value = RigExecSampleRevisionLeaf(
+                key, leaves.attributes[k], nullptr, time, nullptr);
+            read.values.clear();
+            read.Add(object.oracleFrozenKeys[k], value, !value.IsEmpty());
+            memo.oracleEntries[o][k] = add(std::move(read.values.back()));
+        }
+    }
+    memo.samples = std::move(table);
+    return memo;
+}
+
+// The provider leaves, in table order: the memo's sample for each whose
+// read cannot move with the time, a fresh read for the rest.
+void
+_SampleProviderLeaves(const RigExecBakedProgramImpl &B,
+                      const RigExecFrozenSamplerMemo &memo, UsdTimeCode time,
+                      RigExecFrameInputs *sampled)
+{
+    sampled->values.reserve(sampled->values.size() +
+                            B.providerFrozenKeys.size());
+    for (size_t k = 0; k < B.providerFrozenKeys.size(); ++k) {
+        const int32_t entry = k < memo.providerEntries.size()
+                                  ? memo.providerEntries[k]
+                                  : RigExecFrozenSamplerMemo::kPerFrame;
+        if (entry == RigExecFrozenSamplerMemo::kNoSample) {
+            continue;
+        }
+        if (entry < 0) {
+            _SampleAttribute(B.providerFrozenKeys[k],
+                             B.providerLeaves.attributes[k], time, sampled);
+            continue;
+        }
+        sampled->values.push_back(memo.samples->samples[size_t(entry)]);
+        if (B.verifyFrozenStatic) {
+            RigExecFrameInputs fresh;
+            _SampleAttribute(B.providerFrozenKeys[k],
+                             B.providerLeaves.attributes[k], time, &fresh);
+            if (TF_VERIFY(fresh.values.size() == 1,
+                          "frozen static provider leaf read nothing")) {
+                _VerifyServedSample(sampled->values.back(),
+                                    fresh.values.back());
+            }
+        }
+    }
+}
+
+// Attaches the digest order recorded for \p sampled's path sequence, from
+// the memo's recent orders or recorded now. Under
+// RIGEXEC_VERIFY_FROZEN_STATIC, checks the vector digests and classifies as
+// it does with neither the order nor the static table's memos.
+void
+_AttachDigestOrder(const RigExecBakedProgramImpl &B,
+                   RigExecFrozenSamplerMemo *memo,
+                   RigExecFrameInputs *sampled)
+{
+    auto &orders = memo->orders;
+    size_t found = orders.size();
+    for (size_t i = 0; i < orders.size(); ++i) {
+        if (RigExecFrameDigestOrderMatches(orders[i].get(),
+                                           sampled->values)) {
+            found = i;
+            break;
+        }
+    }
+    if (found < orders.size()) {
+        std::rotate(orders.begin(), orders.begin() + found,
+                    orders.begin() + found + 1);
+    } else {
+        std::rotate(orders.begin(), orders.end() - 1, orders.end());
+        orders.front() = RigExecRecordFrameDigestOrder(sampled->values);
+    }
+    sampled->digestOrder = orders.front();
+    if (B.verifyFrozenStatic) {
+        RigExecFrameInputs plain = *sampled;
+        plain.staticSamples.reset();
+        plain.digestOrder.reset();
+        TF_VERIFY(RigExecControlStateDigest(*sampled, sampled->overrides) ==
+                      RigExecControlStateDigest(plain, plain.overrides),
+                  "frozen static digest differs from the plain fold");
+        TF_VERIFY(RigExecControlStateDigestible(*sampled) ==
+                      RigExecControlStateDigestible(plain),
+                  "frozen static digestibility differs from the plain one");
+    }
+}
+
 // Samples one dense blend sample's target points: the refreshed inputs
 // first -- R.GetAttribute follows single authored connections, so an
 // override standing on the target is what live reads -- else the stage at
@@ -747,11 +1077,15 @@ _SampleRevisionLeaf(const RigExecBakedPathLeaves &leaves, size_t k,
 // Parallel to revisionIndex and derivedIndex; empty for the rest. A skin
 // whose layout live holds as fixed leaves its three layout reads empty, as
 // the live prologue skips them: the packet carries the handle instead.
+// A leaf whose read cannot move with the time is served from \p memo while
+// no \p touched path stands on it.
 void
 _SampleRevisionLeaves(const RigExecBakedProgramImpl &B,
                       const RigExecResolvedInputs *refreshed, UsdTimeCode time,
                       RigExecFrameInputs *sampled,
-                      const std::map<SdfPath, VtValue> *layer)
+                      const std::map<SdfPath, VtValue> *layer,
+                      RigExecFrozenSamplerMemo *memo,
+                      const std::vector<SdfPath> &touched)
 {
     using Role = RigExecRevisionLeafRole;
     // Identical raw reads share one answer only within this sample call.
@@ -817,8 +1151,9 @@ _SampleRevisionLeaves(const RigExecBakedProgramImpl &B,
                 values.push_back(VtValue());
                 continue;
             }
-            values.push_back(
-                sampleLeaf(leaves, k));
+            values.push_back(_MemoLeafValue(
+                &memo->revisionRows[r], leaves, k, touched,
+                B.verifyFrozenStatic, [&] { return sampleLeaf(leaves, k); }));
         }
     }
     // Every derived target's, parallel to derivedIndex.
@@ -836,19 +1171,23 @@ _SampleRevisionLeaves(const RigExecBakedProgramImpl &B,
         std::vector<VtValue> &values = sampled->derivedLeaves[d];
         values.reserve(leaves.decl.keys.size());
         for (size_t k = 0; k < leaves.decl.keys.size(); ++k) {
-            values.push_back(
-                sampleLeaf(leaves, k));
+            values.push_back(_MemoLeafValue(
+                &memo->derivedRows[d], leaves, k, touched,
+                B.verifyFrozenStatic, [&] { return sampleLeaf(leaves, k); }));
         }
     }
 }
 
 // Every SkinTopology operation receives source leaves at the job's time.
-// Layout preparation remains in the graph body.
+// Layout preparation remains in the graph body. Served from \p memo as the
+// revision leaves are.
 void
 _SampleLayoutLeaves(const RigExecBakedProgramImpl &B,
                     const RigExecResolvedInputs *refreshed, UsdTimeCode time,
                     RigExecFrameInputs *sampled,
-                    const std::map<SdfPath, VtValue> *layer)
+                    const std::map<SdfPath, VtValue> *layer,
+                    RigExecFrozenSamplerMemo *memo,
+                    const std::vector<SdfPath> &touched)
 {
     const size_t count = B.revisionIndex.size() + B.derivedIndex.size();
     sampled->layoutLeaves.assign(count, std::vector<VtValue>());
@@ -868,9 +1207,13 @@ _SampleLayoutLeaves(const RigExecBakedProgramImpl &B,
         paths.reserve(n);
         for (size_t k = 0; k < n; ++k) {
             paths.push_back(leaves.decl.keys[k].path);
-            values.push_back(RigExecSampleRevisionLeaf(
-                leaves.decl.keys[k], leaves.attributes[k], refreshed, time,
-                layer));
+            values.push_back(_MemoLeafValue(
+                &memo->layoutRows[r], leaves, k, touched,
+                B.verifyFrozenStatic, [&] {
+                    return RigExecSampleRevisionLeaf(
+                        leaves.decl.keys[k], leaves.attributes[k], refreshed,
+                        time, layer);
+                }));
         }
         // A layout that is not fixed can read another value at another
         // time, and no sample in `values` reads it: the control digests
@@ -1840,6 +2183,13 @@ _SampleWithPinnedChainBindings(
     // worker runs the head tier and resolves the walks from these.
     _SampleHeadLeaves(evaluator, B, time, &sampled, layer);
     _SampleOracleReference(evaluator,B,time,overrides,upstreamLayer,overrideFlags,&sampled);
+    // The reads that cannot move with the time, held while the stage and
+    // the program stand; the job's overrides and upstream values reach
+    // `touched`, whose leaf reads are taken fresh.
+    RigExecFrozenSamplerMemo &memo = _FrozenSamplerMemo(evaluator, B, time);
+    sampled.staticSamples = memo.samples;
+    const std::vector<SdfPath> touched =
+        _TouchedPaths(sampled.overridePaths, layer);
 
     for (const RigExecBakedProgramImpl::AvarBinding &binding :
          B.avarBindings) {
@@ -1892,11 +2242,13 @@ _SampleWithPinnedChainBindings(
         _SampleConstraintBindings(constraint, &refreshed, readFlags, time,
                                   &sampled, layer);
     }
-    for (const RigExecBakedProgramImpl::WeightObject &object :
-         B.weightObjects) {
+    for (size_t o = 0; o < B.weightObjects.size(); ++o) {
+        const RigExecBakedProgramImpl::WeightObject &object =
+            B.weightObjects[o];
         _SampleWeightBindings(object, &refreshed, readFlags, time, &sampled,
                               layer);
-        _SampleWeightArrays(object, &refreshed, time, &sampled, layer);
+        _SampleWeightArrays(object, &refreshed, time, &sampled, layer, memo,
+                            o, touched, B.verifyFrozenStatic);
     }
     // Ribbon driver points: read straight off the stage by the prologue,
     // honouring neither connections nor the resolved inputs, so sampled the
@@ -2085,10 +2437,11 @@ _SampleWithPinnedChainBindings(
     }
     // The skin layouts the worker's SkinTopology ops build from, then every
     // revision's assembly reads.
-    _SampleLayoutLeaves(B, &refreshed, time, &sampled, layer);
-    for(size_t k=0;k<B.providerFrozenKeys.size();++k)
-        _SampleAttribute(B.providerFrozenKeys[k],B.providerLeaves.attributes[k],time,&sampled);
-    _SampleRevisionLeaves(B, &refreshed, time, &sampled, layer);
+    _SampleLayoutLeaves(B, &refreshed, time, &sampled, layer, &memo,
+                        touched);
+    _SampleProviderLeaves(B, memo, time, &sampled);
+    _SampleRevisionLeaves(B, &refreshed, time, &sampled, layer, &memo,
+                          touched);
     if (!_AppendSparseLayoutSources(B, &sampled))
         return fail("sparse layout source census differs from compiled leaves");
     // Stage-frame seeds at the job's time, through the program's hook. A
@@ -2117,8 +2470,9 @@ _SampleWithPinnedChainBindings(
             sampled.Add(key, o.value, /*hasValue=*/true);
         }
     }
+    _AttachDigestOrder(B, &memo, &sampled);
 
-    *out = sampled;
+    *out = std::move(sampled);
     return true;
 }
 } // namespace
@@ -2381,6 +2735,11 @@ RigExecSampleFrameInputsWithBurstCache(
     // constant ones by the shared table.
     _SampleHeadLeaves(evaluator, B, time, &sampled, layer);
     _SampleOracleReference(evaluator,B,time,overrides,cache->upstreamLayer,cache->overrideFlags,&sampled);
+    // The time-invariant leaf reads, as in the plain sampler.
+    RigExecFrozenSamplerMemo &memo = _FrozenSamplerMemo(evaluator, B, time);
+    sampled.staticSamples = memo.samples;
+    const std::vector<SdfPath> touched =
+        _TouchedPaths(sampled.overridePaths, layer);
 
     samplePhase("Sample.HeadOracle");
     for (const RigExecBakedProgramImpl::AvarBinding &binding :
@@ -2447,7 +2806,7 @@ RigExecSampleFrameInputsWithBurstCache(
         // Point arrays ride outside the burst memo (always fresh, like the
         // ribbon points below): correctness first, memoization later.
         _SampleWeightArrays(B.weightObjects[i], &refreshed, time, &sampled,
-                            layer);
+                            layer, memo, i, touched, B.verifyFrozenStatic);
     }
     for (const RigExecBakedProgramImpl::Solver &solver : B.solvers) {
         if (solver.ribbonPointsVarying) {
@@ -2625,18 +2984,20 @@ RigExecSampleFrameInputsWithBurstCache(
         }
     }
     samplePhase("Sample.LegacyGeometry");
-    _SampleLayoutLeaves(B, &refreshed, time, &sampled, layer);
+    _SampleLayoutLeaves(B, &refreshed, time, &sampled, layer, &memo,
+                        touched);
     samplePhase("Sample.LayoutLeaves");
     std::set<SdfPath> providerPaths;
     size_t providerGets = 0;
-    for(size_t k=0;k<B.providerFrozenKeys.size();++k) {
-        if (profileSample && B.providerLeaves.attributes[k].IsValid() &&
+    for(size_t k=0;profileSample && k<B.providerFrozenKeys.size();++k) {
+        if (B.providerLeaves.attributes[k].IsValid() &&
             !B.providerFrozenKeys[k].IsEmpty()) {
             providerPaths.insert(B.providerLeaves.attributes[k].GetPath());
-            ++providerGets;
+            providerGets += memo.providerEntries[k] ==
+                            RigExecFrozenSamplerMemo::kPerFrame;
         }
-        _SampleAttribute(B.providerFrozenKeys[k],B.providerLeaves.attributes[k],time,&sampled);
     }
+    _SampleProviderLeaves(B, memo, time, &sampled);
     samplePhase("Sample.ProviderRawGetBlocked");
     if (profileSample) sampleProfiler.RecordInstant("Sample.ProviderInventory",
         "frozenSample", RigExecProfiler::NowUs(),
@@ -2644,7 +3005,8 @@ RigExecSampleFrameInputsWithBurstCache(
          {"uniqueAttributes",std::to_string(providerPaths.size())},
          {"getCalls",std::to_string(providerGets)},
          {"blockedFactCalls",std::to_string(providerGets)}});
-    _SampleRevisionLeaves(B, &refreshed, time, &sampled, layer);
+    _SampleRevisionLeaves(B, &refreshed, time, &sampled, layer, &memo,
+                          touched);
     if (!_AppendSparseLayoutSources(B, &sampled))
         return fail("sparse layout source census differs from compiled leaves");
     samplePhase("Sample.RevisionLeaves");
@@ -2669,6 +3031,7 @@ RigExecSampleFrameInputsWithBurstCache(
         }
     }
 
+    _AttachDigestOrder(B, &memo, &sampled);
     samplePhase("Sample.OverrideFinish");
     *out = std::move(sampled);
     return true;
