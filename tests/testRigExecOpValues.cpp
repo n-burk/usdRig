@@ -628,7 +628,12 @@ void TestSkinEffectiveSelectedTopology()
     topology->pointCount=1;topology->influenceCount=1;topology->validated=true;
     r.topologyResolved=true;r.topology=topology;r.layoutHandle=topology;
     const auto validTopology=Key(B,RigExecBakedSlotDomain::SkinTopology);
-    topology->validated=false;
+    // A layout is immutable once built and keyed by the serial naming its
+    // object (RigExecBakedRunLayoutOp): another one -- here one that failed
+    // validation -- moves the key.
+    auto invalid=std::make_shared<RigExecSkinTopology>(*topology);
+    invalid->validated=false;
+    r.topology=invalid;r.layoutHandle=invalid;++r.layoutSerial;
     CHECK(Key(B,RigExecBakedSlotDomain::SkinTopology)!=validTopology);
     const auto selected=key(true),raw=key(false);
     for(size_t k=0;k<3;++k) set(k,VtValue());
