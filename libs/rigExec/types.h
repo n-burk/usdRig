@@ -4,22 +4,31 @@
 #ifndef RIGEXEC_TYPES_H
 #define RIGEXEC_TYPES_H
 
-#include "rigExecMath/geometryKernels.h"
 #include "rigExecMath/pointFrame.h"
 #include "rigExecMath/wrinkleSettings.h"
 
+#include "pxr/base/gf/matrix4d.h"
 #include "pxr/base/gf/vec2f.h"
+#include "pxr/base/gf/vec3d.h"
 #include "pxr/base/gf/vec3f.h"
 #include "pxr/base/gf/vec3i.h"
 #include "pxr/base/vt/array.h"
+#include "pxr/base/tf/token.h"
 #include "pxr/base/vt/value.h"
 
+#include <array>
 #include <memory>
+#include <string>
 #include <vector>
 
 namespace rigExec {
 
 struct RigExecMoverHandler;
+
+// Defined in rigExecMath/deltaMushKernel.h; the alias is the one
+// rigExecMath/geometryKernels.h declares. Packets hold it by shared_ptr.
+template<class Point, class Wide> struct RigExecDeltaMushRestData;
+using RigExecDeltaMushRest = RigExecDeltaMushRestData<GfVec3f, GfVec3d>;
 
 /// Retain the shared computation/type registration library in headless hosts.
 void RigExecLoadComputations();

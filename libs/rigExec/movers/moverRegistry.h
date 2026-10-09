@@ -2,7 +2,8 @@
 #ifndef RIGEXEC_MOVERS_MOVER_REGISTRY_H
 #define RIGEXEC_MOVERS_MOVER_REGISTRY_H
 
-#include "../moverGraph.h"
+#include "../moverGraphTypes.h"
+#include "../types.h"
 #include "../oracleInputs.h"
 #include "rigExecBinary/external.h"
 

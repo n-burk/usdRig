@@ -3,6 +3,7 @@
 #include "rigEvaluatorInternal.h"
 #include "crossDomainInputs.h"
 #include "inputReplay.h"
+#include "moverGraph.h"
 #include "rigExecGraph/poseSceneLowering.h"
 #include "rigExecGraph/usdSceneAccess.h"
 #include "rigEvaluatorDependencies.h"

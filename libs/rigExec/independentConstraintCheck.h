@@ -4,7 +4,7 @@
 #include "independentConstraintReference.h"
 #include "bakedExecCrossCheck.h"
 #include "goldenPose.h"
-#include "moverGraph.h"
+#include "moverGraphCaches.h"
 #include "frameExtraction.h"
 #include "rigEvaluator.h"
 #include "pxr/usd/usdGeom/xformCache.h"

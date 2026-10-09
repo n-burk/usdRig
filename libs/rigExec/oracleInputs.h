@@ -1,14 +1,21 @@
 // Captured source facts for independent scalar reference handlers.
 #ifndef RIGEXEC_ORACLE_INPUTS_H
 #define RIGEXEC_ORACLE_INPUTS_H
-#include "moverGraph.h"
+#include "moverGraphTypes.h"
+#include "pxr/usd/sdf/types.h"
+#include "pxr/usd/sdf/valueTypeName.h"
+#include "pxr/usd/usd/common.h"
+#include "pxr/usd/usd/timeCode.h"
 #include <map>
 #include <memory>
 #include <utility>
 #include <set>
 #include <type_traits>
 #include <typeindex>
+#include <typeinfo>
+#include <vector>
 namespace rigExec {
+struct RigExecBlendSampleLayout;
 struct RigExecOracleAttribute {
     bool exists = false;
     SdfPath path;

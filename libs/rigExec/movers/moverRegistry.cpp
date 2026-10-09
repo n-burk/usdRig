@@ -1,6 +1,7 @@
 // RigExec mover registry storage and shared stage-reading helpers.
 #include "moverRegistry.h"
 #include "moverExecCommon.h"
+#include "../moverGraph.h"
 #include "rigExecGraph/geometryProgram.h"
 
 #include "pxr/base/plug/plugin.h"

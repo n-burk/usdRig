@@ -32,7 +32,6 @@
 #define RIGEXEC_FROZEN_CONTEXT_H
 
 #include "bakedTrace.h"
-#include "moverGraph.h"
 #include "rigEvaluator.h"
 #include "scalarReferenceAdapter.h"
 

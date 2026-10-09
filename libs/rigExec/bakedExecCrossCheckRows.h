@@ -2,7 +2,7 @@
 #define RIGEXEC_BAKED_EXEC_CROSS_CHECK_ROWS_H
 
 #include "bakedExecCrossCheck.h"
-#include "types.h"
+#include "rigExecMath/pointFrame.h"
 #include <memory>
 
 namespace rigExec {

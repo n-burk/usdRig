@@ -1,6 +1,13 @@
 #ifndef RIGEXEC_GRAPH_GEOMETRY_PROGRAM_H
 #define RIGEXEC_GRAPH_GEOMETRY_PROGRAM_H
-#include "rigExec/moverGraph.h"
+#include "rigExec/moverGraphCaches.h"
+#include "rigExec/moverGraphTypes.h"
+#include "rigExec/types.h"
+#include "rigExecMath/surfaceKernelCache.h"
+#include "pxr/base/vt/types.h"
+#include <memory>
+#include <string>
+#include <vector>
 namespace rigExec {
 /// Detached revision facts. Source/query handles remain in compiler adapters.
 struct RigExecGeometryRecord {

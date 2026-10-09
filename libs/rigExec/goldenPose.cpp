@@ -1,4 +1,5 @@
 #include "goldenPose.h"
+#include "types.h"
 
 #include "pxr/base/gf/quatd.h"
 #include "pxr/base/gf/quatf.h"

@@ -1616,6 +1616,22 @@ RigExecBlendSampleCache::Resolve(
     return _entries.emplace(sample, std::move(built)).first->second;
 }
 
+std::shared_ptr<const RigExecBlendSampleLayout>
+RigExecBlendSampleCache::AdoptExclusive(
+    const SdfPath &sample,
+    std::shared_ptr<const RigExecBlendSampleLayout> layout, bool refused) {
+    if (refused) { _entries[sample]=nullptr; return nullptr; }
+    if (!layout) return nullptr;
+    const auto active=_entries.find(sample);
+    if (active!=_entries.end() && active->second &&
+        (active->second==layout || RigExecSameBlendLayout(*active->second,*layout))) return active->second;
+    const auto candidate=_candidates.find(sample);
+    if (candidate!=_candidates.end() && candidate->second && RigExecSameBlendLayout(*candidate->second,*layout))
+        layout=candidate->second;
+    _entries[sample]=layout;
+    return layout;
+}
+
 RigExecRevisionBinding
 RigExecResolveRevisionBinding(
     const UsdPrim &moverPrim,

@@ -3,6 +3,7 @@
 #include "rigEvaluatorInternal.h"
 #include "rigEvaluatorConstraints.h"
 #include "movers/moverRegistry.h"
+#include "moverGraph.h"
 
 #include "pxr/usd/usd/attribute.h"
 #include "pxr/usd/usd/prim.h"

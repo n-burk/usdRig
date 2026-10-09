@@ -5,11 +5,11 @@
 
 #include "bakedProgram.h"
 #include "liveOperationGraph.h"
-#include "moverGraph.h"
+#include "moverGraphCaches.h"
+#include "moverGraphTypes.h"
 #include "profiler.h"
 #include "solverKernels.h"
 #include "tapSet.h"
-#include "types.h"
 
 #include "rigExecMath/rbf.h"
 #include "rigExecMath/solvers.h"

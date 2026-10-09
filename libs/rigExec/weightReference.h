@@ -1,9 +1,16 @@
 // Independent weight reference over sampled oracle-origin values.
 #ifndef RIGEXEC_WEIGHT_REFERENCE_H
 #define RIGEXEC_WEIGHT_REFERENCE_H
-#include "moverGraph.h"
+#include "moverGraphTypes.h"
+#include "pxr/base/gf/vec3f.h"
+#include "pxr/base/vt/types.h"
+#include "pxr/usd/usd/common.h"
+#include "pxr/usd/usd/timeCode.h"
 #include <functional>
 #include <map>
+#include <string>
+#include <utility>
+#include <vector>
 namespace rigExec {
 struct RigExecWeightReferenceAttribute {
     bool exists = false;

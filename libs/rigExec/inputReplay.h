@@ -2,12 +2,13 @@
 #define RIGEXEC_INPUT_REPLAY_H
 
 #include "observerHost.h"
-#include "types.h"
 #include "pxr/usd/usd/stage.h"
 #include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
+
+PXR_NAMESPACE_USING_DIRECTIVE
 
 namespace rigExec {
 struct RigExecValueOverride;

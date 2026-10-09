@@ -1,4 +1,5 @@
 #include "geometryGraphBinding.h"
+#include "rigExec/moverGraph.h"
 #include <algorithm>
 namespace rigExec {
 bool RigExecBindGeometryGraph(const RigExecSceneGeometryDescriptor &descriptor,

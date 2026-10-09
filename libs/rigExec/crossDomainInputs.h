@@ -1,8 +1,11 @@
 // Compile-selected cross-domain inputs, consumed through the shared op graph.
 #ifndef RIGEXEC_CROSS_DOMAIN_INPUTS_H
 #define RIGEXEC_CROSS_DOMAIN_INPUTS_H
-#include "moverGraph.h"
+#include "moverGraphTypes.h"
+#include <cstdint>
 #include <map>
+#include <string>
+#include <vector>
 
 namespace rigExec {
 struct RigExecBakedProgramImpl;

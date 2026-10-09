@@ -1,4 +1,5 @@
 #include "solverGraphBinding.h"
+#include "rigExec/types.h"
 #include <algorithm>
 #include "pxr/base/vt/types.h"
 namespace rigExec {

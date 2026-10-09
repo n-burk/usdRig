@@ -6,6 +6,7 @@
 // parity-oracle branch, and registers the row that points at them.
 #include "moverRegistry.h"
 #include "moverExecCommon.h"
+#include "../moverGraph.h"
 #include "rigExecMath/geometryKernels.h"
 
 #include "pxr/exec/exec/builtinComputations.h"

@@ -1,6 +1,7 @@
 #include "geometrySceneLowering.h"
 #include "providerProgram.h"
 #include "rigExec/movers/moverRegistry.h"
+#include "rigExec/moverGraph.h"
 #include "pxr/usd/usdGeom/xformOp.h"
 #include <algorithm>
 #include <cstring>

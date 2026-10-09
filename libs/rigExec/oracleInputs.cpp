@@ -1,5 +1,6 @@
 #include "oracleInputs.h"
 #include "movers/moverRegistry.h"
+#include "moverGraph.h"
 #include <set>
 #include <cmath>
 #include "pxr/usd/usd/primRange.h"

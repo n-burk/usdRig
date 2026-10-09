@@ -1,4 +1,5 @@
 #include "rigExec/weightField.h"
+#include "rigExec/bakedProgramImpl.h"
 #include "rigExec/crossDomainInputs.h"
 #include "rigExecGraph/weightProgram.h"
 #include <pxr/usd/usdGeom/pointBased.h>

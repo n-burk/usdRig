@@ -6,6 +6,7 @@
 #include "parallel.h"
 #include "pathText.h"
 #include "crossDomainInputs.h"
+#include "moverGraph.h"
 #include "movers/moverRegistry.h"
 
 #include "pxr/base/work/dispatcher.h"

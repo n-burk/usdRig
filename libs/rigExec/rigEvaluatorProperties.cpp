@@ -4,6 +4,7 @@
 #include "rigEvaluatorDependencies.h"
 #include "rigEvaluatorPropertyBindings.h"
 #include "crossDomainInputs.h"
+#include "moverGraph.h"
 #include "movers/moverRegistry.h"
 #include "rigExecMath/propertyMath.h"
 

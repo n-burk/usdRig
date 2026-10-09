@@ -1,5 +1,6 @@
 #include "geometryProgram.h"
 #include "blendLayout.h"
+#include "rigExec/moverGraph.h"
 #include <cmath>
 namespace rigExec {
 RigExecMoverParameters RigExecAssembleGeometry(const RigExecGeometryRecord &record,

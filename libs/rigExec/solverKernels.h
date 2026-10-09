@@ -14,8 +14,6 @@
 #ifndef RIGEXEC_SOLVER_KERNELS_H
 #define RIGEXEC_SOLVER_KERNELS_H
 
-#include "types.h"
-
 #include "rigExecMath/pointFrame.h"
 
 #include "pxr/base/gf/vec3d.h"
@@ -27,6 +25,9 @@
 PXR_NAMESPACE_USING_DIRECTIVE
 
 namespace rigExec {
+
+// Defined in types.h; these declarations return it by value.
+struct RigExecPointFrameArray;
 
 /// Samples \p posed and \p rest driver curves at \p sampleCount arc-length
 /// parameters and packs the two rotation-minimizing frame sets into one

@@ -1,6 +1,7 @@
 #include "rigExecGraph/geometryProgram.h"
 #include "rigExecGraph/geometrySceneLowering.h"
 #include "rigExecGraph/geometryGraphBinding.h"
+#include "rigExec/moverGraph.h"
 #include <cstdio>
 using namespace rigExec;
 int main() {

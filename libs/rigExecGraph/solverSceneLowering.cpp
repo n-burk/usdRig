@@ -1,6 +1,7 @@
 #include "solverSceneLowering.h"
 #include "sceneInputTypes.h"
 #include "rigExec/solverKernels.h"
+#include "rigExec/types.h"
 #include "pxr/base/vt/types.h"
 #include "pxr/base/gf/math.h"
 #include <type_traits>

@@ -1,5 +1,6 @@
 #include "solverProgram.h"
 #include "rigExec/solverKernels.h"
+#include "rigExec/types.h"
 #include "pxr/base/gf/math.h"
 #include <algorithm>
 namespace rigExec {

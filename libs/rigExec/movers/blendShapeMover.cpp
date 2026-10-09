@@ -8,6 +8,7 @@
 // the row that points at them.
 #include "moverRegistry.h"
 #include "moverExecCommon.h"
+#include "../moverGraph.h"
 
 #include "rigExecMath/geometryKernels.h"
 

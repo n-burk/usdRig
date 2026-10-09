@@ -11,6 +11,8 @@
 
 #include "rigExecMath/propertyMath.h"
 
+#include "pxr/usd/usd/attribute.h"
+
 PXR_NAMESPACE_USING_DIRECTIVE
 
 namespace {

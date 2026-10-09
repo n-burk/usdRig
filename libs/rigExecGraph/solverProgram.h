@@ -2,8 +2,10 @@
 #define RIGEXEC_GRAPH_SOLVER_PROGRAM_H
 #include "rigExecMath/solvers.h"
 #include "rigExecMath/splineIk.h"
-#include "rigExec/types.h"
+#include "rigExecMath/pointFrame.h"
 namespace rigExec {
+// Defined in rigExec/types.h; held and passed by pointer here.
+struct RigExecPointFrameArray;
 enum class RigExecSolverKind { FkChain, TwoBoneIk, BlendPointFrames, TwistDistribution, Ribbon, SplineIk };
 /// Schema relationships that declare solver input prerequisites. A target
 /// solver remains a structural dependency even when its numerical frame/curve
