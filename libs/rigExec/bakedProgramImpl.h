@@ -4904,6 +4904,11 @@ void RigExecBakedRunGeometryPrologue(RigExecBakedProgramImpl *program,
                                      UsdTimeCode time, RigExecRigPose *pose,
                                      bool all);
 
+/// Hands the revisions whose retained lattice binds are equal one shared,
+/// immutable bind (RigExecLatticeBindSharing). The thread that runs the
+/// program calls it before it dispatches a step: native and frozen alike.
+void RigExecBakedShareLatticeBinds(RigExecBakedProgramImpl *program);
+
 /// SkinTopology op \p r's revision: entry r of `revisionIndex`, then of
 /// `derivedIndex` past those; null past both.
 RigExecBakedProgramImpl::GeomRevision *

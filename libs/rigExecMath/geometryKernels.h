@@ -284,8 +284,9 @@ void RigExecApplyLattice(
     const GfVec3i &divisions);
 
 /// The vector form with the bind's per-point Bernstein factors retained in
-/// \p cache, the caller's own per-revision cache (null builds them for this
-/// call only). Bit-identical to the forms above (latticeKernel.h).
+/// \p cache, the caller's own per-revision cache, within its budget. Null,
+/// like the forms above, streams them one point at a time. Bit-identical to
+/// the forms above (latticeKernel.h).
 void RigExecApplyLattice(
     std::vector<GfVec3f> *points,
     const std::vector<GfVec3f> &restPoints,

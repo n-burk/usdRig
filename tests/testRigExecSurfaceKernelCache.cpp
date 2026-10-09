@@ -1,4 +1,5 @@
 #include "rigExecMath/geometryKernels.h"
+#include "rigExecMath/latticeKernel.h"
 #include "rigExecMath/surfaceKernelCache.h"
 #include "rigExecMath/wireKernelCache.h"
 #include <cmath>
@@ -187,10 +188,79 @@ int main() {
         RigExecSurfaceKernelCache<GfVec3f,GfVec3d> wideCache;
         RigExecApplyLattice(&wideOut,wideRest,wideCage,widePosed,wide,&wideCache);
         CHECK(SameBits(wideExpected,wideOut));
+        std::vector<GfVec3f> wideStreamed=wideRest;
+        RigExecApplyLattice(&wideStreamed,wideRest,wideCage,widePosed,wide,nullptr);
+        CHECK(SameBits(wideExpected,wideStreamed));
         CHECK(RigExecLatticeBindBox(wideCage.data(),wideCage.size(),&lo,&size));
         const RigExecLatticeBasis *wideBasis=wideCache.LatticeBasis(
             wideRest.data(),wideRest.size(),lo,size,wide[0],wide[1],wide[2]);
         CHECK(wideBasis && !wideBasis->bounded && wideCache.LatticeBuilds()==1);
+
+        // Over the budget nothing is retained and the factors stream, with
+        // the bits of the retained basis; at the bound it is retained.
+        CHECK(RigExecLatticeBindBox(restCage.data(),restCage.size(),&lo,&size));
+        const double bytes=RigExecLatticeBind<GfVec3f>::Bytes(
+            rest.size(),divs[0],divs[1],divs[2]);
+        CHECK(bytes>0 && bytes<double(RigExecLatticeBindBudgetBytes));
+        RigExecSurfaceKernelCache<GfVec3f,GfVec3d> tight,roomy;
+        tight.SetLatticeBudget(size_t(bytes)-1);
+        roomy.SetLatticeBudget(size_t(bytes));
+        CHECK(tight.LatticeBasis(rest.data(),rest.size(),lo,size,
+            divs[0],divs[1],divs[2])==nullptr);
+        for(const float s:{1.0f,-2.5f,1e30f}) {
+            std::vector<GfVec3f> expected=start,streamed=start,retained=start;
+            RefLattice(&expected,rest,restCage,posedAt(s),divs);
+            RigExecApplyLattice(&streamed,rest,restCage,posedAt(s),divs,&tight);
+            RigExecApplyLattice(&retained,rest,restCage,posedAt(s),divs,&roomy);
+            CHECK(SameBits(expected,streamed) && SameBits(expected,retained));
+        }
+        std::vector<GfVec3f> wildStreamed=start,wildExpected=start;
+        RefLattice(&wildExpected,rest,restCage,wild,divs);
+        RigExecApplyLattice(&wildStreamed,rest,restCage,wild,divs,&tight);
+        CHECK(SameBits(wildExpected,wildStreamed));
+        CHECK(tight.LatticeBuilds()==0 && !tight.RetainedLatticeBind());
+        CHECK(roomy.LatticeBuilds()==1 && roomy.RetainedLatticeBind());
+        // A retained bind that no longer matches is released, not kept, when
+        // the new one is over the budget.
+        roomy.SetLatticeBudget(size_t(bytes)-1);
+        std::vector<GfVec3f> released=start,releasedExpected=start;
+        RigExecApplyLattice(&released,signedRest,restCage,posedAt(1.0f),divs,&roomy);
+        RefLattice(&releasedExpected,signedRest,restCage,posedAt(1.0f),divs);
+        CHECK(SameBits(releasedExpected,released));
+        CHECK(roomy.LatticeBuilds()==1 && !roomy.RetainedLatticeBind());
+
+        // Caches that built equal binds apart are handed one instance, and
+        // answer the bits they did with their own; another bind keeps its own.
+        RigExecSurfaceKernelCache<GfVec3f,GfVec3d> first,second,other;
+        std::vector<GfVec3f> a=start,b=start,c=start;
+        RigExecApplyLattice(&a,rest,restCage,posedAt(1.0f),divs,&first);
+        RigExecApplyLattice(&b,rest,restCage,posedAt(1.0f),divs,&second);
+        RigExecApplyLattice(&c,rest,restCage,posedAt(1.0f),flat,&other);
+        CHECK(first.RetainedLatticeBind() && second.RetainedLatticeBind() &&
+              first.RetainedLatticeBind()!=second.RetainedLatticeBind());
+        const auto otherBind=other.RetainedLatticeBind();
+        {
+            RigExecLatticeBindSharing<GfVec3f> sharing;
+            sharing.Offer(&first); sharing.Offer(&other); sharing.Offer(&second);
+            sharing.Offer(&tight);
+        }
+        CHECK(first.RetainedLatticeBind() &&
+              second.RetainedLatticeBind()==first.RetainedLatticeBind());
+        CHECK(other.RetainedLatticeBind()==otherBind);
+        CHECK(!tight.RetainedLatticeBind());
+        for(const float s:{-2.5f,1e30f}) {
+            std::vector<GfVec3f> expected=start,shared=start;
+            RefLattice(&expected,rest,restCage,posedAt(s),divs);
+            RigExecApplyLattice(&shared,rest,restCage,posedAt(s),divs,&second);
+            CHECK(SameBits(expected,shared));
+        }
+        CHECK(first.LatticeBuilds()==1 && second.LatticeBuilds()==1);
+        CHECK(second.RetainedLatticeBind()==first.RetainedLatticeBind());
+        // A shared bind is immutable: one holder's rebuild leaves the other's.
+        const auto shared=first.RetainedLatticeBind();
+        RigExecApplyLattice(&a,signedRest,restCage,posedAt(1.0f),divs,&first);
+        CHECK(first.LatticeBuilds()==2 && first.RetainedLatticeBind()!=shared);
+        CHECK(second.RetainedLatticeBind()==shared);
     }
     std::printf("SurfaceKernelCache: %d failures\n",failures);
     return failures?1:0;

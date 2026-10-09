@@ -1,14 +1,28 @@
 #ifndef RIGEXEC_MATH_SURFACE_KERNEL_CACHE_H
 #define RIGEXEC_MATH_SURFACE_KERNEL_CACHE_H
 #include "deltaMushKernel.h"
-#include "latticeKernel.h"
 #include "spatialAccel.h"
+#include <cstddef>
 #include <cstring>
 #include <memory>
 namespace rigExec {
+// Named only: the lattice kernel (latticeKernel.h) defines the bind and
+// instantiates the members below that build or compare one.
+struct RigExecLatticeBasis;
+template<class Point> struct RigExecLatticeBind;
+/// The most one revision retains for a lattice bind, in bytes. A bind over
+/// it is not retained: the kernel streams that bind's factors per point
+/// instead, the same bits at (dx+dy+dz) Bernstein calls per point per frame.
+/// 64 MiB keeps every sample rig's binds (bust_anim: 29K points at 13 and 16
+/// divisions, under 5 MB a bind) and meshes up to ~400K points at that
+/// density, while a dense lattice on a large mesh (1M points at 30
+/// divisions per axis, ~760 MB) streams.
+constexpr size_t RigExecLatticeBindBudgetBytes = size_t(64) << 20;
 /// One revision owns and mutates this cache. Clones share only immutable
 /// entries; no global state or locking. Keys compare every scalar's raw bits,
-/// including signed zero/NaN payloads, and every topology element.
+/// including signed zero/NaN payloads, and every topology element. Between
+/// runs, the thread that runs the owning program may also hand the cache an
+/// equal, immutable lattice bind (RigExecLatticeBindSharing).
 template<class Point,class Wide> class RigExecSurfaceKernelCache {
     static bool Same(const std::vector<Point> &a,const std::vector<Point> &b) {
         if(a.size()!=b.size()) return false;
@@ -38,10 +52,9 @@ template<class Point,class Wide> class RigExecSurfaceKernelCache {
     std::shared_ptr<const Fan> fan;
     std::shared_ptr<const std::vector<Point>> pointSamples[2];
     std::vector<Point> invalidSamples;
-    struct Lattice { std::vector<Point> rest; Point lo,size; int divisions[3]={0,0,0};
-        RigExecLatticeBasis value; };
-    std::shared_ptr<const Lattice> lattice;
+    std::shared_ptr<const RigExecLatticeBind<Point>> lattice;
     size_t latticeBuilds=0;
+    size_t latticeBudget=RigExecLatticeBindBudgetBytes;
 public:
     /// A boxed-array caller can retain the vector adapter without converting
     /// unchanged source arrays every frame. No borrowed pointer survives here.
@@ -120,27 +133,30 @@ public:
     /// The lattice bind of \p count rest points in the rest cage's bound
     /// (\p lo, \p size) at \p dx x \p dy x \p dz divisions: everything the
     /// basis reads, so a frame that only moves the posed cage is a compare.
+    /// Null when the bind would retain more than the budget: nothing is kept
+    /// and the kernel streams the factors, the same bits (latticeKernel.h).
     const RigExecLatticeBasis *LatticeBasis(const Point *rest,size_t count,
         const Point &lo,const Point &size,int dx,int dy,int dz) {
-        static_assert(sizeof(Point)==3*sizeof(float),"three packed floats per point");
         if(count && !rest) return nullptr;
-        bool same=lattice && lattice->divisions[0]==dx && lattice->divisions[1]==dy &&
-            lattice->divisions[2]==dz && lattice->rest.size()==count;
-        for(int axis=0;axis<3 && same;++axis) {
-            const auto a=lattice->lo[axis],b=lo[axis],c=lattice->size[axis],d=size[axis];
-            same=!std::memcmp(&a,&b,sizeof(a)) && !std::memcmp(&c,&d,sizeof(c));
-        }
-        if(same && count) same=!std::memcmp(lattice->rest.data(),rest,count*sizeof(Point));
-        if(!same) {
-            auto entry=std::make_shared<Lattice>();
-            if(count) entry->rest.assign(rest,rest+count);
-            entry->lo=lo; entry->size=size;
-            entry->divisions[0]=dx; entry->divisions[1]=dy; entry->divisions[2]=dz;
-            RigExecBuildLatticeBasis(rest,count,lo,size,dx,dy,dz,&entry->value);
-            lattice=entry; ++latticeBuilds;
-        }
+        if(lattice && lattice->Matches(rest,count,lo,size,dx,dy,dz)) return &lattice->value;
+        lattice.reset();
+        if(RigExecLatticeBind<Point>::Bytes(count,dx,dy,dz)>double(latticeBudget)) return nullptr;
+        auto entry=std::make_shared<RigExecLatticeBind<Point>>();
+        entry->Build(rest,count,lo,size,dx,dy,dz);
+        lattice=entry; ++latticeBuilds;
         return &lattice->value;
     }
+    /// The lattice bind retained, or null (RigExecLatticeBindSharing).
+    const std::shared_ptr<const RigExecLatticeBind<Point>> &RetainedLatticeBind() const {
+        return lattice;
+    }
+    /// Retains \p bind, which equals the bind held: the owning program's
+    /// thread, between runs (RigExecLatticeBindSharing).
+    void ShareLatticeBind(const std::shared_ptr<const RigExecLatticeBind<Point>> &bind) {
+        lattice=bind;
+    }
+    /// The bytes a lattice bind is retained under; a test may lower it.
+    void SetLatticeBudget(size_t bytes) { latticeBudget=bytes; }
     /// Test observable: lattice binds built, counted across copies.
     size_t LatticeBuilds() const { return latticeBuilds; }
 };

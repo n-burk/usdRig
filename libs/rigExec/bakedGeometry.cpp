@@ -22,6 +22,7 @@
 #include "rigExecMath/dualQuat.h"
 #include "rigExecMath/envelope.h"
 #include "rigExecMath/geometryKernels.h"
+#include "rigExecMath/latticeKernel.h"
 #include "rigExecMath/simdKernels.h"
 
 #include "pxr/base/gf/matrix4d.h"
@@ -2239,6 +2240,18 @@ void RigExecBakedPrepareDerivedBase(RigExecBakedProgramImpl::GeomChain::Derived 
     derived->baseDirty = !derived->haveResult || !RigExecBakedHeadValueSame(
         VtValue(derived->sampledBase),VtValue(derived->lastBase));
     derived->lastBase = derived->sampledBase;
+}
+void RigExecBakedShareLatticeBinds(RigExecBakedProgramImpl *program)
+{
+    RigExecLatticeBindSharing<GfVec3f> binds;
+    for (auto &chain : program->chains) {
+        for (auto &revision : chain.revisions) {
+            binds.Offer(&revision.surfaceCache);
+        }
+        for (auto &derived : chain.derived) {
+            binds.Offer(&derived.revision.surfaceCache);
+        }
+    }
 }
 void RigExecBakedRunGeometryPrologue(RigExecBakedProgramImpl *program,
                                     UsdTimeCode time,RigExecRigPose *,bool all)

@@ -15,6 +15,7 @@
 #include "rigExecRuntime/labels.h"
 #include "rigExecRuntime/store.h"
 #include "rigExecMath/deltaMushKernel.h"
+#include "rigExecMath/latticeKernel.h"
 #include "rigExecMath/surfaceKernelCache.h"
 #include "rigExecMath/wireKernelCache.h"
 #include "rigExecMath/wrinkleKernel.h"
@@ -5773,6 +5774,19 @@ RrPrologueGeometry(RrProgram *program,
             *error = "geometry scratch does not match its chains";
         }
         return false;
+    }
+    // No step runs yet: revisions with equal lattice binds share one, as
+    // RigExecBakedShareLatticeBinds does.
+    {
+        RigExecLatticeBindSharing<RrVec3f> binds;
+        for (RrGeometryScratch::Chain &chain : scratch->chains) {
+            for (RrGeometryScratch::Revision &rev : chain.revisions) {
+                binds.Offer(&rev.surfaceCache);
+            }
+        }
+        for (RrGeometryScratch::Derived &derived : scratch->derived) {
+            binds.Offer(&derived.revision.surfaceCache);
+        }
     }
 
     if(!program->requiredStageFramesAdmission.admitted)return true;

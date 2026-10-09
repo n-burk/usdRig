@@ -716,6 +716,8 @@ bool RigExecBakedExecuteOpGraph(RigExecBakedProgramImpl *program,UsdTimeCode tim
     }
     B.clustering.lastRunTimed=profiling;
     B.closureFull=force || B.programStamp!=B.lastProgramStamp;
+    // No step runs yet: revisions with equal lattice binds share one.
+    RigExecBakedShareLatticeBinds(&B);
     RigExecBakedPrepareHeadOps(&B);
     RigExecBakedPlaceHeadOverrides(&B);
     RigExecBakedPrepareOracleReference(&B,time);

@@ -256,7 +256,11 @@ RigExecFrozenPurityAudit()
          "revision scratch), touched only by the step that runs the "
          "revision, so no lock; answer-preserving (raw-bit compare of every "
          "input an entry reads, a pure rebuild on a miss); a frozen clone "
-         "shares the immutable entries and replaces only its own slots"},
+         "shares the immutable entries and replaces only its own slots; "
+         "before a run dispatches, the thread running the program points "
+         "revisions' equal lattice binds at one immutable instance "
+         "(RigExecBakedShareLatticeBinds), and a bind over the budget is "
+         "streamed rather than retained"},
         {"RigExecStaticInputCache / RigExecBlendSampleCache OBJECTS",
          RigExecFrozenPurity::LiveOnly,
          "single-threaded or notice-invalidated live state (THREAD rule); "

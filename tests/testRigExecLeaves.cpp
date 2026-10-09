@@ -15,6 +15,7 @@
 #include "rigExecBake/revisionReads.h"
 #include "rigExecBinary/format.h"
 #include "rigExecBinary/generated/rigexec_generated.h"
+#include "rigExecMath/latticeKernel.h"
 #include "rigExecRigging/rigBuilder.h"
 #include "rigExecExampleFixtures.h"
 
@@ -2361,7 +2362,8 @@ RoutedDeformerCases(const std::string &examples)
     const SdfPath rig = RootOf(stage);
     const UsdTimeCode t(stage->GetStartTimeCode() + 12.0);
     auto evaluator = MakeEvaluator(stage, rig);
-    RunChecked(evaluator.get(), {}, t, "lattice cage, before");
+    const RigExecRigPose cageBefore =
+        RunChecked(evaluator.get(), {}, t, "lattice cage, before");
     const RigExecBakedProgramImpl::GeomRevision *lattice =
         FirstRevisionOf(*evaluator, RigExecRevisionOp::Lattice);
     CHECK(lattice && !lattice->binding.cagePoints.IsEmpty());
@@ -2373,11 +2375,22 @@ RoutedDeformerCases(const std::string &examples)
     // frame that moves only the posed cage reuses them.
     const size_t binds = lattice->surfaceCache.LatticeBuilds();
     CHECK(binds > 0);
-    RunChecked(evaluator.get(), {}, UsdTimeCode(t.GetValue() + 1.0),
-               "lattice cage, next frame");
+    const RigExecRigPose cageNext =
+        RunChecked(evaluator.get(), {}, UsdTimeCode(t.GetValue() + 1.0),
+                   "lattice cage, next frame");
     const RigExecBakedProgramImpl::GeomRevision *nextFrame =
         FirstRevisionOf(*evaluator, RigExecRevisionOp::Lattice);
     CHECK(nextFrame && nextFrame->surfaceCache.LatticeBuilds() == binds);
+    // The posed cage moved between the frames, so the strip's points did:
+    // the lattice ran at t+1, through the bind it kept.
+    const SdfPath slab("/LatticeAsset/Geom/Slab.points");
+    const auto slabBefore = cageBefore.movedProperties.find(slab);
+    const auto slabNext = cageNext.movedProperties.find(slab);
+    CHECK(slabBefore != cageBefore.movedProperties.end() &&
+          slabNext != cageNext.movedProperties.end() &&
+          slabBefore->second.IsHolding<VtVec3fArray>() &&
+          slabNext->second.IsHolding<VtVec3fArray>() &&
+          slabBefore->second != slabNext->second);
     UsdAttribute attribute = stage->GetAttributeAtPath(cage);
     VtVec3fArray rest;
     CHECK(attribute.Get(&rest, UsdTimeCode::Default()) && !rest.empty());
@@ -3568,6 +3581,192 @@ TestConstraintArraysAreEpochState()
     checkFrozen(UsdTimeCode(8), "frozen, time after the routes");
 }
 
+// Two strips with the same points, each moved by its own lattice through
+// one cage at the same divisions: two revisions on two chains whose binds
+// are equal.
+const char *const kTwinLattices = R"usda(#usda 1.0
+(
+    endTimeCode = 1048
+    startTimeCode = 1001
+    timeCodesPerSecond = 24
+    upAxis = "Y"
+)
+
+def Xform "LatticeAsset"
+{
+    def RigExecRoot "Rig"
+    {
+        uniform token rigExec:partition = "LatticeAsset"
+
+        def Scope "Joints"
+        {
+            def RigExecJoint "SlabRoot"
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 2, 1) )
+            }
+        }
+
+        def Scope "Movers"
+        {
+            def RigExecLatticeMover "DeformA" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                uniform token rigExec:basis = "bernstein"
+                rel rigExec:cage = </LatticeAsset/Geom/Cage>
+                int3 rigExec:divisions = (2, 2, 3)
+                rel rigExec:moves = </LatticeAsset/Geom/SlabA.points>
+            }
+
+            def RigExecLatticeMover "DeformB" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                uniform token rigExec:basis = "bernstein"
+                rel rigExec:cage = </LatticeAsset/Geom/Cage>
+                int3 rigExec:divisions = (2, 2, 3)
+                rel rigExec:moves = </LatticeAsset/Geom/SlabB.points>
+            }
+        }
+    }
+
+    def Scope "Geom"
+    {
+        def Points "Cage"
+        {
+            point3f[] points = [(-1, -1, 0), (1, -1, 0), (-1, 1, 0), (1, 1, 0), (-1, -1, 2), (1, -1, 2), (-1, 1, 2), (1, 1, 2), (-1, -1, 4), (1, -1, 4), (-1, 1, 4), (1, 1, 4)]
+            point3f[] points.timeSamples = {
+                1001: [(-1, -1, 0), (1, -1, 0), (-1, 1, 0), (1, 1, 0), (-1, -1, 2), (1, -1, 2), (-1, 1, 2), (1, 1, 2), (-1, -1, 4), (1, -1, 4), (-1, 1, 4), (1, 1, 4)],
+                1024: [(-1, -1, 0), (1, -1, 0), (-1, 1, 0), (1, 1, 0), (-2, -2, 2), (2, -2, 2), (-2, 2, 2), (2, 2, 2), (-1, -1, 4), (1, -1, 4), (-1, 1, 4), (1, 1, 4)],
+            }
+            token visibility = "invisible"
+        }
+
+        def Mesh "SlabA"
+        {
+            int[] faceVertexCounts = [4, 4, 4, 4]
+            int[] faceVertexIndices = [0, 1, 3, 2, 2, 3, 5, 4, 4, 5, 7, 6, 6, 7, 9, 8]
+            point3f[] points = [(-0.5, 0, 0), (0.5, 0, 0), (-0.5, 0, 1), (0.5, 0, 1), (-0.5, 0, 2), (0.5, 0, 2), (-0.5, 0, 3), (0.5, 0, 3), (-0.5, 0, 4), (0.5, 0, 4)]
+            uniform token subdivisionScheme = "none"
+        }
+
+        def Mesh "SlabB"
+        {
+            int[] faceVertexCounts = [4, 4, 4, 4]
+            int[] faceVertexIndices = [0, 1, 3, 2, 2, 3, 5, 4, 4, 5, 7, 6, 6, 7, 9, 8]
+            point3f[] points = [(-0.5, 0, 0), (0.5, 0, 0), (-0.5, 0, 1), (0.5, 0, 1), (-0.5, 0, 2), (0.5, 0, 2), (-0.5, 0, 3), (0.5, 0, 3), (-0.5, 0, 4), (0.5, 0, 4)]
+            uniform token subdivisionScheme = "none"
+        }
+    }
+}
+)usda";
+
+// Equal lattice binds share one basis. Each revision builds its own on its
+// first frame; before a later run dispatches, the program hands both one
+// immutable bind, which answers what a fresh program's own binds do. A
+// divisions edit rebuilds the program, and the new revisions share their
+// new bind the same way.
+void
+TestEqualLatticeBindsShareOneBasis()
+{
+    const SdfPath rig("/LatticeAsset/Rig");
+    const SdfPath moverA("/LatticeAsset/Rig/Movers/DeformA");
+    const SdfPath moverB("/LatticeAsset/Rig/Movers/DeformB");
+    const SdfPath slabA("/LatticeAsset/Geom/SlabA.points");
+    const SdfPath slabB("/LatticeAsset/Geom/SlabB.points");
+    const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    CHECK(rigExec::RigExecInputReplayImportFromString(stage->GetRootLayer(),
+                                                      kTwinLattices));
+    auto evaluator = MakeEvaluator(stage, rig);
+    using Revision = RigExecBakedProgramImpl::GeomRevision;
+    // The standing program's lattice revision of the mover at \p path.
+    const auto revisionOf = [&](const SdfPath &path) -> const Revision * {
+        const RigExecBakedProgramImpl *B = Program(*evaluator);
+        if (!B) {
+            return nullptr;
+        }
+        for (const auto &chain : B->chains) {
+            for (const Revision &revision : chain.revisions) {
+                if (revision.op == RigExecRevisionOp::Lattice &&
+                    revision.moverPath == path) {
+                    return &revision;
+                }
+            }
+        }
+        return nullptr;
+    };
+    const auto pointsAt = [](const RigExecRigPose &pose, const SdfPath &path) {
+        const auto found = pose.movedProperties.find(path);
+        return found != pose.movedProperties.end() &&
+                       found->second.IsHolding<VtVec3fArray>()
+                   ? found->second.UncheckedGet<VtVec3fArray>()
+                   : VtVec3fArray();
+    };
+    // Both revisions hold one bind at \p divisions, each having built once.
+    const auto shareOne = [&](const GfVec3i &divisions,
+                              const std::string &what) {
+        const Revision *a = revisionOf(moverA);
+        const Revision *b = revisionOf(moverB);
+        CHECK(a && b);
+        if (!a || !b) {
+            return;
+        }
+        const auto &bind = a->surfaceCache.RetainedLatticeBind();
+        const bool shared =
+            bind && bind == b->surfaceCache.RetainedLatticeBind();
+        if (!shared) {
+            std::printf("FAIL %s: the lattice binds are not shared\n",
+                        what.c_str());
+        }
+        CHECK(shared);
+        CHECK(a->surfaceCache.LatticeBuilds() == 1 &&
+              b->surfaceCache.LatticeBuilds() == 1);
+        CHECK(bind && bind->divisions[0] == divisions[0] &&
+              bind->divisions[1] == divisions[1] &&
+              bind->divisions[2] == divisions[2]);
+    };
+    const RigExecRigPose first =
+        RunChecked(evaluator.get(), {}, UsdTimeCode(1013), "twin, first");
+    const RigExecRigPose next =
+        RunChecked(evaluator.get(), {}, UsdTimeCode(1014), "twin, next");
+    shareOne(GfVec3i(2, 2, 3), "twin, next");
+    // The cage moved, so both strips ran through the shared bind.
+    const VtVec3fArray movedA = pointsAt(next, slabA);
+    CHECK(!movedA.empty() && movedA != pointsAt(first, slabA));
+    CHECK(movedA == pointsAt(next, slabB));
+    CHECK(PoseMismatches(FreshPose(stage, rig, UsdTimeCode(1014)), next,
+                         "twin, next") == 0);
+    ShadowChecked(*evaluator, {}, UsdTimeCode(1014), "twin, next");
+    const Revision *before = revisionOf(moverA);
+    const std::shared_ptr<const RigExecLatticeBind<GfVec3f>> previous =
+        before ? before->surfaceCache.RetainedLatticeBind() : nullptr;
+
+    // The divisions are topology: their edit rebuilds the program, whose
+    // revisions build their binds again and share the new one.
+    const size_t builds = evaluator->GetBakedProgramBuildCount();
+    {
+        SdfChangeBlock block;
+        for (const SdfPath &mover : {moverA, moverB}) {
+            CHECK(stage->GetPrimAtPath(mover)
+                      .GetAttribute(TfToken("rigExec:divisions"))
+                      .Set(GfVec3i(2, 3, 2)));
+        }
+    }
+    CHECK(evaluator->Evaluate(UsdTimeCode(1014)).valid);
+    CHECK(evaluator->GetBakedProgramBuildCount() > builds);
+    const RigExecRigPose rebuilt = RunChecked(
+        evaluator.get(), {}, UsdTimeCode(1015), "twin, rebuilt next");
+    shareOne(GfVec3i(2, 3, 2), "twin, rebuilt next");
+    const Revision *after = revisionOf(moverA);
+    CHECK(previous && after &&
+          after->surfaceCache.RetainedLatticeBind() != previous);
+    CHECK(!pointsAt(rebuilt, slabA).empty() &&
+          pointsAt(rebuilt, slabA) == pointsAt(rebuilt, slabB));
+    CHECK(PoseMismatches(FreshPose(stage, rig, UsdTimeCode(1015)), rebuilt,
+                         "twin, rebuilt next") == 0);
+    ShadowChecked(*evaluator, {}, UsdTimeCode(1015), "twin, rebuilt next");
+}
+
 int
 main(int argc, char **argv)
 {
@@ -3596,6 +3795,7 @@ main(int argc, char **argv)
     TestNoBodyReadsTheStage(examples);
     TestSparseProviderLeaves(examples);
     TestConstraintArraysAreEpochState();
+    TestEqualLatticeBindsShareOneBasis();
     std::printf("testRigExecLeaves: %d failure(s)\n", failures);
     return failures ? 1 : 0;
 }
