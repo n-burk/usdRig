@@ -269,6 +269,19 @@ RigExecBakeToBinary(RigExecRigEvaluator &evaluator,
     if (std::isinf(opts.time)) {
         return Fail("the bake time must be finite");
     }
+    // The file's program is the export build: a Range skin or a group gate
+    // rests only on reads the file holds as constants (private slots), never
+    // on one it must leave listed -- an admitted upstream input or an input
+    // the presentation names. Compile builds the program at its tail, so the
+    // role mode and the upstream suspension stand before it and that one
+    // build is the export build. The guards restore the evaluator on every
+    // return, and its next Evaluate rebuilds in Live mode.
+    const std::vector<SdfPath> upstream = evaluator.GetUpstreamInputPaths();
+    std::set<SdfPath> keep(upstream.begin(), upstream.end());
+    _PresentationInputPaths(opts.presentation, &keep);
+    RigExecScopedBakedRoleMode roles(evaluator, RigExecBakedRoleMode::Export,
+                                     std::move(keep));
+    RigExecScopedUpstreamSuspension suspension(evaluator);
     std::vector<std::string> compileErrors;
     if (!evaluator.Compile(&compileErrors)) {
         std::string joined = "compile failed";
@@ -293,34 +306,15 @@ RigExecBakeToBinary(RigExecRigEvaluator &evaluator,
     if (evaluator.HasInteractiveOverrides()) {
         return Fail("cannot bake with interactive overrides standing");
     }
-    const std::vector<SdfPath> upstream = evaluator.GetUpstreamInputPaths();
-    // The file's program is the export build: a Range skin or a group gate
-    // rests only on reads the file holds as constants (private slots), never
-    // on one it must leave listed -- an admitted upstream input or an input
-    // the presentation names. The guard restores the evaluator's role mode
-    // on every return, and its next Evaluate rebuilds.
-    std::set<SdfPath> keep(upstream.begin(), upstream.end());
-    _PresentationInputPaths(opts.presentation, &keep);
-    RigExecScopedBakedRoleMode roles(evaluator, RigExecBakedRoleMode::Export,
-                                     std::move(keep));
-    RigExecScopedUpstreamSuspension suspension(evaluator);
-    const RigExecBakedProgram *compiled = evaluator.GetBakedProgram();
-    if (!compiled) {
-        return Fail("no baked program standing to capture from");
-    }
-    const double bakeTime =
-        std::isnan(opts.time)
-            ? RigExecBakedProbeTime(compiled->GetStepGraph().stage)
-                  .GetValue()
-            : opts.time;
-    // One generation at the bake time builds the export program, with no
-    // interactive override standing and upstream lifted, so its roles read
-    // the stage; the full run below is of that program.
-    evaluator.Evaluate(UsdTimeCode(bakeTime));
     const RigExecBakedProgram *standing = evaluator.GetBakedProgram();
     if (!standing) {
         return Fail("no baked program standing to capture from");
     }
+    const double bakeTime =
+        std::isnan(opts.time)
+            ? RigExecBakedProbeTime(standing->GetStepGraph().stage)
+                  .GetValue()
+            : opts.time;
     char number[32];
     std::string why;
     const size_t bakedBefore = evaluator.GetBakedGenerationCount();
