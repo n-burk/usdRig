@@ -5578,10 +5578,6 @@ main(int argc, char **argv)
 {
     PlugRegistry::GetInstance().RegisterPlugins(
         RIGEXEC_SCHEMA_RESOURCE_DIR);
-    if (argc>1 && std::string(argv[1])=="--auto-clavicle") {
-        TestAnimatedAutoClavicle(argc>2?argv[2]:RIGEXEC_EXAMPLES_DIR);
-        return failures?1:0;
-    }
     TestComputedEnvelopes();
     TestStaticWeightEnvelope();
     TestAvarDrivenDynamicEnvelope();
