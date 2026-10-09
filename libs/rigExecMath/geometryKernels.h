@@ -406,6 +406,16 @@ bool RigExecApplyWireBasis(
     const std::vector<GfVec3f> &restControlPoints,
     const std::vector<GfVec3f> &posedControlPoints);
 
+/// RigExecApplyWireBasis over the points in [begin, end) only: every control
+/// point in the same order, applying only the entries whose index falls in
+/// the range, so each point receives the same additions in the same order
+/// as from the whole call. Validates as RigExecApplyWireBasis does.
+bool RigExecApplyWireBasisRange(
+    std::vector<GfVec3f> *points, const RigExecWireBasis &basis,
+    const std::vector<int> &indices, const std::vector<float> &weights,
+    const std::vector<GfVec3f> &restControlPoints,
+    const std::vector<GfVec3f> &posedControlPoints, size_t begin, size_t end);
+
 /// The surface projector's cached query data: the fan triangulation and
 /// the candidate index, built once and shared across frames. Triangle
 /// candidates remain non-prunable to preserve legacy float arithmetic.

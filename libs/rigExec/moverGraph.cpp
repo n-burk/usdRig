@@ -6,6 +6,7 @@
 
 #include "rigExecMath/geometryKernels.h"
 #include "rigExecMath/envelope.h"
+#include "rigExecMath/latticeKernel.h"
 #include "rigExecMath/pointFrame.h"
 #include "rigExecMath/simdKernels.h"
 #include "rigExecMath/solvers.h"
@@ -418,6 +419,76 @@ _MatrixKernelAccepts(const RigExecMoverParameters &p, size_t count,
     return weights ? w.ResolveAll(count, weights) : w.ResolvesAll(count);
 }
 
+// The matrix kernel's sparse walk over entries [first, last) of \p w, in
+// place on \p data (indexed absolutely): the per-entry body the whole kernel
+// and its range form share. Each entry writes only its own point, and the
+// radial arm's partial for a weight is a pure function of that weight and
+// the transform, so a walk over a subset of the entries writes those points'
+// bits.
+void
+_ApplyMatrixSparseWalk(const RigExecMoverParameters &p,
+                       const RigExecWeightPacket &w, size_t first,
+                       size_t last, GfVec3f *data)
+{
+    if (p.radialWeight) {
+        // The sparse walk must take the same arc the dense kernel
+        // does. A painted cluster falloff is almost always sparse --
+        // the upper blink weights 414 points of a 26276-point body --
+        // so EVERY radial cluster on this rig arrived here and got a
+        // linear blend, the one case RigExecPartialTransform exists to
+        // prevent. Measured: at a full blink the lid's half-weighted
+        // points cut the chord and sank 0.2951 into an eyeball of
+        // radius 2.4846, which is the lid clipping through the eye.
+        //
+        // Factored per WEIGHT, as the dense kernel is, and for the
+        // same reason: a falloff is mostly a few distinct values.
+        double cachedWeight = -1.0;
+        RigExecPartialDecomposition decomposition;
+        bool haveDecomposition=false;
+        GfMatrix4d partial(1.0);
+        for (size_t k = first; k < last; ++k) {
+            const double value = w.values[k];
+            if (value != cachedWeight) {
+                const double clamped=GfClamp(value,0.0,1.0);
+                if(clamped<=0.0)partial=GfMatrix4d(1.0);
+                else if(clamped>=1.0)partial=p.transform;
+                else {
+                    if(!haveDecomposition) {
+                        decomposition=RigExecDecomposePartialTransform(p.transform);
+                        haveDecomposition=true;
+                    }
+                    partial=RigExecApplyPartialDecomposition(decomposition,clamped);
+                }
+                cachedWeight = value;
+            }
+            GfVec3f &point = data[size_t(w.indices[k])];
+            point = GfVec3f(partial.TransformAffine(GfVec3d(point)));
+        }
+        return;
+    }
+    for (size_t k = first; k < last; ++k) {
+        GfVec3f &point = data[size_t(w.indices[k])];
+        point = GfVec3f(RigExecApplyWeightedMatrix(
+            GfVec3d(point), p.transform, w.values[k]));
+    }
+}
+
+// The entries [*first, *last) of the ascending \p indices that name a point
+// in [begin, end).
+void
+_SparseEntriesIn(const std::vector<int> &indices, size_t begin, size_t end,
+                 size_t *first, size_t *last)
+{
+    const auto below = [](int index, size_t bound) {
+        return index < 0 || size_t(index) < bound;
+    };
+    const auto from =
+        std::lower_bound(indices.begin(), indices.end(), begin, below);
+    *first = size_t(from - indices.begin());
+    *last = size_t(std::lower_bound(from, indices.end(), end, below) -
+                   indices.begin());
+}
+
 // RigExecApplyBlendShapeKernel's validation over \p count points: one delta
 // per point and an envelope that resolves, into \p envelope when given (left
 // untouched at full strength). A surface-frame transport after it reads the
@@ -517,48 +588,7 @@ RigExecApplyMatrixKernel(const RigExecMoverParameters &p,
         if (p.transform == GfMatrix4d(1.0)) {
             return true;  // at rest every weighted point maps to itself
         }
-        GfVec3f *data = pts->data();
-        if (p.radialWeight) {
-            // The sparse walk must take the same arc the dense kernel
-            // does. A painted cluster falloff is almost always sparse --
-            // the upper blink weights 414 points of a 26276-point body --
-            // so EVERY radial cluster on this rig arrived here and got a
-            // linear blend, the one case RigExecPartialTransform exists to
-            // prevent. Measured: at a full blink the lid's half-weighted
-            // points cut the chord and sank 0.2951 into an eyeball of
-            // radius 2.4846, which is the lid clipping through the eye.
-            //
-            // Factored per WEIGHT, as the dense kernel is, and for the
-            // same reason: a falloff is mostly a few distinct values.
-            double cachedWeight = -1.0;
-            RigExecPartialDecomposition decomposition;
-            bool haveDecomposition=false;
-            GfMatrix4d partial(1.0);
-            for (size_t k = 0; k < w.indices.size(); ++k) {
-                const double value = w.values[k];
-                if (value != cachedWeight) {
-                    const double clamped=GfClamp(value,0.0,1.0);
-                    if(clamped<=0.0)partial=GfMatrix4d(1.0);
-                    else if(clamped>=1.0)partial=p.transform;
-                    else {
-                        if(!haveDecomposition) {
-                            decomposition=RigExecDecomposePartialTransform(p.transform);
-                            haveDecomposition=true;
-                        }
-                        partial=RigExecApplyPartialDecomposition(decomposition,clamped);
-                    }
-                    cachedWeight = value;
-                }
-                GfVec3f &point = data[size_t(w.indices[k])];
-                point = GfVec3f(partial.TransformAffine(GfVec3d(point)));
-            }
-            return true;
-        }
-        for (size_t k = 0; k < w.indices.size(); ++k) {
-            GfVec3f &point = data[size_t(w.indices[k])];
-            point = GfVec3f(RigExecApplyWeightedMatrix(
-                GfVec3d(point), p.transform, w.values[k]));
-        }
+        _ApplyMatrixSparseWalk(p, w, 0, w.indices.size(), pts->data());
         return true;
     }
     RigExecApplyMatrixKernelRange(p, weights.data(), 0, count, pts->data(),
@@ -1237,9 +1267,222 @@ RigExecRevisionKernelAcceptance(RigExecRevisionOp op,
         }
         return wire;
     }
+    case RigExecRevisionOp::Lattice:
+        // The kernel refuses only a rest-point count other than the entering
+        // one; an invalid cage passes every point through. Then the "apply
+        // once" envelope resolves at the full count or the revision fails.
+        // Validated here whatever \p envelopeResolves says: RevisionStatic
+        // resolves only a wire's envelope before it asks.
+        if (p.restPoints.size() != count) {
+            return Acceptance::Refuses;
+        }
+        if (!RigExecEnvelopeIsFullStrength(p.weights) &&
+            !p.weights.ResolvesAll(count)) {
+            return Acceptance::Refuses;
+        }
+        return Acceptance::Applies;
     default:
         return Acceptance::Deferred;
     }
+}
+
+bool
+RigExecRevisionIsRangeOp(RigExecRevisionOp op)
+{
+    return op == RigExecRevisionOp::Matrix || op == RigExecRevisionOp::Wire ||
+           op == RigExecRevisionOp::Lattice;
+}
+
+RigExecRevisionAcceptance
+RigExecPrepareRevisionRanges(RigExecRevisionOp op,
+                             const RigExecMoverParameters &p, size_t count,
+                             RigExecWireBasisCache *wireBasis,
+                             RigExecSurfaceKernelCache<GfVec3f, GfVec3d> *cache,
+                             RigExecRevisionRangeInputs *prepared)
+{
+    using Acceptance = RigExecRevisionAcceptance;
+    prepared->matrixWeights.clear();
+    prepared->wireBasis.reset();
+    prepared->wireRestEvaluations = nullptr;
+    prepared->latticeBasis = nullptr;
+    prepared->latticeBind.reset();
+    if (op == RigExecRevisionOp::Matrix) {
+        // RigExecRevisionKernelAcceptance's Matrix answer, by the kernel's
+        // own validation; a dense envelope resolves into the inputs by the
+        // same call (ResolveAll validates exactly as ResolvesAll does).
+        if (!_PacketMatches(op, p) ||
+            !_MatrixKernelAccepts(p, count, &prepared->matrixWeights)) {
+            prepared->matrixWeights.clear();
+            return Acceptance::Refuses;
+        }
+        return Acceptance::Applies;
+    }
+    const Acceptance acceptance = RigExecRevisionKernelAcceptance(op, p, count);
+    if (acceptance != Acceptance::Applies) {
+        return acceptance;
+    }
+    if (op == RigExecRevisionOp::Wire) {
+        // The memos ApplyRevisionKernel's wire arm reads, from the same calls.
+        const RigExecWeightPacket &w = p.weights;
+        if (RigExecWireTakesSparseEnvelope(w)) {
+            if (wireBasis) {
+                prepared->wireBasis = wireBasis->Get(p, w.indices, count);
+            } else {
+                auto built = std::make_shared<RigExecWireBasis>();
+                if (RigExecBuildWireBasis(
+                        p.wireBindCoords.cdata(), p.wireBindCoords.size(),
+                        count, w.indices, p.curveOrder, p.curveKnots,
+                        p.restPoints.size(), p.dropoffDistance,
+                        built.get())) {
+                    prepared->wireBasis = std::move(built);
+                }
+            }
+        } else if (wireBasis) {
+            const RigExecNurbsCurve rest{&p.restPoints, p.curveOrder,
+                                         &p.curveKnots};
+            prepared->wireRestEvaluations = wireBasis->restEvaluations.Get(
+                rest, p.wireBindCoords.cdata(), p.wireBindCoords.size(),
+                p.dropoffDistance);
+        }
+    } else if (op == RigExecRevisionOp::Lattice && cache) {
+        // The basis RigExecApplyLatticeKernel looks up, asked exactly where
+        // the kernel asks: past its pass-through checks, with its bind box.
+        GfVec3f lo(0.0f), size(0.0f);
+        if (RigExecLatticeKernelSetup(
+                count, p.restPoints.data(), p.restPoints.size(),
+                p.auxPoints.data(), p.auxPoints.size(), p.auxPointsB.data(),
+                p.auxPointsB.size(), p.divisions[0], p.divisions[1],
+                p.divisions[2], &lo, &size,
+                static_cast<std::vector<GfVec3f> *>(nullptr))) {
+            prepared->latticeBasis = cache->LatticeBasis(
+                p.restPoints.data(), p.restPoints.size(), lo, size,
+                p.divisions[0], p.divisions[1], p.divisions[2]);
+            if (prepared->latticeBasis) {
+                prepared->latticeBind = cache->RetainedLatticeBind();
+            }
+        }
+    }
+    return acceptance;
+}
+
+// Each arm is RunRevisionKernel restricted to [begin, end): the same kernel
+// over the same packet, through the range forms of its loops. A prepared
+// input that is missing or sized for other points also answers false (an
+// invariant violation the caller counts), never a guess.
+bool
+RigExecRunRevisionRange(RigExecRevisionOp op, const RigExecMoverParameters &p,
+                        const RigExecRevisionRangeInputs &prepared,
+                        const GfVec3f *entering, size_t count, size_t begin,
+                        size_t end, const float *separateEnvelope,
+                        std::vector<GfVec3f> *out, bool useSimd,
+                        bool *untouched)
+{
+    if (untouched) {
+        *untouched = false;
+    }
+    if (!out || out->size() != count || begin > end || end > count ||
+        (count && !entering) || (count && entering == out->data()) ||
+        !RigExecRevisionIsRangeOp(op) || !_PacketMatches(op, p)) {
+        return false;
+    }
+    GfVec3f *const data = out->data();
+    // The range's result is its entering points: reported, or copied when
+    // the caller asked for the result in \p out.
+    const auto passThrough = [&]() {
+        if (untouched) {
+            *untouched = true;
+        } else {
+            std::copy(entering + begin, entering + end, data + begin);
+        }
+        return true;
+    };
+    if (begin == end) {
+        return passThrough();
+    }
+    // Every arm below that runs in place first seeds the range with its
+    // entering points, as RunRevisionKernel copies the whole array.
+    const auto seed = [&]() {
+        std::copy(entering + begin, entering + end, data + begin);
+    };
+    const RigExecWeightPacket &w = p.weights;
+    if (op == RigExecRevisionOp::Matrix) {
+        if (RigExecEnvelopeIsFullStrength(w)) {
+            ApplyMatrixFullStrength(p, entering + begin, data + begin,
+                                    end - begin, useSimd);
+            return true;
+        }
+        if (_MatrixWalksSparse(w)) {
+            if (p.transform == GfMatrix4d(1.0)) {
+                return passThrough();
+            }
+            size_t first = 0, last = 0;
+            _SparseEntriesIn(w.indices, begin, end, &first, &last);
+            if (first == last) {
+                return passThrough();
+            }
+            seed();
+            _ApplyMatrixSparseWalk(p, w, first, last, data);
+            return true;
+        }
+        if (prepared.matrixWeights.size() != count) {
+            return false;
+        }
+        seed();
+        RigExecApplyMatrixKernelRange(p, prepared.matrixWeights.data(), begin,
+                                      end, data, useSimd);
+        return true;
+    }
+    if (op == RigExecRevisionOp::Wire && RigExecWireTakesSparseEnvelope(w)) {
+        // The envelope is the walk's own: no separate blend.
+        if (!prepared.wireBasis) {
+            return false;
+        }
+        size_t first = 0, last = 0;
+        _SparseEntriesIn(w.indices, begin, end, &first, &last);
+        if (first == last) {
+            return passThrough();
+        }
+        seed();
+        return RigExecApplyWireBasisRange(out, *prepared.wireBasis, w.indices,
+                                          w.values, p.restPoints, p.auxPoints,
+                                          begin, end);
+    }
+    // A dense wire or a lattice, blended over the entering points afterwards
+    // unless the envelope is at full strength.
+    const bool blend = !RigExecEnvelopeIsFullStrength(w);
+    if (blend && !separateEnvelope) {
+        return false;
+    }
+    if (op == RigExecRevisionOp::Wire) {
+        seed();
+        const RigExecNurbsCurve rest{&p.restPoints, p.curveOrder,
+                                     &p.curveKnots};
+        const RigExecNurbsCurve posed{&p.auxPoints, p.curveOrder,
+                                      &p.curveKnots};
+        const std::vector<GfVec3f> *evaluations = prepared.wireRestEvaluations;
+        if (!RigExecApplyWire(out, rest, posed, p.wireBindCoords.cdata(),
+                              p.wireBindCoords.size(), p.dropoffDistance,
+                              begin, end,
+                              evaluations ? evaluations->data() : nullptr,
+                              evaluations ? evaluations->size() : 0)) {
+            return false;
+        }
+    } else {
+        if (p.restPoints.size() != count) {
+            return false;  // cardinality mismatch fails atomically
+        }
+        seed();
+        RigExecApplyLatticeKernelRange(
+            out, begin, end, p.restPoints.data(), p.restPoints.size(),
+            p.auxPoints.data(), p.auxPoints.size(), p.auxPointsB.data(),
+            p.auxPointsB.size(), p.divisions[0], p.divisions[1],
+            p.divisions[2], prepared.latticeBasis);
+    }
+    if (blend) {
+        RigExecBlendEnvelopeRange(entering, separateEnvelope, begin, end,
+                                  data);
+    }
+    return true;
 }
 
 // One revision, envelope included: the packet check, the full-strength fast

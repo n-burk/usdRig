@@ -1074,19 +1074,40 @@ RigExecApplyWireBasis(std::vector<GfVec3f> *points,
                       const std::vector<GfVec3f> &restControlPoints,
                       const std::vector<GfVec3f> &posedControlPoints)
 {
+    return RigExecApplyWireBasisRange(points, basis, indices, weights,
+                                      restControlPoints, posedControlPoints,
+                                      0, points ? points->size() : 0);
+}
+
+bool
+RigExecApplyWireBasisRange(std::vector<GfVec3f> *points,
+                           const RigExecWireBasis &basis,
+                           const std::vector<int> &indices,
+                           const std::vector<float> &weights,
+                           const std::vector<GfVec3f> &restControlPoints,
+                           const std::vector<GfVec3f> &posedControlPoints,
+                           size_t begin, size_t end)
+{
     const size_t n = basis.byControlPoint.size();
     if (!points || restControlPoints.size() != n ||
         posedControlPoints.size() != n || indices.size() != weights.size()) {
         return false;
     }
+    end = std::min(end, points->size());
     GfVec3f *data = points->data();
+    // Control-point-major, as the whole call: a point's additions arrive in
+    // control point order whichever range it is applied in.
     for (size_t j = 0; j < n; ++j) {
         const GfVec3f delta = posedControlPoints[j] - restControlPoints[j];
         if (delta == GfVec3f(0.0f)) {
             continue;  // a control point at rest moves nothing
         }
         for (const auto &[k, coefficient] : basis.byControlPoint[j]) {
-            data[size_t(indices[k])] += delta * (coefficient * weights[k]);
+            const int index = indices[k];
+            if (index < 0 || size_t(index) < begin || size_t(index) >= end) {
+                continue;
+            }
+            data[size_t(index)] += delta * (coefficient * weights[k]);
         }
     }
     return true;

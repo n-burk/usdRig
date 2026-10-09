@@ -7,6 +7,8 @@
 #include "rigExec/moverGraph.h"
 #include "rigExecRevisionProgramTest.h"
 #include "rigExec/types.h"
+#include "rigExecMath/geometryKernels.h"
+#include "rigExecMath/latticeKernel.h"
 
 #include "pxr/base/gf/matrix4d.h"
 #include "pxr/base/gf/rotation.h"
@@ -21,8 +23,14 @@
 #include "pxr/usd/usd/stage.h"
 
 #include <algorithm>
+#include <cmath>
+#include <cstdint>
 #include <cstdio>
+#include <cstring>
+#include <functional>
 #include <limits>
+#include <memory>
+#include <vector>
 
 PXR_NAMESPACE_USING_DIRECTIVE
 
@@ -1343,6 +1351,64 @@ TestRevisionAcceptanceMatchesKernel()
               p, points, refuses);
     }
 
+    // Lattice: the kernel refuses only a rest-point count other than the
+    // entering one, and then its separate envelope; an invalid cage passes
+    // every point through, which applies.
+    {
+        RigExecMoverParameters lattice;
+        lattice.valid = true;
+        lattice.kind = TfToken("lattice");
+        lattice.weights = RigExecWeightPacket::Constant(1.0f);
+        lattice.divisions = GfVec3i(2, 2, 2);
+        lattice.restPoints = points;
+        for (int z = 0; z < 2; ++z) {
+            for (int y = 0; y < 2; ++y) {
+                for (int x = 0; x < 2; ++x) {
+                    lattice.auxPoints.emplace_back(float(x), float(y),
+                                                   float(z));
+                }
+            }
+        }
+        lattice.auxPointsB = lattice.auxPoints;
+        lattice.auxPointsB[7] += GfVec3f(0, 0, 1);
+        check("lattice", RigExecRevisionOp::Lattice, lattice, points,
+              applies);
+        auto p = lattice;
+        p.weights = RigExecWeightPacket::Constant(0.5f);
+        check("lattice at half", RigExecRevisionOp::Lattice, p, points,
+              applies);
+        p.weights = dense;
+        check("lattice, dense envelope", RigExecRevisionOp::Lattice, p,
+              points, applies);
+        p.weights = shortDense;
+        check("lattice, envelope one weight short",
+              RigExecRevisionOp::Lattice, p, points, refuses);
+        // RevisionStatic resolves only a wire's envelope before it asks, so
+        // a lattice's envelope is validated whatever the caller says.
+        const bool resolves = true;
+        CHECK(rigExec::RigExecRevisionKernelAcceptance(
+                  RigExecRevisionOp::Lattice, p, points.size(), &resolves) ==
+              refuses);
+        p = lattice;
+        p.restPoints.pop_back();
+        check("lattice, one rest point short", RigExecRevisionOp::Lattice, p,
+              points, refuses);
+        p = lattice;
+        p.auxPointsB.pop_back();
+        check("lattice, posed cage one point short",
+              RigExecRevisionOp::Lattice, p, points, applies);
+        p = lattice;
+        p.divisions = GfVec3i(1, 2, 2);
+        check("lattice, one division", RigExecRevisionOp::Lattice, p, points,
+              applies);
+        p = lattice;
+        p.valid = false;
+        check("lattice, invalid packet", RigExecRevisionOp::Lattice, p,
+              points, refuses);
+        check("lattice packet on a wire", RigExecRevisionOp::Wire, lattice,
+              points, refuses);
+    }
+
     // A skin's decision is the baked program's, from the halves its steps
     // hold; this one only checks the packet.
     {
@@ -1358,6 +1424,498 @@ TestRevisionAcceptanceMatchesKernel()
     }
     std::printf("revision acceptance: %zu packet(s) decided as their kernels "
                 "answer\n", compared);
+}
+
+static float
+NanWithPayload(uint32_t payload)
+{
+    const uint32_t bits = 0x7fc00000u | (payload & 0x3fffffu);
+    float value;
+    std::memcpy(&value, &bits, sizeof(value));
+    return value;
+}
+
+static bool
+SameBits(const std::vector<GfVec3f> &a, const std::vector<GfVec3f> &b)
+{
+    return a.size() == b.size() &&
+           (a.empty() ||
+            !std::memcmp(a.data(), b.data(), a.size() * sizeof(GfVec3f)));
+}
+
+// Whether every point of [begin, end) holds \p fill's bits.
+static bool
+HoldsBits(const std::vector<GfVec3f> &points, size_t begin, size_t end,
+          const GfVec3f &fill)
+{
+    for (size_t i = begin; i < end; ++i) {
+        if (std::memcmp(&points[i], &fill, sizeof(GfVec3f))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Entering points with NaN payloads, signed zeros and infinities at and
+// beside the bounds the range tests cut at, and inside the ranges. A point
+// holds one NaN payload and nothing else non-finite, so no addition meets
+// two different NaNs, whose result is the compiler's operand order.
+static std::vector<GfVec3f>
+MakeRangeEnteringPoints(size_t count)
+{
+    std::vector<GfVec3f> points(count);
+    for (size_t i = 0; i < count; ++i) {
+        const float t = float(i);
+        points[i] = GfVec3f(3.0f * std::sin(0.37f * t),
+                            2.0f * std::cos(0.11f * t) - 1.0f,
+                            0.01f * t - 4.0f);
+    }
+    const float inf = std::numeric_limits<float>::infinity();
+    points[0] = GfVec3f(-0.0f, 0.0f, -0.0f);
+    points[1] = GfVec3f(NanWithPayload(0x1234), -0.0f, 1.0f);
+    points[3] = GfVec3f(inf, -inf, 0.5f);
+    points[332] = GfVec3f(-inf, 0.5f, -0.0f);
+    points[333] = GfVec3f(-0.0f, NanWithPayload(0x2), 0.25f);
+    points[340] = GfVec3f(0.0f, -0.0f, inf);
+    points[699] = GfVec3f(NanWithPayload(0x3ffff), 2.0f, -0.0f);
+    points[700] = GfVec3f(-0.0f, -0.0f, -0.0f);
+    points[1000] = GfVec3f(inf, 1.0f, 0.0f);
+    return points;
+}
+
+// The packets the range tests run, over 1001 points.
+struct RangeTestPackets {
+    static constexpr size_t count = 1001;
+    std::vector<int> sparseIndices;
+    RigExecWeightPacket sparse, denseMatrix, denseWire;
+    RigExecMoverParameters matrix, wire, sparseWire, lattice;
+
+    RangeTestPackets()
+    {
+        // Indices in [0, 1), [1, 333) and [334, 700), none in [333, 334)
+        // or [700, 1001).
+        sparseIndices.push_back(0);
+        for (int i = 3; i < 333; i += 7) sparseIndices.push_back(i);
+        for (int i = 340; i < 700; i += 12) sparseIndices.push_back(i);
+        sparse.representation = TfToken("sparse");
+        sparse.rangePolicy = TfToken("strict");
+        sparse.indices = sparseIndices;
+        for (size_t k = 0; k < sparseIndices.size(); ++k) {
+            sparse.values.push_back(float(k % 6) / 5.0f);
+        }
+        sparse.defaultWeight = 0.0f;
+        sparse.valid = true;
+        denseMatrix.representation = TfToken("dense");
+        denseMatrix.rangePolicy = TfToken("strict");
+        denseWire = denseMatrix;
+        for (size_t i = 0; i < count; ++i) {
+            // Runs of one weight, as a painted falloff has.
+            denseMatrix.values.push_back(float((i / 3) % 11) / 10.0f);
+            denseWire.values.push_back(float(i % 9) / 8.0f);
+        }
+        denseMatrix.valid = denseWire.valid = true;
+
+        matrix = MakeMatrixParams(GfVec3d(0.0), 1.0f);
+        matrix.transform.SetTransform(GfRotation(GfVec3d(1, 2, 3), 37.0),
+                                      GfVec3d(0.5, -1.0, 2.0));
+
+        wire.valid = true;
+        wire.kind = TfToken("wire");
+        wire.weights = RigExecWeightPacket::Constant(1.0f);
+        wire.curveOrder = 3;
+        wire.curveKnots = {0.0, 0.0, 0.0, 1.0, 2.0, 3.0, 3.0, 3.0};
+        wire.restPoints = {GfVec3f(0, 0, 0), GfVec3f(1, 0, 0),
+                           GfVec3f(2, 0, 0), GfVec3f(3, 0, 0),
+                           GfVec3f(4, 0, 0)};
+        // The first control point at rest moves nothing.
+        wire.auxPoints = {GfVec3f(0, 0, 0), GfVec3f(1, 0.5f, 0),
+                          GfVec3f(2, -0.25f, 0.3f), GfVec3f(3, 0.75f, -0.1f),
+                          GfVec3f(4, 0, 0.4f)};
+        wire.dropoffDistance = 2.0;
+        // Some binds lie past the dropoff and are skipped.
+        VtArray<GfVec2f> binds(count);
+        for (size_t i = 0; i < count; ++i) {
+            binds[i] = GfVec2f(3.0f * float(i % 97) / 96.0f,
+                               0.2f * float(i % 13));
+        }
+        wire.wireBindCoords = binds;
+        sparseWire = wire;
+        sparseWire.weights = sparse;
+        VtArray<GfVec2f> sparseBinds(sparseIndices.size());
+        for (size_t k = 0; k < sparseIndices.size(); ++k) {
+            sparseBinds[k] =
+                GfVec2f(3.0f * float(k) / float(sparseIndices.size()),
+                        0.25f * float(k % 11));
+        }
+        sparseWire.wireBindCoords = sparseBinds;
+
+        lattice.valid = true;
+        lattice.kind = TfToken("lattice");
+        lattice.weights = RigExecWeightPacket::Constant(1.0f);
+        lattice.divisions = GfVec3i(3, 4, 2);
+        for (int c = 0; c < 2; ++c) {
+            for (int b = 0; b < 4; ++b) {
+                for (int a = 0; a < 3; ++a) {
+                    lattice.auxPoints.emplace_back(float(a), 1.5f * float(b),
+                                                   0.5f * float(c));
+                }
+            }
+        }
+        lattice.auxPointsB = lattice.auxPoints;
+        for (size_t k = 0; k < lattice.auxPointsB.size(); ++k) {
+            lattice.auxPointsB[k] += GfVec3f(0.1f * float(k % 5),
+                                             -0.05f * float(k % 3), 0.3f);
+        }
+        // Rest points inside and outside the cage's bound, so the nonzero
+        // factor spans differ from point to point.
+        lattice.restPoints.resize(count);
+        for (size_t i = 0; i < count; ++i) {
+            const float t = float(i);
+            lattice.restPoints[i] =
+                GfVec3f(1.0f + 1.6f * std::sin(0.7f * t),
+                        2.25f + 3.0f * std::cos(0.3f * t),
+                        0.25f + 0.4f * std::sin(1.3f * t));
+        }
+        lattice.restPoints[500][1] = NanWithPayload(0x5);
+    }
+};
+
+// A range-pipelined revision's ranges against its whole kernel. For each
+// range op and envelope shape, RigExecRunRevisionRange over an uneven
+// partition (one-point ranges at the start and in the middle) and over one
+// range writes, concatenated, exactly the bits RigExecRunRevisionKernel
+// writes over the whole array; a range touches no point outside it; and it
+// reports untouched exactly where the whole kernel cannot write. The
+// prepared inputs are the memos the whole kernel's path reads.
+static void
+TestRevisionRangesMatchTheWholeKernel()
+{
+    using rigExec::RigExecRevisionAcceptance;
+    using rigExec::RigExecRevisionRangeInputs;
+    using Cache = rigExec::RigExecSurfaceKernelCache<GfVec3f, GfVec3d>;
+    const RangeTestPackets packets;
+    const size_t count = RangeTestPackets::count;
+    const std::vector<GfVec3f> entering = MakeRangeEnteringPoints(count);
+    const std::vector<std::vector<size_t>> partitions = {
+        {0, 1, 333, 334, 700, 1001}, {0, 1001}};
+    const GfVec3f poison(NanWithPayload(0x5a5a5), -0.0f,
+                         NanWithPayload(0x123));
+    size_t compared = 0;
+    // The points every case enters with, unless a case says otherwise.
+    const std::vector<GfVec3f> *source = &entering;
+    const auto check = [&](const char *what, RigExecRevisionOp op,
+                           const RigExecMoverParameters &p, bool useSimd,
+                           bool cached,
+                           const std::function<bool(size_t, size_t)> &skips,
+                           bool moves) {
+        const std::vector<GfVec3f> &in = *source;
+        rigExec::RigExecWireBasisCache wholeWire, rangeWire;
+        Cache wholeSurface, rangeSurface;
+        std::vector<GfVec3f> whole = in;
+        bool ok = rigExec::RigExecRunRevisionKernel(
+            op, p, &whole, useSimd, cached ? &wholeWire : nullptr,
+            cached ? &wholeSurface : nullptr);
+        ok = ok && SameBits(whole, in) != moves;
+        RigExecRevisionRangeInputs prepared;
+        const RigExecRevisionAcceptance acceptance =
+            rigExec::RigExecPrepareRevisionRanges(
+                op, p, count, cached ? &rangeWire : nullptr,
+                cached ? &rangeSurface : nullptr, &prepared);
+        ok = ok && acceptance == RigExecRevisionAcceptance::Applies &&
+             acceptance ==
+                 rigExec::RigExecRevisionKernelAcceptance(op, p, count);
+        // What the prepared inputs hold for this shape.
+        const bool sparseShape =
+            rigExec::RigExecWireTakesSparseEnvelope(p.weights);
+        const bool fullStrength =
+            rigExec::RigExecEnvelopeIsFullStrength(p.weights);
+        if (op == RigExecRevisionOp::Matrix) {
+            ok = ok && prepared.matrixWeights.size() ==
+                           (fullStrength || sparseShape ? size_t(0) : count);
+        } else if (op == RigExecRevisionOp::Wire) {
+            ok = ok && bool(prepared.wireBasis) == sparseShape &&
+                 (prepared.wireRestEvaluations != nullptr) ==
+                     (cached && !sparseShape);
+        } else {
+            ok = ok && (prepared.latticeBasis != nullptr) == cached &&
+                 (!cached || (prepared.latticeBind &&
+                              &prepared.latticeBind->value ==
+                                  prepared.latticeBasis));
+        }
+        std::vector<float> envelope;
+        if (rigExec::RigExecRevisionTakesSeparateBlend(op, p.weights) &&
+            !fullStrength) {
+            ok = p.weights.ResolveAll(count, &envelope) && ok;
+        }
+        const float *separate = envelope.empty() ? nullptr : envelope.data();
+        for (const std::vector<size_t> &bounds : partitions) {
+            std::vector<GfVec3f> reported(count, poison);
+            std::vector<GfVec3f> written(count, poison);
+            for (size_t k = 0; k + 1 < bounds.size(); ++k) {
+                const size_t b = bounds[k], e = bounds[k + 1];
+                bool untouched = !skips(b, e);
+                ok = rigExec::RigExecRunRevisionRange(
+                         op, p, prepared, in.data(), count, b, e,
+                         separate, &reported, useSimd, &untouched) &&
+                     ok;
+                ok = ok && untouched == skips(b, e);
+                if (untouched) {
+                    // Nothing written, and the whole kernel left these
+                    // points as they entered; the caller passes them on.
+                    ok = ok && HoldsBits(reported, b, e, poison) &&
+                         !std::memcmp(whole.data() + b, in.data() + b,
+                                      (e - b) * sizeof(GfVec3f));
+                    std::copy(in.begin() + b, in.begin() + e,
+                              reported.begin() + b);
+                }
+                // Asked for the result in `out`, a range writes it there and
+                // writes nothing else.
+                std::vector<GfVec3f> alone(count, poison);
+                ok = rigExec::RigExecRunRevisionRange(
+                         op, p, prepared, in.data(), count, b, e,
+                         separate, &alone, useSimd) &&
+                     ok;
+                ok = ok && HoldsBits(alone, 0, b, poison) &&
+                     HoldsBits(alone, e, count, poison);
+                std::copy(alone.begin() + b, alone.begin() + e,
+                          written.begin() + b);
+            }
+            ok = ok && SameBits(reported, whole) && SameBits(written, whole);
+        }
+        if (!ok) {
+            std::printf("  %s (simd %d, cached %d): the ranges are not the "
+                        "whole kernel's\n", what, int(useSimd), int(cached));
+        }
+        CHECK(ok);
+        ++compared;
+    };
+    const auto never = [](size_t, size_t) { return false; };
+    const auto always = [](size_t, size_t) { return true; };
+    const auto noIndexIn = [&](size_t b, size_t e) {
+        return std::none_of(packets.sparseIndices.begin(),
+                            packets.sparseIndices.end(), [&](int index) {
+                                return size_t(index) >= b &&
+                                       size_t(index) < e;
+                            });
+    };
+    using Op = RigExecRevisionOp;
+
+    // Matrix: full strength, a dense envelope and a sparse walk, each with
+    // the linear and the radial blend; the identity's sparse walk writes
+    // nothing at all.
+    for (const bool radial : {false, true}) {
+        for (const bool simd : {false, true}) {
+            auto p = packets.matrix;
+            p.radialWeight = radial;
+            check(radial ? "matrix full strength, radial"
+                         : "matrix full strength",
+                  Op::Matrix, p, simd, false, never, true);
+            p.weights = packets.denseMatrix;
+            check(radial ? "matrix dense, radial" : "matrix dense",
+                  Op::Matrix, p, simd, false, never, true);
+        }
+        auto p = packets.matrix;
+        p.radialWeight = radial;
+        p.weights = packets.sparse;
+        check(radial ? "matrix sparse walk, radial" : "matrix sparse walk",
+              Op::Matrix, p, false, false, noIndexIn, true);
+        p.transform = GfMatrix4d(1.0);
+        check("matrix sparse walk at identity", Op::Matrix, p, false, false,
+              always, false);
+    }
+
+    // Wire: the sparse basis (memoized and built per call), the dense walk
+    // with and without rest evaluations, and the dense walk blended with a
+    // separate envelope.
+    for (const bool cached : {false, true}) {
+        check("wire sparse basis", Op::Wire, packets.sparseWire, false,
+              cached, noIndexIn, true);
+        check("wire dense", Op::Wire, packets.wire, false, cached, never,
+              true);
+        auto p = packets.wire;
+        p.weights = packets.denseWire;
+        check("wire dense, separate envelope", Op::Wire, p, false, cached,
+              never, true);
+    }
+
+    // Lattice: through a retained basis (cached) and per point (not), at
+    // full strength and blended, and with non-finite cage deltas, which
+    // visit every term. Those deltas make NaNs of their own, so that case
+    // enters infinities where the others enter NaN payloads.
+    const float inf = std::numeric_limits<float>::infinity();
+    std::vector<GfVec3f> noPayloads = entering;
+    for (GfVec3f &point : noPayloads) {
+        for (int axis = 0; axis < 3; ++axis) {
+            if (std::isnan(point[axis])) {
+                point[axis] = inf;
+            }
+        }
+    }
+    for (const bool cached : {false, true}) {
+        check("lattice", Op::Lattice, packets.lattice, false, cached, never,
+              true);
+        auto p = packets.lattice;
+        p.weights = RigExecWeightPacket::Constant(0.5f);
+        check("lattice at half", Op::Lattice, p, false, cached, never, true);
+        p = packets.lattice;
+        p.auxPointsB[3][0] = inf;
+        p.auxPointsB[5][1] = -inf;
+        source = &noPayloads;
+        check("lattice, non-finite cage deltas", Op::Lattice, p, false,
+              cached, never, true);
+        source = &entering;
+    }
+
+    // The retained bind outlives its cache's slot: handed an equal bind
+    // between runs (RigExecLatticeBindSharing), the cache drops its own,
+    // which the prepared inputs still hold, and the ranges still answer the
+    // whole kernel's bits through it.
+    {
+        Cache first, second;
+        RigExecRevisionRangeInputs prepared;
+        CHECK(rigExec::RigExecPrepareRevisionRanges(
+                  Op::Lattice, packets.lattice, count, nullptr, &first,
+                  &prepared) == RigExecRevisionAcceptance::Applies);
+        std::vector<GfVec3f> whole = entering;
+        CHECK(rigExec::RigExecRunRevisionKernel(Op::Lattice, packets.lattice,
+                                                &whole, false, nullptr,
+                                                &second));
+        const auto held = first.RetainedLatticeBind();
+        CHECK(held && prepared.latticeBind == held &&
+              second.RetainedLatticeBind() &&
+              second.RetainedLatticeBind() != held);
+        {
+            rigExec::RigExecLatticeBindSharing<GfVec3f> sharing;
+            sharing.Offer(&second);
+            sharing.Offer(&first);
+        }
+        CHECK(first.RetainedLatticeBind() == second.RetainedLatticeBind());
+        // Only this test's copy and the prepared inputs hold it now.
+        CHECK(held.use_count() == 2 &&
+              &held->value == prepared.latticeBasis);
+        std::vector<GfVec3f> out(count, poison);
+        for (size_t k = 0; k + 1 < partitions[0].size(); ++k) {
+            CHECK(rigExec::RigExecRunRevisionRange(
+                Op::Lattice, packets.lattice, prepared, entering.data(),
+                count, partitions[0][k], partitions[0][k + 1], nullptr, &out,
+                false));
+        }
+        CHECK(SameBits(out, whole));
+    }
+    std::printf("revision ranges: %zu revision(s) matched their whole "
+                "kernels\n", compared);
+}
+
+// RigExecPrepareRevisionRanges answers RigExecRevisionKernelAcceptance for
+// every packet, and leaves no input from an earlier packet behind where the
+// answer is not Applies for a range op. RigExecRevisionIsRangeOp names
+// exactly Matrix, Wire and Lattice.
+static void
+TestPrepareRevisionRangesDecidesAsTheKernel()
+{
+    using rigExec::RigExecRevisionAcceptance;
+    using rigExec::RigExecRevisionRangeInputs;
+    using Op = RigExecRevisionOp;
+    const RangeTestPackets packets;
+    const size_t count = RangeTestPackets::count;
+    const std::vector<GfVec3f> staleTable(3);
+    const rigExec::RigExecLatticeBasis staleBasis{};
+    const auto check = [&](const char *what, Op op,
+                           const RigExecMoverParameters &p, size_t n,
+                           RigExecRevisionAcceptance expected) {
+        rigExec::RigExecWireBasisCache wire;
+        rigExec::RigExecSurfaceKernelCache<GfVec3f, GfVec3d> surface;
+        RigExecRevisionRangeInputs prepared;
+        prepared.matrixWeights.assign(3, 0.5f);
+        prepared.wireBasis = std::make_shared<rigExec::RigExecWireBasis>();
+        prepared.wireRestEvaluations = &staleTable;
+        prepared.latticeBasis = &staleBasis;
+        const RigExecRevisionAcceptance decided =
+            rigExec::RigExecPrepareRevisionRanges(op, p, n, &wire, &surface,
+                                                  &prepared);
+        bool ok = decided == expected &&
+                  decided == rigExec::RigExecRevisionKernelAcceptance(op, p, n);
+        if (decided != RigExecRevisionAcceptance::Applies ||
+            !rigExec::RigExecRevisionIsRangeOp(op)) {
+            ok = ok && prepared.matrixWeights.empty() && !prepared.wireBasis &&
+                 !prepared.wireRestEvaluations && !prepared.latticeBasis &&
+                 !prepared.latticeBind;
+        }
+        // A packet the kernel refuses is one RigExecRunRevisionKernel fails.
+        if (decided == RigExecRevisionAcceptance::Refuses) {
+            std::vector<GfVec3f> pts(n, GfVec3f(1.0f, 2.0f, 3.0f));
+            ok = ok && !rigExec::RigExecRunRevisionKernel(op, p, &pts, false,
+                                                          nullptr);
+        }
+        if (!ok) {
+            std::printf("  %s: prepared %d, expected %d\n", what,
+                        int(decided), int(expected));
+        }
+        CHECK(ok);
+    };
+    const RigExecRevisionAcceptance applies =
+        RigExecRevisionAcceptance::Applies;
+    const RigExecRevisionAcceptance refuses =
+        RigExecRevisionAcceptance::Refuses;
+
+    auto p = packets.matrix;
+    p.weights = packets.denseMatrix;
+    check("matrix dense", Op::Matrix, p, count, applies);
+    check("matrix dense, one point more", Op::Matrix, p, count + 1, refuses);
+    p.weights.values[7] = 1.5f;
+    check("matrix dense weight above 1", Op::Matrix, p, count, refuses);
+    p.weights = packets.sparse;
+    std::swap(p.weights.indices[1], p.weights.indices[2]);
+    check("matrix sparse walk descending", Op::Matrix, p, count, refuses);
+    p = packets.matrix;
+    p.valid = false;
+    check("matrix, invalid packet", Op::Matrix, p, count, refuses);
+
+    check("wire dense", Op::Wire, packets.wire, count, applies);
+    check("wire dense, one point more", Op::Wire, packets.wire, count + 1,
+          refuses);
+    p = packets.wire;
+    p.weights = packets.denseWire;
+    p.weights.values.pop_back();
+    check("wire dense, envelope one weight short", Op::Wire, p, count,
+          refuses);
+    p = packets.sparseWire;
+    std::swap(p.weights.indices[1], p.weights.indices[2]);
+    check("wire sparse walk descending", Op::Wire, p, count, refuses);
+    check("wire sparse basis", Op::Wire, packets.sparseWire, count, applies);
+
+    check("lattice", Op::Lattice, packets.lattice, count, applies);
+    check("lattice, one point more", Op::Lattice, packets.lattice, count + 1,
+          refuses);
+    p = packets.lattice;
+    p.weights = packets.denseWire;
+    p.weights.values[3] = std::numeric_limits<float>::quiet_NaN();
+    check("lattice, NaN envelope weight", Op::Lattice, p, count, refuses);
+
+    // Not range ops: the acceptance alone, nothing prepared.
+    RigExecMoverParameters blend;
+    blend.valid = true;
+    blend.kind = TfToken("blendShape");
+    blend.weights = RigExecWeightPacket::Constant(1.0f);
+    blend.blendDeltas.assign(count, GfVec3f(0, 1, 0));
+    check("blend shape", Op::BlendShape, blend, count, applies);
+    blend.blendSurfaceFrame = true;
+    check("blend shape on the surface frame", Op::BlendShape, blend, count,
+          RigExecRevisionAcceptance::Deferred);
+
+    const Op ops[] = {Op::Matrix,          Op::Skin,
+                      Op::BlendShape,      Op::VolumeCorrect,
+                      Op::Smooth,          Op::Lattice,
+                      Op::SurfaceProject,  Op::Ribbon,
+                      Op::Wire,            Op::EmitGuidePoints,
+                      Op::RecomputeNormals, Op::RecomputeExtent,
+                      Op::DeltaMush,       Op::Wrinkle,
+                      Op::External,        Op::SurfaceProjector,
+                      Op::ShaderDials};
+    for (const Op op : ops) {
+        CHECK(rigExec::RigExecRevisionIsRangeOp(op) ==
+              (op == Op::Matrix || op == Op::Wire || op == Op::Lattice));
+    }
 }
 
 static void
@@ -1419,6 +1977,8 @@ main(int argc, char **argv)
     TestAppendAfterEvaluation();
     TestEveryOperationUpdatesInteractively();
     TestRevisionAcceptanceMatchesKernel();
+    TestRevisionRangesMatchTheWholeKernel();
+    TestPrepareRevisionRangesDecidesAsTheKernel();
     TestLongResolvedInputConnections();
 
     if (failures) {

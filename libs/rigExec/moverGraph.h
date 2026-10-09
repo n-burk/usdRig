@@ -797,16 +797,73 @@ bool RigExecRevisionTakesSeparateBlend(RigExecRevisionOp op,
                                        const RigExecWeightPacket &w);
 
 /// RigExecRunRevisionKernel's answer over \p count entering points, from the
-/// validation the matrix, blend-shape and wire kernels run first (one
-/// definition each, shared with the kernel) and, for a wire that blends
-/// separately, its envelope. Every other operation is Deferred once its
-/// packet passes; a skin's answer is the baked program's, from the halves
-/// RevisionStatic and the fold hold. \p envelopeResolves, when given, is
-/// `p.weights.ResolvesAll(count)` already answered by a resolve of the
-/// envelope at \p count, so it is not validated a second time.
+/// validation the matrix, blend-shape, wire and lattice kernels run first
+/// (one definition each, shared with the kernel) and, for a wire or a
+/// lattice that blends separately, its envelope. Every other operation is
+/// Deferred once its packet passes; a skin's answer is the baked program's,
+/// from the halves RevisionStatic and the fold hold. \p envelopeResolves,
+/// when given, is a wire's `p.weights.ResolvesAll(count)` already answered
+/// by a resolve of the envelope at \p count, so it is not validated a second
+/// time; a lattice validates its envelope here.
 RigExecRevisionAcceptance RigExecRevisionKernelAcceptance(
     RigExecRevisionOp op, const RigExecMoverParameters &p, size_t count,
     const bool *envelopeResolves = nullptr);
+
+struct RigExecLatticeBasis;  // rigExecMath/latticeKernel.h
+
+/// Ops a range-pipelined chain runs as one step per point range: per point
+/// (output point i reads entering point i and the packet only) and decided
+/// before any point is written (RigExecRevisionKernelAcceptance never answers
+/// Deferred for an assembled packet): Matrix, Wire, Lattice.
+bool RigExecRevisionIsRangeOp(RigExecRevisionOp op);
+
+/// What a range-pipelined revision's range steps read besides the packet,
+/// the separate-blend envelope and the entering points. Filled by its
+/// RevisionStatic (the one writer) and read immutably by its range steps.
+/// The pointers alias the revision's own kernel caches and stay valid until
+/// its next RevisionStatic body; a copied revision copies the caches, which
+/// share the entries.
+struct RigExecRevisionRangeInputs {
+    /// Matrix: the dense envelope at the full count; empty for a
+    /// full-strength envelope or a sparse walk.
+    std::vector<float> matrixWeights;
+    /// Wire with a sparse envelope: RigExecWireBasisCache::Get's basis.
+    std::shared_ptr<const RigExecWireBasis> wireBasis;
+    /// Dense wire: restEvaluations.Get's table, or null to evaluate per point.
+    const std::vector<GfVec3f> *wireRestEvaluations = nullptr;
+    /// Lattice: the cached basis, or null to evaluate per point.
+    const RigExecLatticeBasis *latticeBasis = nullptr;
+    /// The retained bind `latticeBasis` points into, held here because the
+    /// owner may hand the cache an equal bind between runs
+    /// (RigExecLatticeBindSharing), which would otherwise free this one.
+    std::shared_ptr<const RigExecLatticeBind<GfVec3f>> latticeBind;
+};
+
+/// RigExecRevisionKernelAcceptance(op, p, count), exactly; and when that is
+/// Applies for a range op, \p prepared filled for RigExecRunRevisionRange
+/// (otherwise cleared). \p wireBasis and \p cache are the revision's own
+/// memos (null builds per call); the caller is their only writer.
+RigExecRevisionAcceptance RigExecPrepareRevisionRanges(
+    RigExecRevisionOp op, const RigExecMoverParameters &p, size_t count,
+    RigExecWireBasisCache *wireBasis,
+    RigExecSurfaceKernelCache<GfVec3f, GfVec3d> *cache,
+    RigExecRevisionRangeInputs *prepared);
+
+/// Points [begin, end) of a revision that applies: \p out (sized \p count)
+/// receives at those indices exactly what RigExecRunRevisionKernel writes
+/// there for the whole array of \p count entering points; no other index is
+/// touched. \p separateEnvelope is the resolved "apply once" envelope
+/// (\p count floats) for an op that takes a separate blend below full
+/// strength, else null. \p untouched, when set, receives whether the range's
+/// result is the entering points themselves (then \p out is not written).
+/// Pure: concurrent calls for disjoint ranges of one revision are safe.
+/// False only where the whole kernel would refuse, which an Applies
+/// acceptance rules out.
+bool RigExecRunRevisionRange(
+    RigExecRevisionOp op, const RigExecMoverParameters &p,
+    const RigExecRevisionRangeInputs &prepared, const GfVec3f *entering,
+    size_t count, size_t begin, size_t end, const float *separateEnvelope,
+    std::vector<GfVec3f> *out, bool useSimd, bool *untouched = nullptr);
 
 
 /// A provider's asset frame from its rest landmarks and a rest->pose map:

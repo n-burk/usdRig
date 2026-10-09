@@ -210,6 +210,45 @@ RigExecLatticePointDelta(const Point *cageDeltas, int dx, int dy, int dz,
     return delta;
 }
 
+/// RigExecApplyLatticeBasis over points [begin, end) of the \p count points
+/// at \p points: the factor cursor is advanced past the points before
+/// \p begin, and each point visits the same terms in the same order with the
+/// same skipZeroTerms decision, so its bits are the whole call's.
+template <class Point>
+void
+RigExecApplyLatticeBasisRange(Point *points, size_t count, size_t begin,
+                              size_t end, const RigExecLatticeBasis &basis,
+                              const Point *cageDeltas)
+{
+    if (basis.ranges.size() != count * 6) {
+        return;  // a basis for other points: pass through
+    }
+    end = std::min(end, count);
+    if (begin >= end) {
+        return;
+    }
+    const int dx = basis.divisions[0], dy = basis.divisions[1],
+              dz = basis.divisions[2];
+    const size_t cageCount = size_t(dx) * size_t(dy) * size_t(dz);
+    // Revision-wide, as the whole call decides it.
+    const bool skipZeroTerms =
+        basis.bounded && RigExecLatticeDeltasFinite(cageDeltas, cageCount);
+    const double *next = basis.factors.data();
+    for (size_t i = 0; i < begin; ++i) {
+        const int *r = &basis.ranges[i * 6];
+        next += (r[1] - r[0]) + (r[3] - r[2]) + (r[5] - r[4]);
+    }
+    for (size_t i = begin; i < end; ++i) {
+        const int *r = &basis.ranges[i * 6];
+        const double *fa = next;
+        const double *fb = fa + (r[1] - r[0]);
+        const double *fc = fb + (r[3] - r[2]);
+        next = fc + (r[5] - r[4]);
+        points[i] += RigExecLatticePointDelta(cageDeltas, dx, dy, dz, r, fa,
+                                              fb, fc, skipZeroTerms);
+    }
+}
+
 /// Adds the posed cage's displacement to \p points through \p basis, which
 /// was built for these \p count points. \p cageDeltas are posed minus rest,
 /// x-fastest. Bit-identical to visiting every term: the spans alone are
@@ -221,23 +260,35 @@ RigExecApplyLatticeBasis(Point *points, size_t count,
                          const RigExecLatticeBasis &basis,
                          const Point *cageDeltas)
 {
-    if (basis.ranges.size() != count * 6) {
-        return;  // a basis for other points: pass through
+    RigExecApplyLatticeBasisRange(points, count, 0, count, basis, cageDeltas);
+}
+
+/// RigExecApplyLatticeStreaming over points [begin, end) of \p points and
+/// \p restPoints, indexed absolutely: every point's factors and decision are
+/// its own, so each point's bits are the whole call's.
+template <class Point>
+void
+RigExecApplyLatticeStreamingRange(Point *points, size_t begin, size_t end,
+                                  const Point *restPoints, const Point &lo,
+                                  const Point &size, int dx, int dy, int dz,
+                                  const Point *cageDeltas)
+{
+    if (begin >= end) {
+        return;
     }
-    const int dx = basis.divisions[0], dy = basis.divisions[1],
-              dz = basis.divisions[2];
-    const size_t cageCount = size_t(dx) * size_t(dy) * size_t(dz);
-    const bool skipZeroTerms =
-        basis.bounded && RigExecLatticeDeltasFinite(cageDeltas, cageCount);
-    const double *next = basis.factors.data();
-    for (size_t i = 0; i < count; ++i) {
-        const int *r = &basis.ranges[i * 6];
-        const double *fa = next;
-        const double *fb = fa + (r[1] - r[0]);
-        const double *fc = fb + (r[3] - r[2]);
-        next = fc + (r[5] - r[4]);
+    const int divisions[3] = {dx, dy, dz};
+    const bool finite = RigExecLatticeDeltasFinite(
+        cageDeltas, size_t(dx) * size_t(dy) * size_t(dz));
+    std::vector<double> scratch(size_t(dx) + size_t(dy) + size_t(dz));
+    int r[6];
+    for (size_t i = begin; i < end; ++i) {
+        const bool bounded = RigExecLatticePointFactors(
+            restPoints[i], lo, size, divisions, scratch.data(), r);
+        const double *fa = scratch.data() + r[0];
+        const double *fb = scratch.data() + dx + r[2];
+        const double *fc = scratch.data() + dx + dy + r[4];
         points[i] += RigExecLatticePointDelta(cageDeltas, dx, dy, dz, r, fa,
-                                              fb, fc, skipZeroTerms);
+                                              fb, fc, bounded && finite);
     }
 }
 
@@ -255,20 +306,8 @@ RigExecApplyLatticeStreaming(Point *points, size_t count,
                              const Point &size, int dx, int dy, int dz,
                              const Point *cageDeltas)
 {
-    const int divisions[3] = {dx, dy, dz};
-    const bool finite = RigExecLatticeDeltasFinite(
-        cageDeltas, size_t(dx) * size_t(dy) * size_t(dz));
-    std::vector<double> scratch(size_t(dx) + size_t(dy) + size_t(dz));
-    int r[6];
-    for (size_t i = 0; i < count; ++i) {
-        const bool bounded = RigExecLatticePointFactors(
-            restPoints[i], lo, size, divisions, scratch.data(), r);
-        const double *fa = scratch.data() + r[0];
-        const double *fb = scratch.data() + dx + r[2];
-        const double *fc = scratch.data() + dx + dy + r[4];
-        points[i] += RigExecLatticePointDelta(cageDeltas, dx, dy, dz, r, fa,
-                                              fb, fc, bounded && finite);
-    }
+    RigExecApplyLatticeStreamingRange(points, 0, count, restPoints, lo, size,
+                                      dx, dy, dz, cageDeltas);
 }
 
 /// A retained bind: the basis with the raw inputs it was built from.
@@ -376,6 +415,75 @@ private:
     std::vector<std::shared_ptr<const RigExecLatticeBind<Point>>> _distinct;
 };
 
+/// RigExecApplyLatticeKernel's decisions over \p count points before it
+/// reads a point: the cage description, the bind box (\p lo, \p size) and,
+/// when \p cageDeltas is given, the posed-minus-rest cage deltas. False when
+/// the kernel passes every point through.
+template <class Point>
+bool
+RigExecLatticeKernelSetup(size_t count, const Point *restPoints,
+                          size_t restPointsSize, const Point *restCage,
+                          size_t restCageSize, const Point *posedCage,
+                          size_t posedCageSize, int dx, int dy, int dz,
+                          Point *lo, Point *size,
+                          std::vector<Point> *cageDeltas)
+{
+    const size_t cageCount = size_t(dx) * size_t(dy) * size_t(dz);
+    if (count == 0 || restPointsSize != count || restCageSize != cageCount ||
+        posedCageSize != cageCount || dx < 2 || dy < 2 || dz < 2) {
+        return false;  // invalid cage description: pass through
+    }
+    if ((restPointsSize > 0 && !restPoints) ||
+        (restCageSize > 0 && !restCage) ||
+        (posedCageSize > 0 && !posedCage)) {
+        return false;  // a null range with a nonzero size: pass through
+    }
+    if (!RigExecLatticeBindBox(restCage, restCageSize, lo, size)) {
+        return false;
+    }
+    if (cageDeltas) {
+        // Cage deltas preserve identity when the cage is at rest.
+        cageDeltas->resize(cageCount);
+        for (size_t i = 0; i < cageCount; ++i) {
+            (*cageDeltas)[i] = posedCage[i] - restCage[i];
+        }
+    }
+    return true;
+}
+
+/// RigExecApplyLatticeKernel over points [begin, end) of \p points (the whole
+/// array, holding the entering points there): the same pass-through checks
+/// over the whole size, the same bind box and cage deltas, and \p basis (or,
+/// when null, the per-point evaluation the null-cache path performs), so each
+/// point's bits are the whole kernel's. Points outside the range are not
+/// touched.
+template <class Point>
+void
+RigExecApplyLatticeKernelRange(
+    std::vector<Point> *points, size_t begin, size_t end,
+    const Point *restPoints, size_t restPointsSize, const Point *restCage,
+    size_t restCageSize, const Point *posedCage, size_t posedCageSize, int dx,
+    int dy, int dz, const RigExecLatticeBasis *basis)
+{
+    Point lo, size;
+    std::vector<Point> cageDeltas;
+    if (!RigExecLatticeKernelSetup(points->size(), restPoints, restPointsSize,
+                                   restCage, restCageSize, posedCage,
+                                   posedCageSize, dx, dy, dz, &lo, &size,
+                                   &cageDeltas)) {
+        return;
+    }
+    end = std::min(end, points->size());
+    if (basis) {
+        RigExecApplyLatticeBasisRange(points->data(), points->size(), begin,
+                                      end, *basis, cageDeltas.data());
+    } else {
+        RigExecApplyLatticeStreamingRange(points->data(), begin, end,
+                                          restPoints, lo, size, dx, dy, dz,
+                                          cageDeltas.data());
+    }
+}
+
 /// p'(u,v,w) = p + sum_abc B_a(u) B_b(v) B_c(w) (posed - rest)_abc over a
 /// dx x dy x dz cage in x-fastest order. Bind coordinates derive from each
 /// rest point normalized into the rest cage's bound and clamped to it.
@@ -394,25 +502,13 @@ RigExecApplyLatticeKernel(std::vector<Point> *points, const Point *restPoints,
                           size_t posedCageSize, int dx, int dy, int dz,
                           Cache *cache)
 {
-    const size_t cageCount = size_t(dx) * size_t(dy) * size_t(dz);
-    if (points->empty() || restPointsSize != points->size() ||
-        restCageSize != cageCount || posedCageSize != cageCount || dx < 2 ||
-        dy < 2 || dz < 2) {
-        return;  // invalid cage description: pass through
-    }
-    if ((restPointsSize > 0 && !restPoints) ||
-        (restCageSize > 0 && !restCage) ||
-        (posedCageSize > 0 && !posedCage)) {
-        return;  // a null range with a nonzero size: pass through
-    }
     Point lo, size;
-    if (!RigExecLatticeBindBox(restCage, restCageSize, &lo, &size)) {
+    std::vector<Point> cageDeltas;
+    if (!RigExecLatticeKernelSetup(points->size(), restPoints, restPointsSize,
+                                   restCage, restCageSize, posedCage,
+                                   posedCageSize, dx, dy, dz, &lo, &size,
+                                   &cageDeltas)) {
         return;
-    }
-    // Cage deltas preserve identity when the cage is at rest.
-    std::vector<Point> cageDeltas(cageCount);
-    for (size_t i = 0; i < cageCount; ++i) {
-        cageDeltas[i] = posedCage[i] - restCage[i];
     }
     const RigExecLatticeBasis *basis =
         cache ? cache->LatticeBasis(restPoints, restPointsSize, lo, size, dx,
