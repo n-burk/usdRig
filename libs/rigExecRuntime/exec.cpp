@@ -488,6 +488,13 @@ RigExecRuntimeReader::GetWeightPackets() const
 }
 
 bool
+RigExecRuntimeReader::SampleGeometryForTesting(std::string *error)
+{
+    std::vector<std::string> diagnostics;
+    return RrPrologueGeometry(_program.get(), &diagnostics, error);
+}
+
+bool
 RigExecRuntimeReader::Execute(std::string *error)
 {
     RrProgram &program = *_program;

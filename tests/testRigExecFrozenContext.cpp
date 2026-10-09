@@ -3448,7 +3448,17 @@ TestStaticLeavesFollowEdits()
     CHECK(restTzAt(atDefault) == 0.75);
     checkProviders(atDefault);
     digest(atDefault);
-    CHECK(restTzAt(sample(UsdTimeCode(2.0), {}, {})) == 1.25);
+    CHECK(atDefault.staticSamples != nullptr &&
+          atDefault.staticSamples != keyed.staticSamples);
+    // Alternating the two keeps both tables: each is read once per state.
+    const RigExecFrameInputs keyedAgain = sample(UsdTimeCode(2.0), {}, {});
+    CHECK(restTzAt(keyedAgain) == 1.25);
+    CHECK(keyedAgain.staticSamples != nullptr &&
+          keyedAgain.staticSamples == keyed.staticSamples);
+    const RigExecFrameInputs defaultAgain =
+        sample(UsdTimeCode::Default(), {}, {});
+    CHECK(restTzAt(defaultAgain) == 0.75);
+    CHECK(defaultAgain.staticSamples == atDefault.staticSamples);
     CHECK(restTzAttr.Set(2.5, UsdTimeCode(4.0)));
     for (const double t : {3.0, 3.5, 4.0}) {
         const RigExecFrameInputs varying = sample(UsdTimeCode(t), {}, {});
@@ -3484,6 +3494,8 @@ TestStaticLeavesFollowEdits()
               digest(plain));
     }
 
+    // Only the verifier's messages are counted here; any other error stays
+    // posted, and is reported when the mark goes out of scope.
     size_t verifyFailures = 0;
     for (auto it = mark.GetBegin(); it != mark.GetEnd(); ++it) {
         if (it->GetCommentary().find("frozen static") != std::string::npos) {
@@ -3492,7 +3504,6 @@ TestStaticLeavesFollowEdits()
         }
     }
     CHECK(verifyFailures == 0);
-    mark.Clear();
 }
 
 // Every path a frozen worker would otherwise build travels with the job or

@@ -5111,6 +5111,85 @@ TestTheVerifierComparesOnlyLiveStaging()
     CHECK(cone.Compare(B, &differences) == 0);
 }
 
+/// After an adoption, a chunk the rebuild did not retain runs and leaves its
+/// result fresh in staging while its retained fuse is skipped; the forced
+/// pass runs that fuse, which swaps staging out. Staging's freshness and
+/// contents are compared only where the cone ran the fuse too; its size
+/// always.
+void
+TestTheVerifierLeavesStagingToASkippedFuse()
+{
+    RigExecBakedProgramImpl B;
+    B.chains.resize(1);
+    B.chains[0].revisions.resize(1);
+    B.steps.resize(2);
+    B.steps[0].kind = RigExecBakedStepKind::RevisionChunk;
+    B.steps[1].kind = RigExecBakedStepKind::RevisionFuse;
+    for (auto &step : B.steps) {
+        step.object = 0;
+        step.label = "staging fixture";
+    }
+    B.revisionIndex.emplace_back(0, 0);
+    B.opGraph.ops.resize(2);
+    B.opGraph.ops[0].originalIndex = 0;
+    B.opGraph.ops[1].originalIndex = 1;
+    RigExecBakedProgramImpl::GeomRevision &revision = B.chains[0].revisions[0];
+    // The cone: the chunk ran, its result fresh; the fuse was skipped.
+    B.opExecution.ran = {1, 0};
+    revision.output = {GfVec3f(1, 2, 3)};
+    revision.stagingOutput = {GfVec3f(1, 2, 3)};
+    revision.stagingFresh = true;
+    RigExecBakedRunShadow cone;
+    cone.Capture(B);
+    // The forced pass: the fuse applied by a swap, leaving staging the
+    // buffer `output` was, stale, and no longer fresh.
+    B.opExecution.ran = {1, 1};
+    revision.output.swap(revision.stagingOutput);
+    revision.stagingOutput[0] = GfVec3f(7, 8, 9);
+    revision.stagingFresh = false;
+    std::vector<std::string> differences;
+    CHECK(cone.Compare(B, &differences) == 0);
+    revision.stagingOutput.push_back(GfVec3f(0.0f));
+    CHECK(cone.Compare(B, &differences) != 0);
+    revision.stagingOutput.pop_back();
+    // A cone that ran the fuse too is held to both.
+    B.opExecution.ran = {1, 1};
+    revision.stagingFresh = true;
+    cone.Capture(B);
+    revision.stagingFresh = false;
+    CHECK(cone.Compare(B, &differences) != 0);
+    revision.stagingFresh = true;
+    revision.stagingOutput[0] = GfVec3f(4, 5, 6);
+    CHECK(cone.Compare(B, &differences) != 0);
+    revision.stagingOutput[0] = GfVec3f(7, 8, 9);
+    differences.clear();
+    CHECK(cone.Compare(B, &differences) == 0);
+}
+
+/// The shadow puts back the chain input's content version and the base it
+/// last published, as it does the other versions, so the forced pass
+/// decides that version from where the cone run started.
+void
+TestTheVerifierRestoresTheChainInputVersion()
+{
+    RigExecBakedProgramImpl B;
+    B.chains.resize(1);
+    RigExecBakedProgramImpl::GeomChain &chain = B.chains[0];
+    const VtVec3fArray published{GfVec3f(1, 2, 3)};
+    chain.sampledBase = published;
+    chain.publishedInput = published;
+    chain.inputVersion = 4;
+    RigExecBakedRunShadow before;
+    before.Capture(B);
+    // What a publication of a moved base does.
+    chain.sampledBase = VtVec3fArray{GfVec3f(4, 5, 6)};
+    chain.publishedInput = chain.sampledBase;
+    ++chain.inputVersion;
+    before.Restore(&B);
+    CHECK(chain.inputVersion == 4);
+    CHECK(chain.publishedInput == published);
+}
+
 /// A chain revision that passes through and then applies again publishes
 /// what a program that never saw the failure publishes, and a rebuild
 /// carries the buffers, content versions and baselines it holds, so that
@@ -5522,6 +5601,8 @@ main(int argc, char **argv)
     // keeps, and versions carried across a rebuild.
     TestTheFuseSelectsItsBuffersByHand();
     TestTheVerifierComparesOnlyLiveStaging();
+    TestTheVerifierLeavesStagingToASkippedFuse();
+    TestTheVerifierRestoresTheChainInputVersion();
     TestAChainRevisionRecoversAcrossAFailure();
     TestUnmovedPointsKeepTheirVersion();
     {

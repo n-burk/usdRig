@@ -549,6 +549,25 @@ TestStepTimingLeavesOutColdRuns(const std::string &examplesDir)
         if (stamped(B.steps[k])) ++(listed[k] ? listedStamps : unlistedStamps);
     }
     CHECK(listedStamps > 0 && unlistedStamps == 0);
+    // Listed from the executor's own candidate list, in its order, rather
+    // than by a scan of every op's candidate byte (which lists in op order).
+    // A verified run's second pass leaves the workspace its own list.
+    if (!RigExecBakedVerifyConesRequested()) {
+        const std::vector<uint32_t> &pending = B.opWorkspace.pending;
+        bool executorOrder = B.stampedSteps.size() == pending.size();
+        bool opOrder = true;
+        for (size_t i = 0; i < pending.size(); ++i) {
+            executorOrder = executorOrder &&
+                            pending[i] < B.opGraph.ops.size() &&
+                            B.stampedSteps[i] ==
+                                B.opGraph.ops[pending[i]].originalIndex;
+            opOrder = opOrder && (i == 0 || pending[i - 1] < pending[i]);
+        }
+        CHECK(executorOrder);
+        std::printf("step timing: %zu stamped step(s) listed in the "
+                    "executor's order (%s op order)\n",
+                    B.stampedSteps.size(), opOrder ? "which is" : "not");
+    }
 
     // The table: the frame phases fold only under RIGEXEC_BAKED_STEP_TIMING,
     // so the test supplies them; the per-kind lines come from the steps.

@@ -8,6 +8,9 @@ void RrGeometryOpValueKey(const RrProgram *, RigExecWireSlotDomain, uint32_t, st
 /// ChainBase, ChainInput, DerivedOut) had over its points' bytes before it
 /// was keyed by content version; false for any other domain.
 bool RrGeometryChainContentKey(const RrProgram *, RigExecWireSlotDomain, uint32_t, std::string *);
+/// Moves each ChainInput's content version where the base its prologues
+/// sampled differs from the one it last published; before the leaves publish.
+void RrGeometryPublishChainInputs(RrProgram *);
 void RrResetExcludedGeometryValue(RrProgram *, RigExecWireSlotDomain, uint32_t);
 /// The key the executor publishes value (\p domain, \p slot) by.
 void RrOpValueKey(const RrProgram *, uint32_t domain, uint32_t slot, std::string *);

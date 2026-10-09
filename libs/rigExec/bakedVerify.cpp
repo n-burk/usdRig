@@ -550,10 +550,17 @@ CompareRevision(std::vector<std::string> *differences, size_t *count,
     // or a chunked skin's ranges. Once an applying fuse swapped it out, it
     // holds whatever the buffer last did, which a run that re-ran the fuse
     // and one that skipped it legitimately leave different; its size is the
-    // RevisionOut key's either way.
-    CompareValue(differences, count, where + " stagingFresh",
-                 shadow.stagingFresh, revision.stagingFresh);
-    if (revision.chunked || shadow.stagingFresh || revision.stagingFresh) {
+    // RevisionOut key's either way. Where the cone skipped the fuse (a
+    // retained fuse beside a chunk an adoption did not retain), the chunk's
+    // result stays fresh there while the forced pass's fuse swapped it out,
+    // so an unchunked revision's freshness and contents are compared only
+    // where both passes ran the fuse; no fuse writes a chunked one's ranges.
+    if (fuseSelected) {
+        CompareValue(differences, count, where + " stagingFresh",
+                     shadow.stagingFresh, revision.stagingFresh);
+    }
+    if (revision.chunked ||
+        (fuseSelected && (shadow.stagingFresh || revision.stagingFresh))) {
         CompareVector(differences, count, where + " staging output",
                       shadow.stagingOutput, revision.stagingOutput);
     } else {
@@ -763,6 +770,8 @@ RigExecBakedRunShadow::Capture(const RigExecBakedProgramImpl &program)
         chains[c].lastBase = chain.lastBase;
         chains[c].result = chain.result;
         chains[c].spare = chain.spare;
+        chains[c].publishedInput = chain.publishedInput;
+        chains[c].inputVersion = chain.inputVersion;
         chains[c].baseVersion = chain.baseVersion;
         chains[c].resultVersion = chain.resultVersion;
         chains[c].haveResult = chain.haveResult;
@@ -898,6 +907,8 @@ RigExecBakedRunShadow::Restore(RigExecBakedProgramImpl *program) const
         chain.lastBase = chains[c].lastBase;
         chain.result = chains[c].result;
         chain.spare = chains[c].spare;
+        chain.publishedInput = chains[c].publishedInput;
+        chain.inputVersion = chains[c].inputVersion;
         chain.baseVersion = chains[c].baseVersion;
         chain.resultVersion = chains[c].resultVersion;
         chain.haveResult = chains[c].haveResult;

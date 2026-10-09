@@ -737,11 +737,13 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
         }
 
         // inputs:sourceWeights and the parent offsets are authored TABLES
-        // the operator reads raw, once per frame, at the frame's own time.
-        // They are re-read rather than captured, so an animated blend
-        // between two parents bakes -- and the cardinality diagnostic the
-        // dynamic walk gives a malformed one is reproduced from this run's
-        // numbers rather than refused at bake.
+        // the operator reads raw at the frame's own time. They are epoch
+        // state rather than captured: the prologue reads them again when
+        // the program stamp or the stage edit serial moved, or when the time
+        // moved and their read can move with it (ConstraintArrays), so an
+        // animated blend between two parents bakes -- and the cardinality
+        // diagnostic the dynamic walk gives a malformed one is reproduced
+        // from the read's numbers rather than refused at bake.
         // FoldShape and not Fold: nothing about the VALUE is folded, so an
         // interactive override on one of these tables is not placeable --
         // which agrees with the dynamic path, whose raw read ignores such an
@@ -2578,7 +2580,9 @@ NoteConstraintInputs(const RigExecBakedProgramImpl::Constraint &constraint,
     NoteInput(constraint.stretch,sink);
     // The authored source-weight, offset and pole-weight tables are NOT
     // noted here: they are not inputs the step reads at all. The prologue
-    // re-reads them off the stage each run and compares them by value, and
+    // reads them off the stage as epoch state (again whenever the stage edit
+    // serial, the program stamp or a read that varies with the time moved;
+    // ConstraintArrays) and compares them by value, and
     // `constraintArrayClusters` is what dirties this step when one moved
     // (RigExecBakedComputeClosure) -- the §7 source mechanism, not the
     // varying-input one.

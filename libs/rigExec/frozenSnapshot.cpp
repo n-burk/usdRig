@@ -537,28 +537,15 @@ RigExecFreezeProgram(const RigExecRigEvaluator &evaluator,
             snapshot->inputConstants.push_back(VtValue(
                 input.sourceBacked ? input.sourceFallback : input.constant));
         }, /*includeIntervening=*/false);
+    // The samplers' own keys, empty where they read nothing: one source of
+    // keys for the sampler, the worker and the snapshot.
     for (const RigExecBakedProgramImpl::ConstraintArrays &arrays :
          B.constraintArrays) {
-        const SdfPath primPath =
-            arrays.prim ? arrays.prim.GetPath() : SdfPath();
-        snapshot->arrayKeys.push_back(
-            primPath.IsEmpty()
-                ? SdfPath()
-                : primPath.AppendProperty(TfToken("inputs:sourceWeights")));
-        snapshot->arrayKeys.push_back(
-            (primPath.IsEmpty() || !arrays.parentOffsets)
-                ? SdfPath()
-                : primPath.AppendProperty(
-                      TfToken("inputs:translationOffsets")));
-        snapshot->arrayKeys.push_back(
-            (primPath.IsEmpty() || !arrays.parentOffsets)
-                ? SdfPath()
-                : primPath.AppendProperty(TfToken("inputs:rotationOffsets")));
-        snapshot->arrayKeys.push_back(
-            (primPath.IsEmpty() || !arrays.readPole)
-                ? SdfPath()
-                : primPath.AppendProperty(
-                      TfToken("inputs:poleVectorWeights")));
+        const bool valid = arrays.prim.IsValid();
+        for (size_t k = 0; k < arrays.keys.size(); ++k) {
+            snapshot->arrayKeys.push_back(
+                valid && arrays.Sampled(k) ? arrays.keys[k] : SdfPath());
+        }
     }
     for (const RigExecBakedProgramImpl::GeomChain &chain : B.chains) {
         snapshot->chainBaseQueryValid.push_back(

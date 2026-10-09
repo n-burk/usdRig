@@ -1699,13 +1699,14 @@ struct RigExecBakedProgramImpl {
     std::vector<GfMatrix4d> xformBase, lastXformBase;
 
     // inputs:sourceWeights and the parent offsets are read RAW off the
-    // attribute at the frame's time -- no connection walk, no resolved
-    // input, no interactive override -- because that is what the dynamic
-    // walk does with them, and an operator input is not a rig input. The
-    // read is USD, so it is the PROLOGUE's; the cardinality diagnostic
-    // belongs to the constraint step, at the constraint's own place in the
-    // walk, so what the prologue leaves behind is the line rather than the
-    // pose it would have gone into.
+    // attribute -- no connection walk, no resolved input, no interactive
+    // override -- because that is what the dynamic walk does with them, and
+    // an operator input is not a rig input. The read is USD, so it is the
+    // PROLOGUE's, kept as epoch state (`sampled` below) and taken again
+    // only where a read at the frame's time could answer differently; the
+    // cardinality diagnostic belongs to the constraint step, at the
+    // constraint's own place in the walk, so what the prologue leaves
+    // behind is the line rather than the pose it would have gone into.
     struct ConstraintArrays {
         UsdPrim prim;
         SdfPath path;
@@ -3629,9 +3630,12 @@ struct RigExecBakedProgramImpl {
     mutable uint64_t headLeafConstantsSerial = 0;
     mutable bool headLeafConstantsDefault = false;
     /// The frozen samplers' memo of the leaf reads that cannot move with
-    /// the time and of recorded digest orders (RigExecFrozenSamplerMemo).
-    /// UI thread only and never cloned, like headLeafConstants.
-    mutable std::shared_ptr<RigExecFrozenSamplerMemo> frozenSamplerMemo;
+    /// the time and of recorded digest orders (RigExecFrozenSamplerMemo),
+    /// one per Default-ness of the time ([1] Default), so samples that
+    /// alternate the two keep both. UI thread only and never cloned, like
+    /// headLeafConstants.
+    mutable std::array<std::shared_ptr<RigExecFrozenSamplerMemo>, 2>
+        frozenSamplerMemo;
     /// RIGEXEC_VERIFY_FROZEN_STATIC, read at Build: the samplers re-read
     /// every memoized leaf and check it, and the vector's digest, against
     /// the unmemoized answer.
@@ -5378,8 +5382,8 @@ struct RigExecBakedRunShadow {
     struct ChainState {
         std::vector<RevisionState> revisions;
         std::vector<DerivedState> derived;
-        VtVec3fArray lastBase, result, spare;
-        uint64_t baseVersion = 0, resultVersion = 0;
+        VtVec3fArray lastBase, result, spare, publishedInput;
+        uint64_t inputVersion = 0, baseVersion = 0, resultVersion = 0;
         bool haveResult = false, haveBase = false, baseDirty = false, scheduleDirty = false;
     };
     struct SolverState {

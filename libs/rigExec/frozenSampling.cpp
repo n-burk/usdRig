@@ -21,8 +21,8 @@ void RigExecFrozenGeometryTouchTokens()
     (void)frozenDetail::_frozenWeightTokens.Get();
 }
 
-/// The frozen samplers' memo on one program
-/// (RigExecBakedProgramImpl::frozenSamplerMemo), owning thread only.
+/// The frozen samplers' memo on one program, one per Default-ness of the
+/// time (RigExecBakedProgramImpl::frozenSamplerMemo), owning thread only.
 /// `stamp`, `serial` and `atDefault` name the state its reads were taken
 /// under: the program stamp, the evaluator's stage edit serial and the
 /// Default-ness of the time. Every stage notice advances the serial, so
@@ -860,10 +860,13 @@ _FrozenSamplerMemo(const RigExecRigEvaluator &evaluator,
                    const RigExecBakedProgramImpl &B, UsdTimeCode time)
 {
     using Memo = RigExecFrozenSamplerMemo;
-    if (!B.frozenSamplerMemo) {
-        B.frozenSamplerMemo = std::make_shared<Memo>();
+    // One memo per Default-ness: a switch between them keeps the other's.
+    std::shared_ptr<Memo> &slot =
+        B.frozenSamplerMemo[time.IsDefault() ? 1 : 0];
+    if (!slot) {
+        slot = std::make_shared<Memo>();
     }
-    Memo &memo = *B.frozenSamplerMemo;
+    Memo &memo = *slot;
     const uint64_t serial = evaluator.GetStageEditSerial();
     // Sized as the program's tables, so a reshaped program is read again
     // rather than indexed past the memo's end.

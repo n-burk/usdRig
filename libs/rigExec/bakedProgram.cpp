@@ -1321,7 +1321,9 @@ _RouteValueEdits(const RigExecBakedProgramImpl &B,
         // and compares by value, and so does a resolved-input reader whose
         // connection reaches the property, so the program owes either
         // nothing; the frame cache still does, and the path is reported for
-        // that.
+        // that. A constraint's raw arrays are not re-read every run: they
+        // are read again because this notice advanced the stage edit serial
+        // they are kept under (ConstraintArrays).
         if (readWhole(prim) || (!B.resolvedRoutedPrims.empty() &&
                                 _ConnectedSources(B).count(path))) {
             read.push_back(path);

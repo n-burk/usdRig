@@ -869,10 +869,11 @@ bool RigExecBakedExecuteOpGraph(RigExecBakedProgramImpl *program,UsdTimeCode tim
             callbacks.wait=[&]{dispatcher.Wait();}; execute();
         });
     } else execute();
-    // Only a candidate takes a stamp, failed run or not.
+    // Only a candidate takes a stamp, failed run or not; the executor's
+    // pending list holds this run's candidates, once each, in its order.
     if(stamping)
-        for(uint32_t c=0;c<B.opGraph.ops.size() && c<B.opExecution.candidates.size();++c)
-            if(B.opExecution.candidates[c]) B.stampedSteps.push_back(B.opGraph.ops[c].originalIndex);
+        for(const uint32_t c:B.opWorkspace.pending)
+            if(c<B.opGraph.ops.size()) B.stampedSteps.push_back(B.opGraph.ops[c].originalIndex);
     RigExecOpGatherChanges(&state,B.opGraph,B.opExecution.ran);
     if(verifyVersions)
         for(uint32_t c=0;c<state.leafVersionMismatch.size();++c)

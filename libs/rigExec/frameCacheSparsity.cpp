@@ -106,8 +106,9 @@ _ArrayBytes(const VtValue &value)
 size_t
 RigExecRetainedSourcesBytes(const RigExecRetainedFrameState &state)
 {
-    // The constant head leaves are a table every frame sampled under one
-    // program state shares, so no frame counts them.
+    // The constant head leaves and the static samples (staticSamples) are
+    // tables every frame sampled under one program state shares, so no
+    // frame counts them; a retained frame keeps its state's tables alive.
     size_t total = sizeof(RigExecRetainedFrameState);
     for (const RigExecSampledInput &sampled : state.inputs.values) {
         total += sampled.path.GetString().size() + sizeof(bool);

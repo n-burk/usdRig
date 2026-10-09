@@ -282,6 +282,11 @@ public:
     // skips is not listed; empty before the first Execute.
     std::vector<int32_t> GetLastRunTraceForTesting() const;
 
+    // Test-only: the geometry prologue alone, which samples the inputs as
+    // set now and publishes nothing, as a run stopped between its prologue
+    // and its leaf publication would. False naming the failure.
+    bool SampleGeometryForTesting(std::string *error);
+
     // The property chains' published values (chain targets and phased
     // consumers) as the last Execute computed them, in path order.
     std::vector<RigExecRuntimePropertyValue> GetPropertyValues() const;

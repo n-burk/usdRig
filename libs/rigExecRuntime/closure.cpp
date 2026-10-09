@@ -747,6 +747,7 @@ bool RrExecuteOpGraph(RrProgram *p,bool force,std::string *error)
         if(value.changed) state.changedLeaves.push_back(id);
         verifyChain(id);
     };
+    RrGeometryPublishChainInputs(p);
     // A slot-keyed leaf keeps the key an equal compare would keep until a
     // slot it reads is written; the run consumes the written slots.
     auto &inputs=p->inputState;

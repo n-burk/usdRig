@@ -1259,6 +1259,58 @@ _TestChainBaseArray(const UsdStageRefPtr &stage)
                     {{target, VtValue(fewer), true}}, true);
 }
 
+// MeshA.points' ChainInput moves its content version at publication,
+// against the base it last published, as the native PublishLeaves does: a
+// base sampled away and back between two publications moves nothing, so
+// that run is the run of a reader that never sampled it; a base that stays
+// moved still publishes moved.
+static void
+_TestChainInputPublishes(const UsdStageRefPtr &stage)
+{
+    const std::string label = "oneloop_two_limbs MeshA.points publication";
+    const std::string target = "/LimbsAsset/Geom/MeshA.points";
+    const SdfPath rigPath = _FindRig(stage);
+    std::vector<uint8_t> bytes;
+    if (!_BakeArrays(label, stage, rigPath, 6.0, &bytes)) {
+        return;
+    }
+    std::unique_ptr<RigExecRuntimeReader> plain = _OpenRun(label, bytes);
+    std::unique_ptr<RigExecRuntimeReader> sampled = _OpenRun(label, bytes);
+    if (!plain || !sampled) {
+        return;
+    }
+    VtVec3fArray base;
+    CHECK(stage->GetAttributeAtPath(SdfPath(target)).Get(&base));
+    CHECK(!base.empty());
+    VtVec3fArray displaced = base;
+    for (GfVec3f &p : displaced) {
+        p += GfVec3f(0.0f, 0.25f, 0.0f);
+    }
+    std::string error;
+    // The same input calls on both; only `sampled` runs a prologue on the
+    // displaced base before the reset.
+    for (RigExecRuntimeReader *reader : {plain.get(), sampled.get()}) {
+        CHECK(reader->SetInputArray(
+            target, RigExecTestArrayView(VtValue(displaced)), &error));
+        if (reader == sampled.get()) {
+            CHECK(reader->SampleGeometryForTesting(&error));
+        }
+        CHECK(reader->ResetInput(target, &error));
+        CHECK(reader->Execute(&error));
+    }
+    CHECK(sampled->GetLastRunTraceForTesting() ==
+              plain->GetLastRunTraceForTesting() &&
+          _SameRuns(*plain, *sampled));
+    // A base that stays displaced publishes moved points.
+    CHECK(sampled->SetInputArray(
+              target, RigExecTestArrayView(VtValue(displaced)), &error) &&
+          sampled->Execute(&error));
+    CHECK(plain->Execute(&error));
+    CHECK(!_SameOutputs(*plain, *sampled));
+    std::printf("%s: a base sampled and reset between publications keeps "
+                "its version\n", label.c_str());
+}
+
 // The fixed skin layout of MeshASkin in tests/fixtures/oneloop_two_limbs.
 // usda, listed as its two arrays, whose defaults are the stored layout:
 // an index past the influences fails the mover, a valid weights set
@@ -2091,6 +2143,7 @@ main(int argc, char **argv)
     if (const UsdStageRefPtr stage =
             _Open(fixtures + "/oneloop_two_limbs.usda")) {
         _TestChainBaseArray(stage);
+        _TestChainInputPublishes(stage);
         _TestLayoutArrays(stage);
     }
     if (const UsdStageRefPtr stage =

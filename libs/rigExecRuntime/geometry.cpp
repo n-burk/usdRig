@@ -3247,8 +3247,13 @@ struct RrGeometryScratch {
         std::string resultStatus;
         std::vector<RrVec3f> spare;
         // ChainInput, ChainBase and ChainPoints content versions, each
-        // bumped exactly when its array's bytes move.
+        // bumped exactly when its array's bytes move. ChainInput's moves at
+        // publication, against `publishedInput`, the sampled base it last
+        // published; `sampledMoved` says a prologue wrote `sampledBase`
+        // since (RrGeometryPublishChainInputs).
         uint64_t inputVersion = 0, baseVersion = 0, resultVersion = 0;
+        std::vector<RrVec3f> publishedInput;
+        bool sampledMoved = false;
         bool scheduleDirty = true;
         std::vector<Revision> revisions;
         uint32_t createdCount = 0;
@@ -5777,11 +5782,11 @@ RrPrologueGeometry(RrProgram *program,
         auto &chain=scratch->chains[c];
         chain.sampleHaveBase=chain.baseSlot>=0
             ?RrInputHasValue(program,uint32_t(chain.baseSlot)):geo.chains[c].haveBase;
-        // ChainInput keys the sampled base by a content version, moved
-        // exactly when the bytes do; it publishes after every prologue.
+        // ChainInput's content version moves at publication, against the
+        // base it last published (RrGeometryPublishChainInputs).
         const std::vector<RrVec3f> &base=RrGeoChainBase(program,chain);
         if(!RrGeoPointBitsEqual(base,chain.sampledBase)) {
-            chain.sampledBase=base; ++chain.inputVersion;
+            chain.sampledBase=base; chain.sampledMoved=true;
         }
         chain.createdCount=0; chain.scheduleCount=0;
     }
@@ -6970,6 +6975,22 @@ bool RrGeometryChainContentKey(const RrProgram *program, RigExecWireSlotDomain d
         return true;
     }
     return false;
+}
+
+void RrGeometryPublishChainInputs(RrProgram *program)
+{
+    auto *scratch = static_cast<RrGeometryScratch *>(program->geo.get());
+    if (!scratch) return;
+    // As the native PublishLeaves: the version moves exactly when the
+    // sampled bytes differ from the ones last published. A base no prologue
+    // wrote since is the one last published.
+    for (auto &chain : scratch->chains) {
+        if (!chain.sampledMoved) continue;
+        chain.sampledMoved = false;
+        if (!RrGeoPointBitsEqual(chain.sampledBase, chain.publishedInput)) {
+            ++chain.inputVersion; chain.publishedInput = chain.sampledBase;
+        }
+    }
 }
 
 void RrGeometryOpValueKey(const RrProgram *program, RigExecWireSlotDomain domain,
