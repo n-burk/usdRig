@@ -45,6 +45,9 @@ struct RigExecCompiledGraph {
     size_t longestPath = 0;
     std::vector<RigExecOpCluster> clusters;
     std::vector<uint32_t> opClusters;
+    /// Canonical ops whose descriptor has volatileInput, ascending. Filled
+    /// by the compiler; a graph rebuilt from another source copies it.
+    std::vector<uint32_t> volatileOps;
 };
 
 enum class RigExecCyclePolicy { Reject, SetAside };
@@ -85,6 +88,10 @@ struct RigExecOpCallbacks {
     /// Nonfatal invalid values resolve normally with run returning true.
     std::function<bool(uint32_t)> run;
     std::function<void(uint32_t)> skip;
+    /// Optional ascending list of the ops whose skip changes state. When set,
+    /// a non-candidate op outside it is not passed to skip; a candidate that
+    /// does not run always is. Null passes every skipped op.
+    const std::vector<uint32_t> *skipEffects = nullptr;
     /// Current-generation change state, including validity/count/error changes.
     std::function<bool(RigExecValueId)> changed;
     /// Optional reader-specific policy, for an input shadowed at this consumer.
@@ -100,7 +107,12 @@ struct RigExecOpCallbacks {
 
 struct RigExecOpExecution {
     std::vector<char> candidates, ran;
+    /// Finish order from 1; zero for non-candidates. A cluster numbers its
+    /// candidate members consecutively, in member order, after its last body
+    /// and before any successor is released, so every predecessor finishes
+    /// first. A serial run numbers ops in the order their bodies ran.
     std::vector<uint64_t> completion;
+    /// Derived from ran after the join: skipped is every op that did not run.
     size_t executed = 0, skipped = 0;
 };
 

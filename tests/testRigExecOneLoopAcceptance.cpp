@@ -461,6 +461,34 @@ TestPropertyDragCone(const std::string &fixturesDir)
     std::printf("  (d) exact cross-domain wave and unchanged-property cutoff\n");
 }
 
+// Skip is told only the ops whose skip can change state. After a first run,
+// in which every body ran, no other op holds a counter MarkSkipped zeroes.
+void
+TestSkipEffects(const std::string &fixturesDir)
+{
+    auto rig=OpenRig(fixturesDir+"/"+kCrossDomain,kCrossRig);
+    CHECK(rig.evaluator); if(!rig.evaluator)return;
+    auto &E=*rig.evaluator;
+    CHECK(E.Evaluate(UsdTimeCode(12)).valid);
+    const auto &B=E.GetBakedProgram()->GetStepGraph();
+    const auto &effects=B.opAdapter.skipEffects;
+    CHECK(std::is_sorted(effects.begin(),effects.end()));
+    size_t listed=0;
+    for(uint32_t c=0;c<B.opGraph.ops.size();++c) {
+        CHECK(B.opExecution.ran[c]);
+        const auto &step=B.steps[B.opGraph.ops[c].originalIndex];
+        const bool effect=RigExecBakedIsGeometryStep(step.kind) ||
+            step.kind==RigExecBakedStepKind::PropertyRevision;
+        const bool found=std::binary_search(effects.begin(),effects.end(),c);
+        CHECK(found==effect);
+        listed+=found;
+        if(!found) CHECK(!step.counters.revisionsExecuted && !step.counters.revisionsCreated &&
+                         !step.counters.schedulesBuilt);
+    }
+    CHECK(listed==effects.size() && listed>0 && listed<B.opGraph.ops.size());
+    std::printf("  (d) skip is told %zu of %zu operation(s)\n",listed,B.opGraph.ops.size());
+}
+
 // Every backend runs each authored geometry kernel once, through its actual
 // compiled chunk operations. A fused assembly is a separate operation.
 void
@@ -740,6 +768,7 @@ main(int argc, char **argv)
     TestTwoLimbs(fixturesDir);
     TestPrecedingWeight(fixturesDir);
     TestPropertyDragCone(fixturesDir);
+    TestSkipEffects(fixturesDir);
     TestBackendKernelsAndBinaryCycle(fixturesDir);
     TestCycle(fixturesDir);
     if (failures) {

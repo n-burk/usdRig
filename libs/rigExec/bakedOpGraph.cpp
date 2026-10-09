@@ -505,6 +505,18 @@ bool RigExecBakedCompileOpGraph(RigExecBakedProgramImpl *B,std::string *error)
         if(!state.constantSource[c] || step.alwaysRuns) state.sourceVisits.push_back(c);
     }
     state.verifyConstantSources=TfGetenvBool("RIGEXEC_VERIFY_CONSTANT_KEYS",false);
+    // The skip callback below changes state only through MarkSkipped, whose
+    // counters only geometry bodies set, SkipGeometryStep on geometry kinds
+    // and FinishHeadOp on property revisions; every other skip is a no-op.
+    B->opAdapter.skipEffects.clear();
+    B->skinTopologyLayouts.clear();
+    for(uint32_t i=0;i<B->steps.size();++i) {
+        const auto kind=B->steps[i].kind;
+        if(RigExecBakedIsGeometryStep(kind) || kind==RigExecBakedStepKind::PropertyRevision)
+            B->opAdapter.skipEffects.push_back(i);
+        if(kind==RigExecBakedStepKind::SkinTopology)
+            B->skinTopologyLayouts.push_back(B->steps[i].object);
+    }
     return true;
 }
 
@@ -519,19 +531,25 @@ bool RigExecBakedExecuteOpGraph(RigExecBakedProgramImpl *program,UsdTimeCode tim
     const bool first=!state.everRan;
     const bool profiling=B.profiler && B.profiler->IsEnabled();
     // Op stamps are plain clock reads into op-owned fields by the thread
-    // running the op; the owner reads them only after the join.
+    // running the op; the owner reads them only after the join. Decided
+    // once here, so every op of the run agrees and runStamped covers them.
     const bool measuring=state.measuring && !B.measurementSuspended;
-    const bool stamping=measuring || B.recordOpTimings || profiling;
-    B.clustering.lastRunTimed=profiling;
-    for(auto &cluster:B.clustering.clusters) {
+    const bool timing=B.recordOpTimings || profiling;
+    const bool stamping=measuring || timing;
+    if(stamping) B.runStamped=true;
+    // Only a profiled run folds cluster times (below), so only one leaves
+    // any to clear.
+    if(B.clustering.lastRunTimed) for(auto &cluster:B.clustering.clusters) {
         cluster.readyUs=cluster.startUs=cluster.endUs=0;
         cluster.runner=std::thread::id();
     }
+    B.clustering.lastRunTimed=profiling;
     B.closureFull=force || B.programStamp!=B.lastProgramStamp;
     RigExecBakedPrepareHeadOps(&B);
     RigExecBakedPlaceHeadOverrides(&B);
     RigExecBakedPrepareOracleReference(&B,time);
-    B.providerValues.ResetChanges();
+    // Provider values' own change flags have no reader: op values below
+    // carry every change decision.
     for(auto id:state.excludedValues) {
         const auto &value=state.values[size_t(id)];
         ResetExcludedValue(&B,value.domain,value.slot);
@@ -545,7 +563,7 @@ bool RigExecBakedExecuteOpGraph(RigExecBakedProgramImpl *program,UsdTimeCode tim
             B.chainFinal[chain]=VtValue();
     }
     state.changedLeaves.clear(); state.seeds.clear(); state.candidateOps.clear();
-    for(auto &v:state.values) v.changed=0;
+    RigExecOpClearChanges(&state);
     const auto sample=[&](uint32_t d,uint32_t slot,std::string *key) {
         RigExecBakedOpValueKey(B,RigExecBakedSlotDomain(d),slot,key);
     };
@@ -606,7 +624,7 @@ bool RigExecBakedExecuteOpGraph(RigExecBakedProgramImpl *program,UsdTimeCode tim
     callbacks.run=[&](uint32_t c) {
         auto &step=B.steps[B.opGraph.ops[c].originalIndex];
         if(B.opBeforeBody) B.opBeforeBody(B.opGraph.ops[c].originalIndex);
-        RigExecBakedRunStepBody(&B,&step,time);
+        RigExecBakedRunStepBody(&B,&step,time,timing);
         RigExecBakedFinishHeadOp(&B,step);
         // ChainDirty's key is its revision's RevisionDone key. Writes run in
         // (domain, slot) order, so the fuse has built that exact key already.
@@ -638,6 +656,7 @@ bool RigExecBakedExecuteOpGraph(RigExecBakedProgramImpl *program,UsdTimeCode tim
         if(RigExecBakedIsGeometryStep(step.kind)) RigExecBakedSkipGeometryStep(&B,&step);
         RigExecBakedFinishHeadOp(&B,step);
     };
+    callbacks.skipEffects=&state.skipEffects;
     bool ok=false;
     const auto execute=[&] { ok=RigExecExecuteOpGraph(B.opGraph,state.changedLeaves,state.seeds,force,
         callbacks,&B.opExecution,&error,&B.opWorkspace,&state.candidateOps); };
@@ -648,6 +667,7 @@ bool RigExecBakedExecuteOpGraph(RigExecBakedProgramImpl *program,UsdTimeCode tim
             callbacks.wait=[&]{dispatcher.Wait();}; execute();
         });
     } else execute();
+    RigExecOpGatherChanges(&state,B.opGraph,B.opExecution.ran);
     if(!ok) {
         state.retainedFirst.clear();
         B.everRan=false;
@@ -741,7 +761,6 @@ bool RigExecBakedLowerOpGraph(RigExecBakedProgramImpl *B,std::string *error)
         path[i]+=cluster.cost; view.criticalPathCost=std::max(view.criticalPathCost,path[i]);
         view.topologicalOrder.push_back(int(i));
     }
-    B->clusterCounters=std::make_unique<RigExecBakedClusterCounter[]>(std::max<size_t>(1,view.clusters.size()));
     return true;
 }
 } // namespace rigExec

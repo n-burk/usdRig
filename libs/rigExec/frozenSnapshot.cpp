@@ -13,9 +13,8 @@ using namespace frozenDetail;
 
 namespace frozenDetail {
 
-// Memberwise program clone. RigExecBakedProgramImpl is movable but not
-// copyable (clusterCounters' unique_ptr), so the copy is explicit, field by
-// field, in struct order. Live pointers are nulled -- the worker repoints
+// Memberwise program clone. The copy is explicit, field by field, in struct
+// order. Live pointers are nulled -- the worker repoints
 // the ones it uses at worker-owned state -- and every other field is
 // copied, including the per-frame working state (the history the frozen
 // run branches from) and the USD handles (copied but dead; see the audit).
@@ -154,8 +153,8 @@ _CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst)
     D.chainChunkBegin = src.chainChunkBegin;
     D.chainChunkEnd = src.chainChunkEnd;
     D.revisionFuseStep = src.revisionFuseStep;
+    D.skinTopologyLayouts = src.skinTopologyLayouts;
     D.clustering = src.clustering;
-    D.clusterCounters.reset();
     // Build's settings: the clone's partition settings and the worker's
     // kernels are the live program's choices, and its bodies count into
     // their own audit counter.
@@ -200,6 +199,8 @@ _CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst)
     D.timedEpilogueUs = 0;
     D.timedFrames = 0;
     D.measurementSuspended = false;
+    // The steps above carry the source's stamps; the clone clears them too.
+    D.runStamped = src.runStamped;
     D.jointMatrixPublished = src.jointMatrixPublished;
     D.chains = src.chains;
     // Per-consumer overlays borrow the live source layer only during a body.

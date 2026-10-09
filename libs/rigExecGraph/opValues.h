@@ -26,7 +26,13 @@ struct RigExecOpValueState {
 struct RigExecOpAdapterState {
     std::vector<RigExecOpValueState> values;
     std::vector<RigExecValueId> leaves, changedLeaves;
+    /// Every value whose changed flag the last run set: its changed leaves
+    /// and the changed writes of its ops that ran. Gathered by the owner
+    /// after the join; the next run clears exactly these flags.
+    std::vector<RigExecValueId> changedValues;
     std::vector<RigExecValueId> excludedValues;
+    /// RigExecOpCallbacks::skipEffects, filled by the backend at compile.
+    std::vector<uint32_t> skipEffects;
     std::vector<uint32_t> seeds, candidateOps;
     std::vector<uint64_t> inputRevisions;
     std::vector<std::string> inputKeys, inputScratch;
@@ -237,6 +243,25 @@ template <class Sample> inline void RigExecOpPublishValue(
     value->changed = !value->initialized || value->scratch != value->key;
     if (value->changed) ++value->revision;
     value->key.swap(value->scratch); value->initialized = true;
+}
+
+/// Clears every change flag at the start of a run. Only publication sets a
+/// flag, and the last run gathered each one it set into changedValues.
+inline void RigExecOpClearChanges(RigExecOpAdapterState *state)
+{
+    for (RigExecValueId id : state->changedValues) state->values[size_t(id)].changed = 0;
+    state->changedValues.clear();
+}
+
+/// Owner, after the join and on failure too: gathers the flags this run set,
+/// from its changed leaves and the writes of the ops that ran.
+inline void RigExecOpGatherChanges(RigExecOpAdapterState *state,
+    const RigExecCompiledGraph &graph, const std::vector<char> &ran)
+{
+    state->changedValues.assign(state->changedLeaves.begin(), state->changedLeaves.end());
+    for (size_t c = 0; c < graph.ops.size() && c < ran.size(); ++c) if (ran[c])
+        for (RigExecValueId id : graph.ops[c].descriptor.writes)
+            if (state->values[size_t(id)].changed) state->changedValues.push_back(id);
 }
 
 } // namespace rigExec

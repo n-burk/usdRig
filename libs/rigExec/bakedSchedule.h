@@ -19,9 +19,9 @@ enum class RigExecBakedScheduleMode {
     /// Steps in program order on one thread. The reference, and what
     /// RIGEXEC_BAKED_SCHEDULE=serial asks for.
     Serial,
-    /// Clusters spread across the work arena, one task per cluster, with a
-    /// padded atomic remaining-predecessor counter deciding what becomes
-    /// runnable. What RIGEXEC_BAKED_SCHEDULE=parallel asks for.
+    /// Clusters spread across the work arena, one task per cluster, with an
+    /// unpadded atomic count of unfinished candidate predecessors deciding
+    /// what becomes runnable. What RIGEXEC_BAKED_SCHEDULE=parallel asks for.
     Parallel,
 };
 
@@ -101,12 +101,11 @@ double RigExecBakedScheduleGrainUs(double totalCost);
 
 /// The clusters of \p clustering, each after all of its predecessors.
 ///
-/// Cluster ids come out of the level packing, which numbers bins and not
-/// dependencies -- cluster 6 can perfectly well have cluster 10 among its
-/// predecessors -- so anything that walks the cluster graph one cluster at a
-/// time needs this order and not increasing id. A cycle is a coding error
-/// and leaves the clusters on it out of the answer. Build caches the result
-/// as `RigExecBakedClustering::topologicalOrder`.
+/// Derived from the cluster edges alone, never from cluster ids. Lowered ids
+/// follow each cluster's first operation in canonical order, so they happen
+/// to be topological too (RigExecValidateOpClusters checks it). A cycle is a
+/// coding error and leaves the clusters on it out of the answer. Build caches
+/// the result as `RigExecBakedClustering::topologicalOrder`.
 std::vector<int> RigExecBakedClusterTopologicalOrder(
     const RigExecBakedClustering &clustering);
 
@@ -124,8 +123,9 @@ std::vector<int> RigExecBakedClusterTopologicalOrder(
 void RigExecBakedBuildCones(RigExecBakedProgramImpl *program);
 
 /// Dispatches one body with optional timing and immutable check-row capture.
+/// \p profiling stamps the body interval; the run's owner decides it once.
 void RigExecBakedRunStepBody(RigExecBakedProgramImpl *program,
-    RigExecBakedStep *step, UsdTimeCode time);
+    RigExecBakedStep *step, UsdTimeCode time, bool profiling);
 
 /// The clock RigExecProfiler::NowUs reads, in nanoseconds: a plain clock
 /// read, so an op may stamp itself with it.
@@ -141,6 +141,8 @@ void RigExecBakedFinishHeadOp(RigExecBakedProgramImpl *, const RigExecBakedStep 
 bool RigExecBakedHeadValueChanged(const RigExecBakedProgramImpl &,
     RigExecBakedSlotDomain, uint32_t slot);
 
+/// Zeroes the last execution's flags, completion numbers and counts and, when
+/// a run since the last clear stamped (`runStamped`), every step's stamps.
 void RigExecBakedClearRunStamps(RigExecBakedProgramImpl *program);
 
 /// Runs every step of \p program, returning false when one of them gave the

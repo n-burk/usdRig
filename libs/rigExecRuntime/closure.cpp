@@ -40,6 +40,18 @@ _RrIsWeightKind(RigExecWireStepKind kind)
            kind == RigExecWireStepKind::VolumePlacements;
 }
 
+// The skip callback changes state only through MarkSkipped, whose counters
+// only geometry bodies set, and RrSkipGeometryStep; other skips are no-ops.
+void
+_RrIndexSkipEffects(RrProgram *p)
+{
+    auto &skipEffects = p->store.opAdapter.skipEffects;
+    skipEffects.clear();
+    for (uint32_t c = 0; c < p->opGraph.ops.size(); ++c)
+        if (_RrIsGeometryKind((*p->steps)[p->opGraph.ops[c].originalIndex].kind))
+            skipEffects.push_back(c);
+}
+
 }  // namespace
 
 namespace {
@@ -390,7 +402,7 @@ static bool RrCompileCommonGraph(RrProgram *p,std::string *error)
             std::sort(keys.begin(),keys.end()); keys.erase(std::unique(keys.begin(),keys.end()),keys.end());
             if (keys != step.semanticPredecessorKeys) return invalid("semantic keys differ from solver requirements");
         }
-        return RigExecOpCompileAdapter(*p->steps,
+        const bool compiled = RigExecOpCompileAdapter(*p->steps,
             [](const auto &r){return uint32_t(r.domain());},
             [](const auto &r){return r.begin();},[](const auto &r){return r.end();},
             [&](const auto &step){ const auto i=size_t(&step-p->steps->data());
@@ -413,6 +425,8 @@ static bool RrCompileCommonGraph(RrProgram *p,std::string *error)
             [p](uint32_t i) -> const std::vector<std::string> & {
                 return (*p->steps)[i].semanticPredecessorKeys;
             });
+        if (compiled) _RrIndexSkipEffects(p);
+        return compiled;
     }
     if(!p->file->commonGraph) { if(error) *error="missing common operation graph"; return false; }
     const auto &wire=*p->file->commonGraph;
@@ -542,7 +556,10 @@ static bool RrCompileCommonGraph(RrProgram *p,std::string *error)
             if(error) *error="common graph is not the canonical producer order"; return false;
         }
     }
+    // The checked compile has these exact canonical ops and descriptors.
+    graph.volatileOps=checked.volatileOps;
     state.compiled=true; p->opGraph=std::move(graph); p->store.opAdapter=std::move(state);
+    _RrIndexSkipEffects(p);
     return true;
 }
 
@@ -581,7 +598,7 @@ bool RrExecuteOpGraph(RrProgram *p,bool force,std::string *error)
     for(auto id:state.excludedValues) {
         const auto &value=state.values[size_t(id)]; RrResetExcludedValue(p,value.domain,value.slot);
     }
-    for(auto &v:state.values) v.changed=0;
+    RigExecOpClearChanges(&state);
     const auto sample=[&](uint32_t d,uint32_t slot,std::string *key){RrOpValue(p,d,slot,key);};
     for(const auto id:state.leaves) { RigExecOpPublishValue(&state.values[size_t(id)],sample);
         if(state.values[size_t(id)].changed) state.changedLeaves.push_back(id); }
@@ -650,8 +667,14 @@ bool RrExecuteOpGraph(RrProgram *p,bool force,std::string *error)
         const bool changed=!exact || input!=scratch; input.swap(scratch);
         return changed;
     };
+    // The runtime executor is serial (no dispatch), so bodies run in
+    // completion order and a cluster's ran ops are consecutive.
+    s.runTrace.clear();
+    size_t closedClusters=0; uint32_t lastCluster=UINT32_MAX;
     callbacks.run=[&](uint32_t c){
         const auto i=p->opGraph.ops[c].originalIndex;
+        s.runTrace.push_back(int32_t(i));
+        if(p->opGraph.opClusters[c]!=lastCluster) { lastCluster=p->opGraph.opClusters[c]; ++closedClusters; }
         if(!RrRunOpBody(p,i,error)) return false;
         // ChainDirty's key is its revision's RevisionDone key. Writes run in
         // (domain, slot) order, so the fuse has built that key already.
@@ -669,21 +692,17 @@ bool RrExecuteOpGraph(RrProgram *p,bool force,std::string *error)
     };
     callbacks.skip=[&](uint32_t c){const auto i=p->opGraph.ops[c].originalIndex;
         s.stepOutputs[i].MarkSkipped(); if(_RrIsGeometryKind((*p->steps)[i].kind)) RrSkipGeometryStep(p,i);};
+    callbacks.skipEffects=&state.skipEffects;
     std::string graphError;
-    if(!RigExecExecuteOpGraph(p->opGraph,state.changedLeaves,state.seeds,force,callbacks,&s.opExecution,&graphError,&s.opWorkspace,&state.candidateOps)) {
+    const bool ok=RigExecExecuteOpGraph(p->opGraph,state.changedLeaves,state.seeds,force,callbacks,&s.opExecution,&graphError,&s.opWorkspace,&state.candidateOps);
+    RigExecOpGatherChanges(&state,p->opGraph,s.opExecution.ran);
+    if(!ok) {
+        s.runTrace.clear();
         state.everRan=false; s.everRan=false;
         if(error && error->empty()) *error=graphError;
         return false;
     }
-    s.runTrace.clear(); state.seeds.clear();
-    for(uint32_t c=0;c<p->opGraph.ops.size();++c) if(s.opExecution.ran[c]) state.seeds.push_back(c);
-    std::sort(state.seeds.begin(),state.seeds.end(),[&](uint32_t a,uint32_t b) { return s.opExecution.completion[a]<s.opExecution.completion[b]; });
-    for(uint32_t c:state.seeds) s.runTrace.push_back(int32_t(p->opGraph.ops[c].originalIndex));
-    // Trace already owns completion order; reuse retained scratch to count
-    // the production clusters whose operation bodies actually ran.
-    for(uint32_t &c:state.seeds) c=p->opGraph.opClusters[c];
-    std::sort(state.seeds.begin(),state.seeds.end());
-    s.lastClosedClusters=size_t(std::unique(state.seeds.begin(),state.seeds.end())-state.seeds.begin());
+    s.lastClosedClusters=closedClusters;
     RrPropertyPublish(p);
     // Refusal finishes preparation but owes a full pass on the next Execute.
     if(!p->requiredStageFramesAdmission.admitted) {

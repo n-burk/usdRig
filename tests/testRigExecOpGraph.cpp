@@ -573,6 +573,170 @@ void TestFatalCancellationJoinsActiveCallbacks()
     }
 }
 
+/// Multi-member clusters number their candidate members consecutively after
+/// the cluster's last body; counts come from ran. Serial numbering is the
+/// order the bodies ran, which binary playback's run trace relies on.
+void TestClusterCompletionAndCounts()
+{
+    RigExecCompiledGraph graph;
+    CHECK(RigExecCompileOpGraph({Op("A0",{0},{1}),Op("A1",{1},{2}),Op("A2",{2},{3}),
+        Op("B0",{10},{11}),Op("B1",{11},{12}),Op("J",{3,12},{20}),Op("U",{30},{31})},
+        {0,10,30},RigExecCyclePolicy::Reject,&graph));
+    CHECK(RigExecLowerOpClusters(&graph,{},100.0));
+    CHECK(Keys(graph)==std::vector<std::string>({"A0","A1","A2","B0","B1","J","U"}));
+    CHECK(graph.clusters.size()==4);
+    CHECK(graph.opClusters==std::vector<uint32_t>({0,0,0,1,1,2,3}));
+    for (bool parallel : {false, true}) {
+        std::vector<std::atomic<bool>> changed(32);
+        for (auto &value:changed) value.store(false);
+        std::vector<uint32_t> order; // Serial runs only.
+        std::atomic<int> skips{0};
+        RigExecOpCallbacks callbacks;
+        bool republish=true;
+        callbacks.run=[&](uint32_t i) {
+            if (!parallel) order.push_back(i);
+            if (republish) for (auto write:graph.ops[i].descriptor.writes)
+                changed[write].store(true,std::memory_order_release);
+            return true;
+        };
+        callbacks.skip=[&](uint32_t) { ++skips; };
+        callbacks.changed=[&](RigExecValueId id) { return changed[id].load(std::memory_order_acquire); };
+        WorkDispatcher dispatcher;
+        if (parallel) {
+            callbacks.dispatch=[&](std::function<void()> task) {dispatcher.Run(std::move(task));};
+            callbacks.wait=[&] {dispatcher.Wait();};
+        }
+        RigExecOpExecution execution; RigExecOpWorkspace workspace;
+        changed[0].store(true); changed[10].store(true);
+        CHECK(RigExecExecuteOpGraph(graph,{0,10},{},false,callbacks,&execution,nullptr,&workspace));
+        CHECK(execution.executed==6 && execution.skipped==1 && skips.load()==1);
+        CHECK(execution.ran==std::vector<char>({1,1,1,1,1,1,0}));
+        CHECK(execution.completion[6]==0);
+        // Members of one cluster are consecutive; every edge points forward.
+        CHECK(execution.completion[1]==execution.completion[0]+1 &&
+              execution.completion[2]==execution.completion[1]+1);
+        CHECK(execution.completion[4]==execution.completion[3]+1);
+        for (uint32_t i=0;i<graph.ops.size();++i)
+            for (uint32_t predecessor:graph.ops[i].predecessors)
+                if (execution.candidates[i])
+                    CHECK(execution.completion[predecessor]<execution.completion[i]);
+        std::vector<uint64_t> numbers;
+        for (uint32_t i=0;i<graph.ops.size();++i)
+            if (execution.candidates[i]) numbers.push_back(execution.completion[i]);
+        std::sort(numbers.begin(),numbers.end());
+        CHECK(numbers==std::vector<uint64_t>({1,2,3,4,5,6}));
+        if (!parallel) {
+            CHECK(order==std::vector<uint32_t>({0,1,2,3,4,5}));
+            for (size_t k=0;k<order.size();++k) CHECK(execution.completion[order[k]]==k+1);
+        }
+        // B1 is a candidate whose input did not change: it and J skip in
+        // their bodies and are still numbered; A and U are not candidates.
+        for (auto &value:changed) value.store(false);
+        changed[10].store(true); republish=false; skips=0; order.clear();
+        CHECK(RigExecExecuteOpGraph(graph,{10},{},false,callbacks,&execution,nullptr,&workspace));
+        CHECK(execution.candidates==std::vector<char>({0,0,0,1,1,1,0}));
+        CHECK(execution.ran==std::vector<char>({0,0,0,1,0,0,0}));
+        CHECK(execution.executed==1 && execution.skipped==6 && skips.load()==6);
+        CHECK(execution.completion==std::vector<uint64_t>({0,0,0,1,2,3,0}));
+    }
+}
+
+/// Volatile ops are compiled into a list and seeded without a changed input;
+/// a skip-effect list limits skip to the listed non-candidates while every
+/// candidate that does not run is still skipped.
+void TestSkipEffectsAndVolatileSeeds()
+{
+    auto volatileOp=Op("V",{40},{41}); volatileOp.volatileInput=true;
+    RigExecCompiledGraph graph;
+    CHECK(RigExecCompileOpGraph({Op("A",{0},{1}),Op("B",{1},{2}),volatileOp,
+        Op("W",{41},{42}),Op("U",{50},{51})},{0,40,50},RigExecCyclePolicy::Reject,&graph));
+    CHECK(Keys(graph)==std::vector<std::string>({"A","B","U","V","W"}));
+    CHECK(graph.volatileOps==std::vector<uint32_t>({3}));
+    std::vector<char> changed(64,0);
+    std::vector<uint32_t> ran, skipped;
+    RigExecOpCallbacks callbacks;
+    callbacks.run=[&](uint32_t i) {
+        ran.push_back(i);
+        if (graph.ops[i].descriptor.key!="A")
+            for (auto write:graph.ops[i].descriptor.writes) changed[write]=1;
+        return true;
+    };
+    callbacks.skip=[&](uint32_t i) { skipped.push_back(i); };
+    callbacks.changed=[&](RigExecValueId id) { return changed[id]!=0; };
+    RigExecOpExecution execution;
+    CHECK(RigExecExecuteOpGraph(graph,{},{},false,callbacks,&execution));
+    CHECK(ran==std::vector<uint32_t>({3,4}));
+    CHECK(skipped==std::vector<uint32_t>({0,1,2}));
+    const std::vector<uint32_t> effects{1,2};
+    callbacks.skipEffects=&effects;
+    ran.clear(); skipped.clear(); changed.assign(64,0);
+    CHECK(RigExecExecuteOpGraph(graph,{},{},false,callbacks,&execution));
+    CHECK(ran==std::vector<uint32_t>({3,4}));
+    CHECK(skipped==std::vector<uint32_t>({1,2}));
+    CHECK(execution.executed==2 && execution.skipped==3);
+    // A and B are candidates; A republishes nothing, so B skips in its body
+    // although the list does not name it.
+    const std::vector<uint32_t> onlyU{2};
+    callbacks.skipEffects=&onlyU;
+    ran.clear(); skipped.clear(); changed.assign(64,0); changed[0]=1;
+    CHECK(RigExecExecuteOpGraph(graph,{0},{},false,callbacks,&execution));
+    CHECK(ran==std::vector<uint32_t>({0,3,4}));
+    CHECK(skipped==std::vector<uint32_t>({2,1}));
+    // Forced runs seed every op, volatile or not, in the serial FIFO order.
+    ran.clear(); skipped.clear(); changed.assign(64,0);
+    CHECK(RigExecExecuteOpGraph(graph,{},{},true,callbacks,&execution));
+    CHECK(ran==std::vector<uint32_t>({0,2,3,1,4}) && skipped.empty());
+    const std::vector<uint32_t> invalid{uint32_t(graph.ops.size())};
+    callbacks.skipEffects=&invalid;
+    std::string error;
+    CHECK(!RigExecExecuteOpGraph(graph,{},{},false,callbacks,&execution,&error));
+    CHECK(error=="skip effect operation out of range");
+}
+
+/// The flags one run sets are exactly the ones the next run clears.
+void TestChangeFlagsClearedFromGatheredList()
+{
+    RigExecCompiledGraph graph;
+    CHECK(RigExecCompileOpGraph({Op("A",{0},{1}),Op("B",{1},{2}),Op("C",{3},{4}),
+        Op("D",{5},{6})},{0,3,5},RigExecCyclePolicy::Reject,&graph));
+    RigExecOpAdapterState state;
+    for (uint32_t slot=0;slot<7;++slot) RigExecOpAddValue(&state,0,slot);
+    state.leaves={0,3,5};
+    std::vector<std::string> source(7,"x");
+    const auto sample=[&](uint32_t,uint32_t slot,std::string *key) { key->append(source[slot]); };
+    RigExecOpCallbacks callbacks;
+    callbacks.run=[&](uint32_t i) {
+        for (auto id:graph.ops[i].descriptor.writes) RigExecOpPublishValue(&state.values[id],sample);
+        return true;
+    };
+    callbacks.skip=[](uint32_t) {};
+    callbacks.changed=[&](RigExecValueId id) { return state.values[id].changed!=0; };
+    RigExecOpExecution execution;
+    const auto frame=[&] {
+        state.changedLeaves.clear();
+        RigExecOpClearChanges(&state);
+        for (auto &value:state.values) CHECK(!value.changed);
+        for (auto id:state.leaves) {
+            RigExecOpPublishValue(&state.values[id],sample);
+            if (state.values[id].changed) state.changedLeaves.push_back(id);
+        }
+        CHECK(RigExecExecuteOpGraph(graph,state.changedLeaves,{},false,callbacks,&execution));
+        RigExecOpGatherChanges(&state,graph,execution.ran);
+        for (RigExecValueId id=0;id<state.values.size();++id)
+            CHECK(!state.values[id].changed ||
+                  std::find(state.changedValues.begin(),state.changedValues.end(),id)!=
+                      state.changedValues.end());
+    };
+    frame(); // First publication: every value is new.
+    CHECK(state.changedValues.size()==7);
+    source[0]="y"; source[1]="y";
+    frame(); // A and B rerun; A's leaf and output move, B's output does not.
+    CHECK(execution.ran==std::vector<char>({1,1,0,0}));
+    CHECK(state.changedValues==std::vector<RigExecValueId>({0,1}));
+    frame(); // Idle: the last frame's flags are gone.
+    CHECK(state.changedValues.empty());
+}
+
 } // namespace
 
 int main()
@@ -582,6 +746,8 @@ int main()
     TestDeclaredSemanticPredecessors();
     TestCutoffAndRetention(); TestReaderSpecificShadow(); TestCandidateEffectiveInputs(); TestSerialParallelReadiness();
     TestUnrelatedBranchFinishesBeforeGate(); TestFatalCancellationJoinsActiveCallbacks();
+    TestClusterCompletionAndCounts(); TestSkipEffectsAndVolatileSeeds();
+    TestChangeFlagsClearedFromGatheredList();
     std::printf("OpGraph: %d failures\n", failures);
     return failures ? 1 : 0;
 }

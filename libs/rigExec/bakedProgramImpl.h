@@ -1253,7 +1253,7 @@ struct RigExecBakedStep {
     /// while op timing, the profiler or a measurement is on; memo end and
     /// body end only for a measurement. The op holds its thread from
     /// memoStartNs to publishEndNs. Cleared with the body interval at the
-    /// start of every run.
+    /// start of the run after any run that stamped (`runStamped`).
     uint64_t memoStartNs = 0, memoEndNs = 0, bodyEndNs = 0, publishEndNs = 0;
     /// What the step is called in the report and the trace, built once at
     /// Build so that neither costs a string per step per frame.
@@ -1263,8 +1263,8 @@ struct RigExecBakedStep {
     /// Empties this run's output. Called by the executor before the body, so
     /// that a step that is skipped keeps last run's lines for the epilogue
     /// to replay. The timestamps are NOT cleared here for that same reason:
-    /// a skipped step never reaches this, so RigExecBakedRunSteps clears
-    /// every step's interval at the start of the run instead.
+    /// a skipped step never reaches this, so RigExecBakedClearRunStamps
+    /// clears every step's interval at the start of the run instead.
     void BeginRun() {
         diagnostics.clear();
         counters.Clear();
@@ -1338,11 +1338,10 @@ struct RigExecBakedClustering {
     /// cluster graph by cost. Their ratio is the speed-up this schedule can
     /// reach with threads to spare.
     double serialCost = 0, criticalPathCost = 0;
-    /// Every cluster once, each after all of its predecessors. Cluster ids
-    /// number level-packing bins, not dependencies, so increasing id is NOT
-    /// such an order; anything that walks a subset of clusters one at a time
-    /// (a partial cone re-run) walks this instead. RigExecBakedBuildCones
-    /// fills it, which is where Build first needs it.
+    /// Every cluster once, each after all of its predecessors, derived from
+    /// the cluster edges (RigExecBakedClusterTopologicalOrder) rather than
+    /// trusted from the ids. RigExecBakedBuildCones fills it, which is where
+    /// Build first needs it.
     std::vector<int> topologicalOrder;
     /// Whether the last run stamped the per-cluster times above. Only the
     /// parallel executor has clusters to time: a serial run walks the steps
@@ -1350,17 +1349,6 @@ struct RigExecBakedClustering {
     /// rather than printing a table of zeros that reads as "every cluster
     /// was free".
     bool lastRunTimed = false;
-};
-
-/// The remaining-predecessor counter of one cluster.
-///
-/// One cache line each. Two counters in one line would make every finishing
-/// cluster's decrement invalidate its neighbour's line, which on a graph
-/// this wide is the only contention the executor has -- and the only lock,
-/// mutex or condition variable in the whole region is this atomic (§2.2).
-struct alignas(64) RigExecBakedClusterCounter {
-    std::atomic<int> remaining{0};
-    char padding[64 - sizeof(std::atomic<int>)] = {};
 };
 
 /// Population count of one 64-bit word, on every supported compiler.
@@ -2541,6 +2529,10 @@ struct RigExecBakedProgramImpl {
     /// RevisionDone and ChainDirty slots, and so the producer of point
     /// version r + 1 of its chain (RigExecBakedPointVersion).
     std::vector<int> revisionFuseStep;
+    /// The layout (RigExecBakedLayoutRevision index) of every SkinTopology
+    /// step, set where the op graph is compiled, so head preparation clears
+    /// their changed flags without walking every step.
+    std::vector<int> skinTopologyLayouts;
 
     /// The partition of `steps` the parallel executor runs, chosen once at
     /// Build. Its grain comes from the cost model and the machine's
@@ -2548,10 +2540,6 @@ struct RigExecBakedProgramImpl {
     /// what the box was doing at Build time would make "the same program
     /// produces the same answers at every grain" a claim nobody could test.
     RigExecBakedClustering clustering;
-    /// One remaining-predecessor counter per cluster, allocated at Build so
-    /// that the region allocates nothing. An array rather than a vector
-    /// because std::atomic is neither copyable nor movable.
-    std::unique_ptr<RigExecBakedClusterCounter[]> clusterCounters;
     // Settings a body path needs, read from the environment once at Build so
     // that no body reads the environment or a function-local static.
     /// RIGEXEC_BAKED_CHUNK_VERTS: vertices one chunk covers before the cap.
@@ -2689,6 +2677,12 @@ struct RigExecBakedProgramImpl {
     /// would make every step of a verified frame report two runs, and the
     /// table would describe a frame nobody asked for.
     bool measurementSuspended = false;
+    /// Whether a step may hold a nonzero stamp (startUs/endUs or an op
+    /// stamp). The owner sets it before any run whose ops stamp;
+    /// RigExecBakedRunStatistics::Restore only puts back stamps such a run
+    /// wrote since the last clear. RigExecBakedClearRunStamps zeroes the
+    /// stamps and resets it.
+    bool runStamped = false;
 
     /// Per joint, whether this run's final frame earned a published matrix.
     /// Written by the diagnostic pass, read by the fill pass; sized at
@@ -5129,11 +5123,9 @@ void RigExecBakedDeclareInputDependencies(RigExecBakedProgramImpl *program);
 ///    observer of the frame -- the run report, the profiler trace,
 ///    GetClustersRunLastGeneration() -- describes the one run that published
 ///    a pose.
-///  * `clusterCounters` and per-step `measured*` accumulators: the
-///    parallel executor's arrival counters and the calibrator's running
-///    averages. The counters are stored afresh at the head of every parallel
-///    run and mean nothing between runs; the averages are a fit over frames,
-///    which an opt-in calibration reads and this mode does not.
+///  * per-step `measured*` accumulators: the calibrator's running averages,
+///    a fit over frames, which an opt-in calibration reads and this mode
+///    does not.
 struct RigExecBakedLadderTables {
     std::vector<GfMatrix4d> restM;
     std::vector<std::array<GfVec3d, 4>> restPts;

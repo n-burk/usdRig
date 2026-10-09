@@ -243,6 +243,7 @@ bool RigExecCompileOpGraph(const std::vector<RigExecOpDescriptor> &descriptors,
             op.successors.push_back(uint32_t(graph.canonicalIndex[next]));
         Unique(&op.predecessors); Unique(&op.successors);
         for (RigExecValueId value : op.descriptor.reads) graph.readers[value].push_back(i);
+        if (op.descriptor.volatileInput) graph.volatileOps.push_back(i);
         graph.longestPath = std::max(graph.longestPath, distance[i]);
     }
     for (auto &reader : graph.readers) Unique(&reader.second);
@@ -366,6 +367,10 @@ bool RigExecExecuteOpGraph(const RigExecCompiledGraph &graph,
         if (seed >= count) return fail("operation seed out of range");
     if (candidateOps) for (uint32_t candidate : *candidateOps)
         if (candidate >= count) return fail("operation candidate out of range");
+    for (uint32_t op : graph.volatileOps)
+        if (op >= count) return fail("volatile operation out of range");
+    if (callbacks.skipEffects) for (uint32_t op : *callbacks.skipEffects)
+        if (op >= count) return fail("skip effect operation out of range");
     RigExecOpExecution &result = *out;
     RigExecOpWorkspace localWorkspace;
     RigExecOpWorkspace &workspace = suppliedWorkspace ? *suppliedWorkspace : localWorkspace;
@@ -384,8 +389,8 @@ bool RigExecExecuteOpGraph(const RigExecCompiledGraph &graph,
         const auto readers = graph.readers.find(value);
         if (readers != graph.readers.end()) for (uint32_t i : readers->second) seed(i, false);
     }
-    for (uint32_t i = 0; i < count; ++i)
-        if (force || graph.ops[i].descriptor.volatileInput) seed(i, true);
+    if (force) for (uint32_t i = 0; i < count; ++i) seed(i, true);
+    else for (uint32_t i : graph.volatileOps) seed(i, true);
     for (size_t at = 0; at < pending.size(); ++at)
         for (uint32_t next : graph.ops[pending[at]].successors)
             if (!result.candidates[next]) { result.candidates[next] = 1; pending.push_back(next); }
@@ -396,7 +401,9 @@ bool RigExecExecuteOpGraph(const RigExecCompiledGraph &graph,
     unresolved.resize(clusterCount);
     auto &ready = workspace.ready;
     ready.clear(); ready.reserve(clusterCount);
-    for (uint32_t i = 0; i < count; ++i) if (!result.candidates[i]) callbacks.skip(i);
+    if (callbacks.skipEffects) {
+        for (uint32_t i : *callbacks.skipEffects) if (!result.candidates[i]) callbacks.skip(i);
+    } else for (uint32_t i = 0; i < count; ++i) if (!result.candidates[i]) callbacks.skip(i);
     for (uint32_t i = 0; i < clusterCount; ++i) {
         uint32_t dependencies = 0;
         if (clusterCandidates[i]) {
@@ -406,15 +413,10 @@ bool RigExecExecuteOpGraph(const RigExecCompiledGraph &graph,
         }
         unresolved[i].value.store(dependencies, std::memory_order_relaxed);
     }
-    std::atomic<uint64_t> sequence{0};
-    std::atomic<size_t> executed{0}, skipped{count - pending.size()};
     std::atomic<bool> succeeded{true};
+    // A body touches only its own op's flags; counts are summed after join.
     const auto body = [&](uint32_t i) {
-        if (!succeeded.load(std::memory_order_acquire)) {
-            callbacks.skip(i); skipped.fetch_add(1, std::memory_order_relaxed);
-            result.completion[i] = sequence.fetch_add(1, std::memory_order_relaxed) + 1;
-            return;
-        }
+        if (!succeeded.load(std::memory_order_acquire)) { callbacks.skip(i); return; }
         bool needed = seeded[i] != 0;
         if (callbacks.inputsChanged) needed = callbacks.inputsChanged(i) || needed;
         else for (RigExecValueId input : graph.ops[i].descriptor.reads)
@@ -423,26 +425,44 @@ bool RigExecExecuteOpGraph(const RigExecCompiledGraph &graph,
         if (needed) {
             result.ran[i] = 1;
             if (!callbacks.run(i)) succeeded.store(false, std::memory_order_release);
-            executed.fetch_add(1, std::memory_order_relaxed);
-        } else { callbacks.skip(i); skipped.fetch_add(1, std::memory_order_relaxed); }
-        result.completion[i] = sequence.fetch_add(1, std::memory_order_relaxed) + 1;
+        } else callbacks.skip(i);
     };
+    // Runs the cluster's candidate members and returns how many there were.
     const auto clusterBody = [&](uint32_t cluster) {
+        uint32_t bodies = 0;
         for (uint32_t op : graph.clusters[cluster].members)
-            if (result.candidates[op]) body(op);
+            if (result.candidates[op]) { body(op); ++bodies; }
+        return bodies;
+    };
+    // Numbers the candidate members from before + 1, ahead of releasing successors.
+    const auto complete = [&](uint32_t cluster, uint64_t before) {
+        for (uint32_t op : graph.clusters[cluster].members)
+            if (result.candidates[op]) result.completion[op] = ++before;
     };
     if (!callbacks.dispatch) {
+        // One thread owns every counter here, so no read-modify-write.
+        uint64_t finished = 0;
         for (size_t at = 0; at < ready.size(); ++at) {
-            const uint32_t cluster = ready[at]; clusterBody(cluster);
-            for (uint32_t next : graph.clusters[cluster].successors)
-                if (clusterCandidates[next] && unresolved[next].value.fetch_sub(1, std::memory_order_acq_rel) == 1)
-                    ready.push_back(next);
+            const uint32_t cluster = ready[at];
+            const uint32_t bodies = clusterBody(cluster);
+            complete(cluster, finished); finished += bodies;
+            for (uint32_t next : graph.clusters[cluster].successors) {
+                if (!clusterCandidates[next]) continue;
+                auto &remaining = unresolved[next].value;
+                const uint32_t left = remaining.load(std::memory_order_relaxed) - 1;
+                remaining.store(left, std::memory_order_relaxed);
+                if (!left) ready.push_back(next);
+            }
         }
     } else {
+        // The acq_rel release chain on unresolved orders a predecessor's
+        // sequence claim before its successor's, so numbering respects edges.
+        std::atomic<uint64_t> sequence{0};
         std::function<void(uint32_t)> submit;
         submit = [&](uint32_t cluster) {
             callbacks.dispatch([&, cluster] {
-                clusterBody(cluster);
+                const uint32_t bodies = clusterBody(cluster);
+                complete(cluster, sequence.fetch_add(bodies, std::memory_order_relaxed));
                 for (uint32_t next : graph.clusters[cluster].successors)
                     if (clusterCandidates[next] && unresolved[next].value.fetch_sub(1, std::memory_order_acq_rel) == 1)
                         submit(next);
@@ -451,8 +471,9 @@ bool RigExecExecuteOpGraph(const RigExecCompiledGraph &graph,
         for (uint32_t cluster : ready) submit(cluster);
         callbacks.wait();
     }
-    result.executed = executed.load(std::memory_order_relaxed);
-    result.skipped = skipped.load(std::memory_order_relaxed);
+    // Every candidate cluster ran once, so each op either ran or skipped.
+    result.executed = size_t(std::count(result.ran.begin(), result.ran.end(), char(1)));
+    result.skipped = count - result.executed;
     const bool valid = succeeded.load(std::memory_order_acquire);
     if (!valid && error) *error = "an operation failed";
     return valid;

@@ -2121,9 +2121,9 @@ bool RigExecBakedPublishStageFramesRefusal(RigExecBakedProgramImpl *B,
 
 void
 RigExecBakedRunStepBody(RigExecBakedProgramImpl *B,
-                                RigExecBakedStep *step, UsdTimeCode time)
+                                RigExecBakedStep *step, UsdTimeCode time,
+                                bool profiling)
 {
-    const bool profiling=B->recordOpTimings || (B->profiler && B->profiler->IsEnabled());
     const bool measuring=B->opAdapter.measuring && !B->measurementSuspended;
     const uint64_t began=profiling ? RigExecProfiler::NowUs() : 0;
     const uint64_t beganNs=measuring ? RigExecBakedNowNs() : 0;
@@ -2143,9 +2143,12 @@ RigExecBakedRunStepBody(RigExecBakedProgramImpl *B,
 void
 RigExecBakedClearRunStamps(RigExecBakedProgramImpl *program)
 {
-    for (RigExecBakedStep &step : program->steps) {
-        step.startUs = step.endUs = 0;
-        step.memoStartNs = step.memoEndNs = step.bodyEndNs = step.publishEndNs = 0;
+    if (program->runStamped) {
+        for (RigExecBakedStep &step : program->steps) {
+            step.startUs = step.endUs = 0;
+            step.memoStartNs = step.memoEndNs = step.bodyEndNs = step.publishEndNs = 0;
+        }
+        program->runStamped = false;
     }
     auto &execution = program->opExecution;
     std::fill(execution.ran.begin(), execution.ran.end(), char(0));
@@ -3113,10 +3116,8 @@ void RigExecBakedPrepareHeadOps(RigExecBakedProgramImpl *program)
     for (int slot : B.ladderMoved) B.ladderChanged[size_t(slot)] = 0;
     B.restMoved.clear(); B.ladderMoved.clear();
     for (auto &field : B.weightFields) field.changed = false;
-    for (const auto &step : B.steps) {
-        if (step.kind != RigExecBakedStepKind::SkinTopology) continue;
-        if (auto *revision = RigExecBakedLayoutRevision(&B,size_t(step.object))) revision->layoutOutputChanged = false;
-    }
+    for (int layout : B.skinTopologyLayouts)
+        if (auto *revision = RigExecBakedLayoutRevision(&B,size_t(layout))) revision->layoutOutputChanged = false;
 }
 void RigExecBakedFinishHeadOp(RigExecBakedProgramImpl *B,const RigExecBakedStep &step)
 {
