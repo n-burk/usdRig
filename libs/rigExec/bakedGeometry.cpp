@@ -1531,6 +1531,38 @@ ChunkTransformsView(const RigExecBakedProgramImpl::GeomChunk &chunk,
     return view;
 }
 
+/// The skin kernel's validation over the half RevisionStatic holds: the
+/// packet, the layout against the entering count and the envelope it
+/// resolved (the fold's `influencesValid` is the matrix half, which the fuse
+/// ANDs in). One definition for the revision's decision and every chunk's
+/// guard.
+bool
+SkinPacketIsUsable(const RigExecBakedProgramImpl::GeomRevision &revision)
+{
+    return revision.parameters.valid && revision.parameters.kind == "skin" &&
+           revision.layoutUsable && revision.envelopeOk;
+}
+
+/// A skin revision's apply-or-fail answer from that half: past it a linear
+/// blend cannot fail, while a dual-quaternion blend can still be degenerate
+/// at a vertex, which only its chunks see.
+RigExecRevisionAcceptance
+SkinAcceptance(const RigExecBakedProgramImpl::GeomRevision &revision)
+{
+    if (!SkinPacketIsUsable(revision)) {
+        return RigExecRevisionAcceptance::Refuses;
+    }
+    switch (RigExecSkinMethodOf(revision.parameters)) {
+    case RigExecSkinMethod::ClassicLinear:
+        return RigExecRevisionAcceptance::Applies;
+    case RigExecSkinMethod::DualQuaternion:
+        return RigExecRevisionAcceptance::Deferred;
+    case RigExecSkinMethod::Unknown:
+        break;
+    }
+    return RigExecRevisionAcceptance::Refuses;
+}
+
 /// One vertex range of a skin revision: seed the revision's own output buffer
 /// from the preceding points, deform in place, blend the envelope back.
 ///
@@ -2495,6 +2527,24 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
         revision.fullStrength = true;
         revision.partitionStale = false;
         if (!skin) {
+            // A wire's dense walk blends a separate envelope after its
+            // kernel; resolved here at the full count, as a skin's is, and
+            // its chunk blends with this array.
+            if (revision.op == RigExecRevisionOp::Wire &&
+                RigExecRevisionTakesSeparateBlend(
+                    revision.op, revision.parameters.weights)) {
+                revision.fullStrength =
+                    RigExecEnvelopeIsFullStrength(revision.parameters.weights);
+                if (!revision.fullStrength) {
+                    revision.envelopeOk =
+                        revision.parameters.weights.ResolveAll(
+                            count, &revision.envelope);
+                }
+            }
+            // From the validation the chunk's kernel runs first, over the
+            // count it is applied to.
+            revision.acceptance = RigExecRevisionKernelAcceptance(
+                revision.op, revision.parameters, count);
             return;
         }
         revision.layoutUsable =
@@ -2505,6 +2555,7 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
             revision.envelopeOk = revision.parameters.weights.ResolveAll(
                 count, &revision.envelope);
         }
+        revision.acceptance = SkinAcceptance(revision);
         if (revision.chunked) {
             // Whether the keys still describe the vertices. The handle is
             // the identity the SkinTopology op preserves for a binding that
@@ -2564,15 +2615,16 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
                 // blend all live in RigExecRunRevisionKernel, so an
                 // operation cannot mean one thing here and another there.
                 // This unpublished buffer is discarded by Fuse on failure.
+                // A wire blends with the envelope RevisionStatic resolved.
                 chunk.ok = geometryDetail::RunDiscardableGeometry(
                     revision.op, revision.parameters, points, count,
                     &revision.stagingOutput, B.useSimd, &revision.wireBasis,
-                    &revision.surfaceCache);
+                    &revision.surfaceCache,
+                    !revision.fullStrength && revision.envelopeOk
+                        ? &revision.envelope : nullptr);
                 return;
             }
-            if (!revision.parameters.valid ||
-                revision.parameters.kind != "skin" ||
-                !revision.layoutUsable || !revision.envelopeOk ||
+            if (!SkinPacketIsUsable(revision) ||
                 !revision.influencesValid || !sized) {
                 return;
             }
@@ -2589,9 +2641,8 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
         // its range of the output buffer should hold. The fuse discards the
         // work if the revision turns out not to apply.
         chunk.keyChanged = false;
-        if (!revision.status.AllowsApply() || !revision.parameters.valid ||
-            revision.parameters.kind != "skin" || !revision.layoutUsable ||
-            !revision.envelopeOk || revision.partitionStale || !sized) {
+        if (!revision.status.AllowsApply() || !SkinPacketIsUsable(revision) ||
+            revision.partitionStale || !sized) {
             chunk.ok = false;
             return;
         }
@@ -2653,6 +2704,12 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
             if (applied && skin && revision.partitionStale) {
                 applied = FuseWholeRevision(chain, &revision,
                                             size_t(revisionIndex), B.useSimd);
+            } else if (applied && revision.acceptance !=
+                                      RigExecRevisionAcceptance::Deferred) {
+                // RevisionStatic's decision, from the validation each chunk's
+                // kernel runs first, so every chunk's `ok` is this answer.
+                applied = revision.acceptance ==
+                          RigExecRevisionAcceptance::Applies;
             } else if (applied) {
                 for (const RigExecBakedProgramImpl::GeomChunk &chunk :
                          revision.chunks) {
@@ -3658,6 +3715,7 @@ void RigExecBakedResetSetAsideGeometryValue(
     switch (domain) {
     case RigExecBakedSlotDomain::RevisionPacket:
         revision.parameters.valid = false;
+        revision.acceptance = RigExecRevisionAcceptance::Refuses;
         break;
     case RigExecBakedSlotDomain::RevisionTransforms:
         revision.influencesValid = false;

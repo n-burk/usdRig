@@ -3064,10 +3064,19 @@ struct RigExecBakedProgramImpl {
         bool layoutUsable = false;
         /// The envelope, resolved ONCE at the full point count because it
         /// resolves atomically, and the predicate that says the blend is the
-        /// identity and the resolution therefore dead.
+        /// identity and the resolution therefore dead. A skin's, and a dense
+        /// wire's separate blend.
         std::vector<float> envelope;
         bool envelopeOk = false;
         bool fullStrength = false;
+        /// Whether the revision applies, decided by RevisionStatic over
+        /// `precedingCount` points from the validation its kernel runs first
+        /// (RigExecRevisionKernelAcceptance; a skin's from the packet half,
+        /// the fuse ANDing in the fold's `influencesValid`). Part of the
+        /// packet: the fuse selects by it and every chunk's `ok` agrees with
+        /// it. Deferred leaves the answer to the chunks.
+        RigExecRevisionAcceptance acceptance =
+            RigExecRevisionAcceptance::Refuses;
         /// The points this revision is applied to, which is the size every
         /// chunk writes within.
         size_t precedingCount = 0;
@@ -5385,6 +5394,7 @@ struct RigExecBakedRunShadow {
         bool influencesValid = false, influencesChanged = false;
         bool staticDirty = false, partitionStale = false;
         bool layoutUsable = false, envelopeOk = false, fullStrength = false;
+        RigExecRevisionAcceptance acceptance = RigExecRevisionAcceptance::Refuses;
         std::vector<float> publishedWeightValues;
         RigExecWeightPacket currentPhasePacket;
         bool weightFieldPublished = false;

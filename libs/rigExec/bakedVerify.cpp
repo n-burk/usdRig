@@ -421,6 +421,7 @@ CaptureRevision(const RigExecBakedProgramImpl::GeomRevision &revision,
     state->layoutRan = revision.layoutRan;
     state->envelopeOk = revision.envelopeOk;
     state->fullStrength = revision.fullStrength;
+    state->acceptance = revision.acceptance;
     state->chunks.resize(revision.chunks.size());
     for (size_t k = 0; k < revision.chunks.size(); ++k) {
         state->chunks[k].transforms = revision.chunks[k].transforms;
@@ -488,6 +489,7 @@ RestoreRevision(const RigExecBakedRunShadow::RevisionState &state,
     revision->layoutRan = state.layoutRan;
     revision->envelopeOk = state.envelopeOk;
     revision->fullStrength = state.fullStrength;
+    revision->acceptance = state.acceptance;
     for (size_t k = 0; k < revision->chunks.size() && k < state.chunks.size();
          ++k) {
         revision->chunks[k].transforms = state.chunks[k].transforms;
@@ -600,6 +602,8 @@ CompareRevision(std::vector<std::string> *differences, size_t *count,
                  shadow.fullStrength, revision.fullStrength);
     CompareValue(differences, count, where + " partitionStale",
                  shadow.partitionStale, revision.partitionStale);
+    CompareValue(differences, count, where + " acceptance",
+                 shadow.acceptance, revision.acceptance);
     // The published influence overlay, which no slot names and which the
     // comparator DOES compare on the pose: a cone that skipped the assemble
     // of a revision whose packet moved would publish last generation's field

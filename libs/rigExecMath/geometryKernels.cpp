@@ -1060,10 +1060,9 @@ RigExecBuildWireBasis(const GfVec2f *bindCoords, size_t bindCount,
                       RigExecWireBasis *basis)
 {
     const size_t n = controlPointCount;
-    if (!basis || !bindCoords || order < 1 || order > 16 || n < size_t(order) ||
-        knots.size() != n + size_t(order) ||
-        !(knots[size_t(order - 1)] < knots[n]) ||
-        (bindCount != meshPointCount && bindCount != indices.size())) {
+    if (!basis ||
+        !RigExecWireBasisInputsAreUsable(bindCoords, bindCount, meshPointCount,
+                                         indices.size(), order, knots, n)) {
         return false;
     }
     const bool parallel = bindCount == indices.size();
@@ -1116,6 +1115,19 @@ RigExecBuildWireBasis(const GfVec2f *bindCoords, size_t bindCount,
         }
     }
     return true;
+}
+
+bool
+RigExecWireBasisInputsAreUsable(const GfVec2f *bindCoords, size_t bindCount,
+                                size_t meshPointCount, size_t indexCount,
+                                int order, const std::vector<double> &knots,
+                                size_t controlPointCount)
+{
+    const size_t n = controlPointCount;
+    return bindCoords && order >= 1 && order <= 16 && n >= size_t(order) &&
+           knots.size() == n + size_t(order) &&
+           knots[size_t(order - 1)] < knots[n] &&
+           (bindCount == meshPointCount || bindCount == indexCount);
 }
 
 bool
@@ -1201,12 +1213,9 @@ RigExecApplyWire(std::vector<GfVec3f> *points,
                  double dropoffDistance, size_t begin, size_t end,
                  const GfVec3f *restEvals, size_t restEvalCount)
 {
-    if (!points || !bindCoords || !restCurve.IsValid() ||
-        !posedCurve.IsValid() ||
-        restCurve.order != posedCurve.order ||
-        restCurve.points->size() != posedCurve.points->size() ||
-        *restCurve.knots != *posedCurve.knots ||
-        bindCount != points->size() ||
+    if (!points ||
+        !RigExecWireInputsAreUsable(restCurve, posedCurve, bindCoords,
+                                    bindCount, points->size()) ||
         (restEvals && restEvalCount != points->size())) {
         return false;
     }
@@ -1227,6 +1236,21 @@ RigExecApplyWire(std::vector<GfVec3f> *points,
         (*points)[i] += delta * float(f);
     }
     return true;
+}
+
+bool
+RigExecWireInputsAreUsable(const RigExecNurbsCurve &restCurve,
+                           const RigExecNurbsCurve &posedCurve,
+                           const GfVec2f *bindCoords, size_t bindCount,
+                           size_t pointCount)
+{
+    // The knot vectors compare by value, so a NaN knot fails even when both
+    // curves share one vector.
+    return bindCoords && restCurve.IsValid() && posedCurve.IsValid() &&
+           restCurve.order == posedCurve.order &&
+           restCurve.points->size() == posedCurve.points->size() &&
+           !(*restCurve.knots != *posedCurve.knots) &&
+           bindCount == pointCount;
 }
 
 bool

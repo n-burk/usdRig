@@ -387,7 +387,8 @@ void RigExecBakedOpValueKey(const RigExecBakedProgramImpl &B,
             Put(out,v->parameters); Put(out,v->status); Put(out,v->layoutUsable);
             Put(out,v->envelopeOk); Array(out,v->envelope); Put(out,v->fullStrength);
             Put(out,uint64_t(v->precedingCount)); Put(out,v->partitionStale);
-            Put(out,v->weightFieldPublished); Array(out,v->publishedWeightValues); return;
+            Put(out,v->weightFieldPublished); Array(out,v->publishedWeightValues);
+            Put(out,uint8_t(v->acceptance)); return;
         } break;
     case D::RevisionTransforms:
         if(const auto *v=Revision(B,slot)) { Array(out,v->influences);

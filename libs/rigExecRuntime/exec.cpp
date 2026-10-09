@@ -375,6 +375,15 @@ RigExecRuntimeReader::GetPartitionStaleForTesting(
 }
 
 bool
+RigExecRuntimeReader::GetRevisionDecisionForTesting(
+    const std::string &moverPath, int *acceptance, bool *chunksOk) const
+{
+    return acceptance && chunksOk &&
+           RrGeometryRevisionDecisionForTesting(_program.get(), moverPath,
+                                                acceptance, chunksOk);
+}
+
+bool
 RigExecRuntimeReader::GetSkinLayoutIsOpenForTesting(
     const std::string &moverPath) const
 {

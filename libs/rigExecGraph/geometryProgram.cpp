@@ -62,15 +62,16 @@ bool RigExecRunGeometry(RigExecRevisionOp op,const RigExecMoverParameters &param
 namespace geometryDetail {
 bool RunDiscardableGeometry(RigExecRevisionOp op,const RigExecMoverParameters &parameters,
     std::vector<GfVec3f> *points,bool useSimd,RigExecWireBasisCache *wire,
-    RigExecSurfaceKernelCache<GfVec3f,GfVec3d> *surface)
+    RigExecSurfaceKernelCache<GfVec3f,GfVec3d> *surface,const std::vector<float> *envelope)
 {
-    return points && RunDiscardableRevisionKernel(op,parameters,points,useSimd,wire,surface);
+    return points && RunDiscardableRevisionKernel(op,parameters,points,useSimd,wire,surface,envelope);
 }
 bool RunDiscardableGeometry(RigExecRevisionOp op,const RigExecMoverParameters &parameters,
     const GfVec3f *in,size_t count,std::vector<GfVec3f> *out,bool useSimd,
-    RigExecWireBasisCache *wire,RigExecSurfaceKernelCache<GfVec3f,GfVec3d> *surface)
+    RigExecWireBasisCache *wire,RigExecSurfaceKernelCache<GfVec3f,GfVec3d> *surface,
+    const std::vector<float> *envelope)
 {
-    return out && RunDiscardableRevisionKernel(op,parameters,in,count,out,useSimd,wire,surface);
+    return out && RunDiscardableRevisionKernel(op,parameters,in,count,out,useSimd,wire,surface,envelope);
 }
 }
 bool RigExecRunGeometryMatrix(RigExecRevisionOp op,const RigExecRevisionBinding &binding,

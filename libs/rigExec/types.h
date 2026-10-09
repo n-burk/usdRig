@@ -102,6 +102,11 @@ struct RigExecWeightPacket {
     /// publication resolve straight into the shared handle.
     bool ResolveAll(size_t count, std::vector<float> *resolved) const;
     bool ResolveAll(size_t count, VtFloatArray *resolved) const;
+
+    /// Whether ResolveAll(count, ...) succeeds, without writing anything: the
+    /// validation ResolveAll itself runs before it writes, so the two cannot
+    /// disagree.
+    bool ResolvesAll(size_t count) const;
 };
 
 /// Baked distance-to-weight remap for one volumetric weight object

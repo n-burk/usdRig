@@ -328,6 +328,16 @@ bool RigExecApplyWire(
     size_t begin, size_t end,
     const GfVec3f *restEvals = nullptr, size_t restEvalCount = 0);
 
+/// RigExecApplyWire's validation prefix over \p pointCount points, apart
+/// from the rest-evaluation table: both curves evaluable and alike (order,
+/// control point count, knots) and one bind coordinate per point. The one
+/// definition RigExecApplyWire checks and a caller deciding before the
+/// kernel runs reads.
+bool RigExecWireInputsAreUsable(
+    const RigExecNurbsCurve &restCurve,
+    const RigExecNurbsCurve &posedCurve,
+    const GfVec2f *bindCoords, size_t bindCount, size_t pointCount);
+
 /// RigExecApplyWire weighted by a sparse field: only the named points move,
 /// each by weight * f(d) * (C(u) - C0(u)). indices must be ascending and in
 /// range and weights parallel to them. bindCoords either covers every point
@@ -364,6 +374,16 @@ bool RigExecBuildWireBasis(
     const std::vector<int> &indices, int order,
     const std::vector<double> &knots, size_t controlPointCount,
     double dropoffDistance, RigExecWireBasis *basis);
+
+/// RigExecBuildWireBasis's validation of its inputs before it builds
+/// anything, with \p indexCount weighted points: the bind table's storage
+/// and size and the curve layout. The per-index range check stays in the
+/// build; a caller that already proved the indices in range has its whole
+/// answer here.
+bool RigExecWireBasisInputsAreUsable(
+    const GfVec2f *bindCoords, size_t bindCount, size_t meshPointCount,
+    size_t indexCount, int order, const std::vector<double> &knots,
+    size_t controlPointCount);
 
 /// Applies a prebuilt basis: point indices[k] moves by
 /// weights[k] * sum_j coefficient * (posed[j] - rest[j]), summed over only

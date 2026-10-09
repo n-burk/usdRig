@@ -361,33 +361,159 @@ ApplyMatrixFullStrength(const RigExecMoverParameters &p, const GfVec3f *in,
 }
 }  // namespace
 
+// The validation the matrix, blend-shape and wire kernels run before they
+// write, each ONE definition that the kernel runs and
+// RigExecRevisionKernelAcceptance decides by, so the two cannot disagree.
+namespace {
+
+// The packet check every revision kernel makes first.
+bool
+_PacketMatches(RigExecRevisionOp op, const RigExecMoverParameters &p)
+{
+    return p.valid && p.kind == _RevisionKindToken(op);
+}
+
+// The sparse field the matrix kernel walks point by point instead of
+// resolving it densely: the shape a wire takes its envelope in.
+bool
+_MatrixWalksSparse(const RigExecWeightPacket &w)
+{
+    return RigExecWireTakesSparseEnvelope(w);
+}
+
+// Every entry a sparse walk names is usable over \p count points: in range,
+// strictly ascending, finite and in [0, 1]. Validated exactly as ResolveAll
+// would, so the same packets fail.
+bool
+_SparseWalkIsUsable(const RigExecWeightPacket &w, size_t count)
+{
+    for (size_t k = 0; k < w.indices.size(); ++k) {
+        const int index = w.indices[k];
+        const float value = w.values[k];
+        if (index < 0 || size_t(index) >= count ||
+            (k > 0 && index <= w.indices[k - 1]) ||
+            !std::isfinite(value) || value < 0.0f || value > 1.0f) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// RigExecApplyMatrixKernel's validation over \p count points: a full-strength
+// envelope, a sparse walk whose entries are usable, or a dense resolve. Given
+// \p weights, the dense resolve writes into it (ResolveAll validates exactly
+// as ResolvesAll does), so the kernel validates once.
+bool
+_MatrixKernelAccepts(const RigExecMoverParameters &p, size_t count,
+                     std::vector<float> *weights)
+{
+    const RigExecWeightPacket &w = p.weights;
+    if (RigExecEnvelopeIsFullStrength(w)) {
+        return true;
+    }
+    if (_MatrixWalksSparse(w)) {
+        return _SparseWalkIsUsable(w, count);
+    }
+    // A cardinality mismatch fails atomically.
+    return weights ? w.ResolveAll(count, weights) : w.ResolvesAll(count);
+}
+
+// RigExecApplyBlendShapeKernel's validation over \p count points: one delta
+// per point and an envelope that resolves, into \p envelope when given (left
+// untouched at full strength). A surface-frame transport after it reads the
+// entering points and can still refuse them.
+bool
+_BlendShapeKernelAccepts(const RigExecMoverParameters &p, size_t count,
+                         std::vector<float> *envelope)
+{
+    if (p.blendDeltas.size() != count) {
+        return false;
+    }
+    if (RigExecEnvelopeIsFullStrength(p.weights)) {
+        return true;
+    }
+    return envelope ? p.weights.ResolveAll(count, envelope)
+                    : p.weights.ResolvesAll(count);
+}
+
+// The checks the wire operation makes over \p count points before it builds
+// or applies anything: both control polygons alike and evaluable, then a
+// sparse walk's entries, or a dense walk's one bind coordinate per point.
+bool
+_WireKernelPrefix(const RigExecMoverParameters &p, size_t count)
+{
+    if (p.auxPoints.size() != p.restPoints.size()) {
+        return false;
+    }
+    const RigExecNurbsCurve rest{&p.restPoints, p.curveOrder, &p.curveKnots};
+    const RigExecNurbsCurve posed{&p.auxPoints, p.curveOrder, &p.curveKnots};
+    if (!rest.IsValid() || !posed.IsValid()) {
+        return false;
+    }
+    if (RigExecWireTakesSparseEnvelope(p.weights)) {
+        return _SparseWalkIsUsable(p.weights, count);
+    }
+    // A sparse bind table needs a sparse envelope.
+    return p.wireBindCoords.size() == count;
+}
+
+// The wire operation's answer over \p count points: its prefix, then the
+// checks of the basis build or the dense walk it goes on to make
+// (RigExecWireBasisInputsAreUsable, RigExecWireInputsAreUsable). An empty
+// bind table is Deferred: its answer is whether the table has storage, which
+// a memoized basis never asks.
+RigExecRevisionAcceptance
+_WireKernelAcceptance(const RigExecMoverParameters &p, size_t count)
+{
+    using Acceptance = RigExecRevisionAcceptance;
+    if (!_WireKernelPrefix(p, count)) {
+        return Acceptance::Refuses;
+    }
+    if (p.wireBindCoords.empty()) {
+        return Acceptance::Deferred;
+    }
+    if (RigExecWireTakesSparseEnvelope(p.weights)) {
+        // The indices were proved in range above, and a memoized basis exists
+        // only for inputs that passed these same checks.
+        return RigExecWireBasisInputsAreUsable(
+                   p.wireBindCoords.cdata(), p.wireBindCoords.size(), count,
+                   p.weights.indices.size(), p.curveOrder, p.curveKnots,
+                   p.restPoints.size())
+            ? Acceptance::Applies
+            : Acceptance::Refuses;
+    }
+    const RigExecNurbsCurve rest{&p.restPoints, p.curveOrder, &p.curveKnots};
+    const RigExecNurbsCurve posed{&p.auxPoints, p.curveOrder, &p.curveKnots};
+    return RigExecWireInputsAreUsable(rest, posed, p.wireBindCoords.cdata(),
+                                      p.wireBindCoords.size(), count)
+        ? Acceptance::Applies
+        : Acceptance::Refuses;
+}
+
+} // namespace
+
 bool
 RigExecApplyMatrixKernel(const RigExecMoverParameters &p,
                          std::vector<GfVec3f> *pts, bool useSimd)
 {
     const size_t count = pts->size();
+    // Validated before any point is written; a dense envelope is resolved
+    // into `weights` by the same call.
+    std::vector<float> weights;
+    if (!_MatrixKernelAccepts(p, count, &weights)) {
+        return false;
+    }
     if (RigExecEnvelopeIsFullStrength(p.weights)) {
         ApplyMatrixFullStrength(p, pts->data(), pts->data(), count, useSimd);
         return true;
     }
     // A sparse field with a zero default touches only its named points: a
     // face cluster weights a few hundred of a body's tens of thousands, so
-    // resolving and walking the dense array is almost all waste. Validated
-    // exactly as ResolveAll would, so the same packets fail.
+    // resolving and walking the dense array is almost all waste. Its entries
+    // were validated above, exactly as ResolveAll would, so the same packets
+    // fail.
     const RigExecWeightPacket &w = p.weights;
-    if (w.valid && w.representation == "sparse" && w.defaultWeight == 0.0f &&
-        w.indices.size() == w.values.size() &&
-        (w.rangePolicy.IsEmpty() || w.rangePolicy == "strict" ||
-         w.rangePolicy == "clamp")) {
-        for (size_t k = 0; k < w.indices.size(); ++k) {
-            const int index = w.indices[k];
-            const float value = w.values[k];
-            if (index < 0 || size_t(index) >= count ||
-                (k > 0 && index <= w.indices[k - 1]) ||
-                !std::isfinite(value) || value < 0.0f || value > 1.0f) {
-                return false;
-            }
-        }
+    if (_MatrixWalksSparse(w)) {
         if (p.transform == GfMatrix4d(1.0)) {
             return true;  // at rest every weighted point maps to itself
         }
@@ -434,10 +560,6 @@ RigExecApplyMatrixKernel(const RigExecMoverParameters &p,
                 GfVec3d(point), p.transform, w.values[k]));
         }
         return true;
-    }
-    std::vector<float> weights(count);
-    if (!p.weights.ResolveAll(count, &weights)) {
-        return false;  // cardinality mismatch fails atomically
     }
     RigExecApplyMatrixKernelRange(p, weights.data(), 0, count, pts->data(),
                                   useSimd);
@@ -487,6 +609,18 @@ RigExecBlendEnvelopeAll(const GfVec3f *preceding, const float *envelope,
 // what it reads (RigExecSkinLayoutIsUsable, RigExecSkinTransformsAreUsable),
 // the per-vertex body becomes RigExecApplySkinKernelRange, and this function
 // is what it always was: validate, then run every vertex.
+
+RigExecSkinMethod
+RigExecSkinMethodOf(const RigExecMoverParameters &p)
+{
+    if (p.skinningMethod == "classicLinear") {
+        return RigExecSkinMethod::ClassicLinear;
+    }
+    if (p.skinningMethod == "dualQuaternion") {
+        return RigExecSkinMethod::DualQuaternion;
+    }
+    return RigExecSkinMethod::Unknown;
+}
 
 RigExecSkinTransformsView
 RigExecSkinTransformsOf(const RigExecMoverParameters &p)
@@ -599,6 +733,7 @@ RigExecApplySkinKernelRange(const RigExecMoverParameters &p,
                             size_t begin, size_t end,
                             std::vector<GfVec3f> *pts, bool useSimd)
 {
+    const RigExecSkinMethod method = RigExecSkinMethodOf(p);
     const RigExecSkinLayout layout =
         RigExecSkinLayoutForPacket(p, transforms, pts->size());
     // A point range IS a layout: the indices and weights of point i live at
@@ -617,7 +752,7 @@ RigExecApplySkinKernelRange(const RigExecMoverParameters &p,
     // The one point where the skinning methods part. Everything above is
     // the shared per-point gather (indices, weights, influence matrices,
     // rest point); only the accumulation differs.
-    if (p.skinningMethod == "classicLinear") {
+    if (method == RigExecSkinMethod::ClassicLinear) {
         // sum_k w_k T_k p, with the weight complement held at the rest
         // point (see RigExecApplyLinearBlendSkin).
         if (useSimd) {
@@ -629,7 +764,7 @@ RigExecApplySkinKernelRange(const RigExecMoverParameters &p,
         }
         return true;
     }
-    if (p.skinningMethod == "dualQuaternion") {
+    if (method == RigExecSkinMethod::DualQuaternion) {
         // Scale-aware DQS from libs/rigExecMath/dualQuat.h: each influence
         // split once per evaluation into a pre-rotation stretch and a unit
         // dual quaternion, weighted sum over the same layout with
@@ -754,17 +889,14 @@ RigExecApplyBlendShapeKernel(const RigExecMoverParameters &p,
     RigExecSurfaceKernelCache<GfVec3f,GfVec3d> *cache)
 {
     const size_t count = pts->size();
-    if (p.blendDeltas.size() != count) {
-        return false;
-    }
     // Resolve the common envelope up front so a cardinality failure fails the
     // application before any element is written (the in-place write cannot be
     // rolled back).
-    const bool fullStrength = RigExecEnvelopeIsFullStrength(p.weights);
     std::vector<float> envelope;
-    if (!fullStrength && !p.weights.ResolveAll(count, &envelope)) {
+    if (!_BlendShapeKernelAccepts(p, count, &envelope)) {
         return false;
     }
+    const bool fullStrength = RigExecEnvelopeIsFullStrength(p.weights);
 
     std::vector<GfVec3f> transported;
     const std::vector<GfVec3f> *deltas = &p.blendDeltas;
@@ -957,29 +1089,20 @@ ApplyRevisionKernel(RigExecRevisionOp op,
         return true;
     }
     case RigExecRevisionOp::Wire: {
-        if (p.auxPoints.size() != p.restPoints.size()) {
+        // The checks before anything is built or applied; the basis build
+        // and RigExecApplyWire below make the rest of the decision's.
+        if (!_WireKernelPrefix(p, pts->size())) {
             return false;
         }
         const RigExecNurbsCurve rest{&p.restPoints, p.curveOrder,
                                      &p.curveKnots};
         const RigExecNurbsCurve posed{&p.auxPoints, p.curveOrder,
                                       &p.curveKnots};
-        if (!rest.IsValid() || !posed.IsValid()) {
-            return false;
-        }
         // A sparse zero-default envelope: evaluate only the named points.
         // RigExecRunRevisionKernel routes a wire here with its envelope
         // unapplied only when this packet shape is what it holds.
         if (RigExecWireTakesSparseEnvelope(p.weights)) {
             const RigExecWeightPacket &w = p.weights;
-            for (size_t k = 0; k < w.indices.size(); ++k) {
-                if (w.indices[k] < 0 || size_t(w.indices[k]) >= pts->size() ||
-                    (k > 0 && w.indices[k] <= w.indices[k - 1]) ||
-                    !std::isfinite(w.values[k]) || w.values[k] < 0.0f ||
-                    w.values[k] > 1.0f) {
-                    return false;
-                }
-            }
             std::shared_ptr<const RigExecWireBasis> basis;
             if (wireBasis) {
                 basis = wireBasis->Get(p, w.indices, pts->size());
@@ -998,9 +1121,6 @@ ApplyRevisionKernel(RigExecRevisionOp op,
             }
             return RigExecApplyWireBasis(pts, *basis, w.indices, w.values,
                                          p.restPoints, p.auxPoints);
-        }
-        if (p.wireBindCoords.size() != pts->size()) {
-            return false;  // a sparse bind table needs a sparse envelope
         }
         const auto *restEvals=wireBasis ? wireBasis->restEvaluations.Get(
             rest,p.wireBindCoords.cdata(),p.wireBindCoords.size(),p.dropoffDistance) : nullptr;
@@ -1067,6 +1187,59 @@ bool RigExecApplyRevisionKernel(RigExecRevisionOp op,
     return ApplyRevisionKernel(op,p,pts,useSimd,wireBasis,cache,false);
 }
 
+bool
+RigExecRevisionTakesSeparateBlend(RigExecRevisionOp op,
+                                  const RigExecWeightPacket &w)
+{
+    // Matrix, blendShape and the two derived recomputations resolve the
+    // envelope inside their own arithmetic; blending their result again would
+    // apply it twice.
+    return !(op == RigExecRevisionOp::Matrix ||
+             op == RigExecRevisionOp::BlendShape ||
+             op == RigExecRevisionOp::RecomputeNormals ||
+             op == RigExecRevisionOp::RecomputeExtent ||
+             (op == RigExecRevisionOp::Wire &&
+              RigExecWireTakesSparseEnvelope(w)));
+}
+
+RigExecRevisionAcceptance
+RigExecRevisionKernelAcceptance(RigExecRevisionOp op,
+                                const RigExecMoverParameters &p, size_t count)
+{
+    using Acceptance = RigExecRevisionAcceptance;
+    if (!_PacketMatches(op, p)) {
+        return Acceptance::Refuses;
+    }
+    switch (op) {
+    case RigExecRevisionOp::Matrix:
+        return _MatrixKernelAccepts(p, count, nullptr) ? Acceptance::Applies
+                                                       : Acceptance::Refuses;
+    case RigExecRevisionOp::BlendShape:
+        if (!_BlendShapeKernelAccepts(p, count, nullptr)) {
+            return Acceptance::Refuses;
+        }
+        // The surface-frame transport reads the entering points.
+        return p.blendSurfaceFrame ? Acceptance::Deferred
+                                   : Acceptance::Applies;
+    case RigExecRevisionOp::Wire: {
+        const Acceptance wire = _WireKernelAcceptance(p, count);
+        if (wire == Acceptance::Refuses) {
+            return Acceptance::Refuses;
+        }
+        // The "apply once" envelope resolves at the full count or the
+        // revision fails, whatever the kernel answered.
+        if (RigExecRevisionTakesSeparateBlend(op, p.weights) &&
+            !RigExecEnvelopeIsFullStrength(p.weights) &&
+            !p.weights.ResolvesAll(count)) {
+            return Acceptance::Refuses;
+        }
+        return wire;
+    }
+    default:
+        return Acceptance::Deferred;
+    }
+}
+
 // One revision, envelope included: the packet check, the full-strength fast
 // path, RigExecApplyRevisionKernel and the "apply once" blend against the
 // preceding revision.
@@ -1087,9 +1260,10 @@ RunRevisionKernel(RigExecRevisionOp op,
                          std::vector<GfVec3f> *pts, bool useSimd,
                          RigExecWireBasisCache *wireBasis,
     RigExecSurfaceKernelCache<GfVec3f,GfVec3d> *cache, bool discardable,
+    const std::vector<float> *envelope,
     const GfVec3f *source = nullptr, size_t sourceCount = 0)
 {
-    if (!p.valid || p.kind != _RevisionKindToken(op)) {
+    if (!_PacketMatches(op, p)) {
         return false;
     }
     if (source) {
@@ -1102,15 +1276,7 @@ RunRevisionKernel(RigExecRevisionOp op,
         }
         pts->assign(source, source + sourceCount);
     }
-    // Matrix, blendShape and the two derived recomputations resolve the
-    // envelope inside their own arithmetic; blending their result again would
-    // apply it twice.
-    if (op == RigExecRevisionOp::Matrix ||
-        op == RigExecRevisionOp::BlendShape ||
-        op == RigExecRevisionOp::RecomputeNormals ||
-        op == RigExecRevisionOp::RecomputeExtent ||
-        (op == RigExecRevisionOp::Wire &&
-         RigExecWireTakesSparseEnvelope(p.weights))) {
+    if (!RigExecRevisionTakesSeparateBlend(op, p.weights)) {
         return ApplyRevisionKernel(op, p, pts, useSimd, wireBasis,cache,discardable);
     }
 
@@ -1132,12 +1298,21 @@ RunRevisionKernel(RigExecRevisionOp op,
         return false;
     }
     if (!fullStrengthEnvelope) {
-        std::vector<float> envelope;
-        if (!p.weights.ResolveAll(pts->size(), &envelope)) {
-            return false;
+        // \p envelope, when it covers these points, is this packet's already
+        // resolved by the same ResolveAll (RevisionStatic); otherwise it
+        // resolves here.
+        std::vector<float> resolved;
+        const float *weights =
+            envelope && envelope->size() == pts->size() ? envelope->data()
+                                                        : nullptr;
+        if (!weights) {
+            if (!p.weights.ResolveAll(pts->size(), &resolved)) {
+                return false;
+            }
+            weights = resolved.data();
         }
-        RigExecBlendEnvelopeAll(source ? source : preceding.data(),
-                                envelope.data(), pts->size(), pts->data());
+        RigExecBlendEnvelopeAll(source ? source : preceding.data(), weights,
+                                pts->size(), pts->data());
     }
     return true;
 }
@@ -1148,27 +1323,30 @@ bool RigExecRunRevisionKernel(RigExecRevisionOp op,
     const RigExecMoverParameters &p, std::vector<GfVec3f> *pts, bool useSimd,
     RigExecWireBasisCache *wireBasis, RigExecSurfaceKernelCache<GfVec3f,GfVec3d> *cache)
 {
-    return RunRevisionKernel(op,p,pts,useSimd,wireBasis,cache,false);
+    return RunRevisionKernel(op,p,pts,useSimd,wireBasis,cache,false,nullptr);
 }
 
 namespace geometryDetail {
 bool RunDiscardableRevisionKernel(RigExecRevisionOp op,
     const RigExecMoverParameters &p, std::vector<GfVec3f> *pts, bool useSimd,
-    RigExecWireBasisCache *wireBasis, RigExecSurfaceKernelCache<GfVec3f,GfVec3d> *cache)
+    RigExecWireBasisCache *wireBasis, RigExecSurfaceKernelCache<GfVec3f,GfVec3d> *cache,
+    const std::vector<float> *envelope)
 {
-    return RunRevisionKernel(op,p,pts,useSimd,wireBasis,cache,true);
+    return RunRevisionKernel(op,p,pts,useSimd,wireBasis,cache,true,envelope);
 }
 bool RunDiscardableRevisionKernel(RigExecRevisionOp op,
     const RigExecMoverParameters &p, const GfVec3f *in, size_t count,
     std::vector<GfVec3f> *out, bool useSimd, RigExecWireBasisCache *wireBasis,
-    RigExecSurfaceKernelCache<GfVec3f,GfVec3d> *cache)
+    RigExecSurfaceKernelCache<GfVec3f,GfVec3d> *cache,
+    const std::vector<float> *envelope)
 {
     // An empty entering array may come with no storage at all.
     if (!in) {
         out->clear();
-        return RunRevisionKernel(op,p,out,useSimd,wireBasis,cache,true);
+        return RunRevisionKernel(op,p,out,useSimd,wireBasis,cache,true,envelope);
     }
-    return RunRevisionKernel(op,p,out,useSimd,wireBasis,cache,true,in,count);
+    return RunRevisionKernel(op,p,out,useSimd,wireBasis,cache,true,envelope,
+                             in,count);
 }
 } // namespace geometryDetail
 

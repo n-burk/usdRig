@@ -1544,14 +1544,18 @@ bool RigExecRunRevisionKernel(RigExecRevisionOp op,
 namespace geometryDetail {
 /// Internal owned staging only: failure may modify output; the caller must
 /// discard it and retain the preceding published version. Never borrowed points.
+/// \p envelope, when given, is the separate-blend envelope its caller already
+/// resolved from the packet over the points' count; null resolves it here.
 bool RunDiscardableRevisionKernel(RigExecRevisionOp,const RigExecMoverParameters &,
     std::vector<GfVec3f> *,bool,RigExecWireBasisCache *,
-    RigExecSurfaceKernelCache<GfVec3f,GfVec3d> *);
+    RigExecSurfaceKernelCache<GfVec3f,GfVec3d> *,
+    const std::vector<float> *envelope = nullptr);
 /// The same revision out of place: reads the \p count entering points at
 /// \p in, which must not alias \p out, and writes the result to \p out.
 bool RunDiscardableRevisionKernel(RigExecRevisionOp,const RigExecMoverParameters &,
     const GfVec3f *in,size_t count,std::vector<GfVec3f> *out,bool,
-    RigExecWireBasisCache *,RigExecSurfaceKernelCache<GfVec3f,GfVec3d> *);
+    RigExecWireBasisCache *,RigExecSurfaceKernelCache<GfVec3f,GfVec3d> *,
+    const std::vector<float> *envelope = nullptr);
 }
 
 /// Whether \p envelope makes the "apply once" blend the identity, so the
@@ -1578,6 +1582,43 @@ RigExecEnvelopeIsFullStrength(const RigExecWeightPacket &envelope)
             envelope.rangePolicy == "strict" ||
             envelope.rangePolicy == "clamp");
 }
+
+/// A revision's apply-or-fail answer, decided from its packet before any
+/// point is written. `Refuses`: the kernel refuses the packet. `Applies`: it
+/// applies it, and nothing after its validation can refuse. `Deferred`: only
+/// running the kernel answers, because its acceptance reads what it computes
+/// (External's finite-output check, a surface-frame transport, a
+/// dual-quaternion blend) or no validation is factored for the operation.
+enum class RigExecRevisionAcceptance : uint8_t {
+    Refuses = 0,
+    Applies = 1,
+    Deferred = 2,
+};
+
+/// The skinning arithmetic \p p names, which RigExecApplySkinKernelRange
+/// dispatches on. Unknown fails the application; a dual-quaternion blend can
+/// still fail at a vertex, a linear blend cannot.
+enum class RigExecSkinMethod : uint8_t {
+    Unknown,
+    ClassicLinear,
+    DualQuaternion,
+};
+RigExecSkinMethod RigExecSkinMethodOf(const RigExecMoverParameters &p);
+
+/// Whether \p op blends its result back over the entering points afterwards
+/// (RigExecRunRevisionKernel's "apply once") rather than folding the
+/// envelope \p w into its own arithmetic.
+bool RigExecRevisionTakesSeparateBlend(RigExecRevisionOp op,
+                                       const RigExecWeightPacket &w);
+
+/// RigExecRunRevisionKernel's answer over \p count entering points, from the
+/// validation the matrix, blend-shape and wire kernels run first (one
+/// definition each, shared with the kernel) and, for a wire that blends
+/// separately, its envelope. Every other operation is Deferred once its
+/// packet passes; a skin's answer is the baked program's, from the halves
+/// RevisionStatic and the fold hold.
+RigExecRevisionAcceptance RigExecRevisionKernelAcceptance(
+    RigExecRevisionOp op, const RigExecMoverParameters &p, size_t count);
 
 /// Provider results a revision needs that only evaluation can supply.
 ///

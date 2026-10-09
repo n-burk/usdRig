@@ -329,7 +329,7 @@ void CopySkinBodyOutputs(RigExecBakedProgramImpl::GeomRevision *a,
     a->parameters=b.parameters;a->status=b.status;a->precedingCount=b.precedingCount;
     a->defaultWeight=b.defaultWeight;a->lastDefaultWeight=b.lastDefaultWeight;
     a->layoutUsable=b.layoutUsable;a->envelope=b.envelope;a->envelopeOk=b.envelopeOk;
-    a->fullStrength=b.fullStrength;a->partitionStale=b.partitionStale;
+    a->fullStrength=b.fullStrength;a->partitionStale=b.partitionStale;a->acceptance=b.acceptance;
     a->currentPhasePacket=b.currentPhasePacket;a->publishedWeightValues=b.publishedWeightValues;
     a->weightFieldPublished=b.weightFieldPublished;a->topology=b.topology;a->topologyResolved=b.topologyResolved;
     a->stagingOutput=b.stagingOutput;a->output=b.output;a->resultStatus=b.resultStatus;

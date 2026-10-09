@@ -22,6 +22,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <limits>
 
 PXR_NAMESPACE_USING_DIRECTIVE
 
@@ -1137,6 +1138,228 @@ TestEveryOperationUpdatesInteractively()
     }
 }
 
+// A revision's decision, made from its packet before any point is written,
+// is the answer its kernel gives: Refuses where RigExecRunRevisionKernel
+// fails and Applies where it succeeds, for each separable operation class
+// over a valid packet and each validation its kernel runs first. Every case
+// runs with no wire basis cache, then twice through one (a build, then a
+// memo hit), so a memoized basis answers as the build did. Deferred cases
+// only pin the classification.
+static void
+TestRevisionAcceptanceMatchesKernel()
+{
+    using rigExec::RigExecRevisionAcceptance;
+    const VtVec3fArray tetra = MakePoints();
+    const std::vector<GfVec3f> points(tetra.begin(), tetra.end());
+    size_t compared = 0;
+    const auto check = [&](const char *what, RigExecRevisionOp op,
+                           const RigExecMoverParameters &p,
+                           const std::vector<GfVec3f> &base,
+                           RigExecRevisionAcceptance expected) {
+        const RigExecRevisionAcceptance decided =
+            rigExec::RigExecRevisionKernelAcceptance(op, p, base.size());
+        if (decided != expected) {
+            std::printf("  %s: decided %d, expected %d\n", what, int(decided),
+                        int(expected));
+        }
+        CHECK(decided == expected);
+        rigExec::RigExecWireBasisCache cache;
+        for (int run = 0;
+             run < 3 && decided != RigExecRevisionAcceptance::Deferred;
+             ++run) {
+            std::vector<GfVec3f> pts = base;
+            const bool applied = rigExec::RigExecRunRevisionKernel(
+                op, p, &pts, false, run == 0 ? nullptr : &cache);
+            if (applied != (decided == RigExecRevisionAcceptance::Applies)) {
+                std::printf("  %s, run %d: the kernel %s, the decision %d\n",
+                            what, run, applied ? "applied" : "refused",
+                            int(decided));
+                CHECK(false);
+            }
+        }
+        // The envelope's own decision is its resolve's.
+        std::vector<float> resolved;
+        CHECK(p.weights.ResolvesAll(base.size()) ==
+              p.weights.ResolveAll(base.size(), &resolved));
+        ++compared;
+    };
+    const auto envelope = [](const char *representation,
+                            std::vector<float> values,
+                            std::vector<int> indices, float defaultWeight) {
+        RigExecWeightPacket packet;
+        packet.representation = TfToken(representation);
+        packet.rangePolicy = TfToken("strict");
+        packet.values = std::move(values);
+        packet.indices = std::move(indices);
+        packet.defaultWeight = defaultWeight;
+        packet.valid = true;
+        return packet;
+    };
+    const RigExecRevisionAcceptance applies =
+        RigExecRevisionAcceptance::Applies;
+    const RigExecRevisionAcceptance refuses =
+        RigExecRevisionAcceptance::Refuses;
+    const RigExecRevisionAcceptance deferred =
+        RigExecRevisionAcceptance::Deferred;
+
+    // Matrix: full strength, a resolved constant, a dense field, a sparse
+    // walk, and a sparse field with a default (resolved densely).
+    const RigExecMoverParameters matrix =
+        MakeMatrixParams(GfVec3d(0, 2, 0), 1.0f);
+    check("matrix", RigExecRevisionOp::Matrix, matrix, points, applies);
+    check("matrix at half", RigExecRevisionOp::Matrix,
+          MakeMatrixParams(GfVec3d(0, 2, 0), 0.5f), points, applies);
+    const RigExecWeightPacket dense =
+        envelope("dense", {1.0f, 0.5f, 0.25f, 0.0f}, {}, 0.0f);
+    const RigExecWeightPacket shortDense =
+        envelope("dense", {1.0f, 0.5f, 0.25f}, {}, 0.0f);
+    const RigExecWeightPacket sparse =
+        envelope("sparse", {0.5f, 1.0f}, {1, 3}, 0.0f);
+    {
+        auto p = matrix;
+        p.weights = dense;
+        check("matrix, dense", RigExecRevisionOp::Matrix, p, points, applies);
+        p.weights = shortDense;
+        check("matrix, dense one weight short", RigExecRevisionOp::Matrix, p,
+              points, refuses);
+        p.weights = dense;
+        p.weights.values[2] = 1.5f;
+        check("matrix, dense weight above 1", RigExecRevisionOp::Matrix, p,
+              points, refuses);
+        p.weights = sparse;
+        check("matrix, sparse walk", RigExecRevisionOp::Matrix, p, points,
+              applies);
+        p.weights.indices = {1, 9};
+        check("matrix, sparse walk past the points",
+              RigExecRevisionOp::Matrix, p, points, refuses);
+        p.weights.indices = {3, 1};
+        check("matrix, sparse walk descending", RigExecRevisionOp::Matrix, p,
+              points, refuses);
+        p.weights = sparse;
+        p.weights.values[0] = std::numeric_limits<float>::quiet_NaN();
+        check("matrix, sparse walk NaN weight", RigExecRevisionOp::Matrix, p,
+              points, refuses);
+        p.weights = sparse;
+        p.weights.defaultWeight = 0.25f;
+        check("matrix, sparse with a default", RigExecRevisionOp::Matrix, p,
+              points, applies);
+        p = matrix;
+        p.valid = false;
+        check("matrix, invalid packet", RigExecRevisionOp::Matrix, p, points,
+              refuses);
+        check("matrix packet on a blend shape", RigExecRevisionOp::BlendShape,
+              matrix, points, refuses);
+    }
+
+    // Blend shape: the deltas and the envelope; a surface-frame transport
+    // reads the entering points, so only its kernel answers.
+    {
+        RigExecMoverParameters blend;
+        blend.valid = true;
+        blend.kind = TfToken("blendShape");
+        blend.weights = RigExecWeightPacket::Constant(1.0f);
+        blend.blendDeltas.assign(4, GfVec3f(0, 1, 0));
+        check("blend shape", RigExecRevisionOp::BlendShape, blend, points,
+              applies);
+        auto p = blend;
+        p.weights = RigExecWeightPacket::Constant(0.5f);
+        check("blend shape at half", RigExecRevisionOp::BlendShape, p, points,
+              applies);
+        p.weights = dense;
+        check("blend shape, dense", RigExecRevisionOp::BlendShape, p, points,
+              applies);
+        p.weights = shortDense;
+        check("blend shape, envelope one weight short",
+              RigExecRevisionOp::BlendShape, p, points, refuses);
+        p = blend;
+        p.blendDeltas.pop_back();
+        check("blend shape, one delta short", RigExecRevisionOp::BlendShape,
+              p, points, refuses);
+        p = blend;
+        p.blendSurfaceFrame = true;
+        check("blend shape on the surface frame",
+              RigExecRevisionOp::BlendShape, p, points, deferred);
+    }
+
+    // Wire: a dense walk (one bind coordinate per point, its envelope
+    // blended after the kernel) and a sparse walk (one bind coordinate per
+    // weighted point, or per mesh point).
+    {
+        RigExecMoverParameters wire;
+        wire.valid = true;
+        wire.kind = TfToken("wire");
+        wire.weights = RigExecWeightPacket::Constant(1.0f);
+        wire.curveOrder = 2;
+        wire.curveKnots = {0.0, 0.0, 1.0, 1.0};
+        wire.restPoints = {GfVec3f(0, 0, 0), GfVec3f(1, 0, 0)};
+        wire.auxPoints = {GfVec3f(0, 0, 0), GfVec3f(1, 1, 0)};
+        wire.wireBindCoords =
+            VtArray<GfVec2f>{GfVec2f(0.25f, 0.0f), GfVec2f(0.5f, 0.0f),
+                              GfVec2f(0.75f, 0.0f), GfVec2f(1.0f, 0.0f)};
+        check("wire", RigExecRevisionOp::Wire, wire, points, applies);
+        auto p = wire;
+        p.weights = RigExecWeightPacket::Constant(0.5f);
+        check("wire at half", RigExecRevisionOp::Wire, p, points, applies);
+        p.weights = shortDense;
+        check("wire, separate envelope one weight short",
+              RigExecRevisionOp::Wire, p, points, refuses);
+        p = wire;
+        p.wireBindCoords = VtArray<GfVec2f>{GfVec2f(0.25f, 0.0f)};
+        check("wire, one bind coordinate", RigExecRevisionOp::Wire, p, points,
+              refuses);
+        p = wire;
+        p.auxPoints.push_back(GfVec3f(2, 0, 0));
+        check("wire, polygons of unlike size", RigExecRevisionOp::Wire, p,
+              points, refuses);
+        p = wire;
+        p.curveKnots[0] = std::numeric_limits<double>::quiet_NaN();
+        check("wire, NaN knot", RigExecRevisionOp::Wire, p, points, refuses);
+        p = wire;
+        p.curveOrder = 1;
+        check("wire, order 1", RigExecRevisionOp::Wire, p, points, refuses);
+        p = wire;
+        p.wireBindCoords = VtArray<GfVec2f>();
+        check("wire over no points", RigExecRevisionOp::Wire, p, {},
+              deferred);
+
+        auto walk = wire;
+        walk.weights = envelope("sparse", {1.0f, 0.5f}, {0, 2}, 0.0f);
+        walk.wireBindCoords =
+            VtArray<GfVec2f>{GfVec2f(0.25f, 0.0f), GfVec2f(0.75f, 0.0f)};
+        check("wire, sparse walk", RigExecRevisionOp::Wire, walk, points,
+              applies);
+        p = walk;
+        p.wireBindCoords = wire.wireBindCoords;
+        check("wire, sparse walk over the mesh's binds",
+              RigExecRevisionOp::Wire, p, points, applies);
+        p.wireBindCoords =
+            VtArray<GfVec2f>{GfVec2f(0.25f, 0.0f), GfVec2f(0.5f, 0.0f),
+                              GfVec2f(0.75f, 0.0f)};
+        check("wire, sparse walk with three binds",
+              RigExecRevisionOp::Wire, p, points, refuses);
+        p = walk;
+        p.weights.indices = {0, 9};
+        check("wire, sparse walk past the points", RigExecRevisionOp::Wire,
+              p, points, refuses);
+    }
+
+    // A skin's decision is the baked program's, from the halves its steps
+    // hold; this one only checks the packet.
+    {
+        const auto skin = MakeSkinParams(
+            {GfMatrix4d(1.0), GfMatrix4d(1.0).SetTranslate(GfVec3d(0, 4, 0))},
+            {0, 1, 0, 1, 0, 1, 0, 1},
+            {0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f}, 2);
+        check("skin", RigExecRevisionOp::Skin, skin, points, deferred);
+        auto p = skin;
+        p.valid = false;
+        check("skin, invalid packet", RigExecRevisionOp::Skin, p, points,
+              refuses);
+    }
+    std::printf("revision acceptance: %zu packet(s) decided as their kernels "
+                "answer\n", compared);
+}
+
 static void
 TestLongResolvedInputConnections()
 {
@@ -1195,6 +1418,7 @@ main(int argc, char **argv)
     TestLongChainDirtySuffix();
     TestAppendAfterEvaluation();
     TestEveryOperationUpdatesInteractively();
+    TestRevisionAcceptanceMatchesKernel();
     TestLongResolvedInputConnections();
 
     if (failures) {

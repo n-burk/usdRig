@@ -6,6 +6,8 @@
 // evaluator with the same value authored in the session layer.
 #include "rigExecBake/bake.h"
 #include "rigExecBake/staticReport.h"
+#include "rigExec/bakedProgram.h"
+#include "rigExec/bakedProgramImpl.h"
 #include "rigExec/moverGraph.h"
 #include "rigExec/rigEvaluator.h"
 #include "rigExecBinary/format.h"
@@ -20,6 +22,7 @@
 #include "pxr/base/plug/registry.h"
 #include "pxr/base/tf/getenv.h"
 #include "pxr/base/tf/setenv.h"
+#include "pxr/usd/sdf/layer.h"
 #include "pxr/usd/sdf/types.h"
 #include "pxr/usd/usd/primRange.h"
 #include "pxr/usd/usd/stage.h"
@@ -3342,6 +3345,235 @@ TestSimdSettingPerReader()
                 name, differing);
 }
 
+// One revision of each class RevisionStatic decides: a matrix, a blend shape
+// and a dense wire whose inputs:defaultWeight leaves [0, 1] at frame 2 (a
+// refused packet) and returns at full and partial strength, and a
+// classicLinear skin whose joint weights go negative at frame 2 (the layout
+// half of its validation refuses). At a partial weight the wire blends with
+// the envelope RevisionStatic resolved.
+static UsdStageRefPtr
+_AcceptanceStage()
+{
+    const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    const bool imported = stage->GetRootLayer()->ImportFromString(R"USD(#usda 1.0
+(
+    startTimeCode = 1
+    endTimeCode = 4
+)
+def Scope "Asset"
+{
+    def RigExecRoot "Rig"
+    {
+        def RigExecControl "Shift"
+        {
+            double avars:tx.timeSamples = {1: 1, 2: 2, 3: 3, 4: 4}
+        }
+        def RigExecControl "A"
+        {
+            double avars:rz.timeSamples = {1: 0, 2: 35, 3: -60, 4: 20}
+        }
+        def RigExecControl "B"
+        {
+            double avars:tx.timeSamples = {1: 0, 2: 2.5, 3: -4, 4: 1}
+        }
+        def Scope "BlendInputs"
+        {
+            def RigExecBlendInput "Raise"
+            {
+                float inputs:weight = 1
+                rel rigExec:samples = </Asset/Rig/BlendInputs/Raise/Full>
+
+                def RigExecBlendSample "Full"
+                {
+                    float rigExec:activation = 1
+                    rel rigExec:targetPoints = </Asset/Targets/Raised.points>
+                }
+            }
+        }
+        def Scope "Movers"
+        {
+            def RigExecMatrixMover "Lift" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                rel rigExec:moves = </Asset/Geom/Lift.points>
+                rel rigExec:transform = </Asset/Rig/Shift>
+                float inputs:defaultWeight.timeSamples = {1: 0.5, 2: 1.5, 3: 1, 4: 0.25}
+            }
+            def RigExecBlendShapeMover "Blend" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                rel rigExec:moves = </Asset/Geom/Blend.points>
+                rel rigExec:blendInputs = </Asset/Rig/BlendInputs/Raise>
+                float inputs:defaultWeight.timeSamples = {1: 0.5, 2: 1.5, 3: 1, 4: 0.25}
+            }
+            def RigExecCurveMover "Wire" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                uniform token rigExec:mode = "wire"
+                rel rigExec:moves = </Asset/Geom/Wire.points>
+                rel rigExec:driverCurve = </Asset/Curve>
+                rel rigExec:bindCoordinates = </Asset/Bind.st>
+                float inputs:defaultWeight.timeSamples = {1: 0.5, 2: 1.5, 3: 1, 4: 0.25}
+            }
+            def RigExecSkinMover "Skin" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                rel rigExec:moves = </Asset/Geom/Skin.points>
+                rel rigExec:influences = [</Asset/Rig/A>, </Asset/Rig/B>]
+                uniform int rigExec:elementSize = 2
+                uniform token rigExec:skinningMethod = "classicLinear"
+                int[] rigExec:jointIndices = [0, 1, 0, 1, 0, 1, 0, 1]
+                float[] rigExec:jointWeights.timeSamples = {
+                    1: [1, 0, 0.5, 0.5, 0.25, 0.75, 0, 1],
+                    2: [1, 0, 0.5, 0.5, -0.25, 0.75, 0, 1],
+                    3: [1, 0, 0.5, 0.5, 0.25, 0.75, 0, 1],
+                    4: [0.5, 0.5, 0.5, 0.5, 0.25, 0.75, 0, 1],
+                }
+            }
+        }
+    }
+    def Scope "Geom"
+    {
+        def Mesh "Lift"
+        {
+            point3f[] points = [(1, 0, 0), (0, 2, 0.5), (-1, 1, 2), (3, -1, 1)]
+        }
+        def Mesh "Blend"
+        {
+            point3f[] points = [(1, 0, 0), (0, 2, 0.5), (-1, 1, 2), (3, -1, 1)]
+        }
+        def Mesh "Wire"
+        {
+            point3f[] points = [(0.25, 0, 0), (0.5, 0.1, 0), (0.75, 0, 0), (1, 0.2, 0)]
+        }
+        def Mesh "Skin"
+        {
+            point3f[] points = [(1, 0, 0), (0, 2, 0.5), (-1, 1, 2), (3, -1, 1)]
+        }
+    }
+    def Scope "Targets"
+    {
+        def Points "Raised"
+        {
+            point3f[] points = [(1, 0, 2), (0, 2, 2.5), (-1, 1, 4), (3, -1, 3)]
+        }
+    }
+    def Scope "Bind"
+    {
+        float2[] st = [(0.25, 0), (0.5, 0.1), (0.75, 0), (1, 0.2)]
+    }
+    def NurbsCurves "Curve"
+    {
+        int[] curveVertexCounts = [2]
+        int[] order = [2]
+        double[] knots = [0, 0, 1, 1]
+        point3f[] points = [(0, 0, 0), (1, 0, 0)]
+        point3f[] points.timeSamples = {
+            1: [(0, 0, 0), (1, 0.5, 0)],
+            4: [(0, 0, 0), (1, 2, 0)],
+        }
+    }
+}
+)USD");
+    CHECK(imported);
+    return imported ? stage : UsdStageRefPtr();
+}
+
+// The decision each revision's packet carries is what its chunks' kernels
+// answered, on the native program and in the file alike, while a revision
+// fails its validation at frame 2 and recovers at frames 3 and 4. Native
+// and the file play every frame bit for bit (_TestStage), and both decide
+// the same way.
+static void
+TestAcceptanceFailureRecovers()
+{
+    const char *const name = "acceptance failure recovers";
+    const std::vector<double> frames = {1.0, 2.0, 3.0, 4.0};
+    const UsdStageRefPtr stage = _AcceptanceStage();
+    if (!stage) {
+        std::printf("%s: FAILED (no stage)\n", name);
+        return;
+    }
+    std::vector<std::vector<RigExecRuntimePoints>> rows;
+    _TestStage(name, stage, frames, &rows);
+    _CheckFramesDiffer(name, rows);
+
+    const SdfPath rigPath("/Asset/Rig");
+    std::vector<uint8_t> bytes;
+    std::string error;
+    {
+        RigExecRigEvaluator baker(stage, rigPath);
+        CHECK(RigExecTestBakeAt(baker, frames.front(), &bytes, &error));
+    }
+    RigExecTestPlayer player;
+    if (!player.Open(bytes, stage, &error)) {
+        std::printf("%s: FAILED (open: %s)\n", name, error.c_str());
+        CHECK(false);
+        return;
+    }
+    RigExecRigEvaluator evaluator(stage, rigPath);
+    const char *const movers[] = {
+        "/Asset/Rig/Movers/Lift", "/Asset/Rig/Movers/Blend",
+        "/Asset/Rig/Movers/Wire", "/Asset/Rig/Movers/Skin"};
+    size_t decided = 0;
+    for (const double frame : frames) {
+        CHECK(evaluator.Evaluate(frame).valid);
+        CHECK(player.Play(frame, &error));
+        const RigExecBakedProgram *program = evaluator.GetBakedProgram();
+        CHECK(program != nullptr);
+        if (!program) {
+            return;
+        }
+        const RigExecBakedProgramImpl &B = program->GetStepGraph();
+        const RigExecRevisionAcceptance expected =
+            frame == 2.0 ? RigExecRevisionAcceptance::Refuses
+                         : RigExecRevisionAcceptance::Applies;
+        for (const char *mover : movers) {
+            const SdfPath moverPath(mover);
+            const RigExecBakedProgramImpl::GeomRevision *revision = nullptr;
+            for (const auto &chain : B.chains) {
+                for (const auto &candidate : chain.revisions) {
+                    if (candidate.moverPath == moverPath) {
+                        revision = &candidate;
+                    }
+                }
+            }
+            CHECK(revision != nullptr);
+            if (!revision) {
+                continue;
+            }
+            bool chunksOk = !revision->chunks.empty();
+            for (const auto &chunk : revision->chunks) {
+                chunksOk = chunksOk && chunk.ok;
+            }
+            int played = -1;
+            bool playedOk = false;
+            const bool found = player.Reader().GetRevisionDecisionForTesting(
+                mover, &played, &playedOk);
+            const bool agree =
+                revision->acceptance == expected &&
+                chunksOk == (expected == RigExecRevisionAcceptance::Applies) &&
+                found && played == int(revision->acceptance) &&
+                playedOk == chunksOk;
+            CHECK(agree);
+            if (!agree) {
+                std::printf("%s frame %g, %s: native %d (chunks %s), file %d "
+                            "(chunks %s), expected %d\n",
+                            name, frame, mover, int(revision->acceptance),
+                            chunksOk ? "ok" : "refused", played,
+                            playedOk ? "ok" : "refused", int(expected));
+            }
+            ++decided;
+        }
+    }
+    std::printf("%s: %zu decision(s) equal their kernels' answers\n", name,
+                decided);
+}
+
 static void TestRetainedResultOwnership()
 {
     RrRetainedArray<RrVec3f> producer;
@@ -3387,6 +3619,7 @@ main(int argc, char **argv)
     TestPoseDrivenBlendWeights();
     TestBlendActivationDrag();
     TestBlendShapeLayouts();
+    TestAcceptanceFailureRecovers();
 
     std::string examplesDir = RIGEXEC_EXAMPLES_DIR;
     if (argc > 1) {

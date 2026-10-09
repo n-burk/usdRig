@@ -389,10 +389,12 @@ struct RrGeoWeightPacket {
         return packet;
     }
 
-    bool ResolveAll(size_t count, std::vector<float> *resolved) const
+    // ResolveAll's validation, which it runs before it writes, so a decision
+    // made ahead of the resolve cannot disagree with it.
+    bool ResolvesAll(size_t count) const
     {
         const auto &values=Values();const auto &indices=Indices();
-        if (!resolved || !valid) {
+        if (!valid) {
             return false;
         }
         if (!rangePolicy.empty() &&
@@ -424,28 +426,19 @@ struct RrGeoWeightPacket {
         const auto usable = [](float v) {
             return std::isfinite(v) && v >= 0.0f && v <= 1.0f;
         };
-
         if (representation == "constant") {
-            if (!usable(defaultWeight)) {
-                return false;
-            }
-            resolved->assign(count, defaultWeight);
-            return true;
+            return usable(defaultWeight);
         }
-
         if (representation == "dense") {
             for (size_t i = 0; i < count; ++i) {
                 if (!usable(values[i])) {
                     return false;
                 }
             }
-            resolved->assign(values.begin(), values.begin() + count);
             return true;
         }
-
-        // Sparse: the default everywhere, then the authored entries
-        // scattered over it. The default is only checked when some point
-        // can actually read it.
+        // Sparse: the default is only checked when some point can actually
+        // read it.
         if (indices.size() < count && !usable(defaultWeight)) {
             return false;
         }
@@ -454,6 +447,28 @@ struct RrGeoWeightPacket {
                 return false;
             }
         }
+        return true;
+    }
+
+    bool ResolveAll(size_t count, std::vector<float> *resolved) const
+    {
+        const auto &values=Values();const auto &indices=Indices();
+        if (!resolved || !ResolvesAll(count)) {
+            return false;
+        }
+
+        if (representation == "constant") {
+            resolved->assign(count, defaultWeight);
+            return true;
+        }
+
+        if (representation == "dense") {
+            resolved->assign(values.begin(), values.begin() + count);
+            return true;
+        }
+
+        // Sparse: the default everywhere, then the authored entries
+        // scattered over it.
         std::vector<float> valuesOut(count, defaultWeight);
         for (size_t i = 0; i < indices.size(); ++i) {
             valuesOut[static_cast<size_t>(indices[i])] = values[i];
@@ -680,6 +695,43 @@ RrGeoEnvelopeIsFullStrength(const RrGeoWeightPacket &envelope)
            (envelope.rangePolicy.empty() ||
             envelope.rangePolicy == "strict" ||
             envelope.rangePolicy == "clamp");
+}
+
+// RigExecRevisionAcceptance: a revision's apply-or-fail answer, decided from
+// its packet before any point is written.
+enum class RrGeoAcceptance : uint8_t {
+    Refuses = 0,
+    Applies = 1,
+    Deferred = 2,
+};
+
+// A valid sparse field with a zero default, which the matrix and wire
+// kernels walk point by point (RigExecWireTakesSparseEnvelope).
+bool
+RrGeoEnvelopeIsSparseWalk(const RrGeoWeightPacket &w)
+{
+    return w.valid && w.representation == "sparse" &&
+           w.defaultWeight == 0.0f && w.Indices().size() == w.Values().size() &&
+           (w.rangePolicy.empty() || w.rangePolicy == "strict" ||
+            w.rangePolicy == "clamp");
+}
+
+// Every entry a sparse walk names in range, strictly ascending, finite and
+// in [0, 1], as ResolveAll would validate it: the matrix and wire kernels'
+// check before they write (moverGraph.cpp, _SparseWalkIsUsable).
+bool
+RrGeoSparseEnvelopeIsUsable(const RrGeoWeightPacket &w, size_t count)
+{
+    for (size_t k = 0; k < w.Indices().size(); ++k) {
+        const int index = w.Indices()[k];
+        const float value = w.Values()[k];
+        if (index < 0 || size_t(index) >= count ||
+            (k > 0 && index <= w.Indices()[k - 1]) ||
+            !std::isfinite(value) || value < 0.0f || value > 1.0f) {
+            return false;
+        }
+    }
+    return true;
 }
 
 void
@@ -932,25 +984,35 @@ RrGeoApplyMatrixKernelRange(const RrGeoMoverParameters &p,
     }
 }
 
+// The matrix kernel's validation, the one definition it runs first and
+// RrGeoRevisionKernelAcceptance decides by (moverGraph.cpp,
+// _MatrixKernelAccepts). Given \p weights, a dense resolve writes into it.
+bool
+RrGeoMatrixKernelAccepts(const RrGeoMoverParameters &p, size_t count,
+                         std::vector<float> *weights)
+{
+    const RrGeoWeightPacket &w = p.weights;
+    if (RrGeoEnvelopeIsFullStrength(w)) {
+        return true;
+    }
+    if (RrGeoEnvelopeIsSparseWalk(w)) {
+        return RrGeoSparseEnvelopeIsUsable(w, count);
+    }
+    // A cardinality mismatch fails atomically.
+    return weights ? w.ResolveAll(count, weights) : w.ResolvesAll(count);
+}
+
 bool
 RrGeoApplyMatrixKernel(const RrGeoMoverParameters &p, std::vector<RrVec3f> *pts,
                        bool useSimd)
 {
     const size_t count = pts->size();
+    std::vector<float> weights;
+    if (!RrGeoMatrixKernelAccepts(p, count, &weights)) {
+        return false;
+    }
     const RrGeoWeightPacket &w = p.weights;
-    if (w.valid && w.representation == "sparse" && w.defaultWeight == 0.0f &&
-        w.Indices().size() == w.Values().size() &&
-        (w.rangePolicy.empty() || w.rangePolicy == "strict" ||
-         w.rangePolicy == "clamp")) {
-        for (size_t k = 0; k < w.Indices().size(); ++k) {
-            const int index = w.Indices()[k];
-            const float value = w.Values()[k];
-            if (index < 0 || size_t(index) >= count ||
-                (k > 0 && index <= w.Indices()[k - 1]) ||
-                !std::isfinite(value) || value < 0.0f || value > 1.0f) {
-                return false;
-            }
-        }
+    if (RrGeoEnvelopeIsSparseWalk(w)) {
         if (p.transform == RrGeoIdentity()) {
             return true;  // at rest every weighted point maps to itself
         }
@@ -994,10 +1056,6 @@ RrGeoApplyMatrixKernel(const RrGeoMoverParameters &p, std::vector<RrVec3f> *pts,
     if(RrGeoEnvelopeIsFullStrength(p.weights)) {
         RrGeoApplyMatrixKernelRange(p,nullptr,0,count,pts->data(),pts->data(),useSimd);
         return true;
-    }
-    std::vector<float> weights(count);
-    if (!p.weights.ResolveAll(count, &weights)) {
-        return false;  // cardinality mismatch fails atomically
     }
     RrGeoApplyMatrixKernelRange(p, weights.data(), 0, count, pts->data(),
                                 pts->data(), useSimd);
@@ -2010,6 +2068,20 @@ struct RrGeoWireBasis {
     std::vector<std::vector<std::pair<uint32_t, float>>> byControlPoint;
 };
 
+// RigExecWireBasisInputsAreUsable: the basis build's checks before it builds.
+bool
+RrGeoWireBasisInputsAreUsable(const RrVec2f *bindCoords, size_t bindCount,
+                              size_t meshPointCount, size_t indexCount,
+                              int order, const std::vector<double> &knots,
+                              size_t controlPointCount)
+{
+    const size_t n = controlPointCount;
+    return bindCoords && order >= 1 && order <= 16 && n >= size_t(order) &&
+           knots.size() == n + size_t(order) &&
+           knots[size_t(order - 1)] < knots[n] &&
+           (bindCount == meshPointCount || bindCount == indexCount);
+}
+
 bool
 RrGeoBuildWireBasis(const RrVec2f *bindCoords, size_t bindCount,
                    size_t meshPointCount, const std::vector<int> &indices,
@@ -2018,10 +2090,9 @@ RrGeoBuildWireBasis(const RrVec2f *bindCoords, size_t bindCount,
                    RrGeoWireBasis *basis)
 {
     const size_t n = controlPointCount;
-    if (!basis || !bindCoords || order < 1 || order > 16 || n < size_t(order) ||
-        knots.size() != n + size_t(order) ||
-        !(knots[size_t(order - 1)] < knots[n]) ||
-        (bindCount != meshPointCount && bindCount != indices.size())) {
+    if (!basis ||
+        !RrGeoWireBasisInputsAreUsable(bindCoords, bindCount, meshPointCount,
+                                       indices.size(), order, knots, n)) {
         return false;
     }
     const bool parallel = bindCount == indices.size();
@@ -2100,6 +2171,20 @@ RrGeoApplyWireBasis(std::vector<RrVec3f> *points,
     return true;
 }
 
+// RigExecWireInputsAreUsable: RrGeoApplyWire's checks before it writes.
+bool
+RrGeoWireInputsAreUsable(const RrGeoNurbsCurve &restCurve,
+                         const RrGeoNurbsCurve &posedCurve,
+                         const RrVec2f *bindCoords, size_t bindCount,
+                         size_t pointCount)
+{
+    return bindCoords && restCurve.IsValid() && posedCurve.IsValid() &&
+           restCurve.order == posedCurve.order &&
+           restCurve.points->size() == posedCurve.points->size() &&
+           !(*restCurve.knots != *posedCurve.knots) &&
+           bindCount == pointCount;
+}
+
 bool
 RrGeoApplyWire(std::vector<RrVec3f> *points,
               const RrGeoNurbsCurve &restCurve,
@@ -2107,12 +2192,9 @@ RrGeoApplyWire(std::vector<RrVec3f> *points,
               const RrVec2f *bindCoords, size_t bindCount,
               double dropoffDistance, size_t begin, size_t end, const std::vector<RrVec3f> *restEvaluations = nullptr)
 {
-    if (!points || !bindCoords || !restCurve.IsValid() ||
-        !posedCurve.IsValid() ||
-        restCurve.order != posedCurve.order ||
-        restCurve.points->size() != posedCurve.points->size() ||
-        *restCurve.knots != *posedCurve.knots ||
-        bindCount != points->size()) {
+    if (!points ||
+        !RrGeoWireInputsAreUsable(restCurve, posedCurve, bindCoords,
+                                  bindCount, points->size())) {
         return false;
     }
     end = std::min(end, points->size());
@@ -2233,12 +2315,28 @@ RrGeoSkinTransformsAreUsable(const RrMat4d *transforms, size_t count)
     return true;
 }
 
+// RigExecSkinMethodOf: the arithmetic the range kernel dispatches on.
+enum class RrGeoSkinMethod : uint8_t { Unknown, ClassicLinear, DualQuaternion };
+
+RrGeoSkinMethod
+RrGeoSkinMethodOf(const RrGeoMoverParameters &p)
+{
+    if (p.skinningMethod == "classicLinear") {
+        return RrGeoSkinMethod::ClassicLinear;
+    }
+    if (p.skinningMethod == "dualQuaternion") {
+        return RrGeoSkinMethod::DualQuaternion;
+    }
+    return RrGeoSkinMethod::Unknown;
+}
+
 bool
 RrGeoApplySkinKernelRange(const RrGeoMoverParameters &p,
                          const RrGeoSkinTransformsView &transforms,
                          size_t begin, size_t end, std::vector<RrVec3f> *pts,
                          bool useSimd)
 {
+    const RrGeoSkinMethod method = RrGeoSkinMethodOf(p);
     const RrGeoSkinLayout layout =
         RrGeoSkinLayoutForPacket(p, transforms, pts->size());
     RrGeoSkinLayout part = layout;
@@ -2248,7 +2346,7 @@ RrGeoApplySkinKernelRange(const RrGeoMoverParameters &p,
     part.pointCount = end - begin;
     RrVec3f *const points = pts->data();
 
-    if (p.skinningMethod == "classicLinear") {
+    if (method == RrGeoSkinMethod::ClassicLinear) {
         if (useSimd) {
             RrGeoApplyLinearBlendSkinSimd(
                 points + begin, points + begin, part, transforms.rows);
@@ -2258,7 +2356,7 @@ RrGeoApplySkinKernelRange(const RrGeoMoverParameters &p,
         }
         return true;
     }
-    if (p.skinningMethod == "dualQuaternion") {
+    if (method == RrGeoSkinMethod::DualQuaternion) {
         std::vector<RrGeoScaledDualQuat> local;
         const RrGeoScaledDualQuat *palette = transforms.palette;
         size_t paletteSize = transforms.paletteSize;
@@ -2399,19 +2497,34 @@ RrGeoSumBlendChannels(const std::vector<RrGeoBlendChannel> &channels,
     return true;
 }
 
+// The blend-shape kernel's validation, the one definition it runs first and
+// RrGeoRevisionKernelAcceptance decides by (moverGraph.cpp,
+// _BlendShapeKernelAccepts): one delta per point and an envelope that
+// resolves, into \p envelope when given.
+bool
+RrGeoBlendShapeKernelAccepts(const RrGeoMoverParameters &p, size_t count,
+                             std::vector<float> *envelope)
+{
+    if (p.blendDeltas.size() != count) {
+        return false;
+    }
+    if (RrGeoEnvelopeIsFullStrength(p.weights)) {
+        return true;
+    }
+    return envelope ? p.weights.ResolveAll(count, envelope)
+                    : p.weights.ResolvesAll(count);
+}
+
 bool
 RrGeoApplyBlendShapeKernel(const RrGeoMoverParameters &p,
                            std::vector<RrVec3f> *pts, RigExecSurfaceKernelCache<RrVec3f,RrVec3d> *cache = nullptr)
 {
     const size_t count = pts->size();
-    if (p.blendDeltas.size() != count) {
+    std::vector<float> envelope;
+    if (!RrGeoBlendShapeKernelAccepts(p, count, &envelope)) {
         return false;
     }
     const bool full=RrGeoEnvelopeIsFullStrength(p.weights);
-    std::vector<float> envelope;
-    if (!full && !p.weights.ResolveAll(count, &envelope)) {
-        return false;
-    }
 
     std::vector<RrVec3f> transported;
     const std::vector<RrVec3f> *deltas = &p.blendDeltas;
@@ -2468,10 +2581,114 @@ RrGeoApplyDerivedKernel(int op, const RrGeoMoverParameters &p,
 bool
 RrGeoWireTakesSparseEnvelope(const RrGeoWeightPacket &w)
 {
-    return w.valid && w.representation == "sparse" &&
-           w.defaultWeight == 0.0f && w.Indices().size() == w.Values().size() &&
-           (w.rangePolicy.empty() || w.rangePolicy == "strict" ||
-            w.rangePolicy == "clamp");
+    return RrGeoEnvelopeIsSparseWalk(w);
+}
+
+// The checks the wire operation makes before it builds or applies anything
+// (moverGraph.cpp, _WireKernelPrefix).
+bool
+RrGeoWireKernelPrefix(const RrGeoMoverParameters &p, size_t count)
+{
+    if (p.auxPoints.size() != p.restPoints.size()) {
+        return false;
+    }
+    const RrGeoNurbsCurve rest{&p.restPoints, p.curveOrder, &p.curveKnots};
+    const RrGeoNurbsCurve posed{&p.auxPoints, p.curveOrder, &p.curveKnots};
+    if (!rest.IsValid() || !posed.IsValid()) {
+        return false;
+    }
+    if (RrGeoWireTakesSparseEnvelope(p.weights)) {
+        return RrGeoSparseEnvelopeIsUsable(p.weights, count);
+    }
+    // A sparse bind table needs a sparse envelope.
+    return p.wireBindCoords.size() == count;
+}
+
+// The wire operation's answer (moverGraph.cpp, _WireKernelAcceptance): its
+// prefix, then the checks of the basis build or the dense walk. Deferred for
+// an empty bind table, whose answer is its storage, which a remembered basis
+// does not consult.
+RrGeoAcceptance
+RrGeoWireKernelAcceptance(const RrGeoMoverParameters &p, size_t count)
+{
+    if (!RrGeoWireKernelPrefix(p, count)) {
+        return RrGeoAcceptance::Refuses;
+    }
+    if (p.wireBindCoords.empty()) {
+        return RrGeoAcceptance::Deferred;
+    }
+    if (RrGeoWireTakesSparseEnvelope(p.weights)) {
+        return RrGeoWireBasisInputsAreUsable(
+                   p.wireBindCoords.data(), p.wireBindCoords.size(), count,
+                   p.weights.Indices().size(), p.curveOrder, p.curveKnots,
+                   p.restPoints.size())
+            ? RrGeoAcceptance::Applies
+            : RrGeoAcceptance::Refuses;
+    }
+    const RrGeoNurbsCurve rest{&p.restPoints, p.curveOrder, &p.curveKnots};
+    const RrGeoNurbsCurve posed{&p.auxPoints, p.curveOrder, &p.curveKnots};
+    return RrGeoWireInputsAreUsable(rest, posed, p.wireBindCoords.data(),
+                                    p.wireBindCoords.size(), count)
+        ? RrGeoAcceptance::Applies
+        : RrGeoAcceptance::Refuses;
+}
+
+// RigExecRevisionTakesSeparateBlend: the ops RrGeoRunRevisionKernel blends
+// back over the entering points afterwards.
+bool
+RrGeoRevisionTakesSeparateBlend(int op, const RrGeoWeightPacket &w)
+{
+    return !(op == RrGeoOpMatrix || op == RrGeoOpBlendShape ||
+             op == RrGeoOpRecomputeNormals || op == RrGeoOpRecomputeExtent ||
+             (op == RrGeoOpWire && RrGeoWireTakesSparseEnvelope(w)));
+}
+
+// The packet check every revision kernel makes first.
+bool
+RrGeoPacketMatches(int op, const RrGeoMoverParameters &p)
+{
+    const char *const kind = RrGeoKindToken(op);
+    return p.valid && kind && p.kind == kind;
+}
+
+// RigExecRevisionKernelAcceptance: RrGeoRunRevisionKernel's answer over
+// \p count entering points.
+RrGeoAcceptance
+RrGeoRevisionKernelAcceptance(int op, const RrGeoMoverParameters &p,
+                              size_t count)
+{
+    if (!RrGeoPacketMatches(op, p)) {
+        return RrGeoAcceptance::Refuses;
+    }
+    switch (op) {
+    case RrGeoOpMatrix:
+        return RrGeoMatrixKernelAccepts(p, count, nullptr)
+            ? RrGeoAcceptance::Applies
+            : RrGeoAcceptance::Refuses;
+    case RrGeoOpBlendShape:
+        if (!RrGeoBlendShapeKernelAccepts(p, count, nullptr)) {
+            return RrGeoAcceptance::Refuses;
+        }
+        // The surface-frame transport reads the entering points.
+        return p.blendSurfaceFrame ? RrGeoAcceptance::Deferred
+                                   : RrGeoAcceptance::Applies;
+    case RrGeoOpWire: {
+        const RrGeoAcceptance wire = RrGeoWireKernelAcceptance(p, count);
+        if (wire == RrGeoAcceptance::Refuses) {
+            return RrGeoAcceptance::Refuses;
+        }
+        // The "apply once" envelope resolves at the full count or the
+        // revision fails, whatever the kernel answered.
+        if (RrGeoRevisionTakesSeparateBlend(op, p.weights) &&
+            !RrGeoEnvelopeIsFullStrength(p.weights) &&
+            !p.weights.ResolvesAll(count)) {
+            return RrGeoAcceptance::Refuses;
+        }
+        return wire;
+    }
+    default:
+        return RrGeoAcceptance::Deferred;
+    }
 }
 
 
@@ -2844,26 +3061,17 @@ RrGeoApplyRevisionKernel(
         return true;
     }
     case RrGeoOpWire: {
-        if (p.auxPoints.size() != p.restPoints.size()) {
+        // The checks before anything is built or applied; the basis build
+        // and RrGeoApplyWire below make the rest of the decision's.
+        if (!RrGeoWireKernelPrefix(p, pts->size())) {
             return false;
         }
         const RrGeoNurbsCurve rest{&p.restPoints, p.curveOrder,
                                   &p.curveKnots};
         const RrGeoNurbsCurve posed{&p.auxPoints, p.curveOrder,
                                    &p.curveKnots};
-        if (!rest.IsValid() || !posed.IsValid()) {
-            return false;
-        }
         if (RrGeoWireTakesSparseEnvelope(p.weights)) {
             const RrGeoWeightPacket &w = p.weights;
-            for (size_t k = 0; k < w.Indices().size(); ++k) {
-                if (w.Indices()[k] < 0 || size_t(w.Indices()[k]) >= pts->size() ||
-                    (k > 0 && w.Indices()[k] <= w.Indices()[k - 1]) ||
-                    !std::isfinite(w.Values()[k]) || w.Values()[k] < 0.0f ||
-                    w.Values()[k] > 1.0f) {
-                    return false;
-                }
-            }
             const std::shared_ptr<const RrGeoWireBasis> basis =
                 RrGeoCachedWireBasis(p, w.Indices(), pts->size(), wireCache,lastWireBasis);
             if (!basis) {
@@ -2871,9 +3079,6 @@ RrGeoApplyRevisionKernel(
             }
             return RrGeoApplyWireBasis(pts, *basis, w.Indices(), w.Values(),
                                        p.restPoints, p.auxPoints);
-        }
-        if (p.wireBindCoords.size() != pts->size()) {
-            return false;  // a sparse bind table needs a sparse envelope
         }
         // The runtime runs serially; a point range is an independent
         // sub-problem, so the serial call is the parallel loop's answer.
@@ -2894,6 +3099,9 @@ RrGeoApplyRevisionKernel(
 // and \p pts receives the result out of place, as the program's
 // RunRevisionKernel: a full-strength matrix reads them where they are, every
 // other operation copies them first, and the blend reads \p source.
+// \p envelope, when it covers the points, is the separate-blend envelope
+// RevisionStatic already resolved from this packet; otherwise it resolves
+// here.
 bool
 RrGeoRunRevisionKernel(
     int op, const RrGeoMoverParameters &p, std::vector<RrVec3f> *pts,
@@ -2901,9 +3109,10 @@ RrGeoRunRevisionKernel(
     bool useSimd, RigExecSurfaceKernelCache<RrVec3f,RrVec3d> *surfaceCache = nullptr,
     RigExecWireRestCache<RrVec3f,RrVec2f> *wireRestCache = nullptr,
     std::shared_ptr<const RrGeoWireBasisEntry> *lastWireBasis = nullptr,
+    const std::vector<float> *envelope = nullptr,
     const RrVec3f *source = nullptr, size_t sourceCount = 0)
 {
-    if (!p.valid || p.kind != RrGeoKindToken(op)) {
+    if (!RrGeoPacketMatches(op, p)) {
         return false;
     }
     if (source) {
@@ -2915,12 +3124,7 @@ RrGeoRunRevisionKernel(
         }
         pts->assign(source, source + sourceCount);
     }
-    if (op == RrGeoOpMatrix ||
-        op == RrGeoOpBlendShape ||
-        op == RrGeoOpRecomputeNormals ||
-        op == RrGeoOpRecomputeExtent ||
-        (op == RrGeoOpWire &&
-         RrGeoWireTakesSparseEnvelope(p.weights))) {
+    if (!RrGeoRevisionTakesSeparateBlend(op, p.weights)) {
         return RrGeoApplyRevisionKernel(op, p, pts, wireCache, useSimd, surfaceCache, wireRestCache, lastWireBasis);
     }
 
@@ -2937,12 +3141,18 @@ RrGeoRunRevisionKernel(
         return false;
     }
     if (!fullStrengthEnvelope) {
-        std::vector<float> envelope;
-        if (!p.weights.ResolveAll(pts->size(), &envelope)) {
-            return false;
+        std::vector<float> resolved;
+        const float *weights =
+            envelope && envelope->size() == pts->size() ? envelope->data()
+                                                        : nullptr;
+        if (!weights) {
+            if (!p.weights.ResolveAll(pts->size(), &resolved)) {
+                return false;
+            }
+            weights = resolved.data();
         }
-        RrGeoBlendEnvelopeAll(source ? source : preceding.data(),
-                              envelope.data(), pts->size(), pts->data());
+        RrGeoBlendEnvelopeAll(source ? source : preceding.data(), weights,
+                              pts->size(), pts->data());
     }
     return true;
 }
@@ -3030,6 +3240,8 @@ struct RrGeometryScratch {
         bool envelopeOk = false;
         bool fullStrength = false;
         bool layoutUsable = false;
+        // RevisionStatic's apply-or-fail decision (GeomRevision::acceptance).
+        RrGeoAcceptance acceptance = RrGeoAcceptance::Refuses;
         float defaultWeight = 0.0f;
         float lastDefaultWeight = 0.0f;
         bool partitionStale = false;
@@ -3510,6 +3722,38 @@ RrGeometryPartitionStaleForTesting(const RrProgram *program,
             if (program->TextOrEmpty(revisions[r].moverPath) == moverPath) {
                 return scratch->chains[c].revisions[r].partitionStale;
             }
+        }
+    }
+    return false;
+}
+
+bool
+RrGeometryRevisionDecisionForTesting(const RrProgram *program,
+                                     const std::string &moverPath,
+                                     int *acceptance, bool *chunksOk)
+{
+    const auto *scratch =
+        static_cast<const RrGeometryScratch *>(program->geo.get());
+    if (!scratch) {
+        return false;
+    }
+    const RigExecWireDomainGeometry &geo = *program->geometry;
+    for (size_t c = 0; c < geo.chains.size() && c < scratch->chains.size();
+         ++c) {
+        const auto &revisions = geo.chains[c].revisions;
+        for (size_t r = 0; r < revisions.size() &&
+                           r < scratch->chains[c].revisions.size();
+             ++r) {
+            if (program->TextOrEmpty(revisions[r].moverPath) != moverPath) {
+                continue;
+            }
+            const auto &rev = scratch->chains[c].revisions[r];
+            *acceptance = int(rev.acceptance);
+            *chunksOk = !rev.chunks.empty();
+            for (const auto &chunk : rev.chunks) {
+                *chunksOk = *chunksOk && chunk.ok;
+            }
+            return true;
         }
     }
     return false;
@@ -5097,6 +5341,35 @@ RrGeoGatherChunkTransforms(RrProgram *program,
     return true;
 }
 
+// SkinPacketIsUsable (bakedGeometry.cpp): the skin's validation over the half
+// RevisionStatic holds, for its decision and every chunk's guard.
+bool
+RrGeoSkinPacketIsUsable(const RrGeometryScratch::Revision &rev)
+{
+    return rev.parameters.valid &&
+           rev.parameters.kind == RrGeoKindToken(RrGeoOpSkin) &&
+           rev.layoutUsable && rev.envelopeOk;
+}
+
+// SkinAcceptance (bakedGeometry.cpp): past that half a linear blend cannot
+// fail; a dual-quaternion blend can still be degenerate at a vertex.
+RrGeoAcceptance
+RrGeoSkinAcceptance(const RrGeometryScratch::Revision &rev)
+{
+    if (!RrGeoSkinPacketIsUsable(rev)) {
+        return RrGeoAcceptance::Refuses;
+    }
+    switch (RrGeoSkinMethodOf(rev.parameters)) {
+    case RrGeoSkinMethod::ClassicLinear:
+        return RrGeoAcceptance::Applies;
+    case RrGeoSkinMethod::DualQuaternion:
+        return RrGeoAcceptance::Deferred;
+    case RrGeoSkinMethod::Unknown:
+        break;
+    }
+    return RrGeoAcceptance::Refuses;
+}
+
 bool
 RrGeoSkinRange(RrGeometryScratch::Revision *rev, const RrVec3f *preceding,
                const RrGeoSkinTransformsView &view, size_t begin,
@@ -5922,6 +6195,23 @@ RrGeoRunRevisionStaticStep(RrProgram *program, RrGeometryScratch *scratch,
     rev.fullStrength = true;
     rev.partitionStale = false;
     if (!skin) {
+        // A wire's dense walk blends a separate envelope after its kernel;
+        // resolved here at the full count, as a skin's is, and its chunk
+        // blends with this array (bakedGeometry.cpp, RevisionStatic).
+        if (wire.op == uint8_t(RrGeoOpWire) &&
+            RrGeoRevisionTakesSeparateBlend(int(wire.op),
+                                            rev.parameters.weights)) {
+            rev.fullStrength =
+                RrGeoEnvelopeIsFullStrength(rev.parameters.weights);
+            if (!rev.fullStrength) {
+                rev.envelopeOk =
+                    rev.parameters.weights.ResolveAll(count, &rev.envelope);
+            }
+        }
+        // From the validation the chunk's kernel runs first, over the count
+        // it is applied to.
+        rev.acceptance = RrGeoRevisionKernelAcceptance(int(wire.op),
+                                                       rev.parameters, count);
         return true;
     }
     rev.layoutUsable = RrGeoSkinLayoutIsUsable(rev.parameters, count);
@@ -5930,6 +6220,7 @@ RrGeoRunRevisionStaticStep(RrProgram *program, RrGeometryScratch *scratch,
         rev.envelopeOk =
             rev.parameters.weights.ResolveAll(count, &rev.envelope);
     }
+    rev.acceptance = RrGeoSkinAcceptance(rev);
     if (rev.chunked) {
         const RrGeoSkinTopology *const topology =
             rev.parameters.skinTopology.get();
@@ -5989,19 +6280,18 @@ RrGeoRunRevisionChunkStep(RrProgram *program, RrGeometryScratch *scratch,
                 return false;
             }
             // Out of place into the revision's unpublished buffer, which the
-            // fuse swaps in, as the program's chunk does.
+            // fuse swaps in, as the program's chunk does. A wire blends with
+            // the envelope RevisionStatic resolved.
             rev.stagingOutput.resize(count);
             rev.stagingFresh = true;
             chunk.ok = RrGeoRunRevisionKernel(
                 int(wire.op), rev.parameters, &rev.stagingOutput,
                 &scratch->wireBasis, useSimd, &rev.surfaceCache, &rev.wireRestCache, &rev.lastWireBasis,
+                !rev.fullStrength && rev.envelopeOk ? &rev.envelope : nullptr,
                 count > 0 ? points : nullptr, count);
             return true;
         }
-        if (!rev.parameters.valid ||
-            rev.parameters.kind != RrGeoKindToken(RrGeoOpSkin) ||
-            !rev.layoutUsable || !rev.envelopeOk ||
-            !rev.influencesValid || !sized) {
+        if (!RrGeoSkinPacketIsUsable(rev) || !rev.influencesValid || !sized) {
             return true;
         }
         rev.stagingFresh = true;
@@ -6012,10 +6302,8 @@ RrGeoRunRevisionChunkStep(RrProgram *program, RrGeometryScratch *scratch,
     }
 
     chunk.keyChanged = false;
-    if (!rev.status.AllowsApply() || !rev.parameters.valid ||
-        rev.parameters.kind != RrGeoKindToken(RrGeoOpSkin) ||
-        !rev.layoutUsable || !rev.envelopeOk || rev.partitionStale ||
-        !sized) {
+    if (!rev.status.AllowsApply() || !RrGeoSkinPacketIsUsable(rev) ||
+        rev.partitionStale || !sized) {
         chunk.ok = false;
         return true;
     }
@@ -6096,6 +6384,10 @@ RrGeoRunRevisionFuseStep(RrProgram *program, RrGeometryScratch *scratch,
         if (applied && skin && rev.partitionStale) {
             applied = RrGeoFuseWholeRevision(chain, &rev, revisionIndex,
                                              program->geoSettings.useSimd);
+        } else if (applied && rev.acceptance != RrGeoAcceptance::Deferred) {
+            // RevisionStatic's decision, from the validation each chunk's
+            // kernel runs first, so every chunk's `ok` is this answer.
+            applied = rev.acceptance == RrGeoAcceptance::Applies;
         } else if (applied) {
             for (const RrGeometryScratch::Chunk &chunk : rev.chunks) {
                 if (!chunk.ok) {
@@ -6547,7 +6839,8 @@ void RrGeometryOpValueKey(const RrProgram *program, RigExecWireSlotDomain domain
         RrOpBytes(key,rev->status.firstBadAddress);
         RrOpBytes(key,rev->layoutUsable); RrOpBytes(key,rev->envelopeOk); RrOpBytes(key,rev->envelope);
         RrOpBytes(key,rev->fullStrength); RrOpBytes(key,rev->precedingCount); RrOpBytes(key,rev->partitionStale);
-        RrOpBytes(key,rev->weightFieldPublished); RrOpBytes(key,rev->weightField.Read()); break;
+        RrOpBytes(key,rev->weightFieldPublished); RrOpBytes(key,rev->weightField.Read());
+        RrOpBytes(key,uint8_t(rev->acceptance)); break;
     case RigExecWireSlotDomain::RevisionTransforms:
         RrOpBytes(key,rev->influences); RrOpBytes(key,rev->influencesValid);
         RrOpBytes(key,rev->transform); RrOpBytes(key,rev->haveTransform);
@@ -6620,7 +6913,8 @@ void RrResetExcludedGeometryValue(RrProgram *program,
     if(!revision) return;
     switch(domain) {
     case RigExecWireSlotDomain::RevisionPacket:
-        revision->parameters.valid=false; break;
+        revision->parameters.valid=false;
+        revision->acceptance=RrGeoAcceptance::Refuses; break;
     case RigExecWireSlotDomain::RevisionTransforms:
         revision->influencesValid=false; break;
     case RigExecWireSlotDomain::RevisionDone:

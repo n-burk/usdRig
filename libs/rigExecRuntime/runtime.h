@@ -256,6 +256,13 @@ public:
     // \p moverPath's chain revision stale, so that revision ran whole.
     bool GetPartitionStaleForTesting(const std::string &moverPath) const;
 
+    // Test-only: mover \p moverPath's chain revision's apply-or-fail
+    // decision as the last Execute's RevisionStatic made it (0 refuses,
+    // 1 applies, 2 deferred), and whether every chunk of it reported ok.
+    // False when no chain revision moves for it.
+    bool GetRevisionDecisionForTesting(const std::string &moverPath,
+                                       int *acceptance, bool *chunksOk) const;
+
     // Test-only: whether the last Execute's layout of mover \p moverPath's
     // chain revision is the one Open expanded from the file, the same
     // object.

@@ -726,6 +726,13 @@ bool RrGeometrySizeScratch(RrProgram *program, std::string *error);
 /// revision moves for it.
 bool RrGeometryPartitionStaleForTesting(const RrProgram *program,
                                         const std::string &moverPath);
+/// Test-only: mover \p moverPath's chain revision's apply-or-fail decision
+/// as the last RevisionStatic made it (0 refuses, 1 applies, 2 deferred),
+/// and whether every one of its chunks reported ok. False when no chain
+/// revision moves for it.
+bool RrGeometryRevisionDecisionForTesting(const RrProgram *program,
+                                          const std::string &moverPath,
+                                          int *acceptance, bool *chunksOk);
 /// Test-only: whether the last Execute's layout of mover \p moverPath's
 /// chain revision is the one Open expanded from the file. False when no
 /// chain revision moves for it, or it has no layout.
