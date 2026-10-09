@@ -294,10 +294,13 @@ struct RrInputState {
     std::map<uint32_t, std::vector<uint32_t>> tokenArrayPool;
 
     /// The avar table's reads (RigExecBakedProgramImpl::avarBindings and
-    /// avarConstantBindings), as RrProgram::registeredReads indices, in
-    /// file order.
-    std::vector<uint32_t> avarBindingReads;
-    std::vector<uint32_t> avarConstantReads;
+    /// avarConstantBindings), as RrProgram::registeredReads indices,
+    /// bucketed by provider slot (avar / 11): provider p's reads are
+    /// avarReads[avarReadBegin[p], avarReadBegin[p + 1]), its varying ones
+    /// then its constant ones, each in file order -- the order an
+    /// AvarInputs step walks them in. Read through RrAvarReadRange.
+    std::vector<uint32_t> avarReadBegin;
+    std::vector<uint32_t> avarReads;
     /// The override numbers of the provider ladders' inputs, sorted
     /// (RigExecBakedProgramImpl::ladderOverrides).
     std::vector<int32_t> ladderOverrides;
@@ -337,6 +340,19 @@ struct RrInputState {
     /// Attribute path text -> slot id, for the input API.
     std::unordered_map<std::string, uint32_t> nameIndex;
 };
+
+/// Provider slot \p provider's entries of RrInputState::avarReads, as
+/// [first, second) positions: exactly the reads whose avar / 11 is
+/// \p provider. Empty for a negative provider or one past every avar.
+inline std::pair<uint32_t, uint32_t>
+RrAvarReadRange(const RrInputState &state, int64_t provider)
+{
+    if (provider < 0 || size_t(provider) + 1 >= state.avarReadBegin.size()) {
+        return {0, 0};
+    }
+    return {state.avarReadBegin[size_t(provider)],
+            state.avarReadBegin[size_t(provider) + 1]};
+}
 
 /// Attaches \p file's slots to the program: the value pool inline, each
 /// slot at its bake-time default, the token index; and checks what the

@@ -5172,6 +5172,116 @@ _BakeAndOpen(const std::string &what, const UsdStageRefPtr &stage,
     return true;
 }
 
+// Open buckets the avar reads by provider slot with a stable sort
+// (RrInputState::avarReads), so an AvarInputs step walks its provider's
+// reads in file order whatever order the file lists the providers in. The
+// bake writes each flag's bindings by ascending flat avar; the same file
+// listing them interleaved (even positions, then odd), which splits every
+// provider's run, plays every frame and every held constant avar bit for
+// bit as the baked order does, running the same number of ops.
+static void
+TestAvarReadsInAnyFileOrder()
+{
+    const char *const name = "avar reads in any file order";
+    const UsdStageRefPtr stage =
+        UsdStage::Open(_FixturePath("computed_ik_space.usda"));
+    CHECK(stage);
+    if (!stage) {
+        return;
+    }
+    std::vector<uint8_t> bytes;
+    std::unique_ptr<fb::RigExecWireFile> file;
+    if (!_BakeAndOpen(name, stage, SdfPath("/IkSpaceAsset/Rig"), 1.0, &bytes,
+                      &file)) {
+        return;
+    }
+    // Several providers, some binding more than one avar, each flag's
+    // bindings ascending.
+    const std::vector<fb::RigExecWireAvarBinding> &bindings =
+        file->pose->avarBindings;
+    std::vector<uint32_t> providers;
+    bool ascending = true;
+    for (size_t k = 0; k < bindings.size(); ++k) {
+        providers.push_back(bindings[k].flat / 11);
+        const uint8_t flag = uint8_t(fb::InputReadFlags::Varying);
+        for (size_t j = k; j-- > 0;) {
+            if ((bindings[j].read->flags & flag) ==
+                (bindings[k].read->flags & flag)) {
+                ascending = ascending && bindings[j].flat < bindings[k].flat;
+                break;
+            }
+        }
+    }
+    std::sort(providers.begin(), providers.end());
+    const size_t bound = size_t(
+        std::unique(providers.begin(), providers.end()) - providers.begin());
+    CHECK(bound > 1 && bindings.size() > bound && ascending);
+    const std::vector<uint8_t> interleaved =
+        RigExecTestEdited(bytes, [](fb::RigExecWireFile *edited) {
+            std::vector<fb::RigExecWireAvarBinding> &list =
+                edited->pose->avarBindings;
+            std::vector<fb::RigExecWireAvarBinding> order;
+            for (size_t start = 0; start < 2; ++start) {
+                for (size_t k = start; k < list.size(); k += 2) {
+                    order.push_back(std::move(list[k]));
+                }
+            }
+            list = std::move(order);
+        });
+    RigExecTestPlayer baked, edited;
+    std::string error;
+    if (!baked.Open(bytes, stage, &error) ||
+        !edited.Open(interleaved, stage, &error)) {
+        std::printf("%s: open: %s\n", name, error.c_str());
+        CHECK(false);
+        return;
+    }
+    std::vector<_PlayedFrame> rows;
+    for (const double time : {1.0, 3.0, 5.0, 7.0, 10.0}) {
+        CHECK(baked.Play(time, &error));
+        CHECK(edited.Play(time, &error));
+        rows.push_back(_Snapshot(baked.Reader()));
+        CHECK(_SamePlayed(rows.back(), _Snapshot(edited.Reader())));
+        const auto &a = baked->GetJointMatrices();
+        const auto &b = edited->GetJointMatrices();
+        bool same = a.size() == b.size() && !a.empty();
+        for (size_t j = 0; same && j < a.size(); ++j) {
+            same = a[j].path == b[j].path &&
+                   std::memcmp(&a[j].matrix, &b[j].matrix,
+                               sizeof(a[j].matrix)) == 0;
+        }
+        CHECK(same);
+        CHECK(baked->GetCounters().executedOpCount ==
+              edited->GetCounters().executedOpCount);
+    }
+    _CheckFramesDiffer(name, rows);
+    // One constant avar moved at a time re-runs only the AvarInputs step
+    // whose reads hold it; a read filed under another provider would leave
+    // its own provider's pose behind.
+    size_t held = 0;
+    for (size_t i = 0; i < baked->GetInputCount(); ++i) {
+        const RigExecRuntimeInputInfo &info = baked->GetInputInfo(i);
+        if (info.animated || info.type != RrInputTag::Double ||
+            info.name.find(".avars:r") == std::string::npos) {
+            continue;
+        }
+        const double value = info.defaultValue.f64 + 0.25 * double(held % 3 + 1);
+        CHECK(baked.Hold(info.name, value, &error));
+        CHECK(edited.Hold(info.name, value, &error));
+        CHECK(baked.Play(10.0, &error));
+        CHECK(edited.Play(10.0, &error));
+        CHECK(_SamePlayed(_Snapshot(baked.Reader()),
+                          _Snapshot(edited.Reader())));
+        CHECK(baked->GetCounters().executedOpCount ==
+              edited->GetCounters().executedOpCount);
+        ++held;
+    }
+    CHECK(held > bound);
+    std::printf("%s: %zu binding(s) over %zu provider(s), %zu held avar(s) "
+                "checked\n",
+                name, bindings.size(), bound, held);
+}
+
 static void
 TestRepeatedSetRunsNothing()
 {
@@ -5556,6 +5666,7 @@ main(int argc, char **argv)
     TestRepeatedSetRunsNothing();
     TestHeldDragCountsValueEditWork();
     TestRunTraceOrder();
+    TestAvarReadsInAnyFileOrder();
 
     std::string examplesDir = RIGEXEC_EXAMPLES_DIR;
     if (argc > 1) {

@@ -101,6 +101,8 @@ _CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst)
     D.avarConstants = src.avarConstants;
     D.avarBindings = src.avarBindings;
     D.avarConstantBindings = src.avarConstantBindings;
+    D.avarBindingBegin = src.avarBindingBegin;
+    D.avarConstantBindingBegin = src.avarConstantBindingBegin;
     D.patchableAvars = src.patchableAvars;
     D.promotedAvars = src.promotedAvars;
     D.boundInputs = src.boundInputs;

@@ -949,9 +949,10 @@ bool RrEffectiveInputMemo(const RrProgram *program,uint32_t stepIndex,std::strin
         return true;
     }
     if(step.kind==RigExecWireStepKind::AvarInputs) {
-        for(const auto *ids:{&program->inputState.avarBindingReads,&program->inputState.avarConstantReads})
-            for(uint32_t id:*ids) { const auto &binding=program->registeredReads[id];
-                if(binding.avar>=0 && binding.avar/11==step.object) read(*binding.read); }
+        const auto &state=program->inputState;
+        const auto range=RrAvarReadRange(state,step.object);
+        for(uint32_t i=range.first;i<range.second;++i)
+            read(*program->registeredReads[state.avarReads[i]].read);
         return true;
     }
     const RigExecWireRevision *owner=nullptr;
@@ -1415,8 +1416,8 @@ RrInputsBindReads(RrProgram *program, std::string *error)
     const RigExecWireSlotMeta &meta = *program->slotMeta;
     const size_t slots = file.inputs.size();
     const size_t avars = program->constants->avarConstants.size();
-    state.avarBindingReads.clear();
-    state.avarConstantReads.clear();
+    state.avarReadBegin.clear();
+    state.avarReads.clear();
     state.ladderOverrides.clear();
     program->registeredReads.clear();
     // Per slot: the avar binding the slot heads, or -1. A slot heads one.
@@ -1471,6 +1472,7 @@ RrInputsBindReads(RrProgram *program, std::string *error)
     };
     // The avar table, varying bindings first (the program's avarBindings),
     // then the constant ones (avarConstantBindings), each in file order.
+    std::vector<uint32_t> avarOrder;
     for (const bool varying : {true, false}) {
         for (size_t i = 0; i < poses.avarBindings.size(); ++i) {
             const RigExecWireAvarBinding &binding = poses.avarBindings[i];
@@ -1500,13 +1502,37 @@ RrInputsBindReads(RrProgram *program, std::string *error)
                 }
                 head = int32_t(binding.flat);
             }
-            (varying ? state.avarBindingReads : state.avarConstantReads)
-                .push_back(uint32_t(program->registeredReads.size()));
+            avarOrder.push_back(uint32_t(program->registeredReads.size()));
             bind(read,
                  varying ? _RrFamily::AvarBinding
                          : _RrFamily::AvarConstantBinding,
                  i, 0, nullptr);
             program->registeredReads.back().avar = int32_t(binding.flat);
+        }
+    }
+    // Bucketed by provider with a stable counting sort, so a provider's
+    // reads keep the walk order above whatever order the file lists them.
+    {
+        const size_t providers = (avars + 10) / 11;
+        const auto providerOf = [&](uint32_t id) {
+            return program->registeredReads[id].avar;
+        };
+        state.avarReadBegin.assign(providers + 1, 0);
+        for (const uint32_t id : avarOrder) {
+            if (providerOf(id) >= 0) {
+                ++state.avarReadBegin[size_t(providerOf(id)) / 11 + 1];
+            }
+        }
+        for (size_t p = 0; p < providers; ++p) {
+            state.avarReadBegin[p + 1] += state.avarReadBegin[p];
+        }
+        state.avarReads.resize(state.avarReadBegin[providers]);
+        std::vector<uint32_t> next(state.avarReadBegin.begin(),
+                                   state.avarReadBegin.end() - 1);
+        for (const uint32_t id : avarOrder) {
+            if (providerOf(id) >= 0) {
+                state.avarReads[next[size_t(providerOf(id)) / 11]++] = id;
+            }
         }
     }
     for (size_t i = 0; i < poses.ladders.size(); ++i) {

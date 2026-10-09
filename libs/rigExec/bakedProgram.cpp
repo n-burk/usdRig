@@ -3121,6 +3121,7 @@ RigExecBakedProgram::_BuildWithSceneCaptureAttempt(RigExecRigEvaluator *evaluato
             }
         }
     }
+    RigExecBakedIndexAvarBindings(&B);
     B.avars = B.avarConstants;
     bindPhases.Close();
 

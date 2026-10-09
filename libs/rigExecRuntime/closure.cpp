@@ -104,19 +104,16 @@ void _RrInputMemo(const RrProgram *program, const RigExecWireStep &step, std::st
     for(uint32_t slot:step.headInputSlots) appendSlot(slot);
     for(const auto &read:step.headInputReads) RrSourceReadMemo(program,read,key);
     if(step.kind==RigExecWireStepKind::AvarInputs) {
-        const auto bindings=[&](const std::vector<uint32_t> &reads) {
-            for(uint32_t id:reads) {
-                const auto &binding=program->registeredReads[id];
-                if(binding.avar<0 || binding.avar/11!=step.object) continue;
-                const auto &read=*binding.read;
-                _RrAppend(key,binding.avar); _RrMemoValue(key,state.values[read.constant]);
-                for(uint32_t slot:read.walk) appendSlot(slot);
-                for(const auto &candidate:read.propertyCandidates) if(candidate.raw) appendSlot(candidate.slot);
-                for(const auto &candidate:read.doubleCandidates) if(candidate.raw) appendSlot(candidate.slot);
-                if(read.rawFallbackSlot>=0) appendSlot(uint32_t(read.rawFallbackSlot));
-            }
-        };
-        bindings(state.avarBindingReads); bindings(state.avarConstantReads);
+        const auto range=RrAvarReadRange(state,step.object);
+        for(uint32_t i=range.first;i<range.second;++i) {
+            const auto &binding=program->registeredReads[state.avarReads[i]];
+            const auto &read=*binding.read;
+            _RrAppend(key,binding.avar); _RrMemoValue(key,state.values[read.constant]);
+            for(uint32_t slot:read.walk) appendSlot(slot);
+            for(const auto &candidate:read.propertyCandidates) if(candidate.raw) appendSlot(candidate.slot);
+            for(const auto &candidate:read.doubleCandidates) if(candidate.raw) appendSlot(candidate.slot);
+            if(read.rawFallbackSlot>=0) appendSlot(uint32_t(read.rawFallbackSlot));
+        }
     }
     for(int number:step.overrideInputs) {
         if(number<0 || size_t(number)+1>=state.overrideSlotBegin.size()) continue;

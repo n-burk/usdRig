@@ -328,6 +328,7 @@ void TestAvarEffectiveSelection()
     RigExecBakedProgramImpl::AvarBinding binding;
     binding.slot=0; binding.input.walk=0; binding.input.constant=2;
     binding.input.varying=false; B.avarConstantBindings={binding};
+    RigExecBakedIndexAvarBindings(&B);
     auto &input=B.avarConstantBindings[0].input;
     std::vector<uint32_t> covered; std::string selected, key, raw;
     CHECK(RigExecBakedLeafRead(B,input)==3);
@@ -372,6 +373,88 @@ void TestAvarEffectiveSelection()
     CHECK(RigExecBakedOpEffectiveInputKey(B,step,&key,&covered) && key!=constantKey);
 }
 
+// An AvarInputs op keys, notes and reads exactly its provider's bindings
+// (flat slot / 11) of each list, in list order, through the Build-time
+// index: the bytes a scan of the whole list would write, and nothing of
+// another provider's bindings.
+void TestAvarBindingIndex()
+{
+    using Binding=RigExecBakedProgramImpl::AvarBinding;
+    RigExecBakedProgramImpl B;
+    B.avarConstants.assign(4*11,0.0); B.avars.assign(4*11,-1.0);
+    B.leaves.Of<double>().value={1.5,2.5,3.5,4.5};
+    const auto add=[](std::vector<Binding> *list,size_t slot,int leaf,double constant) {
+        Binding binding; binding.slot=slot; binding.input.leaf=leaf;
+        binding.input.constant=constant; list->push_back(binding);
+    };
+    // Provider 1 binds nothing; provider 2 only constants; 0 and 3 both.
+    add(&B.avarBindings,0*11+1,0,10); add(&B.avarBindings,0*11+4,1,11);
+    add(&B.avarBindings,3*11+0,2,12);
+    add(&B.avarConstantBindings,0*11+7,-1,20); add(&B.avarConstantBindings,2*11+2,-1,21);
+    add(&B.avarConstantBindings,2*11+10,3,22); add(&B.avarConstantBindings,3*11+5,-1,23);
+    RigExecBakedIndexAvarBindings(&B);
+    CHECK(B.avarBindingBegin==std::vector<uint32_t>({0,2,2,2,3}));
+    CHECK(B.avarConstantBindingBegin==std::vector<uint32_t>({0,1,1,3,4}));
+    for(int provider=-2;provider<7;++provider) {
+        RigExecBakedStep step; step.kind=RigExecBakedStepKind::AvarInputs; step.object=provider;
+        // The provider's entries by a scan, which the index must name.
+        std::vector<size_t> varying,constant;
+        for(size_t i=0;i<B.avarBindings.size();++i)
+            if(provider>=0 && B.avarBindings[i].slot/11==size_t(provider)) varying.push_back(i);
+        for(size_t i=0;i<B.avarConstantBindings.size();++i)
+            if(provider>=0 && B.avarConstantBindings[i].slot/11==size_t(provider)) constant.push_back(i);
+        const auto listed=[&](const std::vector<uint32_t> &begin) {
+            std::vector<size_t> out; const auto range=RigExecBakedAvarBindingRange(begin,provider);
+            for(size_t i=range.first;i<range.second;++i) out.push_back(i);
+            return out;
+        };
+        CHECK(listed(B.avarBindingBegin)==varying);
+        CHECK(listed(B.avarConstantBindingBegin)==constant);
+        // The raw source key's avar block, written as the scan wrote it.
+        std::string block; block.push_back(char(26));
+        block.append(reinterpret_cast<const char *>(&provider),sizeof(provider));
+        const auto put=[&](const std::vector<Binding> &list,const std::vector<size_t> &ids) {
+            PutU64(&block,ids.size());
+            for(size_t i:ids) {
+                const auto &input=list[i].input; PutU64(&block,list[i].slot);
+                block.append(reinterpret_cast<const char *>(&input.leaf),sizeof(input.leaf));
+                block.append(reinterpret_cast<const char *>(&input.constant),sizeof(input.constant));
+                if(input.leaf>=0) {
+                    const double value=B.leaves.Of<double>().value[size_t(input.leaf)];
+                    block.append(reinterpret_cast<const char *>(&value),sizeof(value));
+                }
+            }
+        };
+        put(B.avarBindings,varying); put(B.avarConstantBindings,constant);
+        std::string raw,effective; std::vector<uint32_t> covered;
+        CHECK(RigExecBakedOpInputKey(B,step,&raw) && raw.find(block)!=std::string::npos);
+        // A program holding only this provider's bindings keys it the same.
+        RigExecBakedProgramImpl alone; alone.leaves.Of<double>().value=B.leaves.Of<double>().value;
+        for(size_t i:varying) alone.avarBindings.push_back(B.avarBindings[i]);
+        for(size_t i:constant) alone.avarConstantBindings.push_back(B.avarConstantBindings[i]);
+        RigExecBakedIndexAvarBindings(&alone);
+        std::string aloneRaw,aloneEffective;
+        CHECK(RigExecBakedOpInputKey(alone,step,&aloneRaw) && aloneRaw==raw);
+        CHECK(RigExecBakedOpEffectiveInputKey(B,step,&effective,&covered));
+        CHECK(RigExecBakedOpEffectiveInputKey(alone,step,&aloneEffective,&covered) &&
+              aloneEffective==effective);
+        // The body writes the provider's avars and no other.
+        std::vector<double> expected=B.avars;
+        for(size_t i:varying) expected[B.avarBindings[i].slot]=RigExecBakedLeafRead(B,B.avarBindings[i].input);
+        for(size_t i:constant) expected[B.avarConstantBindings[i].slot]=RigExecBakedLeafRead(B,B.avarConstantBindings[i].input);
+        RigExecBakedRunAvarOp(&B,&step);
+        CHECK(B.avars==expected);
+    }
+    // Another provider's leaf moves no key of provider 0; its own does.
+    RigExecBakedStep zero; zero.kind=RigExecBakedStepKind::AvarInputs; zero.object=0;
+    std::string before,after;
+    CHECK(RigExecBakedOpInputKey(B,zero,&before));
+    B.leaves.Of<double>().value[2]=-0.0; B.leaves.Of<double>().value[3]=99;
+    CHECK(RigExecBakedOpInputKey(B,zero,&after) && after==before);
+    B.leaves.Of<double>().value[1]=-0.0;
+    CHECK(RigExecBakedOpInputKey(B,zero,&after) && after!=before);
+}
+
 void TestRawInputAndProviderKeys()
 {
     RigExecBakedProgramImpl B; RigExecBakedStep step;
@@ -392,7 +475,7 @@ void TestRawInputAndProviderKeys()
     step.bindingLeaves={999}; CHECK(!RigExecBakedOpInputKey(B,step,&key));
     step=RigExecBakedStep(); step.kind=RigExecBakedStepKind::AvarInputs; step.object=0;
     RigExecBakedProgramImpl::AvarBinding binding; binding.slot=0; binding.input.leaf=0;
-    B.avarBindings.push_back(binding);
+    B.avarBindings.push_back(binding); RigExecBakedIndexAvarBindings(&B);
     CHECK(RigExecBakedOpInputKey(B,step,&key)); const auto avar=key;
     B.leaves.Of<double>().value[0]=0.25;
     CHECK(RigExecBakedOpInputKey(B,step,&key) && key!=avar);
@@ -709,6 +792,7 @@ int main()
     TestSkinEffectiveSelectedTopology(); TestFloatPayloadBits(); TestFieldValidityCountError(); TestPropertyValidityAndLadderState();
     TestChunkRangeIsolation(); TestConstraintSourceAndPropertyAliasKeys();
     TestPacketStatusAndOpaqueBoundary(); TestRawInputAndProviderKeys(); TestAvarEffectiveSelection();
+    TestAvarBindingIndex();
     TestPathTextSpelling(); TestBoxTags(); TestHeadValueBits(); TestCandidateFallbackBytes();
     TestProviderOwnerText(); TestBulkValueKeyBytes(); TestSharedKeyRunsAndPlainValues();
     std::printf("OpValues: %d failures\n",failures);

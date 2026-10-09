@@ -2031,6 +2031,15 @@ struct RigExecBakedProgramImpl {
     /// value a notice names is exactly the value the slot holds. See
     /// RigExecBakedProgram::ApplyAvarValueEdits.
     std::map<SdfPath, size_t> patchableAvars;
+    /// Per provider slot p (flat avar slot / 11), its bindings in each list:
+    /// avarBindings[avarBindingBegin[p], avarBindingBegin[p + 1]) and the
+    /// same over avarConstantBindings with avarConstantBindingBegin. Both
+    /// lists are appended in ascending flat slot order, so a provider's
+    /// bindings are one run in list order. Built with the lists
+    /// (RigExecBakedIndexAvarBindings) and never written by a run; read
+    /// through RigExecBakedAvarBindingRange.
+    std::vector<uint32_t> avarBindingBegin;
+    std::vector<uint32_t> avarConstantBindingBegin;
     /// Indices into avarConstantBindings of the patchable avars an edit has
     /// since animated (a spline key on a released drag). Read per frame the
     /// long way, like a varying binding, until an edit makes them constant
@@ -4725,6 +4734,26 @@ void RigExecBakedNoteRestLeaves(RigExecBakedProgramImpl *program);
 /// The pose half of the prologue: the bound inputs, once per run.
 void RigExecBakedBuildAvarSteps(RigExecBakedProgramImpl *program);
 void RigExecBakedRunAvarOp(RigExecBakedProgramImpl *program, RigExecBakedStep *step);
+
+/// Fills avarBindingBegin and avarConstantBindingBegin from the two binding
+/// lists, which must be sorted by flat slot (verified). Build calls it once
+/// the lists are complete; a program assembled by hand calls it after
+/// filling them.
+void RigExecBakedIndexAvarBindings(RigExecBakedProgramImpl *program);
+
+/// Provider slot \p provider's bindings in the list \p begin indexes, as
+/// [first, second) list positions: exactly the entries whose slot / 11 is
+/// \p provider, in list order. Empty for a negative provider or one past
+/// every binding.
+inline std::pair<size_t, size_t>
+RigExecBakedAvarBindingRange(const std::vector<uint32_t> &begin,
+                             int64_t provider)
+{
+    if (provider < 0 || size_t(provider) + 1 >= begin.size()) {
+        return {0, 0};
+    }
+    return {begin[size_t(provider)], begin[size_t(provider) + 1]};
+}
 
 /// The solver half of the prologue: every ribbon's live driver-curve points,
 /// read off the stage and compared with the last run's.

@@ -2606,9 +2606,12 @@ void NoteStepInputs(const RigExecBakedProgramImpl &B, RigExecBakedDependencySink
             B.weightObjects[size_t(step.object)], sink);
         break;
     case RigExecBakedStepKind::AvarInputs: {
-        const size_t slot=size_t(step.object);
-        for(const auto &binding:B.avarBindings) if(binding.slot/11==slot) NoteInput(binding.input,sink);
-        for(const auto &binding:B.avarConstantBindings) if(binding.slot/11==slot) NoteInput(binding.input,sink);
+        const auto note=[&](const auto &bindings,const std::vector<uint32_t> &begin) {
+            const auto range=RigExecBakedAvarBindingRange(begin,step.object);
+            for(size_t i=range.first;i<range.second;++i) NoteInput(bindings[i].input,sink);
+        };
+        note(B.avarBindings,B.avarBindingBegin);
+        note(B.avarConstantBindings,B.avarConstantBindingBegin);
         break;
     }
     case RigExecBakedStepKind::ProviderRefresh:
@@ -3590,14 +3593,38 @@ RigExecBakedBuildAvarSteps(RigExecBakedProgramImpl *program)
     }
 }
 void
+RigExecBakedIndexAvarBindings(RigExecBakedProgramImpl *program)
+{
+    auto &B=*program;
+    size_t providers=B.avarConstants.size()/11;
+    for(const auto *bindings:{&B.avarBindings,&B.avarConstantBindings})
+        for(const auto &binding:*bindings) providers=std::max(providers,binding.slot/11+1);
+    const auto index=[providers](const std::vector<RigExecBakedProgramImpl::AvarBinding> &bindings,
+                                 std::vector<uint32_t> *begin) {
+        // Contiguous runs per provider need the list sorted by provider;
+        // ascending flat slots give that, and Build appends them so.
+        TF_VERIFY(std::is_sorted(bindings.begin(),bindings.end(),
+            [](const auto &a,const auto &b){return a.slot<b.slot;}));
+        begin->assign(providers+1,0);
+        for(const auto &binding:bindings) ++(*begin)[binding.slot/11+1];
+        for(size_t p=0;p<providers;++p) (*begin)[p+1]+=(*begin)[p];
+    };
+    index(B.avarBindings,&B.avarBindingBegin);
+    index(B.avarConstantBindings,&B.avarConstantBindingBegin);
+}
+void
 RigExecBakedRunAvarOp(RigExecBakedProgramImpl *program,RigExecBakedStep *step)
 {
-    auto &B=*program; const size_t slot=size_t(step->object);
-    const auto read=[&](const auto &binding) {
-        if(binding.slot/11==slot) B.avars[binding.slot]=RigExecBakedLeafRead(B,binding.input);
+    auto &B=*program;
+    const auto read=[&](const auto &bindings,const std::vector<uint32_t> &begin) {
+        const auto range=RigExecBakedAvarBindingRange(begin,step->object);
+        for(size_t i=range.first;i<range.second;++i) {
+            const auto &binding=bindings[i];
+            B.avars[binding.slot]=RigExecBakedLeafRead(B,binding.input);
+        }
     };
-    for(const auto &binding:B.avarBindings) read(binding);
-    for(const auto &binding:B.avarConstantBindings) read(binding);
+    read(B.avarBindings,B.avarBindingBegin);
+    read(B.avarConstantBindings,B.avarConstantBindingBegin);
 }
 
 void

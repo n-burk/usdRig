@@ -798,11 +798,11 @@ static bool InputKey(const RigExecBakedProgramImpl &B,
     };
     if(step.kind==RigExecBakedStepKind::AvarInputs) {
         Put(out,uint8_t(26)); Put(out,step.object);
-        auto bindings=[&](const auto &values) {
-            size_t count=0; for(const auto &binding:values)
-                if(step.object>=0 && binding.slot/11==size_t(step.object)) ++count;
-            Put(out,uint64_t(count));
-            for(const auto &binding:values) if(step.object>=0 && binding.slot/11==size_t(step.object)) {
+        auto bindings=[&](const auto &values,const std::vector<uint32_t> &begin) {
+            const auto range=RigExecBakedAvarBindingRange(begin,step.object);
+            Put(out,uint64_t(range.second-range.first));
+            for(size_t b=range.first;b<range.second;++b) {
+                const auto &binding=values[b];
                 Put(out,uint64_t(binding.slot)); const auto &input=binding.input;
                 // Include the direct sampled pool even when NoteInput omitted it.
                 Put(out,input.leaf);
@@ -828,7 +828,8 @@ static bool InputKey(const RigExecBakedProgramImpl &B,
                 } else if(effective) Put(out,input.constant);
             }
         };
-        bindings(B.avarBindings); bindings(B.avarConstantBindings);
+        bindings(B.avarBindings,B.avarBindingBegin);
+        bindings(B.avarConstantBindings,B.avarConstantBindingBegin);
     }
     if(step.kind==RigExecBakedStepKind::Constraint) {
         Put(out,uint8_t(36)); Put(out,step.object);

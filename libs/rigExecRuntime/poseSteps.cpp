@@ -986,15 +986,13 @@ RrRunPoseStep(RrProgram *program, size_t step, std::string *error)
         return true;
     }
     case RigExecWireStepKind::AvarInputs: {
-        const auto readBindings=[&](const std::vector<uint32_t> &reads) {
-            for(const uint32_t read:reads) {
-                const int avar=program->registeredReads[read].avar;
-                if(avar>=0 && avar/11==wire.object)
-                    store.avars[size_t(avar)]=program->ReadRegistered(int32_t(read)).f64;
-            }
-        };
-        readBindings(program->inputState.avarBindingReads);
-        readBindings(program->inputState.avarConstantReads);
+        const auto &state=program->inputState;
+        const auto range=RrAvarReadRange(state,wire.object);
+        for(uint32_t i=range.first;i<range.second;++i) {
+            const uint32_t read=state.avarReads[i];
+            const int avar=program->registeredReads[read].avar;
+            store.avars[size_t(avar)]=program->ReadRegistered(int32_t(read)).f64;
+        }
         return true;
     }
 
