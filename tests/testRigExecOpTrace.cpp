@@ -567,6 +567,9 @@ TestStepTimingLeavesOutColdRuns(const std::string &examplesDir)
         std::printf("step timing: %zu stamped step(s) listed in the "
                     "executor's order (%s op order)\n",
                     B.stampedSteps.size(), opOrder ? "which is" : "not");
+        // The two orders differ on this run, so a list in op order fails
+        // the check above.
+        CHECK(!opOrder);
     }
 
     // The table: the frame phases fold only under RIGEXEC_BAKED_STEP_TIMING,
