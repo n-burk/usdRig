@@ -4686,7 +4686,9 @@ static void TestDirectStaticNumericSources()
     CHECK(std::all_of(samples.begin(),samples.end(),[](const auto &sample){return !sample.animated;}));
     CHECK(playback.player.Sampler().GetAnimatedCount()==0);
     CHECK(playback.player.Sampler().GetWarnings().empty());
-    const size_t epoch=evaluator.GetBindingEpochDigest(),builds=evaluator.GetBakedProgramBuildCount(),staticRests=evaluator.GetEpochRestFrameCount();
+    // The bake ran in the export role mode; restoring Live makes the next
+    // Evaluate rebuild the program once, and nothing after it rebuilds.
+    const size_t epoch=evaluator.GetBindingEpochDigest(),builds=evaluator.GetBakedProgramBuildCount()+1,staticRests=evaluator.GetEpochRestFrameCount();
     const auto check=[&](double expected,bool edited){playback.Check(evaluator,stage,target.GetPath(),expected,edited);playback.Check(evaluator,stage,target.GetPath(),expected,false,true);CHECK(evaluator.GetBindingEpochDigest()==epoch);CHECK(evaluator.GetBakedProgramBuildCount()==builds);CHECK(evaluator.GetEpochRestFrameCount()==staticRests);};
     check(3,false);
     const auto overrideVisit=[&](const std::vector<RigExecValueOverride> &drag,
@@ -4773,7 +4775,9 @@ static void TestDirectStaticRotationSignSource()
     const auto samples=RigExecRuntimeStageArrayInputs::EnumerateProviderValues(playback.player.Reader());
     CHECK(std::any_of(samples.begin(),samples.end(),[&](const auto &sample){return sample.name==sign.GetPath().GetString() && !sample.animated;}));
     CHECK(playback.player.Sampler().GetAnimatedCount()==0);
-    const size_t epoch=evaluator.GetBindingEpochDigest(),builds=evaluator.GetBakedProgramBuildCount(),rests=evaluator.GetEpochRestFrameCount();
+    // The bake ran in the export role mode; restoring Live makes the next
+    // Evaluate rebuild the program once, and nothing after it rebuilds.
+    const size_t epoch=evaluator.GetBindingEpochDigest(),builds=evaluator.GetBakedProgramBuildCount()+1,rests=evaluator.GetEpochRestFrameCount();
     const auto check=[&](double expected,bool edited){
         playback.Check(evaluator,stage,target.GetPath(),expected,edited);
         playback.Check(evaluator,stage,target.GetPath(),expected,false,true);
