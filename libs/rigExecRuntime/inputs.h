@@ -117,6 +117,10 @@ struct RrArraySlot {
     /// `ran` when ranHeld, else the default.
     RrArrayBuffer ran;
     bool ranHeld = false;
+    /// The elements' content version (held set, else default): two runs
+    /// read the same version exactly when they read the same elements.
+    /// Moved only by RrInputsApplyTouched against `ran`.
+    uint64_t version = 0;
 };
 
 /// A tagged value by value: the file's Value with its optional members
@@ -453,6 +457,10 @@ RrInputArrayDefaultOf(const RrProgram *program, uint32_t slot)
 /// reads take.
 bool RrInputArrayAuthored(const RrProgram *program, uint32_t slot);
 
+/// Array slot \p slot's content version (RrArraySlot::version); 0 for a
+/// slot that is not an array.
+uint64_t RrInputArrayVersion(const RrProgram *program, uint32_t slot);
+
 /// Whether slot \p slot holds a value this run (HasValue).
 bool RrInputHasValue(const RrProgram *program, uint32_t slot);
 
@@ -577,7 +585,11 @@ bool RrEffectiveInputMemo(const RrProgram *program,uint32_t step,std::string *ke
                          std::vector<uint32_t> *coveredPropertyVersions,
                          std::vector<std::pair<uint32_t,uint32_t>> *coveredTyped = nullptr);
 void RrEffectiveReadMemo(const RrProgram *program,const RigExecWireInput &read,std::string *key);
-void RrSourceReadMemo(const RrProgram *program,const RigExecWireInput &read,std::string *key);
+/// \p versioned keys a numeric array slot's current elements by their
+/// content version and its immutable default by nothing, for a memo that
+/// every run rebuilds and compares with the previous run's only.
+void RrSourceReadMemo(const RrProgram *program,const RigExecWireInput &read,std::string *key,
+                      bool versioned=false);
 bool RrReadExternalScalar(const RrProgram *, const RigExecWireExternalDeclaredInput &,
                           RrWireValue *);
 const void *RrReadExternalArray(const RrProgram *, const RigExecWireExternalDeclaredInput &);

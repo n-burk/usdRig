@@ -93,7 +93,7 @@ void ResetExcludedValue(RigExecBakedProgramImpl *program,uint32_t domain,uint32_
 bool RigExecBakedEffectiveMemo(const RigExecBakedProgramImpl &B,uint32_t c,
     std::string *key,std::vector<uint32_t> *property,
     std::vector<std::pair<uint32_t,uint32_t>> *typed,
-    const RigExecBakedOpIdentityRemap *remap)
+    const RigExecBakedOpIdentityRemap *remap,bool contentLeaves)
 {
     if(c>=B.opGraph.ops.size()) return false;
     const auto &step=B.steps[B.opGraph.ops[c].originalIndex];
@@ -104,7 +104,7 @@ bool RigExecBakedEffectiveMemo(const RigExecBakedProgramImpl &B,uint32_t c,
         step.kind==RigExecBakedStepKind::AvarInputs ||
         step.kind==RigExecBakedStepKind::ComposeSubtree;
     const bool exact=RigExecBakedOpEffectiveInputKey(B,step,&scratch,&covered,
-        projectedConsumer?&coveredTyped:nullptr,remap);
+        projectedConsumer?&coveredTyped:nullptr,remap,contentLeaves);
     std::sort(covered.begin(),covered.end());
     std::sort(coveredTyped.begin(),coveredTyped.end());
     const auto *reads=&B.opGraph.ops[c].descriptor.reads;
@@ -505,6 +505,7 @@ bool RigExecBakedCompileOpGraph(RigExecBakedProgramImpl *B,std::string *error)
         if(!state.constantSource[c] || step.alwaysRuns) state.sourceVisits.push_back(c);
     }
     state.verifyConstantSources=TfGetenvBool("RIGEXEC_VERIFY_CONSTANT_KEYS",false);
+    state.verifyLeafVersions=TfGetenvBool("RIGEXEC_VERIFY_LEAF_VERSIONS",false);
     // The skip callback below changes state only through MarkSkipped, whose
     // counters only geometry bodies set, SkipGeometryStep on geometry kinds
     // and FinishHeadOp on property revisions; every other skip is a no-op.
@@ -582,6 +583,15 @@ bool RigExecBakedExecuteOpGraph(RigExecBakedProgramImpl *program,UsdTimeCode tim
     // are rebuilt on a first run, an adoption or a new program stamp; a run
     // that rebuilds none visits only the ops that can seed or change.
     const bool rebuildSources=first || !state.retainedFirst.empty() || B.programStamp!=B.lastProgramStamp;
+    // The keys below read the path leaves' versions: a write from here on
+    // compares against what this run read.
+    ++B.pathLeafRun;
+    const bool verifyVersions=state.verifyLeafVersions;
+    if(verifyVersions) {
+        state.contentSourceKeys.resize(B.opGraph.ops.size());
+        state.contentInputKeys.resize(B.opGraph.ops.size());
+        state.leafVersionMismatch.assign(B.opGraph.ops.size(),0);
+    }
     const auto source=[&](uint32_t c) {
         const auto &step=B.steps[B.opGraph.ops[c].originalIndex];
         bool seed=(first && (c>=state.retainedFirst.size() || !state.retainedFirst[c])) || step.alwaysRuns;
@@ -590,6 +600,15 @@ bool RigExecBakedExecuteOpGraph(RigExecBakedProgramImpl *program,UsdTimeCode tim
         if(rebuildSources || c>=state.constantSource.size() || !state.constantSource[c]) {
             exact=RigExecBakedOpInputKey(B,step,&scratch);
             directChanged=!exact || input!=scratch;
+            if(verifyVersions) {
+                std::string content;
+                const bool contentExact=RigExecBakedOpInputKey(B,step,&content,nullptr,true);
+                // A first run's stored keys may come from another program.
+                if(!first && (contentExact!=exact ||
+                   (exact && directChanged!=(state.contentSourceKeys[c]!=content))))
+                    state.leafVersionMismatch[c]=1;
+                state.contentSourceKeys[c].swap(content);
+            }
             input.swap(scratch);
         } else if(state.verifyConstantSources) {
             const bool built=RigExecBakedOpInputKey(B,step,&scratch);
@@ -612,9 +631,28 @@ bool RigExecBakedExecuteOpGraph(RigExecBakedProgramImpl *program,UsdTimeCode tim
         auto &step=B.steps[B.opGraph.ops[c].originalIndex];
         if(stamping) step.memoStartNs=RigExecBakedNowNs();
         auto &input=state.inputKeys[c]; auto &scratch=state.inputScratch[c];
+        const bool retained=first && c<state.retainedFirst.size() && state.retainedFirst[c];
+        bool changed=false;
+        if(retained) {
+            // Adoption kept the outgoing program's key over leaf contents;
+            // compare like with like, then keep this program's versions.
+            const bool adopted=RigExecBakedEffectiveMemo(B,c,&scratch,
+                &state.coveredPropertyInputs[c],&state.coveredTypedInputs[c],nullptr,true);
+            changed=!adopted || input!=scratch;
+            if(verifyVersions) state.contentInputKeys[c]=scratch;
+        }
         const bool exact=RigExecBakedEffectiveMemo(B,c,&scratch,
             &state.coveredPropertyInputs[c],&state.coveredTypedInputs[c]);
-        const bool changed=!exact || input!=scratch;
+        if(!retained) changed=!exact || input!=scratch;
+        if(verifyVersions && !retained) {
+            std::string content; std::vector<uint32_t> property;
+            std::vector<std::pair<uint32_t,uint32_t>> typed;
+            const bool contentExact=RigExecBakedEffectiveMemo(B,c,&content,&property,&typed,nullptr,true);
+            if(!first && (contentExact!=exact ||
+               (exact && changed!=(state.contentInputKeys[c]!=content))))
+                state.leafVersionMismatch[c]=1;
+            state.contentInputKeys[c].swap(content);
+        }
         state.inputExact[c]=exact?1:0;
         if(!exact) ++state.inputRevisions[c];
         input.swap(scratch);
@@ -668,6 +706,10 @@ bool RigExecBakedExecuteOpGraph(RigExecBakedProgramImpl *program,UsdTimeCode tim
         });
     } else execute();
     RigExecOpGatherChanges(&state,B.opGraph,B.opExecution.ran);
+    if(verifyVersions)
+        for(uint32_t c=0;c<state.leafVersionMismatch.size();++c)
+            TF_VERIFY(!state.leafVersionMismatch[c],
+                "op %u: a path-leaf version key and its content key disagree on a change",c);
     if(!ok) {
         state.retainedFirst.clear();
         B.everRan=false;

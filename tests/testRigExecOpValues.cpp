@@ -543,6 +543,11 @@ void TestSkinEffectiveSelectedTopology()
     auto &r=B.chains[0].revisions[0];r.op=RigExecRevisionOp::Skin;
     RigExecDeclareSkinLayoutLeaves(SdfPath("/Skin"),&r.leaves.decl);
     r.leaves.values={VtValue(VtIntArray{0}),VtValue(VtFloatArray{1.0f}),VtValue(1)};
+    RigExecBakedResetPathLeafVersions(&r.leaves);
+    // Writes as a sampler makes them, after a run read the keys.
+    const auto set=[&](size_t k,VtValue value) {
+        RigExecBakedSetPathLeaf(&r.leaves,k,std::move(value),++B.pathLeafRun);
+    };
     for(uint32_t k=0;k<3;++k)B.pathLeafRefs.push_back({RigExecBakedPathLeafOwner::Revision,0,0,k});
     RigExecBakedStep step;step.kind=RigExecBakedStepKind::RevisionStatic;step.object=0;
     step.bindingLeaves={0,1,2};
@@ -555,20 +560,141 @@ void TestSkinEffectiveSelectedTopology()
     topology->validated=false;
     CHECK(Key(B,RigExecBakedSlotDomain::SkinTopology)!=validTopology);
     const auto selected=key(true),raw=key(false);
-    r.leaves.values={VtValue(),VtValue(),VtValue()};
+    for(size_t k=0;k<3;++k) set(k,VtValue());
     CHECK(key(true)==selected);CHECK(key(false)!=raw);
     // A stale packet topology cannot shadow current null-handle fallback.
     r.layoutHandle.reset();
     const auto unavailable=key(true);
-    r.leaves.values={VtValue(VtIntArray{1}),VtValue(VtFloatArray{0.5f}),VtValue(2)};
+    set(0,VtValue(VtIntArray{1})); set(1,VtValue(VtFloatArray{0.5f})); set(2,VtValue(2));
     CHECK(key(true)!=unavailable);
     // A new current handle shadows raw rows before the packet adopts it.
     r.topology.reset();r.topologyResolved=false;r.layoutHandle=topology;
-    const auto newlySelected=key(true);r.leaves.values[2]=VtValue(3);
+    const auto newlySelected=key(true);set(2,VtValue(3));
     CHECK(key(true)==newlySelected);
     r.layoutHandle.reset();
-    const auto unresolved=key(true);r.leaves.values[2]=VtValue(4);
+    const auto unresolved=key(true);set(2,VtValue(4));
     CHECK(key(true)!=unresolved);
+}
+
+// A geometry path leaf keys as its content version in both tiers. Built at
+// one run and compared with the previous run's, a version key changes
+// exactly when the same key over the leaves' contents does, whatever writes
+// land between the runs (a value that moves and comes back included). A
+// leaf the effective tier resolves through a produced version, and a
+// provider leaf, keep their values.
+void TestPathLeafContentVersions()
+{
+    using Type=RigExecRevisionLeafType; using Time=RigExecRevisionLeafTime;
+    using Flavour=RigExecRevisionLeafFlavour;
+    RigExecBakedProgramImpl B;
+    B.chains.resize(1); B.chains[0].revisions.resize(1); B.revisionIndex={{0,0}};
+    auto &leaves=B.chains[0].revisions[0].leaves;
+    leaves.decl.Add({SdfPath("/Mover.points"),Type::Vec3fArray,Time::AtTime,
+        Flavour::OverlayThenRaw,VtValue(VtVec3fArray())});
+    leaves.decl.Add({SdfPath("/Mover.weight"),Type::Float,Time::AtTime,Flavour::Resolved,VtValue(1.0f)});
+    leaves.values={leaves.decl.keys[0].fallback,leaves.decl.keys[1].fallback};
+    RigExecBakedResetPathLeafVersions(&leaves);
+    B.pathLeafRefs={{RigExecBakedPathLeafOwner::Revision,0,0,0},{RigExecBakedPathLeafOwner::Revision,0,0,1}};
+    RigExecBakedStep step; step.kind=RigExecBakedStepKind::RevisionStatic; step.object=0;
+    step.bindingLeaves={0,1};
+    struct Keys { std::string source,effective; bool sourceExact=false,effectiveExact=false; };
+    const auto keys=[&](bool content) {
+        Keys out; std::vector<uint32_t> covered;
+        out.sourceExact=RigExecBakedOpInputKey(B,step,&out.source,nullptr,content);
+        out.effectiveExact=RigExecBakedOpEffectiveInputKey(B,step,&out.effective,&covered,nullptr,nullptr,content);
+        return out;
+    };
+    const auto write=[&](size_t k,const VtValue &value) {
+        return RigExecBakedSetPathLeaf(&leaves,k,value,B.pathLeafRun);
+    };
+    // A run increments the counter before it builds its keys.
+    const auto run=[&] { ++B.pathLeafRun; return std::make_pair(keys(false),keys(true)); };
+
+    // The key carries the version, not the elements.
+    const VtVec3fArray many(100000,GfVec3f(0.5f));
+    write(0,VtValue(many));
+    const auto big=run();
+    CHECK(big.first.source.size()<256 && big.second.source.size()>many.size()*sizeof(GfVec3f));
+    CHECK(big.first.effective.size()<256 && big.second.effective.size()>many.size()*sizeof(GfVec3f));
+    // The same bytes in another buffer, and a move that comes back before
+    // the next run, change nothing; the same move across a run changes it.
+    write(0,VtValue(VtVec3fArray(many.begin(),many.end())));
+    CHECK(run().first.source==big.first.source);
+    VtVec3fArray moved=many; moved[7][1]=-0.5f;
+    write(0,VtValue(moved)); write(0,VtValue(many));
+    CHECK(run().first.source==big.first.source);
+    write(0,VtValue(moved));
+    const auto there=run();
+    CHECK(there.first.source!=big.first.source && there.first.effective!=big.first.effective);
+    write(0,VtValue(many));
+    const auto back=run();
+    CHECK(back.first.source!=there.first.source && back.first.effective!=there.first.effective);
+
+    // Every decision agrees with the contents' over runs of random writes,
+    // first with both leaves plain, then with the weight resolved through a
+    // produced version that also moves.
+    const float nanA=FloatBits(0x7fc00001u),nanB=FloatBits(0x7fc00002u);
+    const std::vector<VtValue> points{
+        VtValue(VtVec3fArray()),VtValue(VtVec3fArray{GfVec3f(0.0f)}),
+        VtValue(VtVec3fArray{GfVec3f(-0.0f,0.0f,0.0f)}),VtValue(VtVec3fArray{GfVec3f(nanA)}),
+        VtValue(VtVec3fArray{GfVec3f(nanB)}),VtValue(VtVec3fArray{GfVec3f(1,2,3)}),
+        VtValue(VtVec3fArray{GfVec3f(1,2,3)}),VtValue(),VtValue(VtFloatArray{1.0f}),
+        VtValue(GfVec4f(1.0f))};
+    const std::vector<VtValue> weights{VtValue(1.0f),VtValue(0.5f),VtValue(0.0f),
+        VtValue(-0.0f),VtValue(nanA),VtValue(nanB),VtValue(1.0)};
+    uint32_t seed=12345;
+    const auto next=[&](uint32_t n) { seed=seed*1664525u+1013904223u; return (seed>>8)%n; };
+    size_t sourceChanges=0,effectiveChanges=0,compared=0;
+    for(int pass=0;pass<2;++pass) {
+        if(pass==1) {
+            leaves.exactVersions={-1,0}; leaves.exactRecordIndices={-1,-1};
+            leaves.exactValueTypes={-1,int(RigExecBakedPropertyChain::Arm::Float)};
+            B.propertyVersionValid={1}; B.propertyValues.resize(1); B.propertyValues[0].f=0.25f;
+        }
+        auto last=run();
+        for(int i=0;i<4000;++i) {
+            for(uint32_t w=next(4);w>0;--w) {
+                if(next(2)) write(0,points[next(uint32_t(points.size()))]);
+                else write(1,weights[next(uint32_t(weights.size()))]);
+            }
+            if(pass==1 && next(4)==0) B.propertyValues[0].f=next(2)?0.25f:-0.0f;
+            const auto now=run();
+            const auto &[version,content]=now;
+            CHECK(version.sourceExact==content.sourceExact);
+            CHECK(version.effectiveExact==content.effectiveExact);
+            if(version.sourceExact && last.first.sourceExact) {
+                const bool changed=version.source!=last.first.source;
+                CHECK(changed==(content.source!=last.second.source));
+                sourceChanges+=changed; ++compared;
+            }
+            if(version.effectiveExact && last.first.effectiveExact) {
+                const bool changed=version.effective!=last.first.effective;
+                CHECK(changed==(content.effective!=last.second.effective));
+                effectiveChanges+=changed;
+            }
+            last=now;
+        }
+    }
+    CHECK(compared>1000 && sourceChanges>100 && sourceChanges+100<compared && effectiveChanges>100);
+    // A resolved leaf's effective key follows its produced value, which no
+    // write to the leaf moves.
+    const auto before=run();
+    B.propertyValues[0].f=B.propertyValues[0].f==0.25f?0.75f:0.25f;
+    const auto after=run();
+    CHECK(after.first.source==before.first.source && after.first.effective!=before.first.effective);
+
+    // A provider leaf keys its value, written in place by its own sampler.
+    B.providerLeaves.decl.Add({SdfPath("/Provider.attr"),Type::Double,Time::AtTime,Flavour::Raw,VtValue(0.0)});
+    B.providerLeaves.values={VtValue(0.0)};
+    B.pathLeafRefs.push_back({RigExecBakedPathLeafOwner::Provider,0,0,0});
+    RigExecBakedStep refresh; refresh.kind=RigExecBakedStepKind::Solve; refresh.bindingLeaves={2};
+    std::string first,second;
+    CHECK(RigExecBakedOpInputKey(B,refresh,&first));
+    B.providerLeaves.values[0]=VtValue(-0.0);
+    CHECK(RigExecBakedOpInputKey(B,refresh,&second) && second!=first);
+    // Unsized versions are a broken writer contract: never an equal key.
+    leaves.versions.clear();
+    CHECK(!RigExecBakedOpInputKey(B,step,&first));
 }
 
 // The executor never rebuilds a source key the classifier calls constant,
@@ -837,7 +963,7 @@ void TestSharedKeyRunsAndPlainValues()
 }
 int main()
 {
-    TestConstantSourceKeys();
+    TestConstantSourceKeys(); TestPathLeafContentVersions();
     TestSkinEffectiveSelectedTopology(); TestFloatPayloadBits(); TestFieldValidityCountError(); TestPropertyValidityAndLadderState();
     TestChunkRangeIsolation(); TestConstraintSourceAndPropertyAliasKeys();
     TestPacketStatusAndOpaqueBoundary(); TestRawInputAndProviderKeys(); TestAvarEffectiveSelection();

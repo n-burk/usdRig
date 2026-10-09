@@ -292,6 +292,8 @@ struct RrStore {
     std::vector<std::vector<std::string>> headLines;
     std::vector<std::string> headMemoKeys;
     std::vector<std::string> opInputScratch;
+    /// verifyLeafVersions: each step's source memo over array contents.
+    std::vector<std::string> headContentKeys;
     std::vector<RigExecProviderPlainState> providerValues;
     std::vector<RrProviderConversionScratch> providerConversionScratch;
     std::vector<RrProviderRefreshScratch> providerRefreshScratch;
@@ -531,6 +533,10 @@ struct RrProgram {
     /// RIGEXEC_VERIFY_CONSTANT_KEYS, read at Open: every run rebuilds the
     /// constant source memos the closure skips and fails if one moved.
     bool verifyConstantSources = false;
+    /// RIGEXEC_VERIFY_LEAF_VERSIONS, read at Open: every run also builds
+    /// each source memo over array contents and fails if the two disagree
+    /// on a change.
+    bool verifyLeafVersions = false;
 
     /// One plugin revision's playback state, in external_movers order. No
     /// prepared state means no kernel here: the revision passes through.

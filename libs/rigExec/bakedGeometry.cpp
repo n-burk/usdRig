@@ -39,6 +39,7 @@
 #include <cmath>
 #include <cstdio>
 #include <iterator>
+#include <limits>
 #include <string>
 #include <utility>
 #include <vector>
@@ -2916,6 +2917,53 @@ RigExecBakedBindPathLeaves(const UsdStageRefPtr &stage,
     leaves->changed.assign(n, 0);
     leaves->mustSample.assign(n, 0);
     leaves->sampled = false;
+    RigExecBakedResetPathLeafVersions(leaves);
+}
+
+namespace {
+// No run has read the key since its versions restarted.
+constexpr uint64_t kPathLeafUnread = std::numeric_limits<uint64_t>::max();
+}
+
+void
+RigExecBakedResetPathLeafVersions(RigExecBakedPathLeaves *leaves)
+{
+    const size_t n = leaves->values.size();
+    leaves->versions.assign(n, 0);
+    leaves->observed.assign(n, VtValue());
+    leaves->observedVersions.assign(n, 0);
+    leaves->observedRuns.assign(n, kPathLeafUnread);
+}
+
+bool
+RigExecBakedSetPathLeaf(RigExecBakedPathLeaves *leaves, size_t k,
+                        VtValue value, uint64_t run)
+{
+    if (k >= leaves->values.size()) {
+        return false;
+    }
+    const bool changed = !RigExecBakedHeadValueSame(value, leaves->values[k]);
+    // RigExecBakedResetPathLeafVersions sizes the four tables together;
+    // unsized, every key over them is inexact (InputKey), so a version not
+    // kept here can never pass for an unchanged one.
+    if (k < leaves->versions.size() && k < leaves->observed.size() &&
+        k < leaves->observedVersions.size() && k < leaves->observedRuns.size()) {
+        // The first write since a run read the key: what it held is what
+        // that run saw.
+        if (leaves->observedRuns[k] != run) {
+            leaves->observed[k] = leaves->values[k];
+            leaves->observedVersions[k] = leaves->versions[k];
+            leaves->observedRuns[k] = run;
+        }
+        // At the observed version the held value has the observed bytes.
+        const bool moved =
+            leaves->versions[k] == leaves->observedVersions[k]
+                ? changed
+                : !RigExecBakedHeadValueSame(value, leaves->observed[k]);
+        leaves->versions[k] = leaves->observedVersions[k] + (moved ? 1 : 0);
+    }
+    leaves->values[k] = std::move(value);
+    return changed;
 }
 
 bool
@@ -3114,8 +3162,8 @@ RigExecBakedSamplePathLeaves(RigExecBakedProgramImpl *program,
             }
             value = VtValue(present);
         }
-        leaves->changed[k] = RigExecBakedHeadValueSame(value,leaves->values[k]) ? 0 : 1;
-        leaves->values[k] = std::move(value);
+        leaves->changed[k] =
+            RigExecBakedSetPathLeaf(leaves, k, std::move(value), B.pathLeafRun) ? 1 : 0;
         if (walk >= 0 && leaves->changed[k]) {
             B.readerWalkChanged[size_t(walk)] = 1;
         }

@@ -75,7 +75,10 @@ template <class T> void _RrMemoArray(const RrProgram *program, uint32_t slot,
     if (count) key->append(reinterpret_cast<const char *>(values->data()),
                            sizeof(T) * count);
 }
-void _RrRawSlotMemo(const RrProgram *program, int slot, std::string *key)
+// \p versioned keys an array's elements by their content version, for a
+// memo every run rebuilds and compares with the previous run's only.
+void _RrRawSlotMemo(const RrProgram *program, int slot, std::string *key,
+                    bool versioned=false)
 {
     const auto &state = program->inputState;
     const bool declared = slot >= 0 && size_t(slot) < state.slotHasValue.size();
@@ -90,7 +93,11 @@ void _RrRawSlotMemo(const RrProgram *program, int slot, std::string *key)
                          : state.slotAuthored[size_t(slot)]!=0);
     _RrAppend(key, state.slotBlocked[size_t(slot)]);
     _RrAppend(key, tag);
-    if (array) {
+    if (array && versioned) {
+        // The elements are read only while the slot holds a value.
+        if (state.slotHasValue[size_t(slot)])
+            _RrAppend(key, RrInputArrayVersion(program, uint32_t(slot)));
+    } else if (array) {
         switch (tag) {
         case RigExecWireInputTag::IntArray: _RrMemoArray<int32_t>(program,slot,key); break;
         case RigExecWireInputTag::FloatArray: _RrMemoArray<float>(program,slot,key); break;
@@ -109,12 +116,18 @@ void _RrRawSlotMemo(const RrProgram *program, int slot, std::string *key)
             RigExecOpKeyAppend(key,program->TextOrEmpty(uint32_t(state.slotCurrent[size_t(slot)].bits)));
     }
 }
-void _RrInputMemo(const RrProgram *program, const RigExecWireStep &step, std::string *key)
+// \p contentArrays keys every array by its elements, as the
+// verifyLeafVersions cross-check does.
+void _RrInputMemo(const RrProgram *program, const RigExecWireStep &step, std::string *key,
+                  bool contentArrays=false)
 {
     const auto &state=program->inputState;
-    const auto appendSlot=[&](uint32_t slot) { _RrRawSlotMemo(program,int(slot),key); };
+    // Geometry and weight inputs key array elements by content version.
+    const bool versioned=!contentArrays && (_RrIsGeometryKind(step.kind) ||
+        _RrIsWeightKind(step.kind) || step.kind==RigExecWireStepKind::SkinTopology);
+    const auto appendSlot=[&](uint32_t slot) { _RrRawSlotMemo(program,int(slot),key,versioned); };
     for(uint32_t slot:step.headInputSlots) appendSlot(slot);
-    for(const auto &read:step.headInputReads) RrSourceReadMemo(program,read,key);
+    for(const auto &read:step.headInputReads) RrSourceReadMemo(program,read,key,versioned);
     if(step.kind==RigExecWireStepKind::AvarInputs) {
         const auto range=RrAvarReadRange(state,step.object);
         for(uint32_t i=range.first;i<range.second;++i) {
@@ -606,13 +619,20 @@ bool RrExecuteOpGraph(RrProgram *p,bool force,std::string *error)
     // reports unchanged. It is built on a first run; a later run visits only
     // the steps that can seed or change.
     const bool verify=p->verifyConstantSources;
-    int64_t moved=-1;
+    const bool verifyVersions=p->verifyLeafVersions;
+    if(verifyVersions) s.headContentKeys.resize(p->steps->size());
+    int64_t moved=-1, disagreed=-1;
     const auto source=[&](uint32_t c) {
         const auto i=p->opGraph.ops[c].originalIndex; const auto &step=(*p->steps)[i];
         bool seed=first || step.headAlwaysRuns, changed=false;
         auto &input=s.headMemoKeys[i]; auto &scratch=s.opInputScratch[i];
         if(first || c>=state.constantSource.size() || !state.constantSource[c]) {
             scratch.clear(); _RrInputMemo(p,step,&scratch); changed=input!=scratch; input.swap(scratch);
+            if(verifyVersions) {
+                std::string content; _RrInputMemo(p,step,&content,true);
+                if(!first && changed!=(s.headContentKeys[i]!=content) && disagreed<0) disagreed=int64_t(i);
+                s.headContentKeys[i].swap(content);
+            }
         } else if(verify) {
             scratch.clear(); _RrInputMemo(p,step,&scratch);
             if(scratch!=input && moved<0) moved=int64_t(i);
@@ -625,6 +645,12 @@ bool RrExecuteOpGraph(RrProgram *p,bool force,std::string *error)
     else for(const uint32_t c:state.sourceVisits) source(c);
     if(moved>=0) {
         if(error) *error="constant source memo of step "+RrStepLabel(*p,size_t(moved))+" changed";
+        state.everRan=false; s.everRan=false;
+        return false;
+    }
+    if(disagreed>=0) {
+        if(error) *error="source memo of step "+RrStepLabel(*p,size_t(disagreed))+
+            " moved otherwise than its array contents";
         state.everRan=false; s.everRan=false;
         return false;
     }

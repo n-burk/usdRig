@@ -220,11 +220,13 @@ _PatchHeadLeaves(RigExecBakedProgramImpl &B,
 // answered where the live prologue's reads go through the worker's own
 // source facts. Walk and property resolution belongs to the consuming body.
 void
-_PatchPathLeaves(RigExecBakedProgramImpl *,
+_PatchPathLeaves(RigExecBakedProgramImpl *B,
                  RigExecBakedPathLeaves *leaves,
                  const std::vector<VtValue> &values)
 {
-    leaves->values = values;
+    for (size_t k = 0; k < values.size(); ++k) {
+        RigExecBakedSetPathLeaf(leaves, k, values[k], B->pathLeafRun);
+    }
 }
 
 // Places sampled source facts in private leaf tables. Derived validation,
@@ -268,10 +270,10 @@ _FrozenPrologue(_FrozenWorker *worker, const RigExecFrozenProgram &snapshot,
         auto &leaves = object.oracleLeaves;
         for (size_t k=0;k<leaves.decl.keys.size();++k) {
             const auto found = index.find(object.oracleFrozenKeys[k]);
-            const VtValue value = found != index.end() && inputs.values[found->second].hasValue
+            VtValue value = found != index.end() && inputs.values[found->second].hasValue
                 ? inputs.values[found->second].value : VtValue();
-            leaves.changed[k] = !RigExecBakedHeadValueSame(value,leaves.values[k]);
-            leaves.values[k] = value;
+            leaves.changed[k] =
+                RigExecBakedSetPathLeaf(&leaves, k, std::move(value), B.pathLeafRun);
         }
     }
     if (B.hasPropertyChains || !B.weightFields.empty() || !B.headLeaves.empty()) {
@@ -513,8 +515,8 @@ _FrozenPrologue(_FrozenWorker *worker, const RigExecFrozenProgram &snapshot,
             return false;
         }
         for (size_t k = 0; k < values.size(); ++k) {
-            leaves.changed[k] = RigExecBakedHeadValueSame(values[k],leaves.values[k]) ? 0 : 1;
-            leaves.values[k] = values[k];
+            leaves.changed[k] =
+                RigExecBakedSetPathLeaf(&leaves, k, values[k], B.pathLeafRun) ? 1 : 0;
         }
     }
     // Raw revision leaves are copied into the worker's private pools.

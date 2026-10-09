@@ -530,10 +530,13 @@ void RigExecBakedOpValueKey(const RigExecBakedProgramImpl &B,
 }
 static bool InputKey(const RigExecBakedProgramImpl &B,
     const RigExecBakedStep &step,std::string *out,bool effective,std::vector<uint32_t> *covered,std::vector<std::pair<uint32_t,uint32_t>> *typed=nullptr,
-    const RigExecBakedOpIdentityRemap *remap=nullptr)
+    const RigExecBakedOpIdentityRemap *remap=nullptr,bool contentLeaves=false)
 {
     if(!TF_VERIFY(out)) return false;
     out->clear(); bool exact=true;
+    // Versions are program-local: a key read against another program keys
+    // the leaves' contents.
+    contentLeaves=contentLeaves || remap;
     if (remap && step.kind != RigExecBakedStepKind::RevisionStatic &&
         step.kind != RigExecBakedStepKind::RevisionChunk &&
         step.kind != RigExecBakedStepKind::RevisionFuse) return false;
@@ -906,6 +909,20 @@ static bool InputKey(const RigExecBakedProgramImpl &B,
                         Put(out,uint8_t(2)); continue;
                     }
                 }
+                // A geometry owner's raw value keys as its content version,
+                // which moves exactly when the bytes Box writes would. The
+                // effective tier resolves a key through no walk, record or
+                // produced version to that same raw value.
+                const auto at=[](const std::vector<int> &v,uint32_t k) { return k<v.size()?v[k]:-1; };
+                const bool versioned=!contentLeaves && RigExecBakedPathLeafVersioned(ref) &&
+                    (!effective || (ref.key<leaves->decl.keys.size() && at(leaves->walks,ref.key)<0 &&
+                     at(leaves->exactVersions,ref.key)<0 && at(leaves->exactRecordIndices,ref.key)<0));
+                if(versioned) {
+                    if(ref.key>=leaves->versions.size()) { invalid(); continue; }
+                    Put(out,uint8_t(3)); Put(out,leaves->versions[ref.key]);
+                    exact=BoxExact(leaves->values[ref.key])&&exact;
+                    continue;
+                }
                 Put(out,uint8_t(1));
                 if(effective) {
                     exact=Box(out,RigExecBakedResolvePathLeaf(B,*leaves,ref.key))&&exact;
@@ -976,8 +993,8 @@ static bool KeysWeightOverlay(const RigExecBakedProgramImpl &B,const RigExecBake
     const auto &id=B.revisionIndex[size_t(step.object)];
     return B.chains[size_t(id.first)].revisions[size_t(id.second)].weightObject>=0;
 }
-bool RigExecBakedOpInputKey(const RigExecBakedProgramImpl &B,const RigExecBakedStep &step,std::string *out,const RigExecBakedOpIdentityRemap *remap) {
-    const bool exact=InputKey(B,step,out,false,nullptr,nullptr,remap);
+bool RigExecBakedOpInputKey(const RigExecBakedProgramImpl &B,const RigExecBakedStep &step,std::string *out,const RigExecBakedOpIdentityRemap *remap,bool contentLeaves) {
+    const bool exact=InputKey(B,step,out,false,nullptr,nullptr,remap,contentLeaves);
     if(KeysWeightOverlay(B,step)) RigExecOpKeyAppend(out,B.publishWeightFields);
     return exact;
 }
@@ -989,8 +1006,9 @@ bool RigExecBakedOpInputKeyIsConstant(const RigExecBakedProgramImpl &B,const Rig
         step.readerWalks.empty() && !KeysWeightOverlay(B,step);
 }
 bool RigExecBakedOpEffectiveInputKey(const RigExecBakedProgramImpl &B,const RigExecBakedStep &step,
-    std::string *out,std::vector<uint32_t> *covered,std::vector<std::pair<uint32_t,uint32_t>> *typed,const RigExecBakedOpIdentityRemap *remap) {
-    const bool exact=InputKey(B,step,out,true,covered,typed,remap);
+    std::string *out,std::vector<uint32_t> *covered,std::vector<std::pair<uint32_t,uint32_t>> *typed,const RigExecBakedOpIdentityRemap *remap,
+    bool contentLeaves) {
+    const bool exact=InputKey(B,step,out,true,covered,typed,remap,contentLeaves);
     if(KeysWeightOverlay(B,step)) RigExecOpKeyAppend(out,B.publishWeightFields);
     return exact;
 }

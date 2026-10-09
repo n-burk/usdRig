@@ -1259,6 +1259,102 @@ TestARebuiltProgramKeepsItsRunState(const std::string &stagePath,
                 tables);
 }
 
+/// A rebuilt program's retained skin ops compare the outgoing program's key
+/// over leaf CONTENTS. Path-leaf content versions belong to one program: an
+/// outgoing program that saw a skin input move and come back holds another
+/// version for the same bytes than its fresh replacement does, and that must
+/// cost the replacement nothing the plain outgoing program does not.
+/// Returns how many ops the replacement retained.
+size_t
+TestARetainedSkinOpOutlivesItsLeafVersions(const std::string &stagePath,
+                                           const char *name)
+{
+    size_t retained[2] = {0, 0}, executed[2] = {0, 0}, moved = 0;
+    for (int detour = 0; detour < 2; ++detour) {
+        const UsdStageRefPtr stage = UsdStage::Open(stagePath);
+        CHECK(stage != nullptr);
+        if (!stage) {
+            return 0;
+        }
+        // Every skin mover's weight moves at frame 2 and is back at frame
+        // 1, authored in this stage's own session layer.
+        stage->SetEditTarget(UsdEditTarget(stage->GetSessionLayer()));
+        for (const UsdPrim &prim : stage->Traverse()) {
+            if (prim.GetTypeName() != TfToken("RigExecSkinMover")) {
+                continue;
+            }
+            const TfToken weightName("inputs:defaultWeight");
+            UsdAttribute weight = prim.GetAttribute(weightName);
+            float authored = 1.0f;
+            if (weight) {
+                weight.Get(&authored);
+            } else {
+                weight = prim.CreateAttribute(weightName,
+                                              SdfValueTypeNames->Float);
+            }
+            weight.Set(authored, UsdTimeCode(1.0));
+            weight.Set(authored * 0.5f, UsdTimeCode(2.0));
+        }
+        const BuiltProgram built = BuildStage(stage);
+        CHECK(built.program != nullptr);
+        if (!built.program) {
+            return 0;
+        }
+        RigExecRigPose pose;
+        CHECK(built.program->Run(UsdTimeCode(1.0), &pose));
+        if (detour) {
+            CHECK(built.program->Run(UsdTimeCode(2.0), &pose));
+            CHECK(built.program->Run(UsdTimeCode(1.0), &pose));
+        }
+        // Each skin weight leaf's version where the outgoing program left it.
+        std::map<SdfPath, uint64_t> outgoing;
+        const auto weightVersions = [](const RigExecBakedProgramImpl &B,
+                                       std::map<SdfPath, uint64_t> *out) {
+            for (const auto &chain : B.chains) {
+                for (const auto &revision : chain.revisions) {
+                    const int k = revision.leaves.decl.Role(
+                        RigExecRevisionLeafRole::DefaultWeight);
+                    if (revision.op == RigExecRevisionOp::Skin && k >= 0 &&
+                        size_t(k) < revision.leaves.versions.size()) {
+                        (*out)[revision.moverPath] =
+                            revision.leaves.versions[size_t(k)];
+                    }
+                }
+            }
+        };
+        weightVersions(built.program->GetStepGraph(), &outgoing);
+        std::vector<std::string> reasons;
+        std::unique_ptr<RigExecBakedProgram> rebuilt =
+            RigExecBakedProgram::Build(built.evaluator.get(), &reasons);
+        CHECK(rebuilt != nullptr);
+        if (!rebuilt) {
+            return 0;
+        }
+        rebuilt->AdoptGeometryStateFrom(*built.program);
+        const auto &first = rebuilt->GetStepGraph().opAdapter.retainedFirst;
+        retained[detour] = size_t(std::count(first.begin(), first.end(), char(1)));
+        RigExecRigPose after;
+        CHECK(rebuilt->Run(UsdTimeCode(1.0), &after));
+        executed[detour] = after.executedOpCount;
+        std::map<SdfPath, uint64_t> replacement;
+        weightVersions(rebuilt->GetStepGraph(), &replacement);
+        if (detour) {
+            for (const auto &[mover, version] : replacement) {
+                const auto found = outgoing.find(mover);
+                moved += found != outgoing.end() && found->second != version;
+            }
+        }
+    }
+    CHECK(retained[1] == retained[0]);
+    CHECK(executed[1] == executed[0]);
+    // The detour must leave versions apart, or the case shows nothing.
+    CHECK(retained[0] == 0 || moved > 0);
+    std::printf("  %s: %zu op(s) retained, %zu executed after either history; "
+                "%zu skin weight version(s) differ across the rebuild\n",
+                name, retained[0], executed[0], moved);
+    return retained[0];
+}
+
 /// The same question asked of a real recompile, through the parity check.
 ///
 /// Compile() retires the program and rebuilds it, and the replacement adopts
@@ -4774,6 +4870,18 @@ main(int argc, char **argv)
         examplesDir + "/biped/Biped.usda", "Biped");
     TestARebuiltProgramKeepsItsRunState(
         examplesDir + "/04_BlendShapeFace.usda", "04_BlendShapeFace");
+    {
+        const std::string fixtures = examplesDir + "/../tests/fixtures";
+        size_t retained = 0;
+        for (const char *stage : {"raw_skin_layouts.usda", "oneloop_two_limbs.usda",
+                                  "upstream_inputs.usda"}) {
+            retained += TestARetainedSkinOpOutlivesItsLeafVersions(
+                fixtures + "/" + stage, stage);
+        }
+        retained += TestARetainedSkinOpOutlivesItsLeafVersions(
+            examplesDir + "/biped/Biped.usda", "Biped");
+        CHECK(retained > 0);
+    }
     TestARecompiledRigStillAgreesWithTheDynamicPath(
         examplesDir + "/biped/Biped.usda", "Biped");
     TestARecompiledRigStillAgreesWithTheDynamicPath(

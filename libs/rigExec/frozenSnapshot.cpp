@@ -265,6 +265,8 @@ _CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst)
     D.pathLeafChainResults = src.pathLeafChainResults;
     D.pathLeafChainSerial = src.pathLeafChainSerial;
     D.pathLeafSamples = src.pathLeafSamples;
+    // The run the copied leaves' observed values and versions refer to.
+    D.pathLeafRun = src.pathLeafRun;
     D.resolvedRoutedPrims = src.resolvedRoutedPrims;
     D.avarsDisturbed = src.avarsDisturbed;
     D.folded = src.folded;

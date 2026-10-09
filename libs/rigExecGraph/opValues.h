@@ -51,6 +51,13 @@ struct RigExecOpAdapterState {
     bool parallel = false, measuring = false;
     /// Native: rebuild every constant source key each run and verify it.
     bool verifyConstantSources = false;
+    /// Native (RIGEXEC_VERIFY_LEAF_VERSIONS): beside each key that carries
+    /// path-leaf content versions, the same key over the leaves' contents,
+    /// and per op whether the two told a different change this run. Each op
+    /// writes only its own entries; the owner reports after the join.
+    bool verifyLeafVersions = false;
+    std::vector<std::string> contentSourceKeys, contentInputKeys;
+    std::vector<char> leafVersionMismatch;
 };
 
 inline RigExecValueId RigExecOpAddValue(RigExecOpAdapterState *, uint32_t, uint32_t);

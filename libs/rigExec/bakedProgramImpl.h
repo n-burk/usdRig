@@ -470,6 +470,16 @@ struct RigExecBakedPathLeaves {
     std::vector<VtValue> values;
     mutable std::vector<VtValue> consumedValues; ///< per-owner body values, never sampled memo keys
     std::vector<char> changed;
+    /// Per key, the content version the operation keys of a geometry owner
+    /// carry for its value: two runs that read the key read the same
+    /// version exactly when they read the same bytes. Written only through
+    /// RigExecBakedSetPathLeaf, which compares a new value with `observed`,
+    /// the value the last run to read the key saw (taken at the first write
+    /// after that run, `observedRuns` naming it), and its `observedVersions`.
+    std::vector<uint64_t> versions;
+    std::vector<VtValue> observed;
+    std::vector<uint64_t> observedVersions;
+    std::vector<uint64_t> observedRuns;
     /// Per key, the next sample must re-read it whatever else holds: a value
     /// edit reached one of its paths, or a sample skipped it.
     std::vector<char> mustSample;
@@ -3447,6 +3457,9 @@ struct RigExecBakedProgramImpl {
     /// Path leaves re-read by every sample so far. Test observable; written
     /// only by RigExecBakedSamplePathLeaves.
     uint64_t pathLeafSamples = 0;
+    /// Executes that built operation keys, which read the path leaves'
+    /// versions (RigExecBakedSetPathLeaf). Owner of the program only.
+    uint64_t pathLeafRun = 0;
     /// Every property a chain writes: RigExecBakedBuildContext::chainTargets
     /// as Build classified the inputs against it, kept so a bake can
     /// recompute each input's walk the same way.
@@ -3765,6 +3778,28 @@ void RigExecBakedNumberLeaves(RigExecBakedProgramImpl *program);
 /// every value with its key's fallback. Owning thread.
 void RigExecBakedBindPathLeaves(const UsdStageRefPtr &stage,
                                 RigExecBakedPathLeaves *leaves);
+
+/// Restarts \p leaves' content versions at their current values: version
+/// 0, which no run has read yet.
+void RigExecBakedResetPathLeafVersions(RigExecBakedPathLeaves *leaves);
+
+/// Stores \p value as key \p k of \p leaves, \p run being the program's
+/// `pathLeafRun`. The key's version moves exactly when the bytes differ
+/// from those the last run to read it saw (RigExecBakedHeadValueSame), so
+/// writes between two runs that end on the same bytes leave it unmoved.
+/// Returns whether the bytes differ from the value replaced. Every writer
+/// of a geometry owner's `values` goes through here.
+bool RigExecBakedSetPathLeaf(RigExecBakedPathLeaves *leaves, size_t k,
+                             VtValue value, uint64_t run);
+
+/// Whether operation keys carry the content versions of \p ref's owner's
+/// leaves in place of their values: every geometry owner. Provider leaves
+/// keep their values.
+inline bool
+RigExecBakedPathLeafVersioned(const RigExecBakedPathLeafRef &ref)
+{
+    return ref.owner != RigExecBakedPathLeafOwner::Provider;
+}
 
 /// Re-reads, through RigExecSampleRevisionLeaf over the generation's
 /// resolved inputs at \p time, every key of \p leaves that one of these says

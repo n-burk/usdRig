@@ -23,9 +23,12 @@ struct RigExecBakedOpIdentityRemap {
 void RigExecBakedOpValueKey(const RigExecBakedProgramImpl &,
     RigExecBakedSlotDomain, uint32_t slot, std::string *key);
 /// False means an unsupported boxed type or invalid declaration: seed conservatively.
+/// A geometry path leaf keys as its content version (RigExecBakedSetPathLeaf),
+/// which only this program's keys compare against; \p contentLeaves, or a
+/// \p remap, keys its value instead, as a key read against another program must.
 bool RigExecBakedOpInputKey(const RigExecBakedProgramImpl &,
     const RigExecBakedStep &, std::string *key,
-    const RigExecBakedOpIdentityRemap *remap=nullptr);
+    const RigExecBakedOpIdentityRemap *remap=nullptr, bool contentLeaves=false);
 /// True when RigExecBakedOpInputKey reads nothing sampled, overridable or
 /// published for \p step: its bytes and exactness are then fixed by the
 /// compiled step, so the executor builds that key once per program.
@@ -34,7 +37,7 @@ bool RigExecBakedOpInputKeyIsConstant(const RigExecBakedProgramImpl &,
 bool RigExecBakedOpEffectiveInputKey(const RigExecBakedProgramImpl &,
     const RigExecBakedStep &,std::string *key,std::vector<uint32_t> *coveredPropertyVersions,
     std::vector<std::pair<uint32_t,uint32_t>> *coveredTyped=nullptr,
-    const RigExecBakedOpIdentityRemap *remap=nullptr);
+    const RigExecBakedOpIdentityRemap *remap=nullptr, bool contentLeaves=false);
 bool RigExecBakedOpValueKeyIsExact(const RigExecBakedProgramImpl &,
     RigExecBakedSlotDomain, uint32_t slot);
 }

@@ -1003,7 +1003,8 @@ bool RrEffectiveInputMemo(const RrProgram *program,uint32_t stepIndex,std::strin
     }
 }
 
-void RrSourceReadMemo(const RrProgram *program,const RigExecWireInput &read,std::string *key)
+void RrSourceReadMemo(const RrProgram *program,const RigExecWireInput &read,std::string *key,
+                      bool versioned)
 {
     const auto &state=program->inputState;
     const auto append=[&](const auto &v) { key->append(reinterpret_cast<const char *>(&v),sizeof(v)); };
@@ -1054,7 +1055,11 @@ void RrSourceReadMemo(const RrProgram *program,const RigExecWireInput &read,std:
         if(!have) continue;
         if(RigExecFormatIsArrayTag(tag)) {
             const void *value=defaultRead?RrInputArrayDefault(program,slot,tag):RrInputArrayValue(program,slot,tag);
-            append(bool(value)); if(value) array(value,tag);
+            append(bool(value));
+            // Token arrays key their text, which ids need not spell uniquely.
+            if(value && versioned && tag!=RigExecWireInputTag::TokenArray) {
+                if(!defaultRead) append(RrInputArrayVersion(program,slot));
+            } else if(value) array(value,tag);
         } else scalar(defaultRead?state.values[state.file->inputs[slot].value()]:state.slotCurrent[slot]);
     }
 }
@@ -2267,6 +2272,15 @@ RrInputArrayAuthored(const RrProgram *program, uint32_t slot)
            state.arrays[size_t(state.arrayOf[slot])].authored;
 }
 
+uint64_t
+RrInputArrayVersion(const RrProgram *program, uint32_t slot)
+{
+    const RrInputState &state = program->inputState;
+    return _RrIsArraySlot(state, slot)
+               ? state.arrays[size_t(state.arrayOf[slot])].version
+               : 0;
+}
+
 bool
 RrStageInputBlockedSet(RrProgram *program,size_t slot,bool blocked,std::string *error)
 {
@@ -2535,10 +2549,13 @@ RrInputsApplyTouched(RrProgram *program)
             const void *ran =
                 a.ranHeld ? _RrBufferVector(a.tag, a.ran) : a.defaultVector;
             const _RrElements before = _RrVectorElements(a.tag, ran);
+            const bool moved = !_RrSameElements(a.tag, _RrArrayView(a),
+                                                before.data, before.count);
+            if (moved) {
+                ++a.version;
+            }
             const bool changed =
-                state.slotHasValue[s] != state.slotRanHasValue[s] ||
-                !_RrSameElements(a.tag, _RrArrayView(a), before.data,
-                                 before.count);
+                state.slotHasValue[s] != state.slotRanHasValue[s] || moved;
             state.slotRanHasValue[s] = state.slotHasValue[s];
             a.ran = RrArrayBuffer();
             a.ranHeld = false;
