@@ -2027,7 +2027,8 @@ _DropRead(fb::RigExecWireStep *step, fb::SlotDomain domain, uint32_t slot)
 }
 
 // A chain of 10000 points, past the default chunk vertex target, under a
-// blend shape authored first (a whole revision) and three matrix movers
+// blend shape authored last, which mover discovery runs first (siblings run
+// bottom to top), as a whole revision, and three matrix movers
 // (the range-chain fixture's shape: M0 on a driver that moves at frames 1
 // to 3, M1 with a weight out of range at frame 2, M2; the points authored
 // at Default and at frames 1 to 3, moving in [0, 100) only), baked at frame
@@ -2098,16 +2099,6 @@ TestRangeChainBake()
     input.CreateRelationship(TfToken("rigExec:samples"))
         .SetTargets({sample.GetPath()});
     stage->DefinePrim(SdfPath("/Asset/Rig/Movers"), TfToken("Scope"));
-    const UsdPrim blend = stage->DefinePrim(
-        SdfPath("/Asset/Rig/Movers/Blend"), TfToken("RigExecBlendShapeMover"));
-    CHECK(blend.ApplyAPI(TfToken("RigExecMoverAPI")));
-    blend.CreateRelationship(TfToken("rigExec:moves"))
-        .SetTargets({SdfPath("/Asset/Shape.points")});
-    blend.CreateRelationship(TfToken("rigExec:blendInputs"))
-        .SetTargets({input.GetPath()});
-    blend.CreateAttribute(TfToken("inputs:defaultWeight"),
-                          SdfValueTypeNames->Float)
-        .Set(1.0f);
     for (int i = 0; i < 3; ++i) {
         const UsdPrim mover = stage->DefinePrim(
             SdfPath("/Asset/Rig/Movers/M" + std::to_string(i)),
@@ -2127,6 +2118,16 @@ TestRangeChainBake()
             weight.Set(1.0f);
         }
     }
+    const UsdPrim blend = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Movers/Blend"), TfToken("RigExecBlendShapeMover"));
+    CHECK(blend.ApplyAPI(TfToken("RigExecMoverAPI")));
+    blend.CreateRelationship(TfToken("rigExec:moves"))
+        .SetTargets({SdfPath("/Asset/Shape.points")});
+    blend.CreateRelationship(TfToken("rigExec:blendInputs"))
+        .SetTargets({input.GetPath()});
+    blend.CreateAttribute(TfToken("inputs:defaultWeight"),
+                          SdfValueTypeNames->Float)
+        .Set(1.0f);
 
     RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
     const std::unique_ptr<fb::RigExecWireFile> file =
