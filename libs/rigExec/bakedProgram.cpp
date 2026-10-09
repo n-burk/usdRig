@@ -4239,6 +4239,13 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
         if (stageFrames()) {
             constraintArrays();
             RigExecBakedRunGeometryPrologue(&B, time, pose, fullRunRequested);
+            // A Range role or group gate rests on a value this run sampled
+            // otherwise (an override, an upstream input, a point count): no
+            // step runs on it, the pose is untouched, and the owner rebuilds.
+            if (!RigExecBakedRolesStand(B)) {
+                _lastBail = RigExecBakedBail::RoleFlip;
+                return false;
+            }
         }
     }
     if (measuring) {

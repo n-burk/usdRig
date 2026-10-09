@@ -527,6 +527,7 @@ const char *ProgramBailName(RigExecBakedBail bail) {
     case RigExecBakedBail::StageFrames:return "StageFrames";
     case RigExecBakedBail::Step:return "Step";
     case RigExecBakedBail::Publish:return "Publish";
+    case RigExecBakedBail::RoleFlip:return "RoleFlip";
     }
     return "Unknown";
 }

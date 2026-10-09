@@ -270,6 +270,11 @@ struct InputSlot {
   phased: int;
   /// The attribute's value type.
   type: InputTag;
+  // A slot without Listed is private: no integration can set it, so an
+  // unanimated one is a constant holding its default. Format 20 bakes as
+  // such constants the reads a Range Skin or a gated revision rests on (the
+  // skin's method, element size and joint indices; the gate weight's
+  // default weight).
   /// InputSlotFlags.
   flags: ubyte;
 }
@@ -1171,9 +1176,14 @@ table Revision {
   skin_topology_fixed: bool;
   packet_influences: [Matrix4d];
   // One range per step: a whole revision has one; a chunked skin keys
-  // each range by its influences; an unchunked revision with two or more
-  // (format 19) is range-pipelined, a Matrix, Wire or Lattice revision
-  // whose unkeyed ranges are its chain's point partition.
+  // each range by its influences. An unchunked revision with two or more
+  // is a Range revision (format 20): a Matrix, Wire, Lattice, BlendShape or
+  // classicLinear Skin revision whose ranges are its chain's vertex groups,
+  // unkeyed except on a Skin, whose range g carries group g's influence
+  // key; it writes group g exactly when a RevisionChunk step names part g
+  // (the others are gated). In a chain with a Range revision every other
+  // revision is Whole: a keyed skin's ranges are the same groups, and
+  // revision_chunk_count adds one published group per group.
   chunks: [Chunk] (native_inline);
   chunk_base: int;
   /// Absent when there is none, or when it is `topology` itself.
@@ -1183,8 +1193,9 @@ table Revision {
   partition_element_size: int;
   partition_index_count: ulong;
   partition_point_count: ulong;
-  // A skin partition keyed by influences; false for a whole or a
-  // range-pipelined revision.
+  // A skin partition keyed by influences (Legacy, or Whole in a chain with
+  // groups); false for a whole revision or a Range revision, a Range Skin
+  // included.
   chunked: bool;
   partition_candidates: ulong;
   partition_producer_min: int;

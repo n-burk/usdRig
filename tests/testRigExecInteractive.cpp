@@ -1,7 +1,11 @@
 // Persistent graph and interactive edit regressions through the public evaluator.
+#include "rigExec/bakedProgramImpl.h"
+#include "rigExec/frozenContext.h"
 #include "rigExec/inputReplay.h"
 #include "rigExec/rigEvaluator.h"
 #include "pxr/base/plug/registry.h"
+#include "pxr/base/tf/getenv.h"
+#include "pxr/base/tf/setenv.h"
 #include "pxr/base/ts/knot.h"
 #include "pxr/base/ts/spline.h"
 #include "pxr/usd/sdf/types.h"
@@ -783,6 +787,303 @@ static void TestReleasedDragsFollowTheReauthoredSpline()
     }
 }
 
+// A linear skin of 8 points on two influences, A turning 60 degrees about z
+// and B moving 2 along x, every point weighted on both, so dual quaternions
+// and linear blending part. With RIGEXEC_BAKED_CHUNK_VERTS and
+// RIGEXEC_BAKED_GROUP_VERTS at 2 its chain is range-pipelined in 4 groups,
+// and the classicLinear skin is a Range revision resting on its method.
+static const char *kRangeSkinFixture = R"USDA(#usda 1.0
+(
+    startTimeCode = 1
+    endTimeCode = 3
+)
+
+def Scope "Asset"
+{
+    def RigExecRoot "Rig"
+    {
+        def RigExecControl "A"
+        {
+            double avars:rz = 60
+        }
+
+        def RigExecControl "B"
+        {
+            double avars:tx = 2
+        }
+
+        def Scope "Movers"
+        {
+            def RigExecSkinMover "Skin" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                float inputs:defaultWeight = 1
+                rel rigExec:moves = </Asset/Geom/Skin.points>
+                rel rigExec:influences = [</Asset/Rig/A>, </Asset/Rig/B>]
+                uniform int rigExec:elementSize = 2
+                uniform token rigExec:skinningMethod = "classicLinear"
+                int[] rigExec:jointIndices = [0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1]
+                float[] rigExec:jointWeights = [0.5, 0.5, 0.25, 0.75, 0.75, 0.25, 0.5, 0.5, 0.9, 0.1, 0.1, 0.9, 0.6, 0.4, 0.3, 0.7]
+            }
+        }
+    }
+
+    def Scope "Geom"
+    {
+        def Mesh "Skin"
+        {
+            point3f[] points = [(1, 0, 0), (0, 2, 0.5), (-1, 1, 2), (3, -1, 1), (2, 2, 0), (-2, 0, 1), (0, -3, 2), (1, 1, 1)]
+        }
+    }
+}
+)USDA";
+
+static UsdStageRefPtr
+_RangeSkinStage()
+{
+    const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    const bool imported =
+        stage->GetRootLayer()->ImportFromString(kRangeSkinFixture);
+    CHECK(imported);
+    return stage;
+}
+
+// Sets an environment variable for a scope and puts back what stood.
+struct _ScopedEnv {
+    std::string name, saved;
+    _ScopedEnv(const char *variable, const char *value)
+        : name(variable), saved(TfGetenv(variable))
+    {
+        TfSetenv(name, value);
+    }
+    ~_ScopedEnv()
+    {
+        if (saved.empty()) {
+            TfUnsetenv(name);
+        } else {
+            TfSetenv(name, saved);
+        }
+    }
+};
+
+// What a consumer reads of a generation: validity, published values,
+// weight fields and diagnostics, in order.
+static bool
+_SamePublished(const RigExecRigPose &a, const RigExecRigPose &b)
+{
+    if (a.valid != b.valid || a.movedProperties != b.movedProperties ||
+        a.diagnostics != b.diagnostics ||
+        a.weightFields.size() != b.weightFields.size()) {
+        return false;
+    }
+    auto at = b.weightFields.begin();
+    for (const auto &[path, field] : a.weightFields) {
+        if (path != at->first || field.target != at->second.target ||
+            field.weights != at->second.weights) {
+            return false;
+        }
+        ++at;
+    }
+    return true;
+}
+
+static RigExecValueOverride
+_SkinMethod(const char *method)
+{
+    RigExecValueOverride o;
+    o.prim = SdfPath("/Asset/Rig/Movers/Skin");
+    o.attribute = TfToken("rigExec:skinningMethod");
+    o.value = VtValue(TfToken(method));
+    return o;
+}
+
+// A Range role rests on a value a run samples (R3): an interactive override
+// flipping the skin's method to dualQuaternion makes the next Evaluate bail
+// before any step and rebuild once, and its pose (points, weight fields,
+// diagnostics, so no line of the bailed run) is a fresh evaluator's built
+// with the override standing; holding it rebuilds nothing; clearing it
+// rebuilds once more, back to the authored pose. An upstream input setting
+// the method flips once and then holds, since the rebuild classifies with
+// the admitted value. An animated method takes no pin, so three frames that
+// move it rebuild nothing.
+static void TestRoleFlipsRebuildOnce()
+{
+    const _ScopedEnv chunkVerts("RIGEXEC_BAKED_CHUNK_VERTS", "2");
+    const _ScopedEnv groupVerts("RIGEXEC_BAKED_GROUP_VERTS", "2");
+    const SdfPath rig("/Asset/Rig");
+    const SdfPath mover("/Asset/Rig/Movers/Skin");
+    const SdfPath target("/Asset/Geom/Skin.points");
+    const UsdTimeCode time(1.0);
+    const UsdStageRefPtr stage = _RangeSkinStage();
+    if (!stage) {
+        return;
+    }
+    std::vector<std::string> errors;
+    const auto points = [&target](const RigExecRigPose &pose) {
+        const auto found = pose.movedProperties.find(target);
+        return found == pose.movedProperties.end() ? VtValue() : found->second;
+    };
+
+    // The references: authored, and built with the override standing,
+    // which classifies the skin by it and so never flips.
+    RigExecRigEvaluator plain(stage, rig);
+    CHECK(plain.Compile(&errors));
+    const RigExecRigPose linear = plain.Evaluate(time);
+    RigExecRigEvaluator built(stage, rig);
+    built.SetInteractiveOverrides({_SkinMethod("dualQuaternion")});
+    CHECK(built.Compile(&errors));
+    const size_t builtBuilds = built.GetBakedProgramBuildCount();
+    const RigExecRigPose dual = built.Evaluate(time);
+    CHECK(linear.valid && dual.valid);
+    CHECK(built.GetBakedProgramBuildCount() == builtBuilds);
+    CHECK(!points(linear).IsEmpty() && points(linear) != points(dual));
+
+    RigExecRigEvaluator evaluator(stage, rig);
+    CHECK(evaluator.Compile(&errors));
+    CHECK(_SamePublished(evaluator.Evaluate(time), linear));
+    {
+        // The skin is a pinned Range revision of a chain of 4 groups.
+        const RigExecBakedProgram *program = evaluator.GetBakedProgram();
+        CHECK(program != nullptr);
+        const RigExecBakedProgramImpl::GeomRevision *skin = nullptr;
+        size_t bounds = 0;
+        if (program) {
+            for (const auto &chain : program->GetStepGraph().chains) {
+                for (const auto &revision : chain.revisions) {
+                    if (revision.moverPath == mover) {
+                        skin = &revision;
+                        bounds = chain.groupBounds.size();
+                    }
+                }
+            }
+        }
+        CHECK(skin && skin->role == RigExecBakedRevisionRole::Range &&
+              !skin->pins.empty());
+        CHECK(bounds == 5);
+    }
+    const size_t builds = evaluator.GetBakedProgramBuildCount();
+    evaluator.SetInteractiveOverrides({_SkinMethod("dualQuaternion")});
+    CHECK(_SamePublished(evaluator.Evaluate(time), dual));
+    CHECK(evaluator.GetBakedProgramBuildCount() == builds + 1);
+    CHECK(_SamePublished(evaluator.Evaluate(time), dual));
+    CHECK(evaluator.GetBakedProgramBuildCount() == builds + 1);
+    evaluator.ClearInteractiveOverrides();
+    CHECK(_SamePublished(evaluator.Evaluate(time), linear));
+    CHECK(evaluator.GetBakedProgramBuildCount() == builds + 2);
+
+    // An upstream input on the method: one rebuild, then it holds.
+    RigExecRigEvaluator upstream(stage, rig);
+    CHECK(upstream.Compile(&errors));
+    CHECK(upstream.Evaluate(time).valid);
+    const size_t upstreamBuilds = upstream.GetBakedProgramBuildCount();
+    upstream.SetUpstreamInputs({_SkinMethod("dualQuaternion")});
+    const RigExecRigPose admitted = upstream.Evaluate(time);
+    CHECK(admitted.valid && points(admitted) == points(dual));
+    CHECK(upstream.GetBakedProgramBuildCount() == upstreamBuilds + 1);
+    const RigExecRigPose held = upstream.Evaluate(UsdTimeCode(2.0));
+    CHECK(held.valid && points(held) == points(dual));
+    CHECK(upstream.GetBakedProgramBuildCount() == upstreamBuilds + 1);
+
+    // An animated method: the skin is Whole with no pin.
+    const UsdStageRefPtr animatedStage = _RangeSkinStage();
+    if (!animatedStage) {
+        return;
+    }
+    const UsdAttribute method = animatedStage->GetAttributeAtPath(
+        mover.AppendProperty(TfToken("rigExec:skinningMethod")));
+    CHECK(method.Set(TfToken("classicLinear"), UsdTimeCode(1.0)) &&
+          method.Set(TfToken("dualQuaternion"), UsdTimeCode(2.0)) &&
+          method.Set(TfToken("classicLinear"), UsdTimeCode(3.0)));
+    RigExecRigEvaluator animated(animatedStage, rig);
+    CHECK(animated.Compile(&errors));
+    const RigExecRigPose first = animated.Evaluate(UsdTimeCode(1.0));
+    const size_t animatedBuilds = animated.GetBakedProgramBuildCount();
+    const RigExecRigPose second = animated.Evaluate(UsdTimeCode(2.0));
+    const RigExecRigPose third = animated.Evaluate(UsdTimeCode(3.0));
+    CHECK(first.valid && second.valid && third.valid);
+    CHECK(animated.GetBakedProgramBuildCount() == animatedBuilds);
+    CHECK(points(first) == points(linear) && points(second) == points(dual) &&
+          points(third) == points(linear));
+}
+
+// Runs one job of \p evaluator's snapshot \p frozen on \p inputs through the
+// production runner; an invalid pose is a declined job, which publishes
+// nothing.
+static RigExecRigPose
+_RunFrozenJob(const RigExecRigEvaluator &evaluator,
+              const std::shared_ptr<const RigExecFrozenProgram> &frozen,
+              const RigExecFrameInputs &inputs)
+{
+    RigExecFrozenEvalContext context;
+    context.epochDigest = evaluator.GetBindingEpochDigest();
+    context.slotCount = evaluator.GetBakedProgram()->GetProviderCount();
+    context.varyingInputCount = inputs.values.size();
+    if (evaluator.GetPublishWeightFields()) {
+        context.flags |= kRigExecFrozenPublishWeightFields;
+    }
+    if (evaluator.GetSolverGuidesEnabled()) {
+        context.flags |= kRigExecFrozenSolverGuidesEnabled;
+    }
+    context.frozen = frozen.get();
+    return RigExecEvaluateFrozen(context, inputs,
+                                 RigExecMakeProductionStepRunner());
+}
+
+// A frozen job whose inputs flip a Range role declines: the snapshot's
+// Range skin rests on classicLinear, so a job sampled under an override
+// restating it runs and matches live, while one flipping it to
+// dualQuaternion publishes nothing and builds nothing; the live Evaluate
+// the caller falls back to rebuilds once and poses the flip.
+static void TestAFrozenJobThatFlipsARoleDeclines()
+{
+    const _ScopedEnv chunkVerts("RIGEXEC_BAKED_CHUNK_VERTS", "2");
+    const _ScopedEnv groupVerts("RIGEXEC_BAKED_GROUP_VERTS", "2");
+    const SdfPath rig("/Asset/Rig");
+    const UsdStageRefPtr stage = _RangeSkinStage();
+    if (!stage) {
+        return;
+    }
+    std::vector<std::string> errors;
+    RigExecRigEvaluator evaluator(stage, rig);
+    CHECK(evaluator.Compile(&errors));
+    CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
+    const size_t builds = evaluator.GetBakedProgramBuildCount();
+    std::shared_ptr<const RigExecFrozenProgram> frozen;
+    std::string error;
+    CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
+    if (!frozen) {
+        std::printf("role flip freeze refused: %s\n", error.c_str());
+        return;
+    }
+
+    const std::vector<RigExecValueOverride> restated = {
+        _SkinMethod("classicLinear")};
+    RigExecFrameInputs same;
+    CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(2.0), restated,
+                                   &same, &error));
+    const RigExecRigPose ran = _RunFrozenJob(evaluator, frozen, same);
+    CHECK(ran.valid);
+
+    const std::vector<RigExecValueOverride> flipped = {
+        _SkinMethod("dualQuaternion")};
+    RigExecFrameInputs flipping;
+    CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(2.0), flipped,
+                                   &flipping, &error));
+    const RigExecRigPose declined = _RunFrozenJob(evaluator, frozen, flipping);
+    CHECK(!declined.valid);
+    CHECK(evaluator.GetBakedProgramBuildCount() == builds);
+
+    evaluator.SetInteractiveOverrides(restated);
+    const RigExecRigPose liveSame = evaluator.Evaluate(UsdTimeCode(2.0));
+    CHECK(liveSame.valid && _SamePublished(liveSame, ran));
+    CHECK(evaluator.GetBakedProgramBuildCount() == builds);
+    evaluator.SetInteractiveOverrides(flipped);
+    const RigExecRigPose live = evaluator.Evaluate(UsdTimeCode(2.0));
+    CHECK(live.valid && live.movedProperties != liveSame.movedProperties);
+    CHECK(evaluator.GetBakedProgramBuildCount() == builds + 1);
+}
+
 int main()
 {
     PlugRegistry::GetInstance().RegisterPlugins(RIGEXEC_SCHEMA_RESOURCE_DIR);
@@ -794,6 +1095,8 @@ int main()
     TestAnimatedPointCounts();
     TestInteractiveOverrides();
     TestReleasedDragsFollowTheReauthoredSpline();
+    TestRoleFlipsRebuildOnce();
+    TestAFrozenJobThatFlipsARoleDeclines();
     std::printf("testRigExecInteractive: %d failure(s)\n", failures);
     return failures ? 1 : 0;
 }

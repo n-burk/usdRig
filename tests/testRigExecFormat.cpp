@@ -17,8 +17,9 @@
 // encode losslessly and expand back to the layout bit for bit, every layout
 // the sparse form cannot hold is stored raw and verbatim, and the validated
 // flag holds to the evaluator's rules in both directions, in either form;
-// chunk tables hold to the shape the bake cuts, a range-pipelined
-// revision's (format 19) among them; array inputs (slots of each
+// chunk tables hold to the shape the bake cuts, a chain with groups'
+// (format 20: Range and Whole revisions, gates and the private constants
+// they rest on) among them; array inputs (slots of each
 // array tag, their pool and layout defaults, the reads bound to them, and
 // the chain base, layout, painted and oracle slots) round-trip bit for bit,
 // and each rule of theirs refuses its violation with its exact message.
@@ -1476,11 +1477,12 @@ TestOpenRefusals()
     wildRoot[3] = 0x0f;
     CHECK(!_Open(wildRoot, &why) && _Contains(why, "malformed"));
 
-    static_assert(RigExecFormatVersion == 19,
-                  "range-pipelined point chains pin format19");
-    // Every prior format, 18 among them, requires re-export: a range-
-    // pipelined chain's records mean something else to an older reader.
-    // Future versions require a supported exporter.
+    static_assert(RigExecFormatVersion == 20,
+                  "per-group range chains pin format20");
+    // Every prior format, 19 among them, requires re-export: a chain with
+    // groups' records (gated parts, Whole revisions' published groups,
+    // Range skins, private constants) mean something else to an older
+    // reader. Future versions require a supported exporter.
     RigExecWireFile versioned = _RichFile();
     size_t reexports = 0, rebakes = 0;
     for (uint32_t version = 0; version <= RigExecFormatVersion + 1; ++version) {
@@ -1488,12 +1490,12 @@ TestOpenRefusals()
         _context = "open refusals: version " + std::to_string(version);
         versioned.formatVersion = version;
         const std::string expected = "unsupported .rigexec format version " +
-            std::to_string(version) + " (this reader reads 19); " +
-            (version < 19 ? "re-export: range-pipelined point chains" : "rebake");
+            std::to_string(version) + " (this reader reads 20); " +
+            (version < 20 ? "re-export: per-group range chains" : "rebake");
         CHECK(!_Open(_PackUnchecked(versioned), &why) && why == expected);
-        ++(version < 19 ? reexports : rebakes);
+        ++(version < 20 ? reexports : rebakes);
     }
-    CHECK(reexports == 19 && rebakes == 1);
+    CHECK(reexports == 20 && rebakes == 1);
     _context = "open refusals";
     versioned.formatVersion = RigExecFormatVersion;
     std::vector<uint8_t> current;
@@ -4126,11 +4128,15 @@ TestChunkTables()
     refuse("a layout the epoch does not fix",
            [](F &, R &r) { r.skinTopologyFixed = false; },
            row + ": chunked, but not a skin whose layout the epoch fixes");
-    refuse("two chunks, unchunked", [](F &, R &r) {
+    // Unchunked with two ranges, a skin is a Range Skin (format 20), keyed
+    // like a chunked one: unkeyed ranges differ from its producer sets.
+    refuse("two chunks, unchunked", [](F &f, R &r) {
         r.chunked = false;
         r.chunks[0].key.clear();
         r.chunks[1].key.clear();
-    }, row + ": 2 chunks, but not chunked");
+        f.geometry->chainChunkEnd = {2};
+    }, row + ": partition producer set differs from actual influence "
+             "bindings");
     refuse("a key on an unchunked revision", [](F &, R &r) {
         r.chunked = false;
         r.chunks.pop_back();
@@ -4205,81 +4211,428 @@ TestChunkTables()
     CHECK(refused == 20);
 }
 
-/// A range-pipelined revision (format 19): the rich revision, unchunked and
-/// cut into three unkeyed ranges that tile its points from 0, is accepted
-/// and round-trips as a Matrix, Wire and Lattice revision; each way its
-/// table breaks that shape, and a range step or join of it that does not
-/// declare what its body reads, is refused with its exact message. The
-/// format's two helpers name exactly that shape and those three ops.
+// ------------------------------------------------------ chains with groups
+
+// Path ids the group file adds to the rich file's; each is also the id of
+// its name.
+enum : uint32_t {
+    _pgStatic = 13,   // RigExecStaticWeight (token)
+    _pgSparse = 14,   // sparse (token)
+    _pgLinear = 15,   // classicLinear (token)
+    _pgDual = 16,     // dualQuaternion (token)
+    _pgMethod = 17,   // /Rig/Mover.rigExec:skinningMethod
+    _pgDefault = 18,  // /Rig/W.rigExec:defaultWeight
+    _pgIndices = 19,  // /Rig/W.rigExec:indices
+};
+
+// The private slots the group file appends after the rich file's three
+// listed ones, and the values it appends.
+enum : uint32_t {
+    _sgMethod = 3,
+    _sgDefault = 4,
+    _sgIndices = 5,
+};
+enum : uint32_t {
+    _vgLinear = _vCount,
+    _vgDual,
+    _vgZero,
+    _vgIndices,
+    _vgCount,
+};
+
+fb::SlotRange
+_GroupSlot(fb::SlotDomain domain, uint32_t slot)
+{
+    return fb::SlotRange(domain, slot, slot + 1);
+}
+
+fb::RigExecWireStep
+_GroupStep(fb::StepKind kind, int32_t object, int32_t part,
+           std::vector<fb::SlotRange> reads,
+           std::vector<fb::SlotRange> writes)
+{
+    fb::RigExecWireStep step;
+    step.kind = kind;
+    step.object = object;
+    step.part = part;
+    step.reads = std::move(reads);
+    step.writes = std::move(writes);
+    return step;
+}
+
+/// A chain with groups (format 20): the rich revision as an \p op Range
+/// revision over the groups [0, 1), [1, 2), [2, 3) (a Skin: [0, 1),
+/// [1, 2) of its 2-point layout, with no influence, so every key is
+/// empty), with its fold, its packet, a group step for each part of
+/// \p parts (every part when empty) and its join, which reads the parts
+/// that have one. \p gate binds the revision to the weight object, made a
+/// static sparse weight whose default weight reads a private 0 and whose
+/// private indices are {0, 3} (3 is past the chain's points), and puts its
+/// WeightPacket step first. The file also holds a private
+/// rigExec:skinningMethod of the mover, classicLinear, read by a path
+/// read, and the tokens the edits below use.
+RigExecWireFile
+_GroupFile(fb::RevisionOp op, std::vector<size_t> parts = {},
+           bool gate = false)
+{
+    using D = fb::SlotDomain;
+    using K = fb::StepKind;
+    RigExecWireFile f = _RichFile();
+    for (const char *name :
+         {"RigExecStaticWeight", "sparse", "classicLinear", "dualQuaternion",
+          "rigExec:skinningMethod", "rigExec:defaultWeight",
+          "rigExec:indices"}) {
+        f.names.push_back(name);
+    }
+    for (const uint32_t token : {_pgStatic, _pgSparse, _pgLinear, _pgDual}) {
+        f.paths.push_back(fb::PathNode(0, token, PathKind::Token));
+    }
+    f.paths.push_back(fb::PathNode(_pMover, _pgMethod, PathKind::Property));
+    f.paths.push_back(fb::PathNode(_pWeight, _pgDefault, PathKind::Property));
+    f.paths.push_back(fb::PathNode(_pWeight, _pgIndices, PathKind::Property));
+    f.values.resize(_vgCount);
+    f.values[_vgLinear].tag = InputTag::Token;
+    f.values[_vgLinear].bits = _pgLinear;
+    f.values[_vgDual].tag = InputTag::Token;
+    f.values[_vgDual].bits = _pgDual;
+    f.values[_vgZero].tag = InputTag::Float;
+    f.intArrays.emplace_back();
+    f.intArrays.back().v = {0, 3};
+    f.values[_vgIndices].tag = InputTag::IntArray;
+    f.values[_vgIndices].arraySource = fb::ArraySource::Pool;
+    f.values[_vgIndices].array = uint32_t(f.intArrays.size() - 1);
+    const uint8_t has = uint8_t(fb::InputSlotFlags::HasValue);
+    f.inputs.push_back(
+        fb::InputSlot(_pgMethod, _vgLinear, -1, -1, InputTag::Token, has));
+    f.inputs.push_back(
+        fb::InputSlot(_pgDefault, _vgZero, -1, -1, InputTag::Float, has));
+    f.inputs.push_back(fb::InputSlot(_pgIndices, _vgIndices, -1, -1,
+                                     InputTag::IntArray, has));
+    fb::RigExecWireDomainGeometry &g = *f.geometry;
+    fb::RigExecWirePathRead method;
+    method.path = _pgMethod;
+    method.read = _In(InputTag::Token, ReadMode::Resolved, {_sgMethod});
+    method.headFallback = true;
+    g.pathReads.push_back(std::move(method));
+
+    const bool skin = op == fb::RevisionOp::Skin;
+    const size_t groups = skin ? 2 : 3;
+    fb::RigExecWireRevision &r = g.chains[0].revisions[0];
+    r.op = uint8_t(op);
+    r.chunked = false;
+    r.weightObject = gate ? 0 : -1;
+    r.chunks.resize(groups);
+    for (size_t k = 0; k < groups; ++k) {
+        r.chunks[k].begin = int32_t(k);
+        r.chunks[k].end = int32_t(k + 1);
+    }
+    if (skin) {
+        r.skinTopologyFixed = true;
+        r.influenceSlots.clear();
+        r.partitionElementSize = 2;
+        r.partitionIndexCount = 4;
+        r.partitionPointCount = 2;
+        r.partitionProducerMin = r.partitionProducerMax = 0;
+        r.partitionDistinctReads = 1;
+        r.partitionProducerSets.resize(groups);
+        _AddFixtureTopologyHead(f);
+    }
+    g.revisionChunkCount = {int32_t(groups)};
+    g.chainChunkEnd = {int32_t(groups)};
+    if (gate) {
+        fb::RigExecWireWeightObject &w = g.weightObjects[0];
+        w.type = _pgStatic;
+        w.representation = _pgSparse;
+        w.defaultWeight =
+            _In(InputTag::Float, ReadMode::Baked, {_sgDefault});
+        w.defaultWeight->constant = _vgZero;
+        w.indicesSlot = int32_t(_sgIndices);
+    }
+
+    if (parts.empty()) {
+        for (size_t k = 0; k < groups; ++k) {
+            parts.push_back(k);
+        }
+    }
+    // A skin's steps also read its layout.
+    const auto layout = [skin](std::vector<fb::SlotRange> reads) {
+        if (skin) {
+            reads.push_back(_GroupSlot(D::SkinTopology, 0));
+        }
+        return reads;
+    };
+    if (gate) {
+        _AppendStep(f, _GroupStep(K::WeightPacket, 0, -1, {},
+                                  {_GroupSlot(D::WeightPacket, 0)}));
+    }
+    _AppendStep(f, _GroupStep(K::InfluenceFold, 0, -1, {},
+                              {_GroupSlot(D::RevisionTransforms, 0)}));
+    _AppendStep(f, _GroupStep(K::RevisionStatic, 0, -1,
+                              layout({_GroupSlot(D::RevisionTransforms, 0)}),
+                              {_GroupSlot(D::RevisionPacket, 0)}));
+    std::vector<fb::SlotRange> join = {_GroupSlot(D::RevisionPacket, 0),
+                                       _GroupSlot(D::RevisionTransforms, 0),
+                                       _GroupSlot(D::ChainBase, 0)};
+    if (gate) {
+        join.push_back(_GroupSlot(D::WeightPacket, 0));
+    }
+    for (const size_t k : parts) {
+        std::vector<fb::SlotRange> reads = {_GroupSlot(D::RevisionPacket, 0),
+                                            _GroupSlot(D::ChainBase, 0)};
+        if (skin) {
+            reads.push_back(_GroupSlot(D::RevisionTransforms, 0));
+        }
+        _AppendStep(f, _GroupStep(K::RevisionChunk, 0, int32_t(k),
+                                  layout(std::move(reads)),
+                                  {_GroupSlot(D::RevisionOut, uint32_t(k))}));
+        join.push_back(_GroupSlot(D::RevisionOut, uint32_t(k)));
+    }
+    _AppendStep(f, _GroupStep(K::RevisionFuse, 0, -1, layout(std::move(join)),
+                              {_GroupSlot(D::RevisionDone, 0),
+                               _GroupSlot(D::ChainDirty, 0)}));
+    _DeclareFixtureStageFrames(f);
+    return f;
+}
+
+/// Appends to a Matrix group file of every part a second revision of its
+/// chain, a copy of the first, with its fold, packet, chunk steps and fuse:
+/// \p range keeps the groups (a Range revision whose step for part k reads
+/// group k of the first revision's slots); otherwise one whole chunk (a
+/// Whole revision whose chunk reads the entering version and whose fuse
+/// reads it, its chunk and every entering group, and publishes the chain's
+/// groups at RevisionOut [chunk_base + 1, + 3)).
+void
+_AddGroupRevision(RigExecWireFile &f, bool range)
+{
+    using D = fb::SlotDomain;
+    using K = fb::StepKind;
+    fb::RigExecWireDomainGeometry &g = *f.geometry;
+    fb::RigExecWireRevision added = g.chains[0].revisions[0];
+    const uint32_t groups = uint32_t(added.chunks.size());
+    const uint32_t base = groups;
+    if (!range) {
+        added.chunks.assign(1, fb::RigExecWireChunk());
+    }
+    added.chunkBase = int32_t(base);
+    const uint32_t owned = range ? groups : 1 + groups;
+    g.chains[0].revisions.push_back(std::move(added));
+    g.revisionIndex.push_back({0, 1});
+    g.chainRevisionEnd = {2};
+    g.revisionChunkBase = {0, int32_t(base)};
+    g.revisionChunkCount = {int32_t(groups), int32_t(owned)};
+    g.chainChunkEnd = {int32_t(base + owned)};
+    f.cones->revisionClusters.resize(2);
+    f.cones->revisionStaticCluster.push_back(0);
+
+    _AppendStep(f, _GroupStep(K::InfluenceFold, 1, -1, {},
+                              {_GroupSlot(D::RevisionTransforms, 1)}));
+    _AppendStep(f, _GroupStep(K::RevisionStatic, 1, -1,
+                              {_GroupSlot(D::RevisionTransforms, 1)},
+                              {_GroupSlot(D::RevisionPacket, 1)}));
+    std::vector<fb::SlotRange> fuse = {_GroupSlot(D::RevisionPacket, 1),
+                                       _GroupSlot(D::RevisionTransforms, 1),
+                                       _GroupSlot(D::ChainBase, 0),
+                                       _GroupSlot(D::RevisionDone, 0),
+                                       _GroupSlot(D::ChainDirty, 0)};
+    if (range) {
+        for (uint32_t k = 0; k < groups; ++k) {
+            _AppendStep(f, _GroupStep(K::RevisionChunk, 1, int32_t(k),
+                                      {_GroupSlot(D::RevisionPacket, 1),
+                                       _GroupSlot(D::ChainBase, 0),
+                                       _GroupSlot(D::RevisionOut, k)},
+                                      {_GroupSlot(D::RevisionOut, base + k)}));
+            fuse.push_back(_GroupSlot(D::RevisionOut, base + k));
+        }
+        _AppendStep(f, _GroupStep(K::RevisionFuse, 1, -1, std::move(fuse),
+                                  {_GroupSlot(D::RevisionDone, 1),
+                                   _GroupSlot(D::ChainDirty, 1)}));
+    } else {
+        _AppendStep(f, _GroupStep(K::RevisionChunk, 1, 0,
+                                  {_GroupSlot(D::RevisionPacket, 1),
+                                   _GroupSlot(D::ChainBase, 0),
+                                   _GroupSlot(D::RevisionDone, 0),
+                                   _GroupSlot(D::ChainDirty, 0)},
+                                  {_GroupSlot(D::RevisionOut, base)}));
+        // Every entering group (the first revision's slots) and its chunk.
+        fuse.push_back(fb::SlotRange(D::RevisionOut, 0, base + 1));
+        _AppendStep(f, _GroupStep(K::RevisionFuse, 1, -1, std::move(fuse),
+                                  {_GroupSlot(D::RevisionDone, 1),
+                                   _GroupSlot(D::ChainDirty, 1),
+                                   fb::SlotRange(D::RevisionOut, base + 1,
+                                                 base + 1 + groups)}));
+    }
+    _DeclareFixtureStageFrames(f);
+}
+
+/// Chains with groups (format 20). The format's helpers name the Range
+/// revision shape (unchunked, two or more chunks), the Range ops (Matrix,
+/// Wire, Lattice, BlendShape, Skin), the keyed revisions (chunked, or a
+/// Range Skin), a chain's group count and its group writers (a Range
+/// revision writes the parts its steps name, a Whole one every group, each
+/// group entering from its last earlier writer). The group file is
+/// accepted and round-trips as each Range op, a Range Skin with its keys
+/// among them; so are a Whole revision after a Range one (owning
+/// chunks + groups RevisionOut ids), a second Range revision reading the
+/// first's groups, and a gated revision writing only the group its
+/// weight's indices touch. Each way a table, a step or a constant breaks
+/// that shape is refused with its exact message.
 void
 TestRangeChunkTables()
 {
-    _context = "range chunk tables";
+    _context = "group tables";
     std::string why;
-    const std::string row = "geometry.chains[0].revisions[0]";
     using F = RigExecWireFile;
     using R = fb::RigExecWireRevision;
-    // The rich revision is a Matrix revision with no chunk; \p edit runs
-    // after the cut into [0, 1), [1, 2), [2, 3).
-    const auto ranged = [](const std::function<void(F &, R &)> &edit) {
-        F f = _RichFile();
-        R &r = f.geometry->chains[0].revisions[0];
-        r.chunked = false;
-        r.chunks.resize(3);
-        for (size_t k = 0; k < 3; ++k) {
-            r.chunks[k].begin = int32_t(k);
-            r.chunks[k].end = int32_t(k + 1);
-        }
-        edit(f, r);
-        f.geometry->revisionChunkCount = {int32_t(r.chunks.size())};
-        return f;
-    };
+    using D = fb::SlotDomain;
+    using K = fb::StepKind;
+    const std::string row = "geometry.chains[0].revisions[0]";
 
     {
         R r;
+        r.op = uint8_t(fb::RevisionOp::Matrix);
         r.chunks.resize(1);
-        CHECK(!RigExecFormatIsRangeRevision(r));
+        CHECK(!RigExecFormatIsRangeRevision(r) &&
+              !RigExecFormatIsKeyedRevision(r));
         r.chunks.resize(2);
-        CHECK(RigExecFormatIsRangeRevision(r));
+        CHECK(RigExecFormatIsRangeRevision(r) &&
+              !RigExecFormatIsKeyedRevision(r));
+        r.op = uint8_t(fb::RevisionOp::Skin);
+        CHECK(RigExecFormatIsRangeRevision(r) &&
+              RigExecFormatIsKeyedRevision(r));
         r.chunked = true;
-        CHECK(!RigExecFormatIsRangeRevision(r));
+        CHECK(!RigExecFormatIsRangeRevision(r) &&
+              RigExecFormatIsKeyedRevision(r));
         size_t rangeOps = 0;
         for (unsigned op = 0; op <= unsigned(fb::RevisionOp::MAX); ++op) {
             rangeOps += RigExecFormatIsRangeOp(uint8_t(op)) ? 1 : 0;
         }
-        CHECK(rangeOps == 3 &&
+        CHECK(rangeOps == 5 &&
               RigExecFormatIsRangeOp(uint8_t(fb::RevisionOp::Matrix)) &&
               RigExecFormatIsRangeOp(uint8_t(fb::RevisionOp::Wire)) &&
-              RigExecFormatIsRangeOp(uint8_t(fb::RevisionOp::Lattice)));
+              RigExecFormatIsRangeOp(uint8_t(fb::RevisionOp::Lattice)) &&
+              RigExecFormatIsRangeOp(uint8_t(fb::RevisionOp::BlendShape)) &&
+              RigExecFormatIsRangeOp(uint8_t(fb::RevisionOp::Skin)));
     }
-    int accepted = 0;
-    for (const fb::RevisionOp op : {fb::RevisionOp::Matrix, fb::RevisionOp::Wire,
-                                    fb::RevisionOp::Lattice}) {
-        _context = std::string("range chunk tables: accepted as ") +
-                   fb::EnumNameRevisionOp(op);
-        const F f = ranged([op](F &, R &r) { r.op = uint8_t(op); });
-        CHECK(RigExecFormatIsRangeRevision(f.geometry->chains[0].revisions[0]));
+
+    // The group writers of a Range revision of every part, a Range one
+    // writing only part 1 and a Whole one: each group enters from its last
+    // earlier writer. The tables need no valid file.
+    {
+        _context = "group tables: writers";
+        F f = _GroupFile(fb::RevisionOp::Matrix);
+        CHECK(RigExecFormatChainGroups(f, 0) == 3);
+        CHECK(RigExecFormatChainGroups(_RichFile(), 0) == 0);
+        R second = f.geometry->chains[0].revisions[0];
+        R whole = second;
+        whole.chunks.assign(1, fb::RigExecWireChunk());
+        f.geometry->chains[0].revisions.push_back(std::move(second));
+        f.geometry->chains[0].revisions.push_back(std::move(whole));
+        f.steps.push_back(_GroupStep(K::RevisionChunk, 1, 1, {}, {}));
+        std::vector<std::vector<char>> written;
+        std::vector<std::vector<int>> entering;
+        RigExecFormatGroupWriters(f, 0, &written, &entering);
+        CHECK(written == std::vector<std::vector<char>>(
+                             {{1, 1, 1}, {0, 1, 0}, {1, 1, 1}}));
+        CHECK(entering == std::vector<std::vector<int>>(
+                              {{-1, -1, -1}, {0, 0, 0}, {0, 1, 0}}));
+        RigExecFormatGroupWriters(_RichFile(), 0, &written, &entering);
+        CHECK(written.empty() && entering.empty());
+    }
+
+    const auto accept = [&](const std::string &label, const F &f) {
+        _context = "group tables: accepted " + label;
         why.clear();
         const bool valid = RigExecFormatValidate(f, &why);
         CHECK(valid);
         if (!valid) {
-            std::printf("  refused: %s\n", why.c_str());
+            std::printf("  %s refused: %s\n", label.c_str(), why.c_str());
         }
         std::vector<uint8_t> bytes;
-        const bool written = _Write(f, &bytes, &why);
+        const bool written = valid && _Write(f, &bytes, &why);
         const auto opened = written ? _Open(bytes, &why) : nullptr;
-        CHECK(opened && opened->geometry->chains[0].revisions[0].chunks.size() == 3 &&
-              RigExecFormatIsRangeRevision(opened->geometry->chains[0].revisions[0]));
-        accepted += valid && opened ? 1 : 0;
+        CHECK(opened != nullptr);
+        return opened;
+    };
+    int accepted = 0;
+    for (const fb::RevisionOp op :
+         {fb::RevisionOp::Matrix, fb::RevisionOp::Wire,
+          fb::RevisionOp::Lattice, fb::RevisionOp::BlendShape,
+          fb::RevisionOp::Skin}) {
+        const auto opened =
+            accept(std::string("as ") + fb::EnumNameRevisionOp(op),
+                   _GroupFile(op));
+        const bool skin = op == fb::RevisionOp::Skin;
+        if (opened) {
+            const R &r = opened->geometry->chains[0].revisions[0];
+            CHECK(RigExecFormatIsRangeRevision(r) &&
+                  RigExecFormatIsKeyedRevision(r) == skin &&
+                  r.chunks.size() == (skin ? 2u : 3u));
+            ++accepted;
+        }
     }
-    CHECK(accepted == 3);
+    {
+        F f = _GroupFile(fb::RevisionOp::Matrix);
+        _AddGroupRevision(f, false);
+        accepted += accept("with a Whole revision", f) ? 1 : 0;
+    }
+    {
+        F f = _GroupFile(fb::RevisionOp::Matrix);
+        _AddGroupRevision(f, true);
+        accepted += accept("with two Range revisions", f) ? 1 : 0;
+    }
+    accepted += accept("gated", _GroupFile(fb::RevisionOp::Matrix, {0}, true))
+                    ? 1
+                    : 0;
+    CHECK(accepted == 8);
+
+    // The steps of a file, named as the validator names them.
+    const auto stepName = [](const F &f, K kind, int32_t object,
+                             int32_t part) {
+        for (size_t i = 0; i < f.steps.size(); ++i) {
+            const fb::RigExecWireStep &step = f.steps[i];
+            if (step.kind == kind && step.object == object &&
+                (kind != K::RevisionChunk || step.part == part)) {
+                return "step " + std::to_string(i) + " (" +
+                       RigExecFormatStepLabel(f, i) + ")";
+            }
+        }
+        return std::string("no such step");
+    };
+    const auto stepOf = [](F &f, K kind, int32_t object,
+                           int32_t part) -> fb::RigExecWireStep & {
+        for (fb::RigExecWireStep &step : f.steps) {
+            if (step.kind == kind && step.object == object &&
+                (kind != K::RevisionChunk || step.part == part)) {
+                return step;
+            }
+        }
+        return f.steps.back();
+    };
+    const auto dropRead = [](fb::RigExecWireStep &step, D domain,
+                             uint32_t slot) {
+        std::vector<fb::SlotRange> kept;
+        for (const fb::SlotRange &read : step.reads) {
+            if (read.domain() != domain || slot < read.begin() ||
+                slot >= read.end()) {
+                kept.push_back(read);
+                continue;
+            }
+            if (read.begin() < slot) {
+                kept.push_back(fb::SlotRange(domain, read.begin(), slot));
+            }
+            if (slot + 1 < read.end()) {
+                kept.push_back(fb::SlotRange(domain, slot + 1, read.end()));
+            }
+        }
+        step.reads = std::move(kept);
+    };
 
     int refused = 0;
-    const auto refuse = [&](const char *label,
-                            const std::function<void(F &, R &)> &edit,
-                            const std::function<std::string(const F &)> &expected) {
-        _context = std::string("range chunk tables refuse: ") + label;
-        const F f = ranged(edit);
+    const auto refuse = [&](const char *label, const std::function<F()> &make,
+                            const std::function<std::string(const F &)>
+                                &expected) {
+        _context = std::string("group tables refuse: ") + label;
+        const F f = make();
         const std::string want = expected(f);
         why.clear();
         const bool ok = RigExecFormatValidate(f, &why);
@@ -4293,84 +4646,278 @@ TestRangeChunkTables()
     const auto text = [](const std::string &message) {
         return [message](const F &) { return message; };
     };
-    refuse("a range-shaped smooth revision",
-           [](F &, R &r) { r.op = uint8_t(fb::RevisionOp::Smooth); },
-           text(row + ": 3 chunks, but not chunked"));
-    refuse("a key on a range", [](F &, R &r) { r.chunks[1].key = {0}; },
-           text(row + ".chunks[1]: a key on an unchunked revision"));
-    refuse("a gap", [](F &, R &r) {
-        r.chunks[2].begin = 3;
-        r.chunks[2].end = 4;
-    }, text(row + ".chunks[2]: point range [3, 4) is empty or does not "
-                  "continue the chain's point partition at 2"));
-    refuse("an overlap", [](F &, R &r) { r.chunks[1].begin = 0; },
-           text(row + ".chunks[1]: point range [0, 2) is empty or does not "
-                      "continue the chain's point partition at 1"));
-    refuse("a first range off 0", [](F &, R &r) {
-        for (auto &chunk : r.chunks) {
-            ++chunk.begin;
-            ++chunk.end;
-        }
-    }, text(row + ".chunks[0]: point range [1, 2) is empty or does not "
-                  "continue the chain's point partition at 0"));
-    refuse("an empty range", [](F &, R &r) {
-        r.chunks[1].end = 1;
-        r.chunks[2].begin = 1;
-    }, text(row + ".chunks[1]: point range [1, 1) is empty or does not "
-                  "continue the chain's point partition at 1"));
-    refuse("a partition producer set", [](F &, R &r) {
-        // One empty set, with the summary that matches it.
-        r.partitionProducerSets.resize(1);
-        r.partitionDistinctReads = 1;
-    }, text(row + ": partition producer sets on a range-pipelined revision"));
-
-    // Steps of the revision, appended with no edges: the rules on what a
-    // range step and a join declare run before the step graph's.
-    using D = fb::SlotDomain;
-    const auto step = [](F &f, fb::StepKind kind, int32_t part,
-                         std::vector<fb::SlotRange> reads) {
-        fb::RigExecWireStep added;
-        added.kind = kind;
-        added.object = 0;
-        added.part = part;
-        added.reads = std::move(reads);
-        _AppendStep(f, std::move(added));
-    };
-    const auto last = [](const std::string &rest) {
-        return [rest](const F &f) {
-            const size_t at = f.steps.size() - 1;
-            return "step " + std::to_string(at) + " (" +
-                   RigExecFormatStepLabel(f, at) + ")" + rest;
+    const auto matrix = [](const std::function<void(F &, R &)> &edit) {
+        return [edit] {
+            F f = _GroupFile(fb::RevisionOp::Matrix);
+            edit(f, f.geometry->chains[0].revisions[0]);
+            return f;
         };
     };
-    refuse("a range step past the ranges", [&](F &f, R &) {
-        step(f, fb::StepKind::RevisionChunk, 3,
-             {fb::SlotRange(D::RevisionPacket, 0, 1),
-              fb::SlotRange(D::ChainBase, 0, 1)});
-    }, last(": range part 3 of 3"));
-    refuse("a range step without the chain base", [&](F &f, R &) {
-        step(f, fb::StepKind::RevisionChunk, 0,
-             {fb::SlotRange(D::RevisionPacket, 0, 1)});
-    }, last(" does not declare ChainBase[0]"));
-    refuse("a join missing one of its ranges", [&](F &f, R &) {
-        step(f, fb::StepKind::RevisionFuse, -1,
-             {fb::SlotRange(D::RevisionPacket, 0, 1),
-              fb::SlotRange(D::RevisionTransforms, 0, 1),
-              fb::SlotRange(D::ChainBase, 0, 1),
-              fb::SlotRange(D::WeightPacket, 0, 1),
-              fb::SlotRange(D::RevisionOut, 0, 2)});
-    }, last(" does not declare RevisionOut[2]"));
-    refuse("a join without its weight packet", [&](F &f, R &) {
-        step(f, fb::StepKind::RevisionFuse, -1,
-             {fb::SlotRange(D::RevisionPacket, 0, 1),
-              fb::SlotRange(D::RevisionTransforms, 0, 1),
-              fb::SlotRange(D::ChainBase, 0, 1),
-              fb::SlotRange(D::RevisionOut, 0, 3)});
-    }, last(" does not declare WeightPacket[0]"));
-    std::printf("range chunk tables: a range-pipelined revision accepted as "
-                "%d ops; %d range table and step violations refused\n",
+
+    // The Range table, as format 19 held it.
+    refuse("a range-shaped smooth revision",
+           matrix([](F &, R &r) { r.op = uint8_t(fb::RevisionOp::Smooth); }),
+           text(row + ": 3 chunks, but not chunked"));
+    refuse("a key on a range",
+           matrix([](F &, R &r) { r.chunks[1].key = {0}; }),
+           text(row + ".chunks[1]: a key on an unchunked revision"));
+    refuse("a gap", matrix([](F &, R &r) {
+               r.chunks[2].begin = 3;
+               r.chunks[2].end = 4;
+           }),
+           text(row + ".chunks[2]: point range [3, 4) is empty or does not "
+                      "continue the chain's point partition at 2"));
+    refuse("an empty range", matrix([](F &, R &r) {
+               r.chunks[1].end = 1;
+               r.chunks[2].begin = 1;
+           }),
+           text(row + ".chunks[1]: point range [1, 1) is empty or does not "
+                      "continue the chain's point partition at 1"));
+    refuse("a partition producer set", matrix([](F &, R &r) {
+               r.partitionProducerSets.resize(1);
+               r.partitionDistinctReads = 1;
+           }),
+           text(row + ": partition producer sets on a range-pipelined "
+                      "revision"));
+
+    // The counts (F1): a Whole revision owns its chunks and one published
+    // group per group.
+    const auto whole = [](const std::function<void(F &)> &edit) {
+        return [edit] {
+            F f = _GroupFile(fb::RevisionOp::Matrix);
+            _AddGroupRevision(f, false);
+            edit(f);
+            return f;
+        };
+    };
+    refuse("a Whole revision owning only its chunks", whole([](F &f) {
+               f.geometry->revisionChunkCount[1] = 1;
+               f.geometry->chainChunkEnd = {4};
+           }),
+           text("geometry: revision_index or chunk tables disagree at "
+                "revision 1"));
+    refuse("a chain chunk range short of its ids",
+           whole([](F &f) { f.geometry->chainChunkEnd = {6}; }),
+           text("geometry: chain_chunk range of chain 0 does not hold its "
+                "revisions' 7 RevisionOut ids"));
+    refuse("a Whole fuse missing one group write", whole([&](F &f) {
+               stepOf(f, K::RevisionFuse, 1, -1).writes[2] =
+                   fb::SlotRange(D::RevisionOut, 4, 6);
+           }),
+           [&](const F &f) {
+               return stepName(f, K::RevisionFuse, 1, -1) +
+                      " does not write RevisionOut[6], group 2 of the "
+                      "version it publishes";
+           });
+    refuse("a Whole fuse missing an entering group", whole([&](F &f) {
+               dropRead(stepOf(f, K::RevisionFuse, 1, -1), D::RevisionOut, 1);
+           }),
+           [&](const F &f) {
+               return stepName(f, K::RevisionFuse, 1, -1) +
+                      " does not declare RevisionOut[1]";
+           });
+    refuse("a Whole revision without its chunk step", whole([&](F &f) {
+               stepOf(f, K::RevisionChunk, 1, 0).kind = K::RevisionStatic;
+           }),
+           text("geometry.chains[0].revisions[1]: no RevisionChunk step for "
+                "part 0 of a Whole revision"));
+
+    // Group steps and joins (G2).
+    const auto twoRange = [](const std::function<void(F &)> &edit) {
+        return [edit] {
+            F f = _GroupFile(fb::RevisionOp::Matrix);
+            _AddGroupRevision(f, true);
+            edit(f);
+            return f;
+        };
+    };
+    refuse("a range step past the parts", matrix([](F &f, R &) {
+               _AppendStep(f, _GroupStep(K::RevisionChunk, 0, 3,
+                                         {_GroupSlot(D::RevisionPacket, 0),
+                                          _GroupSlot(D::ChainBase, 0)},
+                                         {}));
+           }),
+           [](const F &f) {
+               const size_t at = f.steps.size() - 1;
+               return "step " + std::to_string(at) + " (" +
+                      RigExecFormatStepLabel(f, at) +
+                      "): range part 3 of 3";
+           });
+    refuse("a group step reading the version entering it",
+           twoRange([&](F &f) {
+               fb::RigExecWireStep &step = stepOf(f, K::RevisionChunk, 1, 1);
+               step.reads.push_back(_GroupSlot(D::RevisionDone, 0));
+               step.reads.push_back(_GroupSlot(D::ChainDirty, 0));
+           }),
+           [&](const F &f) {
+               return stepName(f, K::RevisionChunk, 1, 1) +
+                      " declares point version 1 of chain 0, which a "
+                      "range-pipelined range step does not read";
+           });
+    refuse("a group step missing its entering group", twoRange([&](F &f) {
+               dropRead(stepOf(f, K::RevisionChunk, 1, 1), D::RevisionOut, 1);
+           }),
+           [&](const F &f) {
+               return stepName(f, K::RevisionChunk, 1, 1) +
+                      " does not declare RevisionOut[1]";
+           });
+    refuse("a group step reading another group", twoRange([&](F &f) {
+               stepOf(f, K::RevisionChunk, 1, 1).reads.push_back(
+                   _GroupSlot(D::RevisionOut, 2));
+           }),
+           [&](const F &f) {
+               return stepName(f, K::RevisionChunk, 1, 1) +
+                      " reads RevisionOut[2], which is not group 1 of the "
+                      "version entering it";
+           });
+    // With the first revision's part 1 gated, group 1 enters the second
+    // revision from the base, and slot 1 is written by nobody.
+    refuse("a group step reading the unwritten slot of a gated part",
+           [&] {
+               F f = _GroupFile(fb::RevisionOp::Matrix, {0, 2}, true);
+               _AddGroupRevision(f, true);
+               return f;
+           },
+           [&](const F &f) {
+               return stepName(f, K::RevisionChunk, 1, 1) +
+                      " reads RevisionOut[1], which is not group 1 of the "
+                      "version entering it";
+           });
+    refuse("a join reading an unwritten part", [&] {
+               F f = _GroupFile(fb::RevisionOp::Matrix, {0, 2});
+               stepOf(f, K::RevisionFuse, 0, -1).reads.push_back(
+                   _GroupSlot(D::RevisionOut, 1));
+               return f;
+           },
+           [&](const F &f) {
+               return stepName(f, K::RevisionFuse, 0, -1) +
+                      " reads RevisionOut[1] of part 1, which no step "
+                      "writes";
+           });
+    refuse("a join writing a RevisionOut", matrix([&](F &f, R &) {
+               stepOf(f, K::RevisionFuse, 0, -1).writes.push_back(
+                   _GroupSlot(D::RevisionOut, 0));
+           }),
+           [&](const F &f) {
+               return stepName(f, K::RevisionFuse, 0, -1) +
+                      " writes RevisionOut[0], but a join publishes no "
+                      "points";
+           });
+    refuse("a join missing one of its parts", matrix([&](F &f, R &) {
+               dropRead(stepOf(f, K::RevisionFuse, 0, -1), D::RevisionOut, 2);
+           }),
+           [&](const F &f) {
+               return stepName(f, K::RevisionFuse, 0, -1) +
+                      " does not declare RevisionOut[2]";
+           });
+    refuse("mismatched bounds", twoRange([](F &f) {
+               R &second = f.geometry->chains[0].revisions[1];
+               second.chunks[0].end = 2;
+               second.chunks[1].begin = 2;
+               second.chunks[1].end = 3;
+               second.chunks[2].begin = 3;
+               second.chunks[2].end = 4;
+           }),
+           text("geometry.chains[0].revisions[1]: its point ranges differ "
+                "from revisions[0]'s, the chain's partition"));
+
+    // Gates and constants (G2, G3).
+    const auto gated = [](const std::function<void(F &)> &edit) {
+        return [edit] {
+            F f = _GroupFile(fb::RevisionOp::Matrix, {0}, true);
+            edit(f);
+            return f;
+        };
+    };
+    const std::string writesOne = row + ": writes 1 of 3 groups";
+    refuse("a missing part with no gate weight",
+           [] { return _GroupFile(fb::RevisionOp::Matrix, {0, 2}); },
+           text(row + ": writes 2 of 3 groups, but has no weight object to "
+                      "gate on"));
+    refuse("an index in an unwritten part", gated([](F &f) {
+               f.intArrays.back().v = {0, 2};
+           }),
+           text(writesOne + ", but index 2 of weight object 0 lies in part "
+                            "2, which no step writes"));
+    refuse("a listed default weight", gated([](F &f) {
+               // The method and the default weight join the listed prefix,
+               // which stays sorted by path text.
+               const uint8_t listed =
+                   uint8_t(fb::InputSlotFlags::Listed) |
+                   uint8_t(fb::InputSlotFlags::HasValue);
+               f.inputs[_sgMethod] = fb::InputSlot(
+                   _pgMethod, _vgLinear, -1, -1, InputTag::Token, listed);
+               f.inputs[_sgDefault] = fb::InputSlot(
+                   _pgDefault, _vgZero, -1, -1, InputTag::Float, listed);
+               f.listedInputs = 5;
+           }),
+           text(writesOne + ", but weight object 0's default weight is not "
+                            "one private, unanimated slot holding 0"));
+    refuse("an animated default weight", gated([](F &f) {
+               f.inputs[_sgDefault] = fb::InputSlot(
+                   _pgDefault, _vgZero, -1, -1, InputTag::Float,
+                   uint8_t(fb::InputSlotFlags::Animated) |
+                       uint8_t(fb::InputSlotFlags::HasValue));
+           }),
+           text(writesOne + ", but weight object 0's default weight is not "
+                            "one private, unanimated slot holding 0"));
+    refuse("a nonzero default weight", gated([](F &f) {
+               f.inputs[_sgDefault] = fb::InputSlot(
+                   _pgDefault, _vFloatDenormal, -1, -1, InputTag::Float,
+                   uint8_t(fb::InputSlotFlags::HasValue));
+           }),
+           text(writesOne + ", but weight object 0's default weight is not "
+                            "one private, unanimated slot holding 0"));
+    refuse("a dense gate weight", gated([](F &f) {
+               f.geometry->weightObjects[0].representation = _pgLinear;
+           }),
+           text(writesOne + ", but weight object 0 is not a static sparse "
+                            "weight"));
+
+    // A Range Skin (G1, G3): keys checked against its stored layout, a
+    // private classicLinear method.
+    const auto rangeSkin = [](const std::function<void(F &, R &)> &edit) {
+        return [edit] {
+            F f = _GroupFile(fb::RevisionOp::Skin);
+            edit(f, f.geometry->chains[0].revisions[0]);
+            return f;
+        };
+    };
+    refuse("a Range Skin key off its layout", rangeSkin([](F &, R &r) {
+               // Two bound influences: the layout keys the groups {0} and
+               // {0, 1}; group 1 claims {1}.
+               r.influenceSlots = {0, 0};
+               r.chunks[0].key = {0};
+               r.chunks[1].key = {1};
+               r.partitionProducerMin = r.partitionProducerMax = 1;
+               for (auto &set : r.partitionProducerSets) {
+                   set.values = {_GroupSlot(D::BaseMatrix, 0)};
+               }
+           }),
+           [&](const F &f) {
+               return stepName(f, K::RevisionChunk, 0, 1) +
+                      ": chunk key differs from its partition layout";
+           });
+    refuse("a listed method", rangeSkin([](F &f, R &) {
+               f.inputs[_sgMethod] = fb::InputSlot(
+                   _pgMethod, _vgLinear, -1, -1, InputTag::Token,
+                   uint8_t(fb::InputSlotFlags::Listed) |
+                       uint8_t(fb::InputSlotFlags::HasValue));
+               f.listedInputs = 4;
+           }),
+           text(row + ": a Range Skin's rigExec:skinningMethod is not one "
+                      "private, unanimated slot"));
+    refuse("a dual-quaternion method", rangeSkin([](F &f, R &) {
+               f.inputs[_sgMethod] = fb::InputSlot(
+                   _pgMethod, _vgDual, -1, -1, InputTag::Token,
+                   uint8_t(fb::InputSlotFlags::HasValue));
+           }),
+           text(row + ": a Range Skin's rigExec:skinningMethod holds "
+                      "'dualQuaternion', not classicLinear"));
+    std::printf("group tables: %d chains with groups accepted; %d group "
+                "table, step and constant violations refused\n",
                 accepted, refused);
-    CHECK(refused == 11);
+    CHECK(refused == 28);
 }
 
 // ----------------------------------------------------------------- arrays

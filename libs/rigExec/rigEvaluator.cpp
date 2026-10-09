@@ -123,6 +123,7 @@ RigExecRigEvaluator::_EnsureScopedClearShadow()
     if (!_upstreamRequested.empty()) {
         shadow->SetUpstreamInputs(_upstreamRequested);
     }
+    shadow->SetBakedRoleMode(_bakedRoleMode, _bakedExportKeep);
     _scopedClearShadow = std::move(shadow);
 }
 
@@ -206,6 +207,37 @@ RigExecRigEvaluator::SetPublishWeightFields(bool publish)
 }
 
 void
+RigExecRigEvaluator::SetBakedRoleMode(RigExecBakedRoleMode mode,
+                                      std::set<SdfPath> exportKeep)
+{
+    if (_scopedClearShadow) {
+        _scopedClearShadow->SetBakedRoleMode(mode, exportKeep);
+    }
+    if (mode == _bakedRoleMode && exportKeep == _bakedExportKeep) {
+        return;
+    }
+    _bakedRoleMode = mode;
+    _bakedExportKeep = std::move(exportKeep);
+    // Build reads both; the standing program was classified without them.
+    _bakedProgramStale = true;
+}
+
+RigExecScopedBakedRoleMode::RigExecScopedBakedRoleMode(
+    RigExecRigEvaluator &evaluator, RigExecBakedRoleMode mode,
+    std::set<SdfPath> exportKeep)
+    : _evaluator(evaluator)
+    , _previous(evaluator.GetBakedRoleMode())
+    , _previousKeep(evaluator.GetBakedExportKeep())
+{
+    _evaluator.SetBakedRoleMode(mode, std::move(exportKeep));
+}
+
+RigExecScopedBakedRoleMode::~RigExecScopedBakedRoleMode()
+{
+    _evaluator.SetBakedRoleMode(_previous, std::move(_previousKeep));
+}
+
+void
 RigExecRigEvaluator::SetSolverGuidesEnabled(bool enabled)
 {
     if (_inputReplayObserver)
@@ -262,24 +294,49 @@ RigExecRigEvaluator::_EvaluateGeneration(UsdTimeCode time)
         _AdmitUpstreamInputs(time);
         pose.diagnostics.insert(pose.diagnostics.end(),_upstreamDropLines.begin(),_upstreamDropLines.end());
     }
-    if(!_bakedProgram) {
+    const auto unavailable=[&]() {
         pose.diagnostics.push_back("native program unavailable for compiled epoch");
         pose.diagnostics.insert(pose.diagnostics.end(),_bakeRefusalReasons.begin(),_bakeRefusalReasons.end());
+    };
+    if(!_bakedProgram) {
+        unavailable();
         return pose;
     }
-    {
-        RIGEXEC_PROFILE_SCOPE_CAT(_profiler,"Evaluate.PlaceOverrides","evaluate");
-        _bakedProgram->SetUpstreamInputs(_upstreamAdmitted);
-        if(!_bakedProgram->SetOverrides(_interactiveOverrides)) {
-            pose.diagnostics.push_back("native program refused interactive inputs");
+    // Places this generation's inputs on the standing program and runs it.
+    // False with *placed false when it refuses the interactive inputs.
+    const size_t diagnosticsBeforeRun=pose.diagnostics.size();
+    const auto placeAndRun=[&](bool *placed) {
+        {
+            RIGEXEC_PROFILE_SCOPE_CAT(_profiler,"Evaluate.PlaceOverrides","evaluate");
+            _bakedProgram->SetUpstreamInputs(_upstreamAdmitted);
+            *placed=_bakedProgram->SetOverrides(_interactiveOverrides);
+            if(!*placed) {
+                pose.diagnostics.push_back("native program refused interactive inputs");
+                return false;
+            }
+            _bakedProgram->SetPublishWeightFields(_publishWeightFields);
+        }
+        RIGEXEC_PROFILE_SCOPE_CAT(_profiler,"Evaluate.Run","evaluate");
+        return _bakedProgram->Run(time,&pose);
+    };
+    bool placed=true;
+    bool completed=placeAndRun(&placed);
+    if(!placed)return pose;
+    if(!completed && _bakedProgram->GetLastBail()==RigExecBakedBail::RoleFlip) {
+        // A Range role or group gate rested on a value this generation
+        // sampled otherwise. Rebuild from the values standing now (Build
+        // classifies with the overrides and admitted upstream inputs) and
+        // run once more; the bailed run leaves no line, and a second
+        // failure is reported like any other.
+        pose.diagnostics.erase(pose.diagnostics.begin()+std::ptrdiff_t(diagnosticsBeforeRun),
+                               pose.diagnostics.end());
+        _RebuildBakedProgram(std::move(_bakedProgram));
+        if(!_bakedProgram) {
+            unavailable();
             return pose;
         }
-        _bakedProgram->SetPublishWeightFields(_publishWeightFields);
-    }
-    bool completed=false;
-    {
-        RIGEXEC_PROFILE_SCOPE_CAT(_profiler,"Evaluate.Run","evaluate");
-        completed=_bakedProgram->Run(time,&pose);
+        completed=placeAndRun(&placed);
+        if(!placed)return pose;
     }
     if(!completed) {
         pose.valid=false;

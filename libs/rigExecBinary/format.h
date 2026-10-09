@@ -517,24 +517,54 @@ inline constexpr uint8_t RigExecWireConstraintRadialBlend =
 /// rigexec.fbs or to what its records mean bumps it. Open refuses all older
 /// versions with an S3 re-export message; unknown future versions receive a
 /// rebake message.
-inline constexpr uint32_t RigExecFormatVersion = 19;
+inline constexpr uint32_t RigExecFormatVersion = 20;
 
-/// A range-pipelined revision (format 19): unchunked with two or more chunks,
-/// which are its chain's point partition, keys empty.
+/// A Range revision (formats 19 and 20): unchunked with two or more chunks,
+/// which are its chain's group partition. Keys are empty except on a Range
+/// Skin (format 20), whose chunk g carries group g's influence key.
 inline bool
 RigExecFormatIsRangeRevision(const fb::RigExecWireRevision &r)
 {
     return !r.chunked && r.chunks.size() >= 2;
 }
 
-/// The ops a range-pipelined revision may have: Matrix, Wire, Lattice.
+/// The ops a Range revision may have in format 20: Matrix, Wire, Lattice,
+/// BlendShape and Skin (a Skin only with a private classicLinear method).
 inline bool
 RigExecFormatIsRangeOp(uint8_t op)
 {
     return op == uint8_t(fb::RevisionOp::Matrix) ||
            op == uint8_t(fb::RevisionOp::Wire) ||
-           op == uint8_t(fb::RevisionOp::Lattice);
+           op == uint8_t(fb::RevisionOp::Lattice) ||
+           op == uint8_t(fb::RevisionOp::BlendShape) ||
+           op == uint8_t(fb::RevisionOp::Skin);
 }
+
+/// Whether \p r's chunks carry influence keys: a chunked skin (Legacy, or
+/// Whole in a chain with groups) or a Range Skin.
+inline bool
+RigExecFormatIsKeyedRevision(const fb::RigExecWireRevision &r)
+{
+    return r.chunked || (RigExecFormatIsRangeRevision(r) &&
+                         r.op == uint8_t(fb::RevisionOp::Skin));
+}
+
+/// A chain's group count in format 20: the chunk count of its first Range
+/// revision (all Range revisions share the bounds), or 0 when it has none
+/// (every revision Legacy). A revision of a chain with groups that is not
+/// Range is Whole: its fuse writes RevisionOut[chunk_base + chunks.size(),
+/// + groups).
+size_t RigExecFormatChainGroups(const fb::RigExecWireFile &file, size_t chain);
+
+/// Format 20 group writers of chain \p chain, from its revisions and the
+/// file's RevisionChunk steps: (*written)[r][g] whether revision r writes
+/// group g (Range: a step for part g; Whole: always; Legacy: never), and
+/// (*enteringWriter)[r][g] the chain index of the last earlier revision that
+/// writes g, or -1 (the base). Empty when the chain has no groups. The
+/// validator and runtime Open share it.
+void RigExecFormatGroupWriters(const fb::RigExecWireFile &file, size_t chain,
+                               std::vector<std::vector<char>> *written,
+                               std::vector<std::vector<int>> *enteringWriter);
 
 /// Whether \p tag is one of the array tags (IntArray and after).
 inline constexpr bool
@@ -552,11 +582,12 @@ inline constexpr char RigExecFormatIdentifier[] = "REXB";
 /// layouts among them), every read's walk (no scalar read walks an array
 /// slot, an array read walks slots of its own tag), constant and override
 /// number, table shapes and indices, step and cone ranges, skin topologies
-/// and the layout, range-pipelined chains' partitions and step reads, chain
-/// base, painted and oracle slots, path reads, property chains, external
-/// movers and the nested presentation (bounded like Open's buffer, then
-/// verified with its REXP identifier). False with a reason naming the
-/// table, index and field.
+/// and the layout, chains with groups (their partitions, group steps'
+/// reads and writes, and the private constants their Range skins and gates
+/// rest on), chain base, painted and oracle slots, path reads, property
+/// chains, external movers and the nested presentation (bounded like Open's
+/// buffer, then verified with its REXP identifier). False with a reason
+/// naming the table, index and field.
 bool RigExecFormatValidate(const fb::RigExecWireFile &file,
                            std::string *error);
 

@@ -500,6 +500,15 @@ public:
     /// The admitted keys, sorted.
     std::vector<SdfPath> GetUpstreamInputPaths() const;
 
+    /// The roles the next baked program is built with (RigExecBakedRoleMode)
+    /// and, for Export, the paths it must leave listed (admitted upstream
+    /// inputs and presentation inputs). A change marks the program stale; the
+    /// next Evaluate rebuilds.
+    void SetBakedRoleMode(RigExecBakedRoleMode mode,
+                          std::set<SdfPath> exportKeep = {});
+    RigExecBakedRoleMode GetBakedRoleMode() const { return _bakedRoleMode; }
+    const std::set<SdfPath> &GetBakedExportKeep() const { return _bakedExportKeep; }
+
     /// Whether each generation resolves RigExecRigPose::weightFields.
     ///
     /// The influence overlay is a per-POINT field: resolving it walks every
@@ -1551,6 +1560,10 @@ private:
     /// dynamic path does. See _RebuildBakedProgram.
     bool _bakedProgramPublished = false;
     bool _bakedProgramStale = false;
+    /// What Build gives range-chain revisions (SetBakedRoleMode): Live but
+    /// for the bake, which holds Export with its keep-set.
+    RigExecBakedRoleMode _bakedRoleMode = RigExecBakedRoleMode::Live;
+    std::set<SdfPath> _bakedExportKeep;
     /// This epoch already asked for a program and was refused.
     ///
     /// The refusal is a property of the compiled epoch, so re-asking inside
@@ -1662,6 +1675,22 @@ public:
 private:
     RigExecRigEvaluator &_evaluator;
     std::vector<RigExecValueOverride> _saved;
+};
+
+/// Holds \p evaluator in \p mode (with \p exportKeep) for a scope (the bake)
+/// and restores the previous mode and keep-set after.
+class RigExecScopedBakedRoleMode {
+public:
+    RigExecScopedBakedRoleMode(RigExecRigEvaluator &evaluator,
+                               RigExecBakedRoleMode mode,
+                               std::set<SdfPath> exportKeep = {});
+    ~RigExecScopedBakedRoleMode();
+    RigExecScopedBakedRoleMode(const RigExecScopedBakedRoleMode &) = delete;
+    RigExecScopedBakedRoleMode &operator=(const RigExecScopedBakedRoleMode &) = delete;
+private:
+    RigExecRigEvaluator &_evaluator;
+    RigExecBakedRoleMode _previous;
+    std::set<SdfPath> _previousKeep;
 };
 
 /// Test and diagnostic access to the constraint handler registry -- the one

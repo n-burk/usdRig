@@ -2908,27 +2908,58 @@ private:
                 if(revision.driverFramesSolver>=0)read(D::Aggregate,uint32_t(revision.driverFramesSolver));
                 for(const auto &channel:revision.blendChannels)
                     if(channel.poseWeight>=0)read(D::PoseWeight,uint32_t(channel.poseWeight));
-            } else if(step.kind==K::RevisionChunk && RigExecFormatIsRangeRevision(revision)) {
-                // Range `part` of the entering version: the previous revision's
-                // range step when that one is range-pipelined too.
+            } else if(!_groupWritten[c].empty()) {
+                // A chain with groups (format 20), as _RangeSteps holds the
+                // declarations: a group step reads group `part` of the
+                // entering version; a join its written parts; a Whole fuse
+                // its chunks and every group of the entering version.
+                const size_t r=size_t(index.second);
+                const auto group=[&](size_t k) {
+                    const int w=_groupEntering[c][r][k];
+                    if(w<0)return;
+                    const auto &writer=chain.revisions[size_t(w)];
+                    read(D::RevisionOut,uint32_t(writer.chunkBase)+uint32_t(k)+
+                        uint32_t(RigExecFormatIsRangeRevision(writer)?0:writer.chunks.size()));
+                };
+                const bool range=RigExecFormatIsRangeRevision(revision);
+                const bool keyed=RigExecFormatIsKeyedRevision(revision);
                 read(D::RevisionPacket,id);
-                const auto *previous=index.second>0?&chain.revisions[size_t(index.second)-1]:nullptr;
-                if(previous && RigExecFormatIsRangeRevision(*previous)) {
-                    if(_Has(previous->chunks,step.part))
-                        read(D::RevisionOut,uint32_t(previous->chunkBase)+uint32_t(step.part));
-                } else point(c,uint32_t(index.second));
+                if(step.kind==K::RevisionChunk) {
+                    if(!_Has(revision.chunks,step.part))continue;
+                    if(!range && !keyed) {
+                        point(c,uint32_t(r));
+                        if(skin)read(D::RevisionTransforms,id);
+                        continue;
+                    }
+                    group(size_t(step.part));
+                    if(range && skin)read(D::RevisionTransforms,id);
+                    if(keyed) {
+                        const D own=revision.finalPhase?D::FinalMatrix:D::BaseMatrix;
+                        for(int32_t position:revision.chunks[size_t(step.part)].key)
+                            if(_Has(revision.influenceSlots,position) && revision.influenceSlots[size_t(position)]>=0)
+                                read(own,uint32_t(revision.influenceSlots[size_t(position)]));
+                    }
+                    continue;
+                }
+                read(D::RevisionTransforms,id);point(c,uint32_t(r));
+                if(revision.weightObject>=0)read(D::WeightPacket,uint32_t(revision.weightObject));
+                const std::vector<char> &written=_groupWritten[c][r];
+                if(range) {
+                    for(size_t k=0;k<written.size();++k)
+                        if(written[k])read(D::RevisionOut,uint32_t(revision.chunkBase)+uint32_t(k));
+                    continue;
+                }
+                for(size_t k=0;k<revision.chunks.size();++k)read(D::RevisionOut,uint32_t(revision.chunkBase)+uint32_t(k));
+                for(size_t k=0;k<written.size();++k)group(k);
             } else if(step.kind==K::RevisionChunk) {
                 read(D::RevisionPacket,id);point(c,uint32_t(index.second));
-                if(revision.chunked && _Has(revision.chunks,step.part)) {
+                if(RigExecFormatIsKeyedRevision(revision) && _Has(revision.chunks,step.part)) {
                     const D own=revision.finalPhase?D::FinalMatrix:D::BaseMatrix;
                     for(int32_t position:revision.chunks[size_t(step.part)].key)
                         if(_Has(revision.influenceSlots,position) && revision.influenceSlots[size_t(position)]>=0)
                             read(own,uint32_t(revision.influenceSlots[size_t(position)]));
                 } else if(skin)read(D::RevisionTransforms,id);
             } else {
-                // A range-pipelined revision's fuse is a join over its own
-                // ranges; it declares the entering version as a fuse does,
-                // which keeps the joins in chain order.
                 read(D::RevisionPacket,id);read(D::RevisionTransforms,id);point(c,uint32_t(index.second));
                 if(revision.weightObject>=0)read(D::WeightPacket,uint32_t(revision.weightObject));
                 for(size_t k=0;k<revision.chunks.size();++k)read(D::RevisionOut,uint32_t(revision.chunkBase)+uint32_t(k));
@@ -3385,7 +3416,7 @@ private:
                     !require(fb::SlotDomain::Rest, bodyRevision->transformSpaceSlot) ||
                     !require(fb::SlotDomain::Rest, bodyRevision->carrySpaceSlot))) return false;
             }
-            if (bodyRevision && bodyRevision->chunked &&
+            if (bodyRevision && RigExecFormatIsKeyedRevision(*bodyRevision) &&
                 step.kind == fb::StepKind::RevisionChunk) {
                 if (!_Has(bodyRevision->chunks, step.part))
                     return _Bad(_StepName(i) + ": chunk part out of range");
@@ -4253,16 +4284,34 @@ private:
                 return _Bad(row + ": chain_revision range of chain " +
                             _N(c) + " does not match its revisions");
             }
+            // A Whole revision of a chain with groups (format 20) owns, past
+            // its chunks, one RevisionOut id per group, which its fuse
+            // publishes; the chain's chunk range holds every id it owns.
+            const size_t groups = RigExecFormatChainGroups(_f, c);
+            int64_t owned = 0;
             for (size_t r = 0; r < chain.revisions.size(); ++r, ++id) {
+                const fb::RigExecWireRevision &revision = chain.revisions[r];
+                const size_t count =
+                    revision.chunks.size() +
+                    (groups > 0 && !RigExecFormatIsRangeRevision(revision)
+                         ? groups
+                         : 0);
                 if (g.revisionIndex[id].first != int32_t(c) ||
                     g.revisionIndex[id].second != int32_t(r) ||
-                    g.revisionChunkCount[id] !=
-                        int32_t(chain.revisions[r].chunks.size()) ||
-                    g.revisionChunkBase[id] != chain.revisions[r].chunkBase) {
+                    g.revisionChunkCount[id] != int32_t(count) ||
+                    g.revisionChunkBase[id] != revision.chunkBase) {
                     return _Bad(row + ": revision_index or chunk tables "
                                       "disagree at revision " +
                                 _N(id));
                 }
+                owned += int64_t(count);
+            }
+            if (groups > 0 && int64_t(g.chainChunkEnd[c]) -
+                                      int64_t(g.chainChunkBegin[c]) !=
+                                  owned) {
+                return _Bad(row + ": chain_chunk range of chain " + _N(c) +
+                            " does not hold its revisions' " +
+                            _N(size_t(owned)) + " RevisionOut ids");
             }
             for (size_t d = 0; d < chain.derived.size(); ++d, ++derivedId) {
                 if (g.derivedIndex[derivedId].first != int32_t(c) ||
@@ -4271,6 +4320,14 @@ private:
                                 _N(derivedId));
                 }
             }
+        }
+        // The group writers, from the revision ranges checked above; the
+        // step rules, the constants and the body reads all read them.
+        _groupWritten.assign(_chains, {});
+        _groupEntering.assign(_chains, {});
+        for (size_t c = 0; c < _chains; ++c) {
+            RigExecFormatGroupWriters(_f, c, &_groupWritten[c],
+                                      &_groupEntering[c]);
         }
         for (size_t c = 0, first = 0; c < _chains; ++c) {
             if (!_Chain(g.chains[c], "geometry.chains[" + _N(c) + "]",
@@ -4293,96 +4350,399 @@ private:
             !_Bools(g.deltaBaseOk, row, "delta_base_ok")) {
             return false;
         }
-        return _PathReads(g) && _RangeSteps();
+        return _PathReads(g) && _RangeSteps() && _GroupConstants();
     }
 
-    /// The steps of every range-pipelined revision declare what their
-    /// bodies read, as the program's ValidatePointVersions holds them:
-    /// range step k (part k of the partition) its packet, the chain base
-    /// and range k of the entering version, which is the previous
-    /// revision's RevisionOut of part k when that one is range-pipelined
-    /// (then not its whole version), else that version's RevisionDone and
-    /// ChainDirty; the fuse, a join, its packet and transforms, the chain
-    /// base, its weight packet when it has one, each of its own RevisionOut
-    /// and, as a fuse does, the entering version, which orders the joins.
+    /// The steps of every chain with groups (format 20) declare what their
+    /// bodies read and write, as the program's ValidatePointVersions holds
+    /// them. Group k of the version entering revision r is the RevisionOut
+    /// slot of the last earlier revision that writes k (a Range one's
+    /// chunk_base + k, a Whole one's chunk_base + chunks + k), else the
+    /// chain base (RigExecFormatGroupWriters). Every step reads its packet
+    /// and the chain base. A Range revision's group step for part k, at
+    /// most one per part, reads group k of its entering version and no
+    /// other RevisionOut, a Range Skin's also its transforms, and never
+    /// that version's RevisionDone or ChainDirty; its join reads its
+    /// transforms, its weight packet when it has one, the slots of its
+    /// written parts and none other of its own, and the entering version
+    /// (which keeps the joins in chain order), and writes no RevisionOut. A
+    /// Whole keyed skin has one chunk step per part, each reading group k
+    /// of its entering version and no other RevisionOut; any other Whole
+    /// revision has one step per chunk, each reading the entering version
+    /// (a skin also its transforms). A Whole fuse reads its transforms, its
+    /// weight packet when it has one, its chunks, the entering version and
+    /// group k of it for every k, and writes every group it publishes.
     bool _RangeSteps()
     {
         using D = fb::SlotDomain;
         const fb::RigExecWireDomainGeometry &g = *_f.geometry;
+        // RevisionChunk steps per (revision id, part) of chains with groups.
+        std::map<std::pair<uint64_t, int64_t>, size_t> chunkSteps;
         for (size_t i = 0; i < _f.steps.size(); ++i) {
             const fb::RigExecWireStep &step = _f.steps[i];
-            const bool range = step.kind == fb::StepKind::RevisionChunk;
-            if ((!range && step.kind != fb::StepKind::RevisionFuse) ||
+            const bool chunk = step.kind == fb::StepKind::RevisionChunk;
+            if ((!chunk && step.kind != fb::StepKind::RevisionFuse) ||
                 !_Has(g.revisionIndex, step.object)) {
                 continue;
             }
             const RigExecWireIntPair &at = g.revisionIndex[size_t(step.object)];
-            const fb::RigExecWireChain &chain = g.chains[size_t(at.first)];
-            const fb::RigExecWireRevision &revision =
-                chain.revisions[size_t(at.second)];
-            if (!RigExecFormatIsRangeRevision(revision)) {
+            const size_t c = size_t(at.first);
+            const size_t r = size_t(at.second);
+            const std::vector<std::vector<char>> &written = _groupWritten[c];
+            if (written.empty()) {
                 continue;
             }
+            const size_t groups = written[r].size();
+            const fb::RigExecWireChain &chain = g.chains[c];
+            const fb::RigExecWireRevision &revision = chain.revisions[r];
+            const bool range = RigExecFormatIsRangeRevision(revision);
+            const bool keyed = RigExecFormatIsKeyedRevision(revision);
+            const bool skin = revision.op == uint8_t(fb::RevisionOp::Skin);
             const uint64_t id = uint64_t(step.object);
-            const uint64_t c = uint64_t(at.first);
-            const fb::RigExecWireRevision *previous =
-                at.second > 0 ? &chain.revisions[size_t(at.second) - 1]
-                              : nullptr;
+            const std::string name = _StepName(i);
             const auto need = [&](D domain, uint64_t slot) {
                 return _Declares(i, domain, slot) ||
-                       _Bad(_StepName(i) + " does not declare " +
+                       _Bad(name + " does not declare " +
                             rigExecStepGraphDetail::DomainName(
                                 uint8_t(domain)) +
                             "[" + _N(slot) + "]");
             };
-            if (!need(D::RevisionPacket, id) || !need(D::ChainBase, c)) {
+            // Group k as revision w of the chain publishes it.
+            const auto groupSlot = [&](size_t w, size_t k) {
+                const fb::RigExecWireRevision &writer = chain.revisions[w];
+                return uint64_t(int64_t(writer.chunkBase) +
+                                int64_t(RigExecFormatIsRangeRevision(writer)
+                                            ? 0
+                                            : writer.chunks.size()) +
+                                int64_t(k));
+            };
+            // Group k of the version entering this revision: false for the
+            // chain base, else true with its slot.
+            const auto enteringSlot = [&](size_t k, uint64_t *slot) {
+                const int w = _groupEntering[c][r][k];
+                if (w >= 0) {
+                    *slot = groupSlot(size_t(w), k);
+                }
+                return w >= 0;
+            };
+            const auto needVersion = [&]() {
+                return r == 0 || (need(D::RevisionDone, id - 1) &&
+                                  need(D::ChainDirty, id - 1));
+            };
+            const auto readsVersion = [&]() {
+                return r > 0 && (_Declares(i, D::RevisionDone, id - 1) ||
+                                 _Declares(i, D::ChainDirty, id - 1));
+            };
+            if (!need(D::RevisionPacket, id) ||
+                !need(D::ChainBase, uint64_t(c))) {
                 return false;
             }
-            // Whether the step reads the entering version whole.
-            bool whole = previous != nullptr;
-            if (range) {
+            if (chunk) {
                 if (!_Has(revision.chunks, step.part)) {
-                    return _Bad(_StepName(i) + ": range part " +
+                    return _Bad(name + (range ? ": range part " : ": part ") +
                                 std::to_string(step.part) + " of " +
                                 _N(revision.chunks.size()));
                 }
-                if (previous && RigExecFormatIsRangeRevision(*previous)) {
-                    if (!need(D::RevisionOut,
-                              uint64_t(int64_t(previous->chunkBase) +
-                                       step.part))) {
+                if (++chunkSteps[{id, int64_t(step.part)}] > 1) {
+                    return _Bad(name + ": a second step for part " +
+                                std::to_string(step.part));
+                }
+                if (!range && !keyed) {
+                    if (!needVersion() ||
+                        (skin && !need(D::RevisionTransforms, id))) {
                         return false;
                     }
-                    whole = false;
+                    continue;
                 }
-            } else {
-                if (!need(D::RevisionTransforms, id) ||
-                    (revision.weightObject >= 0 &&
-                     !need(D::WeightPacket, uint64_t(revision.weightObject)))) {
+                // A group step: group `part` of the entering version, and
+                // no other RevisionOut slot.
+                const size_t k = size_t(step.part);
+                uint64_t want = 0;
+                const bool slotted = enteringSlot(k, &want);
+                if (slotted && !need(D::RevisionOut, want)) {
                     return false;
                 }
-                for (size_t k = 0; k < revision.chunks.size(); ++k) {
-                    if (!need(D::RevisionOut,
-                              uint64_t(int64_t(revision.chunkBase) +
-                                       int64_t(k)))) {
+                for (const fb::SlotRange &read : step.reads) {
+                    if (read.domain() != D::RevisionOut ||
+                        read.begin() >= read.end() ||
+                        (slotted && read.begin() == want &&
+                         read.end() == want + 1)) {
+                        continue;
+                    }
+                    const uint64_t other =
+                        slotted && read.begin() == want ? want + 1
+                                                        : read.begin();
+                    return _Bad(name + " reads RevisionOut[" + _N(other) +
+                                "], which is not group " + _N(k) +
+                                " of the version entering it");
+                }
+                if (range && skin && !need(D::RevisionTransforms, id)) {
+                    return false;
+                }
+                if (range && readsVersion()) {
+                    return _Bad(name + " declares point version " + _N(r) +
+                                " of chain " + _N(c) +
+                                ", which a range-pipelined range step does "
+                                "not read");
+                }
+                continue;
+            }
+            // The fuse: a Range revision's join, or a Whole revision's.
+            if (!need(D::RevisionTransforms, id) ||
+                (revision.weightObject >= 0 &&
+                 !need(D::WeightPacket, uint64_t(revision.weightObject))) ||
+                !needVersion()) {
+                return false;
+            }
+            const uint64_t base = uint64_t(int64_t(revision.chunkBase));
+            if (range) {
+                for (size_t k = 0; k < groups; ++k) {
+                    if (written[r][k] && !need(D::RevisionOut, base + k)) {
                         return false;
+                    }
+                    if (!written[r][k] &&
+                        _Declares(i, D::RevisionOut, base + k)) {
+                        return _Bad(name + " reads RevisionOut[" +
+                                    _N(base + k) + "] of part " + _N(k) +
+                                    ", which no step writes");
+                    }
+                }
+                for (const fb::SlotRange &write : step.writes) {
+                    if (write.domain() == D::RevisionOut &&
+                        write.begin() < write.end()) {
+                        return _Bad(name + " writes RevisionOut[" +
+                                    _N(write.begin()) +
+                                    "], but a join publishes no points");
+                    }
+                }
+                continue;
+            }
+            const size_t chunks = revision.chunks.size();
+            for (size_t k = 0; k < chunks; ++k) {
+                if (!need(D::RevisionOut, base + k)) {
+                    return false;
+                }
+            }
+            for (size_t k = 0; k < groups; ++k) {
+                uint64_t slot = 0;
+                if (enteringSlot(k, &slot) && !need(D::RevisionOut, slot)) {
+                    return false;
+                }
+                const uint64_t published = base + chunks + k;
+                const bool writes = std::any_of(
+                    step.writes.begin(), step.writes.end(),
+                    [&](const fb::SlotRange &write) {
+                        return write.domain() == D::RevisionOut &&
+                               write.begin() <= published &&
+                               published < write.end();
+                    });
+                if (!writes) {
+                    return _Bad(name + " does not write RevisionOut[" +
+                                _N(published) + "], group " + _N(k) +
+                                " of the version it publishes");
+                }
+            }
+        }
+        // Every part of a Whole revision has its chunk step; a Range
+        // revision's missing parts are its gated groups (_GroupConstants).
+        for (size_t c = 0; c < _chains; ++c) {
+            const fb::RigExecWireChain &chain = g.chains[c];
+            if (_groupWritten[c].empty()) {
+                continue;
+            }
+            for (size_t r = 0; r < chain.revisions.size(); ++r) {
+                const fb::RigExecWireRevision &revision = chain.revisions[r];
+                if (RigExecFormatIsRangeRevision(revision)) {
+                    continue;
+                }
+                const uint64_t id = uint64_t(g.chainRevisionBegin[c]) + r;
+                for (size_t k = 0; k < revision.chunks.size(); ++k) {
+                    if (!chunkSteps.count({id, int64_t(k)})) {
+                        return _Bad("geometry.chains[" + _N(c) +
+                                    "].revisions[" + _N(r) +
+                                    "]: no RevisionChunk step for part " +
+                                    _N(k) + " of a Whole revision");
                     }
                 }
             }
-            if (!previous) {
+        }
+        return true;
+    }
+
+    /// Whether input slot \p slot is private and unanimated: no integration
+    /// can set it, and its default is its value at every time.
+    bool _PrivateConstant(uint32_t slot) const
+    {
+        const uint8_t flags = _f.inputs[slot].flags();
+        return (flags & (uint8_t(fb::InputSlotFlags::Listed) |
+                         uint8_t(fb::InputSlotFlags::Animated))) == 0;
+    }
+
+    /// Whether \p value is a Float holding 0 (either sign).
+    static bool _FloatZero(const fb::RigExecWireValue &value)
+    {
+        if (value.tag != InputTag::Float) {
+            return false;
+        }
+        const uint32_t bits = uint32_t(value.bits);
+        float f = 1.0f;
+        std::memcpy(&f, &bits, sizeof f);
+        return f == 0.0f;
+    }
+
+    /// What the Range roles and gates of a chain with groups rest on, as
+    /// private constants (format 20). A Range Skin's rigExec:skinningMethod
+    /// and rigExec:elementSize reads are one hop over a private, unanimated
+    /// slot (or a static value), the method classicLinear, and its
+    /// joint_indices_slot is private and unanimated. A Range revision that
+    /// writes fewer parts than the chain has groups is gated: its weight
+    /// object is a static sparse weight, neither current-phase nor
+    /// operation-domain, whose default weight reads one private, unanimated
+    /// slot holding 0 (its Baked constant 0 too) and whose indices are a
+    /// private slot, every index of whose default inside the chain's points
+    /// lies in a written part.
+    bool _GroupConstants()
+    {
+        const fb::RigExecWireDomainGeometry &g = *_f.geometry;
+        for (size_t c = 0; c < _chains; ++c) {
+            const std::vector<std::vector<char>> &written = _groupWritten[c];
+            if (written.empty()) {
                 continue;
             }
-            const uint64_t entering = id - 1;
-            if (whole && (!need(D::RevisionDone, entering) ||
-                          !need(D::ChainDirty, entering))) {
-                return false;
+            const fb::RigExecWireChain &chain = g.chains[c];
+            for (size_t r = 0; r < chain.revisions.size(); ++r) {
+                const fb::RigExecWireRevision &revision = chain.revisions[r];
+                if (!RigExecFormatIsRangeRevision(revision)) {
+                    continue;
+                }
+                const std::string row = "geometry.chains[" + _N(c) +
+                                        "].revisions[" + _N(r) + "]";
+                if (revision.op == uint8_t(fb::RevisionOp::Skin) &&
+                    !_RangeSkinConstants(revision, row)) {
+                    return false;
+                }
+                const size_t groups = written[r].size();
+                const size_t count = size_t(
+                    std::count(written[r].begin(), written[r].end(), 1));
+                if (count == groups) {
+                    continue;
+                }
+                const std::string gated = row + ": writes " + _N(count) +
+                                          " of " + _N(groups) + " groups";
+                if (revision.weightObject < 0) {
+                    return _Bad(gated + ", but has no weight object to "
+                                        "gate on");
+                }
+                const fb::RigExecWireWeightObject &w =
+                    g.weightObjects[size_t(revision.weightObject)];
+                const std::string object =
+                    " weight object " + _N(size_t(revision.weightObject));
+                if (RigExecFormatPathText(_f, w.type) !=
+                        "RigExecStaticWeight" ||
+                    RigExecFormatPathText(_f, w.representation) != "sparse") {
+                    return _Bad(gated + ", but" + object +
+                                " is not a static sparse weight");
+                }
+                if (revision.weightCurrentPhase ||
+                    revision.weightOperationDomain) {
+                    return _Bad(gated + ", but its weight is current-phase "
+                                        "or operation-domain");
+                }
+                const RigExecWireInput *d = w.defaultWeight.get();
+                const uint8_t avoid =
+                    uint8_t(fb::InputReadFlags::Varying) |
+                    uint8_t(fb::InputReadFlags::ViaChain);
+                if (!d || d->walk.size() != 1 || (d->flags & avoid) != 0 ||
+                    !_PrivateConstant(d->walk[0]) ||
+                    !_FloatZero(_DefaultOf(int32_t(d->walk[0]))) ||
+                    (d->mode == fb::ReadMode::Baked &&
+                     !_FloatZero(_f.values[d->constant]))) {
+                    return _Bad(gated + ", but" + object +
+                                "'s default weight is not one private, "
+                                "unanimated slot holding 0");
+                }
+                if (w.indicesSlot < 0 ||
+                    (_f.inputs[size_t(w.indicesSlot)].flags() &
+                     uint8_t(fb::InputSlotFlags::Listed)) != 0) {
+                    return _Bad(gated + ", but" + object +
+                                "'s indices are not a private slot");
+                }
+                const int64_t points = revision.chunks.back().end;
+                const std::vector<int32_t> &indices =
+                    _f.intArrays[_DefaultOf(w.indicesSlot).array].v;
+                for (const int32_t index : indices) {
+                    if (index < 0 || int64_t(index) >= points) {
+                        continue;
+                    }
+                    size_t k = 0;
+                    while (k + 1 < groups &&
+                           int64_t(revision.chunks[k].end) <= index) {
+                        ++k;
+                    }
+                    if (!written[r][k]) {
+                        return _Bad(gated + ", but index " +
+                                    std::to_string(index) + " of" + object +
+                                    " lies in part " + _N(k) +
+                                    ", which no step writes");
+                    }
+                }
             }
-            if (!whole && (_Declares(i, D::RevisionDone, entering) ||
-                           _Declares(i, D::ChainDirty, entering))) {
-                return _Bad(_StepName(i) + " declares point version " +
-                            _N(size_t(at.second)) + " of chain " + _N(c) +
-                            ", which a range-pipelined range step does "
-                            "not read");
+        }
+        return true;
+    }
+
+    /// A Range Skin's method, element size and joint indices as private
+    /// constants, the method classicLinear (_GroupConstants).
+    bool _RangeSkinConstants(const fb::RigExecWireRevision &revision,
+                             const std::string &row)
+    {
+        const fb::RigExecWireDomainGeometry &g = *_f.geometry;
+        const std::string mover = RigExecFormatPathText(_f, revision.moverPath);
+        for (const char *attribute :
+             {"rigExec:skinningMethod", "rigExec:elementSize"}) {
+            const bool method =
+                std::strcmp(attribute, "rigExec:skinningMethod") == 0;
+            const std::string path = mover + "." + attribute;
+            for (const fb::RigExecWirePathRead &read : g.pathReads) {
+                if (read.rest ||
+                    RigExecFormatPathText(_f, read.path) != path) {
+                    continue;
+                }
+                std::string text = "classicLinear";
+                if (read.read) {
+                    const uint32_t head =
+                        read.read->walk.empty() ? 0 : read.read->walk[0];
+                    if (read.read->walk.size() != 1 ||
+                        !_PrivateConstant(head)) {
+                        return _Bad(row + ": a Range Skin's " + attribute +
+                                    " is not one private, unanimated slot");
+                    }
+                    const fb::RigExecWireValue &value =
+                        _DefaultOf(int32_t(head));
+                    if (method) {
+                        text = value.tag == InputTag::Token
+                                   ? RigExecFormatPathText(
+                                         _f, uint32_t(value.bits))
+                                   : std::string();
+                    }
+                } else if (method && read.value) {
+                    text = read.value->tag == fb::PathTag::Token
+                               ? RigExecFormatPathText(
+                                     _f, uint32_t(read.value->bits))
+                               : std::string();
+                }
+                if (method && text != "classicLinear") {
+                    return _Bad(row + ": a Range Skin's "
+                                      "rigExec:skinningMethod holds '" +
+                                text + "', not classicLinear");
+                }
             }
+        }
+        if (revision.jointIndicesSlot >= 0 &&
+            !_PrivateConstant(uint32_t(revision.jointIndicesSlot))) {
+            return _Bad(_At(row, "joint_indices_slot") +
+                        ": a Range Skin's joint indices are listed or "
+                        "animated");
         }
         return true;
     }
@@ -4420,9 +4780,9 @@ private:
 
     /// \p chain, whose revisions take flat ids from \p firstRevision. Its
     /// base slot is the target's points input, a float3[] slot whose
-    /// default is the base itself. Its range-pipelined revisions all cut
-    /// the chain's one point partition, so that range step k of one reads
-    /// range k of the one before.
+    /// default is the base itself. Its Range revisions and, when it has
+    /// any, its Whole keyed skins all cut the chain's one group partition,
+    /// so that a group step for part k reads group k of what came before.
     bool _Chain(const fb::RigExecWireChain &chain, const std::string &row,
                 size_t firstRevision)
     {
@@ -4461,14 +4821,21 @@ private:
                 return false;
             }
         }
+        // The chain's group partition is its first Range revision's; every
+        // other Range revision and every Whole keyed skin cuts the same
+        // groups.
         const fb::RigExecWireRevision *partition = nullptr;
-        for (size_t r = 0; r < chain.revisions.size(); ++r) {
-            const fb::RigExecWireRevision &revision = chain.revisions[r];
-            if (!RigExecFormatIsRangeRevision(revision)) {
-                continue;
-            }
-            if (!partition) {
+        for (const fb::RigExecWireRevision &revision : chain.revisions) {
+            if (RigExecFormatIsRangeRevision(revision)) {
                 partition = &revision;
+                break;
+            }
+        }
+        for (size_t r = 0; partition && r < chain.revisions.size(); ++r) {
+            const fb::RigExecWireRevision &revision = chain.revisions[r];
+            if (&revision == partition ||
+                (!RigExecFormatIsKeyedRevision(revision) &&
+                 !RigExecFormatIsRangeRevision(revision))) {
                 continue;
             }
             bool same = revision.chunks.size() == partition->chunks.size();
@@ -4626,13 +4993,16 @@ private:
     /// two ranges that tile the partition's points in order, each keyed by
     /// ascending positions in influence_slots, which size the chunk's
     /// influence rows; its partition layout, when it has one, holds the
-    /// partition's element size and index count. An unchunked revision has
-    /// no key and is at most one range, unless it is range-pipelined
-    /// (format 19): a Matrix, Wire or Lattice revision with no partition
+    /// partition's element size and index count. A Range Skin (format 20,
+    /// unchunked with two or more chunks) is keyed the same way, its ranges
+    /// its chain's groups, none empty. Any other unchunked revision has no
+    /// key and is at most one range, unless it is a Range revision: a
+    /// Matrix, Wire, Lattice or BlendShape revision with no partition
     /// producer set, whose two or more non-empty ranges tile its chain's
-    /// points from 0, one range step each.
+    /// points from 0, one group each.
     bool _Chunks(const fb::RigExecWireRevision &r, const std::string &row)
     {
+        const bool keyed = RigExecFormatIsKeyedRevision(r);
         using ProducerKey=std::pair<uint8_t,uint32_t>;
         std::set<std::vector<ProducerKey>> distinct;
         size_t minimum=SIZE_MAX,maximum=0;
@@ -4649,7 +5019,7 @@ private:
                 return _Bad(row+": partition producer set is not sorted and unique");
             minimum=std::min(minimum,keys.size()); maximum=std::max(maximum,keys.size());
             distinct.insert(keys);
-            if(r.chunked) {
+            if(keyed) {
                 if(set>=r.chunks.size()) return _Bad(row+": partition producer set has no natural chunk");
                 std::vector<ProducerKey> expected;
                 const auto domain=r.finalPhase?fb::SlotDomain::FinalMatrix:fb::SlotDomain::BaseMatrix;
@@ -4668,7 +5038,7 @@ private:
         if(r.partitionProducerMin<0 || r.partitionProducerMax<0 ||
             uint64_t(r.partitionProducerMin)!=minimum || uint64_t(r.partitionProducerMax)!=maximum ||
             r.partitionDistinctReads!=distinct.size() ||
-            (r.chunked && r.partitionProducerSets.size()!=r.chunks.size()))
+            (keyed && r.partitionProducerSets.size()!=r.chunks.size()))
             return _Bad(row+": partition producer summary differs from exact natural sets");
 
         const uint64_t width = r.partitionElementSize < 1
@@ -4684,8 +5054,8 @@ private:
                         " row(s) of partition_element_size " +
                         std::to_string(r.partitionElementSize));
         }
-        if (!r.chunked) {
-            const bool ranges = RigExecFormatIsRangeRevision(r);
+        const bool ranges = RigExecFormatIsRangeRevision(r);
+        if (!keyed) {
             if (ranges && !RigExecFormatIsRangeOp(r.op)) {
                 return _Bad(row + ": " + _N(r.chunks.size()) +
                             " chunks, but not chunked");
@@ -4743,6 +5113,10 @@ private:
             if (chunk.end < chunk.begin) {
                 return _Bad(where + ": vertex range " + range +
                             " ends before it begins");
+            }
+            if (ranges && chunk.end == chunk.begin) {
+                return _Bad(where + ": vertex range " + range +
+                            " is an empty group of a Range Skin");
             }
             at = uint64_t(chunk.end);
             for (size_t j = 0; j < chunk.key.size(); ++j) {
@@ -6257,6 +6631,9 @@ private:
     std::unordered_set<const RigExecWireInput *> _sourceBackedOwners;
     std::vector<uint32_t> _bodyFinLast,_bodyBaseLast;
     std::map<size_t,std::set<std::pair<fb::SlotDomain,uint32_t>>> _bodyReads;
+    /// Per chain, RigExecFormatGroupWriters' tables (empty without groups).
+    std::vector<std::vector<std::vector<char>>> _groupWritten;
+    std::vector<std::vector<std::vector<int>>> _groupEntering;
     const RigExecWireFile &_f;
     std::string _error;
     size_t _slots = 0;
@@ -6300,6 +6677,70 @@ RigExecFormatValidate(const fb::RigExecWireFile &file, std::string *error)
     return _Validator(file).Run(error);
 }
 
+size_t
+RigExecFormatChainGroups(const fb::RigExecWireFile &file, size_t chain)
+{
+    if (!file.geometry || chain >= file.geometry->chains.size()) {
+        return 0;
+    }
+    for (const fb::RigExecWireRevision &revision :
+         file.geometry->chains[chain].revisions) {
+        if (RigExecFormatIsRangeRevision(revision)) {
+            return revision.chunks.size();
+        }
+    }
+    return 0;
+}
+
+void
+RigExecFormatGroupWriters(const fb::RigExecWireFile &file, size_t chain,
+                          std::vector<std::vector<char>> *written,
+                          std::vector<std::vector<int>> *enteringWriter)
+{
+    written->clear();
+    enteringWriter->clear();
+    const size_t groups = RigExecFormatChainGroups(file, chain);
+    if (groups == 0) {
+        return;
+    }
+    const fb::RigExecWireDomainGeometry &g = *file.geometry;
+    const std::vector<fb::RigExecWireRevision> &revisions =
+        g.chains[chain].revisions;
+    const size_t count = revisions.size();
+    written->assign(count, std::vector<char>(groups, 0));
+    enteringWriter->assign(count, std::vector<int>(groups, -1));
+    for (size_t r = 0; r < count; ++r) {
+        if (!RigExecFormatIsRangeRevision(revisions[r])) {
+            (*written)[r].assign(groups, 1);
+        }
+    }
+    // A Range revision writes the parts its RevisionChunk steps name; the
+    // chain's revisions take flat ids from its chain_revision_begin. Range-
+    // checked, so an unvalidated file only yields fewer written parts.
+    if (chain < g.chainRevisionBegin.size() && g.chainRevisionBegin[chain] >= 0) {
+        const int64_t first = g.chainRevisionBegin[chain];
+        for (const fb::RigExecWireStep &step : file.steps) {
+            const int64_t r = int64_t(step.object) - first;
+            if (step.kind != fb::StepKind::RevisionChunk || r < 0 ||
+                uint64_t(r) >= count || step.part < 0 ||
+                uint64_t(step.part) >= groups ||
+                !RigExecFormatIsRangeRevision(revisions[size_t(r)])) {
+                continue;
+            }
+            (*written)[size_t(r)][size_t(step.part)] = 1;
+        }
+    }
+    for (size_t k = 0; k < groups; ++k) {
+        int last = -1;
+        for (size_t r = 0; r < count; ++r) {
+            (*enteringWriter)[r][k] = last;
+            if ((*written)[r][k]) {
+                last = int(r);
+            }
+        }
+    }
+}
+
 namespace {
 
 /// Older files require re-export from the stage after the S3 wire cleanup.
@@ -6307,11 +6748,11 @@ namespace {
 std::string
 _VersionRefusal(uint32_t version)
 {
-    static_assert(RigExecFormatVersion == 19,
+    static_assert(RigExecFormatVersion == 20,
                   "name what the previous format version lacks");
     return "unsupported .rigexec format version " + _N(version) +
            " (this reader reads " + _N(RigExecFormatVersion) + "); " +
-           (version < RigExecFormatVersion ? "re-export: range-pipelined point chains"
+           (version < RigExecFormatVersion ? "re-export: per-group range chains"
                                               : "rebake");
 }
 

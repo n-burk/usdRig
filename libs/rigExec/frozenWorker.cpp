@@ -720,6 +720,12 @@ _RunFrozen(const RigExecFrozenEvalContext &context,
     if (!_FrozenPrologue(&worker, snapshot, inputs, index, time, &working)) {
         return false;
     }
+    // The clone's Range roles and group gates hold only for the values the
+    // snapshot was built with: a job whose sampled values flip one declines
+    // (no publish), and the live Evaluate it falls back to rebuilds.
+    if (!RigExecBakedRolesStand(B)) {
+        return false;
+    }
     if (!_FrozenExecuteGraph(&worker, time)) {
         return false;
     }
