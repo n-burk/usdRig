@@ -863,6 +863,8 @@ void TestExternalFailureAtomicAndStagingRecovery()
     for(float strength:{1.0f,.5f})for(int mode:{0,3,1,3,2,3}) {
         parameters.weights=RigExecWeightPacket::Constant(strength);parameters.externalData=VtValue(mode);
         revision.parameters=parameters;revision.status=RigExecStatusForParameters(parameters,revision.moverPath);
+        // RevisionStatic's decision, which the fuse selects by.
+        revision.acceptance=RigExecRevisionKernelAcceptance(revision.op,parameters,kBase.size());
         RigExecBakedRunGeometryStep(&program,&chunk,UsdTimeCode::Default());
         RigExecBakedRunGeometryStep(&program,&fuse,UsdTimeCode::Default());
         RigExecBakedRunGeometryStep(&program,&publish,UsdTimeCode::Default());

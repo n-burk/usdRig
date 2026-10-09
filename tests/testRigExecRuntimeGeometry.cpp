@@ -3135,9 +3135,9 @@ _TwoKeySkinStage()
 // a layout set at playback amounts to holds Build's keys, the repainted
 // layout, and Build's layout as the partition. It is made here by editing
 // the bake of the layout as built. Playback keeps the keys, finds the
-// partition stale and runs the revision whole, as live baked does after the
-// same in-place repaint, so moving J1 alone moves chunk 0's points too.
-// The file as baked keeps running its chunks.
+// partition stale and runs the revision whole, so moving J1 alone moves
+// chunk 0's points too, as live baked does after rebuilding for the same
+// authored repaint. The file as baked keeps running its chunks.
 static void
 TestRepaintedChunkLayoutRunsWhole()
 {
@@ -3209,12 +3209,13 @@ TestRepaintedChunkLayoutRunsWhole()
     };
     play("as built", asBuilt, false);
 
-    // Live baked takes the repaint as a value edit and keeps Build's keys.
+    // Topology is epoch state: live baked rebuilds once for the authored
+    // repaint and cuts fresh keys, and still plays as the file does.
     const size_t builds = evaluator.GetBakedProgramBuildCount();
     stage->GetAttributeAtPath(SdfPath(skinPath + ".rigExec:jointIndices"))
         .Set(VtIntArray{1, 1, 1, 1});
     play("repainted", repaintedBytes, true);
-    CHECK(evaluator.GetBakedProgramBuildCount() == builds);
+    CHECK(evaluator.GetBakedProgramBuildCount() == builds + 1);
 
     if (always.empty()) {
         TfUnsetenv("RIGEXEC_BAKED_CHUNK_ALWAYS");
@@ -3427,6 +3428,8 @@ def Scope "Asset"
                 uniform int rigExec:elementSize = 2
                 uniform token rigExec:skinningMethod = "classicLinear"
                 int[] rigExec:jointIndices = [0, 1, 0, 1, 0, 1, 0, 1]
+                # Compile checks the layout against the default value.
+                float[] rigExec:jointWeights = [1, 0, 0.5, 0.5, 0.25, 0.75, 0, 1]
                 float[] rigExec:jointWeights.timeSamples = {
                     1: [1, 0, 0.5, 0.5, 0.25, 0.75, 0, 1],
                     2: [1, 0, 0.5, 0.5, -0.25, 0.75, 0, 1],

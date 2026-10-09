@@ -4829,6 +4829,9 @@ TestTheFuseSelectsItsBuffersByHand()
         revision.parameters = p;
         revision.status =
             RigExecStatusForParameters(p, revision.moverPathText);
+        // RevisionStatic's decision, which the fuse selects by.
+        revision.acceptance = RigExecRevisionKernelAcceptance(
+            revision.op, p, base.size());
     };
     RigExecBakedStep chunk, fuse, status;
     chunk.kind = RigExecBakedStepKind::RevisionChunk;
@@ -5104,19 +5107,35 @@ TestUnmovedPointsKeepTheirVersion()
         return;
     }
     const RigExecBakedProgramImpl::GeomChain &chain = B.chains[0];
+    // The chain places the three movers itself, so M0 is found by its path.
+    int m0 = -1;
+    for (size_t o = 0; o < B.revisionIndex.size(); ++o) {
+        const auto &[c, r] = B.revisionIndex[o];
+        if (c == 0 && chain.revisions[size_t(r)].moverPath ==
+                          SdfPath("/Asset/Rig/Movers/M0")) {
+            m0 = int(o);
+        }
+    }
+    CHECK(m0 >= 0);
+    if (m0 < 0) {
+        return;
+    }
+    const RigExecBakedProgramImpl::GeomRevision &zero =
+        chain.revisions[size_t(B.revisionIndex[size_t(m0)].second)];
     RigExecRigPose pose;
     CHECK(built.program->Run(UsdTimeCode(1.0), &pose));
-    const uint64_t first = chain.revisions[0].doneVersion;
+    const uint64_t first = zero.doneVersion;
     const uint64_t points = chain.resultVersion;
     const VtVec3fArray result = chain.result;
     CHECK(built.program->Run(UsdTimeCode(2.0), &pose));
     CHECK(pose.comparisonMismatches == 0);
     using K = RigExecBakedStepKind;
     // The packet moved, so M0 ran, and its points did not.
-    CHECK(RanLast(B, K::RevisionChunk, 0) && RanLast(B, K::RevisionFuse, 0));
-    CHECK(chain.revisions[0].doneVersion == first);
-    for (int r = 1; r < 3; ++r) {
-        CHECK(!RanLast(B, K::RevisionChunk, r) && !RanLast(B, K::RevisionFuse, r));
+    CHECK(RanLast(B, K::RevisionChunk, m0) && RanLast(B, K::RevisionFuse, m0));
+    CHECK(zero.doneVersion == first);
+    for (int r = 0; r < 3; ++r) {
+        CHECK(r == m0 ||
+              (!RanLast(B, K::RevisionChunk, r) && !RanLast(B, K::RevisionFuse, r)));
     }
     CHECK(!RanLast(B, K::ChainStatus, 0));
     CHECK(chain.resultVersion == points && SameBits(chain.result, result));
