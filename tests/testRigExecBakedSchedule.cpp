@@ -7097,8 +7097,7 @@ TestGroupStepsRunOnlyMovedGroups()
         const bool statusRan = RanLast(B, K::ChainStatus, 0);
         if (statusRan != anyMoved) {
             ++failures;
-            std::printf("FAIL %s: ChainStatus %s
-", what,
+            std::printf("FAIL %s: ChainStatus %s\n", what,
                         statusRan ? "ran" : "did not run");
         }
         if (!anyMoved) {
@@ -7115,8 +7114,7 @@ TestGroupStepsRunOnlyMovedGroups()
                     if (read.domain == RigExecBakedSlotDomain::ChainPoints) {
                         ++failures;
                         std::printf("FAIL %s: a reader of the chain's "
-                                    "points reran
-", what);
+                                    "points reran\n", what);
                     }
                 }
             }
@@ -7134,8 +7132,7 @@ TestGroupStepsRunOnlyMovedGroups()
                 if (!lastMoved[g] && !same) {
                     ++failures;
                     std::printf("FAIL %s: unmoved group %zu of the chain's "
-                                "points changed
-", what, g);
+                                "points changed\n", what, g);
                 }
             }
         }
@@ -8756,16 +8753,14 @@ BuildFourGroupStage(const UsdStageRefPtr &stage, bool whole)
         std::vector<std::string> reasons;
         if (!built.evaluator->Compile(&errors)) {
             for (const std::string &error : errors) {
-                std::printf("    compile: %s
-", error.c_str());
+                std::printf("    compile: %s\n", error.c_str());
             }
         } else {
             built.program =
                 RigExecBakedProgram::Build(built.evaluator.get(), &reasons);
         }
         for (const std::string &reason : reasons) {
-            std::printf("    not bakeable: %s
-", reason.c_str());
+            std::printf("    not bakeable: %s\n", reason.c_str());
         }
     }
     TfUnsetenv(whole ? "RIGEXEC_BAKED_RANGE_CHAINS"
