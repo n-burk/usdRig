@@ -59,5 +59,12 @@ bool RigExecBakedSamePoints(const PXR_NS::GfVec3f *a, size_t aCount,
 /// RIGEXEC_VERIFY_CHAIN_VERSIONS check and tests.
 bool RigExecBakedChainContentKey(const RigExecBakedProgramImpl &,
     RigExecBakedSlotDomain, uint32_t slot, std::string *key);
+/// Whether \p key, the value's stored key, still describes the state it is
+/// keyed from: RigExecBakedOpValueKey's answer now, or, for the RevisionOut
+/// of an unchunked revision whose fuse swapped staging into `output`, the
+/// same key over `output`. What a retained op (an adopted skin body, a
+/// frozen clone) is checked by.
+bool RigExecBakedOpValueKeyStands(const RigExecBakedProgramImpl &,
+    RigExecBakedSlotDomain, uint32_t slot, const std::string &key);
 }
 #endif

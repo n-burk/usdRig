@@ -399,9 +399,8 @@ void RigExecBakedAdoptSkinOpState(RigExecBakedProgramImpl *program,const RigExec
             if(!value.initialized || !RigExecBakedOpValueKeyIsExact(P,RigExecBakedSlotDomain(value.domain),value.slot)) {
                 exact=false;continue;
             }
-            std::string actual;
-            RigExecBakedOpValueKey(P,RigExecBakedSlotDomain(value.domain),value.slot,&actual);
-            if(actual!=value.key)exact=false;
+            if(!RigExecBakedOpValueKeyStands(P,RigExecBakedSlotDomain(value.domain),value.slot,value.key))
+                exact=false;
         }
         if(!exact)continue;
         std::string ordinary,remapped,source;std::vector<uint32_t> covered;

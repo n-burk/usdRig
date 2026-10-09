@@ -274,6 +274,35 @@ void Invalid(std::string *out, RigExecBakedSlotDomain domain, uint32_t slot)
     TF_VERIFY(false, "Invalid baked operation value domain %u slot %u",
               unsigned(domain), slot);
 }
+// RevisionOut \p slot's revision and the chunk owning it, or false.
+bool RevisionOutPart(const RigExecBakedProgramImpl &B, uint32_t slot,
+    const RigExecBakedProgramImpl::GeomRevision **revision,
+    const RigExecBakedProgramImpl::GeomChunk **chunk)
+{
+    for(size_t r=0;r<B.revisionChunkBase.size() && r<B.revisionChunkCount.size();++r) {
+        const int base=B.revisionChunkBase[r], count=B.revisionChunkCount[r];
+        if(base<0 || count<0 || slot<uint32_t(base) || uint64_t(slot)-uint32_t(base)>=uint32_t(count)) continue;
+        const auto *v=Revision(B,uint32_t(r));
+        const size_t index=slot-uint32_t(base);
+        if(!v || index>=v->chunks.size()) return false;
+        const auto &part=v->chunks[index];
+        if(part.begin<0 || part.end<part.begin) return false;
+        *revision=v; *chunk=&part;
+        return true;
+    }
+    return false;
+}
+// The RevisionOut key's body over \p points, the buffer holding the chunk's
+// result: only the chunk's own half-open range.
+void PutRevisionOut(std::string *out,
+    const RigExecBakedProgramImpl::GeomChunk &part,
+    const std::vector<GfVec3f> &points)
+{
+    const size_t begin=std::min(size_t(part.begin),points.size());
+    const size_t end=std::min(size_t(part.end),points.size());
+    Put(out,part.ok); Put(out,uint64_t(points.size())); Put(out,uint64_t(end-begin));
+    PutRun(out,points.data()+begin,end-begin);
+}
 }
 
 bool RigExecBakedSpaceLeafKey(const RigExecBakedProgramImpl &B,uint32_t slot,std::string *out)
@@ -394,23 +423,16 @@ void RigExecBakedOpValueKey(const RigExecBakedProgramImpl &B,
         if(const auto *v=Revision(B,slot)) { Array(out,v->influences);
             Put(out,v->transform); Put(out,v->haveTransform); Put(out,v->carry);
             Put(out,v->haveCarry); Put(out,v->influencesValid); return; } break;
-    case D::RevisionOut:
+    case D::RevisionOut: {
         // A chunk owns only its half-open range. Reading sibling output
         // here would race the parallel writer and cause false change waves.
-        for(size_t r=0;r<B.revisionChunkBase.size() && r<B.revisionChunkCount.size();++r) {
-            const int base=B.revisionChunkBase[r], count=B.revisionChunkCount[r];
-            if(base<0 || count<0 || slot<uint32_t(base) || uint64_t(slot)-uint32_t(base)>=uint32_t(count)) continue;
-            const auto *v=Revision(B,uint32_t(r));
-            const size_t chunk=slot-uint32_t(base);
-            if(!v || chunk>=v->chunks.size()) break;
-            const auto &part=v->chunks[chunk];
-            if(part.begin<0 || part.end<part.begin) break;
-            const size_t begin=std::min(size_t(part.begin),v->stagingOutput.size());
-            const size_t end=std::min(size_t(part.end),v->stagingOutput.size());
-            Put(out,part.ok); Put(out,uint64_t(v->stagingOutput.size())); Put(out,uint64_t(end-begin));
-            PutRun(out,v->stagingOutput.data()+begin,end-begin);
+        const RigExecBakedProgramImpl::GeomRevision *v=nullptr;
+        const RigExecBakedProgramImpl::GeomChunk *part=nullptr;
+        if(RevisionOutPart(B,slot,&v,&part)) {
+            PutRevisionOut(out,*part,v->stagingOutput);
             return;
-        } break;
+        }
+    } break;
     case D::RevisionDone:
         if(const auto *v=Revision(B,slot)) {
             Put(out,v->resultStatus); Put(out,v->status); Put(out,v->doneVersion);
@@ -540,6 +562,24 @@ bool RigExecBakedSamePoints(const GfVec3f *a,size_t aCount,const GfVec3f *b,size
     // GfVec3f is three floats with no padding (asserted above).
     return aCount==bCount && (aCount==0 || a==b ||
         std::memcmp(a,b,aCount*sizeof(GfVec3f))==0);
+}
+bool RigExecBakedOpValueKeyStands(const RigExecBakedProgramImpl &B,
+    RigExecBakedSlotDomain domain,uint32_t slot,const std::string &key)
+{
+    std::string actual;
+    RigExecBakedOpValueKey(B,domain,slot,&actual);
+    if(actual==key) return true;
+    // An applying fuse swaps an unchunked revision's staging into `output`,
+    // leaving staging without a value (stagingFresh false): the chunk's last
+    // result, which the key describes, is then `output`, at staging's size.
+    const RigExecBakedProgramImpl::GeomRevision *v=nullptr;
+    const RigExecBakedProgramImpl::GeomChunk *part=nullptr;
+    if(domain!=RigExecBakedSlotDomain::RevisionOut || !RevisionOutPart(B,slot,&v,&part) ||
+       v->chunked || v->stagingFresh || v->output.size()!=v->stagingOutput.size())
+        return false;
+    actual.clear(); Put(&actual,uint8_t(1)); Put(&actual,domain);
+    PutRevisionOut(&actual,*part,v->output);
+    return actual==key;
 }
 bool RigExecBakedChainContentKey(const RigExecBakedProgramImpl &B,
     RigExecBakedSlotDomain domain,uint32_t slot,std::string *out)

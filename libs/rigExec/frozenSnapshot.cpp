@@ -350,9 +350,8 @@ _CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst)
         if(!value.initialized || !RigExecBakedOpValueKeyIsExact(D,domain,value.slot)) {
             retainedComplete=false; continue;
         }
-        std::string actual;
-        RigExecBakedOpValueKey(D,domain,value.slot,&actual);
-        if(actual!=value.key)retainedComplete=false;
+        if(!RigExecBakedOpValueKeyStands(D,domain,value.slot,value.key))
+            retainedComplete=false;
     }
     D.opAdapter.everRan=retainedComplete;
     if(!retainedComplete)D.opAdapter.retainedFirst.clear();
