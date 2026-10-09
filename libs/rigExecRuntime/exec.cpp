@@ -361,6 +361,12 @@ RigExecRuntimeReader::GetSlotLeafKeysForTesting() const
     return _program->store.slotLeafKeys;
 }
 
+size_t
+RigExecRuntimeReader::GetSourceKeysBuiltForTesting() const
+{
+    return _program->store.sourceKeysBuilt;
+}
+
 bool
 RigExecRuntimeReader::GetSimdEnabledForTesting() const
 {

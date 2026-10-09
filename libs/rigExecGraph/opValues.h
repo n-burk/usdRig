@@ -52,6 +52,9 @@ struct RigExecOpAdapterState {
     bool parallel = false, measuring = false;
     /// Native: rebuild every constant source key each run and verify it.
     bool verifyConstantSources = false;
+    /// Native: the generation of the leaf values `sourceKeys` were built
+    /// from (RigExecBakedSourceWatch::serial); 0 when none.
+    uint64_t sourceWatchSerial = 0;
     /// Native (RIGEXEC_VERIFY_LEAF_VERSIONS): beside each key that carries
     /// path-leaf content versions, the same key over the leaves' contents,
     /// and per op whether the two told a different change this run. Each op

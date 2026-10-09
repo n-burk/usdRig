@@ -1991,6 +1991,97 @@ _TestSparseSlotLeaves(const std::string &examples)
     CHECK(run("held at the end") == 0);
 }
 
+// Sparse source memos: a step's source memo reads input slots and Open-time
+// tables only, so a run rebuilds just the memos of steps reading a slot
+// some call wrote. Under RIGEXEC_VERIFY_SOURCE_KEYS every Execute also
+// rebuilds the memos it keeps and fails if one moved. A run after no write
+// builds none; an avar written alone builds some but not all, and its
+// repeat, its move and its reset build the same ones.
+static void
+_TestSparseSourceMemos(const std::string &examples)
+{
+    const UsdStageRefPtr stage = _Open(examples + "/biped/Biped_anim.usda");
+    if (!stage) return;
+    std::vector<uint8_t> bytes;
+    std::string error;
+    {
+        RigExecRigEvaluator evaluator(stage, _FindRig(stage));
+        if (!RigExecTestBakeAt(evaluator, 1.0, &bytes, &error)) {
+            std::printf("sparse source memos: bake: %s\n", error.c_str());
+            CHECK(false);
+            return;
+        }
+    }
+    // The runtime reads its knobs through the C runtime's environment.
+    const auto setKnob = [](const char *value) {
+#if defined(_WIN32)
+        _putenv_s("RIGEXEC_VERIFY_SOURCE_KEYS", value);
+#else
+        if (*value) setenv("RIGEXEC_VERIFY_SOURCE_KEYS", value, 1);
+        else unsetenv("RIGEXEC_VERIFY_SOURCE_KEYS");
+#endif
+    };
+    RigExecTestPlayer player;
+    setKnob("1");
+    const bool opened = player.Open(bytes, stage, &error);
+    setKnob("");
+    if (!opened) {
+        std::printf("sparse source memos: open: %s\n", error.c_str());
+        CHECK(false);
+        return;
+    }
+    RigExecRuntimeReader &reader = player.Reader();
+    const auto run = [&](const char *what) {
+        error.clear();
+        const bool ok = reader.Execute(&error);
+        if (!ok) std::printf("sparse source memos, %s: %s\n", what, error.c_str());
+        CHECK(ok);
+        return reader.GetSourceKeysBuiltForTesting();
+    };
+    CHECK(player.Play(1.0, &error));
+    const size_t all = reader.GetSourceKeysBuiltForTesting();
+    CHECK(all > 0);
+    CHECK(run("held") == 0);
+    CHECK(player.Play(2.0, &error));
+    CHECK(run("held after time") == 0);
+
+    // A static avar's own slot, which its provider's AvarInputs memo reads.
+    const size_t count = reader.GetInputCount();
+    size_t slot = count, one = 0;
+    RrInputValue value;
+    value.tag = RrInputTag::Double;
+    value.f64 = 0.375;
+    for (size_t s = 0; s < count && slot == count; ++s) {
+        const RigExecRuntimeInputInfo &info = reader.GetInputInfo(s);
+        if (info.type != RrInputTag::Double || info.animated ||
+            info.name.find(".avars:") == std::string::npos) {
+            continue;
+        }
+        error.clear();
+        if (!reader.SetInputAt(s, value, &error)) continue;
+        const size_t built = run("avar set");
+        if (built > 0) {
+            slot = s;
+            one = built;
+        }
+    }
+    CHECK(slot < count);
+    if (slot >= count) return;
+    CHECK(one < all);
+    CHECK(reader.SetInputAt(slot, value, &error));
+    CHECK(run("repeated set") == one);
+    value.f64 = -1.25;
+    CHECK(reader.SetInputAt(slot, value, &error));
+    CHECK(run("moved set") == one);
+    CHECK(run("held after the set") == 0);
+    CHECK(reader.ResetInput(reader.GetInputInfo(slot).name, &error));
+    CHECK(run("reset") == one);
+    CHECK(run("held after reset") == 0);
+    std::printf("sparse source memos: %zu keyed, after one avar %zu\n", all, one);
+    CHECK(player.Play(3.0, &error));
+    CHECK(run("held at the end") == 0);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -2212,6 +2303,7 @@ main(int argc, char **argv)
     _TestUnansweredPhaseArray(examples);
     _TestRetainedPointFinalAvailability(examples);
     _TestSparseSlotLeaves(examples);
+    _TestSparseSourceMemos(examples);
     if (failures == 0) {
         std::printf("testRigExecRuntimeInputs: all tests passed\n");
         return 0;

@@ -379,6 +379,13 @@ struct RrStore {
     // scratch, and how many the last run re-keyed.
     std::vector<RigExecValueId> leafQueue;
     size_t slotLeafKeys = 0;
+    // Per op, this run: a slot its source memo reads was written
+    // (RrProgram::slotSourceOps), so the memo is rebuilt. And how many kept
+    // memos RIGEXEC_VERIFY_SOURCE_KEYS found moved.
+    std::vector<char> sourceDirty;
+    size_t sourceKeyMismatches = 0;
+    // How many memos of steps that read inputs the last run built.
+    size_t sourceKeysBuilt = 0;
 };
 
 // The static data the steps read besides the tables and the input slots:
@@ -579,6 +586,13 @@ struct RrProgram {
     /// with the op graph; an empty slotLeafBegin re-keys every leaf per run.
     std::vector<uint32_t> slotLeafBegin;
     std::vector<RigExecValueId> slotLeaves, slotKeyedLeaves, otherLeaves;
+    /// The ops whose source memo reads input slot s, ascending:
+    /// slotSourceOps[slotSourceBegin[s], slotSourceBegin[s + 1]). Built with
+    /// the op graph; empty rebuilds every keyed memo per run.
+    std::vector<uint32_t> slotSourceBegin, slotSourceOps;
+    /// RIGEXEC_VERIFY_SOURCE_KEYS, read at Open: every run rebuilds the
+    /// source memos it keeps and fails if one moved.
+    bool verifySourceKeys = false;
 
     /// One plugin revision's playback state, in external_movers order. No
     /// prepared state means no kernel here: the revision passes through.

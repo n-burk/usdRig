@@ -251,6 +251,10 @@ public:
     // after no input write re-keys none.
     size_t GetSlotLeafKeysForTesting() const;
 
+    // Test-only: how many source memos of steps that read inputs the last
+    // Execute built; a run after no input write builds none.
+    size_t GetSourceKeysBuiltForTesting() const;
+
     // Test-only: whether the skin and matrix kernels take the SIMD path,
     // as RIGEXEC_ENABLE_SIMD said when this reader opened.
     bool GetSimdEnabledForTesting() const;

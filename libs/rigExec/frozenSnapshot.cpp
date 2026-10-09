@@ -140,6 +140,12 @@ _CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst)
     D.verifyPacketVersions = src.verifyPacketVersions;
     D.packetContentKeys = src.packetContentKeys;
     D.packetVersionMismatches = 0;
+    // The values the copied source keys were built from, with their shared
+    // index: the clone's runs compare its own leaves with them.
+    D.sourceWatch = src.sourceWatch;
+    D.verifySourceKeys = src.verifySourceKeys;
+    D.sourceKeyMismatches = 0;
+    D.sourceKeysBuilt = 0;
     D.composeGroups = src.composeGroups;
     // The space switches, and the per-slot index the compose step
     // asks before it takes the switched branch. Left out, the

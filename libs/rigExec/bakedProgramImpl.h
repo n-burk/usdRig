@@ -602,6 +602,58 @@ enum : uint8_t {
     kRigExecSpaceLeafOverlaid = 4,
 };
 
+/// What the source keys (RigExecBakedOpInputKey) read that a run can move,
+/// built with the operation graph from compiled steps and shared, immutable,
+/// by every clone: one entry per leaf, override slot or avar constant a
+/// keyed op reads, with the ops reading it.
+struct RigExecBakedSourceLeafIndex {
+    enum class Kind : uint8_t {
+        Typed,        ///< leaves pool `type` (RigExecBakedLeafType), entry `at`
+        Head,         ///< headLeaves[at]: its type match and value
+        PathVersion,  ///< pathLeafRefs[at], keyed by its content version
+        PathValue,    ///< pathLeafRefs[at], keyed by its value
+        Override,     ///< headOverrides[at]
+        AvarConstant, ///< the constant of avarBindings[at] (`type` 0) or
+                      ///< avarConstantBindings[at] (1)
+    };
+    struct Entry {
+        Kind kind = Kind::Typed;
+        uint8_t type = 0;
+        uint32_t at = 0;
+    };
+    std::vector<Entry> entries;
+    /// Entry w's readers: ops[begin[w], begin[w + 1]).
+    std::vector<uint32_t> begin, ops;
+    /// Per op: its key reads state no entry describes (a Constraint's native
+    /// frames and delta bases), so every run rebuilds it.
+    std::vector<char> untracked;
+    /// The sizes the entries were classified and numbered by; another
+    /// shape rebuilds every key.
+    size_t leafRefs = 0, pathLeafRefs = 0;
+    size_t avarBindings = 0, avarConstantBindings = 0;
+    std::vector<size_t> pools;
+};
+
+/// The values the stored source keys were built from, at each entry of
+/// `index`, and the generation they share with those keys
+/// (RigExecOpAdapterState::sourceWatchSerial): a copy or restore of the
+/// adapter state without this watch leaves the two generations apart, and
+/// the next run rebuilds every key. Owner of the program only.
+struct RigExecBakedSourceWatch {
+    std::shared_ptr<const RigExecBakedSourceLeafIndex> index;
+    uint64_t serial = 0;
+    /// Typed entries' values, at their pool positions.
+    RigExecBakedLeafPools typed;
+    /// Per entry: the Head, PathValue and Override values, and the
+    /// PathVersion version, the AvarConstant's bits and a Head's type match.
+    std::vector<VtValue> values;
+    std::vector<uint64_t> words;
+    bool publishWeightFields = false;
+    /// Per op: whether its last key build was exact, and this run's verdict
+    /// that its key can have moved.
+    std::vector<char> exact, dirty;
+};
+
 /// Publishes \p value at \p key into \p map, in one comparison when the
 /// caller walks its keys in ascending order.
 ///
@@ -3428,6 +3480,16 @@ struct RigExecBakedProgramImpl {
     bool verifyPacketVersions = false;
     std::vector<std::string> packetContentKeys;
     size_t packetVersionMismatches = 0;
+    /// What the source keys read and the values they were built from: a
+    /// run rebuilds only the keys of ops whose entries moved.
+    RigExecBakedSourceWatch sourceWatch;
+    /// RIGEXEC_VERIFY_SOURCE_KEYS, read at compile: every run also rebuilds
+    /// each source key the watch kept and counts those whose bytes or
+    /// exactness moved.
+    bool verifySourceKeys = false;
+    size_t sourceKeyMismatches = 0;
+    /// How many keys of ops that read state the last run built.
+    size_t sourceKeysBuilt = 0;
     std::shared_ptr<RigExecBakedExecCheckRows> execCheckRows;
     std::function<void(uint32_t)> opBeforeBody, opAfterBody; ///< opt-in test observation
     std::vector<WeightField> weightFields;

@@ -483,6 +483,197 @@ void BuildSpaceLeafIndex(RigExecBakedProgramImpl *program)
     B.spaceLeafRekey.assign(count,0);
 }
 
+// Indexes, per keyed op, every state RigExecBakedOpInputKey's source tier
+// reads (InputKey with effective false): the typed and path leaves of its
+// bindingLeaves, its head leaves and override slots and those of its walks,
+// and an AvarInputs op's binding constants and double leaves. An id out of
+// range keys as invalid, which is never exact, and its entry reports moved
+// while it stays out of range. Owner thread, once per compile.
+void BuildSourceLeafIndex(RigExecBakedProgramImpl *program)
+{
+    auto &B=*program; const auto &state=B.opAdapter;
+    using Index=RigExecBakedSourceLeafIndex; using K=Index::Kind;
+    auto index=std::make_shared<Index>();
+    const size_t ops=B.opGraph.ops.size();
+    index->untracked.assign(ops,0);
+    index->leafRefs=B.leafRefs.size(); index->pathLeafRefs=B.pathLeafRefs.size();
+    index->avarBindings=B.avarBindings.size();
+    index->avarConstantBindings=B.avarConstantBindings.size();
+    B.leaves.ForEach([&](auto &pool) { index->pools.push_back(pool.value.size()); });
+    std::map<std::tuple<uint8_t,uint8_t,uint32_t>,uint32_t> ids;
+    std::vector<std::pair<uint32_t,uint32_t>> reads;
+    const auto watch=[&](K kind,uint8_t type,uint32_t at,uint32_t c) {
+        const auto found=ids.emplace(std::make_tuple(uint8_t(kind),type,at),
+                                     uint32_t(index->entries.size()));
+        if(found.second) index->entries.push_back({kind,type,at});
+        reads.emplace_back(found.first->second,c);
+    };
+    for(const uint32_t c:state.sourceVisits) {
+        if(c>=ops || (c<state.constantSource.size() && state.constantSource[c])) continue;
+        const auto &step=B.steps[B.opGraph.ops[c].originalIndex];
+        if(step.kind==RigExecBakedStepKind::Constraint) { index->untracked[c]=1; continue; }
+        const auto head=[&](uint32_t id) { watch(K::Head,0,id,c); };
+        const auto slot=[&](uint32_t id) { watch(K::Override,0,id,c); };
+        if(step.kind==RigExecBakedStepKind::AvarInputs) {
+            const auto bindings=[&](const auto &list,const std::vector<uint32_t> &begin,uint8_t table) {
+                const auto range=RigExecBakedAvarBindingRange(begin,step.object);
+                for(size_t b=range.first;b<range.second && b<list.size();++b) {
+                    watch(K::AvarConstant,table,uint32_t(b),c);
+                    if(list[b].input.leaf>=0)
+                        watch(K::Typed,uint8_t(RigExecBakedLeafType::Double),uint32_t(list[b].input.leaf),c);
+                }
+            };
+            bindings(B.avarBindings,B.avarBindingBegin,0);
+            bindings(B.avarConstantBindings,B.avarConstantBindingBegin,1);
+        }
+        for(const uint32_t id:step.bindingLeaves) {
+            if(id<B.leafRefs.size()) {
+                watch(K::Typed,uint8_t(B.leafRefs[id].type),B.leafRefs[id].index,c);
+                continue;
+            }
+            const size_t offset=size_t(id)-B.leafRefs.size();
+            if(offset<B.pathLeafRefs.size())
+                watch(RigExecBakedPathLeafVersioned(B.pathLeafRefs[offset])?K::PathVersion:K::PathValue,
+                      0,uint32_t(offset),c);
+            else head(uint32_t(offset-B.pathLeafRefs.size()));
+        }
+        for(const uint32_t id:step.leaves) head(id);
+        for(const uint32_t id:step.overrideSlots) slot(id);
+        for(const int walk:step.readerWalks) {
+            if(walk<0 || size_t(walk)>=B.readerWalks.size()) continue;
+            for(const uint32_t id:B.readerWalks[size_t(walk)].leaves) head(id);
+            for(const uint32_t id:B.readerWalks[size_t(walk)].slots) slot(id);
+        }
+    }
+    std::sort(reads.begin(),reads.end());
+    reads.erase(std::unique(reads.begin(),reads.end()),reads.end());
+    index->begin.assign(index->entries.size()+1,0);
+    for(const auto &read:reads) ++index->begin[read.first+1];
+    for(size_t w=0;w<index->entries.size();++w) index->begin[w+1]+=index->begin[w];
+    index->ops.reserve(reads.size());
+    for(const auto &read:reads) index->ops.push_back(read.second);
+    B.sourceWatch=RigExecBakedSourceWatch();
+    B.sourceWatch.index=std::move(index);
+}
+
+// Typed entry \p k of pool T against the watch's copy: whether its bits
+// moved (a token by identity, which is its text). \p take stores it.
+template<class T>
+bool WatchTyped(const RigExecBakedProgramImpl &B,RigExecBakedSourceWatch *watch,uint32_t k,bool take)
+{
+    const auto &live=B.leaves.Of<T>().value;
+    auto &seen=watch->typed.Of<T>().value;
+    if(k>=live.size()) return true;
+    if(seen.size()!=live.size()) { seen.resize(live.size()); seen[k]=live[k]; return true; }
+    using S=typename RigExecBakedLeafPool<T>::Stored;
+    bool same;
+    if constexpr(std::is_same_v<S,TfToken>) same=live[k]==seen[k];
+    else same=std::memcmp(&live[k],&seen[k],sizeof(S))==0;
+    if(take || !same) seen[k]=live[k];
+    return !same;
+}
+
+// Entry \p w's value now against the one the stored keys were built from;
+// \p take stores it whether or not it moved. A value whose table no longer
+// holds it reports moved: its key keys as invalid.
+bool WatchEntry(const RigExecBakedProgramImpl &B,const RigExecBakedSourceLeafIndex &index,
+    size_t w,RigExecBakedSourceWatch *watch,bool take)
+{
+    using K=RigExecBakedSourceLeafIndex::Kind; using L=RigExecBakedLeafType;
+    const auto &entry=index.entries[w];
+    auto &value=watch->values[w]; auto &word=watch->words[w];
+    const auto boxed=[&](const VtValue &now) {
+        const bool same=!take && RigExecExactSourceValueEqual(now,value);
+        if(!same) value=now;
+        return !same;
+    };
+    const auto bits=[&](uint64_t now) {
+        const bool moved=now!=word; word=now;
+        return moved;
+    };
+    switch(entry.kind) {
+    case K::Typed:
+        switch(L(entry.type)) {
+        case L::Double: return WatchTyped<double>(B,watch,entry.at,take);
+        case L::Float: return WatchTyped<float>(B,watch,entry.at,take);
+        case L::Int: return WatchTyped<int>(B,watch,entry.at,take);
+        case L::Bool: return WatchTyped<bool>(B,watch,entry.at,take);
+        case L::Token: return WatchTyped<TfToken>(B,watch,entry.at,take);
+        case L::Matrix4d: return WatchTyped<GfMatrix4d>(B,watch,entry.at,take);
+        case L::Vec3d: return WatchTyped<GfVec3d>(B,watch,entry.at,take);
+        case L::Vec3f: return WatchTyped<GfVec3f>(B,watch,entry.at,take);
+        }
+        return true;
+    case K::Head: {
+        if(entry.at>=B.headLeaves.size()) return true;
+        const auto &leaf=B.headLeaves[entry.at];
+        const bool matched=bits(leaf.typeMatches?1:0);
+        return boxed(leaf.value) || matched || take;
+    }
+    case K::PathVersion: case K::PathValue: {
+        if(entry.at>=B.pathLeafRefs.size()) return true;
+        const auto &ref=B.pathLeafRefs[entry.at];
+        const auto *leaves=RigExecBakedPathLeavesOf(B,ref);
+        if(entry.kind==K::PathValue)
+            return !leaves || ref.key>=leaves->values.size() || boxed(leaves->values[ref.key]);
+        return !leaves || ref.key>=leaves->versions.size() || bits(leaves->versions[ref.key]) || take;
+    }
+    case K::Override:
+        return entry.at>=B.headOverrides.size() || boxed(B.headOverrides[entry.at]);
+    case K::AvarConstant: {
+        const auto &list=entry.type?B.avarConstantBindings:B.avarBindings;
+        if(entry.at>=list.size()) return true;
+        uint64_t now=0; static_assert(sizeof(now)==sizeof(list[entry.at].input.constant),"double bits");
+        std::memcpy(&now,&list[entry.at].input.constant,sizeof(now));
+        return bits(now) || take;
+    }
+    }
+    return true;
+}
+
+// Brings the watch to the values the source keys built next read and says
+// whether this run may keep the stored key of an op it leaves clean in
+// `dirty`: only when those keys were built from the watch's values (same
+// generation, shapes and weight-overlay toggle) and \p full does not ask
+// for every key. A clean op's entries all hold the bytes its stored key
+// was built from, and that key was exact, so a rebuild would give the same
+// bytes and exactness: an equal compare. Owner thread, before the region.
+bool WatchSourceLeaves(RigExecBakedProgramImpl *program,bool full)
+{
+    auto &B=*program; auto &watch=B.sourceWatch; auto &state=B.opAdapter;
+    const auto *index=watch.index.get();
+    const size_t ops=B.opGraph.ops.size();
+    if(!index || index->untracked.size()!=ops) { state.sourceWatchSerial=0; return false; }
+    bool shaped=index->leafRefs==B.leafRefs.size() &&
+        index->pathLeafRefs==B.pathLeafRefs.size() &&
+        index->avarBindings==B.avarBindings.size() &&
+        index->avarConstantBindings==B.avarConstantBindings.size();
+    size_t p=0;
+    B.leaves.ForEach([&](auto &pool) {
+        shaped=shaped && p<index->pools.size() && index->pools[p]==pool.value.size(); ++p;
+    });
+    const bool sparse=!full && shaped && watch.serial!=0 &&
+        state.sourceWatchSerial==watch.serial &&
+        watch.publishWeightFields==B.publishWeightFields &&
+        watch.exact.size()==ops && watch.values.size()==index->entries.size() &&
+        watch.words.size()==index->entries.size();
+    if(!sparse) {
+        watch.values.assign(index->entries.size(),VtValue());
+        watch.words.assign(index->entries.size(),0);
+        watch.exact.assign(ops,0);
+    }
+    watch.dirty.assign(ops,0);
+    if(sparse)
+        for(size_t c=0;c<ops;++c)
+            if(index->untracked[c] || !watch.exact[c]) watch.dirty[c]=1;
+    for(size_t w=0;w<index->entries.size();++w)
+        if(WatchEntry(B,*index,w,&watch,!sparse) && sparse)
+            for(uint32_t i=index->begin[w];i<index->begin[w+1];++i) watch.dirty[index->ops[i]]=1;
+    watch.publishWeightFields=B.publishWeightFields;
+    state.sourceWatchSerial=++watch.serial;
+    return sparse;
+}
+
 // RIGEXEC_VERIFY_CHAIN_VERSIONS, owner thread, after \p id published: a value
 // keyed by a point content version must tell the change the points' bytes
 // tell. The first publication a program sees has nothing to compare with.
@@ -698,6 +889,9 @@ bool RigExecBakedCompileOpGraph(RigExecBakedProgramImpl *B,std::string *error)
     }
     state.verifyConstantSources=TfGetenvBool("RIGEXEC_VERIFY_CONSTANT_KEYS",false);
     state.verifyLeafVersions=TfGetenvBool("RIGEXEC_VERIFY_LEAF_VERSIONS",false);
+    BuildSourceLeafIndex(B);
+    B->verifySourceKeys=TfGetenvBool("RIGEXEC_VERIFY_SOURCE_KEYS",false);
+    B->sourceKeyMismatches=0;
     B->verifyChainVersions=TfGetenvBool("RIGEXEC_VERIFY_CHAIN_VERSIONS",false);
     B->chainContentKeys.assign(B->verifyChainVersions?state.values.size():0,std::string());
     B->chainVersionMismatches=0;
@@ -810,14 +1004,33 @@ bool RigExecBakedExecuteOpGraph(RigExecBakedProgramImpl *program,UsdTimeCode tim
         state.contentInputKeys.resize(B.opGraph.ops.size());
         state.leafVersionMismatch.assign(B.opGraph.ops.size(),0);
     }
+    // A key whose watched leaves all hold what it was built from is kept,
+    // as an equal compare would keep it. The leaf-version check compares
+    // every key it builds, so it rebuilds them all.
+    const bool sparseSources=WatchSourceLeaves(&B,rebuildSources || verifyVersions);
+    const auto &sourceDirty=B.sourceWatch.dirty;
+    auto &sourceExact=B.sourceWatch.exact;
+    B.sourceKeysBuilt=0;
+    size_t keptMoved=0; uint32_t firstKeptMoved=0;
     const auto source=[&](uint32_t c) {
         const auto &step=B.steps[B.opGraph.ops[c].originalIndex];
         bool seed=(first && (c>=state.retainedFirst.size() || !state.retainedFirst[c])) || step.alwaysRuns;
         auto &input=state.sourceKeys[c]; auto &scratch=state.sourceScratch[c];
         bool exact=true, directChanged=false;
-        if(rebuildSources || c>=state.constantSource.size() || !state.constantSource[c]) {
+        if(sparseSources && c<sourceDirty.size() && !sourceDirty[c] &&
+           (c>=state.constantSource.size() || !state.constantSource[c])) {
+            if(B.verifySourceKeys) {
+                const bool built=RigExecBakedOpInputKey(B,step,&scratch);
+                if(!built || scratch!=input) {
+                    if(!keptMoved) firstKeptMoved=c;
+                    ++keptMoved;
+                }
+            }
+        } else if(rebuildSources || c>=state.constantSource.size() || !state.constantSource[c]) {
             exact=RigExecBakedOpInputKey(B,step,&scratch);
             directChanged=!exact || input!=scratch;
+            if(c<sourceExact.size()) sourceExact[c]=exact?1:0;
+            if(c>=state.constantSource.size() || !state.constantSource[c]) ++B.sourceKeysBuilt;
             if(verifyVersions) {
                 std::string content;
                 const bool contentExact=RigExecBakedOpInputKey(B,step,&content,nullptr,true);
@@ -839,6 +1052,12 @@ bool RigExecBakedExecuteOpGraph(RigExecBakedProgramImpl *program,UsdTimeCode tim
     if(rebuildSources || state.verifyConstantSources || state.constantSource.size()!=B.opGraph.ops.size())
         for(uint32_t c=0;c<B.opGraph.ops.size();++c) source(c);
     else for(const uint32_t c:state.sourceVisits) source(c);
+    // Owner thread, before dispatch: one report for the run.
+    if(keptMoved) {
+        B.sourceKeyMismatches+=keptMoved;
+        TF_VERIFY(false,"%zu kept source key(s) moved while no leaf they read did, "
+                  "first of op %u",keptMoved,firstKeptMoved);
+    }
     RigExecOpCallbacks callbacks;
     callbacks.changed=[&](RigExecValueId id){return state.values[size_t(id)].changed!=0;};
     callbacks.inputChanged=[&](uint32_t c,RigExecValueId id) {

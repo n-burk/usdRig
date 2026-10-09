@@ -3767,6 +3767,186 @@ TestEqualLatticeBindsShareOneBasis()
     ShadowChecked(*evaluator, {}, UsdTimeCode(1015), "twin, rebuilt next");
 }
 
+// Ops whose source key reads state: the keys a full source pass builds.
+size_t
+KeyedSourceOps(const RigExecBakedProgramImpl &B)
+{
+    size_t keyed = 0;
+    for (const uint32_t c : B.opAdapter.sourceVisits) {
+        if (c >= B.opAdapter.constantSource.size() ||
+            !B.opAdapter.constantSource[c]) {
+            ++keyed;
+        }
+    }
+    return keyed;
+}
+
+// Sparse source keys over every route that moves what a source key reads:
+// time, a drag placed, moved and released, an upstream value placed, moved
+// and lifted, and a value edit patched at a held frame; and over the routes
+// that rebuild every key: the first run, a new program stamp, a failed
+// run's reset, the weight overlay toggled, and adapter state copied or
+// restored apart from its watch (a frozen clone, the verify-cones restore).
+// Under RIGEXEC_VERIFY_SOURCE_KEYS each run also rebuilds every key it
+// keeps, and none may have moved; a held frame rebuilds only the keys the
+// watch cannot vouch for. Last, a leaf moved behind the watch's back is
+// caught by that check.
+void
+TestSparseSourceKeys(const std::string &examples)
+{
+    const Fixture f = FixtureNamed(Fixtures(examples), "biped");
+    const UsdStageRefPtr stage = UsdStage::Open(f.stage);
+    CHECK(stage);
+    if (!stage) {
+        return;
+    }
+    ArchSetEnv("RIGEXEC_VERIFY_SOURCE_KEYS", "1", /*overwrite=*/true);
+    auto evaluator = MakeEvaluator(stage, f.rig);
+    ArchRemoveEnv("RIGEXEC_VERIFY_SOURCE_KEYS");
+    const RigExecBakedProgramImpl *B = Program(*evaluator);
+    CHECK(B && B->verifySourceKeys && B->sourceWatch.index);
+    if (!B || !B->sourceWatch.index) {
+        return;
+    }
+    const size_t keyed = KeyedSourceOps(*B);
+    CHECK(keyed > 0 && !B->sourceWatch.index->entries.empty());
+    const auto avar = [&](const char *prim, const char *name) {
+        for (const UsdPrim &p : stage->Traverse()) {
+            if (p.GetName() == prim) {
+                return p.GetPath().AppendProperty(TfToken(name));
+            }
+        }
+        return SdfPath();
+    };
+    const SdfPath body = avar("M_Body", "avars:ry");
+    const SdfPath shoulder = avar("L_Shldr", "avars:rz");
+    CHECK(!body.IsEmpty() && !shoulder.IsEmpty());
+    TfErrorMark mark;
+    const auto step = [&](double time, const std::string &what) {
+        const RigExecRigPose pose = evaluator->Evaluate(UsdTimeCode(time));
+        CHECK(pose.valid);
+        const RigExecBakedProgramImpl *P = Program(*evaluator);
+        CHECK(P);
+        if (!P) {
+            return size_t(0);
+        }
+        if (P->sourceKeyMismatches) {
+            std::printf("FAIL %s: %zu kept source key(s) moved\n",
+                        what.c_str(), P->sourceKeyMismatches);
+        }
+        CHECK(P->sourceKeyMismatches == 0);
+        return P->sourceKeysBuilt;
+    };
+    const auto mutableProgram = [&] {
+        return const_cast<RigExecBakedProgramImpl *>(Program(*evaluator));
+    };
+    CHECK(step(1, "first") == keyed);
+    const size_t held = step(1, "held");
+    CHECK(held < keyed);
+    step(2, "time");
+    CHECK(step(2, "held after time") == held);
+
+    evaluator->SetInteractiveOverrides({DragOf(body, 20.0)});
+    const size_t drag = step(2, "drag");
+    CHECK(drag > held && drag < keyed);
+    evaluator->SetInteractiveOverrides({DragOf(body, 25.0)});
+    const size_t dragMoved = step(2, "drag moved");
+    CHECK(dragMoved > held && dragMoved < keyed);
+    evaluator->ClearInteractiveOverrides();
+    CHECK(step(2, "drag released") > held);
+    CHECK(step(2, "held after release") == held);
+
+    evaluator->SetUpstreamInputs({DragOf(shoulder, 30.0)});
+    const size_t upstream = step(2, "upstream");
+    CHECK(upstream > held && upstream < keyed);
+    evaluator->SetUpstreamInputs({DragOf(shoulder, 35.0)});
+    CHECK(step(2, "upstream moved") > held);
+    evaluator->SetUpstreamInputs({});
+    CHECK(step(2, "upstream lifted") > held);
+    CHECK(step(2, "held after upstream") == held);
+    std::printf("sparse source keys: %zu keyed, built held %zu, dragged %zu, "
+                "upstream %zu\n", keyed, held, drag, upstream);
+
+    // The routes that rebuild every key.
+    if (RigExecBakedProgramImpl *M = mutableProgram()) {
+        ++M->programStamp;
+    }
+    CHECK(step(2, "new program stamp") == keyed);
+    CHECK(step(2, "held after the stamp") == held);
+    if (RigExecBakedProgramImpl *M = mutableProgram()) {
+        M->everRan = false;
+        M->opAdapter.everRan = false;
+    }
+    CHECK(step(2, "failed run's reset") == keyed);
+    CHECK(step(2, "held after the reset") == held);
+    if (RigExecBakedProgramImpl *M = mutableProgram()) {
+        M->opAdapter.sourceWatchSerial = 0;
+    }
+    CHECK(step(2, "adapter state apart from its watch") == keyed);
+    CHECK(step(2, "held after the watch") == held);
+    const RigExecBakedProgramImpl *W = Program(*evaluator);
+    const bool publish = W && W->publishWeightFields;
+    evaluator->SetPublishWeightFields(!publish);
+    CHECK(step(2, "weight overlay toggled") == keyed);
+    evaluator->SetPublishWeightFields(publish);
+    CHECK(step(2, "weight overlay back") == keyed);
+    CHECK(step(2, "held after the overlay") == held);
+
+    // An authored value edit, patched in place at the held frame: the
+    // patched binding's constant and leaf move its AvarInputs key.
+    const RigExecBakedProgramImpl *E = Program(*evaluator);
+    CHECK(E && !E->patchableAvars.empty());
+    if (E && !E->patchableAvars.empty()) {
+        UsdAttribute attribute =
+            stage->GetAttributeAtPath(E->patchableAvars.begin()->first);
+        double value = 0.0;
+        attribute.Get(&value, UsdTimeCode::Default());
+        CHECK(attribute.Set(value + 0.5));
+        CHECK(step(2, "value edit") > held);
+    }
+    step(3, "time after the edits");
+    CHECK(step(3, "held after the edits") == held);
+    CHECK(mark.IsClean());
+
+    // A double leaf some key reads, moved together with the watch's copy of
+    // it: the watch keeps its readers' keys, and the check must count them.
+    RigExecBakedProgramImpl *M = mutableProgram();
+    CHECK(M && M->sourceWatch.index);
+    if (!M || !M->sourceWatch.index) {
+        return;
+    }
+    using Kind = RigExecBakedSourceLeafIndex::Kind;
+    const RigExecBakedSourceLeafIndex &index = *M->sourceWatch.index;
+    auto &live = M->leaves.Of<double>().value;
+    auto &seen = M->sourceWatch.typed.Of<double>().value;
+    size_t w = 0;
+    for (; w < index.entries.size(); ++w) {
+        const RigExecBakedSourceLeafIndex::Entry &entry = index.entries[w];
+        if (entry.kind == Kind::Typed &&
+            entry.type == uint8_t(RigExecBakedLeafType::Double) &&
+            index.begin[w + 1] > index.begin[w] && entry.at < live.size() &&
+            entry.at < seen.size()) {
+            break;
+        }
+    }
+    CHECK(w < index.entries.size());
+    if (w == index.entries.size()) {
+        return;
+    }
+    const uint32_t k = index.entries[w].at;
+    const double was = live[k];
+    live[k] = seen[k] = was + 1.0;
+    evaluator->Evaluate(UsdTimeCode(3));
+    const RigExecBakedProgramImpl *F = Program(*evaluator);
+    CHECK(F && F->sourceKeyMismatches > 0);
+    CHECK(!mark.IsClean());
+    mark.Clear();
+    live[k] = seen[k] = was;
+    M->sourceKeyMismatches = 0;
+    step(3, "leaf put back");
+    CHECK(mark.IsClean());
+}
+
 int
 main(int argc, char **argv)
 {
@@ -3796,6 +3976,7 @@ main(int argc, char **argv)
     TestSparseProviderLeaves(examples);
     TestConstraintArraysAreEpochState();
     TestEqualLatticeBindsShareOneBasis();
+    TestSparseSourceKeys(examples);
     std::printf("testRigExecLeaves: %d failure(s)\n", failures);
     return failures ? 1 : 0;
 }

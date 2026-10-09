@@ -192,6 +192,50 @@ bool _RrInputMemoIsConstant(const RigExecWireStep &step)
     return step.kind!=RigExecWireStepKind::AvarInputs && step.headInputSlots.empty() &&
         step.headInputReads.empty() && step.overrideInputs.empty();
 }
+// Indexes the input slots each keyed step's source memo (_RrInputMemo,
+// RrSourceReadMemo) reads. Everything else a memo reads (file values, the
+// step's read lists, the avar and override tables) is fixed at Open, so a
+// memo keeps its bytes until a slot listed here is written
+// (RrInputsMarkWritten).
+void _RrIndexSourceSlots(RrProgram *p)
+{
+    p->slotSourceBegin.clear(); p->slotSourceOps.clear();
+    const auto &state=p->store.opAdapter; const auto &inputs=p->inputState;
+    const size_t slots=inputs.slotHasValue.size();
+    std::vector<std::pair<uint32_t,uint32_t>> reads;
+    const auto read=[&](int64_t slot,uint32_t c) {
+        if(slot>=0 && size_t(slot)<slots) reads.emplace_back(uint32_t(slot),c);
+    };
+    const auto input=[&](const RigExecWireInput &r,uint32_t c) {
+        for(const uint32_t slot:r.walk) read(slot,c);
+        if(r.rawFallbackSlot>=0) read(r.rawFallbackSlot,c);
+        for(const auto *segment:{&r.propertyCandidates,&r.doubleCandidates})
+            for(const auto &hop:*segment) if(hop.raw) read(int64_t(hop.slot),c);
+    };
+    for(const uint32_t c:state.sourceVisits) {
+        if(c<state.constantSource.size() && state.constantSource[c]) continue;
+        const auto &step=(*p->steps)[p->opGraph.ops[c].originalIndex];
+        for(const uint32_t slot:step.headInputSlots) read(slot,c);
+        for(const auto &r:step.headInputReads) input(r,c);
+        if(step.kind==RigExecWireStepKind::AvarInputs) {
+            const auto range=RrAvarReadRange(inputs,step.object);
+            for(uint32_t i=range.first;i<range.second;++i)
+                input(*p->registeredReads[inputs.avarReads[i]].read,c);
+        }
+        for(const int number:step.overrideInputs) {
+            if(number<0 || size_t(number)+1>=inputs.overrideSlotBegin.size()) continue;
+            for(uint32_t i=inputs.overrideSlotBegin[size_t(number)];i<inputs.overrideSlotBegin[size_t(number)+1];++i)
+                read(inputs.overrideSlotList[i],c);
+        }
+    }
+    std::sort(reads.begin(),reads.end());
+    reads.erase(std::unique(reads.begin(),reads.end()),reads.end());
+    p->slotSourceBegin.assign(slots+1,0);
+    for(const auto &entry:reads) ++p->slotSourceBegin[entry.first+1];
+    for(size_t s=0;s<slots;++s) p->slotSourceBegin[s+1]+=p->slotSourceBegin[s];
+    p->slotSourceOps.reserve(reads.size());
+    for(const auto &entry:reads) p->slotSourceOps.push_back(entry.second);
+}
 void _RrPropertyVersion(const RrProgram *program, uint32_t v,std::string *key)
 {
     const auto &value = program->store.propertyVersions[v];
@@ -702,6 +746,7 @@ bool RrCompileOpGraph(RrProgram *p,std::string *error)
     }
     _RrIndexSlotLeaves(p);
     RrIndexEpilogue(p);
+    _RrIndexSourceSlots(p);
     return true;
 }
 
@@ -794,21 +839,44 @@ bool RrExecuteOpGraph(RrProgram *p,bool force,std::string *error)
             }
         }
     }
+    const bool verify=p->verifyConstantSources;
+    const bool verifyVersions=p->verifyLeafVersions;
+    // A keyed memo reads input slots and Open-time tables only
+    // (_RrIndexSourceSlots), so one whose slots no call wrote since the last
+    // run would rebuild to the same bytes: it is kept, as an equal compare
+    // keeps it. The leaf-version check compares every memo it builds.
+    const bool sparseSources=!first && !force && !verifyVersions &&
+        p->slotSourceBegin.size()==inputs.slotHasValue.size()+1;
+    auto &sourceDirty=s.sourceDirty;
+    sourceDirty.assign(p->opGraph.ops.size(),0);
+    if(sparseSources)
+        for(const uint32_t slot:inputs.written) if(size_t(slot)+1<p->slotSourceBegin.size())
+            for(uint32_t k=p->slotSourceBegin[slot];k<p->slotSourceBegin[slot+1];++k)
+                sourceDirty[p->slotSourceOps[k]]=1;
     for(const uint32_t slot:inputs.written) inputs.writtenFlag[slot]=0;
     inputs.written.clear();
     // A constant source memo is empty on every run, which an equal compare
     // reports unchanged. It is built on a first run; a later run visits only
     // the steps that can seed or change.
-    const bool verify=p->verifyConstantSources;
-    const bool verifyVersions=p->verifyLeafVersions;
     if(verifyVersions) s.headContentKeys.resize(p->steps->size());
-    int64_t moved=-1, disagreed=-1;
+    int64_t moved=-1, disagreed=-1, kept=-1;
+    s.sourceKeysBuilt=0;
     const auto source=[&](uint32_t c) {
         const auto i=p->opGraph.ops[c].originalIndex; const auto &step=(*p->steps)[i];
         bool seed=first || step.headAlwaysRuns, changed=false;
         auto &input=s.headMemoKeys[i]; auto &scratch=s.opInputScratch[i];
-        if(first || c>=state.constantSource.size() || !state.constantSource[c]) {
+        if(sparseSources && c<sourceDirty.size() && !sourceDirty[c] &&
+           (c>=state.constantSource.size() || !state.constantSource[c])) {
+            if(p->verifySourceKeys) {
+                scratch.clear(); _RrInputMemo(p,step,&scratch);
+                if(scratch!=input) {
+                    ++s.sourceKeyMismatches;
+                    if(kept<0) kept=int64_t(i);
+                }
+            }
+        } else if(first || c>=state.constantSource.size() || !state.constantSource[c]) {
             scratch.clear(); _RrInputMemo(p,step,&scratch); changed=input!=scratch; input.swap(scratch);
+            if(c>=state.constantSource.size() || !state.constantSource[c]) ++s.sourceKeysBuilt;
             if(verifyVersions) {
                 std::string content; _RrInputMemo(p,step,&content,true);
                 if(!first && changed!=(s.headContentKeys[i]!=content) && disagreed<0) disagreed=int64_t(i);
@@ -832,6 +900,12 @@ bool RrExecuteOpGraph(RrProgram *p,bool force,std::string *error)
     if(disagreed>=0) {
         if(error) *error="source memo of step "+RrStepLabel(*p,size_t(disagreed))+
             " moved otherwise than its array contents";
+        state.everRan=false; s.everRan=false;
+        return false;
+    }
+    if(kept>=0) {
+        if(error) *error="source memo of step "+RrStepLabel(*p,size_t(kept))+
+            " moved while no slot it reads was written";
         state.everRan=false; s.everRan=false;
         return false;
     }
