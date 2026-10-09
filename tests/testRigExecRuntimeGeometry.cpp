@@ -41,6 +41,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <tuple>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -63,6 +64,11 @@ static int comparedFrames = 0;
 
 #include "rigExecFileEdit.h"
 #include "rigExecRuntimeDrive.h"
+
+// The C runtime's environment, defined below: the runtime reads its knobs
+// with std::getenv, which TfSetenv does not reach on Windows.
+static std::string _GetEnv(const char *name);
+static void _SetEnv(const char *name, const std::string &value);
 
 static SdfPath
 _FindRig(const UsdStageRefPtr &stage)
@@ -96,17 +102,85 @@ _ParseFrames(const std::string &text)
     return frames;
 }
 
+// One geometry revision step of a run: whether it is the join or fuse,
+// its mover and its part (a group or chunk; 0 for a fuse).
+using _RevisionStep = std::tuple<bool, std::string, int>;
+
+// The revision steps the native program's last run ran.
+static std::set<_RevisionStep>
+_NativeRevisionSteps(const RigExecRigEvaluator &evaluator)
+{
+    std::set<_RevisionStep> steps;
+    const RigExecBakedProgram *program = evaluator.GetBakedProgram();
+    if (!program) {
+        return steps;
+    }
+    const RigExecBakedProgramImpl &B = program->GetStepGraph();
+    for (size_t c = 0;
+         c < B.opGraph.ops.size() && c < B.opExecution.ran.size(); ++c) {
+        if (!B.opExecution.ran[c]) {
+            continue;
+        }
+        const RigExecBakedStep &step = B.steps[B.opGraph.ops[c].originalIndex];
+        const bool fuse = step.kind == RigExecBakedStepKind::RevisionFuse;
+        if ((!fuse && step.kind != RigExecBakedStepKind::RevisionChunk) ||
+            step.object < 0 || size_t(step.object) >= B.revisionIndex.size()) {
+            continue;
+        }
+        const auto &at = B.revisionIndex[size_t(step.object)];
+        steps.emplace(fuse,
+                      B.chains[size_t(at.first)]
+                          .revisions[size_t(at.second)]
+                          .moverPath.GetString(),
+                      fuse ? 0 : int(step.part));
+    }
+    return steps;
+}
+
+// The revision steps the runtime's last Execute ran.
+static std::set<_RevisionStep>
+_RuntimeRevisionSteps(const fb::RigExecWireFile &file,
+                      const RigExecRuntimeReader &reader)
+{
+    std::set<_RevisionStep> steps;
+    if (!file.geometry) {
+        return steps;
+    }
+    const fb::RigExecWireDomainGeometry &geometry = *file.geometry;
+    for (size_t s = 0; s < file.steps.size(); ++s) {
+        const fb::RigExecWireStep &step = file.steps[s];
+        const bool fuse = step.kind == fb::StepKind::RevisionFuse;
+        if ((!fuse && step.kind != fb::StepKind::RevisionChunk) ||
+            step.object < 0 ||
+            size_t(step.object) >= geometry.revisionIndex.size() ||
+            !reader.GetStepRanForTesting(s)) {
+            continue;
+        }
+        const auto &at = geometry.revisionIndex[size_t(step.object)];
+        steps.emplace(fuse,
+                      RigExecFormatPathText(file,
+                                            geometry.chains[size_t(at.first)]
+                                                .revisions[size_t(at.second)]
+                                                .moverPath),
+                      fuse ? 0 : int(step.part));
+    }
+    return steps;
+}
+
 // Bakes \p stage at the first of \p frames and plays the file through the
 // input sampler beside a fresh baked evaluator, frame by frame: the moved
 // points, ordered diagnostics and actual operation counts,
 // bit for bit. A `static` stage holds an animated source in static data
 // at the bake time, so it plays that time alone. \p played, when given,
-// receives each frame's points.
+// receives each frame's points. With \p exportRoles the evaluator builds
+// in the bake's role mode, so its program is the one the file holds, and
+// after the first frame each frame's geometry revision steps (group steps,
+// chunks, joins and fuses) are the runtime's.
 static void
 _TestStage(const std::string &name, const UsdStageRefPtr &stage,
            const std::vector<double> &frames,
            std::vector<std::vector<RigExecRuntimePoints>> *played = nullptr,
-           bool staticClass = false)
+           bool staticClass = false, bool exportRoles = false)
 {
     const SdfPath rigPath = _FindRig(stage);
     CHECK(!rigPath.IsEmpty() && !frames.empty());
@@ -136,6 +210,12 @@ _TestStage(const std::string &name, const UsdStageRefPtr &stage,
     // A fresh evaluator beside a fresh reader: both start at the bake
     // time's generation, the compile notices in it, with the same history.
     RigExecRigEvaluator evaluator(stage, rigPath);
+    std::unique_ptr<fb::RigExecWireFile> file;
+    if (exportRoles) {
+        evaluator.SetBakedRoleMode(RigExecBakedRoleMode::Export);
+        file = RigExecTestUnpack(bytes);
+        CHECK(file != nullptr);
+    }
 
     bool failed = false;
     int compared = 0;
@@ -269,6 +349,20 @@ _TestStage(const std::string &name, const UsdStageRefPtr &stage,
             }
             CHECK(false);
             failed = true;
+        }
+
+        if (file && compared > 0) {
+            const std::set<_RevisionStep> native =
+                _NativeRevisionSteps(evaluator);
+            const std::set<_RevisionStep> runtime =
+                _RuntimeRevisionSteps(*file, *reader);
+            if (native != runtime) {
+                std::printf("%s frame %.17g: %zu native revision step(s) "
+                            "ran vs %zu in the runtime\n", name.c_str(),
+                            frame, native.size(), runtime.size());
+                CHECK(false);
+                failed = true;
+            }
         }
 
         // Accounting names actual shared operations and completion trace.
@@ -1793,7 +1887,9 @@ _RangeChainStage(size_t count, const _RangeChainOptions &options)
 static void
 TestRangeChainPlays()
 {
+    const std::string verifyCrt = _GetEnv("RIGEXEC_VERIFY_CHAIN_VERSIONS");
     TfSetenv("RIGEXEC_VERIFY_CHAIN_VERSIONS", "1");
+    _SetEnv("RIGEXEC_VERIFY_CHAIN_VERSIONS", "1");
     _RangeChainOptions failing;
     failing.failMiddle = true;
     const std::vector<double> frames = {1, 2, 3, 2, 1, 3};
@@ -1808,6 +1904,7 @@ TestRangeChainPlays()
     _TestStage("range chain sparse first mover",
                _RangeChainStage(10000, sparse), {1, 2, 3, 1});
     TfSetenv("RIGEXEC_VERIFY_CHAIN_VERSIONS", "0");
+    _SetEnv("RIGEXEC_VERIFY_CHAIN_VERSIONS", verifyCrt);
 
     // M1's refusal is reported at frame 2 and nowhere else; every other
     // mover, the wires and the dense matrix among them, applies.
@@ -1954,13 +2051,16 @@ TestRangeChainRolesAndCutoff()
     std::printf("%s: %zu group step(s) checked\n", name, checked);
 }
 
-// Holds an environment knob for a scope, restoring it on exit; Build reads
-// the baked program's knobs, so a bake inside the scope sees it.
+// Holds an environment knob for a scope, restoring it on exit, in both
+// environments: Build reads the baked program's knobs through TfGetenv, the
+// runtime's Open through std::getenv, so a bake and a playback inside the
+// scope both see it.
 struct _ScopedEnv {
     _ScopedEnv(const char *name, const char *value)
-        : _name(name), _old(TfGetenv(name))
+        : _name(name), _old(TfGetenv(name)), _oldCrt(_GetEnv(name))
     {
         TfSetenv(_name, value);
+        _SetEnv(name, value);
     }
     ~_ScopedEnv()
     {
@@ -1969,11 +2069,13 @@ struct _ScopedEnv {
         } else {
             TfSetenv(_name, _old);
         }
+        _SetEnv(_name.c_str(), _oldCrt);
     }
     _ScopedEnv(const _ScopedEnv &) = delete;
     _ScopedEnv &operator=(const _ScopedEnv &) = delete;
     std::string _name;
     std::string _old;
+    std::string _oldCrt;
 };
 
 struct _GroupChainOptions {
@@ -2162,11 +2264,13 @@ TestGroupChainPlays()
     _GroupChainOptions failing;
     failing.failMiddle = true;
     _TestStage("group chain passes through and recovers",
-               _GroupChainStage(failing), {1, 2, 3, 2, 1, 3});
+               _GroupChainStage(failing), {1, 2, 3, 2, 1, 3}, nullptr,
+               /*staticClass=*/false, /*exportRoles=*/true);
     _GroupChainOptions one;
     one.onlyJ3 = true;
     _TestStage("group chain moves one joint", _GroupChainStage(one),
-               {1, 2, 3, 1});
+               {1, 2, 3, 1}, nullptr, /*staticClass=*/false,
+               /*exportRoles=*/true);
 }
 
 // The file's format-20 roles as Open reads them, and the per-group cutoff.
@@ -2308,6 +2412,15 @@ TestGroupChainRolesAndCutoff()
 
     CHECK(player.Play(1.0, &error));
     CHECK(player.Play(2.0, &error));
+    {
+        // The native program in the bake's role mode runs the same revision
+        // steps at frame 2.
+        RigExecRigEvaluator native(stage, SdfPath("/Asset/Rig"));
+        native.SetBakedRoleMode(RigExecBakedRoleMode::Export);
+        CHECK(native.Evaluate(1.0).valid && native.Evaluate(2.0).valid);
+        CHECK(_NativeRevisionSteps(native) ==
+              _RuntimeRevisionSteps(*file, player.Reader()));
+    }
     const size_t linearAt = position[movers + "Linear"];
     size_t checked = 0;
     for (size_t s = 0; s < file->steps.size(); ++s) {
