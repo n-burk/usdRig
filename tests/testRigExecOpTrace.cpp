@@ -10,7 +10,10 @@
 //   * a repeated time executes nothing, in the sense the cone suite uses;
 //   * the op graph it is checked against is acyclic and mirrors itself;
 //   * the profiler replay labels each step event with its kind, domain and
-//     sequence number.
+//     sequence number;
+//   * each timed op's memo and publication stamps bracket its body, whether
+//     the profiler or op timing alone asked for them, and a measurement
+//     (step timing or calibration alone) folds all three.
 // argv[1] = path to the examples directory.
 #include "rigExec/bakedProgram.h"
 #include "rigExec/bakedProgramImpl.h"
@@ -33,9 +36,11 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <map>
 #include <memory>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace rigExec;
@@ -179,6 +184,66 @@ CheckProfilerReplay(const RigExecRigEvaluator &E,
     }
 }
 
+/// Every timed op's memo and publication stamps bracket its body on the
+/// body's clock, the trace reports exactly those phases, and under the
+/// serial executor no two ops of one thread overlap from memo start to
+/// publication end.
+void
+CheckOpPhases(const RigExecRigEvaluator &E,
+              const std::vector<RigExecOpTraceEntry> &trace,
+              const std::string &what)
+{
+    const RigExecBakedProgramImpl &B = E.GetBakedProgram()->GetStepGraph();
+    std::map<std::string, std::vector<std::pair<uint64_t, uint64_t>>> lanes;
+    size_t unbracketed = 0;
+    for (const RigExecOpTraceEntry &entry : trace) {
+        if (entry.step >= B.steps.size()) {
+            continue;
+        }
+        const RigExecBakedStep &step = B.steps[entry.step];
+        const uint64_t endUs = entry.startUs + entry.durationUs;
+        const bool bracketed = entry.startUs != 0 && step.memoStartNs != 0 &&
+            step.publishEndNs != 0 && step.memoStartNs / 1000 <= entry.startUs &&
+            step.publishEndNs / 1000 >= endUs &&
+            entry.memoUs == entry.startUs - step.memoStartNs / 1000 &&
+            entry.publishUs == step.publishEndNs / 1000 - endUs;
+        if (!bracketed) {
+            if (unbracketed < 5) {
+                std::printf("    %s: %s memo %llu ns, body %llu+%llu us, "
+                            "publication end %llu ns\n", what.c_str(),
+                            entry.label.c_str(),
+                            (unsigned long long)step.memoStartNs,
+                            (unsigned long long)entry.startUs,
+                            (unsigned long long)entry.durationUs,
+                            (unsigned long long)step.publishEndNs);
+            }
+            ++unbracketed;
+            continue;
+        }
+        lanes[entry.thread].emplace_back(step.memoStartNs, step.publishEndNs);
+    }
+    if (unbracketed) {
+        ++failures;
+        std::printf("FAIL %s: %zu op(s) whose phases do not bracket the "
+                    "body\n", what.c_str(), unbracketed);
+    }
+    if (B.opAdapter.parallel) {
+        return;
+    }
+    size_t overlaps = 0;
+    for (auto &lane : lanes) {
+        std::sort(lane.second.begin(), lane.second.end());
+        for (size_t i = 1; i < lane.second.size(); ++i) {
+            overlaps += lane.second[i - 1].second > lane.second[i].first;
+        }
+    }
+    if (overlaps) {
+        ++failures;
+        std::printf("FAIL %s: %zu serial op(s) overlap the previous op on "
+                    "their thread\n", what.c_str(), overlaps);
+    }
+}
+
 void
 TestStage(const std::string &examplesDir, const std::string &file,
           double t0, double t1, bool expectTimeChange = true)
@@ -218,6 +283,7 @@ TestStage(const std::string &examplesDir, const std::string &file,
            rigExecTest::CheckTraceRespectsEdges(trace0, graph));
     CheckTraceMatchesClosure(E, trace0, file + " first trace");
     CheckProfilerReplay(E, trace0, file + " first trace");
+    CheckOpPhases(E, trace0, file + " first trace");
 
     // (b) The first run reaches every domain the graph holds.
     for (const char *domain : {"pose", "weight", "geometry"}) {
@@ -255,6 +321,7 @@ TestStage(const std::string &examplesDir, const std::string &file,
            rigExecTest::CheckTraceRespectsEdges(trace1, graph));
     CheckTraceMatchesClosure(E, trace1, file + " second trace");
     CheckProfilerReplay(E, trace1, file + " second trace");
+    CheckOpPhases(E, trace1, file + " second trace");
 
     // (c) The same time again: nothing moved, so no revision executed or
     // was created -- what the cone suite asserts of a repeated time -- and
@@ -321,6 +388,93 @@ TestARebuiltProgramHasNoTraceUntilItRuns(const std::string &examplesDir)
     CHECK(!E.GetOpGraph().empty());
     CHECK(E.Evaluate(UsdTimeCode(1024)).valid);
     CHECK(!E.GetLastOpTrace().empty());
+}
+
+/// Op timing alone, with the profiler off -- what a live inspection panel
+/// turns on -- stamps every executed op's memo start and publication end,
+/// and the trace reports them. Without a measurement it takes no other
+/// stamp.
+void
+TestOpTimingAloneStampsOperationPhases(const std::string &examplesDir,
+                                       const std::string &file, double t0,
+                                       double t1)
+{
+    LiveRig rig = OpenRig(examplesDir + "/" + file);
+    CHECK(rig.evaluator != nullptr);
+    if (!rig.evaluator) return;
+    RigExecRigEvaluator &E = *rig.evaluator;
+    E.SetOpTimingEnabled(true);
+    CHECK(!E.GetProfilingEnabled());
+    const bool measuring = RigExecBakedStepTimingRequested() ||
+                           RigExecBakedScheduleCalibrationRequested();
+    for (const double t : {t0, t1}) {
+        CHECK(E.Evaluate(UsdTimeCode(t)).valid);
+        const RigExecBakedProgramImpl &B =
+            E.GetBakedProgram()->GetStepGraph();
+        CHECK(B.recordOpTimings);
+        CHECK(!B.profiler || !B.profiler->IsEnabled());
+        const std::vector<RigExecOpTraceEntry> trace = E.GetLastOpTrace();
+        CHECK(!trace.empty());
+        CheckOpPhases(E, trace, file + " op timing at " + std::to_string(t));
+        if (!measuring) {
+            for (const RigExecBakedStep &step : B.steps) {
+                CHECK(step.memoEndNs == 0 && step.bodyEndNs == 0);
+            }
+        }
+    }
+}
+
+/// A measurement -- RIGEXEC_BAKED_STEP_TIMING, or RIGEXEC_BAKED_SCHEDULE_
+/// CALIBRATE on its own -- folds each op's memo, body and publication into
+/// the op's accumulators after the join. Without one, and without op timing
+/// or the profiler, no op takes a stamp and nothing accumulates.
+void
+TestMeasurementFoldsOperationPhases(const std::string &examplesDir)
+{
+    LiveRig rig = OpenRig(examplesDir + "/ArmShotAnim.usda");
+    CHECK(rig.evaluator != nullptr);
+    if (!rig.evaluator) return;
+    RigExecRigEvaluator &E = *rig.evaluator;
+    CHECK(!E.GetOpTimingEnabled());
+    CHECK(E.Evaluate(UsdTimeCode(1001)).valid);
+    CHECK(E.Evaluate(UsdTimeCode(1024)).valid);
+    const RigExecBakedProgramImpl &B = E.GetBakedProgram()->GetStepGraph();
+    const bool requested = RigExecBakedStepTimingRequested() ||
+                           RigExecBakedScheduleCalibrationRequested();
+    CHECK(B.opAdapter.measuring == requested);
+    size_t bodies = 0, memos = 0, ranLast = 0;
+    double publications = 0;
+    for (size_t c = 0; c < B.steps.size(); ++c) {
+        const RigExecBakedStep &step = B.steps[c];
+        // Every body run followed a memo of the same op.
+        CHECK(step.measuredMemoRuns >= step.measuredRuns);
+        bodies += step.measuredRuns;
+        memos += step.measuredMemoRuns;
+        publications += step.measuredPublishUs;
+        const bool ran = c < B.opExecution.ran.size() && B.opExecution.ran[c];
+        ranLast += ran;
+        if (requested && ran) {
+            CHECK(step.measuredRuns > 0 && step.measuredMemoRuns > 0);
+            CHECK(step.memoStartNs != 0 && step.memoEndNs >= step.memoStartNs);
+            CHECK(step.bodyEndNs >= step.memoEndNs &&
+                  step.publishEndNs >= step.bodyEndNs);
+        }
+        if (!requested) {
+            CHECK(step.memoStartNs == 0 && step.memoEndNs == 0 &&
+                  step.bodyEndNs == 0 && step.publishEndNs == 0);
+            CHECK(step.measuredUs == 0 && step.measuredMemoUs == 0 &&
+                  step.measuredPublishUs == 0);
+        }
+    }
+    CHECK(ranLast > 0);
+    if (requested) {
+        CHECK(bodies > 0 && memos >= bodies && publications > 0);
+    } else {
+        CHECK(bodies == 0 && memos == 0);
+    }
+    std::printf("  measurement %s: %zu body run(s), %zu memo run(s), "
+                "%.1f us of publication\n", requested ? "on" : "off",
+                bodies, memos, publications);
 }
 
 /// An unresolved plain constraint target publishes invalid source state.
@@ -482,6 +636,11 @@ main(int argc, char **argv)
     TestStage(examplesDir, "biped/Biped_anim.usda", 1, 5);
     TestReferenceChecksUseProductionGraph(examplesDir);
     TestARebuiltProgramHasNoTraceUntilItRuns(examplesDir);
+    TestOpTimingAloneStampsOperationPhases(examplesDir, "ArmShotAnim.usda",
+                                           1001, 1024);
+    TestOpTimingAloneStampsOperationPhases(examplesDir,
+                                           "biped/Biped_anim.usda", 1, 5);
+    TestMeasurementFoldsOperationPhases(examplesDir);
     TestInvalidTargetStillExecutesUnrelatedOperations(examplesDir);
     if (failures) {
         std::printf("%d FAILURE(S)\n", failures);

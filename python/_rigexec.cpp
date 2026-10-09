@@ -830,6 +830,8 @@ PYBIND11_MODULE(_rigexec, m) {
                      d["start_us"] = entry.startUs;
                      d["duration_us"] = entry.durationUs;
                      d["thread"] = entry.thread;
+                     d["memo_us"] = entry.memoUs;
+                     d["publish_us"] = entry.publishUs;
                      out.push_back(d);
                  }
                  return out;
@@ -837,7 +839,9 @@ PYBIND11_MODULE(_rigexec, m) {
              "The graph operations the last generation executed, in completion\n"
              "order: dicts of step, kind, domain ('pose', 'weight' or\n"
              "'geometry'), label, seq (1-based) and cluster. Empty when the\n"
-             "graph has not been compiled.")
+             "graph has not been compiled. With op timing on, start_us and\n"
+             "duration_us give the body, memo_us and publish_us the memo before\n"
+             "it and the value publication after it, and thread the runner.")
         .def_property("op_timing_enabled",
             [] (const _Rig &r) { return r.evaluator->GetOpTimingEnabled(); },
             [] (_Rig &r, bool enabled) { r.evaluator->SetOpTimingEnabled(enabled); })

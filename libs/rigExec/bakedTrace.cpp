@@ -70,6 +70,17 @@ RigExecBakedLastRunTrace(const RigExecBakedProgramImpl &B)
         if (step.startUs && step.endUs >= step.startUs) {
             entry.startUs = step.startUs;
             entry.durationUs = step.endUs - step.startUs;
+            // Nanosecond stamps truncate to the body's microseconds exactly
+            // as RigExecProfiler::NowUs does; a run that stamped no phase
+            // left them cleared.
+            const uint64_t memoStartUs = step.memoStartNs / 1000;
+            const uint64_t publishEndUs = step.publishEndNs / 1000;
+            if (step.memoStartNs && memoStartUs <= step.startUs) {
+                entry.memoUs = step.startUs - memoStartUs;
+            }
+            if (step.publishEndNs && publishEndUs >= step.endUs) {
+                entry.publishUs = publishEndUs - step.endUs;
+            }
             std::ostringstream thread;
             thread << step.runner;
             entry.thread = thread.str();

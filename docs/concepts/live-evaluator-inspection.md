@@ -19,7 +19,11 @@ operation IDs, declared predecessor/successor edges, read/write ranges, and
 cluster IDs. Range endpoints are inclusive, matching `Rig.op_graph()`.
 Trace rows contain `[step, start_us, duration_us, thread, completion_sequence]`.
 Timestamps use the engine's monotonic clock. Zero start and empty thread mean
-that timing was disabled. Do not infer scheduling overlap from completion order.
+that timing was disabled. `trace_phases` holds one `[memo_us, publish_us]` row
+per trace row: the operation's memo before its body and its value publication
+after it, so the operation occupied its thread from `start_us - memo_us` to
+`start_us + duration_us + publish_us`. Both are zero when timing was disabled.
+Do not infer scheduling overlap from completion order.
 `concurrency_limit` reports OpenUSD Work's current limit, not observed occupancy.
 
 The C API uses a size query followed by a copy with capacity greater than the
@@ -41,7 +45,10 @@ and must describe its trace as the last observed generation, not a complete
 record of every frame or of end-to-end UI latency.
 
 Verification: `testRigExecLiveDebug_serial` and `_parallel` exercise active-session
-routing, incremental snapshots, timestamps, recording shutdown, unchanged source
-layers, and evaluation/profiler counters. `testRigExecOpTracePython` covers Python
-trace timing. The sibling's `tests/test_usdview.py` checks the real Qt panel
-against the host's imaging evaluator through `testusdview`.
+routing, incremental snapshots, timestamps and phases, recording shutdown,
+unchanged source layers, and evaluation/profiler counters.
+`testRigExecOpTracePython` and `_serial` cover Python trace timing, and
+`testRigExecOpTrace_*` checks the memo and publication stamps against each
+body, with op timing alone and with the profiler. The sibling's
+`tests/test_usdview.py` checks the real Qt panel against the host's imaging
+evaluator through `testusdview`.

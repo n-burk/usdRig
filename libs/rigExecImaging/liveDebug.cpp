@@ -89,14 +89,18 @@ std::string RigExecImagingRegistry::LiveDebugJson(
             reply["graph"] = JsValue(graph);
         }
         if (knownGraph != session.debugGraphKey || knownGeneration != generation) {
-            JsArray trace;
+            JsArray trace, phases;
             for (const auto &event : evaluator.GetLastOpTrace()) {
                 // Labels and dependencies are held once in the graph.
                 trace.emplace_back(JsArray{JsValue(double(event.step)),
                     JsValue(double(event.startUs)), JsValue(double(event.durationUs)),
                     JsValue(event.thread), JsValue(double(event.seq))});
+                // Row for row beside the trace, whose rows keep their fields.
+                phases.emplace_back(JsArray{JsValue(double(event.memoUs)),
+                    JsValue(double(event.publishUs))});
             }
             reply["trace"] = JsValue(trace);
+            reply["trace_phases"] = JsValue(phases);
         }
         break;
     }

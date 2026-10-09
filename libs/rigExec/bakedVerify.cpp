@@ -1280,6 +1280,8 @@ RigExecBakedRunStatistics::RigExecBakedRunStatistics(
     for (size_t k = 0; k < steps.size(); ++k) {
         steps[k].startUs = program.steps[k].startUs;
         steps[k].endUs = program.steps[k].endUs;
+        steps[k].memoStartNs = program.steps[k].memoStartNs;
+        steps[k].publishEndNs = program.steps[k].publishEndNs;
         steps[k].runner = program.steps[k].runner;
     }
 }
@@ -1305,6 +1307,8 @@ RigExecBakedRunStatistics::Restore(RigExecBakedProgramImpl *program) const
     for (size_t k = 0; k < B.steps.size() && k < steps.size(); ++k) {
         B.steps[k].startUs = steps[k].startUs;
         B.steps[k].endUs = steps[k].endUs;
+        B.steps[k].memoStartNs = steps[k].memoStartNs;
+        B.steps[k].publishEndNs = steps[k].publishEndNs;
         B.steps[k].runner = steps[k].runner;
     }
 }

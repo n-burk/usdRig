@@ -1181,6 +1181,11 @@ foreach(_schedule serial parallel)
     set_property(TEST testRigExecOpTrace_${_schedule} APPEND
         PROPERTY ENVIRONMENT "RIGEXEC_ENABLE_PARALLEL_EVAL=1")
 endforeach()
+# Calibration alone measures: op accumulators fill without STEP_TIMING.
+add_test(NAME testRigExecOpTrace_calibrate
+    COMMAND testRigExecOpTrace "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+set_tests_properties(testRigExecOpTrace_calibrate PROPERTIES
+    ENVIRONMENT "RIGEXEC_BAKED_SCHEDULE_CALIBRATE=1;RIGEXEC_ENABLE_PARALLEL_EVAL=1")
 
 # The one-loop acceptance criteria on their fixtures, under both executors.
 add_executable(testRigExecOneLoopAcceptance tests/testRigExecOneLoopAcceptance.cpp)
@@ -1871,6 +1876,11 @@ if (RIGEXEC_BUILD_PYTHON AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
     add_test(NAME testRigExecOpTracePython COMMAND ${Python3_EXECUTABLE}
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_op_trace.py"
         "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
+    # Under the serial executor the file also checks that no two ops of a
+    # thread overlap from memo to publication.
+    add_test(NAME testRigExecOpTracePython_serial COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_op_trace.py"
+        "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
     add_test(NAME testRigExecGil COMMAND ${Python3_EXECUTABLE}
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_gil.py"
         "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
@@ -2031,7 +2041,7 @@ if (RIGEXEC_BUILD_PYTHON AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
                          testRigExecMoverDiscovery
                          testRigExecSkippedOperations
                          testRigExecFloatCurveOp
-                         testRigExecOpTracePython
+                         testRigExecOpTracePython testRigExecOpTracePython_serial
                          testRigExecUndo testGizmoMath testGizmoScreen
                          testPoseReaderViz
                          testLayerOpinionsModel testCompositionArcsModel
@@ -2053,6 +2063,8 @@ if (RIGEXEC_BUILD_PYTHON AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
         set_property(TEST ${_python_test} APPEND PROPERTY ENVIRONMENT
             "RIGEXEC_USD_INSTALL=${RIGEXEC_TEST_USD_DIR}")
     endforeach()
+    set_property(TEST testRigExecOpTracePython_serial APPEND PROPERTY
+        ENVIRONMENT "RIGEXEC_BAKED_SCHEDULE=serial")
     set_property(TEST testRigExecSpaceSwitchVersionsCones APPEND PROPERTY
         ENVIRONMENT "RIGEXEC_BAKED_VERIFY_CONES=1" "RIGEXEC_BAKED_GRAIN_US=0")
     rigexec_add_digest_gate_test(testRigExecStageEdits

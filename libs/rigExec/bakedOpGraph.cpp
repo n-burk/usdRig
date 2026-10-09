@@ -482,7 +482,9 @@ bool RigExecBakedCompileOpGraph(RigExecBakedProgramImpl *B,std::string *error)
         RigExecParallelEvaluationEnabled() &&
         RigExecBakedScheduleModeFromEnvironment()==RigExecBakedScheduleMode::Parallel &&
         !RigExecBakedScheduleCalibrationRequested();
-    B->opAdapter.measuring=RigExecBakedStepTimingRequested();
+    // Calibration fits what a measurement accumulates, so it measures too.
+    B->opAdapter.measuring=RigExecBakedStepTimingRequested() ||
+        RigExecBakedScheduleCalibrationRequested();
     B->opAdapter.inputRevisions.assign(B->steps.size(),0);
     B->opAdapter.inputKeys.resize(B->steps.size());
     B->opAdapter.inputScratch.resize(B->steps.size());
@@ -504,6 +506,10 @@ bool RigExecBakedExecuteOpGraph(RigExecBakedProgramImpl *program,UsdTimeCode tim
     force=force || B.programStamp!=B.lastProgramStamp;
     const bool first=!state.everRan;
     const bool profiling=B.profiler && B.profiler->IsEnabled();
+    // Op stamps are plain clock reads into op-owned fields by the thread
+    // running the op; the owner reads them only after the join.
+    const bool measuring=state.measuring && !B.measurementSuspended;
+    const bool stamping=measuring || B.recordOpTimings || profiling;
     B.clustering.lastRunTimed=profiling;
     for(auto &cluster:B.clustering.clusters) {
         cluster.readyUs=cluster.startUs=cluster.endUs=0;
@@ -559,7 +565,8 @@ bool RigExecBakedExecuteOpGraph(RigExecBakedProgramImpl *program,UsdTimeCode tim
         return v.changed && (v.domain!=uint32_t(RigExecBakedSlotDomain::PropertyResult) || !IsShadowed(B,step,v.slot));
     };
     callbacks.inputsChanged=[&](uint32_t c) {
-        const auto &step=B.steps[B.opGraph.ops[c].originalIndex];
+        auto &step=B.steps[B.opGraph.ops[c].originalIndex];
+        if(stamping) step.memoStartNs=RigExecBakedNowNs();
         auto &input=state.inputKeys[c]; auto &scratch=state.inputScratch[c];
         const bool exact=RigExecBakedEffectiveMemo(B,c,&scratch,
             &state.coveredPropertyInputs[c],&state.coveredTypedInputs[c]);
@@ -567,6 +574,7 @@ bool RigExecBakedExecuteOpGraph(RigExecBakedProgramImpl *program,UsdTimeCode tim
         state.inputExact[c]=exact?1:0;
         if(!exact) ++state.inputRevisions[c];
         input.swap(scratch);
+        if(measuring) step.memoEndNs=RigExecBakedNowNs();
         return changed;
     };
     callbacks.run=[&](uint32_t c) {
@@ -587,6 +595,7 @@ bool RigExecBakedExecuteOpGraph(RigExecBakedProgramImpl *program,UsdTimeCode tim
                 }
             });
         }
+        if(stamping) step.publishEndNs=RigExecBakedNowNs();
         if(B.opAfterBody) B.opAfterBody(B.opGraph.ops[c].originalIndex);
         return true;
     };
@@ -621,6 +630,19 @@ bool RigExecBakedExecuteOpGraph(RigExecBakedProgramImpl *program,UsdTimeCode tim
             cluster.startUs=step.startUs; cluster.runner=step.runner;
         }
         cluster.endUs=std::max(cluster.endUs,step.endUs);
+    }
+    // Every candidate evaluated its memo this run (a failed run returned
+    // above) and only an op that ran published, so no stamp of another run
+    // is folded.
+    if(measuring) for(uint32_t c=0;c<B.opGraph.ops.size() && c<B.opExecution.candidates.size();++c) {
+        if(!B.opExecution.candidates[c]) continue;
+        auto &step=B.steps[B.opGraph.ops[c].originalIndex];
+        if(step.memoStartNs && step.memoEndNs>=step.memoStartNs) {
+            step.measuredMemoUs+=double(step.memoEndNs-step.memoStartNs)/1000.0;
+            ++step.measuredMemoRuns;
+        }
+        if(B.opExecution.ran[c] && step.bodyEndNs && step.publishEndNs>=step.bodyEndNs)
+            step.measuredPublishUs+=double(step.publishEndNs-step.bodyEndNs)/1000.0;
     }
     RigExecBakedPublishPropertyChains(&B);
     RigExecBakedNoteReaderWalks(&B);

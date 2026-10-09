@@ -83,11 +83,13 @@ def TestTheTraceRespectsTheGraph():
             assert isinstance(domain,str) and first<=last
     for entry in trace:
         assert set(entry) == {"step", "kind", "domain", "label", "seq",
-                              "cluster", "start_us", "duration_us", "thread"}, entry
+                              "cluster", "start_us", "duration_us", "thread",
+                              "memo_us", "publish_us"}, entry
         assert entry["kind"] == by_id[entry["step"]]["kind"]
         assert entry["domain"] == by_id[entry["step"]]["domain"]
     _CheckTrace(trace, graph)
-    assert all(e['start_us'] == 0 and not e['thread'] for e in trace)
+    assert all(e['start_us'] == 0 and not e['thread'] and e['memo_us'] == 0
+               and e['publish_us'] == 0 for e in trace)
     rig.evaluate(1024.0)
     _CheckTrace(rig.last_op_trace(), graph)
     _, timed_rig = _Open("graph")
@@ -96,6 +98,17 @@ def TestTheTraceRespectsTheGraph():
     timed = timed_rig.last_op_trace()
     _CheckTrace(timed, timed_rig.op_graph())
     assert timed and all(e['start_us'] > 0 and e['duration_us'] >= 0 and e['thread'] for e in timed)
+    # The serial executor holds one op at a time, memo through publication;
+    # testRigExecOpTracePython_serial runs this file under it.
+    lanes = {}
+    for e in timed:
+        lanes.setdefault(e['thread'], []).append(
+            (e['start_us'] - e['memo_us'],
+             e['start_us'] + e['duration_us'] + e['publish_us']))
+    if os.environ.get("RIGEXEC_BAKED_SCHEDULE") == "serial":
+        for spans in lanes.values():
+            spans.sort()
+            assert all(a[1] <= b[0] for a, b in zip(spans, spans[1:])), spans
 
 
 def TestReferenceKeepsTheProductionGraph():

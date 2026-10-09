@@ -36,6 +36,11 @@ struct RigExecOpTraceEntry {
     /// Last-run body interval and actual runner; empty when timing is off.
     uint64_t startUs = 0, durationUs = 0;
     std::string thread;
+    /// The memo before the body and the value publication after it, in
+    /// microseconds on the same clock: the op held its thread from
+    /// startUs - memoUs to startUs + durationUs + publishUs. Zero when
+    /// timing is off.
+    uint64_t memoUs = 0, publishUs = 0;
 };
 
 /// One declared slot range of a step. `first` and `last` are inclusive.

@@ -1225,11 +1225,18 @@ struct RigExecBakedStep {
 
     /// What the calibration mode measured: the summed interval of this step
     /// over the frames it watched, and how many of them it saw. Untouched
-    /// unless RIGEXEC_BAKED_SCHEDULE_CALIBRATE asked for a measurement, and
-    /// written only by the serial executor on the one thread it runs on --
-    /// which is what "lock-free per-step timer" comes to.
+    /// unless RIGEXEC_BAKED_SCHEDULE_CALIBRATE or RIGEXEC_BAKED_STEP_TIMING
+    /// asked for a measurement, and written only by the thread that runs the
+    /// step -- which is what "lock-free per-step timer" comes to.
     double measuredUs = 0;
     uint32_t measuredRuns = 0;
+    /// Beside it, under the same requests: the summed memo of every run that
+    /// evaluated this op's memo (one that then skipped the body included),
+    /// how many did, and the summed value publication of the runs that ran
+    /// the body. Folded from the stamps below by the executor's owner after
+    /// the join.
+    double measuredMemoUs = 0, measuredPublishUs = 0;
+    uint32_t measuredMemoRuns = 0;
 
     /// This run's output, all of it per step so that nothing in a body
     /// touches shared state.
@@ -1241,6 +1248,13 @@ struct RigExecBakedStep {
     uint64_t startUs = 0, endUs = 0;
     /// Thread that ran this body, retained for profiler replay.
     std::thread::id runner;
+    /// This run's op stamps in nanoseconds on the same steady clock, written
+    /// only by the thread that runs the op: memo start and publication end
+    /// while op timing, the profiler or a measurement is on; memo end and
+    /// body end only for a measurement. The op holds its thread from
+    /// memoStartNs to publishEndNs. Cleared with the body interval at the
+    /// start of every run.
+    uint64_t memoStartNs = 0, memoEndNs = 0, bodyEndNs = 0, publishEndNs = 0;
     /// What the step is called in the report and the trace, built once at
     /// Build so that neither costs a string per step per frame.
     std::string label;
@@ -5080,12 +5094,13 @@ void RigExecBakedDeclareInputDependencies(RigExecBakedProgramImpl *program);
 ///    clustering's `lastRunTimed`
 ///    the closed-operation sets and full-run flag,
 ///    and each `RigExecBakedCluster`'s `readyUs`/`startUs`/`endUs`, and each
-///    step's `startUs`/`endUs`. RigExecBakedRunStatistics takes all of them
-///    before the second pass and puts them back after it, so that every
+///    step's `startUs`/`endUs` and memo/publication stamps.
+///    RigExecBakedRunStatistics takes all of them before the second pass and
+///    puts them back after it, so that every
 ///    observer of the frame -- the run report, the profiler trace,
 ///    GetClustersRunLastGeneration() -- describes the one run that published
 ///    a pose.
-///  * `clusterCounters` and per-step `measuredUs`/`measuredRuns`: the
+///  * `clusterCounters` and per-step `measured*` accumulators: the
 ///    parallel executor's arrival counters and the calibrator's running
 ///    averages. The counters are stored afresh at the head of every parallel
 ///    run and mean nothing between runs; the averages are a fit over frames,
@@ -5263,6 +5278,10 @@ struct RigExecBakedRunStatistics {
     };
     struct StepTimes {
         uint64_t startUs = 0, endUs = 0;
+        /// The op stamps the trace reads. memoEndNs and bodyEndNs need no
+        /// copy: only a measurement writes them, and the second pass runs
+        /// with measurementSuspended, so it leaves the first pass's.
+        uint64_t memoStartNs = 0, publishEndNs = 0;
         std::thread::id runner;
     };
     RigExecOpExecution opExecution;

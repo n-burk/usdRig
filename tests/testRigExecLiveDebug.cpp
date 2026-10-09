@@ -1,12 +1,20 @@
 // Live inspection reads the host's evaluator without evaluating or authoring.
 #include "rigExecImaging/registry.h"
 #include "rigExecImaging/profilerApi.h"
+#include "rigExec/bakedProgram.h"
+#include "rigExec/bakedProgramImpl.h"
 #include "pxr/base/js/json.h"
 #include "pxr/base/plug/registry.h"
+#include "pxr/base/tf/getenv.h"
 #include "pxr/usd/usd/primRange.h"
 #include "pxr/usd/usdUtils/stageCache.h"
+#include <algorithm>
 #include <cstdio>
+#include <map>
 #include <stdexcept>
+#include <string>
+#include <utility>
+#include <vector>
 
 PXR_NAMESPACE_USING_DIRECTIVE
 using namespace rigExec;
@@ -51,6 +59,43 @@ int main(int argc, char **argv) {
             CHECK(event[2].GetReal() >= 0);
             CHECK(!event[3].GetString().empty());
         }
+        // One [memo, publish] row per trace row, each the evaluator's own
+        // phases for that op. The serial executor runs one op at a time, so
+        // on each thread an op's memo starts after the previous op published.
+        const auto &traceRows = data.at("trace").GetJsArray();
+        const auto &phaseRows = data.at("trace_phases").GetJsArray();
+        const auto *bridge = context->GetBridge(root);
+        CHECK(bridge);
+        const auto opTrace = bridge->GetEvaluator().GetLastOpTrace();
+        CHECK(bridge->GetEvaluator().GetBakedProgram());
+        const auto &steps =
+            bridge->GetEvaluator().GetBakedProgram()->GetStepGraph().steps;
+        CHECK(phaseRows.size() == traceRows.size());
+        CHECK(opTrace.size() == traceRows.size());
+        std::map<std::string, std::vector<std::pair<double, double>>> spans;
+        for (size_t i = 0; i < phaseRows.size() && i < traceRows.size(); ++i) {
+            const auto &phase = phaseRows[i].GetJsArray();
+            const auto &event = traceRows[i].GetJsArray();
+            CHECK(phase.size() == 2);
+            CHECK(event[0].GetReal() == double(opTrace[i].step));
+            // Live op timing alone stamps every op it times, memo start
+            // through publication end.
+            CHECK(opTrace[i].step < steps.size());
+            CHECK(steps[opTrace[i].step].memoStartNs != 0 &&
+                  steps[opTrace[i].step].publishEndNs != 0);
+            CHECK(phase[0].GetReal() == double(opTrace[i].memoUs));
+            CHECK(phase[1].GetReal() == double(opTrace[i].publishUs));
+            spans[event[3].GetString()].emplace_back(
+                event[1].GetReal() - phase[0].GetReal(),
+                event[1].GetReal() + event[2].GetReal() + phase[1].GetReal());
+        }
+        if (TfGetenv("RIGEXEC_BAKED_SCHEDULE") == "serial") {
+            for (auto &lane : spans) {
+                std::sort(lane.second.begin(), lane.second.end());
+                for (size_t i = 1; i < lane.second.size(); ++i)
+                    CHECK(lane.second[i - 1].second <= lane.second[i].first);
+            }
+        }
         const auto held = JsParseString(context->LiveDebugJson(root,
             data.at("graph_key").GetString(), data.at("generation").GetString())).GetJsObject();
         CHECK(!held.count("graph") && !held.count("trace"));
@@ -61,6 +106,10 @@ int main(int argc, char **argv) {
         const auto disabled = JsParseString(context->LiveDebugJson(root, "", "")).GetJsObject();
         for (const auto &row : disabled.at("trace").GetJsArray())
             CHECK(row.GetJsArray()[3].GetString().empty());
+        CHECK(disabled.at("trace_phases").GetJsArray().size() ==
+              disabled.at("trace").GetJsArray().size());
+        for (const auto &row : disabled.at("trace_phases").GetJsArray())
+            CHECK(row.GetJsArray()[0].GetReal() == 0 && row.GetJsArray()[1].GetReal() == 0);
         std::string after; stage->GetRootLayer()->ExportToString(&after);
         CHECK(before == after);
         auto other = UsdStage::CreateInMemory();

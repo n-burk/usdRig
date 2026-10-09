@@ -2010,20 +2010,18 @@ RunStepBody(RigExecBakedProgramImpl *B, RigExecBakedStep *step,
               "declared", step->diagnostics.size(), step->maxDiagnostics);
 }
 
-/// The same clock RigExecProfiler::NowUs reads, in NANOseconds.
-///
+}  // namespace
+
 /// The profiler's microseconds are the right unit for a trace and the wrong
 /// one for a cost model: most steps of a biped frame are under a microsecond,
 /// and a table fitted from integer microseconds would call all of them free.
 uint64_t
-NowNs()
+RigExecBakedNowNs()
 {
     return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
                         std::chrono::steady_clock::now().time_since_epoch())
                         .count());
 }
-
-}  // namespace
 
 namespace {
 bool OriginalPreparationKind(RigExecBakedStepKind kind)
@@ -2128,13 +2126,16 @@ RigExecBakedRunStepBody(RigExecBakedProgramImpl *B,
     const bool profiling=B->recordOpTimings || (B->profiler && B->profiler->IsEnabled());
     const bool measuring=B->opAdapter.measuring && !B->measurementSuspended;
     const uint64_t began=profiling ? RigExecProfiler::NowUs() : 0;
-    const uint64_t beganNs=measuring ? NowNs() : 0;
+    const uint64_t beganNs=measuring ? RigExecBakedNowNs() : 0;
     const size_t index=size_t(step-B->steps.data());
     if(profiling) step->runner=std::this_thread::get_id();
     if(B->execCheckRows) B->execCheckRows->BeforeStep(*B,index);
     RunStepBody(B,step,time);
     if(B->execCheckRows) B->execCheckRows->AfterStep(*B,index);
-    if(measuring) { step->measuredUs+=double(NowNs()-beganNs)/1000.0; ++step->measuredRuns; }
+    if(measuring) {
+        step->bodyEndNs=RigExecBakedNowNs();
+        step->measuredUs+=double(step->bodyEndNs-beganNs)/1000.0; ++step->measuredRuns;
+    }
     if(profiling) { step->startUs=began; step->endUs=RigExecProfiler::NowUs(); }
 
 }
@@ -2144,6 +2145,7 @@ RigExecBakedClearRunStamps(RigExecBakedProgramImpl *program)
 {
     for (RigExecBakedStep &step : program->steps) {
         step.startUs = step.endUs = 0;
+        step.memoStartNs = step.memoEndNs = step.bodyEndNs = step.publishEndNs = 0;
     }
     auto &execution = program->opExecution;
     std::fill(execution.ran.begin(), execution.ran.end(), char(0));
@@ -2307,8 +2309,15 @@ RigExecBakedStepTimingReport(RigExecBakedProgramImpl *program)
     const double frames = double(std::max<size_t>(B.timedFrames, 1));
     std::array<double, kStepKindCount> byKind{};
     std::array<size_t, kStepKindCount> runsByKind{};
-    double steps = 0;
+    std::array<double, kStepKindCount> memoByKind{}, publishByKind{};
+    std::array<size_t, kStepKindCount> memoRunsByKind{};
+    double steps = 0, memos = 0, publications = 0;
     for (const RigExecBakedStep &step : B.steps) {
+        memoByKind[size_t(step.kind)] += step.measuredMemoUs;
+        memoRunsByKind[size_t(step.kind)] += step.measuredMemoRuns;
+        publishByKind[size_t(step.kind)] += step.measuredPublishUs;
+        memos += step.measuredMemoUs;
+        publications += step.measuredPublishUs;
         if (!step.measuredRuns) {
             continue;
         }
@@ -2346,6 +2355,36 @@ RigExecBakedStepTimingReport(RigExecBakedProgramImpl *program)
             RigExecBakedStepKindName(RigExecBakedStepKind(kind)),
             total / frames, total / double(runsByKind[kind]),
             size_t(double(runsByKind[kind]) / frames + 0.5));
+        out += line;
+    }
+    // Then what an op holds its thread for around its body: the memo,
+    // evaluated for every candidate including one that then skips its body,
+    // and the value publication. Summed over threads, so in parallel mode
+    // the whole can exceed the region. "per run" marks a body-table line, so
+    // no line below contains it.
+    std::snprintf(line, sizeof(line),
+                  "  op phases: memos %8.1f  publications %8.1f  "
+                  "memo+body+publication %8.1f\n",
+                  memos / frames, publications / frames,
+                  (memos + steps + publications) / frames);
+    out += line;
+    order.clear();
+    for (size_t kind = 0; kind < kStepKindCount; ++kind) {
+        if (memoRunsByKind[kind]) {
+            order.emplace_back(memoByKind[kind] + publishByKind[kind], kind);
+        }
+    }
+    std::sort(order.begin(), order.end(),
+              [](const auto &a, const auto &b) { return a.first > b.first; });
+    for (const auto &entry : order) {
+        const size_t kind = entry.second;
+        std::snprintf(
+            line, sizeof(line), "  %-16s memo %8.2f over %zu memo(s)  "
+            "publish %8.2f\n",
+            RigExecBakedStepKindName(RigExecBakedStepKind(kind)),
+            memoByKind[kind] / frames,
+            size_t(double(memoRunsByKind[kind]) / frames + 0.5),
+            publishByKind[kind] / frames);
         out += line;
     }
     std::fwrite(out.data(), 1, out.size(), stderr);

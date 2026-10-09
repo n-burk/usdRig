@@ -127,6 +127,10 @@ void RigExecBakedBuildCones(RigExecBakedProgramImpl *program);
 void RigExecBakedRunStepBody(RigExecBakedProgramImpl *program,
     RigExecBakedStep *step, UsdTimeCode time);
 
+/// The clock RigExecProfiler::NowUs reads, in nanoseconds: a plain clock
+/// read, so an op may stamp itself with it.
+uint64_t RigExecBakedNowNs();
+
 void RigExecBakedPrepareHeadOps(RigExecBakedProgramImpl *);
 
 std::vector<char> RigExecBakedExpectedStageFramesAdmissionReads(const RigExecBakedProgramImpl &);
@@ -162,11 +166,11 @@ void RigExecBakedReplayStepTimings(const RigExecBakedProgramImpl &program);
 /// Whether RIGEXEC_BAKED_SCHEDULE_CALIBRATE asks for a measured cost table.
 ///
 /// Opt-in, and serial: the mode runs the program the reference way, times
-/// every step with two clock reads into that step's own accumulator -- no
-/// lock, no shared counter -- and after the requested number of frames fits
-/// the two constants of every step kind by least squares and prints a table
-/// ready to paste over the one in bakedSchedule.cpp. Build itself never
-/// measures anything.
+/// every op's memo, body and value publication with plain clock reads into
+/// that op's own fields -- no lock, no shared counter -- and after the
+/// requested number of frames fits the two constants of every step kind to
+/// the bodies by least squares and prints a table ready to paste over the
+/// one in bakedSchedule.cpp. Build itself never measures anything.
 bool RigExecBakedScheduleCalibrationRequested();
 
 /// Folds this run's per-step intervals into the calibration accumulators and,
@@ -195,11 +199,12 @@ bool RigExecBakedScheduleReportRequested();
 /// Whether RIGEXEC_BAKED_STEP_TIMING asks what a frame spends where.
 ///
 /// Opt-in and OFF by default, in both schedule modes, because the answer
-/// costs two clock reads per step and a frame has several hundred of them --
-/// enough to move the number being asked about. With it off no executor
-/// reads a clock unless the profiler is recording or the schedule report
-/// asked for cluster times, which is what makes the default frame the frame
-/// a caller actually gets.
+/// costs a few clock reads per step and a frame has several hundred of them
+/// -- enough to move the number being asked about. With it off no executor
+/// reads a clock unless the profiler is recording, op timing is on
+/// (RigExecRigEvaluator::SetOpTimingEnabled), calibration is measuring, or
+/// the schedule report asked for cluster times, which is what makes the
+/// default frame the frame a caller actually gets.
 bool RigExecBakedStepTimingRequested();
 
 /// Folds one frame's phase and step times into the accumulators and, once
@@ -208,12 +213,17 @@ bool RigExecBakedStepTimingRequested();
 /// The phases are the three a frame divides into -- the serial prologue, the
 /// region, the serial epilogue -- and the steps are grouped by kind, so the
 /// table says both which third of the frame to attack and which step kind
-/// within it. Averaged over the frames watched rather than printed per
-/// frame: a single frame of a few hundred microseconds is mostly noise.
+/// within it. The body table comes first; after it, the ops' memos and
+/// value publications by kind. Averaged over the frames watched rather than
+/// printed per frame: a single frame of a few hundred microseconds is
+/// mostly noise.
 ///
-/// Only a frame that published a pose is watched, numerator and divisor
-/// together, and the cone verifier's second pass is excluded from both --
-/// so a table is always the cost of one frame of the kind a caller gets.
+/// The frame count and the phases come only from a frame that published a
+/// pose, and the cone verifier's second pass is excluded from everything.
+/// The per-op sums are not gated on publication: a body is summed whenever
+/// it ran, and a memo or a publication whenever its run's op graph
+/// completed, so frames whose generation a step or the publication gave
+/// back overstate the per-kind lines against the divisor.
 void RigExecBakedStepTimingReport(RigExecBakedProgramImpl *program);
 
 }  // namespace rigExec
