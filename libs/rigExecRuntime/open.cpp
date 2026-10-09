@@ -105,6 +105,8 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
     program.geometry = file.geometry.get();
     program.statics.file = &file;
     program.geoSettings = RrGeoSettingsFromEnvironment();
+    program.verifyConstantSources =
+        RrGeoGetenvBool("RIGEXEC_VERIFY_CONSTANT_KEYS", false);
     program.compileDiagnostics = file.compileDiagnostics;
     while (program.stepWeightObjects < file.geometry->weightObjects.size() &&
            !file.geometry->weightObjects[program.stepWeightObjects]

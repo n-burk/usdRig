@@ -121,6 +121,13 @@ void _RrInputMemo(const RrProgram *program, const RigExecWireStep &step, std::st
             appendSlot(state.overrideSlotList[i]);
     }
 }
+// The gates of every input read in _RrInputMemo; a step with none memoizes
+// the empty key. Mirrors RigExecBakedOpInputKeyIsConstant.
+bool _RrInputMemoIsConstant(const RigExecWireStep &step)
+{
+    return step.kind!=RigExecWireStepKind::AvarInputs && step.headInputSlots.empty() &&
+        step.headInputReads.empty() && step.overrideInputs.empty();
+}
 void _RrPropertyVersion(const RrProgram *program, uint32_t v,std::string *key)
 {
     const auto &value = program->store.propertyVersions[v];
@@ -323,7 +330,7 @@ bool RrRunOpBody(RrProgram *p,size_t i,std::string *error)
 }
 }
 
-bool RrCompileOpGraph(RrProgram *p,std::string *error)
+static bool RrCompileCommonGraph(RrProgram *p,std::string *error)
 {
     if(!p->file) {
         // In-memory kernel fixtures bypass strict Open. Validate opted-in
@@ -539,6 +546,21 @@ bool RrCompileOpGraph(RrProgram *p,std::string *error)
     return true;
 }
 
+bool RrCompileOpGraph(RrProgram *p,std::string *error)
+{
+    if(!RrCompileCommonGraph(p,error)) return false;
+    // Wire steps are immutable after Open: one classification serves every run.
+    auto &state=p->store.opAdapter;
+    state.constantSource.assign(p->opGraph.ops.size(),0);
+    state.sourceVisits.clear();
+    for(uint32_t c=0;c<p->opGraph.ops.size();++c) {
+        const auto &step=(*p->steps)[p->opGraph.ops[c].originalIndex];
+        state.constantSource[c]=_RrInputMemoIsConstant(step)?1:0;
+        if(!state.constantSource[c] || step.headAlwaysRuns) state.sourceVisits.push_back(c);
+    }
+    return true;
+}
+
 bool RrExecuteOpGraph(RrProgram *p,bool force,std::string *error)
 {
     auto &s=p->store; auto &state=s.opAdapter;
@@ -563,13 +585,31 @@ bool RrExecuteOpGraph(RrProgram *p,bool force,std::string *error)
     const auto sample=[&](uint32_t d,uint32_t slot,std::string *key){RrOpValue(p,d,slot,key);};
     for(const auto id:state.leaves) { RigExecOpPublishValue(&state.values[size_t(id)],sample);
         if(state.values[size_t(id)].changed) state.changedLeaves.push_back(id); }
-    for(uint32_t c=0;c<p->opGraph.ops.size();++c) {
+    // A constant source memo is empty on every run, which an equal compare
+    // reports unchanged. It is built on a first run; a later run visits only
+    // the steps that can seed or change.
+    const bool verify=p->verifyConstantSources;
+    int64_t moved=-1;
+    const auto source=[&](uint32_t c) {
         const auto i=p->opGraph.ops[c].originalIndex; const auto &step=(*p->steps)[i];
-        bool seed=first || step.headAlwaysRuns;
-        auto &input=s.headMemoKeys[i]; auto &scratch=s.opInputScratch[i]; scratch.clear();
-        _RrInputMemo(p,step,&scratch); const bool changed=input!=scratch; input.swap(scratch);
+        bool seed=first || step.headAlwaysRuns, changed=false;
+        auto &input=s.headMemoKeys[i]; auto &scratch=s.opInputScratch[i];
+        if(first || c>=state.constantSource.size() || !state.constantSource[c]) {
+            scratch.clear(); _RrInputMemo(p,step,&scratch); changed=input!=scratch; input.swap(scratch);
+        } else if(verify) {
+            scratch.clear(); _RrInputMemo(p,step,&scratch);
+            if(scratch!=input && moved<0) moved=int64_t(i);
+        }
         if(seed) state.seeds.push_back(c);
         else if(changed) state.candidateOps.push_back(c);
+    };
+    if(first || verify || state.constantSource.size()!=p->opGraph.ops.size())
+        for(uint32_t c=0;c<p->opGraph.ops.size();++c) source(c);
+    else for(const uint32_t c:state.sourceVisits) source(c);
+    if(moved>=0) {
+        if(error) *error="constant source memo of step "+RrStepLabel(*p,size_t(moved))+" changed";
+        state.everRan=false; s.everRan=false;
+        return false;
     }
     RigExecOpCallbacks callbacks;
     callbacks.changed=[&](RigExecValueId id){return state.values[size_t(id)].changed!=0;};

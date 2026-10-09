@@ -5,6 +5,7 @@
 #include "scalarReferenceAdapter.h"
 #include "parallel.h"
 #include "profiler.h"
+#include "pxr/base/tf/getenv.h"
 #include "pxr/base/work/dispatcher.h"
 #include "pxr/base/work/withScopedParallelism.h"
 #include <algorithm>
@@ -493,6 +494,17 @@ bool RigExecBakedCompileOpGraph(RigExecBakedProgramImpl *B,std::string *error)
     B->opAdapter.coveredPropertyInputs.resize(B->steps.size());
     B->opAdapter.coveredTypedInputs.resize(B->steps.size());
     B->opAdapter.inputExact.assign(B->steps.size(),1);
+    // Steps, their lists and revision weight objects are fixed for the
+    // program's life, so one classification serves every run and clone.
+    auto &state=B->opAdapter;
+    state.constantSource.assign(B->opGraph.ops.size(),0);
+    state.sourceVisits.clear();
+    for(uint32_t c=0;c<B->opGraph.ops.size();++c) {
+        const auto &step=B->steps[B->opGraph.ops[c].originalIndex];
+        state.constantSource[c]=RigExecBakedOpInputKeyIsConstant(*B,step)?1:0;
+        if(!state.constantSource[c] || step.alwaysRuns) state.sourceVisits.push_back(c);
+    }
+    state.verifyConstantSources=TfGetenvBool("RIGEXEC_VERIFY_CONSTANT_KEYS",false);
     return true;
 }
 
@@ -547,17 +559,31 @@ bool RigExecBakedExecuteOpGraph(RigExecBakedProgramImpl *program,UsdTimeCode tim
         });
         if(value.changed) state.changedLeaves.push_back(id);
     }
-    for(uint32_t c=0;c<B.opGraph.ops.size();++c) {
+    // A constant source key keeps the bytes and exactness of its last build,
+    // so it yields what an equal-key compare does: exact and unchanged. Keys
+    // are rebuilt on a first run, an adoption or a new program stamp; a run
+    // that rebuilds none visits only the ops that can seed or change.
+    const bool rebuildSources=first || !state.retainedFirst.empty() || B.programStamp!=B.lastProgramStamp;
+    const auto source=[&](uint32_t c) {
         const auto &step=B.steps[B.opGraph.ops[c].originalIndex];
         bool seed=(first && (c>=state.retainedFirst.size() || !state.retainedFirst[c])) || step.alwaysRuns;
         auto &input=state.sourceKeys[c]; auto &scratch=state.sourceScratch[c];
-        const bool exact=RigExecBakedOpInputKey(B,step,&scratch);
-        const bool directChanged=!exact || input!=scratch;
-        input.swap(scratch);
+        bool exact=true, directChanged=false;
+        if(rebuildSources || c>=state.constantSource.size() || !state.constantSource[c]) {
+            exact=RigExecBakedOpInputKey(B,step,&scratch);
+            directChanged=!exact || input!=scratch;
+            input.swap(scratch);
+        } else if(state.verifyConstantSources) {
+            const bool built=RigExecBakedOpInputKey(B,step,&scratch);
+            TF_VERIFY(built && scratch==input,"constant source key of op %u changed",c);
+        }
         seed=seed || !exact;
         if(seed) state.seeds.push_back(c);
         else if(directChanged || (first && c<state.retainedFirst.size() && state.retainedFirst[c])) state.candidateOps.push_back(c);
-    }
+    };
+    if(rebuildSources || state.verifyConstantSources || state.constantSource.size()!=B.opGraph.ops.size())
+        for(uint32_t c=0;c<B.opGraph.ops.size();++c) source(c);
+    else for(const uint32_t c:state.sourceVisits) source(c);
     RigExecOpCallbacks callbacks;
     callbacks.changed=[&](RigExecValueId id){return state.values[size_t(id)].changed!=0;};
     callbacks.inputChanged=[&](uint32_t c,RigExecValueId id) {

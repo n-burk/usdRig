@@ -857,6 +857,9 @@ static bool InputKey(const RigExecBakedProgramImpl &B,
             }
         }
     }
+    // Outside the effective branches, the source key reads state only in the
+    // AvarInputs and Constraint branches, these four lists and the weight
+    // overlay toggle. RigExecBakedOpInputKeyIsConstant tests the same gates.
     Put(out,uint64_t(step.bindingLeaves.size()));
     for(uint32_t id:step.bindingLeaves) {
         Put(out,remap?identity(remap->bindingLeaves,id):id);
@@ -964,25 +967,31 @@ static bool InputKey(const RigExecBakedProgramImpl &B,
     if(covered) {std::sort(covered->begin(),covered->end());covered->erase(std::unique(covered->begin(),covered->end()),covered->end());}
     return exact;
 }
+// A held-time overlay toggle changes assembly publication without
+// changing numerical leaves. Both key tiers must observe that input.
+static bool KeysWeightOverlay(const RigExecBakedProgramImpl &B,const RigExecBakedStep &step)
+{
+    if(step.kind!=RigExecBakedStepKind::RevisionStatic || step.object<0 || size_t(step.object)>=B.revisionIndex.size())
+        return false;
+    const auto &id=B.revisionIndex[size_t(step.object)];
+    return B.chains[size_t(id.first)].revisions[size_t(id.second)].weightObject>=0;
+}
 bool RigExecBakedOpInputKey(const RigExecBakedProgramImpl &B,const RigExecBakedStep &step,std::string *out,const RigExecBakedOpIdentityRemap *remap) {
     const bool exact=InputKey(B,step,out,false,nullptr,nullptr,remap);
-    // A held-time overlay toggle changes assembly publication without
-    // changing numerical leaves. Both key tiers must observe that input.
-    if(step.kind==RigExecBakedStepKind::RevisionStatic && step.object>=0 && size_t(step.object)<B.revisionIndex.size()) {
-        const auto &id=B.revisionIndex[size_t(step.object)];
-        if(B.chains[size_t(id.first)].revisions[size_t(id.second)].weightObject>=0)
-            RigExecOpKeyAppend(out,B.publishWeightFields);
-    }
+    if(KeysWeightOverlay(B,step)) RigExecOpKeyAppend(out,B.publishWeightFields);
     return exact;
+}
+// The gates of every state read in the non-effective InputKey plus the
+// overlay toggle above. Without one, the key is the four zero list counts.
+bool RigExecBakedOpInputKeyIsConstant(const RigExecBakedProgramImpl &B,const RigExecBakedStep &step) {
+    return step.kind!=RigExecBakedStepKind::AvarInputs && step.kind!=RigExecBakedStepKind::Constraint &&
+        step.bindingLeaves.empty() && step.leaves.empty() && step.overrideSlots.empty() &&
+        step.readerWalks.empty() && !KeysWeightOverlay(B,step);
 }
 bool RigExecBakedOpEffectiveInputKey(const RigExecBakedProgramImpl &B,const RigExecBakedStep &step,
     std::string *out,std::vector<uint32_t> *covered,std::vector<std::pair<uint32_t,uint32_t>> *typed,const RigExecBakedOpIdentityRemap *remap) {
     const bool exact=InputKey(B,step,out,true,covered,typed,remap);
-    if(step.kind==RigExecBakedStepKind::RevisionStatic && step.object>=0 && size_t(step.object)<B.revisionIndex.size()) {
-        const auto &id=B.revisionIndex[size_t(step.object)];
-        if(B.chains[size_t(id.first)].revisions[size_t(id.second)].weightObject>=0)
-            RigExecOpKeyAppend(out,B.publishWeightFields);
-    }
+    if(KeysWeightOverlay(B,step)) RigExecOpKeyAppend(out,B.publishWeightFields);
     return exact;
 }
 } // namespace rigExec

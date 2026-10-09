@@ -571,6 +571,54 @@ void TestSkinEffectiveSelectedTopology()
     CHECK(key(true)!=unresolved);
 }
 
+// The executor never rebuilds a source key the classifier calls constant,
+// so that key must hold its bytes whatever sampled, overridden, published or
+// provider state holds, and every gate the classifier tests must key state.
+void TestConstantSourceKeys()
+{
+    RigExecBakedProgramImpl B;
+    B.leaves.Of<double>().value={0.0}; B.leafRefs.push_back({RigExecBakedLeafType::Double,0});
+    B.headLeaves.resize(1); B.headOverrides.resize(1);
+    B.readerWalks.resize(1); B.readerWalks[0].leaves={0}; B.readerWalks[0].slots={0};
+    B.walkSteps.resize(1); B.walkSteps[0].index=0;
+    B.constraints.resize(1); B.constraints[0].sourceNatives={0};
+    B.nativeFrames.resize(1); B.nativeFrameOk={1};
+    B.chains.resize(1); B.chains[0].revisions.resize(2); B.revisionIndex={{0,0},{0,1}};
+    B.chains[0].revisions[1].weightObject=0;
+    B.providerValues.values.resize(1); B.providerValues.values[0].initialized=true;
+    const auto set=[&](int k) {
+        B.leaves.Of<double>().value[0]=double(k);
+        B.headLeaves[0].value=VtValue(float(k)); B.headOverrides[0]=VtValue(float(k));
+        B.nativeFrames[0].points[0][0]=float(k);
+        B.publishWeightFields=k!=0;
+        B.providerValues.values[0].value=double(k);
+    };
+    using K=RigExecBakedStepKind;
+    const auto make=[](K kind,int object,int part,int list) {
+        RigExecBakedStep step; step.kind=kind; step.object=object; step.part=part;
+        if(list==0) step.bindingLeaves={0}; else if(list==1) step.leaves={0};
+        else if(list==2) step.overrideSlots={0}; else if(list==3) step.readerWalks={0};
+        return step;
+    };
+    std::vector<std::pair<RigExecBakedStep,bool>> cases{
+        {make(K::SpaceExpression,0,0,-1),true}, {make(K::Solve,0,-1,-1),true},
+        {make(K::RevisionStatic,0,-1,-1),true},
+        // The weight overlay toggle, a constraint's native frames, each list.
+        {make(K::RevisionStatic,1,-1,-1),false}, {make(K::Constraint,0,-1,-1),false}};
+    for(int list=0;list<4;++list) cases.push_back({make(K::SpaceExpression,0,0,list),false});
+    std::string fixed; for(int i=0;i<4;++i) PutU64(&fixed,0);
+    for(const auto &[step,constant]:cases) {
+        CHECK(RigExecBakedOpInputKeyIsConstant(B,step)==constant);
+        std::string before,after;
+        set(0); const bool exact=RigExecBakedOpInputKey(B,step,&before);
+        set(1); CHECK(RigExecBakedOpInputKey(B,step,&after)==exact);
+        CHECK((before==after)==constant);
+        if(constant) CHECK(exact && before==fixed);
+    }
+    // AvarInputs keys its bindings whatever its lists hold.
+    CHECK(!RigExecBakedOpInputKeyIsConstant(B,make(K::AvarInputs,0,-1,-1)));
+}
+
 // The per-element encoding keys used before contiguous runs: each field's
 // bytes in memory order. A run must reproduce it byte for byte.
 template<class T> void RefPut(std::string *out,const T &value)
@@ -789,6 +837,7 @@ void TestSharedKeyRunsAndPlainValues()
 }
 int main()
 {
+    TestConstantSourceKeys();
     TestSkinEffectiveSelectedTopology(); TestFloatPayloadBits(); TestFieldValidityCountError(); TestPropertyValidityAndLadderState();
     TestChunkRangeIsolation(); TestConstraintSourceAndPropertyAliasKeys();
     TestPacketStatusAndOpaqueBoundary(); TestRawInputAndProviderKeys(); TestAvarEffectiveSelection();

@@ -36,8 +36,15 @@ struct RigExecOpAdapterState {
     std::vector<char> inputExact;
     /// Native retained pure bodies are candidates on their replacement epoch first run.
     std::vector<char> retainedFirst;
+    /// Per op, set at compile: its source key reads no state that can change,
+    /// so a run that rebuilds no source keys treats it as an equal compare.
+    std::vector<char> constantSource;
+    /// Ascending ops such a run still visits: keyed ones and those that always run.
+    std::vector<uint32_t> sourceVisits;
     bool compiled = false, everRan = false;
     bool parallel = false, measuring = false;
+    /// Native: rebuild every constant source key each run and verify it.
+    bool verifyConstantSources = false;
 };
 
 inline RigExecValueId RigExecOpAddValue(RigExecOpAdapterState *, uint32_t, uint32_t);

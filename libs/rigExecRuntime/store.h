@@ -528,6 +528,9 @@ struct RrProgram {
     /// Read from the environment at Open; the geometry steps pass them to
     /// the kernels.
     RrGeoSettings geoSettings;
+    /// RIGEXEC_VERIFY_CONSTANT_KEYS, read at Open: every run rebuilds the
+    /// constant source memos the closure skips and fails if one moved.
+    bool verifyConstantSources = false;
 
     /// One plugin revision's playback state, in external_movers order. No
     /// prepared state means no kernel here: the revision passes through.

@@ -26,6 +26,11 @@ void RigExecBakedOpValueKey(const RigExecBakedProgramImpl &,
 bool RigExecBakedOpInputKey(const RigExecBakedProgramImpl &,
     const RigExecBakedStep &, std::string *key,
     const RigExecBakedOpIdentityRemap *remap=nullptr);
+/// True when RigExecBakedOpInputKey reads nothing sampled, overridable or
+/// published for \p step: its bytes and exactness are then fixed by the
+/// compiled step, so the executor builds that key once per program.
+bool RigExecBakedOpInputKeyIsConstant(const RigExecBakedProgramImpl &,
+    const RigExecBakedStep &);
 bool RigExecBakedOpEffectiveInputKey(const RigExecBakedProgramImpl &,
     const RigExecBakedStep &,std::string *key,std::vector<uint32_t> *coveredPropertyVersions,
     std::vector<std::pair<uint32_t,uint32_t>> *coveredTyped=nullptr,
