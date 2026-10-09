@@ -940,6 +940,8 @@ RigExecBakedRunShadow::Restore(RigExecBakedProgramImpl *program) const
         B.steps[k].lines = steps[k].lines;
         B.steps[k].counters = steps[k].counters;
     }
+    // Output assigned outside a body: the held set is rebuilt from it.
+    RigExecBakedIndexEpilogue(&B);
 }
 
 size_t

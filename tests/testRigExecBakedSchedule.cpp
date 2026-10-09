@@ -5360,6 +5360,298 @@ TestUnmovedPointsKeepTheirVersion()
     CHECK(B.chainVersionMismatches == 0);
 }
 
+/// Two chains of matrix movers, A0..A2 on /Asset/ShapeA and B0, B1 on
+/// /Asset/ShapeB. A1, A2 and B1 carry an out-of-range inputs:defaultWeight
+/// at frame 2 only, so three revisions in two chains pass through there and
+/// apply again at frames 1 and 3.
+UsdStageRefPtr
+MakeFailingChainsStage()
+{
+    const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    stage->DefinePrim(SdfPath("/Asset"), TfToken("Scope"));
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    const UsdPrim moving = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Moving"), TfToken("RigExecControl"));
+    for (int frame = 1; frame <= 3; ++frame) {
+        moving.GetAttribute(TfToken("avars:tx"))
+            .Set(double(frame), UsdTimeCode(frame));
+    }
+    const UsdPrim still = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Still"), TfToken("RigExecControl"));
+    still.GetAttribute(TfToken("avars:ty")).Set(1.0);
+    stage->DefinePrim(SdfPath("/Asset/Rig/Movers"), TfToken("Scope"));
+    const auto chain = [&](const char *shape, const char *prefix, int count,
+                           const std::set<int> &failing) {
+        const SdfPath target(std::string("/Asset/") + shape + ".points");
+        const UsdPrim points =
+            stage->DefinePrim(target.GetPrimPath(), TfToken("Points"));
+        points.GetAttribute(TfToken("points"))
+            .Set(VtVec3fArray{GfVec3f(0), GfVec3f(1, 0, 0), GfVec3f(0, 2, 0)});
+        for (int i = 0; i < count; ++i) {
+            const UsdPrim mover = stage->DefinePrim(
+                SdfPath(std::string("/Asset/Rig/Movers/") + prefix +
+                        std::to_string(i)),
+                TfToken("RigExecMatrixMover"));
+            mover.ApplyAPI(TfToken("RigExecMoverAPI"));
+            mover.GetRelationship(TfToken("rigExec:moves"))
+                .SetTargets({target});
+            mover.GetRelationship(TfToken("rigExec:transform"))
+                .SetTargets({i == 0 ? moving.GetPath() : still.GetPath()});
+            UsdAttribute weight =
+                mover.GetAttribute(TfToken("inputs:defaultWeight"));
+            if (failing.count(i)) {
+                weight.Set(1.0f, UsdTimeCode(1.0));
+                weight.Set(2.0f, UsdTimeCode(2.0));
+                weight.Set(1.0f, UsdTimeCode(3.0));
+            } else {
+                weight.Set(1.0f);
+            }
+        }
+    };
+    chain("ShapeA", "A", 3, {1, 2});
+    chain("ShapeB", "B", 2, {1});
+    return stage;
+}
+
+/// The failing movers of MakeFailingChainsStage.
+const char *const kFailingMovers[] = {"/Asset/Rig/Movers/A1:",
+                                      "/Asset/Rig/Movers/A2:",
+                                      "/Asset/Rig/Movers/B1:"};
+
+/// The lines of \p diagnostics that report a failed mover, in order.
+std::vector<std::string>
+MoverFailedLines(const std::vector<std::string> &diagnostics)
+{
+    std::vector<std::string> lines;
+    for (const std::string &line : diagnostics) {
+        if (line.rfind("MoverFailed ", 0) == 0) {
+            lines.push_back(line);
+        }
+    }
+    return lines;
+}
+
+/// Whether some line of \p lines names the mover \p prefix ("path:").
+bool
+NamesMover(const std::vector<std::string> &lines, const char *prefix)
+{
+    for (const std::string &line : lines) {
+        if (line.find(prefix) != std::string::npos) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// The epilogue's held set names exactly the steps holding diagnostics or
+/// lines, once each and in step order (a publication has tidied it).
+bool
+HeldStepsAreExact(const RigExecBakedProgramImpl &B)
+{
+    const RigExecHeldSteps &held = B.epilogue.held;
+    if (held.holding.size() != B.steps.size()) {
+        return false;
+    }
+    std::vector<uint32_t> holding;
+    for (uint32_t i = 0; i < B.steps.size(); ++i) {
+        const bool holds = !B.steps[i].diagnostics.empty() ||
+                           !B.steps[i].lines.empty();
+        if ((held.holding[i] != 0) != holds) {
+            return false;
+        }
+        if (holds) {
+            holding.push_back(i);
+        }
+    }
+    return held.ascending && held.held == holding;
+}
+
+/// What the geometry epilogue published while it swept every step: each
+/// geometry step's diagnostics, in step order.
+std::vector<std::string>
+SweptGeometryLines(const RigExecBakedProgramImpl &B)
+{
+    std::vector<std::string> lines;
+    for (const RigExecBakedStep &step : B.steps) {
+        if (RigExecBakedIsGeometryStep(step.kind)) {
+            lines.insert(lines.end(), step.diagnostics.begin(),
+                         step.diagnostics.end());
+        }
+    }
+    return lines;
+}
+
+/// One run's epilogue against the steps it read: the held set is exact,
+/// the geometry lines stand in the pose in step order, and the failing
+/// movers are named exactly when \p failing. Returns the failure lines.
+std::vector<std::string>
+CheckEpilogueRun(const char *what, const RigExecBakedProgramImpl &B,
+                 const RigExecRigPose &pose, bool failing)
+{
+    const int before = failures;
+    CHECK(HeldStepsAreExact(B));
+    CHECK(B.epilogue.verify && B.epilogue.mismatches == 0);
+    const std::vector<std::string> swept = SweptGeometryLines(B);
+    CHECK(swept.empty() ||
+          std::search(pose.diagnostics.begin(), pose.diagnostics.end(),
+                      swept.begin(), swept.end()) !=
+              pose.diagnostics.end());
+    const std::vector<std::string> lines = MoverFailedLines(pose.diagnostics);
+    for (const char *mover : kFailingMovers) {
+        CHECK(NamesMover(lines, mover) == failing);
+        CHECK(NamesMover(swept, mover) == failing);
+    }
+    CHECK(!NamesMover(lines, "/Asset/Rig/Movers/A0:") &&
+          !NamesMover(lines, "/Asset/Rig/Movers/B0:"));
+    if (failures != before) {
+        std::printf("    (%s)\n", what);
+    }
+    return lines;
+}
+
+/// The epilogue publishes from the steps holding output, kept by the owner
+/// after each run, and RIGEXEC_VERIFY_EPILOGUE_LISTS sweeps every step
+/// beside it. Three revisions in two chains fail at frame 2: their lines
+/// appear, survive a run that skips their steps, clear when the revisions
+/// apply again and come back, in step order. A rebuild that adopts the
+/// outgoing program's state publishes them the same way, and so does a
+/// frozen job against a snapshot taken on either side of the failure.
+void
+TestTheEpilogueVisitsTheStepsHoldingLines()
+{
+    TfSetenv("RIGEXEC_VERIFY_EPILOGUE_LISTS", "1");
+    const auto finish = [] { TfSetenv("RIGEXEC_VERIFY_EPILOGUE_LISTS", "0"); };
+    const BuiltProgram built = BuildStage(MakeFailingChainsStage());
+    CHECK(built.program != nullptr);
+    if (!built.program) {
+        finish();
+        return;
+    }
+    const RigExecBakedProgramImpl &B = built.program->GetStepGraph();
+    CHECK(B.chains.size() == 2);
+    std::vector<std::string> failedAtTwo;
+    // Frame 2 twice: the second run skips the failed steps, which keep
+    // their lines.
+    for (const double frame : {1.0, 2.0, 2.0, 3.0, 2.0, 1.0}) {
+        RigExecRigPose pose;
+        CHECK(built.program->Run(UsdTimeCode(frame), &pose));
+        const std::string what =
+            "native frame " + std::to_string(int(frame));
+        const std::vector<std::string> lines =
+            CheckEpilogueRun(what.c_str(), B, pose, frame == 2.0);
+        if (frame == 2.0) {
+            if (failedAtTwo.empty()) {
+                failedAtTwo = lines;
+            }
+            CHECK(lines == failedAtTwo);
+        }
+    }
+    CHECK(!failedAtTwo.empty());
+
+    // A rebuild that adopts the failed frame's state.
+    {
+        RigExecRigPose pose;
+        CHECK(built.program->Run(UsdTimeCode(2.0), &pose));
+        std::vector<std::string> reasons;
+        std::unique_ptr<RigExecBakedProgram> rebuilt =
+            RigExecBakedProgram::Build(built.evaluator.get(), &reasons);
+        CHECK(rebuilt != nullptr);
+        if (rebuilt) {
+            rebuilt->AdoptGeometryStateFrom(*built.program);
+            const RigExecBakedProgramImpl &R = rebuilt->GetStepGraph();
+            CHECK(HeldStepsAreExact(R));
+            for (const double frame : {2.0, 3.0, 2.0}) {
+                RigExecRigPose next;
+                CHECK(rebuilt->Run(UsdTimeCode(frame), &next));
+                const std::string what =
+                    "rebuilt frame " + std::to_string(int(frame));
+                const std::vector<std::string> lines =
+                    CheckEpilogueRun(what.c_str(), R, next, frame == 2.0);
+                if (frame == 2.0) {
+                    CHECK(lines == failedAtTwo);
+                }
+            }
+        }
+    }
+
+    // Frozen jobs, against a snapshot of the failed frame and of the
+    // recovered one: each publishes live's failure lines at its time.
+    {
+        const UsdStageRefPtr stage = MakeFailingChainsStage();
+        RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+        std::vector<std::string> errors;
+        CHECK(evaluator.Compile(&errors));
+        CHECK(evaluator.IsBakeable());
+        const std::vector<RigExecValueOverride> none;
+        const auto job = [&](double time) {
+            std::shared_ptr<const RigExecFrozenProgram> frozen;
+            std::string error;
+            CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
+            RigExecFrameInputs inputs;
+            CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(time), none,
+                                           &inputs, &error));
+            RigExecRigPose pose;
+            const RigExecBakedProgram *program = evaluator.GetBakedProgram();
+            if (!frozen || !program) {
+                std::printf("FAIL epilogue lists: the freeze refused: %s\n",
+                            error.c_str());
+                ++failures;
+                return pose;
+            }
+            RigExecFrozenEvalContext context;
+            context.epochDigest = evaluator.GetBindingEpochDigest();
+            context.slotCount = program->GetProviderCount();
+            context.varyingInputCount = inputs.values.size();
+            context.flags = 0;
+            if (evaluator.GetPublishWeightFields()) {
+                context.flags |= kRigExecFrozenPublishWeightFields;
+            }
+            if (evaluator.GetSolverGuidesEnabled()) {
+                context.flags |= kRigExecFrozenSolverGuidesEnabled;
+            }
+            context.frozen = frozen.get();
+            pose = RigExecEvaluateFrozen(context, inputs,
+                                         RigExecMakeProductionStepRunner());
+            CHECK(pose.valid);
+            return pose;
+        };
+        std::vector<std::string> liveAtTwo;
+        for (const double held : {2.0, 3.0}) {
+            const RigExecRigPose live = evaluator.Evaluate(UsdTimeCode(held));
+            CHECK(live.valid);
+            const std::vector<std::string> liveLines =
+                MoverFailedLines(live.diagnostics);
+            CHECK(liveLines.empty() == (held != 2.0));
+            if (held == 2.0) {
+                liveAtTwo = liveLines;
+            }
+            // The snapshot is the live program at `held`; a job at the
+            // same time skips the failed steps, one at the other time
+            // re-runs them.
+            for (const double time : {held, held == 2.0 ? 3.0 : 2.0}) {
+                const std::vector<std::string> lines =
+                    MoverFailedLines(job(time).diagnostics);
+                if (time == held) {
+                    CHECK(lines == liveLines);
+                } else {
+                    CHECK(lines.empty() == (time != 2.0));
+                }
+                for (const char *mover : kFailingMovers) {
+                    CHECK(NamesMover(lines, mover) == (time == 2.0));
+                }
+            }
+        }
+        // Live at frame 2 again, after a recovered frame.
+        CHECK(MoverFailedLines(
+                  evaluator.Evaluate(UsdTimeCode(2.0)).diagnostics) ==
+              liveAtTwo);
+        CHECK(evaluator.GetBakedProgram() != nullptr &&
+              evaluator.GetBakedProgram()->GetStepGraph().epilogue.mismatches ==
+                  0);
+    }
+    finish();
+}
+
 /// A rebuilt program's retained skin ops compare the keys the outgoing
 /// program published with this one's: every point-carrying value the
 /// adoption copied is republished unchanged at the same time, which holds
@@ -5401,6 +5693,9 @@ TestARebuildKeepsItsPointVersions(const std::string &stagePath,
         }
     }
     CHECK(rebuilt->Run(UsdTimeCode(1.0), &pose));
+    // Retained ops skipped this run: the held set still names exactly
+    // the steps holding lines.
+    CHECK(HeldStepsAreExact(B));
     for (const auto &[id, revision] : copied) {
         const auto &value = B.opAdapter.values[id];
         if (value.changed || value.revision != revision) {
@@ -5605,6 +5900,7 @@ main(int argc, char **argv)
     TestTheVerifierRestoresTheChainInputVersion();
     TestAChainRevisionRecoversAcrossAFailure();
     TestUnmovedPointsKeepTheirVersion();
+    TestTheEpilogueVisitsTheStepsHoldingLines();
     {
         const std::string fixtures = examplesDir + "/../tests/fixtures";
         size_t kept = 0;

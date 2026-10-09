@@ -573,13 +573,11 @@ _FrozenExecuteGraph(_FrozenWorker *worker, UsdTimeCode time)
 void
 _FrozenPublishGeometry(RigExecBakedProgramImpl &B, RigExecRigPose *pose)
 {
-    for (const RigExecBakedStep &step : B.steps) {
-        if (!RigExecBakedIsGeometryStep(step.kind)) {
-            continue;
-        }
-        for (const std::string &diagnostic : step.diagnostics) {
-            pose->diagnostics.push_back(diagnostic);
-        }
+    RigExecBakedEnsureEpilogueIndex(&B);
+    RigExecBakedAppendStepLines(&B, RigExecBakedStepLines::Geometry,
+                                &pose->diagnostics);
+    for (const uint32_t index : B.epilogue.geometrySteps) {
+        const RigExecBakedStep &step = B.steps[index];
         if (step.kind == RigExecBakedStepKind::RevisionStatic) {
             const auto &[chainIndex, revisionIndex] =
                 B.revisionIndex[size_t(step.object)];

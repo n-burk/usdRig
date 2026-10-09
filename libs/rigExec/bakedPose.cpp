@@ -5121,52 +5121,25 @@ bool
 RigExecBakedPublishPose(RigExecBakedProgramImpl *program, RigExecRigPose *pose)
 {
     RigExecBakedProgramImpl &B = *program;
+    RigExecBakedEnsureEpilogueIndex(&B);
+    if (B.epilogue.verify) {
+        RigExecBakedVerifyEpilogueIndex(&B);
+    }
     // SCC-excluded solvers did not attempt publication this generation.
     // The canonical operation inventory is the authority, not authored bindings.
-    std::vector<char> aliveSolver(B.solvers.size(), 0);
-    for (const RigExecBakedStep &step : B.steps)
-        if (step.kind == RigExecBakedStepKind::Solve)
-            aliveSolver[size_t(step.object)] = 1;
+    const std::vector<char> &aliveSolver = B.epilogue.aliveSolver;
     // ORIGINAL's property prologue reported the semantic chain/part
-    // inventory before pose diagnostics. Canonical graph execution may
-    // interleave independent bases; reporting must not expose that order.
-    std::vector<const RigExecBakedStep *> propertyDiagnostics;
-    for (const RigExecBakedStep &step : B.steps) {
-        if (step.kind == RigExecBakedStepKind::PropertyRevision &&
-            (!step.diagnostics.empty() || !step.lines.empty())) {
-            propertyDiagnostics.push_back(&step);
-        }
-    }
-    std::sort(propertyDiagnostics.begin(), propertyDiagnostics.end(),
-              [](const RigExecBakedStep *a, const RigExecBakedStep *b) {
-                  return std::make_pair(a->object, a->part) <
-                         std::make_pair(b->object, b->part);
-              });
-    for (const RigExecBakedStep *step : propertyDiagnostics) {
-        pose->diagnostics.insert(pose->diagnostics.end(),
-                                 step->diagnostics.begin(), step->diagnostics.end());
-        pose->diagnostics.insert(pose->diagnostics.end(),
-                                 step->lines.begin(), step->lines.end());
-    }
+    // inventory before pose diagnostics.
+    RigExecBakedAppendStepLines(&B, RigExecBakedStepLines::Property,
+                                &pose->diagnostics);
     // The walk's diagnostics, in step order: commit lines, constraint lines,
     // world-up lines. They were pushed into the pose as the walk produced
     // them; they are replayed here instead, so that no step body ever touches
     // the generation and the order is program order rather than completion
-    // order.
-    for (const RigExecBakedStep &step : B.steps) {
-        // The pose interpolators' lines come AFTER the joint block, where the
-        // dynamic path's phase emits them; replayed below.
-        if (RigExecBakedIsGeometryStep(step.kind) ||
-            step.kind == RigExecBakedStepKind::PoseInterpolator ||
-            step.kind == RigExecBakedStepKind::PropertyRevision) {
-            continue;
-        }
-        for (const std::string &diagnostic : step.diagnostics) {
-            pose->diagnostics.push_back(diagnostic);
-        }
-        // Memoized step lines remain observable on clean skips.
-        for (const std::string &line : step.lines) pose->diagnostics.push_back(line);
-    }
+    // order. The pose interpolators' lines come AFTER the joint block, where
+    // the dynamic path's phase emits them; replayed below.
+    RigExecBakedAppendStepLines(&B, RigExecBakedStepLines::Walk,
+                                &pose->diagnostics);
 
     // An incomplete solver is an authoring gap, not a silent one. Merged
     // here rather than accumulated during the walk, because the ORDER is a
@@ -5337,14 +5310,8 @@ RigExecBakedPublishPose(RigExecBakedProgramImpl *program, RigExecRigPose *pose)
 
     // Preserve diagnostic publication order: interpolators follow joint,
     // control and guide publications and precede geometry diagnostics.
-    for (const RigExecBakedStep &step : B.steps) {
-        if (step.kind != RigExecBakedStepKind::PoseInterpolator) {
-            continue;
-        }
-        for (const std::string &diagnostic : step.diagnostics) {
-            pose->diagnostics.push_back(diagnostic);
-        }
-    }
+    RigExecBakedAppendStepLines(&B, RigExecBakedStepLines::Interpolator,
+                                &pose->diagnostics);
 
     // Property-domain results, in the same map as the point chains: a
     // consumer tells them apart by the type the VtValue holds.

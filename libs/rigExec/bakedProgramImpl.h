@@ -2707,6 +2707,25 @@ struct RigExecBakedProgramImpl {
     /// steps' stamps and empties the list.
     std::vector<uint32_t> stampedSteps;
 
+    /// What the epilogue visits instead of every step: the step lists Build
+    /// fixes and the steps holding diagnostics or lines now. Indexed by
+    /// RigExecBakedIndexEpilogue once the canonical order is fixed, and
+    /// again wherever step output is assigned outside a body; the owner
+    /// folds the ops that ran after each join (RigExecBakedFoldHeldSteps).
+    struct EpilogueIndex {
+        /// Per solver, 1 where a Solve step publishes it: an SCC-excluded
+        /// solver has none.
+        std::vector<char> aliveSolver;
+        /// The RevisionStatic, ChainStatus and Derived steps, ascending:
+        /// the geometry publication's.
+        std::vector<uint32_t> geometrySteps;
+        RigExecHeldSteps held;
+        /// RIGEXEC_VERIFY_EPILOGUE_LISTS, read at Build: every block is also
+        /// swept from all steps, and a difference counted and TF_VERIFYed.
+        bool verify = false;
+        size_t mismatches = 0;
+    } epilogue;
+
     /// Per joint, whether this run's final frame earned a published matrix.
     /// Written by the diagnostic pass, read by the fill pass; sized at
     /// Build, so the epilogue allocates nothing.
@@ -4974,6 +4993,29 @@ bool RigExecBakedPublishPose(RigExecBakedProgramImpl *program,
 /// Publishes each geometry chain and derived target in chain order.
 void RigExecBakedPublishGeometry(RigExecBakedProgramImpl *program,
                                  RigExecRigPose *pose);
+
+/// Builds RigExecBakedProgramImpl::epilogue from the steps as they stand,
+/// keeping `verify` and `mismatches`. Owner thread.
+void RigExecBakedIndexEpilogue(RigExecBakedProgramImpl *program);
+/// Indexes the epilogue unless it already matches the steps and solvers.
+void RigExecBakedEnsureEpilogueIndex(RigExecBakedProgramImpl *program);
+/// Notes the output of every op the last run ran: a body empties its step's
+/// output first (BeginRun) and is the only run-time writer of it. Owner
+/// thread, after the join, failed run or not.
+void RigExecBakedFoldHeldSteps(RigExecBakedProgramImpl *program);
+/// Under `epilogue.verify`: the Build lists against a sweep of the steps.
+void RigExecBakedVerifyEpilogueIndex(RigExecBakedProgramImpl *program);
+
+/// The step-output blocks of the epilogue, each in its fixed order:
+/// property revisions by (chain, part) with their lines, then the walk's
+/// other non-geometry steps with their lines, then the pose interpolators'
+/// diagnostics, then the geometry steps' diagnostics; each in step order.
+enum class RigExecBakedStepLines { Property, Walk, Interpolator, Geometry };
+/// Appends \p block from the held steps; under `epilogue.verify` also
+/// builds it from every step and counts and TF_VERIFYs a difference.
+void RigExecBakedAppendStepLines(RigExecBakedProgramImpl *program,
+                                 RigExecBakedStepLines block,
+                                 std::vector<std::string> *out);
 
 /// Construct the token tables the step bodies of each translation unit use,
 /// on the calling thread. Build calls them, with RigExecRevisionKernelTouchTokens

@@ -701,6 +701,7 @@ bool RrCompileOpGraph(RrProgram *p,std::string *error)
         if(!state.constantSource[c] || step.headAlwaysRuns) state.sourceVisits.push_back(c);
     }
     _RrIndexSlotLeaves(p);
+    RrIndexEpilogue(p);
     return true;
 }
 
@@ -888,6 +889,7 @@ bool RrExecuteOpGraph(RrProgram *p,bool force,std::string *error)
     std::string graphError;
     const bool ok=RigExecExecuteOpGraph(p->opGraph,state.changedLeaves,state.seeds,force,callbacks,&s.opExecution,&graphError,&s.opWorkspace,&state.candidateOps);
     RigExecOpGatherChanges(&state,p->opGraph,s.opExecution.ran);
+    RrFoldHeldSteps(p);
     if(!ok) {
         s.runTrace.clear();
         state.everRan=false; s.everRan=false;

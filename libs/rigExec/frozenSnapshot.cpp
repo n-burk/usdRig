@@ -127,6 +127,10 @@ _CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst)
     D.constraints = src.constraints;
     D.walkSteps = src.walkSteps;
     D.steps = src.steps;
+    // The steps' output travels with them, so the set of the steps holding
+    // any does too; the clone counts its own verification mismatches.
+    D.epilogue = src.epilogue;
+    D.epilogue.mismatches = 0;
     D.excludedSteps = src.excludedSteps;
     D.opGraph = src.opGraph;
     D.opAdapter = src.opAdapter;

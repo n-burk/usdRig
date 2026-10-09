@@ -551,6 +551,21 @@ struct RrProgram {
     /// published point content version over the points' bytes and fails if
     /// the two disagree on a change.
     bool verifyChainVersions = false;
+    /// What the epilogue visits instead of every step, as the native
+    /// RigExecBakedProgramImpl::EpilogueIndex: indexed with the op graph
+    /// (RrIndexEpilogue) and folded after each run (RrFoldHeldSteps).
+    struct EpilogueIndex {
+        /// Per solver, 1 where a Solve step publishes it.
+        std::vector<char> aliveSolver;
+        /// The RevisionStatic, ChainStatus and Derived steps, ascending.
+        std::vector<uint32_t> geometrySteps;
+        /// The steps holding diagnostics or head lines now.
+        RigExecHeldSteps held;
+        /// RIGEXEC_VERIFY_EPILOGUE_LISTS, read at Open: every block is
+        /// also swept from all steps, and a run whose blocks differ fails.
+        bool verify = false;
+        size_t mismatches = 0;
+    } epilogue;
     /// The leaves whose keys read input slots alone (provider leaves and
     /// constraint input arrays), by the slots they read:
     /// slotLeaves[slotLeafBegin[s], slotLeafBegin[s + 1]). slotKeyedLeaves
@@ -800,6 +815,12 @@ bool RrResolveWeightOracle(const RrProgram *program, size_t object,
 // set since the last run reach; RrStore::animatedTouched stands for a
 // change of time.
 bool RrRunSteps(RrProgram *program, bool force, std::string *error);
+/// Builds RrProgram::epilogue from the steps and their output as they
+/// stand, keeping `verify` and `mismatches`.
+void RrIndexEpilogue(RrProgram *program);
+/// Notes the output of every op the last run ran; after the executor,
+/// failed run or not.
+void RrFoldHeldSteps(RrProgram *program);
 bool RrPublishPose(RrProgram *program,
                    std::vector<std::string> *poseDiagnostics,
                    std::string *error);

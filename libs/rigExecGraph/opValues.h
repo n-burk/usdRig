@@ -61,6 +61,48 @@ struct RigExecOpAdapterState {
     std::vector<char> leafVersionMismatch;
 };
 
+/// The steps whose output (diagnostics, lines) an epilogue publishes is not
+/// empty, so publication visits those rather than every step. Owner thread
+/// only: bodies write their own step's output, and the owner notes each op
+/// that ran after the join. `holding` is exact per step; `held` lists every
+/// holding step and, until Ascending() tidies it, may also repeat one or name
+/// one that no longer holds output.
+struct RigExecHeldSteps {
+    std::vector<char> holding;
+    std::vector<uint32_t> held;
+    bool ascending = true;
+
+    void Reset(size_t count)
+    {
+        holding.assign(count, 0);
+        held.clear();
+        ascending = true;
+    }
+    void Note(uint32_t step, bool holds)
+    {
+        if ((holding[step] != 0) == holds) return;
+        holding[step] = holds ? 1 : 0;
+        if (holds) {
+            ascending = ascending && (held.empty() || held.back() < step);
+            held.push_back(step);
+        } else {
+            ascending = false;
+        }
+    }
+    /// The holding steps in step order.
+    const std::vector<uint32_t> &Ascending()
+    {
+        if (!ascending) {
+            held.erase(std::remove_if(held.begin(), held.end(),
+                [this](uint32_t step) { return !holding[step]; }), held.end());
+            std::sort(held.begin(), held.end());
+            held.erase(std::unique(held.begin(), held.end()), held.end());
+            ascending = true;
+        }
+        return held;
+    }
+};
+
 inline RigExecValueId RigExecOpAddValue(RigExecOpAdapterState *, uint32_t, uint32_t);
 
 /// Preindex typed producers before binding any reads. Backends supply

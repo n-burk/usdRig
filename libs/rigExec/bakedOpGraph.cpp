@@ -9,6 +9,7 @@
 #include "pxr/base/work/dispatcher.h"
 #include "pxr/base/work/withScopedParallelism.h"
 #include <algorithm>
+#include <cstddef>
 #include <cstring>
 #include <limits>
 #include <map>
@@ -683,6 +684,8 @@ bool RigExecBakedCompileOpGraph(RigExecBakedProgramImpl *B,std::string *error)
         if(kind==RigExecBakedStepKind::SkinTopology)
             B->skinTopologyLayouts.push_back(B->steps[i].object);
     }
+    B->epilogue.verify=TfGetenvBool("RIGEXEC_VERIFY_EPILOGUE_LISTS",false);
+    RigExecBakedIndexEpilogue(B);
     return true;
 }
 
@@ -877,6 +880,7 @@ bool RigExecBakedExecuteOpGraph(RigExecBakedProgramImpl *program,UsdTimeCode tim
         for(const uint32_t c:B.opWorkspace.pending)
             if(c<B.opGraph.ops.size()) B.stampedSteps.push_back(B.opGraph.ops[c].originalIndex);
     RigExecOpGatherChanges(&state,B.opGraph,B.opExecution.ran);
+    RigExecBakedFoldHeldSteps(&B);
     if(verifyVersions)
         for(uint32_t c=0;c<state.leafVersionMismatch.size();++c)
             TF_VERIFY(!state.leafVersionMismatch[c],
@@ -981,5 +985,133 @@ bool RigExecBakedLowerOpGraph(RigExecBakedProgramImpl *B,std::string *error)
         view.topologicalOrder.push_back(int(i));
     }
     return true;
+}
+
+namespace {
+bool HoldsOutput(const RigExecBakedStep &step)
+{
+    return !step.diagnostics.empty() || !step.lines.empty();
+}
+
+// The epilogue's fixed step lists, from a sweep of the steps.
+void EpilogueLists(const RigExecBakedProgramImpl &B,std::vector<char> *aliveSolver,
+                   std::vector<uint32_t> *geometrySteps)
+{
+    using K=RigExecBakedStepKind;
+    aliveSolver->assign(B.solvers.size(),0);
+    geometrySteps->clear();
+    for(uint32_t i=0;i<B.steps.size();++i) {
+        const auto &step=B.steps[i];
+        if(step.kind==K::Solve) (*aliveSolver)[size_t(step.object)]=1;
+        if(step.kind==K::RevisionStatic || step.kind==K::ChainStatus || step.kind==K::Derived)
+            geometrySteps->push_back(i);
+    }
+}
+
+// One block's lines from the steps \p visit hands over, which must come in
+// step order.
+template<class Visit>
+void AppendBlock(RigExecBakedStepLines block,const Visit &visit,std::vector<std::string> *out)
+{
+    using K=RigExecBakedStepKind;
+    const auto append=[out](const std::vector<std::string> &lines) {
+        out->insert(out->end(),lines.begin(),lines.end());
+    };
+    switch(block) {
+    case RigExecBakedStepLines::Property: {
+        // The chain/part inventory's order: canonical execution may
+        // interleave independent bases, and reporting must not show it.
+        std::vector<const RigExecBakedStep *> property;
+        visit([&](const RigExecBakedStep &step) {
+            if(step.kind==K::PropertyRevision && HoldsOutput(step)) property.push_back(&step);
+        });
+        std::sort(property.begin(),property.end(),[](const RigExecBakedStep *a,const RigExecBakedStep *b) {
+            return std::make_pair(a->object,a->part)<std::make_pair(b->object,b->part);
+        });
+        for(const RigExecBakedStep *step:property) { append(step->diagnostics); append(step->lines); }
+        return;
+    }
+    case RigExecBakedStepLines::Walk:
+        // Commit, constraint and world-up lines; memoized lines stay
+        // observable on clean skips.
+        visit([&](const RigExecBakedStep &step) {
+            if(RigExecBakedIsGeometryStep(step.kind) || step.kind==K::PoseInterpolator ||
+               step.kind==K::PropertyRevision) return;
+            append(step.diagnostics); append(step.lines);
+        });
+        return;
+    case RigExecBakedStepLines::Interpolator:
+        visit([&](const RigExecBakedStep &step) {
+            if(step.kind==K::PoseInterpolator) append(step.diagnostics);
+        });
+        return;
+    case RigExecBakedStepLines::Geometry:
+        visit([&](const RigExecBakedStep &step) {
+            if(RigExecBakedIsGeometryStep(step.kind)) append(step.diagnostics);
+        });
+        return;
+    }
+}
+}
+
+void RigExecBakedIndexEpilogue(RigExecBakedProgramImpl *program)
+{
+    auto &B=*program; auto &E=B.epilogue;
+    EpilogueLists(B,&E.aliveSolver,&E.geometrySteps);
+    E.held.Reset(B.steps.size());
+    for(uint32_t i=0;i<B.steps.size();++i) E.held.Note(i,HoldsOutput(B.steps[i]));
+}
+
+void RigExecBakedEnsureEpilogueIndex(RigExecBakedProgramImpl *program)
+{
+    const auto &E=program->epilogue;
+    if(E.held.holding.size()!=program->steps.size() ||
+       E.aliveSolver.size()!=program->solvers.size())
+        RigExecBakedIndexEpilogue(program);
+}
+
+void RigExecBakedFoldHeldSteps(RigExecBakedProgramImpl *program)
+{
+    auto &B=*program;
+    if(B.epilogue.held.holding.size()!=B.steps.size()) { RigExecBakedIndexEpilogue(&B); return; }
+    for(uint32_t c=0;c<B.opGraph.ops.size() && c<B.opExecution.ran.size();++c) {
+        if(!B.opExecution.ran[c]) continue;
+        const uint32_t i=B.opGraph.ops[c].originalIndex;
+        B.epilogue.held.Note(i,HoldsOutput(B.steps[i]));
+    }
+}
+
+void RigExecBakedVerifyEpilogueIndex(RigExecBakedProgramImpl *program)
+{
+    auto &B=*program; auto &E=B.epilogue;
+    std::vector<char> aliveSolver; std::vector<uint32_t> geometrySteps;
+    EpilogueLists(B,&aliveSolver,&geometrySteps);
+    bool same=aliveSolver==E.aliveSolver && geometrySteps==E.geometrySteps &&
+        E.held.holding.size()==B.steps.size();
+    for(uint32_t i=0;same && i<B.steps.size();++i)
+        same=(E.held.holding[i]!=0)==HoldsOutput(B.steps[i]);
+    if(!same) {
+        ++E.mismatches;
+        TF_VERIFY(same,"the epilogue's step lists differ from a sweep of the steps");
+    }
+}
+
+void RigExecBakedAppendStepLines(RigExecBakedProgramImpl *program,RigExecBakedStepLines block,
+                                 std::vector<std::string> *out)
+{
+    auto &B=*program; auto &E=B.epilogue;
+    const std::vector<uint32_t> &held=E.held.Ascending();
+    const size_t begin=out->size();
+    AppendBlock(block,[&](const auto &each) { for(const uint32_t i:held) each(B.steps[i]); },out);
+    if(!E.verify) return;
+    std::vector<std::string> swept;
+    AppendBlock(block,[&](const auto &each) { for(const auto &step:B.steps) each(step); },&swept);
+    const bool same=swept.size()==out->size()-begin &&
+        std::equal(swept.begin(),swept.end(),out->begin()+std::ptrdiff_t(begin));
+    if(!same) {
+        ++E.mismatches;
+        TF_VERIFY(same,"epilogue block %d: the held steps' lines differ from a sweep of every step",
+                  int(block));
+    }
 }
 } // namespace rigExec

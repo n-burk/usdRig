@@ -3054,18 +3054,18 @@ RigExecBakedPublishGeometry(RigExecBakedProgramImpl *program,
                             RigExecRigPose *pose)
 {
     RigExecBakedProgramImpl &B = *program;
+    RigExecBakedEnsureEpilogueIndex(&B);
     // Chain by chain, in chain order, and inside a chain exactly where the
     // straight line put each line: every revision's assemble diagnostics
-    // first, then the status sweep's, then the chain's points, then each
-    // derived target's diagnostic and its points. Program order is that
-    // order, so this is one pass over the steps.
-    for (const RigExecBakedStep &step : B.steps) {
-        if (!RigExecBakedIsGeometryStep(step.kind)) {
-            continue;
-        }
-        for (const std::string &diagnostic : step.diagnostics) {
-            pose->diagnostics.push_back(diagnostic);
-        }
+    // first, then the status sweep's, then each derived target's. Program
+    // order is that order.
+    RigExecBakedAppendStepLines(&B, RigExecBakedStepLines::Geometry,
+                                &pose->diagnostics);
+    // The chains' points, weight fields and derived targets, in the same
+    // program order: the maps are keyed, so the order shows only where two
+    // steps name one key, and the later step's value stands as it did.
+    for (const uint32_t index : B.epilogue.geometrySteps) {
+        const RigExecBakedStep &step = B.steps[index];
         if (step.kind == RigExecBakedStepKind::RevisionStatic) {
             const auto &[chainIndex, revisionIndex] =
                 B.revisionIndex[size_t(step.object)];

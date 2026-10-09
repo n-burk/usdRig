@@ -1202,15 +1202,19 @@ _StackedChainStage(float firstWeight, bool failMiddle)
 // RIGEXEC_VERIFY_CHAIN_VERSIONS on, read at Open, which fails any run whose
 // versions and points' bytes disagree on a change. A revision that passes
 // through and recovers, and an edit that leaves points where they were.
+// RIGEXEC_VERIFY_EPILOGUE_LISTS fails a run whose epilogue, published from
+// the steps holding lines, differs from a sweep of every step.
 static void
 TestChainPointVersions()
 {
     TfSetenv("RIGEXEC_VERIFY_CHAIN_VERSIONS", "1");
+    TfSetenv("RIGEXEC_VERIFY_EPILOGUE_LISTS", "1");
     _TestStage("chain revision passes through and recovers",
                _StackedChainStage(1.0f, true), {1, 2, 3, 2, 1, 3});
     _TestStage("chain revision keeps its unmoved points",
                _StackedChainStage(0.0f, false), {1, 2, 3, 3, 1});
     TfSetenv("RIGEXEC_VERIFY_CHAIN_VERSIONS", "0");
+    TfSetenv("RIGEXEC_VERIFY_EPILOGUE_LISTS", "0");
 }
 
 static void

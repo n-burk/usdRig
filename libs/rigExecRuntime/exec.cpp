@@ -536,10 +536,20 @@ RigExecRuntimeReader::Execute(std::string *error)
         return false;
     }
 
+    const size_t epilogueMismatches = program.epilogue.mismatches;
     if (!RrPublishPose(&program, &poseDiagnostics, error)) {
         return false;
     }
     RrPublishGeometry(&program, &poseDiagnostics);
+    // RIGEXEC_VERIFY_EPILOGUE_LISTS: lines the held steps published
+    // differently from a sweep of every step fail the run.
+    if (program.epilogue.mismatches != epilogueMismatches) {
+        if (error) {
+            *error = "the epilogue's held steps and a sweep of every "
+                     "step published different lines";
+        }
+        return false;
+    }
 
     for (const auto &loop : program.opGraph.cycles) {
         std::string message = "operation cycle: ";
