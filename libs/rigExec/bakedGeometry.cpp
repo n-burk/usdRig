@@ -1621,12 +1621,14 @@ SkinAcceptance(const RigExecBakedProgramImpl::GeomRevision &revision)
 /// \p whole runs the full-range kernel instead, which is the same body
 /// inside the kernel's own parallel loop; a revision cut into one chunk uses
 /// it so that an unpartitioned mesh keeps the threading it has today.
+/// \p target is the buffer written, at the full count: staging for a chunk.
 bool
 SkinRange(RigExecBakedProgramImpl::GeomRevision *revision,
           const GfVec3f *preceding, const RigExecSkinTransformsView &view,
-          size_t begin, size_t end, bool whole, bool useSimd)
+          size_t begin, size_t end, bool whole, bool useSimd,
+          std::vector<GfVec3f> *target)
 {
-    std::vector<GfVec3f> &out = revision->stagingOutput;
+    std::vector<GfVec3f> &out = *target;
     std::copy(preceding + begin, preceding + end, out.begin() + long(begin));
     if (whole) {
         if (!RigExecApplySkinKernelWithTransforms(revision->parameters, view,
@@ -2150,10 +2152,15 @@ AssembleRevision(RigExecBakedProgramImpl &B,
 /// holds both the folded table and the preceding points runs the revision
 /// whole. Serial, cold, and exactly the arithmetic an unchunked revision
 /// would have performed.
+///
+/// Into \p fused, never staging: staging holds the ranges the chunks'
+/// published RevisionOut keys describe, and a retained or cloned key must
+/// keep matching it.
 bool
 FuseWholeRevision(const RigExecBakedProgramImpl::GeomChain &chain,
                   RigExecBakedProgramImpl::GeomRevision *revision,
-                  size_t revisionIndex, bool useSimd)
+                  size_t revisionIndex, bool useSimd,
+                  std::vector<GfVec3f> *fused)
 {
     const GfVec3f *points = nullptr;
     size_t count = 0;
@@ -2165,10 +2172,10 @@ FuseWholeRevision(const RigExecBakedProgramImpl::GeomChain &chain,
     }
     // Against the forms the FOLD wrote -- this step reads RevisionTransforms
     // and writes none of it, so the table it skins against is the one that
-    // slot already holds. Into staging, like the chunks: the fuse publishes
-    // it the way it publishes theirs.
+    // slot already holds.
+    fused->resize(count);
     return SkinRange(revision, points, WholeTransformsView(revision), 0, count,
-                     /*whole=*/true, useSimd);
+                     /*whole=*/true, useSimd, fused);
 }
 
 }  // namespace
@@ -2710,7 +2717,8 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
             revision.stagingFresh = true;
             chunk.ok = SkinRange(&revision, points,
                                  WholeTransformsView(&revision), 0, count,
-                                 /*whole=*/true, B.useSimd);
+                                 /*whole=*/true, B.useSimd,
+                                 &revision.stagingOutput);
             return;
         }
 
@@ -2729,7 +2737,8 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
         chunk.ok = SkinRange(&revision, points,
                              ChunkTransformsView(chunk, B.useSimd),
                              size_t(chunk.begin), size_t(chunk.end),
-                             /*whole=*/false, B.useSimd);
+                             /*whole=*/false, B.useSimd,
+                             &revision.stagingOutput);
         return;
     }
 
@@ -2780,9 +2789,13 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
             bool moved = !revision.ran;
             revision.resultStatus = revision.status.state;
             bool applied = packetValid && revision.status.AllowsApply();
-            if (applied && skin && revision.partitionStale) {
+            const bool whole = applied && skin && revision.partitionStale;
+            // The whole-revision skin's points; a stale partition is rare.
+            std::vector<GfVec3f> fused;
+            if (whole) {
                 applied = FuseWholeRevision(chain, &revision,
-                                            size_t(revisionIndex), B.useSimd);
+                                            size_t(revisionIndex), B.useSimd,
+                                            &fused);
             } else if (applied && revision.acceptance !=
                                       RigExecRevisionAcceptance::Deferred) {
                 // RevisionStatic's decision, from the validation each chunk's
@@ -2799,13 +2812,14 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
                 }
             }
             if (applied) {
-                if (revision.chunked || (skin && revision.partitionStale)) {
+                if (revision.chunked || whole) {
+                    const std::vector<GfVec3f> &result =
+                        whole ? fused : revision.stagingOutput;
                     if (!hadOwn) {
-                        moved = moved || !SamePoints(revision.stagingOutput,
-                                                     revision.passedPoints);
+                        moved = moved ||
+                                !SamePoints(result, revision.passedPoints);
                     }
-                    const bool copied =
-                        CopyMovedPoints(revision.stagingOutput, &revision.output);
+                    const bool copied = CopyMovedPoints(result, &revision.output);
                     moved = moved || (hadOwn && copied);
                 } else if (revision.stagingFresh) {
                     moved = moved ||

@@ -5549,12 +5549,14 @@ RrGeoSkinAcceptance(const RrGeometryScratch::Revision &rev)
     return RrGeoAcceptance::Refuses;
 }
 
+// \p target is the buffer written, at the full count: staging for a chunk.
 bool
 RrGeoSkinRange(RrGeometryScratch::Revision *rev, const RrVec3f *preceding,
                const RrGeoSkinTransformsView &view, size_t begin,
-               size_t end, bool whole, bool useSimd)
+               size_t end, bool whole, bool useSimd,
+               std::vector<RrVec3f> *target)
 {
-    std::vector<RrVec3f> &out = rev->stagingOutput;
+    std::vector<RrVec3f> &out = *target;
     if (end > begin && preceding) {
         std::copy(preceding + begin, preceding + end,
                   out.begin() + long(begin));
@@ -5580,10 +5582,12 @@ RrGeoSkinRange(RrGeometryScratch::Revision *rev, const RrVec3f *preceding,
     return true;
 }
 
+// Into \p fused, never staging: staging holds the ranges the chunks'
+// published RevisionOut keys describe (the program's FuseWholeRevision).
 bool
 RrGeoFuseWholeRevision(const RrGeometryScratch::Chain &chain,
                        RrGeometryScratch::Revision *rev, size_t revisionIndex,
-                       bool useSimd)
+                       bool useSimd, std::vector<RrVec3f> *fused)
 {
     const RrVec3f *points = nullptr;
     size_t count = 0;
@@ -5592,10 +5596,9 @@ RrGeoFuseWholeRevision(const RrGeometryScratch::Chain &chain,
         count != rev->precedingCount) {
         return false;
     }
-    // Into staging, like the chunks; the fuse publishes it as theirs.
-    rev->stagingOutput.resize(count);
+    fused->resize(count);
     return RrGeoSkinRange(rev, points, RrGeoWholeTransformsView(rev), 0,
-                          count, true, useSimd);
+                          count, true, useSimd, fused);
 }
 
 // A port of RigExecBakedAdoptPartition. The chunk keys stay Build's,
@@ -6476,7 +6479,7 @@ RrGeoRunRevisionChunkStep(RrProgram *program, RrGeometryScratch *scratch,
         rev.stagingFresh = true;
         chunk.ok = RrGeoSkinRange(&rev, points,
                                   RrGeoWholeTransformsView(&rev), 0, count,
-                                  true, useSimd);
+                                  true, useSimd, &rev.stagingOutput);
         return true;
     }
 
@@ -6503,7 +6506,7 @@ RrGeoRunRevisionChunkStep(RrProgram *program, RrGeometryScratch *scratch,
     chunk.ok = RrGeoSkinRange(&rev, points,
                               RrGeoChunkTransformsView(chunk, useSimd),
                               size_t(chunk.begin), size_t(chunk.end), false,
-                              useSimd);
+                              useSimd, &rev.stagingOutput);
     return true;
 }
 
@@ -6560,9 +6563,13 @@ RrGeoRunRevisionFuseStep(RrProgram *program, RrGeometryScratch *scratch,
         bool moved = !rev.ran;
         rev.resultStatus = rev.status.state;
         bool applied = packetValid && rev.status.AllowsApply();
-        if (applied && skin && rev.partitionStale) {
+        const bool whole = applied && skin && rev.partitionStale;
+        // The whole-revision skin's points; a stale partition is rare.
+        std::vector<RrVec3f> fused;
+        if (whole) {
             applied = RrGeoFuseWholeRevision(chain, &rev, revisionIndex,
-                                             program->geoSettings.useSimd);
+                                             program->geoSettings.useSimd,
+                                             &fused);
         } else if (applied && rev.acceptance != RrGeoAcceptance::Deferred) {
             // RevisionStatic's decision, from the validation each chunk's
             // kernel runs first, so every chunk's `ok` is this answer.
@@ -6576,14 +6583,15 @@ RrGeoRunRevisionFuseStep(RrProgram *program, RrGeometryScratch *scratch,
             }
         }
         if (applied) {
-            if (rev.chunked || (skin && rev.partitionStale)) {
+            if (rev.chunked || whole) {
                 // Sticky chunk ranges stay in staging: copy moved blocks.
+                const std::vector<RrVec3f> &result =
+                    whole ? fused : rev.stagingOutput;
                 if (!hadOwn) {
                     moved = moved ||
-                            !RrGeoPointBitsEqual(rev.stagingOutput, rev.passedPoints);
+                            !RrGeoPointBitsEqual(result, rev.passedPoints);
                 }
-                const bool copied =
-                    RrGeoCopyMovedPoints(rev.stagingOutput, &rev.output);
+                const bool copied = RrGeoCopyMovedPoints(result, &rev.output);
                 moved = moved || (hadOwn && copied);
             } else if (rev.stagingFresh) {
                 moved = moved ||

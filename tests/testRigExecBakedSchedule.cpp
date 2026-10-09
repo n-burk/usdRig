@@ -35,6 +35,7 @@
 #include "rigExec/bakedOpGraph.h"
 #include "rigExec/bakedOpValues.h"
 #include "rigExec/frozenContext.h"
+#include "rigExec/frozenProgram.h"
 #include "rigExec/frameCacheSparsity.h"
 #include "rigExec/parallel.h"
 #include "rigExec/moverGraph.h"
@@ -1986,6 +1987,144 @@ TestARecutLayoutCannotReadAnUndeclaredJoint()
     if (failures == failuresBefore) {
         std::printf("  recut layout: %s ran whole while repainted, and its "
                     "chunks resumed\n", skinPath.GetText());
+    }
+    restore();
+}
+
+/// A whole-revision fuse leaves staging as the chunks' keys describe it.
+///
+/// Under a stale partition a chunk whose joint moved still runs, stands
+/// down, and publishes its RevisionOut key over its range of staging; the
+/// fuse then skins every point. Had the fuse written staging, those keys
+/// would no longer describe the state: a snapshot would refuse to retain
+/// it, and its first job would run every op cold where live runs the drag's
+/// cone.
+void
+TestAStaleFuseKeepsTheChunkKeys()
+{
+    const int failuresBefore = failures;
+    const std::string always = TfGetenv("RIGEXEC_BAKED_CHUNK_ALWAYS");
+    const std::string verts = TfGetenv("RIGEXEC_BAKED_CHUNK_VERTS");
+    TfSetenv("RIGEXEC_BAKED_CHUNK_ALWAYS", "1");
+    TfSetenv("RIGEXEC_BAKED_CHUNK_VERTS", "2");
+    const auto restore = [&]() {
+        if (always.empty()) {
+            TfUnsetenv("RIGEXEC_BAKED_CHUNK_ALWAYS");
+        } else {
+            TfSetenv("RIGEXEC_BAKED_CHUNK_ALWAYS", always);
+        }
+        if (verts.empty()) {
+            TfUnsetenv("RIGEXEC_BAKED_CHUNK_VERTS");
+        } else {
+            TfSetenv("RIGEXEC_BAKED_CHUNK_VERTS", verts);
+        }
+    };
+
+    const UsdStageRefPtr stage = MakeTwoKeySkinStage();
+    const SdfPath rigPath("/Asset/Rig");
+    const SdfPath skinPath("/Asset/Rig/Movers/Skin");
+    RigExecRigEvaluator evaluator(stage, rigPath);
+    std::vector<std::string> errors;
+    CHECK(evaluator.Compile(&errors));
+    CHECK(evaluator.IsBakeable());
+    const UsdTimeCode time(1.0);
+    CHECK(evaluator.Evaluate(time).valid);
+
+    // Chunk 0's points repainted onto j1 by a drag on the indices, then j1
+    // moved: chunk 1, keyed {j1}, runs and stands down; the fuse skins.
+    const RigExecValueOverride onJ1{skinPath, TfToken(),
+                                    TfToken("rigExec:jointIndices"),
+                                    VtValue(VtIntArray{1, 1, 1, 1})};
+    const auto painted = [&](double ty) {
+        return std::vector<RigExecValueOverride>{
+            onJ1, RigExecValueOverride{SdfPath("/Asset/Rig/J1"), TfToken(),
+                                       TfToken("avars:ty"), VtValue(ty)}};
+    };
+    evaluator.SetInteractiveOverrides({onJ1});
+    CHECK(evaluator.Evaluate(time).valid);
+    evaluator.SetInteractiveOverrides(painted(25.0));
+    CHECK(evaluator.Evaluate(time).valid);
+    const RigExecBakedProgram *program = evaluator.GetBakedProgram();
+    CHECK(program != nullptr);
+    if (!program) {
+        restore();
+        return;
+    }
+    const RigExecBakedProgramImpl &B = program->GetStepGraph();
+    const RigExecBakedProgramImpl::GeomRevision *revision = nullptr;
+    for (const auto &chain : B.chains) {
+        for (const auto &candidate : chain.revisions) {
+            if (candidate.moverPath == skinPath) {
+                revision = &candidate;
+            }
+        }
+    }
+    CHECK(revision != nullptr && revision->chunked &&
+          revision->partitionStale && revision->executed);
+
+    // Every published RevisionOut key still describes the state.
+    using D = RigExecBakedSlotDomain;
+    size_t outs = 0, standing = 0;
+    for (const auto &value : B.opAdapter.values) {
+        if (!value.initialized || D(value.domain) != D::RevisionOut) {
+            continue;
+        }
+        ++outs;
+        if (RigExecBakedOpValueKeyStands(B, D::RevisionOut, value.slot,
+                                         value.key)) {
+            ++standing;
+        }
+    }
+    CHECK(outs > 0 && standing == outs);
+
+    // So a snapshot retains the completed state ...
+    std::shared_ptr<const RigExecFrozenProgram> frozen;
+    std::string error;
+    CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
+    if (!frozen) {
+        std::printf("FAIL stale fuse: the freeze refused: %s\n",
+                    error.c_str());
+        restore();
+        return;
+    }
+    CHECK(B.opAdapter.everRan && frozen->program.opAdapter.everRan);
+    CHECK(frozen->program.opAdapter.retainedFirst ==
+          B.opAdapter.retainedFirst);
+
+    // ... and its first job runs what live runs for the next drag.
+    const std::vector<RigExecValueOverride> next = painted(30.0);
+    RigExecFrameInputs inputs;
+    CHECK(RigExecSampleFrameInputs(evaluator, time, next, &inputs, &error));
+    RigExecFrozenEvalContext context;
+    context.epochDigest = evaluator.GetBindingEpochDigest();
+    context.slotCount = program->GetProviderCount();
+    context.varyingInputCount = inputs.values.size();
+    context.flags = 0;
+    if (evaluator.GetPublishWeightFields()) {
+        context.flags |= kRigExecFrozenPublishWeightFields;
+    }
+    if (evaluator.GetSolverGuidesEnabled()) {
+        context.flags |= kRigExecFrozenSolverGuidesEnabled;
+    }
+    context.frozen = frozen.get();
+    const RigExecRigPose job = RigExecEvaluateFrozen(
+        context, inputs, RigExecMakeProductionStepRunner());
+    evaluator.SetInteractiveOverrides(next);
+    const RigExecRigPose live = evaluator.Evaluate(time);
+    CHECK(job.valid && live.valid);
+    rigExecTest::CompareEveryMap(&failures, "stale fuse, first frozen job",
+                                 live, job);
+    if (job.executedOpCount != live.executedOpCount) {
+        std::printf("FAIL stale fuse: the first frozen job ran %zu op(s), "
+                    "live %zu\n", size_t(job.executedOpCount),
+                    size_t(live.executedOpCount));
+        ++failures;
+    }
+    CHECK(job.executedOpCount < B.opGraph.ops.size());
+    if (failures == failuresBefore) {
+        std::printf("  stale fuse: %zu RevisionOut key(s) stand, and the "
+                    "first frozen job ran %zu of %zu op(s), as live did\n",
+                    outs, size_t(job.executedOpCount), B.opGraph.ops.size());
     }
     restore();
 }
@@ -5354,6 +5493,7 @@ main(int argc, char **argv)
     TestAStalePartitionRunsTheRevisionWhole(
         examplesDir + "/biped/Biped.usda");
     TestARecutLayoutCannotReadAnUndeclaredJoint();
+    TestAStaleFuseKeepsTheChunkKeys();
     {
         // Chunked revisions: a fuse reads several chunks of its own, and in
         // oneloop_cross_domain the smooth reads the version a chunked skin's
