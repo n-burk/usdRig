@@ -3288,6 +3288,11 @@ struct RigExecBakedProgramImpl {
         /// Ranges whose kernel refused after an Applies acceptance this run (an
         /// invariant violation; they passed through). Written by the join.
         uint32_t rangeRefusals = 0;
+        /// A cycle set aside one of its ranges or its join (compile state,
+        /// set before each region by the set-aside reset): the revision
+        /// passes the base through like an excluded fuse, `currentSource`
+        /// -1, and its join publishes that version.
+        bool rangeSetAside = false;
     };
     struct GeomChain {
         SdfPath target;

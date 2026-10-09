@@ -4432,18 +4432,13 @@ TestEachChainReaderBindsOneVersion(const BuiltProgram &built,
             if (producer != B.steps.end())
                 CHECK(std::binary_search(step.preds.begin(),step.preds.end(),int(producer-B.steps.begin())));
         }
-        // A range-pipelined revision's join reads its own ranges and no
-        // version; its range step reads range `part` of a range-pipelined
-        // predecessor's buffer and no version, or the version after any
-        // other revision.
-        const bool rangeStep =
-            !fieldReader && revision.rangeRole &&
-            (step.kind == RigExecBakedStepKind::RevisionChunk ||
-             step.kind == RigExecBakedStepKind::RevisionFuse);
-        const bool rangeJoin =
-            rangeStep && step.kind == RigExecBakedStepKind::RevisionFuse;
+        // A range-pipelined revision's join reads its own ranges and, as a
+        // fuse does, the entering version; its range step reads range
+        // `part` of a range-pipelined predecessor's buffer and no version,
+        // or the version after any other revision.
         const bool rangeEntering =
-            rangeStep && !rangeJoin && r > 0 &&
+            !fieldReader && revision.rangeRole &&
+            step.kind == RigExecBakedStepKind::RevisionChunk && r > 0 &&
             B.chains[size_t(c)].revisions[size_t(r) - 1].rangeRole;
         std::vector<int> ownChunks;
         if (step.kind == RigExecBakedStepKind::RevisionFuse) {
@@ -4465,7 +4460,7 @@ TestEachChainReaderBindsOneVersion(const BuiltProgram &built,
             ++stacked;
             if (B.revisionChunkCount[size_t(id)] > 1) ++stackedChunked;
         }
-        if ((r == 0 && !fieldReader) || rangeJoin || rangeEntering) {
+        if ((r == 0 && !fieldReader) || rangeEntering) {
             CHECK(done.empty() && dirty.empty());
             if (rangeEntering) {
                 // Ordered after the predecessor's range step of that part.
@@ -4549,10 +4544,10 @@ TestEachChainReaderBindsOneVersion(const BuiltProgram &built,
 
 /// Appends the chain slots a reader of point version \p r of chain \p c
 /// depends on, transitively, in a chain holding range-pipelined revisions:
-/// \p mode -2 reads the version whole, -1 every range of it but not its
-/// join, k >= 0 range k only. Range k of a range-pipelined revision reads
-/// range k of a range-pipelined predecessor; every other reader reads the
-/// predecessor's RevisionDone, whose producer reads its own chunks.
+/// \p mode -2 reads the version whole, k >= 0 range k only. Range k of a
+/// range-pipelined revision reads range k of a range-pipelined predecessor;
+/// every other reader reads the predecessor's RevisionDone, whose producer
+/// (a fuse or a join) reads its own chunks and the version before, whole.
 void
 AddVersionAncestry(const RigExecBakedProgramImpl &B, int c, int r, int mode,
                    std::vector<RigExecBakedSlotRange> *reads)
@@ -4569,17 +4564,15 @@ AddVersionAncestry(const RigExecBakedProgramImpl &B, int c, int r, int mode,
                 RigExecBakedOne(RigExecBakedSlotDomain::RevisionOut, base + mode));
             continue;
         }
-        if (!range || mode == -2) {
-            reads->push_back(
-                RigExecBakedOne(RigExecBakedSlotDomain::RevisionDone, q));
-            reads->push_back(
-                RigExecBakedOne(RigExecBakedSlotDomain::ChainDirty, q));
-        }
+        reads->push_back(
+            RigExecBakedOne(RigExecBakedSlotDomain::RevisionDone, q));
+        reads->push_back(
+            RigExecBakedOne(RigExecBakedSlotDomain::ChainDirty, q));
         reads->push_back(RigExecBakedRange(RigExecBakedSlotDomain::RevisionOut,
                                            base, base + count));
-        // A join's ranges read every range of what entered it; a whole
-        // revision's chunks and fuse read it whole.
-        mode = range ? -1 : -2;
+        // A join, like a fuse, reads its own ranges and the version before
+        // its own, whole.
+        mode = -2;
     }
 }
 
@@ -4589,8 +4582,8 @@ AddVersionAncestry(const RigExecBakedProgramImpl &B, int c, int r, int mode,
 /// every earlier chunk of its chain, RevisionDone[first, id) and
 /// ChainDirty(id - 1), the fuse reads every chunk of its chain up to its
 /// own, and ChainStatus reads every chunk of its chain. On a chain with
-/// range-pipelined revisions, whose joins nothing in the chain waits for,
-/// the reads are AddVersionAncestry's instead.
+/// range-pipelined revisions, whose range steps wait for no join, the reads
+/// are AddVersionAncestry's instead.
 std::vector<RigExecBakedSlotRange>
 OverApproximateChainReads(const RigExecBakedProgramImpl &B,
                           const RigExecBakedStep &step)
@@ -4627,9 +4620,10 @@ OverApproximateChainReads(const RigExecBakedProgramImpl &B,
     if (pipelined) {
         // A chain with range-pipelined revisions: everything the version
         // read transitively depends on, by the pipelined rules (range k of
-        // a range revision reads range k of its predecessor and no join).
+        // a range revision reads range k of its predecessor and no join; a
+        // join reads its own ranges and the version whole).
         const bool range = revisions[size_t(r)].rangeRole &&
-                           step.kind != RigExecBakedStepKind::RevisionStatic;
+                           step.kind == RigExecBakedStepKind::RevisionChunk;
         if (step.kind == RigExecBakedStepKind::RevisionFuse) {
             reads.push_back(RigExecBakedRange(
                 RigExecBakedSlotDomain::RevisionOut,
@@ -4637,10 +4631,7 @@ OverApproximateChainReads(const RigExecBakedProgramImpl &B,
                 B.revisionChunkBase[size_t(id)] +
                     B.revisionChunkCount[size_t(id)]));
         }
-        const int mode = !range ? -2
-                         : step.kind == RigExecBakedStepKind::RevisionFuse
-                             ? -1
-                             : step.part;
+        const int mode = range ? step.part : -2;
         AddVersionAncestry(B, c, r, mode, &reads);
         return reads;
     }
@@ -5930,7 +5921,8 @@ RangeChainPosition(const RigExecBakedProgramImpl &B, const char *path)
 /// The range chain's layout: three revisions, each range-pipelined with the
 /// three Build bounds of 10,000 points, its own buffer as its version, three
 /// range steps each reading its predecessor's range of the same part and no
-/// version, and a join reading its own three ranges and no version.
+/// version, and a join reading its own three ranges and, as a fuse does, the
+/// version entering the revision.
 void
 TestARangeChainIsCutIntoRanges(const BuiltProgram &built, const char *name)
 {
@@ -5999,8 +5991,18 @@ TestARangeChainIsCutIntoRanges(const BuiltProgram &built, const char *name)
                 for (int k = 0; k < 3; ++k) {
                     CHECK(DeclaresSlot(step.reads, D::RevisionOut, base + k));
                 }
-                CHECK(DeclaredSlots(step.reads, D::RevisionDone) == 0 &&
-                      DeclaredSlots(step.reads, D::ChainDirty) == 0);
+                CHECK(DeclaredSlots(step.reads, D::RevisionDone) ==
+                          (r > 0 ? 1u : 0u) &&
+                      DeclaredSlots(step.reads, D::ChainDirty) ==
+                          (r > 0 ? 1u : 0u));
+                if (r > 0) {
+                    CHECK(DeclaresSlot(step.reads, D::RevisionDone, id - 1) &&
+                          DeclaresSlot(step.reads, D::ChainDirty, id - 1));
+                    // Ordered after the predecessor's join.
+                    CHECK(std::binary_search(
+                        step.preds.begin(), step.preds.end(),
+                        B.revisionFuseStep[size_t(id) - 1]));
+                }
                 CHECK(DeclaresSlot(step.writes, D::RevisionDone, id) &&
                       DeclaresSlot(step.writes, D::ChainDirty, id));
             }
@@ -6011,9 +6013,9 @@ TestARangeChainIsCutIntoRanges(const BuiltProgram &built, const char *name)
 }
 
 /// The validator holds a range-pipelined chain to its reads by name: a
-/// range without its predecessor's range, a join waiting for a point
-/// version, and a join missing one of its own ranges. Each case restores
-/// what it broke.
+/// range without its predecessor's range, a range waiting for a point
+/// version, a join without the version entering it, and a join missing one
+/// of its own ranges. Each case restores what it broke.
 void
 TestTheValidatorRejectsABrokenRangeChain()
 {
@@ -6073,12 +6075,14 @@ TestTheValidatorRejectsABrokenRangeChain()
     }
     {
         // The version read with its producer's edge, so only the
-        // pipelining rule can object.
-        RigExecBakedStep &reader = B.steps[size_t(join)];
-        // Two joins are unordered, so the edge is added only where the
-        // producer precedes the reader in program order (M0 before M1 here).
+        // pipelining rule can object. The predecessor's join need not
+        // precede the range in program order; the case runs where it does.
+        RigExecBakedStep &reader = B.steps[size_t(range)];
         const int producer = B.revisionFuseStep[size_t(id) - 1];
-        if (producer >= 0 && producer < join) {
+        if (producer < 0 || producer > range) {
+            std::printf("  a range waiting for a point version: skipped, the "
+                        "predecessor's join is ordered after it\n");
+        } else {
             std::vector<int> &succs = B.steps[size_t(producer)].succs;
             const std::vector<RigExecBakedSlotRange> reads = reader.reads;
             const std::vector<int> preds = reader.preds;
@@ -6091,21 +6095,38 @@ TestTheValidatorRejectsABrokenRangeChain()
                     std::lower_bound(reader.preds.begin(), reader.preds.end(),
                                      producer),
                     producer);
-                succs.insert(std::lower_bound(succs.begin(), succs.end(), join),
-                             join);
+                succs.insert(
+                    std::lower_bound(succs.begin(), succs.end(), range),
+                    range);
             }
-            ExpectRejected(B, "a join waiting for a point version",
+            ExpectRejected(B, "a range waiting for a point version",
                            {"(" + reader.label + ")",
                             "reads point version 1 of chain 0",
-                            "which a range-pipelined join must not wait for"});
+                            "which a range-pipelined range must not wait for"});
             reader.reads = reads;
             reader.preds = preds;
             succs = producerSuccs;
-            passes("a join waiting for a point version");
-        } else {
-            std::printf("  a join waiting for a point version: skipped, the "
-                        "predecessor's join is ordered after it\n");
+            passes("a range waiting for a point version");
         }
+    }
+    {
+        // The join keeps the joins in chain order through the version it
+        // declares; without it, the version rule objects.
+        RigExecBakedStep &reader = B.steps[size_t(join)];
+        const std::vector<RigExecBakedSlotRange> reads = reader.reads;
+        std::vector<RigExecBakedSlotRange> kept;
+        for (const RigExecBakedSlotRange &read : reader.reads) {
+            if (read.domain != D::RevisionDone) {
+                kept.push_back(read);
+            }
+        }
+        CHECK(kept.size() + 1 == reads.size());
+        reader.reads = kept;
+        ExpectRejected(B, "a join without the version entering it",
+                       {"(" + reader.label + ")",
+                        "reads point version 1 of chain 0 without declaring it"});
+        reader.reads = reads;
+        passes("a join without the version entering it");
     }
     {
         RigExecBakedStep &reader = B.steps[size_t(join)];
@@ -6325,6 +6346,119 @@ TestARangeChainCutsOffUnmovedRanges()
         CHECK(RanLast(B, K::RevisionFuse, id) == (r >= moved));
     }
     CHECK(B.chainVersionMismatches == 0);
+}
+
+/// Three matrix movers over 10,000 points authored Zeta, Middle, Alpha, so
+/// the chain runs them in that order while their paths sort the other way.
+/// Zeta's and Alpha's inputs:defaultWeight leave [0, 1] at frame 2, so both
+/// joins emit a line there.
+UsdStageRefPtr
+MakeReversedLinesStage()
+{
+    const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    stage->DefinePrim(SdfPath("/Asset"), TfToken("Scope"));
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    const UsdPrim moving = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Moving"), TfToken("RigExecControl"));
+    for (int frame = 1; frame <= 3; ++frame) {
+        moving.GetAttribute(TfToken("avars:tx"))
+            .Set(double(frame), UsdTimeCode(frame));
+    }
+    const SdfPath target("/Asset/Shape.points");
+    VtVec3fArray base(10000);
+    for (size_t i = 0; i < base.size(); ++i) {
+        base[i] = GfVec3f(float(i % 101) * 0.25f, float(i / 101) * 0.125f,
+                          1.0f + float(i % 7));
+    }
+    stage->DefinePrim(target.GetPrimPath(), TfToken("Points"))
+        .GetAttribute(TfToken("points"))
+        .Set(base);
+    stage->DefinePrim(SdfPath("/Asset/Rig/Movers"), TfToken("Scope"));
+    for (const char *name : {"Zeta", "Middle", "Alpha"}) {
+        const UsdPrim mover = stage->DefinePrim(
+            SdfPath("/Asset/Rig/Movers").AppendChild(TfToken(name)),
+            TfToken("RigExecMatrixMover"));
+        mover.ApplyAPI(TfToken("RigExecMoverAPI"));
+        mover.GetRelationship(TfToken("rigExec:moves")).SetTargets({target});
+        mover.GetRelationship(TfToken("rigExec:transform"))
+            .SetTargets({moving.GetPath()});
+        UsdAttribute scalar =
+            mover.GetAttribute(TfToken("inputs:defaultWeight"));
+        if (std::string(name) == "Middle") {
+            scalar.Set(1.0f);
+        } else {
+            scalar.Set(1.0f, UsdTimeCode(1.0));
+            scalar.Set(2.0f, UsdTimeCode(2.0));
+            scalar.Set(1.0f, UsdTimeCode(3.0));
+        }
+    }
+    return stage;
+}
+
+/// The joins publish their lines in the unsplit chain's order: two failing
+/// movers whose chain order is the reverse of their paths' order report, at
+/// frame 2, exactly the lines the chain built whole reports, Zeta's first.
+/// The canonical order breaks ties among ready steps by path, so a join
+/// that waited only for its own ranges would let Alpha's line overtake.
+void
+TestRangeJoinsKeepTheLineOrder()
+{
+    const BuiltProgram ranged = BuildStage(MakeReversedLinesStage());
+    TfSetenv("RIGEXEC_BAKED_RANGE_CHAINS", "0");
+    const BuiltProgram whole = BuildStage(MakeReversedLinesStage());
+    TfUnsetenv("RIGEXEC_BAKED_RANGE_CHAINS");
+    CHECK(ranged.program != nullptr && whole.program != nullptr);
+    if (!ranged.program || !whole.program) {
+        return;
+    }
+    const RigExecBakedProgramImpl &R = ranged.program->GetStepGraph();
+    const int zeta = RangeChainPosition(R, "/Asset/Rig/Movers/Zeta");
+    const int alpha = RangeChainPosition(R, "/Asset/Rig/Movers/Alpha");
+    CHECK(zeta >= 0 && alpha > zeta);
+    if (zeta < 0 || alpha <= zeta) {
+        return;
+    }
+    for (const auto &revision : R.chains[0].revisions) {
+        CHECK(revision.rangeRole);
+    }
+    const std::string zetaLine = "MoverFailed /Asset/Rig/Movers/Zeta: "
+                                 "inputs:defaultWeight must be finite";
+    const std::string alphaLine = "MoverFailed /Asset/Rig/Movers/Alpha: "
+                                  "inputs:defaultWeight must be finite";
+    const auto at = [](const std::vector<std::string> &lines,
+                       const std::string &prefix) {
+        for (size_t i = 0; i < lines.size(); ++i) {
+            if (lines[i].rfind(prefix, 0) == 0) {
+                return int(i);
+            }
+        }
+        return -1;
+    };
+    for (const double frame : {1.0, 2.0, 3.0, 2.0}) {
+        RigExecRigPose rangedPose, wholePose;
+        CHECK(ranged.program->Run(UsdTimeCode(frame), &rangedPose));
+        CHECK(whole.program->Run(UsdTimeCode(frame), &wholePose));
+        CHECK(SameBits(R.chains[0].result,
+                       whole.program->GetStepGraph().chains[0].result));
+        const bool same = rangedPose.diagnostics == wholePose.diagnostics;
+        CHECK(same);
+        if (!same) {
+            std::printf("FAIL range join lines at frame %g:\n", frame);
+            for (const std::string &line : rangedPose.diagnostics) {
+                std::printf("  ranged: %s\n", line.c_str());
+            }
+            for (const std::string &line : wholePose.diagnostics) {
+                std::printf("  whole:  %s\n", line.c_str());
+            }
+        }
+        const int first = at(rangedPose.diagnostics, zetaLine);
+        const int second = at(rangedPose.diagnostics, alphaLine);
+        if (frame == 2.0) {
+            CHECK(first >= 0 && second > first);
+        } else {
+            CHECK(first < 0 && second < 0);
+        }
+    }
 }
 
 /// One matrix mover on a control that moves every frame, weighted by a
@@ -6819,6 +6953,7 @@ main(int argc, char **argv)
         TestTheValidatorRejectsABrokenRangeChain();
         TestARangeChainMatchesTheWholeChain();
         TestARangeChainCutsOffUnmovedRanges();
+        TestRangeJoinsKeepTheLineOrder();
     }
     // Chain buffers flip rather than copy, and point values key by content
     // version: buffer selection across a failure, a version an unmoved edit

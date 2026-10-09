@@ -1557,7 +1557,8 @@ ValidatePointVersions(const RigExecBakedProgramImpl &B, GraphViolations *out)
             own.rangeRole && (step.kind == RigExecBakedStepKind::RevisionChunk ||
                               step.kind == RigExecBakedStepKind::RevisionFuse);
         if (rangeStep) {
-            // A join reads every range of its own and no point version; a
+            // A join reads every range of its own and, like a fuse, the
+            // entering version, which orders the joins as the fuses were; a
             // range reads range `part` of a range-pipelined predecessor and
             // no version, or, after any other revision, the version.
             const bool join = step.kind == RigExecBakedStepKind::RevisionFuse;
@@ -1584,25 +1585,20 @@ ValidatePointVersions(const RigExecBakedProgramImpl &B, GraphViolations *out)
                     }
                 }
             }
-            if (r == 0) {
-                continue;
-            }
-            const bool version =
-                covers(step.reads, RigExecBakedSlotDomain::RevisionDone,
-                       id - 1) ||
-                covers(step.reads, RigExecBakedSlotDomain::ChainDirty, id - 1);
             const bool rangeEntering =
+                !join && r > 0 &&
                 B.chains[size_t(chain)].revisions[size_t(r) - 1].rangeRole;
-            if (join || rangeEntering) {
+            if (rangeEntering) {
+                const bool version =
+                    covers(step.reads, RigExecBakedSlotDomain::RevisionDone,
+                           id - 1) ||
+                    covers(step.reads, RigExecBakedSlotDomain::ChainDirty,
+                           id - 1);
                 if (version) {
                     out->Add(NameStep(B, index) + " reads point version " +
                              std::to_string(r) + " of chain " +
                              std::to_string(chain) + ", which a range-"
-                             "pipelined " + (join ? "join" : "range") +
-                             " must not wait for");
-                }
-                if (join) {
-                    continue;
+                             "pipelined range must not wait for");
                 }
                 const auto [base, ranges] = ownRanges(id - 1);
                 if (step.part < 0 || step.part >= ranges ||
