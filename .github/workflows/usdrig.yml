@@ -16,7 +16,8 @@
 #     usdNoodles needs an OpenUSD built with Python + garch/glf, then
 #     FetchContent of facebookexperimental/noodles. testusdview needs a
 #     display / usdview. None of those are in this first gate.
-#   * CTest has no T0/T1 labels here. The gate is the C++ suite
+#   * CTest has a `slow` label for a local quick tier (`ctest -LE slow`).
+#     This workflow does not filter labels. The gate is the C++ suite
 #     (`^testRigExec`) minus cone-verify doubles and the example-parity
 #     sweep, which are workstation-scale relative to the 120 s per-test
 #     TIMEOUT in CMakeLists.txt.
@@ -218,7 +219,15 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            ninja-build libgl1-mesa-dev xorg-dev
+            ninja-build ccache libgl1-mesa-dev xorg-dev
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-${{ runner.os }}-gcc-${{ github.sha }}
+          restore-keys: |
+            ccache-${{ runner.os }}-gcc-
 
       - name: Download OpenUSD prefix
         uses: actions/download-artifact@v4
@@ -231,16 +240,29 @@ jobs:
           tar -C usd-install -xf usd-install.tar
 
       - name: Configure
+        env:
+          CCACHE_DIR: ${{ github.workspace }}/.ccache
+          CCACHE_COMPRESS: "1"
+          CCACHE_MAXSIZE: 400M
         run: |
           cmake -S . -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DUSD_INSTALL_DIR="${GITHUB_WORKSPACE}/usd-install" \
             -DCMAKE_PREFIX_PATH="${GITHUB_WORKSPACE}/usd-install" \
             -DRIGEXEC_BUILD_PYTHON=OFF \
             -DRIGEXEC_BUILD_USDNOODLES=OFF
 
       - name: Build
-        run: ninja -C build -j"$(nproc)"
+        env:
+          CCACHE_DIR: ${{ github.workspace }}/.ccache
+          CCACHE_COMPRESS: "1"
+          CCACHE_MAXSIZE: 400M
+        run: |
+          ccache --zero-stats
+          ninja -C build -j"$(nproc)"
+          ccache --show-stats
 
       - name: rigExecPose smoke
         run: |
@@ -260,9 +282,10 @@ jobs:
           retention-days: 5
 
   # --------------------------------------------------------------------------
-  # C++ CTest gate. -R is a regex on the test name; there are no T0/T1
-  # labels in this tree. Cone-verify doubles and the example-parity sweep
-  # stay out of the first gate (TIMEOUT 120 s, 4 vCPU).
+  # C++ CTest gate. -R is a regex on the test name. The `slow` label is a
+  # local quick tier only; this job does not exclude it. Cone-verify doubles
+  # and the example-parity sweep stay out of the first gate (TIMEOUT 120 s,
+  # 4 vCPU).
   # --------------------------------------------------------------------------
   ctest-cpp:
     name: ctest (C++)

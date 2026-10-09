@@ -29,6 +29,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -38,6 +39,7 @@
 #include <initializer_list>
 #include <map>
 #include <memory>
+#include <thread>
 #include <set>
 #include <string>
 #include <utility>
@@ -64,6 +66,41 @@ using fb::PathKind;
 using fb::ReadMode;
 using fb::RigExecWireFile;
 using fb::RigExecWireInput;
+
+// Independent index ranges (byte flips, random corruptions). The calling
+// thread still applies CHECK, so failure text stays single-threaded.
+template <class Fn>
+void
+_ParallelFor(size_t count, Fn &&fn)
+{
+    unsigned threads = std::thread::hardware_concurrency();
+    if (threads < 2 || count < 64) {
+        for (size_t i = 0; i < count; ++i) {
+            fn(i);
+        }
+        return;
+    }
+    if (threads > 8) {
+        threads = 8;
+    }
+    std::atomic<size_t> next{0};
+    std::vector<std::thread> pool;
+    pool.reserve(threads);
+    for (unsigned t = 0; t < threads; ++t) {
+        pool.emplace_back([&] {
+            for (;;) {
+                const size_t i = next.fetch_add(1, std::memory_order_relaxed);
+                if (i >= count) {
+                    return;
+                }
+                fn(i);
+            }
+        });
+    }
+    for (std::thread &worker : pool) {
+        worker.join();
+    }
+}
 
 // ------------------------------------------------------------ bit helpers
 
@@ -1526,20 +1563,36 @@ TestOpenRefusals()
 
     // Every single-byte corruption is refused or opens cleanly; none
     // crashes. What opens must write back to a buffer Open accepts.
-    size_t refused = 0, opened = 0;
-    for (size_t i = 0; i < bytes.size(); ++i) {
+    // 0 refused with a reason, 1 opened and rewrote, 2 refused with an
+    // empty reason, 3 opened but the rewrite was not accepted.
+    std::vector<uint8_t> flip(bytes.size(), 0);
+    _ParallelFor(bytes.size(), [&](size_t i) {
         std::vector<uint8_t> flipped = bytes;
         flipped[i] ^= 0xff;
         std::string reason;
         const auto file = _Open(flipped, &reason);
         if (!file) {
+            flip[i] = reason.empty() ? 2 : 0;
+            return;
+        }
+        std::vector<uint8_t> rewritten;
+        flip[i] = (_Write(*file, &rewritten) && _Open(rewritten) != nullptr)
+                      ? 1
+                      : 3;
+    });
+    size_t refused = 0, opened = 0;
+    for (size_t i = 0; i < flip.size(); ++i) {
+        if (flip[i] == 0) {
             ++refused;
-            CHECK(!reason.empty());
+            continue;
+        }
+        if (flip[i] == 2) {
+            ++refused;
+            CHECK(false && "byte flip refusal carries a reason");
             continue;
         }
         ++opened;
-        std::vector<uint8_t> rewritten;
-        CHECK(_Write(*file, &rewritten) && _Open(rewritten) != nullptr);
+        CHECK(flip[i] == 1);
     }
     std::printf("byte flips: %zu refused, %zu opened (of %zu bytes)\n",
                 refused, opened, bytes.size());
@@ -5259,10 +5312,12 @@ TestCorruptions()
     };
     const uint8_t interesting[] = {0x00, 0x01, 0x04, 0x08,
                                    0x7f, 0x80, 0xfe, 0xff};
-    size_t refused = 0, opened = 0;
     constexpr int rounds = 20000;
+    // The xorshift above is the input. Mutations are recorded in that order,
+    // then opened together; each round still sees the same bytes.
+    std::vector<std::vector<uint8_t>> mutated(rounds);
     for (int round = 0; round < rounds; ++round) {
-        std::vector<uint8_t> mutated = bytes;
+        mutated[round] = bytes;
         const int edits = 1 + int(next() % 4);
         for (int e = 0; e < edits; ++e) {
             const size_t at = next() % bytes.size();
@@ -5271,32 +5326,50 @@ TestCorruptions()
             }
             switch (next() % 3) {
             case 0:
-                mutated[at] = interesting[next() % 8];
+                mutated[round][at] = interesting[next() % 8];
                 break;
             case 1:
-                mutated[at] = uint8_t(next());
+                mutated[round][at] = uint8_t(next());
                 break;
             default: {
                 // An aligned word set to a small offset or length.
                 const size_t word = at & ~size_t(3);
                 const uint32_t small = uint32_t(next() % bytes.size());
-                if (word >= 8 && word + 4 <= mutated.size()) {
-                    std::memcpy(mutated.data() + word, &small, 4);
+                if (word >= 8 && word + 4 <= mutated[round].size()) {
+                    std::memcpy(mutated[round].data() + word, &small, 4);
                 }
                 break;
             }
             }
         }
+    }
+    // 0 refused with a reason, 1 opened and rewrote, 2 empty reason, 3 bad rewrite.
+    std::vector<uint8_t> outcome(rounds, 0);
+    _ParallelFor(size_t(rounds), [&](size_t round) {
         std::string reason;
-        const auto file = _Open(mutated, &reason);
+        const auto file = _Open(mutated[round], &reason);
         if (!file) {
+            outcome[round] = reason.empty() ? 2 : 0;
+            return;
+        }
+        std::vector<uint8_t> rewritten;
+        outcome[round] =
+            (_Write(*file, &rewritten) && _Open(rewritten) != nullptr) ? 1
+                                                                        : 3;
+    });
+    size_t refused = 0, opened = 0;
+    for (int round = 0; round < rounds; ++round) {
+        if (outcome[round] == 0) {
             ++refused;
-            CHECK(!reason.empty());
+            continue;
+        }
+        if (outcome[round] == 2) {
+            ++refused;
+            CHECK(false && "corruption refusal carries a reason");
             continue;
         }
         ++opened;
-        std::vector<uint8_t> rewritten;
-        CHECK(_Write(*file, &rewritten) && _Open(rewritten) != nullptr);
+        CHECK(outcome[round] == 1);
     }
     std::printf("corruptions: %zu refused, %zu opened (of %d)\n", refused,
                 opened, rounds);

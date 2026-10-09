@@ -37,4 +37,12 @@ cmake --build "$RIG/build" -j "$JOBS"
 if [ "${1:-}" = "--no-test" ]; then
     exit 0
 fi
-ctest --test-dir "$RIG/build" --output-on-failure
+# CTEST_PARALLEL_LEVEL is the knob ctest itself reads; when set, it wins.
+# CTEST_JOBS is the fallback. A local quick tier is `ctest -LE slow`;
+# this script still runs every test, including the slow label.
+if [ -n "${CTEST_PARALLEL_LEVEL:-}" ]; then
+    CTEST_JOBS="$CTEST_PARALLEL_LEVEL"
+elif [ -z "${CTEST_JOBS:-}" ]; then
+    CTEST_JOBS="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)"
+fi
+ctest --test-dir "$RIG/build" -j "$CTEST_JOBS" --output-on-failure

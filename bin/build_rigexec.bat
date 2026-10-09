@@ -29,5 +29,10 @@ cmake --build "%RIG%\build" -j %JOBS%
 if errorlevel 1 exit /b 1
 
 if "%~1"=="--no-test" exit /b 0
-ctest --test-dir "%RIG%\build" --output-on-failure
+rem CTEST_PARALLEL_LEVEL is the knob ctest itself reads; when set, it wins.
+rem A local quick tier is `ctest -LE slow`; this script still runs every
+rem test, including the slow label.
+if defined CTEST_PARALLEL_LEVEL set "CTEST_JOBS=%CTEST_PARALLEL_LEVEL%"
+if not defined CTEST_JOBS set "CTEST_JOBS=%NUMBER_OF_PROCESSORS%"
+ctest --test-dir "%RIG%\build" -j %CTEST_JOBS% --output-on-failure
 exit /b %errorlevel%
