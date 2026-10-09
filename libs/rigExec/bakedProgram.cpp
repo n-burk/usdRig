@@ -835,6 +835,12 @@ void RigExecBakedProgram::AdoptGeometryStateFrom(
                 continue;
             }
             adopt(&revision, node->second, /* keepRun = */ i < divergence);
+            // A range-pipelined revision's own buffer holds its version,
+            // whatever the outgoing node's indirection named; its first run
+            // republishes every range.
+            if (revision.rangeRole) {
+                revision.currentSource = int(i);
+            }
             retained.erase(node);
         }
         // Insertion, removal and reordering rebuild the schedule; a rebind
@@ -2518,6 +2524,7 @@ RigExecBakedProgram::_BuildWithSceneCaptureAttempt(RigExecRigEvaluator *evaluato
     // function-local static, read once here (bodyPurity.h).
     B.chunkVertexTarget = RigExecBakedChunkVertexTargetFromEnvironment();
     B.chunkCap = RigExecBakedChunkCapFromEnvironment();
+    B.rangeChains = RigExecBakedRangeChainsFromEnvironment();
     B.useSimd = RigExecSimdEnabled();
     B.purityAudit = TfGetenvBool("RIGEXEC_PURITY_AUDIT", false);
     B.verifyFrozenStatic = TfGetenvBool("RIGEXEC_VERIFY_FROZEN_STATIC", false);

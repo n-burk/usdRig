@@ -515,6 +515,18 @@ StepSize(const RigExecBakedProgramImpl &B, LazyGeometrySizes &geometry,
         const auto &[chain, revision] = B.revisionIndex[object];
         const RigExecBakedProgramImpl::GeomRevision &geom =
             B.chains[size_t(chain)].revisions[size_t(revision)];
+        if (geom.rangeRole && step.part >= 0 &&
+            size_t(step.part) < geom.chunks.size()) {
+            // A range of a range-pipelined revision: its share of the
+            // revision's units, so the K ranges model what one chunk did.
+            const RigExecBakedProgramImpl::GeomChunk &chunk =
+                geom.chunks[size_t(step.part)];
+            const double points = double(geom.chunks.back().end);
+            return points > 0.0
+                       ? geometry.Get().revisionUnits[object] *
+                             double(chunk.end - chunk.begin) / points
+                       : 0.0;
+        }
         if (geom.chunked && step.part >= 0 &&
             size_t(step.part) < geom.chunks.size()) {
             const RigExecBakedProgramImpl::GeomChunk &chunk =
@@ -535,6 +547,24 @@ StepSize(const RigExecBakedProgramImpl &B, LazyGeometrySizes &geometry,
     return 1;
 }
 
+/// \p fixedUs for \p step, divided among the K ranges of a range-pipelined
+/// revision, so the revision's modelled cost is the one chunk's it replaced.
+double
+RangeFixedUs(const RigExecBakedProgramImpl &B, const RigExecBakedStep &step,
+             double fixedUs)
+{
+    if (step.kind != RigExecBakedStepKind::RevisionChunk || step.object < 0 ||
+        size_t(step.object) >= B.revisionIndex.size()) {
+        return fixedUs;
+    }
+    const auto &[chain, revision] = B.revisionIndex[size_t(step.object)];
+    const RigExecBakedProgramImpl::GeomRevision &geom =
+        B.chains[size_t(chain)].revisions[size_t(revision)];
+    return geom.rangeRole && !geom.chunks.empty()
+               ? fixedUs / double(geom.chunks.size())
+               : fixedUs;
+}
+
 }  // namespace
 
 void
@@ -553,7 +583,8 @@ RigExecBakedAssignStepCosts(RigExecBakedProgramImpl *program,
             ? StepLabel(B, step, labels) : step.descriptorKey.substr(0, category);
         const StepCostConstants &constants = kStepCosts[size_t(step.kind)];
         step.sizeUnits = StepSize(B, geometry, step);
-        step.cost = constants.fixedUs + constants.perUnitUs * step.sizeUnits;
+        step.cost = RangeFixedUs(B, step, constants.fixedUs) +
+                    constants.perUnitUs * step.sizeUnits;
         // Longest path from a source, which is the level the packing groups
         // by. One forward pass, because program order is a topological order.
         int level = 0;
@@ -1520,6 +1551,72 @@ ValidatePointVersions(const RigExecBakedProgramImpl &B, GraphViolations *out)
         }
         if (enteringRevision < 0 || size_t(enteringRevision) >= revisions) continue;
         const auto &[chain, r] = B.revisionIndex[size_t(enteringRevision)];
+        const RigExecBakedProgramImpl::GeomRevision &own =
+            B.chains[size_t(chain)].revisions[size_t(r)];
+        const bool rangeStep =
+            own.rangeRole && (step.kind == RigExecBakedStepKind::RevisionChunk ||
+                              step.kind == RigExecBakedStepKind::RevisionFuse);
+        if (rangeStep) {
+            // A join reads every range of its own and no point version; a
+            // range reads range `part` of a range-pipelined predecessor and
+            // no version, or, after any other revision, the version.
+            const bool join = step.kind == RigExecBakedStepKind::RevisionFuse;
+            const int id = enteringRevision;
+            const auto ownRanges = [&](int revision) {
+                return std::make_pair(B.revisionChunkBase[size_t(revision)],
+                                      B.revisionChunkCount[size_t(revision)]);
+            };
+            if (B.revisionChunkBase.size() != revisions ||
+                B.revisionChunkCount.size() != revisions) {
+                out->Add(NameStep(B, index) + " belongs to a range-pipelined "
+                         "revision of a program without its chunk tables");
+                continue;
+            }
+            if (join) {
+                const auto [base, ranges] = ownRanges(id);
+                for (int k = 0; k < ranges; ++k) {
+                    if (!covers(step.reads, RigExecBakedSlotDomain::RevisionOut,
+                                base + k)) {
+                        out->Add(NameStep(B, index) + " joins revision " +
+                                 std::to_string(id) + " without declaring "
+                                 "RevisionOut[" + std::to_string(base + k) +
+                                 "]");
+                    }
+                }
+            }
+            if (r == 0) {
+                continue;
+            }
+            const bool version =
+                covers(step.reads, RigExecBakedSlotDomain::RevisionDone,
+                       id - 1) ||
+                covers(step.reads, RigExecBakedSlotDomain::ChainDirty, id - 1);
+            const bool rangeEntering =
+                B.chains[size_t(chain)].revisions[size_t(r) - 1].rangeRole;
+            if (join || rangeEntering) {
+                if (version) {
+                    out->Add(NameStep(B, index) + " reads point version " +
+                             std::to_string(r) + " of chain " +
+                             std::to_string(chain) + ", which a range-"
+                             "pipelined " + (join ? "join" : "range") +
+                             " must not wait for");
+                }
+                if (join) {
+                    continue;
+                }
+                const auto [base, ranges] = ownRanges(id - 1);
+                if (step.part < 0 || step.part >= ranges ||
+                    !covers(step.reads, RigExecBakedSlotDomain::RevisionOut,
+                            base + step.part)) {
+                    out->Add(NameStep(B, index) + " reads range " +
+                             std::to_string(step.part) + " of point version " +
+                             std::to_string(r) + " of chain " +
+                             std::to_string(chain) + " without declaring "
+                             "its predecessor's RevisionOut");
+                }
+                continue;
+            }
+        }
         // Version 0 is the source ChainBase, which every chain step reads
         // whether or not it reads points, so there is nothing to check.
         if (r == 0) {

@@ -4466,6 +4466,110 @@ static void TestSparseRawDefaultFrozenLifecycle()
  check(VtVec3fArray{{2,0,0},{1,0,0},{1,1,1},{0,1,0}});
  CHECK(stage->GetRootLayer()->ExportToString(&after));CHECK(before==after);
 }
+// Three matrix movers on one 10,000-point target, which the default vertex
+// target (4096) cuts into three ranges: M0 rides a driver that moves at
+// frames 1-3, M1 and M2 one that stands still.
+UsdStageRefPtr
+MakeRangeChainRig()
+{
+    UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    stage->DefinePrim(SdfPath("/Asset"), TfToken("Scope"));
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    const UsdPrim moving = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Moving"), TfToken("RigExecControl"));
+    for (int frame = 1; frame <= 3; ++frame) {
+        moving.GetAttribute(TfToken("avars:tx"))
+            .Set(double(frame), UsdTimeCode(frame));
+    }
+    const UsdPrim still = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Still"), TfToken("RigExecControl"));
+    still.GetAttribute(TfToken("avars:ty")).Set(1.0);
+    const SdfPath target("/Asset/Shape.points");
+    const UsdPrim shape =
+        stage->DefinePrim(target.GetPrimPath(), TfToken("Points"));
+    VtVec3fArray base(10000);
+    for (size_t i = 0; i < base.size(); ++i) {
+        base[i] = GfVec3f(float(i % 101) * 0.25f, float(i / 101) * 0.125f,
+                          1.0f + float(i % 7));
+    }
+    shape.GetAttribute(TfToken("points")).Set(base);
+    stage->DefinePrim(SdfPath("/Asset/Rig/Movers"), TfToken("Scope"));
+    for (int i = 0; i < 3; ++i) {
+        const UsdPrim mover = stage->DefinePrim(
+            SdfPath("/Asset/Rig/Movers/M" + std::to_string(i)),
+            TfToken("RigExecMatrixMover"));
+        mover.ApplyAPI(TfToken("RigExecMoverAPI"));
+        mover.GetRelationship(TfToken("rigExec:moves")).SetTargets({target});
+        mover.GetRelationship(TfToken("rigExec:transform"))
+            .SetTargets({i == 0 ? moving.GetPath() : still.GetPath()});
+        mover.GetAttribute(TfToken("inputs:defaultWeight")).Set(1.0f);
+    }
+    return stage;
+}
+
+// A range-pipelined chain freezes: a snapshot taken after live frame 1
+// holds every range's RevisionOut key, so the job at frame 1 runs no op and
+// publishes live's points; the job at frame 2, whose ranges M0's driver
+// moves, matches live bit for bit.
+static void
+TestRangeChainWarmsBitIdentical()
+{
+    UsdStageRefPtr stage = MakeRangeChainRig();
+    const SdfPath rig("/Asset/Rig");
+    const SdfPath target("/Asset/Shape.points");
+    RigExecRigEvaluator evaluator(stage, rig);
+    std::vector<std::string> errors;
+    CHECK(evaluator.Compile(&errors));
+    const RigExecRigPose live1 = evaluator.Evaluate(UsdTimeCode(1.0));
+    CHECK(live1.valid);
+    const RigExecBakedProgram *program = evaluator.GetBakedProgram();
+    CHECK(program != nullptr);
+    if (!program) {
+        return;
+    }
+    size_t ranged = 0;
+    for (const auto &chain : program->GetStepGraph().chains) {
+        for (const auto &revision : chain.revisions) {
+            ranged += revision.rangeRole && revision.chunks.size() == 3 ? 1 : 0;
+        }
+    }
+    CHECK(ranged == 3);
+    std::shared_ptr<const RigExecFrozenProgram> frozen;
+    std::string error;
+    CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
+    CHECK(frozen != nullptr);
+    if (!frozen) {
+        std::printf("FAIL range chain: the freeze refused: %s\n",
+                    error.c_str());
+        return;
+    }
+    RigExecBackgroundScheduler scheduler;
+    const std::vector<RigExecValueOverride> noOverrides;
+    RigExecFrameInputs at1;
+    CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(1.0), noOverrides,
+                                   &at1, &error));
+    const RigExecRigPose warm1 =
+        RunWarmingJob(&evaluator, rig, frozen, at1, &scheduler, nullptr);
+    CheckPosesBitIdentical("range chain frame 1", live1, warm1);
+    CheckJobAccepted("range chain frame 1", at1, warm1);
+    CHECK(warm1.executedOpCount == 0);
+    RigExecFrameInputs at2;
+    CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(2.0), noOverrides,
+                                   &at2, &error));
+    const RigExecRigPose warm2 =
+        RunWarmingJob(&evaluator, rig, frozen, at2, &scheduler, nullptr);
+    const RigExecRigPose live2 = evaluator.Evaluate(UsdTimeCode(2.0));
+    CHECK(live2.valid);
+    CheckPosesBitIdentical("range chain frame 2", live2, warm2);
+    CheckJobAccepted("range chain frame 2", at2, warm2);
+    CHECK(warm2.executedOpCount > 0);
+    // The points moved between the frames, so the second job computed them.
+    const auto one = warm1.movedProperties.find(target);
+    const auto two = warm2.movedProperties.find(target);
+    CHECK(one != warm1.movedProperties.end() &&
+          two != warm2.movedProperties.end() && one->second != two->second);
+}
+
 // The blend face (examples/04_BlendShapeFace.usda) warms bit-identically:
 // two animated dense channels over a bound weight object, warmed at three
 // frames that span the weight spline -- a full-target hit (1024), an
@@ -7221,6 +7325,7 @@ main(int argc, char **argv)
     TestNestedSpaceSwitchesWarmBitIdentical();
     TestAHeldFrameJobServesItsOwnDrag();
     TestChainedRigWarmsBitIdentical();
+    TestRangeChainWarmsBitIdentical();
     TestPhasedReadsWarmBitIdentical();
     TestBlinkDragWarmsAsReleased();
     TestBlinkDragEdgesWarmBitIdentical();

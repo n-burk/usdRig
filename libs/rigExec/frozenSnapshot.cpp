@@ -140,6 +140,8 @@ _CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst)
     D.verifyPacketVersions = src.verifyPacketVersions;
     D.packetContentKeys = src.packetContentKeys;
     D.packetVersionMismatches = 0;
+    D.verifyRangeChains = src.verifyRangeChains;
+    D.rangeVerifyMismatches = 0;
     // The values the copied source keys were built from, with their shared
     // index: the clone's runs compare its own leaves with them.
     D.sourceWatch = src.sourceWatch;
@@ -169,6 +171,7 @@ _CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst)
     D.chainChunkBegin = src.chainChunkBegin;
     D.chainChunkEnd = src.chainChunkEnd;
     D.revisionFuseStep = src.revisionFuseStep;
+    D.chunkRevision = src.chunkRevision;
     D.skinTopologyLayouts = src.skinTopologyLayouts;
     D.clustering = src.clustering;
     // Build's settings: the clone's partition settings and the worker's
@@ -176,6 +179,7 @@ _CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst)
     // their own audit counter.
     D.chunkVertexTarget = src.chunkVertexTarget;
     D.chunkCap = src.chunkCap;
+    D.rangeChains = src.rangeChains;
     D.useSimd = src.useSimd;
     D.purityAudit = src.purityAudit;
     D.purityViolations.count.store(0, std::memory_order_relaxed);

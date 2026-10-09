@@ -63,8 +63,9 @@ bool RigExecBakedOpValueKeyIsExact(const RigExecBakedProgramImpl &,
 bool RigExecBakedSamePoints(const PXR_NS::GfVec3f *a, size_t aCount,
     const PXR_NS::GfVec3f *b, size_t bCount);
 /// The key those six domains carried before they were keyed by content
-/// version: the same fields with the points' bytes in place of the version.
-/// False, and an empty key, for any other domain. Owner thread; for the
+/// version: the same fields with the points' bytes in place of the version;
+/// likewise a range-pipelined revision's RevisionOut range. False, and an
+/// empty key, for any other domain. Owner thread; for the
 /// RIGEXEC_VERIFY_CHAIN_VERSIONS check and tests.
 bool RigExecBakedChainContentKey(const RigExecBakedProgramImpl &,
     RigExecBakedSlotDomain, uint32_t slot, std::string *key);

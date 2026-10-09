@@ -23,6 +23,7 @@
 #include "rigExecMath/envelope.h"
 #include "rigExecMath/geometryKernels.h"
 #include "rigExecMath/latticeKernel.h"
+#include "rigExecMath/pointRanges.h"
 #include "rigExecMath/simdKernels.h"
 
 #include "pxr/base/gf/matrix4d.h"
@@ -637,6 +638,15 @@ RigExecBakedChunkCapFromEnvironment()
     return authored < 1 ? size_t(1) : size_t(authored);
 }
 
+/// Whether a chain of more than chunkVertexTarget points runs its Matrix,
+/// Wire and Lattice revisions as one step per point range. Read at Build
+/// into rangeChains.
+bool
+RigExecBakedRangeChainsFromEnvironment()
+{
+    return TfGetenvBool("RIGEXEC_BAKED_RANGE_CHAINS", true);
+}
+
 void
 RigExecBakedPartitionRevision(
     const RigExecBakedProgramImpl &program,
@@ -994,6 +1004,51 @@ DeclarePlacementReads(const RigExecBakedProgramImpl &B, int object,
     }
 }
 
+/// The point count Build cuts \p chain's ranges from, read on the owning
+/// thread in the prologue's order: the upstream value at the target, else the
+/// authored base at Default, else at the earliest time; 0 when none reads.
+/// Only the partition depends on it: a run clips the ranges to the count it
+/// applies to, and any partition gives a per-point kernel the same bits.
+size_t
+BuildPointCount(const RigExecBakedProgramImpl &B,
+                const RigExecBakedProgramImpl::GeomChain &chain)
+{
+    const auto upstream = B.upstream.find(chain.target);
+    if (upstream != B.upstream.end() &&
+        upstream->second.IsHolding<VtVec3fArray>()) {
+        return upstream->second.UncheckedGet<VtVec3fArray>().size();
+    }
+    if (!chain.baseQuery.IsValid()) {
+        return 0;
+    }
+    VtVec3fArray points;
+    if (!chain.baseQuery.Get(&points, UsdTimeCode::Default()) ||
+        points.empty()) {
+        points = VtVec3fArray();
+        chain.baseQuery.Get(&points, UsdTimeCode::EarliestTime());
+    }
+    return points.size();
+}
+
+/// How many ranges a chain of \p points points is cut into: the shared count,
+/// less the trailing ranges the ceil-sized bounds would leave empty (only
+/// when the cap or a tiny vertex target makes the ranges nearly as many as
+/// the points), so every range is non-empty. 1 is no pipelining.
+size_t
+ChainRangeCount(const RigExecBakedProgramImpl &B, size_t points)
+{
+    if (!B.rangeChains) {
+        return 1;
+    }
+    size_t ranges =
+        RigExecPointRangeCount(points, B.chunkVertexTarget, B.chunkCap);
+    while (ranges > 1 &&
+           RigExecPointRangeBound(points, ranges, ranges - 1) >= points) {
+        --ranges;
+    }
+    return ranges;
+}
+
 }  // namespace
 
 void
@@ -1002,9 +1057,14 @@ RigExecBakedBuildGeometrySteps(RigExecBakedProgramImpl *program)
     RigExecBakedProgramImpl &B = *program;
     B.chainChunkBegin.assign(B.chains.size(), 0);
     B.chainChunkEnd.assign(B.chains.size(), 0);
+    B.chunkRevision.clear();
     int nextChunk = 0;
     for (size_t c = 0; c < B.chains.size(); ++c) {
         RigExecBakedProgramImpl::GeomChain &chain = B.chains[c];
+        // The chain's point partition: every range-pipelined revision of it
+        // carries these bounds as its chunks.
+        const size_t points = BuildPointCount(B, chain);
+        const size_t ranges = ChainRangeCount(B, points);
         RigExecBakedStep &input = AddGeometryStep(&B,RigExecBakedStepKind::ChainInputs,int(c));
         input.maxDiagnostics = 0;
         input.reads.push_back(RigExecBakedOne(RigExecBakedSlotDomain::ChainInput,int(c)));
@@ -1043,10 +1103,35 @@ RigExecBakedBuildGeometrySteps(RigExecBakedProgramImpl *program)
             revision.packetInfluences.assign(revision.influenceSlots.size(),
                                              GfMatrix4d(1.0));
             PartitionAtBuild(B, &revision);
+            revision.rangeRole =
+                ranges >= 2 && RigExecRevisionIsRangeOp(revision.op);
+            revision.rangeInputs = RigExecRevisionRangeInputs();
+            revision.joinSeen.clear();
+            revision.rangeRefusals = 0;
+            if (revision.rangeRole) {
+                revision.chunks.assign(ranges,
+                                       RigExecBakedProgramImpl::GeomChunk());
+                for (size_t k = 0; k < ranges; ++k) {
+                    revision.chunks[k].begin =
+                        int(RigExecPointRangeBound(points, ranges, k));
+                    revision.chunks[k].end =
+                        int(RigExecPointRangeBound(points, ranges, k + 1));
+                }
+                revision.chunked = false;
+                // Its own buffer holds its version whatever it decides.
+                revision.currentSource = int(r);
+                revision.joinSeen.assign(ranges, 0);
+            }
             revision.chunkBase = nextChunk;
             nextChunk += int(revision.chunks.size());
             B.revisionChunkBase.push_back(revision.chunkBase);
             B.revisionChunkCount.push_back(int(revision.chunks.size()));
+            B.chunkRevision.insert(B.chunkRevision.end(),
+                                   revision.chunks.size(), id);
+            // Range k of the version entering a range-pipelined revision is
+            // range k of its predecessor's output when that is one too.
+            const bool rangeEntering =
+                revision.rangeRole && r > 0 && chain.revisions[r - 1].rangeRole;
 
             // The fold comes FIRST for every operation but a skin, because
             // every other operation's packet carries the matrix it was folded
@@ -1164,9 +1249,18 @@ RigExecBakedBuildGeometrySteps(RigExecBakedProgramImpl *program)
                     chunk.reads.push_back(RigExecBakedOne(
                         RigExecBakedSlotDomain::RevisionTransforms, id));
                 }
-                // Which buffer holds the entering points is decided by the
-                // previous fuse, so the read is that fuse's version.
-                DeclarePointVersionRead(B, entering, &chunk.reads);
+                if (rangeEntering) {
+                    // The pipelining edge: range k of the predecessor, whose
+                    // own buffer holds it, and nothing of its other ranges
+                    // or its join.
+                    chunk.reads.push_back(RigExecBakedOne(
+                        RigExecBakedSlotDomain::RevisionOut,
+                        chain.revisions[r - 1].chunkBase + int(k)));
+                } else {
+                    // Which buffer holds the entering points is decided by
+                    // the previous fuse, so the read is that fuse's version.
+                    DeclarePointVersionRead(B, entering, &chunk.reads);
+                }
                 chunk.writes.push_back(
                     RigExecBakedOne(RigExecBakedSlotDomain::RevisionOut,
                                     revision.chunkBase + int(k)));
@@ -1196,11 +1290,13 @@ RigExecBakedBuildGeometrySteps(RigExecBakedProgramImpl *program)
                 }
                 // Its own chunks' ranges. The entering points, which the
                 // whole-revision fallback and a pass-through read, are a
-                // version like a chunk's.
+                // version like a chunk's; a join reads no points.
                 fuse.reads.push_back(RigExecBakedRange(
                     RigExecBakedSlotDomain::RevisionOut, revision.chunkBase,
                     revision.chunkBase + int(revision.chunks.size())));
-                DeclarePointVersionRead(B, entering, &fuse.reads);
+                if (!revision.rangeRole) {
+                    DeclarePointVersionRead(B, entering, &fuse.reads);
+                }
                 fuse.writes.push_back(RigExecBakedOne(
                     RigExecBakedSlotDomain::RevisionDone, id));
                 fuse.writes.push_back(RigExecBakedOne(
@@ -2193,6 +2289,143 @@ FuseWholeRevision(const RigExecBakedProgramImpl::GeomChain &chain,
                      /*whole=*/true, useSimd, fused);
 }
 
+/// The fuse's one diagnostic, about an enabled revision whose packet is
+/// invalid: the out-of-range scalar weight, or the invalid common envelope
+/// of a bound weight object. A whole revision's fuse and a range-pipelined
+/// revision's join emit it in the same place.
+void
+EmitInvalidPacketLine(const RigExecBakedProgramImpl &B,
+                      const RigExecBakedProgramImpl::GeomRevision &revision,
+                      bool packetValid, std::vector<std::string> *diagnostics)
+{
+    if (revision.parameters.enabled && !packetValid &&
+        revision.weightObject < 0) {
+        // Read by RevisionStatic, which always runs: a step body that
+        // went to the stage for a value would be a step outside its own
+        // declarations, and the cone could not tell when it moved.
+        const float scalar = revision.defaultWeight;
+        if (!std::isfinite(scalar) || scalar < 0.0f || scalar > 1.0f) {
+            diagnostics->push_back(
+                "MoverFailed " + revision.moverPathText +
+                ": inputs:defaultWeight must be finite and in "
+                "[0, 1]; revision passed through");
+        }
+    } else if (revision.parameters.enabled && !packetValid &&
+               revision.weightObject >= 0 &&
+               !(revision.weightCurrentPhase
+                     ? revision.currentPhasePacket
+                     : B.weightPackets[size_t(revision.weightObject)])
+                    .valid) {
+        // The other half of the same sentence, and the reason the arms
+        // are exclusive: with a weight object bound, the assembler never
+        // reads inputs:defaultWeight, so a rig whose scalar is out of
+        // range and whose object is fine must stay silent.
+        diagnostics->push_back(
+            "MoverFailed " + revision.moverPathText +
+            ": rigExec:weightObject produced an invalid common "
+            "envelope; revision passed through");
+    }
+}
+
+/// Range step \p part of the range-pipelined \p revision (chain index
+/// \p revisionIndex): makes `output` hold range \p part of the revision's
+/// version -- the kernel's points where the revision applies, the entering
+/// points where it does not -- and bumps the range's content version exactly
+/// when those bytes, or the count, moved. Writes only range \p part of
+/// `output` and `stagingOutput`, and its own chunk, so the ranges of one
+/// revision run concurrently; reads only range \p part of the entering
+/// points, which is all the predecessor's range step \p part declared.
+void
+RunRangeStep(const RigExecBakedProgramImpl &B,
+             const RigExecBakedProgramImpl::GeomChain &chain,
+             RigExecBakedProgramImpl::GeomRevision *revision,
+             size_t revisionIndex, size_t part)
+{
+    RigExecBakedProgramImpl::GeomChunk &chunk = revision->chunks[part];
+    const size_t count = revision->precedingCount;
+    size_t begin = 0, end = 0;
+    RigExecPointRangeAt(chunk.begin, chunk.end,
+                        part + 1 == revision->chunks.size(), count, &begin,
+                        &end);
+    const GfVec3f *entering = nullptr;
+    size_t enteringCount = 0;
+    PointsAt(chain, revisionIndex, &entering, &enteringCount);
+    const bool sized = enteringCount == count &&
+                       revision->output.size() == count &&
+                       revision->stagingOutput.size() == count;
+    // Passing through copies the entering range; the buffer is never
+    // redirected, so readers of the version need no indirection.
+    const GfVec3f *source = sized ? entering + begin : nullptr;
+    bool ok = sized;
+    if (sized && RigExecBakedRevisionApplies(*revision)) {
+        bool untouched = false;
+        ok = RigExecRunRevisionRange(
+            revision->op, revision->parameters, revision->rangeInputs,
+            entering, count, begin, end,
+            !revision->fullStrength && revision->envelopeOk
+                ? revision->envelope.data()
+                : nullptr,
+            &revision->stagingOutput, B.useSimd, &untouched);
+        // A refusal after an Applies acceptance is an invariant violation:
+        // the range passes through and the join counts it.
+        if (ok && !untouched) {
+            source = revision->stagingOutput.data() + begin;
+        }
+    }
+    bool moved = !chunk.rangeRan || chunk.rangeCount != count;
+    if (sized && RigExecCopyMovedRange(source, revision->output.data() + begin,
+                                       end - begin)) {
+        moved = true;
+    }
+    chunk.ok = ok;
+    chunk.rangeCount = count;
+    chunk.rangeRan = true;
+    if (moved) {
+        ++chunk.rangeVersion;
+    }
+}
+
+/// The join of the range-pipelined \p revision: the fuse's line and status
+/// from the decision its ranges shared, and RevisionDone's content version
+/// from the range versions. Reads no points: the ranges partition the count
+/// once and each range's version moves exactly when its bytes do, so a range
+/// version the join has not seen is exactly a version whose bytes differ
+/// from its last publication. `currentSource` stays the revision itself.
+void
+RunJoin(const RigExecBakedProgramImpl &B,
+        RigExecBakedProgramImpl::GeomRevision *revision,
+        RigExecBakedStep *step)
+{
+    EmitInvalidPacketLine(B, *revision, revision->parameters.valid,
+                          &step->diagnostics);
+    revision->executed = true;
+    step->counters.revisionsExecuted = 1;
+    const bool applied = RigExecBakedRevisionApplies(*revision);
+    revision->resultStatus = revision->status.state;
+    if (!applied && revision->status.AllowsApply()) {
+        revision->resultStatus = _tokens->moverFailed;
+    }
+    bool moved = !revision->ran;
+    uint32_t refusals = 0;
+    for (size_t k = 0;
+         k < revision->chunks.size() && k < revision->joinSeen.size(); ++k) {
+        const RigExecBakedProgramImpl::GeomChunk &chunk = revision->chunks[k];
+        if (revision->joinSeen[k] != chunk.rangeVersion) {
+            revision->joinSeen[k] = chunk.rangeVersion;
+            moved = true;
+        }
+        if (applied && !chunk.ok) {
+            ++refusals;
+        }
+    }
+    revision->rangeRefusals = refusals;
+    if (moved) {
+        ++revision->doneVersion;
+    }
+    revision->lastStatus = revision->status;
+    revision->ran = true;
+}
+
 }  // namespace
 
 namespace {
@@ -2203,6 +2436,9 @@ void ResetGeometryRevision(RigExecBakedProgramImpl::GeomRevision *revision)
     revision->lastAuxPoints = VtVec3fArray(); revision->lastStatus = RigExecMoverStatus();
     // No baseline survives: the next publication bumps the version anyway.
     revision->stagingFresh = false; revision->passedPoints.clear();
+    // Nor a published range: each range and the join publish a new version.
+    for (auto &chunk : revision->chunks) chunk.rangeRan = false;
+    std::fill(revision->joinSeen.begin(), revision->joinSeen.end(), uint64_t(0));
 }
 }
 void RigExecBakedAdoptRevisionLayout(RigExecBakedProgramImpl::GeomRevision *revision)
@@ -2222,7 +2458,12 @@ void RigExecBakedRunChainInputs(RigExecBakedProgramImpl *program,RigExecBakedSte
         // here and there cannot return to the bytes last published.
         if (!chain.result.empty()) ++chain.resultVersion;
         chain.haveResult = false; chain.result = VtVec3fArray(); chain.scheduleDirty = true;
-        for (auto &revision : chain.revisions) ResetGeometryRevision(&revision);
+        for (size_t r = 0; r < chain.revisions.size(); ++r) {
+            auto &revision = chain.revisions[r];
+            ResetGeometryRevision(&revision);
+            // A range-pipelined revision's own buffer holds its version.
+            if (revision.rangeRole) revision.currentSource = int(r);
+        }
     }
     for (auto &revision : chain.revisions) if (revision.created) {
         ++step->counters.revisionsCreated; revision.created = false;
@@ -2261,6 +2502,16 @@ void RigExecBakedShareLatticeBinds(RigExecBakedProgramImpl *program)
     for (auto &chain : program->chains) {
         for (auto &revision : chain.revisions) {
             binds.Offer(&revision.surfaceCache);
+            // A range-pipelined lattice's range steps read the basis its
+            // RevisionStatic retained through `rangeInputs`, and a step that
+            // follows a skipped RevisionStatic still reads it: name the
+            // bind the cache holds now, which equals the one replaced, so
+            // the one it replaced may be released.
+            if (revision.rangeRole && revision.rangeInputs.latticeBasis) {
+                const auto &bind = revision.surfaceCache.RetainedLatticeBind();
+                revision.rangeInputs.latticeBasis =
+                    bind ? &bind->value : nullptr;
+            }
         }
         for (auto &derived : chain.derived) {
             binds.Offer(&derived.revision.surfaceCache);
@@ -2663,6 +2914,30 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
         revision.envelopeOk = true;
         revision.fullStrength = true;
         revision.partitionStale = false;
+        if (revision.rangeRole) {
+            // The revision's one writer of everything its range steps read
+            // besides the packet and the entering points: the "apply once"
+            // envelope at the full count for every range op that blends
+            // separately, the immutable kernel inputs (`rangeInputs`, which
+            // fills the revision's own caches), and `output` at the count,
+            // whose ranges stay sticky at the same size. A size change moves
+            // `precedingCount`, so every range runs again.
+            if (RigExecRevisionTakesSeparateBlend(
+                    revision.op, revision.parameters.weights)) {
+                revision.fullStrength =
+                    RigExecEnvelopeIsFullStrength(revision.parameters.weights);
+                if (!revision.fullStrength) {
+                    ResolveEnvelope(&revision, count);
+                }
+            }
+            revision.acceptance = RigExecPrepareRevisionRanges(
+                revision.op, revision.parameters, count, &revision.wireBasis,
+                &revision.surfaceCache, &revision.rangeInputs);
+            if (revision.output.size() != count) {
+                revision.output.resize(count);
+            }
+            return;
+        }
         if (!skin) {
             // A wire's dense walk blends a separate envelope after its
             // kernel; resolved here at the full count, as a skin's is, and
@@ -2725,6 +3000,11 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
     }
 
     case RigExecBakedStepKind::RevisionChunk: {
+        if (revision.rangeRole) {
+            RunRangeStep(B, chain, &revision, size_t(revisionIndex),
+                         size_t(step->part));
+            return;
+        }
         RigExecBakedProgramImpl::GeomChunk &chunk =
             revision.chunks[size_t(step->part)];
         const GfVec3f *points = nullptr;
@@ -2795,39 +3075,17 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
     }
 
     case RigExecBakedStepKind::RevisionFuse: {
+        if (revision.rangeRole) {
+            RunJoin(B, &revision, step);
+            return;
+        }
         // Where the dynamic path's assembler would have failed the packet:
         // for a skin revision the matrices are not in it, so "the packet is
         // valid" is the packet's own answer AND the fold's.
         const bool packetValid =
             revision.parameters.valid &&
             (!skin || revision.influencesValid);
-        if (revision.parameters.enabled && !packetValid &&
-            revision.weightObject < 0) {
-            // Read by RevisionStatic, which always runs: a step body that
-            // went to the stage for a value would be a step outside its own
-            // declarations, and the cone could not tell when it moved.
-            const float scalar = revision.defaultWeight;
-            if (!std::isfinite(scalar) || scalar < 0.0f || scalar > 1.0f) {
-                step->diagnostics.push_back(
-                    "MoverFailed " + revision.moverPathText +
-                    ": inputs:defaultWeight must be finite and in "
-                    "[0, 1]; revision passed through");
-            }
-        } else if (revision.parameters.enabled && !packetValid &&
-                   revision.weightObject >= 0 &&
-                   !(revision.weightCurrentPhase
-                         ? revision.currentPhasePacket
-                         : B.weightPackets[size_t(revision.weightObject)])
-                        .valid) {
-            // The other half of the same sentence, and the reason the arms
-            // are exclusive: with a weight object bound, the assembler never
-            // reads inputs:defaultWeight, so a rig whose scalar is out of
-            // range and whose object is fine must stay silent.
-            step->diagnostics.push_back(
-                "MoverFailed " + revision.moverPathText +
-                ": rigExec:weightObject produced an invalid common "
-                "envelope; revision passed through");
-        }
+        EmitInvalidPacketLine(B, revision, packetValid, &step->diagnostics);
         // Selection by the common graph is the sole execution authority.
         revision.executed = true;
         step->counters.revisionsExecuted = revision.executed ? 1 : 0;
@@ -3850,6 +4108,56 @@ RigExecBakedProgramTesting::ShadowAssembly(
     return report;
 }
 
+size_t
+RigExecBakedVerifyRangeChains(RigExecBakedProgramImpl *program)
+{
+    // An independent judge, never a fallback: each range-pipelined revision
+    // of a chain that read a base, run whole by the shared kernel over the
+    // points entering it, with no caches so nothing the program holds moves.
+    // Its ranges hold that answer whether or not they ran this run.
+    RigExecBakedProgramImpl &B = *program;
+    size_t mismatches = 0;
+    std::vector<GfVec3f> whole;
+    for (const RigExecBakedProgramImpl::GeomChain &chain : B.chains) {
+        if (!chain.haveBase) {
+            continue;
+        }
+        for (size_t r = 0; r < chain.revisions.size(); ++r) {
+            const RigExecBakedProgramImpl::GeomRevision &revision =
+                chain.revisions[r];
+            if (!revision.rangeRole) {
+                continue;
+            }
+            const GfVec3f *entering = nullptr;
+            size_t count = 0;
+            PointsAt(chain, r, &entering, &count);
+            whole.assign(entering, entering + count);
+            const bool applied =
+                revision.parameters.valid &&
+                revision.status.AllowsApply() &&
+                RigExecRunRevisionKernel(revision.op, revision.parameters,
+                                         &whole, B.useSimd, nullptr, nullptr);
+            if (!applied) {
+                whole.assign(entering, entering + count);
+            }
+            const bool same =
+                applied == RigExecBakedRevisionApplies(revision) &&
+                revision.rangeRefusals == 0 &&
+                RigExecBakedSamePoints(whole.data(), whole.size(),
+                                       revision.output.data(),
+                                       revision.output.size());
+            if (!same) {
+                ++mismatches;
+                TF_VERIFY(false, "%s: the range-pipelined revision's ranges "
+                          "disagree with the revision run whole",
+                          revision.moverPathText.c_str());
+            }
+        }
+    }
+    B.rangeVerifyMismatches += mismatches;
+    return mismatches;
+}
+
 void RigExecBakedResetSetAsideGeometryValue(
     RigExecBakedProgramImpl *program, RigExecBakedSlotDomain domain, uint32_t slot)
 {
@@ -3900,6 +4208,28 @@ void RigExecBakedResetSetAsideGeometryValue(
             if (slot < uint32_t(first) || slot >= uint32_t(first + count)) continue;
             const auto [chain, part] = B.revisionIndex[revisionIndex];
             auto &revision = B.chains[size_t(chain)].revisions[size_t(part)];
+            if (revision.rangeRole) {
+                // An excluded range passes the base through, as an excluded
+                // whole fuse does, into its own range only; the next run
+                // publishes it again.
+                const size_t k = size_t(slot - uint32_t(first));
+                auto &chunk = revision.chunks[k];
+                chunk.ok = false;
+                chunk.rangeRan = false;
+                const VtVec3fArray &base = B.chains[size_t(chain)].lastBase;
+                if (revision.output.size() == base.size()) {
+                    size_t begin = 0, end = 0;
+                    RigExecPointRangeAt(chunk.begin, chunk.end,
+                                        k + 1 == revision.chunks.size(),
+                                        base.size(), &begin, &end);
+                    if (RigExecCopyMovedRange(base.cdata() + begin,
+                                              revision.output.data() + begin,
+                                              end - begin)) {
+                        ++chunk.rangeVersion;
+                    }
+                }
+                return;
+            }
             revision.stagingOutput.clear();
             revision.stagingFresh = false;
             // The excluded writer owns the full retained staging output;
@@ -3927,6 +4257,21 @@ void RigExecBakedResetSetAsideGeometryValue(
         revision.ran = false;
         revision.executed = false;
         revision.resultStatus = _tokens->operationCycle;
+        if (revision.rangeRole) {
+            // Its own buffer still holds its version: what its ranges, run
+            // or set aside, left there. The version follows their versions,
+            // as the join's does.
+            bool moved = false;
+            for (size_t k = 0; k < revision.chunks.size() &&
+                               k < revision.joinSeen.size(); ++k) {
+                if (revision.joinSeen[k] != revision.chunks[k].rangeVersion) {
+                    revision.joinSeen[k] = revision.chunks[k].rangeVersion;
+                    moved = true;
+                }
+            }
+            if (moved) ++revision.doneVersion;
+            break;
+        }
         revision.currentSource = -1;
         // An excluded fuse never runs, so the version follows the base it
         // passes through, against the copy of the base it last carried.

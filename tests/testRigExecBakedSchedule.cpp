@@ -48,6 +48,7 @@
 #include "pxr/base/gf/vec3f.h"
 #include "pxr/base/plug/registry.h"
 #include "pxr/base/gf/matrix4d.h"
+#include "pxr/base/tf/errorMark.h"
 #include "pxr/base/tf/getenv.h"
 #include "pxr/base/tf/setenv.h"
 #include "pxr/base/tf/pathUtils.h"
@@ -547,8 +548,26 @@ TestTheGraphDescribesTheProgram(const BuiltProgram &built, const char *name)
         readsOut.assign(revisions, false);
         readsDone.assign(revisions, false);
         writesDone.assign(revisions, false);
+        // A range of a range-pipelined revision reads range `part` of its
+        // range-pipelined predecessor's own buffer, which never moves, and
+        // so needs no RevisionDone: that one slot is exempt.
+        int rangeSlot = -1;
+        if (step.kind == RigExecBakedStepKind::RevisionChunk &&
+            step.object > 0 && size_t(step.object) < revisions) {
+            const auto &[c, r] = B.revisionIndex[size_t(step.object)];
+            const auto &chain = B.chains[size_t(c)];
+            if (r > 0 && chain.revisions[size_t(r)].rangeRole &&
+                chain.revisions[size_t(r) - 1].rangeRole) {
+                rangeSlot =
+                    B.revisionChunkBase[size_t(step.object) - 1] + step.part;
+            }
+        }
         for (const RigExecBakedSlotRange &read : step.reads) {
             if (read.domain == RigExecBakedSlotDomain::RevisionOut) {
+                if (rangeSlot >= 0 && read.begin == uint32_t(rangeSlot) &&
+                    read.end == uint32_t(rangeSlot) + 1) {
+                    continue;
+                }
                 markOut(&readsOut, read);
             } else if (read.domain == RigExecBakedSlotDomain::RevisionDone) {
                 mark(&readsDone, read);
@@ -4413,11 +4432,28 @@ TestEachChainReaderBindsOneVersion(const BuiltProgram &built,
             if (producer != B.steps.end())
                 CHECK(std::binary_search(step.preds.begin(),step.preds.end(),int(producer-B.steps.begin())));
         }
+        // A range-pipelined revision's join reads its own ranges and no
+        // version; its range step reads range `part` of a range-pipelined
+        // predecessor's buffer and no version, or the version after any
+        // other revision.
+        const bool rangeStep =
+            !fieldReader && revision.rangeRole &&
+            (step.kind == RigExecBakedStepKind::RevisionChunk ||
+             step.kind == RigExecBakedStepKind::RevisionFuse);
+        const bool rangeJoin =
+            rangeStep && step.kind == RigExecBakedStepKind::RevisionFuse;
+        const bool rangeEntering =
+            rangeStep && !rangeJoin && r > 0 &&
+            B.chains[size_t(c)].revisions[size_t(r) - 1].rangeRole;
         std::vector<int> ownChunks;
         if (step.kind == RigExecBakedStepKind::RevisionFuse) {
             for (int k = 0; k < B.revisionChunkCount[size_t(id)]; ++k) {
                 ownChunks.push_back(B.revisionChunkBase[size_t(id)] + k);
             }
+        }
+        if (rangeEntering) {
+            ownChunks.push_back(B.revisionChunkBase[size_t(id) - 1] +
+                                step.part);
         }
         CHECK(out == ownChunks);
         if (!reader) {
@@ -4425,13 +4461,28 @@ TestEachChainReaderBindsOneVersion(const BuiltProgram &built,
             continue;
         }
         ++checked;
-        if (r == 0 && !fieldReader) {
-            CHECK(done.empty() && dirty.empty());
-            continue;
-        }
         if (r > 0) {
             ++stacked;
             if (B.revisionChunkCount[size_t(id)] > 1) ++stackedChunked;
+        }
+        if ((r == 0 && !fieldReader) || rangeJoin || rangeEntering) {
+            CHECK(done.empty() && dirty.empty());
+            if (rangeEntering) {
+                // Ordered after the predecessor's range step of that part.
+                bool ordered = false;
+                for (size_t p = 0; p < B.steps.size(); ++p) {
+                    const RigExecBakedStep &producer = B.steps[p];
+                    if (producer.kind == RigExecBakedStepKind::RevisionChunk &&
+                        producer.object == id - 1 &&
+                        producer.part == step.part) {
+                        ordered = std::binary_search(step.preds.begin(),
+                                                     step.preds.end(),
+                                                     int(p));
+                    }
+                }
+                CHECK(ordered);
+            }
+            continue;
         }
         std::vector<int> expectedDone,expectedDirty;
         if (r > 0) {
@@ -4496,12 +4547,50 @@ TestEachChainReaderBindsOneVersion(const BuiltProgram &built,
     return stackedChunked;
 }
 
+/// Appends the chain slots a reader of point version \p r of chain \p c
+/// depends on, transitively, in a chain holding range-pipelined revisions:
+/// \p mode -2 reads the version whole, -1 every range of it but not its
+/// join, k >= 0 range k only. Range k of a range-pipelined revision reads
+/// range k of a range-pipelined predecessor; every other reader reads the
+/// predecessor's RevisionDone, whose producer reads its own chunks.
+void
+AddVersionAncestry(const RigExecBakedProgramImpl &B, int c, int r, int mode,
+                   std::vector<RigExecBakedSlotRange> *reads)
+{
+    const auto &revisions = B.chains[size_t(c)].revisions;
+    const int first = B.chainRevisionBegin[size_t(c)];
+    for (; r > 0; --r) {
+        const int q = first + r - 1;
+        const int base = B.revisionChunkBase[size_t(q)];
+        const int count = B.revisionChunkCount[size_t(q)];
+        const bool range = revisions[size_t(r) - 1].rangeRole;
+        if (range && mode >= 0) {
+            reads->push_back(
+                RigExecBakedOne(RigExecBakedSlotDomain::RevisionOut, base + mode));
+            continue;
+        }
+        if (!range || mode == -2) {
+            reads->push_back(
+                RigExecBakedOne(RigExecBakedSlotDomain::RevisionDone, q));
+            reads->push_back(
+                RigExecBakedOne(RigExecBakedSlotDomain::ChainDirty, q));
+        }
+        reads->push_back(RigExecBakedRange(RigExecBakedSlotDomain::RevisionOut,
+                                           base, base + count));
+        // A join's ranges read every range of what entered it; a whole
+        // revision's chunks and fuse read it whole.
+        mode = range ? -1 : -2;
+    }
+}
+
 /// The upper-bound chain reads, rebuilt from the revision tables as the
 /// reference the version reads must order identically to: each chunk, fuse
 /// and current-phase assemble of revision id > first reads RevisionOut of
 /// every earlier chunk of its chain, RevisionDone[first, id) and
 /// ChainDirty(id - 1), the fuse reads every chunk of its chain up to its
-/// own, and ChainStatus reads every chunk of its chain.
+/// own, and ChainStatus reads every chunk of its chain. On a chain with
+/// range-pipelined revisions, whose joins nothing in the chain waits for,
+/// the reads are AddVersionAncestry's instead.
 std::vector<RigExecBakedSlotRange>
 OverApproximateChainReads(const RigExecBakedProgramImpl &B,
                           const RigExecBakedStep &step)
@@ -4528,6 +4617,31 @@ OverApproximateChainReads(const RigExecBakedProgramImpl &B,
     const auto &[c, r] = B.revisionIndex[size_t(id)];
     if (step.kind == RigExecBakedStepKind::RevisionStatic &&
         !B.chains[size_t(c)].revisions[size_t(r)].weightCurrentPhase) {
+        return reads;
+    }
+    const auto &revisions = B.chains[size_t(c)].revisions;
+    bool pipelined = false;
+    for (const auto &revision : revisions) {
+        pipelined = pipelined || revision.rangeRole;
+    }
+    if (pipelined) {
+        // A chain with range-pipelined revisions: everything the version
+        // read transitively depends on, by the pipelined rules (range k of
+        // a range revision reads range k of its predecessor and no join).
+        const bool range = revisions[size_t(r)].rangeRole &&
+                           step.kind != RigExecBakedStepKind::RevisionStatic;
+        if (step.kind == RigExecBakedStepKind::RevisionFuse) {
+            reads.push_back(RigExecBakedRange(
+                RigExecBakedSlotDomain::RevisionOut,
+                B.revisionChunkBase[size_t(id)],
+                B.revisionChunkBase[size_t(id)] +
+                    B.revisionChunkCount[size_t(id)]));
+        }
+        const int mode = !range ? -2
+                         : step.kind == RigExecBakedStepKind::RevisionFuse
+                             ? -1
+                             : step.part;
+        AddVersionAncestry(B, c, r, mode, &reads);
         return reads;
     }
     const int first = B.chainRevisionBegin[size_t(c)];
@@ -5652,6 +5766,567 @@ TestTheEpilogueVisitsTheStepsHoldingLines()
     finish();
 }
 
+/// MakeAnimatedChainStage's three matrix movers over \p points points, which
+/// the default vertex target (4096) cuts into ceil(points / 4096) ranges, so
+/// every revision is range-pipelined. M0 rides a driver that moves at frames
+/// 1-3, M1 and M2 one that stands still; \p failMiddle gives M1 an
+/// out-of-range weight at frame 2 only. With \p moveOnlyRangeZero M0 is
+/// weighted by a sparse static weight naming points [0, 100) only, so frames
+/// 1-3 differ only there: a base move would rerun every range, which reads
+/// ChainBase. The points are time samples at frames 1-3 holding one array,
+/// and a default value too unless \p samplesOnly, which leaves Build's count
+/// to the earliest sample.
+UsdStageRefPtr
+MakeRangeChainStage(size_t points, bool moveOnlyRangeZero, bool failMiddle,
+                    bool samplesOnly = false)
+{
+    const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    stage->DefinePrim(SdfPath("/Asset"), TfToken("Scope"));
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    const UsdPrim moving = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Moving"), TfToken("RigExecControl"));
+    for (int frame = 1; frame <= 3; ++frame) {
+        moving.GetAttribute(TfToken("avars:tx"))
+            .Set(double(frame), UsdTimeCode(frame));
+    }
+    const UsdPrim still = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Still"), TfToken("RigExecControl"));
+    still.GetAttribute(TfToken("avars:ty")).Set(1.0);
+    const SdfPath target("/Asset/Shape.points");
+    const UsdPrim shape =
+        stage->DefinePrim(target.GetPrimPath(), TfToken("Points"));
+    VtVec3fArray base(points);
+    for (size_t i = 0; i < points; ++i) {
+        base[i] = GfVec3f(float(i % 101) * 0.25f, float(i / 101) * 0.125f,
+                          1.0f + float(i % 7));
+    }
+    UsdAttribute authored = shape.GetAttribute(TfToken("points"));
+    if (!samplesOnly) {
+        authored.Set(base);
+    }
+    for (int frame = 1; frame <= 3; ++frame) {
+        authored.Set(base, UsdTimeCode(frame));
+    }
+    UsdPrim weight;
+    if (moveOnlyRangeZero) {
+        VtIntArray named(100);
+        for (int i = 0; i < 100; ++i) {
+            named[size_t(i)] = i;
+        }
+        weight = stage->DefinePrim(SdfPath("/Asset/Rig/Weights/RangeZero"),
+                                   TfToken("RigExecStaticWeight"));
+        weight.CreateRelationship(TfToken("rigExec:weightTarget"), false)
+            .SetTargets({target});
+        weight.CreateAttribute(TfToken("rigExec:representation"),
+                               SdfValueTypeNames->Token, false)
+            .Set(TfToken("sparse"));
+        weight.CreateAttribute(TfToken("rigExec:indices"),
+                               SdfValueTypeNames->IntArray, false)
+            .Set(named);
+        weight.CreateAttribute(TfToken("rigExec:values"),
+                               SdfValueTypeNames->FloatArray, false)
+            .Set(VtFloatArray(named.size(), 1.0f));
+        weight.CreateAttribute(TfToken("rigExec:defaultWeight"),
+                               SdfValueTypeNames->Float, false)
+            .Set(0.0f);
+    }
+    stage->DefinePrim(SdfPath("/Asset/Rig/Movers"), TfToken("Scope"));
+    for (int i = 0; i < 3; ++i) {
+        const UsdPrim mover = stage->DefinePrim(
+            SdfPath("/Asset/Rig/Movers/M" + std::to_string(i)),
+            TfToken("RigExecMatrixMover"));
+        mover.ApplyAPI(TfToken("RigExecMoverAPI"));
+        mover.GetRelationship(TfToken("rigExec:moves")).SetTargets({target});
+        mover.GetRelationship(TfToken("rigExec:transform"))
+            .SetTargets({i == 0 ? moving.GetPath() : still.GetPath()});
+        UsdAttribute scalar =
+            mover.GetAttribute(TfToken("inputs:defaultWeight"));
+        if (i == 0 && weight) {
+            mover.CreateRelationship(TfToken("rigExec:weightObject"), false)
+                .SetTargets({weight.GetPath()});
+        } else if (i == 1 && failMiddle) {
+            scalar.Set(1.0f, UsdTimeCode(1.0));
+            scalar.Set(2.0f, UsdTimeCode(2.0));
+            scalar.Set(1.0f, UsdTimeCode(3.0));
+        } else {
+            scalar.Set(1.0f);
+        }
+    }
+    return stage;
+}
+
+/// Whether \p ranges declare slot \p slot of \p domain.
+bool
+DeclaresSlot(const std::vector<RigExecBakedSlotRange> &ranges,
+             RigExecBakedSlotDomain domain, int slot)
+{
+    for (const RigExecBakedSlotRange &range : ranges) {
+        if (range.domain == domain && slot >= 0 &&
+            range.begin <= uint32_t(slot) && uint32_t(slot) < range.end) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// How many slots of \p domain \p ranges declare.
+size_t
+DeclaredSlots(const std::vector<RigExecBakedSlotRange> &ranges,
+              RigExecBakedSlotDomain domain)
+{
+    size_t count = 0;
+    for (const RigExecBakedSlotRange &range : ranges) {
+        if (range.domain == domain && range.end > range.begin) {
+            count += size_t(range.end - range.begin);
+        }
+    }
+    return count;
+}
+
+/// Whether the step of \p kind for \p object and \p part ran last run.
+bool
+RanLastPart(const RigExecBakedProgramImpl &B, RigExecBakedStepKind kind,
+            int object, int part)
+{
+    for (size_t c = 0; c < B.opGraph.ops.size(); ++c) {
+        const RigExecBakedStep &step = B.steps[B.opGraph.ops[c].originalIndex];
+        if (step.kind == kind && step.object == object && step.part == part) {
+            return c < B.opExecution.ran.size() && B.opExecution.ran[c];
+        }
+    }
+    return false;
+}
+
+/// The op value of \p domain slot \p slot, or null.
+const RigExecOpValueState *
+OpValueAt(const RigExecBakedProgramImpl &B, RigExecBakedSlotDomain domain,
+          int slot)
+{
+    for (const RigExecOpValueState &value : B.opAdapter.values) {
+        if (value.domain == uint32_t(domain) && int(value.slot) == slot) {
+            return &value;
+        }
+    }
+    return nullptr;
+}
+
+/// The chain position of the revision of mover \p path in \p B's only
+/// chain, or -1: the chain orders its movers itself, so they are found by
+/// path.
+int
+RangeChainPosition(const RigExecBakedProgramImpl &B, const char *path)
+{
+    if (B.chains.size() != 1) {
+        return -1;
+    }
+    for (size_t r = 0; r < B.chains[0].revisions.size(); ++r) {
+        if (B.chains[0].revisions[r].moverPath == SdfPath(path)) {
+            return int(r);
+        }
+    }
+    return -1;
+}
+
+/// The range chain's layout: three revisions, each range-pipelined with the
+/// three Build bounds of 10,000 points, its own buffer as its version, three
+/// range steps each reading its predecessor's range of the same part and no
+/// version, and a join reading its own three ranges and no version.
+void
+TestARangeChainIsCutIntoRanges(const BuiltProgram &built, const char *name)
+{
+    CHECK(built.program != nullptr);
+    if (!built.program) {
+        return;
+    }
+    using D = RigExecBakedSlotDomain;
+    using K = RigExecBakedStepKind;
+    const RigExecBakedProgramImpl &B = built.program->GetStepGraph();
+    CHECK(B.rangeChains);
+    CHECK(B.chains.size() == 1 && B.chains[0].revisions.size() == 3);
+    if (B.chains.size() != 1 || B.chains[0].revisions.size() != 3) {
+        return;
+    }
+    const RigExecBakedProgramImpl::GeomChain &chain = B.chains[0];
+    const int first = B.chainRevisionBegin[0];
+    CHECK(B.chunkRevision.size() == size_t(B.chainChunkEnd[0]));
+    const int bounds[4] = {0, 3334, 6668, 10000};
+    for (size_t r = 0; r < chain.revisions.size(); ++r) {
+        const RigExecBakedProgramImpl::GeomRevision &revision =
+            chain.revisions[r];
+        const int id = first + int(r);
+        CHECK(revision.op == RigExecRevisionOp::Matrix);
+        CHECK(revision.rangeRole && !revision.chunked);
+        CHECK(revision.currentSource == int(r));
+        CHECK(revision.chunks.size() == 3 && revision.joinSeen.size() == 3);
+        CHECK(B.revisionChunkCount[size_t(id)] == 3);
+        if (revision.chunks.size() != 3 ||
+            B.revisionChunkCount[size_t(id)] != 3) {
+            continue;
+        }
+        const int base = B.revisionChunkBase[size_t(id)];
+        for (int k = 0; k < 3; ++k) {
+            const auto &chunk = revision.chunks[size_t(k)];
+            CHECK(chunk.begin == bounds[k] && chunk.end == bounds[k + 1]);
+            CHECK(chunk.key.empty());
+            CHECK(size_t(base + k) < B.chunkRevision.size() &&
+                  B.chunkRevision[size_t(base + k)] == id);
+        }
+        const int previous = r > 0 ? B.revisionChunkBase[size_t(id) - 1] : -1;
+        size_t ranges = 0, joins = 0;
+        for (size_t index = 0; index < B.steps.size(); ++index) {
+            const RigExecBakedStep &step = B.steps[index];
+            if (step.object != id) {
+                continue;
+            }
+            if (step.kind == K::RevisionChunk) {
+                ++ranges;
+                CHECK(DeclaresSlot(step.writes, D::RevisionOut,
+                                   base + step.part));
+                CHECK(DeclaresSlot(step.reads, D::RevisionPacket, id));
+                CHECK(DeclaresSlot(step.reads, D::ChainBase, 0));
+                CHECK(DeclaredSlots(step.reads, D::RevisionOut) ==
+                      (r > 0 ? 1u : 0u));
+                CHECK(DeclaredSlots(step.reads, D::RevisionDone) == 0 &&
+                      DeclaredSlots(step.reads, D::ChainDirty) == 0);
+                if (r > 0) {
+                    CHECK(DeclaresSlot(step.reads, D::RevisionOut,
+                                       previous + step.part));
+                }
+            } else if (step.kind == K::RevisionFuse) {
+                ++joins;
+                CHECK(int(index) == B.revisionFuseStep[size_t(id)]);
+                CHECK(DeclaredSlots(step.reads, D::RevisionOut) == 3);
+                for (int k = 0; k < 3; ++k) {
+                    CHECK(DeclaresSlot(step.reads, D::RevisionOut, base + k));
+                }
+                CHECK(DeclaredSlots(step.reads, D::RevisionDone) == 0 &&
+                      DeclaredSlots(step.reads, D::ChainDirty) == 0);
+                CHECK(DeclaresSlot(step.writes, D::RevisionDone, id) &&
+                      DeclaresSlot(step.writes, D::ChainDirty, id));
+            }
+        }
+        CHECK(ranges == 3 && joins == 1);
+    }
+    std::printf("  %s: 3 revisions of 3 ranges each\n", name);
+}
+
+/// The validator holds a range-pipelined chain to its reads by name: a
+/// range without its predecessor's range, a join waiting for a point
+/// version, and a join missing one of its own ranges. Each case restores
+/// what it broke.
+void
+TestTheValidatorRejectsABrokenRangeChain()
+{
+    BuiltProgram built = BuildStage(MakeRangeChainStage(10000, false, false));
+    CHECK(built.program != nullptr);
+    if (!built.program) {
+        return;
+    }
+    using D = RigExecBakedSlotDomain;
+    using K = RigExecBakedStepKind;
+    // The program is this test's own, so it may be edited in place.
+    RigExecBakedProgramImpl &B =
+        const_cast<RigExecBakedProgramImpl &>(built.program->GetStepGraph());
+    CHECK(B.chains.size() == 1 && B.chains[0].revisions.size() == 3);
+    if (B.chains.size() != 1 || B.chains[0].revisions.size() != 3) {
+        return;
+    }
+    // The chain's second revision, its range 1 and its join.
+    const int id = B.chainRevisionBegin[0] + 1;
+    int range = -1;
+    for (size_t index = 0; index < B.steps.size(); ++index) {
+        if (B.steps[index].kind == K::RevisionChunk &&
+            B.steps[index].object == id && B.steps[index].part == 1) {
+            range = int(index);
+        }
+    }
+    const int join = B.revisionFuseStep[size_t(id)];
+    CHECK(range >= 0 && join >= 0);
+    if (range < 0 || join < 0) {
+        return;
+    }
+    const auto passes = [&](const char *what) {
+        std::string restored;
+        if (!RigExecBakedValidateStepGraph(B, &restored)) {
+            ++failures;
+            std::printf("FAIL %s: rejected after the restore: %s\n", what,
+                        restored.c_str());
+        }
+    };
+    std::string error;
+    CHECK(RigExecBakedValidateStepGraph(B, &error));
+    {
+        RigExecBakedStep &reader = B.steps[size_t(range)];
+        const std::vector<RigExecBakedSlotRange> reads = reader.reads;
+        const RigExecBakedSlotRange entering = RigExecBakedOne(
+            D::RevisionOut, B.revisionChunkBase[size_t(id) - 1] + 1);
+        reader.reads.erase(
+            std::remove(reader.reads.begin(), reader.reads.end(), entering),
+            reader.reads.end());
+        CHECK(reader.reads.size() + 1 == reads.size());
+        ExpectRejected(B, "a range without its predecessor's range",
+                       {"(" + reader.label + ")",
+                        "reads range 1 of point version 1 of chain 0",
+                        "without declaring its predecessor's RevisionOut"});
+        reader.reads = reads;
+        passes("a range without its predecessor's range");
+    }
+    {
+        // The version read with its producer's edge, so only the
+        // pipelining rule can object.
+        RigExecBakedStep &reader = B.steps[size_t(join)];
+        // Two joins are unordered, so the edge is added only where the
+        // producer precedes the reader in program order (M0 before M1 here).
+        const int producer = B.revisionFuseStep[size_t(id) - 1];
+        if (producer >= 0 && producer < join) {
+            std::vector<int> &succs = B.steps[size_t(producer)].succs;
+            const std::vector<RigExecBakedSlotRange> reads = reader.reads;
+            const std::vector<int> preds = reader.preds;
+            const std::vector<int> producerSuccs = succs;
+            reader.reads.push_back(RigExecBakedOne(D::RevisionDone, id - 1));
+            reader.reads.push_back(RigExecBakedOne(D::ChainDirty, id - 1));
+            if (!std::binary_search(reader.preds.begin(), reader.preds.end(),
+                                    producer)) {
+                reader.preds.insert(
+                    std::lower_bound(reader.preds.begin(), reader.preds.end(),
+                                     producer),
+                    producer);
+                succs.insert(std::lower_bound(succs.begin(), succs.end(), join),
+                             join);
+            }
+            ExpectRejected(B, "a join waiting for a point version",
+                           {"(" + reader.label + ")",
+                            "reads point version 1 of chain 0",
+                            "which a range-pipelined join must not wait for"});
+            reader.reads = reads;
+            reader.preds = preds;
+            succs = producerSuccs;
+            passes("a join waiting for a point version");
+        } else {
+            std::printf("  a join waiting for a point version: skipped, the "
+                        "predecessor's join is ordered after it\n");
+        }
+    }
+    {
+        RigExecBakedStep &reader = B.steps[size_t(join)];
+        const std::vector<RigExecBakedSlotRange> reads = reader.reads;
+        const int base = B.revisionChunkBase[size_t(id)];
+        for (RigExecBakedSlotRange &read : reader.reads) {
+            if (read.domain == D::RevisionOut) {
+                read.end = uint32_t(base + 2);
+            }
+        }
+        ExpectRejected(B, "a join missing one of its ranges",
+                       {"(" + reader.label + ")",
+                        "joins revision " + std::to_string(id) +
+                            " without declaring RevisionOut[" +
+                            std::to_string(base + 2) + "]"});
+        reader.reads = reads;
+        passes("a join missing one of its ranges");
+    }
+}
+
+/// The range chain against itself built with RIGEXEC_BAKED_RANGE_CHAINS=0
+/// (one chunk and one fuse per revision) over frames {1,2,3,2,1,3}: every
+/// revision's version, the chain's points and every diagnostic agree bit
+/// for bit, M1's MoverFailed line stands at frame 2 alone, and both
+/// RIGEXEC_VERIFY_CHAIN_VERSIONS and the RIGEXEC_VERIFY_RANGE_CHAINS judge
+/// find nothing. The judge itself is shown to catch one wrong point.
+void
+TestARangeChainMatchesTheWholeChain()
+{
+    TfSetenv("RIGEXEC_VERIFY_CHAIN_VERSIONS", "1");
+    TfSetenv("RIGEXEC_VERIFY_RANGE_CHAINS", "1");
+    const BuiltProgram ranged =
+        BuildStage(MakeRangeChainStage(10000, false, true));
+    TfSetenv("RIGEXEC_BAKED_RANGE_CHAINS", "0");
+    const BuiltProgram whole =
+        BuildStage(MakeRangeChainStage(10000, false, true));
+    TfUnsetenv("RIGEXEC_BAKED_RANGE_CHAINS");
+    TfSetenv("RIGEXEC_VERIFY_RANGE_CHAINS", "0");
+    TfSetenv("RIGEXEC_VERIFY_CHAIN_VERSIONS", "0");
+    CHECK(ranged.program != nullptr && whole.program != nullptr);
+    if (!ranged.program || !whole.program) {
+        return;
+    }
+    const RigExecBakedProgramImpl &R = ranged.program->GetStepGraph();
+    const RigExecBakedProgramImpl &W = whole.program->GetStepGraph();
+    CHECK(R.verifyRangeChains && R.verifyChainVersions);
+    CHECK(R.rangeChains && !W.rangeChains);
+    CHECK(R.chains.size() == 1 && W.chains.size() == 1 &&
+          R.chains[0].revisions.size() == 3 &&
+          W.chains[0].revisions.size() == 3);
+    if (R.chains.size() != 1 || W.chains.size() != 1 ||
+        R.chains[0].revisions.size() != 3 ||
+        W.chains[0].revisions.size() != 3) {
+        return;
+    }
+    for (size_t r = 0; r < 3; ++r) {
+        CHECK(R.chains[0].revisions[r].rangeRole);
+        CHECK(!W.chains[0].revisions[r].rangeRole &&
+              W.chains[0].revisions[r].chunks.size() == 1);
+        CHECK(R.chains[0].revisions[r].moverPath ==
+              W.chains[0].revisions[r].moverPath);
+    }
+    const int middle = RangeChainPosition(R, "/Asset/Rig/Movers/M1");
+    CHECK(middle >= 0);
+    if (middle < 0) {
+        return;
+    }
+    const SdfPath target("/Asset/Shape.points");
+    // Version r + 1 of the whole chain: where its fuse left it.
+    const auto version = [](const RigExecBakedProgramImpl::GeomChain &chain,
+                            size_t r) {
+        const int source = chain.revisions[r].currentSource;
+        return source < 0
+                   ? std::vector<GfVec3f>(chain.lastBase.cbegin(),
+                                          chain.lastBase.cend())
+                   : chain.revisions[size_t(source)].output;
+    };
+    for (const double frame : {1.0, 2.0, 3.0, 2.0, 1.0, 3.0}) {
+        RigExecRigPose rangedPose, wholePose;
+        CHECK(ranged.program->Run(UsdTimeCode(frame), &rangedPose));
+        CHECK(whole.program->Run(UsdTimeCode(frame), &wholePose));
+        CHECK(rangedPose.comparisonMismatches == 0 &&
+              wholePose.comparisonMismatches == 0);
+        const auto &rangedChain = R.chains[0];
+        const auto &wholeChain = W.chains[0];
+        CHECK(rangedChain.result.size() == 10000);
+        CHECK(SameBits(rangedChain.result, wholeChain.result));
+        for (size_t r = 0; r < 3; ++r) {
+            if (!SameBits(rangedChain.revisions[r].output,
+                          version(wholeChain, r))) {
+                ++failures;
+                std::printf("FAIL range chain frame %g: revision %zu's "
+                            "version differs from the whole chain's\n",
+                            frame, r);
+            }
+            CHECK(rangedChain.revisions[r].resultStatus ==
+                  wholeChain.revisions[r].resultStatus);
+            CHECK(rangedChain.revisions[r].rangeRefusals == 0);
+        }
+        const auto rangedPoints = rangedPose.movedProperties.find(target);
+        const auto wholePoints = wholePose.movedProperties.find(target);
+        CHECK(rangedPoints != rangedPose.movedProperties.end() &&
+              wholePoints != wholePose.movedProperties.end() &&
+              rangedPoints->second.IsHolding<VtVec3fArray>() &&
+              wholePoints->second.IsHolding<VtVec3fArray>() &&
+              SameBits(rangedPoints->second.UncheckedGet<VtVec3fArray>(),
+                       wholePoints->second.UncheckedGet<VtVec3fArray>()));
+        CHECK(rangedPose.diagnostics == wholePose.diagnostics);
+        const std::vector<std::string> lines =
+            MoverFailedLines(rangedPose.diagnostics);
+        CHECK(NamesMover(lines, "/Asset/Rig/Movers/M1:") == (frame == 2.0));
+        CHECK((rangedChain.revisions[size_t(middle)].resultStatus ==
+               TfToken("moverFailed")) == (frame == 2.0));
+    }
+    CHECK(R.chainVersionMismatches == 0 && W.chainVersionMismatches == 0);
+    CHECK(R.rangeVerifyMismatches == 0);
+
+    // The judge reports a range that disagrees with the revision run whole.
+    RigExecBakedProgramImpl &edited = const_cast<RigExecBakedProgramImpl &>(R);
+    std::vector<GfVec3f> &output = edited.chains[0].revisions[2].output;
+    CHECK(output.size() == 10000);
+    if (output.size() == 10000) {
+        const GfVec3f kept = output[5000];
+        output[5000][0] += 1.0f;
+        {
+            TfErrorMark mark;
+            CHECK(RigExecBakedVerifyRangeChains(&edited) == 1);
+            mark.Clear();
+        }
+        output[5000] = kept;
+        CHECK(RigExecBakedVerifyRangeChains(&edited) == 0);
+    }
+}
+
+/// Range cutoff: M0 moves points [0, 100) only, so between frames 1 and 2
+/// every range of M0 runs (its packet moved) and only range 0 of every
+/// revision after it does; its ranges 1 and 2 publish the bytes they held,
+/// so their RevisionOut values keep their revision, and nothing before M0
+/// runs. The points match the chain built whole.
+void
+TestARangeChainCutsOffUnmovedRanges()
+{
+    TfSetenv("RIGEXEC_VERIFY_CHAIN_VERSIONS", "1");
+    const BuiltProgram built = BuildStage(MakeRangeChainStage(10000, true, false));
+    TfSetenv("RIGEXEC_BAKED_RANGE_CHAINS", "0");
+    const BuiltProgram whole = BuildStage(MakeRangeChainStage(10000, true, false));
+    TfUnsetenv("RIGEXEC_BAKED_RANGE_CHAINS");
+    TfSetenv("RIGEXEC_VERIFY_CHAIN_VERSIONS", "0");
+    CHECK(built.program != nullptr && whole.program != nullptr);
+    if (!built.program || !whole.program) {
+        return;
+    }
+    using D = RigExecBakedSlotDomain;
+    using K = RigExecBakedStepKind;
+    const RigExecBakedProgramImpl &B = built.program->GetStepGraph();
+    const RigExecBakedProgramImpl &W = whole.program->GetStepGraph();
+    CHECK(B.chains.size() == 1 && B.chains[0].revisions.size() == 3 &&
+          W.chains.size() == 1);
+    if (B.chains.size() != 1 || B.chains[0].revisions.size() != 3 ||
+        W.chains.size() != 1) {
+        return;
+    }
+    const int moved = RangeChainPosition(B, "/Asset/Rig/Movers/M0");
+    CHECK(moved >= 0);
+    if (moved < 0) {
+        return;
+    }
+    const int first = B.chainRevisionBegin[0];
+    for (const auto &revision : B.chains[0].revisions) {
+        CHECK(revision.rangeRole && revision.chunks.size() == 3);
+    }
+    RigExecRigPose pose, wholePose;
+    CHECK(built.program->Run(UsdTimeCode(1.0), &pose));
+    CHECK(whole.program->Run(UsdTimeCode(1.0), &wholePose));
+    CHECK(SameBits(B.chains[0].result, W.chains[0].result));
+    std::vector<uint64_t> before(9, 0);
+    for (int r = 0; r < 3; ++r) {
+        for (int k = 0; k < 3; ++k) {
+            const RigExecOpValueState *value = OpValueAt(
+                B, D::RevisionOut, B.revisionChunkBase[size_t(first + r)] + k);
+            CHECK(value != nullptr);
+            before[size_t(r * 3 + k)] = value ? value->revision : 0;
+        }
+    }
+    const VtVec3fArray frameOne = B.chains[0].result;
+    CHECK(built.program->Run(UsdTimeCode(2.0), &pose));
+    CHECK(whole.program->Run(UsdTimeCode(2.0), &wholePose));
+    CHECK(pose.comparisonMismatches == 0);
+    CHECK(SameBits(B.chains[0].result, W.chains[0].result));
+    // Only points [0, 100) moved.
+    const VtVec3fArray &frameTwo = B.chains[0].result;
+    CHECK(frameTwo.size() == frameOne.size() && frameTwo.size() == 10000);
+    if (frameTwo.size() == 10000 && frameOne.size() == 10000) {
+        CHECK(!SameBits(std::vector<GfVec3f>(frameOne.cbegin(),
+                                             frameOne.cbegin() + 100),
+                        std::vector<GfVec3f>(frameTwo.cbegin(),
+                                             frameTwo.cbegin() + 100)));
+        CHECK(std::memcmp(frameOne.cdata() + 100, frameTwo.cdata() + 100,
+                          9900 * sizeof(GfVec3f)) == 0);
+    }
+    for (int r = 0; r < 3; ++r) {
+        const int id = first + r;
+        for (int k = 0; k < 3; ++k) {
+            const bool ran = RanLastPart(B, K::RevisionChunk, id, k);
+            const bool expected = r == moved || (r > moved && k == 0);
+            if (ran != expected) {
+                ++failures;
+                std::printf("FAIL range cutoff: revision %d range %d %s\n", r,
+                            k, ran ? "ran" : "did not run");
+            }
+            const RigExecOpValueState *value = OpValueAt(
+                B, D::RevisionOut, B.revisionChunkBase[size_t(id)] + k);
+            const bool republished =
+                value && value->revision != before[size_t(r * 3 + k)];
+            CHECK(republished == (r >= moved && k == 0));
+        }
+        CHECK(RanLast(B, K::RevisionFuse, id) == (r >= moved));
+    }
+    CHECK(B.chainVersionMismatches == 0);
+}
+
 /// One matrix mover on a control that moves every frame, weighted by a
 /// sparse RigExecDynamicWeight (clamp) over a sparse static base that names
 /// all three points with weight 1 and defaults to 0.25. inputs:driver is 2
@@ -6124,6 +6799,27 @@ main(int argc, char **argv)
         TestThePointVersionsKeepTheOrder(bipedStack, "Biped_stack (chunked)");
     }
     TfSetenv("RIGEXEC_BAKED_CHUNK_ALWAYS", "0");
+    {
+        // Range-pipelined point chains: a chain above the vertex target cut
+        // into ranges, its Matrix revisions run as one step per range and a
+        // join. The count comes from the default value, or from the earliest
+        // sample when there is none.
+        const BuiltProgram ranged =
+            BuildStage(MakeRangeChainStage(10000, false, false));
+        const BuiltProgram sampled =
+            BuildStage(MakeRangeChainStage(10000, false, false, true));
+        TestARangeChainIsCutIntoRanges(ranged, "range_chain");
+        TestARangeChainIsCutIntoRanges(sampled, "range_chain (samples only)");
+        TestTheGraphDescribesTheProgram(ranged, "range_chain");
+        TestTheValidatorAcceptsTheProgram(ranged, "range_chain");
+        TestEachChainReaderBindsOneVersion(ranged, "range_chain");
+        TestThePointVersionsKeepTheOrder(ranged, "range_chain");
+        TestTheClusteringIsSound(ranged, "range_chain");
+        TestTheConeClosuresAreSound(ranged, "range_chain");
+        TestTheValidatorRejectsABrokenRangeChain();
+        TestARangeChainMatchesTheWholeChain();
+        TestARangeChainCutsOffUnmovedRanges();
+    }
     // Chain buffers flip rather than copy, and point values key by content
     // version: buffer selection across a failure, a version an unmoved edit
     // keeps, and versions carried across a rebuild.

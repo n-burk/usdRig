@@ -439,7 +439,14 @@ CaptureRevision(const RigExecBakedProgramImpl::GeomRevision &revision,
         state->chunks[k].palette = revision.chunks[k].palette;
         state->chunks[k].keyChanged = revision.chunks[k].keyChanged;
         state->chunks[k].ok = revision.chunks[k].ok;
+        state->chunks[k].rangeVersion = revision.chunks[k].rangeVersion;
+        state->chunks[k].rangeCount = revision.chunks[k].rangeCount;
+        state->chunks[k].rangeRan = revision.chunks[k].rangeRan;
     }
+    // A range-pipelined revision's join state; `rangeInputs` is a memo of
+    // the packet that RevisionStatic derives, like the caches it names.
+    state->joinSeen = revision.joinSeen;
+    state->rangeRefusals = revision.rangeRefusals;
 }
 
 void
@@ -517,7 +524,12 @@ RestoreRevision(const RigExecBakedRunShadow::RevisionState &state,
         revision->chunks[k].palette = state.chunks[k].palette;
         revision->chunks[k].keyChanged = state.chunks[k].keyChanged;
         revision->chunks[k].ok = state.chunks[k].ok;
+        revision->chunks[k].rangeVersion = state.chunks[k].rangeVersion;
+        revision->chunks[k].rangeCount = state.chunks[k].rangeCount;
+        revision->chunks[k].rangeRan = state.chunks[k].rangeRan;
     }
+    revision->joinSeen = state.joinSeen;
+    revision->rangeRefusals = state.rangeRefusals;
 }
 
 void
@@ -675,7 +687,18 @@ CompareRevision(std::vector<std::string> *differences, size_t *count,
                       shadow.chunks[k].rows, revision.chunks[k].rows);
         CompareVector(differences, count, what + " palette",
                       shadow.chunks[k].palette, revision.chunks[k].palette);
+        CompareValue(differences, count, what + " rangeVersion",
+                     shadow.chunks[k].rangeVersion,
+                     revision.chunks[k].rangeVersion);
+        CompareValue(differences, count, what + " rangeCount",
+                     shadow.chunks[k].rangeCount, revision.chunks[k].rangeCount);
+        CompareValue(differences, count, what + " rangeRan",
+                     shadow.chunks[k].rangeRan, revision.chunks[k].rangeRan);
     }
+    CompareVector(differences, count, where + " joinSeen", shadow.joinSeen,
+                  revision.joinSeen);
+    CompareValue(differences, count, where + " rangeRefusals",
+                 shadow.rangeRefusals, revision.rangeRefusals);
 }
 
 }  // namespace

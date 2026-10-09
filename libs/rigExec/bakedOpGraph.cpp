@@ -898,6 +898,8 @@ bool RigExecBakedCompileOpGraph(RigExecBakedProgramImpl *B,std::string *error)
     B->verifyPacketVersions=TfGetenvBool("RIGEXEC_VERIFY_PACKET_VERSIONS",false);
     B->packetContentKeys.assign(B->verifyPacketVersions?state.values.size():0,std::string());
     B->packetVersionMismatches=0;
+    B->verifyRangeChains=TfGetenvBool("RIGEXEC_VERIFY_RANGE_CHAINS",false);
+    B->rangeVerifyMismatches=0;
     // Each chain revision's WeightPacket op value, whose revision its
     // overlay reuse is keyed by. Ids are this compile's, so no earlier
     // claim stands.
@@ -1174,6 +1176,9 @@ bool RigExecBakedExecuteOpGraph(RigExecBakedProgramImpl *program,UsdTimeCode tim
         state.everRan=false;
         return false;
     }
+    // The range-pipelined revisions against the same revisions run whole:
+    // owner thread, after the join, over what the run left.
+    if(B.verifyRangeChains) RigExecBakedVerifyRangeChains(&B);
     // Worker writes are confined to each operation. Reduce coarse timing
     // after join so profiling never adds synchronization to readiness.
     if(profiling) for(uint32_t c=0;c<B.opGraph.ops.size() && c<B.opExecution.ran.size();++c) {

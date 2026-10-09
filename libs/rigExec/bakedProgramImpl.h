@@ -2604,6 +2604,16 @@ struct RigExecBakedProgramImpl {
     size_t chunkVertexTarget = RigExecGeometryParallelThreshold;
     /// RIGEXEC_BAKED_MAX_CHUNKS: the most chunks one revision is cut into.
     size_t chunkCap = 32;
+    /// RIGEXEC_BAKED_RANGE_CHAINS (default on), read at Build: whether a chain
+    /// of more than chunkVertexTarget points is range-pipelined.
+    bool rangeChains = true;
+    /// The revision id owning each RevisionOut slot (chunk id). Build state.
+    std::vector<int> chunkRevision;
+    /// RIGEXEC_VERIFY_RANGE_CHAINS, read at compile: after the region the
+    /// owner recomputes every range-pipelined revision whole and counts
+    /// disagreements with its ranges here.
+    bool verifyRangeChains = false;
+    size_t rangeVerifyMismatches = 0;
     /// RIGEXEC_ENABLE_SIMD, as RigExecSimdEnabled() answers it.
     bool useSimd = true;
     /// RIGEXEC_PURITY_AUDIT: whether RunStepBody hands its bodies
@@ -2825,6 +2835,14 @@ struct RigExecBakedProgramImpl {
         /// Sticky across a run the chunk sat out, which is what makes the
         /// skip above sound.
         bool ok = false;
+        /// A range-pipelined revision's range: the content version
+        /// RevisionOut keys it by, bumped by its range step exactly when the
+        /// range's bytes in `output` differ from the ones it last published or
+        /// the count moved; that count; and whether it ever published. One
+        /// writer: the range step.
+        uint64_t rangeVersion = 0;
+        size_t rangeCount = 0;
+        bool rangeRan = false;
     };
 
     /// One blend channel's stage handles, resolved once at Build.
@@ -2972,10 +2990,14 @@ struct RigExecBakedProgramImpl {
         RigExecMoverStatus lastStatus;
         bool ran = false;
         /// This revision's own wire-basis memo: only its step runs its
-        /// kernel, so nothing else touches it. A clone shares the entries.
+        /// kernel (a range-pipelined revision's RevisionStatic, which its
+        /// range steps follow), so nothing else touches it. A clone shares
+        /// the entries.
         RigExecWireBasisCache wireBasis;
-        /// Mutated only by this revision's unchunked body/projector. Copies
-        /// share immutable entries; each clone replaces its own cache slots.
+        /// Mutated only by this revision's unchunked body/projector, or by a
+        /// range-pipelined revision's RevisionStatic; its range steps only
+        /// read it. Copies share immutable entries; each clone replaces its
+        /// own cache slots.
         mutable RigExecSurfaceKernelCache<GfVec3f,GfVec3d> surfaceCache;
         /// A read phase named this revision as the point in the chain it
         /// wants the target's points from (the dynamic walk records them
@@ -3251,6 +3273,21 @@ struct RigExecBakedProgramImpl {
         /// RevisionStatic through the stage assembler.
         RigExecExternalPayload externalPayload;
         bool externalPayloadChanged = false;
+        /// Range-pipelined (Build state): `chunks` are the chain's partition
+        /// (chunked false, keys empty); range step k writes range k of
+        /// `output`, which always holds this revision's full version, so
+        /// `currentSource` is the revision itself; the fuse is a join that
+        /// publishes RevisionDone from the range versions without reading
+        /// points.
+        bool rangeRole = false;
+        /// Filled by RevisionStatic (RigExecPrepareRevisionRanges), read by
+        /// the range steps. A memo: never shadowed, restored or compared.
+        RigExecRevisionRangeInputs rangeInputs;
+        /// The range versions the join last published, one per chunk.
+        std::vector<uint64_t> joinSeen;
+        /// Ranges whose kernel refused after an Applies acceptance this run (an
+        /// invariant violation; they passed through). Written by the join.
+        uint32_t rangeRefusals = 0;
     };
     struct GeomChain {
         SdfPath target;
@@ -5118,6 +5155,24 @@ void RigExecFrozenGeometryTouchTokens();
 size_t RigExecBakedChunkVertexTargetFromEnvironment();
 size_t RigExecBakedChunkCapFromEnvironment();
 
+/// Whether \p revision applies this run, from what RevisionStatic and the fold
+/// published (a range-pipelined revision's acceptance is never Deferred): the
+/// one decision its range steps and its join share.
+inline bool
+RigExecBakedRevisionApplies(const RigExecBakedProgramImpl::GeomRevision &revision)
+{
+    const bool packetValid =
+        revision.parameters.valid &&
+        (revision.op != RigExecRevisionOp::Skin || revision.influencesValid);
+    return packetValid && revision.status.AllowsApply() &&
+           revision.acceptance == RigExecRevisionAcceptance::Applies;
+}
+/// RIGEXEC_BAKED_RANGE_CHAINS; read once at Build (bakedGeometry.cpp).
+bool RigExecBakedRangeChainsFromEnvironment();
+/// The RIGEXEC_VERIFY_RANGE_CHAINS judge (bakedGeometry.cpp): owner thread,
+/// after the region; returns this run's mismatches.
+size_t RigExecBakedVerifyRangeChains(RigExecBakedProgramImpl *program);
+
 /// Cuts \p revision's vertices into chunks, from \p indices and
 /// \p elementSize, and records both as the partition's arrays (the indices
 /// only when the cut has more than one chunk). Build only: each chunk step
@@ -5463,6 +5518,9 @@ struct RigExecBakedRunShadow {
         std::vector<float> rows;
         std::vector<RigExecScaledDualQuat> palette;
         bool keyChanged = false, ok = false;
+        uint64_t rangeVersion = 0;
+        size_t rangeCount = 0;
+        bool rangeRan = false;
     };
     struct BlendSampleState {
         std::shared_ptr<const RigExecBlendSampleLayout> layout;
@@ -5509,6 +5567,8 @@ struct RigExecBakedRunShadow {
         bool weightValuesHeld = false;
         uint64_t weightValuesPacketRevision = 0;
         size_t weightValuesCount = 0;
+        std::vector<uint64_t> joinSeen;
+        uint32_t rangeRefusals = 0;
     };
     struct DerivedState {
         RevisionState revision;

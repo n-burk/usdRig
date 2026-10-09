@@ -3,6 +3,7 @@
 #include "pathText.h"
 #include "weightField.h"
 #include "movers/moverRegistry.h"
+#include "rigExecMath/pointRanges.h"
 #include "pxr/base/tf/diagnostic.h"
 #include <algorithm>
 #include <cstring>
@@ -274,14 +275,16 @@ void Invalid(std::string *out, RigExecBakedSlotDomain domain, uint32_t slot)
     TF_VERIFY(false, "Invalid baked operation value domain %u slot %u",
               unsigned(domain), slot);
 }
-// RevisionOut \p slot's revision and the chunk owning it, or false.
+// RevisionOut \p slot's revision and the chunk owning it, or false. Build's
+// chunkRevision table answers in O(1); a program assembled by hand without
+// it is scanned.
 bool RevisionOutPart(const RigExecBakedProgramImpl &B, uint32_t slot,
     const RigExecBakedProgramImpl::GeomRevision **revision,
     const RigExecBakedProgramImpl::GeomChunk **chunk)
 {
-    for(size_t r=0;r<B.revisionChunkBase.size() && r<B.revisionChunkCount.size();++r) {
+    const auto at=[&](size_t r) {
         const int base=B.revisionChunkBase[r], count=B.revisionChunkCount[r];
-        if(base<0 || count<0 || slot<uint32_t(base) || uint64_t(slot)-uint32_t(base)>=uint32_t(count)) continue;
+        if(base<0 || count<0 || slot<uint32_t(base) || uint64_t(slot)-uint32_t(base)>=uint32_t(count)) return false;
         const auto *v=Revision(B,uint32_t(r));
         const size_t index=slot-uint32_t(base);
         if(!v || index>=v->chunks.size()) return false;
@@ -289,6 +292,16 @@ bool RevisionOutPart(const RigExecBakedProgramImpl &B, uint32_t slot,
         if(part.begin<0 || part.end<part.begin) return false;
         *revision=v; *chunk=&part;
         return true;
+    };
+    const size_t tables=std::min(B.revisionChunkBase.size(),B.revisionChunkCount.size());
+    if(slot<B.chunkRevision.size()) {
+        const int r=B.chunkRevision[slot];
+        return r>=0 && size_t(r)<tables && at(size_t(r));
+    }
+    for(size_t r=0;r<tables;++r) {
+        const int base=B.revisionChunkBase[r], count=B.revisionChunkCount[r];
+        if(base<0 || count<0 || slot<uint32_t(base) || uint64_t(slot)-uint32_t(base)>=uint32_t(count)) continue;
+        return at(r);
     }
     return false;
 }
@@ -432,6 +445,13 @@ void RigExecBakedOpValueKey(const RigExecBakedProgramImpl &B,
         const RigExecBakedProgramImpl::GeomRevision *v=nullptr;
         const RigExecBakedProgramImpl::GeomChunk *part=nullptr;
         if(RevisionOutPart(B,slot,&v,&part)) {
+            // A range-pipelined range keys its bytes in `output` by the
+            // content version its step bumps exactly when they move;
+            // RigExecBakedChainContentKey is the same key over the bytes.
+            if(v->rangeRole) {
+                Put(out,part->ok); Put(out,uint64_t(v->output.size()));
+                Put(out,part->rangeVersion); return;
+            }
             PutRevisionOut(out,*part,v->stagingOutput);
             return;
         }
@@ -680,8 +700,10 @@ bool RigExecBakedOpValueKeyStands(const RigExecBakedProgramImpl &B,
     // result, which the key describes, is then `output`, at staging's size.
     const RigExecBakedProgramImpl::GeomRevision *v=nullptr;
     const RigExecBakedProgramImpl::GeomChunk *part=nullptr;
+    // A range-pipelined range never swaps: its key stands only when equal.
     if(domain!=RigExecBakedSlotDomain::RevisionOut || !RevisionOutPart(B,slot,&v,&part) ||
-       v->chunked || v->stagingFresh || v->output.size()!=v->stagingOutput.size())
+       v->chunked || v->rangeRole || v->stagingFresh ||
+       v->output.size()!=v->stagingOutput.size())
         return false;
     actual.clear(); Put(&actual,uint8_t(1)); Put(&actual,domain);
     PutRevisionOut(&actual,*part,v->output);
@@ -714,6 +736,20 @@ bool RigExecBakedChainContentKey(const RigExecBakedProgramImpl &B,
             else break;
             return true;
         } break;
+    case D::RevisionOut: {
+        // Only a range-pipelined range is keyed by a content version: its
+        // own bytes of `output`, as the range step clips them.
+        const RigExecBakedProgramImpl::GeomRevision *v=nullptr;
+        const RigExecBakedProgramImpl::GeomChunk *part=nullptr;
+        if(!RevisionOutPart(B,slot,&v,&part) || !v->rangeRole) break;
+        const size_t k=size_t(part-v->chunks.data());
+        size_t begin=0,end=0;
+        RigExecPointRangeAt(part->begin,part->end,k+1==v->chunks.size(),
+                            v->output.size(),&begin,&end);
+        Put(out,part->ok); Put(out,uint64_t(v->output.size()));
+        PutRun(out,v->output.data()+begin,end-begin);
+        return true;
+    }
     case D::DerivedOut:
         if(slot<B.derivedIndex.size()) {
             const auto index=B.derivedIndex[slot];
