@@ -1706,6 +1706,69 @@ void _SampleOracleReference(const RigExecRigEvaluator &evaluator,
         RigExecCaptureWeightReference(B.stage,weight.path,original,upstream,time,noPlacement));
 }
 
+// The constraint operator arrays, read raw off the prim as the prologue
+// reads them (bakedProgram.cpp, Run's constraintArrays), through the
+// Build-time handles and keys. A channel whose read cannot move with the
+// time (ConstraintArrays::Varies) is read once under the program stamp,
+// the evaluator's stage edit serial and the Default-ness of the time, and
+// that read's sample is added again while they stand: every stage notice
+// advances the serial, so it is what a read would add now. Owning thread
+// only (RigExecBakedProgramImpl::frozenArraySamples).
+void
+_SampleConstraintArrays(const RigExecRigEvaluator &evaluator,
+                        const RigExecBakedProgramImpl &B, UsdTimeCode time,
+                        RigExecFrameInputs *out)
+{
+    using Arrays = RigExecBakedProgramImpl::ConstraintArrays;
+    using Memo = RigExecBakedProgramImpl::FrozenArraySample;
+    const uint64_t serial = evaluator.GetStageEditSerial();
+    if (!B.frozenArrayBuilt || B.frozenArrayStamp != B.programStamp ||
+        B.frozenArraySerial != serial ||
+        B.frozenArrayDefault != time.IsDefault() ||
+        B.frozenArraySamples.size() != B.constraintArrays.size()) {
+        B.frozenArraySamples.assign(B.constraintArrays.size(),
+                                    std::array<Memo, 4>());
+        B.frozenArrayBuilt = true;
+        B.frozenArrayStamp = B.programStamp;
+        B.frozenArraySerial = serial;
+        B.frozenArrayDefault = time.IsDefault();
+    }
+    for (size_t row = 0; row < B.constraintArrays.size(); ++row) {
+        const Arrays &arrays = B.constraintArrays[row];
+        if (!arrays.prim.IsValid()) {
+            continue;
+        }
+        for (size_t channel = 0; channel < 4; ++channel) {
+            if (!arrays.Sampled(channel)) {
+                continue;
+            }
+            Memo &memo = B.frozenArraySamples[row][channel];
+            if (memo.variance == Arrays::kFixed) {
+                if (memo.present) {
+                    out->Add(arrays.keys[channel], memo.value, memo.hasValue,
+                             /*viaChain=*/false, memo.blocked);
+                }
+                continue;
+            }
+            const size_t before = out->values.size();
+            _SampleAttribute(arrays.keys[channel], arrays.attributes[channel],
+                             time, out);
+            if (memo.variance != Arrays::kVarianceUnknown) {
+                continue;
+            }
+            memo.variance = arrays.Varies(channel) ? Arrays::kVaries
+                                                   : Arrays::kFixed;
+            memo.present = out->values.size() > before;
+            if (memo.variance == Arrays::kFixed && memo.present) {
+                const RigExecSampledInput &read = out->values.back();
+                memo.value = read.value;
+                memo.hasValue = read.hasValue;
+                memo.blocked = read.valueBlocked;
+            }
+        }
+    }
+}
+
 bool
 _SampleWithPinnedChainBindings(
     const RigExecRigEvaluator &evaluator, UsdTimeCode time,
@@ -1879,38 +1942,8 @@ _SampleWithPinnedChainBindings(
             }
         }
     }
-    // Constraint operator arrays: read raw off the prim per frame.
-    for (const RigExecBakedProgramImpl::ConstraintArrays &arrays :
-         B.constraintArrays) {
-        if (!arrays.prim.IsValid()) {
-            continue;
-        }
-        const SdfPath primPath = arrays.prim.GetPath();
-        _SampleAttribute(primPath.AppendProperty(TfToken(
-                             "inputs:sourceWeights")),
-                         arrays.prim.GetAttribute(
-                             TfToken("inputs:sourceWeights")),
-                         time, &sampled);
-        if (arrays.parentOffsets) {
-            _SampleAttribute(primPath.AppendProperty(TfToken(
-                                 "inputs:translationOffsets")),
-                             arrays.prim.GetAttribute(TfToken(
-                                 "inputs:translationOffsets")),
-                             time, &sampled);
-            _SampleAttribute(primPath.AppendProperty(TfToken(
-                                 "inputs:rotationOffsets")),
-                             arrays.prim.GetAttribute(TfToken(
-                                 "inputs:rotationOffsets")),
-                             time, &sampled);
-        }
-        if (arrays.readPole) {
-            _SampleAttribute(primPath.AppendProperty(TfToken(
-                                 "inputs:poleVectorWeights")),
-                             arrays.prim.GetAttribute(TfToken(
-                                 "inputs:poleVectorWeights")),
-                             time, &sampled);
-        }
-    }
+    // Constraint operator arrays: read raw off the prim.
+    _SampleConstraintArrays(evaluator, B, time, &sampled);
     // Chain base points: the prologue reads every chain base off the stage
     // (or the upstream layer) per frame, and a worker cannot -- so the UI
     // thread samples these too.
@@ -2451,35 +2484,19 @@ RigExecSampleFrameInputsWithBurstCache(
             }
         }
     }
+    // Through the Build-time handles and keys; the burst memo serves the
+    // static channels.
     for (const RigExecBakedProgramImpl::ConstraintArrays &arrays :
          B.constraintArrays) {
         if (!arrays.prim.IsValid()) {
             continue;
         }
-        const SdfPath primPath = arrays.prim.GetPath();
-        _SampleAttributeCached(primPath.AppendProperty(TfToken(
-                                   "inputs:sourceWeights")),
-                               arrays.prim.GetAttribute(
-                                   TfToken("inputs:sourceWeights")),
-                               time, &sampled, cache);
-        if (arrays.parentOffsets) {
-            _SampleAttributeCached(primPath.AppendProperty(TfToken(
-                                       "inputs:translationOffsets")),
-                                   arrays.prim.GetAttribute(TfToken(
-                                       "inputs:translationOffsets")),
-                                   time, &sampled, cache);
-            _SampleAttributeCached(primPath.AppendProperty(TfToken(
-                                       "inputs:rotationOffsets")),
-                                   arrays.prim.GetAttribute(TfToken(
-                                       "inputs:rotationOffsets")),
-                                   time, &sampled, cache);
-        }
-        if (arrays.readPole) {
-            _SampleAttributeCached(primPath.AppendProperty(TfToken(
-                                       "inputs:poleVectorWeights")),
-                                   arrays.prim.GetAttribute(TfToken(
-                                       "inputs:poleVectorWeights")),
-                                   time, &sampled, cache);
+        for (size_t channel = 0; channel < 4; ++channel) {
+            if (arrays.Sampled(channel)) {
+                _SampleAttributeCached(arrays.keys[channel],
+                                       arrays.attributes[channel], time,
+                                       &sampled, cache);
+            }
         }
     }
     samplePhase("Sample.BlendConstraintArrays");

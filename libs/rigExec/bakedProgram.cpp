@@ -3920,14 +3920,19 @@ RigExecBakedProgram::_BuildWithSceneCaptureAttempt(RigExecRigEvaluator *evaluato
 
 namespace {
 
-// The per-source constraint tables Run reads every frame, interned once at
-// load: interning takes the token registry's lock.
-const TfToken kSourceWeights("inputs:sourceWeights");
-const TfToken kTranslationOffsets("inputs:translationOffsets");
-const TfToken kRotationOffsets("inputs:rotationOffsets");
-const TfToken kPoleVectorWeights("inputs:poleVectorWeights");
+// The per-source constraint tables Run reads, interned once at load:
+// interning takes the token registry's lock.
+const std::array<TfToken,4> kConstraintArrayNames = {
+    TfToken("inputs:sourceWeights"), TfToken("inputs:translationOffsets"),
+    TfToken("inputs:rotationOffsets"), TfToken("inputs:poleVectorWeights")};
 
 } // namespace
+
+const std::array<TfToken,4> &
+RigExecBakedProgramImpl::ConstraintArrays::Names()
+{
+    return kConstraintArrayNames;
+}
 
 bool
 RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
@@ -4023,12 +4028,47 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
 
     // Capture authored arrays only. Their owning Constraint validates and
     // expands neutral defaults after graph readiness has selected the body.
-    const auto constraintArrays = [&B,time]() {
-        const TfToken *names[]={&kSourceWeights,&kTranslationOffsets,&kRotationOffsets,&kPoleVectorWeights};
-        for(auto &arrays:B.constraintArrays) for(size_t channel=0;channel<4;++channel) {
-            VtValue value;
-            if(const auto attribute=arrays.prim.GetAttribute(*names[channel])) attribute.Get(&value,time);
-            arrays.raw[channel]=std::move(value);
+    // A channel is read again only when something that can move its raw
+    // read moved (ConstraintArrays::variance); every other one keeps what
+    // it holds, which is what the read would answer now.
+    const auto constraintArrays = [&B,&E,time,fullRunRequested]() {
+        using Arrays = RigExecBakedProgramImpl::ConstraintArrays;
+        const uint64_t serial = E.GetStageEditSerial();
+        for (Arrays &arrays : B.constraintArrays) {
+            const bool all = fullRunRequested || !arrays.sampled ||
+                             arrays.stamp != B.programStamp ||
+                             arrays.serial != serial;
+            const bool timeMoved = !arrays.sampled || time != arrays.time;
+            const bool defaultMoved =
+                timeMoved && (time.IsDefault() || arrays.time.IsDefault());
+            for (size_t channel = 0; channel < 4; ++channel) {
+                uint8_t &variance = arrays.variance[channel];
+                if (all) {
+                    // An edit can author time samples where there were none.
+                    variance = Arrays::kVarianceUnknown;
+                } else if (!timeMoved) {
+                    continue;
+                } else if (!defaultMoved) {
+                    if (variance == Arrays::kVarianceUnknown) {
+                        variance = arrays.Varies(channel) ? Arrays::kVaries
+                                                          : Arrays::kFixed;
+                    }
+                    if (variance == Arrays::kFixed) {
+                        continue;
+                    }
+                }
+                VtValue value;
+                const UsdAttribute &attribute = arrays.attributes[channel];
+                if (attribute) {
+                    attribute.Get(&value, time);
+                }
+                arrays.raw[channel] = std::move(value);
+                ++B.constraintArrayReads;
+            }
+            arrays.sampled = true;
+            arrays.time = time;
+            arrays.stamp = B.programStamp;
+            arrays.serial = serial;
         }
     };
 

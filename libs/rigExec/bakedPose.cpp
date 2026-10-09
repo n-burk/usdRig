@@ -756,6 +756,13 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
             arrays.prim = prim;
             arrays.path=fc.moverPath;
             arrays.pathText=c.pathText;
+            const auto &names =
+                RigExecBakedProgramImpl::ConstraintArrays::Names();
+            for (size_t channel = 0; prim && channel < 4; ++channel) {
+                arrays.attributes[channel] = prim.GetAttribute(names[channel]);
+                arrays.keys[channel] =
+                    prim.GetPath().AppendProperty(names[channel]);
+            }
             arrays.sourceCount = c.sources.size();
             // An unconsumed table has the same neutral shape as a missing
             // authored array. Admitted bodies still validate and replace it

@@ -38,6 +38,7 @@
 #include "pxr/usd/usd/prim.h"
 #include "pxr/usd/usd/primRange.h"
 #include "pxr/usd/usd/stage.h"
+#include "pxr/usd/usd/variantSets.h"
 
 #include <algorithm>
 #include <atomic>
@@ -3048,6 +3049,445 @@ TestSparseProviderLeaves(const std::string &examples)
     CHECK(mark.IsClean());
 }
 
+// Three constraints whose operator arrays the prologue reads raw: a
+// PositionConstraint's animated source weights, a ParentConstraint's static
+// translation offsets (its rotation offsets authored only by a variant),
+// and a SingleChainIK in object pole mode, which reads its pole weights at
+// their schema fallback until something authors them.
+const char *const kConstraintArrays = R"usda(#usda 1.0
+(
+    endTimeCode = 10
+    startTimeCode = 1
+    timeCodesPerSecond = 24
+    upAxis = "Y"
+)
+
+def Xform "Asset"
+{
+    matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+    uniform token[] xformOpOrder = ["xformOp:transform"]
+
+    def "Sources"
+    {
+        def Xform "A"
+        {
+            matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (10, 0, 0, 1) )
+            uniform token[] xformOpOrder = ["xformOp:transform"]
+        }
+
+        def Xform "B"
+        {
+            matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 10, 0, 1) )
+            uniform token[] xformOpOrder = ["xformOp:transform"]
+        }
+
+        def Xform "Effector"
+        {
+            matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (3, 2, 0, 1) )
+            uniform token[] xformOpOrder = ["xformOp:transform"]
+        }
+
+        def Xform "PoleA"
+        {
+            matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (2, 0, 8, 1) )
+            uniform token[] xformOpOrder = ["xformOp:transform"]
+        }
+
+        def Xform "PoleB"
+        {
+            matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (2, 8, 0, 1) )
+            uniform token[] xformOpOrder = ["xformOp:transform"]
+        }
+    }
+
+    def "Targets"
+    {
+        def Xform "Position"
+        {
+            matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (1, 1, 5, 1) )
+            uniform token[] xformOpOrder = ["xformOp:transform"]
+        }
+
+        def Xform "Parent"
+        {
+            matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+            uniform token[] xformOpOrder = ["xformOp:transform"]
+        }
+    }
+
+    def RigExecRoot "Rig"
+    {
+        def "Joints"
+        {
+            def RigExecJoint "Root"
+            {
+                matrix4d posed:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+
+                def RigExecJoint "Mid"
+                {
+                    matrix4d posed:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (2, 0, 0, 1) )
+
+                    def RigExecJoint "End"
+                    {
+                        matrix4d posed:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (4, 0, 0, 1) )
+                    }
+                }
+            }
+        }
+
+        def Scope "Movers"
+        {
+            def RigExecPositionConstraint "Position" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                rel rigExec:moves = </Asset/Targets/Position>
+                rel rigExec:sources = [</Asset/Sources/A>, </Asset/Sources/B>]
+                float[] inputs:sourceWeights.timeSamples = {
+                    1: [1, 0],
+                    10: [0, 1],
+                }
+            }
+
+            def RigExecParentConstraint "Parent" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+                variants = {
+                    string turn = "none"
+                }
+                prepend variantSets = "turn"
+            )
+            {
+                rel rigExec:moves = </Asset/Targets/Parent>
+                rel rigExec:sources = </Asset/Sources/A>
+                double3[] inputs:translationOffsets = [(1, 0, 0)]
+
+                variantSet "turn" = {
+                    "none" {
+                    }
+                    "quarter" {
+                        double3[] inputs:rotationOffsets = [(0, 0, 90)]
+                    }
+                }
+            }
+
+            def RigExecSingleChainIkConstraint "IK" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                rel rigExec:moves = [</Asset/Rig/Joints/Root>, </Asset/Rig/Joints/Root/Mid>, </Asset/Rig/Joints/Root/Mid/End>]
+                rel rigExec:firstJoint = </Asset/Rig/Joints/Root>
+                rel rigExec:endJoint = </Asset/Rig/Joints/Root/Mid/End>
+                rel rigExec:effector = </Asset/Sources/Effector>
+                double3 inputs:poleVector = (0, 0, 1)
+                uniform token rigExec:poleVectorMode = "object"
+                rel rigExec:poleVectorObjects = [</Asset/Sources/PoleA>, </Asset/Sources/PoleB>]
+            }
+        }
+    }
+}
+)usda";
+
+// The IK's pole weights, from a sublayer.
+const char *const kConstraintArraysSublayer = R"usda(#usda 1.0
+
+over "Asset"
+{
+    over "Rig"
+    {
+        over "Movers"
+        {
+            over "IK"
+            {
+                float[] inputs:poleVectorWeights = [0, 1]
+            }
+        }
+    }
+}
+)usda";
+
+// The constraint operator arrays are epoch state (ConstraintArrays::
+// variance): the prologue reads a channel again only when the time moves
+// and its read can move with it, or the time moves to or from Default, and
+// every channel after any stage notice; the frozen plain sampler serves the
+// fixed channels from its memo on the same terms. Every route that can move
+// a raw read is taken at a held frame -- a property first authored on a
+// channel no bake folds, a value edit, time samples added and removed, a
+// connection made and cleared, a sublayer added, muted, unmuted and
+// removed, a variant switched -- and so are the two that cannot, an
+// interactive override and an upstream value. After every generation each
+// raw channel equals a read made now, the pose equals a freshly compiled
+// program's, and a program that stood through a notice read every channel.
+void
+TestConstraintArraysAreEpochState()
+{
+    using Arrays = RigExecBakedProgramImpl::ConstraintArrays;
+    const SdfPath rig("/Asset/Rig");
+    const SdfPath position("/Asset/Rig/Movers/Position");
+    const SdfPath parent("/Asset/Rig/Movers/Parent");
+    const SdfPath ik("/Asset/Rig/Movers/IK");
+    const SdfPath mid("/Asset/Rig/Joints/Root/Mid");
+    const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    CHECK(rigExec::RigExecInputReplayImportFromString(stage->GetRootLayer(),
+                                                      kConstraintArrays));
+    auto evaluator = MakeEvaluator(stage, rig);
+    const uint64_t kRebuilt = ~uint64_t(0);
+    // The channels of the standing program.
+    const auto channels = [&]() -> uint64_t {
+        const RigExecBakedProgramImpl *B = Program(*evaluator);
+        return B ? 4 * uint64_t(B->constraintArrays.size()) : 0;
+    };
+    // Every raw channel of the standing program against a read made now,
+    // as the prologue made it before the channels were epoch state.
+    const auto rawMismatches = [&](UsdTimeCode time, const std::string &what) {
+        const RigExecBakedProgramImpl *B = Program(*evaluator);
+        if (!B) {
+            return size_t(1);
+        }
+        size_t mismatches = 0;
+        for (const Arrays &arrays : B->constraintArrays) {
+            for (size_t channel = 0; channel < 4; ++channel) {
+                const TfToken &name = Arrays::Names()[channel];
+                VtValue value;
+                if (const UsdAttribute attribute =
+                        arrays.prim.GetAttribute(name)) {
+                    attribute.Get(&value, time);
+                }
+                if (!(value == arrays.raw[channel])) {
+                    std::printf("FAIL %s: a stale raw read of %s\n",
+                                what.c_str(),
+                                arrays.path.AppendProperty(name).GetText());
+                    ++mismatches;
+                }
+            }
+        }
+        return mismatches;
+    };
+    // A freshly compiled program's generation under the same inputs.
+    const auto reference =
+        [&](UsdTimeCode time, const std::vector<RigExecValueOverride> &overrides,
+            const std::vector<RigExecValueOverride> &upstream) {
+            auto fresh = MakeEvaluator(stage, rig);
+            if (!overrides.empty()) {
+                fresh->SetInteractiveOverrides(overrides);
+            }
+            if (!upstream.empty()) {
+                fresh->SetUpstreamInputs(upstream);
+            }
+            return fresh->Evaluate(time);
+        };
+    // One generation at \p time, checked; the channels the standing program
+    // read for it, or kRebuilt when another program answered. With an
+    // override or an upstream value standing the generation may come from
+    // elsewhere, so only its values are checked.
+    RigExecRigPose last;
+    const auto step =
+        [&](UsdTimeCode time, const std::string &what,
+            const std::vector<RigExecValueOverride> &overrides = {},
+            const std::vector<RigExecValueOverride> &upstream = {}) {
+            const RigExecBakedProgramImpl *before = Program(*evaluator);
+            const uint64_t was = before ? before->constraintArrayReads : 0;
+            const size_t builds = evaluator->GetBakedProgramBuildCount();
+            const size_t generations = evaluator->GetBakedGenerationCount();
+            last = evaluator->Evaluate(time);
+            CHECK(last.valid);
+            if (overrides.empty() && upstream.empty()) {
+                CHECK(evaluator->GetBakedGenerationCount() == generations + 1);
+            }
+            CHECK(PoseMismatches(reference(time, overrides, upstream), last,
+                                 what) == 0);
+            CHECK(rawMismatches(time, what) == 0);
+            const RigExecBakedProgramImpl *after = Program(*evaluator);
+            if (!after || after != before ||
+                evaluator->GetBakedProgramBuildCount() != builds) {
+                return kRebuilt;
+            }
+            return after->constraintArrayReads - was;
+        };
+    // A notice re-reads every channel of a program that stands through it.
+    const auto reread = [&](uint64_t read) {
+        return read == kRebuilt || read == channels();
+    };
+    const auto midOf = [&mid](const RigExecRigPose &pose) {
+        const auto found = pose.jointFramesFinal.find(mid);
+        return found != pose.jointFramesFinal.end() ? found->second.Origin()
+                                                    : GfVec3d(0);
+    };
+    // The frozen plain sampler's array samples against reads made now:
+    // present exactly where the attribute is, with the value, hasValue and
+    // blocked bits a read gives.
+    const auto checkFrozen = [&](UsdTimeCode time, const std::string &what) {
+        RigExecFrameInputs inputs;
+        std::string error;
+        const bool sampled =
+            RigExecSampleFrameInputs(*evaluator, time, {}, &inputs, &error);
+        if (!sampled) {
+            std::printf("FAIL %s: frozen sampling: %s\n", what.c_str(),
+                        error.c_str());
+        }
+        CHECK(sampled);
+        const RigExecBakedProgramImpl *B = Program(*evaluator);
+        if (!sampled || !B) {
+            return;
+        }
+        size_t checked = 0;
+        for (const Arrays &arrays : B->constraintArrays) {
+            for (size_t channel = 0; channel < 4; ++channel) {
+                if (!arrays.Sampled(channel)) {
+                    continue;
+                }
+                const SdfPath key =
+                    arrays.path.AppendProperty(Arrays::Names()[channel]);
+                const RigExecSampledInput *sample = nullptr;
+                for (const RigExecSampledInput &s : inputs.values) {
+                    if (s.path == key) {
+                        sample = &s;
+                        break;
+                    }
+                }
+                const UsdAttribute attribute = stage->GetAttributeAtPath(key);
+                if (!attribute) {
+                    CHECK(!sample);
+                    continue;
+                }
+                CHECK(sample);
+                if (!sample) {
+                    continue;
+                }
+                VtValue value;
+                const bool hasValue = attribute.Get(&value, time);
+                const bool blocked =
+                    attribute.GetResolveInfo(time).ValueIsBlocked();
+                if (sample->hasValue != hasValue ||
+                    sample->valueBlocked != blocked ||
+                    !(sample->value == value)) {
+                    std::printf("FAIL %s: the frozen sample of %s differs "
+                                "from a read\n", what.c_str(), key.GetText());
+                    ++failures;
+                }
+                ++checked;
+            }
+        }
+        CHECK(checked > 0);
+    };
+
+    // Held, moved, and to and from Default: one animated channel.
+    step(UsdTimeCode(1), "first");
+    CHECK(step(UsdTimeCode(1), "held") == 0);
+    CHECK(step(UsdTimeCode(2), "time") == 1);
+    CHECK(step(UsdTimeCode(2), "held after time") == 0);
+    CHECK(step(UsdTimeCode::Default(), "to Default") == channels());
+    CHECK(step(UsdTimeCode(3), "from Default") == channels());
+    CHECK(step(UsdTimeCode(4), "time again") == 1);
+    checkFrozen(UsdTimeCode(4), "frozen");
+    checkFrozen(UsdTimeCode(5), "frozen, time");
+    if (const RigExecBakedProgramImpl *B = Program(*evaluator)) {
+        CHECK(B->frozenArraySamples.size() == B->constraintArrays.size());
+        for (size_t row = 0; row < B->constraintArrays.size() &&
+                             row < B->frozenArraySamples.size(); ++row) {
+            const auto &memo = B->frozenArraySamples[row];
+            if (B->constraintArrays[row].path == parent) {
+                CHECK(memo[1].variance == Arrays::kFixed && memo[1].present);
+            } else if (B->constraintArrays[row].path == position) {
+                CHECK(memo[0].variance == Arrays::kVaries);
+            }
+        }
+    }
+    checkFrozen(UsdTimeCode::Default(), "frozen, Default");
+
+    // A property first authored on a channel the program does not fold:
+    // a PositionConstraint consumes no offsets, but the prologue reads them.
+    const SdfPath unread = position.AppendProperty(
+        TfToken("inputs:translationOffsets"));
+    CHECK(stage->GetPrimAtPath(position)
+              .CreateAttribute(unread.GetNameToken(),
+                               SdfValueTypeNames->Double3Array)
+              .Set(VtVec3dArray{GfVec3d(1, 2, 3)}));
+    uint64_t read = step(UsdTimeCode(4), "unfolded channel authored");
+    CHECK(reread(read));
+    std::printf("constraint arrays: an unfolded channel authored %s the "
+                "program (disposition %d)\n",
+                read == kRebuilt ? "rebuilt" : "kept",
+                int(evaluator->GetLastNoticeDisposition()));
+    CHECK(step(UsdTimeCode(4), "held after authoring") == 0);
+
+    // A value edit.
+    const SdfPath offsets =
+        parent.AppendProperty(TfToken("inputs:translationOffsets"));
+    CHECK(stage->GetAttributeAtPath(offsets).Set(
+        VtVec3dArray{GfVec3d(0, 2, 0)}));
+    CHECK(reread(step(UsdTimeCode(4), "value edit")));
+    checkFrozen(UsdTimeCode(4), "frozen, value edit");
+
+    // Time samples added, then removed.
+    CHECK(stage->GetAttributeAtPath(offsets).Set(
+        VtVec3dArray{GfVec3d(3, 0, 0)}, UsdTimeCode(6)));
+    CHECK(reread(step(UsdTimeCode(4), "time sample added")));
+    step(UsdTimeCode(6), "time sample added, at it");
+    step(UsdTimeCode(7), "time sample added, past it");
+    checkFrozen(UsdTimeCode(7), "frozen, time sample added");
+    CHECK(stage->GetAttributeAtPath(offsets).ClearAtTime(UsdTimeCode(6)));
+    CHECK(reread(step(UsdTimeCode(7), "time sample removed")));
+    checkFrozen(UsdTimeCode(7), "frozen, time sample removed");
+
+    // A connection made and cleared: the raw read never follows one.
+    CHECK(stage->GetAttributeAtPath(unread).SetConnections({offsets}));
+    CHECK(reread(step(UsdTimeCode(7), "connection made")));
+    CHECK(stage->GetAttributeAtPath(unread).ClearConnections());
+    CHECK(reread(step(UsdTimeCode(7), "connection cleared")));
+
+    // A sublayer authoring the pole weights: added, muted, unmuted and
+    // removed. The pole moves the chain's middle joint.
+    const GfVec3d unweighted = midOf(last);
+    const SdfLayerRefPtr sublayer =
+        SdfLayer::CreateAnonymous("constraintArrays");
+    CHECK(rigExec::RigExecInputReplayImportFromString(
+        sublayer, kConstraintArraysSublayer));
+    stage->GetRootLayer()->InsertSubLayerPath(sublayer->GetIdentifier());
+    CHECK(reread(step(UsdTimeCode(7), "sublayer added")));
+    CHECK((midOf(last) - unweighted).GetLength() > 1e-6);
+    checkFrozen(UsdTimeCode(7), "frozen, sublayer added");
+    stage->MuteLayer(sublayer->GetIdentifier());
+    CHECK(reread(step(UsdTimeCode(7), "sublayer muted")));
+    CHECK((midOf(last) - unweighted).GetLength() <= 1e-6);
+    stage->UnmuteLayer(sublayer->GetIdentifier());
+    CHECK(reread(step(UsdTimeCode(7), "sublayer unmuted")));
+    stage->GetRootLayer()->RemoveSubLayerPath(0);
+    CHECK(reread(step(UsdTimeCode(7), "sublayer removed")));
+    checkFrozen(UsdTimeCode(7), "frozen, sublayer removed");
+
+    // A variant switched, and back.
+    CHECK(stage->GetPrimAtPath(parent).GetVariantSet("turn")
+              .SetVariantSelection("quarter"));
+    CHECK(reread(step(UsdTimeCode(7), "variant switched")));
+    checkFrozen(UsdTimeCode(7), "frozen, variant switched");
+    CHECK(stage->GetPrimAtPath(parent).GetVariantSet("turn")
+              .SetVariantSelection("none"));
+    CHECK(reread(step(UsdTimeCode(7), "variant switched back")));
+
+    // An interactive override and an upstream value: neither is a stage
+    // edit, and the raw read honours neither (an override on an array
+    // itself is refused outright), so nothing is re-read.
+    const std::vector<RigExecValueOverride> drag = {
+        DragOf(ik.AppendProperty(TfToken("inputs:twistDegrees")), 30.0)};
+    evaluator->SetInteractiveOverrides(drag);
+    read = step(UsdTimeCode(7), "override", drag);
+    CHECK(read == 0 || read == kRebuilt);
+    evaluator->ClearInteractiveOverrides();
+    read = step(UsdTimeCode(7), "override lifted");
+    CHECK(read == 0 || read == kRebuilt);
+    const std::vector<RigExecValueOverride> upstream = {
+        DragOf(offsets, VtVec3dArray{GfVec3d(0, 5, 0)})};
+    evaluator->SetUpstreamInputs(upstream);
+    read = step(UsdTimeCode(7), "upstream", {}, upstream);
+    CHECK(read == 0 || read == kRebuilt);
+    evaluator->SetUpstreamInputs({});
+    read = step(UsdTimeCode(7), "upstream lifted");
+    CHECK(read == 0 || read == kRebuilt);
+
+    step(UsdTimeCode(8), "time after the routes");
+    checkFrozen(UsdTimeCode(8), "frozen, time after the routes");
+}
+
 int
 main(int argc, char **argv)
 {
@@ -3075,6 +3515,7 @@ main(int argc, char **argv)
     TestTheWireBasisMemoIsOwned();
     TestNoBodyReadsTheStage(examples);
     TestSparseProviderLeaves(examples);
+    TestConstraintArraysAreEpochState();
     std::printf("testRigExecLeaves: %d failure(s)\n", failures);
     return failures ? 1 : 0;
 }

@@ -1877,8 +1877,65 @@ struct RigExecBakedProgramImpl {
         std::vector<double> poleWeights, lastPoleWeights;
         std::vector<std::string> poleDiagnostics, lastPoleDiagnostics;
         bool poleOk = true, lastPoleOk = true;
+
+        /// The four channels in `raw` order (Names()), taken off `prim` at
+        /// Build, and the frozen samplers' keys for them. A handle is what
+        /// prim.GetAttribute answers: its validity is asked at every read,
+        /// so a property authored later reads through it.
+        std::array<UsdAttribute,4> attributes;
+        std::array<SdfPath,4> keys;
+        static const std::array<TfToken,4> &Names();
+        /// Whether the frozen samplers read channel \p k: the weights
+        /// always, the parent offsets for a ParentConstraint, the pole
+        /// weights where the step reads them (frozenSnapshot arrayKeys).
+        bool Sampled(size_t k) const
+        {
+            return k == 0 || (k < 3 ? parentOffsets : readPole);
+        }
+        /// Whether channel \p k's read can move with the time: the
+        /// predicate RigExecBakedClassifyInput applies (neither half
+        /// implies the other: a single time sample; a Ts spline).
+        bool Varies(size_t k) const
+        {
+            const UsdAttribute &a = attributes[k];
+            return a && (a.ValueMightBeTimeVarying() ||
+                         a.GetNumTimeSamples() > 0);
+        }
+        /// The prologue's epoch state, owner thread only. Every channel is
+        /// read again on a forced run and whenever the program stamp or
+        /// the evaluator's stage edit serial moved since `sampled`: every
+        /// stage notice advances the serial, so between them only the time
+        /// can move a raw read. Then a channel is read again only when the
+        /// time moves and its read can move with it (`variance`, asked on
+        /// the first such move after a full read), or the time moves to or
+        /// from Default, which read different opinions.
+        enum : uint8_t { kVarianceUnknown = 0, kFixed, kVaries };
+        std::array<uint8_t,4> variance{};
+        bool sampled = false;
+        UsdTimeCode time = UsdTimeCode::Default();
+        uint64_t stamp = 0;
+        uint64_t serial = 0;
     };
     std::vector<ConstraintArrays> constraintArrays;
+    /// Channels the prologue read since Build. Test observable.
+    uint64_t constraintArrayReads = 0;
+    /// The frozen plain sampler's memo of the channels whose read cannot
+    /// move with the time, per constraintArrays entry: the sample one read
+    /// added (whether it added one, and its value, hasValue and blocked
+    /// bits), kept while the program stamp, the evaluator's stage edit
+    /// serial and the Default-ness of the time it was read under stand, as
+    /// headLeafConstants is. UI thread only, written through a const
+    /// program by the sampler; never cloned.
+    struct FrozenArraySample {
+        uint8_t variance = ConstraintArrays::kVarianceUnknown;
+        bool present = false, hasValue = false, blocked = false;
+        VtValue value;
+    };
+    mutable std::vector<std::array<FrozenArraySample,4>> frozenArraySamples;
+    mutable uint64_t frozenArrayStamp = 0;
+    mutable uint64_t frozenArraySerial = 0;
+    mutable bool frozenArrayDefault = false;
+    mutable bool frozenArrayBuilt = false;
 
     // A constraint source (or aim world-up object) that is neither a
     // RigExecControl nor a RigExecJoint is read off the stage, exactly as a
