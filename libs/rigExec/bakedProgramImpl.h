@@ -5011,7 +5011,9 @@ void RigExecBakedRunGeometryPrologue(RigExecBakedProgramImpl *program,
 
 /// Hands the revisions whose retained lattice binds are equal one shared,
 /// immutable bind (RigExecLatticeBindSharing). The thread that runs the
-/// program calls it before it dispatches a step: native and frozen alike.
+/// program calls it while no step runs, before dispatch and again after
+/// the join, so a freeze copies binds already shared: native and frozen
+/// alike.
 void RigExecBakedShareLatticeBinds(RigExecBakedProgramImpl *program);
 
 /// SkinTopology op \p r's revision: entry r of `revisionIndex`, then of

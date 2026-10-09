@@ -5775,6 +5775,24 @@ RrGeometrySkinLayoutIsOpenForTesting(const RrProgram *program,
     return false;
 }
 
+void
+RrShareLatticeBinds(RrProgram *program)
+{
+    if (!program || !program->geo) {
+        return;
+    }
+    RrGeometryScratch *scratch = RrGeoScratch(program);
+    RigExecLatticeBindSharing<RrVec3f> binds;
+    for (RrGeometryScratch::Chain &chain : scratch->chains) {
+        for (RrGeometryScratch::Revision &rev : chain.revisions) {
+            binds.Offer(&rev.surfaceCache);
+        }
+    }
+    for (RrGeometryScratch::Derived &derived : scratch->derived) {
+        binds.Offer(&derived.revision.surfaceCache);
+    }
+}
+
 bool
 RrPrologueGeometry(RrProgram *program,
                    std::vector<std::string> *poseDiagnostics,
@@ -5799,17 +5817,7 @@ RrPrologueGeometry(RrProgram *program,
     }
     // No step runs yet: revisions with equal lattice binds share one, as
     // RigExecBakedShareLatticeBinds does.
-    {
-        RigExecLatticeBindSharing<RrVec3f> binds;
-        for (RrGeometryScratch::Chain &chain : scratch->chains) {
-            for (RrGeometryScratch::Revision &rev : chain.revisions) {
-                binds.Offer(&rev.surfaceCache);
-            }
-        }
-        for (RrGeometryScratch::Derived &derived : scratch->derived) {
-            binds.Offer(&derived.revision.surfaceCache);
-        }
-    }
+    RrShareLatticeBinds(program);
 
     if(!program->requiredStageFramesAdmission.admitted)return true;
 

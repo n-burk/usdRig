@@ -964,7 +964,8 @@ bool RigExecBakedExecuteOpGraph(RigExecBakedProgramImpl *program,UsdTimeCode tim
     }
     B.clustering.lastRunTimed=profiling;
     B.closureFull=force || B.programStamp!=B.lastProgramStamp;
-    // No step runs yet: revisions with equal lattice binds share one.
+    // No step runs yet: revisions with equal lattice binds share one
+    // (binds a copy or adoption brought in; the last join shared its own).
     RigExecBakedShareLatticeBinds(&B);
     RigExecBakedPrepareHeadOps(&B);
     RigExecBakedPlaceHeadOverrides(&B);
@@ -1151,6 +1152,9 @@ bool RigExecBakedExecuteOpGraph(RigExecBakedProgramImpl *program,UsdTimeCode tim
             if(c<B.opGraph.ops.size()) B.stampedSteps.push_back(B.opGraph.ops[c].originalIndex);
     RigExecOpGatherChanges(&state,B.opGraph,B.opExecution.ran);
     RigExecBakedFoldHeldSteps(&B);
+    // Joined: the binds this run built share now, before anything copies
+    // the program (a freeze, a patched snapshot), not at its next run.
+    RigExecBakedShareLatticeBinds(&B);
     if(verifyVersions)
         for(uint32_t c=0;c<state.leafVersionMismatch.size();++c)
             TF_VERIFY(!state.leafVersionMismatch[c],

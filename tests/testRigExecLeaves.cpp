@@ -3662,10 +3662,11 @@ def Xform "LatticeAsset"
 )usda";
 
 // Equal lattice binds share one basis. Each revision builds its own on its
-// first frame; before a later run dispatches, the program hands both one
-// immutable bind, which answers what a fresh program's own binds do. A
-// divisions edit rebuilds the program, and the new revisions share their
-// new bind the same way.
+// first frame; once that run joins, the program hands both one immutable
+// bind, which answers what a fresh program's own binds do, so a snapshot
+// frozen right after the first frame holds one bind too. A divisions edit
+// rebuilds the program, and the new revisions share their new bind the
+// same way.
 void
 TestEqualLatticeBindsShareOneBasis()
 {
@@ -3679,9 +3680,9 @@ TestEqualLatticeBindsShareOneBasis()
                                                       kTwinLattices));
     auto evaluator = MakeEvaluator(stage, rig);
     using Revision = RigExecBakedProgramImpl::GeomRevision;
-    // The standing program's lattice revision of the mover at \p path.
-    const auto revisionOf = [&](const SdfPath &path) -> const Revision * {
-        const RigExecBakedProgramImpl *B = Program(*evaluator);
+    // \p B's lattice revision of the mover at \p path.
+    const auto revisionIn = [](const RigExecBakedProgramImpl *B,
+                               const SdfPath &path) -> const Revision * {
         if (!B) {
             return nullptr;
         }
@@ -3695,6 +3696,10 @@ TestEqualLatticeBindsShareOneBasis()
         }
         return nullptr;
     };
+    // The standing program's.
+    const auto revisionOf = [&](const SdfPath &path) {
+        return revisionIn(Program(*evaluator), path);
+    };
     const auto pointsAt = [](const RigExecRigPose &pose, const SdfPath &path) {
         const auto found = pose.movedProperties.find(path);
         return found != pose.movedProperties.end() &&
@@ -3702,11 +3707,13 @@ TestEqualLatticeBindsShareOneBasis()
                    ? found->second.UncheckedGet<VtVec3fArray>()
                    : VtVec3fArray();
     };
-    // Both revisions hold one bind at \p divisions, each having built once.
-    const auto shareOne = [&](const GfVec3i &divisions,
-                              const std::string &what) {
-        const Revision *a = revisionOf(moverA);
-        const Revision *b = revisionOf(moverB);
+    // \p B's two revisions hold one bind at \p divisions, each having
+    // built once.
+    const auto shareOneIn = [&](const RigExecBakedProgramImpl *B,
+                                const GfVec3i &divisions,
+                                const std::string &what) {
+        const Revision *a = revisionIn(B, moverA);
+        const Revision *b = revisionIn(B, moverB);
         CHECK(a && b);
         if (!a || !b) {
             return;
@@ -3725,8 +3732,26 @@ TestEqualLatticeBindsShareOneBasis()
               bind->divisions[1] == divisions[1] &&
               bind->divisions[2] == divisions[2]);
     };
+    const auto shareOne = [&](const GfVec3i &divisions,
+                              const std::string &what) {
+        shareOneIn(Program(*evaluator), divisions, what);
+    };
     const RigExecRigPose first =
         RunChecked(evaluator.get(), {}, UsdTimeCode(1013), "twin, first");
+    // Shared once the first frame joined, before anything copies the
+    // program: a snapshot frozen now copies the one bind.
+    shareOne(GfVec3i(2, 2, 3), "twin, first");
+    {
+        std::shared_ptr<const RigExecFrozenProgram> frozen;
+        std::string error;
+        CHECK(RigExecFreezeProgram(*evaluator, &frozen, &error));
+        if (frozen) {
+            shareOneIn(&frozen->program, GfVec3i(2, 2, 3),
+                       "twin, frozen after the first frame");
+        } else {
+            std::printf("FAIL twin: freeze refused: %s\n", error.c_str());
+        }
+    }
     const RigExecRigPose next =
         RunChecked(evaluator.get(), {}, UsdTimeCode(1014), "twin, next");
     shareOne(GfVec3i(2, 2, 3), "twin, next");

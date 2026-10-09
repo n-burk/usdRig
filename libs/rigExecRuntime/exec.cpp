@@ -513,7 +513,10 @@ RigExecRuntimeReader::Execute(std::string *error)
     std::vector<std::string> poseDiagnostics;
     if (!RrProloguePose(&program, &poseDiagnostics, error)) return false;
     if (!RrPrologueGeometry(&program, &poseDiagnostics, error)) return false;
-    if (!RrRunSteps(&program, false, error)) {
+    const bool ran = RrRunSteps(&program, false, error);
+    // Joined: the binds this run built share now, not at the next run.
+    RrShareLatticeBinds(&program);
+    if (!ran) {
         return false;
     }
 

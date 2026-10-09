@@ -804,6 +804,10 @@ bool RrProloguePose(RrProgram *program,
 bool RrPrologueGeometry(RrProgram *program,
                         std::vector<std::string> *poseDiagnostics,
                         std::string *error);
+// Hands revisions with equal retained lattice binds one shared bind, as
+// RigExecBakedShareLatticeBinds does. Owner thread, while no step runs: the
+// geometry prologue and after the steps join.
+void RrShareLatticeBinds(RrProgram *program);
 
 // Step bodies by family.
 bool RrRunPoseStep(RrProgram *program, size_t step, std::string *error);
