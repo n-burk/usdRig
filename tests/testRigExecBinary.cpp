@@ -2026,17 +2026,21 @@ _DropRead(fb::RigExecWireStep *step, fb::SlotDomain domain, uint32_t slot)
     step->reads = std::move(kept);
 }
 
-// A chain of 10000 points, past the default chunk vertex target, under
-// three matrix movers (the range-chain fixture's shape: M0 on a driver that
-// moves at frames 1 to 3, M1 with a weight out of range at frame 2, M2;
-// the points authored at Default and at frames 1 to 3, moving in [0, 100)
-// only), baked at frame 1: every revision is range-pipelined (format 19),
-// unchunked and cut into the chain's one point partition, and the
-// validator accepts the file. Edited copies that break a range rule are
-// refused by Write and Open: a key on a range, a gap, two revisions
-// cutting the chain differently, a range-shaped Smooth, a range step
-// missing its read of the previous revision's range, a join missing one of
-// its own ranges, and a join declaring the entering version.
+// A chain of 10000 points, past the default chunk vertex target, under a
+// blend shape authored first (a whole revision) and three matrix movers
+// (the range-chain fixture's shape: M0 on a driver that moves at frames 1
+// to 3, M1 with a weight out of range at frame 2, M2; the points authored
+// at Default and at frames 1 to 3, moving in [0, 100) only), baked at frame
+// 1: every matrix revision is range-pipelined (format 19), unchunked and
+// cut into the chain's one point partition, the first one's range steps
+// declare the blend shape's whole version, and the validator accepts the
+// file. Edited copies that break a range rule are refused by Write and
+// Open: a key on a range, a gap, two revisions cutting the chain
+// differently, a range-shaped Smooth, a range step missing its read of the
+// previous revision's range, a range step after the whole revision missing
+// part of its version, a range step declaring the version of a
+// range-pipelined predecessor, a join missing one of its own ranges, and a
+// join missing the version entering it.
 static void
 TestRangeChainBake()
 {
@@ -2071,7 +2075,39 @@ TestRangeChainBake()
         }
         pointsAttr.Set(at, UsdTimeCode(frame));
     }
+    // The blend shape's target: every point raised by one.
+    VtVec3fArray raised = points;
+    for (GfVec3f &point : raised) {
+        point[2] += 1.0f;
+    }
+    stage->DefinePrim(SdfPath("/Asset/Raised"), TfToken("Points"))
+        .CreateAttribute(TfToken("points"), SdfValueTypeNames->Point3fArray)
+        .Set(raised);
+    const UsdPrim input = stage->DefinePrim(
+        SdfPath("/Asset/Rig/BlendInputs/Raise"), TfToken("RigExecBlendInput"));
+    input.CreateAttribute(TfToken("inputs:weight"), SdfValueTypeNames->Float)
+        .Set(0.5f);
+    const UsdPrim sample = stage->DefinePrim(
+        SdfPath("/Asset/Rig/BlendInputs/Raise/Full"),
+        TfToken("RigExecBlendSample"));
+    sample.CreateAttribute(TfToken("rigExec:activation"),
+                           SdfValueTypeNames->Float)
+        .Set(1.0f);
+    sample.CreateRelationship(TfToken("rigExec:targetPoints"))
+        .SetTargets({SdfPath("/Asset/Raised.points")});
+    input.CreateRelationship(TfToken("rigExec:samples"))
+        .SetTargets({sample.GetPath()});
     stage->DefinePrim(SdfPath("/Asset/Rig/Movers"), TfToken("Scope"));
+    const UsdPrim blend = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Movers/Blend"), TfToken("RigExecBlendShapeMover"));
+    CHECK(blend.ApplyAPI(TfToken("RigExecMoverAPI")));
+    blend.CreateRelationship(TfToken("rigExec:moves"))
+        .SetTargets({SdfPath("/Asset/Shape.points")});
+    blend.CreateRelationship(TfToken("rigExec:blendInputs"))
+        .SetTargets({input.GetPath()});
+    blend.CreateAttribute(TfToken("inputs:defaultWeight"),
+                          SdfValueTypeNames->Float)
+        .Set(1.0f);
     for (int i = 0; i < 3; ++i) {
         const UsdPrim mover = stage->DefinePrim(
             SdfPath("/Asset/Rig/Movers/M" + std::to_string(i)),
@@ -2114,18 +2150,25 @@ TestRangeChainBake()
     }
     const size_t c = size_t(chainIndex);
     const fb::RigExecWireChain &chain = g.chains[c];
-    CHECK(chain.revisions.size() == 3);
-    if (chain.revisions.size() != 3) {
+    CHECK(chain.revisions.size() == 4);
+    if (chain.revisions.size() != 4) {
         return;
     }
-    // One revision per mover, in whatever order, each cutting the chain's
-    // partition into one range step per range.
+    // The blend shape runs first and whole; each matrix mover after it, in
+    // whatever order, cuts the chain's partition into one range step per
+    // range.
+    const fb::RigExecWireRevision &whole = chain.revisions[0];
+    CHECK(RigExecFormatPathText(*file, whole.moverPath) ==
+          "/Asset/Rig/Movers/Blend");
+    CHECK(whole.op == uint8_t(fb::RevisionOp::BlendShape));
+    CHECK(!RigExecFormatIsRangeRevision(whole));
     const size_t ranges = RigExecPointRangeCount(
         kPoints, program.chunkVertexTarget, program.chunkCap);
     CHECK(ranges >= 2);
+    const uint32_t first = uint32_t(g.chainRevisionBegin[c]);
     std::set<std::string> movers;
     size_t rangeSteps = 0;
-    for (size_t r = 0; r < chain.revisions.size(); ++r) {
+    for (size_t r = 1; r < chain.revisions.size(); ++r) {
         const fb::RigExecWireRevision &revision = chain.revisions[r];
         movers.insert(RigExecFormatPathText(*file, revision.moverPath));
         CHECK(revision.op == uint8_t(fb::RevisionOp::Matrix));
@@ -2143,6 +2186,27 @@ TestRangeChainBake()
             if (step.kind == fb::StepKind::RevisionChunk &&
                 step.object == id) {
                 ++rangeSteps;
+                // After the whole revision a range reads its version whole;
+                // after a range-pipelined one, range `part` of it.
+                if (r == 1) {
+                    CHECK(_DeclaresRead(step, fb::SlotDomain::RevisionDone,
+                                        first) &&
+                          _DeclaresRead(step, fb::SlotDomain::ChainDirty,
+                                        first));
+                } else {
+                    CHECK(!_DeclaresRead(step, fb::SlotDomain::RevisionDone,
+                                         uint32_t(id) - 1) &&
+                          !_DeclaresRead(step, fb::SlotDomain::ChainDirty,
+                                         uint32_t(id) - 1));
+                }
+            }
+            if (step.kind == fb::StepKind::RevisionFuse &&
+                step.object == id) {
+                // A join declares the version entering it, as a fuse does.
+                CHECK(_DeclaresRead(step, fb::SlotDomain::RevisionDone,
+                                    uint32_t(id) - 1) &&
+                      _DeclaresRead(step, fb::SlotDomain::ChainDirty,
+                                    uint32_t(id) - 1));
             }
         }
     }
@@ -2151,11 +2215,12 @@ TestRangeChainBake()
                                            "/Asset/Rig/Movers/M2"}));
     CHECK(rangeSteps == 3 * ranges);
 
-    // The edits. Position 0 is the chain's first revision, whose ranges read
-    // the base; position 1 follows a range-pipelined revision.
-    const uint32_t first = uint32_t(g.chainRevisionBegin[c]);
-    const uint32_t second = first + 1;
-    const uint32_t firstBase = uint32_t(chain.revisions[0].chunkBase);
+    // The edits. Position 1 is the first range-pipelined revision, whose
+    // ranges read the blend shape's whole version; position 2 follows a
+    // range-pipelined revision.
+    const uint32_t firstRange = first + 1;
+    const uint32_t second = first + 2;
+    const uint32_t firstBase = uint32_t(chain.revisions[1].chunkBase);
     const auto revisionAt = [c](fb::RigExecWireFile &f,
                                 size_t r) -> fb::RigExecWireRevision & {
         return f.geometry->chains[c].revisions[r];
@@ -2187,23 +2252,23 @@ TestRangeChainBake()
         refused += named ? 1 : 0;
     };
     refuse("a key on a range", [&](fb::RigExecWireFile &f) {
-        revisionAt(f, 0).chunks[1].key = {0};
+        revisionAt(f, 1).chunks[1].key = {0};
         return true;
     }, "chunks[1]: a key on an unchunked revision");
     refuse("a gap", [&](fb::RigExecWireFile &f) {
-        ++revisionAt(f, 0).chunks[1].begin;
+        ++revisionAt(f, 1).chunks[1].begin;
         return true;
     }, "does not continue the chain's point partition");
     refuse("two revisions cutting the chain differently",
            [&](fb::RigExecWireFile &f) {
-               fb::RigExecWireRevision &revision = revisionAt(f, 1);
+               fb::RigExecWireRevision &revision = revisionAt(f, 2);
                --revision.chunks[0].end;
                --revision.chunks[1].begin;
                return true;
            },
-           ".revisions[1]: its point ranges differ from revisions[0]'s");
+           ".revisions[2]: its point ranges differ from revisions[1]'s");
     refuse("a range-shaped smooth revision", [&](fb::RigExecWireFile &f) {
-        revisionAt(f, 0).op = uint8_t(fb::RevisionOp::Smooth);
+        revisionAt(f, 1).op = uint8_t(fb::RevisionOp::Smooth);
         return true;
     }, std::to_string(ranges) + " chunks, but not chunked");
     refuse("a range step missing the previous revision's range",
@@ -2219,9 +2284,36 @@ TestRangeChainBake()
            },
            " does not declare RevisionOut[" + std::to_string(firstBase + 1) +
                "]");
+    refuse("a range step after the whole revision missing part of its version",
+           [&](fb::RigExecWireFile &f) {
+               fb::RigExecWireStep *step =
+                   stepOf(f, fb::StepKind::RevisionChunk, firstRange, 1);
+               if (!step ||
+                   !_DeclaresRead(*step, fb::SlotDomain::ChainDirty, first)) {
+                   return false;
+               }
+               _DropRead(step, fb::SlotDomain::ChainDirty, first);
+               return true;
+           },
+           " does not declare ChainDirty[" + std::to_string(first) + "]");
+    refuse("a range step declaring a range-pipelined predecessor's version",
+           [&](fb::RigExecWireFile &f) {
+               fb::RigExecWireStep *step =
+                   stepOf(f, fb::StepKind::RevisionChunk, second, 1);
+               if (!step || _DeclaresRead(*step, fb::SlotDomain::RevisionDone,
+                                          firstRange)) {
+                   return false;
+               }
+               step->reads.emplace_back(fb::SlotDomain::RevisionDone,
+                                        firstRange, firstRange + 1);
+               step->reads.emplace_back(fb::SlotDomain::ChainDirty,
+                                        firstRange, firstRange + 1);
+               return true;
+           },
+           "which a range-pipelined range step does not read");
     refuse("a join missing one of its ranges", [&](fb::RigExecWireFile &f) {
         fb::RigExecWireStep *join =
-            stepOf(f, fb::StepKind::RevisionFuse, first, -1);
+            stepOf(f, fb::StepKind::RevisionFuse, firstRange, -1);
         const uint32_t own = firstBase + uint32_t(ranges) - 1;
         if (!join || !_DeclaresRead(*join, fb::SlotDomain::RevisionOut, own)) {
             return false;
@@ -2230,25 +2322,24 @@ TestRangeChainBake()
         return true;
     }, " does not declare RevisionOut[" +
            std::to_string(firstBase + ranges - 1) + "]");
-    refuse("a join declaring the entering version",
+    refuse("a join missing the version entering it",
            [&](fb::RigExecWireFile &f) {
                fb::RigExecWireStep *join =
                    stepOf(f, fb::StepKind::RevisionFuse, second, -1);
                if (!join ||
-                   _DeclaresRead(*join, fb::SlotDomain::RevisionDone, first)) {
+                   !_DeclaresRead(*join, fb::SlotDomain::RevisionDone,
+                                  firstRange)) {
                    return false;
                }
-               join->reads.emplace_back(fb::SlotDomain::RevisionDone, first,
-                                        first + 1);
-               join->reads.emplace_back(fb::SlotDomain::ChainDirty, first,
-                                        first + 1);
+               _DropRead(join, fb::SlotDomain::RevisionDone, firstRange);
                return true;
            },
-           "which a range-pipelined join does not read");
-    std::printf("range chain bake: %zu revisions of %zu ranges accepted; "
-                "%d range rule violations refused\n",
-                chain.revisions.size(), ranges, refused);
-    CHECK(refused == 7);
+           " does not declare RevisionDone[" + std::to_string(firstRange) +
+               "]");
+    std::printf("range chain bake: a whole revision and %zu revisions of %zu "
+                "ranges accepted; %d range rule violations refused\n",
+                chain.revisions.size() - 1, ranges, refused);
+    CHECK(refused == 9);
 }
 
 // A connection-following read whose walk reaches a property chain's target

@@ -2927,9 +2927,9 @@ private:
                 } else if(skin)read(D::RevisionTransforms,id);
             } else {
                 // A range-pipelined revision's fuse is a join over its own
-                // ranges; it never reads the entering version.
-                read(D::RevisionPacket,id);read(D::RevisionTransforms,id);
-                if(!RigExecFormatIsRangeRevision(revision))point(c,uint32_t(index.second));
+                // ranges; it declares the entering version as a fuse does,
+                // which keeps the joins in chain order.
+                read(D::RevisionPacket,id);read(D::RevisionTransforms,id);point(c,uint32_t(index.second));
                 if(revision.weightObject>=0)read(D::WeightPacket,uint32_t(revision.weightObject));
                 for(size_t k=0;k<revision.chunks.size();++k)read(D::RevisionOut,uint32_t(revision.chunkBase)+uint32_t(k));
             }
@@ -4303,8 +4303,8 @@ private:
     /// revision's RevisionOut of part k when that one is range-pipelined
     /// (then not its whole version), else that version's RevisionDone and
     /// ChainDirty; the fuse, a join, its packet and transforms, the chain
-    /// base, its weight packet when it has one and each of its own
-    /// RevisionOut, and not the entering version.
+    /// base, its weight packet when it has one, each of its own RevisionOut
+    /// and, as a fuse does, the entering version, which orders the joins.
     bool _RangeSteps()
     {
         using D = fb::SlotDomain;
@@ -4367,7 +4367,6 @@ private:
                         return false;
                     }
                 }
-                whole = false;
             }
             if (!previous) {
                 continue;
@@ -4381,9 +4380,8 @@ private:
                            _Declares(i, D::ChainDirty, entering))) {
                 return _Bad(_StepName(i) + " declares point version " +
                             _N(size_t(at.second)) + " of chain " + _N(c) +
-                            ", which a range-pipelined " +
-                            (range ? "range step" : "join") +
-                            " does not read");
+                            ", which a range-pipelined range step does "
+                            "not read");
             }
         }
         return true;
