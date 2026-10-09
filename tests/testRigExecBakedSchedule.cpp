@@ -8624,6 +8624,44 @@ TestExportModeBakesOnlyConstants()
     std::printf("  export roles: %zu pinned reads\n", expected.size());
 }
 
+/// A program's first run checks its pins against the sample its prologue
+/// just took: an override placed after Build and before the first Run that
+/// moves the gate's default off 0, or flips a Range skin's method, bails
+/// that run (RoleFlip) before any step; one restating the built method runs.
+void
+TestAFreshProgramChecksItsPins()
+{
+    const RigExecValueOverride gate = GroupOverride(
+        "/Asset/Rig/Weights/Gate", "rigExec:defaultWeight", VtValue(0.5f));
+    const RigExecValueOverride dual =
+        GroupOverride("/Asset/Rig/Movers/L1", "rigExec:skinningMethod",
+                      VtValue(TfToken("dualQuaternion")));
+    const RigExecValueOverride linear =
+        GroupOverride("/Asset/Rig/Movers/L1", "rigExec:skinningMethod",
+                      VtValue(TfToken("classicLinear")));
+    const std::pair<RigExecValueOverride, bool> cases[] = {
+        {gate, true}, {dual, true}, {linear, false}};
+    for (const auto &[placed, flips] : cases) {
+        const BuiltProgram built = BuildGroupStage(GroupStageOptions());
+        CHECK(built.program != nullptr);
+        if (!built.program) {
+            continue;
+        }
+        built.evaluator->SetInteractiveOverrides({placed});
+        CHECK(built.program->SetOverrides({placed}));
+        RigExecRigPose pose;
+        const bool ran = built.program->Run(UsdTimeCode(1.0), &pose);
+        CHECK(ran == !flips);
+        CHECK((built.program->GetLastBail() == RigExecBakedBail::RoleFlip) ==
+              flips);
+        // A bailed run ran no step: ChainInputs never took the base.
+        const RigExecBakedProgramImpl::GeomChain *chain =
+            GroupChain(built.program->GetStepGraph());
+        CHECK(chain && chain->haveBase == !flips);
+    }
+    std::printf("  a fresh program checks its pins on its first run\n");
+}
+
 }  // namespace
 
 int
@@ -8835,6 +8873,7 @@ main(int argc, char **argv)
         TestARoleFollowsTheValueBuildReads();
         TestALegacyChainPinsItsWholeSkin();
         TestTheRolesStandWhileTheirPinsHold();
+        TestAFreshProgramChecksItsPins();
         TestExportModeBakesOnlyConstants();
     }
     // Chain buffers flip rather than copy, and point values key by content

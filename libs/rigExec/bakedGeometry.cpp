@@ -2153,10 +2153,8 @@ RigExecBakedRolesStand(const RigExecBakedProgramImpl &B)
         return false;
     };
     for (const RigExecBakedProgramImpl::GeomChain &chain : B.chains) {
-        // A chain that read no base runs no step, so nothing rests on it.
-        if (!chain.haveBase) {
-            continue;
-        }
+        // Only this run's sample counts (the prologue just took it):
+        // `haveBase` is the previous run's, false on a program's first run.
         if (chain.groupPointCount > 0 && chain.sampledHaveBase &&
             chain.sampledBase.size() != chain.groupPointCount) {
             return false;
