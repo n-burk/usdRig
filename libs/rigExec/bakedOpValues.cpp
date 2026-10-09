@@ -275,22 +275,27 @@ void Invalid(std::string *out, RigExecBakedSlotDomain domain, uint32_t slot)
     TF_VERIFY(false, "Invalid baked operation value domain %u slot %u",
               unsigned(domain), slot);
 }
-// RevisionOut \p slot's revision and the chunk owning it, or false. Build's
-// chunkRevision table answers in O(1); a program assembled by hand without
-// it is scanned.
+// RevisionOut \p slot's revision and its part there: a chunk while
+// \p *part < chunks.size() (a Range revision's chunk g is its group g), else
+// group *part - chunks.size() as a Whole revision's fuse publishes it.
+// Build's chunkRevision table answers in O(1); a program assembled by hand
+// without it is scanned.
 bool RevisionOutPart(const RigExecBakedProgramImpl &B, uint32_t slot,
-    const RigExecBakedProgramImpl::GeomRevision **revision,
-    const RigExecBakedProgramImpl::GeomChunk **chunk)
+    const RigExecBakedProgramImpl::GeomRevision **revision, size_t *part)
 {
     const auto at=[&](size_t r) {
         const int base=B.revisionChunkBase[r], count=B.revisionChunkCount[r];
         if(base<0 || count<0 || slot<uint32_t(base) || uint64_t(slot)-uint32_t(base)>=uint32_t(count)) return false;
         const auto *v=Revision(B,uint32_t(r));
         const size_t index=slot-uint32_t(base);
-        if(!v || index>=v->chunks.size()) return false;
-        const auto &part=v->chunks[index];
-        if(part.begin<0 || part.end<part.begin) return false;
-        *revision=v; *chunk=&part;
+        if(!v) return false;
+        const size_t published=v->role==RigExecBakedRevisionRole::Whole ? v->groups.size() : 0;
+        if(index>=v->chunks.size()+published) return false;
+        if(index<v->chunks.size()) {
+            const auto &chunk=v->chunks[index];
+            if(chunk.begin<0 || chunk.end<chunk.begin) return false;
+        }
+        *revision=v; *part=index;
         return true;
     };
     const size_t tables=std::min(B.revisionChunkBase.size(),B.revisionChunkCount.size());
@@ -315,6 +320,63 @@ void PutRevisionOut(std::string *out,
     const size_t end=std::min(size_t(part.end),points.size());
     Put(out,part.ok); Put(out,uint64_t(points.size())); Put(out,uint64_t(end-begin));
     PutRun(out,points.data()+begin,end-begin);
+}
+// The group state RevisionOut \p part of \p v keys, or null for a part keyed
+// by its bytes (a Legacy chunk, a Whole revision's one chunk): a Range
+// group, a keyed Whole skin's speculative chunk (\p *published false), or a
+// Whole revision's published group (\p *published true).
+const RigExecGroupState<GfVec3f> *GroupPart(
+    const RigExecBakedProgramImpl::GeomRevision &v, size_t part, bool *published)
+{
+    using Role=RigExecBakedRevisionRole;
+    *published=false;
+    if(v.role==Role::Range) return part<v.groups.size() ? &v.groups[part] : nullptr;
+    if(v.role!=Role::Whole) return nullptr;
+    if(part>=v.chunks.size()) {
+        const size_t g=part-v.chunks.size();
+        *published=true;
+        return g<v.groups.size() ? &v.groups[g] : nullptr;
+    }
+    return v.chunked && part<v.groups.size() ? &v.groups[part] : nullptr;
+}
+// The point count of a speculative chunk's kept result.
+size_t ComputedCount(const RigExecGroupState<GfVec3f> &g)
+{
+    return g.ownComputed>=0 && g.own[size_t(g.ownComputed)] ?
+        g.own[size_t(g.ownComputed)]->size() : 0;
+}
+// Put's packet bytes with three arrays keyed by the content versions their
+// writers keep instead: a range-chain blend's deltas (deltasVersion, moved
+// exactly when their bytes do), a Range lattice's held rest (the chain base
+// version it is a copy of) and the epoch layout the SkinTopology op built
+// (layoutSerial, which names the immutable `layoutCandidate`).
+// RigExecBakedPacketContentKey keys the bytes.
+void PutPacket(std::string *out, const RigExecBakedProgramImpl::GeomRevision &r)
+{
+    const RigExecMoverParameters &v=r.parameters;
+    Put(out,v.kind); Put(out,v.enabled); Put(out,v.valid); Put(out,v.transform);
+    Put(out,v.radialWeight); Put(out,v.weights);
+    if(r.role!=RigExecBakedRevisionRole::Legacy && r.op==RigExecRevisionOp::BlendShape) {
+        Put(out,uint8_t(1)); Put(out,r.deltasVersion);
+    } else Array(out,v.blendDeltas);
+    Put(out,v.blendSurfaceFrame); Put(out,v.referenceVolume); Put(out,v.strength);
+    Put(out,v.mushIterations); Put(out,v.mushStep); Put(out,v.mushPinBorders);
+    Put(out,v.mushDistanceWeight); Put(out,v.mushDisplacement); Put(out,v.wrinkleSettings);
+    Array(out,v.topologyCounts); Array(out,v.topologyIndices); Array(out,v.auxPoints);
+    Array(out,v.auxPointsB);
+    if(r.restBaseHeld) { Put(out,uint8_t(1)); Put(out,r.restBaseVersion); }
+    else Array(out,v.restPoints);
+    Put(out,v.divisions);
+    Array(out,v.bindCoords); Put(out,v.frames); Array(out,v.wireBindCoords);
+    Put(out,v.curveOrder); Array(out,v.curveKnots); Put(out,v.dropoffDistance);
+    Array(out,v.widths); Array(out,v.skinTransforms); Array(out,v.skinIndices);
+    Array(out,v.skinWeights); Put(out,v.skinElementSize); Put(out,v.skinningMethod);
+    Put(out,bool(v.skinTopology));
+    if(v.skinTopology) {
+        if(v.skinTopology==r.layoutCandidate) { Put(out,uint8_t(1)); Put(out,r.layoutSerial); }
+        else { Put(out,uint8_t(0)); Put(out,*v.skinTopology); }
+    }
+    Put(out,v.externalSchema); Put(out,v.externalData.IsEmpty());
 }
 }
 
@@ -429,31 +491,45 @@ void RigExecBakedOpValueKey(const RigExecBakedProgramImpl &B,
     // RigExecBakedPacketContentKey is the same key over the bytes.
     case D::RevisionPacket:
         if(const auto *v=Revision(B,slot)) {
-            Put(out,v->parameters); Put(out,v->status); Put(out,v->layoutUsable);
+            PutPacket(out,*v); Put(out,v->status); Put(out,v->layoutUsable);
             Put(out,v->envelopeOk); Put(out,v->envelopeVersion); Put(out,v->fullStrength);
             Put(out,uint64_t(v->precedingCount)); Put(out,v->partitionStale);
             Put(out,v->weightFieldPublished); Put(out,v->weightValuesVersion);
             Put(out,uint8_t(v->acceptance)); return;
         } break;
     case D::RevisionTransforms:
-        if(const auto *v=Revision(B,slot)) { Array(out,v->influences);
+        if(const auto *v=Revision(B,slot)) {
+            // A Range skin's group steps read their own joints' matrix
+            // slots; its fold publishes the table's validity alone.
+            if(v->role==RigExecBakedRevisionRole::Range && v->op==RigExecRevisionOp::Skin) {
+                Put(out,v->influencesValid); return;
+            }
+            Array(out,v->influences);
             Put(out,v->transform); Put(out,v->haveTransform); Put(out,v->carry);
             Put(out,v->haveCarry); Put(out,v->influencesValid); return; } break;
     case D::RevisionOut: {
         // A chunk owns only its half-open range. Reading sibling output
         // here would race the parallel writer and cause false change waves.
         const RigExecBakedProgramImpl::GeomRevision *v=nullptr;
-        const RigExecBakedProgramImpl::GeomChunk *part=nullptr;
+        size_t part=0;
         if(RevisionOutPart(B,slot,&v,&part)) {
-            // A range-pipelined range keys its bytes in `output` by the
-            // content version its step bumps exactly when they move;
-            // RigExecBakedChainContentKey is the same key over the bytes.
-            if(v->rangeRole) {
-                Put(out,part->ok); Put(out,uint64_t(v->output.size()));
-                Put(out,part->rangeVersion); return;
+            // A range chain's group keys its bytes by the content version
+            // its writer bumps exactly when they move (pointBlocks.h): a
+            // Range group (ok, count, version), a keyed Whole skin's
+            // speculative chunk (ok, count, computed version), a Whole
+            // published group (count, version). RigExecBakedChainContentKey
+            // is the same key over the published bytes.
+            bool published=false;
+            if(const auto *g=GroupPart(*v,part,&published)) {
+                if(published) { Put(out,uint64_t(g->published.count)); Put(out,g->version); return; }
+                if(v->role==RigExecBakedRevisionRole::Range) {
+                    Put(out,g->ok); Put(out,uint64_t(g->published.count)); Put(out,g->version);
+                    return;
+                }
+                Put(out,g->ok); Put(out,uint64_t(ComputedCount(*g))); Put(out,g->computedVersion);
+                return;
             }
-            PutRevisionOut(out,*part,v->stagingOutput);
-            return;
+            if(part<v->chunks.size()) { PutRevisionOut(out,v->chunks[part],v->stagingOutput); return; }
         }
     } break;
     case D::RevisionDone:
@@ -537,8 +613,9 @@ void RigExecBakedOpValueKey(const RigExecBakedProgramImpl &B,
     case D::SkinTopology:
         if(slot<B.revisionIndex.size()+B.derivedIndex.size()) {
             const auto *v=LayoutRevision(B,slot);
+            // The layout by the serial naming the object it is (RunLayoutOp).
             if(!v) break; Put(out,v->layoutFixed); Put(out,bool(v->layoutHandle));
-            if(v->layoutHandle) Put(out,*v->layoutHandle); return;
+            if(v->layoutHandle) Put(out,v->layoutSerial); return;
         } break;
     case D::RequiredStageFramesAdmission:
         if(slot == 0) { Put(out,B.requiredStageFramesAdmission.admitted);
@@ -674,6 +751,16 @@ void RigExecBakedNoteFloats(std::vector<float> *field,std::vector<float> *scratc
     field->swap(*scratch);
     ++*version;
 }
+void RigExecBakedNoteFloats(VtFloatArray *field,std::vector<float> *scratch,
+    uint64_t *version)
+{
+    if(field->size()==scratch->size() && (field->empty() ||
+       std::memcmp(field->cdata(),scratch->data(),field->size()*sizeof(float))==0))
+        return;
+    // A new buffer, never a write into one a published pose may share.
+    field->assign(scratch->begin(),scratch->end());
+    ++*version;
+}
 bool RigExecBakedPacketContentKey(const RigExecBakedProgramImpl &B,uint32_t slot,
     std::string *out)
 {
@@ -699,14 +786,15 @@ bool RigExecBakedOpValueKeyStands(const RigExecBakedProgramImpl &B,
     // leaving staging without a value (stagingFresh false): the chunk's last
     // result, which the key describes, is then `output`, at staging's size.
     const RigExecBakedProgramImpl::GeomRevision *v=nullptr;
-    const RigExecBakedProgramImpl::GeomChunk *part=nullptr;
-    // A range-pipelined range never swaps: its key stands only when equal.
+    size_t part=0;
+    // A range chain's groups and chunks never swap: their keys stand only
+    // when equal.
     if(domain!=RigExecBakedSlotDomain::RevisionOut || !RevisionOutPart(B,slot,&v,&part) ||
-       v->chunked || v->rangeRole || v->stagingFresh ||
-       v->output.size()!=v->stagingOutput.size())
+       v->role!=RigExecBakedRevisionRole::Legacy || part>=v->chunks.size() ||
+       v->chunked || v->stagingFresh || v->output.size()!=v->stagingOutput.size())
         return false;
     actual.clear(); Put(&actual,uint8_t(1)); Put(&actual,domain);
-    PutRevisionOut(&actual,*part,v->output);
+    PutRevisionOut(&actual,v->chunks[part],v->output);
     return actual==key;
 }
 bool RigExecBakedChainContentKey(const RigExecBakedProgramImpl &B,
@@ -730,24 +818,34 @@ bool RigExecBakedChainContentKey(const RigExecBakedProgramImpl &B,
         if(const auto *v=Revision(B,slot)) {
             Put(out,v->resultStatus); Put(out,v->status);
             const auto &chain=B.chains[size_t(B.revisionIndex[slot].first)];
-            if(v->currentSource<0) Array(out,chain.lastBase);
+            if(v->role!=RigExecBakedRevisionRole::Legacy) {
+                // Version r + 1 of a range chain, out of its groups.
+                std::vector<GfVec3f> gathered;
+                const GfVec3f *points=nullptr; size_t count=0;
+                RigExecBakedVersionPoints(chain,size_t(B.revisionIndex[slot].second)+1,
+                                          &gathered,&points,&count);
+                Put(out,uint64_t(count)); PutRun(out,points,count);
+            }
+            else if(v->currentSource<0) Array(out,chain.lastBase);
             else if(size_t(v->currentSource)<chain.revisions.size())
                 Array(out,chain.revisions[size_t(v->currentSource)].output);
             else break;
             return true;
         } break;
     case D::RevisionOut: {
-        // Only a range-pipelined range is keyed by a content version: its
-        // own bytes of `output`, as the range step clips them.
+        // A published group's bytes: a Range group's and a Whole fuse's
+        // publication. A speculative chunk's computed version also moves
+        // when a forgotten result is computed again (the scratch rule), which
+        // its bytes need not tell, so it is not judged.
         const RigExecBakedProgramImpl::GeomRevision *v=nullptr;
-        const RigExecBakedProgramImpl::GeomChunk *part=nullptr;
-        if(!RevisionOutPart(B,slot,&v,&part) || !v->rangeRole) break;
-        const size_t k=size_t(part-v->chunks.data());
-        size_t begin=0,end=0;
-        RigExecPointRangeAt(part->begin,part->end,k+1==v->chunks.size(),
-                            v->output.size(),&begin,&end);
-        Put(out,part->ok); Put(out,uint64_t(v->output.size()));
-        PutRun(out,v->output.data()+begin,end-begin);
+        size_t part=0;
+        bool published=false;
+        if(!RevisionOutPart(B,slot,&v,&part)) break;
+        const auto *g=GroupPart(*v,part,&published);
+        if(!g || (!published && v->role!=RigExecBakedRevisionRole::Range)) break;
+        if(!published) Put(out,g->ok);
+        Put(out,uint64_t(g->published.count));
+        PutRun(out,g->published.data,g->published.count);
         return true;
     }
     case D::DerivedOut:

@@ -176,9 +176,18 @@ std::string SkinValueIdentity(const RigExecBakedProgramImpl &B,const RigExecOpVa
             if(base<0 || count<0 || v.slot<uint32_t(base) || uint64_t(v.slot)-uint32_t(base)>=uint32_t(count))continue;
             const auto &index=B.revisionIndex[r];const auto &chain=B.chains[size_t(index.first)];
             const auto &revision=chain.revisions[size_t(index.second)];
-            const auto &chunk=revision.chunks[size_t(v.slot-uint32_t(base))];
-            return result+chain.target.GetString()+":"+revision.moverPath.GetString()+":"+
-                std::to_string(index.second)+":"+std::to_string(chunk.begin)+":"+std::to_string(chunk.end);
+            const size_t part=size_t(v.slot-uint32_t(base));
+            const std::string prefix=result+chain.target.GetString()+":"+
+                revision.moverPath.GetString()+":"+std::to_string(index.second)+":";
+            if(part<revision.chunks.size()) {
+                const auto &chunk=revision.chunks[part];
+                return prefix+std::to_string(chunk.begin)+":"+std::to_string(chunk.end);
+            }
+            // A Whole revision's published group, past its chunks.
+            const size_t g=part-revision.chunks.size();
+            if(g+1>=chain.groupBounds.size())return {};
+            return prefix+"group:"+std::to_string(g)+":"+std::to_string(chain.groupBounds[g])+
+                ":"+std::to_string(chain.groupBounds[g+1]);
         }
         return {};
     default:return {};
@@ -297,6 +306,9 @@ bool SameSkinShape(const RigExecBakedProgramImpl &B,const RigExecBakedProgramImp
     const auto &index=B.revisionIndex[r],&prior=P.revisionIndex[old];
     const auto &chain=B.chains[size_t(index.first)],&oldChain=P.chains[size_t(prior.first)];
     const auto &a=chain.revisions[size_t(index.second)],&b=oldChain.revisions[size_t(prior.second)];
+    // CopySkinBodyOutputs carries no group state: a revision of a range chain
+    // runs cold in the new program.
+    if(a.role!=RigExecBakedRevisionRole::Legacy || b.role!=RigExecBakedRevisionRole::Legacy)return false;
     if(index.second!=prior.second || chain.target!=oldChain.target || a.op!=RigExecRevisionOp::Skin ||
        b.op!=a.op || !(a.binding==b.binding) || B.useSimd!=P.useSimd ||
        a.weightObject>=0 || b.weightObject>=0 || !a.pointBindings.empty() || !b.pointBindings.empty() ||
@@ -337,6 +349,10 @@ void CopySkinBodyOutputs(RigExecBakedProgramImpl::GeomRevision *a,
     // The overlay's reuse claim names the outgoing program's op value and
     // is not carried.
     a->envelopeVersion=b.envelopeVersion;a->weightValuesVersion=b.weightValuesVersion;
+    // The serial the copied packet's layout is keyed by: it names the
+    // outgoing layout object, which the new SkinTopology op hands back as
+    // its candidate (AdoptGeometryStateFrom).
+    a->layoutSerial=b.layoutSerial;
     a->stagingOutput=b.stagingOutput;a->output=b.output;a->resultStatus=b.resultStatus;
     a->currentSource=b.currentSource;a->ran=b.ran;a->lastStatus=b.lastStatus;
     // The buffers' roles and the published points' version, with the

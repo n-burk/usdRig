@@ -39,6 +39,7 @@
 #include "pxr/usd/usd/stage.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -2207,6 +2208,15 @@ RigExecBakedAssembleFromLeaves(
     if (layoutPointCount == size_t(-1)) layoutPointCount = basePointCount;
     RigExecProviderValues values =
         RevisionValues(B, revision, basePoints, basePointCount);
+    // Two arrays the packet takes over rather than copies: the summed blend
+    // deltas `values` owns, and a Range lattice's held rest (the chain base
+    // at the version RevisionStatic checked, `restBaseHeld`), which the last
+    // packet gives up because this assembly replaces it.
+    values.lendBlendDeltas = true;
+    if (revision->op == RigExecRevisionOp::Lattice && revision->restBaseHeld &&
+        revision->parameters.restPoints.size() == basePointCount) {
+        values.retainedRest = &revision->parameters.restPoints;
+    }
     RigExecRevisionLeafView view;
     view.decl = &revision->leaves.decl;
     view.values = &RigExecBakedResolvePathLeaves(B,revision->leaves);
@@ -2323,21 +2333,17 @@ ResolveEnvelope(RigExecBakedProgramImpl::GeomRevision *revision, size_t count)
 /// whole. Serial, cold, and exactly the arithmetic an unchunked revision
 /// would have performed.
 ///
-/// Into \p fused, never staging: staging holds the ranges the chunks'
-/// published RevisionOut keys describe, and a retained or cloned key must
-/// keep matching it.
+/// Into \p fused, never staging or a group buffer: they hold what the
+/// chunks' published RevisionOut keys describe, and a retained or cloned key
+/// must keep matching it. \p points are the \p count points entering the
+/// revision.
 bool
-FuseWholeRevision(const RigExecBakedProgramImpl::GeomChain &chain,
-                  RigExecBakedProgramImpl::GeomRevision *revision,
-                  size_t revisionIndex, bool useSimd,
+FuseWholeRevision(RigExecBakedProgramImpl::GeomRevision *revision,
+                  const GfVec3f *points, size_t count, bool useSimd,
                   std::vector<GfVec3f> *fused)
 {
-    const GfVec3f *points = nullptr;
-    size_t count = 0;
-    PointsAt(chain, revisionIndex, &points, &count);
     if (!revision->layoutUsable || !revision->envelopeOk ||
-        count != revision->precedingCount ||
-        revision->stagingOutput.size() != count) {
+        count != revision->precedingCount) {
         return false;
     }
     // Against the forms the FOLD wrote -- this step reads RevisionTransforms
@@ -2401,88 +2407,347 @@ PassBaseThrough(const VtVec3fArray &base,
     }
 }
 
-/// Range step \p part of the range-pipelined \p revision (chain index
-/// \p revisionIndex): makes `output` hold range \p part of the revision's
-/// version -- the kernel's points where the revision applies, the entering
-/// points where it does not -- and bumps the range's content version exactly
-/// when those bytes, or the count, moved. Writes only range \p part of
-/// `output` and `stagingOutput`, and its own chunk, so the ranges of one
-/// revision run concurrently; reads only range \p part of the entering
-/// points, which is all the predecessor's range step \p part declared.
+/// A gated packet that failed RigExecRevisionGateHolds while applying, or a
+/// Range group step that met a stale partition or a count other than its
+/// group's: a pin hole, counted for the owner to report after the region.
 void
-RunRangeStep(const RigExecBakedProgramImpl &B,
-             const RigExecBakedProgramImpl::GeomChain &chain,
-             RigExecBakedProgramImpl::GeomRevision *revision,
-             size_t revisionIndex, size_t part)
+NoteGateViolation(RigExecBakedProgramImpl &B)
 {
-    RigExecBakedProgramImpl::GeomChunk &chunk = revision->chunks[part];
-    const size_t count = revision->precedingCount;
-    size_t begin = 0, end = 0;
-    RigExecPointRangeAt(chunk.begin, chunk.end,
-                        part + 1 == revision->chunks.size(), count, &begin,
-                        &end);
-    const GfVec3f *entering = nullptr;
-    size_t enteringCount = 0;
-    PointsAt(chain, revisionIndex, &entering, &enteringCount);
-    const bool sized = enteringCount == count &&
-                       revision->output.size() == count &&
-                       revision->stagingOutput.size() == count;
-    // Passing through copies the entering range; the buffer is never
-    // redirected, so readers of the version need no indirection.
-    const GfVec3f *source = sized ? entering + begin : nullptr;
-    bool ok = sized;
-    if (sized && RigExecBakedRevisionApplies(*revision)) {
-        bool untouched = false;
-        ok = RigExecRunRevisionRange(
-            revision->op, revision->parameters, revision->rangeInputs,
-            entering, count, begin, end,
-            !revision->fullStrength && revision->envelopeOk
-                ? revision->envelope.data()
-                : nullptr,
-            &revision->stagingOutput, B.useSimd, &untouched);
-        // A refusal after an Applies acceptance is an invariant violation:
-        // the range passes through and the join counts it.
-        if (ok && !untouched) {
-            source = revision->stagingOutput.data() + begin;
-        }
+    B.gateViolations.fetch_add(1, std::memory_order_relaxed);
+}
+
+/// The "apply once" envelope RevisionStatic resolved at the full count, for
+/// a group kernel that blends separately below full strength; else null.
+const float *
+GroupEnvelope(const RigExecBakedProgramImpl::GeomRevision &revision)
+{
+    return !revision.fullStrength && revision.envelopeOk
+               ? revision.envelope.data()
+               : nullptr;
+}
+
+/// Group \p g of the chain base as a content id (pointBlocks.h).
+RigExecGroupSource
+BaseGroupSource(const RigExecBakedProgramImpl::GeomChain &chain, size_t g)
+{
+    RigExecGroupSource source;
+    source.slot = -1 - int64_t(g);
+    source.version = g < chain.baseGroups.size() ? chain.baseGroups[g].version
+                                                  : 0;
+    return source;
+}
+
+/// Makes \p revision's `groupIds[g]` \p source and returns whether it moved.
+bool
+NoteGroupId(RigExecBakedProgramImpl::GeomRevision *revision, size_t g,
+            const RigExecGroupSource &source)
+{
+    if (revision->groupIds[g] == source) {
+        return false;
     }
-    bool moved = !chunk.rangeRan || chunk.rangeCount != count;
-    if (sized && RigExecCopyMovedRange(source, revision->output.data() + begin,
-                                       end - begin)) {
-        moved = true;
+    revision->groupIds[g] = source;
+    return true;
+}
+
+/// Sizes \p revision's `groupIds` to its groups (Build sizes them; a size
+/// change is a publication that moved).
+bool
+SizeGroupIds(RigExecBakedProgramImpl::GeomRevision *revision)
+{
+    if (revision->groupIds.size() == revision->groups.size()) {
+        return false;
     }
-    chunk.ok = ok;
-    chunk.rangeCount = count;
-    chunk.rangeRan = true;
+    revision->groupIds.assign(revision->groups.size(), RigExecGroupSource());
+    return true;
+}
+
+/// The version a join or Whole fuse of a revision a cycle set aside
+/// publishes: the base groups passed through, by their content ids;
+/// `doneVersion` moves only when those ids do.
+void
+PassBaseGroups(const RigExecBakedProgramImpl::GeomChain &chain,
+               RigExecBakedProgramImpl::GeomRevision *revision)
+{
+    revision->ran = false;
+    revision->executed = false;
+    revision->resultStatus = _tokens->operationCycle;
+    bool moved = SizeGroupIds(revision);
+    for (size_t g = 0; g < revision->groupIds.size(); ++g) {
+        moved = NoteGroupId(revision, g, BaseGroupSource(chain, g)) || moved;
+    }
     if (moved) {
-        ++chunk.rangeVersion;
+        ++revision->doneVersion;
     }
 }
 
-/// The join of the range-pipelined \p revision: the fuse's line and status
-/// from the decision its ranges shared, and RevisionDone's content version
-/// from the range versions. Reads no points: the ranges partition the count
-/// once and each range's version moves exactly when its bytes do, so a range
-/// version the join has not seen is exactly a version whose bytes differ
-/// from its last publication. `currentSource` stays the revision itself,
-/// unless a cycle set its ranges aside: then the join publishes what an
-/// excluded fuse does, the base passed through, against the live base it
-/// reads after ChainInputs.
+/// Group step \p g of the Range \p revision (chain index \p revisionIndex of
+/// chain \p chainIndex): publishes group g of version
+/// revisionIndex + 1 -- the group kernel's points where the revision applies,
+/// the entering group shared by reference where it does not or where the
+/// kernel leaves the group untouched -- with a content version that moves
+/// exactly when the published bytes do (pointBlocks.h). Reads only group g of
+/// the entering version (and, for a skin, the matrix slots of its key);
+/// writes only `groups[g]` and its own chunk table, so the groups of one
+/// revision run concurrently. The decision is RevisionStatic's and the
+/// fold's (RigExecBakedRevisionApplies); a kernel refusal after an Applies
+/// acceptance passes the group through and the join counts it.
+void
+RunGroupStep(RigExecBakedProgramImpl &B,
+             const RigExecBakedProgramImpl::GeomChain &chain, int chainIndex,
+             RigExecBakedProgramImpl::GeomRevision *revision,
+             size_t revisionIndex, size_t g)
+{
+    if (g >= revision->groups.size() || g + 1 >= chain.groupBounds.size() ||
+        g >= chain.baseGroups.size()) {
+        return;
+    }
+    RigExecGroupState<GfVec3f> &state = revision->groups[g];
+    if (revision->rangeSetAside) {
+        // A cycle set the revision aside: it passes the base through, as an
+        // excluded fuse does, and computes nothing.
+        state.ok = false;
+        RigExecPublishPassedGroup(&state, chain.baseGroups[g].published,
+                                  BaseGroupSource(chain, g));
+        return;
+    }
+    const RigExecPointsRef<GfVec3f> &entering =
+        RigExecBakedGroupAt(chain, revisionIndex, g);
+    const RigExecGroupSource from =
+        RigExecBakedGroupSourceAt(B, chainIndex, revisionIndex, g);
+    const size_t begin = size_t(chain.groupBounds[g]);
+    const size_t end = size_t(chain.groupBounds[g + 1]);
+    const size_t count = revision->precedingCount;
+    // The count is a pin (RigExecBakedRolesStand), so the group always has
+    // its Build size; a run that met another refuses rather than reading
+    // past a group.
+    if (count != chain.groupPointCount || end < begin ||
+        entering.count != end - begin) {
+        state.ok = false;
+        RigExecPublishPassedGroup(&state, entering, from);
+        NoteGateViolation(B);
+        return;
+    }
+    if (!RigExecBakedRevisionApplies(*revision)) {
+        state.ok = true;
+        RigExecPublishPassedGroup(&state, entering, from);
+        return;
+    }
+    const bool skin = revision->op == RigExecRevisionOp::Skin;
+    RigExecSkinTransformsView view;
+    if (skin) {
+        // Range skins rest on an epoch-fixed layout (a NoLayoutOverride pin),
+        // so the keys describe the vertices; a stale partition is a pin hole
+        // and refuses rather than skinning against identities.
+        if (revision->partitionStale || g >= revision->chunks.size()) {
+            state.ok = false;
+            RigExecPublishPassedGroup(&state, entering, from);
+            NoteGateViolation(B);
+            return;
+        }
+        RigExecBakedProgramImpl::GeomChunk &chunk = revision->chunks[g];
+        chunk.keyChanged = false;
+        GatherChunkTransforms(B, *revision, &chunk);
+        view = ChunkTransformsView(chunk, B.useSimd);
+    }
+    const int k = RigExecGroupScratch(&state, end - begin);
+    bool untouched = false;
+    const bool ok = RigExecRunRevisionGroup(
+        revision->op, revision->parameters, revision->rangeInputs,
+        skin ? &view : nullptr, entering.data, state.own[size_t(k)]->data(),
+        count, begin, end, GroupEnvelope(*revision), B.useSimd, &untouched);
+    state.ok = ok;
+    if (!ok || untouched) {
+        RigExecPublishPassedGroup(&state, entering, from);
+        return;
+    }
+    RigExecPublishOwnGroup(&state, k);
+}
+
+/// Speculative chunk \p g of the Whole keyed skin \p revision: group g of
+/// the entering version skinned against the chunk's own key-filled table
+/// into a buffer of the group's state, kept as its computed result
+/// (RigExecNoteComputedGroup) for the fuse to publish or discard. Like a
+/// Legacy keyed chunk it does not wait for the fold, and its `ok` is sticky
+/// across runs it sits out.
+void
+RunWholeSkinChunk(const RigExecBakedProgramImpl &B,
+                  const RigExecBakedProgramImpl::GeomChain &chain,
+                  RigExecBakedProgramImpl::GeomRevision *revision,
+                  size_t revisionIndex, size_t g)
+{
+    if (g >= revision->chunks.size() || g >= revision->groups.size() ||
+        g + 1 >= chain.groupBounds.size()) {
+        return;
+    }
+    RigExecBakedProgramImpl::GeomChunk &chunk = revision->chunks[g];
+    RigExecGroupState<GfVec3f> &state = revision->groups[g];
+    chunk.keyChanged = false;
+    const RigExecPointsRef<GfVec3f> &entering =
+        RigExecBakedGroupAt(chain, revisionIndex, g);
+    const size_t begin = size_t(chain.groupBounds[g]);
+    const size_t end = size_t(chain.groupBounds[g + 1]);
+    if (!revision->status.AllowsApply() || !SkinPacketIsUsable(*revision) ||
+        revision->partitionStale ||
+        revision->precedingCount != chain.groupPointCount || end < begin ||
+        entering.count != end - begin) {
+        state.ok = false;
+        chunk.ok = false;
+        return;
+    }
+    GatherChunkTransforms(B, *revision, &chunk);
+    const RigExecSkinTransformsView view = ChunkTransformsView(chunk, B.useSimd);
+    const int k = RigExecGroupScratch(&state, end - begin);
+    const bool ok = RigExecRunRevisionGroup(
+        revision->op, revision->parameters, revision->rangeInputs, &view,
+        entering.data, state.own[size_t(k)]->data(), revision->precedingCount,
+        begin, end, GroupEnvelope(*revision), B.useSimd);
+    if (ok) {
+        RigExecNoteComputedGroup(&state, k);
+    }
+    state.ok = ok;
+    chunk.ok = ok;
+}
+
+/// Whether chunk \p k of a Whole or Legacy revision holds an answer: a keyed
+/// Whole skin's in its group state (with a computed result to publish), any
+/// other chunk's in the chunk.
+bool
+ChunkHoldsAnswer(const RigExecBakedProgramImpl::GeomRevision &revision,
+                 size_t k)
+{
+    if (revision.role == RigExecBakedRevisionRole::Whole && revision.chunked) {
+        return k < revision.groups.size() && revision.groups[k].ok &&
+               revision.groups[k].ownComputed >= 0;
+    }
+    return revision.chunks[k].ok;
+}
+
+/// The fuse of the Whole \p revision (revision id \p id, chain index
+/// \p revisionIndex of chain \p chainIndex): the decision a Legacy fuse makes
+/// -- packet and fold, acceptance or the AND of the speculative chunks, the
+/// whole-array skin where the partition went stale -- and then every group
+/// of version revisionIndex + 1 published with its own exact version: the
+/// chunk's computed result (a keyed skin), the group's slice of the result
+/// copied into a buffer of the group (one whole chunk, or the whole-array
+/// skin), or the entering group shared where the revision did not apply.
+/// `groupIds` and `doneVersion` follow (2.7): a downstream group reruns only
+/// if its group moved.
+void
+RunWholeFuse(RigExecBakedProgramImpl &B,
+             const RigExecBakedProgramImpl::GeomChain &chain, int chainIndex,
+             RigExecBakedProgramImpl::GeomRevision *revision, int id,
+             size_t revisionIndex, RigExecBakedStep *step)
+{
+    if (revision->rangeSetAside) {
+        PassBaseGroups(chain, revision);
+        return;
+    }
+    const bool skin = revision->op == RigExecRevisionOp::Skin;
+    const bool packetValid =
+        revision->parameters.valid && (!skin || revision->influencesValid);
+    EmitInvalidPacketLine(B, *revision, packetValid, &step->diagnostics);
+    revision->executed = true;
+    step->counters.revisionsExecuted = 1;
+    revision->resultStatus = revision->status.state;
+    const size_t groupCount = revision->groups.size();
+    const bool keyed = revision->chunked;
+    const size_t count = revision->precedingCount;
+    // The count is a pin; a run at another one refuses.
+    const bool sized =
+        count == chain.groupPointCount &&
+        chain.groupBounds.size() == groupCount + 1 &&
+        (keyed || revision->stagingOutput.size() == count);
+    bool applied = packetValid && revision->status.AllowsApply() && sized;
+    const bool whole = applied && skin && revision->partitionStale;
+    std::vector<GfVec3f> fused;
+    if (whole) {
+        // The whole-array skin; a stale partition is rare.
+        const GfVec3f *points = nullptr;
+        size_t enteringCount = 0;
+        RigExecBakedVersionPoints(chain, revisionIndex,
+                                  &revision->wholeEntering, &points,
+                                  &enteringCount);
+        applied = FuseWholeRevision(revision, points, enteringCount,
+                                    B.useSimd, &fused);
+    } else if (applied && revision->acceptance !=
+                              RigExecRevisionAcceptance::Deferred) {
+        applied = revision->acceptance == RigExecRevisionAcceptance::Applies;
+    } else if (applied) {
+        for (size_t k = 0; k < revision->chunks.size(); ++k) {
+            if (!ChunkHoldsAnswer(*revision, k)) {
+                applied = false;
+                break;
+            }
+        }
+    }
+    // A keyed skin publishes its chunks' results: each must hold one.
+    if (applied && keyed && !whole) {
+        for (size_t g = 0; g < groupCount; ++g) {
+            if (!ChunkHoldsAnswer(*revision, g)) {
+                applied = false;
+                break;
+            }
+        }
+    }
+    if (!applied && revision->status.AllowsApply()) {
+        revision->resultStatus = _tokens->moverFailed;
+    }
+    const std::vector<GfVec3f> *slices =
+        whole ? &fused : (keyed ? nullptr : &revision->stagingOutput);
+    bool moved = SizeGroupIds(revision);
+    for (size_t g = 0; g < groupCount; ++g) {
+        RigExecGroupState<GfVec3f> &state = revision->groups[g];
+        if (applied && !slices) {
+            RigExecPublishOwnGroup(&state, state.ownComputed);
+        } else if (applied) {
+            const size_t begin = size_t(chain.groupBounds[g]);
+            const size_t end = size_t(chain.groupBounds[g + 1]);
+            const int k = RigExecGroupScratch(&state, end - begin);
+            std::copy(slices->begin() + long(begin),
+                      slices->begin() + long(end),
+                      state.own[size_t(k)]->begin());
+            RigExecPublishOwnGroup(&state, k);
+        } else {
+            RigExecPublishPassedGroup(
+                &state, RigExecBakedGroupAt(chain, revisionIndex, g),
+                RigExecBakedGroupSourceAt(B, chainIndex, revisionIndex, g));
+        }
+        RigExecGroupSource source;
+        source.slot = int64_t(RigExecBakedGroupSlot(B, id, g));
+        source.version = state.version;
+        moved = NoteGroupId(revision, g, source) || moved;
+    }
+    if (moved) {
+        ++revision->doneVersion;
+    }
+    revision->lastStatus = revision->status;
+    revision->ran = true;
+}
+
+/// The join of the Range \p revision (revision id \p id, chain index
+/// \p revisionIndex of chain \p chainIndex): the fuse's line and status from
+/// the decision its group steps shared, the refusal count over its written
+/// groups, and the content ids of version revisionIndex + 1 -- its own for
+/// the groups it writes, the predecessor's (the base's for the first
+/// revision) for the groups it aliases. Reads no points. `doneVersion` moves
+/// exactly when those ids do, so a version whose groups all kept their bytes
+/// keeps its version. A cycle that set the revision aside makes it publish
+/// the base passed through.
 void
 RunJoin(const RigExecBakedProgramImpl &B,
         const RigExecBakedProgramImpl::GeomChain &chain,
-        RigExecBakedProgramImpl::GeomRevision *revision,
-        RigExecBakedStep *step)
+        RigExecBakedProgramImpl::GeomRevision *revision, int id,
+        size_t revisionIndex, RigExecBakedStep *step)
 {
     if (revision->rangeSetAside) {
-        revision->ran = false;
-        revision->executed = false;
-        revision->resultStatus = _tokens->operationCycle;
-        PassBaseThrough(chain.lastBase, revision);
+        PassBaseGroups(chain, revision);
         return;
     }
-    EmitInvalidPacketLine(B, *revision, revision->parameters.valid,
-                          &step->diagnostics);
+    // The fuse's own predicate, which for a skin ANDs in the fold.
+    const bool packetValid =
+        revision->parameters.valid &&
+        (revision->op != RigExecRevisionOp::Skin || revision->influencesValid);
+    EmitInvalidPacketLine(B, *revision, packetValid, &step->diagnostics);
     revision->executed = true;
     step->counters.revisionsExecuted = 1;
     const bool applied = RigExecBakedRevisionApplies(*revision);
@@ -2490,18 +2755,25 @@ RunJoin(const RigExecBakedProgramImpl &B,
     if (!applied && revision->status.AllowsApply()) {
         revision->resultStatus = _tokens->moverFailed;
     }
-    bool moved = !revision->ran;
+    const RigExecBakedProgramImpl::GeomRevision *predecessor =
+        revisionIndex > 0 ? &chain.revisions[revisionIndex - 1] : nullptr;
+    bool moved = SizeGroupIds(revision);
     uint32_t refusals = 0;
-    for (size_t k = 0;
-         k < revision->chunks.size() && k < revision->joinSeen.size(); ++k) {
-        const RigExecBakedProgramImpl::GeomChunk &chunk = revision->chunks[k];
-        if (revision->joinSeen[k] != chunk.rangeVersion) {
-            revision->joinSeen[k] = chunk.rangeVersion;
-            moved = true;
+    for (size_t g = 0; g < revision->groupIds.size(); ++g) {
+        RigExecGroupSource source;
+        if (g < revision->groupWritten.size() && revision->groupWritten[g] &&
+            g < revision->groups.size()) {
+            if (applied && !revision->groups[g].ok) {
+                ++refusals;
+            }
+            source.slot = int64_t(RigExecBakedGroupSlot(B, id, g));
+            source.version = revision->groups[g].version;
+        } else if (predecessor && g < predecessor->groupIds.size()) {
+            source = predecessor->groupIds[g];
+        } else {
+            source = BaseGroupSource(chain, g);
         }
-        if (applied && !chunk.ok) {
-            ++refusals;
-        }
+        moved = NoteGroupId(revision, g, source) || moved;
     }
     revision->rangeRefusals = refusals;
     if (moved) {
@@ -2521,9 +2793,14 @@ void ResetGeometryRevision(RigExecBakedProgramImpl::GeomRevision *revision)
     revision->lastAuxPoints = VtVec3fArray(); revision->lastStatus = RigExecMoverStatus();
     // No baseline survives: the next publication bumps the version anyway.
     revision->stagingFresh = false; revision->passedPoints.clear();
-    // Nor a published range: each range and the join publish a new version.
-    for (auto &chunk : revision->chunks) chunk.rangeRan = false;
-    std::fill(revision->joinSeen.begin(), revision->joinSeen.end(), uint64_t(0));
+    // Nor a published group: each group and the join or fuse publish a new
+    // version, above the one they last published (versions never go down).
+    for (auto &group : revision->groups) {
+        RigExecResetGroup(&group);
+        group.ok = false;
+    }
+    std::fill(revision->groupIds.begin(), revision->groupIds.end(),
+              RigExecGroupSource());
 }
 }
 void RigExecBakedAdoptRevisionLayout(RigExecBakedProgramImpl::GeomRevision *revision)
@@ -2767,7 +3044,11 @@ RigExecBakedSkipGeometryStep(RigExecBakedProgramImpl *program,
         revision.staticDirty = false;
         return;
     case RigExecBakedStepKind::RevisionChunk:
-        revision.chunks[size_t(step->part)].keyChanged = false;
+        // A chunk step's part is a chunk (a Range revision's group g is its
+        // chunk g); its group state keeps the published or computed result.
+        if (step->part >= 0 && size_t(step->part) < revision.chunks.size()) {
+            revision.chunks[size_t(step->part)].keyChanged = false;
+        }
         // A skipped body retains its published output validity and bytes.
         // Current-generation execution is reported by portable ran metadata.
         return;
@@ -2997,8 +3278,11 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
         // Both forms of the table, whether or not the revision is chunked:
         // a chunked one's chunks keep their own, but the fuse's whole-array
         // fallback reads these and cannot write them. O(influences) of pure
-        // per-matrix arithmetic, which is the size of this step anyway.
-        if (skin && revision.influencesValid) {
+        // per-matrix arithmetic, which is the size of this step anyway. A
+        // Range skin has no whole-array fallback (its RevisionTransforms
+        // value is the validity alone), so it folds no forms.
+        if (skin && revision.influencesValid &&
+            revision.role != RigExecBakedRevisionRole::Range) {
             FoldTransformForms(&revision, B.useSimd);
         }
         return;
@@ -3032,9 +3316,41 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
                                             error);
             }
         }
-        revision.parameters =
+        const bool rangeChain =
+            revision.role != RigExecBakedRevisionRole::Legacy;
+        const bool rangeLattice = revision.role == RigExecBakedRevisionRole::Range &&
+                                  revision.op == RigExecRevisionOp::Lattice;
+        // A Range lattice's packet holds the chain base as its rest points
+        // (`restBaseHeld`, a copy taken at base version `restBaseVersion`);
+        // the assembly takes that copy back instead of copying the base
+        // again while the version stands (RigExecBakedAssembleFromLeaves).
+        if (revision.restBaseHeld &&
+            (!rangeLattice || revision.restBaseVersion != chain.baseVersion)) {
+            revision.restBaseHeld = false;
+        }
+        RigExecMoverParameters assembled =
             AssembleRevision(B, &revision, chain.lastBase.cdata(),
                              chain.lastBase.size(), time, step,chain.lastBase.size());
+        // A range-chain blend keys its deltas by a content version moved
+        // exactly when their bytes do, not by the bytes.
+        if (rangeChain && revision.op == RigExecRevisionOp::BlendShape &&
+            !RigExecBakedSamePoints(assembled.blendDeltas.data(),
+                                    assembled.blendDeltas.size(),
+                                    revision.parameters.blendDeltas.data(),
+                                    revision.parameters.blendDeltas.size())) {
+            ++revision.deltasVersion;
+        }
+        revision.parameters = std::move(assembled);
+        if (rangeLattice) {
+            // The lattice arm copies the base (or takes the held copy back)
+            // into a valid packet's rest points and leaves them empty
+            // otherwise, so a non-empty rest of the base's count is the base
+            // at this version.
+            revision.restBaseHeld =
+                !revision.parameters.restPoints.empty() &&
+                revision.parameters.restPoints.size() == chain.lastBase.size();
+            revision.restBaseVersion = chain.baseVersion;
+        }
         // The status of the PACKET. For a skin revision that is half of the
         // answer -- the packet carries identities where the matrices would
         // be -- and the fold's `influencesValid` is the other half; the fuse
@@ -3126,9 +3442,15 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
         // a kernel that resized its output failed the application, so no
         // buffer the chain ever reads holds a different count. Sizing the
         // output here rather than in a chunk is what lets the chunks write
-        // disjoint ranges of it without one of them owning its length.
+        // disjoint ranges of it without one of them owning its length. A
+        // Range revision and a keyed Whole skin write group buffers Build
+        // sized instead, and keep no staging.
         const size_t count = chain.lastBase.size();
-        if (revision.stagingOutput.size() != count) {
+        const bool staged =
+            revision.role == RigExecBakedRevisionRole::Legacy ||
+            (revision.role == RigExecBakedRevisionRole::Whole &&
+             !revision.chunked);
+        if (staged && revision.stagingOutput.size() != count) {
             revision.stagingOutput.resize(count);
             // A resized buffer holds no answers, so every chunk of it has to
             // produce one again.
@@ -3143,14 +3465,31 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
         revision.envelopeOk = true;
         revision.fullStrength = true;
         revision.partitionStale = false;
-        if (revision.rangeRole) {
-            // The revision's one writer of everything its range steps read
-            // besides the packet and the entering points: the "apply once"
-            // envelope at the full count for every range op that blends
-            // separately, the immutable kernel inputs (`rangeInputs`, which
-            // fills the revision's own caches), and `output` at the count,
-            // whose ranges stay sticky at the same size. A size change moves
-            // `precedingCount`, so every range runs again.
+        // A gated Range revision writes only the groups its weight names and
+        // aliases the rest, which is exact only while its packet keeps every
+        // unnamed point at its entering bytes; one that applies without
+        // that is a pin hole (counted, reported by the owner).
+        const auto noteGate = [&B, &revision]() {
+            if (revision.role != RigExecBakedRevisionRole::Range ||
+                std::find(revision.groupWritten.begin(),
+                          revision.groupWritten.end(),
+                          char(0)) == revision.groupWritten.end()) {
+                return;
+            }
+            if (revision.parameters.valid && revision.status.AllowsApply() &&
+                revision.acceptance == RigExecRevisionAcceptance::Applies &&
+                !RigExecRevisionGateHolds(revision.op, revision.parameters)) {
+                NoteGateViolation(B);
+            }
+        };
+        if (revision.role == RigExecBakedRevisionRole::Range && !skin) {
+            // The revision's one writer of everything its group steps read
+            // besides the packet and the entering groups: the "apply once"
+            // envelope at the full count for every op that blends
+            // separately, and the immutable kernel inputs (`rangeInputs`,
+            // which fills the revision's own caches; a blend's per-point
+            // weights). A lattice whose rest is the held base names that
+            // base's version, so its bind skips only the rest comparison.
             if (RigExecRevisionTakesSeparateBlend(
                     revision.op, revision.parameters.weights)) {
                 revision.fullStrength =
@@ -3161,10 +3500,9 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
             }
             revision.acceptance = RigExecPrepareRevisionRanges(
                 revision.op, revision.parameters, count, &revision.wireBasis,
-                &revision.surfaceCache, &revision.rangeInputs);
-            if (revision.output.size() != count) {
-                revision.output.resize(count);
-            }
+                &revision.surfaceCache, &revision.rangeInputs,
+                revision.restBaseHeld ? revision.restBaseVersion : 0);
+            noteGate();
             return;
         }
         if (!skin) {
@@ -3190,6 +3528,9 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
                 &revision.envelopeOk);
             return;
         }
+        // Every skin, Legacy, Whole or Range: a Range skin's group steps
+        // share this decision, which never defers for its classicLinear
+        // method.
         revision.layoutUsable =
             RigExecSkinLayoutIsUsable(revision.parameters, count);
         revision.fullStrength =
@@ -3225,20 +3566,36 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
                 elementSize != revision.partitionElementSize ||
                 count != revision.partitionPointCount;
         }
+        noteGate();
         return;
     }
 
     case RigExecBakedStepKind::RevisionChunk: {
-        if (revision.rangeRole) {
-            RunRangeStep(B, chain, &revision, size_t(revisionIndex),
-                         size_t(step->part));
+        if (revision.role == RigExecBakedRevisionRole::Range) {
+            RunGroupStep(B, chain, chainIndex, &revision,
+                         size_t(revisionIndex), size_t(step->part));
+            return;
+        }
+        if (revision.role == RigExecBakedRevisionRole::Whole &&
+            revision.chunked) {
+            RunWholeSkinChunk(B, chain, &revision, size_t(revisionIndex),
+                              size_t(step->part));
             return;
         }
         RigExecBakedProgramImpl::GeomChunk &chunk =
             revision.chunks[size_t(step->part)];
         const GfVec3f *points = nullptr;
         size_t count = 0;
-        PointsAt(chain, size_t(revisionIndex), &points, &count);
+        if (revision.role == RigExecBakedRevisionRole::Whole) {
+            // A Whole revision's one chunk reads the whole entering version:
+            // in place where its groups are one buffer, else gathered into
+            // the revision's own buffer.
+            RigExecBakedVersionPoints(chain, size_t(revisionIndex),
+                                      &revision.wholeEntering, &points,
+                                      &count);
+        } else {
+            PointsAt(chain, size_t(revisionIndex), &points, &count);
+        }
         const bool sized = count == revision.precedingCount &&
                            revision.stagingOutput.size() == count;
 
@@ -3304,8 +3661,14 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
     }
 
     case RigExecBakedStepKind::RevisionFuse: {
-        if (revision.rangeRole) {
-            RunJoin(B, chain, &revision, step);
+        if (revision.role == RigExecBakedRevisionRole::Range) {
+            RunJoin(B, chain, &revision, step->object, size_t(revisionIndex),
+                    step);
+            return;
+        }
+        if (revision.role == RigExecBakedRevisionRole::Whole) {
+            RunWholeFuse(B, chain, chainIndex, &revision, step->object,
+                         size_t(revisionIndex), step);
             return;
         }
         // Where the dynamic path's assembler would have failed the packet:
@@ -3332,9 +3695,12 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
             // The whole-revision skin's points; a stale partition is rare.
             std::vector<GfVec3f> fused;
             if (whole) {
-                applied = FuseWholeRevision(chain, &revision,
-                                            size_t(revisionIndex), B.useSimd,
-                                            &fused);
+                const GfVec3f *points = nullptr;
+                size_t count = 0;
+                PointsAt(chain, size_t(revisionIndex), &points, &count);
+                applied = revision.stagingOutput.size() == count &&
+                          FuseWholeRevision(&revision, points, count,
+                                            B.useSimd, &fused);
             } else if (applied && revision.acceptance !=
                                       RigExecRevisionAcceptance::Deferred) {
                 // RevisionStatic's decision, from the validation each chunk's
@@ -4187,6 +4553,11 @@ RigExecBakedRunLayoutOp(const RigExecBakedProgramImpl &B,
     }
     revision->layoutHandle = std::move(built);
     revision->layoutCandidate = revision->layoutHandle;
+    // `layoutSerial` names `layoutCandidate`: the SkinTopology and
+    // RevisionPacket keys carry it in place of the layout's bytes. Only a
+    // newly built layout -- which differs from the candidate it replaces --
+    // moves it; handing the candidate back keeps it.
+    ++revision->layoutSerial;
 }
 
 namespace {
