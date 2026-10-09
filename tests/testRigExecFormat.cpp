@@ -4549,7 +4549,7 @@ TestRangeChunkTables()
         }
         std::vector<uint8_t> bytes;
         const bool written = valid && _Write(f, &bytes, &why);
-        const auto opened = written ? _Open(bytes, &why) : nullptr;
+        auto opened = written ? _Open(bytes, &why) : nullptr;
         CHECK(opened != nullptr);
         return opened;
     };

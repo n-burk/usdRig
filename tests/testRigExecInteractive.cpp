@@ -972,6 +972,16 @@ static void TestRoleFlipsRebuildOnce()
     CHECK(_SamePublished(evaluator.Evaluate(time), linear));
     CHECK(evaluator.GetBakedProgramBuildCount() == builds + 2);
 
+    // The override placed before the program's first run: Compile's
+    // program rests on classicLinear, so that first Evaluate bails before
+    // any step, rebuilds once and poses the flip.
+    RigExecRigEvaluator fresh(stage, rig);
+    CHECK(fresh.Compile(&errors));
+    const size_t freshBuilds = fresh.GetBakedProgramBuildCount();
+    fresh.SetInteractiveOverrides({_SkinMethod("dualQuaternion")});
+    CHECK(_SamePublished(fresh.Evaluate(time), dual));
+    CHECK(fresh.GetBakedProgramBuildCount() == freshBuilds + 1);
+
     // An upstream input on the method: one rebuild, then it holds.
     RigExecRigEvaluator upstream(stage, rig);
     CHECK(upstream.Compile(&errors));
