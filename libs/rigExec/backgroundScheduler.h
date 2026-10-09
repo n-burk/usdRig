@@ -130,8 +130,8 @@ bool RigExecBackgroundWarmingEnabled(RigExecFrameCacheMode mode,
                                      bool parallelEvalEnabled);
 
 /// The background-fill gate from the environment: the RIGEXEC_FRAME_CACHE
-/// mode (live) and RigExecParallelEvaluationEnabled (the library's cached
-/// switch). Enqueue and the triggers consult this on every call.
+/// mode (live) and RigExecParallelEvaluationEnabled (also live). Enqueue
+/// and the triggers consult this on every call.
 bool RigExecBackgroundWarmingEnabled();
 
 /// One warming request: evaluate \p time for \p rig, publishing into the

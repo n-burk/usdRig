@@ -91,7 +91,7 @@ See [architecture](../specs/spec.md), `libs/rigExec/frameCache.cpp`, and
 `bin/test/run_testusdview_framecache.bat` (or `.sh`) opens the animated arm in
 usdview, waits for automatic range warming, and replays the range in both
 directions. Pass another animated stage as its first argument. The native
-`testRigExecImagingFrameCacheDefault` suite checks default-mode cache hits,
+`testRigExecImagingFrameCache` suite checks default-mode cache hits,
 zero evaluator pulls on warmed frames, edit invalidation, and mode overrides.
 `bin/test/run_testusdview_wrinkle_framecache.bat` (or `.sh`) checks Wrinkle
 parameter edits, immediate dirty display, automatic rebuilding, and cached

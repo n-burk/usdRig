@@ -598,7 +598,10 @@ bool RigExecBakedExecuteOpGraph(RigExecBakedProgramImpl *program,UsdTimeCode tim
     bool ok=false;
     const auto execute=[&] { ok=RigExecExecuteOpGraph(B.opGraph,state.changedLeaves,state.seeds,force,
         callbacks,&B.opExecution,&error,&B.opWorkspace,&state.candidateOps); };
-    if(state.parallel && !RigExecFrozenSerialActive()) {
+    // state.parallel is the choice compile recorded. The live switch can
+    // still force the serial executor without a rebuild.
+    if(state.parallel && RigExecParallelEvaluationEnabled() &&
+       !RigExecFrozenSerialActive()) {
         pxr::WorkWithScopedParallelism([&] {
             pxr::WorkDispatcher dispatcher;
             callbacks.dispatch=[&](std::function<void()> task){dispatcher.Run(std::move(task));};

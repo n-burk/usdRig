@@ -6,6 +6,7 @@
 #include "rigExec/bakedProgram.h"
 #include "rigExec/moverGraph.h"
 #include "rigExec/rigEvaluator.h"
+#include "serialPoseCompare.h"
 
 #include "pxr/base/plug/registry.h"
 #include "pxr/base/tf/getenv.h"
@@ -1511,12 +1512,25 @@ TestAPoseWalkReadPhaseMatchesTheStore()
 }
 
 static void
-TestEveryExampleStage(const std::string &examplesDir)
+TestEveryExampleStage(const std::string &examplesDir,
+                      const std::vector<std::string> &only = {})
 {
     auto stages=TfGlob({examplesDir+"/*.usd*",examplesDir+"/biped/*.usda"});
     std::sort(stages.begin(),stages.end());
     size_t evaluated=0,referenceChecked=0;
     for(const auto &path:stages) {
+        if (!only.empty()) {
+            bool wanted = false;
+            for (const std::string &part : only) {
+                if (path.find(part) != std::string::npos) {
+                    wanted = true;
+                    break;
+                }
+            }
+            if (!wanted) {
+                continue;
+            }
+        }
         const auto stage=UsdStage::Open(path); if(!stage)continue;
         const auto rigPath=FindRig(stage); if(rigPath.IsEmpty())continue;
         RigExecRigEvaluator rig(stage,rigPath);
@@ -1917,6 +1931,11 @@ main(int argc, char **argv)
         return 2;
     }
 
+    // One pass with the shadow on covers the plain assertions and the
+    // wholesale-clear comparison. The separate scoped-clear process repeated
+    // this suite.
+    TfSetenv("RIGEXEC_VERIFY_SCOPED_CLEARS", "1");
+
     TestAnEditAfterTheBakeIsFollowed(examplesDir);
     TestASolverInputEditIsRoutedAfterADeferredCompile(examplesDir);
     TestAnInteractiveOverrideAfterTheBakeIsFollowed(examplesDir);
@@ -1979,6 +1998,26 @@ main(int argc, char **argv)
 
     // Every compiled example checks original independent scalar arithmetic.
     TestEveryExampleStage(examplesDir);
+
+    // Serial executor on the large rigs, one small chain, and both edit
+    // directions (rebuild, and leave the program standing). The shadow stays
+    // off so this pass is the serial evaluator alone.
+    {
+        rigExecTest::EnvOverride shadowOff("RIGEXEC_VERIFY_SCOPED_CLEARS",
+                                           "0");
+        rigExecTest::EnvOverride serialEval("RIGEXEC_ENABLE_PARALLEL_EVAL",
+                                            "0");
+        TestEveryExampleStage(examplesDir,
+                              {"/biped/", "01_FkChainTail.usda"});
+        TestEditAfterTheBake(examplesDir, "biped/Biped.usda",
+                             "a keyed blend weight, a disabled constraint and "
+                             "a moved rest",
+                             EditKeyedBlendDisabledConstraintAndRest,
+                             /* expectRebuild = */ true);
+        TestEditAfterTheBake(examplesDir, "biped/Biped.usda",
+                             "a moved foot roll", EditFootRollValue,
+                             /* expectRebuild = */ false);
+    }
 
     if (failures) {
         std::printf("%d FAILURE(S)\n", failures);

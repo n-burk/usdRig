@@ -29,13 +29,12 @@ namespace {
 // generation, and reports each way the two poses differ as a baked parity
 // mismatch (spec rule S6). The cone verifier cannot stand in for this: it
 // captures the program after the prologue, which is where a stale cache
-// would already have been read. Read once per process.
+// would already have been read. Read when a shadow is created: an
+// evaluator that already compiled does not grow one later.
 bool
 _ScopedClearShadowRequested()
 {
-    static const bool requested =
-        TfGetenvBool("RIGEXEC_VERIFY_SCOPED_CLEARS", false);
-    return requested;
+    return TfGetenvBool("RIGEXEC_VERIFY_SCOPED_CLEARS", false);
 }
 
 /// Destroys a program the evaluator has replaced, off this thread.

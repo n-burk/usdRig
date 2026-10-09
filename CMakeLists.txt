@@ -793,16 +793,8 @@ target_compile_definitions(testRigExecRuntimePose PRIVATE
     RIGEXEC_EXAMPLES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/examples")
 add_test(NAME testRigExecRuntimePose COMMAND testRigExecRuntimePose
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
-add_test(NAME testRigExecRuntimeAutoClavicle COMMAND testRigExecRuntimePose
-    --auto-clavicle "${CMAKE_CURRENT_SOURCE_DIR}/examples")
-# The same suite baked with every step in its own cluster, so a drag at a
-# fixed frame reaches each step only through the dirtying owed to it (a
-# moved avar, an override flag, a moved chain result) and never through a
-# cluster it shares with another step.
-add_test(NAME testRigExecRuntimePoseFineClusters COMMAND testRigExecRuntimePose
-    "${CMAKE_CURRENT_SOURCE_DIR}/examples")
-set_tests_properties(testRigExecRuntimePoseFineClusters PROPERTIES
-    ENVIRONMENT "RIGEXEC_BAKED_GRAIN_US=0")
+# Grain 0, the serial executor, and the keyed auto-clavicle scenario run in
+# this process after the production pass. See the end of the test.
 
 add_executable(testRigExecRuntimeWeights tests/testRigExecRuntimeWeights.cpp)
 target_link_libraries(testRigExecRuntimeWeights PRIVATE rigExecRuntime rigExecBake rigExecSampler)
@@ -814,13 +806,8 @@ target_compile_definitions(testRigExecRuntimeWeights PRIVATE
     RIGEXEC_TEST_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures")
 add_test(NAME testRigExecRuntimeWeights COMMAND testRigExecRuntimeWeights
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
-# The same suite with every step in its own cluster, so a drag of one
-# volume's control reruns that volume's VolumePlacements step alone and the
-# other volume's placement is the one its skipped step kept.
-add_test(NAME testRigExecRuntimeWeightsFineClusters
-    COMMAND testRigExecRuntimeWeights "${CMAKE_CURRENT_SOURCE_DIR}/examples")
-set_tests_properties(testRigExecRuntimeWeightsFineClusters PROPERTIES
-    ENVIRONMENT "RIGEXEC_BAKED_GRAIN_US=0")
+# Grain 0 and the serial executor run in this process after the production
+# pass. The volume-placement drag is repeated at grain 0.
 
 add_executable(testRigExecRuntimeGeometry tests/testRigExecRuntimeGeometry.cpp)
 target_link_libraries(testRigExecRuntimeGeometry PRIVATE rigExecRuntime rigExecBake rigExecSampler)
@@ -831,12 +818,9 @@ target_compile_definitions(testRigExecRuntimeGeometry PRIVATE
     RIGEXEC_EXAMPLES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/examples")
 add_test(NAME testRigExecRuntimeGeometry COMMAND testRigExecRuntimeGeometry
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
-# The same suite baked with every step in its own cluster, so a skin chunk
-# runs only when a joint its key declares moves.
-add_test(NAME testRigExecRuntimeGeometryFineClusters
-    COMMAND testRigExecRuntimeGeometry "${CMAKE_CURRENT_SOURCE_DIR}/examples")
-set_tests_properties(testRigExecRuntimeGeometryFineClusters PROPERTIES
-    ENVIRONMENT "RIGEXEC_BAKED_GRAIN_US=0")
+# Grain 0 and the serial executor run in this process after the production
+# pass. Grain 0 rebakes the biped rows, where a skin chunk's key is the
+# only thing that runs that chunk.
 
 # Inputs set on a binary against the same values authored in the session
 # layer in native graph evaluation: example inputs, held
@@ -1119,6 +1103,11 @@ target_link_libraries(testRigExecBakedMode PRIVATE rigExec)
 target_compile_definitions(testRigExecBakedMode PRIVATE ${_rigexec_schema_resource_define})
 add_test(NAME testRigExecBakedMode COMMAND testRigExecBakedMode
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+# The suite runs with the scoped-clear shadow on, then repeats the example
+# sweep's large rigs and the two edit directions with parallel evaluation
+# off. A shadow mismatch is the baked-parity warning.
+set_tests_properties(testRigExecBakedMode PROPERTIES
+    FAIL_REGULAR_EXPRESSION "baked parity mismatch")
 
 add_executable(testRigExecBakedAttribute tests/testRigExecBakedAttribute.cpp)
 target_link_libraries(testRigExecBakedAttribute PRIVATE rigExec)
@@ -1438,16 +1427,13 @@ target_compile_definitions(testRigExecImagingFrameCache PRIVATE
     ${_rigexec_schema_resource_define} ${_rigexec_imaging_resource_define})
 add_test(NAME testRigExecImagingFrameCache COMMAND testRigExecImagingFrameCache
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
-add_test(NAME testRigExecImagingFrameCacheDefault COMMAND "${CMAKE_COMMAND}" -E env
-    --unset=RIGEXEC_BAKED_SCHEDULE
-    RIGEXEC_FRAME_CACHE=on RIGEXEC_ENABLE_PARALLEL_EVAL=1
-    "$<TARGET_FILE:testRigExecImagingFrameCache>"
-    "${CMAKE_CURRENT_SOURCE_DIR}/examples" --default-mode)
+# No second "default mode" process. The binary never reads --default-mode.
+# CI leaves RIGEXEC_BAKED_SCHEDULE unset, RIGEXEC_FRAME_CACHE defaults to on,
+# and parallel evaluation defaults to on, so that process repeated this one.
 
 foreach(_rigexec_plugin_test testRigExecFrameCacheCones_Verify
         testRigExecFrozenContext
-        testRigExecImagingFrameCache
-        testRigExecImagingFrameCacheDefault)
+        testRigExecImagingFrameCache)
     set_property(TEST ${_rigexec_plugin_test} APPEND PROPERTY
         ENVIRONMENT_MODIFICATION
         "PXR_PLUGINPATH_NAME=path_list_prepend:${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources"
@@ -1679,7 +1665,7 @@ foreach(_suite testRigExecInteractive testRigExecScopedClears
                testRigExecSkinTopology)
     rigexec_add_scoped_clear_test(${_suite} ${_suite})
 endforeach()
-foreach(_suite testRigExecBakedMode testRigExecValueEdits)
+foreach(_suite testRigExecValueEdits)
     rigexec_add_scoped_clear_test(${_suite} ${_suite}
         "${CMAKE_CURRENT_SOURCE_DIR}/examples")
 endforeach()
@@ -1687,13 +1673,12 @@ foreach(_suite testRigExecEpochRests testRigExecNoAuthoring)
     rigexec_add_digest_gate_test(${_suite} ${_suite}
         "${CMAKE_CURRENT_SOURCE_DIR}/examples")
 endforeach()
-foreach(_suite testRigExecArm testRigExecBakedMode testRigExecBakedSchedule
+foreach(_suite testRigExecArm
                testRigExecBinary
-               testRigExecFrameCacheCones_Verify testRigExecFrozenContext
-               testRigExecImaging testRigExecImagingPlayback
-               testRigExecNoAuthoring testRigExecRuntimeGeometry
-               testRigExecRuntimeLoader testRigExecRuntimePose
-               testRigExecRuntimeWeights testRigExecSolverBake
+               testRigExecFrameCacheCones_Verify
+               testRigExecImaging
+               testRigExecNoAuthoring
+               testRigExecRuntimeLoader testRigExecSolverBake
                testRigExecSolverStacking testRigExecVolumeWeights
                testRigExecWeightOverlay)
     rigexec_add_serial_test(${_suite}
@@ -2127,8 +2112,7 @@ endforeach()
 # 110s on a quiet 4-core host. Give each the whole ctest slot so that wait
 # is not starved and the 300s cap is not spent on a shared core.
 if(TEST testRigExecImagingFrameCache)
-    set_tests_properties(testRigExecImagingFrameCache
-        testRigExecImagingFrameCacheDefault PROPERTIES PROCESSORS 4)
+    set_tests_properties(testRigExecImagingFrameCache PROPERTIES PROCESSORS 4)
 endif()
 
 # Install

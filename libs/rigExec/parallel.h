@@ -8,14 +8,17 @@ namespace rigExec {
 
 /// Whether rigExec may spread its own work across threads.
 ///
-/// Backed by the TfEnvSetting RIGEXEC_ENABLE_PARALLEL_EVAL, default true.
-/// Every parallel region this library opens -- the compile-time structure
-/// digest, the compile-time exec warm-up, the per-point geometry kernels and
-/// the per-chain tasks of a parallel-safe chain level -- asks here first, so
-/// a threading regression can be bisected to rigExec
-/// by one setting. PXR_WORK_THREAD_LIMIT cannot answer that question: it also
-/// serialises exec's own compilation and scheduling, so a run with it set
-/// differs from the one being diagnosed in more ways than the one under test.
+/// Read live from RIGEXEC_ENABLE_PARALLEL_EVAL, default true. The TfEnvSetting
+/// of the same name still warns when the variable is set at startup. Every
+/// parallel region this library opens -- the compile-time structure digest,
+/// the compile-time exec warm-up, the per-point geometry kernels and the
+/// per-chain tasks of a parallel-safe chain level -- asks here first, so a
+/// threading regression can be bisected to rigExec by one setting.
+/// PXR_WORK_THREAD_LIMIT cannot answer that question: it also serialises
+/// exec's own compilation and scheduling, so a run with it set differs from
+/// the one being diagnosed in more ways than the one under test. A program
+/// already built keeps the clusters from that build; a later change of this
+/// switch is seen by the next compile and by execute.
 bool RigExecParallelEvaluationEnabled();
 
 /// Whether this thread is running a frozen frame inside a frozen serial

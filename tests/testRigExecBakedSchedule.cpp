@@ -36,6 +36,7 @@
 #include "rigExec/frozenContext.h"
 #include "rigExec/frameCacheSparsity.h"
 #include "rigExec/parallel.h"
+#include "serialPoseCompare.h"
 #include "rigExec/moverGraph.h"
 #include "rigExecMath/dualQuat.h"
 #include "rigExecMath/simdKernels.h"
@@ -4797,6 +4798,57 @@ main(int argc, char **argv)
     TestANonFiniteValueIsNotAConeMismatch(
         examplesDir + "/biped/Biped.usda", TfToken("inputs:defaultWeight"),
         VtValue(std::nanf("")));
+    // The graph, cone, and validator checks do not execute. The serial
+    // executor is what this pass covers: the mode mapping, the runs, and
+    // the chunked skin path.
+    {
+        rigExecTest::EnvOverride serialEval("RIGEXEC_ENABLE_PARALLEL_EVAL",
+                                            "0");
+        TestTheModeIsTheOneTheEnvironmentAsked();
+        TestTheDerivedCompareAgreesWithTheElementwiseOne(
+            examplesDir + "/biped/Biped.usda");
+        TestARebuiltProgramKeepsItsRunState(
+            examplesDir + "/biped/Biped.usda", "Biped");
+        TestARebuiltProgramKeepsItsRunState(
+            examplesDir + "/04_BlendShapeFace.usda", "04_BlendShapeFace");
+        TestARecompiledRigStillAgreesWithTheDynamicPath(
+            examplesDir + "/biped/Biped.usda", "Biped");
+        TestARecompiledRigStillAgreesWithTheDynamicPath(
+            examplesDir + "/04_BlendShapeFace.usda", "04_BlendShapeFace");
+        TestARepeatedTimeReExecutesNothing(examplesDir + "/biped/Biped.usda",
+                                           "Biped");
+        TestARepeatedTimeReExecutesNothing(
+            examplesDir + "/spider_legs_assembly_ref.usda", "spider_legs");
+        TestADragReturnedToItsValueExecutesNothing(
+            examplesDir + "/biped/Biped.usda",
+            SdfPath("/Biped/Rig/Main/Shot/Aux/Controls/M_Body"),
+            TfToken("avars:ty"));
+        TestAConstraintDragRunsOnlyItsCone(
+            examplesDir + "/biped/Biped.usda",
+            SdfPath("/Biped/Rig/Movers/twist_aims/elbowTwist_l_def_aim"),
+            TfToken("inputs:defaultWeight"));
+        TestALeafControlDragRunsOnlyItsCone(
+            examplesDir + "/biped/Biped.usda",
+            SdfPath("/Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/"
+                    "M_Chest/M_ChestTop/L_Shldr/L_UpArmSwing/L_UpArm/"
+                    "L_LoArm/L_Hand"),
+            TfToken("avars:rz"));
+        TestANonFiniteValueIsNotAConeMismatch(
+            examplesDir + "/biped/Biped.usda", TfToken("inputs:defaultWeight"),
+            VtValue(std::nanf("")));
+        TfSetenv("RIGEXEC_BAKED_CHUNK_ALWAYS", "1");
+        TestARejectedSkinPacketPassesThroughLikeTheDynamicPath(
+            examplesDir + "/biped/Biped.usda", "a non-finite defaultWeight",
+            TfToken("inputs:defaultWeight"), VtValue(std::nanf("")));
+        TestARejectedSkinPacketPassesThroughLikeTheDynamicPath(
+            examplesDir + "/biped/Biped.usda", "a non-finite jointWeight",
+            TfToken("rigExec:jointWeights"), VtValue(VtFloatArray()));
+        TestADualQuaternionSkinChunksLikeTheDynamicPath(
+            examplesDir + "/biped/Biped.usda");
+        TestAStalePartitionRunsTheRevisionWhole(
+            examplesDir + "/biped/Biped.usda");
+        TfSetenv("RIGEXEC_BAKED_CHUNK_ALWAYS", "0");
+    }
     if (failures) {
         std::printf("%d FAILURE(S)\n", failures);
         return 1;

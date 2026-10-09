@@ -25,6 +25,7 @@
 #include "rigExecSampler/inputSampler.h"
 #include "pxr/usd/sdf/types.h"
 #include "rigExecExampleFixtures.h"
+#include "serialPoseCompare.h"
 
 #include "pxr/base/plug/registry.h"
 #include "pxr/base/tf/getenv.h"
@@ -2586,6 +2587,58 @@ _TestS9ExportedPlacementCycle(const std::string &fixture)
     std::printf("S9 NoEquivalent: original exported Final placement SCC, invalid publication and independent Base property\n");
 }
 
+static void
+_ReplayBipedFixtures(const std::string &examplesDir, const char *suffix)
+{
+    for (const RigExecExampleFixture &fixture : kRigExecExampleFixtures) {
+        if (!fixture.bakesToday || !rigExecTest::StageIsBiped(fixture.stage)) {
+            continue;
+        }
+        const std::vector<double> frames = _ParseFrames(fixture.frames);
+        CHECK(!frames.empty());
+        if (frames.empty()) {
+            continue;
+        }
+        _TestFixture(std::string(fixture.stage) + suffix,
+                     examplesDir + "/" + fixture.stage, frames,
+                     std::string(fixture.animation) == "static");
+    }
+}
+
+static void
+_CheckSerialSamples(const std::string &examplesDir)
+{
+    for (const RigExecExampleFixture &fixture : kRigExecExampleFixtures) {
+        if (!fixture.bakesToday ||
+            !rigExecTest::StageIsSerialSample(fixture.stage)) {
+            continue;
+        }
+        std::vector<double> frames = _ParseFrames(fixture.frames);
+        CHECK(!frames.empty());
+        if (frames.empty()) {
+            continue;
+        }
+        if (std::string(fixture.animation) == "static") {
+            frames = {frames.front()};
+        }
+        const UsdStageRefPtr stage =
+            UsdStage::Open(examplesDir + "/" + fixture.stage);
+        CHECK(stage);
+        if (!stage) {
+            continue;
+        }
+        const std::string diff =
+            rigExecTest::SerialPoseMatchesParallel(stage, frames);
+        if (!diff.empty()) {
+            ++failures;
+            std::printf("serial pose %s: %s\n", fixture.stage, diff.c_str());
+        } else {
+            std::printf("serial pose %s: matches the parallel evaluator\n",
+                        fixture.stage);
+        }
+    }
+}
+
 int
 main(int argc, char **argv)
 {
@@ -2620,6 +2673,16 @@ main(int argc, char **argv)
                      frames, std::string(fixture.animation) == "static");
     }
     _TestS9ExportedPlacementCycle(examplesDir + "/../tests/fixtures/oneloop_s9_envelope_volumes.usda");
+    // Grain 0 changes the baked bytes. The biped rows exercise singleton
+    // clusters on the large graph, and the volume drag asserts that the
+    // unrelated volume's step stays skipped at that grain too.
+    {
+        rigExecTest::EnvOverride grain("RIGEXEC_BAKED_GRAIN_US", "0");
+        _TestVolumePlacementDrags(std::string(RIGEXEC_TEST_FIXTURES_DIR) +
+                                  "/volume_placements.usda");
+        _ReplayBipedFixtures(examplesDir, " grain 0");
+    }
+    _CheckSerialSamples(examplesDir);
     CHECK(sawBaking);
 
     if (failures == 0) {

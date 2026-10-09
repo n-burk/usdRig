@@ -25,11 +25,12 @@ enum class RigExecBakedScheduleMode {
     Parallel,
 };
 
-/// The mode RIGEXEC_BAKED_SCHEDULE asks for, read once.
+/// The mode RIGEXEC_BAKED_SCHEDULE asks for, read on each call.
 ///
 /// Forced to Serial when RigExecParallelEvaluationEnabled() is false: the
 /// one switch every parallel region in this library is behind answers for
-/// this one too.
+/// this one too. A program already built keeps the executor it was compiled
+/// with; production leaves the variable alone.
 RigExecBakedScheduleMode RigExecBakedScheduleModeFromEnvironment();
 
 /// Whether \p program's step graph is one every executor may trust, which
@@ -97,6 +98,7 @@ void RigExecBakedAssignStepCosts(RigExecBakedProgramImpl *program,
 
 /// The grain Build uses: RIGEXEC_BAKED_GRAIN_US when it is set, and
 /// otherwise `clamp(total cost / (4 x concurrency), 5us, 50us)`.
+/// Read on each call. Clustering is fixed when the program is built.
 double RigExecBakedScheduleGrainUs(double totalCost);
 
 /// The clusters of \p clustering, each after all of its predecessors.

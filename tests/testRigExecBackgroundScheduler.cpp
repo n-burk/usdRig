@@ -39,10 +39,9 @@
 //     nothing; the unlimited default preserves the full burst shape.
 // Two process modes: most tests force RIGEXEC_FRAME_CACHE=on (live-read) and
 // run the warm path, skipping with a note when the ambient
-// RIGEXEC_ENABLE_PARALLEL_EVAL=0 closes the gate -- that cached switch cannot
-// be flipped in-process, so its off mode is covered by the fallback test plus
-// the validation-plan runs of this binary under =0. The fallback test forces
-// the gate closed and passes in every ambient mode.
+// RIGEXEC_ENABLE_PARALLEL_EVAL=0 closes the gate. The serial ctest starts
+// with that switch off. The fallback test forces the frame-cache gate closed
+// and passes in every ambient mode.
 #include "rigExec/backgroundScheduler.h"
 #include "rigExec/frozenContext.h"
 #include "rigExec/parallel.h"
@@ -314,7 +313,7 @@ TestFrameCacheModeReadsLiveFromTheEnvironment()
               RigExecFrameCacheMode::On);
     }
     // The environment-ambient gate agrees with the pure gate fed the live
-    // mode and the library's cached parallel switch.
+    // mode and the live parallel switch.
     ScopedFrameCacheMode on("on");
     CHECK(RigExecBackgroundWarmingEnabled() ==
           RigExecBackgroundWarmingEnabled(

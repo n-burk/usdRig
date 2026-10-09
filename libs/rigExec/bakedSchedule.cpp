@@ -137,18 +137,15 @@ RigExecBakedStepKindName(RigExecBakedStepKind kind)
 RigExecBakedScheduleMode
 RigExecBakedScheduleModeFromEnvironment()
 {
-    // Read once. A mode that could change between two frames of one session
-    // would make "the same program produced two different traces" a question
-    // about when the variable was read rather than about the schedule.
-    static const RigExecBakedScheduleMode mode = [] {
-        if (!RigExecParallelEvaluationEnabled()) {
-            return RigExecBakedScheduleMode::Serial;
-        }
-        return TfGetenv("RIGEXEC_BAKED_SCHEDULE", "parallel") == "parallel"
-                   ? RigExecBakedScheduleMode::Parallel
-                   : RigExecBakedScheduleMode::Serial;
-    }();
-    return mode;
+    // Read on each call. A built program keeps the executor it was compiled
+    // with, so two frames of one session still share a trace while the
+    // variable stays put. Production leaves it alone.
+    if (!RigExecParallelEvaluationEnabled()) {
+        return RigExecBakedScheduleMode::Serial;
+    }
+    return TfGetenv("RIGEXEC_BAKED_SCHEDULE", "parallel") == "parallel"
+               ? RigExecBakedScheduleMode::Parallel
+               : RigExecBakedScheduleMode::Serial;
 }
 
 bool
@@ -569,19 +566,13 @@ RigExecBakedAssignStepCosts(RigExecBakedProgramImpl *program,
 double
 RigExecBakedScheduleGrainUs(double totalCost)
 {
-    // Read once: a grain that could move between two frames of one session
-    // would make "the program produced two schedules" a question about when
-    // the variable was read.
-    static const double override = [] {
-        const std::string text = TfGetenv("RIGEXEC_BAKED_GRAIN_US", "");
-        if (text.empty()) {
-            return -1.0;
-        }
+    // Read on each call. The clusters are fixed when the program is built,
+    // so a grain that moves is seen by the next Build, not by a program
+    // already in hand. Production leaves the variable alone.
+    const std::string text = TfGetenv("RIGEXEC_BAKED_GRAIN_US", "");
+    if (!text.empty()) {
         const double value = std::strtod(text.c_str(), nullptr);
         return value < 0 ? 0.0 : value;
-    }();
-    if (override >= 0) {
-        return override;
     }
     const double concurrency =
         double(std::max<size_t>(WorkGetConcurrencyLimit(), 1));

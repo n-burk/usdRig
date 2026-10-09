@@ -20,6 +20,7 @@
 #include "rigExecImaging/playback.h"
 #include "rigExecImaging/registry.h"
 #include "rigExecExampleFixtures.h"
+#include "serialPoseCompare.h"
 
 #include "pxr/base/plug/registry.h"
 #include "pxr/usd/sdf/assetPath.h"
@@ -445,6 +446,50 @@ main(int argc, char **argv)
     std::printf("playback: %d of %d baking row(s) compared at %d time(s)\n",
                 comparedRows, bakingRows, comparedTimes);
     CHECK(comparedRows == bakingRows);
+    // The live bridge evaluates. Serial pose parity on the bipeds covers
+    // that executor on the large meshes. One small fixture is baked and
+    // played again with the switch off, which is the bridge and playback
+    // path under the serial executor. Bake bytes do not depend on the switch.
+    for (const RigExecExampleFixture &fixture : kRigExecExampleFixtures) {
+        if (!fixture.bakesToday || !rigExecTest::StageIsBiped(fixture.stage)) {
+            continue;
+        }
+        std::vector<double> frames = _ParseFrames(fixture.frames);
+        CHECK(!frames.empty());
+        if (frames.empty()) {
+            continue;
+        }
+        if (std::string(fixture.animation) == "static") {
+            frames = {frames.front()};
+        }
+        const std::string stagePath =
+            (std::filesystem::path(argv[1]) / fixture.stage).string();
+        const UsdStageRefPtr stage = UsdStage::Open(stagePath);
+        CHECK(stage);
+        if (!stage) {
+            continue;
+        }
+        const std::string diff =
+            rigExecTest::SerialPoseMatchesParallel(stage, frames);
+        if (!diff.empty()) {
+            ++failures;
+            std::printf("serial pose %s: %s\n", fixture.stage, diff.c_str());
+        }
+    }
+    {
+        rigExecTest::EnvOverride serialEval("RIGEXEC_ENABLE_PARALLEL_EVAL",
+                                            "0");
+        for (const RigExecExampleFixture &fixture : kRigExecExampleFixtures) {
+            if (!fixture.bakesToday ||
+                std::string(fixture.stage) != "01_FkChainTail.usda") {
+                continue;
+            }
+            const std::string stagePath =
+                (std::filesystem::path(argv[1]) / fixture.stage).string();
+            _TestFixture(stagePath, fixture.frames, fixture.operatorPrim,
+                         fixture.animation, scratch);
+        }
+    }
     if (failures == 0) {
         std::printf("testRigExecImagingPlayback: all tests passed\n");
     } else {

@@ -14,6 +14,7 @@
 #include "rigExecRuntime/runtime.h"
 #include "rigExecRuntime/poseInternal.h"
 #include "rigExecExampleFixtures.h"
+#include "serialPoseCompare.h"
 
 #include "pxr/base/gf/rotation.h"
 #include "pxr/base/plug/registry.h"
@@ -5520,6 +5521,58 @@ TestAnimatedAutoClavicle(const std::string &examplesDir)
     _TestStage("animated auto clavicle FK/IK and limb inputs",stage,{1,2,3,4,2,1});
 }
 
+static void
+_ReplayBipedFixtures(const std::string &examplesDir, const char *suffix)
+{
+    for (const RigExecExampleFixture &fixture : kRigExecExampleFixtures) {
+        if (!fixture.bakesToday || !rigExecTest::StageIsBiped(fixture.stage)) {
+            continue;
+        }
+        const std::vector<double> frames = _ParseFrames(fixture.frames);
+        CHECK(!frames.empty());
+        if (frames.empty()) {
+            continue;
+        }
+        _TestFixture(std::string(fixture.stage) + suffix,
+                     examplesDir + "/" + fixture.stage, frames,
+                     std::string(fixture.animation) == "static");
+    }
+}
+
+static void
+_CheckSerialSamples(const std::string &examplesDir)
+{
+    for (const RigExecExampleFixture &fixture : kRigExecExampleFixtures) {
+        if (!fixture.bakesToday ||
+            !rigExecTest::StageIsSerialSample(fixture.stage)) {
+            continue;
+        }
+        std::vector<double> frames = _ParseFrames(fixture.frames);
+        CHECK(!frames.empty());
+        if (frames.empty()) {
+            continue;
+        }
+        if (std::string(fixture.animation) == "static") {
+            frames = {frames.front()};
+        }
+        const UsdStageRefPtr stage =
+            UsdStage::Open(examplesDir + "/" + fixture.stage);
+        CHECK(stage);
+        if (!stage) {
+            continue;
+        }
+        const std::string diff =
+            rigExecTest::SerialPoseMatchesParallel(stage, frames);
+        if (!diff.empty()) {
+            ++failures;
+            std::printf("serial pose %s: %s\n", fixture.stage, diff.c_str());
+        } else {
+            std::printf("serial pose %s: matches the parallel evaluator\n",
+                        fixture.stage);
+        }
+    }
+}
+
 int
 main(int argc, char **argv)
 {
@@ -5593,6 +5646,18 @@ main(int argc, char **argv)
         _TestFixture(fixture.stage, stagePath, frames,
                      std::string(fixture.animation) == "static");
     }
+    // Grain 0 changes the baked bytes, so the biped rows are baked and
+    // played again. Phased cones assert cluster counts only at this grain.
+    {
+        rigExecTest::EnvOverride grain("RIGEXEC_BAKED_GRAIN_US", "0");
+        TestPhasedRigsRunCones(examplesDir);
+        _ReplayBipedFixtures(examplesDir, " grain 0");
+    }
+    // Serial evaluator against the parallel pose. The runtime reader does
+    // not consult the switch, and the production pass already matched that
+    // pose to the runtime play.
+    _CheckSerialSamples(examplesDir);
+    TestAnimatedAutoClavicle(examplesDir);
     CHECK(sawBaking);
     CHECK(checkedSolverSemanticRequirements);
     CHECK(checkedRefreshRecords && checkedRefreshCarries && checkedRefreshGuards);

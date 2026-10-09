@@ -22,6 +22,7 @@
 // USD handle cannot be -- and the purity audit names every unit the frozen
 // path was checked against.
 #include "rigExec/frozenContext.h"
+#include "serialPoseCompare.h"
 #include "rigExec/frozenContextInternal.h"
 #include "rigExec/backgroundScheduler.h"
 #include "rigExec/bakedProgram.h"
@@ -7028,6 +7029,17 @@ main(int argc, char **argv)
     TestBindIntoNullDeclines();
     TestStaleChainBindingsDeclineSampling();
     TestBurstBuildIntoNullDeclines();
+    // The frozen worker is already serial. This pass is the live evaluator
+    // with parallel evaluation off, on the large rigs and one small mesh.
+    if (argc > 1) {
+        rigExecTest::EnvOverride serialEval("RIGEXEC_ENABLE_PARALLEL_EVAL",
+                                            "0");
+        TestBipedWarmsBitIdentical(argv[1]);
+        TestBipedWarmsBitIdenticalAtSweepDistance(argv[1]);
+        TestStackAnimWarmsBitIdentical(argv[1]);
+        TestStackAnimWarmsBitIdenticalAtSweepDistance(argv[1]);
+        Test9MeshWarmsBitIdentical();
+    }
 
     if (failures) {
         std::printf("%d FAILURE(S)\n", failures);

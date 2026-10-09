@@ -2,6 +2,7 @@
 #include "parallel.h"
 
 #include "pxr/base/tf/envSetting.h"
+#include "pxr/base/tf/getenv.h"
 
 PXR_NAMESPACE_USING_DIRECTIVE
 
@@ -23,7 +24,11 @@ namespace rigExec {
 bool
 RigExecParallelEvaluationEnabled()
 {
-    return TfGetEnvSetting(RIGEXEC_ENABLE_PARALLEL_EVAL);
+    // Live read. TfGetEnvSetting caches the first value for the process,
+    // which would freeze a suite that runs the serial executor after the
+    // parallel one. The env setting above still warns when the variable is
+    // set at startup.
+    return TfGetenvBool("RIGEXEC_ENABLE_PARALLEL_EVAL", true);
 }
 
 }  // namespace rigExec
