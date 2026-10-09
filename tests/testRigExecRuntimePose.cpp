@@ -12,6 +12,7 @@
 #include "rigExecBinary/format.h"
 #include "rigExecMath/propertyMath.h"
 #include "rigExecRuntime/runtime.h"
+#include "rigExecRuntime/opGraph.h"
 #include "rigExecRuntime/poseInternal.h"
 #include "rigExecExampleFixtures.h"
 
@@ -5604,6 +5605,213 @@ TestRunTraceOrder()
     }
 }
 
+// Publishes one value in place and, beside it, through RrOpValueKey: both
+// must report \p changed and leave the same revision, and the stored key
+// must be the key the value has now.
+static bool
+_PublishSmallBothWays(const RrProgram &program, RigExecOpValueState *typed,
+                      RigExecOpValueState *keyed, bool changed)
+{
+    const bool small = RrPublishSmallValue(&program, typed);
+    RigExecOpPublishValue(keyed, [&](uint32_t d, uint32_t slot, std::string *key) {
+        RrOpValueKey(&program, d, slot, key);
+    });
+    std::string now;
+    RrOpValueKey(&program, typed->domain, typed->slot, &now);
+    return small && typed->initialized && typed->changed == char(changed) &&
+           keyed->changed == char(changed) && typed->revision == keyed->revision &&
+           typed->key == keyed->key && typed->key == now;
+}
+
+// \p set writes case k (a value, +0, -0, two NaN payloads) into one
+// floating field of value (\p domain, \p slot); \p other then moves another
+// field. Each publication agrees with the key's and moves exactly when the
+// bytes do.
+template <class Set, class Other>
+static void
+_CheckSmallValue(const RrProgram &program, RigExecWireSlotDomain domain,
+                 uint32_t slot, Set set, Other other, const char *what)
+{
+    RigExecOpValueState typed, keyed;
+    typed.domain = keyed.domain = uint32_t(domain);
+    typed.slot = keyed.slot = slot;
+    const std::pair<int, bool> steps[] = {{0, true}, {0, false}, {1, true},
+        {2, true}, {2, false}, {3, true}, {3, false}, {4, true}, {0, true}};
+    int step = 0;
+    for (const auto &entry : steps) {
+        set(entry.first);
+        if (!_PublishSmallBothWays(program, &typed, &keyed, entry.second)) {
+            ++failures;
+            std::printf("FAIL small value %s, step %d\n", what, step);
+        }
+        ++step;
+    }
+    other();
+    if (!_PublishSmallBothWays(program, &typed, &keyed, true) ||
+        !_PublishSmallBothWays(program, &typed, &keyed, false)) {
+        ++failures;
+        std::printf("FAIL small value %s, other field\n", what);
+    }
+    // Six moves in the sequence and the other field's.
+    if (typed.revision != 7) {
+        ++failures;
+        std::printf("FAIL small value %s: revision %llu\n", what,
+                    (unsigned long long)typed.revision);
+    }
+}
+
+// A value the in-place publication refuses is left as it was.
+static bool
+_RefusesSmall(const RrProgram &program, RigExecWireSlotDomain domain,
+              uint32_t slot)
+{
+    RigExecOpValueState value;
+    value.domain = uint32_t(domain);
+    value.slot = slot;
+    value.key = "kept";
+    value.revision = 5;
+    value.initialized = true;
+    value.changed = 0;
+    return !RrPublishSmallValue(&program, &value) && value.key == "kept" &&
+           value.revision == 5 && value.initialized && value.changed == 0;
+}
+
+// The runtime's fixed-size values publish in place with RrOpValue's bytes,
+// the same flags and revisions, over a hand-assembled store: signed zeros
+// and NaN payloads in every floating field kind, the staged frame of a
+// split commit, and every unboxed provider alternative. Avars, strings,
+// vectors, error text and slots past the tables go through the key.
+static void
+TestSmallValuePublication()
+{
+    using D = RigExecWireSlotDomain;
+    double doubles[5] = {1.5, 0.0, -0.0, 0.0, 0.0};
+    float floats[5] = {1.5f, 0.0f, -0.0f, 0.0f, 0.0f};
+    const uint64_t nan1 = 0x7ff8000000000001ull, nan2 = 0xfff8000000000002ull;
+    const uint32_t fnan1 = 0x7fc00001u, fnan2 = 0xffc00002u;
+    std::memcpy(&doubles[3], &nan1, sizeof(double));
+    std::memcpy(&doubles[4], &nan2, sizeof(double));
+    std::memcpy(&floats[3], &fnan1, sizeof(float));
+    std::memcpy(&floats[4], &fnan2, sizeof(float));
+
+    // Staging slot 4 is the second pair of commit 1, based at 3; commit 0
+    // propagates nothing and owns no slot.
+    fb::RigExecWireDomainPose pose;
+    pose.commits.resize(2);
+    pose.commits[1].split = true;
+    pose.commits[1].stagingBase = 3;
+    pose.commits[1].propagate.resize(2);
+    RrProgram program;
+    program.poses = &pose;
+    RrStore &s = program.store;
+
+    s.base.resize(2);
+    s.fin.resize(2);
+    _CheckSmallValue(program, D::PoseBase, 1,
+        [&](int k) { s.base[1].points[2][1] = doubles[k]; },
+        [&] { s.base[1].flags ^= 0x10u; }, "PoseBase");
+    _CheckSmallValue(program, D::PoseFin, 1,
+        [&](int k) { s.fin[1].points[0][0] = doubles[k]; },
+        [&] { s.fin[1].flags ^= 0x10u; }, "PoseFin");
+    const auto matrices = [&](D domain, std::vector<RrMat4d> *values,
+                              const char *what) {
+        values->assign(2, RrMat4d(1.0));
+        _CheckSmallValue(program, domain, 1,
+            [&](int k) { (*values)[1][3][1] = doubles[k]; },
+            [&] { (*values)[1][0][0] = 2.0; }, what);
+    };
+    matrices(D::PosedM, &s.posedM, "PosedM");
+    matrices(D::FinalMatrix, &s.finalMatrix, "FinalMatrix");
+    matrices(D::BaseMatrix, &s.baseMatrix, "BaseMatrix");
+    matrices(D::SwitchFrame, &s.switchFrames, "SwitchFrame");
+    s.poseWeights.assign(2, 0.5f);
+    _CheckSmallValue(program, D::PoseWeight, 1,
+        [&](int k) { s.poseWeights[1] = floats[k]; },
+        [&] { s.poseWeights[1] = 3.0f; }, "PoseWeight");
+    const auto flagged = [&](D domain, std::vector<char> *flags,
+                             std::vector<RrMat4d> *values, const char *what) {
+        flags->assign(2, 1);
+        values->assign(2, RrMat4d(1.0));
+        _CheckSmallValue(program, domain, 1,
+            [&](int k) { (*values)[1][2][0] = doubles[k]; },
+            [&] { (*flags)[1] = 0; }, what);
+    };
+    flagged(D::ConstraintDelta, &s.deltaPresent, &s.deltaValues, "ConstraintDelta");
+    flagged(D::WeightFrames, &s.volumePlaced, &s.volumePlacement, "WeightFrames");
+    flagged(D::WeightFramesBase, &s.volumePlacedBase, &s.volumePlacementBase,
+            "WeightFramesBase");
+    flagged(D::FrameMatrix, &s.frameMatrixValid, &s.frameMatrix, "FrameMatrix");
+    s.commits.resize(2);
+    s.commits[0].staged.resize(8);
+    s.commits[0].outcome.assign(8, 0);
+    s.commits[1].staged.resize(2);
+    s.commits[1].outcome.assign(2, 0);
+    _CheckSmallValue(program, D::CommitStaging, 4,
+        [&](int k) { s.commits[1].staged[1].points[3][2] = doubles[k]; },
+        [&] { s.commits[1].outcome[1] = 2; }, "CommitStaging");
+
+    // A provider value per unboxed alternative, then its flags.
+    s.providerValues.resize(2);
+    RigExecProviderPlainState &space = s.providerValues[1];
+    space.initialized = true;
+    space.count = 1;
+    _CheckSmallValue(program, D::SpaceValue, 1, [&](int k) {
+        space.value.emplace<std::array<double, 16>>();
+        std::get<std::array<double, 16>>(space.value)[7] = doubles[k];
+    }, [&] { space.blocked = !space.blocked; }, "SpaceValue matrix");
+    _CheckSmallValue(program, D::SpaceValue, 1,
+        [&](int k) { space.value.emplace<double>(doubles[k]); },
+        [&] { space.authoritative = !space.authoritative; }, "SpaceValue double");
+    _CheckSmallValue(program, D::SpaceValue, 1,
+        [&](int k) { space.value.emplace<float>(floats[k]); },
+        [&] { space.count = 3; }, "SpaceValue float");
+    _CheckSmallValue(program, D::SpaceValue, 1, [&](int k) {
+        space.value.emplace<std::array<double, 3>>(
+            std::array<double, 3>{{1.0, doubles[k], -2.0}});
+    }, [&] { space.initialized = !space.initialized; }, "SpaceValue vector");
+    _CheckSmallValue(program, D::SpaceValue, 1, [&](int k) {
+        space.value.emplace<std::array<float, 3>>(
+            std::array<float, 3>{{floats[k], 1.0f, 2.0f}});
+    }, [&] { space.count = 4; }, "SpaceValue float vector");
+    _CheckSmallValue(program, D::SpaceValue, 1, [&](int k) {
+        RigExecProviderPlainFrame frame{};
+        frame.points[3][0] = doubles[k];
+        space.value.emplace<RigExecProviderPlainFrame>(frame);
+    }, [&] { std::get<RigExecProviderPlainFrame>(space.value).flags ^= 0x10u; },
+       "SpaceValue frame");
+    {
+        // An empty value keys its flags and index alone.
+        space.value.emplace<std::monostate>();
+        RigExecOpValueState typed, keyed;
+        typed.domain = keyed.domain = uint32_t(D::SpaceValue);
+        typed.slot = keyed.slot = 1;
+        CHECK(_PublishSmallBothWays(program, &typed, &keyed, true));
+        CHECK(_PublishSmallBothWays(program, &typed, &keyed, false));
+        space.count = 5;
+        CHECK(_PublishSmallBothWays(program, &typed, &keyed, true) &&
+              typed.revision == 2);
+    }
+
+    space.value.emplace<std::string>("a");
+    CHECK(_RefusesSmall(program, D::SpaceValue, 1));
+    space.value.emplace<std::vector<float>>(std::vector<float>{1.0f});
+    CHECK(_RefusesSmall(program, D::SpaceValue, 1));
+    space.value.emplace<double>(1.0);
+    space.error = "unavailable";
+    CHECK(_RefusesSmall(program, D::SpaceValue, 1));
+    CHECK(_RefusesSmall(program, D::SpaceValue, 2));
+    s.avars.assign(22, 0.25);
+    CHECK(_RefusesSmall(program, D::Avars, 1));
+    CHECK(_RefusesSmall(program, D::PoseFin, 2) &&
+          _RefusesSmall(program, D::PosedM, 2) &&
+          _RefusesSmall(program, D::PoseWeight, 2) &&
+          _RefusesSmall(program, D::FrameMatrix, 2));
+    CHECK(_RefusesSmall(program, D::CommitStaging, 7) &&
+          _RefusesSmall(program, D::CommitStaging, 2));
+    s.commits[1].outcome.resize(1);
+    CHECK(_RefusesSmall(program, D::CommitStaging, 4));
+}
+
 static void
 TestAnimatedAutoClavicle(const std::string &examplesDir)
 {
@@ -5661,6 +5869,7 @@ main(int argc, char **argv)
     TestComputedChainsFixture();
     TestIkSpaceFixture();
     TestFrameMatrixGates();
+    TestSmallValuePublication();
     TestUnusableComposedRestUsesLocalMatrixFallback();
     TestSpaceRestMovesWithItsRests();
     TestRepeatedSetRunsNothing();

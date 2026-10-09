@@ -557,6 +557,85 @@ void RigExecBakedOpValueKey(const RigExecBakedProgramImpl &B,
     }
     bad();
 }
+namespace {
+// The largest layout below, a SpaceValue holding a matrix, is 157 bytes.
+using SmallKey=RigExecOpSmallKey<192>;
+// Put's bytes for a frame: its flags, then each point's three doubles.
+void PutSmall(SmallKey *out,const RigExecPointFrame &v)
+{
+    out->Append(v.flags); for(const auto &point:v.points) out->Append(point);
+}
+}
+bool RigExecBakedPublishSmallValue(const RigExecBakedProgramImpl &B,RigExecOpValueState *value)
+{
+    using D=RigExecBakedSlotDomain;
+    const D domain=D(value->domain); const uint32_t slot=value->slot;
+    // RigExecBakedOpValueKey's fields in its order, only for the slots it
+    // keys without failing. Put writes each of these fields as its object
+    // bytes (the vectors and the matrix are padding-free, asserted above).
+    SmallKey key; key.Append(uint8_t(1)); key.Append(domain);
+    const auto matrix=[&](const std::vector<GfMatrix4d> &values) {
+        if(slot>=values.size()) return false;
+        key.Append(values[slot]); return true;
+    };
+    bool keyed=false;
+    switch(domain) {
+    case D::Avars:
+        if(uint64_t(slot)*11+11>B.avars.size()) break;
+        for(size_t i=size_t(slot)*11;i<size_t(slot)*11+11;++i) key.Append(B.avars[i]);
+        keyed=true; break;
+    case D::PoseBase: if(slot<B.base.size()) { PutSmall(&key,B.base[slot]); keyed=true; } break;
+    case D::PoseFin: if(slot<B.fin.size()) { PutSmall(&key,B.fin[slot]); keyed=true; } break;
+    case D::PosedM: keyed=matrix(B.posedM); break;
+    case D::FinalMatrix: keyed=matrix(B.finalMatrix); break;
+    case D::BaseMatrix: keyed=matrix(B.baseMatrix); break;
+    case D::SwitchFrame: keyed=matrix(B.switchFrames); break;
+    case D::WeightFrames: keyed=matrix(B.volumePlacement); break;
+    case D::WeightFramesBase: keyed=matrix(B.volumePlacementBase); break;
+    case D::PoseWeight:
+        if(slot<B.poseWeights.size()) { key.Append(B.poseWeights[slot]); keyed=true; } break;
+    case D::CommitStaging:
+        // The first commit owning the slot decides, as the key's walk does.
+        for(const auto &v:B.commits) if(v.split && v.stagingBase>=0 && slot>=uint32_t(v.stagingBase) &&
+            uint64_t(slot)-uint32_t(v.stagingBase)<v.staged.size()) {
+            const size_t i=slot-uint32_t(v.stagingBase);
+            if(i<v.outcome.size()) { PutSmall(&key,v.staged[i]); key.Append(v.outcome[i]); keyed=true; }
+            break;
+        }
+        break;
+    case D::ConstraintDelta:
+        if(slot<B.deltaValues.size() && slot<B.deltaPresent.size()) {
+            key.Append(B.deltaPresent[slot]); key.Append(B.deltaValues[slot]); keyed=true;
+        } break;
+    case D::FrameMatrix:
+        if(slot<B.frameMatrix.size() && slot<B.frameMatrixValid.size()) {
+            key.Append(B.frameMatrixValid[slot]); key.Append(B.frameMatrix[slot]); keyed=true;
+        } break;
+    case D::SpaceValue: {
+        // Error text, a token and a boxed value key by length or box: they
+        // go through the key.
+        if(slot>=B.providerValues.values.size()) break;
+        const auto &v=B.providerValues.values[slot];
+        if(!v.error.empty()) break;
+        key.Append(v.initialized); key.Append(v.authoritative); key.Append(v.blocked);
+        key.Append(uint64_t(v.count)); key.Append(uint64_t(0)); key.Append(uint64_t(v.value.index()));
+        keyed=std::visit([&](const auto &x) {
+            using T=std::decay_t<decltype(x)>;
+            if constexpr(std::is_same_v<T,RigExecPointFrame>) { PutSmall(&key,x); return true; }
+            else if constexpr(std::is_same_v<T,double> || std::is_same_v<T,float> ||
+                              std::is_same_v<T,GfVec3d> || std::is_same_v<T,GfMatrix4d>) {
+                key.Append(x); return true;
+            }
+            else return std::is_same_v<T,std::monostate>;
+        },v.value);
+        break;
+    }
+    default: break;
+    }
+    if(!keyed || key.overflow) return false;
+    RigExecOpPublishKeyBytes(value,key.bytes,key.size);
+    return true;
+}
 bool RigExecBakedSamePoints(const GfVec3f *a,size_t aCount,const GfVec3f *b,size_t bCount)
 {
     // GfVec3f is three floats with no padding (asserted above).

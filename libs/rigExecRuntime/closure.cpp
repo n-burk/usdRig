@@ -394,6 +394,79 @@ bool RrRunOpBody(RrProgram *p,size_t i,std::string *error)
 }
 }
 
+void RrOpValueKey(const RrProgram *p,uint32_t domain,uint32_t slot,std::string *key)
+{
+    key->clear(); RrOpValue(p,domain,slot,key);
+}
+bool RrPublishSmallValue(const RrProgram *p,RigExecOpValueState *value)
+{
+    const auto &s=p->store; const uint32_t slot=value->slot;
+    // RrOpValue's fields in its order, each as its object bytes. The
+    // largest layout, a SpaceValue holding a matrix, is 155 bytes.
+    RigExecOpSmallKey<192> key;
+    const auto frame=[&](const RrPointFrame &v) { key.Append(v.points); key.Append(v.flags); };
+    const auto matrix=[&](const std::vector<RrMat4d> &values) {
+        if(slot>=values.size()) return false;
+        key.Append(values[slot]); return true;
+    };
+    const auto flagged=[&](const std::vector<char> &flags,const std::vector<RrMat4d> &values) {
+        if(slot>=flags.size() || slot>=values.size()) return false;
+        key.Append(flags[slot]); key.Append(values[slot]); return true;
+    };
+    using D=RigExecWireSlotDomain;
+    bool keyed=false;
+    switch(D(value->domain)) {
+    case D::PoseBase: if(slot<s.base.size()) { frame(s.base[slot]); keyed=true; } break;
+    case D::PoseFin: if(slot<s.fin.size()) { frame(s.fin[slot]); keyed=true; } break;
+    case D::PosedM: keyed=matrix(s.posedM); break;
+    case D::FinalMatrix: keyed=matrix(s.finalMatrix); break;
+    case D::BaseMatrix: keyed=matrix(s.baseMatrix); break;
+    case D::SwitchFrame: keyed=matrix(s.switchFrames); break;
+    case D::PoseWeight:
+        if(slot<s.poseWeights.size()) { key.Append(s.poseWeights[slot]); keyed=true; } break;
+    case D::ConstraintDelta: keyed=flagged(s.deltaPresent,s.deltaValues); break;
+    case D::WeightFrames: keyed=flagged(s.volumePlaced,s.volumePlacement); break;
+    case D::WeightFramesBase: keyed=flagged(s.volumePlacedBase,s.volumePlacementBase); break;
+    case D::FrameMatrix: keyed=flagged(s.frameMatrixValid,s.frameMatrix); break;
+    case D::CommitStaging:
+        if(!p->poses) break;
+        // The first commit owning the slot decides, as RrOpValue's walk does.
+        for(size_t c=0;c<p->poses->commits.size();++c) {
+            const auto &wire=p->poses->commits[c];
+            if(slot<uint32_t(wire.stagingBase) || slot>=uint32_t(wire.stagingBase)+wire.propagate.size()) continue;
+            const auto k=slot-uint32_t(wire.stagingBase);
+            if(c<s.commits.size() && k<s.commits[c].staged.size() && k<s.commits[c].outcome.size()) {
+                frame(s.commits[c].staged[k]); key.Append(s.commits[c].outcome[k]); keyed=true;
+            }
+            break;
+        }
+        break;
+    case D::SpaceValue: {
+        // Error text, strings and vectors key by length: they go through
+        // the key.
+        if(slot>=s.providerValues.size()) break;
+        const auto &v=s.providerValues[slot];
+        if(!v.error.empty()) break;
+        key.Append(v.initialized); key.Append(v.authoritative); key.Append(v.blocked);
+        key.Append(v.count); key.Append(v.error.size()); key.Append(v.value.index());
+        keyed=std::visit([&](const auto &x) {
+            using T=std::decay_t<decltype(x)>;
+            if constexpr(std::is_same_v<T,RigExecProviderPlainFrame>) {
+                key.Append(x.points); key.Append(x.flags); return true;
+            }
+            else if constexpr(std::is_same_v<T,std::string> || RigExecOpKeyIsVector<T>::value) return false;
+            else if constexpr(std::is_same_v<T,std::monostate>) return true;
+            else { key.Append(x); return true; }
+        },v.value);
+        break;
+    }
+    default: break;
+    }
+    if(!keyed || key.overflow) return false;
+    RigExecOpPublishKeyBytes(value,key.bytes,key.size);
+    return true;
+}
+
 static bool RrCompileCommonGraph(RrProgram *p,std::string *error)
 {
     if(!p->file) {
@@ -668,7 +741,9 @@ bool RrExecuteOpGraph(RrProgram *p,bool force,std::string *error)
         last.swap(content);
     };
     const auto publish=[&](RigExecValueId id) {
-        auto &value=state.values[size_t(id)]; RigExecOpPublishValue(&value,sample);
+        // A fixed-size value compares in place; any other through its key.
+        auto &value=state.values[size_t(id)];
+        if(!RrPublishSmallValue(p,&value)) RigExecOpPublishValue(&value,sample);
         if(value.changed) state.changedLeaves.push_back(id);
         verifyChain(id);
     };
@@ -798,7 +873,7 @@ bool RrExecuteOpGraph(RrProgram *p,bool force,std::string *error)
             auto &v=state.values[size_t(id)];
             if(done && v.slot==done->slot && v.domain==uint32_t(RigExecWireSlotDomain::ChainDirty))
                 RigExecOpPublishValue(&v,[&](uint32_t,uint32_t,std::string *key){key->append(done->key);});
-            else RigExecOpPublishValue(&v,sample);
+            else if(!RrPublishSmallValue(p,&v)) RigExecOpPublishValue(&v,sample);
             verifyChain(id);
             if(v.domain==uint32_t(RigExecWireSlotDomain::RevisionDone)) done=&v;
             if(v.domain==uint32_t(RigExecWireSlotDomain::PropertyResult)) s.propertyVersionChanged[v.slot]=v.changed;

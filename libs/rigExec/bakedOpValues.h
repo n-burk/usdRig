@@ -13,6 +13,7 @@ namespace rigExec {
 bool RigExecExactSourceValueEqual(const PXR_NS::VtValue &, const PXR_NS::VtValue &);
 struct RigExecBakedProgramImpl;
 struct RigExecBakedStep;
+struct RigExecOpValueState;
 enum class RigExecBakedSlotDomain : uint8_t;
 /// Checked source/value identity mapping from an outgoing epoch to its replacement.
 /// Used only to re-encode exact retained Skin memos; values are never rewritten.
@@ -25,6 +26,14 @@ struct RigExecBakedOpIdentityRemap {
 /// typed equality or conservative change propagation in the graph adapter.
 void RigExecBakedOpValueKey(const RigExecBakedProgramImpl &,
     RigExecBakedSlotDomain, uint32_t slot, std::string *key);
+/// Publishes a fixed-size value -- pose frames, matrices, avars, staged
+/// frames, unboxed space values -- by building RigExecBakedOpValueKey's
+/// bytes on the stack and comparing them in place with the stored key:
+/// the flag, revision and key the string publication leaves, for values
+/// RigExecBakedOpValueKeyIsExact calls exact. False, with \p value
+/// untouched, for any other value; the caller publishes it through its key.
+bool RigExecBakedPublishSmallValue(const RigExecBakedProgramImpl &,
+    RigExecOpValueState *value);
 /// RigExecBakedOpValueKey of provider leaf \p slot, returning what
 /// RigExecBakedOpValueKeyIsExact answers for it, from one overlay lookup.
 bool RigExecBakedSpaceLeafKey(const RigExecBakedProgramImpl &, uint32_t slot,

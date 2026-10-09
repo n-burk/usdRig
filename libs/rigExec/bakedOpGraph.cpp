@@ -512,12 +512,14 @@ void PublishLeaves(RigExecBakedProgramImpl *program,bool all)
         }
     const auto publish=[&](RigExecValueId id) {
         auto &value=state.values[size_t(id)];
-        RigExecOpPublishValue(&value,[&](uint32_t d,uint32_t slot,std::string *key) {
-            RigExecBakedOpValueKey(B,RigExecBakedSlotDomain(d),slot,key);
-            // An unsupported sampled source has no equality proof.
-            if(!RigExecBakedOpValueKeyIsExact(B,RigExecBakedSlotDomain(d),slot))
-                RigExecOpKeyAppend(key,value.revision+1);
-        });
+        // A fixed-size value compares in place; any other through its key.
+        if(!RigExecBakedPublishSmallValue(B,&value))
+            RigExecOpPublishValue(&value,[&](uint32_t d,uint32_t slot,std::string *key) {
+                RigExecBakedOpValueKey(B,RigExecBakedSlotDomain(d),slot,key);
+                // An unsupported sampled source has no equality proof.
+                if(!RigExecBakedOpValueKeyIsExact(B,RigExecBakedSlotDomain(d),slot))
+                    RigExecOpKeyAppend(key,value.revision+1);
+            });
         if(value.changed) state.changedLeaves.push_back(id);
         if(B.verifyChainVersions) VerifyChainVersion(&B,id);
     };
@@ -829,6 +831,8 @@ bool RigExecBakedExecuteOpGraph(RigExecBakedProgramImpl *program,UsdTimeCode tim
         const RigExecOpValueState *done=nullptr;
         for(auto id:B.opGraph.ops[c].descriptor.writes) {
             auto &v=state.values[size_t(id)];
+            // A fixed-size value compares in place: never RevisionDone or ChainDirty.
+            if(RigExecBakedPublishSmallValue(B,&v)) continue;
             const RigExecOpValueState *reuse=done && v.slot==done->slot &&
                 v.domain==uint32_t(RigExecBakedSlotDomain::ChainDirty) ? done : nullptr;
             bool exact=true;

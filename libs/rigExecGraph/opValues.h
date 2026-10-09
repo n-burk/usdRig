@@ -5,6 +5,7 @@
 #include "providerRecords.h"
 #include <algorithm>
 #include <array>
+#include <cstring>
 #include <map>
 #include <type_traits>
 #include <utility>
@@ -250,6 +251,33 @@ template <class Sample> inline void RigExecOpPublishValue(
     value->changed = !value->initialized || value->scratch != value->key;
     if (value->changed) ++value->revision;
     value->key.swap(value->scratch); value->initialized = true;
+}
+
+/// A fixed-size value's key on the stack: each field's object bytes, in the
+/// order its key appends them. A field past \p N sets `overflow` and writes
+/// nothing; the caller then publishes through the key.
+template <size_t N> struct RigExecOpSmallKey {
+    char bytes[N];
+    size_t size = 0;
+    bool overflow = false;
+    template <class T> void Append(const T &v)
+    {
+        static_assert(std::is_trivially_copyable<T>::value, "key fields copy object bytes");
+        if (sizeof(T) > N - size) { overflow = true; return; }
+        std::memcpy(bytes + size, &v, sizeof(T)); size += sizeof(T);
+    }
+};
+
+/// Publishes \p size key bytes compared in place against the stored key:
+/// the changed flag, revision and stored key RigExecOpPublishValue leaves
+/// when its sample writes exactly these bytes.
+inline void RigExecOpPublishKeyBytes(RigExecOpValueState *value,
+    const char *bytes, size_t size)
+{
+    value->changed = !value->initialized || value->key.size() != size ||
+        (size && std::memcmp(value->key.data(), bytes, size) != 0);
+    if (value->changed) { ++value->revision; value->key.assign(bytes, size); }
+    value->initialized = true;
 }
 
 /// Clears every change flag at the start of a run. Only publication sets a

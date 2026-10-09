@@ -1070,6 +1070,154 @@ void TestPointContentVersions()
     derived.matrix[3][0]=1.0;
     CHECK(Key(B,D::DerivedOut)!=matrix);
 }
+// Publishes one value in place and, beside it, through its key: both must
+// report \p changed and leave the same revision, and the stored key must be
+// the key the value has now, which the value calls exact.
+bool PublishBothWays(const RigExecBakedProgramImpl &B,RigExecOpValueState *typed,
+    RigExecOpValueState *keyed,bool changed)
+{
+    const auto domain=RigExecBakedSlotDomain(typed->domain);
+    const bool small=RigExecBakedPublishSmallValue(B,typed);
+    RigExecOpPublishValue(keyed,[&](uint32_t d,uint32_t slot,std::string *key) {
+        RigExecBakedOpValueKey(B,RigExecBakedSlotDomain(d),slot,key);
+    });
+    return small && typed->initialized && typed->changed==char(changed) &&
+        keyed->changed==char(changed) && typed->revision==keyed->revision &&
+        typed->key==keyed->key && typed->key==Key(B,domain,typed->slot) &&
+        RigExecBakedOpValueKeyIsExact(B,domain,typed->slot);
+}
+// The floating payloads a sequence writes into one field, by case: a
+// value, +0, -0 and two NaN payloads.
+const double kSmallDoubles[]={1.5,0.0,-0.0,kDNaN,kDNaN2};
+const float kSmallFloats[]={1.5f,0.0f,-0.0f,kNaN,kNaN2};
+// \p set writes case k into one floating field of value (\p domain,
+// \p slot); \p other then moves another field. Each publication agrees with
+// the key's, and moves exactly when the bytes do: -0 differs from +0 and a
+// NaN equals only its own payload.
+template<class Set,class Other> void CheckSmallValue(RigExecBakedSlotDomain domain,
+    uint32_t slot,const RigExecBakedProgramImpl &B,Set set,Other other,const char *what)
+{
+    RigExecOpValueState typed,keyed;
+    typed.domain=keyed.domain=uint32_t(domain); typed.slot=keyed.slot=slot;
+    const std::pair<int,bool> steps[]={{0,true},{0,false},{1,true},{2,true},{2,false},
+        {3,true},{3,false},{4,true},{0,true}};
+    int step=0;
+    for(const auto &entry:steps) {
+        set(entry.first);
+        if(!PublishBothWays(B,&typed,&keyed,entry.second)) {
+            ++failures; std::printf("FAIL small value %s, step %d\n",what,step);
+        }
+        ++step;
+    }
+    other();
+    if(!PublishBothWays(B,&typed,&keyed,true) || !PublishBothWays(B,&typed,&keyed,false)) {
+        ++failures; std::printf("FAIL small value %s, other field\n",what);
+    }
+    // Six moves in the sequence and the other field's.
+    if(typed.revision!=7) {
+        ++failures; std::printf("FAIL small value %s: revision %llu\n",what,
+                                (unsigned long long)typed.revision);
+    }
+}
+// A value the in-place publication refuses is left as it was.
+bool RefusesSmall(const RigExecBakedProgramImpl &B,RigExecBakedSlotDomain domain,uint32_t slot)
+{
+    RigExecOpValueState value; value.domain=uint32_t(domain); value.slot=slot;
+    value.key="kept"; value.revision=5; value.initialized=true; value.changed=0;
+    return !RigExecBakedPublishSmallValue(B,&value) && value.key=="kept" &&
+        value.revision==5 && value.initialized && value.changed==0;
+}
+void TestSmallValuePublication()
+{
+    using D=RigExecBakedSlotDomain;
+    RigExecBakedProgramImpl B;
+    B.avars.assign(22,0.25);
+    CheckSmallValue(D::Avars,1,B,[&](int k) { B.avars[15]=kSmallDoubles[k]; },
+                    [&] { B.avars[11]=2.0; },"Avars");
+    B.base.resize(2); B.fin.resize(2);
+    CheckSmallValue(D::PoseBase,1,B,[&](int k) { B.base[1].points[2][1]=kSmallDoubles[k]; },
+                    [&] { B.base[1].flags^=0x10u; },"PoseBase");
+    CheckSmallValue(D::PoseFin,1,B,[&](int k) { B.fin[1].points[0][0]=kSmallDoubles[k]; },
+                    [&] { B.fin[1].flags^=0x10u; },"PoseFin");
+    const auto matrices=[&](D domain,std::vector<GfMatrix4d> *values,const char *what) {
+        values->assign(2,GfMatrix4d(1.0));
+        CheckSmallValue(domain,1,B,[&](int k) { (*values)[1][3][1]=kSmallDoubles[k]; },
+                        [&] { (*values)[1][0][0]=2.0; },what);
+    };
+    matrices(D::PosedM,&B.posedM,"PosedM");
+    matrices(D::FinalMatrix,&B.finalMatrix,"FinalMatrix");
+    matrices(D::BaseMatrix,&B.baseMatrix,"BaseMatrix");
+    matrices(D::SwitchFrame,&B.switchFrames,"SwitchFrame");
+    matrices(D::WeightFrames,&B.volumePlacement,"WeightFrames");
+    matrices(D::WeightFramesBase,&B.volumePlacementBase,"WeightFramesBase");
+    B.poseWeights.assign(2,0.5f);
+    CheckSmallValue(D::PoseWeight,1,B,[&](int k) { B.poseWeights[1]=kSmallFloats[k]; },
+                    [&] { B.poseWeights[1]=3.0f; },"PoseWeight");
+    B.deltaValues.assign(2,GfMatrix4d(1.0)); B.deltaPresent.assign(2,1);
+    CheckSmallValue(D::ConstraintDelta,1,B,[&](int k) { B.deltaValues[1][2][0]=kSmallDoubles[k]; },
+                    [&] { B.deltaPresent[1]=0; },"ConstraintDelta");
+    B.frameMatrix.assign(2,GfMatrix4d(1.0)); B.frameMatrixValid.assign(2,1);
+    CheckSmallValue(D::FrameMatrix,1,B,[&](int k) { B.frameMatrix[1][0][3]=kSmallDoubles[k]; },
+                    [&] { B.frameMatrixValid[1]=0; },"FrameMatrix");
+    // Staging slot 4 is the second pair of the split commit based at 3; the
+    // unsplit commit before it, whose tables are as long, owns no slot.
+    B.commits.resize(2);
+    B.commits[0].staged.resize(8); B.commits[0].outcome.assign(8,0);
+    B.commits[1].split=true; B.commits[1].stagingBase=3;
+    B.commits[1].staged.resize(2); B.commits[1].outcome.assign(2,0);
+    CheckSmallValue(D::CommitStaging,4,B,
+                    [&](int k) { B.commits[1].staged[1].points[3][2]=kSmallDoubles[k]; },
+                    [&] { B.commits[1].outcome[1]=2; },"CommitStaging");
+
+    // A space value per unboxed alternative, then its flags.
+    B.providerValues.values.resize(2);
+    auto &space=B.providerValues.values[1];
+    space.initialized=true; space.count=1;
+    CheckSmallValue(D::SpaceValue,1,B,[&](int k) {
+        space.value.emplace<GfMatrix4d>(1.0); std::get<GfMatrix4d>(space.value)[1][3]=kSmallDoubles[k];
+    },[&] { space.blocked=!space.blocked; },"SpaceValue matrix");
+    CheckSmallValue(D::SpaceValue,1,B,[&](int k) { space.value.emplace<double>(kSmallDoubles[k]); },
+                    [&] { space.authoritative=!space.authoritative; },"SpaceValue double");
+    CheckSmallValue(D::SpaceValue,1,B,[&](int k) { space.value.emplace<float>(kSmallFloats[k]); },
+                    [&] { space.count=3; },"SpaceValue float");
+    CheckSmallValue(D::SpaceValue,1,B,
+                    [&](int k) { space.value.emplace<GfVec3d>(1.0,kSmallDoubles[k],-2.0); },
+                    [&] { space.initialized=!space.initialized; },"SpaceValue vector");
+    CheckSmallValue(D::SpaceValue,1,B,[&](int k) {
+        RigExecPointFrame frame; frame.points[3][0]=kSmallDoubles[k];
+        space.value.emplace<RigExecPointFrame>(frame);
+    },[&] { std::get<RigExecPointFrame>(space.value).flags^=0x10u; },"SpaceValue frame");
+    {
+        // An empty value keys its flags and index alone.
+        space.value.emplace<std::monostate>();
+        RigExecOpValueState typed,keyed;
+        typed.domain=keyed.domain=uint32_t(D::SpaceValue); typed.slot=keyed.slot=1;
+        CHECK(PublishBothWays(B,&typed,&keyed,true));
+        CHECK(PublishBothWays(B,&typed,&keyed,false));
+        space.count=5;
+        CHECK(PublishBothWays(B,&typed,&keyed,true) && typed.revision==2);
+    }
+
+    // What keys by length or box, an unconverted domain, and every slot
+    // the key refuses, go through the key.
+    space.value.emplace<TfToken>(TfToken("a"));
+    CHECK(RefusesSmall(B,D::SpaceValue,1));
+    space.value.emplace<VtValue>(VtValue(1.0));
+    CHECK(RefusesSmall(B,D::SpaceValue,1));
+    space.value.emplace<GfMatrix4d>(1.0); space.error="unavailable";
+    CHECK(RefusesSmall(B,D::SpaceValue,1));
+    CHECK(RefusesSmall(B,D::SpaceValue,2));
+    B.weightFields.resize(1); B.weightFields[0].ok=true;
+    CHECK(RefusesSmall(B,D::WeightField,0));
+    CHECK(RefusesSmall(B,D::RevisionDone,0));
+    CHECK(RefusesSmall(B,D::Avars,2));
+    CHECK(RefusesSmall(B,D::PoseFin,2) && RefusesSmall(B,D::PosedM,2) &&
+          RefusesSmall(B,D::SwitchFrame,2) && RefusesSmall(B,D::PoseWeight,2) &&
+          RefusesSmall(B,D::ConstraintDelta,2) && RefusesSmall(B,D::FrameMatrix,2));
+    CHECK(RefusesSmall(B,D::CommitStaging,7) && RefusesSmall(B,D::CommitStaging,2));
+    B.commits[1].outcome.resize(1);
+    CHECK(RefusesSmall(B,D::CommitStaging,4));
+}
 }
 int main()
 {
@@ -1080,7 +1228,7 @@ int main()
     TestAvarBindingIndex();
     TestPathTextSpelling(); TestBoxTags(); TestHeadValueBits(); TestCandidateFallbackBytes();
     TestProviderOwnerText(); TestBulkValueKeyBytes(); TestSharedKeyRunsAndPlainValues();
-    TestPointContentVersions();
+    TestPointContentVersions(); TestSmallValuePublication();
     std::printf("OpValues: %d failures\n",failures);
     return failures ? 1 : 0;
 }
