@@ -4266,6 +4266,12 @@ main(int argc, char **argv)
     if (!std::filesystem::create_directory(scratch)) {
         return 1;
     }
+    // The == 16 checks measure the invocation cap. The product's 8 ms
+    // stop is wall-clock and fires early when other CTest processes share
+    // the runner, so this process keeps 16 invocations and drops the time
+    // stop. The zero-millisecond case still sets its own budget.
+    RigExecImagingRegistry::GetInstance().SetWarmSamplingBudget(
+        16, std::numeric_limits<double>::infinity());
     TestScrubWarmsThenHits();
     TestCacheOffMatchesCacheOn();
     TestStaticControlEditInvalidatesCachedFrames();
