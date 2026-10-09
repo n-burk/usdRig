@@ -3224,12 +3224,14 @@ over "Asset"
 // every channel after any stage notice; the frozen plain sampler serves the
 // fixed channels from its memo on the same terms. Every route that can move
 // a raw read is taken at a held frame -- a property first authored on a
-// channel no bake folds, a value edit, time samples added and removed, a
-// connection made and cleared, a sublayer added, muted, unmuted and
-// removed, a variant switched -- and so are the two that cannot, an
-// interactive override and an upstream value. After every generation each
-// raw channel equals a read made now, the pose equals a freshly compiled
-// program's, and a program that stood through a notice read every channel.
+// channel no bake folds, a value and a time sample on it (Edited: no stamp
+// moves, so only the stage edit serial re-reads it and rebuilds the frozen
+// memo), a value edit, time samples added and removed, a connection made
+// and cleared, a sublayer added, muted, unmuted and removed, a variant
+// switched -- and so are the two that cannot, an interactive override and
+// an upstream value. After every generation each raw channel equals a read
+// made now, the pose equals a freshly compiled program's, and a program
+// that stood through a notice read every channel.
 void
 TestConstraintArraysAreEpochState()
 {
@@ -3422,6 +3424,71 @@ TestConstraintArraysAreEpochState()
                 read == kRebuilt ? "rebuilt" : "kept",
                 int(evaluator->GetLastNoticeDisposition()));
     CHECK(step(UsdTimeCode(4), "held after authoring") == 0);
+
+    // Edits that leave the program standing with its stamp: nothing folds,
+    // names or routes the channel, so the notice is Edited, and only the
+    // stage edit serial tells the prologue and the frozen memo to read again.
+    const auto stampOf = [&]() {
+        const RigExecBakedProgramImpl *B = Program(*evaluator);
+        return B ? B->programStamp : 0;
+    };
+    const auto varianceOf = [&](const SdfPath &path, size_t channel) {
+        if (const RigExecBakedProgramImpl *B = Program(*evaluator)) {
+            for (const Arrays &arrays : B->constraintArrays) {
+                if (arrays.path == path) {
+                    return int(arrays.variance[channel]);
+                }
+            }
+        }
+        return -1;
+    };
+    // The frozen memo samples only folded channels (Sampled: the weights,
+    // a ParentConstraint's offsets, the IK pole weights, which the schema
+    // always defines), so no Edited route changes a memoized sample; that
+    // the memo was rebuilt under the new serial with the stamp held is what
+    // is observable.
+    const auto memoCurrent = [&](uint64_t before) {
+        const RigExecBakedProgramImpl *B = Program(*evaluator);
+        return B && B->frozenArrayStamp == stampOf() &&
+               B->frozenArraySerial == evaluator->GetStageEditSerial() &&
+               B->frozenArraySerial != before;
+    };
+    const auto memoSerial = [&]() {
+        const RigExecBakedProgramImpl *B = Program(*evaluator);
+        return B ? B->frozenArraySerial : 0;
+    };
+    checkFrozen(UsdTimeCode(4), "frozen, held after authoring");
+    uint64_t memo = memoSerial();
+    const uint64_t stamp = stampOf();
+    // A default value on the unfolded channel, at a held frame.
+    CHECK(stage->GetAttributeAtPath(unread).Set(
+        VtVec3dArray{GfVec3d(4, 5, 6)}));
+    CHECK(evaluator->GetLastNoticeDisposition() ==
+          RigExecNoticeDisposition::Edited);
+    read = step(UsdTimeCode(4), "unfolded channel edited");
+    CHECK(read != kRebuilt && read == channels());
+    CHECK(stampOf() == stamp);
+    checkFrozen(UsdTimeCode(4), "frozen, unfolded channel edited");
+    CHECK(memoCurrent(memo));
+    memo = memoSerial();
+    // Only the animated weights move with the time; the edited channel is
+    // read again once, and then holds.
+    CHECK(step(UsdTimeCode(5), "unfolded channel edited, time") == 1);
+    CHECK(varianceOf(position, 1) == Arrays::kFixed);
+    // A time sample on the same channel: the full read the serial forces
+    // forgets kFixed, so the next time move reads it as varying.
+    CHECK(stage->GetAttributeAtPath(unread).Set(
+        VtVec3dArray{GfVec3d(7, 8, 9)}, UsdTimeCode(6)));
+    CHECK(evaluator->GetLastNoticeDisposition() ==
+          RigExecNoticeDisposition::Edited);
+    read = step(UsdTimeCode(5), "unfolded time sample added");
+    CHECK(read != kRebuilt && read == channels());
+    checkFrozen(UsdTimeCode(5), "frozen, unfolded time sample added");
+    CHECK(memoCurrent(memo));
+    CHECK(step(UsdTimeCode(7), "unfolded time sample added, past it") == 2);
+    CHECK(varianceOf(position, 1) == Arrays::kVaries);
+    checkFrozen(UsdTimeCode(7), "frozen, unfolded time sample added, past it");
+    CHECK(stampOf() == stamp);
 
     // A value edit.
     const SdfPath offsets =
