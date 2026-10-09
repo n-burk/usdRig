@@ -5658,9 +5658,15 @@ TestTheEpilogueVisitsTheStepsHoldingLines()
 /// at frames 1 and 2, 3 at frame 3 and 0.5 at frame 4: the packet stands at
 /// frame 2, moves only its default at frame 3 (every value clamps to 1, and
 /// no point reads the default), and moves its values at frame 4.
+///
+/// With \p unnamedLast the base and the weight name only points 0 and 1, so
+/// point 2 reads the default: at frame 3 the values and indices stay
+/// byte-equal ({1, 1}) while the field's last entry goes 0.5 -> 0.75.
 UsdStageRefPtr
-MakeWeightOverlayStage()
+MakeWeightOverlayStage(bool unnamedLast = false)
 {
+    const VtIntArray named =
+        unnamedLast ? VtIntArray{0, 1} : VtIntArray{0, 1, 2};
     const UsdStageRefPtr stage = UsdStage::CreateInMemory();
     stage->DefinePrim(SdfPath("/Asset"), TfToken("Scope"));
     stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
@@ -5684,10 +5690,10 @@ MakeWeightOverlayStage()
         .Set(TfToken("sparse"));
     base.CreateAttribute(TfToken("rigExec:indices"),
                          SdfValueTypeNames->IntArray, false)
-        .Set(VtIntArray{0, 1, 2});
+        .Set(named);
     base.CreateAttribute(TfToken("rigExec:values"),
                          SdfValueTypeNames->FloatArray, false)
-        .Set(VtFloatArray{1.0f, 1.0f, 1.0f});
+        .Set(VtFloatArray(named.size(), 1.0f));
     base.CreateAttribute(TfToken("rigExec:defaultWeight"),
                          SdfValueTypeNames->Float, false)
         .Set(0.25f);
@@ -5705,7 +5711,7 @@ MakeWeightOverlayStage()
         .Set(TfToken("clamp"));
     weight.CreateAttribute(TfToken("rigExec:indices"),
                            SdfValueTypeNames->IntArray, false)
-        .Set(VtIntArray{0, 1, 2});
+        .Set(named);
     UsdAttribute driver = weight.CreateAttribute(
         TfToken("inputs:driver"), SdfValueTypeNames->Float, false);
     driver.Set(2.0f, UsdTimeCode(1.0));
@@ -5722,6 +5728,23 @@ MakeWeightOverlayStage()
     mover.CreateRelationship(TfToken("rigExec:weightObject"), false)
         .SetTargets({weight.GetPath()});
     return stage;
+}
+
+/// The weight overlay stage's mover revision, found by path, never by
+/// position; \p object receives its revisionIndex entry.
+const RigExecBakedProgramImpl::GeomRevision *
+WeightOverlayRevision(const RigExecBakedProgramImpl &B, int *object)
+{
+    const RigExecBakedProgramImpl::GeomRevision *found = nullptr;
+    for (size_t o = 0; o < B.revisionIndex.size(); ++o) {
+        const auto &[c, r] = B.revisionIndex[o];
+        const auto &candidate = B.chains[size_t(c)].revisions[size_t(r)];
+        if (candidate.moverPath == SdfPath("/Asset/Rig/Movers/M0")) {
+            *object = int(o);
+            found = &candidate;
+        }
+    }
+    return found;
 }
 
 /// RevisionStatic reuses its published weight field while the WeightPacket
@@ -5741,17 +5764,9 @@ TestTheWeightOverlayIsReusedByVersion()
     }
     const RigExecBakedProgramImpl &B = built.program->GetStepGraph();
     CHECK(B.verifyPacketVersions);
-    // Found by path, never by position.
     int object = -1;
-    const RigExecBakedProgramImpl::GeomRevision *found = nullptr;
-    for (size_t o = 0; o < B.revisionIndex.size(); ++o) {
-        const auto &[c, r] = B.revisionIndex[o];
-        const auto &candidate = B.chains[size_t(c)].revisions[size_t(r)];
-        if (candidate.moverPath == SdfPath("/Asset/Rig/Movers/M0")) {
-            object = int(o);
-            found = &candidate;
-        }
-    }
+    const RigExecBakedProgramImpl::GeomRevision *found =
+        WeightOverlayRevision(B, &object);
     CHECK(found != nullptr);
     if (!found) {
         return;
@@ -5808,6 +5823,65 @@ TestTheWeightOverlayIsReusedByVersion()
     const auto published = pose.weightFields.find(SdfPath("/Asset/Rig/Weights/W"));
     CHECK(published != pose.weightFields.end() &&
           published->second.weights.size() == 3);
+    CHECK(B.packetVersionMismatches == 0);
+}
+
+/// Only the packet's default moves at frame 3, and point 2 reads it: the
+/// values and indices the field resolves from stay byte-equal while the
+/// field moves, so the reuse must follow the whole packet (its revision),
+/// never its arrays alone.
+void
+TestADefaultOnlyMoveResolvesTheWeightField()
+{
+    TfSetenv("RIGEXEC_VERIFY_PACKET_VERSIONS", "1");
+    const BuiltProgram built = BuildStage(MakeWeightOverlayStage(true));
+    TfSetenv("RIGEXEC_VERIFY_PACKET_VERSIONS", "0");
+    CHECK(built.program != nullptr);
+    if (!built.program) {
+        return;
+    }
+    const RigExecBakedProgramImpl &B = built.program->GetStepGraph();
+    int object = -1;
+    const RigExecBakedProgramImpl::GeomRevision *found =
+        WeightOverlayRevision(B, &object);
+    CHECK(found != nullptr);
+    if (!found) {
+        return;
+    }
+    const RigExecBakedProgramImpl::GeomRevision &revision = *found;
+    CHECK(revision.weightObject >= 0 && !revision.weightCurrentPhase);
+    const auto field = [&](float last) {
+        return revision.weightFieldPublished &&
+               revision.publishedWeightValues ==
+                   std::vector<float>{1.0f, 1.0f, last};
+    };
+    RigExecRigPose pose;
+    CHECK(built.program->Run(UsdTimeCode(1.0), &pose));
+    CHECK(pose.comparisonMismatches == 0);
+    CHECK(field(0.5f));
+    const uint64_t version = revision.weightValuesVersion;
+    CHECK(built.program->Run(UsdTimeCode(2.0), &pose));
+    CHECK(pose.comparisonMismatches == 0);
+    CHECK(field(0.5f) && revision.weightValuesVersion == version);
+    // The default alone moved: the field follows it and its version moves.
+    CHECK(built.program->Run(UsdTimeCode(3.0), &pose));
+    CHECK(pose.comparisonMismatches == 0);
+    CHECK(RanLast(B, RigExecBakedStepKind::RevisionStatic, object));
+    if (!field(0.75f)) {
+        std::printf("FAIL default-only move: the field did not follow the "
+                    "packet's default\n");
+    }
+    CHECK(field(0.75f) && revision.weightValuesVersion == version + 1);
+    const auto published =
+        pose.weightFields.find(SdfPath("/Asset/Rig/Weights/W"));
+    CHECK(published != pose.weightFields.end() &&
+          std::vector<float>(published->second.weights.cbegin(),
+                             published->second.weights.cend()) ==
+              std::vector<float>({1.0f, 1.0f, 0.75f}));
+    // And back: the held bytes of frame 1, under a new version.
+    CHECK(built.program->Run(UsdTimeCode(1.0), &pose));
+    CHECK(pose.comparisonMismatches == 0);
+    CHECK(field(0.5f) && revision.weightValuesVersion == version + 2);
     CHECK(B.packetVersionMismatches == 0);
 }
 
@@ -6063,6 +6137,7 @@ main(int argc, char **argv)
     // RevisionStatic's weight field reused by its packet's revision and
     // keyed, with the envelope, by content version.
     TestTheWeightOverlayIsReusedByVersion();
+    TestADefaultOnlyMoveResolvesTheWeightField();
     {
         const std::string fixtures = examplesDir + "/../tests/fixtures";
         size_t kept = 0;

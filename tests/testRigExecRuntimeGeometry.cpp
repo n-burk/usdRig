@@ -1222,10 +1222,15 @@ TestChainPointVersions()
 // three points with weight 1 and defaulting to 0.25. inputs:driver is 2 at
 // frames 1 and 2, 3 at frame 3 and 0.5 at frame 4: the weight packet stands
 // at frame 2, moves only its default at frame 3 (no point reads it, every
-// value clamps to 1) and moves its values at frame 4.
+// value clamps to 1) and moves its values at frame 4. With \p unnamedLast
+// the base and the weight name only points 0 and 1, so point 2 reads the
+// default: at frame 3 the values and indices stay byte-equal ({1, 1}) while
+// the field's last entry goes 0.5 -> 0.75.
 static UsdStageRefPtr
-_WeightOverlayStage()
+_WeightOverlayStage(bool unnamedLast = false)
 {
+    const VtIntArray named =
+        unnamedLast ? VtIntArray{0, 1} : VtIntArray{0, 1, 2};
     const UsdStageRefPtr stage = UsdStage::CreateInMemory();
     stage->DefinePrim(SdfPath("/Asset"), TfToken("Scope"));
     stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
@@ -1249,10 +1254,10 @@ _WeightOverlayStage()
         .Set(TfToken("sparse"));
     base.CreateAttribute(TfToken("rigExec:indices"),
                          SdfValueTypeNames->IntArray, false)
-        .Set(VtIntArray{0, 1, 2});
+        .Set(named);
     base.CreateAttribute(TfToken("rigExec:values"),
                          SdfValueTypeNames->FloatArray, false)
-        .Set(VtFloatArray{1.0f, 1.0f, 1.0f});
+        .Set(VtFloatArray(named.size(), 1.0f));
     base.CreateAttribute(TfToken("rigExec:defaultWeight"),
                          SdfValueTypeNames->Float, false)
         .Set(0.25f);
@@ -1270,7 +1275,7 @@ _WeightOverlayStage()
         .Set(TfToken("clamp"));
     weight.CreateAttribute(TfToken("rigExec:indices"),
                            SdfValueTypeNames->IntArray, false)
-        .Set(VtIntArray{0, 1, 2});
+        .Set(named);
     UsdAttribute driver = weight.CreateAttribute(
         TfToken("inputs:driver"), SdfValueTypeNames->Float, false);
     driver.Set(2.0f, UsdTimeCode(1.0));
@@ -1311,6 +1316,27 @@ TestPacketArrayVersions()
         const std::vector<float> full(3, 1.0f), half(3, 0.5f);
         CHECK(fields[0] == full && fields[1] == full && fields[2] == full);
         CHECK(fields[3] == half && fields[4] == full && fields[5] == full);
+    }
+
+    // Only the default moves at frame 3, and point 2 reads it: the arrays
+    // the reuse is keyed by stay byte-equal, so a reuse that ignored the
+    // rest of the packet would hold 0.5 where the field reads 0.75.
+    TfSetenv("RIGEXEC_VERIFY_PACKET_VERSIONS", "1");
+    const char *const defaultName = "weight field follows its packet's default";
+    _TestStage(defaultName, _WeightOverlayStage(true), frames);
+    std::vector<std::vector<float>> defaultFields;
+    CHECK(_FieldsMatchNative(defaultName, _WeightOverlayStage(true), frames,
+                              "/Asset/Rig/Weights/W", "/Asset/Shape.points",
+                              &defaultFields));
+    TfSetenv("RIGEXEC_VERIFY_PACKET_VERSIONS", "0");
+    CHECK(defaultFields.size() == frames.size());
+    if (defaultFields.size() == frames.size()) {
+        const std::vector<float> two{1.0f, 1.0f, 0.5f},
+            three{1.0f, 1.0f, 0.75f}, half{0.5f, 0.5f, 0.125f};
+        CHECK(defaultFields[0] == two && defaultFields[1] == two &&
+              defaultFields[2] == three);
+        CHECK(defaultFields[3] == half && defaultFields[4] == two &&
+              defaultFields[5] == three);
     }
 }
 
