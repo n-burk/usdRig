@@ -4243,6 +4243,13 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
             // otherwise (an override, an upstream input, a point count): no
             // step runs on it, the pose is untouched, and the owner rebuilds.
             if (!RigExecBakedRolesStand(B)) {
+                // The prologue's samples were consumed by no step and the
+                // run commits none of its bookkeeping, so a program run
+                // again (a held replay) re-reads everything, as after a
+                // refused stage-frames run.
+                if (B.programStamp == B.lastProgramStamp) {
+                    ++B.programStamp;
+                }
                 _lastBail = RigExecBakedBail::RoleFlip;
                 return false;
             }
