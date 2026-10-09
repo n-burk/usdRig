@@ -768,6 +768,12 @@ bool RrGeometryPartitionStaleForTesting(const RrProgram *program,
 bool RrGeometryRevisionDecisionForTesting(const RrProgram *program,
                                           const std::string &moverPath,
                                           int *acceptance, bool *chunksOk);
+/// Test-only: whether mover \p moverPath's chain revision is range-pipelined
+/// (its ranges and join run it) and whether it is its own point source.
+/// False when no chain revision moves for it.
+bool RrGeometryRangeRoleForTesting(const RrProgram *program,
+                                   const std::string &moverPath,
+                                   bool *rangeRole, bool *ownSource);
 /// Test-only: whether the last Execute's layout of mover \p moverPath's
 /// chain revision is the one Open expanded from the file. False when no
 /// chain revision moves for it, or it has no layout.

@@ -270,6 +270,12 @@ public:
     bool GetRevisionDecisionForTesting(const std::string &moverPath,
                                        int *acceptance, bool *chunksOk) const;
 
+    // Test-only: whether mover \p moverPath's chain revision is
+    // range-pipelined, as Open read it from the file, and whether it is its
+    // own point source. False when no chain revision moves for it.
+    bool GetRangeRoleForTesting(const std::string &moverPath, bool *rangeRole,
+                                bool *ownSource) const;
+
     // Test-only: whether the last Execute's layout of mover \p moverPath's
     // chain revision is the one Open expanded from the file, the same
     // object.

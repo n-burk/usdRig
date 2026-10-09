@@ -390,6 +390,15 @@ RigExecRuntimeReader::GetRevisionDecisionForTesting(
 }
 
 bool
+RigExecRuntimeReader::GetRangeRoleForTesting(const std::string &moverPath,
+                                             bool *rangeRole,
+                                             bool *ownSource) const
+{
+    return RrGeometryRangeRoleForTesting(_program.get(), moverPath, rangeRole,
+                                         ownSource);
+}
+
+bool
 RigExecRuntimeReader::GetSkinLayoutIsOpenForTesting(
     const std::string &moverPath) const
 {

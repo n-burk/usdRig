@@ -19,6 +19,7 @@
 
 #include "pxr/base/gf/math.h"
 #include "pxr/base/gf/quatf.h"
+#include "pxr/base/gf/vec3i.h"
 #include "pxr/base/plug/registry.h"
 #include "pxr/base/tf/getenv.h"
 #include "pxr/base/tf/setenv.h"
@@ -35,6 +36,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <map>
 #include <memory>
 #include <string>
 #include <utility>
@@ -1544,6 +1546,296 @@ static bool
 _HasLine(const std::vector<std::string> &lines, const std::string &line)
 {
     return std::find(lines.begin(), lines.end(), line) != lines.end();
+}
+
+struct _RangeChainOptions {
+    // The base samples differ only in points [0, 100), and Moving stands
+    // still.
+    bool baseMovesInRangeZero = false;
+    // M0 is weighted by a sparse static weight over points [0, 100).
+    bool sparseFirst = false;
+    // M1's inputs:defaultWeight leaves [0, 1] at frame 2 only.
+    bool failMiddle = false;
+    // The lattice's cage moves at frames 1 to 3.
+    bool cageMoves = true;
+};
+
+// A range-pipelined chain: matrix movers M0 (on Moving), M1 and M2 (on
+// Still) and a lattice blended in at 0.6 move the \p count points of
+// /Asset/Shape.points, a box inside the 2 x 2 x 3 cage; above the default
+// 4096 points a range (RIGEXEC_BAKED_CHUNK_VERTS) all four are cut into
+// ranges, three for 10000 points. A matrix mover on the three points of
+// /Asset/Small.points stays whole. The points hold a default, which Build
+// counts, and samples at frames 1 to 3 that equal it unless
+// \p options.baseMovesInRangeZero.
+static UsdStageRefPtr
+_RangeChainStage(size_t count, const _RangeChainOptions &options)
+{
+    const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    stage->DefinePrim(SdfPath("/Asset"), TfToken("Scope"));
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    const UsdPrim moving = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Moving"), TfToken("RigExecControl"));
+    for (int frame = 1; frame <= 3; ++frame) {
+        moving.GetAttribute(TfToken("avars:tx"))
+            .Set(options.baseMovesInRangeZero ? 1.0 : double(frame),
+                 UsdTimeCode(frame));
+    }
+    const UsdPrim still = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Still"), TfToken("RigExecControl"));
+    still.GetAttribute(TfToken("avars:ty")).Set(1.0);
+
+    const SdfPath target("/Asset/Shape.points");
+    VtVec3fArray points(count);
+    for (size_t i = 0; i < count; ++i) {
+        points[i] = GfVec3f(-0.9f + 0.075f * float(i % 25),
+                            -0.9f + 0.09f * float((i / 25) % 20),
+                            0.1f + 0.2f * float((i / 500) % 20));
+    }
+    UsdAttribute shapePoints =
+        stage->DefinePrim(target.GetPrimPath(), TfToken("Points"))
+            .GetAttribute(TfToken("points"));
+    shapePoints.Set(points);
+    for (int frame = 1; frame <= 3; ++frame) {
+        VtVec3fArray sample = points;
+        if (options.baseMovesInRangeZero) {
+            for (size_t i = 0; i < 100 && i < count; ++i) {
+                sample[i][2] += 0.125f * float(frame);
+            }
+        }
+        shapePoints.Set(sample, UsdTimeCode(frame));
+    }
+
+    // The cage at rest is its default; its middle layer widens per frame.
+    const VtVec3fArray rest = {
+        GfVec3f(-1, -1, 0), GfVec3f(1, -1, 0), GfVec3f(-1, 1, 0),
+        GfVec3f(1, 1, 0),   GfVec3f(-1, -1, 2), GfVec3f(1, -1, 2),
+        GfVec3f(-1, 1, 2),  GfVec3f(1, 1, 2),   GfVec3f(-1, -1, 4),
+        GfVec3f(1, -1, 4),  GfVec3f(-1, 1, 4),  GfVec3f(1, 1, 4)};
+    const UsdPrim cage =
+        stage->DefinePrim(SdfPath("/Asset/Cage"), TfToken("Points"));
+    UsdAttribute cagePoints = cage.GetAttribute(TfToken("points"));
+    cagePoints.Set(rest);
+    for (int frame = 1; frame <= 3; ++frame) {
+        VtVec3fArray posed = rest;
+        if (options.cageMoves) {
+            for (size_t k = 4; k < 8; ++k) {
+                posed[k][0] *= 1.0f + 0.25f * float(frame);
+                posed[k][1] *= 1.0f + 0.25f * float(frame);
+            }
+        }
+        cagePoints.Set(posed, UsdTimeCode(frame));
+    }
+
+    const SdfPath small("/Asset/Small.points");
+    stage->DefinePrim(small.GetPrimPath(), TfToken("Points"))
+        .GetAttribute(TfToken("points"))
+        .Set(VtVec3fArray{GfVec3f(0), GfVec3f(1, 0, 0), GfVec3f(0, 2, 0)});
+
+    stage->DefinePrim(SdfPath("/Asset/Rig/Movers"), TfToken("Scope"));
+    const auto matrixMover = [&](const std::string &name,
+                                 const SdfPath &moves,
+                                 const UsdPrim &control) {
+        const UsdPrim mover = stage->DefinePrim(
+            SdfPath("/Asset/Rig/Movers/" + name),
+            TfToken("RigExecMatrixMover"));
+        mover.ApplyAPI(TfToken("RigExecMoverAPI"));
+        mover.GetRelationship(TfToken("rigExec:moves")).SetTargets({moves});
+        mover.GetRelationship(TfToken("rigExec:transform"))
+            .SetTargets({control.GetPath()});
+        return mover;
+    };
+    const UsdPrim m0 = matrixMover("M0", target, moving);
+    if (options.sparseFirst) {
+        const UsdPrim weight = stage->DefinePrim(
+            SdfPath("/Asset/Rig/Weights/Face"),
+            TfToken("RigExecStaticWeight"));
+        weight.CreateRelationship(TfToken("rigExec:weightTarget"), false)
+            .SetTargets({target});
+        weight.CreateAttribute(TfToken("rigExec:representation"),
+                               SdfValueTypeNames->Token, false)
+            .Set(TfToken("sparse"));
+        VtIntArray indices(100);
+        VtFloatArray values(100);
+        for (int i = 0; i < 100; ++i) {
+            indices[i] = i;
+            values[i] = 0.25f + 0.0075f * float(i);
+        }
+        weight.CreateAttribute(TfToken("rigExec:indices"),
+                               SdfValueTypeNames->IntArray, false)
+            .Set(indices);
+        weight.CreateAttribute(TfToken("rigExec:values"),
+                               SdfValueTypeNames->FloatArray, false)
+            .Set(values);
+        weight.CreateAttribute(TfToken("rigExec:defaultWeight"),
+                               SdfValueTypeNames->Float, false)
+            .Set(0.0f);
+        m0.CreateRelationship(TfToken("rigExec:weightObject"), false)
+            .SetTargets({weight.GetPath()});
+    } else {
+        m0.GetAttribute(TfToken("inputs:defaultWeight")).Set(1.0f);
+    }
+    UsdAttribute m1Weight = matrixMover("M1", target, still)
+                                .GetAttribute(TfToken("inputs:defaultWeight"));
+    if (options.failMiddle) {
+        m1Weight.Set(1.0f, UsdTimeCode(1.0));
+        m1Weight.Set(2.0f, UsdTimeCode(2.0));
+        m1Weight.Set(1.0f, UsdTimeCode(3.0));
+    } else {
+        m1Weight.Set(1.0f);
+    }
+    matrixMover("M2", target, still)
+        .GetAttribute(TfToken("inputs:defaultWeight"))
+        .Set(1.0f);
+    matrixMover("Small", small, still)
+        .GetAttribute(TfToken("inputs:defaultWeight"))
+        .Set(1.0f);
+
+    const UsdPrim lattice = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Movers/Lattice"), TfToken("RigExecLatticeMover"));
+    lattice.ApplyAPI(TfToken("RigExecMoverAPI"));
+    lattice.GetRelationship(TfToken("rigExec:moves")).SetTargets({target});
+    lattice.GetRelationship(TfToken("rigExec:cage"))
+        .SetTargets({cage.GetPath()});
+    lattice.GetAttribute(TfToken("rigExec:basis")).Set(TfToken("bernstein"));
+    lattice.GetAttribute(TfToken("rigExec:divisions")).Set(GfVec3i(2, 2, 3));
+    lattice.GetAttribute(TfToken("inputs:defaultWeight")).Set(0.6f);
+    return stage;
+}
+
+// Range-pipelined chains play as the native program runs them -- points,
+// ordered diagnostics and operation counts bit for bit -- with
+// RIGEXEC_VERIFY_CHAIN_VERSIONS on, read at Open, which fails any run whose
+// range or join versions and their points' bytes disagree on a change: a
+// revision that passes through at frame 2 and recovers, base points that
+// move in range 0 alone, and a sparse first mover whose other ranges pass
+// through.
+static void
+TestRangeChainPlays()
+{
+    TfSetenv("RIGEXEC_VERIFY_CHAIN_VERSIONS", "1");
+    _RangeChainOptions failing;
+    failing.failMiddle = true;
+    const std::vector<double> frames = {1, 2, 3, 2, 1, 3};
+    _TestStage("range chain passes through and recovers",
+               _RangeChainStage(10000, failing), frames);
+    _RangeChainOptions base;
+    base.baseMovesInRangeZero = true;
+    _TestStage("range chain base moves in range 0",
+               _RangeChainStage(10000, base), {1, 2, 3, 2, 1});
+    _RangeChainOptions sparse;
+    sparse.sparseFirst = true;
+    _TestStage("range chain sparse first mover",
+               _RangeChainStage(10000, sparse), {1, 2, 3, 1});
+    TfSetenv("RIGEXEC_VERIFY_CHAIN_VERSIONS", "0");
+
+    // M1's refusal is reported at frame 2 and nowhere else.
+    std::vector<std::vector<std::string>> diagnostics;
+    std::string error;
+    CHECK(_RunDiagnostics(_RangeChainStage(10000, failing), frames,
+                          &diagnostics, &error));
+    if (!error.empty()) {
+        std::printf("range chain diagnostics: %s\n", error.c_str());
+    }
+    const std::string failed = "MoverFailed /Asset/Rig/Movers/M1: execution "
+                               "rejected its inputs; revision passed through";
+    CHECK(diagnostics.size() == frames.size());
+    for (size_t i = 0; i < diagnostics.size() && i < frames.size(); ++i) {
+        CHECK(_HasLine(diagnostics[i], failed) == (frames[i] == 2.0));
+    }
+}
+
+// Open sets the range role on exactly the file's range-pipelined revisions
+// (unchunked, two or more chunks), each its own point source; and the
+// ranges cut off apart. M0's sparse weight moves points in range 0 alone, so
+// at frame 2 every range of M0 runs and every revision after it in the chain
+// runs its range 0 alone, while nothing before it runs.
+static void
+TestRangeChainRolesAndCutoff()
+{
+    const char *const name = "range chain roles and cutoff";
+    _RangeChainOptions options;
+    options.sparseFirst = true;
+    options.cageMoves = false;
+    const UsdStageRefPtr stage = _RangeChainStage(10000, options);
+    std::vector<uint8_t> bytes;
+    std::string error;
+    {
+        RigExecRigEvaluator baker(stage, SdfPath("/Asset/Rig"));
+        CHECK(RigExecTestBakeAt(baker, 1.0, &bytes, &error));
+    }
+    const std::unique_ptr<fb::RigExecWireFile> file = RigExecTestUnpack(bytes);
+    RigExecTestPlayer player;
+    const bool opened = file && file->geometry && player.Open(bytes, stage, &error);
+    CHECK(opened);
+    if (!opened) {
+        std::printf("%s: FAILED (%s)\n", name, error.c_str());
+        return;
+    }
+    const fb::RigExecWireDomainGeometry &geometry = *file->geometry;
+    // Each cut revision's mover, by its position in its chain.
+    std::map<std::string, size_t> position;
+    size_t ranges = 0, wholes = 0;
+    for (const fb::RigExecWireChain &chain : geometry.chains) {
+        for (size_t r = 0; r < chain.revisions.size(); ++r) {
+            const fb::RigExecWireRevision &revision = chain.revisions[r];
+            const std::string mover =
+                RigExecFormatPathText(*file, revision.moverPath);
+            const bool expected =
+                !revision.chunked && revision.chunks.size() >= 2;
+            bool role = !expected, own = !expected;
+            CHECK(player->GetRangeRoleForTesting(mover, &role, &own));
+            CHECK(role == expected && own == expected);
+            if (expected) {
+                ++ranges;
+                CHECK(revision.chunks.size() == 3);
+                position[mover] = r;
+            } else {
+                ++wholes;
+            }
+        }
+    }
+    // M0, M1, M2 and the lattice are cut; Small's mover is whole.
+    CHECK(ranges == 4 && wholes == 1);
+    const auto first = position.find("/Asset/Rig/Movers/M0");
+    CHECK(first != position.end());
+    if (ranges != 4 || first == position.end()) {
+        std::printf("%s: FAILED (%zu cut revision(s))\n", name, ranges);
+        return;
+    }
+
+    CHECK(player.Play(1.0, &error));
+    CHECK(player.Play(2.0, &error));
+    size_t checked = 0;
+    for (size_t s = 0; s < file->steps.size(); ++s) {
+        const fb::RigExecWireStep &step = file->steps[s];
+        if (step.kind != fb::StepKind::RevisionChunk || step.object < 0 ||
+            size_t(step.object) >= geometry.revisionIndex.size()) {
+            continue;
+        }
+        const auto &at = geometry.revisionIndex[size_t(step.object)];
+        const std::string mover = RigExecFormatPathText(
+            *file, geometry.chains[size_t(at.first)]
+                       .revisions[size_t(at.second)]
+                       .moverPath);
+        const auto found = position.find(mover);
+        if (found == position.end()) {
+            continue;
+        }
+        const bool want =
+            found->second == first->second ||
+            (found->second > first->second && step.part == 0);
+        const bool ran = player->GetStepRanForTesting(s);
+        CHECK(ran == want);
+        if (ran != want) {
+            std::printf("%s: %s range %d %s at frame 2\n", name,
+                        mover.c_str(), int(step.part),
+                        ran ? "ran" : "did not run");
+        }
+        ++checked;
+    }
+    CHECK(checked == 12);
+    std::printf("%s: %zu range step(s) checked\n", name, checked);
 }
 
 // A current-phase field the oracle fails to resolve: the combine's
@@ -3731,6 +4023,8 @@ main(int argc, char **argv)
         RIGEXEC_SCHEMA_RESOURCE_DIR);
     TestComputedCurrentPhase();
     TestChainPointVersions();
+    TestRangeChainPlays();
+    TestRangeChainRolesAndCutoff();
     TestPacketArrayVersions();
     TestGeometryDomainArm();
     TestCurrentPhaseThroughCombine();
