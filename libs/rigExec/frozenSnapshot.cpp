@@ -130,6 +130,9 @@ _CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst)
     D.excludedSteps = src.excludedSteps;
     D.opGraph = src.opGraph;
     D.opAdapter = src.opAdapter;
+    D.verifyChainVersions = src.verifyChainVersions;
+    D.chainContentKeys = src.chainContentKeys;
+    D.chainVersionMismatches = 0;
     D.composeGroups = src.composeGroups;
     // The space switches, and the per-slot index the compose step
     // asks before it takes the switched branch. Left out, the

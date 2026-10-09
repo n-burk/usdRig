@@ -28,6 +28,13 @@ std::string Key(const RigExecBakedProgramImpl &B, RigExecBakedSlotDomain domain,
 {
     std::string key; RigExecBakedOpValueKey(B,domain,slot,&key); return key;
 }
+// A point-carrying value's key over its points' bytes, which its value key
+// replaces with a content version.
+std::string ContentKey(const RigExecBakedProgramImpl &B, RigExecBakedSlotDomain domain,
+    uint32_t slot=0)
+{
+    std::string key; CHECK(RigExecBakedChainContentKey(B,domain,slot,&key)); return key;
+}
 float FloatBits(uint32_t bits)
 {
     float value; std::memcpy(&value,&bits,sizeof(value)); return value;
@@ -481,11 +488,18 @@ void TestRawInputAndProviderKeys()
     CHECK(RigExecBakedOpInputKey(B,step,&key) && key!=avar);
     B.chains.resize(1); B.chains[0].sampledHaveBase=true;
     B.chains[0].sampledBase=VtVec3fArray{GfVec3f(0)};
-    const auto incoming=Key(B,RigExecBakedSlotDomain::ChainInput);
+    const auto incoming=ContentKey(B,RigExecBakedSlotDomain::ChainInput);
+    const auto incomingVersion=Key(B,RigExecBakedSlotDomain::ChainInput);
     B.chains[0].sampledBase[0][0]=-0.0f;
-    CHECK(Key(B,RigExecBakedSlotDomain::ChainInput)!=incoming);
+    CHECK(ContentKey(B,RigExecBakedSlotDomain::ChainInput)!=incoming);
+    // The value key moves with the content version publication bumps, not
+    // with the bytes themselves.
+    CHECK(Key(B,RigExecBakedSlotDomain::ChainInput)==incomingVersion);
+    ++B.chains[0].inputVersion;
+    CHECK(Key(B,RigExecBakedSlotDomain::ChainInput)!=incomingVersion);
     B.chains[0].sampledBase[0][0]=0.0f; B.chains[0].sampledHaveBase=false;
-    CHECK(Key(B,RigExecBakedSlotDomain::ChainInput)!=incoming);
+    CHECK(ContentKey(B,RigExecBakedSlotDomain::ChainInput)!=incoming);
+    CHECK(Key(B,RigExecBakedSlotDomain::ChainInput)!=incomingVersion);
     B.providerProgram.sampled.resize(1); B.providerLeaves.values={VtValue(double(0))};
     B.providerLeafBlocked={0};
     const auto raw=Key(B,RigExecBakedSlotDomain::SpaceLeaf);
@@ -865,10 +879,14 @@ void TestBulkValueKeyBytes()
     // vectors, matrices and presence bytes.
     RigExecBakedProgramImpl B;
     B.chains.resize(1); B.chains[0].sampledHaveBase=true;
-    const auto noBase=Key(B,RigExecBakedSlotDomain::ChainInput);
+    const auto noBase=ContentKey(B,RigExecBakedSlotDomain::ChainInput);
     B.chains[0].sampledBase=VtVec3fArray{GfVec3f(-0.0f,kNaN,1.0f),GfVec3f(kNaN2,0.0f,2.0f)};
-    CHECK(Key(B,RigExecBakedSlotDomain::ChainInput)==
+    CHECK(ContentKey(B,RigExecBakedSlotDomain::ChainInput)==
           noBase.substr(0,noBase.size()-8)+RefArray(B.chains[0].sampledBase));
+    B.chains[0].inputVersion=7;
+    std::string input=ValueHeader(RigExecBakedSlotDomain::ChainInput);
+    RefPut(&input,true); input+=U64(7);
+    CHECK(Key(B,RigExecBakedSlotDomain::ChainInput)==input);
     B.weightFields.resize(1); B.weightFields[0].ok=true;
     const auto noValues=Key(B,RigExecBakedSlotDomain::WeightField);
     B.weightFields[0].values={0.0f,-0.0f,kNaN,kNaN2};
@@ -891,11 +909,17 @@ void TestBulkValueKeyBytes()
     RigExecBakedProgramImpl G;
     G.chains.resize(1); G.chains[0].revisions.resize(1); G.revisionIndex={{0,0}};
     auto &revision=G.chains[0].revisions[0]; revision.currentSource=0;
-    const auto noOutput=Key(G,RigExecBakedSlotDomain::RevisionDone);
+    const auto noOutput=ContentKey(G,RigExecBakedSlotDomain::RevisionDone);
     revision.output={GfVec3f(-0.0f,kNaN,1.0f),GfVec3f(kNaN2,0.0f,-3.0f),GfVec3f(4.0f)};
-    const auto done=Key(G,RigExecBakedSlotDomain::RevisionDone);
+    const auto done=ContentKey(G,RigExecBakedSlotDomain::RevisionDone);
     CHECK(done==noOutput.substr(0,noOutput.size()-8)+RefArray(revision.output));
-    CHECK(Key(G,RigExecBakedSlotDomain::ChainDirty)==done);
+    CHECK(ContentKey(G,RigExecBakedSlotDomain::ChainDirty)==done);
+    // The value keys: the same fields with the content version in place of
+    // the points, and the dirty edge the same bytes as the completion.
+    revision.doneVersion=3;
+    const auto versioned=Key(G,RigExecBakedSlotDomain::RevisionDone);
+    CHECK(versioned==noOutput.substr(0,noOutput.size()-8)+U64(3));
+    CHECK(Key(G,RigExecBakedSlotDomain::ChainDirty)==versioned);
     G.revisionChunkBase={0}; G.revisionChunkCount={1};
     revision.stagingOutput=revision.output; revision.chunks.resize(1);
     revision.chunks[0].begin=1; revision.chunks[0].end=3; revision.chunks[0].ok=true;
@@ -1003,6 +1027,49 @@ void TestSharedKeyRunsAndPlainValues()
     std::string frameBytes; RigExecOpKeyAppend(&frameBytes,plain.points); RigExecOpKeyAppend(&frameBytes,plain.flags);
     CHECK(PlainKey(plain)==frameBytes);
 }
+// Point-carrying values key their points by a content version their writer
+// bumps on a byte difference: signed zeros differ, a NaN equals only its
+// own payload. The value key moves with the version and never with the
+// bytes alone; the content key moves with the bytes.
+void TestPointContentVersions()
+{
+    const std::vector<GfVec3f> a{GfVec3f(0.0f,kNaN,1.0f)};
+    std::vector<GfVec3f> b=a;
+    CHECK(RigExecBakedSamePoints(a.data(),a.size(),b.data(),b.size()));
+    b[0][0]=-0.0f;
+    CHECK(!RigExecBakedSamePoints(a.data(),a.size(),b.data(),b.size()));
+    b=a; b[0][1]=kNaN2;
+    CHECK(!RigExecBakedSamePoints(a.data(),a.size(),b.data(),b.size()));
+    CHECK(!RigExecBakedSamePoints(a.data(),a.size(),a.data(),0));
+    CHECK(RigExecBakedSamePoints(nullptr,0,a.data(),0));
+
+    using D=RigExecBakedSlotDomain;
+    RigExecBakedProgramImpl B;
+    B.chains.resize(1); auto &chain=B.chains[0];
+    chain.haveBase=chain.haveResult=true;
+    chain.lastBase=VtVec3fArray{GfVec3f(1.0f)}; chain.result=VtVec3fArray{GfVec3f(2.0f)};
+    chain.derived.resize(1); B.derivedIndex={{0,0}};
+    auto &derived=chain.derived[0];
+    derived.haveResult=true; derived.result=VtVec3fArray{GfVec3f(3.0f)};
+    const auto bytesMove=[&](D domain,VtVec3fArray *points,uint64_t *version) {
+        const auto key=Key(B,domain),content=ContentKey(B,domain);
+        (*points)[0][0]=-(*points)[0][0];
+        CHECK(Key(B,domain)==key);
+        CHECK(ContentKey(B,domain)!=content);
+        ++*version;
+        CHECK(Key(B,domain)!=key);
+    };
+    bytesMove(D::ChainBase,&chain.lastBase,&chain.baseVersion);
+    bytesMove(D::ChainPoints,&chain.result,&chain.resultVersion);
+    bytesMove(D::DerivedOut,&derived.result,&derived.resultVersion);
+    // A matrix target keys its matrix, not its points.
+    derived.matrixTarget=true;
+    const auto matrix=Key(B,D::DerivedOut);
+    ++derived.resultVersion;
+    CHECK(Key(B,D::DerivedOut)==matrix);
+    derived.matrix[3][0]=1.0;
+    CHECK(Key(B,D::DerivedOut)!=matrix);
+}
 }
 int main()
 {
@@ -1013,6 +1080,7 @@ int main()
     TestAvarBindingIndex();
     TestPathTextSpelling(); TestBoxTags(); TestHeadValueBits(); TestCandidateFallbackBytes();
     TestProviderOwnerText(); TestBulkValueKeyBytes(); TestSharedKeyRunsAndPlainValues();
+    TestPointContentVersions();
     std::printf("OpValues: %d failures\n",failures);
     return failures ? 1 : 0;
 }

@@ -294,6 +294,9 @@ struct RrStore {
     std::vector<std::string> opInputScratch;
     /// verifyLeafVersions: each step's source memo over array contents.
     std::vector<std::string> headContentKeys;
+    /// verifyChainVersions: per value id, the last published key of a
+    /// point-carrying value over its points' bytes.
+    std::vector<std::string> chainContentKeys;
     std::vector<RigExecProviderPlainState> providerValues;
     std::vector<RrProviderConversionScratch> providerConversionScratch;
     std::vector<RrProviderRefreshScratch> providerRefreshScratch;
@@ -544,6 +547,10 @@ struct RrProgram {
     /// RIGEXEC_VERIFY_SPARSE_LEAVES, read at Open: every run re-keys the
     /// slot-keyed leaves it skips and fails if one moved.
     bool verifySparseLeaves = false;
+    /// RIGEXEC_VERIFY_CHAIN_VERSIONS, read at Open: every run also keys each
+    /// published point content version over the points' bytes and fails if
+    /// the two disagree on a change.
+    bool verifyChainVersions = false;
     /// The leaves whose keys read input slots alone (provider leaves and
     /// constraint input arrays), by the slots they read:
     /// slotLeaves[slotLeafBegin[s], slotLeafBegin[s + 1]). slotKeyedLeaves

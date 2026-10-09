@@ -341,21 +341,33 @@ RigExecWireBasisCache::Get(const RigExecMoverParameters &p,
     return basis;
 }
 
+namespace {
+// The full-strength matrix movement, which rewrites every point: \p in and
+// \p out may be the same array, since point i is written only after it is
+// read.
+void
+ApplyMatrixFullStrength(const RigExecMoverParameters &p, const GfVec3f *in,
+                        GfVec3f *out, size_t count, bool useSimd)
+{
+    if (p.radialWeight) {
+        for (size_t i = 0; i < count; ++i)
+            out[i] = GfVec3f(p.transform.TransformAffine(GfVec3d(in[i])));
+    } else if (useSimd) {
+        RigExecApplyWeightedMatrixSimd(in,out,1.0f,count,p.transform);
+    } else {
+        for (size_t i = 0; i < count; ++i)
+            out[i] = GfVec3f(RigExecApplyWeightedMatrix(GfVec3d(in[i]),p.transform,1.0));
+    }
+}
+}  // namespace
+
 bool
 RigExecApplyMatrixKernel(const RigExecMoverParameters &p,
                          std::vector<GfVec3f> *pts, bool useSimd)
 {
     const size_t count = pts->size();
     if (RigExecEnvelopeIsFullStrength(p.weights)) {
-        if (p.radialWeight) {
-            for (auto &point : *pts)
-                point = GfVec3f(p.transform.TransformAffine(GfVec3d(point)));
-        } else if (useSimd) {
-            RigExecApplyWeightedMatrixSimd(pts->data(),pts->data(),1.0f,count,p.transform);
-        } else {
-            for (auto &point : *pts)
-                point = GfVec3f(RigExecApplyWeightedMatrix(GfVec3d(point),p.transform,1.0));
-        }
+        ApplyMatrixFullStrength(p, pts->data(), pts->data(), count, useSimd);
         return true;
     }
     // A sparse field with a zero default touches only its named points: a
@@ -1064,15 +1076,31 @@ bool RigExecApplyRevisionKernel(RigExecRevisionOp op,
 // arithmetic, and the rigs that would show a disagreement are the ones no
 // fixture happened to have.
 namespace {
+// \p source, when set, holds the \p sourceCount points entering the revision
+// and \p pts receives the result out of place: the matrix kernel reads them
+// where they are, and every other operation copies them into \p pts first,
+// bit for bit, and then runs in place. The "apply once" blend reads the
+// entering points from \p source rather than from a copy of them.
 bool
 RunRevisionKernel(RigExecRevisionOp op,
                          const RigExecMoverParameters &p,
                          std::vector<GfVec3f> *pts, bool useSimd,
                          RigExecWireBasisCache *wireBasis,
-    RigExecSurfaceKernelCache<GfVec3f,GfVec3d> *cache, bool discardable)
+    RigExecSurfaceKernelCache<GfVec3f,GfVec3d> *cache, bool discardable,
+    const GfVec3f *source = nullptr, size_t sourceCount = 0)
 {
     if (!p.valid || p.kind != _RevisionKindToken(op)) {
         return false;
+    }
+    if (source) {
+        if (op == RigExecRevisionOp::Matrix &&
+            RigExecEnvelopeIsFullStrength(p.weights)) {
+            pts->resize(sourceCount);
+            ApplyMatrixFullStrength(p, source, pts->data(), sourceCount,
+                                    useSimd);
+            return true;
+        }
+        pts->assign(source, source + sourceCount);
     }
     // Matrix, blendShape and the two derived recomputations resolve the
     // envelope inside their own arithmetic; blending their result again would
@@ -1094,7 +1122,7 @@ RunRevisionKernel(RigExecRevisionOp op,
     const bool fullStrengthEnvelope = RigExecEnvelopeIsFullStrength(p.weights);
     const size_t precedingSize = pts->size();
     std::vector<GfVec3f> preceding;
-    if (!fullStrengthEnvelope) {
+    if (!fullStrengthEnvelope && !source) {
         preceding = *pts;
     }
     if (!ApplyRevisionKernel(op, p, pts, useSimd, wireBasis,cache,discardable)) {
@@ -1108,8 +1136,8 @@ RunRevisionKernel(RigExecRevisionOp op,
         if (!p.weights.ResolveAll(pts->size(), &envelope)) {
             return false;
         }
-        RigExecBlendEnvelopeAll(preceding.data(), envelope.data(),
-                                pts->size(), pts->data());
+        RigExecBlendEnvelopeAll(source ? source : preceding.data(),
+                                envelope.data(), pts->size(), pts->data());
     }
     return true;
 }
@@ -1129,6 +1157,18 @@ bool RunDiscardableRevisionKernel(RigExecRevisionOp op,
     RigExecWireBasisCache *wireBasis, RigExecSurfaceKernelCache<GfVec3f,GfVec3d> *cache)
 {
     return RunRevisionKernel(op,p,pts,useSimd,wireBasis,cache,true);
+}
+bool RunDiscardableRevisionKernel(RigExecRevisionOp op,
+    const RigExecMoverParameters &p, const GfVec3f *in, size_t count,
+    std::vector<GfVec3f> *out, bool useSimd, RigExecWireBasisCache *wireBasis,
+    RigExecSurfaceKernelCache<GfVec3f,GfVec3d> *cache)
+{
+    // An empty entering array may come with no storage at all.
+    if (!in) {
+        out->clear();
+        return RunRevisionKernel(op,p,out,useSimd,wireBasis,cache,true);
+    }
+    return RunRevisionKernel(op,p,out,useSimd,wireBasis,cache,true,in,count);
 }
 } // namespace geometryDetail
 

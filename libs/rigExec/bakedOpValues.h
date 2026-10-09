@@ -5,6 +5,9 @@
 #include <string>
 #include <vector>
 #include <utility>
+PXR_NAMESPACE_OPEN_SCOPE
+class GfVec3f;
+PXR_NAMESPACE_CLOSE_SCOPE
 namespace rigExec {
 /// Unsupported boxed types compare unequal conservatively.
 bool RigExecExactSourceValueEqual(const PXR_NS::VtValue &, const PXR_NS::VtValue &);
@@ -44,5 +47,17 @@ bool RigExecBakedOpEffectiveInputKey(const RigExecBakedProgramImpl &,
     const RigExecBakedOpIdentityRemap *remap=nullptr, bool contentLeaves=false);
 bool RigExecBakedOpValueKeyIsExact(const RigExecBakedProgramImpl &,
     RigExecBakedSlotDomain, uint32_t slot);
+/// Whether two point arrays hold the same bytes: the equality the point
+/// content versions (RevisionDone, ChainDirty, ChainPoints, ChainBase,
+/// ChainInput, DerivedOut) are bumped by, signed zeros and NaN payloads
+/// included.
+bool RigExecBakedSamePoints(const PXR_NS::GfVec3f *a, size_t aCount,
+    const PXR_NS::GfVec3f *b, size_t bCount);
+/// The key those six domains carried before they were keyed by content
+/// version: the same fields with the points' bytes in place of the version.
+/// False, and an empty key, for any other domain. Owner thread; for the
+/// RIGEXEC_VERIFY_CHAIN_VERSIONS check and tests.
+bool RigExecBakedChainContentKey(const RigExecBakedProgramImpl &,
+    RigExecBakedSlotDomain, uint32_t slot, std::string *key);
 }
 #endif

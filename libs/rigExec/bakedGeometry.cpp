@@ -8,6 +8,7 @@
 // re-read. The evaluator is not visible here -- the compiled chains arrive
 // restated as RigExecBakedChainSpec, and the caches the frame path shares
 // with the dynamic walk were captured into RigExecBakedProgramImpl at Build.
+#include "bakedOpValues.h"
 #include "bakedProgramImpl.h"
 #include "bakedSchedule.h"
 
@@ -38,6 +39,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <iterator>
 #include <limits>
 #include <string>
@@ -1239,6 +1241,45 @@ PointsAt(const RigExecBakedProgramImpl::GeomChain &chain, size_t version,
     *count = chain.revisions[size_t(source)].output.size();
 }
 
+bool
+SamePoints(const std::vector<GfVec3f> &a, const std::vector<GfVec3f> &b)
+{
+    return RigExecBakedSamePoints(a.data(), a.size(), b.data(), b.size());
+}
+
+bool
+SamePoints(const VtVec3fArray &a, const VtVec3fArray &b)
+{
+    return RigExecBakedSamePoints(a.cdata(), a.size(), b.cdata(), b.size());
+}
+
+/// Makes \p output hold \p staging's points, copying only the blocks whose
+/// bytes differ, and returns whether any did (a size change included). A
+/// chunked skin's ranges stay in staging, where a chunk that sat a run out
+/// keeps its range, so its fuse cannot swap the buffers.
+bool
+CopyMovedPoints(const std::vector<GfVec3f> &staging,
+                std::vector<GfVec3f> *output)
+{
+    if (output->size() != staging.size()) {
+        output->assign(staging.begin(), staging.end());
+        return true;
+    }
+    constexpr size_t kBlock = 1024;
+    bool moved = false;
+    for (size_t begin = 0; begin < staging.size(); begin += kBlock) {
+        const size_t count = std::min(kBlock, staging.size() - begin);
+        if (std::memcmp(staging.data() + begin, output->data() + begin,
+                        count * sizeof(GfVec3f)) != 0) {
+            std::copy(staging.begin() + long(begin),
+                      staging.begin() + long(begin + count),
+                      output->begin() + long(begin));
+            moved = true;
+        }
+    }
+    return moved;
+}
+
 /// The influence matrices of \p revision, out of the tables the pose half's
 /// ProviderMatrix steps published. Returns whether the table MOVED.
 ///
@@ -1504,10 +1545,9 @@ ChunkTransformsView(const RigExecBakedProgramImpl::GeomChunk &chunk,
 bool
 SkinRange(RigExecBakedProgramImpl::GeomRevision *revision,
           const GfVec3f *preceding, const RigExecSkinTransformsView &view,
-          size_t begin, size_t end, bool whole, bool useSimd,
-          bool staging = true)
+          size_t begin, size_t end, bool whole, bool useSimd)
 {
-    std::vector<GfVec3f> &out = staging ? revision->stagingOutput : revision->output;
+    std::vector<GfVec3f> &out = revision->stagingOutput;
     std::copy(preceding + begin, preceding + end, out.begin() + long(begin));
     if (whole) {
         if (!RigExecApplySkinKernelWithTransforms(revision->parameters, view,
@@ -2014,10 +2054,10 @@ FuseWholeRevision(const RigExecBakedProgramImpl::GeomChain &chain,
     }
     // Against the forms the FOLD wrote -- this step reads RevisionTransforms
     // and writes none of it, so the table it skins against is the one that
-    // slot already holds.
-    revision->output.resize(count);
+    // slot already holds. Into staging, like the chunks: the fuse publishes
+    // it the way it publishes theirs.
     return SkinRange(revision, points, WholeTransformsView(revision), 0, count,
-                     /*whole=*/true, useSimd, /*staging=*/false);
+                     /*whole=*/true, useSimd);
 }
 
 }  // namespace
@@ -2028,6 +2068,8 @@ void ResetGeometryRevision(RigExecBakedProgramImpl::GeomRevision *revision)
     revision->created = true; revision->ran = false; revision->output.clear();
     revision->currentSource = -1; revision->lastParameters = RigExecMoverParameters();
     revision->lastAuxPoints = VtVec3fArray(); revision->lastStatus = RigExecMoverStatus();
+    // No baseline survives: the next publication bumps the version anyway.
+    revision->stagingFresh = false; revision->passedPoints.clear();
 }
 }
 void RigExecBakedAdoptRevisionLayout(RigExecBakedProgramImpl::GeomRevision *revision)
@@ -2043,6 +2085,9 @@ void RigExecBakedRunChainInputs(RigExecBakedProgramImpl *program,RigExecBakedSte
     chain.haveBase = chain.sampledHaveBase;
     if (!chain.haveBase) { chain.baseDirty = false; return; }
     if (chain.haveResult && chain.sampledBase.size() != chain.lastBase.size()) {
+        // ChainStatus republishes in this run at the new count, so bumping
+        // here and there cannot return to the bytes last published.
+        if (!chain.result.empty()) ++chain.resultVersion;
         chain.haveResult = false; chain.result = VtVec3fArray(); chain.scheduleDirty = true;
         for (auto &revision : chain.revisions) ResetGeometryRevision(&revision);
     }
@@ -2053,6 +2098,7 @@ void RigExecBakedRunChainInputs(RigExecBakedProgramImpl *program,RigExecBakedSte
     chain.scheduleDirty = false;
     chain.baseDirty = !chain.haveResult || !RigExecBakedHeadValueSame(
         VtValue(chain.sampledBase),VtValue(chain.lastBase));
+    if (!SamePoints(chain.sampledBase, chain.lastBase)) ++chain.baseVersion;
     chain.lastBase = chain.sampledBase;
 }
 void RigExecBakedPrepareDerivedBase(RigExecBakedProgramImpl::GeomChain::Derived *derived,
@@ -2174,8 +2220,16 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
             B.chains[size_t(chainIndex)];
         RigExecBakedProgramImpl::GeomChain::Derived &derived =
             chain.derived[size_t(derivedIndex)];
+        // DerivedOut's content version moves exactly when this step leaves
+        // `result` holding other bytes than it published last, a size reset
+        // included. Held by handle, so the compare costs no copy.
+        const VtVec3fArray published = derived.result;
+        const auto noteResult = [&] {
+            if (!SamePoints(published, derived.result)) ++derived.resultVersion;
+        };
         RigExecBakedPrepareDerivedBase(&derived,step);
         if (!chain.haveBase || !derived.haveBase) {
+            noteResult();
             return;
         }
         RigExecBakedProgramImpl::GeomRevision &revision = derived.revision;
@@ -2245,6 +2299,7 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
         std::copy(revision.output.begin(), revision.output.end(),
                   derived.spare.data());
         derived.result.swap(derived.spare);
+        noteResult();
         derived.haveResult = true;
         step->counters.chainsBuilt = 1;
         return;
@@ -2278,6 +2333,11 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
         const GfVec3f *points = nullptr;
         size_t count = 0;
         PointsAt(chain, chain.revisions.size(), &points, &count);
+        // ChainPoints' content version moves exactly when the bytes do.
+        if (!RigExecBakedSamePoints(points, count, chain.result.cdata(),
+                                    chain.result.size())) {
+            ++chain.resultVersion;
+        }
         // Double-buffered: publication is a refcount bump for the consumer
         // and the array one may still hold from last frame is never the one
         // being written.
@@ -2492,12 +2552,12 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
                 return;
             }
             if (!skin) {
-                // The revision's OWN buffer, seeded from the preceding one:
-                // there is no `scratch = current` and no
-                // `revision.stagingOutput = current` afterwards -- the fuse decides
-                // which buffer the chain's running value is in rather than
-                // copying one into another.
-                revision.stagingOutput.assign(points, points + count);
+                // The revision's OWN unpublished buffer, written out of
+                // place from the preceding points -- no seed copy before a
+                // kernel that rewrites every point -- and swapped in by the
+                // fuse rather than copied.
+                revision.stagingOutput.resize(count);
+                revision.stagingFresh = true;
                 // Not a second dispatch that mirrors _RevisionNode::Compute
                 // -- the same function the node calls. The packet check, the
                 // full-strength fast path, the kernel and the "apply once"
@@ -2505,8 +2565,9 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
                 // operation cannot mean one thing here and another there.
                 // This unpublished buffer is discarded by Fuse on failure.
                 chunk.ok = geometryDetail::RunDiscardableGeometry(
-                    revision.op, revision.parameters, &revision.stagingOutput,
-                    B.useSimd, &revision.wireBasis,&revision.surfaceCache);
+                    revision.op, revision.parameters, points, count,
+                    &revision.stagingOutput, B.useSimd, &revision.wireBasis,
+                    &revision.surfaceCache);
                 return;
             }
             if (!revision.parameters.valid ||
@@ -2515,6 +2576,7 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
                 !revision.influencesValid || !sized) {
                 return;
             }
+            revision.stagingFresh = true;
             chunk.ok = SkinRange(&revision, points,
                                  WholeTransformsView(&revision), 0, count,
                                  /*whole=*/true, B.useSimd);
@@ -2579,6 +2641,13 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
         revision.executed = true;
         step->counters.revisionsExecuted = revision.executed ? 1 : 0;
         if (revision.executed) {
+            // What the previous publication carried, which the content
+            // version is decided against: this revision's own output when it
+            // applied, the copy kept of its entering points when it passed
+            // through, nothing before its first.
+            const bool hadOwn =
+                revision.ran && revision.currentSource == int(revisionIndex);
+            bool moved = !revision.ran;
             revision.resultStatus = revision.status.state;
             bool applied = packetValid && revision.status.AllowsApply();
             if (applied && skin && revision.partitionStale) {
@@ -2594,13 +2663,48 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
                 }
             }
             if (applied) {
-                if (!(skin && revision.partitionStale))
-                    revision.output.assign(revision.stagingOutput.begin(), revision.stagingOutput.end());
+                if (revision.chunked || (skin && revision.partitionStale)) {
+                    if (!hadOwn) {
+                        moved = moved || !SamePoints(revision.stagingOutput,
+                                                     revision.passedPoints);
+                    }
+                    const bool copied =
+                        CopyMovedPoints(revision.stagingOutput, &revision.output);
+                    moved = moved || (hadOwn && copied);
+                } else if (revision.stagingFresh) {
+                    moved = moved ||
+                            !SamePoints(revision.stagingOutput,
+                                        hadOwn ? revision.output
+                                               : revision.passedPoints);
+                    // Ownership flips instead of a copy: the chunk's buffer
+                    // is published, and the one it replaces is the next
+                    // chunk's, at the size the chunk left (RevisionOut keys
+                    // the staging size).
+                    revision.output.swap(revision.stagingOutput);
+                    revision.stagingOutput.resize(revision.output.size());
+                    revision.stagingFresh = false;
+                } else if (!hadOwn) {
+                    // The chunk's latest result is already `output`.
+                    moved = moved || !SamePoints(revision.output,
+                                                 revision.passedPoints);
+                }
                 revision.currentSource = int(revisionIndex);
             } else {
                 // Nothing was applied, so the chain's running value stays
                 // where it was -- an indirection, not a copy. A chunk that
-                // ran and produced points is discarded with it.
+                // ran and produced points is discarded with it, and `output`
+                // keeps the last applied points a later apply may republish.
+                const GfVec3f *points = nullptr;
+                size_t count = 0;
+                PointsAt(chain, size_t(revisionIndex), &points, &count);
+                const std::vector<GfVec3f> &previous =
+                    hadOwn ? revision.output : revision.passedPoints;
+                const bool same = RigExecBakedSamePoints(
+                    points, count, previous.data(), previous.size());
+                moved = moved || !same;
+                if (hadOwn || !same) {
+                    revision.passedPoints.assign(points, points + count);
+                }
                 revision.currentSource =
                     revisionIndex == 0
                         ? -1
@@ -2609,6 +2713,9 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
                 if (revision.status.AllowsApply()) {
                     revision.resultStatus = _tokens->moverFailed;
                 }
+            }
+            if (moved) {
+                ++revision.doneVersion;
             }
             // Keep the published RevisionPacket intact. Ordinary revisions
             // have no duplicate last-parameters snapshot; exact value keys
@@ -3495,11 +3602,15 @@ void RigExecBakedResetSetAsideGeometryValue(
         domain == RigExecBakedSlotDomain::ChainPoints) {
         if (slot >= B.chains.size()) return;
         auto &chain = B.chains[slot];
+        // An excluded writer never runs, so clearing is the only way the
+        // points move: the content version moves with them.
         if (domain == RigExecBakedSlotDomain::ChainBase) {
             chain.haveBase = false;
+            if (!chain.lastBase.empty()) ++chain.baseVersion;
             chain.lastBase.clear();
         } else {
             chain.haveResult = false;
+            if (!chain.result.empty()) ++chain.resultVersion;
             chain.result.clear();
         }
         return;
@@ -3510,6 +3621,7 @@ void RigExecBakedResetSetAsideGeometryValue(
         auto &derived = B.chains[size_t(chain)].derived[size_t(part)];
         derived.haveResult = false;
         derived.haveMatrix = false;
+        if (!derived.result.empty()) ++derived.resultVersion;
         derived.result.clear();
         derived.revision.output.clear();
         derived.revision.ran = false;
@@ -3533,6 +3645,7 @@ void RigExecBakedResetSetAsideGeometryValue(
             const auto [chain, part] = B.revisionIndex[revisionIndex];
             auto &revision = B.chains[size_t(chain)].revisions[size_t(part)];
             revision.stagingOutput.clear();
+            revision.stagingFresh = false;
             // The excluded writer owns the full retained staging output;
             // invalidate every chunk opinion along with its cleared bytes.
             for (auto &chunk : revision.chunks) chunk.ok = false;
@@ -3553,12 +3666,22 @@ void RigExecBakedResetSetAsideGeometryValue(
         revision.output.clear();
         break;
     case RigExecBakedSlotDomain::RevisionDone:
-    case RigExecBakedSlotDomain::ChainDirty:
+    case RigExecBakedSlotDomain::ChainDirty: {
         revision.ran = false;
         revision.executed = false;
         revision.resultStatus = _tokens->operationCycle;
         revision.currentSource = -1;
+        // An excluded fuse never runs, so the version follows the base it
+        // passes through, against the copy of the base it last carried.
+        const VtVec3fArray &base = B.chains[size_t(chain)].lastBase;
+        if (!RigExecBakedSamePoints(base.cdata(), base.size(),
+                                    revision.passedPoints.data(),
+                                    revision.passedPoints.size())) {
+            ++revision.doneVersion;
+            revision.passedPoints.assign(base.cbegin(), base.cend());
+        }
         break;
+    }
     case RigExecBakedSlotDomain::SkinTopology:
         revision.layoutHandle.reset();
         revision.topology.reset();

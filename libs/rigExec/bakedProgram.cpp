@@ -733,6 +733,13 @@ void RigExecBakedProgram::AdoptGeometryStateFrom(
         }
         destination->resultStatus = source->resultStatus;
         destination->output = std::move(source->output);
+        // Both buffers' roles, the published points' content version and
+        // the baseline it is next decided against: a value the outgoing
+        // program published is compared with this one's republication.
+        destination->stagingOutput = std::move(source->stagingOutput);
+        destination->stagingFresh = source->stagingFresh;
+        destination->passedPoints = std::move(source->passedPoints);
+        destination->doneVersion = source->doneVersion;
         destination->lastParameters = std::move(source->lastParameters);
         // A DERIVED revision's remembered input lives beside the packet
         // rather than inside it -- the chain's 315KB point buffer, held by
@@ -835,6 +842,8 @@ void RigExecBakedProgram::AdoptGeometryStateFrom(
         chain.scheduleDirty = !sameSequence;
         chain.lastBase = std::move(old.lastBase);
         chain.result = std::move(old.result);
+        chain.baseVersion = old.baseVersion;
+        chain.resultVersion = old.resultVersion;
         chain.haveResult = old.haveResult;
 
         std::map<SdfPath, RigExecBakedProgramImpl::GeomChain::Derived *>
@@ -856,6 +865,7 @@ void RigExecBakedProgram::AdoptGeometryStateFrom(
                   /* keepRun = */ true);
             derived.lastBase = std::move(match->second->lastBase);
             derived.result = std::move(match->second->result);
+            derived.resultVersion = match->second->resultVersion;
             derived.haveResult = match->second->haveResult;
             derived.matrix = match->second->matrix;
             derived.haveMatrix = match->second->haveMatrix;

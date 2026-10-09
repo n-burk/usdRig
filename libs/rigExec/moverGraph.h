@@ -1547,6 +1547,11 @@ namespace geometryDetail {
 bool RunDiscardableRevisionKernel(RigExecRevisionOp,const RigExecMoverParameters &,
     std::vector<GfVec3f> *,bool,RigExecWireBasisCache *,
     RigExecSurfaceKernelCache<GfVec3f,GfVec3d> *);
+/// The same revision out of place: reads the \p count entering points at
+/// \p in, which must not alias \p out, and writes the result to \p out.
+bool RunDiscardableRevisionKernel(RigExecRevisionOp,const RigExecMoverParameters &,
+    const GfVec3f *in,size_t count,std::vector<GfVec3f> *out,bool,
+    RigExecWireBasisCache *,RigExecSurfaceKernelCache<GfVec3f,GfVec3d> *);
 }
 
 /// Whether \p envelope makes the "apply once" blend the identity, so the

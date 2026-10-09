@@ -883,11 +883,13 @@ RrGeoApplyLinearBlendSkinSimd(const RrVec3f *in, RrVec3f *out,
 
 #endif  // RIGEXEC_RUNTIME_HAS_SSE2
 
-// \p useSimd is the program's RrGeoSettings::useSimd.
+// \p useSimd is the program's RrGeoSettings::useSimd. Reads \p in and writes
+// \p pts, which may be the same array: point i is written only after it is
+// read.
 void
 RrGeoApplyMatrixKernelRange(const RrGeoMoverParameters &p,
                            const float *envelope, size_t begin, size_t end,
-                           RrVec3f *pts, bool useSimd)
+                           const RrVec3f *in, RrVec3f *pts, bool useSimd)
 {
     if (p.radialWeight) {
         // Factored per WEIGHT rather than per point: a painted falloff is
@@ -913,19 +915,19 @@ RrGeoApplyMatrixKernelRange(const RrGeoMoverParameters &p,
                 cachedWeight = w;
             }
             pts[i] = RrGeoToVec3f(partial.TransformAffine(
-                RrGeoToVec3d(pts[i])));
+                RrGeoToVec3d(in[i])));
         }
         return;
     }
     if (useSimd) {
         RrGeoApplyWeightedMatrixSimd(
-            pts + begin, pts + begin, envelope ? envelope + begin : nullptr, end - begin,
+            in + begin, pts + begin, envelope ? envelope + begin : nullptr, end - begin,
             p.transform);
     } else {
         // Element i is written only after it is read, so in-place is safe.
         for (size_t i = begin; i < end; ++i) {
             pts[i] = RrGeoToVec3f(RrGeoApplyWeightedMatrix(
-                RrGeoToVec3d(pts[i]), p.transform, envelope ? envelope[i] : 1.0f));
+                RrGeoToVec3d(in[i]), p.transform, envelope ? envelope[i] : 1.0f));
         }
     }
 }
@@ -990,7 +992,7 @@ RrGeoApplyMatrixKernel(const RrGeoMoverParameters &p, std::vector<RrVec3f> *pts,
         return true;
     }
     if(RrGeoEnvelopeIsFullStrength(p.weights)) {
-        RrGeoApplyMatrixKernelRange(p,nullptr,0,count,pts->data(),useSimd);
+        RrGeoApplyMatrixKernelRange(p,nullptr,0,count,pts->data(),pts->data(),useSimd);
         return true;
     }
     std::vector<float> weights(count);
@@ -998,7 +1000,7 @@ RrGeoApplyMatrixKernel(const RrGeoMoverParameters &p, std::vector<RrVec3f> *pts,
         return false;  // cardinality mismatch fails atomically
     }
     RrGeoApplyMatrixKernelRange(p, weights.data(), 0, count, pts->data(),
-                                useSimd);
+                                pts->data(), useSimd);
     return true;
 }
 
@@ -2479,6 +2481,23 @@ bool RrGeoPointBitsEqual(const std::vector<RrVec3f> &a,const std::vector<RrVec3f
     return a.size()==b.size() &&
         (a.empty() || std::memcmp(a.data(),b.data(),a.size()*sizeof(RrVec3f))==0);
 }
+// The program's CopyMovedPoints: \p output takes \p staging's points, block
+// by block where the bytes differ; returns whether any did.
+bool RrGeoCopyMovedPoints(const std::vector<RrVec3f> &staging,std::vector<RrVec3f> *output)
+{
+    if(output->size()!=staging.size()) { *output=staging; return true; }
+    constexpr size_t kBlock=1024;
+    bool moved=false;
+    for(size_t begin=0;begin<staging.size();begin+=kBlock) {
+        const size_t count=std::min(kBlock,staging.size()-begin);
+        if(std::memcmp(staging.data()+begin,output->data()+begin,count*sizeof(RrVec3f))!=0) {
+            std::copy(staging.begin()+long(begin),staging.begin()+long(begin+count),
+                      output->begin()+long(begin));
+            moved=true;
+        }
+    }
+    return moved;
+}
 struct RrGeoWireBasisEntry {
     std::vector<RrVec2f> binds;
     std::vector<int> indices;
@@ -2871,16 +2890,30 @@ RrGeoApplyRevisionKernel(
     return false;
 }
 
+// \p source, when set, holds the \p sourceCount points entering the revision
+// and \p pts receives the result out of place, as the program's
+// RunRevisionKernel: a full-strength matrix reads them where they are, every
+// other operation copies them first, and the blend reads \p source.
 bool
 RrGeoRunRevisionKernel(
     int op, const RrGeoMoverParameters &p, std::vector<RrVec3f> *pts,
     std::unordered_map<uint64_t, RrGeoWireBasisEntry> *wireCache,
     bool useSimd, RigExecSurfaceKernelCache<RrVec3f,RrVec3d> *surfaceCache = nullptr,
     RigExecWireRestCache<RrVec3f,RrVec2f> *wireRestCache = nullptr,
-    std::shared_ptr<const RrGeoWireBasisEntry> *lastWireBasis = nullptr)
+    std::shared_ptr<const RrGeoWireBasisEntry> *lastWireBasis = nullptr,
+    const RrVec3f *source = nullptr, size_t sourceCount = 0)
 {
     if (!p.valid || p.kind != RrGeoKindToken(op)) {
         return false;
+    }
+    if (source) {
+        if (op == RrGeoOpMatrix && RrGeoEnvelopeIsFullStrength(p.weights)) {
+            pts->resize(sourceCount);
+            RrGeoApplyMatrixKernelRange(p, nullptr, 0, sourceCount, source,
+                                        pts->data(), useSimd);
+            return true;
+        }
+        pts->assign(source, source + sourceCount);
     }
     if (op == RrGeoOpMatrix ||
         op == RrGeoOpBlendShape ||
@@ -2894,7 +2927,7 @@ RrGeoRunRevisionKernel(
     const bool fullStrengthEnvelope = RrGeoEnvelopeIsFullStrength(p.weights);
     const size_t precedingSize = pts->size();
     std::vector<RrVec3f> preceding;
-    if (!fullStrengthEnvelope) {
+    if (!fullStrengthEnvelope && !source) {
         preceding = *pts;
     }
     if (!RrGeoApplyRevisionKernel(op, p, pts, wireCache, useSimd, surfaceCache, wireRestCache, lastWireBasis)) {
@@ -2908,8 +2941,8 @@ RrGeoRunRevisionKernel(
         if (!p.weights.ResolveAll(pts->size(), &envelope)) {
             return false;
         }
-        RrGeoBlendEnvelopeAll(preceding.data(), envelope.data(),
-                              pts->size(), pts->data());
+        RrGeoBlendEnvelopeAll(source ? source : preceding.data(),
+                              envelope.data(), pts->size(), pts->data());
     }
     return true;
 }
@@ -2965,6 +2998,12 @@ struct RrGeometryScratch {
         std::vector<RrVec3f> output;
         std::vector<RrVec3f> stagingOutput;
         int currentSource = -1;
+        // As GeomRevision's: the chunk's unapplied result is in staging; the
+        // copy of the points a pass-through publication carried; and the
+        // content version RevisionDone and ChainDirty key the points by.
+        bool stagingFresh = false;
+        std::vector<RrVec3f> passedPoints;
+        uint64_t doneVersion = 0;
         std::vector<RrMat4d> influences;
         bool influencesValid = false;
         std::vector<RrMat4d> packetInfluences;
@@ -3044,6 +3083,9 @@ struct RrGeometryScratch {
         RrRetainedArray<RrVec3f> result;
         std::string resultStatus;
         std::vector<RrVec3f> spare;
+        // ChainInput, ChainBase and ChainPoints content versions, each
+        // bumped exactly when its array's bytes move.
+        uint64_t inputVersion = 0, baseVersion = 0, resultVersion = 0;
         bool scheduleDirty = true;
         std::vector<Revision> revisions;
         uint32_t createdCount = 0;
@@ -3058,6 +3100,8 @@ struct RrGeometryScratch {
         Revision revision;
         RrRetainedArray<RrVec3f> result;
         std::vector<RrVec3f> spare;
+        // DerivedOut's content version of `result`.
+        uint64_t resultVersion = 0;
         bool haveResult = false;
         bool baseDirty = false;
         uint32_t createdCount = 0;
@@ -5056,9 +5100,9 @@ RrGeoGatherChunkTransforms(RrProgram *program,
 bool
 RrGeoSkinRange(RrGeometryScratch::Revision *rev, const RrVec3f *preceding,
                const RrGeoSkinTransformsView &view, size_t begin,
-               size_t end, bool whole, bool useSimd, bool staging = true)
+               size_t end, bool whole, bool useSimd)
 {
-    std::vector<RrVec3f> &out = staging ? rev->stagingOutput : rev->output;
+    std::vector<RrVec3f> &out = rev->stagingOutput;
     if (end > begin && preceding) {
         std::copy(preceding + begin, preceding + end,
                   out.begin() + long(begin));
@@ -5096,9 +5140,10 @@ RrGeoFuseWholeRevision(const RrGeometryScratch::Chain &chain,
         count != rev->precedingCount) {
         return false;
     }
-    rev->output.resize(count);
+    // Into staging, like the chunks; the fuse publishes it as theirs.
+    rev->stagingOutput.resize(count);
     return RrGeoSkinRange(rev, points, RrGeoWholeTransformsView(rev), 0,
-                          count, true, useSimd, false);
+                          count, true, useSimd);
 }
 
 // A port of RigExecBakedAdoptPartition. The chunk keys stay Build's,
@@ -5128,6 +5173,8 @@ RrGeoResetRevision(RrGeometryScratch::Revision *rev)
     rev->ran = false;
     rev->output.clear();
     rev->stagingOutput.clear();
+    rev->stagingFresh = false;
+    rev->passedPoints.clear();
     rev->currentSource = -1;
     rev->lastParameters = RrGeoMoverParameters();
     rev->lastAuxPoints.clear();
@@ -5275,7 +5322,12 @@ RrPrologueGeometry(RrProgram *program,
         auto &chain=scratch->chains[c];
         chain.sampleHaveBase=chain.baseSlot>=0
             ?RrInputHasValue(program,uint32_t(chain.baseSlot)):geo.chains[c].haveBase;
-        chain.sampledBase=RrGeoChainBase(program,chain);
+        // ChainInput keys the sampled base by a content version, moved
+        // exactly when the bytes do; it publishes after every prologue.
+        const std::vector<RrVec3f> &base=RrGeoChainBase(program,chain);
+        if(!RrGeoPointBitsEqual(base,chain.sampledBase)) {
+            chain.sampledBase=base; ++chain.inputVersion;
+        }
         chain.createdCount=0; chain.scheduleCount=0;
     }
     for (size_t d=0;d<scratch->derived.size();++d) {
@@ -5319,6 +5371,9 @@ bool RrRunChainInputs(RrProgram *program, size_t c, std::string *error)
             return true;
         }
         if (chain.haveResult && basePoints.size() != chain.lastBase.size()) {
+            // ChainStatus republishes in this run at the new count, so the
+            // two bumps cannot return to the bytes last published.
+            if (!chain.result.empty()) ++chain.resultVersion;
             chain.haveResult = false;
             chain.result.clear();
             chain.scheduleDirty = true;
@@ -5336,12 +5391,14 @@ bool RrRunChainInputs(RrProgram *program, size_t c, std::string *error)
             ++chain.scheduleCount;
         }
         chain.scheduleDirty = false;
-        const bool baseDirty =
-            !chain.haveResult || !RrGeoPointBitsEqual(basePoints,chain.lastBase);
+        const bool sameBase = RrGeoPointBitsEqual(basePoints,chain.lastBase);
+        const bool baseDirty = !chain.haveResult || !sameBase;
         if (c < store.chainBaseDirty.size()) {
             store.chainBaseDirty[c] = baseDirty ? 1 : 0;
         }
         if (baseDirty) {
+            // ChainBase's content version moves exactly when the bytes do.
+            if (!sameBase) ++chain.baseVersion;
             chain.lastBase = basePoints;
         }
     return true;
@@ -5505,9 +5562,17 @@ RrGeoRunDerivedStep(RrProgram *program, RrGeometryScratch *scratch,
     derived.haveBase=derived.sampleHaveBase;
     const auto &derivedBase=derived.sampledBase;
     store.derivedHaveBase[size_t(object)]=derived.haveBase?1:0;
+    // DerivedOut's content version moves exactly when this step leaves
+    // `result` holding other bytes than it last published; a size reset
+    // keeps the old array alive here to compare against.
+    RrRetainedArray<RrVec3f> resetFrom;
+    const auto noteReset=[&] {
+        if(!resetFrom.empty()) ++derived.resultVersion;
+    };
     if(derived.haveBase) {
         auto &rev=derived.revision;
         if(derived.haveResult && derivedBase.size()!=derived.lastBase.size()) {
+            resetFrom=derived.result;
             derived.haveResult=false; derived.result.clear(); RrGeoResetRevision(&rev);
         }
         if(rev.created) { ++derived.createdCount; ++derived.scheduleCount; rev.created=false; }
@@ -5526,6 +5591,7 @@ RrGeoRunDerivedStep(RrProgram *program, RrGeometryScratch *scratch,
         store.derivedPublish[size_t(object)].haveBase = false;
     }
     if (!haveBase || !derivedHaveBase) {
+        noteReset();
         return true;
     }
     const RigExecWireRevision &wire =
@@ -5536,10 +5602,12 @@ RrGeoRunDerivedStep(RrProgram *program, RrGeometryScratch *scratch,
                      " references unknown revision op " +
                      std::to_string(wire.op);
         }
+        noteReset();
         return false;
     }
     if (wire.op == RrGeoOpSurfaceProjector ||
         wire.op == RrGeoOpShaderDials) {
+        noteReset();
         derived.haveResult = true;
         return RrGeoRunProjectorTarget(program, scratch, chainIndex, wire,
                                        derived.revision, size_t(object),
@@ -5607,6 +5675,16 @@ RrGeoRunDerivedStep(RrProgram *program, RrGeometryScratch *scratch,
     }
     derived.spare.resize(rev.output.size());
     std::copy(rev.output.begin(), rev.output.end(), derived.spare.data());
+    {
+        // Before the swap, against what was last published: the array a
+        // size reset set aside, else `result` itself (empty either way when
+        // the reset found nothing).
+        const std::vector<RrVec3f> &published =
+            resetFrom.empty() ? derived.result.Read() : resetFrom.Read();
+        if (!RrGeoPointBitsEqual(derived.spare, published)) {
+            ++derived.resultVersion;
+        }
+    }
     if(object>=0 && size_t(object)<store.derivedPublish.size())
         store.derivedPublish[size_t(object)].result.clear();
     derived.result.swap(derived.spare);
@@ -5668,6 +5746,10 @@ RrGeoRunChainStatusStep(RrProgram *program, RrGeometryScratch *scratch,
     chain.spare.resize(count);
     if (count > 0 && points) {
         std::copy(points, points + count, chain.spare.data());
+    }
+    // ChainPoints' content version moves exactly when the bytes do.
+    if (!RrGeoPointBitsEqual(chain.spare, chain.result.Read())) {
+        ++chain.resultVersion;
     }
     if(object>=0 && size_t(object)<store.chainPublish.size())
         store.chainPublish[size_t(object)].result.clear();
@@ -5906,14 +5988,14 @@ RrGeoRunRevisionChunkStep(RrProgram *program, RrGeometryScratch *scratch,
                 }
                 return false;
             }
-            if (count > 0) {
-                rev.stagingOutput.assign(points, points + count);
-            } else {
-                rev.stagingOutput.clear();
-            }
+            // Out of place into the revision's unpublished buffer, which the
+            // fuse swaps in, as the program's chunk does.
+            rev.stagingOutput.resize(count);
+            rev.stagingFresh = true;
             chunk.ok = RrGeoRunRevisionKernel(
                 int(wire.op), rev.parameters, &rev.stagingOutput,
-                &scratch->wireBasis, useSimd, &rev.surfaceCache, &rev.wireRestCache, &rev.lastWireBasis);
+                &scratch->wireBasis, useSimd, &rev.surfaceCache, &rev.wireRestCache, &rev.lastWireBasis,
+                count > 0 ? points : nullptr, count);
             return true;
         }
         if (!rev.parameters.valid ||
@@ -5922,6 +6004,7 @@ RrGeoRunRevisionChunkStep(RrProgram *program, RrGeometryScratch *scratch,
             !rev.influencesValid || !sized) {
             return true;
         }
+        rev.stagingFresh = true;
         chunk.ok = RrGeoSkinRange(&rev, points,
                                   RrGeoWholeTransformsView(&rev), 0, count,
                                   true, useSimd);
@@ -6002,6 +6085,12 @@ RrGeoRunRevisionFuseStep(RrProgram *program, RrGeometryScratch *scratch,
     rev.executed = true;
     output.counters.revisionsExecuted = rev.executed ? 1 : 0;
     if (rev.executed) {
+        // The baseline the content version is decided against, as the
+        // program's fuse: its own output when it applied last, the copy of
+        // its entering points when it passed through, none before its first.
+        const bool hadOwn =
+            rev.ran && rev.currentSource == int(revisionIndex);
+        bool moved = !rev.ran;
         rev.resultStatus = rev.status.state;
         bool applied = packetValid && rev.status.AllowsApply();
         if (applied && skin && rev.partitionStale) {
@@ -6016,9 +6105,43 @@ RrGeoRunRevisionFuseStep(RrProgram *program, RrGeometryScratch *scratch,
             }
         }
         if (applied) {
-            if (!(skin && rev.partitionStale)) rev.output = rev.stagingOutput;
+            if (rev.chunked || (skin && rev.partitionStale)) {
+                // Sticky chunk ranges stay in staging: copy moved blocks.
+                if (!hadOwn) {
+                    moved = moved ||
+                            !RrGeoPointBitsEqual(rev.stagingOutput, rev.passedPoints);
+                }
+                const bool copied =
+                    RrGeoCopyMovedPoints(rev.stagingOutput, &rev.output);
+                moved = moved || (hadOwn && copied);
+            } else if (rev.stagingFresh) {
+                moved = moved ||
+                        !RrGeoPointBitsEqual(rev.stagingOutput,
+                                             hadOwn ? rev.output : rev.passedPoints);
+                // Ownership flips instead of a copy; the replaced buffer is
+                // the next chunk's, at the size the chunk left (RevisionOut
+                // keys the staging size).
+                rev.output.swap(rev.stagingOutput);
+                rev.stagingOutput.resize(rev.output.size());
+                rev.stagingFresh = false;
+            } else if (!hadOwn) {
+                moved = moved || !RrGeoPointBitsEqual(rev.output, rev.passedPoints);
+            }
             rev.currentSource = int(revisionIndex);
         } else {
+            // A pass-through publishes the entering points; `output` keeps
+            // the last applied points a later apply may republish.
+            const std::vector<RrVec3f> *entering =
+                RrGeoPointsVersion(chain, revisionIndex);
+            const std::vector<RrVec3f> &previous =
+                hadOwn ? rev.output : rev.passedPoints;
+            const bool same = entering ? RrGeoPointBitsEqual(*entering, previous)
+                                       : previous.empty();
+            moved = moved || !same;
+            if (hadOwn || !same) {
+                if (entering) rev.passedPoints = *entering;
+                else rev.passedPoints.clear();
+            }
             rev.currentSource =
                 revisionIndex == 0
                     ? -1
@@ -6026,6 +6149,9 @@ RrGeoRunRevisionFuseStep(RrProgram *program, RrGeometryScratch *scratch,
             if (rev.status.AllowsApply()) {
                 rev.resultStatus = "moverFailed";
             }
+        }
+        if (moved) {
+            ++rev.doneVersion;
         }
         // No deep packet snapshot: graph input keys own scheduling.
         rev.lastStatus = rev.status;
@@ -6331,14 +6457,53 @@ void RrOpParametersKey(std::string *key, const RrGeoMoverParameters &p)
 }
 } // namespace
 
+bool RrGeometryChainContentKey(const RrProgram *program, RigExecWireSlotDomain domain,
+    uint32_t slot, std::string *key)
+{
+    const auto *scratch = static_cast<const RrGeometryScratch *>(program->geo.get());
+    key->clear();
+    if (!scratch) return false;
+    using D = RigExecWireSlotDomain;
+    if (domain == D::ChainInput) {
+        const auto &chain=scratch->chains[slot];
+        RrOpBytes(key,chain.sampleHaveBase); RrOpBytes(key,chain.sampledBase); return true;
+    }
+    if (domain == D::ChainBase || domain == D::ChainPoints) {
+        const auto &c = scratch->chains[slot];
+        RrOpBytes(key, domain == D::ChainBase ? c.haveBase : c.haveResult);
+        RrOpBytes(key, domain == D::ChainBase ? c.lastBase : c.result.Read()); return true;
+    }
+    if (domain == D::DerivedOut) {
+        const auto &d = scratch->derived[slot]; RrOpBytes(key,d.haveResult); RrOpBytes(key,d.result.Read());
+        const auto &published = program->store.derivedPublish[slot];
+        RrOpBytes(key,published.haveMatrix); RrOpBytes(key,published.matrix); return true;
+    }
+    if ((domain == D::RevisionDone || domain == D::ChainDirty) &&
+        slot < program->geometry->revisionIndex.size()) {
+        const auto &index=program->geometry->revisionIndex[slot];
+        const auto &chain=scratch->chains[size_t(index.first)];
+        const auto &rev=chain.revisions[size_t(index.second)];
+        RrOpBytes(key,rev.currentSource); RrOpBytes(key,rev.resultStatus);
+        RrOpBytes(key,rev.status.state); RrOpBytes(key,rev.status.firstBadAddress);
+        if(rev.currentSource<0) RrOpBytes(key,chain.lastBase);
+        else if(size_t(rev.currentSource)<chain.revisions.size())
+            RrOpBytes(key,chain.revisions[size_t(rev.currentSource)].output);
+        return true;
+    }
+    return false;
+}
+
 void RrGeometryOpValueKey(const RrProgram *program, RigExecWireSlotDomain domain,
     uint32_t slot, std::string *key)
 {
     const auto *scratch = static_cast<const RrGeometryScratch *>(program->geo.get());
     if (!scratch) return;
+    // The six point-carrying domains key their points by a content version
+    // its writer bumps exactly when the bytes move; RrGeometryChainContentKey
+    // is the same key over the bytes.
     if(domain==RigExecWireSlotDomain::ChainInput) {
         const auto &chain=scratch->chains[slot];
-        RrOpBytes(key,chain.sampleHaveBase); RrOpBytes(key,chain.sampledBase); return;
+        RrOpBytes(key,chain.sampleHaveBase); RrOpBytes(key,chain.inputVersion); return;
     }
     if(domain==RigExecWireSlotDomain::DerivedBase) {
         const auto &derived=scratch->derived[slot];
@@ -6347,10 +6512,10 @@ void RrGeometryOpValueKey(const RrProgram *program, RigExecWireSlotDomain domain
     if (domain == RigExecWireSlotDomain::ChainBase || domain == RigExecWireSlotDomain::ChainPoints) {
         const auto &c = scratch->chains[slot];
         RrOpBytes(key, domain == RigExecWireSlotDomain::ChainBase ? c.haveBase : c.haveResult);
-        RrOpBytes(key, domain == RigExecWireSlotDomain::ChainBase ? c.lastBase : c.result.Read()); return;
+        RrOpBytes(key, domain == RigExecWireSlotDomain::ChainBase ? c.baseVersion : c.resultVersion); return;
     }
     if (domain == RigExecWireSlotDomain::DerivedOut) {
-        const auto &d = scratch->derived[slot]; RrOpBytes(key,d.haveResult); RrOpBytes(key,d.result.Read());
+        const auto &d = scratch->derived[slot]; RrOpBytes(key,d.haveResult); RrOpBytes(key,d.resultVersion);
         const auto &published = program->store.derivedPublish[slot];
         RrOpBytes(key,published.haveMatrix); RrOpBytes(key,published.matrix); return;
     }
@@ -6391,13 +6556,7 @@ void RrGeometryOpValueKey(const RrProgram *program, RigExecWireSlotDomain domain
     case RigExecWireSlotDomain::ChainDirty:
         RrOpBytes(key,rev->currentSource); RrOpBytes(key,rev->resultStatus);
         RrOpBytes(key,rev->status.state); RrOpBytes(key,rev->status.firstBadAddress);
-        if(slot<program->geometry->revisionIndex.size()) {
-            const auto &index=program->geometry->revisionIndex[slot];
-            const auto &chain=scratch->chains[size_t(index.first)];
-            if(rev->currentSource<0) RrOpBytes(key,chain.lastBase);
-            else if(size_t(rev->currentSource)<chain.revisions.size())
-                RrOpBytes(key,chain.revisions[size_t(rev->currentSource)].output);
-        }
+        RrOpBytes(key,rev->doneVersion);
         break;
     case RigExecWireSlotDomain::SkinTopology:
         RrOpBytes(key,bool(rev->layoutHandle));
@@ -6414,16 +6573,21 @@ void RrResetExcludedGeometryValue(RrProgram *program,
 {
     auto *scratch=static_cast<RrGeometryScratch *>(program->geo.get());
     if (!scratch) return;
+    // An excluded writer never runs, so clearing is the only way its points
+    // move: the content version moves with them.
     if (domain==RigExecWireSlotDomain::ChainBase) {
         auto &chain=scratch->chains[slot];
+        if(!chain.lastBase.empty()) ++chain.baseVersion;
         chain.haveBase=false; chain.lastBase.clear(); return;
     }
     if (domain==RigExecWireSlotDomain::ChainPoints) {
         auto &chain=scratch->chains[slot];
+        if(!chain.result.empty()) ++chain.resultVersion;
         chain.haveResult=false; chain.result.clear(); chain.resultStatus.clear(); return;
     }
     if (domain==RigExecWireSlotDomain::DerivedOut) {
         auto &derived=scratch->derived[slot];
+        if(!derived.result.empty()) ++derived.resultVersion;
         derived.haveResult=false; derived.result.clear();
         derived.revision.output.clear(); derived.revision.ran=false;
         program->store.derivedPublish[slot].haveMatrix=false; return;
@@ -6437,6 +6601,7 @@ void RrResetExcludedGeometryValue(RrProgram *program,
                    slot>=uint32_t(wire.chunkBase)+wire.chunks.size()) continue;
                 auto &revision=scratch->chains[c].revisions[r];
                 revision.stagingOutput.clear();
+                revision.stagingFresh=false;
                 for(auto &chunk:revision.chunks) chunk.ok=false;
                 return;
             }
@@ -6444,8 +6609,10 @@ void RrResetExcludedGeometryValue(RrProgram *program,
         return;
     }
     RrGeometryScratch::Revision *revision=nullptr;
+    const RrGeometryScratch::Chain *owner=nullptr;
     if(slot<program->geometry->revisionIndex.size()) {
         const auto &index=program->geometry->revisionIndex[slot];
+        owner=&scratch->chains[size_t(index.first)];
         revision=&scratch->chains[size_t(index.first)].revisions[size_t(index.second)];
     } else if(domain==RigExecWireSlotDomain::SkinTopology) {
         revision=&scratch->derived[slot-program->geometry->revisionIndex.size()].revision;
@@ -6459,7 +6626,13 @@ void RrResetExcludedGeometryValue(RrProgram *program,
     case RigExecWireSlotDomain::RevisionDone:
     case RigExecWireSlotDomain::ChainDirty:
         revision->currentSource=-1; revision->resultStatus="operation cycle";
-        revision->ran=false; revision->executed=false; break;
+        revision->ran=false; revision->executed=false;
+        // An excluded fuse never runs: the version follows the base it
+        // passes through, against the copy of the base it last carried.
+        if(owner && !RrGeoPointBitsEqual(owner->lastBase,revision->passedPoints)) {
+            ++revision->doneVersion; revision->passedPoints=owner->lastBase;
+        }
+        break;
     case RigExecWireSlotDomain::SkinTopology:
         revision->layoutHandle.reset(); revision->topology.reset();
         revision->topologyResolved=false; revision->layoutUsable=false; break;

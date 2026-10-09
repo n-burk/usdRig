@@ -334,6 +334,9 @@ void CopySkinBodyOutputs(RigExecBakedProgramImpl::GeomRevision *a,
     a->weightFieldPublished=b.weightFieldPublished;a->topology=b.topology;a->topologyResolved=b.topologyResolved;
     a->stagingOutput=b.stagingOutput;a->output=b.output;a->resultStatus=b.resultStatus;
     a->currentSource=b.currentSource;a->ran=b.ran;a->lastStatus=b.lastStatus;
+    // The buffers' roles and the published points' version, with the
+    // baseline that version is next decided against.
+    a->stagingFresh=b.stagingFresh;a->passedPoints=b.passedPoints;a->doneVersion=b.doneVersion;
     a->staticDirty=false;a->executed=false;
     for(size_t i=0;i<a->chunks.size();++i) {
         a->chunks[i].ok=b.chunks[i].ok;a->chunks[i].transforms=b.chunks[i].transforms;
@@ -412,10 +415,13 @@ void RigExecBakedAdoptSkinOpState(RigExecBakedProgramImpl *program,const RigExec
         const auto &oldRevision=P.chains[size_t(oldIndex.first)].revisions[size_t(oldIndex.second)];
         CopySkinBodyOutputs(&revision,oldRevision);
         for(const auto *ids:{&prior.descriptor.reads,&prior.descriptor.writes})for(auto id:*ids) {
-            auto &destination=B.opAdapter.values[size_t(map.values[size_t(id)])];
+            const size_t mapped=size_t(map.values[size_t(id)]);
+            auto &destination=B.opAdapter.values[mapped];
             const auto &previous=P.opAdapter.values[size_t(id)];
             destination.key=previous.key;destination.revision=previous.revision;
             destination.initialized=true;destination.changed=0;
+            if(mapped<B.chainContentKeys.size() && size_t(id)<P.chainContentKeys.size())
+                B.chainContentKeys[mapped]=P.chainContentKeys[size_t(id)];
         }
         // MarkSkipped preserves program-size facts on the retained body.
         auto &retainedStep=B.steps[op.originalIndex];
@@ -471,6 +477,25 @@ void BuildSpaceLeafIndex(RigExecBakedProgramImpl *program)
     B.spaceLeafRekey.assign(count,0);
 }
 
+// RIGEXEC_VERIFY_CHAIN_VERSIONS, owner thread, after \p id published: a value
+// keyed by a point content version must tell the change the points' bytes
+// tell. The first publication a program sees has nothing to compare with.
+void VerifyChainVersion(RigExecBakedProgramImpl *program,RigExecValueId id)
+{
+    auto &B=*program;
+    if(size_t(id)>=B.chainContentKeys.size()) return;
+    const auto &value=B.opAdapter.values[size_t(id)];
+    std::string content;
+    if(!RigExecBakedChainContentKey(B,RigExecBakedSlotDomain(value.domain),value.slot,&content)) return;
+    auto &last=B.chainContentKeys[size_t(id)];
+    if(!last.empty() && (last!=content)!=(value.changed!=0)) {
+        ++B.chainVersionMismatches;
+        TF_VERIFY(false,"domain %u slot %u: the point content version and the "
+                  "points' bytes disagree on a change",value.domain,value.slot);
+    }
+    last.swap(content);
+}
+
 // Re-keys the sampled leaves into changedLeaves, in id order. Unless \p all,
 // a provider leaf is re-keyed only for a kRigExecSpaceLeaf* reason; any other
 // keeps the key an equal compare would keep, unchanged. Owner thread, before
@@ -478,6 +503,14 @@ void BuildSpaceLeafIndex(RigExecBakedProgramImpl *program)
 void PublishLeaves(RigExecBakedProgramImpl *program,bool all)
 {
     auto &B=*program; auto &state=B.opAdapter;
+    // A chain input keys its sampled base by a content version, moved here,
+    // before it publishes, exactly when the bytes differ from the base it
+    // last published (held by handle, so immutable).
+    for(auto &chain:B.chains)
+        if(!RigExecBakedSamePoints(chain.sampledBase.cdata(),chain.sampledBase.size(),
+                                   chain.publishedInput.cdata(),chain.publishedInput.size())) {
+            ++chain.inputVersion; chain.publishedInput=chain.sampledBase;
+        }
     const auto publish=[&](RigExecValueId id) {
         auto &value=state.values[size_t(id)];
         RigExecOpPublishValue(&value,[&](uint32_t d,uint32_t slot,std::string *key) {
@@ -487,6 +520,7 @@ void PublishLeaves(RigExecBakedProgramImpl *program,bool all)
                 RigExecOpKeyAppend(key,value.revision+1);
         });
         if(value.changed) state.changedLeaves.push_back(id);
+        if(B.verifyChainVersions) VerifyChainVersion(&B,id);
     };
     const auto *index=B.spaceLeafIndex.get();
     auto &rekey=B.spaceLeafRekey;
@@ -631,6 +665,9 @@ bool RigExecBakedCompileOpGraph(RigExecBakedProgramImpl *B,std::string *error)
     }
     state.verifyConstantSources=TfGetenvBool("RIGEXEC_VERIFY_CONSTANT_KEYS",false);
     state.verifyLeafVersions=TfGetenvBool("RIGEXEC_VERIFY_LEAF_VERSIONS",false);
+    B->verifyChainVersions=TfGetenvBool("RIGEXEC_VERIFY_CHAIN_VERSIONS",false);
+    B->chainContentKeys.assign(B->verifyChainVersions?state.values.size():0,std::string());
+    B->chainVersionMismatches=0;
     BuildSpaceLeafIndex(B);
     // The skip callback below changes state only through MarkSkipped, whose
     // counters only geometry bodies set, SkipGeometryStep on geometry kinds
@@ -828,6 +865,12 @@ bool RigExecBakedExecuteOpGraph(RigExecBakedProgramImpl *program,UsdTimeCode tim
         for(uint32_t c=0;c<state.leafVersionMismatch.size();++c)
             TF_VERIFY(!state.leafVersionMismatch[c],
                 "op %u: a path-leaf version key and its content key disagree on a change",c);
+    // After the join, so the workers do no verification: nothing a run
+    // writes later moves the points a published value describes.
+    if(B.verifyChainVersions)
+        for(uint32_t c=0;c<B.opGraph.ops.size() && c<B.opExecution.ran.size();++c)
+            if(B.opExecution.ran[c])
+                for(const auto id:B.opGraph.ops[c].descriptor.writes) VerifyChainVersion(&B,id);
     if(!ok) {
         state.retainedFirst.clear();
         B.everRan=false;

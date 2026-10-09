@@ -33,6 +33,7 @@
 #include "rigExec/bakedProgramImpl.h"
 #include "rigExec/bakedSchedule.h"
 #include "rigExec/bakedOpGraph.h"
+#include "rigExec/bakedOpValues.h"
 #include "rigExec/frozenContext.h"
 #include "rigExec/frameCacheSparsity.h"
 #include "rigExec/parallel.h"
@@ -65,6 +66,7 @@
 #include <set>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <map>
 #include <limits>
 #include <memory>
@@ -176,6 +178,56 @@ MakeStackedChainStage()
         mover.GetRelationship(TfToken("rigExec:transform"))
             .SetTargets({driver.GetPath()});
         mover.GetAttribute(TfToken("inputs:defaultWeight")).Set(1.0f);
+    }
+    return stage;
+}
+
+/// MakeStackedChainStage's three matrix movers, with M0 on a driver of its
+/// own that moves at frames 1, 2 and 3, and M1 and M2 on one that stands
+/// still. \p firstWeight is M0's inputs:defaultWeight; zero makes its points
+/// the ones it entered with however its driver moves. \p failMiddle gives M1
+/// an out-of-range weight at frame 2 only, so M1 passes through there and
+/// applies again at frame 3.
+UsdStageRefPtr
+MakeAnimatedChainStage(float firstWeight, bool failMiddle)
+{
+    const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    stage->DefinePrim(SdfPath("/Asset"), TfToken("Scope"));
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    const UsdPrim moving = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Moving"), TfToken("RigExecControl"));
+    for (int frame = 1; frame <= 3; ++frame) {
+        moving.GetAttribute(TfToken("avars:tx"))
+            .Set(double(frame), UsdTimeCode(frame));
+    }
+    const UsdPrim still = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Still"), TfToken("RigExecControl"));
+    still.GetAttribute(TfToken("avars:ty")).Set(1.0);
+    const SdfPath target("/Asset/Shape.points");
+    const UsdPrim shape =
+        stage->DefinePrim(target.GetPrimPath(), TfToken("Points"));
+    shape.GetAttribute(TfToken("points"))
+        .Set(VtVec3fArray{GfVec3f(0), GfVec3f(1, 0, 0), GfVec3f(0, 2, 0)});
+    stage->DefinePrim(SdfPath("/Asset/Rig/Movers"), TfToken("Scope"));
+    for (int i = 0; i < 3; ++i) {
+        const UsdPrim mover = stage->DefinePrim(
+            SdfPath("/Asset/Rig/Movers/M" + std::to_string(i)),
+            TfToken("RigExecMatrixMover"));
+        mover.ApplyAPI(TfToken("RigExecMoverAPI"));
+        mover.GetRelationship(TfToken("rigExec:moves")).SetTargets({target});
+        mover.GetRelationship(TfToken("rigExec:transform"))
+            .SetTargets({i == 0 ? moving.GetPath() : still.GetPath()});
+        UsdAttribute weight =
+            mover.GetAttribute(TfToken("inputs:defaultWeight"));
+        if (i == 0) {
+            weight.Set(firstWeight);
+        } else if (i == 1 && failMiddle) {
+            weight.Set(1.0f, UsdTimeCode(1.0));
+            weight.Set(2.0f, UsdTimeCode(2.0));
+            weight.Set(1.0f, UsdTimeCode(3.0));
+        } else {
+            weight.Set(1.0f);
+        }
     }
     return stage;
 }
@@ -4685,6 +4737,422 @@ TestTheValidatorRejectsAnUnboundPointVersion()
     }
 }
 
+/// Whether two point arrays hold the same bytes.
+template <class A, class B>
+bool
+SameBits(const A &a, const B &b)
+{
+    return a.size() == b.size() &&
+           (a.size() == 0 ||
+            std::memcmp(a.data(), b.data(), a.size() * sizeof(GfVec3f)) == 0);
+}
+
+/// Whether the step of \p kind for \p object ran in the program's last run.
+bool
+RanLast(const RigExecBakedProgramImpl &B, RigExecBakedStepKind kind,
+        int object)
+{
+    for (size_t c = 0; c < B.opGraph.ops.size(); ++c) {
+        const RigExecBakedStep &step = B.steps[B.opGraph.ops[c].originalIndex];
+        if (step.kind == kind && step.object == object) {
+            return c < B.opExecution.ran.size() && B.opExecution.ran[c];
+        }
+    }
+    return false;
+}
+
+/// The fuse's buffer selection, stepped by hand so that each run's chunk and
+/// fuse are the test's to choose. An applying fuse swaps the chunk's buffer
+/// in; one that re-applies without its chunk keeps the buffer it published;
+/// one that passes through publishes the entering points, keeps a copy of
+/// them and leaves the revision's last applied points where a later apply
+/// finds them. The value keys carry a content version, and at every
+/// publication they must tell the change the keys over the bytes tell.
+void
+TestTheFuseSelectsItsBuffersByHand()
+{
+    using D = RigExecBakedSlotDomain;
+    const VtVec3fArray base{GfVec3f(0.0f), GfVec3f(1.0f, 0.0f, 0.0f),
+                            GfVec3f(0.0f, 2.0f, 0.0f)};
+    RigExecBakedProgramImpl B;
+    RigExecResolvedInputs resolved;
+    B.resolvedInputs = &resolved;
+    B.chains.resize(1);
+    RigExecBakedProgramImpl::GeomChain &chain = B.chains[0];
+    chain.haveBase = true;
+    chain.lastBase = base;
+    chain.revisions.resize(1);
+    B.revisionIndex = {{0, 0}};
+    RigExecBakedProgramImpl::GeomRevision &revision = chain.revisions[0];
+    revision.op = RigExecRevisionOp::Matrix;
+    revision.moverPath = SdfPath("/M");
+    revision.moverPathText = "/M";
+    revision.chunks.resize(1);
+    revision.precedingCount = base.size();
+    revision.stagingOutput.resize(base.size());
+    const auto setPacket = [&](double tx, bool valid, float strength) {
+        RigExecMoverParameters p;
+        p.kind = RigExecRevisionKindToken(RigExecRevisionOp::Matrix);
+        p.enabled = true;
+        p.valid = valid;
+        p.strength = strength;
+        p.weights = RigExecWeightPacket::Constant(1.0f);
+        GfMatrix4d m(1.0);
+        m.SetTranslateOnly(GfVec3d(tx, 0.0, 0.0));
+        p.transform = m;
+        revision.parameters = p;
+        revision.status =
+            RigExecStatusForParameters(p, revision.moverPathText);
+    };
+    RigExecBakedStep chunk, fuse, status;
+    chunk.kind = RigExecBakedStepKind::RevisionChunk;
+    chunk.object = 0;
+    chunk.part = 0;
+    fuse.kind = RigExecBakedStepKind::RevisionFuse;
+    fuse.object = 0;
+    status.kind = RigExecBakedStepKind::ChainStatus;
+    status.object = 0;
+    const auto run = [&](RigExecBakedStep *step) {
+        RigExecBakedRunGeometryStep(&B, step, UsdTimeCode::Default());
+    };
+    struct Watched {
+        D domain;
+        std::string key, content;
+    };
+    std::vector<Watched> watched{{D::RevisionDone, {}, {}},
+                                 {D::ChainDirty, {}, {}},
+                                 {D::ChainPoints, {}, {}}};
+    const auto publish = [&](const char *what) {
+        for (Watched &w : watched) {
+            std::string key, content;
+            RigExecBakedOpValueKey(B, w.domain, 0, &key);
+            CHECK(RigExecBakedChainContentKey(B, w.domain, 0, &content));
+            if (!w.key.empty() &&
+                (key != w.key) != (content != w.content)) {
+                ++failures;
+                std::printf("FAIL %s: a content version and its points' "
+                            "bytes disagree on a change\n", what);
+            }
+            w.key.swap(key);
+            w.content.swap(content);
+        }
+    };
+    const auto translated = [&](float tx) {
+        VtVec3fArray moved = base;
+        for (GfVec3f &point : moved) {
+            point[0] += tx;
+        }
+        return moved;
+    };
+
+    setPacket(1.0, true, 0.0f);
+    run(&chunk); run(&fuse); run(&status); publish("applies");
+    CHECK(revision.currentSource == 0 && !revision.stagingFresh);
+    CHECK(SameBits(chain.result, translated(1.0f)));
+    const uint64_t first = revision.doneVersion;
+
+    // Re-applies without its chunk: the published buffer stays.
+    run(&fuse); run(&status); publish("re-applies");
+    CHECK(revision.doneVersion == first);
+    CHECK(SameBits(revision.output, translated(1.0f)));
+
+    // Passes through: the base is published and a copy of it kept, and the
+    // last applied points stay the revision's own.
+    setPacket(1.0, false, 0.0f);
+    run(&chunk); run(&fuse); run(&status); publish("passes through");
+    CHECK(revision.currentSource == -1 && revision.doneVersion == first + 1);
+    CHECK(SameBits(chain.result, base));
+    CHECK(SameBits(revision.passedPoints, base));
+    CHECK(SameBits(revision.output, translated(1.0f)));
+
+    // Applies again: compared with the copy, not with its old points.
+    setPacket(1.0, true, 0.0f);
+    run(&chunk); run(&fuse); run(&status); publish("recovers");
+    CHECK(revision.currentSource == 0 && revision.doneVersion == first + 2);
+    CHECK(SameBits(chain.result, translated(1.0f)));
+
+    // A packet that moves without moving the points: the buffers swap and
+    // the version stays.
+    setPacket(1.0, true, 0.5f);
+    run(&chunk); run(&fuse); run(&status); publish("same points");
+    CHECK(revision.doneVersion == first + 2 && !revision.stagingFresh);
+    CHECK(SameBits(chain.result, translated(1.0f)));
+
+    setPacket(2.0, true, 0.5f);
+    run(&chunk); run(&fuse); run(&status); publish("moves");
+    CHECK(revision.doneVersion == first + 3);
+    CHECK(SameBits(chain.result, translated(2.0f)));
+
+    // The entering points move under a pass-through: the copy follows them.
+    setPacket(2.0, false, 0.5f);
+    run(&chunk); run(&fuse); run(&status); publish("passes through again");
+    CHECK(revision.doneVersion == first + 4);
+    VtVec3fArray entering = base;
+    entering[2][1] = 5.0f;
+    chain.lastBase = entering;
+    run(&fuse); run(&status); publish("entering points moved");
+    CHECK(revision.doneVersion == first + 5);
+    CHECK(SameBits(revision.passedPoints, entering));
+    CHECK(SameBits(chain.result, entering));
+    CHECK(SameBits(revision.output, translated(2.0f)));
+}
+
+/// The verifier compares staging only while it holds a value: the chunk's
+/// result before a fuse applied it, or a chunked skin's ranges. Once an
+/// applying fuse swapped it out it holds whatever the buffer last did, which
+/// a forced run and a cone run legitimately leave different -- but its size
+/// is the RevisionOut key's, and the versions and the pass-through copy are
+/// compared like every other value.
+void
+TestTheVerifierComparesOnlyLiveStaging()
+{
+    RigExecBakedProgramImpl B;
+    B.chains.resize(1);
+    B.chains[0].revisions.resize(1);
+    RigExecBakedProgramImpl::GeomRevision &revision = B.chains[0].revisions[0];
+    revision.output = {GfVec3f(1, 2, 3)};
+    revision.stagingOutput = {GfVec3f(4, 5, 6)};
+    RigExecBakedRunShadow cone;
+    cone.Capture(B);
+    std::vector<std::string> differences;
+    CHECK(cone.Compare(B, &differences) == 0);
+    revision.stagingOutput[0][0] = 9.0f;
+    CHECK(cone.Compare(B, &differences) == 0);
+    revision.stagingOutput.push_back(GfVec3f(0.0f));
+    CHECK(cone.Compare(B, &differences) != 0);
+    revision.stagingOutput.pop_back();
+    revision.stagingFresh = true;
+    CHECK(cone.Compare(B, &differences) != 0);
+    cone.Capture(B);
+    revision.stagingOutput[0][0] = 4.0f;
+    CHECK(cone.Compare(B, &differences) != 0);
+    revision.stagingOutput[0][0] = 9.0f;
+    CHECK(cone.Compare(B, &differences) == 0);
+    ++revision.doneVersion;
+    CHECK(cone.Compare(B, &differences) != 0);
+    --revision.doneVersion;
+    revision.passedPoints = {GfVec3f(1.0f)};
+    CHECK(cone.Compare(B, &differences) != 0);
+    revision.passedPoints.clear();
+    ++B.chains[0].resultVersion;
+    CHECK(cone.Compare(B, &differences) != 0);
+    --B.chains[0].resultVersion;
+    ++B.chains[0].baseVersion;
+    CHECK(cone.Compare(B, &differences) != 0);
+    --B.chains[0].baseVersion;
+    CHECK(cone.Compare(B, &differences) == 0);
+}
+
+/// A chain revision that passes through and then applies again publishes
+/// what a program that never saw the failure publishes, and a rebuild
+/// carries the buffers, content versions and baselines it holds, so that
+/// republishing the same frame moves none of them. Under
+/// RIGEXEC_VERIFY_CHAIN_VERSIONS every published point version is checked
+/// against its points' bytes.
+void
+TestAChainRevisionRecoversAcrossAFailure()
+{
+    TfSetenv("RIGEXEC_VERIFY_CHAIN_VERSIONS", "1");
+    const auto finish = [] { TfSetenv("RIGEXEC_VERIFY_CHAIN_VERSIONS", "0"); };
+    const BuiltProgram built = BuildStage(MakeAnimatedChainStage(1.0f, true));
+    const BuiltProgram fresh = BuildStage(MakeAnimatedChainStage(1.0f, true));
+    CHECK(built.program != nullptr && fresh.program != nullptr);
+    if (!built.program || !fresh.program) {
+        finish();
+        return;
+    }
+    const RigExecBakedProgramImpl &B = built.program->GetStepGraph();
+    CHECK(B.verifyChainVersions);
+    CHECK(B.chains.size() == 1 && B.chains[0].revisions.size() == 3);
+    if (B.chains.size() != 1 || B.chains[0].revisions.size() != 3) {
+        finish();
+        return;
+    }
+    const RigExecBakedProgramImpl::GeomChain &chain = B.chains[0];
+    const RigExecBakedProgramImpl::GeomRevision &middle = chain.revisions[1];
+    RigExecRigPose pose;
+    CHECK(built.program->Run(UsdTimeCode(1.0), &pose));
+    CHECK(pose.comparisonMismatches == 0);
+    CHECK(middle.currentSource == 1);
+    const uint64_t applied = middle.doneVersion;
+    CHECK(built.program->Run(UsdTimeCode(2.0), &pose));
+    CHECK(pose.comparisonMismatches == 0);
+    CHECK(middle.resultStatus == TfToken("moverFailed"));
+    CHECK(middle.currentSource == 0);
+    CHECK(middle.doneVersion == applied + 1);
+    CHECK(SameBits(middle.passedPoints, chain.revisions[0].output));
+    CHECK(!middle.output.empty());
+    CHECK(built.program->Run(UsdTimeCode(3.0), &pose));
+    CHECK(pose.comparisonMismatches == 0);
+    CHECK(middle.currentSource == 1 && middle.doneVersion == applied + 2);
+
+    // The same frame, never having failed.
+    RigExecRigPose freshPose;
+    CHECK(fresh.program->Run(UsdTimeCode(3.0), &freshPose));
+    const RigExecBakedProgramImpl &F = fresh.program->GetStepGraph();
+    CHECK(SameBits(chain.result, F.chains[0].result));
+    for (size_t r = 0; r < 3; ++r) {
+        CHECK(chain.revisions[r].currentSource ==
+              F.chains[0].revisions[r].currentSource);
+        CHECK(SameBits(chain.revisions[r].output,
+                       F.chains[0].revisions[r].output));
+    }
+    CHECK(B.chainVersionMismatches == 0 && F.chainVersionMismatches == 0);
+
+    // A rebuild after the failure carries what the next publication is
+    // decided against: the outgoing program's numbers, read before the
+    // adoption moves them.
+    const BuiltProgram outgoing = BuildStage(MakeAnimatedChainStage(1.0f, true));
+    CHECK(outgoing.program != nullptr);
+    if (!outgoing.program) {
+        finish();
+        return;
+    }
+    CHECK(outgoing.program->Run(UsdTimeCode(1.0), &pose));
+    CHECK(outgoing.program->Run(UsdTimeCode(2.0), &pose));
+    const RigExecBakedProgramImpl &O = outgoing.program->GetStepGraph();
+    std::vector<uint64_t> versions;
+    std::vector<std::vector<GfVec3f>> outputs, passed;
+    for (const auto &revision : O.chains[0].revisions) {
+        versions.push_back(revision.doneVersion);
+        outputs.push_back(revision.output);
+        passed.push_back(revision.passedPoints);
+    }
+    const uint64_t baseVersion = O.chains[0].baseVersion;
+    const uint64_t resultVersion = O.chains[0].resultVersion;
+    std::vector<std::string> reasons;
+    std::unique_ptr<RigExecBakedProgram> rebuilt =
+        RigExecBakedProgram::Build(outgoing.evaluator.get(), &reasons);
+    CHECK(rebuilt != nullptr);
+    if (!rebuilt) {
+        finish();
+        return;
+    }
+    rebuilt->AdoptGeometryStateFrom(*outgoing.program);
+    const RigExecBakedProgramImpl &R = rebuilt->GetStepGraph();
+    CHECK(R.chains.size() == 1 && R.chains[0].revisions.size() == 3);
+    if (R.chains.size() != 1 || R.chains[0].revisions.size() != 3) {
+        finish();
+        return;
+    }
+    const auto carried = [&](const char *when) {
+        for (size_t r = 0; r < 3; ++r) {
+            const auto &revision = R.chains[0].revisions[r];
+            if (revision.doneVersion != versions[r] ||
+                !SameBits(revision.output, outputs[r]) ||
+                !SameBits(revision.passedPoints, passed[r])) {
+                ++failures;
+                std::printf("FAIL %s: revision %zu lost its published "
+                            "points' version or baseline\n", when, r);
+            }
+        }
+        CHECK(R.chains[0].baseVersion == baseVersion);
+        CHECK(R.chains[0].resultVersion == resultVersion);
+    };
+    carried("adopted");
+    CHECK(rebuilt->Run(UsdTimeCode(2.0), &pose));
+    CHECK(pose.comparisonMismatches == 0);
+    carried("republished");
+    CHECK(rebuilt->Run(UsdTimeCode(3.0), &pose));
+    CHECK(SameBits(R.chains[0].result, F.chains[0].result));
+    CHECK(R.chainVersionMismatches == 0 && O.chainVersionMismatches == 0);
+    finish();
+}
+
+/// An edit that leaves a revision's points byte for byte where they were
+/// keeps their content version, so nothing that reads them runs again: M0
+/// has a zero weight, so its driver moves its packet and never its points.
+void
+TestUnmovedPointsKeepTheirVersion()
+{
+    TfSetenv("RIGEXEC_VERIFY_CHAIN_VERSIONS", "1");
+    const BuiltProgram built = BuildStage(MakeAnimatedChainStage(0.0f, false));
+    TfSetenv("RIGEXEC_VERIFY_CHAIN_VERSIONS", "0");
+    CHECK(built.program != nullptr);
+    if (!built.program) {
+        return;
+    }
+    const RigExecBakedProgramImpl &B = built.program->GetStepGraph();
+    CHECK(B.chains.size() == 1 && B.chains[0].revisions.size() == 3);
+    if (B.chains.size() != 1 || B.chains[0].revisions.size() != 3) {
+        return;
+    }
+    const RigExecBakedProgramImpl::GeomChain &chain = B.chains[0];
+    RigExecRigPose pose;
+    CHECK(built.program->Run(UsdTimeCode(1.0), &pose));
+    const uint64_t first = chain.revisions[0].doneVersion;
+    const uint64_t points = chain.resultVersion;
+    const VtVec3fArray result = chain.result;
+    CHECK(built.program->Run(UsdTimeCode(2.0), &pose));
+    CHECK(pose.comparisonMismatches == 0);
+    using K = RigExecBakedStepKind;
+    // The packet moved, so M0 ran, and its points did not.
+    CHECK(RanLast(B, K::RevisionChunk, 0) && RanLast(B, K::RevisionFuse, 0));
+    CHECK(chain.revisions[0].doneVersion == first);
+    for (int r = 1; r < 3; ++r) {
+        CHECK(!RanLast(B, K::RevisionChunk, r) && !RanLast(B, K::RevisionFuse, r));
+    }
+    CHECK(!RanLast(B, K::ChainStatus, 0));
+    CHECK(chain.resultVersion == points && SameBits(chain.result, result));
+    CHECK(B.chainVersionMismatches == 0);
+}
+
+/// A rebuilt program's retained skin ops compare the keys the outgoing
+/// program published with this one's: every point-carrying value the
+/// adoption copied is republished unchanged at the same time, which holds
+/// only if each content version crossed with the bytes it describes.
+/// Returns how many such values were checked.
+size_t
+TestARebuildKeepsItsPointVersions(const std::string &stagePath,
+                                  const char *name)
+{
+    TfSetenv("RIGEXEC_VERIFY_CHAIN_VERSIONS", "1");
+    const BuiltProgram built = Build(stagePath);
+    CHECK(built.program != nullptr);
+    if (!built.program) {
+        TfSetenv("RIGEXEC_VERIFY_CHAIN_VERSIONS", "0");
+        return 0;
+    }
+    RigExecRigPose pose;
+    CHECK(built.program->Run(UsdTimeCode(1.0), &pose));
+    std::vector<std::string> reasons;
+    std::unique_ptr<RigExecBakedProgram> rebuilt =
+        RigExecBakedProgram::Build(built.evaluator.get(), &reasons);
+    TfSetenv("RIGEXEC_VERIFY_CHAIN_VERSIONS", "0");
+    CHECK(rebuilt != nullptr);
+    if (!rebuilt) {
+        return 0;
+    }
+    rebuilt->AdoptGeometryStateFrom(*built.program);
+    const RigExecBakedProgramImpl &B = rebuilt->GetStepGraph();
+    using D = RigExecBakedSlotDomain;
+    std::vector<std::pair<size_t, uint64_t>> copied;
+    for (size_t i = 0; i < B.opAdapter.values.size(); ++i) {
+        const auto &value = B.opAdapter.values[i];
+        const D domain = D(value.domain);
+        if (value.initialized &&
+            (domain == D::RevisionDone || domain == D::ChainDirty ||
+             domain == D::ChainBase || domain == D::ChainPoints ||
+             domain == D::ChainInput || domain == D::DerivedOut)) {
+            copied.emplace_back(i, value.revision);
+        }
+    }
+    CHECK(rebuilt->Run(UsdTimeCode(1.0), &pose));
+    for (const auto &[id, revision] : copied) {
+        const auto &value = B.opAdapter.values[id];
+        if (value.changed || value.revision != revision) {
+            ++failures;
+            std::printf("FAIL %s: copied value %zu (domain %u slot %u) moved "
+                        "across the rebuild\n", name, id, value.domain,
+                        value.slot);
+        }
+    }
+    CHECK(B.chainVersionMismatches == 0);
+    std::printf("  %s: %zu point value(s) kept their keys across a "
+                "rebuild\n", name, copied.size());
+    return copied.size();
+}
+
 std::string
 SchemaResourceDir(const std::string &examplesDir)
 {
@@ -4864,6 +5332,23 @@ main(int argc, char **argv)
         TestThePointVersionsKeepTheOrder(bipedStack, "Biped_stack (chunked)");
     }
     TfSetenv("RIGEXEC_BAKED_CHUNK_ALWAYS", "0");
+    // Chain buffers flip rather than copy, and point values key by content
+    // version: buffer selection across a failure, a version an unmoved edit
+    // keeps, and versions carried across a rebuild.
+    TestTheFuseSelectsItsBuffersByHand();
+    TestTheVerifierComparesOnlyLiveStaging();
+    TestAChainRevisionRecoversAcrossAFailure();
+    TestUnmovedPointsKeepTheirVersion();
+    {
+        const std::string fixtures = examplesDir + "/../tests/fixtures";
+        size_t kept = 0;
+        for (const char *stage :
+             {"raw_skin_layouts.usda", "oneloop_two_limbs.usda"}) {
+            kept += TestARebuildKeepsItsPointVersions(fixtures + "/" + stage,
+                                                      stage);
+        }
+        CHECK(kept > 0);
+    }
     TestTheDerivedCompareAgreesWithTheElementwiseOne(
         examplesDir + "/biped/Biped.usda");
     TestARebuiltProgramKeepsItsRunState(

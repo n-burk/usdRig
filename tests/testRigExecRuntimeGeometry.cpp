@@ -1144,6 +1144,72 @@ _TestFalloffInputMatchesSessionEdit()
     }
 }
 
+// Three matrix movers on one points attribute: M0 on a control that moves at
+// frames 1 to 3, M1 and M2 on one that stands still. \p firstWeight is M0's
+// inputs:defaultWeight (zero leaves the points it moves where they
+// entered); \p failMiddle puts M1's weight out of range at frame 2 only, so
+// M1 passes through there and applies again at frame 3.
+static UsdStageRefPtr
+_StackedChainStage(float firstWeight, bool failMiddle)
+{
+    const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    stage->DefinePrim(SdfPath("/Asset"), TfToken("Scope"));
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    const UsdPrim moving = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Moving"), TfToken("RigExecControl"));
+    for (int frame = 1; frame <= 3; ++frame) {
+        moving.GetAttribute(TfToken("avars:tx"))
+            .Set(double(frame), UsdTimeCode(frame));
+    }
+    const UsdPrim still = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Still"), TfToken("RigExecControl"));
+    still.GetAttribute(TfToken("avars:ty")).Set(1.0);
+    const SdfPath target("/Asset/Shape.points");
+    const UsdPrim shape =
+        stage->DefinePrim(target.GetPrimPath(), TfToken("Points"));
+    shape.GetAttribute(TfToken("points"))
+        .Set(VtVec3fArray{GfVec3f(0), GfVec3f(1, 0, 0), GfVec3f(0, 2, 0)});
+    stage->DefinePrim(SdfPath("/Asset/Rig/Movers"), TfToken("Scope"));
+    for (int i = 0; i < 3; ++i) {
+        const UsdPrim mover = stage->DefinePrim(
+            SdfPath("/Asset/Rig/Movers/M" + std::to_string(i)),
+            TfToken("RigExecMatrixMover"));
+        mover.ApplyAPI(TfToken("RigExecMoverAPI"));
+        mover.GetRelationship(TfToken("rigExec:moves")).SetTargets({target});
+        mover.GetRelationship(TfToken("rigExec:transform"))
+            .SetTargets({i == 0 ? moving.GetPath() : still.GetPath()});
+        UsdAttribute weight =
+            mover.GetAttribute(TfToken("inputs:defaultWeight"));
+        if (i == 0) {
+            weight.Set(firstWeight);
+        } else if (i == 1 && failMiddle) {
+            weight.Set(1.0f, UsdTimeCode(1.0));
+            weight.Set(2.0f, UsdTimeCode(2.0));
+            weight.Set(1.0f, UsdTimeCode(3.0));
+        } else {
+            weight.Set(1.0f);
+        }
+    }
+    return stage;
+}
+
+// The fuse flips its buffers rather than copying, and the chain's points key
+// by content version: played against the native program -- points,
+// diagnostics and operation counts bit for bit -- with
+// RIGEXEC_VERIFY_CHAIN_VERSIONS on, read at Open, which fails any run whose
+// versions and points' bytes disagree on a change. A revision that passes
+// through and recovers, and an edit that leaves points where they were.
+static void
+TestChainPointVersions()
+{
+    TfSetenv("RIGEXEC_VERIFY_CHAIN_VERSIONS", "1");
+    _TestStage("chain revision passes through and recovers",
+               _StackedChainStage(1.0f, true), {1, 2, 3, 2, 1, 3});
+    _TestStage("chain revision keeps its unmoved points",
+               _StackedChainStage(0.0f, false), {1, 2, 3, 3, 1});
+    TfSetenv("RIGEXEC_VERIFY_CHAIN_VERSIONS", "0");
+}
+
 static void
 TestGeometryDomainArm()
 {
@@ -3302,6 +3368,7 @@ main(int argc, char **argv)
     PlugRegistry::GetInstance().RegisterPlugins(
         RIGEXEC_SCHEMA_RESOURCE_DIR);
     TestComputedCurrentPhase();
+    TestChainPointVersions();
     TestGeometryDomainArm();
     TestCurrentPhaseThroughCombine();
     TestCurrentPhaseFailure();

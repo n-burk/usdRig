@@ -369,6 +369,9 @@ CaptureRevision(const RigExecBakedProgramImpl::GeomRevision &revision,
 {
     state->output = revision.output;
     state->stagingOutput = revision.stagingOutput;
+    state->passedPoints = revision.passedPoints;
+    state->stagingFresh = revision.stagingFresh;
+    state->doneVersion = revision.doneVersion;
     state->packetInfluences = revision.packetInfluences;
     state->influences = revision.influences;
     state->revisionInputs = revision.revisionInputs.DetachedCopy();
@@ -434,6 +437,9 @@ RestoreRevision(const RigExecBakedRunShadow::RevisionState &state,
 {
     revision->output = state.output;
     revision->stagingOutput = state.stagingOutput;
+    revision->passedPoints = state.passedPoints;
+    revision->stagingFresh = state.stagingFresh;
+    revision->doneVersion = state.doneVersion;
     revision->packetInfluences = state.packetInfluences;
     revision->influences = state.influences;
     revision->revisionInputs = state.revisionInputs;
@@ -528,7 +534,26 @@ CompareRevision(std::vector<std::string> *differences, size_t *count,
     // The values.
     CompareVector(differences, count, where + " output", shadow.output,
                   revision.output);
-    CompareVector(differences, count, where + " staging output", shadow.stagingOutput, revision.stagingOutput);
+    // Staging holds a value only while it has the chunk's unapplied result,
+    // or a chunked skin's ranges. Once an applying fuse swapped it out, it
+    // holds whatever the buffer last did, which a run that re-ran the fuse
+    // and one that skipped it legitimately leave different; its size is the
+    // RevisionOut key's either way.
+    CompareValue(differences, count, where + " stagingFresh",
+                 shadow.stagingFresh, revision.stagingFresh);
+    if (revision.chunked || shadow.stagingFresh || revision.stagingFresh) {
+        CompareVector(differences, count, where + " staging output",
+                      shadow.stagingOutput, revision.stagingOutput);
+    } else {
+        CompareValue(differences, count, where + " staging output size",
+                     shadow.stagingOutput.size(), revision.stagingOutput.size());
+    }
+    // The baseline the next publication's content version is decided
+    // against, and the version itself.
+    CompareVector(differences, count, where + " passedPoints",
+                  shadow.passedPoints, revision.passedPoints);
+    CompareValue(differences, count, where + " doneVersion",
+                 shadow.doneVersion, revision.doneVersion);
     CompareVector(differences, count, where + " packetInfluences",
                   shadow.packetInfluences, revision.packetInfluences);
     CompareVector(differences, count, where + " influences", shadow.influences,
@@ -680,6 +705,7 @@ RigExecBakedRunShadow::Capture(const RigExecBakedProgramImpl &program)
     providerValues = program.providerValues;
     switchFrames = program.switchFrames;
     opAdapter = program.opAdapter;
+    chainContentKeys = program.chainContentKeys;
     opExecution = program.opExecution;
     oraclePublications = program.oraclePublications;
     oracleWeightInputs = program.oracleWeightInputs;
@@ -723,6 +749,8 @@ RigExecBakedRunShadow::Capture(const RigExecBakedProgramImpl &program)
         chains[c].lastBase = chain.lastBase;
         chains[c].result = chain.result;
         chains[c].spare = chain.spare;
+        chains[c].baseVersion = chain.baseVersion;
+        chains[c].resultVersion = chain.resultVersion;
         chains[c].haveResult = chain.haveResult;
         chains[c].haveBase = chain.haveBase;
         chains[c].baseDirty = chain.baseDirty;
@@ -737,6 +765,7 @@ RigExecBakedRunShadow::Capture(const RigExecBakedProgramImpl &program)
                             &chains[c].derived[d].revision);
             chains[c].derived[d].result = chain.derived[d].result;
             chains[c].derived[d].spare = chain.derived[d].spare;
+            chains[c].derived[d].resultVersion = chain.derived[d].resultVersion;
             chains[c].derived[d].lastBase = chain.derived[d].lastBase;
             chains[c].derived[d].haveResult = chain.derived[d].haveResult;
             chains[c].derived[d].haveBase = chain.derived[d].haveBase;
@@ -814,6 +843,7 @@ RigExecBakedRunShadow::Restore(RigExecBakedProgramImpl *program) const
     B.providerValues = providerValues;
     B.switchFrames = switchFrames;
     B.opAdapter = opAdapter;
+    B.chainContentKeys = chainContentKeys;
     B.opExecution = opExecution;
     B.oraclePublications = oraclePublications;
     B.oracleWeightInputs = oracleWeightInputs;
@@ -854,6 +884,8 @@ RigExecBakedRunShadow::Restore(RigExecBakedProgramImpl *program) const
         chain.lastBase = chains[c].lastBase;
         chain.result = chains[c].result;
         chain.spare = chains[c].spare;
+        chain.baseVersion = chains[c].baseVersion;
+        chain.resultVersion = chains[c].resultVersion;
         chain.haveResult = chains[c].haveResult;
         chain.haveBase = chains[c].haveBase;
         chain.baseDirty = chains[c].baseDirty;
@@ -869,6 +901,7 @@ RigExecBakedRunShadow::Restore(RigExecBakedProgramImpl *program) const
                             &chain.derived[d].revision);
             chain.derived[d].result = chains[c].derived[d].result;
             chain.derived[d].spare = chains[c].derived[d].spare;
+            chain.derived[d].resultVersion = chains[c].derived[d].resultVersion;
             chain.derived[d].lastBase = chains[c].derived[d].lastBase;
             chain.derived[d].haveResult = chains[c].derived[d].haveResult;
             chain.derived[d].haveBase = chains[c].derived[d].haveBase;
@@ -1194,6 +1227,10 @@ RigExecBakedRunShadow::Compare(const RigExecBakedProgramImpl &program,
         }
         CompareValue(differences, &count, where + " haveResult",
                      chains[c].haveResult, chain.haveResult);
+        CompareValue(differences, &count, where + " base version",
+                     chains[c].baseVersion, chain.baseVersion);
+        CompareValue(differences, &count, where + " points version",
+                     chains[c].resultVersion, chain.resultVersion);
         for (size_t r = 0;
              r < chain.revisions.size() && r < chains[c].revisions.size();
              ++r) {
@@ -1227,6 +1264,12 @@ RigExecBakedRunShadow::Compare(const RigExecBakedProgramImpl &program,
                        where + " derived " +
                            chain.derived[d].target.GetString() + " matrix");
             }
+            CompareValue(differences, &count,
+                         where + " derived " +
+                             chain.derived[d].target.GetString() +
+                             " points version",
+                         chains[c].derived[d].resultVersion,
+                         chain.derived[d].resultVersion);
             CompareRevision(differences, &count,
                             where + " derived " +
                                 chain.derived[d].target.GetString(),

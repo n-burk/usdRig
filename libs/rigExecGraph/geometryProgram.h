@@ -50,6 +50,12 @@ namespace geometryDetail {
 bool RunDiscardableGeometry(RigExecRevisionOp,const RigExecMoverParameters &,
     std::vector<GfVec3f> *,bool,RigExecWireBasisCache *,
     RigExecSurfaceKernelCache<GfVec3f,GfVec3d> *);
+/// Out of place: reads \p count entering points at \p in (never \p out's
+/// storage) and writes the result to \p out; untouched points are copied
+/// bit for bit.
+bool RunDiscardableGeometry(RigExecRevisionOp,const RigExecMoverParameters &,
+    const GfVec3f *in,size_t count,std::vector<GfVec3f> *out,bool,
+    RigExecWireBasisCache *,RigExecSurfaceKernelCache<GfVec3f,GfVec3d> *);
 }
 bool RigExecRunGeometryDerived(RigExecRevisionOp,const RigExecMoverParameters &,
     const GfVec3f *authored,size_t authoredCount,std::vector<GfVec3f> *result);

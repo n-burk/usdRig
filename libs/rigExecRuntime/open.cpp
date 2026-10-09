@@ -111,6 +111,8 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
         RrGeoGetenvBool("RIGEXEC_VERIFY_LEAF_VERSIONS", false);
     program.verifySparseLeaves =
         RrGeoGetenvBool("RIGEXEC_VERIFY_SPARSE_LEAVES", false);
+    program.verifyChainVersions =
+        RrGeoGetenvBool("RIGEXEC_VERIFY_CHAIN_VERSIONS", false);
     program.compileDiagnostics = file.compileDiagnostics;
     while (program.stepWeightObjects < file.geometry->weightObjects.size() &&
            !file.geometry->weightObjects[program.stepWeightObjects]

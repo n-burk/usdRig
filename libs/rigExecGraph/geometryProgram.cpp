@@ -66,6 +66,12 @@ bool RunDiscardableGeometry(RigExecRevisionOp op,const RigExecMoverParameters &p
 {
     return points && RunDiscardableRevisionKernel(op,parameters,points,useSimd,wire,surface);
 }
+bool RunDiscardableGeometry(RigExecRevisionOp op,const RigExecMoverParameters &parameters,
+    const GfVec3f *in,size_t count,std::vector<GfVec3f> *out,bool useSimd,
+    RigExecWireBasisCache *wire,RigExecSurfaceKernelCache<GfVec3f,GfVec3d> *surface)
+{
+    return out && RunDiscardableRevisionKernel(op,parameters,in,count,out,useSimd,wire,surface);
+}
 }
 bool RigExecRunGeometryMatrix(RigExecRevisionOp op,const RigExecRevisionBinding &binding,
     const RigExecSurfaceProjectorFrames &frames,const RigExecProjectorReads &reads,

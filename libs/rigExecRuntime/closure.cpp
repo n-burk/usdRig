@@ -653,9 +653,24 @@ bool RrExecuteOpGraph(RrProgram *p,bool force,std::string *error)
     }
     RigExecOpClearChanges(&state);
     const auto sample=[&](uint32_t d,uint32_t slot,std::string *key){RrOpValue(p,d,slot,key);};
+    // RIGEXEC_VERIFY_CHAIN_VERSIONS: a value keyed by a point content version
+    // must tell the change its points' bytes tell; the first mismatch fails
+    // the run below.
+    const bool verifyChains=p->verifyChainVersions;
+    if(verifyChains) s.chainContentKeys.resize(state.values.size());
+    int64_t chainMismatch=-1;
+    const auto verifyChain=[&](RigExecValueId id) {
+        if(!verifyChains) return;
+        const auto &value=state.values[size_t(id)]; std::string content;
+        if(!RrGeometryChainContentKey(p,RigExecWireSlotDomain(value.domain),value.slot,&content)) return;
+        auto &last=s.chainContentKeys[size_t(id)];
+        if(!last.empty() && (last!=content)!=(value.changed!=0) && chainMismatch<0) chainMismatch=int64_t(id);
+        last.swap(content);
+    };
     const auto publish=[&](RigExecValueId id) {
         auto &value=state.values[size_t(id)]; RigExecOpPublishValue(&value,sample);
         if(value.changed) state.changedLeaves.push_back(id);
+        verifyChain(id);
     };
     // A slot-keyed leaf keeps the key an equal compare would keep until a
     // slot it reads is written; the run consumes the written slots.
@@ -784,6 +799,7 @@ bool RrExecuteOpGraph(RrProgram *p,bool force,std::string *error)
             if(done && v.slot==done->slot && v.domain==uint32_t(RigExecWireSlotDomain::ChainDirty))
                 RigExecOpPublishValue(&v,[&](uint32_t,uint32_t,std::string *key){key->append(done->key);});
             else RigExecOpPublishValue(&v,sample);
+            verifyChain(id);
             if(v.domain==uint32_t(RigExecWireSlotDomain::RevisionDone)) done=&v;
             if(v.domain==uint32_t(RigExecWireSlotDomain::PropertyResult)) s.propertyVersionChanged[v.slot]=v.changed;
             if(v.domain==uint32_t(RigExecWireSlotDomain::WeightField)) s.weightFieldChanged[v.slot]=v.changed;
@@ -800,6 +816,12 @@ bool RrExecuteOpGraph(RrProgram *p,bool force,std::string *error)
         s.runTrace.clear();
         state.everRan=false; s.everRan=false;
         if(error && error->empty()) *error=graphError;
+        return false;
+    }
+    if(chainMismatch>=0) {
+        if(error) *error="value "+std::to_string(chainMismatch)+
+            ": its point content version and its points' bytes disagree on a change";
+        state.everRan=false; s.everRan=false;
         return false;
     }
     s.lastClosedClusters=closedClusters;

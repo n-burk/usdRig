@@ -2931,6 +2931,10 @@ struct RigExecBakedProgramImpl {
         /// The node's last published status, which outlives an evaluation it
         /// did not take part in -- so does its diagnostic.
         TfToken resultStatus;
+        /// The revision's applied points, which `currentSource` publishes,
+        /// and the buffer its chunks write. An applying fuse swaps an
+        /// unchunked revision's two buffers instead of copying one into the
+        /// other; a chunked skin keeps its ranges in staging.
         std::vector<GfVec3f> output;
         std::vector<GfVec3f> stagingOutput;
         // Last evaluated packet/status and result, so an unchanged input
@@ -3133,6 +3137,19 @@ struct RigExecBakedProgramImpl {
         /// The indirection is what replaces today's `revision.output =
         /// current` copy of a revision that applied nothing.
         int currentSource = -1;
+        /// An unchunked revision's chunk wrote `stagingOutput` and no fuse
+        /// has applied it yet; while false, `output` holds the chunk's
+        /// latest result.
+        bool stagingFresh = false;
+        /// An exact copy of the points the last RevisionDone publication
+        /// carried when the revision passed through: the baseline the next
+        /// publication is compared against. While it applied, the baseline
+        /// is `output` itself.
+        std::vector<GfVec3f> passedPoints;
+        /// The content version RevisionDone and ChainDirty key the points
+        /// by: the fuse bumps it exactly when the points it publishes differ,
+        /// byte for byte, from the ones its previous publication carried.
+        uint64_t doneVersion = 0;
         /// The epoch-fixed skin layout the packet carries: the SkinTopology
         /// op's `layoutHandle`, adopted where the geometry prologue resolves
         /// a topology (a chain revision whose chain read a base, a derived
@@ -3194,6 +3211,12 @@ struct RigExecBakedProgramImpl {
         bool sampledHaveBase = false;
         VtVec3fArray lastBase;
         VtVec3fArray result;
+        /// ChainInput, ChainBase and ChainPoints key their points by these
+        /// content versions, each bumped exactly when the array's bytes
+        /// differ from the ones last published. `publishedInput` is the
+        /// sampled base ChainInput last published, held by handle.
+        VtVec3fArray publishedInput;
+        uint64_t inputVersion = 0, baseVersion = 0, resultVersion = 0;
         /// The other half of the published double buffer. Publication
         /// alternates between `result` and this one, so the array a consumer
         /// may still hold from last frame is never the one being written --
@@ -3226,6 +3249,8 @@ struct RigExecBakedProgramImpl {
             /// The other half of the published double buffer; see the
             /// chain's.
             VtVec3fArray spare;
+            /// DerivedOut's content version of `result`, as the chain's.
+            uint64_t resultVersion = 0;
             bool haveResult = false;
             /// As the chain's, read by the prologue.
             bool haveBase = false;
@@ -3393,6 +3418,13 @@ struct RigExecBakedProgramImpl {
     RigExecOpWorkspace opWorkspace;
     RigExecOpExecution opExecution;
     RigExecOpAdapterState opAdapter;
+    /// RIGEXEC_VERIFY_CHAIN_VERSIONS, read at compile. After a run, the
+    /// owner rebuilds each published point-version key over the points'
+    /// bytes (RigExecBakedChainContentKey) and checks the two told the same
+    /// change; `chainContentKeys` holds the last such key per value id.
+    bool verifyChainVersions = false;
+    std::vector<std::string> chainContentKeys;
+    size_t chainVersionMismatches = 0;
     std::shared_ptr<RigExecBakedExecCheckRows> execCheckRows;
     std::function<void(uint32_t)> opBeforeBody, opAfterBody; ///< opt-in test observation
     std::vector<WeightField> weightFields;
@@ -5333,7 +5365,9 @@ struct RigExecBakedRunShadow {
         std::shared_ptr<const RigExecSkinTopology> layoutHandle, layoutCandidate;
         bool layoutFixed = false, layoutRan = false;
         std::vector<GfVec3f> output;
-        std::vector<GfVec3f> stagingOutput;
+        std::vector<GfVec3f> stagingOutput, passedPoints;
+        bool stagingFresh = false;
+        uint64_t doneVersion = 0;
         std::vector<GfMatrix4d> packetInfluences, influences;
         RigExecResolvedInputs revisionInputs;
         std::vector<float> rows, envelope;
@@ -5358,6 +5392,7 @@ struct RigExecBakedRunShadow {
     struct DerivedState {
         RevisionState revision;
         VtVec3fArray result, spare, lastBase;
+        uint64_t resultVersion = 0;
         bool haveResult = false, haveBase = false, baseDirty = false;
         GfMatrix4d matrix{1.0};
         bool haveMatrix = false;
@@ -5366,6 +5401,7 @@ struct RigExecBakedRunShadow {
         std::vector<RevisionState> revisions;
         std::vector<DerivedState> derived;
         VtVec3fArray lastBase, result, spare;
+        uint64_t baseVersion = 0, resultVersion = 0;
         bool haveResult = false, haveBase = false, baseDirty = false, scheduleDirty = false;
     };
     struct SolverState {
@@ -5388,6 +5424,7 @@ struct RigExecBakedRunShadow {
     RigExecTypedValueStore providerValues{0};
     std::vector<GfMatrix4d> switchFrames;
     RigExecOpAdapterState opAdapter;
+    std::vector<std::string> chainContentKeys;
     RigExecOpExecution opExecution;
     std::vector<double> avars;
     std::vector<float> poseWeights;

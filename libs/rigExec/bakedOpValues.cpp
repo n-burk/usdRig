@@ -373,12 +373,15 @@ void RigExecBakedOpValueKey(const RigExecBakedProgramImpl &B,
     case D::FrameMatrix:
         if(slot<B.frameMatrix.size() && slot<B.frameMatrixValid.size()) {
             Put(out,B.frameMatrixValid[slot]); Put(out,B.frameMatrix[slot]); return; } break;
+    // The six point-carrying domains key their points by a content version
+    // its writer bumps exactly when the bytes move; RigExecBakedChainContentKey
+    // is the same key over the bytes.
     case D::ChainBase:
         if(slot<B.chains.size()) { const auto &v=B.chains[slot];
-            Put(out,v.haveBase); Array(out,v.lastBase); return; } break;
+            Put(out,v.haveBase); Put(out,v.baseVersion); return; } break;
     case D::ChainPoints:
         if(slot<B.chains.size()) { const auto &v=B.chains[slot];
-            Put(out,v.haveResult); Array(out,v.result); return; } break;
+            Put(out,v.haveResult); Put(out,v.resultVersion); return; } break;
     case D::RevisionPacket:
         if(const auto *v=Revision(B,slot)) {
             Put(out,v->parameters); Put(out,v->status); Put(out,v->layoutUsable);
@@ -409,12 +412,7 @@ void RigExecBakedOpValueKey(const RigExecBakedProgramImpl &B,
         } break;
     case D::RevisionDone:
         if(const auto *v=Revision(B,slot)) {
-            Put(out,v->resultStatus); Put(out,v->status);
-            const auto index=B.revisionIndex[slot]; const auto &chain=B.chains[size_t(index.first)];
-            if(v->currentSource<0) Array(out,chain.lastBase);
-            else if(size_t(v->currentSource)<chain.revisions.size())
-                Array(out,chain.revisions[size_t(v->currentSource)].output);
-            else break;
+            Put(out,v->resultStatus); Put(out,v->status); Put(out,v->doneVersion);
             return;
         } break;
     case D::ChainDirty:
@@ -429,7 +427,7 @@ void RigExecBakedOpValueKey(const RigExecBakedProgramImpl &B,
             if(index.second<0 || size_t(index.second)>=chain.derived.size()) break;
             const auto &v=chain.derived[size_t(index.second)];
             Put(out,v.haveResult); Put(out,v.haveMatrix); Put(out,v.matrixTarget);
-            if(v.matrixTarget) Put(out,v.matrix); else Array(out,v.result);
+            if(v.matrixTarget) Put(out,v.matrix); else Put(out,v.resultVersion);
             Put(out,v.revision.resultStatus); Put(out,v.revision.status); return;
         } break;
     case D::WeightPacket:
@@ -516,7 +514,7 @@ void RigExecBakedOpValueKey(const RigExecBakedProgramImpl &B,
         } break;
     case D::ChainInput:
         if(slot<B.chains.size()) { const auto &v=B.chains[slot];
-            Put(out,v.sampledHaveBase); Array(out,v.sampledBase); return; } break;
+            Put(out,v.sampledHaveBase); Put(out,v.inputVersion); return; } break;
     case D::DerivedBase:
         if(slot<B.derivedIndex.size()) {
             const auto index=B.derivedIndex[slot];
@@ -535,6 +533,54 @@ void RigExecBakedOpValueKey(const RigExecBakedProgramImpl &B,
     case D::Snapshots: break;
     }
     bad();
+}
+bool RigExecBakedSamePoints(const GfVec3f *a,size_t aCount,const GfVec3f *b,size_t bCount)
+{
+    // GfVec3f is three floats with no padding (asserted above).
+    return aCount==bCount && (aCount==0 || a==b ||
+        std::memcmp(a,b,aCount*sizeof(GfVec3f))==0);
+}
+bool RigExecBakedChainContentKey(const RigExecBakedProgramImpl &B,
+    RigExecBakedSlotDomain domain,uint32_t slot,std::string *out)
+{
+    if(!TF_VERIFY(out)) return false;
+    using D=RigExecBakedSlotDomain;
+    if(domain==D::ChainDirty) domain=D::RevisionDone;
+    out->clear(); Put(out,uint8_t(1)); Put(out,domain);
+    switch(domain) {
+    case D::ChainInput:
+        if(slot<B.chains.size()) { const auto &v=B.chains[slot];
+            Put(out,v.sampledHaveBase); Array(out,v.sampledBase); return true; } break;
+    case D::ChainBase:
+        if(slot<B.chains.size()) { const auto &v=B.chains[slot];
+            Put(out,v.haveBase); Array(out,v.lastBase); return true; } break;
+    case D::ChainPoints:
+        if(slot<B.chains.size()) { const auto &v=B.chains[slot];
+            Put(out,v.haveResult); Array(out,v.result); return true; } break;
+    case D::RevisionDone:
+        if(const auto *v=Revision(B,slot)) {
+            Put(out,v->resultStatus); Put(out,v->status);
+            const auto &chain=B.chains[size_t(B.revisionIndex[slot].first)];
+            if(v->currentSource<0) Array(out,chain.lastBase);
+            else if(size_t(v->currentSource)<chain.revisions.size())
+                Array(out,chain.revisions[size_t(v->currentSource)].output);
+            else break;
+            return true;
+        } break;
+    case D::DerivedOut:
+        if(slot<B.derivedIndex.size()) {
+            const auto index=B.derivedIndex[slot];
+            if(index.first<0 || size_t(index.first)>=B.chains.size()) break;
+            const auto &chain=B.chains[size_t(index.first)];
+            if(index.second<0 || size_t(index.second)>=chain.derived.size()) break;
+            const auto &v=chain.derived[size_t(index.second)];
+            Put(out,v.haveResult); Put(out,v.haveMatrix); Put(out,v.matrixTarget);
+            if(v.matrixTarget) Put(out,v.matrix); else Array(out,v.result);
+            Put(out,v.revision.resultStatus); Put(out,v.revision.status); return true;
+        } break;
+    default: break;
+    }
+    out->clear(); return false;
 }
 static bool InputKey(const RigExecBakedProgramImpl &B,
     const RigExecBakedStep &step,std::string *out,bool effective,std::vector<uint32_t> *covered,std::vector<std::pair<uint32_t,uint32_t>> *typed=nullptr,
