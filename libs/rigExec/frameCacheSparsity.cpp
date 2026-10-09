@@ -1,6 +1,7 @@
 // RigExec sparse cross-frame reuse. See frameCacheSparsity.h.
 #include "frameCacheSparsity.h"
 #include "bakedOpValues.h"
+#include "bakedProgramImpl.h"
 
 #include "pxr/base/tf/getenv.h"
 

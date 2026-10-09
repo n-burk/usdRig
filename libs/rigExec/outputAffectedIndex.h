@@ -13,7 +13,8 @@
 #ifndef RIGEXEC_OUTPUT_AFFECTED_INDEX_H
 #define RIGEXEC_OUTPUT_AFFECTED_INDEX_H
 
-#include "bakedProgramImpl.h"
+#include "bakedClusters.h"
+#include "tapSet.h"
 
 #include <atomic>
 #include <cstddef>
@@ -23,11 +24,14 @@
 #include <string>
 #include <vector>
 
+#include "pxr/usd/sdf/path.h"
 #include "pxr/usd/usd/notice.h"
 
 PXR_NAMESPACE_USING_DIRECTIVE
 
 namespace rigExec {
+
+struct RigExecBakedProgramImpl;
 
 /// Names one cached-frame input for the affected-set computation: a sampled
 /// source's path string, or `prim|computation|attribute` for an interactive

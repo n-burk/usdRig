@@ -4,7 +4,7 @@
 #define RIGEXEC_FROZEN_CONTEXT_INTERNAL_H
 
 #include "frozenContext.h"
-#include "bakedProgramImpl.h"
+#include "frozenProgram.h"
 #include "tapSet.h"
 
 #include "pxr/base/gf/matrix4d.h"

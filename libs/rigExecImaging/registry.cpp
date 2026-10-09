@@ -1,6 +1,7 @@
 // RigExec imaging registry and C activation surface.
 #include <fstream>
 #include "registry.h"
+#include "rigExec/bakedProgramImpl.h"
 #include "rigExec/frameCacheSparsity.h"
 
 #include "rigExecMath/avarScale.h"

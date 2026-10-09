@@ -7,6 +7,7 @@
 #include "rigExecRuntime/stageArrayInputs.h"
 
 #include "rigExec/rigEvaluator.h"
+#include "rigExec/bakedProgramImpl.h"
 #include "rigExec/bakedTrace.h"
 #include "rigExec/frameExtraction.h"
 #include "rigExec/frozenContext.h"

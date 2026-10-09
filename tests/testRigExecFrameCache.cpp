@@ -23,7 +23,15 @@
 //   * DROP. Corrupt input is declined, never served: invalid poses,
 //     oversized entries, and null out-params all miss.
 #include "rigExec/frameCache.h"
+#include "rigExec/frameCacheSparsity.h"
 #include "rigExec/frozenContext.h"
+
+// These headers only name the baked program's implementation and the
+// frozen snapshot, so editing either rebuilds just the sources that read
+// them.
+#if defined(RIGEXEC_BAKED_PROGRAM_IMPL_H) || defined(RIGEXEC_FROZEN_PROGRAM_H)
+#error "a frame-cache or frozen-context header includes a program definition"
+#endif
 
 #include "pxr/base/gf/matrix4d.h"
 #include "pxr/base/vt/types.h"

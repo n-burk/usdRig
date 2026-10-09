@@ -2136,6 +2136,73 @@ foreach(_rigexec_test IN LISTS _rigexec_tests)
     endif()
 endforeach()
 
+# Precompiled headers: the stable OpenUSD and standard headers nearly every
+# translation unit parses, compiled once. Never a project header, so editing
+# project code never rebuilds one. MSVC only. A consumer may define more
+# macros than its PCH was built with but none fewer, so the shared owner
+# links only usd, whose interface definitions every USD-facing target has.
+# The runtime stays USD-free with a standard-library PCH of its own.
+# -DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON builds without them, which checks
+# that every source includes what it uses.
+if (MSVC AND NOT CMAKE_DISABLE_PRECOMPILE_HEADERS)
+    set(_rigexec_pch_std
+        <algorithm> <array> <atomic> <cmath> <cstddef> <cstdint> <cstdio>
+        <cstring> <functional> <limits> <map> <memory> <optional> <set>
+        <string> <tuple> <type_traits> <unordered_map> <unordered_set>
+        <utility> <variant> <vector>)
+    set(_rigexec_pch_usd
+        <pxr/pxr.h>
+        <pxr/base/gf/matrix3d.h> <pxr/base/gf/matrix4d.h>
+        <pxr/base/gf/quatd.h> <pxr/base/gf/rotation.h>
+        <pxr/base/gf/vec2f.h> <pxr/base/gf/vec3d.h> <pxr/base/gf/vec3f.h>
+        <pxr/base/gf/vec3i.h> <pxr/base/gf/vec4d.h>
+        <pxr/base/plug/registry.h>
+        <pxr/base/tf/diagnostic.h> <pxr/base/tf/functionRef.h>
+        <pxr/base/tf/hash.h> <pxr/base/tf/notice.h> <pxr/base/tf/span.h>
+        <pxr/base/tf/token.h> <pxr/base/tf/type.h> <pxr/base/tf/weakBase.h>
+        <pxr/base/ts/spline.h>
+        <pxr/base/vt/array.h> <pxr/base/vt/dictionary.h>
+        <pxr/base/vt/value.h>
+        <pxr/usd/sdf/layer.h> <pxr/usd/sdf/path.h> <pxr/usd/sdf/types.h>
+        <pxr/usd/sdf/valueTypeName.h>
+        <pxr/usd/usd/attribute.h> <pxr/usd/usd/attributeQuery.h>
+        <pxr/usd/usd/common.h> <pxr/usd/usd/notice.h>
+        <pxr/usd/usd/object.h> <pxr/usd/usd/prim.h>
+        <pxr/usd/usd/relationship.h> <pxr/usd/usd/stage.h>
+        <pxr/usd/usd/timeCode.h> <pxr/usd/usdGeom/xformCache.h>)
+
+    file(CONFIGURE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/rigExecUsdPch.cpp"
+        CONTENT "// Owns the shared USD precompiled header.\n")
+    add_library(rigExecUsdPch OBJECT
+        "${CMAKE_CURRENT_BINARY_DIR}/rigExecUsdPch.cpp")
+    target_link_libraries(rigExecUsdPch PRIVATE usd)
+    target_precompile_headers(rigExecUsdPch PRIVATE
+        ${_rigexec_pch_std} ${_rigexec_pch_usd})
+    target_precompile_headers(rigExecRuntime PRIVATE ${_rigexec_pch_std})
+
+    # The libraries, and every test, bench or probe executable linking one
+    # of the USD-facing libraries.
+    set(_rigexec_pch_users rigExec rigExecImaging rigExecBake)
+    get_property(_rigexec_pch_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+    foreach(_target IN LISTS _rigexec_pch_targets)
+        get_target_property(_type ${_target} TYPE)
+        get_target_property(_links ${_target} LINK_LIBRARIES)
+        if (_type STREQUAL "EXECUTABLE" AND _links AND
+            _target MATCHES "^(test|bench|probe)")
+            foreach(_lib rigExec rigExecBake rigExecImaging rigExecRigging
+                    rigExecSampler rigExecStandalone)
+                if (_lib IN_LIST _links)
+                    list(APPEND _rigexec_pch_users ${_target})
+                    break()
+                endif()
+            endforeach()
+        endif()
+    endforeach()
+    foreach(_target IN LISTS _rigexec_pch_users)
+        target_precompile_headers(${_target} REUSE_FROM rigExecUsdPch)
+    endforeach()
+endif()
+
 # Install
 include(CMakePackageConfigHelpers)
 

@@ -4,6 +4,7 @@
 #include "warmIndex.h"
 
 #include "rigExecMath/pointFrame.h"
+#include "rigExec/bakedProgramImpl.h"
 #include "rigExec/frameCacheSparsity.h"
 
 #include "pxr/base/gf/quatd.h"

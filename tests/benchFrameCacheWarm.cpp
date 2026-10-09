@@ -34,7 +34,6 @@
 // so the on-vs-off p95 answers the contention question on any rig.
 #include "rigExec/backgroundScheduler.h"
 #include "rigExec/bakedProgram.h"
-#include "rigExec/bakedProgramImpl.h"
 #include "rigExec/frameCache.h"
 #include "rigExec/frameCacheSparsity.h"
 #include "rigExec/frozenContext.h"

@@ -20,6 +20,7 @@
 #include "rigExec/bakedTrace.h"
 #include "rigExec/frameCache.h"
 #include "rigExec/frozenContext.h"
+#include "rigExec/frozenProgram.h"
 #include "rigExec/rigEvaluator.h"
 #include "rigExecBake/bake.h"
 #include "rigExecBake/staticReport.h"

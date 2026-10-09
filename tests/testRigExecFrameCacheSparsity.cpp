@@ -10,6 +10,7 @@
 #include "rigExec/frameCacheSparsity.h"
 #include "rigExec/bakedSchedule.h"
 #include "rigExec/frozenContext.h"
+#include "rigExec/frozenProgram.h"
 
 #include "pxr/base/plug/registry.h"
 #include "pxr/base/tf/notice.h"
