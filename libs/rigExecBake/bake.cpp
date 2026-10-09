@@ -12,6 +12,7 @@
 #include "rigExecBinary/generated/presentation_generated.h"
 
 #include "pxr/base/vt/array.h"
+#include "pxr/usd/sdf/path.h"
 #include "pxr/usd/usd/attribute.h"
 #include "pxr/usd/usd/stage.h"
 #include "pxr/usd/usd/timeCode.h"
@@ -186,6 +187,35 @@ private:
     std::vector<_Entry> _entries;
 };
 
+// Adds to \p paths the input each control of \p bytes names, when \p bytes
+// is a REXP buffer that verifies; adds nothing otherwise, and
+// _VerifyPresentation reports that buffer after the capture.
+void
+_PresentationInputPaths(const std::vector<uint8_t> &bytes,
+                        std::set<SdfPath> *paths)
+{
+    if (bytes.empty() || bytes.size() >= FLATBUFFERS_MAX_BUFFER_SIZE) {
+        return;
+    }
+    flatbuffers::Verifier verifier(bytes.data(), bytes.size());
+    if (!fb::VerifyPresentationBuffer(verifier)) {
+        return;
+    }
+    const fb::Presentation *presentation = fb::GetPresentation(bytes.data());
+    if (!presentation->controls()) {
+        return;
+    }
+    for (const fb::PresentationControl *control :
+         *presentation->controls()) {
+        // A name that is no path is no listed input either, which
+        // _VerifyPresentation reports.
+        const std::string input = control->input()->str();
+        if (SdfPath::IsValidPathString(input)) {
+            paths->insert(SdfPath(input));
+        }
+    }
+}
+
 // A REXP buffer that verifies, every control naming one of \p listed
 // (ascending). The bytes are embedded unchanged; nothing here reads more of
 // them than the controls' inputs.
@@ -264,16 +294,33 @@ RigExecBakeToBinary(RigExecRigEvaluator &evaluator,
         return Fail("cannot bake with interactive overrides standing");
     }
     const std::vector<SdfPath> upstream = evaluator.GetUpstreamInputPaths();
+    // The file's program is the export build: a Range skin or a group gate
+    // rests only on reads the file holds as constants (private slots), never
+    // on one it must leave listed -- an admitted upstream input or an input
+    // the presentation names. The guard restores the evaluator's role mode
+    // on every return, and its next Evaluate rebuilds.
+    std::set<SdfPath> keep(upstream.begin(), upstream.end());
+    _PresentationInputPaths(opts.presentation, &keep);
+    RigExecScopedBakedRoleMode roles(evaluator, RigExecBakedRoleMode::Export,
+                                     std::move(keep));
     RigExecScopedUpstreamSuspension suspension(evaluator);
-    const RigExecBakedProgram *standing = evaluator.GetBakedProgram();
-    if (!standing) {
+    const RigExecBakedProgram *compiled = evaluator.GetBakedProgram();
+    if (!compiled) {
         return Fail("no baked program standing to capture from");
     }
     const double bakeTime =
         std::isnan(opts.time)
-            ? RigExecBakedProbeTime(standing->GetStepGraph().stage)
+            ? RigExecBakedProbeTime(compiled->GetStepGraph().stage)
                   .GetValue()
             : opts.time;
+    // One generation at the bake time builds the export program, with no
+    // interactive override standing and upstream lifted, so its roles read
+    // the stage; the full run below is of that program.
+    evaluator.Evaluate(UsdTimeCode(bakeTime));
+    const RigExecBakedProgram *standing = evaluator.GetBakedProgram();
+    if (!standing) {
+        return Fail("no baked program standing to capture from");
+    }
     char number[32];
     std::string why;
     const size_t bakedBefore = evaluator.GetBakedGenerationCount();

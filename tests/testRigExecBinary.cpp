@@ -2026,22 +2026,25 @@ _DropRead(fb::RigExecWireStep *step, fb::SlotDomain domain, uint32_t slot)
     step->reads = std::move(kept);
 }
 
-// A chain of 10000 points, past the default chunk vertex target, under a
-// blend shape authored last, which mover discovery runs first (siblings run
-// bottom to top), as a whole revision, and three matrix movers
-// (the range-chain fixture's shape: M0 on a driver that moves at frames 1
-// to 3, M1 with a weight out of range at frame 2, M2; the points authored
-// at Default and at frames 1 to 3, moving in [0, 100) only), baked at frame
-// 1: every matrix revision is range-pipelined (format 19), unchunked and
-// cut into the chain's one point partition, the first one's range steps
-// declare the blend shape's whole version, and the validator accepts the
-// file. Edited copies that break a range rule are refused by Write and
-// Open: a key on a range, a gap, two revisions cutting the chain
-// differently, a range-shaped Smooth, a range step missing its read of the
-// previous revision's range, a range step after the whole revision missing
-// part of its version, a range step declaring the version of a
-// range-pipelined predecessor, a join missing one of its own ranges, and a
-// join missing the version entering it.
+// A chain of 10000 points, past the default chunk vertex target and cut into
+// G vertex groups at the default group target, under a target-space blend
+// shape authored last, which mover discovery runs first (siblings run
+// bottom to top), and three matrix movers (the range-chain fixture's shape:
+// M0 on a driver that moves at frames 1 to 3, M1 with a weight out of range
+// at frame 2, M2; the points authored at Default and at frames 1 to 3,
+// moving in [0, 100) only), baked at frame 1. In format 20 every revision
+// is Range, the blend shape too, and none is gated (no weight object):
+// unchunked, cut into the chain's G groups with no keys, one group step per
+// group. The blend shape's group steps read the chain base; every later
+// revision's group g reads the previous revision's group g and no whole
+// version; each join reads its own groups and the version entering it. The
+// validator accepts the file. Edited copies that break a group rule are
+// refused by Write and Open: a key on a group, a gap, two revisions cutting
+// the chain differently, a group-shaped Smooth, a group step missing its
+// read of the previous revision's group (after a matrix mover and after the
+// blend shape), a group step declaring the previous revision's version, a
+// join missing one of its own groups, and a join missing the version
+// entering it.
 static void
 TestRangeChainBake()
 {
@@ -2155,25 +2158,27 @@ TestRangeChainBake()
     if (chain.revisions.size() != 4) {
         return;
     }
-    // The blend shape runs first and whole; each matrix mover after it, in
-    // whatever order, cuts the chain's partition into one range step per
-    // range.
-    const fb::RigExecWireRevision &whole = chain.revisions[0];
-    CHECK(RigExecFormatPathText(*file, whole.moverPath) ==
-          "/Asset/Rig/Movers/Blend");
-    CHECK(whole.op == uint8_t(fb::RevisionOp::BlendShape));
-    CHECK(!RigExecFormatIsRangeRevision(whole));
-    const size_t ranges = RigExecPointRangeCount(
-        kPoints, program.chunkVertexTarget, program.chunkCap);
+    // The chain's G groups, as Build cut them.
+    const size_t ranges = RigExecFormatChainGroups(*file, c);
     CHECK(ranges >= 2);
+    CHECK(c < program.chains.size() &&
+          program.chains[c].groupBounds.size() == ranges + 1);
+    // The blend shape runs first; each matrix mover after it, in whatever
+    // order. Every one cuts the chain into one group step per group.
+    CHECK(RigExecFormatPathText(*file, chain.revisions[0].moverPath) ==
+          "/Asset/Rig/Movers/Blend");
     const uint32_t first = uint32_t(g.chainRevisionBegin[c]);
     std::set<std::string> movers;
     size_t rangeSteps = 0;
-    for (size_t r = 1; r < chain.revisions.size(); ++r) {
+    for (size_t r = 0; r < chain.revisions.size(); ++r) {
         const fb::RigExecWireRevision &revision = chain.revisions[r];
-        movers.insert(RigExecFormatPathText(*file, revision.moverPath));
-        CHECK(revision.op == uint8_t(fb::RevisionOp::Matrix));
+        if (r > 0) {
+            movers.insert(RigExecFormatPathText(*file, revision.moverPath));
+        }
+        CHECK(revision.op == uint8_t(r == 0 ? fb::RevisionOp::BlendShape
+                                            : fb::RevisionOp::Matrix));
         CHECK(RigExecFormatIsRangeRevision(revision));
+        CHECK(!RigExecFormatIsKeyedRevision(revision));
         CHECK(revision.chunks.size() == ranges);
         for (size_t k = 0; k < revision.chunks.size(); ++k) {
             CHECK(revision.chunks[k].key.empty());
@@ -2183,18 +2188,21 @@ TestRangeChainBake()
                   RigExecPointRangeBound(kPoints, ranges, k + 1));
         }
         const int32_t id = g.chainRevisionBegin[c] + int32_t(r);
+        CHECK(size_t(id) < g.revisionChunkCount.size() &&
+              size_t(g.revisionChunkCount[size_t(id)]) == ranges);
         for (const fb::RigExecWireStep &step : file->steps) {
             if (step.kind == fb::StepKind::RevisionChunk &&
                 step.object == id) {
                 ++rangeSteps;
-                // After the whole revision a range reads its version whole;
-                // after a range-pipelined one, range `part` of it.
-                if (r == 1) {
-                    CHECK(_DeclaresRead(step, fb::SlotDomain::RevisionDone,
-                                        first) &&
-                          _DeclaresRead(step, fb::SlotDomain::ChainDirty,
-                                        first));
-                } else {
+                CHECK(_DeclaresRead(step, fb::SlotDomain::ChainBase,
+                                    uint32_t(c)));
+                // Group `part` of the entering version: the previous
+                // revision's group, never its whole version.
+                if (r > 0) {
+                    const uint32_t entering = uint32_t(
+                        chain.revisions[r - 1].chunkBase + step.part);
+                    CHECK(_DeclaresRead(step, fb::SlotDomain::RevisionOut,
+                                        entering));
                     CHECK(!_DeclaresRead(step, fb::SlotDomain::RevisionDone,
                                          uint32_t(id) - 1) &&
                           !_DeclaresRead(step, fb::SlotDomain::ChainDirty,
@@ -2203,24 +2211,35 @@ TestRangeChainBake()
             }
             if (step.kind == fb::StepKind::RevisionFuse &&
                 step.object == id) {
-                // A join declares the version entering it, as a fuse does.
-                CHECK(_DeclaresRead(step, fb::SlotDomain::RevisionDone,
-                                    uint32_t(id) - 1) &&
-                      _DeclaresRead(step, fb::SlotDomain::ChainDirty,
-                                    uint32_t(id) - 1));
+                // A join declares its own groups and the version entering
+                // it, as a fuse does.
+                for (size_t k = 0; k < ranges; ++k) {
+                    CHECK(_DeclaresRead(step, fb::SlotDomain::RevisionOut,
+                                        uint32_t(revision.chunkBase + k)));
+                }
+                if (r > 0) {
+                    CHECK(_DeclaresRead(step, fb::SlotDomain::RevisionDone,
+                                        uint32_t(id) - 1) &&
+                          _DeclaresRead(step, fb::SlotDomain::ChainDirty,
+                                        uint32_t(id) - 1));
+                }
             }
         }
     }
     CHECK(movers == std::set<std::string>({"/Asset/Rig/Movers/M0",
                                            "/Asset/Rig/Movers/M1",
                                            "/Asset/Rig/Movers/M2"}));
-    CHECK(rangeSteps == 3 * ranges);
+    CHECK(rangeSteps == 4 * ranges);
+    {
+        std::string why;
+        CHECK(RigExecFormatValidate(*file, &why));
+    }
 
-    // The edits. Position 1 is the first range-pipelined revision, whose
-    // ranges read the blend shape's whole version; position 2 follows a
-    // range-pipelined revision.
+    // The edits. Position 1 is the first matrix mover, whose groups read
+    // the blend shape's; position 2 follows a matrix mover.
     const uint32_t firstRange = first + 1;
     const uint32_t second = first + 2;
+    const uint32_t blendBase = uint32_t(chain.revisions[0].chunkBase);
     const uint32_t firstBase = uint32_t(chain.revisions[1].chunkBase);
     const auto revisionAt = [c](fb::RigExecWireFile &f,
                                 size_t r) -> fb::RigExecWireRevision & {
@@ -2252,7 +2271,7 @@ TestRangeChainBake()
         CHECK(named);
         refused += named ? 1 : 0;
     };
-    refuse("a key on a range", [&](fb::RigExecWireFile &f) {
+    refuse("a key on a group", [&](fb::RigExecWireFile &f) {
         revisionAt(f, 1).chunks[1].key = {0};
         return true;
     }, "chunks[1]: a key on an unchunked revision");
@@ -2267,12 +2286,12 @@ TestRangeChainBake()
                --revision.chunks[1].begin;
                return true;
            },
-           ".revisions[2]: its point ranges differ from revisions[1]'s");
-    refuse("a range-shaped smooth revision", [&](fb::RigExecWireFile &f) {
+           ".revisions[2]: its point ranges differ from revisions[0]'s");
+    refuse("a group-shaped smooth revision", [&](fb::RigExecWireFile &f) {
         revisionAt(f, 1).op = uint8_t(fb::RevisionOp::Smooth);
         return true;
     }, std::to_string(ranges) + " chunks, but not chunked");
-    refuse("a range step missing the previous revision's range",
+    refuse("a group step missing the previous revision's group",
            [&](fb::RigExecWireFile &f) {
                fb::RigExecWireStep *step =
                    stepOf(f, fb::StepKind::RevisionChunk, second, 1);
@@ -2285,19 +2304,20 @@ TestRangeChainBake()
            },
            " does not declare RevisionOut[" + std::to_string(firstBase + 1) +
                "]");
-    refuse("a range step after the whole revision missing part of its version",
+    refuse("a group step missing the blend shape's group",
            [&](fb::RigExecWireFile &f) {
                fb::RigExecWireStep *step =
                    stepOf(f, fb::StepKind::RevisionChunk, firstRange, 1);
-               if (!step ||
-                   !_DeclaresRead(*step, fb::SlotDomain::ChainDirty, first)) {
+               if (!step || !_DeclaresRead(*step, fb::SlotDomain::RevisionOut,
+                                           blendBase + 1)) {
                    return false;
                }
-               _DropRead(step, fb::SlotDomain::ChainDirty, first);
+               _DropRead(step, fb::SlotDomain::RevisionOut, blendBase + 1);
                return true;
            },
-           " does not declare ChainDirty[" + std::to_string(first) + "]");
-    refuse("a range step declaring a range-pipelined predecessor's version",
+           " does not declare RevisionOut[" + std::to_string(blendBase + 1) +
+               "]");
+    refuse("a group step declaring the previous revision's version",
            [&](fb::RigExecWireFile &f) {
                fb::RigExecWireStep *step =
                    stepOf(f, fb::StepKind::RevisionChunk, second, 1);
@@ -2312,7 +2332,7 @@ TestRangeChainBake()
                return true;
            },
            "which a range-pipelined range step does not read");
-    refuse("a join missing one of its ranges", [&](fb::RigExecWireFile &f) {
+    refuse("a join missing one of its groups", [&](fb::RigExecWireFile &f) {
         fb::RigExecWireStep *join =
             stepOf(f, fb::StepKind::RevisionFuse, firstRange, -1);
         const uint32_t own = firstBase + uint32_t(ranges) - 1;
@@ -2337,9 +2357,9 @@ TestRangeChainBake()
            },
            " does not declare RevisionDone[" + std::to_string(firstRange) +
                "]");
-    std::printf("range chain bake: a whole revision and %zu revisions of %zu "
-                "ranges accepted; %d range rule violations refused\n",
-                chain.revisions.size() - 1, ranges, refused);
+    std::printf("range chain bake: %zu Range revisions of %zu groups "
+                "accepted; %d group rule violations refused\n",
+                chain.revisions.size(), ranges, refused);
     CHECK(refused == 9);
 }
 
@@ -2675,6 +2695,732 @@ TestBakeOptions(const std::string &fixture, const std::string &input)
     CHECK(!bake(_PresentationBytes(input, "XXXX"), &result, &error));
     CHECK(error == "the presentation is not a valid REXP buffer");
     std::printf("presentation, bad identifier: %s\n", error.c_str());
+}
+
+// --- Format 20: export roles and constants (D2 b) --------------------------
+
+/// The indices the group-roles fixture's sparse weight names: points
+/// [0, 100) and [N/2, N/2 + 50).
+static std::vector<int>
+_GroupRolesSupport(size_t points)
+{
+    std::vector<int> support;
+    for (int i = 0; i < 100; ++i) {
+        support.push_back(i);
+    }
+    for (int i = 0; i < 50; ++i) {
+        support.push_back(int(points / 2) + i);
+    }
+    return support;
+}
+
+/// A chain of \p points points (10000: past the default chunk vertex
+/// target, cut into G vertex groups at the default group target) under four
+/// movers, authored so the chain runs Blend, Linear, Gated, Dual (siblings
+/// run bottom to top): a target-space blend shape at full envelope; a
+/// classicLinear skin and a dualQuaternion skin, each binding points
+/// [0, N/2) to J0 and the rest to J1; and a matrix mover weighted by a
+/// static sparse weight at a zero default naming _GroupRolesSupport only.
+/// Every value is authored at Default; nothing is connected.
+static UsdStageRefPtr
+_MakeGroupRolesStage(size_t points)
+{
+    const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    stage->DefinePrim(SdfPath("/Asset"), TfToken("Scope"));
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    const auto control = [&](const char *path, const char *avar,
+                             double value) {
+        const UsdPrim prim =
+            stage->DefinePrim(SdfPath(path), TfToken("RigExecControl"));
+        prim.CreateAttribute(TfToken(avar), SdfValueTypeNames->Double)
+            .Set(value);
+        return prim;
+    };
+    const UsdPrim j0 = control("/Asset/Rig/J0", "avars:tx", 2.0);
+    const UsdPrim j1 = control("/Asset/Rig/J1", "avars:ty", 3.0);
+    const UsdPrim moving = control("/Asset/Rig/Moving", "avars:tx", 1.0);
+    const SdfPath target("/Asset/Shape.points");
+    VtVec3fArray base(points);
+    for (size_t i = 0; i < points; ++i) {
+        base[i] = GfVec3f(float(i % 100), float(i / 100), 0.0f);
+    }
+    stage->DefinePrim(target.GetPrimPath(), TfToken("Points"))
+        .CreateAttribute(TfToken("points"), SdfValueTypeNames->Point3fArray)
+        .Set(base);
+    // The blend shape's target: every point raised by one.
+    VtVec3fArray raised = base;
+    for (GfVec3f &point : raised) {
+        point[2] += 1.0f;
+    }
+    stage->DefinePrim(SdfPath("/Asset/Raised"), TfToken("Points"))
+        .CreateAttribute(TfToken("points"), SdfValueTypeNames->Point3fArray)
+        .Set(raised);
+    const UsdPrim input = stage->DefinePrim(
+        SdfPath("/Asset/Rig/BlendInputs/Raise"), TfToken("RigExecBlendInput"));
+    input.CreateAttribute(TfToken("inputs:weight"), SdfValueTypeNames->Float)
+        .Set(0.5f);
+    const UsdPrim sample = stage->DefinePrim(
+        SdfPath("/Asset/Rig/BlendInputs/Raise/Full"),
+        TfToken("RigExecBlendSample"));
+    sample.CreateAttribute(TfToken("rigExec:activation"),
+                           SdfValueTypeNames->Float)
+        .Set(1.0f);
+    sample.CreateRelationship(TfToken("rigExec:targetPoints"))
+        .SetTargets({SdfPath("/Asset/Raised.points")});
+    input.CreateRelationship(TfToken("rigExec:samples"))
+        .SetTargets({sample.GetPath()});
+    const std::vector<int> support = _GroupRolesSupport(points);
+    VtIntArray named(support.size());
+    for (size_t i = 0; i < support.size(); ++i) {
+        named[i] = support[i];
+    }
+    const UsdPrim weight = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Weights/Sparse"), TfToken("RigExecStaticWeight"));
+    weight.CreateRelationship(TfToken("rigExec:weightTarget"), false)
+        .SetTargets({target});
+    weight.CreateAttribute(TfToken("rigExec:representation"),
+                           SdfValueTypeNames->Token, false)
+        .Set(TfToken("sparse"));
+    weight.CreateAttribute(TfToken("rigExec:indices"),
+                           SdfValueTypeNames->IntArray, false)
+        .Set(named);
+    weight.CreateAttribute(TfToken("rigExec:values"),
+                           SdfValueTypeNames->FloatArray, false)
+        .Set(VtFloatArray(support.size(), 1.0f));
+    weight.CreateAttribute(TfToken("rigExec:defaultWeight"),
+                           SdfValueTypeNames->Float, false)
+        .Set(0.0f);
+    stage->DefinePrim(SdfPath("/Asset/Rig/Movers"), TfToken("Scope"));
+    const auto mover = [&](const char *name, const char *type) {
+        const UsdPrim prim = stage->DefinePrim(
+            SdfPath(std::string("/Asset/Rig/Movers/") + name), TfToken(type));
+        CHECK(prim.ApplyAPI(TfToken("RigExecMoverAPI")));
+        prim.CreateRelationship(TfToken("rigExec:moves")).SetTargets({target});
+        return prim;
+    };
+    const auto skin = [&](const char *name, const char *method) {
+        const UsdPrim prim = mover(name, "RigExecSkinMover");
+        prim.CreateAttribute(TfToken("inputs:defaultWeight"),
+                             SdfValueTypeNames->Float)
+            .Set(1.0f);
+        prim.CreateRelationship(TfToken("rigExec:influences"))
+            .SetTargets({j0.GetPath(), j1.GetPath()});
+        prim.CreateAttribute(TfToken("rigExec:elementSize"),
+                             SdfValueTypeNames->Int)
+            .Set(1);
+        VtIntArray indices(points);
+        for (size_t i = 0; i < points; ++i) {
+            indices[i] = i < points / 2 ? 0 : 1;
+        }
+        prim.CreateAttribute(TfToken("rigExec:jointIndices"),
+                             SdfValueTypeNames->IntArray)
+            .Set(indices);
+        prim.CreateAttribute(TfToken("rigExec:jointWeights"),
+                             SdfValueTypeNames->FloatArray)
+            .Set(VtFloatArray(points, 1.0f));
+        prim.CreateAttribute(TfToken("rigExec:skinningMethod"),
+                             SdfValueTypeNames->Token)
+            .Set(TfToken(method));
+    };
+    skin("Dual", "dualQuaternion");
+    const UsdPrim gated = mover("Gated", "RigExecMatrixMover");
+    gated.CreateRelationship(TfToken("rigExec:transform"))
+        .SetTargets({moving.GetPath()});
+    gated.CreateRelationship(TfToken("rigExec:weightObject"), false)
+        .SetTargets({weight.GetPath()});
+    skin("Linear", "classicLinear");
+    const UsdPrim blend = mover("Blend", "RigExecBlendShapeMover");
+    blend.CreateRelationship(TfToken("rigExec:blendInputs"))
+        .SetTargets({input.GetPath()});
+    blend.CreateAttribute(TfToken("inputs:defaultWeight"),
+                          SdfValueTypeNames->Float)
+        .Set(1.0f);
+    return stage;
+}
+
+/// The group-roles chain of a baked file: its index, group count and each
+/// mover's revision index, found by path; -1 when absent.
+struct _GroupRolesChain {
+    int chain = -1;
+    size_t groups = 0;
+    int blend = -1;
+    int linear = -1;
+    int gated = -1;
+    int dual = -1;
+    bool Found() const
+    {
+        return chain >= 0 && blend >= 0 && linear >= 0 && gated >= 0 &&
+               dual >= 0;
+    }
+};
+
+static _GroupRolesChain
+_FindGroupRolesChain(const fb::RigExecWireFile &file)
+{
+    _GroupRolesChain at;
+    const fb::RigExecWireDomainGeometry &g = *file.geometry;
+    for (size_t c = 0; c < g.chains.size(); ++c) {
+        if (RigExecFormatPathText(file, g.chains[c].target) ==
+            "/Asset/Shape.points") {
+            at.chain = int(c);
+        }
+    }
+    if (at.chain < 0) {
+        return at;
+    }
+    at.groups = RigExecFormatChainGroups(file, size_t(at.chain));
+    const fb::RigExecWireChain &chain = g.chains[size_t(at.chain)];
+    for (size_t r = 0; r < chain.revisions.size(); ++r) {
+        const std::string mover =
+            RigExecFormatPathText(file, chain.revisions[r].moverPath);
+        if (mover == "/Asset/Rig/Movers/Blend") {
+            at.blend = int(r);
+        } else if (mover == "/Asset/Rig/Movers/Linear") {
+            at.linear = int(r);
+        } else if (mover == "/Asset/Rig/Movers/Gated") {
+            at.gated = int(r);
+        } else if (mover == "/Asset/Rig/Movers/Dual") {
+            at.dual = int(r);
+        }
+    }
+    return at;
+}
+
+/// The groups of \p groups over \p points points that hold one of
+/// \p indices.
+static std::set<int>
+_GroupsHolding(const std::vector<int> &indices, size_t points, size_t groups)
+{
+    std::set<int> held;
+    for (const int i : indices) {
+        for (size_t k = 0; k < groups; ++k) {
+            if (RigExecPointRangeBound(points, groups, k) <= size_t(i) &&
+                size_t(i) < RigExecPointRangeBound(points, groups, k + 1)) {
+                held.insert(int(k));
+            }
+        }
+    }
+    return held;
+}
+
+/// The parts of revision \p r of chain \p c's RevisionChunk steps.
+static std::set<int>
+_ChunkParts(const fb::RigExecWireFile &file, size_t c, int r)
+{
+    std::set<int> parts;
+    const int32_t id = file.geometry->chainRevisionBegin[c] + int32_t(r);
+    for (const fb::RigExecWireStep &step : file.steps) {
+        if (step.kind == fb::StepKind::RevisionChunk && step.object == id) {
+            parts.insert(int(step.part));
+        }
+    }
+    return parts;
+}
+
+/// Revision \p r of chain \p c's revision_chunk_count, or 0.
+static size_t
+_RevisionChunkCount(const fb::RigExecWireFile &file, size_t c, int r)
+{
+    const fb::RigExecWireDomainGeometry &g = *file.geometry;
+    const size_t id = size_t(g.chainRevisionBegin[c]) + size_t(r);
+    return id < g.revisionChunkCount.size()
+               ? size_t(g.revisionChunkCount[id])
+               : 0;
+}
+
+/// Whether \p file lists the input slot of attribute \p name.
+static bool
+_ListsInput(const fb::RigExecWireFile &file, const std::string &name)
+{
+    const int64_t slot = RigExecTestSlotOf(file, name);
+    return slot >= 0 && uint64_t(slot) < uint64_t(file.listedInputs);
+}
+
+/// Whether \p file holds attribute \p name as a constant: a private slot
+/// that is not Animated, whose default the runtime reads.
+static bool
+_HoldsConstant(const fb::RigExecWireFile &file, const std::string &name)
+{
+    const int64_t slot = RigExecTestSlotOf(file, name);
+    if (slot < 0 || uint64_t(slot) < uint64_t(file.listedInputs)) {
+        return false;
+    }
+    const uint8_t flags = file.inputs[size_t(slot)].flags();
+    return (flags & uint8_t(fb::InputSlotFlags::Listed)) == 0 &&
+           (flags & uint8_t(fb::InputSlotFlags::Animated)) == 0;
+}
+
+/// The default of attribute \p name's slot in \p file, or null.
+static const fb::RigExecWireValue *
+_SlotDefault(const fb::RigExecWireFile &file, const std::string &name)
+{
+    const int64_t slot = RigExecTestSlotOf(file, name);
+    if (slot < 0 || file.inputs[size_t(slot)].value() >= file.values.size()) {
+        return nullptr;
+    }
+    return &file.values[file.inputs[size_t(slot)].value()];
+}
+
+/// Moves the private slot of attribute \p name into \p file's listed prefix
+/// at its place in the path order, renumbering every slot id the file
+/// holds; false when \p file has no private slot for it. Every other rule
+/// on the listed prefix keeps holding.
+static bool
+_ListSlot(fb::RigExecWireFile *file, const std::string &name)
+{
+    const int64_t found = RigExecTestSlotOf(*file, name);
+    if (found < 0 || uint64_t(found) < uint64_t(file->listedInputs)) {
+        return false;
+    }
+    const uint32_t from = uint32_t(found);
+    uint32_t at = 0;
+    while (at < file->listedInputs &&
+           RigExecFormatPathText(*file, file->inputs[at].name()) < name) {
+        ++at;
+    }
+    RigExecTestForEachSlotId(file, [from, at](uint32_t *slot) {
+        if (*slot == from) {
+            *slot = at;
+        } else if (*slot >= at && *slot < from) {
+            ++*slot;
+        }
+    });
+    const fb::InputSlot moved = file->inputs[from];
+    file->inputs.erase(file->inputs.begin() + std::ptrdiff_t(from));
+    file->inputs.insert(
+        file->inputs.begin() + std::ptrdiff_t(at),
+        fb::InputSlot(moved.name(), moved.value(), moved.chain(),
+                      moved.phased(), moved.type(),
+                      uint8_t(moved.flags() |
+                              uint8_t(fb::InputSlotFlags::Listed))));
+    ++file->listedInputs;
+    return true;
+}
+
+// The group-roles fixture baked at frame 1 (format 20, D2 b), from the
+// export program the bake built. The file holds its roles: the blend shape
+// and the matrix mover Range with no keys; the classicLinear skin a Range
+// Skin, unchunked with its G groups keyed by their influences; the
+// dualQuaternion skin Whole, chunked with G keyed groups and G published
+// groups more; the matrix mover gated, with group steps only for the groups
+// its weight names, so the groups it leaves are entered from the revision
+// before it. The reads the Range skin and the gate rest on -- the skin's
+// skinningMethod, elementSize and jointIndices and the weight's
+// defaultWeight -- are constants: private slots holding their bake-time
+// values. The skin's jointWeights and the Whole skin's same reads stay
+// listed. Edited copies are refused by the validator: a Whole revision
+// counting only its chunks, a Range skin group's key changed, and either
+// constant moved into the listed inputs.
+static void
+TestGroupRolesBake()
+{
+    constexpr size_t kPoints = 10000;
+    const UsdStageRefPtr stage = _MakeGroupRolesStage(kPoints);
+    RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+    const std::unique_ptr<fb::RigExecWireFile> file =
+        _BakeAndCompare(evaluator, 1.0, "group roles bake");
+    const RigExecBakedProgram *baked = evaluator.GetBakedProgram();
+    if (!file || !baked) {
+        return;
+    }
+    const RigExecBakedProgramImpl &program = baked->GetStepGraph();
+    CHECK(program.roleMode == RigExecBakedRoleMode::Export);
+    const _GroupRolesChain at = _FindGroupRolesChain(*file);
+    CHECK(at.Found());
+    if (!at.Found()) {
+        return;
+    }
+    const size_t c = size_t(at.chain);
+    const size_t groups = at.groups;
+    const fb::RigExecWireChain &chain = file->geometry->chains[c];
+    CHECK(chain.revisions.size() == 4);
+    CHECK(groups >= 2);
+    CHECK(c < program.chains.size() &&
+          program.chains[c].groupBounds.size() == groups + 1 &&
+          program.chains[c].revisions.size() == chain.revisions.size());
+    if (groups < 2 || c >= program.chains.size() ||
+        program.chains[c].revisions.size() != chain.revisions.size()) {
+        return;
+    }
+    const auto &native = program.chains[c].revisions;
+    std::set<int> every;
+    for (size_t k = 0; k < groups; ++k) {
+        every.insert(int(k));
+    }
+    const auto onBounds = [&](const fb::RigExecWireRevision &revision) {
+        bool same = revision.chunks.size() == groups;
+        for (size_t k = 0; same && k < groups; ++k) {
+            same = uint64_t(revision.chunks[k].begin) ==
+                       RigExecPointRangeBound(kPoints, groups, k) &&
+                   uint64_t(revision.chunks[k].end) ==
+                       RigExecPointRangeBound(kPoints, groups, k + 1);
+        }
+        return same;
+    };
+
+    // Range, no keys: the blend shape on every group, the matrix mover on
+    // the groups its weight names.
+    for (const int r : {at.blend, at.gated}) {
+        const fb::RigExecWireRevision &revision = chain.revisions[size_t(r)];
+        CHECK(native[size_t(r)].role == RigExecBakedRevisionRole::Range);
+        CHECK(RigExecFormatIsRangeRevision(revision));
+        CHECK(!RigExecFormatIsKeyedRevision(revision));
+        CHECK(onBounds(revision));
+        for (const fb::RigExecWireChunk &chunk : revision.chunks) {
+            CHECK(chunk.key.empty());
+        }
+        CHECK(_RevisionChunkCount(*file, c, r) == groups);
+    }
+    CHECK(chain.revisions[size_t(at.blend)].op ==
+          uint8_t(fb::RevisionOp::BlendShape));
+    CHECK(chain.revisions[size_t(at.gated)].op ==
+          uint8_t(fb::RevisionOp::Matrix));
+    CHECK(_ChunkParts(*file, c, at.blend) == every);
+    const std::set<int> written =
+        _GroupsHolding(_GroupRolesSupport(kPoints), kPoints, groups);
+    CHECK(!written.empty() && written.size() < groups);
+    CHECK(_ChunkParts(*file, c, at.gated) == written);
+
+    // The Range skin: unchunked, its chunks the groups, keyed.
+    const fb::RigExecWireRevision &linear = chain.revisions[size_t(at.linear)];
+    CHECK(native[size_t(at.linear)].role == RigExecBakedRevisionRole::Range);
+    CHECK(linear.op == uint8_t(fb::RevisionOp::Skin));
+    CHECK(!linear.chunked && RigExecFormatIsRangeRevision(linear));
+    CHECK(RigExecFormatIsKeyedRevision(linear));
+    CHECK(onBounds(linear));
+    CHECK(_RevisionChunkCount(*file, c, at.linear) == groups);
+    CHECK(_ChunkParts(*file, c, at.linear) == every);
+
+    // The Whole skin: chunked, G keyed chunks, and its fuse's G groups.
+    const fb::RigExecWireRevision &dual = chain.revisions[size_t(at.dual)];
+    CHECK(native[size_t(at.dual)].role == RigExecBakedRevisionRole::Whole);
+    CHECK(dual.op == uint8_t(fb::RevisionOp::Skin));
+    CHECK(dual.chunked && !RigExecFormatIsRangeRevision(dual));
+    CHECK(RigExecFormatIsKeyedRevision(dual));
+    CHECK(onBounds(dual));
+    CHECK(_RevisionChunkCount(*file, c, at.dual) ==
+          dual.chunks.size() + groups);
+    CHECK(_ChunkParts(*file, c, at.dual) == every);
+
+    // Both skins' keys are their groups' influences: J0 (0) below N/2, J1
+    // (1) from there.
+    for (const fb::RigExecWireRevision *skin : {&linear, &dual}) {
+        for (size_t k = 0; k < skin->chunks.size() && k < groups; ++k) {
+            std::set<int> want;
+            if (RigExecPointRangeBound(kPoints, groups, k) < kPoints / 2) {
+                want.insert(0);
+            }
+            if (RigExecPointRangeBound(kPoints, groups, k + 1) >
+                kPoints / 2) {
+                want.insert(1);
+            }
+            CHECK(std::set<int>(skin->chunks[k].key.begin(),
+                                skin->chunks[k].key.end()) == want);
+        }
+    }
+
+    // Each group's writers as Open reads them: every revision writes every
+    // group but the gated one, and a group enters from its last writer.
+    std::vector<std::vector<char>> writes;
+    std::vector<std::vector<int>> entering;
+    RigExecFormatGroupWriters(*file, c, &writes, &entering);
+    CHECK(writes.size() == chain.revisions.size() &&
+          entering.size() == chain.revisions.size());
+    for (size_t r = 0; r < writes.size() && r < entering.size(); ++r) {
+        CHECK(writes[r].size() == groups && entering[r].size() == groups);
+        for (size_t k = 0;
+             k < groups && k < writes[r].size() && k < entering[r].size();
+             ++k) {
+            const auto writer = [&](size_t q) {
+                return int(q) != at.gated || written.count(int(k)) != 0;
+            };
+            int want = -1;
+            for (size_t q = 0; q < r; ++q) {
+                if (writer(q)) {
+                    want = int(q);
+                }
+            }
+            CHECK((writes[r][k] != 0) == writer(r));
+            CHECK(entering[r][k] == want);
+        }
+    }
+    {
+        std::string why;
+        const bool valid = RigExecFormatValidate(*file, &why);
+        if (!valid) {
+            std::printf("  group roles bake refused: %s\n", why.c_str());
+        }
+        CHECK(valid);
+    }
+
+    // The constants: private, not animated, their bake-time values; exactly
+    // the reads the export program pinned are among them.
+    const std::string linearAt = "/Asset/Rig/Movers/Linear.";
+    const std::string dualAt = "/Asset/Rig/Movers/Dual.";
+    const std::string defaultWeight =
+        "/Asset/Rig/Weights/Sparse.rigExec:defaultWeight";
+    const std::set<SdfPath> &pinned = baked->GetExportPinnedPaths();
+    for (const std::string &name :
+         {linearAt + "rigExec:skinningMethod",
+          linearAt + "rigExec:elementSize", linearAt + "rigExec:jointIndices",
+          defaultWeight}) {
+        const bool constant = _HoldsConstant(*file, name);
+        if (!constant) {
+            std::printf("  group roles bake: %s is not a constant\n",
+                        name.c_str());
+        }
+        CHECK(constant);
+        CHECK(pinned.count(SdfPath(name)) == 1);
+    }
+    for (const SdfPath &path : pinned) {
+        CHECK(!_ListsInput(*file, path.GetString()));
+    }
+    for (const std::string &name :
+         {linearAt + "rigExec:jointWeights", dualAt + "rigExec:skinningMethod",
+          dualAt + "rigExec:elementSize", dualAt + "rigExec:jointIndices"}) {
+        const bool listed = _ListsInput(*file, name);
+        if (!listed) {
+            std::printf("  group roles bake: %s is not listed\n",
+                        name.c_str());
+        }
+        CHECK(listed);
+    }
+    const fb::RigExecWireValue *method =
+        _SlotDefault(*file, linearAt + "rigExec:skinningMethod");
+    CHECK(method && method->tag == fb::InputTag::Token &&
+          method->bits <= 0xffffffffull &&
+          _BinaryText(*file, uint32_t(method->bits)) == "classicLinear");
+    const fb::RigExecWireValue *elementSize =
+        _SlotDefault(*file, linearAt + "rigExec:elementSize");
+    CHECK(elementSize && elementSize->tag == fb::InputTag::Int &&
+          elementSize->bits == 1);
+    const fb::RigExecWireValue *zero = _SlotDefault(*file, defaultWeight);
+    CHECK(zero && zero->tag == fb::InputTag::Float &&
+          zero->bits == _BinaryBits(0.0f));
+    CHECK(linear.jointIndicesSlot >= 0 &&
+          uint64_t(linear.jointIndicesSlot) >= uint64_t(file->listedInputs));
+    CHECK(linear.jointWeightsSlot >= 0 &&
+          uint64_t(linear.jointWeightsSlot) < uint64_t(file->listedInputs));
+
+    // The edits, each refused by the validator.
+    int refused = 0;
+    const auto refuse =
+        [&](const std::string &label,
+            const std::function<bool(fb::RigExecWireFile &)> &edit) {
+            fb::RigExecWireFile copy(*file);
+            const bool edited = edit(copy);
+            CHECK(edited);
+            std::string why;
+            const bool rejected = edited && !RigExecFormatValidate(copy, &why);
+            std::printf("  group roles bake, %s: %s\n", label.c_str(),
+                        rejected ? why.c_str() : "ACCEPTED");
+            CHECK(rejected);
+            refused += rejected ? 1 : 0;
+            return why;
+        };
+    refuse("a Whole revision counting only its chunks",
+           [&](fb::RigExecWireFile &f) {
+               const size_t id =
+                   size_t(f.geometry->chainRevisionBegin[c]) + size_t(at.dual);
+               if (id >= f.geometry->revisionChunkCount.size()) {
+                   return false;
+               }
+               f.geometry->revisionChunkCount[id] =
+                   int32_t(dual.chunks.size());
+               return true;
+           });
+    refuse("a Range skin group's key changed", [&](fb::RigExecWireFile &f) {
+        std::vector<fb::RigExecWireChunk> &chunks =
+            f.geometry->chains[c].revisions[size_t(at.linear)].chunks;
+        if (chunks.empty()) {
+            return false;
+        }
+        // Group 0 holds J0's points only; claim J1's instead.
+        chunks[0].key = {1};
+        return true;
+    });
+    for (const std::string &name :
+         {linearAt + "rigExec:skinningMethod", defaultWeight}) {
+        const std::string why =
+            refuse("listing " + name, [&](fb::RigExecWireFile &f) {
+                return _ListSlot(&f, name);
+            });
+        // Refused for the constant, not for how the edit moved the slot.
+        CHECK(!_Contains(why, "malformed type, flags or default") &&
+              !_Contains(why, "listed inputs are not sorted"));
+    }
+    std::printf("group roles bake: %zu groups; gated mover writes %zu; %zu "
+                "constants; %d edits refused\n",
+                groups, written.size(), pinned.size(), refused);
+    CHECK(refused == 4);
+}
+
+// The bake's keep-set (D2 b): an admitted upstream input and a presentation
+// input stay listed, so the export program rests no Range role or gate on
+// them, and only that one changes. With the classicLinear skin's
+// skinningMethod admitted upstream before the bake, the bake succeeds and
+// reports it, the file lists it, and holds that skin Whole (chunked, its
+// fuse's G groups more) with its layout reads listed, while the gate
+// stands; the upstream input stands again after the bake. With a
+// presentation naming the weight's defaultWeight, the file lists it and the
+// matrix mover writes every group, while the skin stays a Range Skin.
+static void
+TestExportKeepSetBake()
+{
+    constexpr size_t kPoints = 10000;
+    const std::string linearAt = "/Asset/Rig/Movers/Linear.";
+    const std::string method = linearAt + "rigExec:skinningMethod";
+    const std::string defaultWeight =
+        "/Asset/Rig/Weights/Sparse.rigExec:defaultWeight";
+    const auto bake = [&](RigExecRigEvaluator &evaluator,
+                          const RigExecBakeOpts &opts,
+                          RigExecBakeResult *result,
+                          const std::string &label) {
+        std::string error;
+        const bool baked =
+            RigExecBakeToBinary(evaluator, opts, result, &error);
+        if (!baked) {
+            std::printf("%s bake diagnostic: %s\n", label.c_str(),
+                        error.c_str());
+        }
+        CHECK(baked);
+        return baked ? _BinaryCompareProgram(evaluator, result->bytes, label)
+                     : std::unique_ptr<fb::RigExecWireFile>();
+    };
+
+    {
+        const UsdStageRefPtr stage = _MakeGroupRolesStage(kPoints);
+        RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+        RigExecValueOverride upstream;
+        upstream.prim = SdfPath("/Asset/Rig/Movers/Linear");
+        upstream.attribute = TfToken("rigExec:skinningMethod");
+        upstream.value = VtValue(TfToken("classicLinear"));
+        evaluator.SetUpstreamInputs({upstream});
+        CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
+        const std::vector<SdfPath> admitted{SdfPath(method)};
+        CHECK(evaluator.GetUpstreamInputPaths() == admitted);
+        RigExecBakeOpts opts;
+        opts.time = 1.0;
+        RigExecBakeResult result;
+        const std::unique_ptr<fb::RigExecWireFile> file =
+            bake(evaluator, opts, &result, "upstream keep-set bake");
+        CHECK(result.upstreamInputs == std::vector<std::string>{method});
+        CHECK(evaluator.GetUpstreamInputPaths() == admitted);
+        const _GroupRolesChain at =
+            file ? _FindGroupRolesChain(*file) : _GroupRolesChain();
+        CHECK(at.Found());
+        if (file && at.Found()) {
+            const size_t c = size_t(at.chain);
+            const fb::RigExecWireRevision &skin =
+                file->geometry->chains[c].revisions[size_t(at.linear)];
+            CHECK(skin.chunked && !RigExecFormatIsRangeRevision(skin));
+            CHECK(_RevisionChunkCount(*file, c, at.linear) ==
+                  skin.chunks.size() + at.groups);
+            CHECK(_ListsInput(*file, method));
+            CHECK(_ListsInput(*file, linearAt + "rigExec:elementSize"));
+            CHECK(_ListsInput(*file, linearAt + "rigExec:jointIndices"));
+            CHECK(_HoldsConstant(*file, defaultWeight));
+            CHECK(_ChunkParts(*file, c, at.gated) ==
+                  _GroupsHolding(_GroupRolesSupport(kPoints), kPoints,
+                                 at.groups));
+            std::printf("upstream keep-set bake: the skin is Whole and its "
+                        "method listed\n");
+        }
+    }
+
+    {
+        const UsdStageRefPtr stage = _MakeGroupRolesStage(kPoints);
+        RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+        CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
+        // A Live program lists the weight's default, so a presentation may
+        // name it.
+        CHECK(evaluator.GetBakedProgram() &&
+              evaluator.GetBakedProgram()->GetUpstreamAdmissible().count(
+                  SdfPath(defaultWeight)) == 1);
+        RigExecBakeOpts opts;
+        opts.time = 1.0;
+        opts.presentation = _PresentationBytes(defaultWeight);
+        RigExecBakeResult result;
+        const std::unique_ptr<fb::RigExecWireFile> file =
+            bake(evaluator, opts, &result, "presentation keep-set bake");
+        const _GroupRolesChain at =
+            file ? _FindGroupRolesChain(*file) : _GroupRolesChain();
+        CHECK(at.Found());
+        if (file && at.Found()) {
+            const size_t c = size_t(at.chain);
+            const fb::RigExecWireChain &chain = file->geometry->chains[c];
+            CHECK(file->presentation == opts.presentation);
+            CHECK(_ListsInput(*file, defaultWeight));
+            std::set<int> every;
+            for (size_t k = 0; k < at.groups; ++k) {
+                every.insert(int(k));
+            }
+            CHECK(at.groups >= 2);
+            CHECK(RigExecFormatIsRangeRevision(
+                chain.revisions[size_t(at.gated)]));
+            CHECK(_ChunkParts(*file, c, at.gated) == every);
+            const fb::RigExecWireRevision &skin =
+                chain.revisions[size_t(at.linear)];
+            CHECK(!skin.chunked && RigExecFormatIsRangeRevision(skin));
+            CHECK(_HoldsConstant(*file, method));
+            std::printf("presentation keep-set bake: the mover is ungated "
+                        "and its weight's default listed\n");
+        }
+    }
+}
+
+// The bake holds the evaluator in the export role mode for its own length
+// only: after a bake, and after one that fails past the export build (a
+// presentation naming no listed input), the evaluator is back in Live mode
+// with no keep-set; the export program stands until the next Evaluate,
+// which rebuilds once, in Live mode, and the one after it rebuilds nothing.
+static void
+TestBakeRestoresLiveRoles()
+{
+    const UsdStageRefPtr stage = _MakeGroupRolesStage(10000);
+    RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+    CHECK(evaluator.GetBakedRoleMode() == RigExecBakedRoleMode::Live);
+    const auto restored = [&](const char *label) {
+        CHECK(evaluator.GetBakedRoleMode() == RigExecBakedRoleMode::Live);
+        CHECK(evaluator.GetBakedExportKeep().empty());
+        const RigExecBakedProgram *exported = evaluator.GetBakedProgram();
+        CHECK(exported &&
+              exported->GetStepGraph().roleMode ==
+                  RigExecBakedRoleMode::Export &&
+              !exported->GetExportPinnedPaths().empty());
+        const size_t builds = evaluator.GetBakedProgramBuildCount();
+        CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
+        const bool rebuilt =
+            evaluator.GetBakedProgramBuildCount() == builds + 1;
+        const RigExecBakedProgram *live = evaluator.GetBakedProgram();
+        const bool isLive =
+            live &&
+            live->GetStepGraph().roleMode == RigExecBakedRoleMode::Live &&
+            live->GetExportPinnedPaths().empty();
+        CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
+        const bool held = evaluator.GetBakedProgramBuildCount() == builds + 1;
+        std::printf("bake role restore %s: %s\n", label,
+                    rebuilt && isLive && held ? "one rebuild, Live"
+                                              : "WRONG");
+        CHECK(rebuilt && isLive && held);
+    };
+    RigExecBakeOpts opts;
+    opts.time = 1.0;
+    RigExecBakeResult result;
+    std::string error;
+    const bool baked = RigExecBakeToBinary(evaluator, opts, &result, &error);
+    if (!baked) {
+        std::printf("bake role restore diagnostic: %s\n", error.c_str());
+    }
+    CHECK(baked);
+    restored("after a bake");
+
+    opts.presentation = _PresentationBytes("/Asset/Rig/NoSuch.inputs:x");
+    error.clear();
+    CHECK(!RigExecBakeToBinary(evaluator, opts, &result, &error));
+    CHECK(error == "presentation control Tail.rz names "
+                   "/Asset/Rig/NoSuch.inputs:x, which is not a listed input");
+    restored("after a failed bake");
 }
 
 // Format 9, examples/biped/Biped.usda at fixture time 1: 3,467,672 bytes,
@@ -3039,6 +3785,9 @@ main(int argc, char **argv)
     TestStaticReportRevisionReads();
     TestStaticReportAnsweredBlendSamples();
     TestBakeOptions(tail, "/TailAsset/Rig/Controls/Tail2.avars:rz");
+    TestGroupRolesBake();
+    TestExportKeepSetBake();
+    TestBakeRestoresLiveRoles();
     // Each example's positive capture/default/source conformance and two
     // fresh bakes run in its existing verify_binary registration before
     // the unchanged runtime defaults, frame sampling and drag ledger.

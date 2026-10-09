@@ -2202,8 +2202,14 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
         }
     }
     const auto &publicScalars = baked->GetUpstreamAdmissible();
+    // The reads an export build's Range skins and group gates rest on are
+    // the file's constants: private slots holding their bake-time value,
+    // which no integration can set. Empty for a Live program.
+    const std::set<SdfPath> &pinned = baked->GetExportPinnedPaths();
     const auto listedSlot = [&](uint32_t id) {
         const UsdAttribute &attribute = S.slots[id];
+        if (pinned.count(attribute.GetPath()) != 0)
+            return false;
         if (RigExecFormatIsArrayTag(S.slotTags[id]))
             return publicArrays.count(attribute.GetPath()) != 0;
         const auto found = publicScalars.find(attribute.GetPath());

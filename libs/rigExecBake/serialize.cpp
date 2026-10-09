@@ -1429,7 +1429,10 @@ _FileFill::_Revision(const RigExecBakedProgramImpl::GeomRevision &revision,
     out->partitionElementSize = int32_t(revision.partitionElementSize);
     out->partitionIndexCount = uint64_t(revision.partitionIndexCount);
     out->partitionPointCount = uint64_t(revision.partitionPointCount);
-    out->chunked = revision.chunked;
+    // A Range skin is unchunked in the file, its chunks the chain's groups
+    // with their influence keys (RigExecFormatIsKeyedRevision).
+    out->chunked = revision.chunked &&
+                   revision.role != RigExecBakedRevisionRole::Range;
     out->partitionCandidates = uint64_t(revision.partitionCandidates);
     out->partitionProducerMin = int32_t(revision.partitionProducerMin);
     out->partitionProducerMax = int32_t(revision.partitionProducerMax);

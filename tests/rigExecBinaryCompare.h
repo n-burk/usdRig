@@ -2469,7 +2469,10 @@ _BinaryCompareRevision(
           int64_t(wire.partitionElementSize));
     CHECK(uint64_t(live.partitionIndexCount) == wire.partitionIndexCount);
     CHECK(uint64_t(live.partitionPointCount) == wire.partitionPointCount);
-    CHECK(live.chunked == wire.chunked);
+    // A Range skin's keyed chunks are unchunked in the file.
+    CHECK((live.chunked &&
+           live.role != rigExec::RigExecBakedRevisionRole::Range) ==
+          wire.chunked);
     CHECK(uint64_t(live.partitionCandidates) == wire.partitionCandidates);
     CHECK(int64_t(live.partitionProducerMin) == int64_t(wire.partitionProducerMin));
     CHECK(int64_t(live.partitionProducerMax) == int64_t(wire.partitionProducerMax));

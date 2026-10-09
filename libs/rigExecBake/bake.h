@@ -60,9 +60,15 @@ struct RigExecBakeResult {
 /// list, or a program the FlatBuffer file cannot hold or whose file does
 /// not open again.
 ///
-/// Compiles, checks export admission, evaluates once at the bake time with
-/// every operation forced to run, and serializes with upstream inputs
-/// suspended. The complete requested input list is restored on every return.
+/// Compiles, checks export admission, builds the export program
+/// (RigExecBakedRoleMode::Export, keeping every admitted upstream input and
+/// every presentation input listed) with one generation at the bake time,
+/// evaluates once more there with every operation forced to run, and
+/// serializes with upstream inputs suspended. The reads the export
+/// program's Range skins and group gates rest on are private slots holding
+/// their bake-time values. The complete requested input list and the
+/// evaluator's role mode are restored on every return; its next Evaluate
+/// rebuilds the program.
 bool RigExecBakeToBinary(RigExecRigEvaluator &evaluator,
                          const RigExecBakeOpts &opts,
                          RigExecBakeResult *result, std::string *error);
