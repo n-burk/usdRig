@@ -811,10 +811,11 @@ RigExecRevisionAcceptance RigExecRevisionKernelAcceptance(
 
 struct RigExecLatticeBasis;  // rigExecMath/latticeKernel.h
 
-/// Ops a range-pipelined chain runs as one step per point range: per point
-/// (output point i reads entering point i and the packet only) and decided
-/// before any point is written (RigExecRevisionKernelAcceptance never answers
-/// Deferred for an assembled packet): Matrix, Wire, Lattice.
+/// Ops a revision of a range-pipelined chain may run one step per vertex
+/// group: Matrix, Wire, Lattice, and -- classified further at Build by
+/// skinning method and delta space -- Skin and BlendShape. Each is per point
+/// (output point i reads entering point i, the packet and, for a skin, the
+/// influence table only).
 bool RigExecRevisionIsRangeOp(RigExecRevisionOp op);
 
 /// What a range-pipelined revision's range steps read besides the packet,
@@ -837,17 +838,60 @@ struct RigExecRevisionRangeInputs {
     /// owner may hand the cache an equal bind between runs
     /// (RigExecLatticeBindSharing), which would otherwise free this one.
     std::shared_ptr<const RigExecLatticeBind<GfVec3f>> latticeBind;
+    /// BlendShape: the envelope resolved at the full count, the weight its
+    /// kernel blends each point by; empty at full strength.
+    std::vector<float> blendWeights;
 };
 
 /// RigExecRevisionKernelAcceptance(op, p, count), exactly; and when that is
-/// Applies for a range op, \p prepared filled for RigExecRunRevisionRange
+/// Applies for a range op, \p prepared filled for RigExecRunRevisionGroup
 /// (otherwise cleared). \p wireBasis and \p cache are the revision's own
 /// memos (null builds per call); the caller is their only writer.
+/// The BlendShape arm's answer is RigExecRevisionKernelAcceptance(BlendShape,
+/// p, count) and, when Applies below full strength, `prepared->blendWeights`
+/// holds ResolveAll(count). A Skin's RevisionStatic decides with
+/// SkinAcceptance and does not call it.
+/// \p restVersion (0: unknown) is the content version of p.restPoints; a
+/// lattice bind whose cache recorded the same version skips only the
+/// rest-point comparison.
 RigExecRevisionAcceptance RigExecPrepareRevisionRanges(
     RigExecRevisionOp op, const RigExecMoverParameters &p, size_t count,
     RigExecWireBasisCache *wireBasis,
     RigExecSurfaceKernelCache<GfVec3f, GfVec3d> *cache,
-    RigExecRevisionRangeInputs *prepared);
+    RigExecRevisionRangeInputs *prepared, uint64_t restVersion = 0);
+
+/// Whether \p p's packet keeps every point whose resolved envelope weight is
+/// <= 0 at its entering bytes: a valid sparse envelope with a zero default
+/// (RigExecWireTakesSparseEnvelope) on Matrix, Wire, Lattice, a classicLinear
+/// Skin or a target-space BlendShape. The kernel half of a group gate.
+bool RigExecRevisionGateHolds(RigExecRevisionOp op,
+                              const RigExecMoverParameters &p);
+
+/// RigExecRunRevisionRange over one vertex group held in its own buffers:
+/// \p in[k] is entering point begin + k and \p out[k] receives point
+/// begin + k's result, k < end - begin (\p out never aliases \p in). Every
+/// whole-array input (\p p, \p prepared, \p separateEnvelope, sparse indices,
+/// bind tables) is indexed absolutely. Ops: Matrix, Wire, Lattice; Skin
+/// (\p skin is the table the group reads: a chunk's key-filled table or the
+/// fold's; classicLinear or dualQuaternion, then the "apply once" envelope
+/// when \p separateEnvelope is given); BlendShape in target space. Each
+/// point's bits are the whole kernel's; \p out is fully written unless
+/// \p untouched is set true. \p untouched, when non-null, receives whether
+/// the result is \p in itself (then \p out is not written). False where the
+/// whole kernel would refuse and, for a dual-quaternion skin, where a point's
+/// blend is degenerate. RigExecRunRevisionRange becomes a call of this with
+/// in = entering + begin and out = out->data() + begin.
+/// A null \p skin reads the packet's own influence table. The caller decided
+/// the revision applies: a skin's layout and table are validated whole by it
+/// (RigExecSkinLayoutIsUsable, RigExecSkinTransformsAreUsable), as for
+/// RigExecApplySkinKernelRange. Pure: concurrent calls for distinct groups
+/// of one revision are safe.
+bool RigExecRunRevisionGroup(
+    RigExecRevisionOp op, const RigExecMoverParameters &p,
+    const RigExecRevisionRangeInputs &prepared,
+    const RigExecSkinTransformsView *skin, const GfVec3f *in, GfVec3f *out,
+    size_t count, size_t begin, size_t end, const float *separateEnvelope,
+    bool useSimd, bool *untouched = nullptr);
 
 /// Points [begin, end) of a revision that applies: \p out (sized \p count)
 /// receives at those indices exactly what RigExecRunRevisionKernel writes
@@ -856,6 +900,8 @@ RigExecRevisionAcceptance RigExecPrepareRevisionRanges(
 /// (\p count floats) for an op that takes a separate blend below full
 /// strength, else null. \p untouched, when set, receives whether the range's
 /// result is the entering points themselves (then \p out is not written).
+/// RigExecRunRevisionGroup over in = entering + begin and
+/// out = out->data() + begin; a skin reads the packet's own table.
 /// Pure: concurrent calls for disjoint ranges of one revision are safe.
 /// False only where the whole kernel would refuse, which an Applies
 /// acceptance rules out.

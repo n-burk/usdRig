@@ -210,13 +210,14 @@ RigExecLatticePointDelta(const Point *cageDeltas, int dx, int dy, int dz,
     return delta;
 }
 
-/// RigExecApplyLatticeBasis over points [begin, end) of the \p count points
-/// at \p points: the factor cursor is advanced past the points before
-/// \p begin, and each point visits the same terms in the same order with the
-/// same skipZeroTerms decision, so its bits are the whole call's.
+/// RigExecApplyLatticeBasis over points [begin, end) of \p count points, the
+/// group's own buffer \p out holding point begin + k at k: the factor cursor
+/// is advanced past the points before \p begin, and each point visits the
+/// same terms in the same order with the same skipZeroTerms decision, so its
+/// bits are the whole call's.
 template <class Point>
 void
-RigExecApplyLatticeBasisRange(Point *points, size_t count, size_t begin,
+RigExecApplyLatticeBasisGroup(Point *out, size_t count, size_t begin,
                               size_t end, const RigExecLatticeBasis &basis,
                               const Point *cageDeltas)
 {
@@ -244,9 +245,25 @@ RigExecApplyLatticeBasisRange(Point *points, size_t count, size_t begin,
         const double *fb = fa + (r[1] - r[0]);
         const double *fc = fb + (r[3] - r[2]);
         next = fc + (r[5] - r[4]);
-        points[i] += RigExecLatticePointDelta(cageDeltas, dx, dy, dz, r, fa,
-                                              fb, fc, skipZeroTerms);
+        out[i - begin] += RigExecLatticePointDelta(cageDeltas, dx, dy, dz, r,
+                                                   fa, fb, fc, skipZeroTerms);
     }
+}
+
+/// RigExecApplyLatticeBasis over points [begin, end) of the \p count points
+/// at \p points, indexed absolutely (RigExecApplyLatticeBasisGroup).
+template <class Point>
+void
+RigExecApplyLatticeBasisRange(Point *points, size_t count, size_t begin,
+                              size_t end, const RigExecLatticeBasis &basis,
+                              const Point *cageDeltas)
+{
+    end = std::min(end, count);
+    if (begin >= end) {
+        return;
+    }
+    RigExecApplyLatticeBasisGroup(points + begin, count, begin, end, basis,
+                                  cageDeltas);
 }
 
 /// Adds the posed cage's displacement to \p points through \p basis, which
@@ -263,12 +280,13 @@ RigExecApplyLatticeBasis(Point *points, size_t count,
     RigExecApplyLatticeBasisRange(points, count, 0, count, basis, cageDeltas);
 }
 
-/// RigExecApplyLatticeStreaming over points [begin, end) of \p points and
-/// \p restPoints, indexed absolutely: every point's factors and decision are
-/// its own, so each point's bits are the whole call's.
+/// RigExecApplyLatticeStreaming over points [begin, end), the group's own
+/// buffer \p out holding point begin + k at k and \p restPoints indexed
+/// absolutely: every point's factors and decision are its own, so each
+/// point's bits are the whole call's.
 template <class Point>
 void
-RigExecApplyLatticeStreamingRange(Point *points, size_t begin, size_t end,
+RigExecApplyLatticeStreamingGroup(Point *out, size_t begin, size_t end,
                                   const Point *restPoints, const Point &lo,
                                   const Point &size, int dx, int dy, int dz,
                                   const Point *cageDeltas)
@@ -287,9 +305,26 @@ RigExecApplyLatticeStreamingRange(Point *points, size_t begin, size_t end,
         const double *fa = scratch.data() + r[0];
         const double *fb = scratch.data() + dx + r[2];
         const double *fc = scratch.data() + dx + dy + r[4];
-        points[i] += RigExecLatticePointDelta(cageDeltas, dx, dy, dz, r, fa,
-                                              fb, fc, bounded && finite);
+        out[i - begin] += RigExecLatticePointDelta(cageDeltas, dx, dy, dz, r,
+                                                   fa, fb, fc,
+                                                   bounded && finite);
     }
+}
+
+/// RigExecApplyLatticeStreaming over points [begin, end) of \p points and
+/// \p restPoints, indexed absolutely (RigExecApplyLatticeStreamingGroup).
+template <class Point>
+void
+RigExecApplyLatticeStreamingRange(Point *points, size_t begin, size_t end,
+                                  const Point *restPoints, const Point &lo,
+                                  const Point &size, int dx, int dy, int dz,
+                                  const Point *cageDeltas)
+{
+    if (begin >= end) {
+        return;
+    }
+    RigExecApplyLatticeStreamingGroup(points + begin, begin, end, restPoints,
+                                      lo, size, dx, dy, dz, cageDeltas);
 }
 
 /// The kernel without a retained basis: each point's factors go through a
@@ -337,8 +372,11 @@ struct RigExecLatticeBind {
 
     /// Whether this bind was built from these inputs, comparing every
     /// scalar's raw bits: a signed zero or a NaN payload is another bind.
+    /// \p restKnownEqual (the caller's content version of \p restPoints is
+    /// the one the bind was built from) skips only the rest-point compare.
     bool Matches(const Point *restPoints, size_t count, const Point &bindLo,
-                 const Point &bindSize, int dx, int dy, int dz) const
+                 const Point &bindSize, int dx, int dy, int dz,
+                 bool restKnownEqual = false) const
     {
         if (divisions[0] != dx || divisions[1] != dy || divisions[2] != dz ||
             rest.size() != count) {
@@ -352,7 +390,7 @@ struct RigExecLatticeBind {
                 return false;
             }
         }
-        return !count ||
+        return restKnownEqual || !count ||
                !std::memcmp(rest.data(), restPoints, count * sizeof(Point));
     }
 
@@ -480,6 +518,44 @@ RigExecApplyLatticeKernelRange(
     } else {
         RigExecApplyLatticeStreamingRange(points->data(), begin, end,
                                           restPoints, lo, size, dx, dy, dz,
+                                          cageDeltas.data());
+    }
+}
+
+/// RigExecApplyLatticeKernelRange with the group's points in their own
+/// buffers: \p in[k] / \p out[k] are point begin + k of \p count; every
+/// whole-array check and the factor cursor are the whole call's. When the
+/// setup refuses (an invalid cage), copies \p in to \p out and returns.
+template <class Point>
+void
+RigExecApplyLatticeKernelGroup(
+    const Point *in, Point *out, size_t count, size_t begin, size_t end,
+    const Point *restPoints, size_t restPointsSize, const Point *restCage,
+    size_t restCageSize, const Point *posedCage, size_t posedCageSize, int dx,
+    int dy, int dz, const RigExecLatticeBasis *basis)
+{
+    end = std::min(end, count);
+    if (begin >= end) {
+        return;
+    }
+    // The entering points first, as the whole kernel runs on a copy of
+    // them: every pass-through below leaves them, and the deformation adds
+    // each point's displacement to its own.
+    std::copy(in, in + (end - begin), out);
+    Point lo, size;
+    std::vector<Point> cageDeltas;
+    if (!RigExecLatticeKernelSetup(count, restPoints, restPointsSize,
+                                   restCage, restCageSize, posedCage,
+                                   posedCageSize, dx, dy, dz, &lo, &size,
+                                   &cageDeltas)) {
+        return;
+    }
+    if (basis) {
+        RigExecApplyLatticeBasisGroup(out, count, begin, end, *basis,
+                                      cageDeltas.data());
+    } else {
+        RigExecApplyLatticeStreamingGroup(out, begin, end, restPoints, lo,
+                                          size, dx, dy, dz,
                                           cageDeltas.data());
     }
 }

@@ -420,15 +420,16 @@ _MatrixKernelAccepts(const RigExecMoverParameters &p, size_t count,
 }
 
 // The matrix kernel's sparse walk over entries [first, last) of \p w, in
-// place on \p data (indexed absolutely): the per-entry body the whole kernel
-// and its range form share. Each entry writes only its own point, and the
+// place on \p data, which holds point \p offset at 0 (the whole array: 0; a
+// group's own buffer: its first point): the per-entry body the whole kernel
+// and its group form share. Each entry writes only its own point, and the
 // radial arm's partial for a weight is a pure function of that weight and
 // the transform, so a walk over a subset of the entries writes those points'
 // bits.
 void
 _ApplyMatrixSparseWalk(const RigExecMoverParameters &p,
                        const RigExecWeightPacket &w, size_t first,
-                       size_t last, GfVec3f *data)
+                       size_t last, GfVec3f *data, size_t offset = 0)
 {
     if (p.radialWeight) {
         // The sparse walk must take the same arc the dense kernel
@@ -461,13 +462,13 @@ _ApplyMatrixSparseWalk(const RigExecMoverParameters &p,
                 }
                 cachedWeight = value;
             }
-            GfVec3f &point = data[size_t(w.indices[k])];
+            GfVec3f &point = data[size_t(w.indices[k]) - offset];
             point = GfVec3f(partial.TransformAffine(GfVec3d(point)));
         }
         return;
     }
     for (size_t k = first; k < last; ++k) {
-        GfVec3f &point = data[size_t(w.indices[k])];
+        GfVec3f &point = data[size_t(w.indices[k]) - offset];
         point = GfVec3f(RigExecApplyWeightedMatrix(
             GfVec3d(point), p.transform, w.values[k]));
     }
@@ -1290,7 +1291,35 @@ bool
 RigExecRevisionIsRangeOp(RigExecRevisionOp op)
 {
     return op == RigExecRevisionOp::Matrix || op == RigExecRevisionOp::Wire ||
-           op == RigExecRevisionOp::Lattice;
+           op == RigExecRevisionOp::Lattice || op == RigExecRevisionOp::Skin ||
+           op == RigExecRevisionOp::BlendShape;
+}
+
+bool
+RigExecRevisionGateHolds(RigExecRevisionOp op, const RigExecMoverParameters &p)
+{
+    // Only the listed points of such an envelope weigh above 0, and each op
+    // below leaves a point of weight <= 0 at its entering bytes: the matrix
+    // and wire walks never visit it, and the lattice, linear skin and target
+    // blend take RigExecBlendEnvelope's `weight <= 0` branch, whatever the
+    // deformation computed there.
+    if (!RigExecWireTakesSparseEnvelope(p.weights)) {
+        return false;
+    }
+    switch (op) {
+    case RigExecRevisionOp::Matrix:
+    case RigExecRevisionOp::Wire:
+    case RigExecRevisionOp::Lattice:
+        return true;
+    case RigExecRevisionOp::Skin:
+        // A dual-quaternion blend can fail the revision at any vertex.
+        return RigExecSkinMethodOf(p) == RigExecSkinMethod::ClassicLinear;
+    case RigExecRevisionOp::BlendShape:
+        // The surface-frame transport reads every entering point.
+        return !p.blendSurfaceFrame;
+    default:
+        return false;
+    }
 }
 
 RigExecRevisionAcceptance
@@ -1298,7 +1327,8 @@ RigExecPrepareRevisionRanges(RigExecRevisionOp op,
                              const RigExecMoverParameters &p, size_t count,
                              RigExecWireBasisCache *wireBasis,
                              RigExecSurfaceKernelCache<GfVec3f, GfVec3d> *cache,
-                             RigExecRevisionRangeInputs *prepared)
+                             RigExecRevisionRangeInputs *prepared,
+                             uint64_t restVersion)
 {
     using Acceptance = RigExecRevisionAcceptance;
     prepared->matrixWeights.clear();
@@ -1306,6 +1336,24 @@ RigExecPrepareRevisionRanges(RigExecRevisionOp op,
     prepared->wireRestEvaluations = nullptr;
     prepared->latticeBasis = nullptr;
     prepared->latticeBind.reset();
+    prepared->blendWeights.clear();
+    if (op == RigExecRevisionOp::BlendShape) {
+        // RigExecRevisionKernelAcceptance's BlendShape answer, by the
+        // kernel's own validation; an envelope below full strength resolves
+        // into the inputs by the same call.
+        if (!_PacketMatches(op, p) ||
+            !_BlendShapeKernelAccepts(p, count, &prepared->blendWeights)) {
+            prepared->blendWeights.clear();
+            return Acceptance::Refuses;
+        }
+        if (p.blendSurfaceFrame) {
+            // The transport reads the entering points: Deferred, nothing
+            // prepared.
+            prepared->blendWeights.clear();
+            return Acceptance::Deferred;
+        }
+        return Acceptance::Applies;
+    }
     if (op == RigExecRevisionOp::Matrix) {
         // RigExecRevisionKernelAcceptance's Matrix answer, by the kernel's
         // own validation; a dense envelope resolves into the inputs by the
@@ -1356,7 +1404,7 @@ RigExecPrepareRevisionRanges(RigExecRevisionOp op,
                 static_cast<std::vector<GfVec3f> *>(nullptr))) {
             prepared->latticeBasis = cache->LatticeBasis(
                 p.restPoints.data(), p.restPoints.size(), lo, size,
-                p.divisions[0], p.divisions[1], p.divisions[2]);
+                p.divisions[0], p.divisions[1], p.divisions[2], restVersion);
             if (prepared->latticeBasis) {
                 prepared->latticeBind = cache->RetainedLatticeBind();
             }
@@ -1365,50 +1413,50 @@ RigExecPrepareRevisionRanges(RigExecRevisionOp op,
     return acceptance;
 }
 
-// Each arm is RunRevisionKernel restricted to [begin, end): the same kernel
-// over the same packet, through the range forms of its loops. A prepared
-// input that is missing or sized for other points also answers false (an
-// invariant violation the caller counts), never a guess.
+// Each arm is RunRevisionKernel restricted to [begin, end), reading the
+// group's entering points at \p in and writing its result at \p out: the same
+// kernel over the same packet, through the group forms of its loops, with
+// every whole-array input indexed absolutely. A prepared input that is
+// missing or sized for other points also answers false (an invariant
+// violation the caller counts), never a guess.
 bool
-RigExecRunRevisionRange(RigExecRevisionOp op, const RigExecMoverParameters &p,
+RigExecRunRevisionGroup(RigExecRevisionOp op, const RigExecMoverParameters &p,
                         const RigExecRevisionRangeInputs &prepared,
-                        const GfVec3f *entering, size_t count, size_t begin,
-                        size_t end, const float *separateEnvelope,
-                        std::vector<GfVec3f> *out, bool useSimd,
+                        const RigExecSkinTransformsView *skin,
+                        const GfVec3f *in, GfVec3f *out, size_t count,
+                        size_t begin, size_t end,
+                        const float *separateEnvelope, bool useSimd,
                         bool *untouched)
 {
     if (untouched) {
         *untouched = false;
     }
-    if (!out || out->size() != count || begin > end || end > count ||
-        (count && !entering) || (count && entering == out->data()) ||
+    if (begin > end || end > count ||
+        (begin < end && (!in || !out || in == out)) ||
         !RigExecRevisionIsRangeOp(op) || !_PacketMatches(op, p)) {
         return false;
     }
-    GfVec3f *const data = out->data();
-    // The range's result is its entering points: reported, or copied when
+    const size_t n = end - begin;
+    // The group's result is its entering points: reported, or copied when
     // the caller asked for the result in \p out.
     const auto passThrough = [&]() {
         if (untouched) {
             *untouched = true;
         } else {
-            std::copy(entering + begin, entering + end, data + begin);
+            std::copy(in, in + n, out);
         }
         return true;
     };
-    if (begin == end) {
+    if (n == 0) {
         return passThrough();
     }
-    // Every arm below that runs in place first seeds the range with its
+    // Every arm below that runs in place on \p out first seeds it with the
     // entering points, as RunRevisionKernel copies the whole array.
-    const auto seed = [&]() {
-        std::copy(entering + begin, entering + end, data + begin);
-    };
+    const auto seed = [&]() { std::copy(in, in + n, out); };
     const RigExecWeightPacket &w = p.weights;
     if (op == RigExecRevisionOp::Matrix) {
         if (RigExecEnvelopeIsFullStrength(w)) {
-            ApplyMatrixFullStrength(p, entering + begin, data + begin,
-                                    end - begin, useSimd);
+            ApplyMatrixFullStrength(p, in, out, n, useSimd);
             return true;
         }
         if (_MatrixWalksSparse(w)) {
@@ -1421,15 +1469,34 @@ RigExecRunRevisionRange(RigExecRevisionOp op, const RigExecMoverParameters &p,
                 return passThrough();
             }
             seed();
-            _ApplyMatrixSparseWalk(p, w, first, last, data);
+            _ApplyMatrixSparseWalk(p, w, first, last, out, begin);
             return true;
         }
         if (prepared.matrixWeights.size() != count) {
             return false;
         }
         seed();
-        RigExecApplyMatrixKernelRange(p, prepared.matrixWeights.data(), begin,
-                                      end, data, useSimd);
+        RigExecApplyMatrixKernelRange(p, prepared.matrixWeights.data() + begin,
+                                      0, n, out, useSimd);
+        return true;
+    }
+    if (op == RigExecRevisionOp::BlendShape) {
+        // Target space only: the surface-frame transport reads every
+        // entering point. The envelope is folded in per point, as the whole
+        // kernel folds it: the delta added and blended back in one step.
+        const bool fullStrength = RigExecEnvelopeIsFullStrength(w);
+        if (p.blendSurfaceFrame || p.blendDeltas.size() != count ||
+            (!fullStrength && prepared.blendWeights.size() != count)) {
+            return false;
+        }
+        const GfVec3f *const delta = p.blendDeltas.data() + begin;
+        const float *const weight =
+            fullStrength ? nullptr : prepared.blendWeights.data() + begin;
+        for (size_t k = 0; k < n; ++k) {
+            const GfVec3f preceding = in[k];
+            out[k] = RigExecBlendEnvelope(preceding, preceding + delta[k],
+                                          fullStrength ? 1.0f : weight[k]);
+        }
         return true;
     }
     if (op == RigExecRevisionOp::Wire && RigExecWireTakesSparseEnvelope(w)) {
@@ -1443,12 +1510,12 @@ RigExecRunRevisionRange(RigExecRevisionOp op, const RigExecMoverParameters &p,
             return passThrough();
         }
         seed();
-        return RigExecApplyWireBasisRange(out, *prepared.wireBasis, w.indices,
-                                          w.values, p.restPoints, p.auxPoints,
-                                          begin, end);
+        return RigExecApplyWireBasisGroup(out, begin, end, *prepared.wireBasis,
+                                          w.indices, w.values, p.restPoints,
+                                          p.auxPoints);
     }
-    // A dense wire or a lattice, blended over the entering points afterwards
-    // unless the envelope is at full strength.
+    // A dense wire, a lattice or a skin, blended over the entering points
+    // afterwards unless the envelope is at full strength.
     const bool blend = !RigExecEnvelopeIsFullStrength(w);
     if (blend && !separateEnvelope) {
         return false;
@@ -1460,29 +1527,95 @@ RigExecRunRevisionRange(RigExecRevisionOp op, const RigExecMoverParameters &p,
         const RigExecNurbsCurve posed{&p.auxPoints, p.curveOrder,
                                       &p.curveKnots};
         const std::vector<GfVec3f> *evaluations = prepared.wireRestEvaluations;
-        if (!RigExecApplyWire(out, rest, posed, p.wireBindCoords.cdata(),
-                              p.wireBindCoords.size(), p.dropoffDistance,
-                              begin, end,
-                              evaluations ? evaluations->data() : nullptr,
-                              evaluations ? evaluations->size() : 0)) {
+        if (!RigExecApplyWireGroup(out, begin, end, count, rest, posed,
+                                   p.wireBindCoords.cdata(),
+                                   p.wireBindCoords.size(), p.dropoffDistance,
+                                   evaluations ? evaluations->data() : nullptr,
+                                   evaluations ? evaluations->size() : 0)) {
             return false;
         }
-    } else {
+    } else if (op == RigExecRevisionOp::Lattice) {
         if (p.restPoints.size() != count) {
             return false;  // cardinality mismatch fails atomically
         }
-        seed();
-        RigExecApplyLatticeKernelRange(
-            out, begin, end, p.restPoints.data(), p.restPoints.size(),
-            p.auxPoints.data(), p.auxPoints.size(), p.auxPointsB.data(),
-            p.auxPointsB.size(), p.divisions[0], p.divisions[1],
-            p.divisions[2], prepared.latticeBasis);
+        // Seeds \p out itself, which is all a refused setup leaves there.
+        RigExecApplyLatticeKernelGroup(
+            in, out, count, begin, end, p.restPoints.data(),
+            p.restPoints.size(), p.auxPoints.data(), p.auxPoints.size(),
+            p.auxPointsB.data(), p.auxPointsB.size(), p.divisions[0],
+            p.divisions[1], p.divisions[2], prepared.latticeBasis);
+    } else {
+        // Skin: the group's part of the layout against the table it reads
+        // (\p skin, or the packet's own). The layout and the table were
+        // validated whole by the caller, as for RigExecApplySkinKernelRange;
+        // only the shape the part indexes is checked here. A dual-quaternion
+        // palette not handed in is built here, per call.
+        const RigExecSkinTransformsView view =
+            skin ? *skin : RigExecSkinTransformsOf(p);
+        const RigExecSkinLayout layout =
+            RigExecSkinLayoutForPacket(p, view, count);
+        if (layout.elementSize < 1 ||
+            layout.indexCount != count * layout.elementSize ||
+            (!p.skinTopology &&
+             p.skinWeights.size() != p.skinIndices.size())) {
+            return false;
+        }
+        RigExecSkinLayout part = layout;
+        part.indices = layout.indices + begin * layout.elementSize;
+        part.weights = layout.weights + begin * layout.elementSize;
+        part.indexCount = n * layout.elementSize;
+        part.pointCount = n;
+        switch (RigExecSkinMethodOf(p)) {
+        case RigExecSkinMethod::ClassicLinear:
+            if (useSimd) {
+                RigExecApplyLinearBlendSkinSimd(in, out, part, view.rows);
+            } else {
+                RigExecApplyLinearBlendSkin(in, out, part);
+            }
+            break;
+        case RigExecSkinMethod::DualQuaternion: {
+            std::vector<RigExecScaledDualQuat> local;
+            const RigExecScaledDualQuat *palette = view.palette;
+            size_t paletteSize = view.paletteSize;
+            if (!palette) {
+                local = RigExecSkinDualQuatPalette(layout);
+                palette = local.data();
+                paletteSize = local.size();
+            }
+            if (!RigExecApplyDualQuatSkin(in, out, part, palette,
+                                          paletteSize)) {
+                return false;
+            }
+            break;
+        }
+        case RigExecSkinMethod::Unknown:
+            return false;
+        }
     }
     if (blend) {
-        RigExecBlendEnvelopeRange(entering, separateEnvelope, begin, end,
-                                  data);
+        RigExecBlendEnvelopeRange(in, separateEnvelope + begin, 0, n, out);
     }
     return true;
+}
+
+bool
+RigExecRunRevisionRange(RigExecRevisionOp op, const RigExecMoverParameters &p,
+                        const RigExecRevisionRangeInputs &prepared,
+                        const GfVec3f *entering, size_t count, size_t begin,
+                        size_t end, const float *separateEnvelope,
+                        std::vector<GfVec3f> *out, bool useSimd,
+                        bool *untouched)
+{
+    if (untouched) {
+        *untouched = false;
+    }
+    if (!out || out->size() != count || begin > end || end > count ||
+        (count && !entering) || (count && entering == out->data())) {
+        return false;
+    }
+    return RigExecRunRevisionGroup(op, p, prepared, nullptr, entering + begin,
+                                   out->data() + begin, count, begin, end,
+                                   separateEnvelope, useSimd, untouched);
 }
 
 // One revision, envelope included: the packet check, the full-strength fast
@@ -2591,7 +2724,11 @@ RigExecAssembleParameters(
 
     switch (op) {
     case RigExecRevisionOp::BlendShape: {
-        params.blendDeltas = values.blendDeltas;
+        if (values.lendBlendDeltas) {
+            params.blendDeltas.swap(values.blendDeltas);
+        } else {
+            params.blendDeltas = values.blendDeltas;
+        }
         const TfToken space =
             _Token(moverPrim, _attrTokens->deltaSpace, _valueTokens->target);
         if (space != "target" && space != "surfaceFrame") break;
@@ -2694,7 +2831,11 @@ RigExecAssembleParameters(
     }
 
     case RigExecRevisionOp::Lattice: {
-        params.restPoints = values.basePoints;
+        if (values.retainedRest && !values.retainedRest->empty()) {
+            params.restPoints.swap(*values.retainedRest);
+        } else {
+            params.restPoints = values.basePoints;
+        }
         // Operand order matters and is not symmetric: the shared applier is
         // RigExecApplyLattice(points, restPoints, restCage, posedCage, divs),
         // so auxPoints is the BIND-TIME cage and auxPointsB the live one --
@@ -3739,7 +3880,11 @@ RigExecAssembleFromLeaves(RigExecRevisionOp op,
     }
     switch (op) {
     case RigExecRevisionOp::BlendShape: {
-        params.blendDeltas = values.blendDeltas;
+        if (values.lendBlendDeltas) {
+            params.blendDeltas.swap(values.blendDeltas);
+        } else {
+            params.blendDeltas = values.blendDeltas;
+        }
         const TfToken space = L.Scalar<TfToken>(
             Role::DeltaSpace, _valueTokens->target, "rigExec:deltaSpace");
         if (space != "target" && space != "surfaceFrame") break;
@@ -3845,7 +3990,11 @@ RigExecAssembleFromLeaves(RigExecRevisionOp op,
     case RigExecRevisionOp::Lattice: {
         // auxPoints is the BIND-TIME cage and auxPointsB the live one, as
         // the stage assembler orders them.
-        values.CopyBasePoints(&params.restPoints);
+        if (values.retainedRest && !values.retainedRest->empty()) {
+            params.restPoints.swap(*values.retainedRest);
+        } else {
+            values.CopyBasePoints(&params.restPoints);
+        }
         params.auxPoints = L.Array<GfVec3f>(Role::RestCage);
         params.auxPointsB = L.Array<GfVec3f>(Role::LiveCage);
         params.divisions = L.Scalar<GfVec3i>(

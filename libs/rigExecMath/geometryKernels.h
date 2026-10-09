@@ -340,6 +340,14 @@ bool RigExecApplyWire(
     size_t begin, size_t end,
     const GfVec3f *restEvals = nullptr, size_t restEvalCount = 0);
 
+/// RigExecApplyWire over points [begin, end) held at \p out[0, end - begin)
+/// (seeded by the caller), for \p count points in all.
+bool RigExecApplyWireGroup(
+    GfVec3f *out, size_t begin, size_t end, size_t count,
+    const RigExecNurbsCurve &restCurve, const RigExecNurbsCurve &posedCurve,
+    const GfVec2f *bindCoords, size_t bindCount, double dropoffDistance,
+    const GfVec3f *restEvals = nullptr, size_t restEvalCount = 0);
+
 /// RigExecApplyWire's validation prefix over \p pointCount points, apart
 /// from the rest-evaluation table: both curves evaluable and alike (order,
 /// control point count, knots) and one bind coordinate per point. The one
@@ -415,6 +423,15 @@ bool RigExecApplyWireBasisRange(
     const std::vector<int> &indices, const std::vector<float> &weights,
     const std::vector<GfVec3f> &restControlPoints,
     const std::vector<GfVec3f> &posedControlPoints, size_t begin, size_t end);
+
+/// RigExecApplyWireBasisRange over a group's own buffer: \p out[k] is point
+/// begin + k, seeded with the entering points by the caller; the same entries
+/// in the same order, so each point's bits are the whole call's.
+bool RigExecApplyWireBasisGroup(
+    GfVec3f *out, size_t begin, size_t end, const RigExecWireBasis &basis,
+    const std::vector<int> &indices, const std::vector<float> &weights,
+    const std::vector<GfVec3f> &restControlPoints,
+    const std::vector<GfVec3f> &posedControlPoints);
 
 /// The surface projector's cached query data: the fan triangulation and
 /// the candidate index, built once and shared across frames. Triangle

@@ -1,5 +1,6 @@
 #include "rigExecMath/geometryKernels.h"
 #include "rigExecMath/latticeKernel.h"
+#include "rigExecMath/pointBlocks.h"
 #include "rigExecMath/pointRanges.h"
 #include "rigExecMath/surfaceKernelCache.h"
 #include "rigExecMath/wireKernelCache.h"
@@ -473,6 +474,426 @@ int main() {
             shortPosed,0,count) && SameBits(refused,start));
         CHECK(!RigExecApplyWireBasis(&refused,basis,indices,weights,rest,shortPosed));
         CHECK(!RigExecApplyWireBasisRange(nullptr,basis,indices,weights,rest,posed,0,1));
+    }
+    // Lattice groups: each group's points in buffers of their own -- the
+    // entering ones read at in[k], the result written over a poison at
+    // out[k] -- give the whole kernel's bits through a retained basis and
+    // per point, with non-finite cage deltas and with an overflowing degree
+    // (an unbounded basis); an invalid cage, or a basis for other points,
+    // leaves each group's buffer holding its entering points.
+    {
+        const float inf=std::numeric_limits<float>::infinity();
+        float poisonValue; const uint32_t bits=0x7fc5a5a5u;
+        std::memcpy(&poisonValue,&bits,sizeof(bits));
+        const GfVec3f poison(poisonValue,-0.0f,poisonValue);
+        const GfVec3i divs(3,4,2);
+        std::vector<GfVec3f> restCage;
+        for(int c=0;c<2;++c) for(int b=0;b<4;++b) for(int a=0;a<3;++a)
+            restCage.push_back(GfVec3f(float(a),1.5f*float(b),0.5f*float(c)));
+        std::vector<GfVec3f> posedCage=restCage;
+        for(size_t k=0;k<posedCage.size();++k)
+            posedCage[k]+=GfVec3f(0.1f*float(k%5),-0.05f*float(k%3),0.3f);
+        const size_t count=1001;
+        std::vector<GfVec3f> rest(count),start(count);
+        for(size_t i=0;i<count;++i) {
+            const float t=float(i);
+            rest[i]=GfVec3f(1.0f+1.6f*std::sin(0.7f*t),2.25f+3.0f*std::cos(0.3f*t),
+                0.25f+0.4f*std::sin(1.3f*t));
+            start[i]=GfVec3f(std::sin(0.37f*t),std::cos(0.11f*t),0.01f*t);
+        }
+        start[0]=GfVec3f(-0.0f,0.0f,-0.0f); start[333]=GfVec3f(inf,-0.0f,-inf);
+        start[700]=GfVec3f(-0.0f,-0.0f,-0.0f);
+        const std::vector<std::vector<size_t>> partitions={{0,1,333,334,700,1001},{0,1001}};
+        // The groups of \p bounds assembled, each run from its own buffers;
+        // a guard point on each side of a group's output must survive.
+        bool guarded=true;
+        const auto groups=[&](const std::vector<GfVec3f> &r,const std::vector<GfVec3f> &rc,
+            const std::vector<GfVec3f> &pc,const GfVec3i &dv,const std::vector<GfVec3f> &enter,
+            const std::vector<size_t> &bounds,const RigExecLatticeBasis *use) {
+            std::vector<GfVec3f> assembled(enter.size(),poison);
+            for(size_t k=0;k+1<bounds.size();++k) {
+                const size_t b=bounds[k],e=bounds[k+1];
+                const std::vector<GfVec3f> in(enter.begin()+long(b),enter.begin()+long(e));
+                std::vector<GfVec3f> out(e-b+2,poison);
+                RigExecApplyLatticeKernelGroup(in.data(),out.data()+1,enter.size(),b,e,
+                    r.data(),r.size(),rc.data(),rc.size(),pc.data(),pc.size(),
+                    dv[0],dv[1],dv[2],use);
+                if(std::memcmp(&out.front(),&poison,sizeof(GfVec3f)) ||
+                   std::memcmp(&out.back(),&poison,sizeof(GfVec3f))) guarded=false;
+                std::copy(out.begin()+1,out.end()-1,assembled.begin()+long(b));
+            }
+            return assembled;
+        };
+        const auto groupsMatch=[&](const std::vector<GfVec3f> &r,const std::vector<GfVec3f> &rc,
+            const std::vector<GfVec3f> &pc,const GfVec3i &dv,const std::vector<GfVec3f> &enter,
+            const std::vector<std::vector<size_t>> &cuts) {
+            RigExecSurfaceKernelCache<GfVec3f,GfVec3d> cache;
+            std::vector<GfVec3f> streamed=enter,retained=enter;
+            RigExecApplyLattice(&streamed,r,rc,pc,dv,nullptr);
+            RigExecApplyLattice(&retained,r,rc,pc,dv,&cache);
+            GfVec3f lo,size;
+            const RigExecLatticeBasis *basis=nullptr;
+            if(RigExecLatticeKernelSetup(enter.size(),r.data(),r.size(),rc.data(),rc.size(),
+                pc.data(),pc.size(),dv[0],dv[1],dv[2],&lo,&size,
+                static_cast<std::vector<GfVec3f>*>(nullptr)))
+                basis=cache.LatticeBasis(r.data(),r.size(),lo,size,dv[0],dv[1],dv[2]);
+            bool ok=basis!=nullptr && !SameBits(retained,enter);
+            for(const auto &bounds:cuts)
+                for(const RigExecLatticeBasis *use:{basis,(const RigExecLatticeBasis*)nullptr})
+                    ok=ok && SameBits(groups(r,rc,pc,dv,enter,bounds,use),use ? retained : streamed);
+            return ok;
+        };
+        CHECK(groupsMatch(rest,restCage,posedCage,divs,start,partitions));
+        std::vector<GfVec3f> wild=posedCage;
+        wild[3][0]=inf; wild[5][1]=-inf;
+        CHECK(groupsMatch(rest,restCage,wild,divs,start,partitions));
+        const GfVec3i wide(1100,2,2);
+        std::vector<GfVec3f> wideCage;
+        for(int c=0;c<2;++c) for(int b=0;b<2;++b) for(int a=0;a<wide[0];++a)
+            wideCage.push_back(GfVec3f(float(a)/float(wide[0]-1),float(b),float(c)));
+        std::vector<GfVec3f> widePosed=wideCage;
+        for(GfVec3f &p:widePosed) p+=GfVec3f(0,0.1f,0);
+        std::vector<GfVec3f> wideRest(25),wideStart(25);
+        for(size_t i=0;i<wideRest.size();++i) {
+            wideRest[i]=GfVec3f(float(i)/20.0f-0.1f,0.3f+0.02f*float(i),0.7f);
+            wideStart[i]=GfVec3f(float(i),-float(i),0.25f);
+        }
+        CHECK(groupsMatch(wideRest,wideCage,widePosed,wide,wideStart,
+            {{0,1,8,9,17,25},{0,25}}));
+        // Refused setups pass every point through, over the poison: a short
+        // posed cage and a single division.
+        const std::vector<GfVec3f> shortCage(posedCage.begin(),posedCage.end()-1);
+        CHECK(SameBits(groups(rest,restCage,shortCage,divs,start,partitions[0],nullptr),start));
+        CHECK(SameBits(groups(rest,restCage,posedCage,GfVec3i(1,4,2),start,partitions[0],nullptr),
+            start));
+        RigExecLatticeBasis other;
+        other.divisions[0]=3; other.divisions[1]=4; other.divisions[2]=2;
+        CHECK(SameBits(groups(rest,restCage,posedCage,divs,start,partitions[0],&other),start));
+        CHECK(guarded);
+    }
+
+    // Wire groups: the basis and the dense walk over a group's own buffer,
+    // seeded with its entering points, give the whole calls' bits, write no
+    // point outside the buffer, and validate as the whole calls do.
+    {
+        std::vector<GfVec3f> rest={{0,0,0},{1,0,0},{2,0,0},{3,0,0},{4,0,0}};
+        std::vector<GfVec3f> posed={{0,0,0},{1,0.5f,0},{2,-0.25f,0.3f},{3,0.75f,-0.1f},{4,0,0.4f}};
+        const std::vector<double> knots={0,0,0,1,2,3,3,3};
+        const size_t count=1001;
+        std::vector<int> indices{0};
+        for(int i=3;i<333;i+=7) indices.push_back(i);
+        for(int i=340;i<700;i+=12) indices.push_back(i);
+        std::vector<float> weights;
+        std::vector<GfVec2f> sparseBinds,binds(count);
+        for(size_t k=0;k<indices.size();++k) {
+            weights.push_back(float(k%6)/5.0f);
+            sparseBinds.push_back(GfVec2f(3.0f*float(k)/float(indices.size()),0.25f*float(k%11)));
+        }
+        for(size_t i=0;i<count;++i) binds[i]=GfVec2f(3.0f*float(i%97)/96.0f,0.2f*float(i%13));
+        RigExecWireBasis basis;
+        CHECK(RigExecBuildWireBasis(sparseBinds.data(),sparseBinds.size(),count,indices,3,knots,
+            rest.size(),2.0,&basis));
+        std::vector<GfVec3f> start(count);
+        for(size_t i=0;i<count;++i) start[i]=GfVec3f(std::sin(0.37f*float(i)),-0.0f,0.5f);
+        start[0]=GfVec3f(-0.0f,-0.0f,-0.0f);
+        const RigExecNurbsCurve restCurve{&rest,3,&knots},posedCurve{&posed,3,&knots};
+        std::vector<GfVec3f> evals(count);
+        for(size_t i=0;i<count;++i) evals[i]=restCurve.Evaluate(binds[i][0]);
+        std::vector<GfVec3f> wholeBasis=start,wholeDense=start,wholeTable=start;
+        CHECK(RigExecApplyWireBasis(&wholeBasis,basis,indices,weights,rest,posed));
+        CHECK(RigExecApplyWire(&wholeDense,restCurve,posedCurve,binds.data(),binds.size(),
+            2.0,0,count));
+        CHECK(RigExecApplyWire(&wholeTable,restCurve,posedCurve,binds.data(),binds.size(),
+            2.0,0,count,evals.data(),evals.size()));
+        CHECK(!SameBits(wholeBasis,start) && !SameBits(wholeDense,start) &&
+              SameBits(wholeTable,wholeDense));
+        float poisonValue; const uint32_t bits=0x7fc00abcu;
+        std::memcpy(&poisonValue,&bits,sizeof(bits));
+        const GfVec3f poison(poisonValue,poisonValue,-0.0f);
+        bool guarded=true;
+        for(const std::vector<size_t> &bounds:
+                std::vector<std::vector<size_t>>{{0,1,333,334,700,1001},{0,1001}}) {
+            std::vector<GfVec3f> byBasis(count),byDense(count),byTable(count);
+            for(size_t k=0;k+1<bounds.size();++k) {
+                const size_t b=bounds[k],e=bounds[k+1];
+                // A guard point on each side of the group's seeded buffer.
+                std::vector<GfVec3f> seeded(e-b+2,poison);
+                std::copy(start.begin()+long(b),start.begin()+long(e),seeded.begin()+1);
+                std::vector<GfVec3f> a=seeded,d=seeded,t=seeded;
+                CHECK(RigExecApplyWireBasisGroup(a.data()+1,b,e,basis,indices,weights,rest,posed));
+                CHECK(RigExecApplyWireGroup(d.data()+1,b,e,count,restCurve,posedCurve,
+                    binds.data(),binds.size(),2.0));
+                CHECK(RigExecApplyWireGroup(t.data()+1,b,e,count,restCurve,posedCurve,
+                    binds.data(),binds.size(),2.0,evals.data(),evals.size()));
+                for(const std::vector<GfVec3f> *g:{&a,&d,&t}) {
+                    if(std::memcmp(&g->front(),&poison,sizeof(GfVec3f)) ||
+                       std::memcmp(&g->back(),&poison,sizeof(GfVec3f))) guarded=false;
+                }
+                std::copy(a.begin()+1,a.end()-1,byBasis.begin()+long(b));
+                std::copy(d.begin()+1,d.end()-1,byDense.begin()+long(b));
+                std::copy(t.begin()+1,t.end()-1,byTable.begin()+long(b));
+            }
+            CHECK(SameBits(byBasis,wholeBasis) && SameBits(byDense,wholeDense) &&
+                  SameBits(byTable,wholeDense));
+        }
+        CHECK(guarded);
+        // Refused as the whole calls refuse, writing nothing: a short posed
+        // polygon, a bind table for other points, a short rest table, and a
+        // non-empty group with no buffer. An empty group needs none.
+        std::vector<GfVec3f> shortPosed=posed; shortPosed.pop_back();
+        const std::vector<GfVec3f> first(start.begin(),start.begin()+10);
+        std::vector<GfVec3f> refused=first;
+        CHECK(!RigExecApplyWireBasisGroup(refused.data(),0,10,basis,indices,weights,rest,
+            shortPosed));
+        CHECK(!RigExecApplyWireGroup(refused.data(),0,10,count+1,restCurve,posedCurve,
+            binds.data(),binds.size(),2.0));
+        CHECK(!RigExecApplyWireGroup(refused.data(),0,10,count,restCurve,posedCurve,
+            binds.data(),binds.size(),2.0,evals.data(),evals.size()-1));
+        CHECK(!RigExecApplyWireGroup(nullptr,0,10,count,restCurve,posedCurve,
+            binds.data(),binds.size(),2.0));
+        CHECK(!RigExecApplyWireBasisGroup(nullptr,0,10,basis,indices,weights,rest,posed));
+        CHECK(SameBits(refused,first));
+        CHECK(RigExecApplyWireGroup(nullptr,5,5,count,restCurve,posedCurve,
+            binds.data(),binds.size(),2.0));
+        CHECK(RigExecApplyWireBasisGroup(nullptr,5,5,basis,indices,weights,rest,posed));
+    }
+
+    // Point blocks: the copy-on-write protocol of one vertex group.
+    {
+        using State=RigExecGroupState<GfVec3f>;
+        using Ref=RigExecPointsRef<GfVec3f>;
+        using Buffer=std::vector<GfVec3f>;
+        // Writes \p v's pattern into own buffer \p k.
+        const auto fill=[](State *s,int k,float v) {
+            for(GfVec3f &p:*s->own[k]) p=GfVec3f(v,-v,0.0f);
+        };
+        // A scratch is never a buffer someone else holds; a free buffer
+        // nobody holds is preferred (no allocation), and a count change
+        // resizes it.
+        {
+            State s;
+            s.own[0]=std::make_shared<Buffer>(4);
+            s.own[1]=std::make_shared<Buffer>(4);
+            const GfVec3f *first=s.own[0]->data(),*second=s.own[1]->data();
+            CHECK(RigExecGroupScratch(&s,4)==0 && s.own[0]->data()==first);
+            const auto held=s.own[0];
+            CHECK(RigExecGroupScratch(&s,4)==1 && s.own[1]->data()==second);
+            const auto heldToo=s.own[1];
+            const int k=RigExecGroupScratch(&s,4);
+            CHECK(k==0 && s.own[k]!=held && s.own[k]!=heldToo &&
+                  s.own[k].use_count()==1 && s.own[k]->size()==4);
+            CHECK(held->data()==first && heldToo->data()==second && s.own[1]==heldToo);
+            State r;
+            r.own[0]=std::make_shared<Buffer>(4);
+            CHECK(RigExecGroupScratch(&r,7)==0 && r.own[0]->size()==7);
+            CHECK(RigExecGroupScratch(&r,2)==0 && r.own[0]->size()==2);
+        }
+        // Own publications: a first one bumps; equal bytes keep the published
+        // ref; a signed zero is other bytes. A reset keeps the version, and
+        // the next publication of the same bytes still bumps above it.
+        {
+            State g;
+            int k=RigExecGroupScratch(&g,3);
+            fill(&g,k,1.0f);
+            CHECK(RigExecPublishOwnGroup(&g,k) && g.version==1 && g.ran && g.ownPublished==k);
+            CHECK(g.published.data==g.own[k]->data() && g.published.count==3 &&
+                  g.published.owner==g.own[k]);
+            int m=RigExecGroupScratch(&g,3);
+            CHECK(m!=k);
+            fill(&g,m,1.0f);
+            CHECK(!RigExecPublishOwnGroup(&g,m) && g.version==1 && g.ownPublished==k &&
+                  g.published.data==g.own[k]->data());
+            m=RigExecGroupScratch(&g,3);
+            CHECK(m!=k);
+            fill(&g,m,1.0f);
+            (*g.own[m])[1][2]=-0.0f;
+            CHECK(RigExecPublishOwnGroup(&g,m) && g.version==2 && g.ownPublished==m);
+            const GfVec3f *stale=g.published.data;
+            RigExecResetGroup(&g);
+            CHECK(!g.ran && g.version==2 && g.ownPublished==-1 && g.ownComputed==-1 &&
+                  g.own[0] && g.own[1]);
+            // The buffer the stale ref still holds is not a scratch, though
+            // no index names it published any more.
+            const auto other=g.own[1-m];
+            k=RigExecGroupScratch(&g,3);
+            CHECK(k==1-m && g.own[k]!=other && g.own[m]->data()==stale);
+            fill(&g,k,1.0f);
+            (*g.own[k])[1][2]=-0.0f;
+            CHECK(RigExecPublishOwnGroup(&g,k) && g.version==3 && g.ownPublished==k);
+        }
+        // Passed publications: the same slot inherits its version (no byte
+        // compare), another slot is compared, and an own publication in
+        // between forgets the source.
+        {
+            const auto a=std::make_shared<Buffer>(3,GfVec3f(2.0f,0.0f,1.0f));
+            const auto b=std::make_shared<Buffer>(*a);
+            const auto c=std::make_shared<Buffer>(3,GfVec3f(2.0f,-0.0f,1.0f));
+            const Ref ra{a,a->data(),3},rb{b,b->data(),3},rc{c,c->data(),3};
+            State s;
+            CHECK(RigExecPublishPassedGroup(&s,ra,{5,3}) && s.version==1 &&
+                  s.published.data==ra.data && s.ownPublished==-1 &&
+                  (s.passedFrom==RigExecGroupSource{5,3}));
+            CHECK(!RigExecPublishPassedGroup(&s,ra,{5,3}) && s.version==1);
+            CHECK(RigExecPublishPassedGroup(&s,ra,{5,4}) && s.version==2);
+            CHECK(!RigExecPublishPassedGroup(&s,rb,{-1,7}) && s.version==2 &&
+                  s.published.data==rb.data && (s.passedFrom==RigExecGroupSource{-1,7}));
+            CHECK(RigExecPublishPassedGroup(&s,rc,{9,1}) && s.version==3);
+            s.own[0]=std::make_shared<Buffer>(3,GfVec3f(5.0f));
+            CHECK(RigExecPublishOwnGroup(&s,0) && s.version==4 &&
+                  s.passedFrom.slot==kRigExecNoGroupSource && s.ownPublished==0);
+            CHECK(RigExecPublishPassedGroup(&s,rc,{9,1}) && s.version==5 &&
+                  s.ownPublished==-1);
+            State fresh;
+            CHECK(RigExecPublishPassedGroup(&fresh,rb,{}) && fresh.version==1);
+            CHECK(!RigExecPublishPassedGroup(&fresh,ra,{}) && fresh.version==1);
+        }
+        // Computed results: equal bytes keep the kept buffer; a fuse that
+        // publishes the result shares it. With a computed result in one
+        // buffer and another publication in the other (a chunk ran, its fuse
+        // did not), the scratch forgets the result and hands its buffer
+        // back, and the next result bumps.
+        {
+            State chunk;
+            int k=RigExecGroupScratch(&chunk,2);
+            fill(&chunk,k,3.0f);
+            CHECK(RigExecNoteComputedGroup(&chunk,k) && chunk.computedVersion==1 &&
+                  chunk.ownComputed==k && chunk.computedRan);
+            int m=RigExecGroupScratch(&chunk,2);
+            CHECK(m!=k);
+            fill(&chunk,m,3.0f);
+            CHECK(!RigExecNoteComputedGroup(&chunk,m) && chunk.computedVersion==1 &&
+                  chunk.ownComputed==k);
+            CHECK(RigExecPublishOwnGroup(&chunk,chunk.ownComputed) && chunk.ownPublished==k);
+            m=RigExecGroupScratch(&chunk,2);
+            CHECK(m!=k);
+            fill(&chunk,m,4.0f);
+            CHECK(RigExecNoteComputedGroup(&chunk,m) && chunk.computedVersion==2 &&
+                  chunk.ownComputed==m && chunk.ownPublished==k);
+
+            State f5;
+            f5.own[0]=std::make_shared<Buffer>(2,GfVec3f(1.0f));
+            f5.own[1]=std::make_shared<Buffer>(2,GfVec3f(1.0f));
+            f5.ownComputed=0; f5.computedRan=true; f5.computedVersion=6;
+            f5.ownPublished=1; f5.ran=true; f5.version=4;
+            f5.published=Ref{f5.own[1],f5.own[1]->data(),2};
+            const GfVec3f *kept=f5.own[0]->data();
+            CHECK(RigExecGroupScratch(&f5,2)==0 && f5.own[0]->data()==kept);
+            CHECK(f5.ownComputed==-1 && !f5.computedRan && f5.ownPublished==1);
+            CHECK(RigExecNoteComputedGroup(&f5,0) && f5.computedVersion==7 &&
+                  f5.ownComputed==0);
+        }
+        // A clone shares every buffer; dropping its spare leaves the source's
+        // writer a unique scratch, and the clone allocates on its first write
+        // without touching a buffer the source holds.
+        {
+            State live;
+            live.own[0]=std::make_shared<Buffer>(2,GfVec3f(1.0f));
+            live.own[1]=std::make_shared<Buffer>(2,GfVec3f(2.0f));
+            CHECK(RigExecPublishOwnGroup(&live,0));
+            const GfVec3f *spare=live.own[1]->data();
+            State clone=live;
+            RigExecDropGroupSpare(&clone);
+            CHECK(clone.own[0]==live.own[0] && !clone.own[1] &&
+                  clone.published.data==live.published.data);
+            CHECK(RigExecGroupScratch(&live,2)==1 && live.own[1]->data()==spare);
+            const int first=RigExecGroupScratch(&clone,2);
+            CHECK(first==1 && clone.own[1] && clone.own[1]!=live.own[1] &&
+                  clone.own[1].use_count()==1);
+            fill(&clone,first,9.0f);
+            CHECK(RigExecPublishOwnGroup(&clone,first) && clone.ownPublished==1);
+            CHECK(RigExecGroupScratch(&clone,2)==0 && clone.own[0]!=live.own[0]);
+            CHECK((*live.own[0])[0]==GfVec3f(1.0f) && live.published.data==live.own[0]->data());
+            State speculative;
+            speculative.own[0]=std::make_shared<Buffer>(2);
+            speculative.own[1]=std::make_shared<Buffer>(2);
+            speculative.ownComputed=1;
+            RigExecDropGroupSpare(&speculative);
+            CHECK(!speculative.own[0] && speculative.own[1]);
+        }
+        // Contiguous groups are slices of one owner at their bounds' offsets
+        // (from bounds[0]); anything else is gathered, with the same bits.
+        {
+            const auto whole=std::make_shared<Buffer>(10);
+            for(size_t i=0;i<10;++i) (*whole)[i]=GfVec3f(float(i),-0.0f,0.5f*float(i));
+            const int bounds[5]={0,3,3,7,10};
+            const Ref g0{whole,whole->data(),3},g1{whole,whole->data()+3,0},
+                g2{whole,whole->data()+3,4},g3{whole,whole->data()+7,3};
+            const GfVec3f *at=nullptr;
+            const Ref *slices[4]={&g0,&g1,&g2,&g3};
+            CHECK(RigExecGroupsContiguous(slices,bounds,4,&at) && at==whole->data());
+            const auto copy=std::make_shared<Buffer>(whole->begin()+3,whole->begin()+7);
+            const Ref moved{copy,copy->data(),4};
+            const Ref *mixed[4]={&g0,&g1,&moved,&g3};
+            CHECK(!RigExecGroupsContiguous(mixed,bounds,4,&at));
+            Buffer gathered(10,GfVec3f(-1.0f));
+            RigExecGatherGroups(mixed,bounds,4,gathered.data());
+            CHECK(SameBits(gathered,*whole));
+            const Ref shortGroup{whole,whole->data()+3,3};
+            const Ref *wrong[4]={&g0,&g1,&shortGroup,&g3};
+            CHECK(!RigExecGroupsContiguous(wrong,bounds,4,&at));
+            const Ref shifted{whole,whole->data()+6,3};
+            const Ref *gap[4]={&g0,&g1,&g2,&shifted};
+            CHECK(!RigExecGroupsContiguous(gap,bounds,4,&at));
+            const int tail[3]={3,7,10};
+            const Ref *last[2]={&g2,&g3};
+            CHECK(RigExecGroupsContiguous(last,tail,2,&at) && at==whole->data()+3);
+            Buffer tailOut(7);
+            RigExecGatherGroups(last,tail,2,tailOut.data());
+            CHECK(SameBits(tailOut,Buffer(whole->begin()+3,whole->end())));
+        }
+        CHECK(RigExecPointsBitsEqual<GfVec3f>(nullptr,0,nullptr,0));
+        const GfVec3f plus(0.0f),minus(-0.0f);
+        CHECK(!RigExecPointsBitsEqual(&plus,1,&minus,1) && !RigExecPointsBitsEqual(&plus,1,&plus,0));
+    }
+
+    // The lattice rest version: on the nonzero version a bind was built
+    // from, the cache skips only the rest-point compare (a mutated rest copy
+    // a compare would reject is accepted); an unequal or unknown version
+    // compares; a changed cage is rejected whatever the version; a shared
+    // bind keeps each cache's version; dropping the bind clears it.
+    {
+        std::vector<GfVec3f> restCage;
+        for(int c=0;c<2;++c) for(int b=0;b<4;++b) for(int a=0;a<3;++a)
+            restCage.push_back(GfVec3f(float(a),1.5f*float(b),0.5f*float(c)));
+        std::vector<GfVec3f> grown=restCage;
+        grown.back()=GfVec3f(2,4.5f,0.75f);
+        const std::vector<GfVec3f> rest={{0.3f,1.1f,0.2f},{0,0,0},{2,4.5f,0.5f},
+            {-1,2,0.25f},{1.25f,0.5f,0.3f}};
+        std::vector<GfVec3f> mutated=rest;
+        mutated[1][0]=-0.0f;
+        GfVec3f lo,size,grownLo,grownSize;
+        CHECK(RigExecLatticeBindBox(restCage.data(),restCage.size(),&lo,&size));
+        CHECK(RigExecLatticeBindBox(grown.data(),grown.size(),&grownLo,&grownSize));
+        RigExecSurfaceKernelCache<GfVec3f,GfVec3d> cache;
+        const RigExecLatticeBasis *basis=
+            cache.LatticeBasis(rest.data(),rest.size(),lo,size,3,4,2,7);
+        CHECK(basis && cache.LatticeBuilds()==1 && cache.LatticeRestVersion()==7);
+        CHECK(cache.LatticeBasis(mutated.data(),mutated.size(),lo,size,3,4,2,7)==basis);
+        CHECK(cache.LatticeBuilds()==1);
+        CHECK(cache.LatticeBasis(mutated.data(),mutated.size(),lo,size,3,4,2,8));
+        CHECK(cache.LatticeBuilds()==2 && cache.LatticeRestVersion()==8);
+        CHECK(cache.LatticeBasis(rest.data(),rest.size(),grownLo,grownSize,3,4,2,8));
+        CHECK(cache.LatticeBuilds()==3 && cache.LatticeRestVersion()==8);
+        CHECK(cache.LatticeBasis(rest.data(),rest.size(),grownLo,grownSize,3,4,2,0));
+        CHECK(cache.LatticeBuilds()==3);
+        CHECK(cache.LatticeBasis(mutated.data(),mutated.size(),grownLo,grownSize,3,4,2,0));
+        CHECK(cache.LatticeBuilds()==4 && cache.LatticeRestVersion()==0);
+        RigExecSurfaceKernelCache<GfVec3f,GfVec3d> first,second;
+        CHECK(first.LatticeBasis(rest.data(),rest.size(),lo,size,3,4,2,3));
+        CHECK(second.LatticeBasis(rest.data(),rest.size(),lo,size,3,4,2,9));
+        {
+            RigExecLatticeBindSharing<GfVec3f> sharing;
+            sharing.Offer(&first); sharing.Offer(&second);
+        }
+        CHECK(first.RetainedLatticeBind() &&
+              second.RetainedLatticeBind()==first.RetainedLatticeBind());
+        CHECK(first.LatticeRestVersion()==3 && second.LatticeRestVersion()==9);
+        CHECK(second.LatticeBasis(mutated.data(),mutated.size(),lo,size,3,4,2,9)==
+              &first.RetainedLatticeBind()->value);
+        CHECK(second.LatticeBuilds()==1);
+        second.SetLatticeBudget(0);
+        CHECK(!second.LatticeBasis(rest.data(),rest.size(),lo,size,4,3,2,9));
+        CHECK(!second.RetainedLatticeBind() && second.LatticeRestVersion()==0);
     }
     std::printf("SurfaceKernelCache: %d failures\n",failures);
     return failures?1:0;

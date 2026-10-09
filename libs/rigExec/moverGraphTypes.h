@@ -263,7 +263,9 @@ struct RigExecProviderValues {
         if (n) out->assign(BasePointData(),BasePointData()+n);
         else out->clear();
     }
-    std::vector<GfVec3f> blendDeltas;  ///< summed channel deltas
+    /// Summed channel deltas. Mutable so a caller that lends them
+    /// (`lendBlendDeltas`) gives them up through the const assembler input.
+    mutable std::vector<GfVec3f> blendDeltas;
     /// Cache for a skin mover's epoch-fixed per-point layout. Null re-reads
     /// and re-validates the arrays every call, which is what a layout that
     /// is animated, connected, or written by a property chain requires.
@@ -281,6 +283,13 @@ struct RigExecProviderValues {
     /// an array read that bypasses `resolved` (a lattice's or a wire's rest
     /// data at Default) still answers from it before the stage.
     const std::map<SdfPath, VtValue> *upstream = nullptr;
+    /// When true the BlendShape arm swaps `blendDeltas` into the packet
+    /// instead of copying them (the caller gives them up).
+    bool lendBlendDeltas = false;
+    /// When non-null and non-empty, the Lattice arm swaps it into
+    /// `restPoints` instead of copying the base; the caller guarantees it
+    /// holds the base's bytes (the chain base version did not move).
+    std::vector<GfVec3f> *retainedRest = nullptr;
 };
 
 /// The provider frames a surface projector reads, as ASSET frames: each

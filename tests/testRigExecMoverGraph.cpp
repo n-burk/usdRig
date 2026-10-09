@@ -1809,7 +1809,7 @@ TestRevisionRangesMatchTheWholeKernel()
 // RigExecPrepareRevisionRanges answers RigExecRevisionKernelAcceptance for
 // every packet, and leaves no input from an earlier packet behind where the
 // answer is not Applies for a range op. RigExecRevisionIsRangeOp names
-// exactly Matrix, Wire and Lattice.
+// exactly Matrix, Wire, Lattice, Skin and BlendShape.
 static void
 TestPrepareRevisionRangesDecidesAsTheKernel()
 {
@@ -1830,6 +1830,7 @@ TestPrepareRevisionRangesDecidesAsTheKernel()
         prepared.wireBasis = std::make_shared<rigExec::RigExecWireBasis>();
         prepared.wireRestEvaluations = &staleTable;
         prepared.latticeBasis = &staleBasis;
+        prepared.blendWeights.assign(3, 0.25f);
         const RigExecRevisionAcceptance decided =
             rigExec::RigExecPrepareRevisionRanges(op, p, n, &wire, &surface,
                                                   &prepared);
@@ -1839,7 +1840,15 @@ TestPrepareRevisionRangesDecidesAsTheKernel()
             !rigExec::RigExecRevisionIsRangeOp(op)) {
             ok = ok && prepared.matrixWeights.empty() && !prepared.wireBasis &&
                  !prepared.wireRestEvaluations && !prepared.latticeBasis &&
-                 !prepared.latticeBind;
+                 !prepared.latticeBind && prepared.blendWeights.empty();
+        } else if (op == Op::BlendShape) {
+            // The blend kernel's own resolve, or nothing at full strength.
+            std::vector<float> resolved;
+            if (!rigExec::RigExecEnvelopeIsFullStrength(p.weights)) {
+                ok = ok && p.weights.ResolveAll(n, &resolved);
+            }
+            ok = ok && prepared.blendWeights == resolved &&
+                 prepared.matrixWeights.empty() && !prepared.latticeBasis;
         }
         // A packet the kernel refuses is one RigExecRunRevisionKernel fails.
         if (decided == RigExecRevisionAcceptance::Refuses) {
@@ -1892,15 +1901,34 @@ TestPrepareRevisionRangesDecidesAsTheKernel()
     p.weights.values[3] = std::numeric_limits<float>::quiet_NaN();
     check("lattice, NaN envelope weight", Op::Lattice, p, count, refuses);
 
-    // Not range ops: the acceptance alone, nothing prepared.
+    // Blend shapes: the kernel's validation and, below full strength, its
+    // resolved envelope; the surface frame is Deferred with nothing kept.
     RigExecMoverParameters blend;
     blend.valid = true;
     blend.kind = TfToken("blendShape");
     blend.weights = RigExecWeightPacket::Constant(1.0f);
     blend.blendDeltas.assign(count, GfVec3f(0, 1, 0));
     check("blend shape", Op::BlendShape, blend, count, applies);
+    check("blend shape, one point more", Op::BlendShape, blend, count + 1,
+          refuses);
+    blend.weights = packets.denseWire;
+    check("blend shape, dense envelope", Op::BlendShape, blend, count,
+          applies);
+    blend.weights = packets.sparse;
+    check("blend shape, sparse envelope", Op::BlendShape, blend, count,
+          applies);
+    blend.weights.values[2] = std::numeric_limits<float>::quiet_NaN();
+    check("blend shape, NaN envelope weight", Op::BlendShape, blend, count,
+          refuses);
+    blend.weights = packets.denseWire;
     blend.blendSurfaceFrame = true;
     check("blend shape on the surface frame", Op::BlendShape, blend, count,
+          RigExecRevisionAcceptance::Deferred);
+
+    // A skin's answer is the baked program's (SkinAcceptance): the packet
+    // check alone here, Deferred, and nothing prepared.
+    check("skin", Op::Skin,
+          MakeSkinParams({GfMatrix4d(1.0)}, {0}, {1.0f}, 1), count,
           RigExecRevisionAcceptance::Deferred);
 
     const Op ops[] = {Op::Matrix,          Op::Skin,
@@ -1914,7 +1942,622 @@ TestPrepareRevisionRangesDecidesAsTheKernel()
                       Op::ShaderDials};
     for (const Op op : ops) {
         CHECK(rigExec::RigExecRevisionIsRangeOp(op) ==
-              (op == Op::Matrix || op == Op::Wire || op == Op::Lattice));
+              (op == Op::Matrix || op == Op::Wire || op == Op::Lattice ||
+               op == Op::Skin || op == Op::BlendShape));
+    }
+}
+
+// A skin packet over \p count points for the group tests: six influences
+// (rotations, translations, one non-uniform scale), three slots per point --
+// two named by the point's 200-point band and a third that is always
+// influence 0 at weight 0, as a zero-weight slot of a real body is -- with
+// full, partial and zero weight sums.
+static RigExecMoverParameters
+MakeRangeSkinPacket(size_t count, const char *method)
+{
+    std::vector<GfMatrix4d> transforms;
+    for (int t = 0; t < 6; ++t) {
+        GfMatrix4d m(1.0);
+        m.SetTransform(GfRotation(GfVec3d(1.0, 0.5 * t, 2.0 - t),
+                                  11.0 + 9.0 * t),
+                       GfVec3d(0.25 * t, -0.5 + 0.1 * t, 0.75));
+        if (t == 4) {
+            GfMatrix4d scale(1.0);
+            scale.SetScale(GfVec3d(1.5, 0.75, 1.2));
+            m = scale * m;
+        }
+        transforms.push_back(m);
+    }
+    std::vector<int> indices;
+    std::vector<float> weights;
+    for (size_t i = 0; i < count; ++i) {
+        const int band = int(i / 200);
+        indices.push_back(band % 6);
+        indices.push_back((band + 1) % 6);
+        indices.push_back(0);
+        float a = 0.2f + 0.6f * float(i % 7) / 6.0f;
+        float b = 1.0f - a;
+        if (i % 11 == 0) {
+            b *= 0.5f;  // a shortfall, held at rest
+        }
+        if (i % 97 == 0) {
+            a = b = 0.0f;  // no weight at all
+        }
+        weights.push_back(a);
+        weights.push_back(b);
+        weights.push_back(0.0f);
+    }
+    RigExecMoverParameters p =
+        MakeSkinParams(transforms, indices, weights, 3);
+    p.skinningMethod = TfToken(method);
+    return p;
+}
+
+// The influence table a skin chunk of [b, e) fills: the matrices its points
+// name, and at every other entry a finite garbage matrix the group must
+// never read.
+static std::vector<GfMatrix4d>
+KeyFilledSkinTable(const RigExecMoverParameters &p, size_t b, size_t e)
+{
+    std::vector<GfMatrix4d> table(
+        p.skinTransforms.size(),
+        GfMatrix4d(1.0).SetTranslate(GfVec3d(1e3, -2e3, 5e2)));
+    const size_t slots = size_t(p.skinElementSize);
+    for (size_t i = b * slots; i < e * slots; ++i) {
+        const size_t t = size_t(p.skinIndices[i]);
+        table[t] = p.skinTransforms[t];
+    }
+    return table;
+}
+
+// Runs \p group over each [bounds[k], bounds[k + 1]) of \p in, each group's
+// entering points copied into a buffer of their own and its result written
+// into a poison-filled one, and assembles the groups' results (an untouched
+// group contributes its entering points). False when a call fails, an
+// untouched group wrote its buffer, a result asked without `untouched` is
+// not the one asked with it, or `untouched` disagrees with \p skips.
+using RigExecTestGroupRun = std::function<bool(
+    const GfVec3f *in, GfVec3f *out, size_t begin, size_t end,
+    bool *untouched)>;
+static bool
+RunGroups(const std::vector<GfVec3f> &in, const std::vector<size_t> &bounds,
+          const RigExecTestGroupRun &group,
+          const std::function<bool(size_t, size_t)> &skips,
+          std::vector<GfVec3f> *assembled)
+{
+    const GfVec3f poison(NanWithPayload(0x5a5a5), -0.0f,
+                         NanWithPayload(0x123));
+    bool ok = true;
+    assembled->assign(in.size(), poison);
+    for (size_t k = 0; k + 1 < bounds.size(); ++k) {
+        const size_t b = bounds[k], e = bounds[k + 1];
+        const std::vector<GfVec3f> entering(in.begin() + long(b),
+                                            in.begin() + long(e));
+        std::vector<GfVec3f> reported(e - b, poison);
+        bool untouched = !skips(b, e);
+        ok = group(entering.data(), reported.data(), b, e, &untouched) && ok;
+        ok = ok && untouched == skips(b, e);
+        if (untouched) {
+            ok = ok && HoldsBits(reported, 0, e - b, poison);
+            reported = entering;
+        }
+        std::vector<GfVec3f> written(e - b, poison);
+        ok = group(entering.data(), written.data(), b, e, nullptr) && ok;
+        ok = ok && SameBits(written, reported);
+        std::copy(written.begin(), written.end(),
+                  assembled->begin() + long(b));
+    }
+    return ok;
+}
+
+// A range chain's vertex groups against the whole kernel. For every group
+// op and envelope shape, RigExecRunRevisionGroup over each group of an
+// uneven partition (one-point groups at the start and in the middle) and of
+// one group, each in its own buffers, writes concatenated exactly the bits
+// RigExecRunRevisionKernel writes over the whole array of entering points
+// with NaN payloads, signed zeros and infinities; reports untouched exactly
+// where the whole kernel cannot write; and a skin group reads only the
+// influences its points name.
+static void
+TestRevisionGroupsMatchTheWholeKernel()
+{
+    using rigExec::RigExecRevisionAcceptance;
+    using rigExec::RigExecRevisionRangeInputs;
+    using rigExec::RigExecSkinTransformsView;
+    using Cache = rigExec::RigExecSurfaceKernelCache<GfVec3f, GfVec3d>;
+    using Op = RigExecRevisionOp;
+    const RangeTestPackets packets;
+    const size_t count = RangeTestPackets::count;
+    const std::vector<GfVec3f> entering = MakeRangeEnteringPoints(count);
+    const std::vector<std::vector<size_t>> partitions = {
+        {0, 1, 333, 334, 700, 1001}, {0, 1001}};
+    size_t compared = 0;
+    // What a case enters with and how it is cut, unless it says otherwise,
+    // and which table a skin group reads: 0 the packet's own (null), 1 the
+    // whole table with its rows or palette handed in, 2 the group's
+    // key-filled table with its own.
+    const std::vector<GfVec3f> *source = &entering;
+    const std::vector<std::vector<size_t>> *cuts = &partitions;
+    int skinTable = 0;
+    const auto check = [&](const char *what, Op op,
+                           const RigExecMoverParameters &p, bool useSimd,
+                           bool cached,
+                           const std::function<bool(size_t, size_t)> &skips,
+                           bool moves) {
+        const std::vector<GfVec3f> &in = *source;
+        const size_t n = in.size();
+        rigExec::RigExecWireBasisCache wholeWire, groupWire;
+        Cache wholeSurface, groupSurface;
+        std::vector<GfVec3f> whole = in;
+        bool ok = rigExec::RigExecRunRevisionKernel(
+            op, p, &whole, useSimd, cached ? &wholeWire : nullptr,
+            cached ? &wholeSurface : nullptr);
+        ok = ok && SameBits(whole, in) != moves;
+        RigExecRevisionRangeInputs prepared;
+        if (op != Op::Skin) {
+            // A skin's decision is SkinAcceptance's, in the baked program.
+            ok = ok && rigExec::RigExecPrepareRevisionRanges(
+                           op, p, n, cached ? &groupWire : nullptr,
+                           cached ? &groupSurface : nullptr, &prepared) ==
+                           RigExecRevisionAcceptance::Applies;
+        }
+        std::vector<float> envelope;
+        if (rigExec::RigExecRevisionTakesSeparateBlend(op, p.weights) &&
+            !rigExec::RigExecEnvelopeIsFullStrength(p.weights)) {
+            ok = p.weights.ResolveAll(n, &envelope) && ok;
+        }
+        const float *separate = envelope.empty() ? nullptr : envelope.data();
+        const bool linear = rigExec::RigExecSkinMethodOf(p) ==
+                            rigExec::RigExecSkinMethod::ClassicLinear;
+        const RigExecTestGroupRun group =
+            [&](const GfVec3f *groupIn, GfVec3f *out, size_t b, size_t e,
+                bool *untouched) {
+                std::vector<GfMatrix4d> table;
+                std::vector<float> rows;
+                std::vector<rigExec::RigExecScaledDualQuat> palette;
+                RigExecSkinTransformsView view;
+                const RigExecSkinTransformsView *skin = nullptr;
+                if (op == Op::Skin && skinTable != 0) {
+                    table = skinTable == 1 ? p.skinTransforms
+                                           : KeyFilledSkinTable(p, b, e);
+                    view.transforms = table.data();
+                    view.transformCount = table.size();
+                    if (linear) {
+                        rows.resize(table.size() *
+                                    rigExec::RigExecSkinRowStride);
+                        for (size_t t = 0; t < table.size(); ++t) {
+                            rigExec::RigExecNarrowSkinRows(
+                                table[t],
+                                &rows[t * rigExec::RigExecSkinRowStride]);
+                        }
+                        view.rows = rows.data();
+                    } else {
+                        palette = rigExec::RigExecSkinDualQuatPalette(
+                            rigExec::RigExecSkinLayoutForPacket(p, view, n));
+                        view.palette = palette.data();
+                        view.paletteSize = palette.size();
+                    }
+                    skin = &view;
+                }
+                return rigExec::RigExecRunRevisionGroup(
+                    op, p, prepared, skin, groupIn, out, n, b, e, separate,
+                    useSimd, untouched);
+            };
+        for (const std::vector<size_t> &bounds : *cuts) {
+            std::vector<GfVec3f> assembled;
+            ok = RunGroups(in, bounds, group, skips, &assembled) && ok;
+            ok = ok && SameBits(assembled, whole);
+        }
+        if (!ok) {
+            std::printf("  %s (simd %d, cached %d, skin table %d): the groups "
+                        "are not the whole kernel's\n",
+                        what, int(useSimd), int(cached), skinTable);
+        }
+        CHECK(ok);
+        ++compared;
+    };
+    const auto never = [](size_t, size_t) { return false; };
+    const auto always = [](size_t, size_t) { return true; };
+    const auto noIndexIn = [&](size_t b, size_t e) {
+        return std::none_of(packets.sparseIndices.begin(),
+                            packets.sparseIndices.end(), [&](int index) {
+                                return size_t(index) >= b &&
+                                       size_t(index) < e;
+                            });
+    };
+
+    // Matrix: full strength (SIMD on and off), a dense envelope and a sparse
+    // walk, each with the linear and the radial blend; the identity's sparse
+    // walk leaves every group untouched.
+    for (const bool radial : {false, true}) {
+        for (const bool simd : {false, true}) {
+            auto p = packets.matrix;
+            p.radialWeight = radial;
+            check("matrix full strength", Op::Matrix, p, simd, false, never,
+                  true);
+            p.weights = packets.denseMatrix;
+            check("matrix dense", Op::Matrix, p, simd, false, never, true);
+        }
+        auto p = packets.matrix;
+        p.radialWeight = radial;
+        p.weights = packets.sparse;
+        check("matrix sparse walk", Op::Matrix, p, false, false, noIndexIn,
+              true);
+        p.transform = GfMatrix4d(1.0);
+        check("matrix sparse walk at identity", Op::Matrix, p, false, false,
+              always, false);
+    }
+
+    // Wire: the sparse basis, the dense walk with rest evaluations (cached)
+    // and without, and the dense walk blended with a separate envelope.
+    for (const bool cached : {false, true}) {
+        check("wire sparse basis", Op::Wire, packets.sparseWire, false,
+              cached, noIndexIn, true);
+        check("wire dense", Op::Wire, packets.wire, false, cached, never,
+              true);
+        auto p = packets.wire;
+        p.weights = packets.denseWire;
+        check("wire dense, separate envelope", Op::Wire, p, false, cached,
+              never, true);
+    }
+
+    // Lattice: a retained basis (cached) and per point, at full strength and
+    // blended, with non-finite cage deltas (which visit every term, so that
+    // case enters infinities and no NaN payloads), an overflowing degree (an
+    // unbounded basis, over fewer points), and an invalid cage, whose groups
+    // are written with their entering points over the poison.
+    const float inf = std::numeric_limits<float>::infinity();
+    std::vector<GfVec3f> noPayloads = entering;
+    for (GfVec3f &point : noPayloads) {
+        for (int axis = 0; axis < 3; ++axis) {
+            if (std::isnan(point[axis])) {
+                point[axis] = inf;
+            }
+        }
+    }
+    RigExecMoverParameters wide = packets.lattice;
+    wide.divisions = GfVec3i(1100, 2, 2);
+    wide.auxPoints.clear();
+    for (int c = 0; c < 2; ++c) {
+        for (int b = 0; b < 2; ++b) {
+            for (int a = 0; a < 1100; ++a) {
+                wide.auxPoints.emplace_back(float(a) / 1099.0f, float(b),
+                                            float(c));
+            }
+        }
+    }
+    wide.auxPointsB = wide.auxPoints;
+    for (GfVec3f &point : wide.auxPointsB) {
+        point += GfVec3f(0.0f, 0.1f, 0.0f);
+    }
+    std::vector<GfVec3f> wideIn(25);
+    wide.restPoints.resize(25);
+    for (size_t i = 0; i < 25; ++i) {
+        wide.restPoints[i] = GfVec3f(float(i) / 20.0f - 0.1f,
+                                     0.3f + 0.02f * float(i), 0.7f);
+        wideIn[i] = GfVec3f(float(i), -float(i), 0.25f);
+    }
+    wideIn[0] = GfVec3f(-0.0f, 0.0f, -0.0f);
+    const std::vector<std::vector<size_t>> wideCuts = {{0, 1, 8, 9, 17, 25},
+                                                       {0, 25}};
+    for (const bool cached : {false, true}) {
+        check("lattice", Op::Lattice, packets.lattice, false, cached, never,
+              true);
+        auto p = packets.lattice;
+        p.weights = packets.denseWire;
+        check("lattice, separate envelope", Op::Lattice, p, false, cached,
+              never, true);
+        p = packets.lattice;
+        p.auxPointsB[3][0] = inf;
+        p.auxPointsB[5][1] = -inf;
+        source = &noPayloads;
+        check("lattice, non-finite cage deltas", Op::Lattice, p, false,
+              cached, never, true);
+        source = &wideIn;
+        cuts = &wideCuts;
+        check("lattice, unbounded basis", Op::Lattice, wide, false, cached,
+              never, true);
+        source = &entering;
+        cuts = &partitions;
+        p = packets.lattice;
+        p.divisions = GfVec3i(1, 4, 2);
+        check("lattice, invalid cage", Op::Lattice, p, false, cached, never,
+              false);
+    }
+
+    // Skin: the linear blend (SIMD on and off) and the dual-quaternion one,
+    // at full strength and under a dense envelope, against the packet's own
+    // table, the whole table handed in, and each group's key-filled table.
+    for (const char *method : {"classicLinear", "dualQuaternion"}) {
+        const RigExecMoverParameters skin = MakeRangeSkinPacket(count, method);
+        for (const bool enveloped : {false, true}) {
+            auto p = skin;
+            if (enveloped) {
+                p.weights = packets.denseWire;
+            }
+            for (const int table : {0, 1, 2}) {
+                skinTable = table;
+                for (const bool simd : {false, true}) {
+                    check(method, Op::Skin, p, simd, false, never, true);
+                }
+            }
+            skinTable = 0;
+        }
+    }
+
+    // Blend shape in target space: full strength, a sparse envelope and a
+    // dense one, with a NaN-payload delta and an infinite one.
+    RigExecMoverParameters blend;
+    blend.valid = true;
+    blend.kind = TfToken("blendShape");
+    blend.weights = RigExecWeightPacket::Constant(1.0f);
+    blend.blendDeltas.resize(count);
+    for (size_t i = 0; i < count; ++i) {
+        blend.blendDeltas[i] =
+            GfVec3f(0.01f * float(i % 17) - 0.08f, -0.0f,
+                    0.5f * std::sin(0.13f * float(i)));
+    }
+    blend.blendDeltas[5] = GfVec3f(0.5f, NanWithPayload(0x77), 0.0f);
+    blend.blendDeltas[900] = GfVec3f(inf, 1.0f, -0.0f);
+    check("blend shape, full strength", Op::BlendShape, blend, false, false,
+          never, true);
+    blend.weights = packets.sparse;
+    check("blend shape, sparse envelope", Op::BlendShape, blend, false, false,
+          never, true);
+    blend.weights = packets.denseWire;
+    check("blend shape, dense envelope", Op::BlendShape, blend, false, false,
+          never, true);
+
+    // What a group refuses: a surface-frame blend, an op that is not a
+    // group op, an output that aliases the input, a skin method neither
+    // kernel owns, and a sparse wire with nothing prepared.
+    {
+        RigExecRevisionRangeInputs none;
+        std::vector<GfVec3f> out(10);
+        auto p = blend;
+        p.blendSurfaceFrame = true;
+        CHECK(!rigExec::RigExecRunRevisionGroup(Op::BlendShape, p, none,
+                                                nullptr, entering.data(),
+                                                out.data(), count, 0, 10,
+                                                nullptr, false));
+        p = blend;
+        p.kind = TfToken("smooth");
+        CHECK(!rigExec::RigExecRunRevisionGroup(Op::Smooth, p, none, nullptr,
+                                                entering.data(), out.data(),
+                                                count, 0, 10, nullptr,
+                                                false));
+        std::vector<GfVec3f> same(entering.begin(), entering.begin() + 10);
+        CHECK(!rigExec::RigExecRunRevisionGroup(
+            Op::Matrix, packets.matrix, none, nullptr, same.data(),
+            same.data(), count, 0, 10, nullptr, false));
+        auto unknown = MakeRangeSkinPacket(count, "classicLinear");
+        unknown.skinningMethod = TfToken("unknownMethod");
+        CHECK(!rigExec::RigExecRunRevisionGroup(Op::Skin, unknown, none,
+                                                nullptr, entering.data(),
+                                                out.data(), count, 0, 10,
+                                                nullptr, false));
+        CHECK(!rigExec::RigExecRunRevisionGroup(
+            Op::Wire, packets.sparseWire, none, nullptr, entering.data(),
+            out.data(), count, 0, 10, nullptr, false));
+    }
+
+    // RevisionStatic's rest version reaches the lattice bind it prepares.
+    {
+        Cache surface;
+        RigExecRevisionRangeInputs prepared;
+        CHECK(rigExec::RigExecPrepareRevisionRanges(
+                  Op::Lattice, packets.lattice, count, nullptr, &surface,
+                  &prepared, 5) == RigExecRevisionAcceptance::Applies);
+        CHECK(prepared.latticeBasis && surface.LatticeRestVersion() == 5);
+    }
+    std::printf("revision groups: %zu revision(s) matched their whole "
+                "kernels\n", compared);
+}
+
+// A group gate's kernel half. Under a valid sparse envelope with a zero
+// default every point the envelope does not list leaves each gated op at
+// its entering bytes -- NaN payloads, signed zeros and infinities included,
+// however wild the deformation computed there -- so a group that holds no
+// listed point is its entering group. RigExecRevisionGateHolds answers true
+// for exactly those packets.
+static void
+TestGatedOpsKeepUnlistedPoints()
+{
+    using Op = RigExecRevisionOp;
+    const RangeTestPackets packets;
+    const size_t count = RangeTestPackets::count;
+    const std::vector<GfVec3f> entering = MakeRangeEnteringPoints(count);
+    const float inf = std::numeric_limits<float>::infinity();
+    std::vector<char> listed(count, 0);
+    for (const int index : packets.sparseIndices) {
+        listed[size_t(index)] = 1;
+    }
+    // Whether the whole kernel kept every unlisted point and moved some
+    // listed one.
+    const auto keepsUnlisted = [&](Op op, const RigExecMoverParameters &p,
+                                   bool useSimd) {
+        std::vector<GfVec3f> whole = entering;
+        bool ok = rigExec::RigExecRunRevisionKernel(op, p, &whole, useSimd,
+                                                    nullptr);
+        size_t moved = 0;
+        for (size_t i = 0; i < count; ++i) {
+            const bool same =
+                !std::memcmp(&whole[i], &entering[i], sizeof(GfVec3f));
+            if (!listed[i]) {
+                ok = ok && same;
+            } else if (!same) {
+                ++moved;
+            }
+        }
+        return ok && moved > 0;
+    };
+    const auto gated = [&](const char *what, Op op,
+                           const RigExecMoverParameters &p, bool useSimd) {
+        const bool ok = rigExec::RigExecRevisionGateHolds(op, p) &&
+                        keepsUnlisted(op, p, useSimd);
+        if (!ok) {
+            std::printf("  %s: an unlisted point moved\n", what);
+        }
+        CHECK(ok);
+    };
+
+    // Matrix: the sparse walk, linear and radial, and a translation whose
+    // points overflow to infinity.
+    auto matrix = packets.matrix;
+    matrix.weights = packets.sparse;
+    gated("matrix", Op::Matrix, matrix, false);
+    matrix.radialWeight = true;
+    gated("matrix, radial", Op::Matrix, matrix, false);
+    matrix.radialWeight = false;
+    matrix.transform.SetTranslateOnly(GfVec3d(1e39, 0.0, -1e39));
+    gated("matrix, overflowing translation", Op::Matrix, matrix, false);
+
+    // Wire: the sparse basis, and a posed control point at infinity.
+    auto wire = packets.sparseWire;
+    gated("wire", Op::Wire, wire, false);
+    wire.auxPoints[2][1] = inf;
+    gated("wire, infinite control point", Op::Wire, wire, false);
+
+    // Lattice: deformed everywhere, blended back; and with non-finite cage
+    // deltas, which make NaNs at every point.
+    auto lattice = packets.lattice;
+    lattice.weights = packets.sparse;
+    gated("lattice", Op::Lattice, lattice, false);
+    lattice.auxPointsB[3][0] = inf;
+    lattice.auxPointsB[5][1] = -inf;
+    gated("lattice, non-finite cage deltas", Op::Lattice, lattice, false);
+
+    // Linear skin, SIMD on and off, with an influence whose translation
+    // overflows a float.
+    auto skin = MakeRangeSkinPacket(count, "classicLinear");
+    skin.weights = packets.sparse;
+    gated("linear skin", Op::Skin, skin, false);
+    gated("linear skin, simd", Op::Skin, skin, true);
+    skin.skinTransforms[1].SetTranslateOnly(GfVec3d(1e39, 2.0, -1e39));
+    gated("linear skin, overflowing influence", Op::Skin, skin, false);
+    gated("linear skin, overflowing influence, simd", Op::Skin, skin, true);
+
+    // Target blend, with NaN-payload and infinite deltas at unlisted points.
+    RigExecMoverParameters blend;
+    blend.valid = true;
+    blend.kind = TfToken("blendShape");
+    blend.weights = packets.sparse;
+    blend.blendDeltas.assign(count, GfVec3f(0.25f, -0.5f, 0.125f));
+    blend.blendDeltas[5] = GfVec3f(NanWithPayload(0x99), 0.0f, inf);
+    blend.blendDeltas[900] = GfVec3f(-inf, inf, -0.0f);
+    CHECK(!listed[5] && !listed[900]);
+    gated("blend shape", Op::BlendShape, blend, false);
+
+    // Not gates: a dual-quaternion skin, a surface-frame blend, a dense
+    // envelope, a nonzero default (which moves unlisted points), a constant
+    // envelope, an invalid packet, and an op the gate does not cover.
+    auto dq = MakeRangeSkinPacket(count, "dualQuaternion");
+    dq.weights = packets.sparse;
+    CHECK(!rigExec::RigExecRevisionGateHolds(Op::Skin, dq));
+    auto frame = blend;
+    frame.blendSurfaceFrame = true;
+    CHECK(!rigExec::RigExecRevisionGateHolds(Op::BlendShape, frame));
+    auto dense = packets.matrix;
+    dense.weights = packets.denseMatrix;
+    CHECK(!rigExec::RigExecRevisionGateHolds(Op::Matrix, dense));
+    auto defaulted = packets.matrix;
+    defaulted.weights = packets.sparse;
+    defaulted.weights.defaultWeight = 0.25f;
+    CHECK(!rigExec::RigExecRevisionGateHolds(Op::Matrix, defaulted));
+    CHECK(!keepsUnlisted(Op::Matrix, defaulted, false));
+    CHECK(!rigExec::RigExecRevisionGateHolds(Op::Matrix, packets.matrix));
+    auto invalid = packets.matrix;
+    invalid.weights = packets.sparse;
+    invalid.weights.valid = false;
+    CHECK(!rigExec::RigExecRevisionGateHolds(Op::Matrix, invalid));
+    auto smooth = blend;
+    smooth.kind = TfToken("smooth");
+    CHECK(!rigExec::RigExecRevisionGateHolds(Op::Smooth, smooth));
+}
+
+// The assembler's two lend hooks. Lent blend deltas move into the packet,
+// leaving the lender's vector empty; a retained rest moves into a lattice's
+// packet in place of a copy of the base. Neither is taken unless asked, an
+// empty retained rest falls back to the base, and the packet is the one a
+// copy assembles. Both assemblers: from leaves (the baked program) and from
+// the stage.
+static void
+TestAssemblerLendsDeltasAndRest()
+{
+    using Op = RigExecRevisionOp;
+    const std::vector<GfVec3f> deltas = {GfVec3f(0, 1, 0),
+                                         GfVec3f(-0.0f, 2, 0),
+                                         GfVec3f(3, 0, 1)};
+    const std::vector<GfVec3f> base = {GfVec3f(1, 1, 1), GfVec3f(2, 2, 2),
+                                       GfVec3f(3, 3, 3)};
+    RigExecRevisionBinding binding;
+    rigExec::RigExecRevisionLeafView leaves;
+    {
+        rigExec::RigExecProviderValues values;
+        values.blendDeltas = deltas;
+        const RigExecMoverParameters copied =
+            rigExec::RigExecAssembleFromLeaves(Op::BlendShape, binding,
+                                               leaves, values);
+        CHECK(copied.valid && SameBits(copied.blendDeltas, deltas));
+        CHECK(SameBits(values.blendDeltas, deltas));
+        values.lendBlendDeltas = true;
+        const GfVec3f *storage = values.blendDeltas.data();
+        const RigExecMoverParameters lent =
+            rigExec::RigExecAssembleFromLeaves(Op::BlendShape, binding,
+                                               leaves, values);
+        CHECK(lent.valid && SameBits(lent.blendDeltas, deltas));
+        CHECK(lent.blendDeltas.data() == storage);
+        CHECK(values.blendDeltas.empty());
+        CHECK(lent == copied);
+    }
+    {
+        rigExec::RigExecProviderValues values;
+        values.basePoints = base;
+        const RigExecMoverParameters copied =
+            rigExec::RigExecAssembleFromLeaves(Op::Lattice, binding, leaves,
+                                               values);
+        CHECK(SameBits(copied.restPoints, base));
+        std::vector<GfVec3f> retained = base;
+        const GfVec3f *storage = retained.data();
+        values.retainedRest = &retained;
+        const RigExecMoverParameters lent =
+            rigExec::RigExecAssembleFromLeaves(Op::Lattice, binding, leaves,
+                                               values);
+        CHECK(SameBits(lent.restPoints, base) &&
+              lent.restPoints.data() == storage && retained.empty());
+        CHECK(SameBits(values.basePoints, base));
+        CHECK(lent == copied);
+        const RigExecMoverParameters again =
+            rigExec::RigExecAssembleFromLeaves(Op::Lattice, binding, leaves,
+                                               values);
+        CHECK(SameBits(again.restPoints, base) &&
+              again.restPoints.data() != storage);
+    }
+    {
+        UsdStageRefPtr stage = UsdStage::CreateInMemory();
+        const UsdPrim blendMover =
+            stage->DefinePrim(SdfPath("/A/Rig/Movers/Blend"),
+                              TfToken("RigExecBlendShapeMover"));
+        rigExec::RigExecProviderValues values;
+        values.blendDeltas = deltas;
+        values.lendBlendDeltas = true;
+        const GfVec3f *storage = values.blendDeltas.data();
+        const RigExecMoverParameters p = RigExecAssembleParameters(
+            blendMover, Op::BlendShape, binding, values);
+        CHECK(p.valid && SameBits(p.blendDeltas, deltas) &&
+              p.blendDeltas.data() == storage && values.blendDeltas.empty());
+        const UsdPrim latticeMover =
+            stage->DefinePrim(SdfPath("/A/Rig/Movers/Cage"),
+                              TfToken("RigExecLatticeMover"));
+        rigExec::RigExecProviderValues cage;
+        cage.basePoints = base;
+        std::vector<GfVec3f> retained = base;
+        const GfVec3f *rest = retained.data();
+        cage.retainedRest = &retained;
+        const RigExecMoverParameters q = RigExecAssembleParameters(
+            latticeMover, Op::Lattice, binding, cage);
+        CHECK(SameBits(q.restPoints, base) && q.restPoints.data() == rest &&
+              retained.empty());
     }
 }
 
@@ -1979,6 +2622,9 @@ main(int argc, char **argv)
     TestRevisionAcceptanceMatchesKernel();
     TestRevisionRangesMatchTheWholeKernel();
     TestPrepareRevisionRangesDecidesAsTheKernel();
+    TestRevisionGroupsMatchTheWholeKernel();
+    TestGatedOpsKeepUnlistedPoints();
+    TestAssemblerLendsDeltasAndRest();
     TestLongResolvedInputConnections();
 
     if (failures) {

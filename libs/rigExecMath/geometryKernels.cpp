@@ -1088,13 +1088,29 @@ RigExecApplyWireBasisRange(std::vector<GfVec3f> *points,
                            const std::vector<GfVec3f> &posedControlPoints,
                            size_t begin, size_t end)
 {
-    const size_t n = basis.byControlPoint.size();
-    if (!points || restControlPoints.size() != n ||
-        posedControlPoints.size() != n || indices.size() != weights.size()) {
+    if (!points) {
         return false;
     }
     end = std::min(end, points->size());
-    GfVec3f *data = points->data();
+    begin = std::min(begin, end);
+    return RigExecApplyWireBasisGroup(points->data() + begin, begin, end,
+                                      basis, indices, weights,
+                                      restControlPoints, posedControlPoints);
+}
+
+bool
+RigExecApplyWireBasisGroup(GfVec3f *out, size_t begin, size_t end,
+                           const RigExecWireBasis &basis,
+                           const std::vector<int> &indices,
+                           const std::vector<float> &weights,
+                           const std::vector<GfVec3f> &restControlPoints,
+                           const std::vector<GfVec3f> &posedControlPoints)
+{
+    const size_t n = basis.byControlPoint.size();
+    if ((!out && begin < end) || restControlPoints.size() != n ||
+        posedControlPoints.size() != n || indices.size() != weights.size()) {
+        return false;
+    }
     // Control-point-major, as the whole call: a point's additions arrive in
     // control point order whichever range it is applied in.
     for (size_t j = 0; j < n; ++j) {
@@ -1107,7 +1123,7 @@ RigExecApplyWireBasisRange(std::vector<GfVec3f> *points,
             if (index < 0 || size_t(index) < begin || size_t(index) >= end) {
                 continue;
             }
-            data[size_t(index)] += delta * (coefficient * weights[k]);
+            out[size_t(index) - begin] += delta * (coefficient * weights[k]);
         }
     }
     return true;
@@ -1170,13 +1186,34 @@ RigExecApplyWire(std::vector<GfVec3f> *points,
                  double dropoffDistance, size_t begin, size_t end,
                  const GfVec3f *restEvals, size_t restEvalCount)
 {
-    if (!points ||
-        !RigExecWireInputsAreUsable(restCurve, posedCurve, bindCoords,
-                                    bindCount, points->size()) ||
-        (restEvals && restEvalCount != points->size())) {
+    if (!points) {
         return false;
     }
     end = std::min(end, points->size());
+    begin = std::min(begin, end);
+    return RigExecApplyWireGroup(points->data() + begin, begin, end,
+                                 points->size(), restCurve, posedCurve,
+                                 bindCoords, bindCount, dropoffDistance,
+                                 restEvals, restEvalCount);
+}
+
+bool
+RigExecApplyWireGroup(GfVec3f *out, size_t begin, size_t end, size_t count,
+                      const RigExecNurbsCurve &restCurve,
+                      const RigExecNurbsCurve &posedCurve,
+                      const GfVec2f *bindCoords, size_t bindCount,
+                      double dropoffDistance, const GfVec3f *restEvals,
+                      size_t restEvalCount)
+{
+    if (!RigExecWireInputsAreUsable(restCurve, posedCurve, bindCoords,
+                                    bindCount, count) ||
+        (restEvals && restEvalCount != count)) {
+        return false;
+    }
+    end = std::min(end, count);
+    if (begin < end && !out) {
+        return false;
+    }
     for (size_t i = begin; i < end; ++i) {
         const double u = bindCoords[i][0];
         const double d = bindCoords[i][1];
@@ -1190,7 +1227,7 @@ RigExecApplyWire(std::vector<GfVec3f> *points,
         }
         const GfVec3f rest = restEvals ? restEvals[i] : restCurve.Evaluate(u);
         const GfVec3f delta = posedCurve.Evaluate(u) - rest;
-        (*points)[i] += delta * float(f);
+        out[i - begin] += delta * float(f);
     }
     return true;
 }

@@ -3,6 +3,7 @@
 #include "deltaMushKernel.h"
 #include "spatialAccel.h"
 #include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <memory>
 namespace rigExec {
@@ -53,6 +54,10 @@ template<class Point,class Wide> class RigExecSurfaceKernelCache {
     std::shared_ptr<const std::vector<Point>> pointSamples[2];
     std::vector<Point> invalidSamples;
     std::shared_ptr<const RigExecLatticeBind<Point>> lattice;
+    /// The nonzero content version of the rest points `lattice` was built
+    /// from, or 0 (unknown). Kept by ShareLatticeBind (equal bytes) and
+    /// cleared with the bind.
+    uint64_t latticeRestVersion=0;
     size_t latticeBuilds=0;
     size_t latticeBudget=RigExecLatticeBindBudgetBytes;
 public:
@@ -135,15 +140,20 @@ public:
     /// basis reads, so a frame that only moves the posed cage is a compare.
     /// Null when the bind would retain more than the budget: nothing is kept
     /// and the kernel streams the factors, the same bits (latticeKernel.h).
+    /// \p restVersion (0: unknown) is the caller's content version of
+    /// \p rest: equal to the nonzero one the bind was built from, only the
+    /// rest-point compare is skipped.
     const RigExecLatticeBasis *LatticeBasis(const Point *rest,size_t count,
-        const Point &lo,const Point &size,int dx,int dy,int dz) {
+        const Point &lo,const Point &size,int dx,int dy,int dz,
+        uint64_t restVersion=0) {
         if(count && !rest) return nullptr;
-        if(lattice && lattice->Matches(rest,count,lo,size,dx,dy,dz)) return &lattice->value;
-        lattice.reset();
+        const bool restKnown=restVersion!=0 && restVersion==latticeRestVersion;
+        if(lattice && lattice->Matches(rest,count,lo,size,dx,dy,dz,restKnown)) return &lattice->value;
+        lattice.reset(); latticeRestVersion=0;
         if(RigExecLatticeBind<Point>::Bytes(count,dx,dy,dz)>double(latticeBudget)) return nullptr;
         auto entry=std::make_shared<RigExecLatticeBind<Point>>();
         entry->Build(rest,count,lo,size,dx,dy,dz);
-        lattice=entry; ++latticeBuilds;
+        lattice=entry; latticeRestVersion=restVersion; ++latticeBuilds;
         return &lattice->value;
     }
     /// The lattice bind retained, or null (RigExecLatticeBindSharing).
@@ -159,6 +169,8 @@ public:
     void SetLatticeBudget(size_t bytes) { latticeBudget=bytes; }
     /// Test observable: lattice binds built, counted across copies.
     size_t LatticeBuilds() const { return latticeBuilds; }
+    /// Test observable: the rest version the retained bind was built from.
+    uint64_t LatticeRestVersion() const { return latticeRestVersion; }
 };
 }
 #endif
