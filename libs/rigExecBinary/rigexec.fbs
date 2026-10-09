@@ -1170,6 +1170,10 @@ table Revision {
   final_phase: bool;
   skin_topology_fixed: bool;
   packet_influences: [Matrix4d];
+  // One range per step: a whole revision has one; a chunked skin keys
+  // each range by its influences; an unchunked revision with two or more
+  // (format 19) is range-pipelined, a Matrix, Wire or Lattice revision
+  // whose unkeyed ranges are its chain's point partition.
   chunks: [Chunk] (native_inline);
   chunk_base: int;
   /// Absent when there is none, or when it is `topology` itself.
@@ -1179,6 +1183,8 @@ table Revision {
   partition_element_size: int;
   partition_index_count: ulong;
   partition_point_count: ulong;
+  // A skin partition keyed by influences; false for a whole or a
+  // range-pipelined revision.
   chunked: bool;
   partition_candidates: ulong;
   partition_producer_min: int;

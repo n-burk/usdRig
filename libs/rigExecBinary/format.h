@@ -514,9 +514,27 @@ inline constexpr uint8_t RigExecWireConstraintRadialBlend =
     uint8_t(fb::ConstraintFlags::RadialBlend);
 
 /// The format version this code reads and writes; every change to
-/// rigexec.fbs bumps it. Open refuses all older versions with an S3
-/// re-export message; unknown future versions receive a rebake message.
-inline constexpr uint32_t RigExecFormatVersion = 18;
+/// rigexec.fbs or to what its records mean bumps it. Open refuses all older
+/// versions with an S3 re-export message; unknown future versions receive a
+/// rebake message.
+inline constexpr uint32_t RigExecFormatVersion = 19;
+
+/// A range-pipelined revision (format 19): unchunked with two or more chunks,
+/// which are its chain's point partition, keys empty.
+inline bool
+RigExecFormatIsRangeRevision(const fb::RigExecWireRevision &r)
+{
+    return !r.chunked && r.chunks.size() >= 2;
+}
+
+/// The ops a range-pipelined revision may have: Matrix, Wire, Lattice.
+inline bool
+RigExecFormatIsRangeOp(uint8_t op)
+{
+    return op == uint8_t(fb::RevisionOp::Matrix) ||
+           op == uint8_t(fb::RevisionOp::Wire) ||
+           op == uint8_t(fb::RevisionOp::Lattice);
+}
 
 /// Whether \p tag is one of the array tags (IntArray and after).
 inline constexpr bool
@@ -534,10 +552,11 @@ inline constexpr char RigExecFormatIdentifier[] = "REXB";
 /// layouts among them), every read's walk (no scalar read walks an array
 /// slot, an array read walks slots of its own tag), constant and override
 /// number, table shapes and indices, step and cone ranges, skin topologies
-/// and the layout, chain base, painted and oracle slots, path reads,
-/// property chains, external movers and the nested presentation (bounded
-/// like Open's buffer, then verified with its REXP identifier). False with
-/// a reason naming the table, index and field.
+/// and the layout, range-pipelined chains' partitions and step reads, chain
+/// base, painted and oracle slots, path reads, property chains, external
+/// movers and the nested presentation (bounded like Open's buffer, then
+/// verified with its REXP identifier). False with a reason naming the
+/// table, index and field.
 bool RigExecFormatValidate(const fb::RigExecWireFile &file,
                            std::string *error);
 

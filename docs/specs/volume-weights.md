@@ -27,7 +27,7 @@ multipliers default to 1 and must be finite and positive. The origin stays
 fixed; placement rotation determines the axes. These inputs are animatable
 and affect evaluation, guides, and framing bounds.
 
-Binary exports use inner format version 18 and carry all six directional inputs. Re-export
+Binary exports use inner format version 19 and carry all six directional inputs. Re-export
 older `.rigexec` files and rebuild runtime consumers; USD source stages
 retain their previous shape when directional inputs are absent.
 

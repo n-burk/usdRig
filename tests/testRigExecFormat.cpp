@@ -17,7 +17,8 @@
 // encode losslessly and expand back to the layout bit for bit, every layout
 // the sparse form cannot hold is stored raw and verbatim, and the validated
 // flag holds to the evaluator's rules in both directions, in either form;
-// chunk tables hold to the shape the bake cuts; array inputs (slots of each
+// chunk tables hold to the shape the bake cuts, a range-pipelined
+// revision's (format 19) among them; array inputs (slots of each
 // array tag, their pool and layout defaults, the reads bound to them, and
 // the chain base, layout, painted and oracle slots) round-trip bit for bit,
 // and each rule of theirs refuses its violation with its exact message.
@@ -1475,28 +1476,32 @@ TestOpenRefusals()
     wildRoot[3] = 0x0f;
     CHECK(!_Open(wildRoot, &why) && _Contains(why, "malformed"));
 
-    static_assert(RigExecFormatVersion == 18,
-                  "graph clavicle and limb records pin format18");
-    // Every prior format requires re-export to the compact graph layout.
+    static_assert(RigExecFormatVersion == 19,
+                  "range-pipelined point chains pin format19");
+    // Every prior format, 18 among them, requires re-export: a range-
+    // pipelined chain's records mean something else to an older reader.
     // Future versions require a supported exporter.
     RigExecWireFile versioned = _RichFile();
+    size_t reexports = 0, rebakes = 0;
     for (uint32_t version = 0; version <= RigExecFormatVersion + 1; ++version) {
         if (version == RigExecFormatVersion) continue;
         _context = "open refusals: version " + std::to_string(version);
         versioned.formatVersion = version;
         const std::string expected = "unsupported .rigexec format version " +
-            std::to_string(version) + " (this reader reads " +
-            std::to_string(RigExecFormatVersion) + "); " +
-            (version < RigExecFormatVersion ? "re-export: graph clavicle and limb records" : "rebake");
+            std::to_string(version) + " (this reader reads 19); " +
+            (version < 19 ? "re-export: range-pipelined point chains" : "rebake");
         CHECK(!_Open(_PackUnchecked(versioned), &why) && why == expected);
+        ++(version < 19 ? reexports : rebakes);
     }
+    CHECK(reexports == 19 && rebakes == 1);
     _context = "open refusals";
     versioned.formatVersion = RigExecFormatVersion;
     std::vector<uint8_t> current;
     CHECK(_Write(versioned, &current) && _Open(current, &why) != nullptr);
-    std::printf("format versions: 0 through 10 refused with a re-export, "
+    std::printf("format versions: 0 through %u refused with a re-export, "
                 "%u with a rebake; %u writes and opens\n",
-                RigExecFormatVersion + 1, RigExecFormatVersion);
+                RigExecFormatVersion - 1, RigExecFormatVersion + 1,
+                RigExecFormatVersion);
 
     // A verified buffer that breaks a rule.
     RigExecWireFile broken = _RichFile();
@@ -4200,6 +4205,174 @@ TestChunkTables()
     CHECK(refused == 20);
 }
 
+/// A range-pipelined revision (format 19): the rich revision, unchunked and
+/// cut into three unkeyed ranges that tile its points from 0, is accepted
+/// and round-trips as a Matrix, Wire and Lattice revision; each way its
+/// table breaks that shape, and a range step or join of it that does not
+/// declare what its body reads, is refused with its exact message. The
+/// format's two helpers name exactly that shape and those three ops.
+void
+TestRangeChunkTables()
+{
+    _context = "range chunk tables";
+    std::string why;
+    const std::string row = "geometry.chains[0].revisions[0]";
+    using F = RigExecWireFile;
+    using R = fb::RigExecWireRevision;
+    // The rich revision is a Matrix revision with no chunk; \p edit runs
+    // after the cut into [0, 1), [1, 2), [2, 3).
+    const auto ranged = [](const std::function<void(F &, R &)> &edit) {
+        F f = _RichFile();
+        R &r = f.geometry->chains[0].revisions[0];
+        r.chunked = false;
+        r.chunks.resize(3);
+        for (size_t k = 0; k < 3; ++k) {
+            r.chunks[k].begin = int32_t(k);
+            r.chunks[k].end = int32_t(k + 1);
+        }
+        edit(f, r);
+        f.geometry->revisionChunkCount = {int32_t(r.chunks.size())};
+        return f;
+    };
+
+    {
+        R r;
+        r.chunks.resize(1);
+        CHECK(!RigExecFormatIsRangeRevision(r));
+        r.chunks.resize(2);
+        CHECK(RigExecFormatIsRangeRevision(r));
+        r.chunked = true;
+        CHECK(!RigExecFormatIsRangeRevision(r));
+        size_t rangeOps = 0;
+        for (unsigned op = 0; op <= unsigned(fb::RevisionOp::MAX); ++op) {
+            rangeOps += RigExecFormatIsRangeOp(uint8_t(op)) ? 1 : 0;
+        }
+        CHECK(rangeOps == 3 &&
+              RigExecFormatIsRangeOp(uint8_t(fb::RevisionOp::Matrix)) &&
+              RigExecFormatIsRangeOp(uint8_t(fb::RevisionOp::Wire)) &&
+              RigExecFormatIsRangeOp(uint8_t(fb::RevisionOp::Lattice)));
+    }
+    int accepted = 0;
+    for (const fb::RevisionOp op : {fb::RevisionOp::Matrix, fb::RevisionOp::Wire,
+                                    fb::RevisionOp::Lattice}) {
+        _context = std::string("range chunk tables: accepted as ") +
+                   fb::EnumNameRevisionOp(op);
+        const F f = ranged([op](F &, R &r) { r.op = uint8_t(op); });
+        CHECK(RigExecFormatIsRangeRevision(f.geometry->chains[0].revisions[0]));
+        why.clear();
+        const bool valid = RigExecFormatValidate(f, &why);
+        CHECK(valid);
+        if (!valid) {
+            std::printf("  refused: %s\n", why.c_str());
+        }
+        std::vector<uint8_t> bytes;
+        const bool written = _Write(f, &bytes, &why);
+        const auto opened = written ? _Open(bytes, &why) : nullptr;
+        CHECK(opened && opened->geometry->chains[0].revisions[0].chunks.size() == 3 &&
+              RigExecFormatIsRangeRevision(opened->geometry->chains[0].revisions[0]));
+        accepted += valid && opened ? 1 : 0;
+    }
+    CHECK(accepted == 3);
+
+    int refused = 0;
+    const auto refuse = [&](const char *label,
+                            const std::function<void(F &, R &)> &edit,
+                            const std::function<std::string(const F &)> &expected) {
+        _context = std::string("range chunk tables refuse: ") + label;
+        const F f = ranged(edit);
+        const std::string want = expected(f);
+        why.clear();
+        const bool ok = RigExecFormatValidate(f, &why);
+        CHECK(!ok && why == want);
+        if (ok || why != want) {
+            std::printf("  got '%s', expected '%s'\n",
+                        ok ? "(accepted)" : why.c_str(), want.c_str());
+        }
+        ++refused;
+    };
+    const auto text = [](const std::string &message) {
+        return [message](const F &) { return message; };
+    };
+    refuse("a range-shaped smooth revision",
+           [](F &, R &r) { r.op = uint8_t(fb::RevisionOp::Smooth); },
+           text(row + ": 3 chunks, but not chunked"));
+    refuse("a key on a range", [](F &, R &r) { r.chunks[1].key = {0}; },
+           text(row + ".chunks[1]: a key on an unchunked revision"));
+    refuse("a gap", [](F &, R &r) {
+        r.chunks[2].begin = 3;
+        r.chunks[2].end = 4;
+    }, text(row + ".chunks[2]: point range [3, 4) is empty or does not "
+                  "continue the chain's point partition at 2"));
+    refuse("an overlap", [](F &, R &r) { r.chunks[1].begin = 0; },
+           text(row + ".chunks[1]: point range [0, 2) is empty or does not "
+                      "continue the chain's point partition at 1"));
+    refuse("a first range off 0", [](F &, R &r) {
+        for (auto &chunk : r.chunks) {
+            ++chunk.begin;
+            ++chunk.end;
+        }
+    }, text(row + ".chunks[0]: point range [1, 2) is empty or does not "
+                  "continue the chain's point partition at 0"));
+    refuse("an empty range", [](F &, R &r) {
+        r.chunks[1].end = 1;
+        r.chunks[2].begin = 1;
+    }, text(row + ".chunks[1]: point range [1, 1) is empty or does not "
+                  "continue the chain's point partition at 1"));
+    refuse("a partition producer set", [](F &, R &r) {
+        // One empty set, with the summary that matches it.
+        r.partitionProducerSets.resize(1);
+        r.partitionDistinctReads = 1;
+    }, text(row + ": partition producer sets on a range-pipelined revision"));
+
+    // Steps of the revision, appended with no edges: the rules on what a
+    // range step and a join declare run before the step graph's.
+    using D = fb::SlotDomain;
+    const auto step = [](F &f, fb::StepKind kind, int32_t part,
+                         std::vector<fb::SlotRange> reads) {
+        fb::RigExecWireStep added;
+        added.kind = kind;
+        added.object = 0;
+        added.part = part;
+        added.reads = std::move(reads);
+        _AppendStep(f, std::move(added));
+    };
+    const auto last = [](const std::string &rest) {
+        return [rest](const F &f) {
+            const size_t at = f.steps.size() - 1;
+            return "step " + std::to_string(at) + " (" +
+                   RigExecFormatStepLabel(f, at) + ")" + rest;
+        };
+    };
+    refuse("a range step past the ranges", [&](F &f, R &) {
+        step(f, fb::StepKind::RevisionChunk, 3,
+             {fb::SlotRange(D::RevisionPacket, 0, 1),
+              fb::SlotRange(D::ChainBase, 0, 1)});
+    }, last(": range part 3 of 3"));
+    refuse("a range step without the chain base", [&](F &f, R &) {
+        step(f, fb::StepKind::RevisionChunk, 0,
+             {fb::SlotRange(D::RevisionPacket, 0, 1)});
+    }, last(" does not declare ChainBase[0]"));
+    refuse("a join missing one of its ranges", [&](F &f, R &) {
+        step(f, fb::StepKind::RevisionFuse, -1,
+             {fb::SlotRange(D::RevisionPacket, 0, 1),
+              fb::SlotRange(D::RevisionTransforms, 0, 1),
+              fb::SlotRange(D::ChainBase, 0, 1),
+              fb::SlotRange(D::WeightPacket, 0, 1),
+              fb::SlotRange(D::RevisionOut, 0, 2)});
+    }, last(" does not declare RevisionOut[2]"));
+    refuse("a join without its weight packet", [&](F &f, R &) {
+        step(f, fb::StepKind::RevisionFuse, -1,
+             {fb::SlotRange(D::RevisionPacket, 0, 1),
+              fb::SlotRange(D::RevisionTransforms, 0, 1),
+              fb::SlotRange(D::ChainBase, 0, 1),
+              fb::SlotRange(D::RevisionOut, 0, 3)});
+    }, last(" does not declare WeightPacket[0]"));
+    std::printf("range chunk tables: a range-pipelined revision accepted as "
+                "%d ops; %d range table and step violations refused\n",
+                accepted, refused);
+    CHECK(refused == 11);
+}
+
 // ----------------------------------------------------------------- arrays
 
 // Path ids the array file adds to the rich file's; each is also the id of
@@ -5640,6 +5813,7 @@ main()
     TestSparseTopology();
     TestRawTopology();
     TestChunkTables();
+    TestRangeChunkTables();
     TestArrayInputs();
     TestHeadFormatCases();
     TestHeadComposeFormatCases();

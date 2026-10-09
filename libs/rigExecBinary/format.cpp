@@ -2908,6 +2908,15 @@ private:
                 if(revision.driverFramesSolver>=0)read(D::Aggregate,uint32_t(revision.driverFramesSolver));
                 for(const auto &channel:revision.blendChannels)
                     if(channel.poseWeight>=0)read(D::PoseWeight,uint32_t(channel.poseWeight));
+            } else if(step.kind==K::RevisionChunk && RigExecFormatIsRangeRevision(revision)) {
+                // Range `part` of the entering version: the previous revision's
+                // range step when that one is range-pipelined too.
+                read(D::RevisionPacket,id);
+                const auto *previous=index.second>0?&chain.revisions[size_t(index.second)-1]:nullptr;
+                if(previous && RigExecFormatIsRangeRevision(*previous)) {
+                    if(_Has(previous->chunks,step.part))
+                        read(D::RevisionOut,uint32_t(previous->chunkBase)+uint32_t(step.part));
+                } else point(c,uint32_t(index.second));
             } else if(step.kind==K::RevisionChunk) {
                 read(D::RevisionPacket,id);point(c,uint32_t(index.second));
                 if(revision.chunked && _Has(revision.chunks,step.part)) {
@@ -2917,7 +2926,10 @@ private:
                             read(own,uint32_t(revision.influenceSlots[size_t(position)]));
                 } else if(skin)read(D::RevisionTransforms,id);
             } else {
-                read(D::RevisionPacket,id);read(D::RevisionTransforms,id);point(c,uint32_t(index.second));
+                // A range-pipelined revision's fuse is a join over its own
+                // ranges; it never reads the entering version.
+                read(D::RevisionPacket,id);read(D::RevisionTransforms,id);
+                if(!RigExecFormatIsRangeRevision(revision))point(c,uint32_t(index.second));
                 if(revision.weightObject>=0)read(D::WeightPacket,uint32_t(revision.weightObject));
                 for(size_t k=0;k<revision.chunks.size();++k)read(D::RevisionOut,uint32_t(revision.chunkBase)+uint32_t(k));
             }
@@ -4281,7 +4293,100 @@ private:
             !_Bools(g.deltaBaseOk, row, "delta_base_ok")) {
             return false;
         }
-        return _PathReads(g);
+        return _PathReads(g) && _RangeSteps();
+    }
+
+    /// The steps of every range-pipelined revision declare what their
+    /// bodies read, as the program's ValidatePointVersions holds them:
+    /// range step k (part k of the partition) its packet, the chain base
+    /// and range k of the entering version, which is the previous
+    /// revision's RevisionOut of part k when that one is range-pipelined
+    /// (then not its whole version), else that version's RevisionDone and
+    /// ChainDirty; the fuse, a join, its packet and transforms, the chain
+    /// base, its weight packet when it has one and each of its own
+    /// RevisionOut, and not the entering version.
+    bool _RangeSteps()
+    {
+        using D = fb::SlotDomain;
+        const fb::RigExecWireDomainGeometry &g = *_f.geometry;
+        for (size_t i = 0; i < _f.steps.size(); ++i) {
+            const fb::RigExecWireStep &step = _f.steps[i];
+            const bool range = step.kind == fb::StepKind::RevisionChunk;
+            if ((!range && step.kind != fb::StepKind::RevisionFuse) ||
+                !_Has(g.revisionIndex, step.object)) {
+                continue;
+            }
+            const RigExecWireIntPair &at = g.revisionIndex[size_t(step.object)];
+            const fb::RigExecWireChain &chain = g.chains[size_t(at.first)];
+            const fb::RigExecWireRevision &revision =
+                chain.revisions[size_t(at.second)];
+            if (!RigExecFormatIsRangeRevision(revision)) {
+                continue;
+            }
+            const uint64_t id = uint64_t(step.object);
+            const uint64_t c = uint64_t(at.first);
+            const fb::RigExecWireRevision *previous =
+                at.second > 0 ? &chain.revisions[size_t(at.second) - 1]
+                              : nullptr;
+            const auto need = [&](D domain, uint64_t slot) {
+                return _Declares(i, domain, slot) ||
+                       _Bad(_StepName(i) + " does not declare " +
+                            rigExecStepGraphDetail::DomainName(
+                                uint8_t(domain)) +
+                            "[" + _N(slot) + "]");
+            };
+            if (!need(D::RevisionPacket, id) || !need(D::ChainBase, c)) {
+                return false;
+            }
+            // Whether the step reads the entering version whole.
+            bool whole = previous != nullptr;
+            if (range) {
+                if (!_Has(revision.chunks, step.part)) {
+                    return _Bad(_StepName(i) + ": range part " +
+                                std::to_string(step.part) + " of " +
+                                _N(revision.chunks.size()));
+                }
+                if (previous && RigExecFormatIsRangeRevision(*previous)) {
+                    if (!need(D::RevisionOut,
+                              uint64_t(int64_t(previous->chunkBase) +
+                                       step.part))) {
+                        return false;
+                    }
+                    whole = false;
+                }
+            } else {
+                if (!need(D::RevisionTransforms, id) ||
+                    (revision.weightObject >= 0 &&
+                     !need(D::WeightPacket, uint64_t(revision.weightObject)))) {
+                    return false;
+                }
+                for (size_t k = 0; k < revision.chunks.size(); ++k) {
+                    if (!need(D::RevisionOut,
+                              uint64_t(int64_t(revision.chunkBase) +
+                                       int64_t(k)))) {
+                        return false;
+                    }
+                }
+                whole = false;
+            }
+            if (!previous) {
+                continue;
+            }
+            const uint64_t entering = id - 1;
+            if (whole && (!need(D::RevisionDone, entering) ||
+                          !need(D::ChainDirty, entering))) {
+                return false;
+            }
+            if (!whole && (_Declares(i, D::RevisionDone, entering) ||
+                           _Declares(i, D::ChainDirty, entering))) {
+                return _Bad(_StepName(i) + " declares point version " +
+                            _N(size_t(at.second)) + " of chain " + _N(c) +
+                            ", which a range-pipelined " +
+                            (range ? "range step" : "join") +
+                            " does not read");
+            }
+        }
+        return true;
     }
 
     /// An input slot field: -1, or a slot of tag \p tag.
@@ -4317,7 +4422,9 @@ private:
 
     /// \p chain, whose revisions take flat ids from \p firstRevision. Its
     /// base slot is the target's points input, a float3[] slot whose
-    /// default is the base itself.
+    /// default is the base itself. Its range-pipelined revisions all cut
+    /// the chain's one point partition, so that range step k of one reads
+    /// range k of the one before.
     bool _Chain(const fb::RigExecWireChain &chain, const std::string &row,
                 size_t firstRevision)
     {
@@ -4354,6 +4461,28 @@ private:
                            row + ".revisions[" + _N(r) + "]",
                            firstRevision + r)) {
                 return false;
+            }
+        }
+        const fb::RigExecWireRevision *partition = nullptr;
+        for (size_t r = 0; r < chain.revisions.size(); ++r) {
+            const fb::RigExecWireRevision &revision = chain.revisions[r];
+            if (!RigExecFormatIsRangeRevision(revision)) {
+                continue;
+            }
+            if (!partition) {
+                partition = &revision;
+                continue;
+            }
+            bool same = revision.chunks.size() == partition->chunks.size();
+            for (size_t k = 0; same && k < revision.chunks.size(); ++k) {
+                same = revision.chunks[k].begin == partition->chunks[k].begin &&
+                       revision.chunks[k].end == partition->chunks[k].end;
+            }
+            if (!same) {
+                return _Bad(row + ".revisions[" + _N(r) +
+                            "]: its point ranges differ from revisions[" +
+                            _N(size_t(partition - chain.revisions.data())) +
+                            "]'s, the chain's partition");
             }
         }
         for (size_t d = 0; d < chain.derived.size(); ++d) {
@@ -4499,8 +4628,11 @@ private:
     /// two ranges that tile the partition's points in order, each keyed by
     /// ascending positions in influence_slots, which size the chunk's
     /// influence rows; its partition layout, when it has one, holds the
-    /// partition's element size and index count. An unchunked revision is
-    /// at most one range, with no key.
+    /// partition's element size and index count. An unchunked revision has
+    /// no key and is at most one range, unless it is range-pipelined
+    /// (format 19): a Matrix, Wire or Lattice revision with no partition
+    /// producer set, whose two or more non-empty ranges tile its chain's
+    /// points from 0, one range step each.
     bool _Chunks(const fb::RigExecWireRevision &r, const std::string &row)
     {
         using ProducerKey=std::pair<uint8_t,uint32_t>;
@@ -4555,7 +4687,8 @@ private:
                         std::to_string(r.partitionElementSize));
         }
         if (!r.chunked) {
-            if (r.chunks.size() > 1) {
+            const bool ranges = RigExecFormatIsRangeRevision(r);
+            if (ranges && !RigExecFormatIsRangeOp(r.op)) {
                 return _Bad(row + ": " + _N(r.chunks.size()) +
                             " chunks, but not chunked");
             }
@@ -4564,6 +4697,27 @@ private:
                     return _Bad(_At(row, "chunks", long(k)) +
                                 ": a key on an unchunked revision");
                 }
+            }
+            if (!ranges) {
+                return true;
+            }
+            if (!r.partitionProducerSets.empty()) {
+                return _Bad(row + ": partition producer sets on a "
+                                  "range-pipelined revision");
+            }
+            int64_t at = 0;
+            for (size_t k = 0; k < r.chunks.size(); ++k) {
+                const fb::RigExecWireChunk &chunk = r.chunks[k];
+                if (chunk.begin != at || chunk.end <= chunk.begin) {
+                    return _Bad(_At(row, "chunks", long(k)) +
+                                ": point range [" +
+                                std::to_string(chunk.begin) + ", " +
+                                std::to_string(chunk.end) +
+                                ") is empty or does not continue the "
+                                "chain's point partition at " +
+                                std::to_string(at));
+                }
+                at = chunk.end;
             }
             return true;
         }
@@ -6155,11 +6309,11 @@ namespace {
 std::string
 _VersionRefusal(uint32_t version)
 {
-    static_assert(RigExecFormatVersion == 18,
+    static_assert(RigExecFormatVersion == 19,
                   "name what the previous format version lacks");
     return "unsupported .rigexec format version " + _N(version) +
            " (this reader reads " + _N(RigExecFormatVersion) + "); " +
-           (version < RigExecFormatVersion ? "re-export: graph clavicle and limb records"
+           (version < RigExecFormatVersion ? "re-export: range-pipelined point chains"
                                               : "rebake");
 }
 
