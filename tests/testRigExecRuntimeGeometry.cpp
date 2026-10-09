@@ -19,6 +19,7 @@
 
 #include "pxr/base/gf/math.h"
 #include "pxr/base/gf/quatf.h"
+#include "pxr/base/gf/vec2f.h"
 #include "pxr/base/gf/vec3i.h"
 #include "pxr/base/plug/registry.h"
 #include "pxr/base/tf/getenv.h"
@@ -1558,16 +1559,21 @@ struct _RangeChainOptions {
     bool failMiddle = false;
     // The lattice's cage moves at frames 1 to 3.
     bool cageMoves = true;
+    // The wires' curve moves at frames 1 to 3.
+    bool curveMoves = true;
 };
 
 // A range-pipelined chain: matrix movers M0 (on Moving), M1 and M2 (on
-// Still) and a lattice blended in at 0.6 move the \p count points of
-// /Asset/Shape.points, a box inside the 2 x 2 x 3 cage; above the default
-// 4096 points a range (RIGEXEC_BAKED_CHUNK_VERTS) all four are cut into
-// ranges, three for 10000 points. A matrix mover on the three points of
-// /Asset/Small.points stays whole. The points hold a default, which Build
-// counts, and samples at frames 1 to 3 that equal it unless
-// \p options.baseMovesInRangeZero.
+// Still), a lattice blended in at 0.6, Half (a matrix mover on Still at a
+// uniform 0.5: the dense envelope), WireDense (a wire at 0.5 with a dropoff:
+// rest evaluations and the separate blend) and WireSparse (a wire under a
+// sparse static weight naming points in the first two ranges only: the
+// basis) move the \p count points of /Asset/Shape.points, a box inside the
+// 2 x 2 x 3 cage; above the default 4096 points a range
+// (RIGEXEC_BAKED_CHUNK_VERTS) all seven are cut into ranges, three for 10000
+// points. A matrix mover on the three points of /Asset/Small.points stays
+// whole. The points hold a default, which Build counts, and samples at
+// frames 1 to 3 that equal it unless \p options.baseMovesInRangeZero.
 static UsdStageRefPtr
 _RangeChainStage(size_t count, const _RangeChainOptions &options)
 {
@@ -1700,6 +1706,78 @@ _RangeChainStage(size_t count, const _RangeChainOptions &options)
     lattice.GetAttribute(TfToken("rigExec:basis")).Set(TfToken("bernstein"));
     lattice.GetAttribute(TfToken("rigExec:divisions")).Set(GfVec3i(2, 2, 3));
     lattice.GetAttribute(TfToken("inputs:defaultWeight")).Set(0.6f);
+
+    matrixMover("Half", target, still)
+        .GetAttribute(TfToken("inputs:defaultWeight"))
+        .Set(0.5f);
+
+    // The wires' curve: its second control point rises per frame.
+    const UsdPrim curve =
+        stage->DefinePrim(SdfPath("/Asset/Curve"), TfToken("NurbsCurves"));
+    curve.GetAttribute(TfToken("curveVertexCounts")).Set(VtIntArray{2});
+    curve.GetAttribute(TfToken("order")).Set(VtIntArray{2});
+    curve.GetAttribute(TfToken("knots")).Set(VtDoubleArray{0, 0, 1, 1});
+    UsdAttribute curvePoints = curve.GetAttribute(TfToken("points"));
+    curvePoints.Set(VtVec3fArray{GfVec3f(0, 0, 0), GfVec3f(1, 0, 0)});
+    for (int frame = 1; frame <= 3; ++frame) {
+        const float rise = options.curveMoves ? 0.25f * float(frame) : 0.0f;
+        curvePoints.Set(
+            VtVec3fArray{GfVec3f(0, 0, 0), GfVec3f(1, rise, 0.5f * rise)},
+            UsdTimeCode(frame));
+    }
+    const UsdPrim bind =
+        stage->DefinePrim(SdfPath("/Asset/Bind"), TfToken("Scope"));
+    VtVec2fArray dense(count);
+    for (size_t i = 0; i < count; ++i) {
+        dense[i] = GfVec2f(float(i % 100) / 99.0f, 0.02f * float(i % 60));
+    }
+    bind.CreateAttribute(TfToken("dense"), SdfValueTypeNames->Float2Array)
+        .Set(dense);
+    // The sparse weight's points, every 97th from 0: ranges 0 and 1 only.
+    VtIntArray named(40);
+    VtFloatArray strengths(40);
+    VtVec2fArray sparse(40);
+    for (int i = 0; i < 40; ++i) {
+        named[size_t(i)] = 97 * i;
+        strengths[size_t(i)] = 0.5f + 0.0125f * float(i);
+        sparse[size_t(i)] = GfVec2f(float(i) / 39.0f, 0.0f);
+    }
+    bind.CreateAttribute(TfToken("sparse"), SdfValueTypeNames->Float2Array)
+        .Set(sparse);
+    const UsdPrim wireWeight = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Weights/Wire"), TfToken("RigExecStaticWeight"));
+    wireWeight.CreateRelationship(TfToken("rigExec:weightTarget"), false)
+        .SetTargets({target});
+    wireWeight.CreateAttribute(TfToken("rigExec:representation"),
+                               SdfValueTypeNames->Token, false)
+        .Set(TfToken("sparse"));
+    wireWeight.CreateAttribute(TfToken("rigExec:indices"),
+                               SdfValueTypeNames->IntArray, false)
+        .Set(named);
+    wireWeight.CreateAttribute(TfToken("rigExec:values"),
+                               SdfValueTypeNames->FloatArray, false)
+        .Set(strengths);
+    wireWeight.CreateAttribute(TfToken("rigExec:defaultWeight"),
+                               SdfValueTypeNames->Float, false)
+        .Set(0.0f);
+    const auto wireMover = [&](const std::string &name, const char *table) {
+        const UsdPrim mover = stage->DefinePrim(
+            SdfPath("/Asset/Rig/Movers/" + name), TfToken("RigExecCurveMover"));
+        mover.ApplyAPI(TfToken("RigExecMoverAPI"));
+        mover.GetAttribute(TfToken("rigExec:mode")).Set(TfToken("wire"));
+        mover.GetRelationship(TfToken("rigExec:moves")).SetTargets({target});
+        mover.GetRelationship(TfToken("rigExec:driverCurve"))
+            .SetTargets({curve.GetPath()});
+        mover.GetRelationship(TfToken("rigExec:bindCoordinates"))
+            .SetTargets({bind.GetPath().AppendProperty(TfToken(table))});
+        return mover;
+    };
+    const UsdPrim wireDense = wireMover("WireDense", "dense");
+    wireDense.GetAttribute(TfToken("inputs:defaultWeight")).Set(0.5f);
+    wireDense.GetAttribute(TfToken("inputs:dropoffDistance")).Set(1.0f);
+    wireMover("WireSparse", "sparse")
+        .CreateRelationship(TfToken("rigExec:weightObject"), false)
+        .SetTargets({wireWeight.GetPath()});
     return stage;
 }
 
@@ -1729,7 +1807,8 @@ TestRangeChainPlays()
                _RangeChainStage(10000, sparse), {1, 2, 3, 1});
     TfSetenv("RIGEXEC_VERIFY_CHAIN_VERSIONS", "0");
 
-    // M1's refusal is reported at frame 2 and nowhere else.
+    // M1's refusal is reported at frame 2 and nowhere else; every other
+    // mover, the wires and the dense matrix among them, applies.
     std::vector<std::vector<std::string>> diagnostics;
     std::string error;
     CHECK(_RunDiagnostics(_RangeChainStage(10000, failing), frames,
@@ -1742,6 +1821,16 @@ TestRangeChainPlays()
     CHECK(diagnostics.size() == frames.size());
     for (size_t i = 0; i < diagnostics.size() && i < frames.size(); ++i) {
         CHECK(_HasLine(diagnostics[i], failed) == (frames[i] == 2.0));
+        for (const std::string &line : diagnostics[i]) {
+            const bool other =
+                line.rfind("MoverFailed ", 0) == 0 &&
+                line.rfind("MoverFailed /Asset/Rig/Movers/M1:", 0) != 0;
+            CHECK(!other);
+            if (other) {
+                std::printf("range chain frame %g: %s\n", frames[i],
+                            line.c_str());
+            }
+        }
     }
 }
 
@@ -1757,6 +1846,7 @@ TestRangeChainRolesAndCutoff()
     _RangeChainOptions options;
     options.sparseFirst = true;
     options.cageMoves = false;
+    options.curveMoves = false;
     const UsdStageRefPtr stage = _RangeChainStage(10000, options);
     std::vector<uint8_t> bytes;
     std::string error;
@@ -1795,11 +1885,12 @@ TestRangeChainRolesAndCutoff()
             }
         }
     }
-    // M0, M1, M2 and the lattice are cut; Small's mover is whole.
-    CHECK(ranges == 4 && wholes == 1);
+    // M0, M1, M2, the lattice, Half and the two wires are cut; Small's
+    // mover is whole.
+    CHECK(ranges == 7 && wholes == 1);
     const auto first = position.find("/Asset/Rig/Movers/M0");
     CHECK(first != position.end());
-    if (ranges != 4 || first == position.end()) {
+    if (ranges != 7 || first == position.end()) {
         std::printf("%s: FAILED (%zu cut revision(s))\n", name, ranges);
         return;
     }
@@ -1834,7 +1925,7 @@ TestRangeChainRolesAndCutoff()
         }
         ++checked;
     }
-    CHECK(checked == 12);
+    CHECK(checked == 21);
     std::printf("%s: %zu range step(s) checked\n", name, checked);
 }
 

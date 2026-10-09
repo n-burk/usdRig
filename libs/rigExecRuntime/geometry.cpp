@@ -3488,6 +3488,11 @@ struct RrGeometryScratch {
         // (an invariant violation; they passed through). Written by the join.
         std::vector<uint64_t> joinSeen;
         uint32_t rangeRefusals = 0;
+        // A cycle set aside one of its ranges or its join (the program's
+        // excluded set, applied before each run): the revision passes the
+        // base through like an excluded fuse, `currentSource` -1, and its
+        // join publishes that version (native rangeSetAside).
+        bool rangeSetAside = false;
         std::shared_ptr<const RrGeoSkinTopology> topology;
         bool topologyResolved = false;
         // A fixed revision's layout as its layout slots describe it (the
@@ -6254,7 +6259,7 @@ bool RrRunChainInputs(RrProgram *program, size_t c, std::string *error)
             for (size_t r = 0; r < chain.revisions.size(); ++r) {
                 RrGeometryScratch::Revision &rev = chain.revisions[r];
                 RrGeoResetRevision(&rev);
-                if (rev.rangeRole) {
+                if (rev.rangeRole && !rev.rangeSetAside) {
                     rev.currentSource = int(r);
                 }
             }
@@ -7100,6 +7105,19 @@ RrGeoRunRevisionFuseStep(RrProgram *program, RrGeometryScratch *scratch,
     const bool skin = wire.op == uint8_t(RrGeoOpSkin);
     const bool packetValid =
         rev.parameters.valid && (!skin || rev.influencesValid);
+    if (rev.rangeSetAside) {
+        // A cycle set its ranges aside: publish what an excluded fuse does,
+        // the base passed through, against the live base (native RunJoin).
+        rev.ran = false;
+        rev.executed = false;
+        rev.resultStatus = "operation cycle";
+        if (!RrGeoPointBitsEqual(chain.lastBase, rev.passedPoints)) {
+            ++rev.doneVersion;
+            rev.passedPoints = chain.lastBase;
+        }
+        (void)error;
+        return true;
+    }
     RrGeoFuseWeightDiagnostics(program, wire, rev, packetValid,
                                &output.diagnostics);
     if (rev.rangeRole) {
@@ -7718,18 +7736,13 @@ void RrResetExcludedGeometryValue(RrProgram *program,
         if(!RrGeoChunkOwner(program,*scratch,slot,&c,&r,&k)) return;
         auto &revision=scratch->chains[c].revisions[r];
         if(revision.rangeRole) {
-            // An excluded range passes the base through, as an excluded
-            // fuse does, and publishes anew once it runs again.
+            // A set-aside range makes the revision pass the base through, as
+            // an excluded fuse does: its successors and every reader of its
+            // version read the live base, never this buffer; its join
+            // publishes that version (native RigExecBakedResetSetAsideGeometryValue).
             auto &chunk=revision.chunks[k];
             chunk.ok=false; chunk.rangeRan=false;
-            const auto &base=scratch->chains[c].lastBase;
-            if(revision.output.size()==base.size()) {
-                size_t begin=0, end=0;
-                RigExecPointRangeAt(chunk.begin,chunk.end,k+1==revision.chunks.size(),
-                                    base.size(),&begin,&end);
-                std::copy(base.begin()+long(begin),base.begin()+long(end),
-                          revision.output.begin()+long(begin));
-            }
+            revision.rangeSetAside=true; revision.currentSource=-1;
             return;
         }
         revision.stagingOutput.clear();
@@ -7755,13 +7768,9 @@ void RrResetExcludedGeometryValue(RrProgram *program,
         revision->influencesValid=false; break;
     case RigExecWireSlotDomain::RevisionDone:
     case RigExecWireSlotDomain::ChainDirty:
-        if(revision->rangeRole) {
-            // Its source stays itself: `output` holds what its ranges left.
-            revision->resultStatus="operation cycle";
-            revision->ran=false; revision->executed=false;
-            ++revision->doneVersion;
-            break;
-        }
+        // A range-pipelined revision set aside passes the base through
+        // exactly as a whole one does.
+        if(revision->rangeRole) revision->rangeSetAside=true;
         revision->currentSource=-1; revision->resultStatus="operation cycle";
         revision->ran=false; revision->executed=false;
         // An excluded fuse never runs: the version follows the base it
