@@ -3563,14 +3563,15 @@ RunWholeFuse(RigExecBakedProgramImpl &B,
 /// \p revisionIndex of chain \p chainIndex): the fuse's line and status from
 /// the decision its group steps shared, the refusal count over its written
 /// groups, and the content ids of version revisionIndex + 1 -- its own for
-/// the groups it writes, the predecessor's (the base's for the first
-/// revision) for the groups it aliases. Reads no points. `doneVersion` moves
+/// the groups it writes, the entering version's for the groups it aliases
+/// (RigExecBakedGroupSourceAt, which resolves past a revision a cycle set
+/// aside to the base groups as ChainInputs left them). Reads no points. `doneVersion` moves
 /// exactly when those ids do, so a version whose groups all kept their bytes
 /// keeps its version. A cycle that set the revision aside makes it publish
 /// the base passed through.
 void
 RunJoin(const RigExecBakedProgramImpl &B,
-        const RigExecBakedProgramImpl::GeomChain &chain,
+        const RigExecBakedProgramImpl::GeomChain &chain, int chainIndex,
         RigExecBakedProgramImpl::GeomRevision *revision, int id,
         size_t revisionIndex, RigExecBakedStep *step)
 {
@@ -3590,8 +3591,6 @@ RunJoin(const RigExecBakedProgramImpl &B,
     if (!applied && revision->status.AllowsApply()) {
         revision->resultStatus = _tokens->moverFailed;
     }
-    const RigExecBakedProgramImpl::GeomRevision *predecessor =
-        revisionIndex > 0 ? &chain.revisions[revisionIndex - 1] : nullptr;
     bool moved = SizeGroupIds(revision);
     uint32_t refusals = 0;
     for (size_t g = 0; g < revision->groupIds.size(); ++g) {
@@ -3603,10 +3602,8 @@ RunJoin(const RigExecBakedProgramImpl &B,
             }
             source.slot = int64_t(RigExecBakedGroupSlot(B, id, g));
             source.version = revision->groups[g].version;
-        } else if (predecessor && g < predecessor->groupIds.size()) {
-            source = predecessor->groupIds[g];
         } else {
-            source = BaseGroupSource(chain, g);
+            source = RigExecBakedGroupSourceAt(B, chainIndex, revisionIndex, g);
         }
         moved = NoteGroupId(revision, g, source) || moved;
     }
@@ -4497,8 +4494,8 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
 
     case RigExecBakedStepKind::RevisionFuse: {
         if (revision.role == RigExecBakedRevisionRole::Range) {
-            RunJoin(B, chain, &revision, step->object, size_t(revisionIndex),
-                    step);
+            RunJoin(B, chain, chainIndex, &revision, step->object,
+                    size_t(revisionIndex), step);
             return;
         }
         if (revision.role == RigExecBakedRevisionRole::Whole) {

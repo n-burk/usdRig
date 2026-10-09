@@ -7047,7 +7047,11 @@ TestGroupChainsMatchTheWholeChain()
 ///    (one packet) and only group 2's version moves there and after it;
 ///  * 7 -> 8, the base moves in group 0 alone: every group step reruns (each
 ///    reads the chain base) but only group 0's versions move.
-/// Frames 7 and 9 move nothing and run no group step.
+/// Frames 7 and 9 move nothing and run no group step. After the groups
+/// (F13): ChainStatus reruns exactly when a group of the last version moved,
+/// bumps its content version once and keeps every unmoved group's bytes; a
+/// frame that moves nothing reruns neither it nor any reader of the chain's
+/// points, and the published result keeps its identity.
 void
 TestGroupStepsRunOnlyMovedGroups()
 {
@@ -7072,10 +7076,69 @@ TestGroupStepsRunOnlyMovedGroups()
     const auto step = [&](double frame, const char *what, const auto &ran,
                           const auto &moved) {
         const std::vector<std::vector<uint64_t>> before = GroupVersions(B);
+        const VtVec3fArray resultBefore = chain.result;
+        const uint64_t resultVersionBefore = chain.resultVersion;
         RigExecRigPose pose;
         CHECK(built.program->Run(UsdTimeCode(frame), &pose));
         CHECK(pose.comparisonMismatches == 0);
         const std::vector<std::vector<uint64_t>> after = GroupVersions(B);
+        // Which groups of the chain's last version moved.
+        const size_t groups = chain.groupBounds.size() - 1;
+        std::vector<char> lastMoved(groups, 0);
+        bool anyMoved = false;
+        for (size_t r = 0; r < chain.revisions.size(); ++r) {
+            for (size_t g = 0; g < groups; ++g) {
+                if (chain.revisions[r].groupWritten[g] && moved(r, g)) {
+                    lastMoved[g] = 1;
+                    anyMoved = true;
+                }
+            }
+        }
+        const bool statusRan = RanLast(B, K::ChainStatus, 0);
+        if (statusRan != anyMoved) {
+            ++failures;
+            std::printf("FAIL %s: ChainStatus %s
+", what,
+                        statusRan ? "ran" : "did not run");
+        }
+        if (!anyMoved) {
+            CHECK(chain.result.IsIdentical(resultBefore));
+            CHECK(chain.resultVersion == resultVersionBefore);
+            // Nothing that reads the chain's points reran.
+            for (size_t c = 0; c < B.opGraph.ops.size() &&
+                               c < B.opExecution.ran.size(); ++c) {
+                if (!B.opExecution.ran[c]) {
+                    continue;
+                }
+                for (const RigExecBakedSlotRange &read :
+                     B.steps[B.opGraph.ops[c].originalIndex].reads) {
+                    if (read.domain == RigExecBakedSlotDomain::ChainPoints) {
+                        ++failures;
+                        std::printf("FAIL %s: a reader of the chain's "
+                                    "points reran
+", what);
+                    }
+                }
+            }
+        } else {
+            CHECK(chain.resultVersion == resultVersionBefore + 1);
+            CHECK(chain.result.size() == resultBefore.size());
+            for (size_t g = 0; g < groups && chain.result.size() ==
+                                                 resultBefore.size(); ++g) {
+                const size_t begin = size_t(chain.groupBounds[g]);
+                const size_t end = size_t(chain.groupBounds[g + 1]);
+                const bool same =
+                    std::memcmp(chain.result.cdata() + begin,
+                                resultBefore.cdata() + begin,
+                                (end - begin) * sizeof(GfVec3f)) == 0;
+                if (!lastMoved[g] && !same) {
+                    ++failures;
+                    std::printf("FAIL %s: unmoved group %zu of the chain's "
+                                "points changed
+", what, g);
+                }
+            }
+        }
         for (size_t r = 0; r < chain.revisions.size(); ++r) {
             const auto &revision = chain.revisions[r];
             for (size_t g = 0; g < revision.groups.size(); ++g) {
@@ -8662,6 +8725,90 @@ TestAFreshProgramChecksItsPins()
     std::printf("  a fresh program checks its pins on its first run\n");
 }
 
+/// The Whole keyed skin's speculative buffers (F5). An override repainting
+/// Dual's joint indices stales its partition: the fuse publishes the
+/// whole-array skin from a fresh group buffer while the chunks keep their
+/// last computed results, so group 3 (the only group the repaint moves)
+/// holds a computed and a published buffer that differ. Once the override
+/// lifts, chunk 3 forgets its computed result, recomputes into that buffer
+/// and the fuse publishes it. Twice; every frame's chain, versions and
+/// lines match the chain built whole, and the content-version judge finds
+/// nothing.
+void
+TestAWholeSkinChunkOutlivesAStaleFuse()
+{
+    TfSetenv("RIGEXEC_BAKED_RANGE_CHAINS", "0");
+    const BuiltProgram whole = BuildStage(MakeGroupChainStage());
+    TfUnsetenv("RIGEXEC_BAKED_RANGE_CHAINS");
+    TfSetenv("RIGEXEC_VERIFY_CHAIN_VERSIONS", "1");
+    const BuiltProgram ranged = BuildStage(MakeGroupChainStage());
+    TfSetenv("RIGEXEC_VERIFY_CHAIN_VERSIONS", "0");
+    CHECK(whole.program != nullptr && ranged.program != nullptr);
+    if (!whole.program || !ranged.program) {
+        return;
+    }
+    const RigExecBakedProgramImpl &R = ranged.program->GetStepGraph();
+    const RigExecBakedProgramImpl &W = whole.program->GetStepGraph();
+    if (!GroupChainHasItsRoles(R, /*gates=*/true, "stale fuse") ||
+        W.chains.size() != 1) {
+        return;
+    }
+    constexpr size_t kDual = 4;
+    const RigExecBakedProgramImpl::GeomRevision &dual =
+        R.chains[0].revisions[kDual];
+    const RigExecValueOverride repaint =
+        GroupOverride("/Asset/Rig/Movers/Dual", "rigExec:jointIndices",
+                      VtValue(VtIntArray(10000, 0)));
+    // (frame, whether the repaint stands)
+    const std::pair<double, bool> visits[] = {
+        {4.0, false}, {5.0, true}, {5.0, false}, {6.0, false},
+        {8.0, true},  {8.0, false}, {9.0, false}};
+    int forgotten = 0;
+    for (const auto &[frame, stale] : visits) {
+        const std::vector<RigExecValueOverride> overrides =
+            stale ? std::vector<RigExecValueOverride>{repaint}
+                  : std::vector<RigExecValueOverride>{};
+        for (const BuiltProgram *built : {&whole, &ranged}) {
+            if (stale) {
+                built->evaluator->SetInteractiveOverrides(overrides);
+            } else {
+                built->evaluator->ClearInteractiveOverrides();
+            }
+            CHECK(built->program->SetOverrides(overrides));
+        }
+        const RigExecGroupState<GfVec3f> &three = dual.groups[3];
+        const bool split = three.ownComputed >= 0 &&
+                           three.ownPublished >= 0 &&
+                           three.ownComputed != three.ownPublished;
+        RigExecRigPose rangedPose, wholePose;
+        CHECK(ranged.program->Run(UsdTimeCode(frame), &rangedPose));
+        CHECK(whole.program->Run(UsdTimeCode(frame), &wholePose));
+        if (stale) {
+            // The fuse published group 3 from a buffer of its own.
+            CHECK(three.ownComputed >= 0 && three.ownPublished >= 0 &&
+                  three.ownComputed != three.ownPublished);
+        } else if (split) {
+            ++forgotten;
+            CHECK(RanLastPart(R, RigExecBakedStepKind::RevisionChunk,
+                              R.chainRevisionBegin[0] + int(kDual), 3));
+            CHECK(three.ownComputed >= 0 &&
+                  three.ownComputed == three.ownPublished);
+        }
+        if (!SameBits(R.chains[0].result, W.chains[0].result)) {
+            ++failures;
+            std::printf("FAIL stale fuse frame %g%s: the chain's points "
+                        "differ from the chain built whole\n", frame,
+                        stale ? " (repainted)" : "");
+        }
+        CHECK(EveryVersionAgrees(R, W));
+        CHECK(rangedPose.diagnostics == wholePose.diagnostics);
+    }
+    CHECK(forgotten == 2);
+    CHECK(R.chainVersionMismatches == 0);
+    std::printf("  a Whole skin chunk outlives its stale fuse (%d)\n",
+                forgotten);
+}
+
 }  // namespace
 
 int
@@ -8860,6 +9007,7 @@ main(int argc, char **argv)
         TestGroupChainsMatchTheWholeChain();
         TestGroupStepsRunOnlyMovedGroups();
         TestARebuildAdoptsAGroupChain();
+        TestAWholeSkinChunkOutlivesAStaleFuse();
     }
     {
         // Wave 6 Build: vertex groups, roles, gates and pins of a range
