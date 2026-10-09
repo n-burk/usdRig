@@ -36,10 +36,12 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <limits>
 #include <map>
 #include <memory>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 #include <set>
@@ -1834,11 +1836,13 @@ TestRangeChainPlays()
     }
 }
 
-// Open sets the range role on exactly the file's range-pipelined revisions
-// (unchunked, two or more chunks), each its own point source; and the
-// ranges cut off apart. M0's sparse weight moves points in range 0 alone, so
-// at frame 2 every range of M0 runs and every revision after it in the chain
-// runs its range 0 alone, while nothing before it runs.
+// Open sets the Range role on exactly the file's Range revisions (unchunked,
+// two or more chunks: the chain's vertex groups, ten for 10000 points at the
+// default 1024 per group), each its own point source; and the groups cut off
+// apart. M0's static sparse weight names points in group 0 alone, so M0 is
+// gated to that group's one step, and WireSparse's (points 0 to 3783) to
+// groups 0 to 3. At frame 2 M0's step runs and every revision after it in
+// the chain runs its group 0 alone, while nothing before it runs.
 static void
 TestRangeChainRolesAndCutoff()
 {
@@ -1878,7 +1882,7 @@ TestRangeChainRolesAndCutoff()
             CHECK(role == expected && own == expected);
             if (expected) {
                 ++ranges;
-                CHECK(revision.chunks.size() == 3);
+                CHECK(revision.chunks.size() == 10);
                 position[mover] = r;
             } else {
                 ++wholes;
@@ -1888,6 +1892,26 @@ TestRangeChainRolesAndCutoff()
     // M0, M1, M2, the lattice, Half and the two wires are cut; Small's
     // mover is whole.
     CHECK(ranges == 7 && wholes == 1);
+    // The group steps each cut revision has: one per written group.
+    std::map<std::string, std::set<int>> parts;
+    for (size_t s = 0; s < file->steps.size(); ++s) {
+        const fb::RigExecWireStep &step = file->steps[s];
+        if (step.kind != fb::StepKind::RevisionChunk || step.object < 0 ||
+            size_t(step.object) >= geometry.revisionIndex.size()) {
+            continue;
+        }
+        const auto &at = geometry.revisionIndex[size_t(step.object)];
+        parts[RigExecFormatPathText(*file, geometry.chains[size_t(at.first)]
+                                               .revisions[size_t(at.second)]
+                                               .moverPath)]
+            .insert(step.part);
+    }
+    CHECK(parts["/Asset/Rig/Movers/M0"] == std::set<int>({0}));
+    CHECK(parts["/Asset/Rig/Movers/WireSparse"] ==
+          std::set<int>({0, 1, 2, 3}));
+    for (const char *ungated : {"M1", "M2", "Lattice", "Half", "WireDense"}) {
+        CHECK(parts[std::string("/Asset/Rig/Movers/") + ungated].size() == 10);
+    }
     const auto first = position.find("/Asset/Rig/Movers/M0");
     CHECK(first != position.end());
     if (ranges != 7 || first == position.end()) {
@@ -1925,8 +1949,437 @@ TestRangeChainRolesAndCutoff()
         }
         ++checked;
     }
-    CHECK(checked == 21);
-    std::printf("%s: %zu range step(s) checked\n", name, checked);
+    // 1 + 4 gated steps and 10 for each of the other five.
+    CHECK(checked == 55);
+    std::printf("%s: %zu group step(s) checked\n", name, checked);
+}
+
+// Holds an environment knob for a scope, restoring it on exit; Build reads
+// the baked program's knobs, so a bake inside the scope sees it.
+struct _ScopedEnv {
+    _ScopedEnv(const char *name, const char *value)
+        : _name(name), _old(TfGetenv(name))
+    {
+        TfSetenv(_name, value);
+    }
+    ~_ScopedEnv()
+    {
+        if (_old.empty()) {
+            TfUnsetenv(_name);
+        } else {
+            TfSetenv(_name, _old);
+        }
+    }
+    _ScopedEnv(const _ScopedEnv &) = delete;
+    _ScopedEnv &operator=(const _ScopedEnv &) = delete;
+    std::string _name;
+    std::string _old;
+};
+
+struct _GroupChainOptions {
+    // Every control but J3 stands still; J3 moves at every frame.
+    bool onlyJ3 = false;
+    // Middle's inputs:defaultWeight leaves [0, 1] at frame 2 only.
+    bool failMiddle = false;
+};
+
+// A chain of 64 points that, under RIGEXEC_BAKED_CHUNK_VERTS=16 and
+// RIGEXEC_BAKED_GROUP_VERTS=8, is cut into eight vertex groups of eight
+// points: Blend, a target-space blend shape (Range); Linear, a classicLinear
+// skin whose point i follows joint J(i / 8) alone, so that group g's key is
+// {g} (a Range skin); Gated, a matrix mover under a static sparse weight
+// with a zero default over points 1 to 5, all in group 0 (Range, gated to
+// group 0); Middle, a full-strength matrix mover (Range); and Dual, a
+// dualQuaternion skin on Root (Whole: eight keyed speculative chunks).
+// J3 moves at frames 1 to 3; the other animated controls and the blend
+// weight move too unless \p options.onlyJ3.
+static UsdStageRefPtr
+_GroupChainStage(const _GroupChainOptions &options)
+{
+    const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    stage->SetStartTimeCode(1.0);
+    stage->SetEndTimeCode(3.0);
+    stage->DefinePrim(SdfPath("/Asset"), TfToken("Scope"));
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    stage->DefinePrim(SdfPath("/Asset/Rig/Controls"), TfToken("Scope"));
+    const bool all = !options.onlyJ3;
+    // A control whose avar takes \p values at frames 1 to 3 when
+    // \p animated, else holds \p values[0] as its default.
+    const auto control = [&](const std::string &name, const char *avar,
+                             const std::array<double, 3> &values,
+                             bool animated) {
+        const UsdPrim prim = stage->DefinePrim(
+            SdfPath("/Asset/Rig/Controls/" + name), TfToken("RigExecControl"));
+        const UsdAttribute attribute =
+            prim.CreateAttribute(TfToken(avar), SdfValueTypeNames->Double);
+        if (!animated) {
+            attribute.Set(values[0]);
+            return prim;
+        }
+        for (size_t f = 0; f < values.size(); ++f) {
+            attribute.Set(values[f], UsdTimeCode(double(f + 1)));
+        }
+        return prim;
+    };
+    const UsdPrim root = control("Root", "avars:tx", {0.5, 1.0, 1.5}, all);
+    const UsdPrim gate = control("Gate", "avars:tz", {0.25, 0.75, -0.5}, all);
+    const UsdPrim still = control("Still", "avars:ty", {1.0, 1.0, 1.0}, false);
+    SdfPathVector joints;
+    for (int j = 0; j < 8; ++j) {
+        const double ty = 0.25 * double(j);
+        joints.push_back(control("J" + std::to_string(j), "avars:ty",
+                                 {ty, ty + 0.5, ty - 0.5}, j == 3)
+                             .GetPath());
+    }
+
+    const SdfPath target("/Asset/Geom/Body.points");
+    VtVec3fArray points(64), lifted(64);
+    for (size_t i = 0; i < points.size(); ++i) {
+        points[i] = GfVec3f(0.125f * float(i % 8), 0.25f * float(i / 8),
+                            0.0625f * float(i % 5));
+        lifted[i] = points[i] +
+                    GfVec3f(0.0f, 0.0f, 0.5f + 0.03125f * float(i % 4));
+    }
+    stage->DefinePrim(target.GetPrimPath(), TfToken("Points"))
+        .GetAttribute(TfToken("points"))
+        .Set(points);
+    stage->DefinePrim(SdfPath("/Asset/Targets/Lifted"), TfToken("Points"))
+        .CreateAttribute(TfToken("points"), SdfValueTypeNames->Point3fArray)
+        .Set(lifted);
+
+    const UsdPrim input = stage->DefinePrim(
+        SdfPath("/Asset/Rig/BlendInputs/Lift"), TfToken("RigExecBlendInput"));
+    const UsdAttribute weight = input.GetAttribute(TfToken("inputs:weight"));
+    if (all) {
+        weight.Set(0.25f, UsdTimeCode(1.0));
+        weight.Set(0.5f, UsdTimeCode(2.0));
+        weight.Set(0.75f, UsdTimeCode(3.0));
+    } else {
+        weight.Set(0.5f);
+    }
+    const UsdPrim sample = stage->DefinePrim(
+        input.GetPath().AppendChild(TfToken("Full")),
+        TfToken("RigExecBlendSample"));
+    sample.CreateRelationship(TfToken("rigExec:targetPoints"))
+        .SetTargets({SdfPath("/Asset/Targets/Lifted.points")});
+    sample.GetAttribute(TfToken("rigExec:activation")).Set(1.0f);
+    input.CreateRelationship(TfToken("rigExec:samples"))
+        .SetTargets({sample.GetPath()});
+
+    const UsdPrim face = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Weights/Face"), TfToken("RigExecStaticWeight"));
+    face.CreateRelationship(TfToken("rigExec:weightTarget"), false)
+        .SetTargets({target});
+    face.CreateAttribute(TfToken("rigExec:representation"),
+                         SdfValueTypeNames->Token, false)
+        .Set(TfToken("sparse"));
+    face.CreateAttribute(TfToken("rigExec:indices"),
+                         SdfValueTypeNames->IntArray, false)
+        .Set(VtIntArray{1, 2, 3, 4, 5});
+    face.CreateAttribute(TfToken("rigExec:values"),
+                         SdfValueTypeNames->FloatArray, false)
+        .Set(VtFloatArray{0.25f, 0.5f, 0.75f, 1.0f, 0.5f});
+    face.CreateAttribute(TfToken("rigExec:defaultWeight"),
+                         SdfValueTypeNames->Float, false)
+        .Set(0.0f);
+
+    stage->DefinePrim(SdfPath("/Asset/Rig/Movers"), TfToken("Scope"));
+    const auto mover = [&](const char *name, const char *type) {
+        const UsdPrim prim = stage->DefinePrim(
+            SdfPath("/Asset/Rig/Movers").AppendChild(TfToken(name)),
+            TfToken(type));
+        prim.ApplyAPI(TfToken("RigExecMoverAPI"));
+        prim.GetRelationship(TfToken("rigExec:moves")).SetTargets({target});
+        return prim;
+    };
+    // A skin of every point on \p influences, point i on influence
+    // \p indexOf(i) at full weight.
+    const auto skin = [&](const char *name, const char *method,
+                          const SdfPathVector &influences,
+                          const std::function<int(size_t)> &indexOf) {
+        const UsdPrim prim = mover(name, "RigExecSkinMover");
+        prim.GetAttribute(TfToken("inputs:defaultWeight")).Set(1.0f);
+        prim.CreateRelationship(TfToken("rigExec:influences"))
+            .SetTargets(influences);
+        prim.CreateAttribute(TfToken("rigExec:elementSize"),
+                             SdfValueTypeNames->Int)
+            .Set(1);
+        prim.CreateAttribute(TfToken("rigExec:skinningMethod"),
+                             SdfValueTypeNames->Token)
+            .Set(TfToken(method));
+        VtIntArray indices(points.size());
+        for (size_t i = 0; i < indices.size(); ++i) {
+            indices[i] = indexOf(i);
+        }
+        prim.CreateAttribute(TfToken("rigExec:jointIndices"),
+                             SdfValueTypeNames->IntArray)
+            .Set(indices);
+        prim.CreateAttribute(TfToken("rigExec:jointWeights"),
+                             SdfValueTypeNames->FloatArray)
+            .Set(VtFloatArray(points.size(), 1.0f));
+    };
+
+    const UsdPrim blend = mover("Blend", "RigExecBlendShapeMover");
+    blend.GetAttribute(TfToken("inputs:defaultWeight")).Set(1.0f);
+    blend.CreateRelationship(TfToken("rigExec:blendInputs"))
+        .SetTargets({input.GetPath()});
+    skin("Linear", "classicLinear", joints,
+         [](size_t i) { return int(i / 8); });
+    const UsdPrim gated = mover("Gated", "RigExecMatrixMover");
+    gated.GetRelationship(TfToken("rigExec:transform"))
+        .SetTargets({gate.GetPath()});
+    gated.CreateRelationship(TfToken("rigExec:weightObject"), false)
+        .SetTargets({face.GetPath()});
+    const UsdPrim middle = mover("Middle", "RigExecMatrixMover");
+    middle.GetRelationship(TfToken("rigExec:transform"))
+        .SetTargets({still.GetPath()});
+    UsdAttribute middleWeight =
+        middle.GetAttribute(TfToken("inputs:defaultWeight"));
+    if (options.failMiddle) {
+        middleWeight.Set(1.0f, UsdTimeCode(1.0));
+        middleWeight.Set(2.0f, UsdTimeCode(2.0));
+        middleWeight.Set(1.0f, UsdTimeCode(3.0));
+    } else {
+        middleWeight.Set(1.0f);
+    }
+    skin("Dual", "dualQuaternion", {root.GetPath()},
+         [](size_t) { return 0; });
+    return stage;
+}
+
+// A chain with vertex groups plays as the native program runs it -- points
+// and ordered diagnostics bit for bit -- under RIGEXEC_VERIFY_CHAIN_VERSIONS,
+// which fails any run whose group, join or fuse versions and their bytes
+// disagree on a change: Middle passes through at frame 2 and recovers, and
+// the Range skin, the target blend, the gated mover and the Whole skin move
+// around it; and with J3 alone moving.
+static void
+TestGroupChainPlays()
+{
+    const _ScopedEnv chunks("RIGEXEC_BAKED_CHUNK_VERTS", "16");
+    const _ScopedEnv groups("RIGEXEC_BAKED_GROUP_VERTS", "8");
+    const _ScopedEnv verify("RIGEXEC_VERIFY_CHAIN_VERSIONS", "1");
+    _GroupChainOptions failing;
+    failing.failMiddle = true;
+    _TestStage("group chain passes through and recovers",
+               _GroupChainStage(failing), {1, 2, 3, 2, 1, 3});
+    _GroupChainOptions one;
+    one.onlyJ3 = true;
+    _TestStage("group chain moves one joint", _GroupChainStage(one),
+               {1, 2, 3, 1});
+}
+
+// The file's format-20 roles as Open reads them, and the per-group cutoff.
+// Blend, Linear, Gated and Middle are Range (unchunked, the eight groups),
+// Linear's chunk g keyed {g}; Gated has its group 0 step alone; Dual is a
+// Whole keyed skin whose published groups follow its eight chunks. J3 moves
+// group 3's points alone, so at frame 2 Linear runs its group 3 step and
+// every revision after it in the chain its group 3 step (Gated has none),
+// Dual's fuse runs exactly when Dual follows Linear, and nothing before
+// Linear runs.
+static void
+TestGroupChainRolesAndCutoff()
+{
+    const char *const name = "group chain roles and cutoff";
+    const _ScopedEnv chunks("RIGEXEC_BAKED_CHUNK_VERTS", "16");
+    const _ScopedEnv groups("RIGEXEC_BAKED_GROUP_VERTS", "8");
+    _GroupChainOptions options;
+    options.onlyJ3 = true;
+    const UsdStageRefPtr stage = _GroupChainStage(options);
+    std::vector<uint8_t> bytes;
+    std::string error;
+    {
+        RigExecRigEvaluator baker(stage, SdfPath("/Asset/Rig"));
+        CHECK(RigExecTestBakeAt(baker, 1.0, &bytes, &error));
+    }
+    const std::unique_ptr<fb::RigExecWireFile> file = RigExecTestUnpack(bytes);
+    RigExecTestPlayer player;
+    const bool opened =
+        file && file->geometry && player.Open(bytes, stage, &error);
+    CHECK(opened);
+    if (!opened) {
+        std::printf("%s: FAILED (%s)\n", name, error.c_str());
+        return;
+    }
+    const fb::RigExecWireDomainGeometry &geometry = *file->geometry;
+    const std::string movers = "/Asset/Rig/Movers/";
+    // Each mover's chain position, revision and revision id.
+    std::map<std::string, size_t> position;
+    std::map<std::string, const fb::RigExecWireRevision *> revisionOf;
+    std::map<std::string, size_t> idOf;
+    size_t body = 0;
+    for (size_t id = 0; id < geometry.revisionIndex.size(); ++id) {
+        const auto &at = geometry.revisionIndex[id];
+        const fb::RigExecWireRevision &revision =
+            geometry.chains[size_t(at.first)].revisions[size_t(at.second)];
+        const std::string mover =
+            RigExecFormatPathText(*file, revision.moverPath);
+        if (mover.rfind(movers, 0) != 0) {
+            continue;
+        }
+        position[mover] = size_t(at.second);
+        revisionOf[mover] = &revision;
+        idOf[mover] = id;
+        body = size_t(at.first);
+    }
+    CHECK(position.size() == 5);
+    if (position.size() != 5) {
+        std::printf("%s: FAILED (%zu mover(s))\n", name, position.size());
+        return;
+    }
+    CHECK(RigExecFormatChainGroups(*file, body) == 8);
+    for (const char *range : {"Blend", "Linear", "Gated", "Middle"}) {
+        const std::string mover = movers + range;
+        const fb::RigExecWireRevision &revision = *revisionOf[mover];
+        CHECK(RigExecFormatIsRangeRevision(revision) &&
+              revision.chunks.size() == 8);
+        bool role = false, own = false;
+        CHECK(player->GetRangeRoleForTesting(mover, &role, &own) && role &&
+              own);
+    }
+    const fb::RigExecWireRevision &linear = *revisionOf[movers + "Linear"];
+    CHECK(RigExecFormatIsKeyedRevision(linear));
+    for (size_t g = 0; g < linear.chunks.size(); ++g) {
+        CHECK(linear.chunks[g].key == std::vector<int32_t>{int32_t(g)});
+    }
+    const fb::RigExecWireRevision &dual = *revisionOf[movers + "Dual"];
+    const size_t dualId = idOf[movers + "Dual"];
+    CHECK(dual.chunked && dual.chunks.size() == 8);
+    CHECK(dualId < geometry.revisionChunkCount.size() &&
+          geometry.revisionChunkCount[dualId] == 16);
+    {
+        bool role = true, own = false;
+        CHECK(player->GetRangeRoleForTesting(movers + "Dual", &role, &own) &&
+              !role && own);
+    }
+    // One step per written group: Gated has group 0's alone.
+    std::map<std::string, std::set<int>> parts;
+    for (const fb::RigExecWireStep &step : file->steps) {
+        if (step.kind != fb::StepKind::RevisionChunk || step.object < 0 ||
+            size_t(step.object) >= geometry.revisionIndex.size()) {
+            continue;
+        }
+        const auto &at = geometry.revisionIndex[size_t(step.object)];
+        parts[RigExecFormatPathText(*file, geometry.chains[size_t(at.first)]
+                                               .revisions[size_t(at.second)]
+                                               .moverPath)]
+            .insert(step.part);
+    }
+    CHECK(parts[movers + "Gated"] == std::set<int>({0}));
+    for (const char *every : {"Blend", "Linear", "Middle", "Dual"}) {
+        CHECK(parts[movers + every].size() == 8);
+    }
+    // A file whose Whole fuse misses one group write is refused at Open.
+    const uint32_t lastGroup = uint32_t(dual.chunkBase) + 15;
+    const std::vector<uint8_t> missing =
+        RigExecTestEdited(bytes, [&](fb::RigExecWireFile *edited) {
+            for (fb::RigExecWireStep &step : edited->steps) {
+                if (step.kind != fb::StepKind::RevisionFuse ||
+                    step.object != int32_t(dualId)) {
+                    continue;
+                }
+                std::vector<fb::SlotRange> writes;
+                for (const fb::SlotRange &range : step.writes) {
+                    if (range.domain() != fb::SlotDomain::RevisionOut ||
+                        lastGroup < range.begin() ||
+                        lastGroup >= range.end()) {
+                        writes.push_back(range);
+                        continue;
+                    }
+                    if (range.begin() < lastGroup) {
+                        writes.push_back(fb::SlotRange(range.domain(),
+                                                       range.begin(),
+                                                       lastGroup));
+                    }
+                    if (lastGroup + 1 < range.end()) {
+                        writes.push_back(fb::SlotRange(
+                            range.domain(), lastGroup + 1, range.end()));
+                    }
+                }
+                step.writes = std::move(writes);
+            }
+        });
+    {
+        std::string refused;
+        CHECK(!missing.empty() &&
+              !RigExecRuntimeReader::Open(missing.data(), missing.size(),
+                                          &refused));
+    }
+
+    CHECK(player.Play(1.0, &error));
+    CHECK(player.Play(2.0, &error));
+    const size_t linearAt = position[movers + "Linear"];
+    size_t checked = 0;
+    for (size_t s = 0; s < file->steps.size(); ++s) {
+        const fb::RigExecWireStep &step = file->steps[s];
+        if ((step.kind != fb::StepKind::RevisionChunk &&
+             step.kind != fb::StepKind::RevisionFuse) ||
+            step.object < 0 ||
+            size_t(step.object) >= geometry.revisionIndex.size()) {
+            continue;
+        }
+        const auto &at = geometry.revisionIndex[size_t(step.object)];
+        const std::string mover = RigExecFormatPathText(
+            *file, geometry.chains[size_t(at.first)]
+                       .revisions[size_t(at.second)]
+                       .moverPath);
+        const auto found = position.find(mover);
+        if (found == position.end()) {
+            continue;
+        }
+        bool want = false;
+        if (step.kind == fb::StepKind::RevisionChunk) {
+            want = found->second >= linearAt && step.part == 3;
+        } else if (mover == movers + "Dual") {
+            want = found->second > linearAt;
+        } else {
+            continue;
+        }
+        const bool ran = player->GetStepRanForTesting(s);
+        CHECK(ran == want);
+        if (ran != want) {
+            std::printf("%s: %s %s %d %s at frame 2\n", name, mover.c_str(),
+                        step.kind == fb::StepKind::RevisionFuse ? "fuse"
+                                                                : "group",
+                        int(step.part), ran ? "ran" : "did not run");
+        }
+        ++checked;
+    }
+    // 8 + 8 + 1 + 8 + 8 group steps and Dual's fuse.
+    CHECK(checked == 34);
+    std::printf("%s: %zu step(s) checked\n", name, checked);
+}
+
+// The epilogue shares each published array with its producer: the weight
+// field and the moved points maps hold handles, so publishing copies no
+// values (the reader API copies once).
+static void
+TestEpilogueSharesPublications()
+{
+    static_assert(
+        std::is_same<decltype(RrWeightFieldPublish::weights),
+                     RrRetainedArray<float>>::value,
+        "a published weight field shares its producer's array");
+    static_assert(
+        std::is_same<decltype(RrStore::movedProperties)::mapped_type,
+                     RrRetainedArray<RrVec3f>>::value,
+        "published points share their producer's array");
+    RrRetainedArray<float> field;
+    field.Write().assign(4, 0.5f);
+    RrWeightFieldPublish published;
+    published.weights = field;
+    CHECK(published.weights.data() == field.data());
+    RrRetainedArray<RrVec3f> result;
+    std::vector<RrVec3f> spare(3, RrVec3f(1, 2, 3));
+    result.swap(spare);
+    std::map<uint32_t, RrRetainedArray<RrVec3f>> moved;
+    moved[7] = result;
+    CHECK(moved[7].data() == result.data());
+    // The producer's next swap leaves the publication its own bytes.
+    std::vector<RrVec3f> next(3, RrVec3f(4, 5, 6));
+    result.swap(next);
+    CHECK(moved[7].Read()[0] == RrVec3f(1, 2, 3));
+    CHECK(result.Read()[0] == RrVec3f(4, 5, 6));
 }
 
 // A current-phase field the oracle fails to resolve: the combine's
@@ -3357,103 +3810,144 @@ TestDynamicSupportFromSlots()
     std::printf("%s: checked\n", name);
 }
 
-// A chunked skin's layout as inputs (the two-key skin, chunked at two
-// vertices): a repaint of its indices runs the revision whole and plays as
-// the session edit does with J1 moved, a weights-only set keeps the chunks,
-// and a reset returns the Open layout and the partition.
+// A skin's layout as inputs on a chain with vertex groups (the two-key
+// skin's four points, RIGEXEC_BAKED_CHUNK_VERTS and RIGEXEC_BAKED_GROUP_VERTS
+// at 2: two groups). The classicLinear skin is a Range skin there: its
+// element size and joint indices are constants of the file (private slots,
+// not inputs), so setting the indices by name is refused, while a
+// weights-only set keeps the partition and plays as the session edit does.
+// A dualQuaternion skin is Whole (a full-strength matrix mover gives its
+// chain the groups) and keeps its layout inputs: a repaint of its indices
+// runs it whole and plays as the session edit does with J1 moved, and a
+// reset returns the Open layout and the partition.
 static void
 TestLayoutSetOnChunkedRevision()
 {
-    const char *const name = "chunked layout inputs";
-    const std::string always = TfGetenv("RIGEXEC_BAKED_CHUNK_ALWAYS");
-    const std::string verts = TfGetenv("RIGEXEC_BAKED_CHUNK_VERTS");
-    TfSetenv("RIGEXEC_BAKED_CHUNK_ALWAYS", "1");
-    TfSetenv("RIGEXEC_BAKED_CHUNK_VERTS", "2");
+    const char *const name = "group chain layout inputs";
+    const _ScopedEnv always("RIGEXEC_BAKED_CHUNK_ALWAYS", "1");
+    const _ScopedEnv verts("RIGEXEC_BAKED_CHUNK_VERTS", "2");
+    const _ScopedEnv groups("RIGEXEC_BAKED_GROUP_VERTS", "2");
     const std::string skin = "/Asset/Rig/Movers/Skin";
     const std::string indices = skin + ".rigExec:jointIndices";
     const std::string weights = skin + ".rigExec:jointWeights";
     const std::string j1 = "/Asset/Rig/J1.avars:ty";
-    const UsdStageRefPtr stage = _TwoKeySkinStage();
     const SdfPath rigPath("/Asset/Rig");
-    std::vector<uint8_t> bytes;
-    std::string error;
-    {
-        RigExecRigEvaluator evaluator(stage, rigPath);
-        CHECK(RigExecTestBakeAt(evaluator, 1.0, &bytes, &error));
-    }
-    // The chunked revision's layout arrays are its inputs, defaulting to
-    // the stored layout.
-    int listed = 0;
-    if (const std::unique_ptr<fb::RigExecWireFile> file =
-            RigExecTestUnpack(bytes)) {
+    // The skin's revision in \p bytes: whether it is a Range skin, or a
+    // Whole keyed skin whose published groups follow its two chunks, and
+    // whether its layout slots are listed inputs.
+    struct Layout {
+        bool found = false, range = false, whole = false;
+        bool indicesListed = false, weightsListed = false;
+    };
+    const auto layoutOf = [&](const std::vector<uint8_t> &bytes) {
+        Layout layout;
+        const std::unique_ptr<fb::RigExecWireFile> file =
+            RigExecTestUnpack(bytes);
+        if (!file || !file->geometry) {
+            return layout;
+        }
         const auto &geometry = *file->geometry;
         for (size_t id = 0; id < geometry.revisionIndex.size(); ++id) {
             const auto &at = geometry.revisionIndex[id];
             const fb::RigExecWireRevision &revision =
                 geometry.chains[size_t(at.first)]
                     .revisions[size_t(at.second)];
-            const int64_t i = RigExecTestSlotOf(*file, indices);
-            const int64_t w = RigExecTestSlotOf(*file, weights);
-            if (RigExecFormatPathText(*file, revision.moverPath) != skin ||
-                !revision.chunked || !revision.topologyResolved || i < 0 ||
-                w < 0 || revision.jointIndicesSlot != i ||
-                revision.jointWeightsSlot != w) {
+            if (RigExecFormatPathText(*file, revision.moverPath) != skin) {
                 continue;
             }
-            const fb::RigExecWireValue &a =
-                file->values[file->inputs[size_t(i)].value()];
-            const fb::RigExecWireValue &b =
-                file->values[file->inputs[size_t(w)].value()];
-            if (a.arraySource == fb::ArraySource::SkinIndices &&
-                b.arraySource == fb::ArraySource::SkinWeights &&
-                a.array == id && b.array == id) {
-                ++listed;
-            }
+            layout.found = true;
+            layout.range = RigExecFormatIsRangeRevision(revision) &&
+                           RigExecFormatIsKeyedRevision(revision) &&
+                           revision.chunks.size() == 2;
+            layout.whole =
+                revision.chunked && revision.chunks.size() == 2 &&
+                RigExecFormatChainGroups(*file, size_t(at.first)) == 2 &&
+                id < geometry.revisionChunkCount.size() &&
+                geometry.revisionChunkCount[id] == 4;
+        }
+        const int64_t i = RigExecTestSlotOf(*file, indices);
+        const int64_t w = RigExecTestSlotOf(*file, weights);
+        layout.indicesListed =
+            i >= 0 && uint64_t(i) < uint64_t(file->listedInputs);
+        layout.weightsListed =
+            w >= 0 && uint64_t(w) < uint64_t(file->listedInputs);
+        return layout;
+    };
+    std::string error;
+
+    // classicLinear: a Range skin with constant indices.
+    {
+        const UsdStageRefPtr stage = _TwoKeySkinStage();
+        std::vector<uint8_t> bytes;
+        {
+            RigExecRigEvaluator evaluator(stage, rigPath);
+            CHECK(RigExecTestBakeAt(evaluator, 1.0, &bytes, &error));
+        }
+        const Layout layout = layoutOf(bytes);
+        CHECK(layout.found && layout.range && !layout.whole);
+        CHECK(!layout.indicesListed && layout.weightsListed);
+        std::unique_ptr<RigExecRuntimeReader> reader =
+            layout.range ? _ArrayReader(name, bytes) : nullptr;
+        if (reader) {
+            size_t at = 0;
+            CHECK(!reader->FindInput(indices, &at));
+            CHECK(reader->FindInput(weights, &at));
+            // Weights alone: the partition's indices stand, so the groups
+            // run.
+            CHECK(_ArraySetsMatch(
+                name, "linear, weights only", stage, rigPath, reader.get(),
+                {{weights, VtValue(VtFloatArray{0.5f, 1.0f, 1.0f, 0.25f}),
+                  false}}));
+            CHECK(!reader->GetPartitionStaleForTesting(skin) &&
+                  !reader->GetSkinLayoutIsOpenForTesting(skin));
         }
     }
-    CHECK(listed == 1);
-    std::unique_ptr<RigExecRuntimeReader> reader =
-        listed == 1 ? _ArrayReader(name, bytes) : nullptr;
-    if (reader) {
-        CHECK(!reader->GetPartitionStaleForTesting(skin) &&
-              reader->GetSkinLayoutIsOpenForTesting(skin));
-        // A repaint: the partition holds other indices, so the revision
-        // runs whole, and only J1 moves the points.
-        CHECK(_ArraySetsMatch(name, "repainted, J1 moved", stage, rigPath,
-                              reader.get(),
-                              {{indices, VtValue(VtIntArray{1, 1, 1, 1}),
-                                false},
-                               {j1, VtValue(25.0), false}}));
-        CHECK(reader->GetPartitionStaleForTesting(skin) &&
-              !reader->GetSkinLayoutIsOpenForTesting(skin));
-        // Back to the file's layout: the Open one, and the chunks run.
-        CHECK(reader->ResetInput(indices, &error) &&
-              reader->Execute(&error));
-        CHECK(!reader->GetPartitionStaleForTesting(skin) &&
-              reader->GetSkinLayoutIsOpenForTesting(skin));
-    }
-    std::unique_ptr<RigExecRuntimeReader> weighted =
-        listed == 1 ? _ArrayReader(name, bytes) : nullptr;
-    if (weighted) {
-        // Weights alone: the partition's indices stand, so the chunks run.
-        CHECK(_ArraySetsMatch(
-            name, "weights only", stage, rigPath, weighted.get(),
-            {{weights, VtValue(VtFloatArray{0.5f, 1.0f, 1.0f, 0.25f}),
-              false}}));
-        CHECK(!weighted->GetPartitionStaleForTesting(skin) &&
-              !weighted->GetSkinLayoutIsOpenForTesting(skin));
+
+    // dualQuaternion: a Whole keyed skin whose layout stays inputs.
+    {
+        const UsdStageRefPtr stage = _TwoKeySkinStage();
+        stage->GetPrimAtPath(SdfPath(skin))
+            .CreateAttribute(TfToken("rigExec:skinningMethod"),
+                             SdfValueTypeNames->Token)
+            .Set(TfToken("dualQuaternion"));
+        const UsdPrim lift = stage->DefinePrim(
+            SdfPath("/Asset/Rig/Movers/Lift"), TfToken("RigExecMatrixMover"));
+        lift.ApplyAPI(TfToken("RigExecMoverAPI"));
+        lift.GetRelationship(TfToken("rigExec:moves"))
+            .SetTargets({SdfPath("/Asset/Geom/Mesh.points")});
+        lift.GetRelationship(TfToken("rigExec:transform"))
+            .SetTargets({SdfPath("/Asset/Rig/J0")});
+        lift.GetAttribute(TfToken("inputs:defaultWeight")).Set(1.0f);
+        std::vector<uint8_t> bytes;
+        {
+            RigExecRigEvaluator evaluator(stage, rigPath);
+            CHECK(RigExecTestBakeAt(evaluator, 1.0, &bytes, &error));
+        }
+        const Layout layout = layoutOf(bytes);
+        CHECK(layout.found && layout.whole && !layout.range);
+        CHECK(layout.indicesListed && layout.weightsListed);
+        std::unique_ptr<RigExecRuntimeReader> reader =
+            layout.whole ? _ArrayReader(name, bytes) : nullptr;
+        if (reader) {
+            CHECK(!reader->GetPartitionStaleForTesting(skin) &&
+                  reader->GetSkinLayoutIsOpenForTesting(skin));
+            // A repaint: the partition holds other indices, so the
+            // revision runs whole, and only J1 moves the points.
+            CHECK(_ArraySetsMatch(name, "dual, repainted, J1 moved", stage,
+                                  rigPath, reader.get(),
+                                  {{indices, VtValue(VtIntArray{1, 1, 1, 1}),
+                                    false},
+                                   {j1, VtValue(25.0), false}}));
+            CHECK(reader->GetPartitionStaleForTesting(skin) &&
+                  !reader->GetSkinLayoutIsOpenForTesting(skin));
+            // Back to the file's layout: the Open one, and the chunks run.
+            CHECK(reader->ResetInput(indices, &error) &&
+                  reader->Execute(&error));
+            CHECK(!reader->GetPartitionStaleForTesting(skin) &&
+                  reader->GetSkinLayoutIsOpenForTesting(skin));
+        }
     }
     std::printf("%s: checked\n", name);
-    if (always.empty()) {
-        TfUnsetenv("RIGEXEC_BAKED_CHUNK_ALWAYS");
-    } else {
-        TfSetenv("RIGEXEC_BAKED_CHUNK_ALWAYS", always);
-    }
-    if (verts.empty()) {
-        TfUnsetenv("RIGEXEC_BAKED_CHUNK_VERTS");
-    } else {
-        TfSetenv("RIGEXEC_BAKED_CHUNK_VERTS", verts);
-    }
 }
 
 // The C runtime's environment, the one std::getenv reads (TfSetenv on
@@ -4116,6 +4610,9 @@ main(int argc, char **argv)
     TestChainPointVersions();
     TestRangeChainPlays();
     TestRangeChainRolesAndCutoff();
+    TestGroupChainPlays();
+    TestGroupChainRolesAndCutoff();
+    TestEpilogueSharesPublications();
     TestPacketArrayVersions();
     TestGeometryDomainArm();
     TestCurrentPhaseThroughCombine();

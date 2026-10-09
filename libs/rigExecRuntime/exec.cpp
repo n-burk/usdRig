@@ -641,7 +641,7 @@ RigExecRuntimeReader::Execute(std::string *error)
     for (const auto &entry : store.movedProperties) {
         RigExecRuntimePoints moved;
         moved.path = program.TextOrEmpty(entry.first);
-        moved.points = entry.second;
+        moved.points = entry.second.Read();
         points.push_back(std::move(moved));
     }
     std::vector<RigExecRuntimeMatrixPrimvar> matrixPrimvars;
@@ -674,9 +674,13 @@ RigExecRuntimeReader::Execute(std::string *error)
         RigExecRuntimeWeightField field;
         field.path = program.TextOrEmpty(entry.first);
         field.target = program.TextOrEmpty(entry.second.target);
-        field.weights = entry.second.weights;
+        field.weights = entry.second.weights.Read();
         weightFieldsOut.push_back(std::move(field));
     }
+    // The API holds its copies now: releasing the epilogue's shares leaves
+    // the producers' buffers unique, so the next run's swaps reuse them.
+    store.movedProperties.clear();
+    store.weightFields.clear();
     _SortByPath(&jointMatrices);
     _SortByPath(&points);
     _SortByPath(&matrixPrimvars);

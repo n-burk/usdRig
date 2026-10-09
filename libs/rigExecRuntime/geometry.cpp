@@ -16,6 +16,7 @@
 #include "rigExecRuntime/store.h"
 #include "rigExecMath/deltaMushKernel.h"
 #include "rigExecMath/latticeKernel.h"
+#include "rigExecMath/pointBlocks.h"
 #include "rigExecMath/pointRanges.h"
 #include "rigExecMath/surfaceKernelCache.h"
 #include "rigExecMath/wireKernelCache.h"
@@ -1005,13 +1006,13 @@ RrGeoMatrixKernelAccepts(const RrGeoMoverParameters &p, size_t count,
 }
 
 // The sparse walk's entries [kBegin, kEnd), applied in place to \p data: the
-// one loop the whole kernel runs over every entry and a range over the
-// entries whose indices fall in it. The radial arc's per-weight memo only
-// skips recomputing a pure function of the weight, so where a walk starts
-// changes no bit.
+// one loop the whole kernel runs over every entry and a group over the
+// entries whose indices fall in it, \p data[index - offset] holding point
+// index. The radial arc's per-weight memo only skips recomputing a pure
+// function of the weight, so where a walk starts changes no bit.
 void
 RrGeoApplyMatrixSparseWalk(const RrGeoMoverParameters &p, size_t kBegin,
-                           size_t kEnd, RrVec3f *data)
+                           size_t kEnd, RrVec3f *data, size_t offset = 0)
 {
     const RrGeoWeightPacket &w = p.weights;
     if (p.radialWeight) {
@@ -1037,14 +1038,14 @@ RrGeoApplyMatrixSparseWalk(const RrGeoMoverParameters &p, size_t kBegin,
                 }
                 cachedWeight = value;
             }
-            RrVec3f &point = data[size_t(w.Indices()[k])];
+            RrVec3f &point = data[size_t(w.Indices()[k]) - offset];
             point = RrGeoToVec3f(
                 partial.TransformAffine(RrGeoToVec3d(point)));
         }
         return;
     }
     for (size_t k = kBegin; k < kEnd; ++k) {
-        RrVec3f &point = data[size_t(w.Indices()[k])];
+        RrVec3f &point = data[size_t(w.Indices()[k]) - offset];
         point = RrGeoToVec3f(RrGeoApplyWeightedMatrix(
             RrGeoToVec3d(point), p.transform, w.Values()[k]));
     }
@@ -2135,25 +2136,24 @@ RrGeoApplyWireBasis(std::vector<RrVec3f> *points,
     return true;
 }
 
-// RrGeoApplyWireBasis over the points in [begin, end) only
-// (RigExecApplyWireBasisRange): every control point in the same order,
-// applying only the entries whose index falls in the range, so each point
+// RrGeoApplyWireBasis over the points in [begin, end) only, held in a
+// group's own buffer (RigExecApplyWireBasisGroup): \p out[k] is point
+// begin + k, seeded by the caller; every control point in the same order,
+// applying only the entries whose index falls in the group, so each point
 // receives the same additions in the same order as from the whole call.
 bool
-RrGeoApplyWireBasisRange(std::vector<RrVec3f> *points,
-                        const RrGeoWireBasis &basis,
-                        const std::vector<int> &indices,
-                        const std::vector<float> &weights,
-                        const std::vector<RrVec3f> &restControlPoints,
-                        const std::vector<RrVec3f> &posedControlPoints,
-                        size_t begin, size_t end)
+RrGeoApplyWireBasisGroup(RrVec3f *out, size_t begin, size_t end,
+                         const RrGeoWireBasis &basis,
+                         const std::vector<int> &indices,
+                         const std::vector<float> &weights,
+                         const std::vector<RrVec3f> &restControlPoints,
+                         const std::vector<RrVec3f> &posedControlPoints)
 {
     const size_t n = basis.byControlPoint.size();
-    if (!points || restControlPoints.size() != n ||
+    if (!out || restControlPoints.size() != n ||
         posedControlPoints.size() != n || indices.size() != weights.size()) {
         return false;
     }
-    RrVec3f *data = points->data();
     for (size_t j = 0; j < n; ++j) {
         const RrVec3f delta = posedControlPoints[j] - restControlPoints[j];
         if (delta == RrVec3f(0.0f)) {
@@ -2162,7 +2162,7 @@ RrGeoApplyWireBasisRange(std::vector<RrVec3f> *points,
         for (const auto &[k, coefficient] : basis.byControlPoint[j]) {
             const size_t index = size_t(indices[k]);
             if (index >= begin && index < end) {
-                data[index] += delta * (coefficient * weights[k]);
+                out[index - begin] += delta * (coefficient * weights[k]);
             }
         }
     }
@@ -2210,6 +2210,41 @@ RrGeoApplyWire(std::vector<RrVec3f> *points,
         const RrVec3f delta = posedCurve.Evaluate(u) -
             (restEvaluations ? (*restEvaluations)[i] : restCurve.Evaluate(u));
         (*points)[i] += delta * float(f);
+    }
+    return true;
+}
+
+// RrGeoApplyWire over points [begin, end) of \p count, held at
+// \p out[0, end - begin) and seeded by the caller (RigExecApplyWireGroup):
+// the whole call's checks over \p count and its arithmetic per point.
+bool
+RrGeoApplyWireGroup(RrVec3f *out, size_t begin, size_t end, size_t count,
+                    const RrGeoNurbsCurve &restCurve,
+                    const RrGeoNurbsCurve &posedCurve,
+                    const RrVec2f *bindCoords, size_t bindCount,
+                    double dropoffDistance,
+                    const std::vector<RrVec3f> *restEvaluations = nullptr)
+{
+    if (!out ||
+        !RrGeoWireInputsAreUsable(restCurve, posedCurve, bindCoords,
+                                  bindCount, count)) {
+        return false;
+    }
+    end = std::min(end, count);
+    for (size_t i = begin; i < end; ++i) {
+        const double u = bindCoords[i][0];
+        const double d = bindCoords[i][1];
+        double f = 1.0;
+        if (dropoffDistance > 0.0) {
+            const double s = std::min(std::max(d / dropoffDistance, 0.0), 1.0);
+            f = 1.0 - s * s * (3.0 - 2.0 * s);
+        }
+        if (f <= 0.0) {
+            continue;
+        }
+        const RrVec3f delta = posedCurve.Evaluate(u) -
+            (restEvaluations ? (*restEvaluations)[i] : restCurve.Evaluate(u));
+        out[i - begin] += delta * float(f);
     }
     return true;
 }
@@ -3200,6 +3235,9 @@ struct RrGeoRevisionRangeInputs {
     // runs, which would otherwise free the basis a later range step reads.
     std::shared_ptr<const RigExecLatticeBind<RrVec3f>> latticeBind;
     const RigExecLatticeBasis *latticeBasis = nullptr;
+    // BlendShape: the envelope resolved at the full count, the weight its
+    // kernel blends each point by; empty at full strength.
+    std::vector<float> blendWeights;
 };
 
 // RrGeoRevisionKernelAcceptance(op, p, count, envelopeResolves), exactly
@@ -3222,6 +3260,7 @@ RrGeoPrepareRevisionRanges(
     prepared->wireRestEvaluations = nullptr;
     prepared->latticeBind.reset();
     prepared->latticeBasis = nullptr;
+    prepared->blendWeights.clear();
     const RrGeoAcceptance acceptance =
         RrGeoRevisionKernelAcceptance(op, p, count, envelopeResolves);
     if (acceptance != RrGeoAcceptance::Applies) {
@@ -3266,48 +3305,54 @@ RrGeoPrepareRevisionRanges(
         }
         break;
     }
+    case RrGeoOpBlendShape:
+        if (!RrGeoEnvelopeIsFullStrength(w)) {
+            w.ResolveAll(count, &prepared->blendWeights);
+        }
+        break;
     default:
         break;
     }
     return acceptance;
 }
 
-// Points [begin, end) of a revision that applies (RigExecRunRevisionRange):
-// \p out (sized \p count) receives at those indices exactly what
-// RrGeoRunRevisionKernel writes there for the whole array of \p count
-// entering points, and no other index. \p separateEnvelope is the resolved
-// "apply once" envelope for an op that blends one below full strength, else
-// null. \p untouched, when given, receives whether the range's result is the
-// entering points themselves, and then \p out is not written. Reads only
-// \p prepared and the packet, so ranges of one revision are independent.
+// Points [begin, end) of a revision that applies, held in a vertex group's
+// own buffers (RigExecRunRevisionGroup): \p in[k] is entering point
+// begin + k and \p out[k] receives point begin + k's result, k < end - begin
+// (\p out never aliases \p in), exactly what RrGeoRunRevisionKernel writes
+// there for the whole array of \p count entering points. Every whole-array
+// input (the packet, \p prepared, \p separateEnvelope, sparse indices, bind
+// tables) is indexed absolutely. Ops: Matrix, Wire, Lattice and a
+// target-space BlendShape; a skin runs through RrGeoSkinGroup.
+// \p separateEnvelope is the resolved "apply once" envelope for an op that
+// blends one below full strength, else null. \p untouched, when given,
+// receives whether the result is \p in itself, and then \p out is not
+// written. Reads only \p prepared and the packet, so groups are independent.
 bool
-RrGeoRunRevisionRange(int op, const RrGeoMoverParameters &p,
+RrGeoRunRevisionGroup(int op, const RrGeoMoverParameters &p,
                       const RrGeoRevisionRangeInputs &prepared,
-                      const RrVec3f *entering, size_t count, size_t begin,
-                      size_t end, const float *separateEnvelope,
-                      std::vector<RrVec3f> *out, bool useSimd,
-                      bool *untouched = nullptr)
+                      const RrVec3f *in, RrVec3f *out, size_t count,
+                      size_t begin, size_t end, const float *separateEnvelope,
+                      bool useSimd, bool *untouched = nullptr)
 {
     if (untouched) {
         *untouched = false;
     }
-    if (!out || out->size() != count || begin > end || end > count ||
-        (count > 0 && !entering) || !RrGeoPacketMatches(op, p)) {
+    if (begin > end || end > count || (end > begin && (!in || !out)) ||
+        !RrGeoPacketMatches(op, p)) {
         return false;
     }
+    const size_t n = end - begin;
     const RrGeoWeightPacket &w = p.weights;
     const bool blend = RrGeoRevisionTakesSeparateBlend(op, w) &&
                        !RrGeoEnvelopeIsFullStrength(w);
     if (blend && !separateEnvelope) {
         return false;
     }
-    RrVec3f *data = out->data();
     // The kernels below start from the entering points, as the whole kernel
     // starts from its copy of them.
-    const auto seed = [&] {
-        std::copy(entering + begin, entering + end, data + begin);
-    };
-    // A range the kernel leaves as it entered.
+    const auto seed = [&] { std::copy(in, in + n, out); };
+    // A group the kernel leaves as it entered.
     const auto passThrough = [&] {
         if (untouched) {
             *untouched = true;
@@ -3328,8 +3373,7 @@ RrGeoRunRevisionRange(int op, const RrGeoMoverParameters &p,
     switch (op) {
     case RrGeoOpMatrix: {
         if (RrGeoEnvelopeIsFullStrength(w)) {
-            RrGeoApplyMatrixKernelRange(p, nullptr, begin, end, entering,
-                                        data, useSimd);
+            RrGeoApplyMatrixKernelRange(p, nullptr, 0, n, in, out, useSimd);
             return true;
         }
         if (RrGeoEnvelopeIsSparseWalk(w)) {
@@ -3339,14 +3383,14 @@ RrGeoRunRevisionRange(int op, const RrGeoMoverParameters &p,
                 return passThrough();
             }
             seed();
-            RrGeoApplyMatrixSparseWalk(p, kBegin, kEnd, data);
+            RrGeoApplyMatrixSparseWalk(p, kBegin, kEnd, out, begin);
             return true;
         }
         if (prepared.matrixWeights.size() != count) {
             return false;
         }
-        RrGeoApplyMatrixKernelRange(p, prepared.matrixWeights.data(), begin,
-                                    end, entering, data, useSimd);
+        RrGeoApplyMatrixKernelRange(p, prepared.matrixWeights.data() + begin,
+                                    0, n, in, out, useSimd);
         return true;
     }
     case RrGeoOpWire: {
@@ -3360,19 +3404,20 @@ RrGeoRunRevisionRange(int op, const RrGeoMoverParameters &p,
                 return passThrough();
             }
             seed();
-            return RrGeoApplyWireBasisRange(out, *prepared.wireBasis,
-                                            w.Indices(), w.Values(),
-                                            p.restPoints, p.auxPoints, begin,
-                                            end);
+            return RrGeoApplyWireBasisGroup(out, begin, end,
+                                            *prepared.wireBasis, w.Indices(),
+                                            w.Values(), p.restPoints,
+                                            p.auxPoints);
         }
         const RrGeoNurbsCurve rest{&p.restPoints, p.curveOrder,
                                    &p.curveKnots};
         const RrGeoNurbsCurve posed{&p.auxPoints, p.curveOrder,
                                     &p.curveKnots};
         seed();
-        if (!RrGeoApplyWire(out, rest, posed, p.wireBindCoords.data(),
-                            p.wireBindCoords.size(), p.dropoffDistance, begin,
-                            end, prepared.wireRestEvaluations)) {
+        if (!RrGeoApplyWireGroup(out, begin, end, count, rest, posed,
+                                 p.wireBindCoords.data(),
+                                 p.wireBindCoords.size(), p.dropoffDistance,
+                                 prepared.wireRestEvaluations)) {
             return false;
         }
         break;
@@ -3381,21 +3426,46 @@ RrGeoRunRevisionRange(int op, const RrGeoMoverParameters &p,
         if (p.restPoints.size() != count) {
             return false;  // cardinality mismatch fails atomically
         }
-        seed();
-        RigExecApplyLatticeKernelRange(
-            out, begin, end, p.restPoints.data(), p.restPoints.size(),
-            p.auxPoints.data(), p.auxPoints.size(), p.auxPointsB.data(),
-            p.auxPointsB.size(), p.divisions[0], p.divisions[1],
-            p.divisions[2], prepared.latticeBasis);
+        // An invalid cage copies \p in to \p out: the whole kernel's
+        // pass-through.
+        RigExecApplyLatticeKernelGroup<RrVec3f>(
+            in, out, count, begin, end, p.restPoints.data(),
+            p.restPoints.size(), p.auxPoints.data(), p.auxPoints.size(),
+            p.auxPointsB.data(), p.auxPointsB.size(), p.divisions[0],
+            p.divisions[1], p.divisions[2], prepared.latticeBasis);
         break;
+    case RrGeoOpBlendShape: {
+        // Target space only: the runtime never records a surface frame.
+        const bool full = RrGeoEnvelopeIsFullStrength(w);
+        if (p.blendSurfaceFrame || p.blendDeltas.size() != count ||
+            (!full && prepared.blendWeights.size() != count)) {
+            return false;
+        }
+        const RrVec3f *const delta = p.blendDeltas.data() + begin;
+        const float *const weight =
+            full ? nullptr : prepared.blendWeights.data() + begin;
+        for (size_t k = 0; k < n; ++k) {
+            const RrVec3f preceding = in[k];
+            out[k] = RrGeoBlendEnvelope(preceding, preceding + delta[k],
+                                        full ? 1.0f : weight[k]);
+        }
+        return true;
+    }
     default:
         return false;
     }
     if (blend) {
-        RrGeoBlendEnvelopeRange(entering, separateEnvelope, begin, end, data);
+        for (size_t k = 0; k < n; ++k) {
+            out[k] = RrGeoBlendEnvelope(in[k], out[k],
+                                        separateEnvelope[begin + k]);
+        }
     }
     return true;
 }
+
+// A revision's place in its chain (RigExecBakedRevisionRole), read from the
+// file at Open.
+enum class RrGeoRole : uint8_t { Legacy, Range, Whole };
 
 RrGeoMoverStatus
 RrGeoStatusForParameters(const RrGeoMoverParameters &parameters,
@@ -3429,13 +3499,6 @@ struct RrGeometryScratch {
         std::vector<RrGeoScaledDualQuat> palette;
         bool keyChanged = false;
         bool ok = false;
-        // As GeomChunk's, for a range-pipelined revision's range: the
-        // content version RevisionOut keys it by, bumped by its range step
-        // exactly when the range's bytes in `output` move or the count does;
-        // that count; and whether it ever published.
-        uint64_t rangeVersion = 0;
-        size_t rangeCount = 0;
-        bool rangeRan = false;
     };
     struct Revision {
         std::map<std::tuple<uint32_t,bool,uint8_t>,const RigExecWireExternalDeclaredInput *> leafSites;
@@ -3474,24 +3537,49 @@ struct RrGeometryScratch {
         std::vector<float> rows;
         std::vector<RrGeoScaledDualQuat> palette;
         std::vector<Chunk> chunks;
+        // The chunks carry influence keys (RigExecFormatIsKeyedRevision): a
+        // chunked skin, Legacy or Whole, or a Range skin.
         bool chunked = false;
-        // Range-pipelined (Open state, RigExecFormatIsRangeRevision):
-        // `chunks` are the chain's point partition; range step k writes
-        // range k of `output`, which always holds this revision's whole
-        // version, so `currentSource` is the revision itself; the fuse is a
-        // join that publishes RevisionDone from the range versions.
+        // The revision's op (RrGeoOp), Open state.
+        int op = -1;
+        // Open state, from the file (format 20). Legacy: the chain has no
+        // vertex groups. Range (RigExecFormatIsRangeRevision): one
+        // RevisionChunk step per group it writes, part g writing group g,
+        // and a join. Whole: speculative chunks (a keyed skin's chunk g is
+        // group g) and a fuse that decides and publishes every group.
+        RrGeoRole role = RrGeoRole::Legacy;
+        // role == Range, kept for the role accessor.
         bool rangeRole = false;
-        // Filled by RevisionStatic, read by the range steps; a memo.
+        // Range and Whole (Open state, RigExecFormatGroupWriters), per chain
+        // group: whether this revision publishes it, and the chain index of
+        // the last earlier revision that does, -1 for the base.
+        std::vector<char> groupWritten;
+        std::vector<int> enteringWriter;
+        // The RevisionOut slot of group 0 as this revision publishes it:
+        // chunk_base for Range, chunk_base + chunks for Whole.
+        int64_t groupSlotBase = 0;
+        // Per chain group (pointBlocks.h): its publication and, for a Whole
+        // keyed skin, chunk g's speculative result. Only written groups are
+        // ever published; each owns two buffers sized at Open.
+        std::vector<RigExecGroupState<RrVec3f>> groups;
+        // The join's or fuse's last publication: the content id of each
+        // group of the version this revision leaves.
+        std::vector<RigExecGroupSource> groupIds;
+        // A whole reader's gather of the version this revision leaves, and
+        // the group ids it was gathered from (the runtime is serial, so a
+        // reader's pointer holds until a writer of that version runs).
+        mutable std::vector<RrVec3f> versionGather;
+        mutable std::vector<RigExecGroupSource> versionGatherIds;
+        // Filled by RevisionStatic, read by the group steps; a memo.
         RrGeoRevisionRangeInputs rangeInputs;
-        // The range versions the join last published, one per chunk, and the
-        // ranges whose kernel refused after an Applies acceptance this run
-        // (an invariant violation; they passed through). Written by the join.
-        std::vector<uint64_t> joinSeen;
+        // The written groups whose kernel refused after an Applies
+        // acceptance this run (an invariant violation; they passed
+        // through). Written by the join.
         uint32_t rangeRefusals = 0;
-        // A cycle set aside one of its ranges or its join (the program's
-        // excluded set, applied before each run): the revision passes the
-        // base through like an excluded fuse, `currentSource` -1, and its
-        // join publishes that version (native rangeSetAside).
+        // A cycle set aside one of its group slots or its join or fuse (the
+        // program's excluded set, applied before each run): every reader of
+        // a version past it reads the base groups, `currentSource` -1, and
+        // its join or fuse publishes the base (native rangeSetAside).
         bool rangeSetAside = false;
         std::shared_ptr<const RrGeoSkinTopology> topology;
         bool topologyResolved = false;
@@ -3579,6 +3667,15 @@ struct RrGeometryScratch {
         std::vector<RrVec3f> publishedInput;
         bool sampledMoved = false;
         bool scheduleDirty = true;
+        // A chain with vertex groups (Open state): G + 1 group bounds, the
+        // last the chain's count at the bake; empty for a Legacy chain.
+        std::vector<int> groupBounds;
+        // The base as groups (ChainInputs, the one writer): refs into
+        // `baseOwner`, each version bumped exactly when its bytes move.
+        std::shared_ptr<const std::vector<RrVec3f>> baseOwner;
+        std::vector<RigExecGroupState<RrVec3f>> baseGroups;
+        // ChainStatus: the group ids `result` was gathered from.
+        std::vector<RigExecGroupSource> resultIds;
         std::vector<Revision> revisions;
         uint32_t createdCount = 0;
         uint32_t scheduleCount = 0;
@@ -3650,6 +3747,10 @@ struct RrGeometryScratch {
     std::vector<std::shared_ptr<const RrGeoSkinTopology>> epochTopologies;
     std::vector<std::shared_ptr<const RrGeoSkinTopology>>
         epochPartitionTopologies;
+    // Gated Range revisions whose packet failed the gate while applying, and
+    // Range skins that met a stale partition (a pin hole the file's private
+    // constants rule out). Counted by RevisionStatic and the group steps.
+    uint64_t gateViolations = 0;
 
     // The sample point tables point into noPoints and blendPointPool, so
     // the scratch never moves or copies.
@@ -3681,6 +3782,236 @@ RrGeoChunkOwner(const RrProgram *program, const RrGeometryScratch &scratch,
     *part = size_t(slot) - size_t(program->geometry->chains[*chain]
                                       .revisions[*revision]
                                       .chunkBase);
+    return true;
+}
+
+// Vertex groups of a chain with groups (format 20). Group g's content id is
+// the RevisionOut slot that published it and that slot's version; the base's
+// group g is slot -1 - g (pointBlocks.h).
+
+RigExecGroupSource
+RrGeoSource(int64_t slot, uint64_t version)
+{
+    RigExecGroupSource source;
+    source.slot = slot;
+    source.version = version;
+    return source;
+}
+
+// Points [begin, end) of group \p g at \p count points: the bake's bounds
+// clipped to the run's count, the last group running to it.
+void
+RrGeoGroupBounds(const RrGeometryScratch::Chain &chain, size_t g, size_t count,
+                 size_t *begin, size_t *end)
+{
+    const size_t groups = chain.groupBounds.size() - 1;
+    RigExecPointRangeAt(chain.groupBounds[g], chain.groupBounds[g + 1],
+                        g + 1 == groups, count, begin, end);
+}
+
+// Group \p g of version \p version of \p chain (0 the base; v what revision
+// v - 1 left; RigExecBakedGroupAt): the ref the last revision before
+// \p version that writes g published, and its content id in \p id when
+// given; the base group when none does, or when a revision set aside lies
+// between that writer and \p version.
+const RigExecPointsRef<RrVec3f> &
+RrGeoGroupAt(const RrGeometryScratch::Chain &chain, size_t version, size_t g,
+             RigExecGroupSource *id)
+{
+    int writer = -1;
+    if (version > 0 && version <= chain.revisions.size()) {
+        const RrGeometryScratch::Revision &last = chain.revisions[version - 1];
+        writer = last.groupWritten[g] ? int(version - 1)
+                                      : last.enteringWriter[g];
+    }
+    for (size_t q = writer < 0 ? version : size_t(writer); q < version; ++q) {
+        if (chain.revisions[q].rangeSetAside) {
+            writer = -1;
+            break;
+        }
+    }
+    if (writer < 0) {
+        const RigExecGroupState<RrVec3f> &base = chain.baseGroups[g];
+        if (id) {
+            *id = RrGeoSource(-1 - int64_t(g), base.version);
+        }
+        return base.published;
+    }
+    const RrGeometryScratch::Revision &rev = chain.revisions[size_t(writer)];
+    if (id) {
+        *id = RrGeoSource(rev.groupSlotBase + int64_t(g),
+                          rev.groups[g].version);
+    }
+    return rev.groups[g].published;
+}
+
+// ChainInputs, the base groups' one writer: refs into one shared copy of
+// `lastBase`, each version bumped exactly when its group's bytes move (or on
+// its first publication since a reset).
+void
+RrGeoPublishBaseGroups(RrGeometryScratch::Chain *chain)
+{
+    if (chain->groupBounds.empty()) {
+        return;
+    }
+    chain->baseOwner =
+        std::make_shared<const std::vector<RrVec3f>>(chain->lastBase);
+    const std::vector<RrVec3f> &base = *chain->baseOwner;
+    for (size_t g = 0; g < chain->baseGroups.size(); ++g) {
+        size_t begin = 0, end = 0;
+        RrGeoGroupBounds(*chain, g, base.size(), &begin, &end);
+        RigExecGroupState<RrVec3f> &state = chain->baseGroups[g];
+        RigExecPointsRef<RrVec3f> ref;
+        ref.owner = chain->baseOwner;
+        ref.data = base.data() + begin;
+        ref.count = end - begin;
+        const bool same =
+            state.ran &&
+            RigExecPointsBitsEqual(state.published.data, state.published.count,
+                                   ref.data, ref.count);
+        state.published = std::move(ref);
+        state.ran = true;
+        if (!same) {
+            ++state.version;
+        }
+    }
+}
+
+// Base group \p g passed through into \p state: what a set-aside group slot
+// publishes, the version every reader past it resolves to.
+void
+RrGeoPassBaseGroup(const RrGeometryScratch::Chain &chain, size_t g,
+                   RigExecGroupState<RrVec3f> *state)
+{
+    const RigExecGroupState<RrVec3f> &base = chain.baseGroups[g];
+    RigExecPublishPassedGroup(state, base.published,
+                              RrGeoSource(-1 - int64_t(g), base.version));
+}
+
+// Version \p version > 0 of a chain with groups as one array, for a whole
+// reader: the base itself while every group is the base's, else the gather
+// the revision leaving that version holds, refreshed when a group id moved.
+// Ids follow bytes exactly, so an unmoved id list is unmoved points.
+const std::vector<RrVec3f> *
+RrGeoGatherVersion(const RrGeometryScratch::Chain &chain, size_t version)
+{
+    const size_t groups = chain.groupBounds.size() - 1;
+    const RrGeometryScratch::Revision &owner = chain.revisions[version - 1];
+    bool base = true;
+    bool same = owner.versionGatherIds.size() == groups;
+    for (size_t g = 0; g < groups; ++g) {
+        RigExecGroupSource id;
+        RrGeoGroupAt(chain, version, g, &id);
+        base = base && id.slot < 0;
+        same = same && owner.versionGatherIds[g] == id;
+    }
+    if (base) {
+        return &chain.lastBase;
+    }
+    if (!same) {
+        owner.versionGatherIds.resize(groups);
+        owner.versionGather.clear();
+        for (size_t g = 0; g < groups; ++g) {
+            const RigExecPointsRef<RrVec3f> &ref = RrGeoGroupAt(
+                chain, version, g, &owner.versionGatherIds[g]);
+            if (ref.count > 0 && ref.data) {
+                owner.versionGather.insert(owner.versionGather.end(),
+                                           ref.data, ref.data + ref.count);
+            }
+        }
+    }
+    return &owner.versionGather;
+}
+
+// The skin over points [begin, end) of \p count held in a group's own
+// buffers: \p in[k] / \p out[k] are point begin + k (\p out never aliases
+// \p in); the layout's rows from begin, then the "apply once" envelope, as
+// the whole kernel and a chunk's range give each point.
+bool
+RrGeoSkinGroup(const RrGeometryScratch::Revision &rev, const RrVec3f *in,
+               const RrGeoSkinTransformsView &view, size_t count,
+               size_t begin, size_t end, bool useSimd, RrVec3f *out)
+{
+    if (begin > end || end > count || (end > begin && (!in || !out))) {
+        return false;
+    }
+    const size_t n = end - begin;
+    const RrGeoMoverParameters &p = rev.parameters;
+    const RrGeoSkinLayout layout = RrGeoSkinLayoutForPacket(p, view, count);
+    RrGeoSkinLayout part = layout;
+    part.indices = layout.indices + begin * layout.elementSize;
+    part.weights = layout.weights + begin * layout.elementSize;
+    part.indexCount = n * layout.elementSize;
+    part.pointCount = n;
+    switch (RrGeoSkinMethodOf(p)) {
+    case RrGeoSkinMethod::ClassicLinear:
+        if (useSimd) {
+            RrGeoApplyLinearBlendSkinSimd(in, out, part, view.rows);
+        } else {
+            RrGeoApplyLinearBlendSkin(in, out, part);
+        }
+        break;
+    case RrGeoSkinMethod::DualQuaternion: {
+        std::vector<RrGeoScaledDualQuat> local;
+        const RrGeoScaledDualQuat *palette = view.palette;
+        size_t paletteSize = view.paletteSize;
+        if (!palette) {
+            local = RrGeoSkinDualQuatPalette(layout);
+            palette = local.data();
+            paletteSize = local.size();
+        }
+        if (!RrGeoApplyDualQuatSkin(in, out, part, palette, paletteSize)) {
+            return false;
+        }
+        break;
+    }
+    default:
+        return false;
+    }
+    if (!rev.fullStrength) {
+        if (rev.envelope.size() != count) {
+            return false;
+        }
+        for (size_t k = 0; k < n; ++k) {
+            out[k] = RrGeoBlendEnvelope(in[k], out[k],
+                                        rev.envelope[begin + k]);
+        }
+    }
+    return true;
+}
+
+// Whether a gated Range revision's packet keeps every point of its unwritten
+// groups at its entering bytes (RigExecRevisionGateHolds, plus the file's
+// promise that every listed index lies in a written group); true for a
+// revision that writes every group.
+bool
+RrGeoGroupGateHolds(const RrGeometryScratch::Chain &chain,
+                    const RrGeometryScratch::Revision &rev, size_t count)
+{
+    if (std::find(rev.groupWritten.begin(), rev.groupWritten.end(), char(0)) ==
+        rev.groupWritten.end()) {
+        return true;
+    }
+    const RrGeoMoverParameters &p = rev.parameters;
+    if (!RrGeoEnvelopeIsSparseWalk(p.weights) ||
+        (rev.op == RrGeoOpSkin &&
+         RrGeoSkinMethodOf(p) != RrGeoSkinMethod::ClassicLinear) ||
+        (rev.op == RrGeoOpBlendShape && p.blendSurfaceFrame)) {
+        return false;
+    }
+    const size_t groups = chain.groupBounds.size() - 1;
+    for (const int index : p.weights.Indices()) {
+        if (index < 0 || size_t(index) >= count) {
+            continue;
+        }
+        size_t g = size_t(std::upper_bound(chain.groupBounds.begin(),
+                                           chain.groupBounds.end(), index) -
+                          chain.groupBounds.begin());
+        g = g == 0 ? 0 : std::min(g - 1, groups - 1);
+        if (!rev.groupWritten[g]) {
+            return false;
+        }
+    }
     return true;
 }
 
@@ -4209,6 +4540,15 @@ RrGeometryRevisionDecisionForTesting(const RrProgram *program,
             }
             const auto &rev = scratch->chains[c].revisions[r];
             *acceptance = int(rev.acceptance);
+            if (rev.rangeRole) {
+                // A Range revision's answer per written group.
+                *chunksOk = true;
+                for (size_t g = 0; g < rev.groups.size(); ++g) {
+                    *chunksOk = *chunksOk &&
+                                (!rev.groupWritten[g] || rev.groups[g].ok);
+                }
+                return true;
+            }
             *chunksOk = !rev.chunks.empty();
             for (const auto &chunk : rev.chunks) {
                 *chunksOk = *chunksOk && chunk.ok;
@@ -4299,6 +4639,35 @@ RrGeometrySizeScratch(RrProgram *program, std::string *error)
         const RigExecWireChain &chain = geo.chains[c];
         RrGeometryScratch::Chain &out = scratch->chains[c];
         out.revisions.resize(chain.revisions.size());
+        // Format 20 vertex groups: the bounds every Range revision of the
+        // chain shares, and per revision the groups it writes and the
+        // revision each group enters from.
+        const size_t groups = RigExecFormatChainGroups(file, c);
+        std::vector<std::vector<char>> written;
+        std::vector<std::vector<int>> entering;
+        if (groups > 0) {
+            RigExecFormatGroupWriters(file, c, &written, &entering);
+            for (const RigExecWireRevision &wire : chain.revisions) {
+                if (RigExecFormatIsRangeRevision(wire) &&
+                    wire.chunks.size() == groups) {
+                    for (const RigExecWireChunk &chunk : wire.chunks) {
+                        out.groupBounds.push_back(chunk.begin);
+                    }
+                    out.groupBounds.push_back(wire.chunks.back().end);
+                    break;
+                }
+            }
+            if (out.groupBounds.size() != groups + 1 ||
+                written.size() != chain.revisions.size() ||
+                entering.size() != chain.revisions.size()) {
+                if (error) {
+                    *error = "geometry chain's vertex groups do not match "
+                             "its revisions";
+                }
+                return false;
+            }
+            out.baseGroups.resize(groups);
+        }
         for (size_t r = 0; r < chain.revisions.size(); ++r) {
             const RigExecWireRevision &wire = chain.revisions[r];
             if (!RrGeoOpName(wire.op)) {
@@ -4333,14 +4702,15 @@ RrGeometrySizeScratch(RrProgram *program, std::string *error)
                     }
                 }
             }
-            rev.chunked = wire.chunked;
+            rev.chunked = RigExecFormatIsKeyedRevision(wire);
+            rev.op = int(wire.op);
             rev.chunks.resize(wire.chunks.size());
             for (size_t k = 0; k < wire.chunks.size(); ++k) {
                 RrGeometryScratch::Chunk &chunk = rev.chunks[k];
                 chunk.begin = wire.chunks[k].begin;
                 chunk.end = wire.chunks[k].end;
                 chunk.key = wire.chunks[k].key;
-                if (wire.chunked) {
+                if (rev.chunked) {
                     chunk.transforms.assign(influences, identity);
                     chunk.rows.assign(
                         influences * size_t(RrGeoSkinRowStride), 0.0f);
@@ -4350,25 +4720,61 @@ RrGeometrySizeScratch(RrProgram *program, std::string *error)
                             &chunk.rows[t * size_t(RrGeoSkinRowStride)]);
                     }
                 }
-                // The first revision naming a slot owns it, as a scan in
-                // chain and revision order would find it.
-                if (wire.chunkBase >= 0) {
-                    const size_t slot = size_t(wire.chunkBase) + k;
-                    if (slot >= scratch->chunkOwner.size()) {
-                        scratch->chunkOwner.resize(slot + 1, {-1, -1});
-                    }
-                    if (scratch->chunkOwner[slot].first < 0) {
-                        scratch->chunkOwner[slot] = {int32_t(c), int32_t(r)};
-                    }
+            }
+            // The first revision naming a slot owns it, as a scan in chain
+            // and revision order would find it: its chunks' slots, then a
+            // Whole revision's published groups (revision_chunk_count).
+            size_t slots = wire.chunks.size();
+            if (id < geo.revisionChunkCount.size() &&
+                geo.revisionChunkCount[id] > 0) {
+                slots = std::max(slots, size_t(geo.revisionChunkCount[id]));
+            }
+            for (size_t k = 0; wire.chunkBase >= 0 && k < slots; ++k) {
+                const size_t slot = size_t(wire.chunkBase) + k;
+                if (slot >= scratch->chunkOwner.size()) {
+                    scratch->chunkOwner.resize(slot + 1, {-1, -1});
+                }
+                if (scratch->chunkOwner[slot].first < 0) {
+                    scratch->chunkOwner[slot] = {int32_t(c), int32_t(r)};
                 }
             }
-            // A range-pipelined revision is its own point source from Open
-            // on: `output` holds its whole version once its ranges run.
-            rev.rangeRole = RigExecFormatIsRangeRevision(wire);
-            if (rev.rangeRole) {
+            // In a chain with groups every revision is Range or Whole and
+            // its own point source from Open on: its groups hold its
+            // version. Each written group owns two buffers of its size.
+            if (groups > 0) {
+                rev.role = RigExecFormatIsRangeRevision(wire)
+                               ? RrGeoRole::Range
+                               : RrGeoRole::Whole;
+                rev.groupWritten = written[r];
+                rev.enteringWriter = entering[r];
+                if (rev.groupWritten.size() != groups ||
+                    rev.enteringWriter.size() != groups) {
+                    if (error) {
+                        *error = "geometry revision's vertex groups do not "
+                                 "match its chain";
+                    }
+                    return false;
+                }
+                rev.groupSlotBase =
+                    int64_t(wire.chunkBase) +
+                    (rev.role == RrGeoRole::Range ? 0
+                                                  : int64_t(wire.chunks.size()));
+                rev.groups.resize(groups);
+                rev.groupIds.assign(groups, RigExecGroupSource());
+                for (size_t g = 0; g < groups; ++g) {
+                    if (!rev.groupWritten[g]) {
+                        continue;
+                    }
+                    const size_t size = size_t(std::max(
+                        0, out.groupBounds[g + 1] - out.groupBounds[g]));
+                    for (std::shared_ptr<std::vector<RrVec3f>> &own :
+                         rev.groups[g].own) {
+                        own = std::make_shared<std::vector<RrVec3f>>(size);
+                    }
+                }
                 rev.currentSource = int(r);
-                rev.joinSeen.assign(wire.chunks.size(), 0);
             }
+            rev.rangeRole = rev.role == RrGeoRole::Range;
             // One expansion per layout: a partition the bake shared with
             // the topology shares its expansion here too.
             const std::shared_ptr<const RrGeoSkinTopology> topology =
@@ -4618,6 +5024,9 @@ RrGeoPointsVersion(const RrGeometryScratch::Chain &chain, size_t version)
 {
     if (version > chain.revisions.size()) {
         return nullptr;
+    }
+    if (version > 0 && !chain.groupBounds.empty()) {
+        return RrGeoGatherVersion(chain, version);
     }
     const int source =
         version == 0 ? -1 : chain.revisions[version - 1].currentSource;
@@ -6031,12 +6440,15 @@ RrGeoResetRevision(RrGeometryScratch::Revision *rev)
     rev->lastParameters = RrGeoMoverParameters();
     rev->lastAuxPoints.clear();
     rev->lastStatus = RrGeoMoverStatus();
-    // A range-pipelined revision's ranges and join publish anew; its caller
-    // restores it as its own source.
-    for (RrGeometryScratch::Chunk &chunk : rev->chunks) {
-        chunk.rangeRan = false;
+    // A Range or Whole revision's groups and join or fuse publish anew,
+    // their versions never lowered; its caller restores it as its own
+    // source.
+    for (RigExecGroupState<RrVec3f> &state : rev->groups) {
+        RigExecResetGroup(&state);
     }
-    std::fill(rev->joinSeen.begin(), rev->joinSeen.end(), uint64_t(0));
+    std::fill(rev->groupIds.begin(), rev->groupIds.end(),
+              RigExecGroupSource());
+    rev->versionGatherIds.clear();
 }
 
 // \p chain's base points this run: its base slot's elements, else the ones
@@ -6259,10 +6671,14 @@ bool RrRunChainInputs(RrProgram *program, size_t c, std::string *error)
             for (size_t r = 0; r < chain.revisions.size(); ++r) {
                 RrGeometryScratch::Revision &rev = chain.revisions[r];
                 RrGeoResetRevision(&rev);
-                if (rev.rangeRole && !rev.rangeSetAside) {
+                if (rev.role != RrGeoRole::Legacy && !rev.rangeSetAside) {
                     rev.currentSource = int(r);
                 }
             }
+            for (RigExecGroupState<RrVec3f> &state : chain.baseGroups) {
+                RigExecResetGroup(&state);
+            }
+            chain.resultIds.clear();
         }
         for (RrGeometryScratch::Revision &rev : chain.revisions) {
             if (rev.created) {
@@ -6283,6 +6699,9 @@ bool RrRunChainInputs(RrProgram *program, size_t c, std::string *error)
             // ChainBase's content version moves exactly when the bytes do.
             if (!sameBase) ++chain.baseVersion;
             chain.lastBase = basePoints;
+        }
+        if (!chain.groupBounds.empty() && (!sameBase || !chain.baseOwner)) {
+            RrGeoPublishBaseGroups(&chain);
         }
     return true;
 }
@@ -6619,24 +7038,58 @@ RrGeoRunChainStatusStep(RrProgram *program, RrGeometryScratch *scratch,
                 ": execution rejected its inputs; revision passed through");
         }
     }
-    const RrVec3f *points =
-        chain.lastBase.empty() ? nullptr : chain.lastBase.data();
-    size_t count = chain.lastBase.size();
-    if (!chain.revisions.empty()) {
-        RrGeoPointsAfter(chain, chain.revisions.size() - 1, &points,
-                         &count);
+    if (!chain.groupBounds.empty() && !chain.revisions.empty()) {
+        // A chain with groups: the published result stands, the same
+        // array, while no group id of the last version moved; else the
+        // groups are gathered into the spare.
+        const size_t groups = chain.groupBounds.size() - 1;
+        const size_t last = chain.revisions.size();
+        bool same = chain.haveResult && chain.resultIds.size() == groups;
+        for (size_t g = 0; g < groups && same; ++g) {
+            RigExecGroupSource id;
+            RrGeoGroupAt(chain, last, g, &id);
+            same = chain.resultIds[g] == id;
+        }
+        if (!same) {
+            chain.resultIds.resize(groups);
+            chain.spare.clear();
+            for (size_t g = 0; g < groups; ++g) {
+                const RigExecPointsRef<RrVec3f> &ref =
+                    RrGeoGroupAt(chain, last, g, &chain.resultIds[g]);
+                if (ref.count > 0 && ref.data) {
+                    chain.spare.insert(chain.spare.end(), ref.data,
+                                       ref.data + ref.count);
+                }
+            }
+            // ChainPoints' content version moves exactly when the bytes do.
+            if (!RrGeoPointBitsEqual(chain.spare, chain.result.Read())) {
+                ++chain.resultVersion;
+            }
+            if (size_t(object) < store.chainPublish.size()) {
+                store.chainPublish[size_t(object)].result.clear();
+            }
+            chain.result.swap(chain.spare);
+        }
+    } else {
+        const RrVec3f *points =
+            chain.lastBase.empty() ? nullptr : chain.lastBase.data();
+        size_t count = chain.lastBase.size();
+        if (!chain.revisions.empty()) {
+            RrGeoPointsAfter(chain, chain.revisions.size() - 1, &points,
+                             &count);
+        }
+        chain.spare.resize(count);
+        if (count > 0 && points) {
+            std::copy(points, points + count, chain.spare.data());
+        }
+        // ChainPoints' content version moves exactly when the bytes do.
+        if (!RrGeoPointBitsEqual(chain.spare, chain.result.Read())) {
+            ++chain.resultVersion;
+        }
+        if(object>=0 && size_t(object)<store.chainPublish.size())
+            store.chainPublish[size_t(object)].result.clear();
+        chain.result.swap(chain.spare);
     }
-    chain.spare.resize(count);
-    if (count > 0 && points) {
-        std::copy(points, points + count, chain.spare.data());
-    }
-    // ChainPoints' content version moves exactly when the bytes do.
-    if (!RrGeoPointBitsEqual(chain.spare, chain.result.Read())) {
-        ++chain.resultVersion;
-    }
-    if(object>=0 && size_t(object)<store.chainPublish.size())
-        store.chainPublish[size_t(object)].result.clear();
-    chain.result.swap(chain.spare);
     chain.haveResult = true;
     if (size_t(object) < store.chainPublish.size()) {
         store.chainPublish[size_t(object)].haveBase = true;
@@ -6671,7 +7124,9 @@ RrGeoRunInfluenceFoldStep(RrProgram *program, RrGeometryScratch *scratch,
     rev.influencesValid =
         !skin || RrGeoSkinTransformsAreUsable(rev.influences.data(),
                                              rev.influences.size());
-    if (skin && rev.influencesValid) {
+    // A Range skin's group steps skin from their chunks' tables: the fold
+    // gives it validity only.
+    if (skin && rev.influencesValid && rev.role != RrGeoRole::Range) {
         RrGeoFoldTransformForms(&rev, program->geoSettings.useSimd);
     }
     return true;
@@ -6826,7 +7281,11 @@ RrGeoRunRevisionStaticStep(RrProgram *program, RrGeometryScratch *scratch,
         store.revisionPublish[size_t(id)].weightField = rev.weightField;
     }
     const size_t count = chain.lastBase.size();
-    if (rev.stagingOutput.size() != count) {
+    // Range revisions and Whole keyed skins write their groups' own buffers;
+    // the others stage the whole count.
+    const bool staged = rev.role == RrGeoRole::Legacy ||
+                        (rev.role == RrGeoRole::Whole && !rev.chunked);
+    if (staged && rev.stagingOutput.size() != count) {
         rev.stagingOutput.resize(count);
         rev.staticDirty = true;
         if (id >= 0 && size_t(id) < store.revisionStaticDirty.size()) {
@@ -6860,13 +7319,15 @@ RrGeoRunRevisionStaticStep(RrProgram *program, RrGeometryScratch *scratch,
                 int(wire.op), rev.parameters, count, &rev.envelopeOk);
             return true;
         }
-        // Range-pipelined: the one writer of `output`'s size, which its
-        // ranges fill in place, and of the inputs they read.
-        rev.output.resize(count);
+        // Range: the one writer of the inputs its group steps read.
         rev.acceptance = RrGeoPrepareRevisionRanges(
             int(wire.op), rev.parameters, count, &rev.envelopeOk,
             &scratch->wireBasis, &rev.lastWireBasis, &rev.wireRestCache,
             &rev.surfaceCache, &rev.rangeInputs);
+        if (rev.acceptance == RrGeoAcceptance::Applies &&
+            !RrGeoGroupGateHolds(chain, rev, count)) {
+            ++scratch->gateViolations;
+        }
         return true;
     }
     rev.layoutUsable = RrGeoSkinLayoutIsUsable(rev.parameters, count);
@@ -6889,6 +7350,10 @@ RrGeoRunRevisionStaticStep(RrProgram *program, RrGeometryScratch *scratch,
             elementSize != rev.partitionElementSize ||
             count != rev.partitionPointCount;
     }
+    if (rev.rangeRole && rev.acceptance == RrGeoAcceptance::Applies &&
+        !RrGeoGroupGateHolds(chain, rev, count)) {
+        ++scratch->gateViolations;
+    }
     return true;
 }
 
@@ -6905,55 +7370,215 @@ RrGeoRevisionApplies(const RrGeometryScratch::Revision &rev, int op)
            rev.acceptance == RrGeoAcceptance::Applies;
 }
 
-// Range step \p part of a range-pipelined revision: range \p part of the
-// revision's version, applied or passed through, into `output`, whose bytes
-// there its content version follows. Writes only `output` and
-// `stagingOutput` over the range, and the chunk.
-void
-RrGeoRunRangeStep(const RrGeometryScratch::Chain &chain,
+// Group step \p g of a Range revision (RunGroupStep): group g of the version
+// entering it, applied into one of the group's own buffers or passed
+// through shared. Writes only `groups[g]` and, for a skin, chunk g's table.
+// A refusal after an Applies acceptance passes the group through; the join
+// counts it.
+bool
+RrGeoRunGroupStep(RrProgram *program, RrGeometryScratch *scratch,
+                  const RrGeometryScratch::Chain &chain,
+                  const RigExecWireRevision &wire,
                   RrGeometryScratch::Revision *rev, size_t revisionIndex,
-                  int op, size_t part, bool useSimd)
+                  size_t g, bool useSimd, std::string *error)
 {
-    RrGeometryScratch::Chunk &chunk = rev->chunks[part];
+    RigExecGroupState<RrVec3f> &state = rev->groups[g];
+    if (rev->rangeSetAside) {
+        // A cycle set the revision aside: the base, as every reader past it
+        // resolves.
+        RrGeoPassBaseGroup(chain, g, &state);
+        state.ok = false;
+        return true;
+    }
     const size_t count = rev->precedingCount;
     size_t begin = 0, end = 0;
-    RigExecPointRangeAt(chunk.begin, chunk.end, part + 1 == rev->chunks.size(),
-                        count, &begin, &end);
-    const RrVec3f *entering = nullptr;
-    size_t entered = 0;
-    RrGeoPointsBefore(chain, revisionIndex, &entering, &entered);
-    const bool sized = entered == count && rev->output.size() == count &&
-                       rev->stagingOutput.size() == count;
-    const RrVec3f *source = entering ? entering + begin : nullptr;
+    RrGeoGroupBounds(chain, g, count, &begin, &end);
+    const size_t n = end - begin;
+    RigExecGroupSource from;
+    const RigExecPointsRef<RrVec3f> &entering =
+        RrGeoGroupAt(chain, revisionIndex, g, &from);
+    const bool sized = entering.count == n && chain.lastBase.size() == count;
     bool ok = sized;
-    if (sized && RrGeoRevisionApplies(*rev, op)) {
-        const float *envelope =
-            !rev->fullStrength && rev->envelopeOk &&
-                    rev->envelope.size() == count
-                ? rev->envelope.data()
-                : nullptr;
-        bool untouched = false;
-        ok = RrGeoRunRevisionRange(op, rev->parameters, rev->rangeInputs,
-                                   entering, count, begin, end, envelope,
-                                   &rev->stagingOutput, useSimd, &untouched);
-        // A refusal after an Applies acceptance passes the range through;
-        // the join counts it.
-        if (ok && !untouched) {
-            source = rev->stagingOutput.data() + begin;
+    if (sized && RrGeoRevisionApplies(*rev, rev->op)) {
+        if (rev->op == RrGeoOpSkin) {
+            RrGeometryScratch::Chunk &chunk = rev->chunks[g];
+            chunk.keyChanged = false;
+            if (rev->partitionStale) {
+                // The file holds the layout's indices and element size as
+                // private constants, so this cannot arise: refuse.
+                ++scratch->gateViolations;
+                ok = false;
+            } else {
+                if (!RrGeoGatherChunkTransforms(program, wire, *rev, &chunk,
+                                                error)) {
+                    return false;
+                }
+                const int k = RigExecGroupScratch(&state, n);
+                std::vector<RrVec3f> &buffer = *state.own[k];
+                buffer.resize(n);
+                ok = RrGeoSkinGroup(*rev, entering.data,
+                                    RrGeoChunkTransformsView(chunk, useSimd),
+                                    count, begin, end, useSimd,
+                                    buffer.data());
+                chunk.ok = ok;
+                if (ok) {
+                    RigExecPublishOwnGroup(&state, k);
+                    state.ok = true;
+                    return true;
+                }
+            }
+        } else {
+            const float *envelope = !rev->fullStrength && rev->envelopeOk &&
+                                            rev->envelope.size() == count
+                                        ? rev->envelope.data()
+                                        : nullptr;
+            const int k = RigExecGroupScratch(&state, n);
+            std::vector<RrVec3f> &buffer = *state.own[k];
+            buffer.resize(n);
+            bool untouched = false;
+            ok = RrGeoRunRevisionGroup(rev->op, rev->parameters,
+                                       rev->rangeInputs, entering.data,
+                                       buffer.data(), count, begin, end,
+                                       envelope, useSimd, &untouched);
+            if (ok && !untouched) {
+                RigExecPublishOwnGroup(&state, k);
+                state.ok = true;
+                return true;
+            }
         }
     }
-    bool moved = !chunk.rangeRan || chunk.rangeCount != count;
-    if (sized && end > begin) {
-        const bool copied = RigExecCopyMovedRange(
-            source, rev->output.data() + begin, end - begin);
-        moved = moved || copied;
+    RigExecPublishPassedGroup(&state, entering, from);
+    state.ok = ok;
+    return true;
+}
+
+// Speculative chunk \p g of a Whole keyed skin: group g of the entering
+// version skinned into one of the group's own buffers and kept as the
+// computed result its fuse publishes if the revision applies.
+bool
+RrGeoRunWholeSkinChunk(RrProgram *program,
+                       const RrGeometryScratch::Chain &chain,
+                       const RigExecWireRevision &wire,
+                       RrGeometryScratch::Revision *rev, size_t revisionIndex,
+                       size_t g, bool useSimd, std::string *error)
+{
+    RrGeometryScratch::Chunk &chunk = rev->chunks[g];
+    RigExecGroupState<RrVec3f> &state = rev->groups[g];
+    chunk.keyChanged = false;
+    const size_t count = rev->precedingCount;
+    size_t begin = 0, end = 0;
+    RrGeoGroupBounds(chain, g, count, &begin, &end);
+    const size_t n = end - begin;
+    const RigExecPointsRef<RrVec3f> &entering =
+        RrGeoGroupAt(chain, revisionIndex, g, nullptr);
+    const bool sized = entering.count == n && chain.lastBase.size() == count;
+    if (!rev->status.AllowsApply() || !RrGeoSkinPacketIsUsable(*rev) ||
+        rev->partitionStale || !sized) {
+        chunk.ok = false;
+        state.ok = false;
+        return true;
     }
-    chunk.ok = ok;
-    chunk.rangeCount = count;
-    chunk.rangeRan = true;
+    if (!RrGeoGatherChunkTransforms(program, wire, *rev, &chunk, error)) {
+        return false;
+    }
+    const int k = RigExecGroupScratch(&state, n);
+    std::vector<RrVec3f> &buffer = *state.own[k];
+    buffer.resize(n);
+    chunk.ok = RrGeoSkinGroup(*rev, entering.data,
+                              RrGeoChunkTransformsView(chunk, useSimd), count,
+                              begin, end, useSimd, buffer.data());
+    if (chunk.ok) {
+        RigExecNoteComputedGroup(&state, k);
+    }
+    state.ok = chunk.ok;
+    return true;
+}
+
+// The fuse of a Whole revision in a chain with groups: the decision the
+// Legacy fuse makes, then every group published -- the keyed chunks'
+// computed groups, or slices of the one chunk's or the stale-partition
+// result, where it applied; the entering groups shared where it did not --
+// and its group ids, which RevisionDone's content version follows.
+void
+RrGeoRunWholeFuse(const RrGeometryScratch::Chain &chain,
+                  RrGeometryScratch::Revision *rev, size_t revisionIndex,
+                  bool skin, bool packetValid, bool useSimd)
+{
+    const size_t groups = chain.groupBounds.size() - 1;
+    const size_t count = rev->precedingCount;
+    rev->resultStatus = rev->status.state;
+    bool applied = packetValid && rev->status.AllowsApply();
+    const bool whole = applied && skin && rev->partitionStale;
+    std::vector<RrVec3f> fused;
+    if (whole) {
+        applied = RrGeoFuseWholeRevision(chain, rev, revisionIndex, useSimd,
+                                         &fused);
+    } else if (applied && rev->acceptance != RrGeoAcceptance::Deferred) {
+        applied = rev->acceptance == RrGeoAcceptance::Applies;
+    } else if (applied) {
+        for (const RrGeometryScratch::Chunk &chunk : rev->chunks) {
+            if (!chunk.ok) {
+                applied = false;
+                break;
+            }
+        }
+    }
+    // Where the applied points are: each keyed chunk's computed group, or
+    // one array at the full count.
+    const std::vector<RrVec3f> *result =
+        whole ? &fused : (rev->chunked ? nullptr : &rev->stagingOutput);
+    if (applied && !result) {
+        for (size_t g = 0; g < groups; ++g) {
+            if (g >= rev->chunks.size() || !rev->chunks[g].ok ||
+                rev->groups[g].ownComputed < 0) {
+                applied = false;
+                break;
+            }
+        }
+    }
+    if (applied && result && result->size() != count) {
+        applied = false;
+    }
+    for (size_t g = 0; g < groups; ++g) {
+        RigExecGroupState<RrVec3f> &state = rev->groups[g];
+        if (!applied) {
+            RigExecGroupSource from;
+            const RigExecPointsRef<RrVec3f> &entering =
+                RrGeoGroupAt(chain, revisionIndex, g, &from);
+            RigExecPublishPassedGroup(&state, entering, from);
+            continue;
+        }
+        if (!result) {
+            RigExecPublishOwnGroup(&state, state.ownComputed);
+            continue;
+        }
+        size_t begin = 0, end = 0;
+        RrGeoGroupBounds(chain, g, count, &begin, &end);
+        const int k = RigExecGroupScratch(&state, end - begin);
+        state.own[k]->assign(result->begin() + std::ptrdiff_t(begin),
+                             result->begin() + std::ptrdiff_t(end));
+        RigExecPublishOwnGroup(&state, k);
+    }
+    if (!applied && rev->status.AllowsApply()) {
+        rev->resultStatus = "moverFailed";
+    }
+    // RevisionDone's content version moves exactly when a group id of the
+    // version it leaves does (a reset clears the ids, so the next
+    // publication bumps).
+    bool moved = rev->groupIds.size() != groups;
+    rev->groupIds.resize(groups);
+    for (size_t g = 0; g < groups; ++g) {
+        const RigExecGroupSource id = RrGeoSource(
+            rev->groupSlotBase + int64_t(g), rev->groups[g].version);
+        if (rev->groupIds[g] != id) {
+            rev->groupIds[g] = id;
+            moved = true;
+        }
+    }
     if (moved) {
-        ++chunk.rangeVersion;
+        ++rev->doneVersion;
     }
+    rev->currentSource = int(revisionIndex);
 }
 
 // The fuse's two lines about a packet its weight failed: an out-of-range
@@ -7015,10 +7640,25 @@ RrGeoRunRevisionChunkStep(RrProgram *program, RrGeometryScratch *scratch,
         }
         return false;
     }
-    if (rev.rangeRole) {
-        RrGeoRunRangeStep(chain, &rev, revisionIndex, int(wire.op),
-                          size_t(wireStep.part), useSimd);
-        return true;
+    if (rev.role != RrGeoRole::Legacy &&
+        (rev.rangeRole || rev.chunked)) {
+        const size_t g = size_t(wireStep.part);
+        if (g >= rev.groups.size()) {
+            if (error) {
+                *error = RrGeoStepLabel(program, step) + " names no group";
+            }
+            return false;
+        }
+        const bool ran =
+            rev.rangeRole
+                ? RrGeoRunGroupStep(program, scratch, chain, wire, &rev,
+                                    revisionIndex, g, useSimd, error)
+                : RrGeoRunWholeSkinChunk(program, chain, wire, &rev,
+                                         revisionIndex, g, useSimd, error);
+        if (!ran && error) {
+            *error = RrGeoStepLabel(program, step) + ": " + *error;
+        }
+        return ran;
     }
     RrGeometryScratch::Chunk &chunk = rev.chunks[size_t(wireStep.part)];
     const RrVec3f *points = nullptr;
@@ -7106,12 +7746,31 @@ RrGeoRunRevisionFuseStep(RrProgram *program, RrGeometryScratch *scratch,
     const bool packetValid =
         rev.parameters.valid && (!skin || rev.influencesValid);
     if (rev.rangeSetAside) {
-        // A cycle set its ranges aside: publish what an excluded fuse does,
-        // the base passed through, against the live base (native RunJoin).
+        // A cycle set the revision aside: publish what an excluded fuse
+        // does, the base passed through, against the live base (native
+        // RunJoin); in a chain with groups, the base groups and their ids.
         rev.ran = false;
         rev.executed = false;
         rev.resultStatus = "operation cycle";
-        if (!RrGeoPointBitsEqual(chain.lastBase, rev.passedPoints)) {
+        if (!chain.groupBounds.empty()) {
+            const size_t groups = chain.groupBounds.size() - 1;
+            bool moved = rev.groupIds.size() != groups;
+            rev.groupIds.resize(groups);
+            for (size_t g = 0; g < groups; ++g) {
+                if (rev.groupWritten[g]) {
+                    RrGeoPassBaseGroup(chain, g, &rev.groups[g]);
+                }
+                const RigExecGroupSource base = RrGeoSource(
+                    -1 - int64_t(g), chain.baseGroups[g].version);
+                if (rev.groupIds[g] != base) {
+                    rev.groupIds[g] = base;
+                    moved = true;
+                }
+            }
+            if (moved) {
+                ++rev.doneVersion;
+            }
+        } else if (!RrGeoPointBitsEqual(chain.lastBase, rev.passedPoints)) {
             ++rev.doneVersion;
             rev.passedPoints = chain.lastBase;
         }
@@ -7121,9 +7780,10 @@ RrGeoRunRevisionFuseStep(RrProgram *program, RrGeometryScratch *scratch,
     RrGeoFuseWeightDiagnostics(program, wire, rev, packetValid,
                                &output.diagnostics);
     if (rev.rangeRole) {
-        // The join: the ranges wrote the whole version into `output`, which
-        // stays this revision's source; RevisionDone's content version moves
-        // exactly when a range's did, or on the first publication.
+        // The join: the group steps published the written groups, and the
+        // others are the entering version's. RevisionDone's content version
+        // moves exactly when a group id of the version it leaves does (a
+        // reset clears the ids, so the next publication bumps).
         rev.executed = true;
         output.counters.revisionsExecuted = 1;
         const bool applied = RrGeoRevisionApplies(rev, int(wire.op));
@@ -7131,17 +7791,19 @@ RrGeoRunRevisionFuseStep(RrProgram *program, RrGeometryScratch *scratch,
         if (!applied && rev.status.AllowsApply()) {
             rev.resultStatus = "moverFailed";
         }
-        bool moved = !rev.ran;
+        const size_t groups = rev.groups.size();
+        bool moved = rev.groupIds.size() != groups;
         rev.rangeRefusals = 0;
-        rev.joinSeen.resize(rev.chunks.size(), 0);
-        for (size_t k = 0; k < rev.chunks.size(); ++k) {
-            const RrGeometryScratch::Chunk &chunk = rev.chunks[k];
-            if (rev.joinSeen[k] != chunk.rangeVersion) {
-                moved = true;
-                rev.joinSeen[k] = chunk.rangeVersion;
-            }
-            if (applied && !chunk.ok) {
+        rev.groupIds.resize(groups);
+        for (size_t g = 0; g < groups; ++g) {
+            if (rev.groupWritten[g] && applied && !rev.groups[g].ok) {
                 ++rev.rangeRefusals;
+            }
+            RigExecGroupSource source;
+            RrGeoGroupAt(chain, revisionIndex + 1, g, &source);
+            if (rev.groupIds[g] != source) {
+                rev.groupIds[g] = source;
+                moved = true;
             }
         }
         if (moved) {
@@ -7160,7 +7822,12 @@ RrGeoRunRevisionFuseStep(RrProgram *program, RrGeometryScratch *scratch,
     // The common graph selected this semantic completion body.
     rev.executed = true;
     output.counters.revisionsExecuted = rev.executed ? 1 : 0;
-    if (rev.executed) {
+    if (rev.role == RrGeoRole::Whole) {
+        RrGeoRunWholeFuse(chain, &rev, revisionIndex, skin, packetValid,
+                          program->geoSettings.useSimd);
+        rev.lastStatus = rev.status;
+        rev.ran = true;
+    } else if (rev.executed) {
         // The baseline the content version is decided against, as the
         // program's fuse: its own output when it applied last, the copy of
         // its entering points when it passed through, none before its first.
@@ -7593,23 +8260,45 @@ bool RrGeometryChainContentKey(const RrProgram *program, RigExecWireSlotDomain d
         const auto &rev=chain.revisions[size_t(index.second)];
         RrOpBytes(key,rev.currentSource); RrOpBytes(key,rev.resultStatus);
         RrOpBytes(key,rev.status.state); RrOpBytes(key,rev.status.firstBadAddress);
-        if(rev.currentSource<0) RrOpBytes(key,chain.lastBase);
+        if (!chain.groupBounds.empty()) {
+            // The groups' bytes as published, read afresh: never the
+            // readers' gather, which trusts the ids this judges.
+            const size_t version = size_t(index.second) + 1;
+            for (size_t g = 0; g + 1 < chain.groupBounds.size(); ++g) {
+                const auto &ref = RrGeoGroupAt(chain, version, g, nullptr);
+                RrOpBytes(key, ref.count);
+                if (ref.count > 0 && ref.data) RigExecOpKeyAppendRun(key, ref.data, ref.count);
+            }
+        } else if(rev.currentSource<0) RrOpBytes(key,chain.lastBase);
         else if(size_t(rev.currentSource)<chain.revisions.size())
             RrOpBytes(key,chain.revisions[size_t(rev.currentSource)].output);
         return true;
     }
-    // A range-pipelined revision's range: the key its content version
-    // stands for, over the range's bytes in `output`.
+    // A group slot: the key its content version stands for, over the bytes
+    // published (or, for a Whole keyed skin's chunk, computed).
     size_t c = 0, r = 0, k = 0;
     if (domain == D::RevisionOut && RrGeoChunkOwner(program, *scratch, slot, &c, &r, &k)) {
         const auto &rev = scratch->chains[c].revisions[r];
-        if (!rev.rangeRole) return false;
-        const auto &chunk = rev.chunks[k];
-        size_t begin = 0, end = 0;
-        RigExecPointRangeAt(chunk.begin, chunk.end, k + 1 == rev.chunks.size(),
-                            rev.output.size(), &begin, &end);
-        RrOpBytes(key,chunk.ok); RrOpBytes(key,rev.output.size());
-        if (begin < end) RigExecOpKeyAppendRun(key,rev.output.data()+begin,end-begin);
+        if (rev.role == RrGeoRole::Legacy || (rev.role == RrGeoRole::Whole &&
+                                              !rev.chunked && k < rev.chunks.size()))
+            return false;
+        const bool range = rev.role == RrGeoRole::Range;
+        const bool published = range || k >= rev.chunks.size();
+        const size_t g = range || !published ? k : k - rev.chunks.size();
+        if (g >= rev.groups.size()) return false;
+        const auto &state = rev.groups[g];
+        const RrVec3f *data = state.published.data;
+        size_t n = state.published.count;
+        if (!published) {
+            const bool computed = state.ownComputed >= 0 && state.own[state.ownComputed];
+            data = computed ? state.own[state.ownComputed]->data() : nullptr;
+            n = computed ? state.own[state.ownComputed]->size() : 0;
+            RrOpBytes(key,rev.chunks[k].ok);
+        } else if (range) {
+            RrOpBytes(key,state.ok);
+        }
+        RrOpBytes(key,n);
+        if (n > 0 && data) RigExecOpKeyAppendRun(key,data,n);
         return true;
     }
     return false;
@@ -7661,11 +8350,32 @@ void RrGeometryOpValueKey(const RrProgram *program, RigExecWireSlotDomain domain
         size_t c = 0, r = 0, k = 0;
         if (!RrGeoChunkOwner(program, *scratch, slot, &c, &r, &k)) return;
         const auto &rev = scratch->chains[c].revisions[r];
+        // O(1) for a group: its content version, which only its writer
+        // moves. A Range group (ok, count, version); a Whole revision's
+        // published group (count, version); a Whole keyed skin's chunk its
+        // computed result (ok, count, computedVersion).
+        if (rev.role == RrGeoRole::Range) {
+            if (k >= rev.groups.size()) return;
+            const auto &state = rev.groups[k];
+            RrOpBytes(key,state.ok); RrOpBytes(key,state.published.count);
+            RrOpBytes(key,state.version);
+            return;
+        }
+        if (rev.role == RrGeoRole::Whole && k >= rev.chunks.size()) {
+            const size_t g = k - rev.chunks.size();
+            if (g >= rev.groups.size()) return;
+            const auto &state = rev.groups[g];
+            RrOpBytes(key,state.published.count); RrOpBytes(key,state.version);
+            return;
+        }
+        if (k >= rev.chunks.size()) return;
         const auto &chunk = rev.chunks[k];
-        if (rev.rangeRole) {
-            // O(1): the range's content version, which only its step writes.
-            RrOpBytes(key,chunk.ok); RrOpBytes(key,rev.output.size());
-            RrOpBytes(key,chunk.rangeVersion);
+        if (rev.role == RrGeoRole::Whole && rev.chunked) {
+            if (k >= rev.groups.size()) return;
+            const auto &state = rev.groups[k];
+            const size_t n = state.ownComputed >= 0 && state.own[state.ownComputed]
+                ? state.own[state.ownComputed]->size() : 0;
+            RrOpBytes(key,chunk.ok); RrOpBytes(key,n); RrOpBytes(key,state.computedVersion);
             return;
         }
         const size_t begin=std::min(size_t(chunk.begin),rev.stagingOutput.size());
@@ -7688,6 +8398,11 @@ void RrGeometryOpValueKey(const RrProgram *program, RigExecWireSlotDomain domain
     case RigExecWireSlotDomain::RevisionPacket:
         RrOpPacketKey(key,*rev,false); break;
     case RigExecWireSlotDomain::RevisionTransforms:
+        // A Range skin's group steps gather their own joints' matrices:
+        // they read the fold for its validity alone.
+        if (rev->role == RrGeoRole::Range && rev->op == RrGeoOpSkin) {
+            RrOpBytes(key,rev->influencesValid); break;
+        }
         RrOpBytes(key,rev->influences); RrOpBytes(key,rev->influencesValid);
         RrOpBytes(key,rev->transform); RrOpBytes(key,rev->haveTransform);
         RrOpBytes(key,rev->carry); RrOpBytes(key,rev->haveCarry); break;
@@ -7717,7 +8432,8 @@ void RrResetExcludedGeometryValue(RrProgram *program,
     if (domain==RigExecWireSlotDomain::ChainBase) {
         auto &chain=scratch->chains[slot];
         if(!chain.lastBase.empty()) ++chain.baseVersion;
-        chain.haveBase=false; chain.lastBase.clear(); return;
+        chain.haveBase=false; chain.lastBase.clear();
+        RrGeoPublishBaseGroups(&chain); return;
     }
     if (domain==RigExecWireSlotDomain::ChainPoints) {
         auto &chain=scratch->chains[slot];
@@ -7734,20 +8450,27 @@ void RrResetExcludedGeometryValue(RrProgram *program,
     if (domain==RigExecWireSlotDomain::RevisionOut) {
         size_t c=0, r=0, k=0;
         if(!RrGeoChunkOwner(program,*scratch,slot,&c,&r,&k)) return;
-        auto &revision=scratch->chains[c].revisions[r];
-        if(revision.rangeRole) {
-            // A set-aside range makes the revision pass the base through, as
-            // an excluded fuse does: its successors and every reader of its
-            // version read the live base, never this buffer; its join
-            // publishes that version (native RigExecBakedResetSetAsideGeometryValue).
-            auto &chunk=revision.chunks[k];
-            chunk.ok=false; chunk.rangeRan=false;
+        auto &chain=scratch->chains[c];
+        auto &revision=chain.revisions[r];
+        if(revision.role==RrGeoRole::Range || (revision.role==RrGeoRole::Whole &&
+                                                k>=revision.chunks.size())) {
+            // A set-aside group slot makes the revision pass the base
+            // through, as an excluded fuse does: its successors and every
+            // reader of its version read the live base groups, never this
+            // slot; its join or fuse publishes that version (native
+            // RigExecBakedResetSetAsideGeometryValue).
+            const size_t g=revision.role==RrGeoRole::Range ? k : k-revision.chunks.size();
+            if(g<revision.groups.size()) {
+                revision.groups[g].ok=false;
+                RrGeoPassBaseGroup(chain,g,&revision.groups[g]);
+            }
             revision.rangeSetAside=true; revision.currentSource=-1;
             return;
         }
         revision.stagingOutput.clear();
         revision.stagingFresh=false;
         for(auto &chunk:revision.chunks) chunk.ok=false;
+        for(auto &state:revision.groups) state.ok=false;
         return;
     }
     RrGeometryScratch::Revision *revision=nullptr;
@@ -7768,14 +8491,25 @@ void RrResetExcludedGeometryValue(RrProgram *program,
         revision->influencesValid=false; break;
     case RigExecWireSlotDomain::RevisionDone:
     case RigExecWireSlotDomain::ChainDirty:
-        // A range-pipelined revision set aside passes the base through
-        // exactly as a whole one does.
-        if(revision->rangeRole) revision->rangeSetAside=true;
+        // A Range or Whole revision set aside passes the base through
+        // exactly as a Legacy one does.
+        if(revision->role!=RrGeoRole::Legacy) revision->rangeSetAside=true;
         revision->currentSource=-1; revision->resultStatus="operation cycle";
         revision->ran=false; revision->executed=false;
         // An excluded fuse never runs: the version follows the base it
-        // passes through, against the copy of the base it last carried.
-        if(owner && !RrGeoPointBitsEqual(owner->lastBase,revision->passedPoints)) {
+        // passes through, against the base it last carried -- in a chain
+        // with groups, the base groups' ids.
+        if(owner && !owner->groupBounds.empty()) {
+            const size_t groups=owner->groupBounds.size()-1;
+            bool moved=revision->groupIds.size()!=groups;
+            revision->groupIds.resize(groups);
+            for(size_t g=0;g<groups;++g) {
+                if(revision->groupWritten[g]) RrGeoPassBaseGroup(*owner,g,&revision->groups[g]);
+                const RigExecGroupSource id=RrGeoSource(-1-int64_t(g),owner->baseGroups[g].version);
+                if(revision->groupIds[g]!=id) { revision->groupIds[g]=id; moved=true; }
+            }
+            if(moved) ++revision->doneVersion;
+        } else if(owner && !RrGeoPointBitsEqual(owner->lastBase,revision->passedPoints)) {
             ++revision->doneVersion; revision->passedPoints=owner->lastBase;
         }
         break;

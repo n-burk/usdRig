@@ -217,9 +217,11 @@ struct RrWeightFieldResult {
     std::string error;
 };
 
+// The epilogue's share of a revision's resolved field (never a copy); the
+// reader API copies it once (exec.cpp).
 struct RrWeightFieldPublish {
     uint32_t target = 0;
-    std::vector<float> weights;
+    RrRetainedArray<float> weights;
 };
 
 // One derived target's publish row.
@@ -354,7 +356,9 @@ struct RrStore {
     std::map<uint32_t, RrMat4d> jointMatricesFinal;
     std::map<uint32_t, RrPointFrame> jointFramesBase, jointFramesFinal;
     std::map<uint32_t, RrPointFrame> controlFrames;
-    std::map<uint32_t, std::vector<RrVec3f>> movedProperties;
+    /// The epilogue's shares of the chains' and derived targets' results,
+    /// released once the reader API has copied them.
+    std::map<uint32_t, RrRetainedArray<RrVec3f>> movedProperties;
     /// Matrix primvars a surface projector published, by property.
     std::map<uint32_t, RrMat4d> movedMatrices;
     std::map<uint32_t, RrWeightFieldPublish> weightFields;

@@ -391,7 +391,7 @@ RrPublishGeometry(RrProgram *program,
                     .revisions[size_t(entry.second)];
             RrWeightFieldPublish field;
             field.target = publish.weightFieldTarget;
-            field.weights = publish.weightField.Read();
+            field.weights = publish.weightField;
             store.weightFields[geo.weightObjects[size_t(wire.weightObject)]
                                    .path] = std::move(field);
         } else if (step.kind == RigExecWireStepKind::ChainStatus) {
@@ -400,7 +400,7 @@ RrPublishGeometry(RrProgram *program,
                 continue;
             }
             store.movedProperties[store.chainPublish[chain].target] =
-                store.chainPublish[chain].result.Read();
+                store.chainPublish[chain].result;
         } else if (step.kind == RigExecWireStepKind::Derived) {
             const auto &entry = geo.derivedIndex[size_t(step.object)];
             const size_t chain = size_t(entry.first);
@@ -408,7 +408,7 @@ RrPublishGeometry(RrProgram *program,
                 store.derivedPublish[size_t(step.object)];
             if (store.chainPublish[chain].haveBase && derived.haveBase) {
                 if (!derived.matrixTarget) {
-                    store.movedProperties[derived.target] = derived.result.Read();
+                    store.movedProperties[derived.target] = derived.result;
                 } else if (derived.haveMatrix) {
                     store.movedMatrices[derived.target] = derived.matrix;
                 }
