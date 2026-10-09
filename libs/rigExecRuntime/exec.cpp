@@ -402,6 +402,23 @@ RigExecRuntimeReader::GetLastRunTraceForTesting() const
     return _program->store.runTrace;
 }
 
+std::vector<std::string>
+RigExecRuntimeReader::GetComposeMovesForTesting(bool ladder) const
+{
+    const RrStore &store = _program->store;
+    const std::vector<char> &changed =
+        ladder ? store.ladderChanged : store.restChanged;
+    const RigExecWireSlotMeta &meta = *_program->slotMeta;
+    std::vector<std::string> out;
+    for (size_t slot = 0; slot < changed.size() && slot < meta.paths.size();
+         ++slot) {
+        if (changed[slot]) {
+            out.push_back(_program->TextOrEmpty(meta.paths[slot]));
+        }
+    }
+    return out;
+}
+
 bool
 RigExecRuntimeReader::GetStepRanForTesting(size_t step) const
 {

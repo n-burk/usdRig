@@ -3130,11 +3130,12 @@ RigExecBakedComposeRestRange(RigExecBakedProgramImpl *program, int begin,
         B.restPts[slot] = B.restFrames[slot].points;
         B.restRoundTrip[slot] = RigExecBakedRoundTrip(B.restM[slot]);
 
-        // Compared by VALUE: a recompose that landed on the same numbers
-        // moved nothing, and the readers of the rest may sit it out.
-        // `restPts`, `restFrames` and `restRoundTrip` are functions of
-        // `restM`, so it stands for all four.
-        if (trackMoves && B.restM[slot] != B.lastRestM[slot]) {
+        // Compared BIT FOR BIT, as the op graph keys the rest: a recompose
+        // that lands on the same bits (a held NaN included) moved nothing,
+        // and the readers of the rest may sit it out; a flipped zero sign
+        // moved. `restPts`, `restFrames` and `restRoundTrip` are functions
+        // of `restM`, so it stands for all four.
+        if (trackMoves && !RigExecTypedSame(B.restM[slot], B.lastRestM[slot])) {
             B.lastRestM[slot] = B.restM[slot];
             if (!B.restChanged[slot]) {
                 B.restChanged[slot] = 1;
@@ -3224,16 +3225,16 @@ RigExecBakedComposeLadderRange(RigExecBakedProgramImpl *program, int begin,
         const TfToken order = rd(L.rotationOrder);
         B.rotOrder[slot] = order.IsEmpty() ? B.xyzToken : order;
 
-        // By value, as the rest is; `defaultRoundTrip` is a function of
+        // Bit for bit, as the rest is; `defaultRoundTrip` is a function of
         // `selfD`.
         if (trackMoves &&
-            (B.selfD[slot] != B.lastSelfD[slot] ||
-             B.parentDinv[slot] != B.lastParentDinv[slot] ||
+            (!RigExecTypedSame(B.selfD[slot], B.lastSelfD[slot]) ||
+             !RigExecTypedSame(B.parentDinv[slot], B.lastParentDinv[slot]) ||
              B.posedAuthored[slot] != B.lastPosedAuthored[slot] ||
-             B.posedAuthoredM[slot] != B.lastPosedAuthoredM[slot] ||
+             !RigExecTypedSame(B.posedAuthoredM[slot], B.lastPosedAuthoredM[slot]) ||
              B.rotOrder[slot] != B.lastRotOrder[slot] ||
-             B.posedD[slot] != B.lastPosedD[slot] ||
-             B.parentSpaceM[slot] != B.lastParentSpaceM[slot] ||
+             !RigExecTypedSame(B.posedD[slot], B.lastPosedD[slot]) ||
+             !RigExecTypedSame(B.parentSpaceM[slot], B.lastParentSpaceM[slot]) ||
              B.parentSpaceAuthored[slot] != B.lastParentSpaceAuthored[slot] ||
              B.rotationSign[slot] != B.lastRotationSign[slot])) {
             B.lastSelfD[slot] = B.selfD[slot];

@@ -2,6 +2,7 @@
 
 #include "poseInternal.h"
 #include <algorithm>
+#include <cstring>
 #include <limits>
 #include <utility>
 
@@ -47,6 +48,19 @@ _RrWireLandmarks(const std::array<RigExecWireVec3d, 4> &wire)
         out[i] = RrVec3d(wire[i][0], wire[i][1], wire[i][2]);
     }
     return out;
+}
+
+// RigExecTypedSame's matrix rule: bit for bit, so a held NaN has not moved
+// and a flipped zero sign has.
+bool
+_RrSameBits(const RrMat4d &a, const RrMat4d &b)
+{
+    for (size_t r = 0; r < 4; ++r) {
+        if (std::memcmp(a[r], b[r], 4 * sizeof(double)) != 0) {
+            return false;
+        }
+    }
+    return true;
 }
 
 // RigExecBakedComposeLadder (bakedPose.cpp), over the scratch tables.
@@ -241,14 +255,15 @@ _RrComposeLadder(RrProgram *program, bool trackMoves,
         if (!trackMoves) {
             continue;
         }
-        if (scratch->restM[i] != scratch->lastRestM[i] ||
-            scratch->selfD[i] != scratch->lastSelfD[i] ||
-            scratch->parentDinv[i] != scratch->lastParentDinv[i] ||
+        // Bit for bit, as the baked program compares them.
+        if (!_RrSameBits(scratch->restM[i], scratch->lastRestM[i]) ||
+            !_RrSameBits(scratch->selfD[i], scratch->lastSelfD[i]) ||
+            !_RrSameBits(scratch->parentDinv[i], scratch->lastParentDinv[i]) ||
             scratch->posedAuthored[i] != scratch->lastPosedAuthored[i] ||
-            scratch->posedAuthoredM[i] != scratch->lastPosedAuthoredM[i] ||
+            !_RrSameBits(scratch->posedAuthoredM[i], scratch->lastPosedAuthoredM[i]) ||
             scratch->rotOrder[i] != scratch->lastRotOrder[i] ||
-            scratch->posedD[i] != scratch->lastPosedD[i] ||
-            scratch->parentSpaceM[i] != scratch->lastParentSpaceM[i] ||
+            !_RrSameBits(scratch->posedD[i], scratch->lastPosedD[i]) ||
+            !_RrSameBits(scratch->parentSpaceM[i], scratch->lastParentSpaceM[i]) ||
             scratch->parentSpaceAuthored[i] != scratch->lastParentSpaceAuthored[i] ||
             scratch->rotationSign[i] != scratch->lastRotationSign[i]) {
             store.ladderMovedSlots.push_back(int(i));

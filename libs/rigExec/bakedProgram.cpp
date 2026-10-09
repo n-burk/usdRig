@@ -3026,7 +3026,7 @@ RigExecBakedProgram::_BuildWithSceneCaptureAttempt(RigExecRigEvaluator *evaluato
     bindPhases.Close();
     // The comparison buffers the rest and ladder ops compare against,
     // seeded with what Build just composed: a later compose that lands on
-    // the same numbers finds nothing moved.
+    // the same bits finds nothing moved.
     B.lastRestM = B.restM;
     B.lastSelfD = B.selfD;
     B.lastPosedD = B.posedD;

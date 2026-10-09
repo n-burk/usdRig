@@ -291,6 +291,12 @@ public:
     // and its leaf publication would. False naming the failure.
     bool SampleGeometryForTesting(std::string *error);
 
+    // Test-only: the providers whose rest (\p ladder false) or default-space
+    // ladder (\p ladder true) the last Execute's compose steps found moved,
+    // by path, in slot order. A solver refreshes its rest description from
+    // the moved rests it measures.
+    std::vector<std::string> GetComposeMovesForTesting(bool ladder) const;
+
     // The property chains' published values (chain targets and phased
     // consumers) as the last Execute computed them, in path order.
     std::vector<RigExecRuntimePropertyValue> GetPropertyValues() const;

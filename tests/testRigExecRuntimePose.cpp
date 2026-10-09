@@ -5812,6 +5812,298 @@ TestSmallValuePublication()
     CHECK(_RefusesSmall(program, D::CommitStaging, 4));
 }
 
+// The rest and ladder move predicates compare bits, as the op graph keys
+// do. Held's rest:tx and HeldDefault's default:tx turn NaN at frame 2 and
+// hold; their rest:ty and default:ty keep moving, so at frame 3 the compose
+// steps run over the held NaN and land on the bits frame 2 left. Neither
+// slot moves there, Chain (which measures Held's rest and runs on every
+// frame for its control) keeps its rest description, and a forced run
+// agrees with the cone run. The NaN's arrival and departure, and Free's
+// finite rest, still move. Native first, then the runtime.
+static void
+TestHeldNaNRestDoesNotMove()
+{
+    const char *const name = "held NaN rest";
+    const SdfLayerRefPtr layer = SdfLayer::CreateAnonymous(".usda");
+    CHECK(layer->ImportFromString(R"usda(#usda 1.0
+(
+    startTimeCode = 1
+    endTimeCode = 4
+)
+
+def Xform "Asset"
+{
+    def RigExecRoot "Rig"
+    {
+        def Scope "Controls"
+        {
+            def RigExecControl "Ctl" (
+                prepend apiSchemas = ["RigExecControlAPI"]
+            )
+            {
+                double avars:rz.timeSamples = {
+                    1: 0,
+                    4: 30,
+                }
+            }
+        }
+
+        def Scope "Solvers"
+        {
+            def RigExecFkChain "Chain"
+            {
+                rel rigExec:controls = </Asset/Rig/Controls/Ctl>
+                rel rigExec:joints = </Asset/Rig/Joints/Held>
+            }
+        }
+
+        def Scope "Joints"
+        {
+            def RigExecJoint "Held"
+            {
+                matrix4d default:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (2, 0, 0, 1) )
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (2, 0, 0, 1) )
+                double rest:ty.timeSamples = {
+                    1: 0,
+                    4: 3,
+                }
+            }
+
+            def RigExecJoint "HeldDefault"
+            {
+                double default:ty.timeSamples = {
+                    1: 0,
+                    4: 3,
+                }
+            }
+
+            def RigExecJoint "Free"
+            {
+                double rest:tx.timeSamples = {
+                    1: 0,
+                    4: 3,
+                }
+            }
+        }
+    }
+}
+)usda"));
+    const UsdStageRefPtr stage = UsdStage::Open(layer);
+    CHECK(stage);
+    if (!stage) {
+        return;
+    }
+    const SdfPath rigPath("/Asset/Rig");
+    const SdfPath held("/Asset/Rig/Joints/Held");
+    const SdfPath heldDefault("/Asset/Rig/Joints/HeldDefault");
+    const SdfPath freeJoint("/Asset/Rig/Joints/Free");
+    const SdfPath chain("/Asset/Rig/Solvers/Chain");
+    // 0 at frame 1, then NaN held from frame 2 on.
+    const auto holdNaN = [&](const SdfPath &prim, const char *channel) {
+        const UsdAttribute attribute =
+            stage->GetPrimAtPath(prim).CreateAttribute(
+                TfToken(channel), SdfValueTypeNames->Double);
+        CHECK(attribute.Set(0.0, UsdTimeCode(1.0)));
+        CHECK(attribute.Set(std::numeric_limits<double>::quiet_NaN(),
+                            UsdTimeCode(2.0)));
+    };
+    holdNaN(held, "rest:tx");
+    holdNaN(heldDefault, "default:tx");
+
+    // Native.
+    RigExecRigEvaluator evaluator(stage, rigPath);
+    std::vector<std::string> notices;
+    CHECK(evaluator.Compile(&notices));
+    const auto evaluate =
+        [&](double frame) -> const RigExecBakedProgramImpl * {
+        const size_t generations = evaluator.GetBakedGenerationCount();
+        evaluator.Evaluate(UsdTimeCode(frame));
+        CHECK(evaluator.GetBakedGenerationCount() == generations + 1);
+        const RigExecBakedProgram *program = evaluator.GetBakedProgram();
+        return program ? &program->GetStepGraph() : nullptr;
+    };
+    const RigExecBakedProgramImpl *const B = evaluate(1.0);
+    CHECK(B);
+    if (!B) {
+        return;
+    }
+    // Evaluates \p frame; false when the evaluator replaced the program B
+    // names, which no later check may then read.
+    const size_t builds = evaluator.GetBakedProgramBuildCount();
+    const auto stay = [&](double frame) {
+        const bool same = evaluate(frame) == B &&
+                          evaluator.GetBakedProgramBuildCount() == builds;
+        CHECK(same);
+        return same;
+    };
+    const auto slotOf = [&](const SdfPath &path) {
+        const auto found = B->index.find(path);
+        return found == B->index.end() ? -1 : found->second;
+    };
+    // The step of \p kind that \p owner's compose group or solver owns.
+    const auto stepOf = [&](RigExecBakedStepKind kind, const SdfPath &owner) {
+        for (size_t i = 0; i < B->steps.size(); ++i) {
+            const RigExecBakedStep &step = B->steps[i];
+            if (step.kind != kind || step.object < 0) {
+                continue;
+            }
+            const size_t object = size_t(step.object);
+            const bool owns =
+                kind == RigExecBakedStepKind::Solve
+                    ? object < B->solvers.size() &&
+                          B->solvers[object].path == owner
+                    : object < B->composeGroups.size() &&
+                          B->paths[size_t(B->composeGroups[object].begin)] ==
+                              owner;
+            if (owns) {
+                return int(i);
+            }
+        }
+        return -1;
+    };
+    const auto ran = [&](int step) {
+        for (size_t c = 0; c < B->opGraph.ops.size(); ++c) {
+            if (step >= 0 && B->opGraph.ops[c].originalIndex == uint32_t(step)) {
+                return c < B->opExecution.ran.size() &&
+                       B->opExecution.ran[c] != 0;
+            }
+        }
+        return false;
+    };
+    const auto moved = [](const std::vector<int> &slots, int slot) {
+        return std::find(slots.begin(), slots.end(), slot) != slots.end();
+    };
+    const auto refreshes = [&]() -> long long {
+        for (const auto &solver : B->solvers) {
+            if (solver.path == chain) {
+                return (long long)solver.restRefreshes;
+            }
+        }
+        return -1;
+    };
+    const int heldSlot = slotOf(held);
+    const int heldDefaultSlot = slotOf(heldDefault);
+    const int freeSlot = slotOf(freeJoint);
+    const int restOp = stepOf(RigExecBakedStepKind::RestCompose, held);
+    const int ladderOp =
+        stepOf(RigExecBakedStepKind::LadderCompose, heldDefault);
+    const int solveOp = stepOf(RigExecBakedStepKind::Solve, chain);
+    CHECK(heldSlot >= 0 && heldDefaultSlot >= 0 && freeSlot >= 0);
+    CHECK(restOp >= 0 && ladderOp >= 0 && solveOp >= 0);
+    CHECK(refreshes() >= 0);
+    if (heldSlot < 0 || heldDefaultSlot < 0 || freeSlot < 0) {
+        return;
+    }
+
+    // The NaN arrives: the rest and the ladder move, and Chain refreshes.
+    if (!stay(2.0)) {
+        return;
+    }
+    CHECK(moved(B->restMoved, heldSlot));
+    CHECK(moved(B->ladderMoved, heldDefaultSlot));
+    CHECK(moved(B->restMoved, freeSlot));
+    const long long arrived = refreshes();
+    CHECK(arrived > 0);
+
+    // Held: the composes run over the held NaN and find the same bits.
+    if (!stay(3.0)) {
+        return;
+    }
+    CHECK(ran(restOp));
+    CHECK(ran(ladderOp));
+    CHECK(ran(solveOp));
+    CHECK(!B->restChanged[size_t(heldSlot)]);
+    CHECK(!moved(B->restMoved, heldSlot));
+    CHECK(!B->ladderChanged[size_t(heldDefaultSlot)]);
+    CHECK(!moved(B->ladderMoved, heldDefaultSlot));
+    CHECK(moved(B->restMoved, freeSlot));
+    CHECK(refreshes() == arrived);
+
+    // The same frame as a cone run, then forced from where it left off.
+    if (!stay(3.0)) {
+        return;
+    }
+    const std::vector<int> coneRests = B->restMoved;
+    const std::vector<int> coneLadders = B->ladderMoved;
+    evaluator.GetBakedProgram()->RequestFullRun();
+    if (!stay(3.0)) {
+        return;
+    }
+    CHECK(ran(restOp) && ran(ladderOp));
+    CHECK(B->restMoved == coneRests);
+    CHECK(B->ladderMoved == coneLadders);
+    CHECK(!B->restChanged[size_t(heldSlot)]);
+    CHECK(!B->ladderChanged[size_t(heldDefaultSlot)]);
+    const long long forced = refreshes();
+
+    // The NaN leaves: a move again.
+    if (!stay(1.0)) {
+        return;
+    }
+    CHECK(moved(B->restMoved, heldSlot));
+    CHECK(moved(B->ladderMoved, heldDefaultSlot));
+    CHECK(moved(B->restMoved, freeSlot));
+    CHECK(refreshes() > forced);
+
+    // The runtime, over the same history. Its compose steps record the
+    // moves its Solve steps refresh from.
+    std::vector<uint8_t> bytes;
+    std::unique_ptr<fb::RigExecWireFile> file;
+    if (!_BakeAndOpen(name, stage, rigPath, 1.0, &bytes, &file)) {
+        return;
+    }
+    RigExecTestPlayer player;
+    std::string error;
+    if (!player.Open(bytes, stage, &error)) {
+        std::printf("FAILED: %s: open: %s\n", name, error.c_str());
+        ++failures;
+        return;
+    }
+    const auto play = [&](double frame) {
+        error.clear();
+        CHECK(player.Play(frame, &error));
+        if (!error.empty()) {
+            std::printf("  %s frame %g: %s\n", name, frame, error.c_str());
+        }
+    };
+    const auto moves = [&](bool ladder, const SdfPath &path) {
+        const std::vector<std::string> paths =
+            player->GetComposeMovesForTesting(ladder);
+        return std::find(paths.begin(), paths.end(), path.GetString()) !=
+               paths.end();
+    };
+    const auto headRan = [&](fb::StepKind kind, const SdfPath &owner) {
+        for (const int32_t step : player->GetLastRunTraceForTesting()) {
+            if (step >= 0 && size_t(step) < file->steps.size() &&
+                file->steps[size_t(step)].kind == kind &&
+                player->GetStepLabelForTesting(size_t(step)) ==
+                    owner.GetString()) {
+                return true;
+            }
+        }
+        return false;
+    };
+    play(1.0);
+    play(2.0);
+    CHECK(moves(false, held));
+    CHECK(moves(true, heldDefault));
+    CHECK(moves(false, freeJoint));
+    play(3.0);
+    CHECK(headRan(fb::StepKind::RestCompose, held));
+    CHECK(headRan(fb::StepKind::LadderCompose, heldDefault));
+    CHECK(!moves(false, held));
+    CHECK(!moves(true, heldDefault));
+    CHECK(moves(false, freeJoint));
+    // Frame 3 again moves nothing, the held NaN included.
+    play(3.0);
+    CHECK(player->GetComposeMovesForTesting(false).empty());
+    CHECK(player->GetComposeMovesForTesting(true).empty());
+    play(1.0);
+    CHECK(moves(false, held));
+    CHECK(moves(true, heldDefault));
+    CHECK(moves(false, freeJoint));
+}
+
 static void
 TestAnimatedAutoClavicle(const std::string &examplesDir)
 {
@@ -5876,6 +6168,7 @@ main(int argc, char **argv)
     TestHeldDragCountsValueEditWork();
     TestRunTraceOrder();
     TestAvarReadsInAnyFileOrder();
+    TestHeldNaNRestDoesNotMove();
 
     std::string examplesDir = RIGEXEC_EXAMPLES_DIR;
     if (argc > 1) {
