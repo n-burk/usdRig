@@ -151,7 +151,7 @@ The standalone rigpack path does not join this picture. `docs/specs/standalone-r
 
 ### Edit-time incremental path
 
-Structural edits rebuild the compiled declarations. Value edits do not.
+Structural edits rebuild the compiled declarations. Value edits do not. `ClassifyNoticeDisposition` (`libs/rigExec/rigEvaluatorNotices.cpp:147-175`) sorts a stage notice against the standing program: `Patched` for a default-only avar edit the program can apply in place, `Edited` for a value edit the program can route, `Stale` when the capture index says the program itself is wrong, and `StampBumped` when the edit is real but unrouted, so the next generation runs every cluster once (`rigEvaluator.h:308-320`). The notice callback does not evaluate.
 
 The frame cache keys a pose by `(bindingEpochDigest, controlStateDigest)`, not by time (`libs/rigExec/frameCache.h:1-14`). Time is stored on the entry as a warming hint. A scrub across identical control values hits. A control edit changes the digest of every affected frame, so the old entries become unreachable and LRU drops them. The store is sixteen shards. Lookup copies a shared handle under the shard lock and copies the pose outside it. Publish builds the entry before taking the lock (`frameCache.h:15-22`). The published pose is bit-identical to a live evaluation of those inputs, or it is not served (`docs/concepts/frame-cache-warming.md:29-34`).
 
@@ -258,7 +258,8 @@ A search of `libs/` found no second range-for over a conditional `initializer_li
 - The mover registry and the plugin loader are function-local statics with mutexes (`moverRegistry.cpp:40-57`). Registration from static initializers in each mover translation unit (`RIGEXEC_REGISTER_MOVER` at `moverRegistry.h:286-288`) depends on those TUs being linked in.
 - `RIGEXEC_ENABLE_PARALLEL_EVAL` is a `TfEnvSetting` read on each call (`parallel.cpp:10-27`). The baked schedule mode is documented as read once (`bakedSchedule.h:28-32`).
 - Standalone interns schema identities once per process under a mutex because Exec keeps the keys after the database dies (`docs/specs/standalone-runtime.md:75-77`).
-- Frame-cache and scheduler locks are explicit and ordered. Operation bodies stay out of them.
+- Frame-cache and scheduler locks are explicit and ordered. Operation bodies stay out of them. Imaging's order is the scheduler fence, then the context mutex, then noted-root and warm-index locks, then the directory mutex as a leaf (`libs/rigExecImaging/registry.h:63-73`).
+- `RigExecImagingRegistry::GetInstance()` is a legacy process-wide handle. It owns no stage and forwards to whichever context was activated most recently (`registry.h:44-62`). A host that activates a second stage through that entry point leaves the first context evaluating. Stage-aware callers use `ForStage`. `RigExecTouchPoseHighlights::GetInstance()` is a second process-wide object.
 
 ### Error handling
 
@@ -283,6 +284,7 @@ The suite is the operational hotspot. This branch registers 185 `add_test` comma
 - PR #10's description still talks about a temporary Computed section that carries per-frame slot values. The tip of the branch is the later work: one validated FlatBuffer, head ops in the shared step graph, and a reader that computes the graph. There is no `Computed` table in `rigexec.fbs`.
 - Head-tier names remain in `bakedSchedule.h` (`RigExecBakedValidateHeadTier`, `RigExecBakedHeadSeeds`) after the commit that removed the retired head classification. The comments say head classification does not constrain order. The names still read as a second scheduler.
 - `libs/rigExec/backgroundScheduler.h:75-80` repeats the generation-fence comment verbatim.
+- `libs/rigExec/bakedProgram.h:1-15` still says a feature the program cannot express "stays on the dynamic path" and that the program is a second implementation beside per-frame OpenExec requests. `Evaluate` does not do that. A missing program returns an invalid pose and the refusal reasons (`rigEvaluator.cpp:265-268`, `344-349`). The same "dynamic path" wording is still scattered through the evaluator, the baked program, and the notice handler. `AGENTS.md:32-38` is the rule that matches the code: one loop, and a failed compile is an invalid pose. The header comments will send a porter looking for a fallback that is gone.
 
 ## 5. Readiness to merge into main
 
@@ -295,18 +297,21 @@ Eight schema classes exist only on `main`:
 - `RigExecArmatureParent`, `RigExecBoneFrame`, `RigExecConstraintFrame`, `RigExecCopyFrame`, `RigExecMappedFrame`
 - `RigExecSkinInfluence`, `RigExecLayeredSkinMover`, `RigExecSurfaceBindingMover`
 
-With them came affine-frame kernels (`affineFrameKernels.cpp`), an armature mover, a surface-binding mover, lattice and surface-snap kernels, Delta Mush setting changes, a multi-stage imaging fallback (`libs/rigExecImaging/fallbackStage.cpp` on `main`), gizmo deferred-release tests, and extensions to the frame-cache and frozen-sampling paths.
+With them came affine-frame kernels (`affineFrameKernels.cpp`), an armature mover, a surface-binding mover, lattice and surface-snap kernels, Delta Mush settings (`RigExecDeltaMushSettings` on `main`), gizmo deferred-release tests, and a different warming design. `main`'s container treats revision ops 19, 20, and 21 as wire aliases for extended surface, Delta Mush, and lattice records, and sets `extendedDeformerSemantics` when the op is at least 19 (`main`'s `libs/rigExecBinary/container.h` and `geometry.cpp`). This branch's mover translation units for those three deformers are shorter (88, 199, and 172 lines against 149, 297, and 276 on `main`) and do not carry that settings struct.
 
-Those nodes are not in this branch's `schema.usda`. A merge that keeps `main`'s behavior has to re-lower them onto the v4 operation graph, the format-18 tables, and the runtime step bodies. A merge that drops them deletes a committed feature from `main`.
+Warming diverges in the same commit. `main` fills the cache from a private captured stage (`fallbackStage.cpp`) and still documents a dynamic-run switch. This branch warms only a frozen program on the shared graph (`docs/concepts/frame-cache-warming.md:36-39`, `backgroundScheduler.h:4-8`). Porting the fallback means reimplementing it as frozen input capture, or dropping private-stage warming on purpose.
+
+The external-mover guide is a contract break inside the same commit. `main`'s `docs/concepts/external-movers.md` still says plugin API 2, with stage reads inside `assembleExternal`. This branch's copy says API 4, declared inputs, and no stage access (`docs/concepts/external-movers.md:14-28`, `moverRegistry.h:249-257`). A plugin built to the `main` page will not load here.
+
+Those nodes are not in this branch's `schema.usda`. A merge that keeps `main`'s behavior has to re-lower the new types and the extended deformer settings onto the v4 operation graph, the format-18 tables, and the runtime step bodies, and has to pick one warming design. A merge that drops them deletes a committed feature from `main`.
 
 ### Why the merge is dirty
 
-The overlap is not a handful of import lines. `5ded2be` edits the sectioned container and the bake capture path. This branch deletes that container. `git diff` names both sides for, among others:
+`git merge-tree` of `main` into this branch reports 17 content conflicts and 6 modify/delete conflicts. The modify/delete set is the sectioned container and the capture path this branch removed while `main` extended them: `libs/rigExecBake/capture.cpp`, `libs/rigExecBinary/container.h`, `libs/rigExecBinary/geometry.cpp`, `libs/rigExecBinary/geometry.h`, `libs/rigExec/frozenGeometry.cpp`, and `libs/rigExec/rigEvaluatorGeometryEvaluation.cpp`.
 
-- `libs/rigExecBake/capture.cpp`, `capture.h` (deleted here, modified on `main`)
-- `libs/rigExecBinary/container.h`, `geometry.cpp`, `geometry.h` (deleted here, modified on `main`)
-- `libs/rigExec/frozenGeometry.cpp`, `rigEvaluatorGeometryEvaluation.cpp` (deleted here, modified on `main`)
-- and files that exist on both and both changed: `CMakeLists.txt`, `schema.usda`, `moverGraph.cpp`, the Delta Mush / lattice / surface movers, `frozenSampling.cpp`, `rigExecRuntime/geometry.cpp`, `rigExecImaging/registry.cpp`, `gizmoUI.py`, and the frame-cache and binary tests
+The content conflicts are `CMakeLists.txt`, `docs/concepts/external-movers.md`, `docs/concepts/frame-cache-warming.md`, `docs/index.md`, `docs/operator_notes.py`, `libs/rigExec/moverGraph.cpp`, `libs/rigExec/rigEvaluatorCompile.cpp`, `libs/rigExecBake/serialize.cpp`, `libs/rigExecImaging/registry.cpp`, `libs/rigExecMath/deltaMushKernel.h`, `libs/rigExecMath/geometryKernels.cpp`, `libs/rigExecMath/geometryKernels.h`, `libs/rigExecRuntime/geometry.cpp`, and the binary, Delta Mush, frozen-context, and imaging frame-cache tests.
+
+A clean auto-merge is not a clean port. `libs/rigExec/movers/deltaMushMover.cpp`, `latticeMover.cpp`, and `surfaceMover.cpp` are outside that conflict list, and so is `schema.usda`. On this branch those mover files no longer mention `RigExecDeltaMushSettings` or `extendedDeformerSemantics`. Taking the auto-merged text can compile while dropping the smoothing, transport, lattice-grid, and surface-snap modes `main` just added.
 
 `main`'s container is a different file format. Its `libs/rigExecBinary/container.h` (at `5ded2be`) describes a 16-byte header plus a section table, magic `REXB` as a little-endian integer, version `0x00030003` (major 3, minor 3). Unknown section tags are skipped, so a minor bump can add tables. Major 3 is not readable by an older major. That reader tolerates a lower minor. Format 18 does not tolerate anything. A file written by current `main` starts with `REXB`, so this branch's opener takes the old-container path and returns "not a v4 .rigexec (old REXB container); rebake" (`format.cpp:6243-6247`). It never reaches the format-18 version check. A format-18 file opened by `main`'s sectioned reader fails that reader's header parse. The two magics match. The layouts do not.
 
@@ -335,7 +340,7 @@ Effort is scope: which libraries move, and whether a change is already written. 
 
 1. **Land PR #7 onto `rigexec-format-v4` before any merge to `main`.** The dangling range-for in `constraintSceneLowering.cpp:106-107` segfaults bake and the pose smoke test. The 120-second timeout on every test (`CMakeLists.txt:2106`) also kills cases #7 measured above that cap. The patch is four files and already has a green 163-test run. Review that diff; do not re-discover it during the `main` rebase.
 
-2. **Rebase onto `5ded2be` and port `main`'s eight schema types, or record an explicit decision to drop them.** The conflict is a format replacement (`container.h` and `capture.cpp` deleted here) overlapping a feature commit that extended those files. A textual merge will not compile the new movers. The port is schema, OpenExec registration, lowering, bake tables, runtime step bodies, imaging fallback, and the new kernel tests. Dropping them is smaller and deletes shipped behavior from `main`. Either choice should be in the PR #10 description before review.
+2. **Rebase onto `5ded2be` and port `main`'s eight schema types plus the extended deformer and warming behavior, or record an explicit decision to drop them.** The conflict is a format replacement (the container and `capture.cpp` deleted here) overlapping a feature commit that extended those files. Seventeen paths conflict as text. Six are modify/delete. The three shared deformer movers can auto-merge and still lose `main`'s settings. The port is schema, OpenExec registration, lowering, format-18 records in place of wire ops 19–21, runtime step bodies, and a choice between private-stage warming and the frozen program. Plugin docs have to stay on API 4. Dropping the commit is smaller and deletes shipped behavior from `main`. Either choice should be in the PR #10 description before review.
 
 3. **Rebake the tutorial asset and state the file break.** Replace `docs/examples/godot_rolling_ball.zip`'s `rolling_ball.rigexec` with a format-18 bake, and say in `docs/concepts/tutorial-godot-baked-rig.md` that format 17 does not open. Rebuild the sibling Godot player against this runtime in that repo, not in this one. Sectioned files from `main` need the same rebake once their nodes exist on this branch.
 
