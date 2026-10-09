@@ -3332,6 +3332,26 @@ struct RrGeometryScratch {
         std::vector<std::vector<std::shared_ptr<const RrGeoBlendLayout>>>;
     std::vector<std::vector<SampleLayouts>> blendLayouts;
     std::vector<std::vector<SampleLayouts>> derivedBlendLayouts;
+    // The same shape, beside each sparse sample's layout: its offsets and
+    // point indices reads at Default (path and rest row, resolved at Open),
+    // the input slots they walk, and what the held layout was built from --
+    // per slot its content version and its authored and present marks, and
+    // the raw point count. The layout is a pure function of those, so an
+    // assembly rebuilds it only when one of them moved.
+    struct SparseSource {
+        uint32_t offsetsPath = 0;
+        int32_t offsetsRow = -1;
+        uint32_t indicesPath = 0;
+        int32_t indicesRow = -1;
+        std::vector<uint32_t> slots;
+        bool built = false;
+        std::vector<uint64_t> versions;
+        std::vector<uint8_t> marks;
+        size_t pointCount = 0;
+    };
+    using SampleSources = std::vector<std::vector<SparseSource>>;
+    std::vector<std::vector<SampleSources>> blendSources;
+    std::vector<std::vector<SampleSources>> derivedBlendSources;
     // The same shape for the dense points each sample consumed at the bake
     // time, converted at Open, one vector per pool entry: noPoints for a
     // sparse sample or one the file holds no points for.
@@ -3701,6 +3721,145 @@ RrGeoResolveReads(const std::vector<RrPathRead> &table,
     }
 }
 
+// Adds to \p slots, once each, the input slots an array read of \p rev
+// walks: path-read row \p row's, and every leaf site's at \p path.
+void
+RrGeoArrayReadSlots(const std::vector<RrPathRead> &table,
+                    const RrGeometryScratch::Revision &rev, uint32_t path,
+                    int32_t row, std::vector<uint32_t> *slots)
+{
+    const auto add = [slots](const RigExecWireInput *read) {
+        if (!read || !RigExecFormatIsArrayTag(read->tag)) {
+            return;
+        }
+        for (const uint32_t slot : read->walk) {
+            if (std::find(slots->begin(), slots->end(), slot) ==
+                slots->end()) {
+                slots->push_back(slot);
+            }
+        }
+    };
+    if (row >= 0 && size_t(row) < table.size()) {
+        const RrPathRead &entry = table[size_t(row)];
+        add(entry.read ? entry.read->read.get() : nullptr);
+    }
+    if (path == 0) {
+        return;
+    }
+    for (const auto &[identity, site] : rev.leafSites) {
+        if (std::get<0>(identity) == path) {
+            add(site->read.get());
+        }
+    }
+}
+
+// Marks the input slots revision \p rev's topology reads walk
+// (RrInputsMarkTopology): its skin's joint indices, its mesh's face counts
+// and indices, and its driver curve's order and knots, live and at rest.
+void
+RrGeoMarkTopologySlots(RrProgram *program, const RigExecWireRevision &wire,
+                       const RrGeometryScratch::Revision &rev)
+{
+    std::vector<uint32_t> slots;
+    if (wire.jointIndicesSlot >= 0) {
+        slots.push_back(uint32_t(wire.jointIndicesSlot));
+    }
+    const auto read = [&](uint32_t path) {
+        if (path == 0) {
+            return;
+        }
+        for (const bool rest : {false, true}) {
+            RrGeoArrayReadSlots(program->pathReads, rev, path,
+                                RrFindPathReadRow(program->pathReads, path,
+                                                  rest),
+                                &slots);
+        }
+    };
+    read(rev.attrPath[size_t(RrGeoAttrJointIndices)]);
+    for (const RrGeoBinding binding :
+         {RrGeoBindTopologyCounts, RrGeoBindTopologyIndices,
+          RrGeoBindDriverCurveOrder, RrGeoBindDriverCurveKnots}) {
+        read(rev.bindingPath[size_t(binding)]);
+    }
+    for (const uint32_t slot : slots) {
+        RrInputsMarkTopology(program, slot);
+    }
+}
+
+// The Raw leaf site at Default that \p rev declares for \p attribute
+// (".offsets" or ".pointIndices") of blend shape \p shape, the read the
+// sparse assembly makes: its path and rest row, or path 0 and row -1 when
+// \p rev declares none. Spells paths, so Open alone calls it.
+std::pair<uint32_t, int32_t>
+RrGeoSparseSourceRead(const RigExecWireFile &file,
+                      const std::vector<RrPathRead> &table,
+                      const RrGeometryScratch::Revision &rev,
+                      const std::string &shape, const char *attribute,
+                      uint8_t tag)
+{
+    const std::string path = shape + attribute;
+    for (const auto &[identity, site] : rev.leafSites) {
+        if (!std::get<1>(identity) || std::get<2>(identity) != tag ||
+            site->flavour != fb::ExternalInputFlavour::Raw) {
+            continue;
+        }
+        if (RigExecFormatPathText(file, site->path) != path) {
+            continue;
+        }
+        return {site->path, RrFindPathReadRow(table, site->path, true)};
+    }
+    return {0, -1};
+}
+
+// Slot \p slot's authored (1) and present (2) marks, which decide which of
+// its elements a read at Default takes.
+uint8_t
+RrGeoSlotMarks(const RrProgram *program, uint32_t slot)
+{
+    return uint8_t((RrInputArrayAuthored(program, slot) ? 1 : 0) |
+                   (RrInputHasValue(program, slot) ? 2 : 0));
+}
+
+// Whether \p source's held layout was built from what its reads answer
+// now: the same raw \p pointCount, and per slot they walk the same content
+// version and marks. A slot's version moves whenever a run reads other
+// elements than the run before it, and never back, so an unmoved version
+// is the elements the layout was built from.
+bool
+RrGeoSparseSourceHeld(const RrProgram *program,
+                      const RrGeometryScratch::SparseSource &source,
+                      size_t pointCount)
+{
+    if (!source.built || source.pointCount != pointCount ||
+        source.versions.size() != source.slots.size() ||
+        source.marks.size() != source.slots.size()) {
+        return false;
+    }
+    for (size_t i = 0; i < source.slots.size(); ++i) {
+        const uint32_t slot = source.slots[i];
+        if (RrInputArrayVersion(program, slot) != source.versions[i] ||
+            RrGeoSlotMarks(program, slot) != source.marks[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Records on \p source what its layout was just built from.
+void
+RrGeoNoteSparseSource(const RrProgram *program, size_t pointCount,
+                      RrGeometryScratch::SparseSource *source)
+{
+    source->built = true;
+    source->pointCount = pointCount;
+    source->versions.clear();
+    source->marks.clear();
+    for (const uint32_t slot : source->slots) {
+        source->versions.push_back(RrInputArrayVersion(program, slot));
+        source->marks.push_back(RrGeoSlotMarks(program, slot));
+    }
+}
+
 }  // namespace
 
 bool
@@ -3883,6 +4042,7 @@ RrGeometrySizeScratch(RrProgram *program, std::string *error)
                 wire.weightFieldTarget;
             rev.phasedPoints.assign(wire.pointBindings.size(), nullptr);
             RrGeoResolveReads(program->pathReads, properties, wire, &rev);
+            RrGeoMarkTopologySlots(program, wire, rev);
         }
     }
     scratch->derived.resize(geo.derivedIndex.size());
@@ -3903,6 +4063,7 @@ RrGeometrySizeScratch(RrProgram *program, std::string *error)
         RrGeoResolveReads(program->pathReads, properties, wire,
                           &scratch->derived[d].revision);
         auto &revision = scratch->derived[d].revision;
+        RrGeoMarkTopologySlots(program, wire, revision);
         const size_t layout = geo.revisionIndex.size() + d;
         if (wire.topologyResolved)
             scratch->epochTopologies[layout] = RrGeoWireTopology(wire.topology.get());
@@ -3980,6 +4141,68 @@ RrGeometrySizeScratch(RrProgram *program, std::string *error)
         for (const RigExecWireDerived &derived : chain.derived) {
             scratch->derivedBlendLayouts[c].push_back(
                 layoutsOf(*derived.revision));
+        }
+    }
+    // Each sparse sample's two source reads, resolved once against the
+    // revision that assembles it; the slots they walk are topology.
+    const auto sourcesOf = [&](const RigExecWireRevision &wire,
+                               const RrGeometryScratch::Revision *rev) {
+        RrGeometryScratch::SampleSources out(wire.blendChannels.size());
+        for (size_t c = 0; c < wire.blendChannels.size(); ++c) {
+            const RigExecWireBlendChannel &bound = wire.blendChannels[c];
+            out[c].resize(bound.samples.size());
+            for (size_t s = 0; rev && s < bound.samples.size(); ++s) {
+                if (!bound.samples[s].blendShape) {
+                    continue;
+                }
+                RrGeometryScratch::SparseSource &source = out[c][s];
+                const std::string shape = RigExecFormatPathText(
+                    *program->file, bound.samples[s].blendShape);
+                std::tie(source.offsetsPath, source.offsetsRow) =
+                    RrGeoSparseSourceRead(
+                        *program->file, program->pathReads, *rev, shape,
+                        ".offsets",
+                        uint8_t(RigExecWireInputTag::Vec3fArray));
+                std::tie(source.indicesPath, source.indicesRow) =
+                    RrGeoSparseSourceRead(
+                        *program->file, program->pathReads, *rev, shape,
+                        ".pointIndices",
+                        uint8_t(RigExecWireInputTag::IntArray));
+                RrGeoArrayReadSlots(program->pathReads, *rev,
+                                    source.offsetsPath, source.offsetsRow,
+                                    &source.slots);
+                RrGeoArrayReadSlots(program->pathReads, *rev,
+                                    source.indicesPath, source.indicesRow,
+                                    &source.slots);
+                for (const uint32_t slot : source.slots) {
+                    RrInputsMarkTopology(program, slot);
+                }
+            }
+        }
+        return out;
+    };
+    // A derived target's revision is the one its derivedIndex entry names.
+    std::map<std::pair<size_t, size_t>, size_t> derivedAt;
+    for (size_t d = 0; d < geo.derivedIndex.size(); ++d) {
+        derivedAt.emplace(
+            std::make_pair(size_t(geo.derivedIndex[d].first),
+                           size_t(geo.derivedIndex[d].second)),
+            d);
+    }
+    scratch->blendSources.resize(geo.chains.size());
+    scratch->derivedBlendSources.resize(geo.chains.size());
+    for (size_t c = 0; c < geo.chains.size(); ++c) {
+        const RigExecWireChain &chain = geo.chains[c];
+        for (size_t r = 0; r < chain.revisions.size(); ++r) {
+            scratch->blendSources[c].push_back(sourcesOf(
+                chain.revisions[r], &scratch->chains[c].revisions[r]));
+        }
+        for (size_t d = 0; d < chain.derived.size(); ++d) {
+            const auto at = derivedAt.find(std::make_pair(c, d));
+            scratch->derivedBlendSources[c].push_back(sourcesOf(
+                *chain.derived[d].revision,
+                at == derivedAt.end() ? nullptr
+                                      : &scratch->derived[at->second].revision));
         }
     }
     // Each dense sample's points, converted once per pool entry.
@@ -4275,6 +4498,13 @@ RrGeoAssembleBlendDeltas(const RrGeoAssembleInputs &in,
                 in.revision < pointTable[in.chain].size()
             ? &pointTable[in.chain][in.revision]
             : nullptr;
+    auto &sourceTable = in.derived ? in.scratch->derivedBlendSources
+                                   : in.scratch->blendSources;
+    RrGeometryScratch::SampleSources *sources =
+        in.chain < sourceTable.size() &&
+                in.revision < sourceTable[in.chain].size()
+            ? &sourceTable[in.chain][in.revision]
+            : nullptr;
     std::vector<RrGeoBlendChannel> channels;
     channels.reserve(in.wire->blendChannels.size());
     for (size_t c = 0; c < in.wire->blendChannels.size(); ++c) {
@@ -4309,32 +4539,30 @@ RrGeoAssembleBlendDeltas(const RrGeoAssembleInputs &in,
                                     : &in.scratch->noPoints;
             }
             if (boundSample.blendShape && layouts && c < layouts->size() &&
-                s < (*layouts)[c].size()) {
-                // Exact RawDefault leaves; sparse connections never imply Final.
-                const std::string shape=RigExecFormatPathText(*in.program->file,boundSample.blendShape);
-                const auto source=[&](const char *attribute,uint8_t tag) {
-                    RrGeoRead read;read.rest=true;read.owner=in.rev;
-                    const std::string path=shape+attribute;
-                    for(const auto &[identity,site]:in.rev->leafSites) {
-                        if(!std::get<1>(identity) || std::get<2>(identity)!=tag ||
-                           site->flavour!=fb::ExternalInputFlavour::Raw)continue;
-                        if(RigExecFormatPathText(*in.program->file,site->path)!=path)continue;
-                        read.path=site->path;
-                        read.row=RrFindPathReadRow(*in.scratch->pathReads,read.path,true);
-                        break;
-                    }
-                    return read;
-                };
-                std::vector<RrVec3f> offsets;std::vector<int> indices;
-                RrGeoReadArray(in.program,in.scratch,source(".offsets",uint8_t(RigExecWireInputTag::Vec3fArray)),&offsets);
-                RrGeoReadArray(in.program,in.scratch,source(".pointIndices",uint8_t(RigExecWireInputTag::IntArray)),&indices);
-                auto layout=std::make_shared<RrGeoBlendLayout>();
-                const size_t rawCount=in.chain<in.scratch->chains.size()?in.scratch->chains[in.chain].lastBase.size():0;
-                layout->pointCount=rawCount;
-                if(boundSample.shapeValid)
-                    RigExecBuildBlendLayout(offsets,indices,rawCount,layout.get());
+                s < (*layouts)[c].size() && sources &&
+                c < sources->size() && s < (*sources)[c].size()) {
+                // Exact RawDefault leaves; sparse connections never imply
+                // Final. The reads were resolved at Open; the layout is
+                // rebuilt only when what they answer or the count moved.
+                RrGeometryScratch::SparseSource &source = (*sources)[c][s];
                 auto &held=(*layouts)[c][s];
-                if(!held || !RigExecSameBlendLayout(*held,*layout))held=std::move(layout);
+                const size_t rawCount=in.chain<in.scratch->chains.size()?in.scratch->chains[in.chain].lastBase.size():0;
+                if (!held || !RrGeoSparseSourceHeld(in.program, source, rawCount)) {
+                    const auto restRead=[&](uint32_t path,int32_t row) {
+                        RrGeoRead at;at.rest=true;at.owner=in.rev;
+                        at.path=path;at.row=row;
+                        return at;
+                    };
+                    std::vector<RrVec3f> offsets;std::vector<int> indices;
+                    RrGeoReadArray(in.program,in.scratch,restRead(source.offsetsPath,source.offsetsRow),&offsets);
+                    RrGeoReadArray(in.program,in.scratch,restRead(source.indicesPath,source.indicesRow),&indices);
+                    auto layout=std::make_shared<RrGeoBlendLayout>();
+                    layout->pointCount=rawCount;
+                    if(boundSample.shapeValid)
+                        RigExecBuildBlendLayout(offsets,indices,rawCount,layout.get());
+                    if(!held || !RigExecSameBlendLayout(*held,*layout))held=std::move(layout);
+                    RrGeoNoteSparseSource(in.program, rawCount, &source);
+                }
                 sample.layout = held;
             }
             channel.samples.push_back(std::move(sample));

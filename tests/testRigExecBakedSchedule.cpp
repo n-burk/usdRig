@@ -1751,13 +1751,16 @@ MakeTwoKeySkinStage()
 /// chunk reads a joint its Build key never declared (B21).
 ///
 /// The chunk steps declare their reads from the Build keys, and a frame may
-/// not change the program. Repainting chunk 0's points onto j1 and then
-/// moving only j1 is the frame the cone answers with chunk 1 and the fuse;
-/// a chunk 0 that had been re-cut onto j1 would keep its range from the frame
-/// before. Instead the keys stay Build's, the partition is stale and the fuse
-/// skins every point, equal to the exec reference to the bit. Painting the
-/// Build indices back adopts the new handle, and the chunks run again. A
-/// frozen job at each stage agrees with the reference too.
+/// not change the program. The indices are topology, so only a drag on them
+/// repaints a standing program. Repainting chunk 0's points onto j1 and
+/// then moving only j1 is the frame the cone answers with chunk 1 and the
+/// fuse; a chunk 0 that had been re-cut onto j1 would keep its range from
+/// the frame before. Instead the keys stay Build's, the partition is stale
+/// and the fuse skins every point, equal to the exec reference to the bit.
+/// Lifting the drag on the indices adopts a handle with Build's arrays, and
+/// the chunks run again. A frozen job at each stage agrees with the
+/// reference too. An authored repaint rebuilds the program, whose keys are
+/// cut from the indices it reads.
 void
 TestARecutLayoutCannotReadAnUndeclaredJoint()
 {
@@ -1903,16 +1906,26 @@ TestARecutLayoutCannotReadAnUndeclaredJoint()
           revision->partitionTopology == revision->topology);
     const size_t builds = evaluator.GetBakedProgramBuildCount();
 
-    // Chunk 0's points repainted onto j1: a value edit, no rebuild.
-    indices.Set(VtIntArray{1, 1, 1, 1});
+    // Chunk 0's points repainted onto j1 by a drag on the indices: an
+    // override stands on topology, and nothing rebuilds.
+    const RigExecValueOverride onJ1{skinPath.GetPrimPath(), TfToken(),
+                                    TfToken("rigExec:jointIndices"),
+                                    VtValue(VtIntArray{1, 1, 1, 1})};
+    const std::vector<RigExecValueOverride> paint = {onJ1};
+    evaluator.SetInteractiveOverrides(paint);
     pose = evaluator.Evaluate(time);
-    agrees("repainted", pose, none);
+    agrees("repainted", pose, paint);
     revision = skin();
     CHECK(revision != nullptr);
     CHECK(evaluator.GetBakedProgramBuildCount() == builds);
 
     // Only j1 moves.
-    const std::vector<RigExecValueOverride> drag = dragJ1(25.0);
+    const auto paintedDrag = [&](double value) {
+        std::vector<RigExecValueOverride> overrides = dragJ1(value);
+        overrides.push_back(onJ1);
+        return overrides;
+    };
+    const std::vector<RigExecValueOverride> drag = paintedDrag(25.0);
     evaluator.SetInteractiveOverrides(drag);
     pose = evaluator.Evaluate(time);
     agrees("repainted, j1 moved", pose, drag);
@@ -1932,13 +1945,15 @@ TestARecutLayoutCannotReadAnUndeclaredJoint()
         CHECK(!chunk.ok);
     }
     CHECK(evaluator.GetBakedGenerationCount() == 3);
-    frozenAgrees("frozen, repainted, j1 moved again", dragJ1(30.0));
+    frozenAgrees("frozen, repainted, j1 moved again", paintedDrag(30.0));
 
-    // The Build indices painted back: the new handle has the partition's
-    // arrays, so it is adopted and the chunks run again.
-    indices.Set(VtIntArray{0, 0, 1, 1});
+    // The drag on the indices lifted: the Build indices read again, so the
+    // new handle has the partition's arrays, is adopted, and the chunks run
+    // again.
+    const std::vector<RigExecValueOverride> unpainted = dragJ1(25.0);
+    evaluator.SetInteractiveOverrides(unpainted);
     pose = evaluator.Evaluate(time);
-    agrees("painted back", pose, drag);
+    agrees("painted back", pose, unpainted);
     revision = skin();
     CHECK(revision != nullptr);
     if (!revision) {
@@ -1957,6 +1972,17 @@ TestARecutLayoutCannotReadAnUndeclaredJoint()
     agrees("painted back, drag lifted", pose, none);
     CHECK(evaluator.GetBakedProgramBuildCount() == builds);
     CHECK(evaluator.GetBakedGenerationCount() == 5);
+
+    // An authored repaint is topology: the program rebuilds and cuts its
+    // keys from the indices it reads, so no partition stands stale.
+    indices.Set(VtIntArray{1, 1, 1, 1});
+    CHECK(evaluator.GetLastNoticeDisposition() ==
+          RigExecNoticeDisposition::Stale);
+    pose = evaluator.Evaluate(time);
+    agrees("authored repaint", pose, none);
+    CHECK(evaluator.GetBakedProgramBuildCount() == builds + 1);
+    revision = skin();
+    CHECK(revision != nullptr && !revision->partitionStale);
     if (failures == failuresBefore) {
         std::printf("  recut layout: %s ran whole while repainted, and its "
                     "chunks resumed\n", skinPath.GetText());

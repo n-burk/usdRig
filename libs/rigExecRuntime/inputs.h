@@ -276,6 +276,9 @@ struct RrInputState {
     std::vector<uint8_t> slotBlocked, slotProviderSource;
     std::vector<uint8_t> slotAuthored, slotRanAuthored;
     std::vector<uint8_t> slotDefaultHasValue;
+    /// Per slot: whether a topology read walks it (RrInputsMarkTopology,
+    /// at Open), which fixes its element count for the reader.
+    std::vector<uint8_t> slotTopology;
     /// Per slot: the value and HasValue the last run read, which a set is
     /// compared with to tell a change from a repeat. Seeded with the
     /// defaults; kept for slots that are not Animated.
@@ -395,12 +398,13 @@ bool RrInputsSet(RrProgram *program, size_t index, const RrInputValue &value,
 /// Array input \p index (a listed slot) holds a copy of \p value's
 /// elements: an \p authored set (SetInputArray), which every read takes and
 /// which keeps the default's element count, or a sampled one, of any
-/// count, which only the reads at the evaluation time take; each reader
-/// judges the elements as the evaluators judge the stage's. A set whose
-/// elements equal the held ones only takes the set's kind; one equal to the
-/// default holds nothing. False with the reason, nothing changed, for an
-/// index past the listed inputs, a scalar input, another tag, elements
-/// without data, or an authored count other than the default's.
+/// count but a topology input's, which only the reads at the evaluation
+/// time take; each reader judges the elements as the evaluators judge the
+/// stage's. A set whose elements equal the held ones only takes the set's
+/// kind; one equal to the default holds nothing. False with the reason,
+/// nothing changed, for an index past the listed inputs, a scalar input,
+/// another tag, elements without data, an authored count other than the
+/// default's, or a topology input's count other than the default's.
 bool RrInputsSetArray(RrProgram *program, size_t index,
                       const RigExecRuntimeArray &value, bool authored,
                       std::string *error);
@@ -426,6 +430,15 @@ bool RrInputsGetArray(const RrProgram *program, size_t index,
 /// geometry family builds at Open.
 void RrInputsBindArrayDefault(RrProgram *program, uint32_t slot,
                               const void *vector);
+
+/// Array slot \p slot carries topology: a skin's joint indices, a mesh's
+/// face counts or indices, a curve's order or knots, or a sparse blend
+/// shape's offsets or point indices. Topology is epoch state and the reader
+/// never recompiles, so its element count stays the default's: a sampled
+/// set of another count is refused (RrInputsSetArray) as an authored one
+/// is. The geometry family marks its topology reads' slots at Open; a
+/// scalar slot is left alone.
+void RrInputsMarkTopology(RrProgram *program, uint32_t slot);
 
 /// After the families bound the layout defaults: every array slot has a
 /// default, and the listed ones report its element count. False with the

@@ -18,7 +18,8 @@
 // and a sampled set of another count; a Default-time read alone; a chain
 // base, reset and re-run at another count; a fixed skin layout rebuilt
 // from its arrays and from its element size, and returned to the Open
-// layout by a reset; painted weights, a repeated sparse index among them;
+// layout by a reset, whose indices, topology, refuse a sampled set of
+// another count; painted weights, a repeated sparse index among them;
 // and a mesh's topology, a ribbon's bind coordinates, a blend sample's
 // points and a volume's gathered curve. Then array sets live baked takes as
 // interactive overrides, against which the work counters agree too, and a
@@ -1401,6 +1402,41 @@ _TestLayoutArrays(const UsdStageRefPtr &stage)
             CHECK(played.GetSkinLayoutIsOpenForTesting(mover));
             CHECK(plain && _SameOutputs(*plain, played));
         });
+    // The indices are topology, fixed for the reader: a sampled set of
+    // another count is refused with its reason and changes nothing, while
+    // one of their own count is taken. The weights are values: a sampled set
+    // of theirs of another count is taken, and the mover fails as live does.
+    {
+        std::unique_ptr<RigExecRuntimeReader> played = _OpenRun(label, listed);
+        size_t at = 0, painted = 0;
+        CHECK(played && played->FindInput(indicesName, &at) &&
+              played->FindInput(weightsName, &painted));
+        if (played) {
+            std::string why;
+            const VtIntArray shorter(indices.begin(), indices.end() - 2);
+            CHECK(!played->SetSampledInputArrayAt(
+                at, RigExecTestArrayView(VtValue(shorter)), &why));
+            CHECK(why == indicesName + " is topology, fixed at " +
+                             std::to_string(indices.size()) +
+                             " elements for this reader; a sampled set of " +
+                             std::to_string(shorter.size()) + " is refused");
+            RigExecRuntimeArray kept;
+            CHECK(played->GetInputArrayAt(at, &kept) &&
+                  kept.count == indices.size());
+            CHECK(played->Execute(&why) && plain &&
+                  _SameOutputs(*plain, *played));
+            CHECK(played->GetSkinLayoutIsOpenForTesting(mover));
+            VtIntArray reordered = indices;
+            std::swap(reordered[0], reordered[1]);
+            CHECK(played->SetSampledInputArrayAt(
+                at, RigExecTestArrayView(VtValue(reordered)), &why));
+            const VtFloatArray fewer(weights.begin(), weights.end() - 2);
+            CHECK(played->SetSampledInputArrayAt(
+                painted, RigExecTestArrayView(VtValue(fewer)), &why));
+            CHECK(played->Execute(&why));
+            CHECK(!played->GetSkinLayoutIsOpenForTesting(mover));
+        }
+    }
     // The element size is a scalar input: a set of it rebuilds the layout
     // as live's layout op does, and 1 makes the twenty entries twenty rows,
     // which the mesh's ten points cannot use.
@@ -1541,12 +1577,16 @@ _TestPaintedArrays(const UsdStageRefPtr &stage)
 // Real numeric-time samples, not public setter simulations. A second reader
 // holds only this array at its bake value at the same frame, proving that the
 // array (rather than an unrelated animated scalar) changes the published pose.
+// For \p topology, whose count is fixed for the reader, the \p invalid
+// sample of another count is refused with its reason instead, and the
+// reader keeps the elements it held.
 static void
 _CheckStageArraySamples(const std::string &label, const UsdStageRefPtr &stage,
                         const SdfPath &rigPath, const std::string &name,
                         double time, const VtValue &initial,
                         const VtValue &changed, const VtValue &invalid,
-                        const VtValue &extra = VtValue())
+                        const VtValue &extra = VtValue(),
+                        bool topology = false)
 {
     const UsdAttribute attribute = stage->GetAttributeAtPath(SdfPath(name));
     CHECK(attribute);
@@ -1624,6 +1664,25 @@ _CheckStageArraySamples(const std::string &label, const UsdStageRefPtr &stage,
     CHECK(sampler.GetWarnings().empty());
     for (int step = 1; step <= (extra.IsEmpty() ? 3 : 5); ++step) {
         const double frame = time + step;
+        if (topology && step == 2) {
+            const size_t count = RigExecTestArrayView(invalid).count;
+            CHECK(count != RigExecTestArrayView(initial).count);
+            CHECK(!RigExecTestDrive(reader.get(), &sampler, frame, &error));
+            CHECK(error == name + " is topology, fixed at " +
+                               std::to_string(
+                                   RigExecTestArrayView(initial).count) +
+                               " elements for this reader; a sampled set "
+                               "of " + std::to_string(count) +
+                               " is refused");
+            RigExecRuntimeArray kept;
+            if (found->slot < reader->GetInputCount()) {
+                CHECK(reader->GetInputArrayAt(found->slot, &kept) &&
+                      kept.count == RigExecTestArrayView(changed).count);
+            }
+            std::printf("%s frame %g: %s\n", label.c_str(), frame,
+                        error.c_str());
+            continue;
+        }
         CHECK(RigExecTestDrive(reader.get(), &sampler, frame, &error));
         {
             RigExecRigPose pose;
@@ -1768,8 +1827,14 @@ _TestExampleArrays(const std::string &examples)
             UsdEditContext context(stage, stage->GetSessionLayer());
             CHECK(driver.Set(points));
         }
+        // A mesh's face indices are topology: their invalid sample, of
+        // another count, is refused.
+        const bool topology =
+            std::string(c.attribute).find(".faceVertexIndices") !=
+            std::string::npos;
         _CheckStageArraySamples(label + " stage samples", stage, rigPath,
-                                c.attribute, c.time, held, c.edit(held), invalid);
+                                c.attribute, c.time, held, c.edit(held),
+                                invalid, VtValue(), topology);
     }
 }
 
@@ -2044,8 +2109,9 @@ main(int argc, char **argv)
             name, 1001.0, VtValue(initial), VtValue(VtFloatArray{1.2f}),
             VtValue(VtFloatArray{0.4f, 0.8f}), VtValue(VtFloatArray()));
     }
-    // Delta mush's short topology must pass through rather than refuse the
-    // stage sample globally. Exact live parity includes its published status.
+    // Delta mush's topology samples: a reordering of the same count is
+    // followed with exact live parity; a short sample is another count of
+    // topology, which the reader refuses with its reason.
     if (const auto stage = _Open(fixtures + "/computed_path_reads.usda")) {
         const std::string name = "/PathReadAsset/Geom/Ball.faceVertexIndices";
         VtIntArray initial;
@@ -2055,7 +2121,8 @@ main(int argc, char **argv)
         std::reverse(changed.begin(), changed.begin() + 3);
         _CheckStageArraySamples("smooth short topology", stage, _FindRig(stage),
             name, 1.0, VtValue(initial), VtValue(changed),
-            VtValue(VtIntArray(initial.begin(), initial.begin() + 4)));
+            VtValue(VtIntArray(initial.begin(), initial.begin() + 4)),
+            VtValue(), /*topology=*/true);
     }
     if (const UsdStageRefPtr stage =
             _Open(fixtures + "/oneloop_two_limbs.usda")) {

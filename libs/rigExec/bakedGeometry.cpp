@@ -186,11 +186,12 @@ RigExecBakedBuildGeometry(RigExecBakedBuildContext *ctx,
         // value edit needs no rebuild and an override places itself. The
         // layout arrays are still NAMED, because bakeability judged them --
         // connecting one is a resync, and the judgement was that none is
-        // connected. They do not belong in `rebuild` even though the layout
-        // is no longer read per frame: the SkinTopology op holds it, and its
-        // layout leaves are filed under these paths, so a weight-paint edit
-        // reaches the next generation through the re-read rather than
-        // through a rebuild of this program.
+        // connected. The weights do not belong in `rebuild`: the SkinTopology
+        // op holds the layout, and its layout leaves are filed under these
+        // paths, so a weight-paint edit reaches the next generation through
+        // the re-read rather than through a rebuild of this program. The
+        // indices and element size are topology, and go to `rebuild` with
+        // the other topology reads below.
         B.prims.insert(r.moverPath);
         for (const SdfPath &structural : r.binding.externalStructure) {
             if (structural.IsPropertyPath()) B.named.insert(structural);
@@ -209,8 +210,9 @@ RigExecBakedBuildGeometry(RigExecBakedBuildContext *ctx,
         // program -- they are re-read on every frame through the
         // generation's resolved inputs -- so they belong in `named`, where a
         // RESYNC (the property appearing, disappearing or being retargeted,
-        // which also invalidates any retained query) finds them, and in no
-        // case in `rebuild`, which is for values the program captured.
+        // which also invalidates any retained query) finds them, and not in
+        // `rebuild`, which is for values the program captured -- except the
+        // topology among them, which is epoch state (below).
         // Named unconditionally rather than per operation: the binding
         // carries exactly the paths the operation resolved, so an empty one
         // is an operation that does not read it and an authored one is a
@@ -309,11 +311,11 @@ RigExecBakedBuildGeometry(RigExecBakedBuildContext *ctx,
                         sample.points =
                             B.stage->GetAttributeAtPath(binding.points);
                     } else {
-                        // A sparse sample's shape is resolved in the
-                        // prologue, through the evaluator's cache; what is
-                        // named here is the shape prim, so a resync under it
-                        // rebuilds. A value edit to its offsets is caught by
-                        // the cache, which every notice clears.
+                        // A sparse sample's shape is read from its leaves;
+                        // what is named here is the shape prim, so a resync
+                        // under it rebuilds. Its offsets and point indices
+                        // are topology, so an edit to either rebuilds too
+                        // (the epoch reads below).
                         B.prims.insert(binding.blendShape.GetPrimPath());
                     }
                     channel.samples.push_back(std::move(sample));
@@ -435,6 +437,35 @@ RigExecBakedBuildGeometry(RigExecBakedBuildContext *ctx,
                 }
             }
         }
+        // Topology is epoch state: the reads the role table marks
+        // (RigExecRevisionLeafRoleIsTopology) and a sparse sample's offsets
+        // and point indices. An authored edit to one -- a value, a time
+        // sample, a connection -- rebuilds the program into a new epoch
+        // instead of reaching the next generation through a re-read, so
+        // inside one program such a read moves only with the time or an
+        // override (RigExecBakedSamplePathLeaves).
+        const auto epoch = [&](int k) {
+            if (k < 0 || size_t(k) >= decl.keys.size() ||
+                !decl.keys[size_t(k)].path.IsPropertyPath()) {
+                return;
+            }
+            const SdfPath &path = decl.keys[size_t(k)].path;
+            B.rebuild.insert(path);
+            B.named.insert(path);
+            B.prims.insert(path.GetPrimPath());
+        };
+        for (size_t role = 0; role < decl.roles.size(); ++role) {
+            if (RigExecRevisionLeafRoleIsTopology(
+                    RigExecRevisionLeafRole(role))) {
+                epoch(decl.roles[role]);
+            }
+        }
+        for (const auto &channel : out.blendChannels) {
+            for (const auto &sample : channel.samples) {
+                epoch(sample.offsetsLeaf);
+                epoch(sample.indicesLeaf);
+            }
+        }
         out.kernelRecord.op=out.op;
         out.kernelRecord.binding=out.binding;
         out.kernelRecord.leaves=decl;
@@ -448,6 +479,22 @@ RigExecBakedBuildGeometry(RigExecBakedBuildContext *ctx,
         }
         return out;
     };
+    // A revision's leaves bound, its sparse samples' offsets and point
+    // indices marked epoch keys beside the role table's.
+    const auto bindRevisionLeaves =
+        [&](RigExecBakedProgramImpl::GeomRevision *revision) {
+            RigExecBakedBindPathLeaves(B.stage, &revision->leaves);
+            std::vector<char> &marks = revision->leaves.epoch;
+            for (const auto &channel : revision->blendChannels) {
+                for (const auto &sample : channel.samples) {
+                    for (const int k : {sample.offsetsLeaf, sample.indicesLeaf}) {
+                        if (k >= 0 && size_t(k) < marks.size()) {
+                            marks[size_t(k)] = 1;
+                        }
+                    }
+                }
+            }
+        };
     for (const RigExecBakedChainSpec &spec : chains) {
         const SdfPath &target = spec.target;
         RigExecBakedProgramImpl::GeomChain chain;
@@ -472,7 +519,7 @@ RigExecBakedBuildGeometry(RigExecBakedBuildContext *ctx,
                  RigExecRevisionLeafType::Float,
                  RigExecRevisionLeafTime::AtTime,
                  RigExecRevisionLeafFlavour::ResolvedOnly, VtValue(1.0f)});
-            RigExecBakedBindPathLeaves(B.stage, &baked.leaves);
+            bindRevisionLeaves(&baked);
         }
         for (const RigExecBakedRevisionSpec &derived : spec.derived) {
             RigExecBakedProgramImpl::GeomChain::Derived d;
@@ -491,7 +538,7 @@ RigExecBakedBuildGeometry(RigExecBakedBuildContext *ctx,
                 refuse("derived target has no attribute", derived.target);
             }
             d.revision = bakeRevision(derived);
-            RigExecBakedBindPathLeaves(B.stage, &d.revision.leaves);
+            bindRevisionLeaves(&d.revision);
             chain.derived.push_back(std::move(d));
         }
         B.chains.push_back(std::move(chain));
@@ -2018,8 +2065,40 @@ RigExecBakedAssembleFromLeaves(
     }
     // Derived normalization consumes only the declared sparse RawDefault
     // leaves and this target's raw base cardinality, inside the selected body.
+    // A layout is a pure function of those, so it is rebuilt only when the
+    // leaves' content versions or the point count moved since it was built;
+    // a leaf a walk or a produced value answers is not keyed so, and
+    // rebuilds every time.
+    const RigExecBakedPathLeaves &sources = revision->leaves;
+    const auto rawVersion = [&sources, &view](int k, uint64_t *version) {
+        const auto at = [k](const std::vector<int> &v) {
+            return size_t(k) < v.size() ? v[size_t(k)] : -1;
+        };
+        if (k < 0 || size_t(k) >= sources.versions.size() ||
+            size_t(k) >= view.values->size() ||
+            at(sources.walks) >= 0 || at(sources.exactVersions) >= 0 ||
+            at(sources.exactRecordIndices) >= 0) {
+            return false;
+        }
+        *version = sources.versions[size_t(k)];
+        return true;
+    };
     for (auto &channel : revision->blendChannels) for (auto &sample : channel.samples) {
         if (sample.blendShape.IsEmpty()) continue;
+        uint64_t offsetsVersion = 0, indicesVersion = 0;
+        const bool keyed = rawVersion(sample.offsetsLeaf, &offsetsVersion) &&
+                           rawVersion(sample.indicesLeaf, &indicesVersion);
+        if (keyed && sample.layoutKeyed && sample.layout &&
+            sample.layoutOffsetsVersion == offsetsVersion &&
+            sample.layoutIndicesVersion == indicesVersion &&
+            sample.layoutPointCount == layoutPointCount) {
+            continue;
+        }
+        sample.layoutKeyed = keyed;
+        sample.layoutOffsetsVersion = offsetsVersion;
+        sample.layoutIndicesVersion = indicesVersion;
+        sample.layoutPointCount = layoutPointCount;
+        ++sample.layoutBuilds;
         const auto &raw = *view.values;
         const VtVec3fArray offsets = sample.offsetsLeaf >= 0 && size_t(sample.offsetsLeaf) < raw.size() &&
             raw[size_t(sample.offsetsLeaf)].IsHolding<VtVec3fArray>() ?
@@ -3078,6 +3157,15 @@ RigExecBakedBindPathLeaves(const UsdStageRefPtr &stage,
         leaves->varying[k] = varying ? 1 : 0;
         leaves->values.push_back(key.fallback);
     }
+    leaves->epoch.assign(n, 0);
+    leaves->overrideReached.assign(n, 0);
+    for (size_t role = 0; role < leaves->decl.roles.size(); ++role) {
+        const int k = leaves->decl.roles[role];
+        if (k >= 0 && size_t(k) < n &&
+            RigExecRevisionLeafRoleIsTopology(RigExecRevisionLeafRole(role))) {
+            leaves->epoch[size_t(k)] = 1;
+        }
+    }
     leaves->changed.assign(n, 0);
     leaves->mustSample.assign(n, 0);
     leaves->sampled = false;
@@ -3278,14 +3366,29 @@ RigExecBakedSamplePathLeaves(RigExecBakedProgramImpl *program,
     const bool defaultMoved =
         timeMoved && (time.IsDefault() || leaves->time.IsDefault());
     RigExecResolvedInputs sourceOnly;
+    std::vector<SdfPath> overridePaths;
     if (B.interactiveOverrides) {
         for (const auto &overrideValue : *B.interactiveOverrides) {
             const SdfPath path = overrideValue.attribute.IsEmpty()
                 ? overrideValue.prim.AppendProperty(overrideValue.computation)
                 : overrideValue.prim.AppendProperty(overrideValue.attribute);
             sourceOnly.SetProperty(path,overrideValue.value);
+            overridePaths.push_back(path);
         }
     }
+    // Whether a standing override is at a path key \p k's read can reach:
+    // the overlay the read consults holds nothing anywhere else.
+    const auto overrideReaches = [&](size_t k) {
+        if (!overrides || k >= leaves->hops.size()) {
+            return false;
+        }
+        const std::vector<SdfPath> &reach = leaves->hops[k];
+        return std::any_of(overridePaths.begin(), overridePaths.end(),
+                           [&reach](const SdfPath &path) {
+                               return std::find(reach.begin(), reach.end(),
+                                                path) != reach.end();
+                           });
+    };
     std::vector<SdfPath> hops;
     for (size_t k = 0; k < leaves->decl.keys.size(); ++k) {
         leaves->changed[k] = 0;
@@ -3296,7 +3399,16 @@ RigExecBakedSamplePathLeaves(RigExecBakedProgramImpl *program,
         const RigExecRevisionLeafKey &key = leaves->decl.keys[k];
         const bool rebind = all || leaves->VarianceStale(B.programStamp, k);
         const bool atTime = key.time == RigExecRevisionLeafTime::AtTime;
-        if (!rebind && !overridden && !chainsMoved &&
+        // A topology key is epoch state: a standing override moves it only
+        // where one stands on its hops, now or at its last sample.
+        const bool epoch = k < leaves->epoch.size() && leaves->epoch[k] != 0;
+        bool reached = epoch && overrideReaches(k);
+        const bool overrideMoves =
+            overridden &&
+            (!epoch || reached ||
+             (k < leaves->overrideReached.size() &&
+              leaves->overrideReached[k] != 0));
+        if (!rebind && !overrideMoves && !chainsMoved &&
             !(atTime && timeMoved && (leaves->varying[k] || defaultMoved))) {
             continue;
         }
@@ -3306,6 +3418,13 @@ RigExecBakedSamplePathLeaves(RigExecBakedProgramImpl *program,
             RigExecRevisionLeafHops(key, leaves->attributes[k], &hops,
                                     &varying);
             leaves->varying[k] = varying ? 1 : 0;
+            if (epoch && k < leaves->hops.size()) {
+                leaves->hops[k] = hops;
+                reached = overrideReaches(k);
+            }
+        }
+        if (epoch && k < leaves->overrideReached.size()) {
+            leaves->overrideReached[k] = reached ? 1 : 0;
         }
         leaves->mustSample[k] = 0;
         ++B.pathLeafSamples;
@@ -3398,7 +3517,11 @@ RigExecBakedBuildLayoutSteps(RigExecBakedProgramImpl *program)
         RigExecBakedBindPathLeaves(B.stage, &revision.layoutLeaves);
         revision.layoutOverlay.assign(revision.layoutLeaves.decl.keys.size(),
                                       VtValue());
-        revision.layoutFixed = RigExecSkinLayoutIsFixed(revision.moverPrim);
+        revision.layoutTopologyFixed =
+            RigExecSkinLayoutTopologyIsFixed(revision.moverPrim);
+        revision.layoutFixed =
+            revision.layoutTopologyFixed &&
+            RigExecSkinLayoutWeightsAreFixed(revision.moverPrim);
         revision.layoutFixedChanged = false;
         revision.layoutRan = false;
         revision.layoutHandle = nullptr;
@@ -3449,10 +3572,13 @@ RigExecBakedSampleLayoutLeaves(RigExecBakedProgramImpl *program,
     RigExecBakedProgramImpl &B = *program;
     RigExecBakedPathLeaves &leaves = revision->layoutLeaves;
     revision->layoutFixedChanged = false;
-    // Variance can change on a retained program after an authored layout edit.
-    // Capture source metadata only when its owning-thread bindings refresh.
+    // The weights' variance can change on a retained program after an
+    // authored weights edit; an edit to the indices or the element size
+    // rebuilds it, so the topology half stands from Build. Capture source
+    // metadata only when its owning-thread bindings refresh.
     revision->layoutFixed = all || !leaves.sampled
-        ? RigExecSkinLayoutIsFixed(revision->moverPrim)
+        ? revision->layoutTopologyFixed &&
+              RigExecSkinLayoutWeightsAreFixed(revision->moverPrim)
         : RigExecBakedLayoutFixedNow(B, *revision);
     RigExecBakedSamplePathLeaves(&B, &leaves, time, all);
 
@@ -3462,9 +3588,16 @@ bool
 RigExecBakedLayoutFixedNow(const RigExecBakedProgramImpl &B,
                            const RigExecBakedProgramImpl::GeomRevision &revision)
 {
-    return revision.layoutLeaves.AnyVarianceStale(B.programStamp)
-        ? RigExecSkinLayoutIsFixed(revision.moverPrim)
-        : revision.layoutFixed;
+    if (!revision.layoutTopologyFixed) {
+        return false;
+    }
+    const RigExecBakedPathLeaves &leaves = revision.layoutLeaves;
+    const int weights = leaves.decl.Role(RigExecRevisionLeafRole::JointWeights);
+    const bool stale = weights >= 0
+        ? leaves.VarianceStale(B.programStamp, size_t(weights))
+        : leaves.AnyVarianceStale(B.programStamp);
+    return stale ? RigExecSkinLayoutWeightsAreFixed(revision.moverPrim)
+                 : revision.layoutFixed;
 }
 
 void

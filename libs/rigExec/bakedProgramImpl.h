@@ -458,6 +458,13 @@ struct RigExecBakedPathLeaves {
     std::vector<UsdAttribute> attributes;
     std::vector<std::vector<SdfPath>> hops;
     std::vector<char> varying;
+    /// Per key, whether it reads topology (RigExecRevisionLeafRoleIsTopology,
+    /// or a sparse blend sample's offsets and point indices): epoch state,
+    /// whose authored edits rebuild the program. Build state. For such a key
+    /// `overrideReached` says whether an interactive override stood on one
+    /// of its hops at its last sample.
+    std::vector<char> epoch;
+    std::vector<char> overrideReached;
     /// Per key, its RigExecBakedProgramImpl::readerWalks index when its
     /// read goes through the resolved inputs and its hops meet a chain
     /// target or a record consumer, else -1 (or empty: none). Build state.
@@ -2861,6 +2868,16 @@ struct RigExecBakedProgramImpl {
             SdfPath blendShape;
             std::shared_ptr<const RigExecBlendSampleLayout> layout;
             bool shapeValid = false;
+            /// What `layout` was built from while `layoutKeyed`: the content
+            /// versions of the offsets and indices leaves and the point
+            /// count. The assembly rebuilds the layout only when one of them
+            /// moved; `layoutBuilds` counts the builds. Owned by the body
+            /// that assembles the revision.
+            bool layoutKeyed = false;
+            uint64_t layoutOffsetsVersion = 0;
+            uint64_t layoutIndicesVersion = 0;
+            size_t layoutPointCount = 0;
+            uint64_t layoutBuilds = 0;
             /// Structural cache refusal retained for the runtime stream policy.
             bool layoutRefused = false;
             /// The dense points the last assembly consumed; the bake stores
@@ -3171,9 +3188,11 @@ struct RigExecBakedProgramImpl {
         /// `layoutLeaves` are the layout's three reads
         /// (RigExecDeclareSkinLayoutLeaves), sampled on the owning thread
         /// before the op runs, and `layoutOverlay` the overlay entry each
-        /// last saw at its path. `layoutFixed` is RigExecSkinLayoutIsFixed,
-        /// asked at Build and again when a value edit reaches one of the
-        /// three paths or the program stamp moves; `layoutFixedChanged` says
+        /// last saw at its path. `layoutFixed` is RigExecSkinLayoutIsFixed:
+        /// its topology half (`layoutTopologyFixed`) asked at Build only, as
+        /// an edit to either path rebuilds the program, and its weights half
+        /// asked at Build and again when a value edit reaches the weights or
+        /// the program stamp moves; `layoutFixedChanged` says
         /// the last sample moved it. `layoutHandle` is the op's output: null
         /// while the layout is not epoch state, else the layout the leaves
         /// describe, the same object for as long as they describe the same
@@ -3183,6 +3202,7 @@ struct RigExecBakedProgramImpl {
         /// program.
         RigExecBakedPathLeaves layoutLeaves;
         std::vector<VtValue> layoutOverlay;
+        bool layoutTopologyFixed = false;
         bool layoutFixed = false;
         bool layoutFixedChanged = false;
         bool layoutRan = false;
@@ -3933,7 +3953,10 @@ RigExecBakedPathLeafVersioned(const RigExecBakedPathLeafRef &ref)
 ///  1. the first sample, a moved program stamp, or \p all (a forced run);
 ///  2. an interactive override standing now or at the last sample: a drag on
 ///     any hop, numbered or routed, reaches the read through the resolved
-///     inputs, so every key re-reads while one stands and once after;
+///     inputs, so every key re-reads while one stands and once after; a
+///     topology key (`epoch`) re-reads only while one stands on one of its
+///     hops, the only paths its read consults the overlay at, and once
+///     after;
 ///  3. a moved time, for a key read at the time that can vary with it (or
 ///     when the time moves to or from Default);
 ///  4. its `mustSample` byte: a value edit reached one of its paths
@@ -4958,7 +4981,8 @@ void RigExecBakedBuildLayoutSteps(RigExecBakedProgramImpl *program);
 void RigExecBakedDeclareLayoutReads(RigExecBakedProgramImpl *program);
 
 /// Re-reads \p revision's layout leaves at \p time through the generation's
-/// resolved inputs, and re-asks RigExecSkinLayoutIsFixed, when one of these
+/// resolved inputs, and re-asks RigExecSkinLayoutWeightsAreFixed (the
+/// topology half stands from Build), when one of these
 /// says they can have moved since the last sample:
 ///  1. the first sample, \p all (a forced run), or a moved program stamp;
 ///  2. a leaf's `mustSample` byte: a value edit or a routed override reached
@@ -4975,8 +4999,9 @@ void RigExecBakedSampleLayoutLeaves(
     bool all);
 
 /// Whether \p revision's skin layout is fixed, as the next sample answers
-/// it: GeomRevision::layoutFixed while that answer is current (its layout
-/// leaves' AnyVarianceStale false), else RigExecSkinLayoutIsFixed asked
+/// it: false while its topology half (`layoutTopologyFixed`, Build) is;
+/// else GeomRevision::layoutFixed while that answer is current (its weights
+/// leaf's VarianceStale false), else RigExecSkinLayoutWeightsAreFixed asked
 /// again, without storing it. Owning thread.
 bool RigExecBakedLayoutFixedNow(
     const RigExecBakedProgramImpl &program,
@@ -5366,6 +5391,11 @@ struct RigExecBakedRunShadow {
         std::shared_ptr<const RigExecBlendSampleLayout> layout;
         std::vector<GfVec3f> lastPoints;
         bool layoutRefused = false;
+        bool layoutKeyed = false;
+        uint64_t layoutOffsetsVersion = 0;
+        uint64_t layoutIndicesVersion = 0;
+        size_t layoutPointCount = 0;
+        uint64_t layoutBuilds = 0;
     };
     struct RevisionState {
         std::vector<std::vector<BlendSampleState>> blendSamples;

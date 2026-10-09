@@ -1869,21 +1869,48 @@ RigExecResolveSkinTopology(
         });
 }
 
+namespace {
+
+// Whether none of \p names on \p moverPrim might vary with time or has an
+// authored connection; false for an invalid prim.
 bool
-RigExecSkinLayoutIsFixed(const UsdPrim &moverPrim)
+_SkinLayoutAttributesAreFixed(const UsdPrim &moverPrim,
+                              std::initializer_list<TfToken> names)
 {
     if (!moverPrim) {
         return false;
     }
-    for (const TfToken &name : {_attrTokens->jointIndices,
-                                _attrTokens->jointWeights,
-                                _attrTokens->elementSize}) {
+    for (const TfToken &name : names) {
         const UsdAttribute a = moverPrim.GetAttribute(name);
         if (a && (a.ValueMightBeTimeVarying() || a.HasAuthoredConnections())) {
             return false;
         }
     }
     return true;
+}
+
+}  // namespace
+
+bool
+RigExecSkinLayoutIsFixed(const UsdPrim &moverPrim)
+{
+    return _SkinLayoutAttributesAreFixed(
+        moverPrim, {_attrTokens->jointIndices, _attrTokens->jointWeights,
+                    _attrTokens->elementSize});
+}
+
+bool
+RigExecSkinLayoutTopologyIsFixed(const UsdPrim &moverPrim)
+{
+    return _SkinLayoutAttributesAreFixed(
+        moverPrim, {_attrTokens->jointIndices, _attrTokens->elementSize});
+}
+
+bool
+RigExecSkinLayoutWeightsAreFixed(const UsdPrim &moverPrim)
+{
+    return _SkinLayoutAttributesAreFixed(moverPrim,
+                                         {_attrTokens->jointWeights});
 }
 
 void
@@ -2688,6 +2715,23 @@ RigExecRevisionOpAssemblesFromLeaves(RigExecRevisionOp op)
         return true;
     }
     return false;
+}
+
+bool
+RigExecRevisionLeafRoleIsTopology(RigExecRevisionLeafRole role)
+{
+    switch (role) {
+    case RigExecRevisionLeafRole::ElementSize:
+    case RigExecRevisionLeafRole::JointIndices:
+    case RigExecRevisionLeafRole::TopologyCounts:
+    case RigExecRevisionLeafRole::TopologyIndices:
+    case RigExecRevisionLeafRole::Divisions:
+    case RigExecRevisionLeafRole::CurveOrder:
+    case RigExecRevisionLeafRole::CurveKnots:
+        return true;
+    default:
+        return false;
+    }
 }
 
 void

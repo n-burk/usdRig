@@ -413,6 +413,11 @@ CaptureRevision(const RigExecBakedProgramImpl::GeomRevision &revision,
             saved[s].layout = samples[s].layout;
             saved[s].lastPoints = samples[s].lastPoints;
             saved[s].layoutRefused = samples[s].layoutRefused;
+            saved[s].layoutKeyed = samples[s].layoutKeyed;
+            saved[s].layoutOffsetsVersion = samples[s].layoutOffsetsVersion;
+            saved[s].layoutIndicesVersion = samples[s].layoutIndicesVersion;
+            saved[s].layoutPointCount = samples[s].layoutPointCount;
+            saved[s].layoutBuilds = samples[s].layoutBuilds;
         }
     }
     state->layoutHandle = revision.layoutHandle;
@@ -481,6 +486,11 @@ RestoreRevision(const RigExecBakedRunShadow::RevisionState &state,
             samples[s].layout = saved[s].layout;
             samples[s].lastPoints = saved[s].lastPoints;
             samples[s].layoutRefused = saved[s].layoutRefused;
+            samples[s].layoutKeyed = saved[s].layoutKeyed;
+            samples[s].layoutOffsetsVersion = saved[s].layoutOffsetsVersion;
+            samples[s].layoutIndicesVersion = saved[s].layoutIndicesVersion;
+            samples[s].layoutPointCount = saved[s].layoutPointCount;
+            samples[s].layoutBuilds = saved[s].layoutBuilds;
         }
     }
     revision->layoutHandle = state.layoutHandle;

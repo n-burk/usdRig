@@ -707,6 +707,7 @@ RrInputsOpen(RrProgram *program, const RigExecWireFile *file,
         }
     state.slotAuthored.assign(slots, 0);
     state.slotRanAuthored.assign(slots, 0);
+    state.slotTopology.assign(slots, 0);
     state.slotDefaultHasValue.resize(slots);
     for (size_t s = 0; s < slots; ++s) {
         const RigExecWireInputSlot &slot = file->inputs[s];
@@ -2102,6 +2103,17 @@ _RrSetArraySlot(RrProgram *program, size_t index,
                                   "count, not " +
                                   std::to_string(value.count));
     }
+    // Topology is epoch state, and the reader never recompiles: another
+    // count is outside its contract, refused rather than followed.
+    if (index < state.slotTopology.size() && state.slotTopology[index] &&
+        value.count != info.defaultCount) {
+        return _RrFail(error, info.name + " is topology, fixed at " +
+                                  std::to_string(info.defaultCount) +
+                                  " elements for this reader; a sampled "
+                                  "set of " +
+                                  std::to_string(value.count) +
+                                  " is refused");
+    }
     const uint32_t slot = uint32_t(index);
     RrArraySlot &a = state.arrays[size_t(state.arrayOf[slot])];
     const RigExecWireInputTag tag = a.tag;
@@ -2221,6 +2233,15 @@ RrInputsBindArrayDefault(RrProgram *program, uint32_t slot,
     RrInputState &state = program->inputState;
     if (_RrIsArraySlot(state, slot)) {
         state.arrays[size_t(state.arrayOf[slot])].defaultVector = vector;
+    }
+}
+
+void
+RrInputsMarkTopology(RrProgram *program, uint32_t slot)
+{
+    RrInputState &state = program->inputState;
+    if (slot < state.slotTopology.size() && _RrIsArraySlot(state, slot)) {
+        state.slotTopology[slot] = 1;
     }
 }
 

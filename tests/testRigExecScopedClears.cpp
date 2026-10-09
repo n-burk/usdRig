@@ -508,12 +508,16 @@ TestABlendSampleEdit()
     CHECK(evaluator->GetBlendSampleCacheSize() == 2);
 
     // One shape's offsets: that sample's cached shape goes, the other's
-    // stays.
+    // stays. Offsets are topology, so the program rebuilds.
+    const size_t builds = evaluator->GetBakedProgramBuildCount();
     stage->GetPrimAtPath(SdfPath("/Asset/Shapes/Up"))
         .GetAttribute(TfToken("offsets"))
         .Set(VtVec3fArray{GfVec3f(0, 0, 2)});
+    CHECK(evaluator->GetLastNoticeDisposition() ==
+          RigExecNoticeDisposition::Stale);
     CHECK(evaluator->GetBlendSampleCacheSize() == 1);
     pose = evaluator->Evaluate(UsdTimeCode::Default());
+    CHECK(evaluator->GetBakedProgramBuildCount() == builds + 1);
     points = Deformed(pose, kBlendTarget);
     CHECK(points.size() == 4 && points[2] == GfVec3f(1, 1, 2));
     CHECK(evaluator->GetBlendSampleCacheSize() == 2);
@@ -543,6 +547,71 @@ TestABlendSampleEdit()
                          stage, pose);
 }
 
+// The sparse samples of the blend mover, in channel order.
+std::vector<const RigExecBakedProgramImpl::GeomBlendChannel::Sample *>
+SparseSamples(const RigExecRigEvaluator &evaluator)
+{
+    std::vector<const RigExecBakedProgramImpl::GeomBlendChannel::Sample *> out;
+    const RigExecBakedProgram *program = evaluator.GetBakedProgram();
+    if (!program) {
+        return out;
+    }
+    for (const auto &chain : program->GetStepGraph().chains) {
+        for (const auto &revision : chain.revisions) {
+            for (const auto &channel : revision.blendChannels) {
+                for (const auto &sample : channel.samples) {
+                    if (!sample.blendShape.IsEmpty()) {
+                        out.push_back(&sample);
+                    }
+                }
+            }
+        }
+    }
+    return out;
+}
+
+// A sparse layout is epoch data: a channel weight keyed over three frames
+// re-runs the blend revision at every frame, and no frame builds a sample's
+// layout again -- it stays the same object.
+void
+TestASparseLayoutIsBuiltOncePerEpoch()
+{
+    const UsdStageRefPtr stage = MakeBlendRig();
+    const UsdAttribute weight =
+        stage->GetPrimAtPath(SdfPath("/Asset/Rig/Channels/Raise"))
+            .GetAttribute(TfToken("inputs:weight"));
+    CHECK(weight.Set(0.0f, UsdTimeCode(1.0)));
+    CHECK(weight.Set(1.0f, UsdTimeCode(3.0)));
+    auto evaluator = Compiled(stage);
+    RigExecRigPose pose = evaluator->Evaluate(UsdTimeCode(1.0));
+    CHECK(pose.valid);
+    VtVec3fArray previous = Deformed(pose, kBlendTarget);
+    std::vector<uint64_t> built;
+    std::vector<std::shared_ptr<const RigExecBlendSampleLayout>> held;
+    for (const auto *sample : SparseSamples(*evaluator)) {
+        CHECK(sample->layout != nullptr && sample->layoutBuilds > 0);
+        built.push_back(sample->layoutBuilds);
+        held.push_back(sample->layout);
+    }
+    CHECK(built.size() == 2);
+    const size_t builds = evaluator->GetBakedProgramBuildCount();
+    for (const double frame : {2.0, 3.0}) {
+        pose = evaluator->Evaluate(UsdTimeCode(frame));
+        const VtVec3fArray points = Deformed(pose, kBlendTarget);
+        // The weight moved the points, so the revision ran.
+        CHECK(points.size() == 4 && points != previous);
+        previous = points;
+        const auto samples = SparseSamples(*evaluator);
+        CHECK(samples.size() == built.size());
+        for (size_t i = 0; i < samples.size() && i < built.size(); ++i) {
+            CHECK(samples[i]->layoutBuilds == built[i]);
+            CHECK(samples[i]->layout == held[i]);
+        }
+    }
+    CHECK(previous.size() == 4 && previous[2] == GfVec3f(1, 1, 1));
+    CHECK(evaluator->GetBakedProgramBuildCount() == builds);
+}
+
 }  // namespace
 
 int
@@ -553,6 +622,7 @@ main()
         TestAChainInputDefaultEditReachesTheChain();
         TestAnInputsMethodEditOnASkinMover();
         TestABlendSampleEdit();
+        TestASparseLayoutIsBuiltOncePerEpoch();
     }
     if (failures) {
         std::printf("testRigExecScopedClears: %d failure(s)\n", failures);

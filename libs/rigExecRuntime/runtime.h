@@ -180,7 +180,10 @@ public:
     // The stage's own value of array input \p index at a sampled time, of
     // any count: the reads at the evaluation time take it, the Default-time
     // ones keep theirs, and each reader judges the count as the evaluators
-    // judge the stage's.
+    // judge the stage's. Topology (a skin's joint indices, a mesh's face
+    // counts and indices, a curve's order and knots, a sparse blend shape's
+    // offsets and point indices) is fixed for the reader: a set of another
+    // count than the default's is refused with the reason.
     bool SetSampledInputArrayAt(size_t index, const RigExecRuntimeArray &value,
                                 std::string *error);
     // Array input \p index's elements: its default, or the value last set.

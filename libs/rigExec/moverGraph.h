@@ -770,6 +770,14 @@ std::shared_ptr<const RigExecSkinTopology> RigExecResolveSkinTopology(
 /// stage: owning thread only.
 bool RigExecSkinLayoutIsFixed(const UsdPrim &moverPrim);
 
+/// RigExecSkinLayoutIsFixed's two halves. The topology half asks it of
+/// rigExec:jointIndices and rigExec:elementSize, whose authored edits
+/// rebuild the program, so a program asks it once, at Build; the weights
+/// half asks it of rigExec:jointWeights, a per-frame value whose edits do
+/// not. Their conjunction is RigExecSkinLayoutIsFixed. Owning thread only.
+bool RigExecSkinLayoutTopologyIsFixed(const UsdPrim &moverPrim);
+bool RigExecSkinLayoutWeightsAreFixed(const UsdPrim &moverPrim);
+
 /// Fills \p topology from a skin layout's arrays and element size against an
 /// influence table of \p influenceCount entries: the copies, then the shape,
 /// index range and weight checks of RigExecSkinLayout::Validate, which set
@@ -1937,6 +1945,14 @@ struct RigExecRevisionLeafDecl {
         return roles[size_t(role)];
     }
 };
+
+/// Whether \p role reads topology, which is epoch state: a skin's
+/// jointIndices and elementSize, a mesh's face counts and indices, a
+/// lattice's divisions, a wire curve's order and knots. An authored edit to
+/// such a path rebuilds the program, so inside one program its read moves
+/// only with the time (an attribute that varies), an interactive override
+/// on one of its hops, or a rebind.
+bool RigExecRevisionLeafRoleIsTopology(RigExecRevisionLeafRole role);
 
 /// Whether RigExecAssembleFromLeaves covers \p op: every operation. A
 /// projector's matrix targets read through

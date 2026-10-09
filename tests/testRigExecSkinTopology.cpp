@@ -22,6 +22,7 @@
 #include "pxr/base/tf/getenv.h"
 #include "pxr/base/tf/notice.h"
 #include "pxr/base/tf/weakBase.h"
+#include "pxr/usd/sdf/changeBlock.h"
 #include "pxr/usd/sdf/types.h"
 #include "pxr/usd/usd/editContext.h"
 #include "pxr/usd/usd/notice.h"
@@ -182,8 +183,9 @@ TestWeightPaintEditAfterFirstEvaluate()
     CheckSkinned(evaluator.Evaluate(UsdTimeCode::Default()), 0.25f, 0.5f,
                  "partially painted weights");
 
-    // The other two layout attributes are equally value edits: swapping the
-    // index of every second slot swaps which control drives it.
+    // The indices are topology: an edit rebuilds the program rather than
+    // reaching it as a value, and swapping the index of every second slot
+    // swaps which control drives it.
     VtIntArray swapped(kPointCount * 2);
     for (size_t i = 0; i < kPointCount; ++i) {
         swapped[i * 2] = 1;
@@ -799,10 +801,11 @@ private:
 };
 
 // An authored edit of each layout array, and a drag on the weights and its
-// lift: each evaluated by the standing program, which none of them rebuilds,
-// and each equal to a program built fresh after it. Then time samples
-// authored on the weights and removed again, run on a program directly and
-// held to the exec reference.
+// lift: each equal to a program built fresh after it. The indices are
+// topology, so their edit rebuilds the program once; the weights are values,
+// and nothing after that rebuilds. Then time samples authored on the weights
+// and removed again, run on a program directly and held to the exec
+// reference.
 // Direct Run publishes into caller-owned pose storage; initialize the same
 // fresh output and requested-time metadata that Evaluate initializes before Run.
 bool
@@ -842,11 +845,17 @@ TestBakedLayoutFollowsEdits()
         swapped[i * 2 + 1] = 0;
     }
     skin.GetAttribute(TfToken("rigExec:jointIndices")).Set(swapped);
+    CHECK(evaluator->GetLastNoticeDisposition() ==
+          RigExecNoticeDisposition::Stale);
     pose = evaluator->Evaluate(t1);
     CheckSkinned(pose, 0.0f, 1.0f, "baked, jointIndices edited");
     CheckAgreesWithFresh("baked, jointIndices edited", stage, none, t1, pose);
+    CHECK(evaluator->GetBakedProgramBuildCount() == builds + 1);
+    const size_t rebuilt = evaluator->GetBakedProgramBuildCount();
 
     weights.Set(Weights(0.25f, 0.5f));
+    CHECK(evaluator->GetLastNoticeDisposition() !=
+          RigExecNoticeDisposition::Stale);
     pose = evaluator->Evaluate(t1);
     CheckSkinned(pose, 0.5f, 0.25f, "baked, jointWeights edited");
     CheckAgreesWithFresh("baked, jointWeights edited", stage, none, t1, pose);
@@ -863,7 +872,7 @@ TestBakedLayoutFollowsEdits()
     CheckAgreesWithFresh("baked, drag lifted", stage, none, t1, pose);
     CHECK(Adopted(*evaluator) != nullptr);
 
-    CHECK(evaluator->GetBakedProgramBuildCount() == builds);
+    CHECK(evaluator->GetBakedProgramBuildCount() == rebuilt);
 
     // Two time samples on the weights: the layout is no longer epoch state.
     // Retain a program across the new animation. Its declared SkinTopology
@@ -1521,6 +1530,153 @@ void TestRetainedSkinRebuildInvalidation()
     }
 }
 
+// Topology is epoch state: an authored edit of the skin's indices or element
+// size is not a value the standing program re-reads but a rebuild, decided
+// by the program's own index (Stale) before the next generation, and the
+// rebuilt program agrees with a fresh one -- for a layout of another count
+// too. The weights stay values: their edit reaches the standing program.
+void
+TestATopologyEditRebuildsTheProgram()
+{
+    UsdStageRefPtr stage = MakeSkinnedRig();
+    const UsdPrim skin = stage->GetPrimAtPath(kSkin);
+    const UsdAttribute weights = skin.CreateAttribute(
+        TfToken("rigExec:jointWeights"), SdfValueTypeNames->FloatArray);
+    weights.Set(Weights(1.0f, 0.0f));
+    auto evaluator = CompiledIn(stage, SdfPath("/Asset/Rig"),
+                                ReferenceChecksRequested());
+    const UsdTimeCode t1(1.0);
+    const std::vector<RigExecValueOverride> none;
+    CheckSkinned(evaluator->Evaluate(t1), 1.0f, 0.0f, "topology, before");
+    {
+        const Revision *revision = SkinRevision(*evaluator);
+        CHECK(revision && revision->layoutTopologyFixed &&
+              revision->layoutFixed);
+        // The topology reads are in the program's rebuild index; the
+        // weights are not.
+        const RigExecBakedProgram *program = evaluator->GetBakedProgram();
+        CHECK(program != nullptr);
+        if (!program) {
+            return;
+        }
+        const RigExecBakedProgramImpl &B = program->GetStepGraph();
+        CHECK(B.rebuild.count(
+                  kSkin.AppendProperty(TfToken("rigExec:jointIndices"))) == 1);
+        CHECK(B.rebuild.count(
+                  kSkin.AppendProperty(TfToken("rigExec:elementSize"))) == 1);
+        CHECK(B.rebuild.count(
+                  kSkin.AppendProperty(TfToken("rigExec:jointWeights"))) == 0);
+    }
+    size_t builds = evaluator->GetBakedProgramBuildCount();
+
+    // Every point on the other control: the same count, other indices.
+    VtIntArray swapped(kPointCount * 2);
+    for (size_t i = 0; i < kPointCount; ++i) {
+        swapped[i * 2] = 1;
+        swapped[i * 2 + 1] = 0;
+    }
+    skin.GetAttribute(TfToken("rigExec:jointIndices")).Set(swapped);
+    CHECK(evaluator->GetLastNoticeDisposition() ==
+          RigExecNoticeDisposition::Stale);
+    RigExecRigPose pose = evaluator->Evaluate(t1);
+    CHECK(evaluator->GetBakedProgramBuildCount() == builds + 1);
+    CheckSkinned(pose, 0.0f, 1.0f, "topology, indices swapped");
+    CheckAgreesWithFresh("topology, indices swapped", stage, none, t1, pose);
+
+    // A layout of another count: one influence per point, every point on
+    // the first control. Held to a fresh program at the generation after
+    // the rebuild, whatever the rebuild itself reported.
+    builds = evaluator->GetBakedProgramBuildCount();
+    {
+        SdfChangeBlock block;
+        skin.GetAttribute(TfToken("rigExec:elementSize")).Set(1);
+        skin.GetAttribute(TfToken("rigExec:jointIndices"))
+            .Set(VtIntArray(kPointCount, 0));
+        weights.Set(VtFloatArray(kPointCount, 1.0f));
+    }
+    CHECK(evaluator->GetLastNoticeDisposition() ==
+          RigExecNoticeDisposition::Stale);
+    CheckSkinned(evaluator->Evaluate(t1), 1.0f, 0.0f,
+                 "topology, one influence per point");
+    CHECK(evaluator->GetBakedProgramBuildCount() > builds);
+    pose = evaluator->Evaluate(t1);
+    CheckSkinned(pose, 1.0f, 0.0f, "topology, one influence per point, held");
+    CheckAgreesWithFresh("topology, one influence per point", stage, none, t1,
+                         pose);
+    {
+        const Revision *revision = SkinRevision(*evaluator);
+        CHECK(revision && revision->layoutHandle &&
+              revision->layoutHandle->elementSize == 1);
+    }
+
+    // The weights are values: a repaint reaches the standing program.
+    builds = evaluator->GetBakedProgramBuildCount();
+    weights.Set(VtFloatArray(kPointCount, 0.5f));
+    CHECK(evaluator->GetLastNoticeDisposition() !=
+          RigExecNoticeDisposition::Stale);
+    pose = evaluator->Evaluate(t1);
+    CheckSkinned(pose, 0.5f, 0.0f, "topology, weights repainted");
+    CheckAgreesWithFresh("topology, weights repainted", stage, none, t1,
+                         pose);
+    CHECK(evaluator->GetBakedProgramBuildCount() == builds);
+}
+
+// Joint weights stay per-frame values over fixed indices: keyed weights are
+// re-read at every frame by the standing program, which nothing rebuilds,
+// while the indices and the element size, whose reads cannot vary, are
+// topology the samples leave alone.
+void
+TestAnimatedWeightsOverFixedIndices()
+{
+    UsdStageRefPtr stage = MakeSkinnedRig();
+    const UsdAttribute weights =
+        stage->GetPrimAtPath(kSkin)
+            .CreateAttribute(TfToken("rigExec:jointWeights"),
+                             SdfValueTypeNames->FloatArray);
+    weights.Set(Weights(1.0f, 0.0f));
+    weights.Set(Weights(1.0f, 0.0f), 1.0);
+    weights.Set(Weights(0.0f, 1.0f), 2.0);
+    weights.Set(Weights(0.5f, 0.5f), 3.0);
+    auto evaluator = CompiledIn(stage, SdfPath("/Asset/Rig"),
+                                ReferenceChecksRequested());
+    CheckSkinned(evaluator->Evaluate(1.0), 1.0f, 0.0f,
+                 "animated weights at 1");
+    const size_t builds = evaluator->GetBakedProgramBuildCount();
+    const Revision *revision = SkinRevision(*evaluator);
+    CHECK(revision != nullptr);
+    if (!revision) {
+        return;
+    }
+    // The layout moves with the time; its topology half does not.
+    CHECK(revision->layoutTopologyFixed);
+    CHECK(!revision->layoutFixed);
+    const RigExecBakedPathLeaves &leaves = revision->layoutLeaves;
+    const int indices = leaves.decl.Role(RigExecRevisionLeafRole::JointIndices);
+    const int size = leaves.decl.Role(RigExecRevisionLeafRole::ElementSize);
+    const int painted =
+        leaves.decl.Role(RigExecRevisionLeafRole::JointWeights);
+    const auto flag = [](const std::vector<char> &flags, int k) {
+        return k >= 0 && size_t(k) < flags.size() && flags[size_t(k)] != 0;
+    };
+    CHECK(flag(leaves.epoch, indices) && flag(leaves.epoch, size));
+    CHECK(!flag(leaves.epoch, painted));
+    CHECK(flag(leaves.varying, painted));
+    CHECK(!flag(leaves.varying, indices) && !flag(leaves.varying, size));
+    const std::vector<std::pair<double, std::pair<float, float>>> frames = {
+        {2.0, {0.0f, 1.0f}}, {3.0, {0.5f, 0.5f}}, {1.0, {1.0f, 0.0f}}};
+    for (const auto &[frame, expected] : frames) {
+        const std::string what =
+            "animated weights at " + std::to_string(int(frame));
+        const RigExecRigPose pose = evaluator->Evaluate(frame);
+        CheckSkinned(pose, expected.first, expected.second, what.c_str());
+        CheckAgreesWithFresh(what, stage, {}, UsdTimeCode(frame), pose);
+        // The frame's sample moved the weights and left the topology.
+        CHECK(flag(leaves.changed, painted));
+        CHECK(!flag(leaves.changed, indices) && !flag(leaves.changed, size));
+    }
+    CHECK(evaluator->GetBakedProgramBuildCount() == builds);
+}
+
 }  // namespace
 
 int
@@ -1536,6 +1692,8 @@ main(int argc, char **argv)
         TestTheLayoutFieldsAreSetWhereTheyWere(argv[2]);
         TestTheLayoutHandleSurvivesUnrelatedNotices();
         TestRetainedSkinRebuildInvalidation();
+        TestATopologyEditRebuildsTheProgram();
+        TestAnimatedWeightsOverFixedIndices();
         if (failures) {
             std::printf("%d FAILURE(S)\n", failures);
             return 1;
