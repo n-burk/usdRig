@@ -2596,6 +2596,9 @@ RigExecBakedProgram::_BuildWithSceneCaptureAttempt(RigExecRigEvaluator *evaluato
     B.chunkVertexTarget = RigExecBakedChunkVertexTargetFromEnvironment();
     B.chunkCap = RigExecBakedChunkCapFromEnvironment();
     B.rangeChains = RigExecBakedRangeChainsFromEnvironment();
+    B.groupVertexTarget = RigExecBakedGroupVertexTargetFromEnvironment();
+    B.groupCap = RigExecBakedGroupCapFromEnvironment();
+    B.groupGates = RigExecBakedGroupGatesFromEnvironment();
     B.useSimd = RigExecSimdEnabled();
     B.purityAudit = TfGetenvBool("RIGEXEC_PURITY_AUDIT", false);
     B.verifyFrozenStatic = TfGetenvBool("RIGEXEC_VERIFY_FROZEN_STATIC", false);
@@ -2616,6 +2619,19 @@ RigExecBakedProgram::_BuildWithSceneCaptureAttempt(RigExecRigEvaluator *evaluato
     // marked rather than scoped; see RigExecProfilePhases.
     phases.Next("Bake.entry");
     B.interactiveOverrides = &E._interactiveOverrides;
+    // The roles a range chain's revisions take, and what the geometry Build
+    // classifies them from: the standing overrides above and the admitted
+    // upstream values, placed with SetUpstreamInputs' filter, so Build reads
+    // what the first prologue will (a value admitted later flips a role and
+    // the evaluator rebuilds).
+    B.roleMode = E.GetBakedRoleMode();
+    B.exportKeep = E.GetBakedExportKeep();
+    B.upstream.clear();
+    for (const RigExecValueOverride &o : E._upstreamAdmitted) {
+        if (!o.attribute.IsEmpty() && o.computation.IsEmpty()) {
+            B.upstream[o.prim.AppendProperty(o.attribute)] = o.value;
+        }
+    }
     B.ownedJointSolverBinding = E._jointSolverBinding;
     for (auto it = B.ownedJointSolverBinding.begin(); it != B.ownedJointSolverBinding.end();) {
         auto &writers = it->second;
@@ -4465,6 +4481,12 @@ const RigExecBakedProgramImpl &
 RigExecBakedProgram::GetStepGraph() const
 {
     return *_impl;
+}
+
+const std::set<SdfPath> &
+RigExecBakedProgram::GetExportPinnedPaths() const
+{
+    return _impl->exportPinnedPaths;
 }
 
 UsdTimeCode

@@ -32,6 +32,7 @@
 #include "pxr/usd/sdf/valueTypeName.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <set>
@@ -195,7 +196,18 @@ struct RigExecStageFrameSeeds {
     }
 };
 
-enum class RigExecBakedBail { None, StageFrames, Step, Publish };
+enum class RigExecBakedBail { None, StageFrames, Step, Publish, RoleFlip };
+
+/// Which roles Build gives a range-pipelined chain's revisions. Both modes
+/// cut the same groups (RIGEXEC_BAKED_GROUP_VERTS / _CAP). Live (the
+/// evaluator and its frozen clones): a Range role or a group gate may rest on
+/// a value an interactive override or upstream input can flip; the run then
+/// bails (RoleFlip) and the evaluator rebuilds. Export (the .rigexec bake): a
+/// Range role or gate may rest only on reads the file can hold as private
+/// constants (unanimated, one-hop, unconnected, not a property-chain target,
+/// not in the bake's keep-set); otherwise the skin is Whole, the revision
+/// ungated.
+enum class RigExecBakedRoleMode : uint8_t { Live, Export };
 
 /// One compiled epoch, flattened.
 class RigExecBakedProgram {
@@ -408,6 +420,12 @@ public:
     /// value at one of these paths is placed into the generation's resolved
     /// inputs too, which is what the oracle reads. Built with the above.
     const std::set<SdfPath> &GetUpstreamOracle() const;
+
+    /// Export mode: the attribute paths of the reads the program's Range
+    /// roles and gates rest on (method, element size and joint indices of a
+    /// Range skin; every read feeding a gated weight's resolved default). The
+    /// capture writes their slots private. Empty in Live mode.
+    const std::set<SdfPath> &GetExportPinnedPaths() const;
 
     /// Whether a run resolves RigExecRigPose::weightFields, following
     /// RigExecRigEvaluator::SetPublishWeightFields: the per-point overlay

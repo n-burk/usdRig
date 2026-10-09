@@ -64,6 +64,10 @@ TF_DEFINE_PRIVATE_TOKENS(
     ((jointIndices, "rigExec:jointIndices"))
     ((elementSize, "rigExec:elementSize"))
     ((denseRepresentation, "dense"))
+    ((sparseRepresentation, "sparse"))
+    ((staticWeight, "RigExecStaticWeight"))
+    ((weightDefault, "rigExec:defaultWeight"))
+    ((targetSpace, "target"))
     ((operationCycle, "operation cycle"))
 );
 
@@ -649,6 +653,32 @@ RigExecBakedRangeChainsFromEnvironment()
     return TfGetenvBool("RIGEXEC_BAKED_RANGE_CHAINS", true);
 }
 
+/// How many points one vertex group of a range chain covers before the cap
+/// takes over. Read at Build into groupVertexTarget.
+size_t
+RigExecBakedGroupVertexTargetFromEnvironment()
+{
+    const int authored = TfGetenvInt("RIGEXEC_BAKED_GROUP_VERTS", 1024);
+    return authored < 1 ? size_t(1) : size_t(authored);
+}
+
+/// The most vertex groups one range chain is cut into. Read at Build into
+/// groupCap.
+size_t
+RigExecBakedGroupCapFromEnvironment()
+{
+    const int authored = TfGetenvInt("RIGEXEC_BAKED_GROUP_CAP", 16);
+    return authored < 1 ? size_t(1) : size_t(authored);
+}
+
+/// Whether a Range revision over a static sparse zero-default weight writes
+/// only the groups its indices touch. Read at Build into groupGates.
+bool
+RigExecBakedGroupGatesFromEnvironment()
+{
+    return TfGetenvBool("RIGEXEC_BAKED_GROUP_GATES", true);
+}
+
 void
 RigExecBakedPartitionRevision(
     const RigExecBakedProgramImpl &program,
@@ -1051,6 +1081,633 @@ ChainRangeCount(const RigExecBakedProgramImpl &B, size_t points)
     return ranges;
 }
 
+/// How many vertex groups a range chain of \p points points is cut into:
+/// the group target and cap, trimmed like ChainRangeCount so every group is
+/// non-empty. Live and Export alike.
+size_t
+ChainGroupCount(const RigExecBakedProgramImpl &B, size_t points)
+{
+    if (!B.rangeChains) {
+        return 1;
+    }
+    size_t groups =
+        RigExecPointRangeCount(points, B.groupVertexTarget, B.groupCap);
+    while (groups > 1 &&
+           RigExecPointRangeBound(points, groups, groups - 1) >= points) {
+        --groups;
+    }
+    return groups;
+}
+
+using GeomRole = RigExecBakedRevisionRole;
+using RolePin = RigExecBakedRolePin;
+
+/// What Build's role classification reads, the way the geometry prologue
+/// will read it: the stage, the evaluator's standing interactive overrides
+/// and the admitted upstream values (B.upstream). Owning thread, Build only.
+struct RoleReads {
+    explicit RoleReads(const RigExecBakedProgramImpl &program)
+        : B(program),
+          exportMode(program.roleMode == RigExecBakedRoleMode::Export)
+    {
+        if (B.interactiveOverrides) {
+            for (const RigExecValueOverride &o : *B.interactiveOverrides) {
+                const SdfPath path = o.prim.AppendProperty(
+                    o.attribute.IsEmpty() ? o.computation : o.attribute);
+                overlay.SetProperty(path, o.value);
+                overrides.emplace_back(path, o.value);
+            }
+        }
+    }
+
+    /// Whether a standing override or an admitted upstream value stands on
+    /// one of \p hops.
+    bool Reaches(const std::vector<SdfPath> &hops) const
+    {
+        for (const SdfPath &hop : hops) {
+            if (B.upstream.count(hop)) {
+                return true;
+            }
+            for (const auto &entry : overrides) {
+                if (entry.first == hop) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /// Whether \p path may never become a file constant: a property-chain
+    /// target, an admitted upstream path or a path the bake keeps listed.
+    bool KeptListed(const SdfPath &path) const
+    {
+        return B.chainTargets.count(path) || B.upstream.count(path) ||
+               B.exportKeep.count(path);
+    }
+
+    /// Live: key \p k's read cannot move with the time -- no hop varies or
+    /// holds a time sample, so an animated method or space is never pinned --
+    /// and its walk meets no value the region computes.
+    bool Pinnable(const RigExecBakedPathLeaves &leaves, int k) const
+    {
+        if (k < 0 || size_t(k) >= leaves.decl.keys.size() ||
+            size_t(k) >= leaves.hops.size()) {
+            return false;
+        }
+        if (size_t(k) < leaves.walks.size() && leaves.walks[size_t(k)] >= 0) {
+            return false;
+        }
+        if (RigExecBakedLeafVaryingNow(B, leaves, size_t(k))) {
+            return false;
+        }
+        for (const SdfPath &hop : leaves.hops[size_t(k)]) {
+            if (const UsdAttribute a = B.stage->GetAttributeAtPath(hop)) {
+                if (a.ValueMightBeTimeVarying() || a.GetNumTimeSamples() > 0) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    /// Export: pinnable, a walk of exactly the head (no connection), and
+    /// never kept listed.
+    bool Bakeable(const RigExecBakedPathLeaves &leaves, int k) const
+    {
+        if (!Pinnable(leaves, k)) {
+            return false;
+        }
+        const std::vector<SdfPath> &hops = leaves.hops[size_t(k)];
+        const SdfPath &head = leaves.decl.keys[size_t(k)].path;
+        if (hops.size() > 1 || (hops.size() == 1 && hops[0] != head) ||
+            KeptListed(head)) {
+            return false;
+        }
+        const UsdAttribute &a = size_t(k) < leaves.attributes.size()
+                                    ? leaves.attributes[size_t(k)]
+                                    : UsdAttribute();
+        return !(a && a.HasAuthoredConnections());
+    }
+
+    /// The rule of the mode Build runs in.
+    bool Usable(const RigExecBakedPathLeaves &leaves, int k) const
+    {
+        return exportMode ? Bakeable(leaves, k) : Pinnable(leaves, k);
+    }
+
+    /// Key \p k's value as the prologue will sample it. A usable key does not
+    /// vary, so Default reads what every time reads.
+    TfToken Token(const RigExecBakedPathLeaves &leaves, int k) const
+    {
+        const VtValue value = RigExecSampleRevisionLeaf(
+            leaves.decl.keys[size_t(k)], leaves.attributes[size_t(k)],
+            &overlay, UsdTimeCode::Default(), &B.upstream);
+        return value.IsHolding<TfToken>() ? value.UncheckedGet<TfToken>()
+                                          : TfToken();
+    }
+
+    const RigExecBakedProgramImpl &B;
+    const bool exportMode;
+    RigExecResolvedInputs overlay;
+    std::vector<std::pair<SdfPath, VtValue>> overrides;
+};
+
+/// A skin mover's layout arrays as PartitionAtBuild reads them, at Default;
+/// false when they cannot be cut.
+bool
+ReadSkinLayoutAtBuild(const RigExecBakedProgramImpl::GeomRevision &revision,
+                      VtIntArray *indices, int *elementSize)
+{
+    *elementSize = 1;
+    if (!revision.moverPrim) {
+        return false;
+    }
+    if (const UsdAttribute a =
+            revision.moverPrim.GetAttribute(_tokens->jointIndices)) {
+        a.Get(indices, UsdTimeCode::Default());
+    }
+    if (const UsdAttribute a =
+            revision.moverPrim.GetAttribute(_tokens->elementSize)) {
+        a.Get(elementSize, UsdTimeCode::Default());
+    }
+    return *elementSize >= 1 && !indices->empty() &&
+           indices->size() % size_t(*elementSize) == 0;
+}
+
+/// Cuts a skin revision of a range chain at the chain's group bounds: chunk
+/// g is group g, keyed by the union of its vertices' joint indices (zero-
+/// weight slots included) and cut exactly at the bounds -- no merge, no
+/// degenerate fallback, RIGEXEC_BAKED_CHUNK_ALWAYS not consulted -- with its
+/// tables filled as a keyed chunk's and the indices kept for adoption.
+/// False, leaving the revision as it was, when the layout cannot be cut.
+bool
+PartitionSkinGroups(RigExecBakedProgramImpl::GeomRevision *revision,
+                    const std::vector<int> &bounds)
+{
+    using GeomChunk = RigExecBakedProgramImpl::GeomChunk;
+    VtIntArray indices;
+    int elementSize = 1;
+    if (bounds.size() < 2 ||
+        !ReadSkinLayoutAtBuild(*revision, &indices, &elementSize)) {
+        return false;
+    }
+    const size_t slots = size_t(elementSize);
+    const size_t layoutPoints = indices.size() / slots;
+    const size_t influences = revision->influenceSlots.size();
+    std::vector<GeomChunk> chunks(bounds.size() - 1);
+    std::vector<char> claimed(influences, 0);
+    for (size_t g = 0; g + 1 < bounds.size(); ++g) {
+        GeomChunk &chunk = chunks[g];
+        chunk.begin = bounds[g];
+        chunk.end = bounds[g + 1];
+        const size_t end = std::min(size_t(chunk.end), layoutPoints);
+        for (size_t point = size_t(chunk.begin); point < end; ++point) {
+            for (size_t slot = 0; slot < slots; ++slot) {
+                const int index = indices.cdata()[point * slots + slot];
+                // As RigExecBakedPartitionRevision: an index outside the
+                // table is a layout the packet rejects.
+                if (index < 0 || size_t(index) >= influences ||
+                    claimed[size_t(index)]) {
+                    continue;
+                }
+                claimed[size_t(index)] = 1;
+                chunk.key.push_back(index);
+            }
+        }
+        std::sort(chunk.key.begin(), chunk.key.end());
+        for (const int index : chunk.key) {
+            claimed[size_t(index)] = 0;
+        }
+        chunk.ok = false;
+        chunk.keyChanged = false;
+        chunk.transforms.assign(influences, GfMatrix4d(1.0));
+        chunk.rows.assign(influences * RigExecSkinRowStride, 0.0f);
+        for (size_t t = 0; t < influences; ++t) {
+            RigExecNarrowSkinRows(chunk.transforms[t],
+                                  &chunk.rows[t * RigExecSkinRowStride]);
+        }
+    }
+    revision->chunks = std::move(chunks);
+    revision->chunked = true;
+    revision->partitionIndices = indices;
+    revision->partitionElementSize = elementSize;
+    revision->partitionIndexCount = indices.size();
+    revision->partitionPointCount = layoutPoints;
+    revision->partitionCandidates = revision->chunks.size();
+    revision->partitionProducerSets.clear();
+    std::set<SkinProducerSet> distinct;
+    int producerMin = -1, producerMax = 0;
+    for (const GeomChunk &chunk : revision->chunks) {
+        SkinProducerSet producers = ChunkProducers(*revision, chunk, true);
+        const int count = int(producers.size());
+        producerMin = producerMin < 0 ? count : std::min(producerMin, count);
+        producerMax = std::max(producerMax, count);
+        distinct.insert(producers);
+        revision->partitionProducerSets.push_back(std::move(producers));
+    }
+    revision->partitionProducerMin = std::max(0, producerMin);
+    revision->partitionProducerMax = producerMax;
+    revision->partitionDistinctReads = distinct.size();
+    return true;
+}
+
+/// The role \p revision of an eligible chain takes, from what Build reads,
+/// with the pins it rests on (2.2). A role a usable method or space leaf
+/// chose by value is pinned, whichever it chose; a Range skin also pins that
+/// no override or upstream value reaches its layout topology. Export adds
+/// the Range skin's reads to \p pinned.
+GeomRole
+ClassifyRevision(const RoleReads &reads,
+                 RigExecBakedProgramImpl::GeomRevision *revision,
+                 std::vector<SdfPath> *pinned)
+{
+    using Role = RigExecRevisionLeafRole;
+    const RigExecBakedPathLeaves &leaves = revision->leaves;
+    const auto pinToken = [&](int k, const TfToken &token) {
+        RolePin pin;
+        pin.kind = RolePin::Kind::LeafToken;
+        pin.leaf = k;
+        pin.token = token;
+        revision->pins.push_back(pin);
+    };
+    switch (revision->op) {
+    case RigExecRevisionOp::Matrix:
+    case RigExecRevisionOp::Wire:
+    case RigExecRevisionOp::Lattice:
+        return GeomRole::Range;
+    case RigExecRevisionOp::BlendShape: {
+        // rigExec:deltaSpace never enters the file, so Export pins it as
+        // Live does.
+        const int space = leaves.decl.Role(Role::DeltaSpace);
+        if (!reads.Pinnable(leaves, space)) {
+            return GeomRole::Whole;
+        }
+        const TfToken value = reads.Token(leaves, space);
+        pinToken(space, value);
+        return value == _tokens->targetSpace ? GeomRole::Range
+                                             : GeomRole::Whole;
+    }
+    case RigExecRevisionOp::Skin: {
+        // The keys of a Range skin rest on an epoch-fixed layout; without
+        // one the method decides nothing and nothing is pinned.
+        VtIntArray indices;
+        int elementSize = 1;
+        if (!revision->skinTopologyFixed ||
+            !RigExecSkinLayoutTopologyIsFixed(revision->moverPrim) ||
+            !ReadSkinLayoutAtBuild(*revision, &indices, &elementSize)) {
+            return GeomRole::Whole;
+        }
+        const int method = leaves.decl.Role(Role::SkinningMethod);
+        const int jointIndices = leaves.decl.Role(Role::JointIndices);
+        const int size = leaves.decl.Role(Role::ElementSize);
+        if (!reads.Usable(leaves, method) || jointIndices < 0 || size < 0 ||
+            size_t(jointIndices) >= leaves.hops.size() ||
+            size_t(size) >= leaves.hops.size()) {
+            return GeomRole::Whole;
+        }
+        // A layout override or upstream value standing at Build keeps the
+        // stale-partition fallback of a Whole fuse.
+        if (reads.Reaches(leaves.hops[size_t(jointIndices)]) ||
+            reads.Reaches(leaves.hops[size_t(size)]) ||
+            (reads.exportMode && (!reads.Bakeable(leaves, jointIndices) ||
+                                  !reads.Bakeable(leaves, size)))) {
+            return GeomRole::Whole;
+        }
+        const TfToken value = reads.Token(leaves, method);
+        pinToken(method, value);
+        if (value != _tokens->classicLinear) {
+            return GeomRole::Whole;
+        }
+        for (const int k : {jointIndices, size}) {
+            RolePin pin;
+            pin.kind = RolePin::Kind::NoLayoutOverride;
+            pin.leaf = k;
+            revision->pins.push_back(pin);
+        }
+        if (reads.exportMode) {
+            for (const int k : {method, jointIndices, size}) {
+                pinned->push_back(leaves.decl.keys[size_t(k)].path);
+            }
+        }
+        return GeomRole::Range;
+    }
+    default:
+        return GeomRole::Whole;
+    }
+}
+
+/// Static sparse weight object \p object's resolved unlisted value -- its
+/// defaultWeight, the only read that enters it (types.cpp) -- as the
+/// prologue will read it, when a gate may rest on it: the read is pinnable
+/// (Live) or a bakeable constant (Export). \p head receives the read's
+/// attribute path.
+bool
+GateDefault(const RoleReads &reads, int object, float *value, SdfPath *head)
+{
+    const RigExecBakedProgramImpl &B = reads.B;
+    if (object < 0 || size_t(object) >= B.weightObjects.size()) {
+        return false;
+    }
+    const RigExecBakedProgramImpl::WeightObject &weight =
+        B.weightObjects[size_t(object)];
+    if (weight.type != _tokens->staticWeight ||
+        weight.representation != _tokens->sparseRepresentation) {
+        return false;
+    }
+    const RigExecBakedInput<float> &input = weight.defaultWeight;
+    if (input.varying || input.walk >= 0) {
+        return false;
+    }
+    SdfPathVector walk;
+    UsdAttribute selected;
+    if (input.head) {
+        bool viaChain = false, varying = false;
+        RigExecBakedClassifyInput<float>(input.head, UsdTimeCode::Default(),
+                                         B.chainTargets, &viaChain, &varying,
+                                         &selected, &walk);
+        if (viaChain || varying) {
+            return false;
+        }
+        *head = input.head.GetPath();
+        if (reads.exportMode && (walk.size() > 1 ||
+                                 input.head.HasAuthoredConnections())) {
+            return false;
+        }
+    } else {
+        *head = weight.path.AppendProperty(_tokens->weightDefault);
+    }
+    if (reads.exportMode) {
+        if (reads.KeptListed(*head)) {
+            return false;
+        }
+        for (const SdfPath &hop : walk) {
+            if (reads.KeptListed(hop)) {
+                return false;
+            }
+        }
+    }
+    // The value the walk selects -- it does not vary, so Default reads what
+    // every time reads -- unless a standing override or upstream value
+    // answers first along the walk.
+    *value = input.constant;
+    const auto number = [value](const VtValue &v) {
+        if (v.IsHolding<float>()) {
+            *value = v.UncheckedGet<float>();
+        } else if (v.IsHolding<double>()) {
+            *value = float(v.UncheckedGet<double>());
+        } else {
+            return false;
+        }
+        return true;
+    };
+    VtValue authored;
+    if (selected && selected.Get(&authored, UsdTimeCode::Default())) {
+        number(authored);
+    }
+    for (const SdfPath &hop : walk) {
+        for (const auto &entry : reads.overrides) {
+            if (entry.first == hop) {
+                return number(entry.second);
+            }
+        }
+        const auto upstream = B.upstream.find(hop);
+        if (upstream != B.upstream.end()) {
+            return number(upstream->second);
+        }
+    }
+    return true;
+}
+
+/// Gates a Range \p revision (2.3): a static sparse weight object with an
+/// exactly-zero resolved default the pins can hold, a packet the kernel half
+/// (RigExecRevisionGateHolds) admits, and no current-phase or operation-
+/// domain weighting. Writes the groups the authored indices inside
+/// [0, N0) touch into \p written, pins the default and, in Export, adds its
+/// read to \p pinned.
+bool
+GateRevision(const RoleReads &reads,
+             const RigExecBakedProgramImpl::GeomChain &chain,
+             RigExecBakedProgramImpl::GeomRevision *revision,
+             std::vector<char> *written, std::vector<SdfPath> *pinned)
+{
+    const RigExecBakedProgramImpl &B = reads.B;
+    if (!B.groupGates || revision->weightObject < 0 ||
+        revision->weightCurrentPhase || revision->weightOperationDomain) {
+        return false;
+    }
+    float value = 1.0f;
+    SdfPath head;
+    if (!GateDefault(reads, revision->weightObject, &value, &head) ||
+        value != 0.0f) {
+        return false;
+    }
+    const RigExecBakedProgramImpl::WeightObject &weight =
+        B.weightObjects[size_t(revision->weightObject)];
+    // The packet a run assembles from this object, as far as the gate reads
+    // it: the static weight's arrays at the default the pin holds.
+    RigExecMoverParameters probe;
+    probe.enabled = true;
+    probe.valid = true;
+    probe.weights.representation = weight.representation;
+    probe.weights.rangePolicy = weight.rangePolicy;
+    probe.weights.values = weight.values;
+    probe.weights.indices = weight.indices;
+    probe.weights.defaultWeight = 0.0f;
+    probe.weights.valid = true;
+    probe.skinningMethod = _tokens->classicLinear;
+    probe.blendSurfaceFrame = false;
+    if (!RigExecRevisionGateHolds(revision->op, probe)) {
+        return false;
+    }
+    const std::vector<int> &bounds = chain.groupBounds;
+    written->assign(bounds.size() - 1, 0);
+    for (const int index : weight.indices) {
+        if (index < 0 || size_t(index) >= chain.groupPointCount) {
+            continue;
+        }
+        const size_t g = size_t(std::upper_bound(bounds.begin(), bounds.end(),
+                                                 index) -
+                                bounds.begin()) - 1;
+        if (g < written->size()) {
+            (*written)[g] = 1;
+        }
+    }
+    RolePin pin;
+    pin.kind = RolePin::Kind::WeightDefaultZero;
+    pin.weightObject = revision->weightObject;
+    revision->pins.push_back(pin);
+    if (reads.exportMode) {
+        pinned->push_back(head);
+    }
+    return true;
+}
+
+/// Gives every revision of \p chain its role, groups, gates, pins and
+/// chunks (2.1-2.3, 5.2). A chain is range-pipelined when wave 5 would split
+/// it, it holds two or more groups and one of its revisions takes the Range
+/// role; every other chain keeps its Legacy chunks. The skinning methods and
+/// delta spaces of an eligible chain are epoch keys: an authored edit to one
+/// rebuilds, so only an override or upstream value flips a role in-epoch.
+void
+AssignChainRoles(RigExecBakedProgramImpl *program, const RoleReads &reads,
+                 RigExecBakedProgramImpl::GeomChain *chain, size_t points)
+{
+    RigExecBakedProgramImpl &B = *program;
+    const size_t groups = ChainGroupCount(B, points);
+    const bool eligible = ChainRangeCount(B, points) >= 2 && groups >= 2;
+    chain->groupBounds.clear();
+    chain->groupPointCount = 0;
+    chain->baseOwner.reset();
+    chain->baseGroups.clear();
+    chain->resultIds.clear();
+    chain->spareIds.clear();
+    std::vector<GeomRole> candidate(chain->revisions.size(), GeomRole::Legacy);
+    std::vector<std::vector<SdfPath>> pinned(chain->revisions.size());
+    bool anyRange = false;
+    for (size_t r = 0; r < chain->revisions.size(); ++r) {
+        RigExecBakedProgramImpl::GeomRevision &revision = chain->revisions[r];
+        revision.role = GeomRole::Legacy;
+        revision.rangeRole = false;
+        revision.groupWritten.clear();
+        revision.enteringWriter.clear();
+        revision.groups.clear();
+        revision.groupIds.clear();
+        revision.pins.clear();
+        PartitionAtBuild(B, &revision);
+        if (!eligible) {
+            continue;
+        }
+        for (const RigExecRevisionLeafRole role :
+                 {RigExecRevisionLeafRole::SkinningMethod,
+                  RigExecRevisionLeafRole::DeltaSpace}) {
+            const int k = revision.leaves.decl.Role(role);
+            if (k >= 0 && revision.leaves.decl.keys[size_t(k)]
+                              .path.IsPropertyPath()) {
+                const SdfPath &path = revision.leaves.decl.keys[size_t(k)].path;
+                B.rebuild.insert(path);
+                B.named.insert(path);
+                B.prims.insert(path.GetPrimPath());
+            }
+        }
+        candidate[r] = ClassifyRevision(reads, &revision, &pinned[r]);
+        anyRange = anyRange || candidate[r] == GeomRole::Range;
+    }
+    if (!anyRange) {
+        // Legacy. A skin or blend that a usable leaf made Whole keeps its
+        // LeafToken pin, so a flip to Range rebuilds into a range chain.
+        return;
+    }
+    chain->groupPointCount = points;
+    chain->groupBounds.resize(groups + 1);
+    for (size_t g = 0; g <= groups; ++g) {
+        chain->groupBounds[g] = int(RigExecPointRangeBound(points, groups, g));
+    }
+    chain->baseGroups.resize(groups);
+    chain->resultIds.assign(groups, RigExecGroupSource());
+    chain->spareIds.assign(groups, RigExecGroupSource());
+    std::vector<int> lastWriter(groups, -1);
+    for (size_t r = 0; r < chain->revisions.size(); ++r) {
+        RigExecBakedProgramImpl::GeomRevision &revision = chain->revisions[r];
+        revision.role = candidate[r];
+        revision.rangeRole = revision.role == GeomRole::Range;
+        revision.groupWritten.assign(groups, 1);
+        const bool skin = revision.op == RigExecRevisionOp::Skin;
+        if (revision.rangeRole && skin &&
+            !PartitionSkinGroups(&revision, chain->groupBounds)) {
+            // Unreachable: the classification read the same layout.
+            revision.role = GeomRole::Whole;
+            revision.rangeRole = false;
+            pinned[r].clear();
+        }
+        if (revision.rangeRole) {
+            if (!skin) {
+                revision.chunks.assign(groups,
+                                       RigExecBakedProgramImpl::GeomChunk());
+                for (size_t g = 0; g < groups; ++g) {
+                    revision.chunks[g].begin = chain->groupBounds[g];
+                    revision.chunks[g].end = chain->groupBounds[g + 1];
+                }
+                revision.chunked = false;
+                revision.partitionIndices = VtIntArray();
+            }
+            std::vector<char> written;
+            if (GateRevision(reads, *chain, &revision, &written, &pinned[r])) {
+                revision.groupWritten = std::move(written);
+            }
+            B.exportPinnedPaths.insert(pinned[r].begin(), pinned[r].end());
+        } else if (skin && revision.skinTopologyFixed &&
+                   PartitionSkinGroups(&revision, chain->groupBounds)) {
+            // A Whole keyed skin: one speculative chunk per group.
+        } else {
+            // A Whole one-chunk revision: PartitionAtBuild's single chunk,
+            // which a skin's whole fuse runs unkeyed.
+            revision.chunks.assign(1, RigExecBakedProgramImpl::GeomChunk());
+            revision.chunked = false;
+            revision.partitionIndices = VtIntArray();
+        }
+        revision.enteringWriter = lastWriter;
+        revision.groups.assign(groups, RigExecGroupState<GfVec3f>());
+        revision.groupIds.assign(groups, RigExecGroupSource());
+        for (size_t g = 0; g < groups; ++g) {
+            if (!revision.groupWritten[g]) {
+                continue;
+            }
+            lastWriter[g] = int(r);
+            // The two buffers its writer alternates between, sized to the
+            // group here, on the owning thread, so a run allocates nothing.
+            const size_t size =
+                size_t(chain->groupBounds[g + 1] - chain->groupBounds[g]);
+            for (auto &own : revision.groups[g].own) {
+                own = std::make_shared<std::vector<GfVec3f>>(size);
+            }
+        }
+    }
+}
+
+/// The chain index of the revision whose slot holds group \p g of point
+/// version \p version of \p chain, or -1 for the base: the last revision
+/// before the version that writes g, unless a revision a cycle set aside
+/// (which passes the base through) comes first.
+int
+GroupWriter(const RigExecBakedProgramImpl::GeomChain &chain, size_t version,
+            size_t g)
+{
+    for (size_t q = std::min(version, chain.revisions.size()); q > 0; --q) {
+        const RigExecBakedProgramImpl::GeomRevision &revision =
+            chain.revisions[q - 1];
+        if (revision.rangeSetAside) {
+            return -1;
+        }
+        if (g < revision.groupWritten.size() && revision.groupWritten[g]) {
+            return int(q - 1);
+        }
+    }
+    return -1;
+}
+
+/// Appends RevisionOut reads of `chunkBase + g` for every written group g,
+/// one range per run of consecutive written groups.
+void
+DeclareWrittenGroupReads(const RigExecBakedProgramImpl::GeomRevision &revision,
+                         std::vector<RigExecBakedSlotRange> *reads)
+{
+    const size_t groups = revision.groupWritten.size();
+    for (size_t g = 0; g < groups;) {
+        if (!revision.groupWritten[g]) {
+            ++g;
+            continue;
+        }
+        size_t end = g + 1;
+        while (end < groups && revision.groupWritten[end]) {
+            ++end;
+        }
+        reads->push_back(RigExecBakedRange(RigExecBakedSlotDomain::RevisionOut,
+                                           revision.chunkBase + int(g),
+                                           revision.chunkBase + int(end)));
+        g = end;
+    }
+}
+
 }  // namespace
 
 void
@@ -1060,13 +1717,16 @@ RigExecBakedBuildGeometrySteps(RigExecBakedProgramImpl *program)
     B.chainChunkBegin.assign(B.chains.size(), 0);
     B.chainChunkEnd.assign(B.chains.size(), 0);
     B.chunkRevision.clear();
+    B.exportPinnedPaths.clear();
+    const RoleReads roleReads(B);
     int nextChunk = 0;
     for (size_t c = 0; c < B.chains.size(); ++c) {
         RigExecBakedProgramImpl::GeomChain &chain = B.chains[c];
-        // The chain's point partition: every range-pipelined revision of it
-        // carries these bounds as its chunks.
-        const size_t points = BuildPointCount(B, chain);
-        const size_t ranges = ChainRangeCount(B, points);
+        // The chain's vertex groups, roles, gates and pins: every Range
+        // revision of it carries the group bounds as its chunks.
+        AssignChainRoles(&B, roleReads, &chain, BuildPointCount(B, chain));
+        const size_t groups =
+            chain.groupBounds.empty() ? 0 : chain.groupBounds.size() - 1;
         RigExecBakedStep &input = AddGeometryStep(&B,RigExecBakedStepKind::ChainInputs,int(c));
         input.maxDiagnostics = 0;
         input.reads.push_back(RigExecBakedOne(RigExecBakedSlotDomain::ChainInput,int(c)));
@@ -1104,36 +1764,22 @@ RigExecBakedBuildGeometrySteps(RigExecBakedProgramImpl *program)
             // in exactly where the assembler's would have landed.
             revision.packetInfluences.assign(revision.influenceSlots.size(),
                                              GfMatrix4d(1.0));
-            PartitionAtBuild(B, &revision);
-            revision.rangeRole =
-                ranges >= 2 && RigExecRevisionIsRangeOp(revision.op);
             revision.rangeInputs = RigExecRevisionRangeInputs();
             revision.joinSeen.clear();
             revision.rangeRefusals = 0;
-            if (revision.rangeRole) {
-                revision.chunks.assign(ranges,
-                                       RigExecBakedProgramImpl::GeomChunk());
-                for (size_t k = 0; k < ranges; ++k) {
-                    revision.chunks[k].begin =
-                        int(RigExecPointRangeBound(points, ranges, k));
-                    revision.chunks[k].end =
-                        int(RigExecPointRangeBound(points, ranges, k + 1));
-                }
-                revision.chunked = false;
-                // Its own buffer holds its version whatever it decides.
-                revision.currentSource = int(r);
-                revision.joinSeen.assign(ranges, 0);
-            }
+            const GeomRole role = revision.role;
+            // RevisionOut ids: a Range revision's G groups (an unwritten one
+            // has no writer and no reader); a Whole one's chunks, then the G
+            // groups its fuse publishes; a Legacy one's chunks.
+            const size_t own = revision.chunks.size();
+            const size_t published = role == GeomRole::Range ? groups
+                                     : role == GeomRole::Whole ? own + groups
+                                                               : own;
             revision.chunkBase = nextChunk;
-            nextChunk += int(revision.chunks.size());
+            nextChunk += int(published);
             B.revisionChunkBase.push_back(revision.chunkBase);
-            B.revisionChunkCount.push_back(int(revision.chunks.size()));
-            B.chunkRevision.insert(B.chunkRevision.end(),
-                                   revision.chunks.size(), id);
-            // Range k of the version entering a range-pipelined revision is
-            // range k of its predecessor's output when that is one too.
-            const bool rangeEntering =
-                revision.rangeRole && r > 0 && chain.revisions[r - 1].rangeRole;
+            B.revisionChunkCount.push_back(int(published));
+            B.chunkRevision.insert(B.chunkRevision.end(), published, id);
 
             // The fold comes FIRST for every operation but a skin, because
             // every other operation's packet carries the matrix it was folded
@@ -1222,13 +1868,29 @@ RigExecBakedBuildGeometrySteps(RigExecBakedProgramImpl *program)
                 addFold();
                 addStatic();
             }
+            // A Range revision's group steps and a Whole keyed skin's
+            // speculative chunks are one per group and read group g of the
+            // entering version alone; every other chunk reads the version.
+            const bool perGroup =
+                role == GeomRole::Range ||
+                (role == GeomRole::Whole && revision.chunked);
             for (size_t k = 0; k < revision.chunks.size(); ++k) {
+                if (role == GeomRole::Range && !revision.groupWritten[k]) {
+                    // A gated group: the entering group is this revision's.
+                    continue;
+                }
                 RigExecBakedStep &chunk = AddGeometryStep(
                     &B, RigExecBakedStepKind::RevisionChunk, id, int(k));
                 chunk.reads.push_back(RigExecBakedOne(
                     RigExecBakedSlotDomain::RevisionPacket, id));
                 chunk.reads.push_back(RigExecBakedOne(
                     RigExecBakedSlotDomain::ChainBase, int(c)));
+                if (role == GeomRole::Range && skin) {
+                    // The fold's validity, which the group step's decision
+                    // shares with the join.
+                    chunk.reads.push_back(RigExecBakedOne(
+                        RigExecBakedSlotDomain::RevisionTransforms, id));
+                }
                 if (revision.chunked) {
                     // The whole point: this chunk waits for ITS influences
                     // and for nothing else. Not the fold, not the other
@@ -1251,13 +1913,11 @@ RigExecBakedBuildGeometrySteps(RigExecBakedProgramImpl *program)
                     chunk.reads.push_back(RigExecBakedOne(
                         RigExecBakedSlotDomain::RevisionTransforms, id));
                 }
-                if (rangeEntering) {
-                    // The pipelining edge: range k of the predecessor, whose
-                    // own buffer holds it, and nothing of its other ranges
-                    // or its join.
-                    chunk.reads.push_back(RigExecBakedOne(
-                        RigExecBakedSlotDomain::RevisionOut,
-                        chain.revisions[r - 1].chunkBase + int(k)));
+                if (perGroup) {
+                    // The pipelining edge: group k of the entering version,
+                    // in its last writer's slot, and nothing of any join.
+                    RigExecBakedDeclareGroupRead(B, int(c), r, k,
+                                                 &chunk.reads);
                 } else {
                     // Which buffer holds the entering points is decided by
                     // the previous fuse, so the read is that fuse's version.
@@ -1290,16 +1950,37 @@ RigExecBakedBuildGeometrySteps(RigExecBakedProgramImpl *program)
                         RigExecBakedSlotDomain::WeightPacket,
                         revision.weightObject));
                 }
-                // Its own chunks' ranges. The entering points, which the
-                // whole-revision fallback and a pass-through read, are a
-                // version like a chunk's. A join reads no points, but it
-                // declares the entering version too: that keeps the joins in
-                // chain order, so their lines keep the unsplit chain's order
-                // in the canonical step order the epilogue reports in.
-                fuse.reads.push_back(RigExecBakedRange(
-                    RigExecBakedSlotDomain::RevisionOut, revision.chunkBase,
-                    revision.chunkBase + int(revision.chunks.size())));
+                // Its own chunks' ranges -- a join, its written groups'.
+                // The entering points, which the whole-revision fallback and
+                // a pass-through read, are a version like a chunk's. A join
+                // reads no points, but it declares the entering version too:
+                // that keeps the joins in chain order, so their lines keep
+                // the unsplit chain's order in the canonical step order the
+                // epilogue reports in, and hands it the predecessor's group
+                // ids.
+                if (role == GeomRole::Range) {
+                    DeclareWrittenGroupReads(revision, &fuse.reads);
+                } else {
+                    fuse.reads.push_back(RigExecBakedRange(
+                        RigExecBakedSlotDomain::RevisionOut,
+                        revision.chunkBase,
+                        revision.chunkBase + int(revision.chunks.size())));
+                }
                 DeclarePointVersionRead(B, entering, &fuse.reads);
+                if (role == GeomRole::Whole) {
+                    // A Whole fuse publishes every group: an applied group
+                    // from its chunks, a refused one passed from the
+                    // entering group it reads here.
+                    for (size_t g = 0; g < groups; ++g) {
+                        RigExecBakedDeclareGroupRead(B, int(c), r, g,
+                                                     &fuse.reads);
+                    }
+                    fuse.writes.push_back(RigExecBakedRange(
+                        RigExecBakedSlotDomain::RevisionOut,
+                        revision.chunkBase + int(revision.chunks.size()),
+                        revision.chunkBase + int(revision.chunks.size()) +
+                            int(groups)));
+                }
                 fuse.writes.push_back(RigExecBakedOne(
                     RigExecBakedSlotDomain::RevisionDone, id));
                 fuse.writes.push_back(RigExecBakedOne(
@@ -1356,6 +2037,162 @@ RigExecBakedBuildGeometrySteps(RigExecBakedProgramImpl *program)
                 RigExecBakedOne(RigExecBakedSlotDomain::DerivedOut, id));
         }
     }
+}
+
+// The vertex groups of a range chain (bakedProgramImpl.h).
+
+namespace {
+// What RigExecBakedGroupAt answers for a group the chain does not have.
+// Constant-initialized, so no reader meets an initialization guard.
+const RigExecPointsRef<GfVec3f> kNoGroup{};
+}  // namespace
+
+const RigExecPointsRef<GfVec3f> &
+RigExecBakedGroupAt(const RigExecBakedProgramImpl::GeomChain &chain,
+                    size_t version, size_t g)
+{
+    const int writer = GroupWriter(chain, version, g);
+    if (writer < 0) {
+        return g < chain.baseGroups.size() ? chain.baseGroups[g].published
+                                           : kNoGroup;
+    }
+    const auto &groups = chain.revisions[size_t(writer)].groups;
+    return g < groups.size() ? groups[g].published : kNoGroup;
+}
+
+RigExecGroupSource
+RigExecBakedGroupSourceAt(const RigExecBakedProgramImpl &B, int chain,
+                          size_t version, size_t g)
+{
+    RigExecGroupSource source;
+    if (chain < 0 || size_t(chain) >= B.chains.size()) {
+        return source;
+    }
+    const RigExecBakedProgramImpl::GeomChain &geom = B.chains[size_t(chain)];
+    const int writer = GroupWriter(geom, version, g);
+    if (writer < 0) {
+        source.slot = -1 - int64_t(g);
+        source.version =
+            g < geom.baseGroups.size() ? geom.baseGroups[g].version : 0;
+        return source;
+    }
+    const RigExecBakedProgramImpl::GeomRevision &revision =
+        geom.revisions[size_t(writer)];
+    source.slot = RigExecBakedGroupSlot(
+        B, B.chainRevisionBegin[size_t(chain)] + writer, g);
+    source.version = g < revision.groups.size() ? revision.groups[g].version
+                                                : 0;
+    return source;
+}
+
+void
+RigExecBakedDeclareGroupRead(const RigExecBakedProgramImpl &B, int chain,
+                             size_t version, size_t g,
+                             std::vector<RigExecBakedSlotRange> *reads)
+{
+    if (chain < 0 || size_t(chain) >= B.chains.size()) {
+        return;
+    }
+    const int writer = GroupWriter(B.chains[size_t(chain)], version, g);
+    const int slot =
+        writer < 0 ? -1
+                   : RigExecBakedGroupSlot(
+                         B, B.chainRevisionBegin[size_t(chain)] + writer, g);
+    reads->push_back(
+        slot < 0 ? RigExecBakedOne(RigExecBakedSlotDomain::ChainBase, chain)
+                 : RigExecBakedOne(RigExecBakedSlotDomain::RevisionOut, slot));
+}
+
+int
+RigExecBakedGroupSlot(const RigExecBakedProgramImpl &B, int id, size_t g)
+{
+    if (id < 0 || size_t(id) >= B.revisionIndex.size()) {
+        return -1;
+    }
+    const auto &[chain, r] = B.revisionIndex[size_t(id)];
+    const RigExecBakedProgramImpl::GeomRevision &revision =
+        B.chains[size_t(chain)].revisions[size_t(r)];
+    if (g >= revision.groupWritten.size()) {
+        return -1;
+    }
+    switch (revision.role) {
+    case RigExecBakedRevisionRole::Range:
+        return revision.groupWritten[g] ? revision.chunkBase + int(g) : -1;
+    case RigExecBakedRevisionRole::Whole:
+        return revision.chunkBase + int(revision.chunks.size()) + int(g);
+    case RigExecBakedRevisionRole::Legacy:
+        break;
+    }
+    return -1;
+}
+
+bool
+RigExecBakedRolesStand(const RigExecBakedProgramImpl &B)
+{
+    // Worker-safe (the frozen worker calls it on its clone): reads sampled
+    // leaves and the clone's own tables, compares tokens and paths by
+    // identity, builds no token or path and posts no diagnostic.
+    const auto reached = [&B](const std::vector<SdfPath> &hops) {
+        for (const SdfPath &hop : hops) {
+            if (B.interactiveOverrides) {
+                for (const RigExecValueOverride &o : *B.interactiveOverrides) {
+                    const TfToken &name =
+                        o.attribute.IsEmpty() ? o.computation : o.attribute;
+                    if (name == hop.GetNameToken() &&
+                        o.prim == hop.GetPrimPath()) {
+                        return true;
+                    }
+                }
+            }
+            for (const auto &entry : B.upstream) {
+                if (entry.first == hop) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    };
+    for (const RigExecBakedProgramImpl::GeomChain &chain : B.chains) {
+        // A chain that read no base runs no step, so nothing rests on it.
+        if (!chain.haveBase) {
+            continue;
+        }
+        if (chain.groupPointCount > 0 && chain.sampledHaveBase &&
+            chain.sampledBase.size() != chain.groupPointCount) {
+            return false;
+        }
+        for (const RigExecBakedProgramImpl::GeomRevision &revision :
+                 chain.revisions) {
+            const RigExecBakedPathLeaves &leaves = revision.leaves;
+            for (const RigExecBakedRolePin &pin : revision.pins) {
+                switch (pin.kind) {
+                case RigExecBakedRolePin::Kind::LeafToken:
+                    if (leaves.sampled &&
+                        leaves.Value<TfToken>(pin.leaf, TfToken()) !=
+                            pin.token) {
+                        return false;
+                    }
+                    break;
+                case RigExecBakedRolePin::Kind::WeightDefaultZero:
+                    if (pin.weightObject < 0 ||
+                        size_t(pin.weightObject) >= B.weightObjects.size() ||
+                        RigExecBakedLeaf(
+                            B, B.weightObjects[size_t(pin.weightObject)]
+                                   .defaultWeight) != 0.0f) {
+                        return false;
+                    }
+                    break;
+                case RigExecBakedRolePin::Kind::NoLayoutOverride:
+                    if (pin.leaf >= 0 && size_t(pin.leaf) < leaves.hops.size() &&
+                        reached(leaves.hops[size_t(pin.leaf)])) {
+                        return false;
+                    }
+                    break;
+                }
+            }
+        }
+    }
+    return true;
 }
 
 // One frame, geometry half.

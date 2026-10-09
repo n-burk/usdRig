@@ -37,6 +37,7 @@
 
 #include "rigExecMath/avarScale.h"
 #include "rigExecMath/dualQuat.h"
+#include "rigExecMath/pointBlocks.h"
 #include "rigExecMath/pointFrame.h"
 #include "rigExecMath/propertyMath.h"
 #include "rigExecMath/rbf.h"
@@ -456,7 +457,9 @@ struct RigExecBakedPathLeaves {
     RigExecRevisionLeafDecl decl;
     /// Per key, the attribute at its path (invalid when none stands there),
     /// every path its read can reach, and whether the read can move with the
-    /// time. Owning thread only: a frozen worker never touches them.
+    /// time. Owning thread only: a frozen worker never touches them, except
+    /// that RigExecBakedRolesStand compares its clone's own copy of `hops`
+    /// by path identity.
     std::vector<UsdAttribute> attributes;
     std::vector<std::vector<SdfPath>> hops;
     std::vector<char> varying;
@@ -1112,6 +1115,9 @@ struct RigExecBakedPointsBinding {
     std::string missDiagnostic;
     /// Dense over every binding of the program, for the test capture.
     int id = -1;
+    /// The binding's own gather buffer for a version that is not one buffer
+    /// (RigExecBakedResolvePoints); one reading step per binding.
+    mutable std::vector<GfVec3f> gather;
 };
 
 /// One provider frame as one writer of its stack -- a constraint or a
@@ -1668,6 +1674,33 @@ struct RigExecBakedCommit {
 using RigExecBakedPropagateOutcome=RigExecPosePropagateOutcome;
 
 class RigExecBakedExecCheckRows;
+/// A revision's place in its chain (Build state).
+enum class RigExecBakedRevisionRole : uint8_t {
+    /// Not in a range-pipelined chain: chunks and fuse as before wave 6.
+    Legacy,
+    /// One RevisionChunk step per written group and a join.
+    Range,
+    /// Decided whole: speculative chunks (one per group for a keyed skin,
+    /// else one) and a fuse that decides and publishes every group.
+    Whole,
+};
+
+/// One fact a Range role, a Whole role chosen by value, or a group gate rests
+/// on (Build state); RigExecBakedRolesStand checks them.
+struct RigExecBakedRolePin {
+    enum class Kind : uint8_t {
+        LeafToken,          ///< `leaves` key `leaf` still holds `token`
+        WeightDefaultZero,  ///< weightObjects[weightObject]'s resolved
+                            ///< unlisted value reads exactly 0
+        NoLayoutOverride,   ///< no override or upstream key reaches the
+                            ///< skin's JointIndices / ElementSize hops
+    };
+    Kind kind = Kind::LeafToken;
+    int leaf = -1;
+    TfToken token;
+    int weightObject = -1;
+};
+
 struct RigExecBakedProgramImpl {
     RigExecRigEvaluator *evaluator = nullptr;
     UsdStageRefPtr stage;
@@ -2607,6 +2640,34 @@ struct RigExecBakedProgramImpl {
     /// RIGEXEC_BAKED_RANGE_CHAINS (default on), read at Build: whether a chain
     /// of more than chunkVertexTarget points is range-pipelined.
     bool rangeChains = true;
+    /// RIGEXEC_BAKED_GROUP_VERTS (1024) and RIGEXEC_BAKED_GROUP_CAP (16), read
+    /// at Build: a range chain's group target and cap (both role modes).
+    size_t groupVertexTarget = 1024;
+    size_t groupCap = 16;
+    /// RIGEXEC_BAKED_GROUP_GATES (default on), read at Build.
+    bool groupGates = true;
+    /// The evaluator's role mode and export keep-set when Build ran.
+    RigExecBakedRoleMode roleMode = RigExecBakedRoleMode::Live;
+    std::set<SdfPath> exportKeep;
+    /// Export: the attribute paths the pins rest on (GetExportPinnedPaths).
+    std::set<SdfPath> exportPinnedPaths;
+    /// A relaxed counter that a copy or an assignment starts at zero, so it
+    /// keeps the program copyable (as PurityCounter does) while bodies call
+    /// fetch_add on it directly.
+    struct ZeroOnCopyCounter : std::atomic<uint64_t> {
+        ZeroOnCopyCounter() : std::atomic<uint64_t>(0) {}
+        ZeroOnCopyCounter(const ZeroOnCopyCounter &)
+            : std::atomic<uint64_t>(0) {}
+        ZeroOnCopyCounter &operator=(const ZeroOnCopyCounter &) {
+            store(0, std::memory_order_relaxed);
+            return *this;
+        }
+    };
+    /// Gated packets that failed RigExecRevisionGateHolds while applying, and
+    /// Range skins that met a stale partition, this run (a pin hole); counted
+    /// by bodies, reported by the owner after the region. Relaxed: nothing is
+    /// published through it.
+    ZeroOnCopyCounter gateViolations;
     /// The revision id owning each RevisionOut slot (chunk id). Build state.
     std::vector<int> chunkRevision;
     /// RIGEXEC_VERIFY_RANGE_CHAINS, read at compile: after the region the
@@ -2833,16 +2894,9 @@ struct RigExecBakedProgramImpl {
         bool keyChanged = false;
         /// The range of the output buffer holds this run's value for it.
         /// Sticky across a run the chunk sat out, which is what makes the
-        /// skip above sound.
+        /// skip above sound. In a range chain, chunk g is vertex group g
+        /// (GeomRevision::groups holds its published points).
         bool ok = false;
-        /// A range-pipelined revision's range: the content version
-        /// RevisionOut keys it by, bumped by its range step exactly when the
-        /// range's bytes in `output` differ from the ones it last published or
-        /// the count moved; that count; and whether it ever published. One
-        /// writer: the range step.
-        uint64_t rangeVersion = 0;
-        size_t rangeCount = 0;
-        bool rangeRan = false;
     };
 
     /// One blend channel's stage handles, resolved once at Build.
@@ -3161,8 +3215,9 @@ struct RigExecBakedProgramImpl {
         /// The field this revision published this run, and whether it
         /// published one at all. Written by RevisionStatic -- which is where
         /// the dynamic path publishes it, from the packet the mover is about
-        /// to consume -- and drained by the epilogue in chain order.
-        std::vector<float> publishedWeightValues;
+        /// to consume -- and drained by the epilogue in chain order, which
+        /// shares the array rather than copying it.
+        VtFloatArray publishedWeightValues;
         bool weightFieldPublished = false;
         /// The content versions the RevisionPacket key carries in place of
         /// `envelope`'s and `publishedWeightValues`' bytes: RevisionStatic
@@ -3293,6 +3348,35 @@ struct RigExecBakedProgramImpl {
         /// passes the base through like an excluded fuse, `currentSource`
         /// -1, and its join publishes that version.
         bool rangeSetAside = false;
+        RigExecBakedRevisionRole role = RigExecBakedRevisionRole::Legacy;
+        /// Range/Whole: per chain group (size G), whether this revision
+        /// publishes it (a Range revision's gated groups; every group of a
+        /// Whole one).
+        std::vector<char> groupWritten;
+        /// Range/Whole: per chain group, the chain index of the revision whose
+        /// slot holds group g of the version entering this one; -1 the base.
+        std::vector<int> enteringWriter;
+        /// Range/Whole: size G, indexed by group; only written groups are ever
+        /// published. Range: written by the group's step; Whole: chunk g owns
+        /// the computed half, the fuse the published half (pointBlocks.h).
+        std::vector<RigExecGroupState<GfVec3f>> groups;
+        /// The join's or fuse's last publication: the content id of each group
+        /// of version r + 1. Read by the next join or fuse and by ChainStatus.
+        std::vector<RigExecGroupSource> groupIds;
+        /// Whole non-per-point op: the entering version gathered for its chunk.
+        std::vector<GfVec3f> wholeEntering;
+        /// Build: what the role and the gate rest on.
+        std::vector<RigExecBakedRolePin> pins;
+        /// RevisionStatic, BlendShape of a range chain: content version of
+        /// parameters.blendDeltas (memcmp), keyed in place of the bytes.
+        uint64_t deltasVersion = 0;
+        /// RevisionStatic, Lattice: parameters.restPoints holds the base at
+        /// `restBaseVersion` (kept without a copy while it stands).
+        bool restBaseHeld = false;
+        uint64_t restBaseVersion = 0;
+        /// SkinTopology op: bumped when `layoutHandle` becomes another object;
+        /// the SkinTopology and RevisionPacket keys carry it, not the bytes.
+        uint64_t layoutSerial = 0;
     };
     struct GeomChain {
         SdfPath target;
@@ -3326,6 +3410,17 @@ struct RigExecBakedProgramImpl {
         /// the identity sequence of its revisions changed, and not for a
         /// packet that merely holds different numbers.
         bool scheduleDirty = true;
+        /// Range-pipelined (Build state): G + 1 group bounds, the last N0;
+        /// empty for a chain that is not.
+        std::vector<int> groupBounds;
+        /// The count the groups were cut from (a pin: another count bails).
+        size_t groupPointCount = 0;
+        /// The base as groups (ChainInputs, the one writer): refs into
+        /// `baseOwner`, each version bumped exactly when its bytes move.
+        std::shared_ptr<const VtVec3fArray> baseOwner;
+        std::vector<RigExecGroupState<GfVec3f>> baseGroups;
+        /// ChainStatus: the group ids `result` and `spare` were gathered from.
+        std::vector<RigExecGroupSource> resultIds, spareIds;
         // Derived maintenance reads this chain's FINAL points.
         struct Derived {
             SdfPath target;
@@ -3498,6 +3593,9 @@ struct RigExecBakedProgramImpl {
         std::vector<PointInput> pointReads;
         std::vector<float> values;
         std::vector<float> nextValues; ///< producer-owned reusable result scratch
+        /// The entering view's gather scratch for a range chain's version
+        /// that is not one buffer; the producer's own.
+        std::vector<GfVec3f> enteringGather;
         RigExecWeightFieldWorkspace workspace;
         std::vector<RigExecWeightFieldInputs> currentInputs; ///< producer-owned current packet scratch
         mutable std::vector<RigExecWeightFieldInputs> effectiveInputs; ///< exclusive producer key scratch
@@ -5178,6 +5276,43 @@ bool RigExecBakedRangeChainsFromEnvironment();
 /// after the region; returns this run's mismatches.
 size_t RigExecBakedVerifyRangeChains(RigExecBakedProgramImpl *program);
 
+/// Group \p g of point version \p version of \p chain (0 the base; v what
+/// revision v - 1 left): the ref its writer published; the base group when a
+/// set-aside revision lies between g's writer and \p version.
+const RigExecPointsRef<GfVec3f> &RigExecBakedGroupAt(
+    const RigExecBakedProgramImpl::GeomChain &chain, size_t version, size_t g);
+/// That group's content id (writer slot and version).
+RigExecGroupSource RigExecBakedGroupSourceAt(
+    const RigExecBakedProgramImpl &B, int chain, size_t version, size_t g);
+/// Declares the read of group \p g of version \p version of chain \p chain:
+/// ChainBase for the base (or past a set-aside revision), else the writer's
+/// RevisionOut slot (2.4).
+void RigExecBakedDeclareGroupRead(const RigExecBakedProgramImpl &B, int chain,
+    size_t version, size_t g, std::vector<RigExecBakedSlotRange> *reads);
+/// The RevisionOut slot of group \p g as revision \p id publishes it (Range:
+/// chunkBase + g; Whole: chunkBase + chunks.size() + g), or -1 when unwritten.
+int RigExecBakedGroupSlot(const RigExecBakedProgramImpl &B, int id, size_t g);
+/// Whether every role pin holds for this run's sampled values. Owning thread
+/// after RigExecBakedRunGeometryPrologue; the frozen worker after
+/// _FrozenPrologue. Reach from *interactiveOverrides and upstream against the
+/// hops; never reads overrideReached; no TfToken from text, no SdfPath text,
+/// no TF_ diagnostics.
+bool RigExecBakedRolesStand(const RigExecBakedProgramImpl &program);
+/// The points of version \p version as one contiguous array: in place for the
+/// base, a Legacy buffer or one-buffer slices, else gathered into the
+/// reader's \p scratch. Valid until the calling step returns.
+void RigExecBakedVersionPoints(const RigExecBakedProgramImpl::GeomChain &chain,
+    size_t version, std::vector<GfVec3f> *scratch, const GfVec3f **points,
+    size_t *count);
+size_t RigExecBakedGroupVertexTargetFromEnvironment();
+size_t RigExecBakedGroupCapFromEnvironment();
+bool RigExecBakedGroupGatesFromEnvironment();
+/// VtFloatArray form of RigExecBakedNoteFloats (H4): replaces \p field by
+/// \p scratch's values (assign, never a detach copy) and bumps \p version
+/// exactly when the bytes differ.
+void RigExecBakedNoteFloats(VtFloatArray *field, std::vector<float> *scratch,
+                            uint64_t *version);
+
 /// Cuts \p revision's vertices into chunks, from \p indices and
 /// \p elementSize, and records both as the partition's arrays (the indices
 /// only when the cut has more than one chunk). Build only: each chunk step
@@ -5523,9 +5658,6 @@ struct RigExecBakedRunShadow {
         std::vector<float> rows;
         std::vector<RigExecScaledDualQuat> palette;
         bool keyChanged = false, ok = false;
-        uint64_t rangeVersion = 0;
-        size_t rangeCount = 0;
-        bool rangeRan = false;
     };
     struct BlendSampleState {
         std::shared_ptr<const RigExecBlendSampleLayout> layout;
@@ -5565,7 +5697,7 @@ struct RigExecBakedRunShadow {
         bool staticDirty = false, partitionStale = false;
         bool layoutUsable = false, envelopeOk = false, fullStrength = false;
         RigExecRevisionAcceptance acceptance = RigExecRevisionAcceptance::Refuses;
-        std::vector<float> publishedWeightValues;
+        VtFloatArray publishedWeightValues;
         RigExecWeightPacket currentPhasePacket;
         bool weightFieldPublished = false;
         uint64_t envelopeVersion = 0, weightValuesVersion = 0;
@@ -5574,6 +5706,12 @@ struct RigExecBakedRunShadow {
         size_t weightValuesCount = 0;
         std::vector<uint64_t> joinSeen;
         uint32_t rangeRefusals = 0;
+        /// Copied as states (refs and own[] handles), never as bytes.
+        std::vector<RigExecGroupState<GfVec3f>> groups;
+        std::vector<RigExecGroupSource> groupIds;
+        uint64_t deltasVersion = 0;
+        bool restBaseHeld = false;
+        uint64_t restBaseVersion = 0, layoutSerial = 0;
     };
     struct DerivedState {
         RevisionState revision;
@@ -5589,6 +5727,9 @@ struct RigExecBakedRunShadow {
         VtVec3fArray lastBase, result, spare, publishedInput;
         uint64_t inputVersion = 0, baseVersion = 0, resultVersion = 0;
         bool haveResult = false, haveBase = false, baseDirty = false, scheduleDirty = false;
+        std::shared_ptr<const VtVec3fArray> baseOwner;
+        std::vector<RigExecGroupState<GfVec3f>> baseGroups;
+        std::vector<RigExecGroupSource> resultIds, spareIds;
     };
     struct SolverState {
         std::vector<RigExecPointFrame> outFrames;

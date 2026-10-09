@@ -564,6 +564,11 @@ _BuildUpstreamSets(RigExecBakedProgramImpl *program)
                                               a.GetTypeName().GetType());
         }
     }
+    // An Export program's pinned reads are private constants in the file
+    // (GetExportPinnedPaths), never listed slots, so never admissible.
+    for (const SdfPath &path : B.exportPinnedPaths) {
+        B.upstreamAdmissible.erase(path);
+    }
 
     // The objects the volatile oracle resolves, over the exporter's index
     // space (step-backed objects, then the envelope list): constraint and

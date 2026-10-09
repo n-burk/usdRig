@@ -515,13 +515,16 @@ StepSize(const RigExecBakedProgramImpl &B, LazyGeometrySizes &geometry,
         const auto &[chain, revision] = B.revisionIndex[object];
         const RigExecBakedProgramImpl::GeomRevision &geom =
             B.chains[size_t(chain)].revisions[size_t(revision)];
-        if (geom.rangeRole && step.part >= 0 &&
-            size_t(step.part) < geom.chunks.size()) {
-            // A range of a range-pipelined revision: its share of the
-            // revision's units, so the K ranges model what one chunk did.
+        if ((geom.role == RigExecBakedRevisionRole::Range ||
+             (geom.role == RigExecBakedRevisionRole::Whole && geom.chunked)) &&
+            step.part >= 0 && size_t(step.part) < geom.chunks.size()) {
+            // A vertex group of a range chain -- a Range revision's group
+            // step or a Whole keyed skin's speculative chunk: the group's
+            // share of the revision's units.
             const RigExecBakedProgramImpl::GeomChunk &chunk =
                 geom.chunks[size_t(step.part)];
-            const double points = double(geom.chunks.back().end);
+            const double points =
+                double(B.chains[size_t(chain)].groupPointCount);
             return points > 0.0
                        ? geometry.Get().revisionUnits[object] *
                              double(chunk.end - chunk.begin) / points
@@ -547,8 +550,9 @@ StepSize(const RigExecBakedProgramImpl &B, LazyGeometrySizes &geometry,
     return 1;
 }
 
-/// \p fixedUs for \p step, divided among the K ranges of a range-pipelined
-/// revision, so the revision's modelled cost is the one chunk's it replaced.
+/// \p fixedUs for \p step, divided among the group steps of a range chain's
+/// revision -- a Range revision's written groups, a Whole keyed skin's G
+/// chunks -- so the revision's modelled cost is the one chunk's it replaced.
 double
 RangeFixedUs(const RigExecBakedProgramImpl &B, const RigExecBakedStep &step,
              double fixedUs)
@@ -560,9 +564,14 @@ RangeFixedUs(const RigExecBakedProgramImpl &B, const RigExecBakedStep &step,
     const auto &[chain, revision] = B.revisionIndex[size_t(step.object)];
     const RigExecBakedProgramImpl::GeomRevision &geom =
         B.chains[size_t(chain)].revisions[size_t(revision)];
-    return geom.rangeRole && !geom.chunks.empty()
-               ? fixedUs / double(geom.chunks.size())
-               : fixedUs;
+    size_t steps = 0;
+    if (geom.role == RigExecBakedRevisionRole::Range) {
+        steps = size_t(std::count(geom.groupWritten.begin(),
+                                  geom.groupWritten.end(), char(1)));
+    } else if (geom.role == RigExecBakedRevisionRole::Whole && geom.chunked) {
+        steps = geom.chunks.size();
+    }
+    return steps > 0 ? fixedUs / double(steps) : fixedUs;
 }
 
 }  // namespace
@@ -1361,6 +1370,11 @@ ValidateClusters(const RigExecBakedProgramImpl &B, GraphViolations *out)
 /// of either is that revision's fuse (revisionFuseStep). The declaration is
 /// checked from the revision tables rather than from the sweep, so a version
 /// read the builder dropped is reported even though no edge is missing for it.
+/// In a range chain a group step reads exactly group `part` of the entering
+/// version (its writer's RevisionOut slot, or ChainBase) and no version; a
+/// join reads its written groups and the version; a Whole fuse publishes and
+/// reads every group besides the version. Each RevisionOut slot has one
+/// writer, and a slot nobody writes (a gated group) has no reader.
 void
 ValidatePointVersions(const RigExecBakedProgramImpl &B, GraphViolations *out)
 {
@@ -1553,65 +1567,142 @@ ValidatePointVersions(const RigExecBakedProgramImpl &B, GraphViolations *out)
         const auto &[chain, r] = B.revisionIndex[size_t(enteringRevision)];
         const RigExecBakedProgramImpl::GeomRevision &own =
             B.chains[size_t(chain)].revisions[size_t(r)];
-        const bool rangeStep =
-            own.rangeRole && (step.kind == RigExecBakedStepKind::RevisionChunk ||
-                              step.kind == RigExecBakedStepKind::RevisionFuse);
-        if (rangeStep) {
-            // A join reads every range of its own and, like a fuse, the
-            // entering version, which orders the joins as the fuses were; a
-            // range reads range `part` of a range-pipelined predecessor and
-            // no version, or, after any other revision, the version.
-            const bool join = step.kind == RigExecBakedStepKind::RevisionFuse;
-            const int id = enteringRevision;
-            const auto ownRanges = [&](int revision) {
-                return std::make_pair(B.revisionChunkBase[size_t(revision)],
-                                      B.revisionChunkCount[size_t(revision)]);
-            };
+        const bool groupStep =
+            own.role != RigExecBakedRevisionRole::Legacy &&
+            (step.kind == RigExecBakedStepKind::RevisionChunk ||
+             step.kind == RigExecBakedStepKind::RevisionFuse);
+        if (groupStep) {
             if (B.revisionChunkBase.size() != revisions ||
                 B.revisionChunkCount.size() != revisions) {
-                out->Add(NameStep(B, index) + " belongs to a range-pipelined "
+                out->Add(NameStep(B, index) + " belongs to a range-chain "
                          "revision of a program without its chunk tables");
                 continue;
             }
-            if (join) {
-                const auto [base, ranges] = ownRanges(id);
-                for (int k = 0; k < ranges; ++k) {
-                    if (!covers(step.reads, RigExecBakedSlotDomain::RevisionOut,
-                                base + k)) {
-                        out->Add(NameStep(B, index) + " joins revision " +
-                                 std::to_string(id) + " without declaring "
-                                 "RevisionOut[" + std::to_string(base + k) +
-                                 "]");
+            const int id = enteringRevision;
+            const int base = B.revisionChunkBase[size_t(id)];
+            const size_t groups = own.groupWritten.size();
+            const bool range = own.role == RigExecBakedRevisionRole::Range;
+            const bool fuse = step.kind == RigExecBakedStepKind::RevisionFuse;
+            const std::string version = " of point version " +
+                                        std::to_string(r) + " of chain " +
+                                        std::to_string(chain);
+            // Group g of the version entering the revision: its last
+            // writer's slot, or -1 for the base. (A lambda may not capture
+            // a structured binding in C++17, so the chain is copied.)
+            const int chainIndex = chain;
+            const auto groupSlot = [&](size_t g) {
+                const int writer = g < own.enteringWriter.size()
+                                       ? own.enteringWriter[g]
+                                       : -1;
+                return writer < 0
+                           ? -1
+                           : RigExecBakedGroupSlot(
+                                 B,
+                                 B.chainRevisionBegin[size_t(chainIndex)] +
+                                     writer,
+                                 g);
+            };
+            const auto readsGroup = [&](size_t g) {
+                const int slot = groupSlot(g);
+                return slot < 0
+                           ? covers(step.reads, RigExecBakedSlotDomain::ChainBase,
+                                    chainIndex)
+                           : covers(step.reads,
+                                    RigExecBakedSlotDomain::RevisionOut, slot);
+            };
+            if (!fuse && (range || own.chunked)) {
+                // A group step: group `part` of the entering version and
+                // nothing else of it.
+                const size_t g = size_t(step.part);
+                if (step.part < 0 || g >= groups ||
+                    (range && !own.groupWritten[g])) {
+                    out->Add(NameStep(B, index) + " is group " +
+                             std::to_string(step.part) + " of revision " +
+                             std::to_string(id) + ", which writes no such "
+                             "group");
+                    continue;
+                }
+                if (!covers(step.writes, RigExecBakedSlotDomain::RevisionOut,
+                            base + int(g))) {
+                    out->Add(NameStep(B, index) + " does not write group " +
+                             std::to_string(g) + " of revision " +
+                             std::to_string(id) + " (RevisionOut[" +
+                             std::to_string(base + int(g)) + "])");
+                }
+                if (!readsGroup(g)) {
+                    out->Add(NameStep(B, index) + " reads group " +
+                             std::to_string(g) + version +
+                             " without declaring its writer's slot");
+                }
+                const int expected = groupSlot(g);
+                for (const RigExecBakedSlotRange &read : step.reads) {
+                    if (read.domain != RigExecBakedSlotDomain::RevisionOut) {
+                        continue;
+                    }
+                    for (uint32_t slot = read.begin;
+                         slot < read.end && slot < B.chunkRevision.size();
+                         ++slot) {
+                        if (int(slot) != expected) {
+                            out->Add(NameStep(B, index) + " reads RevisionOut[" +
+                                     std::to_string(slot) + "], which is not "
+                                     "group " + std::to_string(g) + version);
+                        }
                     }
                 }
-            }
-            const bool rangeEntering =
-                !join && r > 0 &&
-                B.chains[size_t(chain)].revisions[size_t(r) - 1].rangeRole;
-            if (rangeEntering) {
-                const bool version =
-                    covers(step.reads, RigExecBakedSlotDomain::RevisionDone,
-                           id - 1) ||
-                    covers(step.reads, RigExecBakedSlotDomain::ChainDirty,
-                           id - 1);
-                if (version) {
+                if (r > 0 &&
+                    (covers(step.reads, RigExecBakedSlotDomain::RevisionDone,
+                            id - 1) ||
+                     covers(step.reads, RigExecBakedSlotDomain::ChainDirty,
+                            id - 1))) {
                     out->Add(NameStep(B, index) + " reads point version " +
                              std::to_string(r) + " of chain " +
-                             std::to_string(chain) + ", which a range-"
-                             "pipelined range must not wait for");
-                }
-                const auto [base, ranges] = ownRanges(id - 1);
-                if (step.part < 0 || step.part >= ranges ||
-                    !covers(step.reads, RigExecBakedSlotDomain::RevisionOut,
-                            base + step.part)) {
-                    out->Add(NameStep(B, index) + " reads range " +
-                             std::to_string(step.part) + " of point version " +
-                             std::to_string(r) + " of chain " +
-                             std::to_string(chain) + " without declaring "
-                             "its predecessor's RevisionOut");
+                             std::to_string(chain) + ", which a group step "
+                             "must not wait for");
                 }
                 continue;
             }
+            if (fuse && range) {
+                // A join: its written groups, and below, like a fuse, the
+                // entering version, which keeps the joins in chain order.
+                for (size_t g = 0; g < groups; ++g) {
+                    if (own.groupWritten[g] &&
+                        !covers(step.reads, RigExecBakedSlotDomain::RevisionOut,
+                                base + int(g))) {
+                        out->Add(NameStep(B, index) + " joins revision " +
+                                 std::to_string(id) + " without declaring "
+                                 "RevisionOut[" + std::to_string(base + int(g)) +
+                                 "]");
+                    }
+                }
+                for (const RigExecBakedSlotRange &write : step.writes) {
+                    if (write.domain == RigExecBakedSlotDomain::RevisionOut &&
+                        !write.IsEmpty()) {
+                        out->Add(NameStep(B, index) + " joins revision " +
+                                 std::to_string(id) + " and writes "
+                                 "RevisionOut[" + std::to_string(write.begin) +
+                                 "]");
+                    }
+                }
+            } else if (fuse) {
+                // A Whole fuse publishes every group and reads every
+                // entering group it may pass through.
+                const int published = base + int(own.chunks.size());
+                for (size_t g = 0; g < groups; ++g) {
+                    if (!covers(step.writes, RigExecBakedSlotDomain::RevisionOut,
+                                published + int(g))) {
+                        out->Add(NameStep(B, index) + " does not publish group " +
+                                 std::to_string(g) + " of revision " +
+                                 std::to_string(id) + " (RevisionOut[" +
+                                 std::to_string(published + int(g)) + "])");
+                    }
+                    if (!readsGroup(g)) {
+                        out->Add(NameStep(B, index) + " reads group " +
+                                 std::to_string(g) + version +
+                                 " without declaring its writer's slot");
+                    }
+                }
+            }
+            // A join, a Whole fuse and a Whole one-chunk op read the version.
         }
         // Version 0 is the source ChainBase, which every chain step reads
         // whether or not it reads points, so there is nothing to check.
@@ -1627,6 +1718,39 @@ ValidatePointVersions(const RigExecBakedProgramImpl &B, GraphViolations *out)
             out->Add(NameStep(B, index) + " reads point version " +
                      std::to_string(r) + " of chain " +
                      std::to_string(chain) + " without declaring it");
+        }
+    }
+    // One writer per RevisionOut slot, and a reader only of a written one.
+    const size_t outSlots = B.chunkRevision.size();
+    std::vector<int> outWriter(outSlots, -1);
+    for (int index = 0; index < count; ++index) {
+        for (const RigExecBakedSlotRange &write : B.steps[size_t(index)].writes) {
+            if (write.domain != RigExecBakedSlotDomain::RevisionOut) {
+                continue;
+            }
+            for (uint32_t slot = write.begin; slot < write.end && slot < outSlots;
+                 ++slot) {
+                if (outWriter[slot] >= 0 && outWriter[slot] != index) {
+                    out->Add(NameStep(B, index) + " writes RevisionOut[" +
+                             std::to_string(slot) + "], which " +
+                             NameStep(B, outWriter[slot]) + " writes too");
+                }
+                outWriter[slot] = index;
+            }
+        }
+    }
+    for (int index = 0; index < count; ++index) {
+        for (const RigExecBakedSlotRange &read : B.steps[size_t(index)].reads) {
+            if (read.domain != RigExecBakedSlotDomain::RevisionOut) {
+                continue;
+            }
+            for (uint32_t slot = read.begin; slot < read.end && slot < outSlots;
+                 ++slot) {
+                if (outWriter[slot] < 0) {
+                    out->Add(NameStep(B, index) + " reads RevisionOut[" +
+                             std::to_string(slot) + "], which no step writes");
+                }
+            }
         }
     }
 }
