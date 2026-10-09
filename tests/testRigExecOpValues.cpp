@@ -1,17 +1,21 @@
 #include "rigExec/bakedOpValues.h"
 #include "rigExec/bakedProgramImpl.h"
 #include "rigExec/pathText.h"
+#include "rigExecGraph/opValues.h"
 #include "rigExecGraph/providerProgram.h"
 #include "pxr/base/gf/quatd.h"
 #include "pxr/base/gf/vec2d.h"
 #include "pxr/base/gf/vec4f.h"
 #include "pxr/base/vt/types.h"
 #include "pxr/base/vt/value.h"
+#include <array>
+#include <climits>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <set>
 #include <string>
+#include <variant>
 #include <vector>
 
 using namespace rigExec;
@@ -483,6 +487,222 @@ void TestSkinEffectiveSelectedTopology()
     const auto unresolved=key(true);r.leaves.values[2]=VtValue(4);
     CHECK(key(true)!=unresolved);
 }
+
+// The per-element encoding keys used before contiguous runs: each field's
+// bytes in memory order. A run must reproduce it byte for byte.
+template<class T> void RefPut(std::string *out,const T &value)
+{
+    static_assert(std::is_arithmetic<T>::value,"fields only");
+    out->append(reinterpret_cast<const char *>(&value),sizeof(value));
+}
+void RefPut(std::string *out,const GfVec2f &v) { for(int i=0;i<2;++i) RefPut(out,v[i]); }
+void RefPut(std::string *out,const GfVec3f &v) { for(int i=0;i<3;++i) RefPut(out,v[i]); }
+void RefPut(std::string *out,const GfVec3d &v) { for(int i=0;i<3;++i) RefPut(out,v[i]); }
+void RefPut(std::string *out,const GfVec3i &v) { for(int i=0;i<3;++i) RefPut(out,v[i]); }
+void RefPut(std::string *out,const GfMatrix4d &v)
+{
+    for(int r=0;r<4;++r) for(int c=0;c<4;++c) RefPut(out,v[r][c]);
+}
+template<class A> std::string RefRun(const A &values)
+{
+    std::string out; for(const auto &value:values) RefPut(&out,value); return out;
+}
+std::string U64(uint64_t value) { std::string out; PutU64(&out,value); return out; }
+template<class A> std::string RefArray(const A &values) { return U64(values.size())+RefRun(values); }
+// The shared key encoder's elements before runs: each one's object bytes.
+template<class V> std::string RefObjectArray(const V &values)
+{
+    std::string out=U64(values.size());
+    for(const auto &value:values) {
+        const typename V::value_type element=value;
+        out.append(reinterpret_cast<const char *>(&element),sizeof(element));
+    }
+    return out;
+}
+std::string ValueHeader(RigExecBakedSlotDomain domain)
+{
+    std::string out(1,char(1));
+    out.append(reinterpret_cast<const char *>(&domain),sizeof(domain));
+    return out;
+}
+const float kNaN=FloatBits(UINT32_C(0x7fc00001)),kNaN2=FloatBits(UINT32_C(0xffc00002));
+const double kDNaN=DoubleBits(UINT64_C(0x7ff8000000000001)),kDNaN2=DoubleBits(UINT64_C(0xfff8000000000002));
+GfMatrix4d SignedMatrix()
+{
+    GfMatrix4d m(1.0); m[3][0]=-0.0; m[2][1]=kDNaN; m[0][3]=kDNaN2; m[1][2]=-7.5;
+    return m;
+}
+// A boxed array keys as its tag, its count, then its elements' bytes.
+template<class T> void CheckBoxRun(const VtArray<T> &values)
+{
+    const auto key=LeafKey(VtValue(values)),empty=LeafKey(VtValue(VtArray<T>()));
+    CHECK(EndsWith(empty,U64(0)));
+    CHECK(key==empty.substr(0,empty.size()-8)+RefArray(values));
+}
+void TestBulkValueKeyBytes()
+{
+    // Every element type that keys as one run, with signed zeros, NaN
+    // payloads of both signs and empty arrays.
+    CheckBoxRun(VtDoubleArray{0.0,-0.0,kDNaN,kDNaN2,-2.25});
+    CheckBoxRun(VtFloatArray{0.0f,-0.0f,kNaN,kNaN2,1.5f});
+    CheckBoxRun(VtIntArray{0,-1,INT_MAX,INT_MIN});
+    CheckBoxRun(VtBoolArray{true,false,true});
+    CheckBoxRun(VtVec2fArray{GfVec2f(-0.0f,kNaN),GfVec2f(1.0f,kNaN2)});
+    CheckBoxRun(VtVec3fArray{GfVec3f(0.0f,-0.0f,kNaN),GfVec3f(kNaN2,1.0f,-1.0f)});
+    CheckBoxRun(VtVec3dArray{GfVec3d(-0.0,kDNaN,1.0),GfVec3d(kDNaN2)});
+    CheckBoxRun(VtVec3iArray{GfVec3i(1,-2,INT_MIN),GfVec3i(0)});
+    CheckBoxRun(VtMatrix4dArray{SignedMatrix(),GfMatrix4d(2.0)});
+    CheckBoxRun(VtDoubleArray()); CheckBoxRun(VtVec3fArray()); CheckBoxRun(VtMatrix4dArray());
+    // Text arrays keep one length-prefixed record per element.
+    const VtTokenArray tokens{TfToken("a"),TfToken(""),TfToken("bc")};
+    const auto tokenKey=LeafKey(VtValue(tokens)),noTokens=LeafKey(VtValue(VtTokenArray()));
+    CHECK(tokenKey==noTokens.substr(0,noTokens.size()-8)+U64(3)+Prefixed("a")+Prefixed("")+Prefixed("bc"));
+    const VtStringArray strings{"a","","bc"};
+    const auto stringKey=LeafKey(VtValue(strings)),noStrings=LeafKey(VtValue(VtStringArray()));
+    CHECK(stringKey==noStrings.substr(0,noStrings.size()-8)+U64(3)+Prefixed("a")+Prefixed("")+Prefixed("bc"));
+
+    // Arrays inside value keys: VtArray and std::vector points, scalar
+    // vectors, matrices and presence bytes.
+    RigExecBakedProgramImpl B;
+    B.chains.resize(1); B.chains[0].sampledHaveBase=true;
+    const auto noBase=Key(B,RigExecBakedSlotDomain::ChainInput);
+    B.chains[0].sampledBase=VtVec3fArray{GfVec3f(-0.0f,kNaN,1.0f),GfVec3f(kNaN2,0.0f,2.0f)};
+    CHECK(Key(B,RigExecBakedSlotDomain::ChainInput)==
+          noBase.substr(0,noBase.size()-8)+RefArray(B.chains[0].sampledBase));
+    B.weightFields.resize(1); B.weightFields[0].ok=true;
+    const auto noValues=Key(B,RigExecBakedSlotDomain::WeightField);
+    B.weightFields[0].values={0.0f,-0.0f,kNaN,kNaN2};
+    CHECK(Key(B,RigExecBakedSlotDomain::WeightField)==
+          noValues.substr(0,noValues.size()-8)+RefArray(B.weightFields[0].values));
+    B.solvers.resize(1); B.solvers[0].ribbonPointsVarying=true;
+    const auto noRibbon=Key(B,RigExecBakedSlotDomain::SolverPoints);
+    B.solvers[0].ribbonPoints={GfVec3f(kNaN,-0.0f,3.0f),GfVec3f(0.5f)};
+    CHECK(Key(B,RigExecBakedSlotDomain::SolverPoints)==
+          noRibbon.substr(0,noRibbon.size()-8)+RefArray(B.solvers[0].ribbonPoints));
+    B.commits.resize(1);
+    const auto noDeltas=Key(B,RigExecBakedSlotDomain::CommitDelta);
+    CHECK(EndsWith(noDeltas,U64(0)+U64(0)));
+    B.commits[0].deltas={SignedMatrix(),GfMatrix4d(1.0)}; B.commits[0].deltaOk={1,0,char(0xff)};
+    CHECK(Key(B,RigExecBakedSlotDomain::CommitDelta)==noDeltas.substr(0,noDeltas.size()-16)+
+          RefArray(B.commits[0].deltas)+RefArray(B.commits[0].deltaOk));
+
+    // A revision's completed points, the same bytes as its chain dirty
+    // edge, and a chunk's half-open range of staged points.
+    RigExecBakedProgramImpl G;
+    G.chains.resize(1); G.chains[0].revisions.resize(1); G.revisionIndex={{0,0}};
+    auto &revision=G.chains[0].revisions[0]; revision.currentSource=0;
+    const auto noOutput=Key(G,RigExecBakedSlotDomain::RevisionDone);
+    revision.output={GfVec3f(-0.0f,kNaN,1.0f),GfVec3f(kNaN2,0.0f,-3.0f),GfVec3f(4.0f)};
+    const auto done=Key(G,RigExecBakedSlotDomain::RevisionDone);
+    CHECK(done==noOutput.substr(0,noOutput.size()-8)+RefArray(revision.output));
+    CHECK(Key(G,RigExecBakedSlotDomain::ChainDirty)==done);
+    G.revisionChunkBase={0}; G.revisionChunkCount={1};
+    revision.stagingOutput=revision.output; revision.chunks.resize(1);
+    revision.chunks[0].begin=1; revision.chunks[0].end=3; revision.chunks[0].ok=true;
+    std::string staged=ValueHeader(RigExecBakedSlotDomain::RevisionOut);
+    RefPut(&staged,true); staged+=U64(3)+U64(2);
+    staged+=RefRun(std::vector<GfVec3f>(revision.stagingOutput.begin()+1,revision.stagingOutput.end()));
+    CHECK(Key(G,RigExecBakedSlotDomain::RevisionOut)==staged);
+    revision.chunks[0].begin=3;
+    std::string none=ValueHeader(RigExecBakedSlotDomain::RevisionOut);
+    RefPut(&none,true); none+=U64(3)+U64(0);
+    CHECK(Key(G,RigExecBakedSlotDomain::RevisionOut)==none);
+
+    // A rest's four points after its matrix and frame.
+    RigExecBakedProgramImpl R;
+    const std::array<GfVec3d,4> points{{GfVec3d(-0.0,kDNaN,1.0),GfVec3d(2.0),GfVec3d(kDNaN2),GfVec3d(0.0)}};
+    RigExecPointFrame frame; frame.points[1]=GfVec3d(-0.0,kDNaN,3.0);
+    R.restM={SignedMatrix()}; R.restFrames={frame}; R.restPts={points};
+    std::string rest=ValueHeader(RigExecBakedSlotDomain::Rest);
+    RefPut(&rest,R.restM[0]); RefPut(&rest,frame.flags); rest+=RefRun(frame.points)+RefRun(points);
+    CHECK(Key(R,RigExecBakedSlotDomain::Rest)==rest);
+
+    // A weight field's raw point leaf inside its effective input key.
+    RigExecBakedProgramImpl W;
+    W.weightFields.resize(1); auto &field=W.weightFields[0];
+    field.form=RigExecBakedProgramImpl::WeightField::Form::EnvelopeProperty; field.objects={0};
+    W.weightProgram.resize(1); W.weightProgram[0].kind=3; W.weightObjects.resize(1);
+    RigExecBakedStep step; step.kind=RigExecBakedStepKind::WeightField; step.object=0;
+    const auto fieldKey=[&](const VtVec3fArray &leaf) {
+        W.weightObjects[0].oracleLeaves.values={VtValue(leaf)};
+        std::string key; std::vector<uint32_t> covered;
+        CHECK(RigExecBakedOpEffectiveInputKey(W,step,&key,&covered));
+        return key;
+    };
+    const VtVec3fArray leaf{GfVec3f(-0.0f,kNaN,1.0f),GfVec3f(kNaN2),GfVec3f(0.25f)};
+    const auto emptyLeaf=fieldKey(VtVec3fArray()),fullLeaf=fieldKey(leaf);
+    const std::string run=U64(leaf.size())+RefRun(leaf);
+    const size_t at=fullLeaf.find(run);
+    CHECK(at!=std::string::npos &&
+          fullLeaf.substr(0,at)+U64(0)+fullLeaf.substr(at+run.size())==emptyLeaf);
+}
+std::string PlainKey(const RigExecProviderPlainValue &value)
+{
+    std::string out; RigExecOpKeyPlainValue(&out,value); return out;
+}
+// A provider vector keys by its contents: the same contents in another
+// buffer agree, and an edit in place, which keeps the container's
+// pointer, size and capacity, does not.
+template<class V> void CheckPlainContents(const V &values,const typename V::value_type &other,
+    const std::string &expected)
+{
+    RigExecProviderPlainValue held=values; const auto before=PlainKey(held);
+    CHECK(before==expected);
+    V spare; spare.reserve(values.size()*4+8); spare.assign(values.begin(),values.end());
+    CHECK(PlainKey(RigExecProviderPlainValue(spare))==before);
+    std::get<V>(held)[0]=other;
+    CHECK(PlainKey(held)!=before);
+}
+void TestSharedKeyRunsAndPlainValues()
+{
+    // The shared encoder's runs: the same bytes as each element's object
+    // bytes, signed zeros, NaN payloads and empty vectors included.
+    const auto same=[](const auto &values) {
+        std::string key; RigExecOpKeyArray(&key,values); CHECK(key==RefObjectArray(values));
+    };
+    same(std::vector<float>{0.0f,-0.0f,kNaN,kNaN2}); same(std::vector<float>());
+    same(std::vector<double>{-0.0,kDNaN,kDNaN2}); same(std::vector<int32_t>{INT_MIN,0,7});
+    same(std::vector<char>{0,1,char(0xff)}); same(std::vector<uint8_t>{2,0});
+    same(std::vector<std::array<float,2>>{{{-0.0f,kNaN}}});
+    same(std::vector<std::array<float,3>>{{{kNaN2,-0.0f,1.0f}},{{0.0f,0.0f,0.0f}}});
+    same(std::vector<std::array<double,3>>{{{-0.0,kDNaN,0.5}}});
+    std::array<double,16> matrix{}; matrix[3]=-0.0; matrix[9]=kDNaN2;
+    same(std::vector<std::array<double,16>>{matrix}); same(std::vector<std::array<double,16>>());
+    same(std::vector<bool>{true,false,true});
+    static_assert(RigExecOpKeyBulkElement<std::array<double,16>>::value &&
+                  !RigExecOpKeyBulkElement<std::string>::value &&
+                  !RigExecOpKeyBulkElement<std::array<std::string,2>>::value &&
+                  RigExecOpKeyContiguous<std::vector<float>>::value &&
+                  RigExecOpKeyContiguous<VtVec3fArray>::value &&
+                  !RigExecOpKeyContiguous<std::vector<bool>>::value,"key run eligibility");
+
+    // Every vector alternative of a provider value.
+    CheckPlainContents(std::vector<float>{-0.0f,kNaN,2.0f},0.0f,
+                       RefObjectArray(std::vector<float>{-0.0f,kNaN,2.0f}));
+    CheckPlainContents(std::vector<double>{-0.0,kDNaN},0.0,
+                       RefObjectArray(std::vector<double>{-0.0,kDNaN}));
+    CheckPlainContents(std::vector<int32_t>{3,-4},5,RefObjectArray(std::vector<int32_t>{3,-4}));
+    const std::vector<std::array<float,3>> vec3f{{{-0.0f,kNaN2,1.0f}}};
+    CheckPlainContents(vec3f,std::array<float,3>{{0.0f,0.0f,1.0f}},RefObjectArray(vec3f));
+    const std::vector<std::array<double,3>> vec3d{{{1.0,-0.0,kDNaN}},{{2.0,2.0,2.0}}};
+    CheckPlainContents(vec3d,std::array<double,3>{{1.0,0.0,0.0}},RefObjectArray(vec3d));
+    const std::vector<std::array<float,2>> vec2f{{{kNaN,-0.0f}}};
+    CheckPlainContents(vec2f,std::array<float,2>{{kNaN,0.0f}},RefObjectArray(vec2f));
+    const std::vector<std::array<double,16>> matrices{matrix};
+    std::array<double,16> moved=matrix; moved[9]=kDNaN;
+    CheckPlainContents(matrices,moved,RefObjectArray(matrices));
+    CheckPlainContents(std::vector<std::string>{"xformOp:translate",""},std::string("xformOp:rotateXYZ"),
+                       U64(2)+Prefixed("xformOp:translate")+Prefixed(""));
+    CheckPlainContents(std::vector<bool>{true,false},false,U64(2)+std::string("\1\0",2));
+    // Scalars, fixed arrays and frames keep their object bytes; an empty
+    // value adds nothing beyond its variant index, which the caller writes.
+    std::string scalar; RigExecOpKeyAppend(&scalar,-0.0);
+    CHECK(PlainKey(-0.0)==scalar && PlainKey(std::monostate()).empty());
+    CHECK(PlainKey(std::string("ab"))==Prefixed("ab"));
+    RigExecProviderPlainFrame plain; plain.points[2][1]=-0.0; plain.flags=5;
+    std::string frameBytes; RigExecOpKeyAppend(&frameBytes,plain.points); RigExecOpKeyAppend(&frameBytes,plain.flags);
+    CHECK(PlainKey(plain)==frameBytes);
+}
 }
 int main()
 {
@@ -490,7 +710,7 @@ int main()
     TestChunkRangeIsolation(); TestConstraintSourceAndPropertyAliasKeys();
     TestPacketStatusAndOpaqueBoundary(); TestRawInputAndProviderKeys(); TestAvarEffectiveSelection();
     TestPathTextSpelling(); TestBoxTags(); TestHeadValueBits(); TestCandidateFallbackBytes();
-    TestProviderOwnerText();
+    TestProviderOwnerText(); TestBulkValueKeyBytes(); TestSharedKeyRunsAndPlainValues();
     std::printf("OpValues: %d failures\n",failures);
     return failures ? 1 : 0;
 }

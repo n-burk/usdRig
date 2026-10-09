@@ -271,7 +271,7 @@ void RrOpValue(const RrProgram *p, uint32_t domain, uint32_t slot, std::string *
     case RigExecWireSlotDomain::Rest:
         if(pose) {
             RigExecOpKeyAppend(key,pose->restM[slot]); RrOpFrame(key,pose->restFrames[slot]);
-            for(const auto &point:pose->restPts[slot]) RigExecOpKeyAppend(key,point);
+            RigExecOpKeyAppendRun(key,pose->restPts[slot].data(),pose->restPts[slot].size());
         } break;
     case RigExecWireSlotDomain::Ladder:
         if(pose) { RigExecOpKeyAppend(key,pose->selfD[slot]); RigExecOpKeyAppend(key,pose->parentDinv[slot]);
@@ -284,12 +284,7 @@ void RrOpValue(const RrProgram *p, uint32_t domain, uint32_t slot, std::string *
         RigExecOpKeyAppend(key,v.initialized); RigExecOpKeyAppend(key,v.authoritative);
         RigExecOpKeyAppend(key,v.blocked); RigExecOpKeyAppend(key,v.count);
         RigExecOpKeyAppend(key,v.error); RigExecOpKeyAppend(key,v.value.index());
-        std::visit([&](const auto &value) {
-            using T=std::decay_t<decltype(value)>;
-            if constexpr(std::is_same_v<T,RigExecProviderPlainFrame>) {
-                RigExecOpKeyAppend(key,value.points); RigExecOpKeyAppend(key,value.flags);
-            } else if constexpr(!std::is_same_v<T,std::monostate>) RigExecOpKeyAppend(key,value);
-        },v.value);
+        RigExecOpKeyPlainValue(key,v.value);
         break;
     }
     case RigExecWireSlotDomain::ConstraintInputs:
@@ -621,8 +616,15 @@ bool RrExecuteOpGraph(RrProgram *p,bool force,std::string *error)
     callbacks.run=[&](uint32_t c){
         const auto i=p->opGraph.ops[c].originalIndex;
         if(!RrRunOpBody(p,i,error)) return false;
+        // ChainDirty's key is its revision's RevisionDone key. Writes run in
+        // (domain, slot) order, so the fuse has built that key already.
+        const RigExecOpValueState *done=nullptr;
         for(auto id:p->opGraph.ops[c].descriptor.writes) {
-            auto &v=state.values[size_t(id)]; RigExecOpPublishValue(&v,sample);
+            auto &v=state.values[size_t(id)];
+            if(done && v.slot==done->slot && v.domain==uint32_t(RigExecWireSlotDomain::ChainDirty))
+                RigExecOpPublishValue(&v,[&](uint32_t,uint32_t,std::string *key){key->append(done->key);});
+            else RigExecOpPublishValue(&v,sample);
+            if(v.domain==uint32_t(RigExecWireSlotDomain::RevisionDone)) done=&v;
             if(v.domain==uint32_t(RigExecWireSlotDomain::PropertyResult)) s.propertyVersionChanged[v.slot]=v.changed;
             if(v.domain==uint32_t(RigExecWireSlotDomain::WeightField)) s.weightFieldChanged[v.slot]=v.changed;
         }

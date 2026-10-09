@@ -2,8 +2,14 @@
 #define RIGEXEC_GRAPH_OP_VALUES_H
 
 #include "opGraph.h"
+#include "providerRecords.h"
 #include <algorithm>
+#include <array>
 #include <map>
+#include <type_traits>
+#include <utility>
+#include <variant>
+#include <vector>
 
 namespace rigExec {
 
@@ -164,10 +170,57 @@ inline void RigExecOpKeyAppend(std::string *key, const std::string &v)
 {
     RigExecOpKeyAppend(key, v.size()); key->append(v);
 }
+/// Element types whose key bytes are exactly their object bytes: padding-free
+/// and trivially copyable, so a contiguous run of them keys with one append.
+/// Integers, float, double and std::array of them qualify here. A backend
+/// opts in its fixed-size vector and matrix types, asserting their size, in
+/// a header that every user of their keys includes.
+template <class T> struct RigExecOpKeyBulkElement : std::integral_constant<bool,
+    std::is_integral<T>::value || std::is_same<T, float>::value ||
+    std::is_same<T, double>::value> {};
+template <class T, size_t N> struct RigExecOpKeyBulkElement<std::array<T, N>>
+    : RigExecOpKeyBulkElement<T> {
+    static_assert(sizeof(std::array<T, N>) == N * sizeof(T),
+                  "key runs need padding-free elements");
+};
+/// Containers whose elements are one contiguous array (std::vector<bool> is not).
+template <class C, class = void> struct RigExecOpKeyContiguous : std::false_type {};
+template <class C> struct RigExecOpKeyContiguous<C,
+    std::void_t<decltype(std::declval<const C &>().data())>>
+    : std::is_same<decltype(std::declval<const C &>().data()),
+                   const typename C::value_type *> {};
+/// Appends \p count elements as one run: the same bytes as appending each
+/// element's fields in memory order, signed zeros and NaN payloads included.
+template <class T> inline void RigExecOpKeyAppendRun(std::string *key,
+    const T *data, size_t count)
+{
+    static_assert(std::is_trivially_copyable<T>::value,
+                  "key runs copy object bytes");
+    if (count) key->append(reinterpret_cast<const char *>(data), count * sizeof(T));
+}
 template <class T> inline void RigExecOpKeyArray(std::string *key, const T &v)
 {
+    using Element = typename T::value_type;
     RigExecOpKeyAppend(key, v.size());
-    for (const auto &item : v) RigExecOpKeyAppend(key, item);
+    if constexpr (RigExecOpKeyBulkElement<Element>::value &&
+                  RigExecOpKeyContiguous<T>::value)
+        RigExecOpKeyAppendRun(key, v.data(), v.size());
+    else
+        for (const auto &item : v) RigExecOpKeyAppend(key, static_cast<const Element &>(item));
+}
+template <class T> struct RigExecOpKeyIsVector : std::false_type {};
+template <class T, class A> struct RigExecOpKeyIsVector<std::vector<T, A>> : std::true_type {};
+/// A provider value's payload. Vector alternatives key by count and
+/// contents, strings element by element; the variant index is the caller's.
+inline void RigExecOpKeyPlainValue(std::string *key, const RigExecProviderPlainValue &value)
+{
+    std::visit([&](const auto &v) {
+        using T = std::decay_t<decltype(v)>;
+        if constexpr (std::is_same<T, RigExecProviderPlainFrame>::value) {
+            RigExecOpKeyAppend(key, v.points); RigExecOpKeyAppend(key, v.flags);
+        } else if constexpr (RigExecOpKeyIsVector<T>::value) RigExecOpKeyArray(key, v);
+        else if constexpr (!std::is_same<T, std::monostate>::value) RigExecOpKeyAppend(key, v);
+    }, value);
 }
 
 template <class Sample> inline void RigExecOpPublishValue(

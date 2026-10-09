@@ -26,10 +26,27 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <type_traits>
 #include <vector>
 #include <unordered_map>
 
 namespace rigExec {
+
+// Runtime vectors and matrices are bare scalar arrays, so their key bytes
+// are their object bytes and contiguous runs of them key with one append.
+static_assert(sizeof(RrVec2f) == 2 * sizeof(float) &&
+              sizeof(RrVec3f) == 3 * sizeof(float) &&
+              sizeof(RrVec3d) == 3 * sizeof(double) &&
+              sizeof(RrMat4d) == 16 * sizeof(double) &&
+              std::is_trivially_copyable<RrVec2f>::value &&
+              std::is_trivially_copyable<RrVec3f>::value &&
+              std::is_trivially_copyable<RrVec3d>::value &&
+              std::is_trivially_copyable<RrMat4d>::value,
+              "key runs need padding-free, trivially copyable elements");
+template <> struct RigExecOpKeyBulkElement<RrVec2f> : std::true_type {};
+template <> struct RigExecOpKeyBulkElement<RrVec3f> : std::true_type {};
+template <> struct RigExecOpKeyBulkElement<RrVec3d> : std::true_type {};
+template <> struct RigExecOpKeyBulkElement<RrMat4d> : std::true_type {};
 
 // The runtime's field numbers of each table's inputs, in the tables'
 // field order. A registered read (RrRegisteredRead) names the table field

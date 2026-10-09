@@ -6254,7 +6254,13 @@ void RrOpBytes(std::string *key, const std::string &v)
 void RrOpBytes(std::string *key, const RrPointFrame &v)
 { RrOpBytes(key,v.points); RrOpBytes(key,v.flags); }
 template <class T> void RrOpBytes(std::string *key, const std::vector<T> &v)
-{ RrOpBytes(key, v.size()); for (const auto &x : v) RrOpBytes(key, x); }
+{
+    RrOpBytes(key, v.size());
+    if constexpr (RigExecOpKeyBulkElement<T>::value &&
+                  RigExecOpKeyContiguous<std::vector<T>>::value)
+        RigExecOpKeyAppendRun(key, v.data(), v.size());
+    else for (const auto &x : v) RrOpBytes(key, x);
+}
 void RrOpParametersKey(std::string *key, const RrGeoMoverParameters &p)
 {
     RrOpBytes(key, p.kind);
@@ -6358,7 +6364,7 @@ void RrGeometryOpValueKey(const RrProgram *program, RigExecWireSlotDomain domain
             const size_t begin=std::min(size_t(chunk.begin),rev.stagingOutput.size());
             const size_t end=std::min(size_t(chunk.end),rev.stagingOutput.size());
             RrOpBytes(key,chunk.ok); RrOpBytes(key,rev.stagingOutput.size()); RrOpBytes(key,end-begin);
-            for (size_t k=begin;k<end;++k) RrOpBytes(key,rev.stagingOutput[k]);
+            if (begin < end) RigExecOpKeyAppendRun(key,rev.stagingOutput.data()+begin,end-begin);
             return;
         }
         return;

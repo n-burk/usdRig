@@ -82,6 +82,19 @@ void Put(std::string *out, const GfMatrix4d &v)
 {
     for (int r=0;r<4;++r) for (int c=0;c<4;++c) Put(out,v[r][c]);
 }
+// Put writes these element types as their object bytes in memory order:
+// integers, float, double and the padding-free vectors above. A contiguous
+// run of them is one append.
+template<class T> constexpr bool kRunElement=RigExecOpKeyBulkElement<T>::value || kBitwiseElement<T>;
+static_assert(std::is_trivially_copyable_v<GfVec2f> && std::is_trivially_copyable_v<GfVec3f> &&
+              std::is_trivially_copyable_v<GfVec3d> && std::is_trivially_copyable_v<GfVec3i> &&
+              std::is_trivially_copyable_v<GfMatrix4d>,"key runs copy object bytes");
+template<class T> void PutRun(std::string *out, const T *data, size_t count)
+{
+    static_assert(kRunElement<T>,"Put writes this element type field by field");
+    RigExecOpKeyAppendRun(out,data,count);
+}
+template<class ArrayT> void Array(std::string *out, const ArrayT &values);
 // Boxed samples retain a type tag plus exact payload bytes. Unknown plugin
 // values are deliberately non-exact; callers must propagate conservatively.
 bool BoxExact(const VtValue &v)
@@ -166,7 +179,7 @@ bool Box(std::string *out, const VtValue &v)
         else { Put(out,BoxTag::PathElements); PutPathElements(out,path); }
         return true;
     }
-#define VECTOR(T,TAG) if(v.IsHolding<VtArray<T>>()) { Put(out,BoxTag::TAG); const auto &a=v.UncheckedGet<VtArray<T>>(); Put(out,uint64_t(a.size())); for(size_t i=0;i<a.size();++i) Put(out,T(a[i])); return true; }
+#define VECTOR(T,TAG) if(v.IsHolding<VtArray<T>>()) { Put(out,BoxTag::TAG); Array(out,v.UncheckedGet<VtArray<T>>()); return true; }
     VECTOR(double,DoubleArray) VECTOR(float,FloatArray) VECTOR(int,IntArray) VECTOR(bool,BoolArray)
     VECTOR(TfToken,TokenArray) VECTOR(std::string,StringArray) VECTOR(GfVec2f,Vec2fArray)
     VECTOR(GfVec3f,Vec3fArray) VECTOR(GfVec3d,Vec3dArray) VECTOR(GfVec3i,Vec3iArray)
@@ -181,7 +194,11 @@ void Put(std::string *out, const RigExecPointFrame &v)
 }
 template<class ArrayT> void Array(std::string *out, const ArrayT &values)
 {
-    Put(out, uint64_t(values.size())); for (const auto &value : values) Put(out,value);
+    using T=typename ArrayT::value_type;
+    Put(out, uint64_t(values.size()));
+    if constexpr(kRunElement<T> && RigExecOpKeyContiguous<ArrayT>::value)
+        PutRun(out,values.data(),values.size());
+    else for (const auto &value : values) Put(out,value);
 }
 void Put(std::string *out, const RigExecPointFrameArray &v)
 {
@@ -373,7 +390,7 @@ void RigExecBakedOpValueKey(const RigExecBakedProgramImpl &B,
             const size_t begin=std::min(size_t(part.begin),v->stagingOutput.size());
             const size_t end=std::min(size_t(part.end),v->stagingOutput.size());
             Put(out,part.ok); Put(out,uint64_t(v->stagingOutput.size())); Put(out,uint64_t(end-begin));
-            for(size_t i=begin;i<end;++i) Put(out,v->stagingOutput[i]);
+            PutRun(out,v->stagingOutput.data()+begin,end-begin);
             return;
         } break;
     case D::RevisionDone:
@@ -445,7 +462,7 @@ void RigExecBakedOpValueKey(const RigExecBakedProgramImpl &B,
     case D::Rest:
         if(slot<B.restM.size() && slot<B.restFrames.size() && slot<B.restPts.size()) {
             Put(out,B.restM[slot]); Put(out,B.restFrames[slot]);
-            for(const auto &point:B.restPts[slot]) Put(out,point); return; } break;
+            PutRun(out,B.restPts[slot].data(),B.restPts[slot].size()); return; } break;
     case D::Ladder:
         if(slot<B.restRoundTrip.size() && slot<B.defaultRoundTrip.size() &&
             slot<B.selfD.size() && slot<B.parentDinv.size() &&
@@ -624,7 +641,7 @@ static bool InputKey(const RigExecBakedProgramImpl &B,
         auto points=[&](const RigExecWeightPointInput &p) {
             Put(out,p.declared);Put(out,p.available);Put(out,p.count);
             if(p.available && p.count && !p.data){exact=false;return;}
-            if(p.available)for(size_t i=0;i<p.count;++i)Put(out,p.data[i]);
+            if(p.available)PutRun(out,p.data,p.count);
         };
         for(int id:field.objects) {
             if(id<0 || size_t(id)>=B.weightProgram.size() || size_t(id)>=field.effectiveInputs.size())return false;
@@ -638,7 +655,7 @@ static bool InputKey(const RigExecBakedProgramImpl &B,
                 Put(out,input.hasPlacement);if(input.hasPlacement)Put(out,input.placement);
                 const auto &target=input.phasedPoints[1];const auto &primary=input.phasedPoints[0];
                 if(target.declared){Put(out,uint8_t(1));points(target);}
-                else if(record.samplesInFlight){Put(out,uint8_t(3));Put(out,entering.count);if(entering.count&&!entering.data)return false;for(size_t i=0;i<entering.count;++i)Put(out,entering.data[i]);}
+                else if(record.samplesInFlight){Put(out,uint8_t(3));Put(out,entering.count);if(entering.count&&!entering.data)return false;PutRun(out,entering.data,entering.count);}
                 else if(primary.declared && primary.available){Put(out,uint8_t(2));points(primary);}
                 else {const auto &raw=(!primary.declared && input.rawPoints[0].available)?input.rawPoints[0]:input.rawPoints[1];Put(out,uint8_t(4));points(raw);}
                 for(int i=4;i<=10;++i)scalar(i);

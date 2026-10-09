@@ -582,18 +582,26 @@ bool RigExecBakedExecuteOpGraph(RigExecBakedProgramImpl *program,UsdTimeCode tim
         if(B.opBeforeBody) B.opBeforeBody(B.opGraph.ops[c].originalIndex);
         RigExecBakedRunStepBody(&B,&step,time);
         RigExecBakedFinishHeadOp(&B,step);
+        // ChainDirty's key is its revision's RevisionDone key. Writes run in
+        // (domain, slot) order, so the fuse has built that exact key already.
+        const RigExecOpValueState *done=nullptr;
         for(auto id:B.opGraph.ops[c].descriptor.writes) {
             auto &v=state.values[size_t(id)];
+            const RigExecOpValueState *reuse=done && v.slot==done->slot &&
+                v.domain==uint32_t(RigExecBakedSlotDomain::ChainDirty) ? done : nullptr;
+            bool exact=true;
             RigExecOpPublishValue(&v,[&](uint32_t d,uint32_t slot,std::string *key) {
-                sample(d,slot,key);
+                if(reuse) key->append(reuse->key); else sample(d,slot,key);
                 // API4 opaque packets are deterministic in their declared
                 // inputs and immutable manifest. Retain their identity
                 // while every bound input version remains the same.
                 if(!RigExecBakedOpValueKeyIsExact(B,RigExecBakedSlotDomain(d),slot)) {
+                    exact=false;
                     RigExecOpKeyAppend(key,state.inputKeys[c]);
                     if(!state.inputExact[c]) RigExecOpKeyAppend(key,state.inputRevisions[c]);
                 }
             });
+            if(v.domain==uint32_t(RigExecBakedSlotDomain::RevisionDone)) done=exact?&v:nullptr;
         }
         if(stamping) step.publishEndNs=RigExecBakedNowNs();
         if(B.opAfterBody) B.opAfterBody(B.opGraph.ops[c].originalIndex);
