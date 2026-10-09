@@ -5,10 +5,12 @@
 #include "rigExecGraph/usdSceneAccess.h"
 #include "rigExecGraph/providerContextBinding.h"
 #include "rigExecGraph/providerRefresh.h"
+#include "parallel.h"
 #include "pxr/usd/sdf/types.h"
 #include "pxr/usd/usd/resolveInfo.h"
 #include <algorithm>
 #include <cmath>
+#include <unordered_map>
 
 namespace rigExec {
 namespace {
@@ -139,8 +141,24 @@ bool RigExecBakedBuildSpaces(RigExecBakedProgramImpl *program,UsdTimeCode captur
     const char *poseInputs[]={"posed:space","posed:defaultSpace","parent:defaultSpace","parent:space",
         "avars:unitScaleFactor","avars:tx","avars:ty","avars:tz","avars:sx","avars:sy","avars:sz",
         "avars:rx","avars:ry","avars:rz","avars:rspin","avars:rotationOrder","avars:rotationSign"};
+    // Every slot's pose-input closure from one _PoseInputGraph batch, as the
+    // compile computes its own: an attribute many closures reach is read
+    // once. Providers and connectedPose equal _CollectPoseInputInfo's for
+    // each prim; RIGEXEC_VERIFY_POSEINFO re-walks every closure to check.
+    // Nothing is skipped, so a joint-bound slot still lists its providers;
+    // only an empty path gets no entry, and the walker's answer for it is
+    // empty too. Owning thread; the graph spreads its stage reads as the
+    // other Build-time regions do.
+    std::unordered_map<SdfPath,evaluatorDetail::_PoseInputInfo,SdfPath::Hash> poseInfos;
+    {
+        evaluatorDetail::_PoseInputGraph graph;
+        graph.Extend(B.stage,B.paths,[](const SdfPath &){return false;},
+            RigExecParallelEvaluationEnabled() && !RigExecFrozenSerialActive(),*B.profiler,&poseInfos);
+    }
+    const evaluatorDetail::_PoseInputInfo noPoseInputs;
     for(size_t slot=0;slot<B.paths.size();++slot) {
-        const auto info=evaluatorDetail::_CollectPoseInputInfo(B.stage->GetPrimAtPath(B.paths[slot]));
+        const auto computed=poseInfos.find(B.paths[slot]);
+        const auto &info=computed!=poseInfos.end()?computed->second:noPoseInputs;
         for(const auto &path:info.providers) {
             const auto found=B.index.find(path);
             if(found!=B.index.end()) B.poseProviderInputs[slot].push_back(found->second);

@@ -89,10 +89,10 @@ _CollectAttributeConnectionInputs(const UsdPrim &prim)
     return inputs;
 }
 
-// RIGEXEC_VERIFY_POSEINFO=1: every closure _PoseInputGraph computes is
-// recomputed by _CollectPoseInputInfo, the per-prim walker it replaces, and
-// the compile fails fatally unless providers, attributes and connectedPose
-// all agree.
+// RIGEXEC_VERIFY_POSEINFO=1: every closure _PoseInputGraph computes, for the
+// compile and for the baked program's BuildSpaces, is recomputed by
+// _CollectPoseInputInfo, the per-prim walker it replaces, and the build fails
+// fatally unless providers, attributes and connectedPose all agree.
 static bool
 _PoseInfoVerifyRequested()
 {
@@ -270,8 +270,9 @@ _NamespaceFrameProvider(UsdPrim prim)
 }
 
 // One prim's closure, walked on its own. _PoseInputGraph computes the same
-// closures for many prims at once and is what the compile uses; this stays
-// as the reference RIGEXEC_VERIFY_POSEINFO checks the graph against.
+// closures for many prims at once and is what the compile and BuildSpaces
+// use; this stays as the reference RIGEXEC_VERIFY_POSEINFO checks the graph
+// against.
 _PoseInputInfo
 _CollectPoseInputInfo(const UsdPrim &prim)
 {
