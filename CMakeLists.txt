@@ -2108,12 +2108,21 @@ foreach(_rigexec_test IN LISTS _rigexec_tests)
             "LD_LIBRARY_PATH=path_list_prepend:${CMAKE_CURRENT_BINARY_DIR}")
     endif()
 endforeach()
-# The imaging frame-cache suites wait on short rendezvous and take about
-# 110s on a quiet 4-core host. Give each the whole ctest slot so that wait
+# The imaging frame-cache suite waits on short rendezvous and takes about
+# 110s on a quiet 4-core host. Give it the whole ctest slot so that wait
 # is not starved and the 300s cap is not spent on a shared core.
 if(TEST testRigExecImagingFrameCache)
     set_tests_properties(testRigExecImagingFrameCache PROPERTIES PROCESSORS 4)
 endif()
+# These processes also run the grain-0 biped replay and the serial evaluator
+# pass that used to be separate ctests. On a loaded 4-core runner that work
+# can pass 300s without a hung test.
+foreach(_rigexec_long_test testRigExecRuntimePose testRigExecRuntimeWeights
+                           testRigExecRuntimeGeometry testRigExecBakedMode)
+    if(TEST ${_rigexec_long_test})
+        set_tests_properties(${_rigexec_long_test} PROPERTIES TIMEOUT 600)
+    endif()
+endforeach()
 
 # Install
 include(CMakePackageConfigHelpers)
