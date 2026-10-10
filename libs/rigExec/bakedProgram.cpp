@@ -4540,6 +4540,14 @@ RigExecBakedProbeTime(const UsdStageRefPtr &stage)
     return _ProbeTime(stage);
 }
 
+void
+RigExecBakedProgramTesting::SetOpObservers(const RigExecBakedProgram &program,
+    std::function<void(uint32_t)> before, std::function<void(uint32_t)> after)
+{
+    program._impl->opBeforeBody = std::move(before);
+    program._impl->opAfterBody = std::move(after);
+}
+
 bool
 RigExecBakedProgramTesting::CapturePointReads(
     const RigExecBakedProgram &program)
