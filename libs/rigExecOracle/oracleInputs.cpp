@@ -2,7 +2,6 @@
 #include "rigExec/movers/moverRegistry.h"
 #include "rigExec/moverGraph.h"
 #include <set>
-#include <cmath>
 #include "pxr/usd/usd/primRange.h"
 #include "pxr/usd/usdSkel/blendShape.h"
 namespace rigExec {
@@ -67,34 +66,5 @@ RigExecOracleScene RigExecCaptureOracleInputs(const UsdStageRefPtr &stage,
     for (const auto &prim:stage->TraverseAll())
         if (scene.prims.count(prim.GetPath())) scene.primOrder.push_back(prim.GetPath());
     return scene;
-}
-SdfPathVector RigExecRelationshipTargets(const RigExecOraclePrim &p,const char *name) {
-    for(const auto &entry:p.relationships)if(entry.first.GetString()==name)return entry.second.targets;
-    return {};
-}
-RigExecReadPhase RigExecPhaseForInput(const RigExecOraclePrim &p,const char *name) {
-    for(const auto &entry:p.relationships)if(entry.first.GetString()==name)return entry.second.phase;
-    return {};
-}
-namespace {
-const TfToken _oracleOffsets("offsets"),_oraclePointIndices("pointIndices");
-}
-bool RigExecResolveBlendSampleLayout(const RigExecOracleScene &scene,const SdfPath &path,size_t pointCount,RigExecBlendSampleLayout *layout) {
-    layout->pointCount=pointCount;layout->valid=false;
-    if(!scene.BlendShapes().count(path.GetPrimPath()))return true;
-    const auto shape=scene.GetPrimAtPath(path.GetPrimPath());
-    const auto offsetsAttr=shape.GetAttribute(_oracleOffsets);
-    const auto indicesAttr=shape.GetAttribute(_oraclePointIndices);
-    const bool cacheable=!offsetsAttr.connected&&!indicesAttr.connected;
-    VtVec3fArray offsets;VtIntArray indices;
-    offsetsAttr.Get(&offsets);indicesAttr.Get(&indices);
-    if(!indices.empty()) {
-        if(indices.size()!=offsets.size())return cacheable;
-        for(int index:indices)if(index<0||size_t(index)>=pointCount)return cacheable;
-    } else if(!offsets.empty()&&offsets.size()!=pointCount)return cacheable;
-    for(const auto &offset:offsets)if(!std::isfinite(offset[0])||!std::isfinite(offset[1])||!std::isfinite(offset[2]))return cacheable;
-    layout->offsets.assign(offsets.begin(),offsets.end());
-    layout->indices.assign(indices.begin(),indices.end());layout->valid=true;
-    return cacheable;
 }
 } // namespace rigExec

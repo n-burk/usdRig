@@ -215,6 +215,24 @@ RigExecPhaseForInput(const UsdPrim &moverPrim, const char *rel)
     return phase;
 }
 
+SdfPathVector
+RigExecRelationshipTargets(const RigExecOraclePrim &prim, const char *name)
+{
+    for (const auto &entry : prim.relationships) {
+        if (entry.first.GetString() == name) return entry.second.targets;
+    }
+    return {};
+}
+
+RigExecReadPhase
+RigExecPhaseForInput(const RigExecOraclePrim &prim, const char *name)
+{
+    for (const auto &entry : prim.relationships) {
+        if (entry.first.GetString() == name) return entry.second.phase;
+    }
+    return {};
+}
+
 VtValue
 RigExecPhasedConsumerValue(const VtValue &chainValue,
                            const SdfValueTypeName &consumerType)
@@ -378,6 +396,43 @@ RigExecValidateMoverTargets(
         return false;
     }
     return true;
+}
+
+bool
+RigExecResolveBlendSampleLayout(const RigExecOracleScene &scene, const SdfPath &path,
+    size_t pointCount, RigExecBlendSampleLayout *layout)
+{
+    layout->pointCount = pointCount;
+    layout->valid = false;
+    if (!scene.BlendShapes().count(path.GetPrimPath())) return true;
+    const auto shape = scene.GetPrimAtPath(path.GetPrimPath());
+    const TfToken offsetsToken("offsets");
+    const TfToken indicesToken("pointIndices");
+    const auto offsetsAttr = shape.GetAttribute(offsetsToken);
+    const auto indicesAttr = shape.GetAttribute(indicesToken);
+    const bool cacheable = !offsetsAttr.connected && !indicesAttr.connected;
+    VtVec3fArray offsets;
+    VtIntArray indices;
+    offsetsAttr.Get(&offsets);
+    indicesAttr.Get(&indices);
+    if (!indices.empty()) {
+        if (indices.size() != offsets.size()) return cacheable;
+        for (int index : indices) {
+            if (index < 0 || size_t(index) >= pointCount) return cacheable;
+        }
+    } else if (!offsets.empty() && offsets.size() != pointCount) {
+        return cacheable;
+    }
+    for (const auto &offset : offsets) {
+        if (!std::isfinite(offset[0]) || !std::isfinite(offset[1]) ||
+            !std::isfinite(offset[2])) {
+            return cacheable;
+        }
+    }
+    layout->offsets.assign(offsets.begin(), offsets.end());
+    layout->indices.assign(indices.begin(), indices.end());
+    layout->valid = true;
+    return cacheable;
 }
 
 bool
