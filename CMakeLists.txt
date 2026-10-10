@@ -129,7 +129,7 @@ target_link_libraries(rigExecScene PRIVATE rigExecGraph rigExecMath)
 set_target_properties(rigExecScene PROPERTIES POSITION_INDEPENDENT_CODE ON)
 add_library(rigExec::rigExecScene ALIAS rigExecScene)
 target_sources(rigExecScene INTERFACE
-    "${CMAKE_CURRENT_SOURCE_DIR}/libs/rigExecScene/sceneLinkAnchor.cpp")
+    "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs/rigExecScene/sceneLinkAnchor.cpp>")
 
 # rigExec: schema bindings and native evaluation. It does not link the
 # scene or oracle libraries. Callers that compile a stage link
