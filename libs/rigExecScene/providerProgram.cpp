@@ -1,5 +1,5 @@
 #include "providerProgram.h"
-#include "providerArithmetic.h"
+#include "rigExecGraph/providerArithmetic.h"
 #include "rigExecMath/affineFrameKernels.h"
 #include "rigExecMath/avarScale.h"
 #include "pxr/base/gf/rotation.h"

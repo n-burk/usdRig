@@ -13,11 +13,11 @@
 #ifndef RIGEXEC_BAKED_PROGRAM_IMPL_H
 #define RIGEXEC_BAKED_PROGRAM_IMPL_H
 
-#include "rigExecGraph/weightProgram.h"
-#include "rigExecGraph/geometrySceneLowering.h"
+#include "rigExecScene/weightProgram.h"
+#include "rigExecScene/geometrySceneLowering.h"
 #include "bakedClusters.h"
 #include "bakedProgram.h"
-#include "rigExecGraph/autoClavicleGraph.h"
+#include "rigExecScene/autoClavicleGraph.h"
 #include "frameExtraction.h"
 #include "moverGraph.h"
 #include "crossDomainInputs.h"
@@ -30,10 +30,10 @@
 #include "weightPackets.h"
 #include "rigExecGraph/opGraph.h"
 #include "rigExecGraph/opValues.h"
-#include "rigExecGraph/providerProgram.h"
-#include "rigExecGraph/solverProgram.h"
-#include "rigExecGraph/constraintProgram.h"
-#include "rigExecGraph/poseProgram.h"
+#include "rigExecScene/providerProgram.h"
+#include "rigExecScene/solverProgram.h"
+#include "rigExecScene/constraintProgram.h"
+#include "rigExecScene/poseProgram.h"
 
 #include "rigExecMath/avarScale.h"
 #include "rigExecMath/dualQuat.h"

@@ -1,7 +1,7 @@
 // Persistent surface bindings; coordinate/algorithm references: docs/references.md.
 #include "moverRegistry.h"
 #include "externalPlayback.h"
-#include "rigExecGraph/sceneDescriptors.h"
+#include "rigExecScene/sceneDescriptors.h"
 #include "pxr/base/vt/dictionary.h"
 #include "pxr/usd/usdGeom/pointBased.h"
 #include <cmath>

@@ -11,7 +11,10 @@ line. This script is not wired into CI.
 Limitations are printed with --explain. Schedule/cone variants that
 rigexec_add_graph_test() adds are synthesized. Tests registered from
 example-fixture lists are named but not expanded (those lists live in
-tests/exampleFixtures.cmake).
+tests/exampleFixtures.cmake). A library no executable links directly
+(the scene compiler absorbed into rigExec, the test oracle linked from
+rigExec) selects the tests that link its parent. A library that already
+has direct executables, such as rigExecMath, does not take that hop.
 """
 
 from __future__ import annotations
@@ -201,6 +204,23 @@ def synthesize_graph_tests(text: str) -> str:
     return text + "\n" + "\n".join(extra) + "\n"
 
 
+def extract_link_names(token: str) -> list[str]:
+    """Library names on a link line, including generator expressions."""
+    token = token.strip('"')
+    if token in {"PUBLIC", "PRIVATE", "INTERFACE"}:
+        return []
+    if token.startswith("$"):
+        skip = {
+            "STREQUAL", "TARGET_PROPERTY", "TYPE", "EXECUTABLE", "LINK_LIBRARY",
+            "WHOLE_ARCHIVE", "BUILD_INTERFACE", "INSTALL_INTERFACE", "LINK_ONLY",
+            "AND", "OR", "NOT", "BOOL", "IF", "PLATFORM_ID",
+        }
+        return [n for n in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", token) if n not in skip]
+    if token.startswith("-"):
+        return []
+    return [token]
+
+
 def parse(cmake_text: str) -> dict:
     text = synthesize_graph_tests(expand_foreach(strip_comments(cmake_text)))
     libraries = {}  # name -> {sources, links, kind}
@@ -224,7 +244,9 @@ def parse(cmake_text: str) -> dict:
             executables[exe] = {"sources": sources, "links": []}
         elif name == "target_link_libraries" and len(args) >= 2:
             target = args[0]
-            libs = [a for a in args[1:] if a not in {"PUBLIC", "PRIVATE", "INTERFACE"}]
+            libs = []
+            for arg in args[1:]:
+                libs.extend(extract_link_names(arg))
             if target in libraries:
                 libraries[target]["links"].extend(libs)
             elif target in executables:
@@ -411,12 +433,37 @@ def select(paths: list[str], model: dict, index: dict, follow_headers: bool) -> 
     else:
         wanted = set()
         direct = set()
+        # A library no executable names (scene lowering absorbed into
+        # rigExec, the oracle linked through rigExec's interface) still
+        # selects the executables that link its parent. Libraries that
+        # already have direct executables, such as rigExecMath, do not
+        # take that hop.
+        for lib in sorted(l for l in libs if not str(l).startswith("exe:")):
+            named = {
+                exe for exe, info in model["executables"].items()
+                if lib in info["links"]
+            }
+            if named:
+                direct |= named
+                continue
+            parents = {
+                other for other, info in model["libraries"].items()
+                if lib in info["links"]
+            }
+            hopped = {
+                exe for exe, info in model["executables"].items()
+                if parents & set(info["links"])
+            }
+            direct |= hopped
+            reasons[lib].append(
+                "no executable links this library; one hop through "
+                + (", ".join(sorted(parents)) if parents else "(none)")
+            )
         for exe, info in model["executables"].items():
             reached = set(index["exe_closure"][exe])
-            linked = set(info["links"])
             if reached & libs or ("exe:" + exe) in libs:
                 wanted.add(exe)
-            if linked & libs or ("exe:" + exe) in libs:
+            if ("exe:" + exe) in libs:
                 direct.add(exe)
             for src in info["sources"]:
                 if os.path.normpath(src) in pathset:
@@ -489,6 +536,7 @@ def snapshot(model: dict, index: dict) -> dict:
             "rigexec_add_graph_test cone and graph variants are synthesized.",
             "Example-fixture loops (IN LISTS) are not expanded.",
             "A change inside libs/rigExec selects every test that links the rigExec shared library.",
+            "A library with no direct executable (rigExecScene, rigExecOracle) selects tests that link the library that links it.",
         ],
     }
 
@@ -562,8 +610,21 @@ def main(argv: list[str]) -> int:
         if direct_free:
             label = "^usd-free$"
         else:
-            libs = [lib for lib in result["libraries"] if lib.startswith("rigExec")]
-            label = "^(" + "|".join(re.escape(lib) for lib in libs) + ")$" if libs else ""
+            # ctest labels name libraries an executable links directly.
+            # A lonely library's tests carry its parent's label.
+            label_libs = []
+            for lib in result["libraries"]:
+                if not lib.startswith("rigExec"):
+                    continue
+                named = any(lib in info["links"] for info in model["executables"].values())
+                if named:
+                    label_libs.append(lib)
+                    continue
+                for other, info in model["libraries"].items():
+                    if lib in info["links"] and other.startswith("rigExec"):
+                        label_libs.append(other)
+            label_libs = list(dict.fromkeys(label_libs))
+            label = "^(" + "|".join(re.escape(lib) for lib in label_libs) + ")$" if label_libs else ""
         if regex and label:
             print("ctest (direct):")
             print(

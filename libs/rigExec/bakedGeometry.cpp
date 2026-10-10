@@ -1,4 +1,4 @@
-#include "rigExecGraph/geometryProgram.h"
+#include "rigExecScene/geometryProgram.h"
 #include "rigExecGraph/blendLayout.h"
 #include "rigExec/weightField.h"
 // The baked program's geometry half: the chain/revision bake and the frame

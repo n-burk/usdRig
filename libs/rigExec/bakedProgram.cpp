@@ -22,7 +22,7 @@
 
 #include "bakedProgramImpl.h"
 #include "projectorCaptureNotice.h"
-#include "rigExecGraph/poseSceneLowering.h"
+#include "rigExecScene/poseSceneLowering.h"
 #include "bakedSchedule.h"
 #include "bakedOpGraph.h"
 #include "crossDomainInputs.h"

@@ -1,5 +1,5 @@
-#include "goldenPose.h"
-#include "types.h"
+#include "rigExec/goldenPose.h"
+#include "rigExec/types.h"
 
 #include "pxr/base/gf/quatd.h"
 #include "pxr/base/gf/quatf.h"
@@ -17,6 +17,8 @@
 #include <sstream>
 
 namespace rigExec {
+std::string RigExecOracleGoldenDouble(double value);
+std::string RigExecOracleGoldenEscape(const std::string &value);
 namespace {
 // The retired scheduler summary is work metadata, with an exact grammar.
 // Other diagnostics, including similar prefixes, remain part of the verdict.
@@ -49,7 +51,7 @@ std::string Bits(float value)
     uint32_t bits; std::memcpy(&bits, &value, sizeof bits);
     return Hex(bits, 8);
 }
-std::string Bits(double value) { return RigExecGoldenDouble(value); }
+std::string Bits(double value) { return RigExecOracleGoldenDouble(value); }
 template<class Vector> std::string VectorBits(const Vector &value)
 {
     std::string result;
@@ -96,8 +98,8 @@ bool ValueBits(const VtValue &value, std::string *out, std::string *error)
                 return ArrayBits(rest, "vec3d", [](const GfVec3d &p){return VectorBits(p);});});
     })
     RIGEXEC_GOLDEN_SCALAR(RigExecWeightPacket, "weightPacket", [](const RigExecWeightPacket &v){
-        return RigExecGoldenEscape(v.representation.GetString()) + " " +
-            RigExecGoldenEscape(v.rangePolicy.GetString()) + " " + Bits(v.defaultWeight) + " " +
+        return RigExecOracleGoldenEscape(v.representation.GetString()) + " " +
+            RigExecOracleGoldenEscape(v.rangePolicy.GetString()) + " " + Bits(v.defaultWeight) + " " +
             (v.valid ? "1 " : "0 ") +
             ArrayBits(v.values, "float", [](float x){return Bits(x);}) + " " +
             ArrayBits(v.indices, "int", [](int x){return std::to_string(x);});
@@ -119,10 +121,10 @@ bool ValueBits(const VtValue &value, std::string *out, std::string *error)
     RIGEXEC_GOLDEN_SCALAR(GfVec4f, "vec4f", [](const GfVec4f &v){return VectorBits(v);})
     RIGEXEC_GOLDEN_SCALAR(GfVec4d, "vec4d", [](const GfVec4d &v){return VectorBits(v);})
     RIGEXEC_GOLDEN_SCALAR(GfMatrix4d, "matrix4d", [](const GfMatrix4d &v){return MatrixBits(v);})
-    RIGEXEC_GOLDEN_SCALAR(TfToken, "token", [](const TfToken &v){return RigExecGoldenEscape(v.GetString());})
-    RIGEXEC_GOLDEN_SCALAR(std::string, "string", [](const std::string &v){return RigExecGoldenEscape(v);})
-    RIGEXEC_GOLDEN_SCALAR(SdfPath, "path", [](const SdfPath &v){return RigExecGoldenEscape(v.GetString());})
-    RIGEXEC_GOLDEN_SCALAR(SdfAssetPath, "asset", [](const SdfAssetPath &v){return RigExecGoldenEscape(v.GetAssetPath());})
+    RIGEXEC_GOLDEN_SCALAR(TfToken, "token", [](const TfToken &v){return RigExecOracleGoldenEscape(v.GetString());})
+    RIGEXEC_GOLDEN_SCALAR(std::string, "string", [](const std::string &v){return RigExecOracleGoldenEscape(v);})
+    RIGEXEC_GOLDEN_SCALAR(SdfPath, "path", [](const SdfPath &v){return RigExecOracleGoldenEscape(v.GetString());})
+    RIGEXEC_GOLDEN_SCALAR(SdfAssetPath, "asset", [](const SdfAssetPath &v){return RigExecOracleGoldenEscape(v.GetAssetPath());})
     RIGEXEC_GOLDEN_SCALAR(GfRange3f, "range3f", [](const GfRange3f &v){return VectorBits(v.GetMin()) + " " + VectorBits(v.GetMax());})
     RIGEXEC_GOLDEN_SCALAR(GfRange3d, "range3d", [](const GfRange3d &v){return VectorBits(v.GetMin()) + " " + VectorBits(v.GetMax());})
     RIGEXEC_GOLDEN_SCALAR(GfQuatf, "quatf", [](const GfQuatf &v){return Bits(v.GetReal()) + " " + VectorBits(v.GetImaginary());})
@@ -139,7 +141,7 @@ bool ValueBits(const VtValue &value, std::string *out, std::string *error)
     RIGEXEC_GOLDEN_ARRAY(VtVec3fArray, "vec3f", [](const GfVec3f &v){return VectorBits(v);})
     RIGEXEC_GOLDEN_ARRAY(VtVec3dArray, "vec3d", [](const GfVec3d &v){return VectorBits(v);})
     RIGEXEC_GOLDEN_ARRAY(VtMatrix4dArray, "matrix4d", [](const GfMatrix4d &v){return MatrixBits(v);})
-    RIGEXEC_GOLDEN_ARRAY(VtTokenArray, "token", [](const TfToken &v){return RigExecGoldenEscape(v.GetString());})
+    RIGEXEC_GOLDEN_ARRAY(VtTokenArray, "token", [](const TfToken &v){return RigExecOracleGoldenEscape(v.GetString());})
 #undef RIGEXEC_GOLDEN_ARRAY
     if (error) *error = "unsupported golden value type " + value.GetTypeName();
     return false;
@@ -147,25 +149,25 @@ bool ValueBits(const VtValue &value, std::string *out, std::string *error)
 
 } // namespace
 
-bool RigExecEncodeGoldenValue(const VtValue &value, std::string *encoded, std::string *error)
+bool RigExecOracleEncodeGoldenValue(const VtValue &value, std::string *encoded, std::string *error)
 {
     if (!encoded) { if (error) *error = "null golden value output"; return false; }
     return ValueBits(value, encoded, error);
 }
 
-std::string RigExecGoldenDouble(double value)
+std::string RigExecOracleGoldenDouble(double value)
 {
     uint64_t bits; std::memcpy(&bits, &value, sizeof bits);
     return Hex(bits, 16);
 }
-std::string RigExecGoldenHex(uint64_t value) { return Hex(value, 16); }
-uint64_t RigExecGoldenDigest(const std::string &bytes)
+std::string RigExecOracleGoldenHex(uint64_t value) { return Hex(value, 16); }
+uint64_t RigExecOracleGoldenDigest(const std::string &bytes)
 {
     uint64_t hash = UINT64_C(14695981039346656037);
     for (unsigned char byte : bytes) { hash ^= byte; hash *= UINT64_C(1099511628211); }
     return hash;
 }
-std::string RigExecGoldenEscape(const std::string &value)
+std::string RigExecOracleGoldenEscape(const std::string &value)
 {
     std::string result = "\"";
     for (unsigned char ch : value) {
@@ -179,7 +181,7 @@ std::string RigExecGoldenEscape(const std::string &value)
     return result + '"';
 }
 
-bool RigExecEncodeGoldenPose(const RigExecRigPose &pose,
+bool RigExecOracleEncodeGoldenPose(const RigExecRigPose &pose,
     std::vector<RigExecGoldenValue> *values, std::string *error, bool includeOracle)
 {
     if (!values) { if (error) *error = "null golden output"; return false; }
@@ -215,29 +217,29 @@ bool RigExecEncodeGoldenPose(const RigExecRigPose &pose,
     for (const auto &entry : pose.weightFields) {
         const auto &field = entry.second;
         result.push_back({"weightFields", entry.first.GetString(),
-            RigExecGoldenEscape(field.target.GetString()) + " " +
+            RigExecOracleGoldenEscape(field.target.GetString()) + " " +
             ArrayBits(field.weights, "float", [](float v){return Bits(v);})});
     }
     matrices(pose.weightFrames, "weightFrames");
     size_t diagnosticIndex = 0;
     for (const std::string &diagnostic : pose.diagnostics) {
         if (IsRetiredWorkSummary(diagnostic)) continue;
-        result.push_back({"diagnostics", std::to_string(diagnosticIndex++), RigExecGoldenEscape(diagnostic)});
+        result.push_back({"diagnostics", std::to_string(diagnosticIndex++), RigExecOracleGoldenEscape(diagnostic)});
     }
     *values = std::move(result);
     return true;
 }
 
-std::string RigExecGoldenVisit(const std::string &leg, size_t ordinal,
+std::string RigExecOracleGoldenVisit(const std::string &leg, size_t ordinal,
     const RigExecRigPose &pose, const std::vector<RigExecGoldenValue> &values,
     bool digestDomains)
 {
-    std::string result = "visit " + RigExecGoldenEscape(leg) + " " +
+    std::string result = "visit " + RigExecOracleGoldenEscape(leg) + " " +
         std::to_string(ordinal) + " time=" +
-        (pose.time.IsDefault() ? "default" : RigExecGoldenDouble(pose.time.GetValue())) + "\n";
+        (pose.time.IsDefault() ? "default" : RigExecOracleGoldenDouble(pose.time.GetValue())) + "\n";
     std::map<std::string, std::pair<size_t, std::string>> domains;
     for (const auto &value : values) {
-        const std::string row = "v " + value.domain + " " + RigExecGoldenEscape(value.key) +
+        const std::string row = "v " + value.domain + " " + RigExecOracleGoldenEscape(value.key) +
             " " + value.value + "\n";
         if (digestDomains && value.domain != "diagnostics" && value.domain != "valid") {
             auto &domain = domains[value.domain]; ++domain.first; domain.second += row;
@@ -245,11 +247,11 @@ std::string RigExecGoldenVisit(const std::string &leg, size_t ordinal,
     }
     for (const auto &domain : domains)
         result += "h " + domain.first + " " + std::to_string(domain.second.first) + " " +
-            RigExecGoldenHex(RigExecGoldenDigest(domain.second.second)) + "\n";
+            RigExecOracleGoldenHex(RigExecOracleGoldenDigest(domain.second.second)) + "\n";
     return result;
 }
 
-bool RigExecCompareGolden(const std::string &expected,
+bool RigExecOracleCompareGolden(const std::string &expected,
     const std::string &actual, std::string *error)
 {
     if (expected == actual) return true;

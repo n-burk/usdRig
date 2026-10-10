@@ -16,9 +16,9 @@
 #include "moverGraph.h"
 #include "rigEvaluator.h"
 #include "solverKernels.h"
-#include "rigExecGraph/sceneCompileInputs.h"
-#include "rigExecGraph/solverSceneLowering.h"
-#include "rigExecGraph/constraintSceneLowering.h"
+#include "rigExecScene/sceneCompileInputs.h"
+#include "rigExecScene/solverSceneLowering.h"
+#include "rigExecScene/constraintSceneLowering.h"
 #include "types.h"
 
 #include "rigExecMath/geometryKernels.h"

@@ -1,5 +1,5 @@
-#include "bakedExecCrossCheck.h"
-#include "goldenPose.h"
+#include "rigExec/bakedExecCrossCheck.h"
+#include "rigExec/goldenPose.h"
 #include <algorithm>
 #include <set>
 #include <tuple>

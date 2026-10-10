@@ -1,10 +1,10 @@
-#include "bakedExecCrossCheckRows.h"
-#include "bakedProgramImpl.h"
-#include "bakedProgram.h"
-#include "goldenPose.h"
-#include "solverKernels.h"
-#include "weightPackets.h"
-#include "independentConstraintCheck.h"
+#include "rigExec/bakedExecCrossCheckRows.h"
+#include "rigExec/bakedProgramImpl.h"
+#include "rigExec/bakedProgram.h"
+#include "rigExec/goldenPose.h"
+#include "rigExec/solverKernels.h"
+#include "rigExec/weightPackets.h"
+#include "rigExec/independentConstraintCheck.h"
 #include "pxr/base/vt/array.h"
 #include <algorithm>
 #include <limits>
@@ -429,6 +429,8 @@ bool RigExecBakedExecCheckRows::Add(RigExecExecCheckDescriptor d, Binding bindin
     _stageArrays.push_back(_bindings.back().arrays ? _bindings.back().arrays(b) : std::vector<RigExecExecArrayWitness>{});
     return true;
 }
+
+RigExecBakedExecCheckRows::~RigExecBakedExecCheckRows() = default;
 
 std::shared_ptr<RigExecBakedExecCheckRows> RigExecBakedExecCheckRows::Build(const B &b, std::string *error)
 {

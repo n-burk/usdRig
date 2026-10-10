@@ -3,7 +3,7 @@
 // See bakedSchedule.h for what belongs here and what belongs with a domain.
 #include "bakedSchedule.h"
 #include "bakedOpGraph.h"
-#include "rigExecGraph/solverProgram.h"
+#include "rigExecScene/solverProgram.h"
 #include "bakedExecCrossCheckRows.h"
 
 #include "bakedTrace.h"

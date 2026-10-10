@@ -12,9 +12,17 @@ The root README is the build entry point; `docs/index.md` is the node catalog.
 
 - `libs/rigExecMath`: numerical kernels. Keep math independent of stage access.
   The archive links `gf`, `vt`, and `tf`; it does not read a stage.
-- `libs/rigExecGraph`: the CMake target is the USD-free op scheduler,
-  `opGraph.cpp` only. The other sources in that directory are USD scene
-  lowering compiled into `rigExec`.
+- `libs/rigExecGraph`: the USD-free op scheduler (`opGraph.cpp` only).
+  Runtime and the binary format include these headers. Do not add a
+  stage or `pxr/` include here.
+- `libs/rigExecScene`: USD scene lowering. It links `tf`, `gf`, `vt`,
+  `sdf`, `ts`, `usd`, and `usdGeom`, plus the graph archive and math.
+  Its objects are absorbed into `librigExec.so`. Installed headers live
+  under `include/rigExecScene/`.
+- `libs/rigExecOracle`: test oracles and golden capture. Executables that
+  link `rigExec`, and the Python module, link this object library. It is
+  not part of `librigExec.so`. A cpu-reference or golden run aborts when
+  the library is missing.
 - `libs/rigExecSampler`: copies stage values into runtime inputs. This is
   the USD boundary in front of playback.
 - `libs/rigExecSchema/schema.usda`: source schema. Resources under

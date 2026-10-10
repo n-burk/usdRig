@@ -32,6 +32,7 @@ pybind11_add_module(_rigexec _rigexec.cpp)
 target_link_libraries(_rigexec PRIVATE
     rigExecRigging
     rigExec
+    rigExecOracle
     usd sdf tf gf vt)
 
 # The installed extension lands in lib/python while rigExec/rigExecRigging land

@@ -1,7 +1,7 @@
 #ifndef RIGEXEC_STANDALONE_PROVIDER_RUNTIME_H
 #define RIGEXEC_STANDALONE_PROVIDER_RUNTIME_H
 #include "sceneDb.h"
-#include "rigExecGraph/providerProgram.h"
+#include "rigExecScene/providerProgram.h"
 namespace rigExec {
 /// Concrete stage-free provider execution. Full rig execution must additionally
 /// lower solver, mover, weight and switch domain kernels into the same graph.

@@ -10,7 +10,7 @@
 #include "scalarReference.h"
 #include "rigExecMath/envelope.h"
 #include "rigExecMath/weightFields.h"
-#include "rigExecGraph/weightProgram.h"
+#include "rigExecScene/weightProgram.h"
 
 #include "pxr/base/ts/spline.h"
 #include "pxr/usd/usd/attribute.h"

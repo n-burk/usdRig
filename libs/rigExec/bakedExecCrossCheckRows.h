@@ -17,12 +17,15 @@ class RigExecBakedExecCheckRows {
 public:
     static std::shared_ptr<RigExecBakedExecCheckRows> Build(
         const RigExecBakedProgramImpl &, std::string *error = nullptr);
-    void BeforeStep(const RigExecBakedProgramImpl &, size_t step);
-    void BeforeSlot(const RigExecBakedProgramImpl &, RigExecBakedStepKind,
+    // Virtual so the evaluator can call the test oracle library. The vtable
+    // lives with the oracle objects, not in the shared library.
+    virtual ~RigExecBakedExecCheckRows();
+    virtual void BeforeStep(const RigExecBakedProgramImpl &, size_t step);
+    virtual void BeforeSlot(const RigExecBakedProgramImpl &, RigExecBakedStepKind,
                     int groupBegin, int slot);
-    void AfterStep(const RigExecBakedProgramImpl &, size_t step);
+    virtual void AfterStep(const RigExecBakedProgramImpl &, size_t step);
     /// Checks-only actual candidate observation; never used as reference input.
-    void ObserveConstraintCandidate(int walk, const RigExecPointFrame &);
+    virtual void ObserveConstraintCandidate(int walk, const RigExecPointFrame &);
     RigExecExecCrossCheckReport Evaluate(UsdTimeCode);
     const std::vector<RigExecExecCheckDescriptor> &Descriptors() const { return _descriptors; }
     /// Immutable capture inspection and intentional witness mutations for tests.

@@ -10,8 +10,8 @@
 #include "rigExecRuntime/inputs.h"
 #include "rigExecRuntime/store.h"
 #include "rigExecRuntime/stageArrayInputs.h"
-#include "rigExecGraph/usdSceneAccess.h"
-#include "rigExecGraph/sceneProgramLowering.h"
+#include "rigExecScene/usdSceneAccess.h"
+#include "rigExecScene/sceneProgramLowering.h"
 
 #include "pxr/base/plug/plugin.h"
 #include "pxr/base/plug/registry.h"

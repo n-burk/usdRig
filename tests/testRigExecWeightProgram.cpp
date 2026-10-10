@@ -1,8 +1,8 @@
-#include "rigExecGraph/weightProgram.h"
-#include "rigExecGraph/weightGraphBinding.h"
-#include "rigExecGraph/sceneTypedReads.h"
-#include "rigExecGraph/sceneGraphTypedRead.h"
-#include "rigExecGraph/weightSceneLowering.h"
+#include "rigExecScene/weightProgram.h"
+#include "rigExecScene/weightGraphBinding.h"
+#include "rigExecScene/sceneTypedReads.h"
+#include "rigExecScene/sceneGraphTypedRead.h"
+#include "rigExecScene/weightSceneLowering.h"
 #include <cmath>
 #include <iostream>
 #include <stdexcept>

@@ -2,7 +2,7 @@
 #include "moverRegistry.h"
 #include "moverExecCommon.h"
 #include "../moverGraph.h"
-#include "rigExecGraph/geometryProgram.h"
+#include "rigExecScene/geometryProgram.h"
 
 #include "pxr/base/plug/plugin.h"
 #include "pxr/base/plug/registry.h"

@@ -1,8 +1,8 @@
 // Constraint operators, pose interpolators, and rest-frame composition.
 
 #include "rigEvaluatorInternal.h"
-#include "rigExecGraph/poseSceneLowering.h"
-#include "rigExecGraph/usdSceneAccess.h"
+#include "rigExecScene/poseSceneLowering.h"
+#include "rigExecScene/usdSceneAccess.h"
 #include "rigEvaluatorDependencies.h"
 #include "rigEvaluatorConstraints.h"
 #include "movers/moverRegistry.h"

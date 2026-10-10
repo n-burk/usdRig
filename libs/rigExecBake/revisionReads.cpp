@@ -1,5 +1,6 @@
 // .rigexec path-read enumeration.
 #include "rigExecBake/revisionReads.h"
+#include "rigExec/bakedProgramImpl.h"
 #include "rigExec/moverGraph.h"
 
 #include "pxr/base/gf/matrix4d.h"
@@ -586,21 +587,30 @@ _Weight(const RigExecResolvedInputs &overlay, _Enumeration E,
 
 void
 RigExecBakeEnumerateRevisionReads(
-    const RigExecBakedProgramImpl &program,
-    const RigExecBakedProgramImpl::GeomRevision &revision, double time,
+    const RigExecBakedProgramImpl &program, size_t chainIndex,
+    size_t revisionIndex, bool derived, double time,
     const RigExecBakeRevisionReadSink &sink)
 {
-    bool derived = false;
-    for (const RigExecBakedProgramImpl::GeomChain &chain : program.chains) {
-        for (const RigExecBakedProgramImpl::GeomChain::Derived &d :
-             chain.derived) {
-            derived = derived || &d.revision == &revision;
+    if (chainIndex >= program.chains.size()) {
+        return;
+    }
+    const RigExecBakedProgramImpl::GeomChain &chain = program.chains[chainIndex];
+    const RigExecBakedProgramImpl::GeomRevision *revision = nullptr;
+    if (derived) {
+        if (revisionIndex >= chain.derived.size()) {
+            return;
         }
+        revision = &chain.derived[revisionIndex].revision;
+    } else {
+        if (revisionIndex >= chain.revisions.size()) {
+            return;
+        }
+        revision = &chain.revisions[revisionIndex];
     }
     _Enumeration E;
     E.time = UsdTimeCode(time);
     E.sink = &sink;
-    _Revision(program, _RunOverlay(program), E, revision, derived);
+    _Revision(program, _RunOverlay(program), E, *revision, derived);
 }
 
 void
