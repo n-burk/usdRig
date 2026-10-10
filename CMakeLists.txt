@@ -49,7 +49,8 @@ elseif (UNIX)
 endif()
 set(CMAKE_INSTALL_RPATH_USE_LINK_PATH ON)
 
-# Shared descriptor compiler and executor, with no USD dependency.
+# USD-free op scheduler (opGraph.cpp only). The other libs/rigExecGraph
+# sources are compiled into the USD-linked rigExec library.
 add_library(rigExecGraph STATIC libs/rigExecGraph/opGraph.cpp)
 target_compile_features(rigExecGraph PUBLIC cxx_std_17)
 target_compile_definitions(rigExecGraph PUBLIC
@@ -2165,7 +2166,7 @@ endforeach()
 
 get_property(_rigexec_tests DIRECTORY PROPERTY TESTS)
 foreach(_rigexec_test IN LISTS _rigexec_tests)
-    set_tests_properties(${_rigexec_test} PROPERTIES TIMEOUT 120)
+    set_tests_properties(${_rigexec_test} PROPERTIES TIMEOUT 300)
     if (WIN32)
         set_property(TEST ${_rigexec_test} APPEND PROPERTY
             ENVIRONMENT_MODIFICATION
@@ -2185,18 +2186,10 @@ foreach(_rigexec_test IN LISTS _rigexec_tests)
             "LD_LIBRARY_PATH=path_list_prepend:${CMAKE_CURRENT_BINARY_DIR}")
     endif()
 endforeach()
-# The imaging frame-cache suites pass in about 110s on a quiet 4-core host,
-# and the scoped-clear baked sweep in about 115s while sharing that host.
-# The 120s cap kills them before the assertions finish. They still run every
-# check. The frame-cache suites also wait on short rendezvous, so each takes
-# the whole ctest slot instead of sharing it.
-foreach(_rigexec_long testRigExecImagingFrameCache
-        testRigExecImagingFrameCacheDefault
-        testRigExecBakedModeScopedClears)
-    if(TEST ${_rigexec_long})
-        set_tests_properties(${_rigexec_long} PROPERTIES TIMEOUT 300)
-    endif()
-endforeach()
+# Every test gets 300s. Several suites sit past two minutes on a 4-core
+# runner, and a 120s cap kills them before the assertions finish. The
+# frame-cache suites also wait on short rendezvous, so each takes the
+# whole ctest slot instead of sharing it.
 if(TEST testRigExecImagingFrameCache)
     set_tests_properties(testRigExecImagingFrameCache
         testRigExecImagingFrameCacheDefault PROPERTIES PROCESSORS 4)

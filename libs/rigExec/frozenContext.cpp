@@ -253,8 +253,7 @@ RigExecEvaluateFrozen(const RigExecFrozenEvalContext &context,
     RigExecInputReplayComparisonScope replayComparison("RigExecEvaluateFrozen");
     // Stream 0 stub, retained: without a step runner no request can prove
     // bit-identity, so every request answers invalid -- the fail-closed
-    // answer -- while still carrying the requested time for the fallback's
-    // own logging.
+    // answer -- while still carrying the requested time on that pose.
     (void)context;
     RigExecRigPose pose;
     pose.time = inputs.time;

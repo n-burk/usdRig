@@ -2,6 +2,7 @@
 #include "weightReference.h"
 #include "rigEvaluatorInternal.h"
 #include "moverGraph.h"
+#include "rigExecMath/volumeFieldCheck.h"
 #include "rigExecMath/weightFields.h"
 #include "pxr/usd/usdGeom/pointBased.h"
 #include <algorithm>
@@ -272,18 +273,14 @@ ResolveVolume(
         if (boundsMode == _kGeoBounded) {
             extent.extentU = readFloat(_kGeoExtentU, 1.0f);
             extent.extentV = readFloat(_kGeoExtentV, 1.0f);
-            for (const float e : {extent.extentU, extent.extentV}) {
-                if (!std::isfinite(e) || e <= 0.0f) {
-                    *error = who() +
-                             ": inputs:extentU/V must be finite and positive "
-                             "when rigExec:planeBounds is `bounded`";
-                    return false;
-                }
+            if (!RigExecVolumeExtentsOk(who(), extent.extentU, extent.extentV,
+                                        error)) {
+                return false;
             }
             extentPtr = &extent;
         } else if (boundsMode != _kGeoUnbounded) {
-            *error = who() + ": unknown rigExec:planeBounds " +
-                     boundsMode.GetString();
+            *error = RigExecUnknownPlaneBoundsMessage(
+                who(), boundsMode.GetString());
             return false;
         }
         RigExecPlaneWeightField(
@@ -296,11 +293,8 @@ ResolveVolume(
     const float sx = readFloat(_kGeoScaleX, 1.0f);
     const float sy = readFloat(_kGeoScaleY, 1.0f);
     const float sz = readFloat(_kGeoScaleZ, 1.0f);
-    for (float s : {sx, sy, sz}) {
-        if (!std::isfinite(s) || s <= 0.0f) {
-            *error = who() + ": inputs:scaleX/Y/Z must be finite and positive";
-            return false;
-        }
+    if (!RigExecVolumeAxisScalesOk(who(), sx, sy, sz, error)) {
+        return false;
     }
     GfMatrix4d divide(1.0);
     divide.SetScale(GfVec3d(1.0 / double(sx), 1.0 / double(sy),
@@ -316,12 +310,9 @@ ResolveVolume(
             readFloat(_kGeoScaleXNeg, 1.0f),
             readFloat(_kGeoScaleYNeg, 1.0f),
             readFloat(_kGeoScaleZNeg, 1.0f));
-        for (int axis = 0; axis < 3; ++axis) {
-            if (!std::isfinite(positiveScales[axis]) || positiveScales[axis] <= 0 ||
-                !std::isfinite(negativeScales[axis]) || negativeScales[axis] <= 0) {
-                *error = who() + ": signed axis scales must be finite and positive";
-                return false;
-            }
+        if (!RigExecSignedAxisScalesOk(who(), positiveScales, negativeScales,
+                                       error)) {
+            return false;
         }
         RigExecSphereWeightField(samplePoints, worldToLocal, params, weights,
                                  positiveScales, negativeScales);
