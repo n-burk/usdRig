@@ -190,6 +190,16 @@ bool RigExecFrameDigestOrderMatches(
     const RigExecFrameDigestOrder *order,
     const std::vector<RigExecSampledInput> &values);
 
+/// The text bytes of every path in \p order's recorded sequence (the sum of
+/// GetString().size(), duplicates included), computed once when the order
+/// was recorded. 0 for null.
+size_t RigExecFrameDigestOrderPathTextBytes(const RigExecFrameDigestOrder *order);
+
+/// Whether \p path is one of \p order's first-win paths (binary search over
+/// the recorded sorted order). False for null.
+bool RigExecFrameDigestOrderHasPath(const RigExecFrameDigestOrder *order,
+                                    const SdfPath &path);
+
 /// Folds an epoch-constant digest (plan D3: RigExecEpochConstantDigest, the
 /// value-sensitive avar-constant region the epoch digest no longer covers)
 /// into a control digest, under its own domain tag. The fold is

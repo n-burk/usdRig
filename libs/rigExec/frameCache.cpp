@@ -26,6 +26,7 @@
 #include "pxr/base/gf/vec4h.h"
 #include "pxr/base/vt/array.h"
 
+#include <algorithm>
 #include <cstring>
 #include <map>
 #include <memory>
@@ -692,11 +693,13 @@ RigExecSampleDigestible(const RigExecSampledInput &sample)
 }
 
 // `paths` is the recorded sequence; `order[j]` the index of the j-th
-// first-win path in sorted order and `prefix[j]` its _SamplePrefix.
+// first-win path in sorted order and `prefix[j]` its _SamplePrefix;
+// `pathTextBytes` the text bytes of every path in `paths`.
 struct RigExecFrameDigestOrder {
     std::vector<SdfPath> paths;
     std::vector<uint32_t> order;
     std::vector<uint64_t> prefix;
+    size_t pathTextBytes = 0;
 };
 
 std::shared_ptr<const RigExecFrameDigestOrder>
@@ -708,6 +711,7 @@ RigExecRecordFrameDigestOrder(const std::vector<RigExecSampledInput> &values)
     std::map<SdfPath, uint32_t> ordered;
     for (size_t i = 0; i < values.size(); ++i) {
         order->paths.push_back(values[i].path);
+        order->pathTextBytes += values[i].path.GetString().size();
         ordered.emplace(values[i].path, uint32_t(i));
     }
     order->order.reserve(ordered.size());
@@ -733,6 +737,29 @@ RigExecFrameDigestOrderMatches(const RigExecFrameDigestOrder *order,
         }
     }
     return true;
+}
+
+size_t
+RigExecFrameDigestOrderPathTextBytes(const RigExecFrameDigestOrder *order)
+{
+    return order ? order->pathTextBytes : 0;
+}
+
+bool
+RigExecFrameDigestOrderHasPath(const RigExecFrameDigestOrder *order,
+                               const SdfPath &path)
+{
+    if (!order) {
+        return false;
+    }
+    // `order` lists the first-win paths ascending by SdfPath's operator<,
+    // the recording map's own comparison.
+    const auto found = std::lower_bound(
+        order->order.begin(), order->order.end(), path,
+        [order](uint32_t index, const SdfPath &key) {
+            return order->paths[index] < key;
+        });
+    return found != order->order.end() && order->paths[*found] == path;
 }
 
 uint64_t

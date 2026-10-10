@@ -2314,7 +2314,11 @@ RigExecImagingRegistry::BuildWarmWork(
         RigExecFullEvalProvenance(program->GetStepGraph(), time);
     provenance.unfoldedControlDigest = unfoldedDigest;
     warmPhase("Warm.Provenance");
-    RigExecWarmWork work = [inputs, context, key, cache, scheduler, rig,
+    // The retained state holds its own copy, so the job takes the sampled
+    // vector itself, immutable from here; nothing below reads `inputs`.
+    std::shared_ptr<const RigExecFrameInputs> jobInputs =
+        std::make_shared<RigExecFrameInputs>(std::move(inputs));
+    RigExecWarmWork work = [jobInputs, context, key, cache, scheduler, rig,
                               runner, frozen, workspaces, warmIndex, retained,
                               retainedBytes, provenance, progressPublication, publishObserver](
                                  const RigExecWarmRequest &request) {
@@ -2341,7 +2345,7 @@ RigExecImagingRegistry::BuildWarmWork(
         }
         workerPhase("Warm.WorkerLane");
         const RigExecRigPose pose = RigExecEvaluateFrozen(
-            laneContext, inputs, runner, scheduler, rig);
+            laneContext, *jobInputs, runner, scheduler, rig);
         workerPhase("Warm.WorkerEvaluate");
         // Stale at publish means an edit landed mid-run -- a generation
         // bump or a scoped purge that moved this time's fence token (the

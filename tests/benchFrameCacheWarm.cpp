@@ -3,7 +3,10 @@
 // this bench measures what warming DOES with them: cold-vs-warm scrub
 // throughput, edit-to-affected-frames recompute cost, UI-eval latency with
 // warming on/off (median and p95), memory under the cap, an N-second
-// UI-vs-warming stress for TSAN runs, and a Chrome-trace lane demo. Prints
+// UI-vs-warming stress for TSAN runs, and a Chrome-trace lane demo. The
+// scrub ends with the routes production samples through (the pinned
+// samplers, the digest and the lookup apart, and a sample after a stage
+// edit); its self-binding rows time the fallback route. Prints
 // human-readable numbers; asserts nothing, so it is built but deliberately
 // NOT registered with ctest (like benchFrameCache): wall-clock comparisons
 // flake on shared CI runners, so the benches report and the gate stays
@@ -51,6 +54,7 @@
 #include "pxr/usd/sdf/path.h"
 #include "pxr/usd/sdf/types.h"
 #include "pxr/usd/usd/attribute.h"
+#include "pxr/usd/usd/editContext.h"
 #include "pxr/usd/usd/prim.h"
 #include "pxr/usd/usd/primRange.h"
 #include "pxr/usd/usd/relationship.h"
@@ -280,6 +284,195 @@ KeyFor(uint64_t epoch, const RigExecFrameInputs &inputs,
     return key;
 }
 
+// The warm anatomy production pays, 40 repetitions each: the pinned
+// samplers with the chains bound once (as the bridge and the registry bind
+// them), the digest and the lookup apart, and the trusted sample after a
+// stage edit no rig reads (every notice moves the stage edit serial, so the
+// sampler memo rebuilds once per notice). \p cache holds every frame of
+// \p frames under KeyFor; a miss is printed as data, not asserted.
+bool
+BenchPinnedAnatomy(BenchRig *rig, const std::vector<double> &frames,
+                   RigExecFrameCache *cache)
+{
+    const size_t reps = 40;
+    const std::vector<RigExecValueOverride> noOverrides;
+    const RigExecRigEvaluator &evaluator = *rig->evaluator;
+    RigExecChainSampleBindings bindings;
+    std::string bindError;
+    if (!RigExecBindChainSampleInputs(evaluator, &bindings, &bindError)) {
+        std::printf("  pinned anatomy skipped: chain bind declined (%s)\n",
+                    bindError.c_str());
+        return true;
+    }
+    const auto fail = [](const char *row, double t,
+                         const std::string &error) {
+        std::printf("  %s sample failed at %g (%s)\n", row, t,
+                    error.c_str());
+        return false;
+    };
+    size_t misses = 0;
+
+    // The headline: a served revisit's sample, digest and lookup.
+    std::vector<double> keyHit;
+    for (size_t rep = 0; rep < reps; ++rep) {
+        const double t = frames[rep % frames.size()];
+        RigExecFrameInputs inputs;
+        std::string error;
+        RigExecRigPose served;
+        const double start = NowUs();
+        const bool sampled = RigExecSampleFrameInputsWithTrustedChainBindings(
+            evaluator, UsdTimeCode(t), noOverrides, bindings, &inputs,
+            &error);
+        const bool hit =
+            sampled &&
+            cache->Lookup(KeyFor(rig->epoch, inputs, noOverrides), &served);
+        keyHit.push_back(NowUs() - start);
+        if (!sampled) {
+            return fail("key hit", t, error);
+        }
+        misses += hit && served.valid ? 0 : 1;
+    }
+    PrintDistribution("key hit (trusted)", keyHit, "us/frame");
+
+    // The samplers alone. The trusted vectors feed the digest and lookup
+    // rows below.
+    std::vector<RigExecFrameInputs> vectors(frames.size());
+    std::vector<double> trusted;
+    for (size_t rep = 0; rep < reps; ++rep) {
+        const double t = frames[rep % frames.size()];
+        RigExecFrameInputs inputs;
+        std::string error;
+        const double start = NowUs();
+        const bool sampled = RigExecSampleFrameInputsWithTrustedChainBindings(
+            evaluator, UsdTimeCode(t), noOverrides, bindings, &inputs,
+            &error);
+        trusted.push_back(NowUs() - start);
+        if (!sampled) {
+            return fail("trusted", t, error);
+        }
+        vectors[rep % frames.size()] = std::move(inputs);
+    }
+    PrintDistribution("sample trusted", trusted, "us/frame");
+    std::vector<double> verified;
+    for (size_t rep = 0; rep < reps; ++rep) {
+        const double t = frames[rep % frames.size()];
+        RigExecFrameInputs inputs;
+        std::string error;
+        const double start = NowUs();
+        const bool sampled = RigExecSampleFrameInputsWithChainBindings(
+            evaluator, UsdTimeCode(t), noOverrides, bindings, &inputs,
+            &error);
+        verified.push_back(NowUs() - start);
+        if (!sampled) {
+            return fail("verified", t, error);
+        }
+    }
+    PrintDistribution("sample verified", verified, "us/frame");
+    {
+        RigExecBurstSampleCache burst;
+        std::string error;
+        const RigExecBakedProgram *program = evaluator.GetBakedProgram();
+        if (!program ||
+            !RigExecBuildBurstSampleCache(
+                *program, bindings, noOverrides,
+                RigExecFrameCacheEpochDigest(evaluator), &burst, &error)) {
+            std::printf("  sample burst skipped: build declined (%s)\n",
+                        error.c_str());
+        } else {
+            std::vector<double> burstSamples;
+            for (size_t rep = 0; rep < reps; ++rep) {
+                const double t = frames[rep % frames.size()];
+                RigExecFrameInputs inputs;
+                const double start = NowUs();
+                const bool sampled = RigExecSampleFrameInputsWithBurstCache(
+                    evaluator, UsdTimeCode(t), noOverrides, &burst, &inputs,
+                    &error);
+                burstSamples.push_back(NowUs() - start);
+                if (!sampled) {
+                    return fail("burst", t, error);
+                }
+            }
+            PrintDistribution("sample burst", burstSamples, "us/frame");
+        }
+    }
+
+    // The key and the store apart, over the trusted vectors.
+    std::vector<RigExecFrameCacheKey> keys(frames.size());
+    std::vector<double> digestOnly;
+    for (size_t rep = 0; rep < reps; ++rep) {
+        const size_t i = rep % frames.size();
+        const double start = NowUs();
+        keys[i] = KeyFor(rig->epoch, vectors[i], noOverrides);
+        digestOnly.push_back(NowUs() - start);
+    }
+    PrintDistribution("digest only", digestOnly, "us/frame");
+    std::vector<double> lookupOnly;
+    for (size_t rep = 0; rep < reps; ++rep) {
+        const size_t i = rep % frames.size();
+        RigExecRigPose served;
+        const double start = NowUs();
+        const bool hit = cache->Lookup(keys[i], &served);
+        lookupOnly.push_back(NowUs() - start);
+        misses += hit && served.valid ? 0 : 1;
+    }
+    PrintDistribution("lookup only", lookupOnly, "us/frame");
+
+    // One session-layer value per repetition on an attribute outside every
+    // rig, then the trusted sample. The attribute's prim is defined (a
+    // resync) and removed outside the timed loop, and the chains are bound
+    // again after the define: trusted bindings do not outlive a resync.
+    {
+        const UsdStageRefPtr &stage = rig->stage;
+        const SdfPath scratchPath("/BenchFrameCacheWarmScratch");
+        UsdAttribute scratch;
+        {
+            UsdEditContext session(stage, stage->GetSessionLayer());
+            scratch = stage->DefinePrim(scratchPath)
+                          .CreateAttribute(TfToken("benchValue"),
+                                           SdfValueTypeNames->Double);
+        }
+        RigExecChainSampleBindings rebound;
+        std::string error;
+        if (!scratch ||
+            !RigExecBindChainSampleInputs(evaluator, &rebound, &error)) {
+            std::printf("  sample after a stage edit skipped (%s)\n",
+                        error.c_str());
+        } else {
+            std::vector<double> afterEdit;
+            for (size_t rep = 0; rep < reps; ++rep) {
+                const double t = frames[rep % frames.size()];
+                {
+                    UsdEditContext session(stage, stage->GetSessionLayer());
+                    scratch.Set(double(rep));
+                }
+                RigExecFrameInputs inputs;
+                const double start = NowUs();
+                const bool sampled =
+                    RigExecSampleFrameInputsWithTrustedChainBindings(
+                        evaluator, UsdTimeCode(t), noOverrides, rebound,
+                        &inputs, &error);
+                afterEdit.push_back(NowUs() - start);
+                if (!sampled) {
+                    std::printf("  sample after a stage edit failed at %g "
+                                "(%s)\n",
+                                t, error.c_str());
+                    afterEdit.clear();
+                    break;
+                }
+            }
+            if (!afterEdit.empty()) {
+                PrintDistribution("sample trusted after a stage edit",
+                                  afterEdit, "us/frame");
+            }
+        }
+        UsdEditContext session(stage, stage->GetSessionLayer());
+        stage->RemovePrim(scratchPath);
+    }
+    std::printf("  %-22s %10zu (key hit and lookup only rows)\n",
+                "pinned misses", misses);
+    return true;
+}
+
 // Scrub throughput: cold (live eval + publish) vs warm (digest + lookup).
 
 bool
@@ -429,6 +622,10 @@ BenchScrub(BenchRig *rig, const char *name,
         std::printf("  %-22s %10.1f us/frame (median)\n",
                     "warm of which: digest+lookup",
                     Percentile(digestLookup, 0.5));
+        // The same samples under their production name: the route the
+        // bridge takes only when the pinned route declines.
+        PrintDistribution("sample self-binding (fallback)", sampleOnly,
+                          "us/frame");
     }
     const double ratio =
         Percentile(warm, 0.5) > 0.0
@@ -443,7 +640,10 @@ BenchScrub(BenchRig *rig, const char *name,
                 "bytes=%zu (bench misses=%zu invalid=%zu)\n",
                 stats.hits, stats.misses, stats.published,
                 stats.entryCount, stats.bytes, misses, invalid);
-    return true;
+    // After the statistics above, so their counts stay the scrub's own.
+    std::printf("  pinned anatomy (production routes, 40 repetitions "
+                "each):\n");
+    return BenchPinnedAnatomy(rig, frames, &cache);
 }
 
 // Edit cost: one control-sample edit across an N-frame range, then what the

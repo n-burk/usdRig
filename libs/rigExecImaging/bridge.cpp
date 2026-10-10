@@ -1935,8 +1935,15 @@ RigExecFreshProof::RigExecFreshProof(
     // Stage seeds fold no path string, so they contribute none: a notice
     // that moves only seeds leaves the proof standing, and the digest
     // compare -- which does fold them -- misses honestly on the visit.
+    // A matching recorded order is immutable and shared, and its first-win
+    // paths are exactly the vector's sample paths, so it stands in for
+    // their text.
+    if (inputs && RigExecFrameDigestOrderMatches(inputs->digestOrder.get(),
+                                                 inputs->values)) {
+        order = inputs->digestOrder;
+    }
     std::set<std::string> ids;
-    if (inputs) {
+    if (inputs && !order) {
         for (const RigExecSampledInput &sample : inputs->values) {
             if (!sample.path.IsEmpty()) {
                 ids.insert(sample.path.GetString());
@@ -1949,6 +1956,16 @@ RigExecFreshProof::RigExecFreshProof(
         }
     }
     paths.assign(ids.begin(), ids.end());
+}
+
+bool
+RigExecFreshProof::Covers(const std::string &id, const SdfPath &asPath) const
+{
+    // Empty paths are no dependency on either side: `paths` never holds
+    // one, and an empty \p asPath is not looked up.
+    return std::binary_search(paths.begin(), paths.end(), id) ||
+           (order && !asPath.IsEmpty() &&
+            RigExecFrameDigestOrderHasPath(order.get(), asPath));
 }
 
 void
@@ -2057,12 +2074,28 @@ RigExecImagingBridge::RetireProofsForControls(
     if (_freshDigests.empty() || controls.empty()) {
         return 0;
     }
-    const std::set<std::string> doomed(controls.begin(), controls.end());
+    // Each doomed id once, beside its path when the id spells one
+    // canonically: then the id equals a sample path's text exactly when
+    // the paths are equal, and an id that spells none equals no sample
+    // path's text, so it can only name an override.
+    std::vector<std::pair<std::string, SdfPath>> doomed;
+    {
+        const std::set<std::string> unique(controls.begin(), controls.end());
+        doomed.reserve(unique.size());
+        for (const std::string &id : unique) {
+            SdfPath path = SdfPath::IsValidPathString(id) ? SdfPath(id)
+                                                          : SdfPath();
+            if (!path.IsEmpty() && path.GetString() != id) {
+                path = SdfPath();
+            }
+            doomed.emplace_back(id, std::move(path));
+        }
+    }
     size_t retired = 0;
     for (auto it = _freshDigests.begin(); it != _freshDigests.end();) {
         bool hit = false;
-        for (const std::string &path : it->second.paths) {
-            if (doomed.find(path) != doomed.end()) {
+        for (const auto &[id, path] : doomed) {
+            if (it->second.Covers(id, path)) {
                 hit = true;
                 break;
             }

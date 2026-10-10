@@ -81,7 +81,8 @@
 //   * RETIRE. One control retires exactly the affected frames; the next
 //     commit re-warms them first; re-warmed frames are bit-identical.
 //   * PROOFS. Proofs carry their sampled-path set: constant patches retire
-//     none, varying edits retire all.
+//     none, varying edits retire all. The set is the vector's shared digest
+//     order, and retiring by control id matches the path-text rule.
 //   * DRAG. Warming under a drag admits override identities with exact
 //     seeds; release re-warms what the commit retired.
 //   * FENCED-CLEAR. Clear with jobs queued and running, then drain: late
@@ -133,6 +134,7 @@
 #include <limits>
 #include <map>
 #include <mutex>
+#include <set>
 #include <string>
 #include <thread>
 #include <utility>
@@ -3744,8 +3746,9 @@ TestProofScopingRetiresOnlyIntersecting()
         CHECK(bridge->GetFreshProofCount() == 2);
         RigExecFreshProof proof;
         CHECK(bridge->GetFreshProof(UsdTimeCode(1.0), &proof));
-        // The dependency set is recorded: non-empty, sorted, unique.
-        CHECK(!proof.paths.empty());
+        // The dependency set is recorded: the shared digest order or path
+        // text, the text sorted and unique.
+        CHECK(proof.order || !proof.paths.empty());
         CHECK(std::is_sorted(proof.paths.begin(), proof.paths.end()));
         CHECK(std::adjacent_find(proof.paths.begin(), proof.paths.end()) ==
               proof.paths.end());
@@ -3781,6 +3784,176 @@ TestProofScopingRetiresOnlyIntersecting()
         CHECK(bridge->GetFreshProof(UsdTimeCode(2.0), &retired));
         registry.Deactivate();
     }
+}
+
+// PROOFS BY ORDER. A proof holds its sampled vector's recorded digest order
+// instead of every sample path's text: memoized frames of one path sequence
+// share one order, and retiring by control id retires exactly the proofs
+// the text-set rule retires -- a canonical path id by path, anything else
+// (override ids, non-paths, other spellings of a path) by text only.
+void
+TestProofsShareTheDigestOrder()
+{
+    std::printf("progress: TestProofsShareTheDigestOrder\n");
+    std::fflush(stdout);
+    SetEnv("RIGEXEC_FRAME_CACHE", "on");
+    SetEnv("RIGEXEC_FRAME_CACHE_VERIFY", "0");
+    if (RigExecFrameCacheModeFromEnvironment() ==
+        RigExecFrameCacheMode::Off) {
+        return;
+    }
+    const UsdStageRefPtr stage = MakeTinyRig();
+    RigExecImagingBridge bridge(stage, SdfPath("/Asset/Rig"));
+    CHECK(bridge.Compile());
+    const std::vector<RigExecValueOverride> none;
+
+    // Warming proofs recorded beside the memoized frames: an ordered vector
+    // with a repeated, an empty and a variant-selection path; an ordered
+    // vector under a standing override; and a vector with no order, which
+    // keeps the path text.
+    const SdfPath variant = SdfPath("/V")
+                                .AppendVariantSelection("v", "a")
+                                .AppendProperty(TfToken("x"));
+    RigExecFrameInputs repeated;
+    repeated.Add(SdfPath("/P/A.x"), VtValue(1.0));
+    repeated.Add(SdfPath("/P/B.y"), VtValue(2.0));
+    repeated.Add(SdfPath("/P/A.x"), VtValue(3.0));
+    repeated.Add(SdfPath(), VtValue(4.0));
+    repeated.Add(variant, VtValue(5.0));
+    repeated.digestOrder = RigExecRecordFrameDigestOrder(repeated.values);
+    RigExecFrameInputs overridden;
+    overridden.Add(SdfPath("/P/A.x"), VtValue(6.0));
+    overridden.Add(SdfPath("/R.w"), VtValue(7.0));
+    overridden.digestOrder = RigExecRecordFrameDigestOrder(overridden.values);
+    RigExecFrameInputs unordered;
+    unordered.Add(SdfPath("/P/B.y"), VtValue(8.0));
+    unordered.Add(SdfPath("/Q.z"), VtValue(9.0));
+    const std::vector<RigExecValueOverride> standing{RigExecValueOverride{
+        SdfPath("/Asset/Rig/AlongX"), TfToken(), TfToken("avars:tx"),
+        VtValue(3.0)}};
+    const std::vector<double> memoized{1.0, 2.0, 3.0};
+    const std::vector<double> warmed{11.0, 12.0, 13.0};
+
+    // Drops every proof, then records the memoized and the warming ones.
+    const auto record = [&]() {
+        bridge.ClearFrameCache();
+        for (double time : memoized) {
+            const auto result =
+                bridge.EvaluateAndPublishResult(UsdTimeCode(time));
+            CHECK(result.ok && !result.cacheHit);
+        }
+        bridge.NoteWarmingEnqueued(UsdTimeCode(11.0), 11, 11, repeated);
+        bridge.NoteWarmingEnqueued(UsdTimeCode(13.0), 13, 13, unordered);
+        bridge.SetInteractiveOverrides(standing);
+        bridge.NoteWarmingEnqueued(UsdTimeCode(12.0), 12, 12, overridden);
+        bridge.ClearInteractiveOverrides();
+        CHECK(bridge.GetFreshProofCount() ==
+              memoized.size() + warmed.size());
+    };
+
+    // Today's rule per proof, from the vector and overrides it was recorded
+    // from: every non-empty sample path's text plus the override ids. The
+    // memoized vectors are re-sampled here and pinned to their proofs by
+    // the unfolded digest.
+    std::map<double, std::set<std::string>> reference;
+    const auto addReference =
+        [&reference](double time, const RigExecFrameInputs &inputs,
+                     const std::vector<RigExecValueOverride> &overrides) {
+            std::set<std::string> &ids = reference[time];
+            for (const RigExecSampledInput &sample : inputs.values) {
+                if (!sample.path.IsEmpty()) {
+                    ids.insert(sample.path.GetString());
+                }
+            }
+            for (const RigExecValueOverride &o : overrides) {
+                ids.insert(RigExecControlIdForOverride(o));
+            }
+        };
+    record();
+    std::map<double, RigExecFreshProof> proofs;
+    for (double time : memoized) {
+        CHECK(bridge.GetFreshProof(UsdTimeCode(time), &proofs[time]));
+        RigExecFrameInputs sampled;
+        CHECK(RigExecSampleFrameInputs(bridge.GetEvaluator(),
+                                       UsdTimeCode(time), none, &sampled));
+        CHECK(!sampled.values.empty());
+        CHECK(RigExecControlStateDigest(sampled, none) ==
+              proofs[time].unfolded);
+        addReference(time, sampled, none);
+    }
+    // The varying edit test's control: every memoized proof names it.
+    CHECK(reference[1.0].count("/Asset/Rig/AlongX.avars:tx") == 1);
+    addReference(11.0, repeated, none);
+    addReference(12.0, overridden, standing);
+    addReference(13.0, unordered, none);
+    for (double time : warmed) {
+        CHECK(bridge.GetFreshProof(UsdTimeCode(time), &proofs[time]));
+    }
+
+    // One order for every memoized frame, and no sample text beside it.
+    CHECK(proofs[1.0].order != nullptr);
+    CHECK(proofs[1.0].order == proofs[2.0].order);
+    CHECK(proofs[2.0].order == proofs[3.0].order);
+    for (double time : memoized) {
+        CHECK(proofs[time].sampledInputs);
+        CHECK(proofs[time].paths.empty());
+    }
+    CHECK(proofs[11.0].order == repeated.digestOrder);
+    CHECK(proofs[11.0].paths.empty());
+    CHECK(proofs[12.0].order == overridden.digestOrder);
+    CHECK(proofs[12.0].paths ==
+          std::vector<std::string>{RigExecControlIdForOverride(standing[0])});
+    CHECK(proofs[13.0].order == nullptr);
+    CHECK(proofs[13.0].paths ==
+          std::vector<std::string>(reference[13.0].begin(),
+                                   reference[13.0].end()));
+
+    // Every id any proof names, plus ids that name none: other spellings of
+    // a named path (the second is a valid, non-canonical one), a relative
+    // path, a prim path, a non-path and the empty id.
+    std::set<std::string> candidates;
+    for (const auto &entry : reference) {
+        candidates.insert(entry.second.begin(), entry.second.end());
+    }
+    candidates.insert({"/P/../P/A.x", "/V{ v = a }.x", "P/A.x", "/P",
+                       "not a path", ""});
+    std::vector<double> times = memoized;
+    times.insert(times.end(), warmed.begin(), warmed.end());
+    const auto retireAndCompare =
+        [&](const std::vector<std::string> &controls) {
+            record();
+            std::set<double> expected;
+            for (const auto &[time, ids] : reference) {
+                for (const std::string &id : controls) {
+                    if (ids.count(id)) {
+                        expected.insert(time);
+                    }
+                }
+            }
+            const size_t retired = bridge.RetireProofsForControls(controls);
+            if (retired != expected.size()) {
+                std::printf("retiring <%s>: %zu proofs, expected %zu\n",
+                            controls.front().c_str(), retired,
+                            expected.size());
+                CHECK(false);
+            }
+            for (double time : times) {
+                RigExecFreshProof held;
+                if (bridge.GetFreshProof(UsdTimeCode(time), &held) ==
+                    (expected.count(time) != 0)) {
+                    std::printf("retiring <%s>: proof %g wrongly %s\n",
+                                controls.front().c_str(), time,
+                                expected.count(time) ? "kept" : "retired");
+                    CHECK(false);
+                }
+            }
+        };
+    for (const std::string &id : candidates) {
+        retireAndCompare({id});
+    }
+    // A sampled path, an override id and a non-path in one call.
+    retireAndCompare({"/Q.z", RigExecControlIdForOverride(standing[0]),
+                      "not a path"});
 }
 
 // ROUTED THROUGH A CONNECTION. A property-chain mover's input connected to a
@@ -4851,6 +5024,7 @@ main(int argc, char **argv)
     TestTimeSampledSkinWeightsKeyFramesApart();
     TestInSessionWeightSamplesKeyFramesApart();
     TestLiveChainBindingsFollowNotices();
+    TestProofsShareTheDigestOrder();
     if (failures == 0) {
         std::printf("testRigExecImagingFrameCache: all tests passed\n");
     } else {

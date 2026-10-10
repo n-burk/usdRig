@@ -110,8 +110,17 @@ RigExecRetainedSourcesBytes(const RigExecRetainedFrameState &state)
     // tables every frame sampled under one program state shares, so no
     // frame counts them; a retained frame keeps its state's tables alive.
     size_t total = sizeof(RigExecRetainedFrameState);
+    // A vector that still repeats its recorded digest order counts the
+    // order's path text total, recorded once: the same sum per sample.
+    const RigExecFrameDigestOrder *order = state.inputs.digestOrder.get();
+    const bool ordered =
+        RigExecFrameDigestOrderMatches(order, state.inputs.values);
+    if (ordered) {
+        total += RigExecFrameDigestOrderPathTextBytes(order);
+    }
     for (const RigExecSampledInput &sampled : state.inputs.values) {
-        total += sampled.path.GetString().size() + sizeof(bool);
+        total += ordered ? sizeof(bool)
+                         : sampled.path.GetString().size() + sizeof(bool);
         if (sampled.hasValue) {
             total += _ArrayBytes(sampled.value);
         }

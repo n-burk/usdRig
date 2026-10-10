@@ -536,6 +536,95 @@ TestUpstreamMissesSparseReuse()
     CHECK(arrays.RetainedBytes() > authored.RetainedBytes());
 }
 
+// Retained bytes are the same number whether the path text comes from the
+// vector's recorded digest order or from each sample: every sample's path
+// text (a repeated path twice), a flag, and its payload. An order recorded
+// for another sequence is not used.
+void
+TestRetainedBytesUnchangedByTheOrder()
+{
+    const std::string points = "/Rig/Geo.points";
+    const std::string tx = "/Rig/Ctl.avars:tx";
+    const std::string ty = "/Rig/Ctl.avars:ty";
+    const std::string rz = "/Rig/Ctl.avars:rz";
+    RigExecFrameInputs inputs;
+    inputs.time = UsdTimeCode(3.0);
+    inputs.Add(SdfPath(points), VtValue(VtVec3fArray(5, GfVec3f(1.0f))));
+    inputs.Add(SdfPath(tx), VtValue(1.5));
+    inputs.Add(SdfPath(ty), VtValue(), /*hasValue=*/false);
+    inputs.Add(SdfPath(tx), VtValue(2.5));
+    inputs.digestOrder = RigExecRecordFrameDigestOrder(inputs.values);
+    const RigExecFrameDigestOrder *order = inputs.digestOrder.get();
+    CHECK(RigExecFrameDigestOrderMatches(order, inputs.values));
+
+    // The order's text total counts the repeat; HasPath answers its
+    // first-win paths and nothing else.
+    CHECK(RigExecFrameDigestOrderPathTextBytes(order) ==
+          points.size() + 2 * tx.size() + ty.size());
+    CHECK(RigExecFrameDigestOrderPathTextBytes(nullptr) == 0);
+    CHECK(RigExecFrameDigestOrderHasPath(order, SdfPath(points)));
+    CHECK(RigExecFrameDigestOrderHasPath(order, SdfPath(tx)));
+    CHECK(RigExecFrameDigestOrderHasPath(order, SdfPath(ty)));
+    CHECK(!RigExecFrameDigestOrderHasPath(order, SdfPath(rz)));
+    CHECK(!RigExecFrameDigestOrderHasPath(order, SdfPath("/Rig/Ctl")));
+    CHECK(!RigExecFrameDigestOrderHasPath(order, SdfPath()));
+    CHECK(!RigExecFrameDigestOrderHasPath(nullptr, SdfPath(tx)));
+
+    // The per-sample sum frameCacheSparsity.cpp kept before the order:
+    // path text and a flag per sample, an array's elements, a scalar's
+    // VtValue, nothing for a valueless sample.
+    const auto reference = [](const RigExecFrameInputs &sampled) {
+        size_t total = sizeof(RigExecRetainedFrameState);
+        for (const RigExecSampledInput &sample : sampled.values) {
+            total += sample.path.GetString().size() + sizeof(bool);
+            if (!sample.hasValue) {
+                continue;
+            }
+            total += sample.value.IsHolding<VtVec3fArray>()
+                         ? sample.value.UncheckedGet<VtVec3fArray>().size() *
+                               sizeof(GfVec3f)
+                         : sizeof(VtValue);
+        }
+        return total;
+    };
+    const size_t expected = sizeof(RigExecRetainedFrameState) +
+                            points.size() + 2 * tx.size() + ty.size() +
+                            4 * sizeof(bool) + 5 * sizeof(GfVec3f) +
+                            2 * sizeof(VtValue);
+    CHECK(reference(inputs) == expected);
+    const auto bytes = [](const RigExecFrameInputs &sampled) {
+        return RigExecCaptureRetainedState(sampled, {}, 7, 3, 0)
+            .RetainedBytes();
+    };
+    CHECK(RigExecCaptureRetainedState(inputs, {}, 7, 3, 0)
+              .inputs.digestOrder == inputs.digestOrder);
+    CHECK(bytes(inputs) == expected);
+    RigExecFrameInputs plain = inputs;
+    plain.digestOrder.reset();
+    CHECK(bytes(plain) == expected);
+
+    // Without the repeat, both routes drop one path's text, flag and value.
+    RigExecFrameInputs single = inputs;
+    single.values.pop_back();
+    single.digestOrder = RigExecRecordFrameDigestOrder(single.values);
+    const size_t singleExpected =
+        expected - tx.size() - sizeof(bool) - sizeof(VtValue);
+    CHECK(reference(single) == singleExpected);
+    CHECK(bytes(single) == singleExpected);
+    single.digestOrder.reset();
+    CHECK(bytes(single) == singleExpected);
+
+    // A grown vector keeps the shorter sequence's order, which no longer
+    // matches: every sample counts its own text.
+    RigExecFrameInputs grown = inputs;
+    grown.Add(SdfPath(rz), VtValue(4.0));
+    CHECK(!RigExecFrameDigestOrderMatches(grown.digestOrder.get(),
+                                          grown.values));
+    CHECK(bytes(grown) == reference(grown));
+    CHECK(bytes(grown) ==
+          expected + rz.size() + sizeof(bool) + sizeof(VtValue));
+}
+
 // A frame retained under other values of a listed external input
 // (varyingRevisionLeaves, which the control digest folds) is never reused:
 // no control id names them, so at a standing time with every sampled
@@ -1253,6 +1342,7 @@ main()
     TestNoticeAdapterRealNotice();
     TestOverrideSeeds();
     TestRecomposedVersionSeedsSparseReuse();
+    TestRetainedBytesUnchangedByTheOrder();
     if (failures == 0) {
         std::printf("PASS testRigExecFrameCacheSparsity\n");
     } else {
