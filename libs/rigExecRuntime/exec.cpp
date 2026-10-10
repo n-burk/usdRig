@@ -385,6 +385,13 @@ RigExecRuntimeReader::GetSlotLeafKeysForTesting() const
 }
 
 size_t
+RigExecRuntimeReader::GetSlotLeafCountForTesting(size_t slot) const
+{
+    const std::vector<uint32_t> &begin = _program->slotLeafBegin;
+    return slot + 1 < begin.size() ? begin[slot + 1] - begin[slot] : 0;
+}
+
+size_t
 RigExecRuntimeReader::GetSourceKeysBuiltForTesting() const
 {
     return _program->store.sourceKeysBuilt;

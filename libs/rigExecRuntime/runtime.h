@@ -265,6 +265,8 @@ public:
     // leaves, constraint input arrays) the last Execute re-keyed; a run
     // after no input write re-keys none.
     size_t GetSlotLeafKeysForTesting() const;
+    // Test-only: how many slot-keyed leaves read input \p slot.
+    size_t GetSlotLeafCountForTesting(size_t slot) const;
 
     // Test-only: how many source memos of steps that read inputs the last
     // Execute built; a run after no input write builds none.

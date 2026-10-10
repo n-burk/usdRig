@@ -1952,27 +1952,43 @@ _TestSparseSlotLeaves(const std::string &examples)
     const size_t sampled = reader.GetSlotLeafKeysForTesting();
     CHECK(run("held after time") == 0);
 
-    // A provider leaf's own source slot, scalar and listed.
-    const RigExecStageArrayInputInfo *source = nullptr;
-    const auto providers =
-        RigExecRuntimeStageArrayInputs::EnumerateProviderValues(reader);
-    for (const RigExecStageArrayInputInfo &info : providers) {
-        if (info.tag == RrInputTag::Double && info.slot < reader.GetInputCount()) {
-            source = &info;
-            break;
+    // A provider leaf's own source slot, scalar and sampleable: the first
+    // Double slot a slot-keyed leaf reads, else the first such Matrix4d
+    // slot. Pruning drops the provider leaves no step reads (the animated
+    // avars' among them), so the slot can be one EnumerateProviderValues
+    // does not list: a non-animated stage-sampled raw source.
+    size_t slot = reader.GetInputCount();
+    RrInputTag tag = RrInputTag::Double;
+    for (const RrInputTag want : {RrInputTag::Double, RrInputTag::Matrix4d}) {
+        for (size_t s = 0; s < reader.GetInputCount(); ++s) {
+            if (reader.GetInputInfo(s).type == want &&
+                RigExecRuntimeStageArrayInputs::CanSampleProviderValue(reader, s) &&
+                reader.GetSlotLeafCountForTesting(s) > 0) {
+                slot = s;
+                tag = want;
+                break;
+            }
         }
+        if (slot < reader.GetInputCount()) break;
     }
-    CHECK(source);
-    if (!source) return;
-    const size_t slot = source->slot;
-    RrInputValue value;
-    value.tag = RrInputTag::Double;
-    value.f64 = 0.375;
+    CHECK(slot < reader.GetInputCount());
+    if (slot >= reader.GetInputCount()) return;
+    // The slot's value: the number, or a translation by it.
+    const auto valueOf = [tag](double x) {
+        RrInputValue v;
+        v.tag = tag;
+        v.f64 = x;
+        v.matrix = RrMat4d(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, x, 0, 0, 1);
+        return v;
+    };
+    RrInputValue value = valueOf(0.375);
     CHECK(RigExecRuntimeStageArrayInputs::SetScalarSample(reader, slot, value, &error));
     const size_t one = run("sampled set");
     CHECK(one > 0 && one < all);
     std::printf("sparse slot leaves: %zu, re-keyed after a time step %zu, "
-                "after one input %zu\n", all, sampled, one);
+                "after one input %zu (%s, %s)\n", all, sampled, one,
+                reader.GetInputInfo(slot).name.c_str(),
+                tag == RrInputTag::Double ? "Double" : "Matrix4d");
     CHECK(RigExecRuntimeStageArrayInputs::SetScalarSample(reader, slot, value, &error));
     CHECK(run("repeated sampled set") == 0);
     CHECK(RigExecRuntimeStageArrayInputs::SetSampleBlocked(reader, slot, true, &error));
@@ -1981,7 +1997,7 @@ _TestSparseSlotLeaves(const std::string &examples)
     CHECK(run("unblocked") == one);
     CHECK(RigExecRuntimeStageArrayInputs::ClearScalarSample(reader, slot, &error));
     CHECK(run("sampled clear") == one);
-    value.f64 = -1.25;
+    value = valueOf(-1.25);
     CHECK(reader.SetInputAt(slot, value, &error));
     CHECK(run("authored set") == one);
     CHECK(reader.ClearInputAt(slot, &error));
@@ -2471,7 +2487,10 @@ _TestAPrunedBakeKeepsABlockedAnimatedAvar(const std::string &examples)
         CHECK(avar.Set(last, UsdTimeCode(3.0)));
     }
     CHECK(avar.ValueMightBeTimeVarying());
-    CHECK(avar.GetResolveInfo(UsdTimeCode(2.0)).ValueIsBlocked());
+    // A blocked time sample resolves to no value (ValueIsBlocked describes
+    // only a blocked default).
+    VtValue blocked;
+    CHECK(!avar.Get(&blocked, UsdTimeCode(2.0)));
     const std::string label =
         "pruned bake, " + avar.GetPath().GetString() + " blocked at 2";
     std::vector<uint8_t> bytes, unprunedBytes;
@@ -2502,9 +2521,9 @@ _TestAPrunedBakeKeepsABlockedAnimatedAvar(const std::string &examples)
     for (const std::string &warning : sampler.GetWarnings()) {
         std::printf("%s: sampler: %s\n", label.c_str(), warning.c_str());
     }
+    // Compiled by its first Evaluate, so its poses carry the compile
+    // warnings the bake recorded, as the reader's diagnostics do.
     RigExecRigEvaluator evaluator(stage, rig);
-    std::vector<std::string> errors;
-    CHECK(evaluator.Compile(&errors));
     for (const double frame : {1.0, 2.0, 3.0}) {
         CHECK(RigExecTestDrive(reader.get(), &sampler, frame, &error));
         const RigExecRigPose pose = evaluator.Evaluate(UsdTimeCode(frame));
