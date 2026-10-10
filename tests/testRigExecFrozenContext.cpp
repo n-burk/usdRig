@@ -3489,8 +3489,12 @@ TestStaticLeavesFollowEdits()
         for (size_t i = 0;
              i < burst.values.size() && i < plain.values.size(); ++i) {
             CHECK(burst.values[i].path == plain.values[i].path);
-            CHECK(burst.values[i].staticSample ==
-                  plain.values[i].staticSample);
+            // A read the burst serves from its own maps (a chain base)
+            // carries no table mark; every other read shares the table.
+            if (burst.values[i].burstSampleRoute == RigExecBurstRouteFresh) {
+                CHECK(burst.values[i].staticSample ==
+                      plain.values[i].staticSample);
+            }
             CHECK(RigExecBakedHeadValueSame(burst.values[i].value,
                                             plain.values[i].value));
         }
@@ -3508,6 +3512,421 @@ TestStaticLeavesFollowEdits()
         }
     }
     CHECK(verifyFailures == 0);
+}
+
+// Compiles \p evaluator and runs \p time with RIGEXEC_VERIFY_FROZEN_STATIC
+// set: read at Build, so it stands for this program alone.
+void
+CompileUnderStaticVerify(RigExecRigEvaluator *evaluator, UsdTimeCode time)
+{
+    const std::string knob("RIGEXEC_VERIFY_FROZEN_STATIC");
+    const std::string saved = TfGetenv(knob);
+    TfSetenv(knob, "1");
+    CHECK(evaluator->Compile());
+    CHECK(evaluator->Evaluate(time).valid);
+    if (saved.empty()) {
+        TfUnsetenv(knob);
+    } else {
+        TfSetenv(knob, saved);
+    }
+}
+
+// The static verifier's failures posted since \p mark. Any other error
+// stays posted, and is reported when the mark goes out of scope.
+size_t
+StaticVerifyFailures(const TfErrorMark &mark)
+{
+    size_t failed = 0;
+    for (auto it = mark.GetBegin(); it != mark.GetEnd(); ++it) {
+        if (it->GetCommentary().find("frozen static") != std::string::npos) {
+            std::printf("FAIL %s\n", it->GetCommentary().c_str());
+            ++failed;
+        }
+    }
+    return failed;
+}
+
+// \p inputs' control digest, checked against the plain fold of the same
+// vector: every sample folded from its bytes, through a sorted map.
+uint64_t
+DigestMatchingPlainFold(const RigExecFrameInputs &inputs)
+{
+    RigExecFrameInputs plain = inputs;
+    plain.staticSamples.reset();
+    plain.digestOrder.reset();
+    const uint64_t value = RigExecControlStateDigest(inputs, inputs.overrides);
+    CHECK(value == RigExecControlStateDigest(plain, plain.overrides));
+    return value;
+}
+
+// The first sample \p inputs holds at \p path (the one Find answers), or
+// null.
+const RigExecSampledInput *
+FirstSampleNamed(const RigExecFrameInputs &inputs, const SdfPath &path)
+{
+    for (const RigExecSampledInput &value : inputs.values) {
+        if (value.path == path) {
+            return &value;
+        }
+    }
+    return nullptr;
+}
+
+// The samplers serve every source-backed binding (a direct numeric
+// argument with no time samples, read through its query) from the sampler
+// memo's table: on the biped every sample only such bindings take is a
+// table copy at two frames of a trusted-route vector, each checked against
+// a fresh read under RIGEXEC_VERIFY_FROZEN_STATIC, and the vectors digest
+// as their plain folds.
+void
+TestTheSamplerServesSourceBackedReads(const std::string &examplesDir)
+{
+    UsdStageRefPtr stage = UsdStage::Open(examplesDir + "/biped/Biped.usda");
+    CHECK(stage);
+    if (!stage) {
+        return;
+    }
+    const SdfPath rig("/Biped/Rig");
+    CHECK(stage->GetPrimAtPath(rig));
+    TfErrorMark mark;
+    RigExecRigEvaluator evaluator(stage, rig);
+    CompileUnderStaticVerify(&evaluator, UsdTimeCode(1.0));
+    const RigExecBakedProgram *program = evaluator.GetBakedProgram();
+    CHECK(program != nullptr);
+    if (!program) {
+        return;
+    }
+    const RigExecBakedProgramImpl &B = program->GetStepGraph();
+    CHECK(B.verifyFrozenStatic);
+    CHECK(!B.sourceBackedPaths.empty());
+    // The paths no other binding samples under the same key.
+    std::set<SdfPath> sourceOnly = B.sourceBackedPaths;
+    frozenDetail::_ForEachPatchableInput(B, [&sourceOnly](const auto &input) {
+        if (!input.sourceBacked && input.head) {
+            sourceOnly.erase(input.head.GetPath());
+        }
+    });
+    CHECK(!sourceOnly.empty());
+    RigExecChainSampleBindings bindings;
+    std::string error;
+    CHECK(RigExecBindChainSampleInputs(evaluator, &bindings, &error));
+    std::shared_ptr<const RigExecFrozenStaticSamples> table;
+    for (const double t : {1.0, 2.0}) {
+        RigExecFrameInputs inputs;
+        CHECK(RigExecSampleFrameInputsWithTrustedChainBindings(
+            evaluator, UsdTimeCode(t), {}, bindings, &inputs, &error));
+        size_t served = 0, read = 0;
+        for (const RigExecSampledInput &value : inputs.values) {
+            if (!sourceOnly.count(value.path)) {
+                continue;
+            }
+            if (value.staticSample >= 0) {
+                ++served;
+            } else {
+                ++read;
+            }
+        }
+        std::printf("biped frame %g: %zu source-backed samples served, "
+                    "%zu read\n", t, served, read);
+        CHECK(served > 0);
+        CHECK(read == 0);
+        CHECK(inputs.staticSamples != nullptr);
+        if (table) {
+            CHECK(inputs.staticSamples == table);
+        }
+        table = inputs.staticSamples;
+        DigestMatchingPlainFold(inputs);
+    }
+    CHECK(StaticVerifyFailures(mark) == 0);
+}
+
+// A Default edit of a source-backed rest argument reaches the very next
+// vector as a table copy of the new value, and its key. The tiny rig's
+// AlongY.rest:tx is authored before the build, so its query reads the
+// spec the edit changes.
+void
+TestASourceBackedEditReachesTheNextVector()
+{
+    UsdStageRefPtr stage = MakeTinyRig();
+    const SdfPath restTxPath("/Asset/Rig/AlongY.rest:tx");
+    const UsdAttribute restTx = stage->GetAttributeAtPath(restTxPath);
+    CHECK(restTx);
+    if (!restTx) {
+        return;
+    }
+    CHECK(restTx.Set(0.25));
+    TfErrorMark mark;
+    RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+    CompileUnderStaticVerify(&evaluator, UsdTimeCode(1.0));
+    const RigExecBakedProgram *program = evaluator.GetBakedProgram();
+    CHECK(program != nullptr);
+    if (!program) {
+        return;
+    }
+    CHECK(program->GetStepGraph().sourceBackedPaths.count(restTxPath) == 1);
+    RigExecChainSampleBindings bindings;
+    std::string error;
+    CHECK(RigExecBindChainSampleInputs(evaluator, &bindings, &error));
+    const auto sampleAt = [&](double t) {
+        RigExecFrameInputs inputs;
+        CHECK(RigExecSampleFrameInputsWithTrustedChainBindings(
+            evaluator, UsdTimeCode(t), {}, bindings, &inputs, &error));
+        return inputs;
+    };
+    // The served value: a table copy, or -1.
+    const auto restTxServed = [&restTxPath](const RigExecFrameInputs &inputs) {
+        const RigExecSampledInput *found =
+            FirstSampleNamed(inputs, restTxPath);
+        return found && found->staticSample >= 0 &&
+                       found->value.IsHolding<double>()
+                   ? found->value.UncheckedGet<double>()
+                   : -1.0;
+    };
+    const RigExecFrameInputs before = sampleAt(2.0);
+    CHECK(restTxServed(before) == 0.25);
+    CHECK(restTxServed(sampleAt(3.0)) == 0.25);
+    CHECK(restTx.Set(0.5));
+    const RigExecFrameInputs after = sampleAt(2.0);
+    CHECK(restTxServed(after) == 0.5);
+    CHECK(after.staticSamples != nullptr &&
+          after.staticSamples != before.staticSamples);
+    CHECK(DigestMatchingPlainFold(after) != DigestMatchingPlainFold(before));
+    CHECK(StaticVerifyFailures(mark) == 0);
+}
+
+// The pinned sampler serves the chain and derived base reads and the blend
+// channel reads that cannot move with the time from the sampler memo's
+// table (examples/04_BlendShapeFace.usda; session-layer opinions written
+// before the build hold the brow weight static and give the base points
+// the spec a later edit changes): table copies at two frames, checked
+// against fresh reads under RIGEXEC_VERIFY_FROZEN_STATIC, while the
+// animated smile weight is read per frame. An override standing on the
+// held weight is read fresh and lifts with it; an edit of the base points
+// reaches the next vector.
+void
+TestTheSamplerServesStaticBasesAndBlends(const std::string &examplesDir)
+{
+    UsdStageRefPtr stage =
+        UsdStage::Open(examplesDir + "/04_BlendShapeFace.usda");
+    CHECK(stage);
+    if (!stage) {
+        return;
+    }
+    const SdfPath basePath("/FaceAsset/Geom/FaceCard.points");
+    const SdfPath smileWeight(
+        "/FaceAsset/Rig/BlendInputs/Smile.inputs:weight");
+    const SdfPath browWeight(
+        "/FaceAsset/Rig/BlendInputs/BrowRaise.inputs:weight");
+    stage->SetEditTarget(stage->GetSessionLayer());
+    const UsdAttribute points = stage->GetAttributeAtPath(basePath);
+    VtVec3fArray authored;
+    CHECK(points && points.Get(&authored, UsdTimeCode::Default()));
+    CHECK(!authored.empty());
+    if (authored.empty()) {
+        return;
+    }
+    CHECK(points.Set(authored));
+    const UsdAttribute brow = stage->GetAttributeAtPath(browWeight);
+    CHECK(brow && brow.Set(0.6f));
+    CHECK(!brow.ValueMightBeTimeVarying());
+    CHECK(stage->GetAttributeAtPath(smileWeight).ValueMightBeTimeVarying());
+
+    TfErrorMark mark;
+    RigExecRigEvaluator evaluator(stage, SdfPath("/FaceAsset/Rig"));
+    CompileUnderStaticVerify(&evaluator, UsdTimeCode(1001.0));
+    const RigExecBakedProgram *program = evaluator.GetBakedProgram();
+    CHECK(program != nullptr);
+    if (!program) {
+        return;
+    }
+    const RigExecBakedProgramImpl &B = program->GetStepGraph();
+    CHECK(B.verifyFrozenStatic);
+    CHECK(B.chains.size() == 1);
+    // Every read the memo can hold here: the brow weight, the bases, and
+    // each blend sample's activation and dense points.
+    std::vector<SdfPath> held{browWeight};
+    for (const RigExecBakedProgramImpl::GeomChain &chain : B.chains) {
+        held.push_back(chain.target);
+        for (const RigExecBakedProgramImpl::GeomChain::Derived &derived :
+             chain.derived) {
+            if (derived.baseQuery.IsValid()) {
+                held.push_back(derived.target);
+            }
+        }
+        for (const RigExecBakedProgramImpl::GeomRevision &revision :
+             chain.revisions) {
+            for (const RigExecBakedProgramImpl::GeomBlendChannel &channel :
+                 revision.blendChannels) {
+                for (const RigExecBakedProgramImpl::GeomBlendChannel::Sample
+                         &blendSample : channel.samples) {
+                    held.push_back(blendSample.activation.GetPath());
+                    if (blendSample.points.IsValid()) {
+                        held.push_back(frozenDetail::_FrozenBlendInputKey(
+                            blendSample.samplePath, "points"));
+                    }
+                }
+            }
+        }
+    }
+    // The brow weight, the base, and three samples' activations and points.
+    CHECK(held.size() >= 8);
+
+    std::string error;
+    const auto sampleAt =
+        [&](double t, const std::vector<RigExecValueOverride> &overrides) {
+            RigExecFrameInputs inputs;
+            CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(t),
+                                           overrides, &inputs, &error));
+            return inputs;
+        };
+    const auto served = [](const RigExecFrameInputs &inputs,
+                           const SdfPath &path) {
+        const RigExecSampledInput *found = FirstSampleNamed(inputs, path);
+        return found != nullptr && found->staticSample >= 0;
+    };
+    const auto floatAt = [](const RigExecFrameInputs &inputs,
+                            const SdfPath &path) {
+        const RigExecSampledInput *found = FirstSampleNamed(inputs, path);
+        return found && found->value.IsHolding<float>()
+                   ? found->value.UncheckedGet<float>()
+                   : -1.0f;
+    };
+    const auto checkHeld = [&](const RigExecFrameInputs &inputs,
+                               const SdfPath &except, const char *what) {
+        for (const SdfPath &path : held) {
+            if (path != except && !served(inputs, path)) {
+                std::printf("FAIL %s: <%s> is not a table copy\n", what,
+                            path.GetText());
+                ++failures;
+            }
+        }
+    };
+    std::shared_ptr<const RigExecFrozenStaticSamples> table;
+    for (const double t : {1001.0, 1002.0}) {
+        const RigExecFrameInputs inputs = sampleAt(t, {});
+        checkHeld(inputs, SdfPath(), "a frame");
+        const RigExecSampledInput *smile =
+            FirstSampleNamed(inputs, smileWeight);
+        CHECK(smile != nullptr && smile->staticSample < 0);
+        CHECK(floatAt(inputs, browWeight) == 0.6f);
+        CHECK(inputs.staticSamples != nullptr);
+        if (table) {
+            CHECK(inputs.staticSamples == table);
+        }
+        table = inputs.staticSamples;
+        DigestMatchingPlainFold(inputs);
+    }
+
+    // An override on the held weight is read through, the rest still
+    // served; released, the weight is served again.
+    RigExecValueOverride drag;
+    drag.prim = SdfPath("/FaceAsset/Rig/BlendInputs/BrowRaise");
+    drag.attribute = TfToken("inputs:weight");
+    drag.value = VtValue(0.2f);
+    const RigExecFrameInputs dragged = sampleAt(1002.0, {drag});
+    CHECK(!served(dragged, browWeight));
+    CHECK(floatAt(dragged, browWeight) == 0.2f);
+    checkHeld(dragged, browWeight, "a held drag");
+    const RigExecFrameInputs released = sampleAt(1002.0, {});
+    CHECK(served(released, browWeight));
+    CHECK(floatAt(released, browWeight) == 0.6f);
+    CHECK(DigestMatchingPlainFold(dragged) !=
+          DigestMatchingPlainFold(released));
+
+    // An edit of the base points: a new table holding the edited points.
+    VtVec3fArray moved = authored;
+    moved[0] = GfVec3f(moved[0][0], moved[0][1], 0.5f);
+    CHECK(points.Set(moved));
+    const RigExecFrameInputs edited = sampleAt(1002.0, {});
+    const RigExecSampledInput *base = FirstSampleNamed(edited, basePath);
+    CHECK(base != nullptr && base->staticSample >= 0);
+    CHECK(base != nullptr && base->value.IsHolding<VtVec3fArray>() &&
+          base->value.UncheckedGet<VtVec3fArray>() == moved);
+    CHECK(edited.staticSamples != nullptr &&
+          edited.staticSamples != released.staticSamples);
+    CHECK(StaticVerifyFailures(mark) == 0);
+}
+
+// A burst memoizes a read through the resolved inputs only while nothing
+// on its walk can move with the time. The smile weight of
+// examples/04_BlendShapeFace.usda (a rig with no property chain) holds a
+// session-layer default and connects to a keyed float `driver`: its head
+// cannot vary, its walk can. The burst re-reads it every frame, as the
+// plain sampler does, and still memoizes the static activations.
+void
+TestABurstRereadsAConnectedAnimatedWeight(const std::string &examplesDir)
+{
+    UsdStageRefPtr stage =
+        UsdStage::Open(examplesDir + "/04_BlendShapeFace.usda");
+    CHECK(stage);
+    if (!stage) {
+        return;
+    }
+    const SdfPath smilePath("/FaceAsset/Rig/BlendInputs/Smile");
+    const SdfPath weightPath =
+        smilePath.AppendProperty(TfToken("inputs:weight"));
+    const SdfPath driverPath = smilePath.AppendProperty(TfToken("driver"));
+    const SdfPath activationPath(
+        "/FaceAsset/Rig/BlendInputs/Smile/Half.rigExec:activation");
+    stage->SetEditTarget(stage->GetSessionLayer());
+    const UsdPrim smile = stage->GetPrimAtPath(smilePath);
+    CHECK(smile);
+    if (!smile) {
+        return;
+    }
+    const UsdAttribute driver =
+        smile.CreateAttribute(TfToken("driver"), SdfValueTypeNames->Float);
+    CHECK(driver.Set(0.0f, UsdTimeCode(1.0)));
+    CHECK(driver.Set(1.0f, UsdTimeCode(3.0)));
+    const UsdAttribute weight = stage->GetAttributeAtPath(weightPath);
+    CHECK(weight && weight.Set(0.0f));
+    CHECK(weight.SetConnections({driverPath}));
+    CHECK(!weight.ValueMightBeTimeVarying());
+    CHECK(driver.ValueMightBeTimeVarying());
+
+    RigExecRigEvaluator evaluator(stage, SdfPath("/FaceAsset/Rig"));
+    std::vector<std::string> errors;
+    CHECK(evaluator.Compile(&errors));
+    for (const std::string &e : errors) {
+        std::printf("connected weight compile: %s\n", e.c_str());
+    }
+    CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
+    const RigExecBakedProgram *program = evaluator.GetBakedProgram();
+    CHECK(program != nullptr);
+    if (!program) {
+        return;
+    }
+    RigExecChainSampleBindings bindings;
+    std::string error;
+    CHECK(RigExecBindChainSampleInputs(evaluator, &bindings, &error));
+    // No chain bound: the burst's resolved route memoizes.
+    CHECK(bindings.chains.empty());
+    RigExecBurstSampleCache cache;
+    CHECK(RigExecBuildBurstSampleCache(*program, bindings, {},
+                                       RigExecFrameCacheEpochDigest(evaluator),
+                                       &cache, &error));
+    CHECK(cache.usable);
+    const auto weightAt = [&weightPath](const RigExecFrameInputs &inputs) {
+        const RigExecSampledInput *found = FirstSampleNamed(inputs, weightPath);
+        return found && found->value.IsHolding<float>()
+                   ? found->value.UncheckedGet<float>()
+                   : -1.0f;
+    };
+    const float driven[] = {0.0f, 0.5f, 1.0f};
+    for (int frame = 1; frame <= 3; ++frame) {
+        const UsdTimeCode time(double(frame));
+        RigExecFrameInputs plain, burst;
+        CHECK(RigExecSampleFrameInputsWithChainBindings(
+            evaluator, time, {}, bindings, &plain, &error));
+        CHECK(RigExecSampleFrameInputsWithBurstCache(
+            evaluator, time, {}, &cache, &burst, &error));
+        CHECK(weightAt(plain) == driven[frame - 1]);
+        CHECK(weightAt(burst) == weightAt(plain));
+        CHECK(RigExecControlStateDigestWithBurstCache(burst, {}, &cache) ==
+              RigExecControlStateDigest(plain, {}));
+    }
+    CHECK(cache.staticResolved.count(weightPath) == 0);
+    CHECK(cache.staticResolved.count(activationPath) == 1);
 }
 
 // Every path a frozen worker would otherwise build travels with the job or
@@ -7900,6 +8319,13 @@ main(int argc, char **argv)
     TestStillCurrentDetectsConstantEdit();
     TestConstantHeadLeavesRideASharedTable();
     TestStaticLeavesFollowEdits();
+    // Wave 7 W7-statickey: held source-backed, base and blend reads.
+    TestASourceBackedEditReachesTheNextVector();
+    if (argc > 1) {
+        TestTheSamplerServesSourceBackedReads(argv[1]);
+        TestTheSamplerServesStaticBasesAndBlends(argv[1]);
+        TestABurstRereadsAConnectedAnimatedWeight(argv[1]);
+    }
     TestOverridePathsTravelWithTheJob();
     TestPatchFrozenAvarConstants();
     if (argc > 1) {
