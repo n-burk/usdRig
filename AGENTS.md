@@ -11,15 +11,27 @@ The root README is the build entry point; `docs/index.md` is the node catalog.
 ## Code map
 
 - `libs/rigExecMath`: numerical kernels. Keep math independent of stage access.
+  The archive links `gf`, `vt`, and `tf`; it does not read a stage.
+- `libs/rigExecGraph`: the CMake target is the USD-free op scheduler,
+  `opGraph.cpp` only. The other sources in that directory are USD scene
+  lowering compiled into `rigExec`.
+- `libs/rigExecSampler`: copies stage values into runtime inputs. This is
+  the USD boundary in front of playback.
 - `libs/rigExecSchema/schema.usda`: source schema. Resources under
   `plugin/rigExecSchema/resources` are generated; regenerate with
   `bin/gen_schema.sh` or `bin/gen_schema.bat` after schema edits.
-- `libs/rigExec`: dynamic evaluator, mover graph, baked program, scheduling,
+- `libs/rigExec`: evaluator, mover graph, baked program, scheduling,
   invalidation, and frame caching. Preserve dynamic/baked parity.
+  `Evaluate` runs that baked program, or returns an invalid pose and the
+  `IsBakeable` reasons. It does not evaluate through OpenExec. The tap set
+  remains for cross-check and tests.
 - `libs/rigExecRigging` and `python`: authoring APIs and Python bindings.
 - `libs/rigExecImaging`: scene indices, activation, and display state.
 - `libs/rigExecBake`, `libs/rigExecBinary`, `libs/rigExecRuntime`: export,
   binary layout, and playback. Check version compatibility when changing records.
+  `rigExecRuntime` links `rigExecBinary` and `rigExecGraph` and no OpenUSD
+  library. Do not include a `pxr/` header from a runtime translation unit or
+  from a header-only kernel the runtime instantiates.
 - `libs/rigExecStandalone`: experimental scene adapter and rigpack path;
   distinct from `.rigexec` binary playback.
 - `plugin/rigExecUsdview`: editor UI plus Qt-free interaction models.
@@ -82,7 +94,20 @@ scripts; their defaults look for a sibling dependency install.
    `bin/build_rigexec.sh` / `bin\build_rigexec.bat` build everything; use them
    for a fresh checkout only.
 4. Run the smallest set of tests that covers the change, capped at 4 minutes
-   of wall clock: `ctest --test-dir build -R <tests> --stop-time <now+4min>`.
+   of wall clock. `bin/test_changed.sh <paths>` prints that set.
+   `bin/test_changed.sh --run <paths>` builds the direct executables and
+   runs them. The direct set is the inner loop; run the transitive set
+   before pushing. The ctest line uses labels: `usd-free` when the direct
+   executables link no OpenUSD library, otherwise the project libraries
+   the change sits in.
+   `ctest --test-dir build -L fast` is the short tier. `ctest -L usd-free`
+   runs without a stage. `tests/fixtures/minimal.rigexec` is the checked-in
+   program `testRigExecRuntimeFixture` opens. The whole `ctest` gate still
+   runs in CI.
+   `bin/build_rigexec.sh` writes `build/compile_commands.json` and uses
+   ccache when it is on `PATH`. `.clangd` reads that database.
+   `bin/check_runtime_usd_free.sh` compiles the runtime with no `pxr`
+   include path.
 5. Use `bin/test/run_python_tests.sh` or `.bat` only for Qt-free interaction
    changes, and the relevant `bin/test/run_testusdview*` helper only for
    viewport changes.
