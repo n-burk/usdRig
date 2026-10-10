@@ -145,8 +145,8 @@ class RigExecControl "RigExecControl" (
         string className = "Control"
     }
     doc = """An animator-facing RigExecXformable: animation is authored
-    on the avars (or an authored/connected posed:space), exactly like an
-    Ir xformable. Channel semantics live on the applied
+    on the avars (or an authored/connected posed:space). Channel
+    semantics live on the applied
     RigExecControlAPI. Publishes computePointFrame/computeRestFrame/
     computeMatrix (spec section 4.1). A synthesized viewport guide can be
     drawn at the posed frame origin (see guide:shape), purpose guide, the
@@ -311,10 +311,12 @@ class "RigExecXformable" (
         string className = "Xformable"
     }
     doc = """An abstract animation interface for an animatable coordinate
-    space, mirroring OpenExec's IrXformable contract exactly
-    (user-directed alignment, 2026-07-25): matrix4d local-to-world
-    rest/default/posed/parent spaces and scalar translation/rotation avars
-    (rotations in degrees). Concrete controls and joints add local scale
+    space, following the attribute layout of OpenExec's IrXformable:
+    matrix4d local-to-world rest/default/posed/parent spaces and scalar
+    translation/rotation avars (rotations in degrees). Unlike IrXformable
+    it is Boundable, adds avars:rotationSign, defaults
+    avars:unitScaleFactor to 1, and its avars pose it directly rather than
+    through a separate controller. Concrete controls and joints add local scale
     avars; volume weights deliberately do not because their shape comes from
     inputs:scaleX/Y/Z. For a joint, the posed space comes from the compiler's
     private solver binding (view-free extraction: one element of the
@@ -446,10 +448,12 @@ class RigExecJoint "RigExecJoint" (
         }
         string className = "Joint"
     }
-    doc = """The joint of an armature-based rig, mirroring OpenExec's
-    IrJointScope exactly: a RigExecXformable specialized so guides can be
+    doc = """The joint of an armature-based rig, modeled on OpenExec's
+    IrJointScope: a RigExecXformable specialized so guides can be
     drawn (a sphere at the posed origin and one cone to each nested child
-    joint, purpose guide). Hierarchy is namespace nesting (a child joint is
+    joint, purpose guide). Unlike IrJointScope it adds avars:sx/sy/sz and
+    sizes its guides with guide:radius rather than guide:length.
+    Hierarchy is namespace nesting (a child joint is
     authored inside its parent joint), and guide links derive directly from
     the evaluated parent and child origins."""
 )
@@ -612,7 +616,7 @@ class RigExecFkChain "RigExecFkChain" (
         RigExecJoint or RigExecControl, which every joint in
         rigExec:joints must share (descendants count). The chain then
         hangs from that provider exactly as if rigExec:startFrame named
-        it, in both evaluation paths.
+        it.
 
         Authored targets always win over the inference, silently: a
         chain with both behaves as if the policy were `none`. A chain
@@ -625,8 +629,8 @@ class RigExecFkChain "RigExecFkChain" (
         Mechanics: the inference is compiled, not evaluated. Each
         compile writes the derived target into the stage session layer
         (never the asset), where the ordinary relationship machinery
-        picks it up -- scheduling, exec reachability, and the baked
-        program all see it as authored. Session-layer opinions on
+        picks it up -- scheduling and the compiled program both see it
+        as authored. Session-layer opinions on
         rigExec:startFrame for a `parent` chain are therefore
         compiler-managed: hand-authoring targets there while the policy
         is active may be replaced on recompile. Author them in an
@@ -637,7 +641,7 @@ class RigExecFkChain "RigExecFkChain" (
         extraction, user-directed 2026-07-25). List position is the
         aggregate element index; length is the effective sample count.
         The compiler binds each joint to one aggregate element
-        in the derived layer."""
+        in the compiled program."""
     )
     double guide:radius = 1.0 (
         doc = """Radius of the sphere and cone drawn at each aggregate
@@ -1947,9 +1951,8 @@ class "RigExecVolumeWeight" (
         the weight.
 
         This is a STRUCTURAL read, resampled to a lookup table once per
-        binding epoch, NOT a per-frame exec input: an exec computation
-        resolves an attribute at one time, and a curve needs the whole
-        function. The animatable knobs are falloffMin/Max, invert, and
+        binding epoch, NOT a per-frame input: a per-frame input is a
+        value at one time, and a curve is the whole function. The animatable knobs are falloffMin/Max, invert, and
         strength; the curve is a rig-authoring parameter, which is also
         what keeps the field epoch-shape-stable (spec section 4.1).
 
@@ -2173,12 +2176,10 @@ class RigExecCombineWeight "RigExecCombineWeight" (
         input to a dense field before folding, so dense is the only
         representation it can publish.
 
-        Inheriting the base fallback made a DEFAULT combine -- author the
-        prim, wire two inputs, change nothing else -- publish an invalid
-        packet on the exec path while the CPU oracle resolved it happily.
-        That is a parity mismatch reachable by doing the most obvious
-        possible thing, and a schema fallback its own kernel rejects is
-        simply the wrong fallback."""
+        With the base fallback, a DEFAULT combine -- author the prim, wire
+        two inputs, change nothing else -- would publish an invalid
+        packet, and a schema fallback its own kernel rejects is simply the
+        wrong fallback."""
     )
     rel rigExec:inputWeights (
         doc = """Ordered weight objects to fold. Every input must resolve
@@ -3112,8 +3113,8 @@ class RigExecSurfaceProjector "RigExecSurfaceProjector" (
 
     Both primvars are derived targets of the surface's point chain: they
     are recomputed when the chain's final points or a source frame
-    change, and the dynamic path, the baked program, the frame cache and
-    the .rigexec runtime compute them with one kernel."""
+    change, and native, frozen and frame-cache evaluation and the
+    .rigexec runtime compute them with one kernel."""
 )
 {
     rel rigExec:space (

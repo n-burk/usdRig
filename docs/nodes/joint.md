@@ -34,10 +34,12 @@ rig. Joints nest in the namespace to form the hierarchy, and
 usdview draws each joint as a guide sphere with a cone to every nested
 child.
 
-The joint of an armature-based rig, mirroring OpenExec's
-IrJointScope exactly: a RigExecXformable specialized so guides can be
+The joint of an armature-based rig, modeled on OpenExec's
+IrJointScope: a RigExecXformable specialized so guides can be
 drawn (a sphere at the posed origin and one cone to each nested child
-joint, purpose guide). Hierarchy is namespace nesting (a child joint is
+joint, purpose guide). Unlike IrJointScope it adds avars:sx/sy/sz and
+sizes its guides with guide:radius rather than guide:length.
+Hierarchy is namespace nesting (a child joint is
 authored inside its parent joint), and guide links derive directly from
 the evaluated parent and child origins.
 

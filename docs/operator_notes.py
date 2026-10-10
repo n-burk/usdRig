@@ -746,21 +746,20 @@ bends — the classic spine/tentacle rig. The mover reads the frame array
 off this prim directly; naming a joint per sample on `rigExec:joints` is
 optional, and buys a posed chain that constraints and matrix movers can
 read like any other joint.""",
-        "how_it_works": """All of it is pose phase: the solve is one branch of the
-pose bake (`libs/rigExec/bakedPose.cpp:2552`), and `RigExecRibbon` is one
-of the six baked solver types (`libs/rigExec/bakedProgram.cpp:124`). The
+        "how_it_works": """All of it is pose phase: the solve is one solver operation
+(`libs/rigExecGraph/solverProgram.cpp:92`), and `RigExecRibbon` is one of
+the six compiled solver types (`libs/rigExec/bakedProgram.cpp:156`). The
 compiler resolves `rigExec:driverCurve` to the target's native `points`
-attribute and the solve reads two values of it — the live one and the
-bind-time (default) one — then samples both at equal arc length
-(`libs/rigExecMath/geometryKernels.cpp:549`) and transports a
-rotation-minimizing frame along each, publishing the posed frames paired
-with their rests as one `computePointFrameArray`. Each
+attribute and the solve reads two values of it — the live one, at the read
+phase declared on `rigExec:driverCurve`
+(`libs/rigExec/crossDomainInputs.cpp:244`), and the bind-time (default)
+one — then samples both at equal arc length and transports a
+rotation-minimizing frame along each
+(`libs/rigExecMath/geometryKernels.cpp:741`), publishing the posed frames
+paired with their rests as one `computePointFrameArray`. Each
 `rigExec:joints` entry takes one element of that array as its whole posed
-frame, handed to exec as an override on the joint
-(`libs/rigExec/rigEvaluator.cpp:10512-10515`). Because the driver is scene
-data rather than a control-driven curve, the solve cannot see mover output
-(`libs/rigExec/computations.cpp:1032`); what a wrap measures against is
-the bind-time curve.""",
+frame through the compiled solver-to-joint binding. What a wrap measures
+against is the bind-time curve.""",
         "wiring": [
             # rigEvaluator.cpp:3468-3479 resolves the target to its `.points`;
             # with no target nothing is resolved and solverKernels.cpp:28
@@ -2709,12 +2708,12 @@ department upstream authored it in, and `remap` divides it down into the
 0 → 1 a weight expects; `clamp`, `add`, `multiply` and `blend` cover the
 rest. `remap` deliberately does not bound its result, so a clamp mover
 after it is what keeps an overshoot from driving a shape past its target.""",
-        "how_it_works": """A math mover has no phase inside exec at all. Its inputs are all
-authored on itself and the chain's base is the target attribute's own
-authored value, so property chains are evaluated BEFORE exec runs and the
-result is supplied to exec as a value override — which is how a normalized
-weight reaches the blendshape mover or solver that reads it instead of
-being recomputed inside that kernel. Each revision computes
+        "how_it_works": """A math mover's inputs live on the mover itself, and the chain's
+base is the target attribute's own authored value. The compiled graph
+orders the property chain before every operation that reads the revised
+attribute, and those operations read the chain's result — which is how a
+normalized weight reaches the blendshape mover or solver that reads it
+instead of being recomputed inside that kernel. Each revision computes
 `r = op(incoming)` and mixes it back through the common envelope
 (`incoming + defaultWeight × (r − incoming)`), so zero passes the incoming
 value through and one applies the operation outright. Movers sharing one
@@ -2751,8 +2750,9 @@ and it drives nothing, the blendshape does all the work.""",
         "tips": [
             # rigEvaluator.cpp:5540-5548: "the chain's base is the target
             # attribute's own authored value ... evaluable BEFORE exec runs".
-            "Property chains resolve before exec runs, so a revised weight "
-            "reaches solvers and movers in the same evaluation.",
+            "Property chains run before the operations that read their "
+            "target, so a revised weight reaches solvers and movers in the "
+            "same evaluation.",
             # rigEvaluator.cpp:149-163 (_GetMoverExecutionOrder reverses the
             # composed pre-order), confirmed by evaluating the example stage:
             # listing Bound first is what makes Normalize run first.
@@ -2816,11 +2816,10 @@ without clamping (a degenerate `min == max` yields 0).
 Inputs may be CONNECTED rather than authored locally: the read follows
 the connection chain and resolves the source at the evaluated time, which
 is what lets an animator channel published on a control drive the mover.
-The whole property chain still owes exec nothing, so it resolves BEFORE
-exec runs and its result is handed back as the attribute's own value; a
-chain whose input is produced by another property chain is ordered after
-its producer. That input reads the producer's base, its authored value,
-unless it declares `rigExecReadPhase = "final"` or a checkpoint (see
+The chain runs before every operation that reads the revised attribute,
+and they read its result as the attribute's value; a chain whose input is
+produced by another property chain is ordered after its producer. That
+input reads the producer's base, its authored value, unless it declares `rigExecReadPhase = "final"` or a checkpoint (see
 [Connected inputs](../concepts/how-operators-fire.md#connected-inputs)).""",
         "wiring": [
             # rigEvaluator.cpp:3842-3866 -- a property mover's parameters are
@@ -2893,10 +2892,9 @@ exact at both endpoints, so a `blend` at weight 1 is a straight
 substitution and a partial weight is a crossfade between two frames.
 `inputs:value` may be CONNECTED, which is how a control drives the
 arithmetic: the mover reads the same `posed:space` matrix the control is
-posed and drawn at. The whole property chain resolves BEFORE exec runs —
-that is what lets its result be handed back as the attribute's value —
-so the operand has to be a matrix that already stands on the stage,
-authored or connected.""",
+posed and drawn at. A property chain reads property values, not evaluated
+provider frames, so the operand has to be a matrix that already stands on
+the stage, authored or connected.""",
         "wiring": [
             ("`rigExec:moves`", "Exact matrix4d property to revise.", "yes"),
             ("`inputs:value.connect`", "Optional matrix4d source for the operand. "

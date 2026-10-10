@@ -6,7 +6,7 @@ affiliation, endorsement, or ownership of the underlying techniques.
 
 | Area | Public source | RigExec code |
 |---|---|---|
-| Typed dependency evaluation | [OpenExec introduction](https://openusd.org/release/intro_to_openexec.html) and [system design](https://openusd.org/dev/api/page__execution__system__design.html) | `libs/rigExec` |
+| OpenExec computation registration and reference requests | [OpenExec introduction](https://openusd.org/release/intro_to_openexec.html) and [system design](https://openusd.org/dev/api/page__execution__system__design.html) | `libs/rigExec/computations.cpp`, `libs/rigExec/moverKernels.cpp`, `libs/rigExec/types.cpp`, `libs/rigExec/tapSet.cpp`; used only by the [reference check](concepts/baked-vs-dynamic.md#openexec-reference-checks) and tests. Production evaluation uses the shared operation graph in `libs/rigExecGraph`. |
 | Scene-index publication | [Hydra getting started](https://openusd.org/dev/api/_page__hydra__getting__started__guide.html) | `libs/rigExecImaging` |
 | Dual-quaternion skinning | Kavan et al., *Geometric Skinning with Approximate Dual Quaternion Blending* (2008), [author project page](https://users.cs.utah.edu/~ladislav/dq/index.html) | `libs/rigExecMath/dualQuat.cpp` |
 | Delta Mush | Mancewicz, Derksen, and Wilson, *Delta Mush: Smoothing Deformations While Preserving Detail* (2014), [publisher entry](https://dl.acm.org/doi/10.1145/2614106.2614144) | `libs/rigExecMath/deltaMushKernel.h` |
@@ -63,8 +63,10 @@ USD assets must likewise be opened with the updated schema and runtime.
 The stage-free `libs/rigExecMath/affineFrameKernels.cpp` implements joint
 inheritance, affine frame copying/mapping, weighted rest-to-pose parenting,
 constraint space conversion, tracking, stretch and location remapping.
-`libs/rigExec/affineFrameComputations.cpp` only reads declared Exec inputs and
-adapts frame providers into these value kernels. Source behavior references
+Production evaluation runs these kernels as provider-program operations
+(`libs/rigExecGraph/providerProgram.cpp`). The OpenExec expressions in
+`libs/rigExec/affineFrameComputations.cpp` read declared inputs and call the
+same kernels, but nothing requests them. Source behavior references
 include Blender's [constraint evaluator](https://github.com/blender/blender/blob/main/source/blender/blenkernel/intern/constraint.cc),
 [joint inheritance](https://github.com/blender/blender/blob/main/source/blender/blenkernel/intern/armature.cc),
 and [rotation channel extraction](https://github.com/blender/blender/blob/main/source/blender/blenlib/intern/math_rotation_c.cc).

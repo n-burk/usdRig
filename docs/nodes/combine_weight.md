@@ -99,12 +99,10 @@ of `constant`, which a combine cannot honour: it resolves every
 input to a dense field before folding, so dense is the only
 representation it can publish.
 
-Inheriting the base fallback made a DEFAULT combine -- author the
-prim, wire two inputs, change nothing else -- publish an invalid
-packet on the exec path while the CPU oracle resolved it happily.
-That is a parity mismatch reachable by doing the most obvious
-possible thing, and a schema fallback its own kernel rejects is
-simply the wrong fallback.
+With the base fallback, a DEFAULT combine -- author the prim, wire
+two inputs, change nothing else -- would publish an invalid
+packet, and a schema fallback its own kernel rejects is simply the
+wrong fallback.
 
 #### `rigExec:inputWeights`
 

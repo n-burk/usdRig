@@ -30,8 +30,8 @@ directly; unlike joints and solvers, a control is not a diagnostic, so it
 keeps the default render purpose.
 
 An animator-facing RigExecXformable: animation is authored
-on the avars (or an authored/connected posed:space), exactly like an
-Ir xformable. Channel semantics live on the applied
+on the avars (or an authored/connected posed:space). Channel
+semantics live on the applied
 RigExecControlAPI. Publishes computePointFrame/computeRestFrame/
 computeMatrix (spec section 4.1). A synthesized viewport guide can be
 drawn at the posed frame origin (see guide:shape), purpose guide, the

@@ -1,5 +1,9 @@
 # OpenExec (ExecUsd) Client Evaluation API — Condensed Reference
 
+> OpenUSD 26.08 study notes, not a description of RigExec. See
+> [OpenExec reference checks](../concepts/baked-vs-dynamic.md#openexec-reference-checks)
+> for how `RigExecTapSet` is used.
+
 Source studied: the OpenUSD v26.08 `pxr/exec/` tree (headers:
 `execUsd/system.h`, `execUsd/request.h`, `execUsd/valueKey.h`,
 `execUsd/cacheView.h`, `execUsd/valueOverride.h`, `exec/request.h`,
@@ -316,8 +320,10 @@ Build/runtime requirements:
 
 ## 10. Facade design implications (RigExecTapSet)
 
-- Hold: `UsdStageRefPtr` (or rely on system's ref), one `ExecUsdSystem`, one
-  move-only `ExecUsdRequest`, and the key vector's index→tap mapping.
+- Hold: `UsdStageRefPtr` (or rely on system's ref), one move-only
+  `ExecUsdRequest`, and the key vector's index→tap mapping. All tap sets on a
+  stage share one `ExecUsdSystem` (one compiled network and value cache per
+  stage; `libs/rigExec/tapSet.cpp:82-147`).
 - Rebuilding the tap set means building a *new* request (keys are fixed at
   BuildRequest; there is no append API).
 - Invalidations arrive synchronously on authoring/ChangeTime threads: your

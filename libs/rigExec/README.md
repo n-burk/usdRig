@@ -54,7 +54,8 @@ retained USD handles remain unused in worker execution.
 `libs/rigExecOracle/scalarReference.cpp` and `weightReference.cpp` judge
 captured inputs independently of production graph results.
 `bakedExecCrossCheckRows.cpp` compares eligible operation rows and records
-explicit reasons when no equivalent row exists. `goldenPose.cpp` encodes
+explicit reasons when no equivalent row exists; see
+[OpenExec reference checks](../../docs/concepts/baked-vs-dynamic.md#openexec-reference-checks). `goldenPose.cpp` encodes
 published values with exact floating-point bits; `goldenSuite.cpp` checks
 complete evaluator histories. Those files are `librigExecOracle.so`. `librigExec.so` does not link it.
 A test links it when that test runs a cpu-reference, golden, or exec

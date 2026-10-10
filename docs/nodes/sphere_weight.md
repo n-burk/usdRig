@@ -196,9 +196,8 @@ parameter -- 1 at falloffMin, 0 at falloffMax -- and the value is
 the weight.
 
 This is a STRUCTURAL read, resampled to a lookup table once per
-binding epoch, NOT a per-frame exec input: an exec computation
-resolves an attribute at one time, and a curve needs the whole
-function. The animatable knobs are falloffMin/Max, invert, and
+binding epoch, NOT a per-frame input: a per-frame input is a
+value at one time, and a curve is the whole function. The animatable knobs are falloffMin/Max, invert, and
 strength; the curve is a rig-authoring parameter, which is also
 what keeps the field epoch-shape-stable (spec section 4.1).
 

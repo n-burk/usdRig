@@ -187,7 +187,7 @@ nearest namespace ancestor of the chain's joints that is a
 RigExecJoint or RigExecControl, which every joint in
 rigExec:joints must share (descendants count). The chain then
 hangs from that provider exactly as if rigExec:startFrame named
-it, in both evaluation paths.
+it.
 
 Authored targets always win over the inference, silently: a
 chain with both behaves as if the policy were `none`. A chain
@@ -200,8 +200,8 @@ writer, and the compiler warns when it does not.
 Mechanics: the inference is compiled, not evaluated. Each
 compile writes the derived target into the stage session layer
 (never the asset), where the ordinary relationship machinery
-picks it up -- scheduling, exec reachability, and the baked
-program all see it as authored. Session-layer opinions on
+picks it up -- scheduling and the compiled program both see it
+as authored. Session-layer opinions on
 rigExec:startFrame for a `parent` chain are therefore
 compiler-managed: hand-authoring targets there while the policy
 is active may be replaced on recompile. Author them in an
@@ -215,7 +215,7 @@ Ordered output joints this solver poses (view-free
 extraction, user-directed 2026-07-25). List position is the
 aggregate element index; length is the effective sample count.
 The compiler binds each joint to one aggregate element
-in the derived layer.
+in the compiled program.
 
 #### `guide:radius`
 

@@ -8,8 +8,8 @@ bin/launch_usdview.bat examples\<file>.usda
 ```
 
 The rigExecUsdview plugin activates automatically for stages carrying a
-`RigExecRoot` prim and republishes OpenExec-evaluated results on every
-timeline change.
+`RigExecRoot` prim and republishes evaluated results on every timeline
+change.
 
 Joints and aggregate solvers draw as **guide geometry**: each joint draws a
 sphere at its posed origin and a cone to every nested child joint, while
@@ -87,9 +87,9 @@ performance or `2d/bust_dd_b/bust_dd_b_rig.usda` for the neutral rig.
 - **09_PropertyMathMovers.usda** — the property output domain:
   `RigExecFloatMathMover`, `RigExecVec3fMathMover`, and
   `RigExecMatrixMathMover` each revise an exact scalar/vector/matrix
-  attribute instead of a `point3f[]` array. A property chain resolves off
-  the authored stage before exec runs, so its result is handed back to
-  exec as the attribute's value — which is how `03`'s clamped weight
+  attribute instead of a `point3f[]` array. The compiled graph orders a
+  property chain before the operations that read the revised attribute,
+  and they read the chain's result — which is how `03`'s clamped weight
   reaches `RigExecBlendPointFrames`. A witness card skinned by a matrix
   mover sits alongside, so one rig shows both domains.
 - **10_AimXformTurret.usda** — a `RigExecAimConstraint` driving a plain
@@ -150,16 +150,22 @@ performance or `2d/bust_dd_b/bust_dd_b_rig.usda` for the neutral rig.
   so pose movers execute first and geometry movers can consume final pose.
 - Two movers writing the same target may be siblings or nested; the final
   composed hierarchy always supplies their deterministic stack order.
-- Joints and controls follow OpenExec's Ir contract exactly (no
-  deviations): both are `RigExecXformable`s with orthonormal
-  local-to-world `matrix4d rest:space`, avars for animation (rotations
-  in degrees; `avars:rspin` is the twist channel). Solver output is
+- Joints and controls are `RigExecXformable`s, which follow the attribute
+  layout of OpenExec's `IrXformable`: orthonormal local-to-world
+  `matrix4d rest:space`, default and posed spaces, and avars for animation
+  (rotations in degrees; `avars:rspin` is the twist channel). They differ
+  from it: `RigExecXformable` is `Boundable`, adds `avars:rotationSign`,
+  and defaults `avars:unitScaleFactor` to 1; its avars pose the xformable
+  directly instead of feeding a separate controller; controls and joints
+  add `avars:sx/sy/sz`; and a joint sizes its guides with `guide:radius`
+  where `IrJointScope` has `guide:length`. Solver output is
   **view-free**: a solver owns an ordered `rel rigExec:joints` list and
   the compiler binds each listed joint to one element of that solver's
-  aggregate result. The binding is internal — it exists only inside the
-  compiler's private evaluation stage, is not a schema property, and is
-  never authored on your stage (there is no `RigExecPointFrameView`
-  either). Authoring the solver's `rigExec:joints` list is the whole job. Joint hierarchy is prim nesting;
+  aggregate result. The binding is internal — it exists only in the
+  compiled program, is not a schema property, and is never authored on
+  your stage (there is no `RigExecPointFrameView` either). Authoring the
+  solver's `rigExec:joints` list is the whole job. Joint hierarchy is prim
+  nesting;
   an xformable with only a `rest:space` follows its rest (or its
   namespace parent) — see `08_AimEyes` for static joints posed
   downstream by movers. Joint guide cones derive their direction and length
@@ -178,10 +184,11 @@ performance or `2d/bust_dd_b/bust_dd_b_rig.usda` for the neutral rig.
   attribute — exactly one target each, and the target's value type must
   match the mover's static type). A rig with neither joints nor movers is
   still rejected: it publishes nothing.
-- Property-chain results reach every consumer. A computation reading the
-  attribute gets an exec value override; packet assembly, which never touches
-  exec, gets the same value through the evaluator's resolved-input set. Both
-  are filled from the one chain result before any input is read.
+- Property-chain results reach every consumer. Every operation that reads a
+  revised attribute as its own input is bound to the chain's result in the
+  compiled graph and runs after the chain. An input connected to that
+  attribute reads its authored base unless it declares a read phase (see
+  [connected inputs](../docs/concepts/how-operators-fire.md#connected-inputs)).
 - **Read phases** decide *which revision* of an input a mover consumes, and
   are authored as metadata on the relationship (or attribute) that names it:
 

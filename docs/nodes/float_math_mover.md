@@ -44,12 +44,12 @@ between keys and extrapolated linearly past the first and last key.
 
 ## How it works
 
-A math mover has no phase inside exec at all. Its inputs are all
-authored on itself and the chain's base is the target attribute's own
-authored value, so property chains are evaluated BEFORE exec runs and the
-result is supplied to exec as a value override — which is how a normalized
-weight reaches the blendshape mover or solver that reads it instead of
-being recomputed inside that kernel. Each revision computes
+A math mover's inputs live on the mover itself, and the chain's
+base is the target attribute's own authored value. The compiled graph
+orders the property chain before every operation that reads the revised
+attribute, and those operations read the chain's result — which is how a
+normalized weight reaches the blendshape mover or solver that reads it
+instead of being recomputed inside that kernel. Each revision computes
 `r = op(incoming)` and mixes it back through the common envelope
 (`incoming + defaultWeight × (r − incoming)`), so zero passes the incoming
 value through and one applies the operation outright. Movers sharing one
@@ -170,7 +170,7 @@ python docs/render_media.py --page float_math_mover
 
 ## Tips
 
-- Property chains resolve before exec runs, so a revised weight reaches solvers and movers in the same evaluation.
+- Property chains run before the operations that read their target, so a revised weight reaches solvers and movers in the same evaluation.
 - Same-target math movers run in mover-stack order — the reversed namespace walk — so the LAST sibling listed executes FIRST. `reorder nameChildren` is how the example puts remap before clamp.
 - `remap` only normalizes: `(v − min) / (max − min)`, with a zero-width range returning 0 rather than dividing. Chain a `clamp` after it whenever the incoming channel can overshoot.
 - A connection to a property these movers revise reads its base, the authored value before any of them. Declare `rigExecReadPhase = "final"` on the connected input to read their result, or a prim path to read it as that prim's movers left it. The phase is read on every connected attribute under the rig root, whatever operator it belongs to; see [Connected inputs](../concepts/how-operators-fire.md#connected-inputs) and example 16.
