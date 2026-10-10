@@ -18,6 +18,11 @@
 PXR_NAMESPACE_USING_DIRECTIVE
 
 namespace rigExec {
+namespace {
+const GfVec3d _affectAxes[3] = {
+    GfVec3d(1, 0, 0), GfVec3d(0, 1, 0), GfVec3d(0, 0, 1)};
+}
+
 
 // The ribbon sampler, shared by the RigExecRibbon exec callback and by the
 // baked program, which samples the same two curves with no VdfNetwork around
@@ -357,8 +362,7 @@ RigExecMaskTransform(const GfMatrix4d &m, const bool translation[3],
             x = std::atan2(-r[2][1], r[1][1]);
             z = 0.0;
         }
-        static const GfVec3d axes[3] = {
-            GfVec3d(1, 0, 0), GfVec3d(0, 1, 0), GfVec3d(0, 0, 1)};
+        const auto &axes = _affectAxes;
         const double angles[3] = {GfRadiansToDegrees(x),
                                   GfRadiansToDegrees(y),
                                   GfRadiansToDegrees(z)};

@@ -55,6 +55,13 @@ RigExecStageKeyLeafToken()
     return leaf;
 }
 
+const TfToken &
+RigExecUpstreamInputsToken()
+{
+    static const TfToken container("rigExecInputs");
+    return container;
+}
+
 uint64_t
 RigExecStageKeyFromAddedEntries(
     const HdSceneIndexBaseRefPtr &input,
@@ -2846,6 +2853,241 @@ RigExecResultsSceneIndex::_BindToStageContext(
     // deltas, epoch) and records the key; a chain it does not know -- a
     // hand-built one -- stays exactly as it was built.
     RigExecImagingRegistry::BindChain(this, key);
+    // The old context dropped this chain's table; the new one has none yet.
+    std::atomic_store(&_upstreamTable,
+                      std::shared_ptr<const RigExecUpstreamTable>());
+    _upstreamSourcesDirty = true;
+    _haveUpstreamT0 = false;
+}
+
+bool
+RigExecResultsSceneIndex::_NoteUpstreamAdded(
+    const HdSceneIndexObserver::AddedPrimEntries &entries)
+{
+    // One container lookup per added prim: the add is the only notice a
+    // source present at population sends. Every add is checked, wherever it
+    // lands: a prim outside the sessions' read roots today can enter them
+    // with a later connection edit, which sends no add.
+    const HdSceneIndexBaseRefPtr &input = _GetInputSceneIndex();
+    bool noted = false;
+    for (const auto &entry : entries) {
+        const HdSceneIndexPrim prim = input->GetPrim(entry.primPath);
+        const bool carries =
+            prim.dataSource &&
+            HdContainerDataSource::Cast(
+                prim.dataSource->Get(RigExecUpstreamInputsToken()));
+        if (carries) {
+            _upstreamPrims.insert(entry.primPath);
+            noted = true;
+        } else if (_upstreamPrims.erase(entry.primPath) != 0) {
+            noted = true;
+        }
+    }
+    _upstreamSourcesDirty = _upstreamSourcesDirty || noted;
+    return noted;
+}
+
+bool
+RigExecResultsSceneIndex::_NoteUpstreamDirtied(
+    const HdSceneIndexObserver::DirtiedPrimEntries &entries)
+{
+    static const HdDataSourceLocator inputs(RigExecUpstreamInputsToken());
+    bool noted = false;
+    for (const auto &entry : entries) {
+        if (!entry.dirtyLocators.Intersects(inputs)) {
+            continue;
+        }
+        // A universal dirty (an epoch swap's, among others) names no
+        // source: it re-pulls a prim already known to carry one, and
+        // discovers none.
+        if (entry.dirtyLocators.Contains(
+                HdDataSourceLocator::EmptyLocator())) {
+            if (_upstreamPrims.count(entry.primPath)) {
+                noted = true;
+            }
+            continue;
+        }
+        _upstreamPrims.insert(entry.primPath);
+        noted = true;
+    }
+    _upstreamSourcesDirty = _upstreamSourcesDirty || noted;
+    return noted;
+}
+
+bool
+RigExecResultsSceneIndex::_NoteUpstreamRemoved(
+    const HdSceneIndexObserver::RemovedPrimEntries &entries)
+{
+    bool noted = false;
+    for (const auto &entry : entries) {
+        for (auto it = _upstreamPrims.lower_bound(entry.primPath);
+             it != _upstreamPrims.end() && it->HasPrefix(entry.primPath);) {
+            it = _upstreamPrims.erase(it);
+            noted = true;
+        }
+    }
+    _upstreamSourcesDirty = _upstreamSourcesDirty || noted;
+    return noted;
+}
+
+void
+RigExecResultsSceneIndex::PullUpstreamInputs()
+{
+    _RequestUpstreamPull(_UpstreamPull::Window);
+}
+
+void
+RigExecResultsSceneIndex::_RequestUpstreamPull(_UpstreamPull why)
+{
+    if (_upstreamPulling.exchange(true)) {
+        // A notice raised by a source while a pull runs (GetPrim and
+        // GetValue may send synchronously): served by one more pull after
+        // this one returns, never by a nested one.
+        if (_upstreamInRepull.load()) {
+            TF_WARN("rigExecInputs: a source changed again during the "
+                    "deferred re-pull; the change is dropped until the "
+                    "next notice");
+        } else {
+            _upstreamRepull.store(true);
+        }
+        return;
+    }
+    _PullUpstreamOnce(why);
+    if (_upstreamRepull.exchange(false)) {
+        _upstreamInRepull.store(true);
+        _upstreamSourcesDirty = true;
+        // A trigger's caller evaluates next, which hands the re-pulled
+        // values over; any other pull re-evaluates for itself.
+        _PullUpstreamOnce(why == _UpstreamPull::Trigger
+                              ? _UpstreamPull::Trigger
+                              : _UpstreamPull::Sources);
+        _upstreamInRepull.store(false);
+    }
+    _upstreamPulling.store(false);
+}
+
+void
+RigExecResultsSceneIndex::_PullUpstreamOnce(_UpstreamPull why)
+{
+    const std::shared_ptr<const RigExecUpstreamTable> previous =
+        GetUpstreamTable();
+    if (_upstreamPrims.empty() && !previous) {
+        return;
+    }
+    const RigExecImagingRegistry::Ptr context =
+        RigExecImagingRegistry::ForKey(GetContextKey());
+    if (!context) {
+        // Unbound: kept dirty for the pull that follows the bind.
+        _upstreamSourcesDirty = true;
+        return;
+    }
+    // The window under the context's lock, released before any source is
+    // called (a source may send a notice that re-enters the context).
+    const RigExecUpstreamPullWindow window = context->GetUpstreamPullWindow();
+    const double t0 = _haveUpstreamT0 ? _upstreamT0
+                      : window.haveTime ? window.time
+                                        : window.lo;
+    const double lo = std::min(window.lo, t0);
+    const double hi = std::max(window.hi, t0);
+    auto table = std::make_shared<RigExecUpstreamTable>();
+    // A trigger inside the stored window with no source change since: the
+    // frame tables stand (each a function of absolute time until the next
+    // dirty), and only the values at T0 are re-derived, from the stored
+    // samples, with no data source call.
+    if (why == _UpstreamPull::Trigger && !_upstreamSourcesDirty && previous &&
+        previous->windowLo == lo && previous->windowHi == hi &&
+        previous->held == window.held) {
+        *table = *previous;
+        RigExecReanchorUpstreamTable(table.get(), t0);
+    } else {
+        table->t0 = t0;
+        table->held = window.held;
+        table->windowLo = lo;
+        table->windowHi = hi;
+        // Integer frames of the window, bounded so a runaway range cannot
+        // stall the notice thread.
+        constexpr int64_t kMaxFrames = 100000;
+        const double first = std::ceil(lo);
+        const double last = std::floor(hi);
+        table->firstFrame = int64_t(first);
+        table->frameCount =
+            last >= first
+                ? size_t(std::min<int64_t>(int64_t(last - first) + 1,
+                                           kMaxFrames))
+                : 0;
+        _upstreamSourcesDirty = false;
+        const HdSceneIndexBaseRefPtr &input = _GetInputSceneIndex();
+        std::vector<SdfPath> gone;
+        const std::vector<SdfPath> prims(_upstreamPrims.begin(),
+                                         _upstreamPrims.end());
+        for (const SdfPath &primPath : prims) {
+            const HdSceneIndexPrim prim = input->GetPrim(primPath);
+            const HdContainerDataSourceHandle inputs =
+                prim.dataSource
+                    ? HdContainerDataSource::Cast(
+                          prim.dataSource->Get(RigExecUpstreamInputsToken()))
+                    : HdContainerDataSourceHandle();
+            if (!inputs) {
+                gone.push_back(primPath);
+                continue;
+            }
+            for (const TfToken &name : inputs->GetNames()) {
+                const HdSampledDataSourceHandle source =
+                    HdSampledDataSource::Cast(inputs->Get(name));
+                const SdfPath path = primPath.AppendProperty(name);
+                if (!source || path.IsEmpty()) {
+                    continue;
+                }
+                // Once per source: whether it varies over the window, and
+                // the times to query if it does (offsets from T0).
+                std::vector<HdSampledDataSource::Time> times;
+                const bool varies =
+                    source->GetContributingSampleTimesForInterval(
+                        HdSampledDataSource::Time(lo - t0),
+                        HdSampledDataSource::Time(hi - t0), &times) &&
+                    !times.empty();
+                RigExecUpstreamTableEntry entry;
+                bool filled = false;
+                if (!varies) {
+                    filled = RigExecFillUniformUpstreamEntry(
+                        source->GetValue(0.0f), &entry);
+                } else {
+                    // Only the returned times: the signal elsewhere is the
+                    // reconstruction (upstreamTable.h).
+                    std::vector<RigExecUpstreamTableSample> samples;
+                    samples.reserve(times.size());
+                    for (const HdSampledDataSource::Time offset : times) {
+                        samples.push_back(RigExecUpstreamTableSample{
+                            t0 + double(offset), source->GetValue(offset)});
+                    }
+                    filled = RigExecFillVaryingUpstreamEntry(
+                        *table, std::move(samples), &entry);
+                }
+                if (filled) {
+                    table->entries.emplace(path, std::move(entry));
+                }
+            }
+        }
+        for (const SdfPath &primPath : gone) {
+            _upstreamPrims.erase(primPath);
+        }
+    }
+    // An empty table is still handed over once, so the context lifts what
+    // the chain published before.
+    if (table->entries.empty()) {
+        if (!previous) {
+            return;
+        }
+        std::atomic_store(&_upstreamTable,
+                          std::shared_ptr<const RigExecUpstreamTable>());
+    } else {
+        std::atomic_store(&_upstreamTable,
+                          std::shared_ptr<const RigExecUpstreamTable>(table));
+    }
+    context->SetUpstreamTable(this, table);
+    if (why == _UpstreamPull::Sources) {
+        context->RefreshUpstreamInputs();
+    }
 }
 
 bool
@@ -2884,6 +3126,8 @@ RigExecResultsSceneIndex::_PrimsAdded(
         // Binding runs unobserved too: the store swap's history refresh is
         // exactly the unobserved branch of NotifyGenerationPublished.
         _BindToStageContext(entries);
+        // Sources are noted unobserved too; the next trigger pulls them.
+        _NoteUpstreamAdded(entries);
         for (const auto &entry : entries) {
             _RefreshDrivenXform(entry.primPath);
             _RefreshAnnouncedGuides(entry.primPath);
@@ -2918,11 +3162,20 @@ RigExecResultsSceneIndex::_PrimsAdded(
         }
         UsdTimeCode time;
         if (_TriggerTime(_GetInputSceneIndex(), entry.primPath, &time)) {
-            // The pull was the point, not the value: one readable trigger
-            // means the adapter ran and the rig is active.
-            (void)time;
+            // The pull was the point: one readable trigger means the adapter
+            // ran and the rig is active. Its time is also the input scene
+            // index's, so it anchors upstream offsets until a trigger moves.
+            if (time.IsNumeric() && std::isfinite(time.GetValue())) {
+                _upstreamT0 = time.GetValue();
+                _haveUpstreamT0 = true;
+            }
             break;
         }
+    }
+    // Upstream sources added with their prims (or a re-add that dropped
+    // them): pulled now, and the context re-evaluates with them.
+    if (_NoteUpstreamAdded(entries)) {
+        _RequestUpstreamPull(_UpstreamPull::Sources);
     }
     // A re-added path may still be driven by the current generation, and
     // _PrimsRemoved pruned its history when it went away. Restore it, or a
@@ -2957,6 +3210,9 @@ RigExecResultsSceneIndex::_PrimsRemoved(
     const HdSceneIndexBase &,
     const HdSceneIndexObserver::RemovedPrimEntries &entries)
 {
+    // A removed source lifts its values: pulled below once the removal is
+    // forwarded while observed, at the next trigger otherwise.
+    const bool upstreamRemoved = _NoteUpstreamRemoved(entries);
     // Same reasoning as _PrimsAdded: forget the history for a removed
     // subtree even while unobserved, or stale topology outlives the prims.
     if (!_IsObserved()) {
@@ -3069,6 +3325,9 @@ RigExecResultsSceneIndex::_PrimsRemoved(
     if (!addedGuides.empty()) {
         _SendPrimsAdded(addedGuides);
     }
+    if (upstreamRemoved) {
+        _RequestUpstreamPull(_UpstreamPull::Sources);
+    }
 }
 
 void
@@ -3076,9 +3335,13 @@ RigExecResultsSceneIndex::_PrimsDirtied(
     const HdSceneIndexBase &,
     const HdSceneIndexObserver::DirtiedPrimEntries &entries)
 {
+    // A `rigExecInputs` dirty is noted observed or not; the pull waits for
+    // an observer, as the trigger does.
+    const bool upstreamDirtied = _NoteUpstreamDirtied(entries);
     if (!_IsObserved()) {
         return;
     }
+    bool triggered = false;
     // Live evaluation for hosts with no RigExec timeline glue (usdrecord):
     // the rig adapter flags rigExec/time time-varying on every RigExecRoot
     // prim, so the host's SetTime dirties it here. Pull the frame and
@@ -3092,6 +3355,14 @@ RigExecResultsSceneIndex::_PrimsDirtied(
         }
         UsdTimeCode time;
         if (_TriggerTime(_GetInputSceneIndex(), entry.primPath, &time)) {
+            // The trigger time is the input scene index's time: T0, the
+            // anchor of every upstream offset. The pull runs first, with no
+            // lock held, so the SetTime below hands its values over.
+            if (time.IsNumeric() && std::isfinite(time.GetValue())) {
+                _upstreamT0 = time.GetValue();
+                _haveUpstreamT0 = true;
+            }
+            _RequestUpstreamPull(_UpstreamPull::Trigger);
             // One SetTime evaluates every session of this chain's context:
             // the first readable trigger names the frame for all of them.
             // Other stages' contexts keep their own clocks.
@@ -3099,8 +3370,12 @@ RigExecResultsSceneIndex::_PrimsDirtied(
                     RigExecImagingRegistry::ForKey(GetContextKey())) {
                 context->SetTime(time);
             }
+            triggered = true;
             break;
         }
+    }
+    if (upstreamDirtied && !triggered) {
+        _RequestUpstreamPull(_UpstreamPull::Sources);
     }
     // A synthesized guide reads its visibility AND its parent's world
     // transform from that parent, so a parent whose either changed has to

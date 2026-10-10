@@ -1,13 +1,5 @@
-// The baked program's scheduler: the edges between its steps, the executors
-// that run them, and the report that shows both.
-// The step bodies live with the domain they belong to (bakedPose.cpp,
-// bakedGeometry.cpp). What lives here is everything that is true of a step
-// whatever it computes: that its reads and writes are declared as slot
-// ranges, that the edges between steps follow mechanically from those
-// declarations, that every edge points forward in program order, and that
-// running the steps in program order on one thread reproduces the straight
-// line this graph was derived from -- which is the reference every other
-// order is measured against.
+// Native body dispatch, semantic declaration checks, costs, and graph reports.
+// Canonical dependency compilation and execution live in bakedOpGraph.
 #ifndef RIGEXEC_BAKED_SCHEDULE_H
 #define RIGEXEC_BAKED_SCHEDULE_H
 
@@ -22,16 +14,14 @@
 
 namespace rigExec {
 
-struct RigExecBakedEdgeSweep;
-
 /// Which executor a run uses.
 enum class RigExecBakedScheduleMode {
     /// Steps in program order on one thread. The reference, and what
     /// RIGEXEC_BAKED_SCHEDULE=serial asks for.
     Serial,
-    /// Clusters spread across the work arena, one task per cluster, with a
-    /// padded atomic remaining-predecessor counter deciding what becomes
-    /// runnable. What RIGEXEC_BAKED_SCHEDULE=parallel asks for.
+    /// Clusters spread across the work arena, one task per cluster, with an
+    /// unpadded atomic count of unfinished candidate predecessors deciding
+    /// what becomes runnable. What RIGEXEC_BAKED_SCHEDULE=parallel asks for.
     Parallel,
 };
 
@@ -42,67 +32,53 @@ enum class RigExecBakedScheduleMode {
 /// this one too.
 RigExecBakedScheduleMode RigExecBakedScheduleModeFromEnvironment();
 
-/// Computes the edges between \p program's steps from their declared slot
-/// ranges, and checks that every one of them points forward.
+/// Whether \p program's step graph is one every executor may trust, which
+/// Build asks before it hands the program out and refuses it when not.
 ///
-/// Once, at Build, in program order: for each read range, an edge from every
-/// step still holding the last write of any slot in it; for each write
-/// range, an edge from those writers (write-after-write) and from every step
-/// that has read any slot of it since the program started (write-after-read,
-/// which is why the reader lists are seeded from program start and not from
-/// the previous write -- a step reading a slot no earlier step wrote is
-/// reading last run's value, and the step that overwrites it must still
-/// follow).
+/// Three checks. The edges: `preds` and `succs` sorted, unique, pointing
+/// backward and forward respectively, and each the inverse of the other.
+/// The producers: every slot a step reads in a domain the prologue does not
+/// fill has a writer at a strictly lower index, and no step names the retired
+/// Snapshots domain; every pose version a commit, a solve or a last-version
+/// reader is bound to was written by an earlier step; and every reader of a
+/// chain's points declares the version it reads, whose only producer is one
+/// revision's fuse and is among the reader's preds. The clusters: a partition of the steps with
+/// members in program order, cluster edges that cover the step edges, and a
+/// topological order naming every cluster once.
 ///
-/// \p sweep carries the edge sweep Build started over the pose half; this
-/// extends it over the steps appended since (see RigExecBakedEdgeSweep).
-void RigExecBakedBuildSchedule(RigExecBakedProgramImpl *program,
-                               RigExecBakedEdgeSweep *sweep);
+/// On failure \p error receives the first violation, naming the steps, the
+/// domain and the slot, and how many more there were.
+bool RigExecBakedValidateStepGraph(const RigExecBakedProgramImpl &program,
+                                   std::string *error);
 
-/// One half-open run of a domain's slots, and the step it belongs to: the
-/// unit the edge sweep's writer and reader tables are kept in.
-struct RigExecBakedSlotInterval {
-    uint32_t begin = 0, end = 0;
-    int step = 0;
-};
+/// Validates property, rest, ladder, layout, and weight-field declarations.
+/// Head classification does not constrain canonical order or dependencies.
+bool RigExecBakedValidateHeadTier(const RigExecBakedProgramImpl &program,
+                                  std::string *error);
 
-/// The edge sweep's running state, which is everything a step's edges
-/// depend on besides its own declarations: per domain, which step still
-/// holds the last write of each slot, and which steps have read each slot
-/// since that write.
-///
-/// Kept between the two halves of Build rather than rebuilt, because the
-/// sweep is a fold over the steps in program order and a step appended
-/// later can change nothing an earlier step's edges were derived from. So
-/// extending the tables over the geometry steps produces exactly the edges a
-/// single sweep over the finished program would have -- the pose steps' own
-/// edges, and with them the levels the vertex partition was cut from, are
-/// never revisited and cannot move.
-///
-/// Sound only while the program GROWS BY APPENDING: a step at or below
-/// `swept` must not have its declared ranges changed, nor a step be inserted
-/// before it. Build's two halves obey that (the geometry half appends, and
-/// reads the pose half's levels without writing them).
-struct RigExecBakedEdgeSweep {
-    std::array<std::vector<RigExecBakedSlotInterval>,
-               RigExecBakedSlotDomainCount>
-        writers, readers;
-    /// Steps [0, swept) carry their final predecessors and labels, and
-    /// successors among themselves; a later sweep only appends to those.
-    int swept = 0;
-};
 
-/// The edge sweep over the steps appended since \p sweep last ran, and
-/// checks that every new edge points forward.
-///
-/// Run twice by Build, over one \p sweep: once over the pose half by
-/// itself, so that the vertex partition can ask what LEVEL a chunk's joints
-/// land at before it decides whether cutting the revision buys anything, and
-/// again from RigExecBakedBuildSchedule over the geometry steps appended
-/// since. See RigExecBakedEdgeSweep for why the two passes together are the
-/// one sweep.
-void RigExecBakedBuildStepEdges(RigExecBakedProgramImpl *program,
-                                RigExecBakedEdgeSweep *sweep);
+/// The clusters a value edit on override index \p index re-runs, when the
+/// index is a ladder channel's (kEditRouteHead): the rest and ladder ops
+/// whose binding leaves hold it, their forward closure within the head
+/// tier (a parent's RestCompose reaches its children's through
+/// `Rest[parent]`), and the cluster of every region step that declares a
+/// head output of an op in that closure. Sorted and unique; empty for an
+/// index no head op reads.
+std::vector<int> RigExecBakedHeadSeeds(const RigExecBakedProgramImpl &program,
+                                       int index);
+
+/// RigExecBakedHeadSeeds in parts, for a caller asking for many indices:
+/// per head step, the clusters its closure's outputs reach; the head steps
+/// whose binding leaves hold \p index's leaf; and the clusters a set of
+/// head steps reaches, sorted.
+std::vector<RigExecBakedClusterSet> RigExecBakedHeadOpSeeds(
+    const RigExecBakedProgramImpl &program);
+std::vector<uint32_t> RigExecBakedHeadOpsReading(
+    const RigExecBakedProgramImpl &program, int index);
+std::vector<int> RigExecBakedHeadSeedsFrom(
+    const RigExecBakedProgramImpl &program,
+    const std::vector<RigExecBakedClusterSet> &opSeeds,
+    const std::vector<uint32_t> &ops);
 
 /// Assigns every step from \p firstStep on its size, its cost and its
 /// longest-path level.
@@ -119,73 +95,71 @@ void RigExecBakedBuildStepEdges(RigExecBakedProgramImpl *program,
 void RigExecBakedAssignStepCosts(RigExecBakedProgramImpl *program,
                                  size_t firstStep = 0);
 
-/// Partitions \p program's steps into clusters at \p grainUs microseconds.
-///
-/// Pure: it reads the program and returns a partition, so a caller may ask
-/// the same program for the schedule at several grains and compare them --
-/// which is exactly what the byte-identity-across-grains argument needs.
-/// A grain of zero means one step per cluster.
-///
-/// Level-pack (§5.1): steps are grouped by longest-path level, each level is
-/// cut into contiguous bins of about one grain, single-successor chains are
-/// fused to a fixpoint and a cluster too small to be worth a task joins its
-/// one predecessor. Every one of those transformations preserves acyclicity
-/// of the quotient graph, which is what makes any cluster order that
-/// respects the cluster edges a valid execution order.
-RigExecBakedClustering RigExecBakedBuildClusters(
-    const RigExecBakedProgramImpl &program, double grainUs);
+/// The concurrency an exported program is lowered for. Exports must not
+/// depend on the baking machine; 8 reproduces the
+/// clustering of every bake made with 8 or fewer workers.
+constexpr size_t kRigExecBakedReferenceConcurrency = 8;
 
-/// The grain Build uses: RIGEXEC_BAKED_GRAIN_US when it is set, and
-/// otherwise `clamp(total cost / (4 x concurrency), 5us, 50us)`.
-double RigExecBakedScheduleGrainUs(double totalCost);
+/// The lowering grain, in microseconds, for a program whose model serial
+/// cost is \p totalCost, scheduled for \p concurrency workers (0 counts as
+/// 1). RIGEXEC_BAKED_GRAIN_US, read once, overrides both.
+double RigExecBakedScheduleGrainUs(double totalCost, size_t concurrency);
+
+/// kRigExecBakedReferenceConcurrency for an Export build, else the
+/// machine's WorkGetConcurrencyLimit() (at least 1). Owner thread, Build.
+size_t RigExecBakedLoweringConcurrency(const RigExecBakedProgramImpl &B);
 
 /// The clusters of \p clustering, each after all of its predecessors.
 ///
-/// Cluster ids come out of the level packing, which numbers bins and not
-/// dependencies -- cluster 6 can perfectly well have cluster 10 among its
-/// predecessors -- so anything that walks the cluster graph one cluster at a
-/// time needs this order and not increasing id. A cycle is a coding error
-/// and leaves the clusters on it out of the answer. Build caches the result
-/// as `RigExecBakedClustering::topologicalOrder`.
+/// Derived from the cluster edges alone, never from cluster ids. Lowered ids
+/// follow each cluster's first operation in canonical order, so they happen
+/// to be topological too (RigExecValidateOpClusters checks it). A cycle is a
+/// coding error and leaves the clusters on it out of the answer. Build caches
+/// the result as `RigExecBakedClustering::topologicalOrder`.
 std::vector<int> RigExecBakedClusterTopologicalOrder(
     const RigExecBakedClustering &clustering);
 
-/// Computes the cone closure of \p program's steps and clusters (§7).
+/// Computes cluster reachability and source-to-operation lookup tables.
 ///
-/// Once, at Build, from the edges and the clustering: `stepCone` holds every
-/// step that has to run when a given step does, `cone[c]` every cluster that
-/// has to run when c does, and the lookup tables beside each are what a
-/// frame maps a changed source onto, at that grain. Nothing here measures
-/// anything and nothing depends on a run. The cluster closure walks the
-/// clusters in topological order, which it caches on `program->clustering`;
-/// the step closure walks program order backwards.
+/// Once at Build, `cone[c]` records downstream clusters for output-affected
+/// queries. The common executor closes candidate operations over its actual
+/// successor adjacency; no dense all-pairs step table is retained. Cluster
+/// closure walks cached topological order. These tables depend only on the
+/// compiled graph, not on timing or a particular execution.
 ///
 /// There is no second closure. A cluster never has to run so that another
 /// can read what it wrote LAST run -- versioned pose storage (§3.1) leaves
 /// every version where its writer left it.
 void RigExecBakedBuildCones(RigExecBakedProgramImpl *program);
 
-/// Decides which clusters this run executes, and updates the source state
-/// the next run compares against.
-///
-/// Sources -- the avar table, each chain's base points, each skin
-/// revision's static packet, the property-chain results -- have already been
-/// evaluated when this is called, and are compared by VALUE. The result is
-/// left in `program->closedSteps`, the forward step closure of the steps a
-/// moved source reaches, and in `program->closed`, the clusters holding one
-/// of them; `force` asks for the whole program, which is what the first run
-/// of an epoch, a bumped program stamp and the verifier's second pass all
-/// want.
-void RigExecBakedComputeClosure(RigExecBakedProgramImpl *program,
-                               UsdTimeCode time, bool force);
+/// Dispatches one body with optional timing and immutable check-row capture.
+/// \p profiling stamps the body interval; the run's owner decides it once.
+void RigExecBakedRunStepBody(RigExecBakedProgramImpl *program,
+    RigExecBakedStep *step, UsdTimeCode time, bool profiling);
+
+/// The clock RigExecProfiler::NowUs reads, in nanoseconds: a plain clock
+/// read, so an op may stamp itself with it.
+uint64_t RigExecBakedNowNs();
+
+void RigExecBakedPrepareHeadOps(RigExecBakedProgramImpl *);
+
+std::vector<char> RigExecBakedExpectedStageFramesAdmissionReads(const RigExecBakedProgramImpl &);
+void RigExecBakedDeclareStageFramesAdmission(RigExecBakedProgramImpl *);
+bool RigExecBakedRequiresStageFramesAdmission(const RigExecBakedStep &);
+bool RigExecBakedPublishStageFramesRefusal(RigExecBakedProgramImpl *, RigExecRigPose *);
+void RigExecBakedFinishHeadOp(RigExecBakedProgramImpl *, const RigExecBakedStep &);
+bool RigExecBakedHeadValueChanged(const RigExecBakedProgramImpl &,
+    RigExecBakedSlotDomain, uint32_t slot);
+
+/// Zeroes the last execution's flags, completion numbers and counts, and the
+/// stamps of the steps runs since the last clear listed (`stampedSteps`).
+void RigExecBakedClearRunStamps(RigExecBakedProgramImpl *program);
 
 /// Runs every step of \p program, returning false when one of them gave the
 /// generation back.
 ///
-/// Nothing here touches the pose: a step writes its diagnostics, its counter
-/// deltas and its phased-read records into itself, and this merges the
-/// records into the run's store in step order. The epilogue replays the
-/// rest.
+/// Nothing here touches the pose: a step writes its diagnostics and its
+/// counter deltas into itself, and the epilogue replays them.
 /// \p force asks for every cluster, which is what a first run, a bumped
 /// program stamp and the verifier's second pass all need.
 bool RigExecBakedRunSteps(RigExecBakedProgramImpl *program, UsdTimeCode time,
@@ -204,11 +178,11 @@ void RigExecBakedReplayStepTimings(const RigExecBakedProgramImpl &program);
 /// Whether RIGEXEC_BAKED_SCHEDULE_CALIBRATE asks for a measured cost table.
 ///
 /// Opt-in, and serial: the mode runs the program the reference way, times
-/// every step with two clock reads into that step's own accumulator -- no
-/// lock, no shared counter -- and after the requested number of frames fits
-/// the two constants of every step kind by least squares and prints a table
-/// ready to paste over the one in bakedSchedule.cpp. Build itself never
-/// measures anything.
+/// every op's memo, body and value publication with plain clock reads into
+/// that op's own fields -- no lock, no shared counter -- and after the
+/// requested number of frames fits the two constants of every step kind to
+/// the bodies by least squares and prints a table ready to paste over the
+/// one in bakedSchedule.cpp. Build itself never measures anything.
 bool RigExecBakedScheduleCalibrationRequested();
 
 /// Folds this run's per-step intervals into the calibration accumulators and,
@@ -237,11 +211,12 @@ bool RigExecBakedScheduleReportRequested();
 /// Whether RIGEXEC_BAKED_STEP_TIMING asks what a frame spends where.
 ///
 /// Opt-in and OFF by default, in both schedule modes, because the answer
-/// costs two clock reads per step and a frame has several hundred of them --
-/// enough to move the number being asked about. With it off no executor
-/// reads a clock unless the profiler is recording or the schedule report
-/// asked for cluster times, which is what makes the default frame the frame
-/// a caller actually gets.
+/// costs a few clock reads per step and a frame has several hundred of them
+/// -- enough to move the number being asked about. With it off no executor
+/// reads a clock unless the profiler is recording, op timing is on
+/// (RigExecRigEvaluator::SetOpTimingEnabled), calibration is measuring, or
+/// the schedule report asked for cluster times, which is what makes the
+/// default frame the frame a caller actually gets.
 bool RigExecBakedStepTimingRequested();
 
 /// Folds one frame's phase and step times into the accumulators and, once
@@ -250,13 +225,26 @@ bool RigExecBakedStepTimingRequested();
 /// The phases are the three a frame divides into -- the serial prologue, the
 /// region, the serial epilogue -- and the steps are grouped by kind, so the
 /// table says both which third of the frame to attack and which step kind
-/// within it. Averaged over the frames watched rather than printed per
-/// frame: a single frame of a few hundred microseconds is mostly noise.
+/// within it. The body table comes first; after it, the ops' memos and
+/// value publications by kind. Averaged over the frames watched rather than
+/// printed per frame: a single frame of a few hundred microseconds is
+/// mostly noise.
 ///
-/// Only a frame that published a pose is watched, numerator and divisor
-/// together, and the cone verifier's second pass is excluded from both --
-/// so a table is always the cost of one frame of the kind a caller gets.
+/// The frame count and the phases come only from a frame that published a
+/// pose, and the cone verifier's second pass is excluded from everything.
+/// A cold run -- the program's first, or a forced one -- runs nearly every
+/// op, so it is left out of every sum and its phases are averaged on a last
+/// line of their own; it still counts toward the frames watched. Under
+/// calibration, whose fit keeps cold frames, it is summed like any other.
+/// The per-op sums are not gated on publication: a body is summed whenever
+/// it ran, and a memo or a publication whenever its run's op graph
+/// completed, so frames whose generation a step or the publication gave
+/// back overstate the per-kind lines against the divisor.
 void RigExecBakedStepTimingReport(RigExecBakedProgramImpl *program);
+
+/// The table RigExecBakedStepTimingReport prints, from what \p program has
+/// accumulated so far.
+std::string RigExecBakedStepTimingTable(const RigExecBakedProgramImpl &program);
 
 }  // namespace rigExec
 

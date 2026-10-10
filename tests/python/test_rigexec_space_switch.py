@@ -19,7 +19,7 @@ some other part of the rig. The contract this holds:
   * the index can be read from a property on the control itself, so the
     animator-facing channel sits beside the avars;
   * a pole vector can live in its own IK handle's switched space -- one
-    switch reading another's target -- and a cycle is refused.
+    switch reading another's target -- and a cycle is locally set aside with a diagnostic.
 
 Usage: test_rigexec_space_switch.py [<generated schema resources dir>]
 """
@@ -77,7 +77,7 @@ class _Fixture(object):
     Hand listing [Chest, Other, world]."""
 
     def __init__(self, sources=("Chest", "Other", "world"), labels=None,
-                 masks=None, active_attribute=False, mode="dynamic"):
+                 masks=None, active_attribute=False, mode="graph"):
         self.stage = Usd.Stage.CreateInMemory("spaces.usda")
         builder = rigexec.Builder.create(self.stage, RIG, "Test")
         self.chest = builder.add_control("Chest", _Translate(*CHEST))
@@ -114,7 +114,7 @@ class _Fixture(object):
                     self.dial.GetPath()])
         self.rig = rigexec.Rig(self.stage, RIG)
         self.rig.compile()
-        self.rig.evaluation_mode = mode
+        self.rig.cpu_reference = True
         self.mode = mode
 
     def Avar(self, control, name, value):
@@ -139,17 +139,13 @@ class _Fixture(object):
         # element by element; a mismatch here is the two paths disagreeing
         # about the same switch, which is the failure a value check alone
         # cannot see.
-        if self.mode == "parity" and pose.baked_parity_mismatches:
-            raise AssertionError(
-                "%d baked parity mismatch(es) on a switched rig"
-                % pose.baked_parity_mismatches)
         return pose.control_frame(self.paths[control]).to_matrix4()
 
 
 def TestRestAgreesEverywhere():
     """Every space gives the same answer at rest. This is the property that
     makes a space switch safe to add to a rig that already works."""
-    for mode in ("dynamic", "baked", "parity"):
+    for mode in ("graph",):
         fixture = _Fixture(mode=mode)
         for active in (0.0, 1.0, 2.0, 0.5, 1.5):
             fixture.Active(active)
@@ -159,15 +155,15 @@ def TestRestAgreesEverywhere():
 
 
 def TestTheProgramAndTheWalkAgree():
-    """Parity mode compares the baked program with the dynamic walk element
+    """Parity mode compares the compiled graph with the dynamic walk element
     by element, on the cases that exercise every branch of the switch."""
-    fixture = _Fixture(mode="parity")
+    fixture = _Fixture(mode="graph")
     fixture.Avar("Chest", "tx", 10.0).Avar("Other", "ry", 25.0)
     fixture.Avar("Hand", "tx", 3.0).Avar("Hand", "rz", 12.0)
     for active in (0.0, 1.0, 2.0, 0.5, 1.4, -3.0, 9.0):
         fixture.Active(active)
         fixture.World()          # raises on any mismatch
-    masked = _Fixture(mode="parity",
+    masked = _Fixture(mode="graph",
                       masks={"affectTranslationX": False,
                              "affectTranslationY": False,
                              "affectTranslationZ": False})
@@ -269,7 +265,7 @@ def TestTwistOnlyDropsTheSwing():
     """A pole vector in its hand's space follows the forearm's TWIST and does
     not swing around with the wrist. The split is exact, so 30 degrees of
     twist arrives as 30 and 30 degrees of swing arrives as nothing."""
-    for mode in ("dynamic", "parity"):
+    for mode in ("graph",):
         fixture = _Fixture(mode=mode)
         # Other is the "hand": twist about Y, which is the axis the switch
         # is told to keep.
@@ -281,7 +277,7 @@ def TestTwistOnlyDropsTheSwing():
             Gf.Vec3d(0, 1, 0))
         fixture.rig = rigexec.Rig(fixture.stage, RIG)
         fixture.rig.compile()
-        fixture.rig.evaluation_mode = mode
+        fixture.rig.cpu_reference = True
         fixture.Active(1.0)
 
         rest = _Matrix(fixture.World())
@@ -349,7 +345,7 @@ def TestSwitchReadsAnotherSwitchedControl():
            % (poled,))
 
 
-def TestCycleIsRefused():
+def TestCycleSetsAsideMembers():
     fixture = _Fixture()
     other = fixture.stage.DefinePrim("/Rig/Movers/chestSpaces",
                                      "RigExecSpaceSwitch")
@@ -358,13 +354,35 @@ def TestCycleIsRefused():
     other.CreateRelationship("rigExec:sources").SetTargets(
         [fixture.paths["Hand"]])
     rig = rigexec.Rig(fixture.stage, RIG)
-    try:
-        rig.compile()
-    except Exception as error:  # noqa: BLE001 -- the message is the contract
-        _Check("cycle" in str(error),
-               "a space-switch cycle names itself: %s" % error)
-        return
-    _Check(False, "a space-switch cycle must be refused at compile")
+    rig.compile()
+    expected = {fixture.switch.GetPath().pathString, other.GetPath().pathString}
+    skipped = rig.skipped_operations()
+    _Check(set(skipped) == expected, "exact cyclic switch owners: %s" % skipped)
+    _Check(len(set(skipped.values())) == 1, "one component-local reason: %s" % skipped)
+    reason = next(iter(skipped.values()))
+    _Check("pose dependency cycle" in reason and " -> " in reason,
+           "the common compiler reports an actual loop: %s" % reason)
+    for owner in expected:
+        _Check(owner in reason, "cyclic owner absent from reason: %s" % reason)
+    authored = fixture.stage.GetRootLayer().ExportToString()
+    pose = rig.evaluate(0)
+    _Check(pose.valid, "one cyclic component does not reject unrelated work")
+    _Check(_Near(_Origin(pose.control_frame(fixture.paths["Other"]).to_matrix4()), OTHER),
+           "the independent Other control keeps its authored frame")
+    held = rig.evaluate(0)
+    _Check(held.valid and rig.skipped_operations() == skipped,
+           "held local exclusion/reporting is stable")
+    _Check(tuple(held.control_frame(fixture.paths["Other"]).to_matrix4()) ==
+           tuple(pose.control_frame(fixture.paths["Other"]).to_matrix4()),
+           "the unrelated held frame is exact")
+    _Check(fixture.stage.GetRootLayer().ExportToString() == authored,
+           "local cycle handling does not author the stage")
+    fixture.Avar("Other", "ty", 7.0)
+    moved = rig.evaluate(0)
+    _Check(moved.valid and _Near(_Origin(moved.control_frame(
+        fixture.paths["Other"]).to_matrix4()), (OTHER[0], OTHER[1] + 7.0, OTHER[2])),
+        "the unrelated control still responds while the loop is set aside")
+    _Check(rig.skipped_operations() == skipped, "the unrelated edit does not change cycle membership")
 
 
 def TestSourceWeightsAreRefused():
@@ -396,7 +414,7 @@ def main():
     TestTwistOnlyDropsTheSwing()
     TestIndexFromAControlProperty()
     TestSwitchReadsAnotherSwitchedControl()
-    TestCycleIsRefused()
+    TestCycleSetsAsideMembers()
     TestSourceWeightsAreRefused()
     print("OK")
     return 0

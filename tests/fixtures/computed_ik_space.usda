@@ -1,0 +1,316 @@
+#usda 1.0
+(
+    """
+    Test fixture: IK solvers measured in a space. The arm's chain is
+    measured in rigExec:space (a master control that turns and scales over
+    the shot, with the arm's controls under it) composed with a keyed,
+    non-uniform rigExec:spaceMatrix, so its bone lengths and the axis
+    handles it publishes follow both. The reach names no space and keys
+    its spaceMatrix alone, so only that matrix puts it on the solver's live
+    arm. The tail is a spline IK measured in the same master, whose rest is
+    rebuilt in the space once the master has moved. The leg names neither.
+    Baked and verified at frames 1, 3, 5, 7 and 10 by
+    verify_binary_computed_ik_space, and played by testRigExecRuntimePose,
+    which also gives the leg a constant spaceMatrix.
+    """
+    defaultPrim = "IkSpaceAsset"
+    endTimeCode = 10
+    startTimeCode = 1
+    upAxis = "Y"
+)
+
+def Xform "IkSpaceAsset"
+{
+    def RigExecRoot "Rig"
+    {
+        uniform token rigExec:partition = "IkSpaceAsset"
+        custom int rigExec:restFrameVersion = 2
+
+        def Scope "Controls"
+        {
+            def RigExecControl "Master" (
+                prepend apiSchemas = ["RigExecControlAPI"]
+            )
+            {
+                double avars:ry = 0
+                double avars:ry.timeSamples = {
+                    1: 0,
+                    10: 30,
+                }
+                double avars:sx = 1
+                double avars:sx.timeSamples = {
+                    1: 1,
+                    10: 1.5,
+                }
+                double avars:sy = 1
+                double avars:sy.timeSamples = {
+                    1: 1,
+                    10: 1.5,
+                }
+                double avars:sz = 1
+                double avars:sz.timeSamples = {
+                    1: 1,
+                    10: 1.5,
+                }
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+
+                def RigExecControl "Shoulder" (
+                    prepend apiSchemas = ["RigExecControlAPI"]
+                )
+                {
+                    matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 10, 0, 1) )
+                }
+
+                def RigExecControl "HandIK" (
+                    prepend apiSchemas = ["RigExecControlAPI"]
+                )
+                {
+                    double avars:tx = 0
+                    double avars:tx.timeSamples = {
+                        1: 0,
+                        10: -2,
+                    }
+                    double avars:ty = 0
+                    double avars:ty.timeSamples = {
+                        1: 0,
+                        10: -3,
+                    }
+                    double avars:tz = 0
+                    double avars:tz.timeSamples = {
+                        1: 0,
+                        10: 1,
+                    }
+                    matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (6, 10, 0, 1) )
+                }
+
+                def RigExecControl "ElbowPole" (
+                    prepend apiSchemas = ["RigExecControlAPI"]
+                )
+                {
+                    matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (3, 10, -3, 1) )
+                }
+
+                def RigExecControl "TailRoot" (
+                    prepend apiSchemas = ["RigExecControlAPI"]
+                )
+                {
+                    matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (-4, 10, 0, 1) )
+                }
+
+                def RigExecControl "TailMid" (
+                    prepend apiSchemas = ["RigExecControlAPI"]
+                )
+                {
+                    double avars:tz = 0
+                    double avars:tz.timeSamples = {
+                        1: 0,
+                        10: 0.75,
+                    }
+                    matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (-4, 13, 0, 1) )
+                }
+
+                def RigExecControl "TailEnd" (
+                    prepend apiSchemas = ["RigExecControlAPI"]
+                )
+                {
+                    double avars:tx = 0
+                    double avars:tx.timeSamples = {
+                        1: 0,
+                        10: 1.5,
+                    }
+                    matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (-4, 16, 0, 1) )
+                }
+            }
+
+            def RigExecControl "Hip" (
+                prepend apiSchemas = ["RigExecControlAPI"]
+            )
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (2, 5, 0, 1) )
+            }
+
+            def RigExecControl "FootIK" (
+                prepend apiSchemas = ["RigExecControlAPI"]
+            )
+            {
+                double avars:ty = 0
+                double avars:ty.timeSamples = {
+                    1: 0,
+                    10: 2,
+                }
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (2, 0, 0, 1) )
+            }
+
+            def RigExecControl "KneePole" (
+                prepend apiSchemas = ["RigExecControlAPI"]
+            )
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (2, 2.5, 3, 1) )
+            }
+
+            def RigExecControl "ReachRoot" (
+                prepend apiSchemas = ["RigExecControlAPI"]
+            )
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (-2, 5, 0, 1) )
+            }
+
+            def RigExecControl "ReachIK" (
+                prepend apiSchemas = ["RigExecControlAPI"]
+            )
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (-2, 0.5, 0, 1) )
+            }
+
+            def RigExecControl "ReachPole" (
+                prepend apiSchemas = ["RigExecControlAPI"]
+            )
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (-2, 2.5, 3, 1) )
+            }
+        }
+
+        def Scope "Solvers"
+        {
+            def RigExecTwoBoneIk "ArmIK"
+            {
+                float inputs:softness = 0.1
+                float inputs:stretch = 1
+                rel rigExec:effectorControl = </IkSpaceAsset/Rig/Controls/Master/HandIK>
+                rel rigExec:joints = [
+                    </IkSpaceAsset/Rig/Joints/Shoulder>,
+                    </IkSpaceAsset/Rig/Joints/Shoulder/Elbow>,
+                    </IkSpaceAsset/Rig/Joints/Shoulder/Elbow/Wrist>,
+                ]
+                rel rigExec:poleControl = </IkSpaceAsset/Rig/Controls/Master/ElbowPole>
+                double rigExec:preferredBendRadians = -0.35
+                rel rigExec:rootControl = </IkSpaceAsset/Rig/Controls/Master/Shoulder>
+                rel rigExec:space = </IkSpaceAsset/Rig/Controls/Master>
+                matrix4d rigExec:spaceMatrix = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+                matrix4d rigExec:spaceMatrix.timeSamples = {
+                    1: ( (1.25, 0, 0, 0), (0, 1.25, 0, 0), (0, 0, 1.25, 0), (0, 0, 0, 1) ),
+                    10: ( (0.8, 0, 0, 0), (0, 0.9, 0, 0), (0, 0, 0.7, 0), (0.5, 0, 0, 1) ),
+                }
+                double rigExec:upperLengthOffset = 0.25
+            }
+
+            def RigExecTwoBoneIk "LegIK"
+            {
+                rel rigExec:effectorControl = </IkSpaceAsset/Rig/Controls/FootIK>
+                rel rigExec:joints = [
+                    </IkSpaceAsset/Rig/Joints/Hip>,
+                    </IkSpaceAsset/Rig/Joints/Hip/Knee>,
+                    </IkSpaceAsset/Rig/Joints/Hip/Knee/Ankle>,
+                ]
+                rel rigExec:poleControl = </IkSpaceAsset/Rig/Controls/KneePole>
+                rel rigExec:rootControl = </IkSpaceAsset/Rig/Controls/Hip>
+            }
+
+            def RigExecTwoBoneIk "ReachIK"
+            {
+                rel rigExec:effectorControl = </IkSpaceAsset/Rig/Controls/ReachIK>
+                rel rigExec:joints = [
+                    </IkSpaceAsset/Rig/Joints/ReachA>,
+                    </IkSpaceAsset/Rig/Joints/ReachA/ReachB>,
+                    </IkSpaceAsset/Rig/Joints/ReachA/ReachB/ReachC>,
+                ]
+                rel rigExec:poleControl = </IkSpaceAsset/Rig/Controls/ReachPole>
+                rel rigExec:rootControl = </IkSpaceAsset/Rig/Controls/ReachRoot>
+                matrix4d rigExec:spaceMatrix = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+                matrix4d rigExec:spaceMatrix.timeSamples = {
+                    1: ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ),
+                    10: ( (1.2, 0, 0, 0), (0, 0.8, 0, 0), (0, 0, 1, 0), (0, 0.25, 0, 1) ),
+                }
+            }
+
+            def RigExecSplineIk "TailIK"
+            {
+                rel rigExec:endControl = </IkSpaceAsset/Rig/Controls/Master/TailEnd>
+                rel rigExec:joints = [
+                    </IkSpaceAsset/Rig/Joints/Tail0>,
+                    </IkSpaceAsset/Rig/Joints/Tail0/Tail1>,
+                    </IkSpaceAsset/Rig/Joints/Tail0/Tail1/Tail2>,
+                    </IkSpaceAsset/Rig/Joints/Tail0/Tail1/Tail2/Tail3>,
+                    </IkSpaceAsset/Rig/Joints/Tail0/Tail1/Tail2/Tail3/Tail4>,
+                ]
+                rel rigExec:midControl = </IkSpaceAsset/Rig/Controls/Master/TailMid>
+                rel rigExec:rootControl = </IkSpaceAsset/Rig/Controls/Master/TailRoot>
+                rel rigExec:space = </IkSpaceAsset/Rig/Controls/Master>
+                uniform float[] rigExec:volumeWeights = [0.5, 1, 1, 1, 0.5]
+            }
+        }
+
+        def Scope "Joints"
+        {
+            def RigExecJoint "Shoulder"
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 10, 0, 1) )
+
+                def RigExecJoint "Elbow"
+                {
+                    matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (3, 0, 0, 1) )
+
+                    def RigExecJoint "Wrist"
+                    {
+                        matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (3, 0, 0, 1) )
+                    }
+                }
+            }
+
+            def RigExecJoint "Hip"
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (2, 5, 0, 1) )
+
+                def RigExecJoint "Knee"
+                {
+                    matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, -2.5, 0.2, 1) )
+
+                    def RigExecJoint "Ankle"
+                    {
+                        matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, -2.5, -0.2, 1) )
+                    }
+                }
+            }
+
+            def RigExecJoint "ReachA"
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (-2, 5, 0, 1) )
+
+                def RigExecJoint "ReachB"
+                {
+                    matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, -2.5, 0.2, 1) )
+
+                    def RigExecJoint "ReachC"
+                    {
+                        matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, -2.5, -0.2, 1) )
+                    }
+                }
+            }
+
+            def RigExecJoint "Tail0"
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (-4, 10, 0, 1) )
+
+                def RigExecJoint "Tail1"
+                {
+                    matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 1.5, 0, 1) )
+
+                    def RigExecJoint "Tail2"
+                    {
+                        matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 1.5, 0, 1) )
+
+                        def RigExecJoint "Tail3"
+                        {
+                            matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 1.5, 0, 1) )
+
+                            def RigExecJoint "Tail4"
+                            {
+                                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 1.5, 0, 1) )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

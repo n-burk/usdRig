@@ -30,8 +30,6 @@
 #                              pairing on the rig; neither exists yet.
 #   selection.addToPicker   -- "Add to picker" needs a picker edit path;
 #                              pickerScene reads, it does not write.
-#   modes.evaluation        -- the Evaluation submenu's children need the
-#                              engine to expose its modes by name.
 #
 # A stub item still resolves and still draws; `ResolvedItem.stub` is how
 # the widget can grey it out or badge it rather than silently doing
@@ -69,7 +67,6 @@ except ImportError:                    # loader that did not add our dir
 # Dynamic children (`children`), asked through context.Children(name):
 #   spaces      the spaces the selected control can switch to
 #   tools       the manipulators available right now
-#   evaluation  the evaluation modes the engine offers (stub)
 
 
 SELECTION = Menu(
@@ -155,11 +152,6 @@ MODES = Menu(
         # it is fetched when the submenu unfolds rather than written out.
         dict(id="modes.tool", label="Tool", kind=SUBMENU, dir="NE",
              children="tools"),
-        # STUB: no action yet. The evaluation modes exist in the engine
-        # but nothing names them for a UI, so the provider has nothing to
-        # return and this opens empty until stage 2 gives it a list.
-        dict(id="modes.evaluation", label="Evaluation", kind=SUBMENU,
-             dir="SW", children="evaluation", stub=True),
         dict(id="modes.toolVisibility", label="Viewport tools",
              kind=TOGGLE, dir="SE", read="toolVisible",
              write="SetToolVisibility"),
@@ -173,5 +165,4 @@ MENUS = {SELECTION.id: SELECTION, MODES.id: MODES}
 # The items declared with no action behind them. Kept as a list, not
 # just a flag on each record, so stage 2 has one thing to read and one
 # thing to empty.
-STUBS = ("selection.counterpart", "selection.addToPicker",
-         "modes.evaluation")
+STUBS = ("selection.counterpart", "selection.addToPicker")

@@ -22,24 +22,42 @@
 // USD handle cannot be -- and the purity audit names every unit the frozen
 // path was checked against.
 #include "rigExec/frozenContext.h"
+#include "rigExec/frozenContextInternal.h"
 #include "rigExec/backgroundScheduler.h"
 #include "rigExec/bakedProgram.h"
 #include "rigExec/frameCache.h"
+#include "rigExec/frameCacheSparsity.h"
 #include "rigExec/generation.h"
 #include "rigExec/parallel.h"
 #include "rigExec/rigEvaluator.h"
 #include "rigExecRigging/rigBuilder.h"
+#include "rigExecBake/bake.h"
+#include "rigExecRuntime/runtime.h"
+#include "rigExecSampler/inputSampler.h"
 
+#include "pxr/base/tf/errorMark.h"
+#include "pxr/base/tf/getenv.h"
+#include "pxr/base/tf/setenv.h"
 #include "pxr/base/tf/stringUtils.h"
+#include "pxr/usd/sdf/layer.h"
 #include "pxr/usd/sdf/types.h"
 #include "pxr/usd/usd/attribute.h"
+#include "pxr/usd/usd/editTarget.h"
 #include "pxr/usd/usd/primRange.h"
 #include "pxr/usd/usd/relationship.h"
+#include "pxr/usd/usd/resolveInfo.h"
 #include "pxr/usd/usd/stage.h"
 
+#include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <functional>
+#include <limits>
+#include <map>
+#include <memory>
+#include <set>
 #include <string>
 #include <thread>
 #include <type_traits>
@@ -113,8 +131,6 @@ TestClearEmptiesTheVectorAndResetsTime()
     RigExecFrameInputs inputs;
     inputs.time = UsdTimeCode(6.0);
     inputs.Add(SdfPath("/Rig/Ctl.avars:tx"), VtValue(1.0));
-    inputs.chainDiagnostics.push_back("diag");
-    inputs.chainResults[SdfPath("/Rig/Ctl.avars:tx")] = VtValue(1.0);
     inputs.stageSeeds.xformBase.push_back(GfMatrix4d(1.0));
     inputs.stageSeeds.nativeOk.push_back(1);
     inputs.stageSeeds.deltaBase.push_back(GfMatrix4d(1.0));
@@ -122,8 +138,6 @@ TestClearEmptiesTheVectorAndResetsTime()
     CHECK(inputs.time == UsdTimeCode::Default());
     CHECK(inputs.values.empty());
     CHECK(inputs.Find(SdfPath("/Rig/Ctl.avars:tx")) == nullptr);
-    CHECK(inputs.chainDiagnostics.empty());
-    CHECK(inputs.chainResults.empty());
     CHECK(inputs.stageSeeds.xformBase.empty());
     CHECK(inputs.stageSeeds.xformFrames.empty());
     CHECK(inputs.stageSeeds.nativeOk.empty());
@@ -273,10 +287,8 @@ MakeTinyRig()
 
 // The sampler reproduces what the frame path reads: each sampled avar equals
 // both the authored time sample and a direct stage read at the sampled
-// time, and the vector holds exactly the two varying bindings plus the one
-// chain base plus the one authored mover scalar -- the bench's 9-mesh
-// breakdown (2 query reads, N base reads) at one mesh, with the packet
-// assembly's per-frame reads sampled beside them.
+// time. The exact vector also carries the chain base, packet source reads,
+// registered fixed numeric rest arguments, and private raw provider rows.
 void
 TestSamplerMatchesLiveReads()
 {
@@ -284,7 +296,6 @@ TestSamplerMatchesLiveReads()
     RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
     std::vector<std::string> errors;
     CHECK(evaluator.Compile(&errors));
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     const RigExecRigPose live = evaluator.Evaluate(UsdTimeCode(1.0));
     CHECK(live.valid);
     CHECK(evaluator.GetBakedProgram() != nullptr);
@@ -297,7 +308,101 @@ TestSamplerMatchesLiveReads()
                                    &inputs, &error));
     CHECK(error.empty());
     CHECK(inputs.time == UsdTimeCode(1.0));
-    CHECK(inputs.values.size() == 6);
+    const auto &B = evaluator.GetBakedProgram()->GetStepGraph();
+    std::set<SdfPath> expectedKeys{
+        SdfPath("/Asset/Rig/AlongX.avars:tx"),
+        SdfPath("/Asset/Rig/AlongY.avars:ty"),
+        SdfPath("/Asset/Geom/Mesh_0.points"),
+        SdfPath("/Asset/Rig/Movers/Skin_0.inputs:enabled"),
+        SdfPath("/Asset/Rig/Movers/Skin_0.inputs:defaultWeight"),
+        SdfPath("/Asset/Rig/Movers/Skin_0.rigExec:skinningMethod")};
+    // Fixed source-backed rest arguments still travel as current source facts.
+    // This fixture has exactly these two providers and no constraint offsets.
+    const char *restMembers[]{
+        "rest:tx","rest:ty","rest:tz","rest:rx","rest:ry","rest:rz"};
+    std::set<SdfPath> expectedFixedSources;
+    for (const SdfPath &owner : {SdfPath("/Asset/Rig/AlongX"),
+                                 SdfPath("/Asset/Rig/AlongY")}) {
+        const auto slot=B.index.find(owner);CHECK(slot!=B.index.end());
+        if(slot==B.index.end()) continue;
+        for(size_t member=0;member<6;++member) {
+            const SdfPath path=owner.AppendProperty(TfToken(restMembers[member]));
+            CHECK(expectedFixedSources.insert(path).second);
+            CHECK(expectedKeys.insert(path).second);
+            const auto &input=B.ladders[size_t(slot->second)].restAvars[member];
+            CHECK(input.sourceBacked && !input.varying && input.walk<0);
+            CHECK(input.sourceFallback==0.0);
+            CHECK(input.head.GetPath()==path);
+            CHECK(input.query.IsValid());
+            if(input.query.IsValid())CHECK(input.query.GetAttribute().GetPath()==path);
+            const auto attribute=stage->GetAttributeAtPath(path);CHECK(attribute);
+            if(!attribute)continue;
+            CHECK(attribute.GetTypeName()==SdfValueTypeNames->Double);
+            CHECK(attribute.GetNumTimeSamples()==0 && !attribute.HasSpline());
+            const auto sample=std::find_if(inputs.values.begin(),inputs.values.end(),
+                [&](const RigExecSampledInput &value){return value.path==path;});
+            CHECK(sample!=inputs.values.end());if(sample==inputs.values.end())continue;
+            VtValue raw;const bool present=attribute.Get(&raw,inputs.time);
+            CHECK(sample->hasValue==present);
+            CHECK(sample->valueBlocked==attribute.GetResolveInfo(inputs.time).ValueIsBlocked());
+            CHECK(!sample->viaChain);
+            CHECK(raw.IsHolding<double>() && sample->value.IsHolding<double>());
+            CHECK(RigExecBakedHeadValueSame(sample->value,raw));
+            if(raw.IsHolding<double>())CHECK(raw.UncheckedGet<double>()==0.0);
+        }
+    }
+    for (const SdfPath &owner : {SdfPath("/Asset/Rig/AlongX"),
+                                 SdfPath("/Asset/Rig/AlongY")}) {
+        const SdfPath path=owner.AppendProperty(TfToken("avars:rotationSign"));
+        CHECK(expectedFixedSources.insert(path).second);
+        CHECK(expectedKeys.insert(path).second);
+        const auto slot=B.index.find(owner);CHECK(slot!=B.index.end());
+        if(slot==B.index.end())continue;
+        const auto &input=B.ladders[size_t(slot->second)].rotationSign;
+        CHECK(input.sourceBacked && !input.varying && input.walk<0);
+        CHECK(input.sourceFallback==GfVec3d(1));
+        CHECK(input.head.GetPath()==path && input.query.IsValid());
+        const auto attribute=stage->GetAttributeAtPath(path);CHECK(attribute);
+        if(!attribute)continue;
+        CHECK(attribute.GetTypeName()==SdfValueTypeNames->Double3);
+        const auto sample=std::find_if(inputs.values.begin(),inputs.values.end(),
+            [&](const RigExecSampledInput &value){return value.path==path;});
+        CHECK(sample!=inputs.values.end());if(sample==inputs.values.end())continue;
+        VtValue raw;const bool present=attribute.Get(&raw,inputs.time);
+        CHECK(sample->hasValue==present);
+        CHECK(sample->valueBlocked==attribute.GetResolveInfo(inputs.time).ValueIsBlocked());
+        CHECK(!sample->viaChain);
+        CHECK(raw.IsHolding<GfVec3d>() && sample->value.IsHolding<GfVec3d>());
+        CHECK(RigExecBakedHeadValueSame(sample->value,raw));
+        if(raw.IsHolding<GfVec3d>())CHECK(raw.UncheckedGet<GfVec3d>()==GfVec3d(1));
+    }
+    CHECK(B.sourceBackedPaths==expectedFixedSources);
+    CHECK(B.providerFrozenKeys.size() == B.providerLeaves.attributes.size());
+    for (size_t k = 0; k < B.providerFrozenKeys.size(); ++k) {
+        const auto &key = B.providerFrozenKeys[k];
+        CHECK(expectedKeys.insert(key).second);
+        if (k >= B.providerLeaves.attributes.size()) continue;
+        const auto &attribute = B.providerLeaves.attributes[k];
+        CHECK(attribute);
+        if (!attribute) continue;
+        CHECK(key == attribute.GetPrimPath().AppendProperty(
+            TfToken("rigExec:providerRaw:" + attribute.GetName().GetString())));
+        const auto sample = std::find_if(inputs.values.begin(), inputs.values.end(),
+            [&](const RigExecSampledInput &v) { return v.path == key; });
+        CHECK(sample != inputs.values.end());
+        if (sample == inputs.values.end()) continue;
+        VtValue raw;
+        const bool hasValue = attribute.Get(&raw, inputs.time);
+        CHECK(sample->hasValue == hasValue);
+        CHECK(sample->valueBlocked ==
+              attribute.GetResolveInfo(inputs.time).ValueIsBlocked());
+        CHECK(!sample->viaChain);
+        CHECK(RigExecBakedHeadValueSame(sample->value, raw));
+    }
+    std::set<SdfPath> actualKeys;
+    for (const auto &sample : inputs.values)
+        CHECK(actualKeys.insert(sample.path).second);
+    CHECK(actualKeys == expectedKeys);
 
     const SdfPath txPath("/Asset/Rig/AlongX.avars:tx");
     const SdfPath tyPath("/Asset/Rig/AlongY.avars:ty");
@@ -352,12 +457,18 @@ TestSamplerMatchesLiveReads()
     CHECK(moverWeight->Get<float>() == stageWeight);
     CHECK(moverEnabled->Get<bool>() == stageEnabled);
     CHECK(moverMethod->Get<TfToken>() == stageMethod);
-    // And the assembled skin packet travels beside the values (one chain
-    // revision), excluded from the digest as derived.
-    CHECK(inputs.revisionPackets.size() == 1);
-    CHECK(inputs.revisionPackets[0].valid);
-    CHECK(inputs.revisionPackets[0].kind == TfToken("skin"));
-    CHECK(inputs.chainDiagnostics.empty());
+    // And the skin's layout leaves travel beside the values (one chain
+    // revision), excluded from the digest; its assembly leaves leave the
+    // three layout reads empty, which the handle answers on the worker.
+    CHECK(inputs.layoutLeaves.size() == 1);
+    CHECK(inputs.layoutLeaves[0].size() == 3);
+    if (inputs.layoutLeaves[0].size() == 3) {
+        CHECK(inputs.layoutLeaves[0][0].IsHolding<VtIntArray>());
+        CHECK(inputs.layoutLeaves[0][1].IsHolding<VtFloatArray>());
+        CHECK(inputs.layoutLeaves[0][2].IsHolding<int>());
+    }
+    CHECK(inputs.revisionLeaves.size() == 1);
+    CHECK(!inputs.revisionLeaves[0].empty());
     CHECK(inputs.overrides.empty());
 }
 
@@ -370,7 +481,6 @@ TestDigestMovesWithControls()
     UsdStageRefPtr stage = MakeTinyRig();
     RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
     CHECK(evaluator.Compile());
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
     CHECK(evaluator.Evaluate(UsdTimeCode(2.0)).valid);
 
@@ -412,12 +522,11 @@ TestDigestMovesWithControls()
     CHECK(RigExecFrozenControlDigest(withGap) != digest1);
 }
 
-// Increment B: the chain-sampling hook. The tiny rig plus one float math
-// mover revising the tx avar by a time-varying factor -- the biped's foot
-// chains in miniature (compare examples/09_PropertyMathMovers.usda): the
-// chain's output at the sampled time exists nowhere until the hook runs,
-// so a sampler that read the standing state would warm frame 3 with
-// frame 2's chain values.
+// Chained rigs. The tiny rig plus one float math mover revising the tx avar
+// by a time-varying factor -- the biped's foot chains in miniature (compare
+// examples/09_PropertyMathMovers.usda): the chain's output at the sampled
+// time exists nowhere until the worker's declared property operations runs, so a job that read
+// the standing state would warm frame 3 with frame 2's chain values.
 
 UsdStageRefPtr
 MakeChainedRig()
@@ -484,15 +593,264 @@ CheckPosesBitIdentical(const char *what, const RigExecRigPose &live,
     CHECK(warmed.time == live.time);
     RigExecRigPose diff;
     RigExecComparePoses(live, warmed, &diff);
-    if (diff.bakedParityMismatches != 0) {
+    if (diff.comparisonMismatches != 0) {
         std::printf("FAIL %s: %zu parity mismatch(es):\n", what,
-                    diff.bakedParityMismatches);
+                    diff.comparisonMismatches);
         for (const std::string &diagnostic : diff.diagnostics) {
             std::printf("    %s\n", diagnostic.c_str());
         }
     }
-    CHECK(diff.bakedParityMismatches == 0);
+    CHECK(diff.comparisonMismatches == 0);
     CHECK(diff.diagnostics.empty());
+}
+
+// The job was accepted, not served by a live fallback: no sample came from
+// standing chain outputs, and the worker returned a pose.
+static void
+CheckJobAccepted(const char *what, const RigExecFrameInputs &inputs,
+                 const RigExecRigPose &warmed)
+{
+    bool viaChain = false;
+    for (const RigExecSampledInput &sample : inputs.values) {
+        viaChain = viaChain || sample.viaChain;
+    }
+    if (viaChain || !warmed.valid) {
+        std::printf("FAIL %s: the job was declined\n", what);
+    }
+    CHECK(!viaChain);
+    CHECK(warmed.valid);
+}
+
+// Whether every reader of \p a reads what it reads in \p b: each moved
+// property (a float or double by its bits), control frame and joint frame,
+// and the diagnostics. Unlike CheckPosesBitIdentical it leaves the work
+// counters out, which differ between a held drag and its release.
+static void
+CheckSameReadings(const char *what, const RigExecRigPose &a,
+                  const RigExecRigPose &b)
+{
+    const auto sameValue = [](const VtValue &x, const VtValue &y) {
+        if (x.IsHolding<float>() && y.IsHolding<float>()) {
+            const float p = x.UncheckedGet<float>();
+            const float q = y.UncheckedGet<float>();
+            return std::memcmp(&p, &q, sizeof(p)) == 0;
+        }
+        if (x.IsHolding<double>() && y.IsHolding<double>()) {
+            const double p = x.UncheckedGet<double>();
+            const double q = y.UncheckedGet<double>();
+            return std::memcmp(&p, &q, sizeof(p)) == 0;
+        }
+        return x == y;
+    };
+    std::string why;
+    if (!a.valid || !b.valid) {
+        why = "an invalid pose";
+    } else if (a.movedProperties.size() != b.movedProperties.size()) {
+        why = "moved property count";
+    } else if (a.controlFrames != b.controlFrames) {
+        why = "control frames";
+    } else if (a.jointFramesFinal != b.jointFramesFinal) {
+        why = "joint frames";
+    } else {
+        // Less the mover graph's work line, a work counter too.
+        const auto lines = [](const RigExecRigPose &pose) {
+            std::vector<std::string> out;
+            for (const std::string &line : pose.diagnostics) {
+                if (line.rfind("mover graph: ", 0) != 0) {
+                    out.push_back(line);
+                }
+            }
+            return out;
+        };
+        if (lines(a) != lines(b)) {
+            why = "diagnostics";
+        }
+    }
+    for (auto i = a.movedProperties.begin(), j = b.movedProperties.begin();
+         why.empty() && i != a.movedProperties.end(); ++i, ++j) {
+        if (i->first != j->first || !sameValue(i->second, j->second)) {
+            why = "moved property " + i->first.GetString();
+        }
+    }
+    if (!why.empty()) {
+        std::printf("FAIL %s: the readings differ (%s)\n", what, why.c_str());
+    }
+    CHECK(why.empty());
+}
+
+// Space switches nested under switched controls: S (in Other's space) sits
+// under P, and P is switched into C's space with C under S, so S resolves
+// first and reads P BEFORE P's switch. The baked program binds that read to
+// P's pre-switch version; a warming job runs the same steps from the frozen
+// snapshot, so it must match live baked and the independent scalar reference bit for bit --
+// at an unrun frame, and under a drag of an index.
+UsdStageRefPtr
+MakeNestedSpaceSwitchRig()
+{
+    UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    stage->DefinePrim(SdfPath("/Asset"), TfToken("Scope"));
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    const auto control = [&stage](const char *path, double x) {
+        const UsdPrim prim =
+            stage->DefinePrim(SdfPath(path), TfToken("RigExecControl"));
+        GfMatrix4d rest(1.0);
+        rest.SetTranslateOnly(GfVec3d(x, 100.0, 0.0));
+        prim.GetAttribute(TfToken("rest:space")).Set(rest);
+        return prim;
+    };
+    const UsdPrim other = control("/Asset/Rig/Other", 50.0);
+    const UsdPrim p = control("/Asset/Rig/P", 0.0);
+    const UsdPrim s = control("/Asset/Rig/P/S", 10.0);
+    const UsdPrim c = control("/Asset/Rig/P/S/C", 15.0);
+    stage->DefinePrim(SdfPath("/Asset/Rig/Movers"), TfToken("Scope"));
+    const double pActive[4] = {0.0, 1.0, 0.5, 0.0};
+    const double sActive[4] = {0.5, 0.0, 1.0, 0.5};
+    const auto spaces = [&stage](const char *name, const UsdPrim &target,
+                                 const UsdPrim &source,
+                                 const double (&keys)[4]) {
+        const UsdPrim prim = stage->DefinePrim(
+            SdfPath("/Asset/Rig/Movers").AppendChild(TfToken(name)),
+            TfToken("RigExecSpaceSwitch"));
+        prim.CreateRelationship(TfToken("rigExec:target"))
+            .SetTargets({target.GetPath()});
+        // The rig root is not a provider: it is spelled "world".
+        prim.CreateRelationship(TfToken("rigExec:sources"))
+            .SetTargets({source.GetPath(), SdfPath("/Asset/Rig")});
+        UsdAttribute active = prim.CreateAttribute(
+            TfToken("inputs:activeSpace"), SdfValueTypeNames->Double);
+        for (int t = 0; t < 4; ++t) {
+            active.Set(keys[t], UsdTimeCode(double(t + 1)));
+        }
+    };
+    spaces("sSpaces", s, other, sActive);
+    spaces("pSpaces", p, c, pActive);
+    UsdAttribute tx = other.GetAttribute(TfToken("avars:tx"));
+    UsdAttribute rz = p.GetAttribute(TfToken("avars:rz"));
+    for (int t = 1; t <= 4; ++t) {
+        tx.Set(10.0 * double(t), UsdTimeCode(double(t)));
+        rz.Set(7.5 * double(t) - 12.0, UsdTimeCode(double(t)));
+    }
+    return stage;
+}
+
+void
+TestNestedSpaceSwitchesWarmBitIdentical()
+{
+    UsdStageRefPtr stage = MakeNestedSpaceSwitchRig();
+    const SdfPath rig("/Asset/Rig");
+    RigExecRigEvaluator evaluator(stage, rig);
+    std::vector<std::string> errors;
+    CHECK(evaluator.Compile(&errors));
+    CHECK(evaluator.IsBakeable());
+    RigExecRigEvaluator walk(stage, rig);
+    CHECK(walk.Compile(&errors));
+    walk.cpuReference = true;
+    CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
+    CHECK(evaluator.Evaluate(UsdTimeCode(2.0)).valid);
+    CHECK(evaluator.GetBakedProgram() != nullptr);
+
+    std::shared_ptr<const RigExecFrozenProgram> frozen;
+    std::string error;
+    CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
+    if (!frozen) {
+        std::printf("nested space switches freeze refused: %s\n",
+                    error.c_str());
+        return;
+    }
+    RigExecBackgroundScheduler scheduler;
+    std::vector<RigExecValueOverride> noOverrides;
+    RigExecFrameInputs at3;
+    CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(3.0), noOverrides,
+                                   &at3, &error));
+    bool ran = false;
+    const RigExecRigPose warmed3 =
+        RunWarmingJob(&evaluator, rig, frozen, at3, &scheduler, &ran);
+    CHECK(ran);
+    const RigExecRigPose live3 = evaluator.Evaluate(UsdTimeCode(3.0));
+    CHECK(live3.valid);
+    CheckPosesBitIdentical("nested switches warmed frame 3", live3, warmed3);
+    CheckPosesBitIdentical("nested switches walk frame 3",
+                           walk.Evaluate(UsdTimeCode(3.0)), warmed3);
+
+    // A held drag of P's index: the warmed pose, live baked and the walk
+    // agree under it.
+    RigExecValueOverride drag;
+    drag.prim = SdfPath("/Asset/Rig/Movers/pSpaces");
+    drag.attribute = TfToken("inputs:activeSpace");
+    drag.value = VtValue(0.25);
+    evaluator.SetInteractiveOverrides({drag});
+    walk.SetInteractiveOverrides({drag});
+    CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
+    RigExecFrameInputs dragged;
+    CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(4.0), {drag},
+                                   &dragged, &error));
+    const RigExecRigPose warmedDragged =
+        RunWarmingJob(&evaluator, rig, frozen, dragged, &scheduler, &ran);
+    CHECK(ran);
+    const RigExecRigPose liveDragged = evaluator.Evaluate(UsdTimeCode(4.0));
+    CHECK(liveDragged.valid);
+    CheckPosesBitIdentical("nested switches warmed under a drag",
+                           liveDragged, warmedDragged);
+    CheckPosesBitIdentical("nested switches walk under a drag",
+                           walk.Evaluate(UsdTimeCode(4.0)), warmedDragged);
+    evaluator.SetInteractiveOverrides({});
+    walk.SetInteractiveOverrides({});
+}
+
+// A job at live's last time under a different drag value than live's last
+// run: the clone carries live's time and both override flags, so nothing in
+// them says the value moved, and the worker re-samples every leaf anyway.
+// The warmed pose is the job's drag's, as the walk and live baked pose it.
+void
+TestAHeldFrameJobServesItsOwnDrag()
+{
+    UsdStageRefPtr stage = MakeNestedSpaceSwitchRig();
+    const SdfPath rig("/Asset/Rig");
+    RigExecRigEvaluator evaluator(stage, rig);
+    std::vector<std::string> errors;
+    CHECK(evaluator.Compile(&errors));
+    RigExecRigEvaluator walk(stage, rig);
+    CHECK(walk.Compile(&errors));
+    walk.cpuReference = true;
+    const auto dragTo = [](double value) {
+        RigExecValueOverride drag;
+        drag.prim = SdfPath("/Asset/Rig/Movers/pSpaces");
+        drag.attribute = TfToken("inputs:activeSpace");
+        drag.value = VtValue(value);
+        return drag;
+    };
+    const UsdTimeCode held(3.0);
+    CHECK(evaluator.Evaluate(UsdTimeCode(2.0)).valid);
+    evaluator.SetInteractiveOverrides({dragTo(0.25)});
+    CHECK(evaluator.Evaluate(held).valid);
+    std::shared_ptr<const RigExecFrozenProgram> frozen;
+    std::string error;
+    CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
+    if (!frozen) {
+        std::printf("held-frame drag freeze refused: %s\n", error.c_str());
+        return;
+    }
+    const RigExecValueOverride other = dragTo(0.75);
+    RigExecFrameInputs inputs;
+    CHECK(RigExecSampleFrameInputs(evaluator, held, {other}, &inputs,
+                                   &error));
+    RigExecBackgroundScheduler scheduler;
+    bool ran = false;
+    const RigExecRigPose warmed =
+        RunWarmingJob(&evaluator, rig, frozen, inputs, &scheduler, &ran);
+    CHECK(ran);
+    walk.SetInteractiveOverrides({other});
+    CheckPosesBitIdentical("held-frame job against the walk",
+                           walk.Evaluate(held), warmed);
+    evaluator.SetInteractiveOverrides({other});
+    const RigExecRigPose live = evaluator.Evaluate(held);
+    CheckPosesBitIdentical("held-frame job against live", live, warmed);
+    // Not vacuous: the two drag values pose the rig differently.
+    walk.SetInteractiveOverrides({dragTo(0.25)});
+    const RigExecRigPose first = walk.Evaluate(held);
+    CHECK(first.controlFrames != live.controlFrames);
+    evaluator.SetInteractiveOverrides({});
+    walk.SetInteractiveOverrides({});
 }
 
 // A warming job's pose is bit-identical to live evaluation of the same
@@ -506,7 +864,6 @@ TestProductionRunnerIsBitIdenticalToLive()
     const SdfPath rig("/Asset/Rig");
     RigExecRigEvaluator evaluator(stage, rig);
     CHECK(evaluator.Compile());
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
     CHECK(evaluator.Evaluate(UsdTimeCode(2.0)).valid);
 
@@ -559,13 +916,12 @@ TestProductionRunnerIsBitIdenticalToLive()
     evaluator.SetInteractiveOverrides({});
 }
 
-// The chained rig warms bit-identically: the hook recomputes the chain for
-// the job's time (never the evaluator's last-run outputs), the sampled tx
-// carries the revised value with no stale mark, the per-target results
-// travel with the vector, and the warmed poses match live with zero
+// The chained rig warms bit-identically: the worker recomputes the chain
+// for the job's time from its head-leaf samples (never the evaluator's
+// last-run outputs) and resolves the tx binding through its reader walk,
+// no sample is marked stale, and the warmed poses match live with zero
 // parity mismatches -- including under a drag on the chain's target (the
-// post-chain replacement) and on the mover's own factor input (a pre-chain
-// read).
+// chain's base) and on the mover's own factor input (a pre-chain read).
 void
 TestChainedRigWarmsBitIdentical()
 {
@@ -574,7 +930,6 @@ TestChainedRigWarmsBitIdentical()
     RigExecRigEvaluator evaluator(stage, rig);
     std::vector<std::string> errors;
     CHECK(evaluator.Compile(&errors));
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
     CHECK(evaluator.Evaluate(UsdTimeCode(2.0)).valid);
 
@@ -586,56 +941,63 @@ TestChainedRigWarmsBitIdentical()
           SdfPath("/Asset/Rig/AlongX.avars:tx"));
     CHECK(RigExecChainSampleBindingsStillCurrent(bound, evaluator));
 
-    // The unlock: a chained rig freezes now that the hook reproduces the
-    // chains for the job's time.
+    // A chained rig freezes: the worker runs the chains for the job's time
+    // and resolves the bindings that read them.
     std::shared_ptr<const RigExecFrozenProgram> frozen;
     CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
     CHECK(frozen != nullptr);
     RigExecBackgroundScheduler scheduler;
     std::vector<RigExecValueOverride> noOverrides;
 
-    // Frame 3, which live has not run: the hook's values, not frame 2's.
+    // Frame 3, which live has not run: the job's head leaves, not frame 2's
+    // state.
     RigExecFrameInputs at3;
     CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(3.0), noOverrides,
                                    &at3, &error));
     CHECK(!at3.HasChainResolvedInputs());
-    CHECK(at3.chainResults.size() == 1);
-    // Sensitivity: the chain's output moves every frame, so a sampler that
-    // read the standing (frame-2) state would be caught below -- and the
-    // tx binding consumed the revised value, not the authored base.
+    const SdfPath txPath("/Asset/Rig/AlongX.avars:tx");
+    double authored = 0.0;
+    CHECK(stage->GetAttributeAtPath(txPath).Get(&authored,
+                                               UsdTimeCode(3.0)));
+    // The tx binding reads the chain's result, so it samples nothing: the
+    // worker resolves its reader walk. The chain's own inputs travel as
+    // head leaves under their own keys: the target's authored value, which
+    // moves from frame 2, and the gain's factor at frame 3.
     {
         RigExecFrameInputs at2;
         CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(2.0),
                                        noOverrides, &at2, &error));
-        const SdfPath txPath("/Asset/Rig/AlongX.avars:tx");
-        const auto r3 = at3.chainResults.find(txPath);
-        const auto r2 = at2.chainResults.find(txPath);
-        CHECK(r3 != at3.chainResults.end());
-        CHECK(r2 != at2.chainResults.end());
-        CHECK(r3->second != r2->second);
-        const VtValue *tx = at3.Find(txPath);
-        CHECK(tx != nullptr && tx->IsHolding<double>());
-        CHECK(tx->Get<double>() == r3->second.Get<double>());
-        double authored = 0.0;
-        CHECK(stage->GetAttributeAtPath(txPath).Get(&authored,
-                                                   UsdTimeCode(3.0)));
-        CHECK(tx->Get<double>() != authored);
+        CHECK(at3.Find(txPath) == nullptr);
+        const SdfPath ownKey("/Asset/Rig/AlongX.frozenChainOwn:avars:tx");
+        const VtValue *own2 = at2.Find(ownKey);
+        CHECK(own2 != nullptr && own2->IsHolding<double>() &&
+              own2->Get<double>() != authored);
+        const VtValue *own = at3.Find(
+            SdfPath("/Asset/Rig/AlongX.frozenChainOwn:avars:tx"));
+        CHECK(own != nullptr && own->IsHolding<double>() &&
+              own->Get<double>() == authored);
+        const VtValue *factor = at3.Find(SdfPath(
+            "/Asset/Rig/Movers/TxGain.frozenChainHop:inputs:value"));
+        CHECK(factor != nullptr && factor->IsHolding<float>() &&
+              factor->Get<float>() == 1.5f);
     }
     const RigExecRigPose warmed3 =
         RunWarmingJob(&evaluator, rig, frozen, at3, &scheduler, nullptr);
     const RigExecRigPose live3 = evaluator.Evaluate(UsdTimeCode(3.0));
     CHECK(live3.valid);
     CheckPosesBitIdentical("warmed chained frame 3", live3, warmed3);
-    // The transported result is the revised value live published: the
-    // chain's output, not its authored base.
+    CheckJobAccepted("warmed chained frame 3", at3, warmed3);
+    // The worker's declared property operations published the revised value live published:
+    // the chain's output, not its base.
     {
-        const auto published = live3.movedProperties.find(
-            SdfPath("/Asset/Rig/AlongX.avars:tx"));
+        const auto published = live3.movedProperties.find(txPath);
+        const auto computed = warmed3.movedProperties.find(txPath);
         CHECK(published != live3.movedProperties.end());
-        const auto carried = at3.chainResults.find(
-            SdfPath("/Asset/Rig/AlongX.avars:tx"));
-        CHECK(carried != at3.chainResults.end());
-        CHECK(carried->second == published->second);
+        CHECK(computed != warmed3.movedProperties.end());
+        CHECK(published != live3.movedProperties.end() &&
+              computed != warmed3.movedProperties.end() &&
+              computed->second == published->second &&
+              computed->second != VtValue(authored));
     }
 
     CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
@@ -648,9 +1010,10 @@ TestChainedRigWarmsBitIdentical()
     const RigExecRigPose live4 = evaluator.Evaluate(UsdTimeCode(4.0));
     CHECK(live4.valid);
     CheckPosesBitIdentical("warmed chained frame 4", live4, warmed4);
+    CheckJobAccepted("warmed chained frame 4", at4, warmed4);
 
-    // A drag on the chain's target replaces the chain's result; a drag on
-    // the mover's factor input is read pre-chain. Both warm bit-identical.
+    // A drag on the chain's target is the chain's base; a drag on the
+    // mover's factor input is read pre-chain. Both warm bit-identical.
     for (int arm = 0; arm < 2; ++arm) {
         RigExecValueOverride drag;
         if (arm == 0) {
@@ -676,17 +1039,468 @@ TestChainedRigWarmsBitIdentical()
         CheckPosesBitIdentical(arm == 0 ? "chained drag on the target"
                                         : "chained drag on the factor",
                                liveDragged, warmedDragged);
+        CheckJobAccepted("chained drag", dragged, warmedDragged);
         evaluator.SetInteractiveOverrides({});
     }
 }
 
-// A chain binding a weight object declines at every layer: the hook names
-// the chain but refuses to evaluate it (the envelope resolves through the
-// evaluator's live oracle), the sampler falls back to the standing state
-// and marks viaChain, the freeze refuses the rig, and the runner declines
-// the marked vector. Live still evaluates -- decline is never failure.
+// The read phase of a connection, warmed: the chained rig plus readout
+// movers that add what they read of the revised tx avar to float channels
+// of their own -- undeclared (the base: tx as authored), `final` (no record:
+// tx's published value answers it), `base` on a hop, `final` through that
+// hop (a record of every revision) and a checkpoint at the last revision.
+// The worker publishes each record on its reader as live does, the warmed
+// poses match live bit for bit, and so they do under each drag rule: on a
+// reader's own input, on the hop, and on the target, whose drag is the
+// chain's base -- the base readers read it, the checkpoint and the final
+// readers the chain revised from it -- and reads, warmed and live, what
+// the drag authored at that frame reads.
+UsdStageRefPtr
+MakePhasedChainedRig()
+{
+    UsdStageRefPtr stage = MakeChainedRig();
+    const UsdPrim channels = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Channels/Readouts"), TfToken("Scope"));
+    stage->DefinePrim(SdfPath("/Asset/Rig/Movers/Readouts"), TfToken("Scope"));
+    const auto readout = [&](const char *name, const SdfPath &source,
+                             const char *phase) {
+        const UsdAttribute target = channels.CreateAttribute(
+            TfToken(std::string("rigExec:") + name), SdfValueTypeNames->Float);
+        target.Set(0.0f);
+        const UsdPrim mover = stage->DefinePrim(
+            SdfPath(std::string("/Asset/Rig/Movers/Readouts/") + name),
+            TfToken("RigExecFloatMathMover"));
+        mover.ApplyAPI(TfToken("RigExecMoverAPI"));
+        mover.CreateAttribute(TfToken("rigExec:operation"),
+                              SdfValueTypeNames->Token)
+            .Set(TfToken("add"));
+        mover.GetRelationship(TfToken("rigExec:moves"))
+            .SetTargets({target.GetPath()});
+        const UsdAttribute value = mover.CreateAttribute(
+            TfToken("inputs:value"), SdfValueTypeNames->Float);
+        value.SetConnections({source});
+        if (phase) {
+            value.SetMetadata(TfToken("rigExecReadPhase"), std::string(phase));
+        }
+    };
+    const SdfPath tx("/Asset/Rig/AlongX.avars:tx");
+    readout("base", tx, nullptr);
+    readout("final", tx, "final");
+    readout("hop", tx, "base");
+    readout("finalViaHop",
+            SdfPath("/Asset/Rig/Movers/Readouts/hop.inputs:value"), "final");
+    readout("lastCheckpoint", tx, "/Asset/Rig/Movers/TxGain");
+    return stage;
+}
+
+static float
+_ReadoutOf(const RigExecRigPose &pose, const char *name)
+{
+    const auto it = pose.movedProperties.find(SdfPath(
+        std::string("/Asset/Rig/Channels/Readouts.rigExec:") + name));
+    return it != pose.movedProperties.end() && it->second.IsHolding<float>()
+               ? it->second.UncheckedGet<float>()
+               : -1.0f;
+}
+
 void
-TestChainHookDeclinesWeightObjects()
+TestPhasedReadsWarmBitIdentical()
+{
+    UsdStageRefPtr stage = MakePhasedChainedRig();
+    const SdfPath rig("/Asset/Rig");
+    RigExecRigEvaluator evaluator(stage, rig);
+    std::vector<std::string> errors;
+    CHECK(evaluator.Compile(&errors));
+    CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
+    CHECK(evaluator.Evaluate(UsdTimeCode(2.0)).valid);
+    // base, hop, finalViaHop and lastCheckpoint; `final` passes no
+    // recorded hop.
+    CHECK(evaluator.GetPhasedConnections().size() == 4);
+
+    std::shared_ptr<const RigExecFrozenProgram> frozen;
+    std::string error;
+    CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
+    CHECK(frozen != nullptr);
+    RigExecBackgroundScheduler scheduler;
+
+    const SdfPath txPath("/Asset/Rig/AlongX.avars:tx");
+    double authored = 0.0;
+    CHECK(stage->GetAttributeAtPath(txPath).Get(&authored, UsdTimeCode(3.0)));
+    RigExecFrameInputs at3;
+    CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(3.0), {}, &at3,
+                                   &error));
+    CHECK(!at3.HasChainResolvedInputs());
+    const RigExecRigPose warmed3 =
+        RunWarmingJob(&evaluator, rig, frozen, at3, &scheduler, nullptr);
+    const RigExecRigPose live3 = evaluator.Evaluate(UsdTimeCode(3.0));
+    CHECK(live3.valid);
+    CheckPosesBitIdentical("phased reads, frame 3", live3, warmed3);
+    CheckJobAccepted("phased reads, frame 3", at3, warmed3);
+    // The worker's declared property operations publishes each record on its reader, as live
+    // does: the base reader reads tx as authored.
+    CHECK(_ReadoutOf(warmed3, "base") == float(authored));
+    const auto revised = live3.movedProperties.find(txPath);
+    CHECK(revised != live3.movedProperties.end() &&
+          revised->second.IsHolding<double>());
+    const float final = revised != live3.movedProperties.end()
+                            ? float(revised->second.Get<double>())
+                            : 0.0f;
+    CHECK(final != float(authored));
+    CHECK(_ReadoutOf(live3, "base") == float(authored));
+    CHECK(_ReadoutOf(live3, "hop") == float(authored));
+    CHECK(_ReadoutOf(live3, "final") == final);
+    CHECK(_ReadoutOf(live3, "finalViaHop") == final);
+    CHECK(_ReadoutOf(live3, "lastCheckpoint") == final);
+
+    struct Drag {
+        const char *what;
+        RigExecValueOverride override;
+        float base, hop, final, finalViaHop, lastCheckpoint;
+    };
+    const auto at = [](const char *prim, const char *attribute,
+                       const VtValue &value) {
+        return RigExecValueOverride{SdfPath(prim), TfToken(),
+                                    TfToken(attribute), value};
+    };
+    // TxGain multiplies by 1.5 at frame 3: 3.25 revises to 4.875 exactly.
+    const float draggedFinal = 4.875f;
+    const Drag drags[] = {
+        {"drag on a reader's input",
+         at("/Asset/Rig/Movers/Readouts/base", "inputs:value",
+            VtValue(0.5f)),
+         0.5f, float(authored), final, final, final},
+        {"drag on the hop",
+         at("/Asset/Rig/Movers/Readouts/hop", "inputs:value",
+            VtValue(0.25f)),
+         float(authored), 0.25f, final, 0.25f, final},
+        {"drag on the target",
+         at("/Asset/Rig/AlongX", "avars:tx", VtValue(3.25)),
+         3.25f, 3.25f, draggedFinal, draggedFinal, draggedFinal},
+    };
+    RigExecRigPose liveOnTarget;
+    for (const Drag &drag : drags) {
+        evaluator.SetInteractiveOverrides({drag.override});
+        CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
+        RigExecFrameInputs dragged;
+        CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(3.0),
+                                       {drag.override}, &dragged, &error));
+        const RigExecRigPose warmed = RunWarmingJob(
+            &evaluator, rig, frozen, dragged, &scheduler, nullptr);
+        const RigExecRigPose live = evaluator.Evaluate(UsdTimeCode(3.0));
+        CHECK(live.valid);
+        CheckPosesBitIdentical(drag.what, live, warmed);
+        CheckJobAccepted(drag.what, dragged, warmed);
+        const bool read = _ReadoutOf(live, "base") == drag.base &&
+                          _ReadoutOf(live, "hop") == drag.hop &&
+                          _ReadoutOf(live, "final") == drag.final &&
+                          _ReadoutOf(live, "finalViaHop") ==
+                              drag.finalViaHop &&
+                          _ReadoutOf(live, "lastCheckpoint") ==
+                              drag.lastCheckpoint;
+        if (!read) {
+            std::printf("FAIL %s: read %.9g %.9g %.9g %.9g %.9g\n",
+                        drag.what, double(_ReadoutOf(live, "base")),
+                        double(_ReadoutOf(live, "hop")),
+                        double(_ReadoutOf(live, "final")),
+                        double(_ReadoutOf(live, "finalViaHop")),
+                        double(_ReadoutOf(live, "lastCheckpoint")));
+        }
+        CHECK(read);
+        if (drag.override.prim == SdfPath("/Asset/Rig/AlongX")) {
+            liveOnTarget = live;
+        }
+        evaluator.SetInteractiveOverrides({});
+    }
+
+    // Released: 3.25 authored at frame 3 reads, live and warmed (frozen
+    // after frame 2, as above), what the drag on the target read.
+    stage->GetAttributeAtPath(txPath).Set(3.25, UsdTimeCode(3.0));
+    CHECK(evaluator.Evaluate(UsdTimeCode(2.0)).valid);
+    CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
+    RigExecFrameInputs released3;
+    CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(3.0), {},
+                                   &released3, &error));
+    const RigExecRigPose warmedReleased = RunWarmingJob(
+        &evaluator, rig, frozen, released3, &scheduler, nullptr);
+    const RigExecRigPose liveReleased = evaluator.Evaluate(UsdTimeCode(3.0));
+    CheckPosesBitIdentical("released target drag", liveReleased,
+                           warmedReleased);
+    CheckJobAccepted("released target drag", released3, warmedReleased);
+    CheckSameReadings("released target drag against the drag", liveOnTarget,
+                      liveReleased);
+    stage->GetAttributeAtPath(txPath).Set(authored, UsdTimeCode(3.0));
+
+    // A rewire that keeps every record's consumer, type and position but
+    // lengthens a walk -- finalViaHop now reads through a relay outside
+    // the rig, which reads nothing at a phase itself, before the hop --
+    // leaves bindings that would stand aside by the old hops: no longer
+    // current, so the caller rebinds.
+    RigExecChainSampleBindings bound;
+    CHECK(RigExecBindChainSampleInputs(evaluator, &bound, &error));
+    CHECK(RigExecChainSampleBindingsStillCurrent(bound, evaluator));
+    const SdfPath finalViaHop(
+        "/Asset/Rig/Movers/Readouts/finalViaHop.inputs:value");
+    const UsdAttribute relay =
+        stage->DefinePrim(SdfPath("/Asset/Relay"), TfToken("Scope"))
+            .CreateAttribute(TfToken("rigExec:relay"),
+                             SdfValueTypeNames->Float);
+    relay.SetConnections(
+        {SdfPath("/Asset/Rig/Movers/Readouts/hop.inputs:value")});
+    stage->GetAttributeAtPath(finalViaHop).SetConnections({relay.GetPath()});
+    CHECK(evaluator.Evaluate(UsdTimeCode(3.0)).valid);
+    size_t hops = 0;
+    for (const RigExecPhasedConnection &connection :
+         evaluator.GetPhasedConnections()) {
+        if (connection.consumer == finalViaHop) {
+            hops = connection.hops.size();
+        }
+    }
+    CHECK(hops == 3);
+    CHECK(evaluator.GetPhasedConnections().size() == 4);
+    CHECK(!RigExecChainSampleBindingsStillCurrent(bound, evaluator));
+}
+
+struct _BlinkRigOptions {
+    // The channel authored at 0.2; false leaves it without a value.
+    bool authored = true;
+    // The lid control reading it.
+    bool lid = true;
+    // A Gain doubling the channel before the clamp, read at its checkpoint
+    // by a third readout chain and, with the lid, by the lid's tz.
+    bool gain = false;
+};
+
+// The blink on the tiny rig: a float channel authored at 0.2 and clamped to
+// [0, 1], read undeclared and at `final` by readout chains and by a lid
+// control's avars (tx at the base, ty at `final`).
+UsdStageRefPtr
+MakeBlinkRig(const _BlinkRigOptions &options = _BlinkRigOptions())
+{
+    UsdStageRefPtr stage = MakeTinyRig();
+    const UsdAttribute blink =
+        stage->DefinePrim(SdfPath("/Asset/Rig/Channels/Face"),
+                          TfToken("Scope"))
+            .CreateAttribute(TfToken("rigExec:blink"),
+                             SdfValueTypeNames->Float);
+    if (options.authored) {
+        blink.Set(0.2f);
+    }
+    const auto mover = [&](const std::string &path, const char *operation,
+                           const SdfPath &target) {
+        const UsdPrim prim =
+            stage->DefinePrim(SdfPath("/Asset/Rig/Movers/" + path),
+                              TfToken("RigExecFloatMathMover"));
+        prim.ApplyAPI(TfToken("RigExecMoverAPI"));
+        prim.CreateAttribute(TfToken("rigExec:operation"),
+                             SdfValueTypeNames->Token)
+            .Set(TfToken(operation));
+        prim.GetRelationship(TfToken("rigExec:moves")).SetTargets({target});
+        return prim;
+    };
+    const UsdPrim clamp = mover("ClampBlink", "clamp", blink.GetPath());
+    clamp.CreateAttribute(TfToken("inputs:min"), SdfValueTypeNames->Float)
+        .Set(0.0f);
+    clamp.CreateAttribute(TfToken("inputs:max"), SdfValueTypeNames->Float)
+        .Set(1.0f);
+    // A nested mover revises before its parent: Gain, then the clamp.
+    const char *const gainPath = "/Asset/Rig/Movers/ClampBlink/Gain";
+    if (options.gain) {
+        mover("ClampBlink/Gain", "multiply", blink.GetPath())
+            .CreateAttribute(TfToken("inputs:value"), SdfValueTypeNames->Float)
+            .Set(2.0f);
+    }
+    const UsdPrim channels = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Channels/Readouts"), TfToken("Scope"));
+    stage->DefinePrim(SdfPath("/Asset/Rig/Movers/Readouts"), TfToken("Scope"));
+    std::vector<std::pair<const char *, const char *>> readouts = {
+        {"blinkBase", nullptr}, {"blinkFinal", "final"}};
+    if (options.gain) {
+        readouts.emplace_back("blinkCheckpoint", gainPath);
+    }
+    for (const auto &[name, phase] : readouts) {
+        const UsdAttribute target = channels.CreateAttribute(
+            TfToken(std::string("rigExec:") + name), SdfValueTypeNames->Float);
+        target.Set(0.0f);
+        const UsdAttribute value =
+            mover(std::string("Readouts/") + name, "add", target.GetPath())
+                .CreateAttribute(TfToken("inputs:value"),
+                                 SdfValueTypeNames->Float);
+        value.SetConnections({blink.GetPath()});
+        if (phase) {
+            value.SetMetadata(TfToken("rigExecReadPhase"), std::string(phase));
+        }
+    }
+    if (options.lid) {
+        const UsdPrim lid = stage->DefinePrim(SdfPath("/Asset/Rig/Lid"),
+                                              TfToken("RigExecControl"));
+        lid.GetAttribute(TfToken("avars:tx"))
+            .SetConnections({blink.GetPath()});
+        const UsdAttribute ty = lid.GetAttribute(TfToken("avars:ty"));
+        ty.SetConnections({blink.GetPath()});
+        ty.SetMetadata(TfToken("rigExecReadPhase"), std::string("final"));
+        if (options.gain) {
+            const UsdAttribute tz = lid.GetAttribute(TfToken("avars:tz"));
+            tz.SetConnections({blink.GetPath()});
+            tz.SetMetadata(TfToken("rigExecReadPhase"), std::string(gainPath));
+        }
+    }
+    return stage;
+}
+
+// The blink dragged to 1.4 warms bit-identically to live, with the base
+// readers on 1.4 and the final readers on 1.0; authored at 1.4 and
+// released, it warms bit-identically again and reads, live, exactly what
+// the drag read.
+void
+TestBlinkDragWarmsAsReleased()
+{
+    UsdStageRefPtr stage = MakeBlinkRig();
+    const SdfPath rig("/Asset/Rig");
+    RigExecRigEvaluator evaluator(stage, rig);
+    std::vector<std::string> errors;
+    CHECK(evaluator.Compile(&errors));
+    CHECK(evaluator.GetSkippedOperations().empty());
+    CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
+    CHECK(evaluator.Evaluate(UsdTimeCode(2.0)).valid);
+    RigExecBackgroundScheduler scheduler;
+    std::shared_ptr<const RigExecFrozenProgram> frozen;
+    std::string error;
+
+    const SdfPath blink("/Asset/Rig/Channels/Face.rigExec:blink");
+    const RigExecValueOverride drag{blink.GetPrimPath(), TfToken(),
+                                    blink.GetNameToken(), VtValue(1.4f)};
+    evaluator.SetInteractiveOverrides({drag});
+    CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
+    RigExecFrameInputs dragged3;
+    CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(3.0), {drag},
+                                   &dragged3, &error));
+    CHECK(!dragged3.HasChainResolvedInputs());
+    const RigExecRigPose warmed = RunWarmingJob(&evaluator, rig, frozen,
+                                                dragged3, &scheduler, nullptr);
+    const RigExecRigPose live = evaluator.Evaluate(UsdTimeCode(3.0));
+    CheckPosesBitIdentical("blink drag", live, warmed);
+    CheckJobAccepted("blink drag", dragged3, warmed);
+    CHECK(_ReadoutOf(live, "blinkBase") == 1.4f);
+    CHECK(_ReadoutOf(live, "blinkFinal") == 1.0f);
+    const auto lid = live.controlFrames.find(SdfPath("/Asset/Rig/Lid"));
+    CHECK(lid != live.controlFrames.end() &&
+          lid->second.points[0] == GfVec3d(double(1.4f), 1.0, 0.0));
+    evaluator.SetInteractiveOverrides({});
+
+    // Frozen after frame 2 again, so the warmed and the live frame 3 share
+    // a history.
+    stage->GetAttributeAtPath(blink).Set(1.4f);
+    CHECK(evaluator.Evaluate(UsdTimeCode(2.0)).valid);
+    CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
+    RigExecFrameInputs released3;
+    CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(3.0), {},
+                                   &released3, &error));
+    const RigExecRigPose warmedReleased = RunWarmingJob(
+        &evaluator, rig, frozen, released3, &scheduler, nullptr);
+    const RigExecRigPose liveReleased = evaluator.Evaluate(UsdTimeCode(3.0));
+    CheckPosesBitIdentical("blink released", liveReleased, warmedReleased);
+    CheckJobAccepted("blink released", released3, warmedReleased);
+    CheckSameReadings("blink released against the drag", live, liveReleased);
+}
+
+// The frozen sampler's own copy of the base rule, at its edges, each warmed
+// bit-identically to live at frame 3 (frozen after frame 2): with nothing
+// authored a drag of 0.5 is the base, so the chain runs and its result
+// travels with the vector; a NaN drag skips the chain with the line an
+// authored NaN prints, and nothing travels; with a Gain before the clamp,
+// a drag of 0.75 reads 0.75 at the base, 1.5 at Gain's checkpoint and 1.0
+// at `final`; and a double drag of 1.4 reads what the float 1.4 reads.
+void
+TestBlinkDragEdgesWarmBitIdentical()
+{
+    const SdfPath rig("/Asset/Rig");
+    const SdfPath blink("/Asset/Rig/Channels/Face.rigExec:blink");
+    struct Warmed {
+        RigExecRigPose live;
+        RigExecRigPose warmed;
+        RigExecFrameInputs inputs;
+    };
+    const auto warm = [&](const char *what, const _BlinkRigOptions &options,
+                          const VtValue &value) {
+        Warmed out;
+        UsdStageRefPtr stage = MakeBlinkRig(options);
+        RigExecRigEvaluator evaluator(stage, rig);
+        std::vector<std::string> errors;
+        CHECK(evaluator.Compile(&errors));
+        CHECK(evaluator.GetSkippedOperations().empty());
+        CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
+        CHECK(evaluator.Evaluate(UsdTimeCode(2.0)).valid);
+        RigExecBackgroundScheduler scheduler;
+        std::shared_ptr<const RigExecFrozenProgram> frozen;
+        std::string error;
+        const RigExecValueOverride drag{blink.GetPrimPath(), TfToken(),
+                                        blink.GetNameToken(), value};
+        evaluator.SetInteractiveOverrides({drag});
+        CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
+        CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(3.0), {drag},
+                                       &out.inputs, &error));
+        CHECK(!out.inputs.HasChainResolvedInputs());
+        out.warmed = RunWarmingJob(&evaluator, rig, frozen, out.inputs,
+                                   &scheduler, nullptr);
+        out.live = evaluator.Evaluate(UsdTimeCode(3.0));
+        CHECK(out.live.valid);
+        CheckPosesBitIdentical(what, out.live, out.warmed);
+        CheckJobAccepted(what, out.inputs, out.warmed);
+        return out;
+    };
+    const auto lidAt = [](const RigExecRigPose &pose) {
+        const auto lid = pose.controlFrames.find(SdfPath("/Asset/Rig/Lid"));
+        return lid == pose.controlFrames.end()
+                   ? GfVec3d(-1.0)
+                   : GfVec3d(lid->second.points[0]);
+    };
+
+    _BlinkRigOptions unauthored;
+    unauthored.authored = false;
+    const Warmed drawn = warm("blink drag, nothing authored", unauthored,
+                              VtValue(0.5f));
+    CHECK(_ReadoutOf(drawn.live, "blinkBase") == 0.5f);
+    CHECK(_ReadoutOf(drawn.live, "blinkFinal") == 0.5f);
+    CHECK(lidAt(drawn.live) == GfVec3d(0.5, 0.5, 0.0));
+    const auto computed = drawn.warmed.movedProperties.find(blink);
+    CHECK(computed != drawn.warmed.movedProperties.end() &&
+          computed->second == VtValue(0.5f));
+
+    _BlinkRigOptions noLid;
+    noLid.lid = false;
+    const Warmed skipped = warm("blink NaN drag", noLid,
+                                VtValue(std::nanf("")));
+    CHECK(skipped.live.movedProperties.count(blink) == 0);
+    CHECK(skipped.warmed.movedProperties.count(blink) == 0);
+    for (const RigExecRigPose *pose : {&skipped.live, &skipped.warmed}) {
+        CHECK(std::count(pose->diagnostics.begin(), pose->diagnostics.end(),
+                         "property chain " + blink.GetString() +
+                             ": authored base is not finite; chain "
+                             "skipped") == 1);
+    }
+
+    _BlinkRigOptions gained;
+    gained.gain = true;
+    const Warmed checkpoint = warm("blink drag, Gain then clamp", gained,
+                                   VtValue(0.75f));
+    CHECK(_ReadoutOf(checkpoint.live, "blinkBase") == 0.75f);
+    CHECK(_ReadoutOf(checkpoint.live, "blinkCheckpoint") == 1.5f);
+    CHECK(_ReadoutOf(checkpoint.live, "blinkFinal") == 1.0f);
+    CHECK(lidAt(checkpoint.live) == GfVec3d(0.75, 1.0, 1.5));
+
+    const Warmed asFloat =
+        warm("blink float drag", _BlinkRigOptions(), VtValue(1.4f));
+    const Warmed asDouble =
+        warm("blink double drag", _BlinkRigOptions(), VtValue(1.4));
+    CheckSameReadings("blink double drag against the float drag",
+                      asFloat.live, asDouble.live);
+}
+
+// A bound property envelope is a one-element producer field. A detached
+// warming job consumes its sampled inputs and matches the weighted live
+// value; removing the binding still recovers the full-strength chain.
+void
+TestAPropertyEnvelopeFreezes()
 {
     UsdStageRefPtr stage = MakeChainedRig();
     const UsdPrim weight = stage->DefinePrim(
@@ -707,7 +1521,6 @@ TestChainHookDeclinesWeightObjects()
     RigExecRigEvaluator evaluator(stage, rig);
     std::vector<std::string> errors;
     CHECK(evaluator.Compile(&errors));
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
 
     RigExecChainSampleBindings bound;
@@ -717,37 +1530,440 @@ TestChainHookDeclinesWeightObjects()
     CHECK(bound.chains[0].revisions.size() == 1);
     CHECK(bound.chains[0].revisions[0].weightObjects.size() == 1);
 
-    RigExecResolvedInputs resolved;
-    CHECK(!RigExecEvaluateChainsForTime(bound, UsdTimeCode(2.0), &resolved,
-                                        nullptr, nullptr, &error));
-    CHECK(!error.empty());
-
     std::vector<RigExecValueOverride> noOverrides;
     RigExecFrameInputs at2;
     CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(2.0), noOverrides,
                                    &at2, &error));
-    CHECK(at2.HasChainResolvedInputs());
-    CHECK(at2.chainResults.empty());
+    CHECK(!at2.HasChainResolvedInputs());
 
     std::shared_ptr<const RigExecFrozenProgram> frozen;
-    CHECK(!RigExecFreezeProgram(evaluator, &frozen, &error));
-    CHECK(frozen == nullptr);
-    CHECK(error.find("weight object") != std::string::npos);
+    CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
+    CHECK(frozen != nullptr);
+    CHECK(evaluator.Evaluate(UsdTimeCode(2.0)).valid);
+    RigExecBackgroundScheduler scheduler;
+    if (frozen) {
+        CHECK(frozen->program.weightFields.size() == 1);
+        if (frozen->program.weightFields.size() == 1) {
+            const auto &field = frozen->program.weightFields.front();
+            CHECK(field.form == RigExecBakedProgramImpl::WeightField::Form::EnvelopeProperty);
+            CHECK(field.ok && field.count == 1);
+            CHECK(field.values == std::vector<float>{0.5f});
+        }
+        RigExecFrameInputs at3;
+        CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(3.0), noOverrides,
+                                       &at3, &error));
+        CHECK(!at3.HasChainResolvedInputs());
+        const RigExecRigPose warmed = RunWarmingJob(&evaluator, rig, frozen,
+                                                   at3, &scheduler, nullptr);
+        CheckJobAccepted("bound envelope warmed frame 3", at3, warmed);
+        const RigExecRigPose live = evaluator.Evaluate(UsdTimeCode(3.0));
+        CheckPosesBitIdentical("bound envelope frame 3", live, warmed);
+        // The FloatMath channel narrows the authored 10.3 double to float:
+        // 10.300000190734863 * 1.5 rounds to 15.450000762939453.
+        // Blending halfway rounds to exactly 12.875 before widening to double.
+        const SdfPath target("/Asset/Rig/AlongX.avars:tx");
+        for (const auto *pose : {&live, &warmed}) {
+            const auto value = pose->movedProperties.find(target);
+            CHECK(value != pose->movedProperties.end());
+            if (value != pose->movedProperties.end()) {
+                CHECK(value->second.IsHolding<double>());
+                if (value->second.IsHolding<double>())
+                    CHECK(value->second.UncheckedGet<double>() == 12.875);
+            }
+        }
+    }
 
-    // The marked vector declines at the runner even against a snapshot
-    // taken before the weight object was bound.
     CHECK(stage->GetPrimAtPath(SdfPath("/Asset/Rig/Movers/TxGain"))
               .GetRelationship(TfToken("rigExec:weightObject"))
               .SetTargets({}));
     CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
     CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
     CHECK(frozen != nullptr);
+    RigExecFrameInputs unbound;
+    CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(2.0), noOverrides,
+                                   &unbound, &error));
+    const RigExecRigPose warmed = RunWarmingJob(&evaluator, rig, frozen,
+                                                unbound, &scheduler, nullptr);
+    CheckJobAccepted("unbound envelope warmed frame 2", unbound, warmed);
+    const RigExecRigPose live = evaluator.Evaluate(UsdTimeCode(2.0));
+    CheckPosesBitIdentical("unbound envelope frame 2", live, warmed);
+}
+
+// testRigExecArm's phase rig (_PhaseRig there): one dial at 0.45, revised
+// by Gain (x2) and then Limit (clamp to 0.6), read by readout movers at
+// every phase rule, in kFrozenPhaseReadouts order:
+//   Undeclared       no metadata                        0.45
+//   Final            `final`                            0.6
+//   Hop              `base`                             0.45
+//   FinalViaHop      `final`, through Hop's input       0.6
+//   FinalHop         `final`                            0.6
+//   BaseViaFinalHop  no metadata, through FinalHop's    0.45
+//   Checkpoint       Gain's path                        0.9
+//   LastCheckpoint   Limit's path, the last revision    0.6
+const char *const kFrozenPhaseReadouts[] = {
+    "Undeclared", "Final",   "Hop",       "FinalViaHop",
+    "FinalHop",   "BaseViaFinalHop", "Checkpoint", "LastCheckpoint"};
+
+UsdStageRefPtr
+MakeFrozenPhaseRig()
+{
+    const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    stage->DefinePrim(SdfPath("/Asset"), TfToken("Xform"));
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    stage->DefinePrim(SdfPath("/Asset/Rig/Movers"), TfToken("Scope"));
+    stage->DefinePrim(SdfPath("/Asset/Rig/Movers/Readouts"),
+                      TfToken("Scope"));
+    const UsdAttribute dial =
+        stage->DefinePrim(SdfPath("/Asset/Rig/Channels/Dial"),
+                          TfToken("Scope"))
+            .CreateAttribute(TfToken("rigExec:amount"),
+                             SdfValueTypeNames->Float);
+    dial.Set(0.45f);
+    const auto mover = [&](const std::string &path, const char *operation,
+                           const SdfPath &target) {
+        const UsdPrim prim = stage->DefinePrim(
+            SdfPath("/Asset/Rig/Movers/" + path),
+            TfToken("RigExecFloatMathMover"));
+        CHECK(prim.ApplyAPI(TfToken("RigExecMoverAPI")));
+        prim.CreateAttribute(TfToken("rigExec:operation"),
+                             SdfValueTypeNames->Token)
+            .Set(TfToken(operation));
+        prim.CreateRelationship(TfToken("rigExec:moves"))
+            .SetTargets({target});
+        return prim;
+    };
+    const UsdPrim limit = mover("Limit", "clamp", dial.GetPath());
+    limit.CreateAttribute(TfToken("inputs:min"), SdfValueTypeNames->Float)
+        .Set(0.0f);
+    limit.CreateAttribute(TfToken("inputs:max"), SdfValueTypeNames->Float)
+        .Set(0.6f);
+    mover("Limit/Gain", "multiply", dial.GetPath())
+        .CreateAttribute(TfToken("inputs:value"), SdfValueTypeNames->Float)
+        .Set(2.0f);
+    const UsdPrim readouts = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Channels/Readouts"), TfToken("Scope"));
+    const auto readout = [&](const char *name, const SdfPath &source,
+                             const char *phase) {
+        const UsdAttribute channel = readouts.CreateAttribute(
+            TfToken(std::string("rigExec:") + name),
+            SdfValueTypeNames->Float);
+        channel.Set(0.0f);
+        const UsdAttribute value =
+            mover(std::string("Readouts/") + name, "add", channel.GetPath())
+                .CreateAttribute(TfToken("inputs:value"),
+                                 SdfValueTypeNames->Float);
+        value.SetConnections({source});
+        if (phase) {
+            value.SetMetadata(TfToken("rigExecReadPhase"),
+                              std::string(phase));
+        }
+    };
+    const SdfPath hop("/Asset/Rig/Movers/Readouts/Hop.inputs:value");
+    const SdfPath finalHop(
+        "/Asset/Rig/Movers/Readouts/FinalHop.inputs:value");
+    readout("Undeclared", dial.GetPath(), nullptr);
+    readout("Final", dial.GetPath(), "final");
+    readout("Hop", dial.GetPath(), "base");
+    readout("FinalViaHop", hop, "final");
+    readout("FinalHop", dial.GetPath(), "final");
+    readout("BaseViaFinalHop", finalHop, nullptr);
+    readout("Checkpoint", dial.GetPath(), "/Asset/Rig/Movers/Limit/Gain");
+    readout("LastCheckpoint", dial.GetPath(), "/Asset/Rig/Movers/Limit");
+    return stage;
+}
+
+bool
+FrozenPhaseReadoutsAre(const char *what, const RigExecRigPose &pose,
+                       const std::vector<float> &expected)
+{
+    bool same = pose.valid;
+    for (size_t i = 0; i < expected.size(); ++i) {
+        const auto it = pose.movedProperties.find(SdfPath(
+            std::string("/Asset/Rig/Channels/Readouts.rigExec:") +
+            kFrozenPhaseReadouts[i]));
+        const float got =
+            it != pose.movedProperties.end() && it->second.IsHolding<float>()
+                ? it->second.UncheckedGet<float>()
+                : -1.0f;
+        if (std::abs(got - expected[i]) > 1e-6f) {
+            std::printf("  %s: %s reads %.9g, expected %.9g\n", what,
+                        kFrozenPhaseReadouts[i], double(got),
+                        double(expected[i]));
+            same = false;
+        }
+    }
+    return same;
+}
+
+// testRigExecArm's TestPhasedReadDragRules, through the worker: each drag
+// rule warms bit-identically to live, the job is accepted (no stale chain
+// sample, a pose returned), and the warmed readouts are the rule's. Each
+// case is frozen from live's run under the case before it, so the worker's
+// property operation values start from another drag's versions and re-runs what moved.
+void
+TestPhasedReadDragRulesFrozen()
+{
+    const auto drag = [](const char *prim, const char *attribute,
+                         float value) {
+        return RigExecValueOverride{SdfPath(prim), TfToken(),
+                                    TfToken(attribute), VtValue(value)};
+    };
+    const std::vector<float> undragged = {0.45f, 0.6f,  0.45f, 0.6f,
+                                          0.6f,  0.45f, 0.9f,  0.6f};
+    struct Case {
+        const char *what;
+        std::vector<RigExecValueOverride> overrides;
+        std::vector<float> readouts;
+    };
+    const Case cases[] = {
+        {"undragged", {}, undragged},
+        // A recorded reader's own input, which FinalViaHop's walk passes.
+        {"drag on Hop",
+         {drag("/Asset/Rig/Movers/Readouts/Hop", "inputs:value", 0.125f)},
+         {0.45f, 0.6f, 0.125f, 0.125f, 0.6f, 0.45f, 0.9f, 0.6f}},
+        // An unrecorded hop: the base reader through it stands aside.
+        {"drag on FinalHop",
+         {drag("/Asset/Rig/Movers/Readouts/FinalHop", "inputs:value",
+               0.375f)},
+         {0.45f, 0.6f, 0.45f, 0.6f, 0.375f, 0.375f, 0.9f, 0.6f}},
+        // The target: the drag is the base.
+        {"drag on the dial",
+         {drag("/Asset/Rig/Channels/Dial", "rigExec:amount", 0.25f)},
+         {0.25f, 0.5f, 0.25f, 0.5f, 0.5f, 0.25f, 0.5f, 0.5f}},
+        {"lifted", {}, undragged},
+    };
+    const UsdStageRefPtr stage = MakeFrozenPhaseRig();
+    const SdfPath rig("/Asset/Rig");
+    RigExecRigEvaluator evaluator(stage, rig);
+    std::vector<std::string> errors;
+    CHECK(evaluator.Compile(&errors));
+    CHECK(evaluator.GetSkippedOperations().empty());
+    CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
     RigExecBackgroundScheduler scheduler;
-    bool ran = true;
-    const RigExecRigPose pose =
-        RunWarmingJob(&evaluator, rig, frozen, at2, &scheduler, &ran);
-    CHECK(!pose.valid);
-    CHECK(!ran);
+    const UsdTimeCode time(2.0);
+    for (const Case &c : cases) {
+        evaluator.SetInteractiveOverrides(c.overrides);
+        std::shared_ptr<const RigExecFrozenProgram> frozen;
+        std::string error;
+        CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
+        if (!frozen) {
+            std::printf("FAIL %s: freeze refused: %s\n", c.what,
+                        error.c_str());
+            continue;
+        }
+        RigExecFrameInputs inputs;
+        CHECK(RigExecSampleFrameInputs(evaluator, time, c.overrides, &inputs,
+                                       &error));
+        const RigExecRigPose warmed = RunWarmingJob(
+            &evaluator, rig, frozen, inputs, &scheduler, nullptr);
+        const RigExecRigPose live = evaluator.Evaluate(time);
+        CHECK(live.valid);
+        CheckPosesBitIdentical(c.what, live, warmed);
+        CheckJobAccepted(c.what, inputs, warmed);
+        CHECK(FrozenPhaseReadoutsAre(c.what, warmed, c.readouts));
+    }
+    evaluator.SetInteractiveOverrides({});
+}
+
+// A control whose tx (authored \p tx, static) a clamp revises to at most
+// 0.5 after a gain multiplies it by \p factor, or by 0.5 x t at frames 1-4
+// when \p animatedFactor: tx is a chain target and the head of tx's own
+// avar binding, which reads the chain's result.
+UsdStageRefPtr
+MakeClampedChainRig(double tx, bool animatedFactor)
+{
+    const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    stage->DefinePrim(SdfPath("/Asset"), TfToken("Scope"));
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    stage->DefinePrim(SdfPath("/Asset/Rig/AlongX"), TfToken("RigExecControl"))
+        .GetAttribute(TfToken("avars:tx"))
+        .Set(tx);
+    stage->DefinePrim(SdfPath("/Asset/Rig/Movers"), TfToken("Scope"));
+    const SdfPath target("/Asset/Rig/AlongX.avars:tx");
+    const auto mover = [&](const std::string &path, const char *operation) {
+        const UsdPrim prim = stage->DefinePrim(
+            SdfPath("/Asset/Rig/Movers/" + path),
+            TfToken("RigExecFloatMathMover"));
+        prim.ApplyAPI(TfToken("RigExecMoverAPI"));
+        prim.CreateAttribute(TfToken("rigExec:operation"),
+                             SdfValueTypeNames->Token)
+            .Set(TfToken(operation));
+        prim.GetRelationship(TfToken("rigExec:moves")).SetTargets({target});
+        return prim;
+    };
+    const UsdPrim limit = mover("Limit", "clamp");
+    limit.CreateAttribute(TfToken("inputs:min"), SdfValueTypeNames->Float)
+        .Set(0.0f);
+    limit.CreateAttribute(TfToken("inputs:max"), SdfValueTypeNames->Float)
+        .Set(0.5f);
+    const UsdAttribute factor =
+        mover("Limit/Gain", "multiply")
+            .CreateAttribute(TfToken("inputs:value"),
+                             SdfValueTypeNames->Float);
+    if (animatedFactor) {
+        for (int t = 1; t <= 4; ++t) {
+            factor.Set(0.5f * float(t), UsdTimeCode(double(t)));
+        }
+    } else {
+        factor.Set(2.0f);
+    }
+    return stage;
+}
+
+// \p inputs less the head-leaf samples and their constant table: the
+// vector a sampler without them would produce, whose digest is what the
+// frame cache keyed on before.
+RigExecFrameInputs
+WithoutHeadLeaves(const RigExecFrameInputs &inputs,
+                  const SdfPath &rawAlias = SdfPath())
+{
+    RigExecFrameInputs out = inputs;
+    out.headLeafConstants.reset();
+    out.values.clear();
+    for (const RigExecSampledInput &sample : inputs.values) {
+        if (sample.path.GetName().rfind("frozenChain", 0) != 0 &&
+            sample.path != rawAlias) {
+            out.values.push_back(sample);
+        }
+    }
+    return out;
+}
+
+// A chain target's own value samples at its synthetic key, as authored,
+// and a reader whose head is that target (tx's avar binding) samples
+// nothing: the worker resolves it to the chain's result. Two jobs whose
+// targets differ only in the authored value, which the clamp folds to one
+// result, have different digests -- the own value moves them -- and each
+// serves a pose equal to live. The provider source pool transports the same
+// authored target at its raw alias while a provider step reads it (Build
+// prunes an avar's provider leaf, which no step reads). Removing both
+// source routes leaves equal states because the clamp produces equal poses.
+void
+TestAChainTargetOwnValueKeyIsDistinct()
+{
+    const SdfPath rig("/Asset/Rig");
+    const SdfPath txPath("/Asset/Rig/AlongX.avars:tx");
+    const SdfPath ownKey("/Asset/Rig/AlongX.frozenChainOwn:avars:tx");
+    const SdfPath rawOwnKey("/Asset/Rig/AlongX.rigExec:providerRaw:avars:tx");
+    struct Job {
+        RigExecFrameInputs inputs;
+        RigExecRigPose live, warmed;
+    };
+    const auto warm = [&](double tx) {
+        Job job;
+        const UsdStageRefPtr stage = MakeClampedChainRig(tx, false);
+        RigExecRigEvaluator evaluator(stage, rig);
+        std::vector<std::string> errors;
+        CHECK(evaluator.Compile(&errors));
+        CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
+        CHECK(evaluator.Evaluate(UsdTimeCode(2.0)).valid);
+        std::shared_ptr<const RigExecFrozenProgram> frozen;
+        std::string error;
+        CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
+        if (!frozen) {
+            std::printf("FAIL own-value key: freeze refused: %s\n",
+                        error.c_str());
+            return job;
+        }
+        CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(3.0), {},
+                                       &job.inputs, &error));
+        RigExecBackgroundScheduler scheduler;
+        job.warmed = RunWarmingJob(&evaluator, rig, frozen, job.inputs,
+                                   &scheduler, nullptr);
+        job.live = evaluator.Evaluate(UsdTimeCode(3.0));
+        CHECK(job.live.valid);
+        CheckPosesBitIdentical("own-value key", job.live, job.warmed);
+        CheckJobAccepted("own-value key", job.inputs, job.warmed);
+        return job;
+    };
+    const Job three = warm(3.0);
+    const Job four = warm(4.0);
+    for (const Job *job : {&three, &four}) {
+        CHECK(job->inputs.Find(txPath) == nullptr);
+        const auto reader = job->warmed.movedProperties.find(txPath);
+        CHECK(reader != job->warmed.movedProperties.end() &&
+              reader->second.IsHolding<double>() &&
+              reader->second.UncheckedGet<double>() == 0.5);
+    }
+    const VtValue *own3 = three.inputs.Find(ownKey);
+    const VtValue *own4 = four.inputs.Find(ownKey);
+    CHECK(own3 != nullptr && own3->IsHolding<double>() &&
+          own3->Get<double>() == 3.0);
+    CHECK(own4 != nullptr && own4->IsHolding<double>() &&
+          own4->Get<double>() == 4.0);
+    const VtValue *raw3 = three.inputs.Find(rawOwnKey);
+    const VtValue *raw4 = four.inputs.Find(rawOwnKey);
+    CHECK((raw3 == nullptr) == (raw4 == nullptr));
+    CHECK(raw3 == nullptr || (raw3->IsHolding<double>() &&
+                              raw3->Get<double>() == 3.0));
+    CHECK(raw4 == nullptr || (raw4->IsHolding<double>() &&
+                              raw4->Get<double>() == 4.0));
+    CHECK(RigExecFrozenControlDigest(three.inputs) !=
+          RigExecFrozenControlDigest(four.inputs));
+    CHECK(RigExecControlStateDigest(three.inputs, {}) !=
+          RigExecControlStateDigest(four.inputs, {}));
+    CheckSameReadings("own-value key: equal results", three.live, four.live);
+    // Normalize only the head leaves and this controlled target's raw alias.
+    CHECK(RigExecControlStateDigest(
+              WithoutHeadLeaves(three.inputs, rawOwnKey), {}) ==
+          RigExecControlStateDigest(
+              WithoutHeadLeaves(four.inputs, rawOwnKey), {}));
+}
+
+// Two frames that differ only in a chain mover's own animated inputs:value,
+// whose effect the clamp folds away, have different control digests: the
+// factor is a head-leaf sample. Without the head leaves they collide (the
+// pre-existing gap, harmless here because the poses are equal), which the
+// last check pins so a sampler that dropped the leaves is caught.
+void
+TestAChainMoverInputMovesTheDigest()
+{
+    const SdfPath rig("/Asset/Rig");
+    const UsdStageRefPtr stage = MakeClampedChainRig(3.0, true);
+    RigExecRigEvaluator evaluator(stage, rig);
+    std::vector<std::string> errors;
+    CHECK(evaluator.Compile(&errors));
+    CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
+    CHECK(evaluator.Evaluate(UsdTimeCode(2.0)).valid);
+    std::shared_ptr<const RigExecFrozenProgram> frozen;
+    std::string error;
+    CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
+    if (!frozen) {
+        std::printf("FAIL chain mover input digest: freeze refused: %s\n",
+                    error.c_str());
+        return;
+    }
+    RigExecBackgroundScheduler scheduler;
+    RigExecFrameInputs at3, at4;
+    CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(3.0), {}, &at3,
+                                   &error));
+    CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(4.0), {}, &at4,
+                                   &error));
+    const SdfPath factorKey(
+        "/Asset/Rig/Movers/Limit/Gain.frozenChainHop:inputs:value");
+    const VtValue *factor3 = at3.Find(factorKey);
+    const VtValue *factor4 = at4.Find(factorKey);
+    CHECK(factor3 != nullptr && factor3->IsHolding<float>() &&
+          factor3->Get<float>() == 1.5f);
+    CHECK(factor4 != nullptr && factor4->IsHolding<float>() &&
+          factor4->Get<float>() == 2.0f);
+    CHECK(RigExecControlStateDigest(at3, {}) !=
+          RigExecControlStateDigest(at4, {}));
+    CHECK(RigExecFrozenControlDigest(at3) != RigExecFrozenControlDigest(at4));
+    CHECK(RigExecControlStateDigest(WithoutHeadLeaves(at3), {}) ==
+          RigExecControlStateDigest(WithoutHeadLeaves(at4), {}));
+    const RigExecRigPose warmed3 =
+        RunWarmingJob(&evaluator, rig, frozen, at3, &scheduler, nullptr);
+    const RigExecRigPose live3 = evaluator.Evaluate(UsdTimeCode(3.0));
+    CheckPosesBitIdentical("chain mover input, frame 3", live3, warmed3);
+    CheckJobAccepted("chain mover input, frame 3", at3, warmed3);
+    CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
+    const RigExecRigPose warmed4 =
+        RunWarmingJob(&evaluator, rig, frozen, at4, &scheduler, nullptr);
+    const RigExecRigPose live4 = evaluator.Evaluate(UsdTimeCode(4.0));
+    CheckPosesBitIdentical("chain mover input, frame 4", live4, warmed4);
+    CheckJobAccepted("chain mover input, frame 4", at4, warmed4);
+    CheckSameReadings("chain mover input: equal results", live3, live4);
 }
 
 // The session-pinned route samples exactly what a fresh bind samples: same
@@ -760,7 +1976,6 @@ TestSessionBindingsMatchFreshBind()
     const SdfPath rig("/Asset/Rig");
     RigExecRigEvaluator evaluator(stage, rig);
     CHECK(evaluator.Compile());
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
     CHECK(evaluator.Evaluate(UsdTimeCode(2.0)).valid);
 
@@ -790,8 +2005,6 @@ TestSessionBindingsMatchFreshBind()
             CHECK(fresh.values[i].viaChain == session.values[i].viaChain);
             CHECK(fresh.values[i].value == session.values[i].value);
         }
-        CHECK(fresh.chainResults == session.chainResults);
-        CHECK(fresh.chainDiagnostics == session.chainDiagnostics);
         CHECK(RigExecFrozenControlDigest(fresh) ==
               RigExecFrozenControlDigest(session));
     }
@@ -895,7 +2108,6 @@ TestBurstCacheMatchesPinnedSampling()
         const SdfPath rig("/Asset/Rig");
         RigExecRigEvaluator evaluator(stage, rig);
         CHECK(evaluator.Compile());
-        evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
         CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
         CHECK(evaluator.Evaluate(UsdTimeCode(2.0)).valid);
 
@@ -932,8 +2144,6 @@ TestBurstCacheMatchesPinnedSampling()
                           burst.values[i].viaChain);
                     CHECK(plain.values[i].value == burst.values[i].value);
                 }
-                CHECK(plain.chainResults == burst.chainResults);
-                CHECK(plain.chainDiagnostics == burst.chainDiagnostics);
                 CHECK(RigExecFrozenControlDigest(plain) ==
                       RigExecFrozenControlDigest(burst));
                 CHECK(RigExecControlStateDigest(plain, overrides) ==
@@ -982,7 +2192,6 @@ TestVolumeWeightsBurstMatchesPlain(const std::string &examplesDir)
     RigExecRigEvaluator evaluator(stage, rig);
     std::vector<std::string> errors;
     CHECK(evaluator.Compile(&errors));
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     CHECK(evaluator.Evaluate(UsdTimeCode(1001.0)).valid);
     const RigExecBakedProgramImpl &B =
         evaluator.GetBakedProgram()->GetStepGraph();
@@ -1011,8 +2220,6 @@ TestVolumeWeightsBurstMatchesPlain(const std::string &examplesDir)
             CHECK(plain.values[i].viaChain == burst.values[i].viaChain);
             CHECK(plain.values[i].value == burst.values[i].value);
         }
-        CHECK(plain.chainResults == burst.chainResults);
-        CHECK(plain.chainDiagnostics == burst.chainDiagnostics);
         CHECK(plain.stageSeeds == burst.stageSeeds);
         CHECK(RigExecFrozenControlDigest(plain) ==
               RigExecFrozenControlDigest(burst));
@@ -1022,6 +2229,404 @@ TestVolumeWeightsBurstMatchesPlain(const std::string &examplesDir)
     }
 }
 
+// The paths of every volume slot the walk places (placedVolumes) of \p B.
+static std::set<SdfPath>
+PlacedVolumeSlots(const RigExecBakedProgramImpl &B)
+{
+    std::set<SdfPath> paths;
+    for (size_t i = 0; i < B.placedVolumes.size() && i < B.paths.size();
+         ++i) {
+        if (B.placedVolumes[i]) {
+            paths.insert(B.paths[i]);
+        }
+    }
+    return paths;
+}
+
+static std::set<SdfPath>
+KeysOf(const std::map<SdfPath, GfMatrix4d> &frames)
+{
+    std::set<SdfPath> keys;
+    for (const auto &[path, frame] : frames) {
+        keys.insert(path);
+    }
+    return keys;
+}
+
+// The clusters of every Base and Final VolumePlacements step, in program order.
+static std::vector<int>
+VolumePlacementsClusters(const RigExecBakedProgramImpl &B)
+{
+    std::vector<int> clusters;
+    for (const RigExecBakedStep &step : B.steps) {
+        if (step.kind == RigExecBakedStepKind::VolumePlacements) {
+            clusters.push_back(step.cluster);
+        }
+    }
+    return clusters;
+}
+
+// Frozen weightFrames must equal live's, keys and bits.
+static void
+CheckWeightFramesEqual(const char *what, const char *path,
+                       const std::map<SdfPath, GfMatrix4d> &live,
+                       const std::map<SdfPath, GfMatrix4d> &frozen)
+{
+    if (frozen == live) {
+        return;
+    }
+    std::printf("FAIL %s: %s publishes %zu weight frame(s), live %zu%s\n",
+                what, path, frozen.size(), live.size(),
+                KeysOf(frozen) == KeysOf(live) ? " (values differ)" : "");
+    ++failures;
+}
+
+// A fresh workspace computes each typed placement once; its held repeat
+// retains the published frames and skips every placement body.
+static std::shared_ptr<const RigExecFrozenProgram>
+CheckFrozenWeightFramesMatchLive(RigExecRigEvaluator *evaluator,
+                                 const SdfPath &rig, UsdTimeCode time,
+                                 const char *what)
+{
+    const auto live = evaluator->Evaluate(time);
+    CHECK(live.valid && !live.weightFrames.empty());
+    const auto &B = evaluator->GetBakedProgram()->GetStepGraph();
+    CHECK(KeysOf(live.weightFrames) == PlacedVolumeSlots(B));
+    std::shared_ptr<const RigExecFrozenProgram> frozen;
+    std::string error;
+    CHECK(RigExecFreezeProgram(*evaluator,&frozen,&error));
+    RigExecFrameInputs inputs;
+    CHECK(RigExecSampleFrameInputs(*evaluator,time,{},&inputs,&error));
+    if (!frozen) return {};
+    RigExecFrozenEvalContext context;
+    context.epochDigest = evaluator->GetBindingEpochDigest();
+    context.slotCount = evaluator->GetBakedProgram()->GetProviderCount();
+    context.varyingInputCount = inputs.values.size();
+    context.frozen = frozen.get();
+    auto workspace = RigExecCreateFrozenWorkspace(frozen);
+    context.workspace = workspace.get();
+    std::set<size_t> placementSteps;
+    for(size_t i=0;i<B.steps.size();++i)
+        if(B.steps[i].kind==RigExecBakedStepKind::VolumePlacements)
+            placementSteps.insert(i);
+    CHECK(!placementSteps.empty());
+    for (int repeat = 0; repeat < 2; ++repeat) {
+        RigExecFrozenRunReport report;
+        const auto pose = RigExecEvaluateFrozen(context,inputs,
+            RigExecMakeProductionStepRunner(),nullptr,rig,&report);
+        CHECK(report.ran && pose.valid);
+        CheckWeightFramesEqual(what,"a held common-graph job",live.weightFrames,pose.weightFrames);
+        std::set<size_t> ranPlacements;
+        for (const auto &entry : report.region)
+            if(entry.kind=="VolumePlacements") {
+                CHECK(placementSteps.count(entry.step)==1);
+                CHECK(ranPlacements.insert(entry.step).second);
+            }
+        // Both jobs branch from a completed same-time snapshot.
+        CHECK(ranPlacements.empty());
+    }
+    return frozen;
+}
+// Frozen publishes exactly live's weightFrames on every path. On
+// 14_VolumeConstrainedSweep with a volume outside the rig that only a
+// constraint names, that volume has a slot and a placement step, which the
+// frozen cone runs, and neither live nor frozen publishes it.
+void
+TestFrozenWeightFramesMatchLive(const std::string &examplesDir)
+{
+    const auto open = [](const std::string &path, SdfPath *rig) {
+        UsdStageRefPtr stage = UsdStage::Open(path);
+        CHECK(stage);
+        if (stage) {
+            for (const UsdPrim &prim : stage->TraverseAll()) {
+                if (prim.GetTypeName() == "RigExecRoot") {
+                    *rig = prim.GetPath();
+                    break;
+                }
+            }
+        }
+        CHECK(!rig->IsEmpty());
+        return stage;
+    };
+    {
+        SdfPath rig;
+        UsdStageRefPtr stage =
+            open(examplesDir + "/11_VolumeWeights.usda", &rig);
+        if (!stage || rig.IsEmpty()) {
+            return;
+        }
+        RigExecRigEvaluator evaluator(stage, rig);
+        CHECK(evaluator.Compile());
+        CHECK(evaluator.Evaluate(UsdTimeCode(1001.0)).valid);
+        CheckFrozenWeightFramesMatchLive(&evaluator, rig, UsdTimeCode(1012.0),
+                                         "11_VolumeWeights");
+    }
+    SdfPath rig;
+    UsdStageRefPtr stage =
+        open(examplesDir + "/14_VolumeConstrainedSweep.usda", &rig);
+    if (!stage || rig.IsEmpty()) {
+        return;
+    }
+    stage->SetEditTarget(stage->GetSessionLayer());
+    const SdfPath outsidePath("/SweepAsset/Outside");
+    const UsdPrim outside =
+        stage->DefinePrim(outsidePath, TfToken("RigExecSphereWeight"));
+    const char *const avars[3] = {"avars:tx", "avars:ty", "avars:tz"};
+    const GfVec3d from(0, 5, 0), to(6, 5, 4);
+    for (int k = 0; k < 3; ++k) {
+        const UsdAttribute avar = outside.CreateAttribute(
+            TfToken(avars[k]), SdfValueTypeNames->Double);
+        avar.Set(from[k], UsdTimeCode(1001));
+        avar.Set(to[k], UsdTimeCode(1048));
+    }
+    stage->GetPrimAtPath(SdfPath("/SweepAsset/Rig/Movers/Sweep"))
+        .GetRelationship(TfToken("rigExec:sources"))
+        .SetTargets({outsidePath});
+    RigExecRigEvaluator evaluator(stage, rig);
+    CHECK(evaluator.Compile());
+    CHECK(evaluator.Evaluate(UsdTimeCode(1001.0)).valid);
+    const std::shared_ptr<const RigExecFrozenProgram> ranSlots =
+        CheckFrozenWeightFramesMatchLive(&evaluator, rig, UsdTimeCode(1024.0),
+                                         "untapped volume source");
+    // Not vacuous: the untapped volume is a volume slot, and the cone that
+    // ran its placement step placed it (ty = 5) without publishing it.
+    const RigExecBakedProgramImpl &B =
+        evaluator.GetBakedProgram()->GetStepGraph();
+    const auto slot = B.index.find(outsidePath);
+    CHECK(slot != B.index.end());
+    if (slot == B.index.end() || !ranSlots) {
+        return;
+    }
+    const size_t i = size_t(slot->second);
+    CHECK(i < B.noScaleAvars.size() && B.noScaleAvars[i] == 1);
+    CHECK(i < B.placedVolumes.size() && B.placedVolumes[i] == 0);
+    CHECK(i < ranSlots->program.volumePlacement.size());
+    if (i < ranSlots->program.volumePlacement.size())
+        CHECK(ranSlots->program.volumePlacement[i].ExtractTranslation()[1] == 5.0);
+}
+
+// A cold workspace computes both typed placement producers, replacing
+// poisoned snapshot storage. A retained held workspace executes neither;
+// changing an unrelated root must also preserve the guide's placement.
+void
+TestFrozenWholeRunSkippingVolumePlacementsPublishesLive()
+{
+    const char *label = "whole frozen run skips VolumePlacements";
+    const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    const bool imported = stage->GetRootLayer()->ImportFromString(R"(#usda 1.0
+(
+    startTimeCode = 1
+    endTimeCode = 10
+)
+def Xform "Asset"
+{
+    def RigExecRoot "Rig"
+    {
+        def RigExecControl "Root"
+        {
+            double avars:rz = 0
+            double avars:rz.timeSamples = {1: 0, 2: 45}
+        }
+        def RigExecJoint "Joint"
+        {
+            matrix4d rest:space = ((1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 1, 0, 1))
+            double avars:rz.connect = </Asset/Rig/Root.avars:rz>
+        }
+        def RigExecSphereWeight "Guide"
+        {
+            double avars:ty = 3
+            float inputs:falloffMin = 0
+            float inputs:falloffMax = 1
+        }
+    }
+}
+)");
+    CHECK(imported);
+    const SdfPath rig("/Asset/Rig"), guide("/Asset/Rig/Guide");
+    RigExecRigEvaluator evaluator(stage, rig);
+    evaluator.SetProfilingEnabled(true);
+    std::vector<std::string> errors;
+    if (!evaluator.Compile(&errors)) {
+        for (const std::string &e : errors) {
+            std::printf("FAIL %s: compile error: %s\n", label, e.c_str());
+        }
+        ++failures;
+        return;
+    }
+    CHECK(evaluator.Evaluate(UsdTimeCode(1)).valid);
+    CHECK(evaluator.Evaluate(UsdTimeCode(2)).valid);
+    CHECK(evaluator.GetBakedGenerationCount() == 2);
+    const RigExecBakedProgram *program = evaluator.GetBakedProgram();
+    CHECK(program != nullptr);
+    if (!program) {
+        return;
+    }
+    // The guide has distinct Base and Final placement producers; neither
+    // reads outside the graph or belongs to an always-running cluster.
+    const RigExecBakedProgramImpl &B = program->GetStepGraph();
+    const std::vector<int> placements = VolumePlacementsClusters(B);
+    for (const int placement : placements) {
+        CHECK(placement >= 0 && !B.cones.always.Test(placement));
+    }
+    for (const RigExecBakedStep &step : B.steps) {
+        CHECK(!step.externalReads);
+    }
+    const auto guideSlot = B.index.find(guide);
+    CHECK(guideSlot != B.index.end());
+    if (guideSlot == B.index.end()) {
+        return;
+    }
+    std::set<size_t> placementSteps;
+    std::set<int> placementParts;
+    for (size_t i = 0; i < B.steps.size(); ++i) {
+        const auto &step = B.steps[i];
+        if (step.kind != RigExecBakedStepKind::VolumePlacements ||
+            step.object != guideSlot->second) continue;
+        CHECK(placementSteps.insert(i).second);
+        CHECK(placementParts.insert(step.part).second);
+        CHECK(step.writes.size() == 1);
+        const auto domain = step.part == 1 ? RigExecBakedSlotDomain::WeightFrames
+                                         : RigExecBakedSlotDomain::WeightFramesBase;
+        if (step.writes.size() == 1) {
+            CHECK(step.writes[0].domain == domain);
+            CHECK(step.writes[0].begin == uint32_t(guideSlot->second));
+            CHECK(step.writes[0].end == uint32_t(guideSlot->second + 1));
+        }
+    }
+    CHECK(placementParts == std::set<int>({1, 2}));
+
+    std::shared_ptr<const RigExecFrozenProgram> frozen, poisoned;
+    std::string error;
+    CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
+    CHECK(RigExecFreezeProgram(evaluator, &poisoned, &error));
+    RigExecFrameInputs held, moved;
+    CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(3), {}, &held,
+                                   &error));
+    CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(1), {}, &moved,
+                                   &error));
+    if (!frozen || !poisoned) {
+        std::printf("FAIL %s: no snapshot (%s)\n", label, error.c_str());
+        ++failures;
+        return;
+    }
+    // A completed unmodified snapshot carries its owned output payloads and
+    // signatures. Its first held job must not become an artificial cold run.
+    auto completedWorkspace=RigExecCreateFrozenWorkspace(frozen);
+    CHECK(completedWorkspace);
+    if(completedWorkspace) {
+        RigExecFrozenEvalContext completedContext;
+        completedContext.frozen=frozen.get();
+        completedContext.workspace=completedWorkspace.get();
+        completedContext.epochDigest=evaluator.GetBindingEpochDigest();
+        completedContext.slotCount=program->GetProviderCount();
+        completedContext.varyingInputCount=held.values.size();
+        RigExecFrozenRunReport completedReport;
+        const auto completed=RigExecEvaluateFrozen(completedContext,held,
+            RigExecMakeProductionStepRunner(),nullptr,rig,&completedReport);
+        CHECK(completedReport.ran && completed.valid);
+        CHECK(completedReport.region.empty());
+        completedContext.varyingInputCount=moved.values.size();
+        RigExecFrozenRunReport independentReport;
+        const auto independent=RigExecEvaluateFrozen(completedContext,moved,
+            RigExecMakeProductionStepRunner(),nullptr,rig,&independentReport);
+        CHECK(independentReport.ran && independent.valid);
+        for(const auto &entry:independentReport.region)
+            CHECK(!placementSteps.count(entry.step));
+        CheckWeightFramesEqual(label,"completed independent input",
+                               completed.weightFrames,independent.weightFrames);
+    }
+    // RigExecFreezeProgram allocates the snapshot non-const, and no job is
+    // running on it.
+    GfMatrix4d poison(1.0);
+    poison.SetTranslate(GfVec3d(0, 100, 0));
+    const_cast<RigExecFrozenProgram &>(*poisoned)
+        .program.volumePlacement[size_t(guideSlot->second)] = poison;
+    // An edit after the freeze settles the snapshot's clone verdict again,
+    // as RigExecPatchFrozenAvarConstants does: its lanes inherit it.
+    frozenDetail::_SettleCloneVerdict(
+        &const_cast<RigExecFrozenProgram &>(*poisoned).program);
+
+    auto workspace = RigExecCreateFrozenWorkspace(poisoned);
+    CHECK(workspace);
+    if (!workspace) return;
+    RigExecFrozenEvalContext context;
+    context.frozen = poisoned.get();
+    context.workspace = workspace.get();
+    context.epochDigest = evaluator.GetBindingEpochDigest();
+    context.slotCount = program->GetProviderCount();
+    context.varyingInputCount = held.values.size();
+    RigExecFrozenRunReport coldReport;
+    const auto cold = RigExecEvaluateFrozen(context, held,
+        RigExecMakeProductionStepRunner(), nullptr, rig, &coldReport);
+    CHECK(coldReport.ran && cold.valid);
+    std::set<size_t> coldPlacements;
+    for (const auto &entry : coldReport.region)
+        if (placementSteps.count(entry.step))
+            CHECK(coldPlacements.insert(entry.step).second);
+    CHECK(coldPlacements == placementSteps);
+    const auto coldGuide = cold.weightFrames.find(guide);
+    CHECK(coldGuide != cold.weightFrames.end() &&
+          coldGuide->second.ExtractTranslation()[1] == 3.0);
+    for (const auto *inputs : {&held, &moved}) {
+        context.varyingInputCount = inputs->values.size();
+        RigExecFrozenRunReport report;
+        const auto retained = RigExecEvaluateFrozen(context, *inputs,
+            RigExecMakeProductionStepRunner(), nullptr, rig, &report);
+        CHECK(report.ran && retained.valid);
+        for (const auto &entry : report.region)
+            CHECK(!placementSteps.count(entry.step));
+        CheckWeightFramesEqual(label, "retained unrelated/held input",
+                               cold.weightFrames, retained.weightFrames);
+    }
+
+    RigExecBackgroundScheduler scheduler;
+    bool ran = false;
+    const RigExecRigPose poisonedHeld =
+        RunWarmingJob(&evaluator, rig, poisoned, held, &scheduler, &ran);
+    CHECK(ran);
+    const auto poisonAt3 = poisonedHeld.weightFrames.find(guide);
+    CHECK(poisonAt3 != poisonedHeld.weightFrames.end() &&
+          poisonAt3->second.ExtractTranslation()[1] == 3.0);
+    ran = false;
+    const RigExecRigPose poisonedMoved =
+        RunWarmingJob(&evaluator, rig, poisoned, moved, &scheduler, &ran);
+    CHECK(ran);
+    const auto poisonAt1 = poisonedMoved.weightFrames.find(guide);
+    CHECK(poisonAt1 != poisonedMoved.weightFrames.end() &&
+          poisonAt1->second.ExtractTranslation()[1] == 3.0);
+
+    ran = false;
+    const RigExecRigPose skipped =
+        RunWarmingJob(&evaluator, rig, frozen, held, &scheduler, &ran);
+    CHECK(ran);
+    ran = false;
+    const RigExecRigPose placed =
+        RunWarmingJob(&evaluator, rig, frozen, moved, &scheduler, &ran);
+    CHECK(ran);
+
+    evaluator.ClearProfile();
+    const RigExecRigPose live3 = evaluator.Evaluate(UsdTimeCode(3));
+    CHECK(live3.valid);
+    for (const RigExecOpTraceEntry &entry : evaluator.GetLastOpTrace()) {
+        CHECK(entry.kind != "VolumePlacements");
+    }
+    const auto guideLive = live3.weightFrames.find(guide);
+    CHECK(live3.weightFrames.size() == 1);
+    CHECK(guideLive != live3.weightFrames.end() &&
+          guideLive->second.ExtractTranslation()[1] == 3.0);
+    CheckWeightFramesEqual(label, "the job at 3", live3.weightFrames,
+                           skipped.weightFrames);
+    const RigExecRigPose live1 = evaluator.Evaluate(UsdTimeCode(1));
+    CHECK(live1.valid);
+    CheckWeightFramesEqual(label, "the job at 1", live1.weightFrames,
+                           placed.weightFrames);
+
+    ran = false;
+    const auto repeated = RunWarmingJob(&evaluator,rig,frozen,held,&scheduler,&ran);
+    CHECK(ran);
+    CheckWeightFramesEqual(label,"a repeated held common-graph job",
+                           live3.weightFrames,repeated.weightFrames);
+}
 // Poses warmed from burst-cached vectors are bit-identical to live: freeze
 // after frame 2, warm frames 3 and 4 through one cache, and diff against
 // live -- then again at 3 with a held drag standing, through a cache built
@@ -1033,7 +2638,6 @@ TestBurstCacheWarmsBitIdentical()
     const SdfPath rig("/Asset/Rig");
     RigExecRigEvaluator evaluator(stage, rig);
     CHECK(evaluator.Compile());
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
     CHECK(evaluator.Evaluate(UsdTimeCode(2.0)).valid);
 
@@ -1102,12 +2706,10 @@ TestBurstCacheRejectsForeignProgram()
     UsdStageRefPtr stageA = MakeTinyRig();
     RigExecRigEvaluator evaluatorA(stageA, SdfPath("/Asset/Rig"));
     CHECK(evaluatorA.Compile());
-    evaluatorA.SetEvaluationMode(RigExecEvaluationMode::Baked);
     CHECK(evaluatorA.Evaluate(UsdTimeCode(1.0)).valid);
     UsdStageRefPtr stageB = MakeChainedRig();
     RigExecRigEvaluator evaluatorB(stageB, SdfPath("/Asset/Rig"));
     CHECK(evaluatorB.Compile());
-    evaluatorB.SetEvaluationMode(RigExecEvaluationMode::Baked);
     CHECK(evaluatorB.Evaluate(UsdTimeCode(1.0)).valid);
 
     RigExecChainSampleBindings pinned;
@@ -1142,7 +2744,6 @@ TestSamplerNullOutDeclines()
     UsdStageRefPtr stage = MakeTinyRig();
     RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
     CHECK(evaluator.Compile());
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
     std::string error;
     CHECK(!RigExecSampleFrameInputs(evaluator, UsdTimeCode(1.0), {}, nullptr,
@@ -1183,7 +2784,6 @@ TestStaleChainBindingsDeclineSampling()
     UsdStageRefPtr stage = MakeChainedRig();
     RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
     CHECK(evaluator.Compile());
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
     RigExecChainSampleBindings empty;
     RigExecFrameInputs inputs;
@@ -1207,7 +2807,6 @@ TestBurstBuildIntoNullDeclines()
     UsdStageRefPtr stage = MakeTinyRig();
     RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
     CHECK(evaluator.Compile());
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
     RigExecChainSampleBindings pinned;
     std::string error;
@@ -1218,14 +2817,13 @@ TestBurstBuildIntoNullDeclines()
     CHECK(error.find("no burst cache") != std::string::npos);
 }
 
-// A constraint target deleted after the build declines sampling and names
-// the target: the epoch settles lazily, so the stale program still stands
-// and the seed hook -- which the sampler only forwards -- reports the
-// same unresolvable target live would give the generation back for.
+// Deleting a required target transports the canonical refusal and successful
+// sampling prefix. Failed/later buffers retain the compiled generation; pure
+// preparation completes without publishing post-frame geometry or transforms.
 void
-TestUnresolvableTargetDeclinesSampling(const std::string &examplesDir)
+TestUnavailableTargetSamplesLocalInvalidRoles(const std::string &examplesDir)
 {
-    UsdStageRefPtr stage = UsdStage::Open(examplesDir + "/aimtest.usda");
+    UsdStageRefPtr stage = UsdStage::Open(examplesDir + "/aimtest_points.usda");
     CHECK(stage);
     if (!stage) {
         return;
@@ -1244,7 +2842,6 @@ TestUnresolvableTargetDeclinesSampling(const std::string &examplesDir)
     RigExecRigEvaluator evaluator(stage, rig);
     std::vector<std::string> errors;
     CHECK(evaluator.Compile(&errors));
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
     RigExecFrameInputs before;
     std::string error;
@@ -1253,19 +2850,138 @@ TestUnresolvableTargetDeclinesSampling(const std::string &examplesDir)
                                    &before, &error));
     CHECK(!before.stageSeeds.xformBase.empty());
 
-    CHECK(stage->RemovePrim(SdfPath("/World/Geom/Sphere")));
+    const auto &B = evaluator.GetBakedProgram()->GetStepGraph();
+    // Sampling time 25 does not mutate the live buffers last evaluated at 1.
+    // Refusal retains these buffers, not the independently sampled time-25 pose.
+    RigExecStageFrameSeeds retained;
+    retained.xformBase = B.xformBase;
+    for (const int slot : B.xformSlots) retained.xformFrames.push_back(B.base[size_t(slot)]);
+    retained.deltaOk = B.deltaBaseOk;
+    retained.deltaBase = B.deltaBaseMatrix;
+    retained.nativeOk = B.nativeFrameOk;
+    retained.nativeFrames = B.nativeFrames;
+    const SdfPath target("/World/Geom/Sphere");
+    const SdfPath mover("/World/RigRoot/Movers/RigExecAimConstraint1");
+    const SdfPath pointsPath = target.AppendProperty(TfToken("points"));
+    const auto constraint = std::find_if(B.constraints.begin(), B.constraints.end(),
+        [&](const auto &value) { return value.path == mover; });
+    CHECK(constraint != B.constraints.end());
+    if (constraint == B.constraints.end()) return;
+    CHECK(std::count_if(B.constraints.begin(), B.constraints.end(),
+        [&](const auto &value) { return value.path == mover; }) == 1);
+    CHECK(constraint->pointsTarget == pointsPath);
+    CHECK(constraint->deltaBasePath == target);
+    const auto slot = B.index.find(target);
+    CHECK(slot != B.index.end());
+    if (slot == B.index.end()) return;
+    const auto xform = std::find(B.xformSlots.begin(), B.xformSlots.end(), slot->second);
+    const auto delta = std::find(B.deltaBasePaths.begin(), B.deltaBasePaths.end(), target);
+    CHECK(xform != B.xformSlots.end());
+    CHECK(delta != B.deltaBasePaths.end());
+    if (xform == B.xformSlots.end() || delta == B.deltaBasePaths.end()) return;
+    const size_t x = size_t(xform - B.xformSlots.begin());
+    const size_t d = size_t(delta - B.deltaBasePaths.begin());
+    CHECK(constraint->target == slot->second);
+    CHECK(constraint->deltaBase == int(d));
+    CHECK(before.stageSeeds.xformFrames[x].IsValid());
+    CHECK(before.stageSeeds.deltaOk[d]);
+    std::shared_ptr<const RigExecFrozenProgram> frozen;
+    CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
+    if (!frozen) return;
+    auto workspace = RigExecCreateFrozenWorkspace(frozen);
+    CHECK(workspace);
+    if (!workspace) return;
+    RigExecFrozenEvalContext context;
+    context.frozen = frozen.get();
+    context.workspace = workspace.get();
+    context.epochDigest = evaluator.GetBindingEpochDigest();
+    context.slotCount = evaluator.GetBakedProgram()->GetProviderCount();
+    context.varyingInputCount = before.values.size();
+    const auto valid = RigExecEvaluateFrozen(context, before,
+        RigExecMakeProductionStepRunner(), nullptr, rig);
+    CHECK(valid.valid);
+    CHECK(valid.providerXforms.count(target) == 1);
+    const auto validPoints = valid.movedProperties.find(pointsPath);
+    CHECK(validPoints != valid.movedProperties.end() &&
+          validPoints->second.IsHolding<VtVec3fArray>() &&
+          !validPoints->second.Get<VtVec3fArray>().empty());
+
+    CHECK(stage->RemovePrim(target));
     RigExecStageFrameSeeds seeds;
-    CHECK(!evaluator.GetBakedProgram()->SampleStageFrameSeeds(
+    error.clear();
+    CHECK(evaluator.GetBakedProgram()->SampleStageFrameSeeds(
         UsdTimeCode(25.0), &seeds, &error));
-    CHECK(error.find("could not resolve constraint target") !=
-          std::string::npos);
-    CHECK(error.find("/World/Geom/Sphere") != std::string::npos);
+    CHECK(error.empty());
+    CHECK(seeds.xformFrames.size() == before.stageSeeds.xformFrames.size());
+    CHECK(seeds.xformBase.size() == before.stageSeeds.xformBase.size());
+    CHECK(seeds.deltaOk.size() == before.stageSeeds.deltaOk.size());
+    CHECK(seeds.nativeFrames.size() == before.stageSeeds.nativeFrames.size());
+    CHECK(seeds.nativeOk.size() == before.stageSeeds.nativeOk.size());
+    CHECK(!seeds.requiredStageFramesAdmission.admitted);
+    CHECK(seeds.requiredStageFramesAdmission.firstBadTarget == int32_t(x));
+    CHECK(seeds.xformFrames[x].flags == retained.xformFrames[x].flags);
+    CHECK(RigExecBakedHeadValueSame(VtValue(seeds.xformBase[x]), VtValue(retained.xformBase[x])));
+    CHECK(seeds.deltaOk == retained.deltaOk);
+    CHECK(seeds.deltaBase.size() == retained.deltaBase.size());
+    for (size_t k = 0; k < seeds.deltaBase.size() && k < retained.deltaBase.size(); ++k)
+        CHECK(RigExecBakedHeadValueSame(VtValue(seeds.deltaBase[k]), VtValue(retained.deltaBase[k])));
+    for (size_t k = 0; k < seeds.xformFrames.size(); ++k) {
+        const auto &expected = k < x ? before.stageSeeds : retained;
+        CHECK(seeds.xformFrames[k].flags == expected.xformFrames[k].flags);
+        CHECK(seeds.xformFrames[k].points.size() == expected.xformFrames[k].points.size());
+        CHECK(RigExecBakedHeadValueSame(VtValue(seeds.xformBase[k]),
+                                      VtValue(expected.xformBase[k])));
+        for (size_t p = 0; p < seeds.xformFrames[k].points.size(); ++p)
+            CHECK(RigExecBakedHeadValueSame(VtValue(seeds.xformFrames[k].points[p]),
+                VtValue(expected.xformFrames[k].points[p])));
+    }
+    for (size_t k = 0; k < seeds.nativeFrames.size(); ++k) {
+        CHECK(seeds.nativeOk[k] == retained.nativeOk[k]);
+        CHECK(seeds.nativeFrames[k].flags == retained.nativeFrames[k].flags);
+        CHECK(seeds.nativeFrames[k].points.size() == retained.nativeFrames[k].points.size());
+        for (size_t p = 0; p < seeds.nativeFrames[k].points.size(); ++p)
+            CHECK(RigExecBakedHeadValueSame(VtValue(seeds.nativeFrames[k].points[p]),
+                VtValue(retained.nativeFrames[k].points[p])));
+    }
     RigExecFrameInputs after;
-    CHECK(!RigExecSampleFrameInputs(evaluator, UsdTimeCode(25.0), noOverrides,
+    CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(25.0), noOverrides,
                                     &after, &error));
-    CHECK(error.find("could not resolve constraint target") !=
-          std::string::npos);
-    CHECK(error.find("/World/Geom/Sphere") != std::string::npos);
+    CHECK(error.empty());
+    CHECK(after.stageSeeds.xformFrames.size() == seeds.xformFrames.size());
+    CHECK(after.stageSeeds == seeds);
+    CHECK(!after.stageSeeds.requiredStageFramesAdmission.admitted);
+    CHECK(after.stageSeeds.requiredStageFramesAdmission.firstBadTarget == int32_t(x));
+    const auto rawPoints = std::find_if(after.values.begin(), after.values.end(),
+        [&](const auto &sample) { return sample.path == pointsPath; });
+    CHECK(rawPoints != after.values.end() && !rawPoints->hasValue);
+    context.varyingInputCount = after.values.size();
+    // Observe the runner's truthful refusal inside the same serial job.
+    // The public wrapper discards unsuccessful output and returns its empty
+    // fail-closed pose; these are separate publication boundaries.
+    RigExecRigPose refused;
+    bool runnerReturned = true;
+    const auto production = RigExecMakeProductionStepRunner();
+    const auto unavailable = RigExecEvaluateFrozen(context, after,
+        [&](const RigExecFrozenEvalContext &c, const RigExecFrameInputs &i,
+            RigExecFrozenArena &arena, RigExecRigPose *pose) {
+            runnerReturned = production(c, i, arena, pose);
+            refused = *pose;
+            return runnerReturned;
+        }, nullptr, rig);
+    CHECK(!runnerReturned);
+    CHECK(!refused.valid);
+    CHECK(unavailable.diagnostics.empty());
+    CHECK(!unavailable.valid);
+    CHECK(unavailable.providerXforms.count(target) == 0);
+    CHECK(unavailable.providerBaseXforms.count(target) == 0);
+    const auto unavailablePoints = unavailable.movedProperties.find(pointsPath);
+    CHECK(unavailablePoints == unavailable.movedProperties.end());
+    CHECK(std::find(refused.diagnostics.begin(), refused.diagnostics.end(),
+        "could not resolve constraint target /World/Geom/Sphere relative to the asset root") !=
+        refused.diagnostics.end());
+    CHECK(!refused.diagnostics.empty());
+    CHECK(!refused.diagnostics.empty() && refused.diagnostics.back() ==
+        "could not resolve constraint target /World/Geom/Sphere relative to the asset root");
 }
 
 // Overrides select placement, samples, and digest together: sampling
@@ -1277,7 +2993,6 @@ TestBurstCacheRejectsChangedOverrides()
     const SdfPath rig("/Asset/Rig");
     RigExecRigEvaluator evaluator(stage, rig);
     CHECK(evaluator.Compile());
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
 
     RigExecChainSampleBindings pinned;
@@ -1317,7 +3032,6 @@ TestBurstDigestOrderFallback()
     const SdfPath rig("/Asset/Rig");
     RigExecRigEvaluator evaluator(stage, rig);
     CHECK(evaluator.Compile());
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
     CHECK(evaluator.Evaluate(UsdTimeCode(2.0)).valid);
 
@@ -1361,7 +3075,6 @@ TestBurstBuildDeclinesUnplaceable()
     const SdfPath rig("/Asset/Rig");
     RigExecRigEvaluator evaluator(stage, rig);
     CHECK(evaluator.Compile());
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
 
     RigExecChainSampleBindings pinned;
@@ -1393,7 +3106,6 @@ TestStillCurrentDetectsConstantEdit()
     const SdfPath rig("/Asset/Rig");
     RigExecRigEvaluator evaluator(stage, rig);
     CHECK(evaluator.Compile());
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
 
     RigExecChainSampleBindings bound;
@@ -1428,6 +3140,847 @@ TestStillCurrentDetectsConstantEdit()
                            warmed2);
 }
 
+// The head leaves without time samples ride a table every vector sampled
+// under one program state shares (RigExecHeadLeafConstants): the vector
+// carries only the leaves that vary, two frames share one table, and Find
+// still answers a constant. An edit to a constant leaf reads a new table
+// whose digest moves, and a job sampled after it warms bit-identically
+// even from a snapshot frozen before the edit -- the table carries the
+// value the snapshot never saw, and the worker re-runs what it reaches.
+void
+TestConstantHeadLeavesRideASharedTable()
+{
+    UsdStageRefPtr stage = MakeChainedRig();
+    const SdfPath rig("/Asset/Rig");
+    RigExecRigEvaluator evaluator(stage, rig);
+    CHECK(evaluator.Compile());
+    CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
+    std::string error;
+    std::shared_ptr<const RigExecFrozenProgram> before;
+    CHECK(RigExecFreezeProgram(evaluator, &before, &error));
+    CHECK(before != nullptr);
+    if (!before) {
+        return;
+    }
+
+    const SdfPath weightKey(
+        "/Asset/Rig/Movers/TxGain.frozenChainHop:inputs:defaultWeight");
+    const SdfPath factorKey(
+        "/Asset/Rig/Movers/TxGain.frozenChainHop:inputs:value");
+    RigExecFrameInputs at2, at3;
+    CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(2.0), {}, &at2,
+                                   &error));
+    CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(3.0), {}, &at3,
+                                   &error));
+    CHECK(at3.headLeafConstants != nullptr);
+    if (!at3.headLeafConstants) {
+        return;
+    }
+    CHECK(at2.headLeafConstants == at3.headLeafConstants);
+    const RigExecHeadLeafConstants &table = *at3.headLeafConstants;
+    CHECK(table.keys.size() == table.varying.size() &&
+          table.keys.size() == table.values.size());
+    size_t constants = 0, varyingSamples = 0;
+    for (size_t j = 0; j < table.keys.size(); ++j) {
+        bool sampled = false;
+        for (const RigExecSampledInput &sample : at3.values) {
+            sampled = sampled || sample.path == table.keys[j];
+        }
+        // Exactly the varying leaves travel in the vector.
+        CHECK(sampled == (table.varying[j] != 0));
+        constants += table.varying[j] ? 0 : 1;
+        varyingSamples += table.varying[j] ? 1 : 0;
+    }
+    CHECK(constants > 0);
+    CHECK(varyingSamples > 0);
+    for (const RigExecSampledInput &sample : at3.values) {
+        CHECK(sample.path != weightKey);
+    }
+    const VtValue *weight = at3.Find(weightKey);
+    CHECK(weight != nullptr && weight->IsHolding<float>() &&
+          weight->Get<float>() == 1.0f);
+    const VtValue *factor = at3.Find(factorKey);
+    CHECK(factor != nullptr && factor->IsHolding<float>() &&
+          factor->Get<float>() == 1.5f);
+
+    stage->GetAttributeAtPath(
+             SdfPath("/Asset/Rig/Movers/TxGain.inputs:defaultWeight"))
+        .Set(0.5f);
+    RigExecFrameInputs edited3;
+    CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(3.0), {}, &edited3,
+                                   &error));
+    CHECK(edited3.headLeafConstants != nullptr &&
+          edited3.headLeafConstants != at3.headLeafConstants);
+    const VtValue *editedWeight = edited3.Find(weightKey);
+    CHECK(editedWeight != nullptr && editedWeight->IsHolding<float>() &&
+          editedWeight->Get<float>() == 0.5f);
+    CHECK(RigExecControlStateDigest(edited3, {}) !=
+          RigExecControlStateDigest(at3, {}));
+    CHECK(RigExecFrozenControlDigest(edited3) !=
+          RigExecFrozenControlDigest(at3));
+
+    RigExecBackgroundScheduler scheduler;
+    const RigExecRigPose warmed =
+        RunWarmingJob(&evaluator, rig, before, edited3, &scheduler, nullptr);
+    const RigExecRigPose live = evaluator.Evaluate(UsdTimeCode(3.0));
+    CHECK(live.valid);
+    CheckPosesBitIdentical("constant head leaf edited after the freeze",
+                           live, warmed);
+    CheckJobAccepted("constant head leaf edited after the freeze", edited3,
+                     warmed);
+
+    // An edit that leaves every constant as it was keeps the standing
+    // table: frames sampled on either side of it share one.
+    stage->GetAttributeAtPath(
+             SdfPath("/Asset/Rig/Movers/TxGain.inputs:value"))
+        .Set(2.25f, UsdTimeCode(4.0));
+    RigExecFrameInputs after3;
+    CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(3.0), {}, &after3,
+                                   &error));
+    CHECK(after3.headLeafConstants != nullptr &&
+          after3.headLeafConstants == edited3.headLeafConstants);
+}
+
+// The samplers serve every leaf read that cannot move with the time from
+// one table per program state (RigExecFrozenStaticSamples) and re-read the
+// rest, so a vector still holds what fresh reads answer: frames share the
+// table and the recorded fold order, and digest exactly as the plain fold.
+// An upstream value, an override, a value edit and added time samples each
+// reach the very next sample, through the plain and the burst route alike.
+// RIGEXEC_VERIFY_FROZEN_STATIC checks every served read against a fresh one
+// besides.
+void
+TestStaticLeavesFollowEdits()
+{
+    UsdStageRefPtr stage = MakeTinyRig();
+    const SdfPath rig("/Asset/Rig");
+    RigExecRigEvaluator evaluator(stage, rig);
+    TfErrorMark mark;
+    {
+        // Read at Build, so it stands for this program alone.
+        const std::string knob("RIGEXEC_VERIFY_FROZEN_STATIC");
+        const std::string saved = TfGetenv(knob);
+        TfSetenv(knob, "1");
+        CHECK(evaluator.Compile());
+        CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
+        if (saved.empty()) {
+            TfUnsetenv(knob);
+        } else {
+            TfSetenv(knob, saved);
+        }
+    }
+    const RigExecBakedProgram *program = evaluator.GetBakedProgram();
+    CHECK(program != nullptr);
+    if (!program) {
+        return;
+    }
+    const RigExecBakedProgramImpl &B = program->GetStepGraph();
+    CHECK(B.verifyFrozenStatic);
+    CHECK(B.revisionIndex.size() == 1);
+    if (B.revisionIndex.size() != 1) {
+        return;
+    }
+    const auto &[chainIndex, revisionIndex] = B.revisionIndex[0];
+    const RigExecBakedProgramImpl::GeomRevision &skin =
+        B.chains[size_t(chainIndex)].revisions[size_t(revisionIndex)];
+    const int weightKey =
+        skin.leaves.decl.Role(RigExecRevisionLeafRole::DefaultWeight);
+    const int layoutWeights =
+        skin.layoutLeaves.decl.Role(RigExecRevisionLeafRole::JointWeights);
+    // A provider leaf a step reads (the ladder's rest channel): Build prunes
+    // the leaves of rest:tz and the other rest avars, which no step reads.
+    const SdfPath restTzPath("/Asset/Rig/AlongX.rest:space");
+    const auto restAt = [](double z) {
+        GfMatrix4d m(1.0);
+        m[3][2] = z;
+        return m;
+    };
+    size_t restTz = B.providerFrozenKeys.size();
+    for (size_t k = 0; k < B.providerLeaves.decl.keys.size() &&
+                       k < B.providerFrozenKeys.size();
+         ++k) {
+        if (B.providerLeaves.decl.keys[k].path == restTzPath) {
+            restTz = k;
+        }
+    }
+    CHECK(weightKey >= 0);
+    CHECK(layoutWeights >= 0);
+    CHECK(restTz < B.providerFrozenKeys.size());
+    if (weightKey < 0 || layoutWeights < 0 ||
+        restTz >= B.providerFrozenKeys.size()) {
+        return;
+    }
+
+    std::string error;
+    const auto sample = [&](UsdTimeCode time,
+                            const std::vector<RigExecValueOverride> &overrides,
+                            const std::vector<RigExecUpstreamValue> &upstream) {
+        RigExecFrameInputs inputs;
+        CHECK(RigExecSampleFrameInputs(evaluator, time, overrides, upstream,
+                                       &inputs, &error));
+        return inputs;
+    };
+    // The control digest, checked against the plain fold of the same
+    // vector: every sample folded from its bytes, through a sorted map.
+    const auto digest = [](const RigExecFrameInputs &inputs) {
+        RigExecFrameInputs plain = inputs;
+        plain.staticSamples.reset();
+        plain.digestOrder.reset();
+        CHECK(RigExecControlStateDigestible(inputs, inputs.overrides) ==
+              RigExecControlStateDigestible(plain, plain.overrides));
+        const uint64_t value =
+            RigExecControlStateDigest(inputs, inputs.overrides);
+        CHECK(value == RigExecControlStateDigest(plain, plain.overrides));
+        return value;
+    };
+    const auto providerSample =
+        [&B](const RigExecFrameInputs &inputs,
+             size_t k) -> const RigExecSampledInput * {
+        for (const RigExecSampledInput &value : inputs.values) {
+            if (value.path == B.providerFrozenKeys[k]) {
+                return &value;
+            }
+        }
+        return nullptr;
+    };
+    // Every provider sample is a fresh read at the vector's time.
+    const auto checkProviders = [&](const RigExecFrameInputs &inputs) {
+        for (size_t k = 0; k < B.providerFrozenKeys.size(); ++k) {
+            const UsdAttribute &attribute = B.providerLeaves.attributes[k];
+            if (!attribute) {
+                continue;
+            }
+            const RigExecSampledInput *found = providerSample(inputs, k);
+            CHECK(found != nullptr);
+            if (!found) {
+                continue;
+            }
+            VtValue raw;
+            const bool hasValue = attribute.Get(&raw, inputs.time);
+            CHECK(found->hasValue == hasValue);
+            CHECK(found->valueBlocked ==
+                  attribute.GetResolveInfo(inputs.time).ValueIsBlocked());
+            CHECK(RigExecBakedHeadValueSame(found->value, raw));
+        }
+    };
+    const auto leafAt = [](const std::vector<std::vector<VtValue>> &rows,
+                           int key) {
+        return !rows.empty() && size_t(key) < rows[0].size()
+                   ? rows[0][size_t(key)]
+                   : VtValue();
+    };
+    const auto restTzAt = [&](const RigExecFrameInputs &inputs) {
+        const RigExecSampledInput *found = providerSample(inputs, restTz);
+        return found && found->value.IsHolding<GfMatrix4d>()
+                   ? found->value.UncheckedGet<GfMatrix4d>()[3][2]
+                   : -1.0;
+    };
+
+    // Two frames share the table and the recorded order; the animated
+    // avars still move the digest.
+    const RigExecFrameInputs at1 = sample(UsdTimeCode(1.0), {}, {});
+    const RigExecFrameInputs at2 = sample(UsdTimeCode(2.0), {}, {});
+    CHECK(at1.staticSamples != nullptr);
+    CHECK(at1.staticSamples == at2.staticSamples);
+    CHECK(at1.digestOrder != nullptr);
+    CHECK(at1.digestOrder == at2.digestOrder);
+    const RigExecSampledInput *served = providerSample(at2, restTz);
+    CHECK(served != nullptr && served->staticSample >= 0);
+    checkProviders(at1);
+    checkProviders(at2);
+    const uint64_t digest2 = digest(at2);
+    CHECK(digest(at1) != digest2);
+    const VtValue authoredWeight = leafAt(at2.revisionLeaves, weightKey);
+    CHECK(authoredWeight.IsHolding<float>() &&
+          authoredWeight.UncheckedGet<float>() == 1.0f);
+    const VtValue authoredWeights = leafAt(at2.layoutLeaves, layoutWeights);
+    CHECK(authoredWeights.IsHolding<VtFloatArray>());
+    if (!authoredWeights.IsHolding<VtFloatArray>()) {
+        return;
+    }
+
+    // An upstream value on a static revision leaf's read is read through,
+    // and the next frame without it reads the stage again.
+    RigExecUpstreamValue up;
+    up.path = SdfPath("/Asset/Rig/Movers/Skin_0.inputs:defaultWeight");
+    up.value = VtValue(0.5f);
+    const RigExecFrameInputs upstreamed = sample(UsdTimeCode(2.0), {}, {up});
+    CHECK(upstreamed.upstream.size() == 1);
+    const VtValue upWeight = leafAt(upstreamed.revisionLeaves, weightKey);
+    CHECK(upWeight.IsHolding<float>() && upWeight.UncheckedGet<float>() == 0.5f);
+    CHECK(digest(upstreamed) != digest2);
+    const RigExecFrameInputs lifted = sample(UsdTimeCode(2.0), {}, {});
+    CHECK(RigExecBakedHeadValueSame(leafAt(lifted.revisionLeaves, weightKey),
+                                    authoredWeight));
+    CHECK(digest(lifted) == digest2);
+
+    // An override on a static layout leaf likewise.
+    VtFloatArray painted = authoredWeights.UncheckedGet<VtFloatArray>();
+    for (float &w : painted) {
+        w = 1.0f - w;
+    }
+    RigExecValueOverride paint;
+    paint.prim = SdfPath("/Asset/Rig/Movers/Skin_0");
+    paint.attribute = TfToken("rigExec:jointWeights");
+    paint.value = VtValue(painted);
+    const RigExecFrameInputs overridden = sample(UsdTimeCode(2.0), {paint}, {});
+    CHECK(RigExecBakedHeadValueSame(
+        leafAt(overridden.layoutLeaves, layoutWeights), VtValue(painted)));
+    CHECK(digest(overridden) != digest2);
+    const RigExecFrameInputs released = sample(UsdTimeCode(2.0), {}, {});
+    CHECK(RigExecBakedHeadValueSame(
+        leafAt(released.layoutLeaves, layoutWeights), authoredWeights));
+    CHECK(digest(released) == digest2);
+
+    // A value edit reaches the next sample: a new table, the edited value,
+    // a moved digest.
+    const UsdAttribute restTzAttr = stage->GetAttributeAtPath(restTzPath);
+    CHECK(restTzAttr.Set(restAt(0.75)));
+    const RigExecFrameInputs edited = sample(UsdTimeCode(2.0), {}, {});
+    CHECK(edited.staticSamples != nullptr &&
+          edited.staticSamples != at2.staticSamples);
+    CHECK(restTzAt(edited) == 0.75);
+    checkProviders(edited);
+    CHECK(digest(edited) != digest2);
+    CHECK(stage->GetAttributeAtPath(
+                   SdfPath("/Asset/Rig/Movers/Skin_0.rigExec:jointWeights"))
+              .Set(painted));
+    const RigExecFrameInputs repainted = sample(UsdTimeCode(2.0), {}, {});
+    CHECK(RigExecBakedHeadValueSame(
+        leafAt(repainted.layoutLeaves, layoutWeights), VtValue(painted)));
+
+    // One time sample over the default: every numeric time reads it and
+    // Default reads the default, so a table stands per Default-ness. A
+    // second makes the read vary, and it is read at every sample.
+    CHECK(restTzAttr.Set(restAt(1.25), UsdTimeCode(3.0)));
+    const RigExecFrameInputs keyed = sample(UsdTimeCode(2.0), {}, {});
+    CHECK(restTzAt(keyed) == 1.25);
+    checkProviders(keyed);
+    digest(keyed);
+    const RigExecFrameInputs atDefault = sample(UsdTimeCode::Default(), {}, {});
+    CHECK(restTzAt(atDefault) == 0.75);
+    checkProviders(atDefault);
+    digest(atDefault);
+    CHECK(atDefault.staticSamples != nullptr &&
+          atDefault.staticSamples != keyed.staticSamples);
+    // Alternating the two keeps both tables: each is read once per state.
+    const RigExecFrameInputs keyedAgain = sample(UsdTimeCode(2.0), {}, {});
+    CHECK(restTzAt(keyedAgain) == 1.25);
+    CHECK(keyedAgain.staticSamples != nullptr &&
+          keyedAgain.staticSamples == keyed.staticSamples);
+    const RigExecFrameInputs defaultAgain =
+        sample(UsdTimeCode::Default(), {}, {});
+    CHECK(restTzAt(defaultAgain) == 0.75);
+    CHECK(defaultAgain.staticSamples == atDefault.staticSamples);
+    CHECK(restTzAttr.Set(restAt(2.5), UsdTimeCode(4.0)));
+    for (const double t : {3.0, 3.5, 4.0}) {
+        const RigExecFrameInputs varying = sample(UsdTimeCode(t), {}, {});
+        const RigExecSampledInput *tz = providerSample(varying, restTz);
+        CHECK(tz != nullptr && tz->staticSample < 0);
+        checkProviders(varying);
+        digest(varying);
+    }
+
+    // The burst route serves the same table and digests the same.
+    RigExecChainSampleBindings bindings;
+    CHECK(RigExecBindChainSampleInputs(evaluator, &bindings, &error));
+    RigExecBurstSampleCache cache;
+    CHECK(RigExecBuildBurstSampleCache(*evaluator.GetBakedProgram(), bindings,
+                                       {}, RigExecFrameCacheEpochDigest(evaluator),
+                                       &cache, &error));
+    for (const double t : {3.0, 4.0, 3.0}) {
+        RigExecFrameInputs burst;
+        CHECK(RigExecSampleFrameInputsWithBurstCache(
+            evaluator, UsdTimeCode(t), {}, &cache, &burst, &error));
+        const RigExecFrameInputs plain = sample(UsdTimeCode(t), {}, {});
+        CHECK(burst.staticSamples == plain.staticSamples);
+        CHECK(burst.values.size() == plain.values.size());
+        for (size_t i = 0;
+             i < burst.values.size() && i < plain.values.size(); ++i) {
+            CHECK(burst.values[i].path == plain.values[i].path);
+            // A read the burst serves from its own maps (a chain base)
+            // carries no table mark; every other read shares the table.
+            if (burst.values[i].burstSampleRoute == RigExecBurstRouteFresh) {
+                CHECK(burst.values[i].staticSample ==
+                      plain.values[i].staticSample);
+            }
+            CHECK(RigExecBakedHeadValueSame(burst.values[i].value,
+                                            plain.values[i].value));
+        }
+        CHECK(RigExecControlStateDigestWithBurstCache(burst, {}, &cache) ==
+              digest(plain));
+    }
+
+    // Only the verifier's messages are counted here; any other error stays
+    // posted, and is reported when the mark goes out of scope.
+    size_t verifyFailures = 0;
+    for (auto it = mark.GetBegin(); it != mark.GetEnd(); ++it) {
+        if (it->GetCommentary().find("frozen static") != std::string::npos) {
+            std::printf("FAIL %s\n", it->GetCommentary().c_str());
+            ++verifyFailures;
+        }
+    }
+    CHECK(verifyFailures == 0);
+}
+
+// Compiles \p evaluator and runs \p time with RIGEXEC_VERIFY_FROZEN_STATIC
+// set: read at Build, so it stands for this program alone.
+void
+CompileUnderStaticVerify(RigExecRigEvaluator *evaluator, UsdTimeCode time)
+{
+    const std::string knob("RIGEXEC_VERIFY_FROZEN_STATIC");
+    const std::string saved = TfGetenv(knob);
+    TfSetenv(knob, "1");
+    CHECK(evaluator->Compile());
+    CHECK(evaluator->Evaluate(time).valid);
+    if (saved.empty()) {
+        TfUnsetenv(knob);
+    } else {
+        TfSetenv(knob, saved);
+    }
+}
+
+// The static verifier's failures posted since \p mark. Any other error
+// stays posted, and is reported when the mark goes out of scope.
+size_t
+StaticVerifyFailures(const TfErrorMark &mark)
+{
+    size_t failed = 0;
+    for (auto it = mark.GetBegin(); it != mark.GetEnd(); ++it) {
+        if (it->GetCommentary().find("frozen static") != std::string::npos) {
+            std::printf("FAIL %s\n", it->GetCommentary().c_str());
+            ++failed;
+        }
+    }
+    return failed;
+}
+
+// \p inputs' control digest, checked against the plain fold of the same
+// vector: every sample folded from its bytes, through a sorted map.
+uint64_t
+DigestMatchingPlainFold(const RigExecFrameInputs &inputs)
+{
+    RigExecFrameInputs plain = inputs;
+    plain.staticSamples.reset();
+    plain.digestOrder.reset();
+    const uint64_t value = RigExecControlStateDigest(inputs, inputs.overrides);
+    CHECK(value == RigExecControlStateDigest(plain, plain.overrides));
+    return value;
+}
+
+// The first sample \p inputs holds at \p path (the one Find answers), or
+// null.
+const RigExecSampledInput *
+FirstSampleNamed(const RigExecFrameInputs &inputs, const SdfPath &path)
+{
+    for (const RigExecSampledInput &value : inputs.values) {
+        if (value.path == path) {
+            return &value;
+        }
+    }
+    return nullptr;
+}
+
+// The samplers serve every source-backed binding (a direct numeric
+// argument with no time samples, read through its query) from the sampler
+// memo's table: on the biped every sample only such bindings take is a
+// table copy at two frames of a trusted-route vector, each checked against
+// a fresh read under RIGEXEC_VERIFY_FROZEN_STATIC, and the vectors digest
+// as their plain folds.
+void
+TestTheSamplerServesSourceBackedReads(const std::string &examplesDir)
+{
+    UsdStageRefPtr stage = UsdStage::Open(examplesDir + "/biped/Biped.usda");
+    CHECK(stage);
+    if (!stage) {
+        return;
+    }
+    const SdfPath rig("/Biped/Rig");
+    CHECK(stage->GetPrimAtPath(rig));
+    TfErrorMark mark;
+    RigExecRigEvaluator evaluator(stage, rig);
+    CompileUnderStaticVerify(&evaluator, UsdTimeCode(1.0));
+    const RigExecBakedProgram *program = evaluator.GetBakedProgram();
+    CHECK(program != nullptr);
+    if (!program) {
+        return;
+    }
+    const RigExecBakedProgramImpl &B = program->GetStepGraph();
+    CHECK(B.verifyFrozenStatic);
+    CHECK(!B.sourceBackedPaths.empty());
+    // The paths no other binding samples under the same key.
+    std::set<SdfPath> sourceOnly = B.sourceBackedPaths;
+    frozenDetail::_ForEachPatchableInput(B, [&sourceOnly](const auto &input) {
+        if (!input.sourceBacked && input.head) {
+            sourceOnly.erase(input.head.GetPath());
+        }
+    });
+    CHECK(!sourceOnly.empty());
+    RigExecChainSampleBindings bindings;
+    std::string error;
+    CHECK(RigExecBindChainSampleInputs(evaluator, &bindings, &error));
+    std::shared_ptr<const RigExecFrozenStaticSamples> table;
+    for (const double t : {1.0, 2.0}) {
+        RigExecFrameInputs inputs;
+        CHECK(RigExecSampleFrameInputsWithTrustedChainBindings(
+            evaluator, UsdTimeCode(t), {}, bindings, &inputs, &error));
+        size_t served = 0, read = 0;
+        for (const RigExecSampledInput &value : inputs.values) {
+            if (!sourceOnly.count(value.path)) {
+                continue;
+            }
+            if (value.staticSample >= 0) {
+                ++served;
+            } else {
+                ++read;
+            }
+        }
+        std::printf("biped frame %g: %zu source-backed samples served, "
+                    "%zu read\n", t, served, read);
+        CHECK(served > 0);
+        CHECK(read == 0);
+        CHECK(inputs.staticSamples != nullptr);
+        if (table) {
+            CHECK(inputs.staticSamples == table);
+        }
+        table = inputs.staticSamples;
+        DigestMatchingPlainFold(inputs);
+    }
+    CHECK(StaticVerifyFailures(mark) == 0);
+}
+
+// A Default edit of a source-backed rest argument reaches the very next
+// vector as a table copy of the new value, and its key. The tiny rig's
+// AlongY.rest:tx is authored before the build, so its query reads the
+// spec the edit changes.
+void
+TestASourceBackedEditReachesTheNextVector()
+{
+    UsdStageRefPtr stage = MakeTinyRig();
+    const SdfPath restTxPath("/Asset/Rig/AlongY.rest:tx");
+    const UsdAttribute restTx = stage->GetAttributeAtPath(restTxPath);
+    CHECK(restTx);
+    if (!restTx) {
+        return;
+    }
+    CHECK(restTx.Set(0.25));
+    TfErrorMark mark;
+    RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+    CompileUnderStaticVerify(&evaluator, UsdTimeCode(1.0));
+    const RigExecBakedProgram *program = evaluator.GetBakedProgram();
+    CHECK(program != nullptr);
+    if (!program) {
+        return;
+    }
+    CHECK(program->GetStepGraph().sourceBackedPaths.count(restTxPath) == 1);
+    RigExecChainSampleBindings bindings;
+    std::string error;
+    CHECK(RigExecBindChainSampleInputs(evaluator, &bindings, &error));
+    const auto sampleAt = [&](double t) {
+        RigExecFrameInputs inputs;
+        CHECK(RigExecSampleFrameInputsWithTrustedChainBindings(
+            evaluator, UsdTimeCode(t), {}, bindings, &inputs, &error));
+        return inputs;
+    };
+    // The served value: a table copy, or -1.
+    const auto restTxServed = [&restTxPath](const RigExecFrameInputs &inputs) {
+        const RigExecSampledInput *found =
+            FirstSampleNamed(inputs, restTxPath);
+        return found && found->staticSample >= 0 &&
+                       found->value.IsHolding<double>()
+                   ? found->value.UncheckedGet<double>()
+                   : -1.0;
+    };
+    const RigExecFrameInputs before = sampleAt(2.0);
+    CHECK(restTxServed(before) == 0.25);
+    CHECK(restTxServed(sampleAt(3.0)) == 0.25);
+    CHECK(restTx.Set(0.5));
+    const RigExecFrameInputs after = sampleAt(2.0);
+    CHECK(restTxServed(after) == 0.5);
+    CHECK(after.staticSamples != nullptr &&
+          after.staticSamples != before.staticSamples);
+    CHECK(DigestMatchingPlainFold(after) != DigestMatchingPlainFold(before));
+    CHECK(StaticVerifyFailures(mark) == 0);
+}
+
+// The pinned sampler serves the chain and derived base reads and the blend
+// channel reads that cannot move with the time from the sampler memo's
+// table (examples/04_BlendShapeFace.usda; session-layer opinions written
+// before the build hold the brow weight static and give the base points
+// the spec a later edit changes): table copies at two frames, checked
+// against fresh reads under RIGEXEC_VERIFY_FROZEN_STATIC, while the
+// animated smile weight is read per frame. An override standing on the
+// held weight is read fresh and lifts with it; an edit of the base points
+// reaches the next vector.
+void
+TestTheSamplerServesStaticBasesAndBlends(const std::string &examplesDir)
+{
+    UsdStageRefPtr stage =
+        UsdStage::Open(examplesDir + "/04_BlendShapeFace.usda");
+    CHECK(stage);
+    if (!stage) {
+        return;
+    }
+    const SdfPath basePath("/FaceAsset/Geom/FaceCard.points");
+    const SdfPath smileWeight(
+        "/FaceAsset/Rig/BlendInputs/Smile.inputs:weight");
+    const SdfPath browWeight(
+        "/FaceAsset/Rig/BlendInputs/BrowRaise.inputs:weight");
+    stage->SetEditTarget(stage->GetSessionLayer());
+    const UsdAttribute points = stage->GetAttributeAtPath(basePath);
+    VtVec3fArray authored;
+    CHECK(points && points.Get(&authored, UsdTimeCode::Default()));
+    CHECK(!authored.empty());
+    if (authored.empty()) {
+        return;
+    }
+    CHECK(points.Set(authored));
+    const UsdAttribute brow = stage->GetAttributeAtPath(browWeight);
+    CHECK(brow && brow.Set(0.6f));
+    CHECK(!brow.ValueMightBeTimeVarying());
+    CHECK(stage->GetAttributeAtPath(smileWeight).ValueMightBeTimeVarying());
+
+    TfErrorMark mark;
+    RigExecRigEvaluator evaluator(stage, SdfPath("/FaceAsset/Rig"));
+    CompileUnderStaticVerify(&evaluator, UsdTimeCode(1001.0));
+    const RigExecBakedProgram *program = evaluator.GetBakedProgram();
+    CHECK(program != nullptr);
+    if (!program) {
+        return;
+    }
+    const RigExecBakedProgramImpl &B = program->GetStepGraph();
+    CHECK(B.verifyFrozenStatic);
+    CHECK(B.chains.size() == 1);
+    // Every read the memo can hold here: the brow weight, the bases, and
+    // each blend sample's activation and dense points.
+    std::vector<SdfPath> held{browWeight};
+    for (const RigExecBakedProgramImpl::GeomChain &chain : B.chains) {
+        held.push_back(chain.target);
+        for (const RigExecBakedProgramImpl::GeomChain::Derived &derived :
+             chain.derived) {
+            if (derived.baseQuery.IsValid()) {
+                held.push_back(derived.target);
+            }
+        }
+        for (const RigExecBakedProgramImpl::GeomRevision &revision :
+             chain.revisions) {
+            for (const RigExecBakedProgramImpl::GeomBlendChannel &channel :
+                 revision.blendChannels) {
+                for (const RigExecBakedProgramImpl::GeomBlendChannel::Sample
+                         &blendSample : channel.samples) {
+                    held.push_back(blendSample.activation.GetPath());
+                    if (blendSample.points.IsValid()) {
+                        held.push_back(frozenDetail::_FrozenBlendInputKey(
+                            blendSample.samplePath, "points"));
+                    }
+                }
+            }
+        }
+    }
+    // The brow weight, the base, and three samples' activations and points.
+    CHECK(held.size() >= 8);
+
+    std::string error;
+    const auto sampleAt =
+        [&](double t, const std::vector<RigExecValueOverride> &overrides) {
+            RigExecFrameInputs inputs;
+            CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(t),
+                                           overrides, &inputs, &error));
+            return inputs;
+        };
+    const auto served = [](const RigExecFrameInputs &inputs,
+                           const SdfPath &path) {
+        const RigExecSampledInput *found = FirstSampleNamed(inputs, path);
+        return found != nullptr && found->staticSample >= 0;
+    };
+    const auto floatAt = [](const RigExecFrameInputs &inputs,
+                            const SdfPath &path) {
+        const RigExecSampledInput *found = FirstSampleNamed(inputs, path);
+        return found && found->value.IsHolding<float>()
+                   ? found->value.UncheckedGet<float>()
+                   : -1.0f;
+    };
+    const auto checkHeld = [&](const RigExecFrameInputs &inputs,
+                               const SdfPath &except, const char *what) {
+        for (const SdfPath &path : held) {
+            if (path != except && !served(inputs, path)) {
+                std::printf("FAIL %s: <%s> is not a table copy\n", what,
+                            path.GetText());
+                ++failures;
+            }
+        }
+    };
+    std::shared_ptr<const RigExecFrozenStaticSamples> table;
+    for (const double t : {1001.0, 1002.0}) {
+        const RigExecFrameInputs inputs = sampleAt(t, {});
+        checkHeld(inputs, SdfPath(), "a frame");
+        const RigExecSampledInput *smile =
+            FirstSampleNamed(inputs, smileWeight);
+        CHECK(smile != nullptr && smile->staticSample < 0);
+        CHECK(floatAt(inputs, browWeight) == 0.6f);
+        CHECK(inputs.staticSamples != nullptr);
+        if (table) {
+            CHECK(inputs.staticSamples == table);
+        }
+        table = inputs.staticSamples;
+        DigestMatchingPlainFold(inputs);
+    }
+
+    // An override on the held weight is read through, the rest still
+    // served; released, the weight is served again.
+    RigExecValueOverride drag;
+    drag.prim = SdfPath("/FaceAsset/Rig/BlendInputs/BrowRaise");
+    drag.attribute = TfToken("inputs:weight");
+    drag.value = VtValue(0.2f);
+    const RigExecFrameInputs dragged = sampleAt(1002.0, {drag});
+    CHECK(!served(dragged, browWeight));
+    CHECK(floatAt(dragged, browWeight) == 0.2f);
+    checkHeld(dragged, browWeight, "a held drag");
+    const RigExecFrameInputs released = sampleAt(1002.0, {});
+    CHECK(served(released, browWeight));
+    CHECK(floatAt(released, browWeight) == 0.6f);
+    CHECK(DigestMatchingPlainFold(dragged) !=
+          DigestMatchingPlainFold(released));
+
+    // An edit of the base points: a new table holding the edited points.
+    VtVec3fArray moved = authored;
+    moved[0] = GfVec3f(moved[0][0], moved[0][1], 0.5f);
+    CHECK(points.Set(moved));
+    const RigExecFrameInputs edited = sampleAt(1002.0, {});
+    const RigExecSampledInput *base = FirstSampleNamed(edited, basePath);
+    CHECK(base != nullptr && base->staticSample >= 0);
+    CHECK(base != nullptr && base->value.IsHolding<VtVec3fArray>() &&
+          base->value.UncheckedGet<VtVec3fArray>() == moved);
+    CHECK(edited.staticSamples != nullptr &&
+          edited.staticSamples != released.staticSamples);
+    CHECK(StaticVerifyFailures(mark) == 0);
+}
+
+// A burst memoizes a read through the resolved inputs only while nothing
+// on its walk can move with the time. The smile weight of
+// examples/04_BlendShapeFace.usda (a rig with no property chain) holds a
+// session-layer default and connects to a keyed float `driver`: its head
+// cannot vary, its walk can. The burst re-reads it every frame, as the
+// plain sampler does, and still memoizes the static activations.
+void
+TestABurstRereadsAConnectedAnimatedWeight(const std::string &examplesDir)
+{
+    UsdStageRefPtr stage =
+        UsdStage::Open(examplesDir + "/04_BlendShapeFace.usda");
+    CHECK(stage);
+    if (!stage) {
+        return;
+    }
+    const SdfPath smilePath("/FaceAsset/Rig/BlendInputs/Smile");
+    const SdfPath weightPath =
+        smilePath.AppendProperty(TfToken("inputs:weight"));
+    const SdfPath driverPath = smilePath.AppendProperty(TfToken("driver"));
+    const SdfPath activationPath(
+        "/FaceAsset/Rig/BlendInputs/Smile/Half.rigExec:activation");
+    stage->SetEditTarget(stage->GetSessionLayer());
+    const UsdPrim smile = stage->GetPrimAtPath(smilePath);
+    CHECK(smile);
+    if (!smile) {
+        return;
+    }
+    const UsdAttribute driver =
+        smile.CreateAttribute(TfToken("driver"), SdfValueTypeNames->Float);
+    CHECK(driver.Set(0.0f, UsdTimeCode(1.0)));
+    CHECK(driver.Set(1.0f, UsdTimeCode(3.0)));
+    const UsdAttribute weight = stage->GetAttributeAtPath(weightPath);
+    CHECK(weight && weight.Set(0.0f));
+    CHECK(weight.SetConnections({driverPath}));
+    CHECK(!weight.ValueMightBeTimeVarying());
+    CHECK(driver.ValueMightBeTimeVarying());
+
+    RigExecRigEvaluator evaluator(stage, SdfPath("/FaceAsset/Rig"));
+    std::vector<std::string> errors;
+    CHECK(evaluator.Compile(&errors));
+    for (const std::string &e : errors) {
+        std::printf("connected weight compile: %s\n", e.c_str());
+    }
+    CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
+    const RigExecBakedProgram *program = evaluator.GetBakedProgram();
+    CHECK(program != nullptr);
+    if (!program) {
+        return;
+    }
+    RigExecChainSampleBindings bindings;
+    std::string error;
+    CHECK(RigExecBindChainSampleInputs(evaluator, &bindings, &error));
+    // No chain bound: the burst's resolved route memoizes.
+    CHECK(bindings.chains.empty());
+    RigExecBurstSampleCache cache;
+    CHECK(RigExecBuildBurstSampleCache(*program, bindings, {},
+                                       RigExecFrameCacheEpochDigest(evaluator),
+                                       &cache, &error));
+    CHECK(cache.usable);
+    const auto weightAt = [&weightPath](const RigExecFrameInputs &inputs) {
+        const RigExecSampledInput *found = FirstSampleNamed(inputs, weightPath);
+        return found && found->value.IsHolding<float>()
+                   ? found->value.UncheckedGet<float>()
+                   : -1.0f;
+    };
+    const float driven[] = {0.0f, 0.5f, 1.0f};
+    for (int frame = 1; frame <= 3; ++frame) {
+        const UsdTimeCode time{double(frame)};
+        RigExecFrameInputs plain, burst;
+        CHECK(RigExecSampleFrameInputsWithChainBindings(
+            evaluator, time, {}, bindings, &plain, &error));
+        CHECK(RigExecSampleFrameInputsWithBurstCache(
+            evaluator, time, {}, &cache, &burst, &error));
+        CHECK(weightAt(plain) == driven[frame - 1]);
+        CHECK(weightAt(burst) == weightAt(plain));
+        CHECK(RigExecControlStateDigestWithBurstCache(burst, {}, &cache) ==
+              RigExecControlStateDigest(plain, {}));
+    }
+    CHECK(cache.staticResolved.count(weightPath) == 0);
+    CHECK(cache.staticResolved.count(activationPath) == 1);
+}
+
+// Every path a frozen worker would otherwise build travels with the job or
+// the snapshot: each override's property path rides the vector beside it
+// (RigExecFrameInputs::overridePaths), and the worker places the drag from
+// it. A vector whose two lists disagree declines rather than build one.
+void
+TestOverridePathsTravelWithTheJob()
+{
+    UsdStageRefPtr stage = MakeChainedRig();
+    const SdfPath rig("/Asset/Rig");
+    RigExecRigEvaluator evaluator(stage, rig);
+    CHECK(evaluator.Compile());
+    CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
+    RigExecValueOverride drag;
+    drag.prim = SdfPath("/Asset/Rig/AlongX");
+    drag.attribute = TfToken("avars:tx");
+    drag.value = VtValue(3.25);
+    evaluator.SetInteractiveOverrides({drag});
+    CHECK(evaluator.Evaluate(UsdTimeCode(2.0)).valid);
+    std::string error;
+    std::shared_ptr<const RigExecFrozenProgram> frozen;
+    CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
+    RigExecFrameInputs dragged;
+    CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(3.0), {drag},
+                                   &dragged, &error));
+    CHECK(dragged.overrides.size() == 1);
+    CHECK(dragged.overridePaths.size() == 1 &&
+          dragged.overridePaths[0] ==
+              SdfPath("/Asset/Rig/AlongX.avars:tx"));
+    RigExecBackgroundScheduler scheduler;
+    const RigExecRigPose warmed =
+        RunWarmingJob(&evaluator, rig, frozen, dragged, &scheduler, nullptr);
+    const RigExecRigPose live = evaluator.Evaluate(UsdTimeCode(3.0));
+    CHECK(live.valid);
+    CheckPosesBitIdentical("drag placed from the job's paths", live, warmed);
+
+    RigExecFrameInputs pathless = dragged;
+    pathless.overridePaths.clear();
+    bool ran = true;
+    RunWarmingJob(&evaluator, rig, frozen, pathless, &scheduler, &ran);
+    CHECK(!ran);
+    evaluator.SetInteractiveOverrides({});
+}
+
 // Increment C at the API level: an avar default edit patches the live
 // program in place (same program object, same epoch, moved region digest),
 // and carrying the region onto a copy of the snapshot warms
@@ -1442,7 +3995,6 @@ TestPatchFrozenAvarConstants()
     const SdfPath rig("/Asset/Rig");
     RigExecRigEvaluator evaluator(stage, rig);
     CHECK(evaluator.Compile());
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
     CHECK(evaluator.Evaluate(UsdTimeCode(2.0)).valid);
 
@@ -1477,7 +4029,7 @@ TestPatchFrozenAvarConstants()
         CHECK(stale.valid);
         RigExecRigPose diff;
         RigExecComparePoses(live3, stale, &diff);
-        CHECK(diff.bakedParityMismatches != 0);
+        CHECK(diff.comparisonMismatches != 0);
     }
 
     // The patched copy warms bit-identically, and the base is untouched
@@ -1503,7 +4055,6 @@ TestProductionRunnerDeclinesWithoutProof()
     const SdfPath rig("/Asset/Rig");
     RigExecRigEvaluator evaluator(stage, rig);
     CHECK(evaluator.Compile());
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
 
     std::shared_ptr<const RigExecFrozenProgram> frozen;
@@ -1596,7 +4147,7 @@ TestKernel(const RigExecFrozenEvalContext &context,
         published[i] = published[i] / (published[i] + 1.0);
     }
     pose->movedProperties[SdfPath("/FrozenTest.out")] = VtValue(published);
-    pose->solverEvaluations = inputs.values.size();
+    pose->executedOpCount = 1;
     pose->valid = true;
     return true;
 }
@@ -1652,7 +4203,7 @@ TestFrozenRunIsBitIdentical()
     CHECK(first.valid);
     CHECK(second.valid);
     CHECK(first.time == UsdTimeCode(3.0));
-    CHECK(first.solverEvaluations == inputs.values.size());
+    CHECK(first.executedOpCount == 1);
     const VtDoubleArray *a = TestOutput(first);
     const VtDoubleArray *b = TestOutput(second);
     CHECK(a != nullptr);
@@ -1783,12 +4334,11 @@ TestGenerationFenceDropsStaleJobs()
               .valid);
 }
 
-// D7: refusal rigs memoize UI-thread results but never create a background
-// job. The policy predicate, the sampler, and the worker entry all agree:
-// the predicate declines, the sampler reports no program, and a context
-// carrying the refusal flag declines even with a willing runner.
+// Admission and refusal are explicit: an admitted rig samples its graph,
+// while a context carrying the refusal flag declines even with a willing
+// runner. The background policy never enqueues a refused context.
 void
-TestRefusalRigsNeverEnqueue()
+TestAdmissionAndRefusedJobs()
 {
     CHECK(!RigExecShouldEnqueueBackgroundJob(/*bakeRefused=*/true));
     CHECK(RigExecShouldEnqueueBackgroundJob(/*bakeRefused=*/false));
@@ -1799,14 +4349,16 @@ TestRefusalRigsNeverEnqueue()
     RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
     CHECK(evaluator.Compile());
     CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
-    CHECK(evaluator.GetBakedProgram() == nullptr);
+    CHECK(evaluator.GetBakedProgram() != nullptr);
 
     RigExecFrameInputs inputs;
     std::string error;
     std::vector<RigExecValueOverride> noOverrides;
-    CHECK(!RigExecSampleFrameInputs(evaluator, UsdTimeCode(1.0), noOverrides,
+    CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(1.0), noOverrides,
                                     &inputs, &error));
-    CHECK(!error.empty());
+    CHECK(error.empty());
+    CHECK(inputs.time == UsdTimeCode(1.0));
+    CHECK(inputs.Find(SdfPath("/Asset/Rig/AlongX.avars:tx")) != nullptr);
 
     const RigExecFrameInputs runnable = TestInputs();
     RigExecFrozenEvalContext refused = TestContext(runnable);
@@ -1939,9 +4491,9 @@ TestConcurrentFrozenRunsAgree()
 }
 
 // The purity audit is data, so its shape is asserted: every row names a
-// unit and its note, every verdict class is represented, and the rows the
-// plan's Constraints exist for -- the shared memos workers bypass, the live
-// state they never reach -- are present with non-pure verdicts.
+// unit and its note, every verdict class is represented, the live state
+// workers never reach is present with non-pure verdicts, and the wire-basis
+// memo, owned per revision and per chain graph, is pure.
 void
 TestPurityAuditNamesEveryUnit()
 {
@@ -1964,7 +4516,7 @@ TestPurityAuditNamesEveryUnit()
         }
         const bool isLive = finding.verdict == RigExecFrozenPurity::LiveOnly;
         if (std::strstr(finding.unit, "wire-basis memo")) {
-            sawWireMemo = isLive;
+            sawWireMemo = finding.verdict == RigExecFrozenPurity::Pure;
         }
         if (std::strstr(finding.unit, "UsdStage")) {
             sawStage = isLive;
@@ -1998,8 +4550,8 @@ TestPurityAuditNamesEveryUnit()
 }  // namespace
 
 // The biped: sixteen float chain-driven inputs over the foot movers, and
-// the rig the hook unlocks. Warmed frames match live with zero parity
-// mismatches -- the same bar as the fixture, on a production rig.
+// the rig the worker's declared property operations unlocks. Warmed frames match live with zero
+// parity mismatches -- the same bar as the fixture, on a production rig.
 //
 // The counts are the DELIVERED rig's. They are asserted rather than
 // printed because a chain that stops binding is a chain the warming job
@@ -2031,7 +4583,6 @@ TestBipedWarmsBitIdentical(const std::string &examplesDir,
     RigExecRigEvaluator evaluator(stage, rig);
     std::vector<std::string> errors;
     CHECK(evaluator.Compile(&errors));
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
     CHECK(evaluator.Evaluate(UsdTimeCode(2.0)).valid);
 
@@ -2061,12 +4612,25 @@ TestBipedWarmsBitIdentical(const std::string &examplesDir,
     CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(3.0), noOverrides,
                                    &at3, &error));
     CHECK(!at3.HasChainResolvedInputs());
-    CHECK(!at3.chainResults.empty());
+    // The chains' inputs travel as head leaves, under their own keys: the
+    // varying ones as samples, the rest in the shared constant table.
+    size_t headSamples = 0;
+    for (const RigExecSampledInput &sample : at3.values) {
+        headSamples +=
+            sample.path.GetName().rfind("frozenChain", 0) == 0 ? 1 : 0;
+    }
+    if (at3.headLeafConstants) {
+        for (const char varying : at3.headLeafConstants->varying) {
+            headSamples += varying ? 0 : 1;
+        }
+    }
+    CHECK(headSamples > 0);
     const RigExecRigPose warmed3 =
         RunWarmingJob(&evaluator, rig, frozen, at3, &scheduler, nullptr);
     const RigExecRigPose live3 = evaluator.Evaluate(UsdTimeCode(3.0));
     CHECK(live3.valid);
     CheckPosesBitIdentical(what3.c_str(), live3, warmed3);
+    CheckJobAccepted(what3.c_str(), at3, warmed3);
 
     CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
     RigExecFrameInputs at4;
@@ -2188,7 +4752,7 @@ TestKeyedOperatorInputsWarmBitIdentical(const std::string &examplesDir)
     RigExecRigEvaluator evaluator(stage, rig);
     std::vector<std::string> errors;
     CHECK(evaluator.Compile(&errors));
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::BakedWithParityCheck);
+    evaluator.cpuReference = true;
     CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
     CHECK(evaluator.Evaluate(UsdTimeCode(2.0)).valid);
     std::shared_ptr<const RigExecFrozenProgram> frozen;
@@ -2209,13 +4773,13 @@ TestKeyedOperatorInputsWarmBitIdentical(const std::string &examplesDir)
             &evaluator, rig, frozen, inputs, &scheduler, nullptr);
         const RigExecRigPose live = evaluator.Evaluate(UsdTimeCode(frame));
         CHECK(live.valid);
-        if (live.bakedParityMismatches != 0) {
+        if (live.referenceMismatches != 0) {
             for (const std::string &diagnostic : live.diagnostics) {
                 std::printf("keyed operator inputs live frame %g: %s\n",
                             frame, diagnostic.c_str());
             }
         }
-        CHECK(live.bakedParityMismatches == 0);
+        CHECK(live.referenceMismatches == 0);
         const std::string what =
             "keyed operator inputs warmed frame " + std::to_string(frame);
         CheckPosesBitIdentical(what.c_str(), live, warmed);
@@ -2230,6 +4794,286 @@ TestStackAnimWarmsBitIdentical(const std::string &examplesDir)
 {
     TestBipedWarmsBitIdentical(examplesDir, "Biped_stack_anim.usda",
                                /*expectChains=*/335);
+}
+
+const SdfPath kSparseFrozenTarget("/Asset/Geom/Face.points");
+
+// A four-point mesh and a blend shape mover with two channels, each with one
+// SPARSE sample -- a rigExec:blendShape naming a UsdSkelBlendShape -- so both
+// shapes are cached by sample prim.
+UsdStageRefPtr
+MakeSparseFrozenRig()
+{
+    UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    stage->DefinePrim(SdfPath("/Asset"), TfToken("Scope"));
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    const UsdPrim mesh =
+        stage->DefinePrim(kSparseFrozenTarget.GetPrimPath(), TfToken("Mesh"));
+    mesh.GetAttribute(TfToken("points"))
+        .Set(VtVec3fArray{{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}});
+    mesh.GetAttribute(TfToken("faceVertexCounts")).Set(VtIntArray{4});
+    mesh.GetAttribute(TfToken("faceVertexIndices"))
+        .Set(VtIntArray{0, 1, 2, 3});
+    const auto shape = [&stage](const char *name, const GfVec3f &offset,
+                                int index) {
+        const UsdPrim prim = stage->DefinePrim(
+            SdfPath(std::string("/Asset/Shapes/") + name),
+            TfToken("BlendShape"));
+        prim.CreateAttribute(TfToken("offsets"),
+                             SdfValueTypeNames->Vector3fArray)
+            .Set(VtVec3fArray{offset});
+        prim.CreateAttribute(TfToken("pointIndices"),
+                             SdfValueTypeNames->IntArray)
+            .Set(VtIntArray{index});
+        return prim;
+    };
+    const UsdPrim up = shape("Up", GfVec3f(0, 0, 1), 2);
+    const UsdPrim side = shape("Side", GfVec3f(1, 0, 0), 0);
+    SdfPathVector channels;
+    for (const auto &[name, blendShape] :
+         {std::make_pair("Raise", up), std::make_pair("Push", side)}) {
+        const SdfPath channelPath =
+            SdfPath("/Asset/Rig/Channels").AppendChild(TfToken(name));
+        const UsdPrim channel =
+            stage->DefinePrim(channelPath, TfToken("RigExecBlendInput"));
+        const UsdPrim sample = stage->DefinePrim(
+            channelPath.AppendChild(TfToken("Full")),
+            TfToken("RigExecBlendSample"));
+        sample.CreateAttribute(TfToken("rigExec:activation"),
+                               SdfValueTypeNames->Float).Set(1.0f);
+        sample.CreateRelationship(TfToken("rigExec:blendShape"))
+            .SetTargets({blendShape.GetPath()});
+        channel.GetRelationship(TfToken("rigExec:samples"))
+            .SetTargets({sample.GetPath()});
+        channel.GetAttribute(TfToken("inputs:weight")).Set(1.0f);
+        channels.push_back(channelPath);
+    }
+    const UsdPrim blend = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Movers/Blend"), TfToken("RigExecBlendShapeMover"));
+    blend.ApplyAPI(TfToken("RigExecMoverAPI"));
+    blend.GetRelationship(TfToken("rigExec:moves")).SetTargets({kSparseFrozenTarget});
+    blend.GetRelationship(TfToken("rigExec:blendInputs")).SetTargets(channels);
+    return stage;
+}
+
+static void TestSparseRawDefaultFrozenLifecycle()
+{
+ auto stage=MakeSparseFrozenRig();const SdfPath rig("/Asset/Rig");RigExecRigEvaluator evaluator(stage,rig);CHECK(evaluator.Compile());
+ const auto offsets=stage->GetAttributeAtPath(SdfPath("/Asset/Shapes/Side.offsets"));const auto indices=stage->GetAttributeAtPath(SdfPath("/Asset/Shapes/Side.pointIndices"));
+ const auto points=[&](const RigExecRigPose &pose){auto p=pose.movedProperties.find(kSparseFrozenTarget);CHECK(p!=pose.movedProperties.end());return p==pose.movedProperties.end()?VtVec3fArray():p->second.Get<VtVec3fArray>();};
+ const auto check=[&](const VtVec3fArray &expected){const auto live=evaluator.Evaluate(UsdTimeCode(1));CHECK(points(live)==expected);std::shared_ptr<const RigExecFrozenProgram> frozen;std::string error;CHECK(RigExecFreezeProgram(evaluator,&frozen,&error));RigExecFrameInputs inputs;CHECK(RigExecSampleFrameInputs(evaluator,UsdTimeCode(1),{},&inputs,&error));RigExecBackgroundScheduler scheduler;const auto warm=RunWarmingJob(&evaluator,rig,frozen,inputs,&scheduler,nullptr);CheckPosesBitIdentical("sparse rawDefault frozen",live,warm);CHECK(warm.executedOpCount==0);const auto held=evaluator.Evaluate(UsdTimeCode(1));CHECK(held.executedOpCount==0);};
+ check(VtVec3fArray{{1,0,0},{1,0,0},{1,1,1},{0,1,0}});
+ std::shared_ptr<const RigExecFrozenProgram> beforeEdit;std::string editError;CHECK(RigExecFreezeProgram(evaluator,&beforeEdit,&editError));RigExecFrameInputs beforeInputs;CHECK(RigExecSampleFrameInputs(evaluator,UsdTimeCode(1),{},&beforeInputs,&editError));
+ CHECK(offsets.Set(VtVec3fArray{{2,0,0}}));RigExecFrameInputs afterInputs;CHECK(RigExecSampleFrameInputs(evaluator,UsdTimeCode(1),{},&afterInputs,&editError));CHECK(RigExecFrozenControlDigest(beforeInputs)!=RigExecFrozenControlDigest(afterInputs));RigExecBackgroundScheduler editScheduler;const auto editedWarm=RunWarmingJob(&evaluator,rig,beforeEdit,afterInputs,&editScheduler,nullptr);CHECK(points(editedWarm)==VtVec3fArray({{2,0,0},{1,0,0},{1,1,1},{0,1,0}}));
+ check(VtVec3fArray{{2,0,0},{1,0,0},{1,1,1},{0,1,0}});
+ CHECK(offsets.Set(VtVec3fArray{{99,0,0}},UsdTimeCode(1)));check(VtVec3fArray{{2,0,0},{1,0,0},{1,1,1},{0,1,0}});
+ CHECK(indices.Set(VtIntArray{4}));check(VtVec3fArray{{0,0,0},{1,0,0},{1,1,0},{0,1,0}});
+ CHECK(indices.Set(VtIntArray{0}));check(VtVec3fArray{{2,0,0},{1,0,0},{1,1,1},{0,1,0}});
+ CHECK(offsets.Set(VtVec3fArray{}));CHECK(indices.Set(VtIntArray{}));check(VtVec3fArray{{0,0,0},{1,0,0},{1,1,1},{0,1,0}});
+ CHECK(offsets.Set(VtVec3fArray{{2,0,0}}));CHECK(indices.Set(VtIntArray{0}));check(VtVec3fArray{{2,0,0},{1,0,0},{1,1,1},{0,1,0}});
+ const auto basePoints=stage->GetAttributeAtPath(kSparseFrozenTarget);
+ // Upstream arrays require the authored element count, but their values win.
+ const VtVec3fArray authoredThree{{10,0,0},{11,0,0},{11,1,0}};
+ const VtVec3fArray upstreamPoints{{0,0,0},{1,0,0},{1,1,0}};
+ CHECK(authoredThree!=upstreamPoints);CHECK(basePoints.Set(authoredThree));
+ const auto basePrim=basePoints.GetPrim();
+ CHECK(basePrim.GetAttribute(TfToken("faceVertexCounts")).Set(VtIntArray{3}));
+ CHECK(basePrim.GetAttribute(TfToken("faceVertexIndices")).Set(VtIntArray{0,1,2}));
+ CHECK(evaluator.Evaluate(UsdTimeCode(1)).valid);
+ std::shared_ptr<const RigExecFrozenProgram> snapshot;std::string error;CHECK(RigExecFreezeProgram(evaluator,&snapshot,&error));
+ RigExecFrameInputs sampled;CHECK(RigExecSampleFrameInputs(evaluator,UsdTimeCode(1),{},std::vector<RigExecUpstreamValue>{{kSparseFrozenTarget,VtValue(upstreamPoints),0}},&sampled,&error));
+ CHECK(sampled.upstream.size()==1);
+ if(sampled.upstream.size()==1){CHECK(sampled.upstream[0].path==kSparseFrozenTarget);CHECK(sampled.upstream[0].value==VtValue(upstreamPoints));}
+ RigExecBackgroundScheduler scheduler;const auto upstream=RunWarmingJob(&evaluator,rig,snapshot,sampled,&scheduler,nullptr);CHECK(points(upstream)==VtVec3fArray({{2,0,0},{1,0,0},{1,1,1}}));
+ CHECK(basePoints.Set(VtVec3fArray{{0,0,0},{1,0,0},{1,1,0},{0,1,0}}));
+ CHECK(basePrim.GetAttribute(TfToken("faceVertexCounts")).Set(VtIntArray{4}));
+ CHECK(basePrim.GetAttribute(TfToken("faceVertexIndices")).Set(VtIntArray{0,1,2,3}));
+ std::string before,after;CHECK(stage->GetRootLayer()->ExportToString(&before));
+ // Observe the topology rebuild before comparing the settled generation.
+ const size_t buildsBeforeRestore=evaluator.GetBakedProgramBuildCount();
+ const auto restored=evaluator.Evaluate(UsdTimeCode(1));CHECK(restored.valid);
+ CHECK(evaluator.GetBakedProgramBuildCount()==buildsBeforeRestore+1);
+ CHECK(points(restored)==VtVec3fArray({{2,0,0},{1,0,0},{1,1,1},{0,1,0}}));
+ CHECK(restored.diagnostics==std::vector<std::string>{"structural edit: epoch rebuilt"});
+ check(VtVec3fArray{{2,0,0},{1,0,0},{1,1,1},{0,1,0}});
+ CHECK(stage->GetRootLayer()->ExportToString(&after));CHECK(before==after);
+}
+// Three matrix movers on one 10,000-point target, which the default vertex
+// targets make a range chain (vertex groups of 1,024 points): M0 rides a
+// driver that moves at frames 1-3, M1 and M2 one that stands still.
+UsdStageRefPtr
+MakeRangeChainRig()
+{
+    UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    stage->DefinePrim(SdfPath("/Asset"), TfToken("Scope"));
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    const UsdPrim moving = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Moving"), TfToken("RigExecControl"));
+    for (int frame = 1; frame <= 3; ++frame) {
+        moving.GetAttribute(TfToken("avars:tx"))
+            .Set(double(frame), UsdTimeCode(frame));
+    }
+    const UsdPrim still = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Still"), TfToken("RigExecControl"));
+    still.GetAttribute(TfToken("avars:ty")).Set(1.0);
+    const SdfPath target("/Asset/Shape.points");
+    const UsdPrim shape =
+        stage->DefinePrim(target.GetPrimPath(), TfToken("Points"));
+    VtVec3fArray base(10000);
+    for (size_t i = 0; i < base.size(); ++i) {
+        base[i] = GfVec3f(float(i % 101) * 0.25f, float(i / 101) * 0.125f,
+                          1.0f + float(i % 7));
+    }
+    shape.GetAttribute(TfToken("points")).Set(base);
+    stage->DefinePrim(SdfPath("/Asset/Rig/Movers"), TfToken("Scope"));
+    for (int i = 0; i < 3; ++i) {
+        const UsdPrim mover = stage->DefinePrim(
+            SdfPath("/Asset/Rig/Movers/M" + std::to_string(i)),
+            TfToken("RigExecMatrixMover"));
+        mover.ApplyAPI(TfToken("RigExecMoverAPI"));
+        mover.GetRelationship(TfToken("rigExec:moves")).SetTargets({target});
+        mover.GetRelationship(TfToken("rigExec:transform"))
+            .SetTargets({i == 0 ? moving.GetPath() : still.GetPath()});
+        mover.GetAttribute(TfToken("inputs:defaultWeight")).Set(1.0f);
+    }
+    return stage;
+}
+
+// A range-pipelined chain freezes: a snapshot taken after live frame 1
+// shares every published vertex group with live and holds every group's
+// RevisionOut key, so the job at frame 1 runs no op and publishes live's
+// points; the job at frame 2, whose groups M0's driver moves, writes its own
+// buffers, leaves live's untouched and matches live bit for bit.
+static void
+TestRangeChainWarmsBitIdentical()
+{
+    UsdStageRefPtr stage = MakeRangeChainRig();
+    const SdfPath rig("/Asset/Rig");
+    const SdfPath target("/Asset/Shape.points");
+    RigExecRigEvaluator evaluator(stage, rig);
+    std::vector<std::string> errors;
+    CHECK(evaluator.Compile(&errors));
+    const RigExecRigPose live1 = evaluator.Evaluate(UsdTimeCode(1.0));
+    CHECK(live1.valid);
+    const RigExecBakedProgram *program = evaluator.GetBakedProgram();
+    CHECK(program != nullptr);
+    if (!program) {
+        return;
+    }
+    size_t ranged = 0;
+    for (const auto &chain : program->GetStepGraph().chains) {
+        for (const auto &revision : chain.revisions) {
+            ranged += revision.rangeRole && chain.groupBounds.size() >= 3 &&
+                              revision.chunks.size() ==
+                                  chain.groupBounds.size() - 1
+                          ? 1
+                          : 0;
+        }
+    }
+    CHECK(ranged == 3);
+    std::shared_ptr<const RigExecFrozenProgram> frozen;
+    std::string error;
+    CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
+    CHECK(frozen != nullptr);
+    if (!frozen) {
+        std::printf("FAIL range chain: the freeze refused: %s\n",
+                    error.c_str());
+        return;
+    }
+    // Right after the freeze every published group, and every base group,
+    // is the live one's: shared by refcount, never copied. The live bytes
+    // are kept aside to show no frozen job writes into them.
+    const RigExecBakedProgramImpl &live = program->GetStepGraph();
+    struct LiveGroup {
+        const GfVec3f *data = nullptr;
+        std::vector<GfVec3f> bytes;
+    };
+    std::vector<LiveGroup> liveGroups;
+    size_t sharedGroups = 0;
+    const auto collect = [&](const std::vector<RigExecGroupState<GfVec3f>> &a,
+                             const std::vector<RigExecGroupState<GfVec3f>> &b) {
+        CHECK(a.size() == b.size());
+        for (size_t g = 0; g < a.size() && g < b.size(); ++g) {
+            if (!a[g].published.data || a[g].published.count == 0) {
+                continue;
+            }
+            sharedGroups +=
+                a[g].published.data == b[g].published.data ? 1 : 0;
+            liveGroups.push_back(
+                {a[g].published.data,
+                 std::vector<GfVec3f>(a[g].published.data,
+                                      a[g].published.data +
+                                          a[g].published.count)});
+        }
+    };
+    CHECK(live.chains.size() == frozen->program.chains.size());
+    for (size_t c = 0;
+         c < live.chains.size() && c < frozen->program.chains.size(); ++c) {
+        const auto &a = live.chains[c];
+        const auto &b = frozen->program.chains[c];
+        collect(a.baseGroups, b.baseGroups);
+        CHECK(a.revisions.size() == b.revisions.size());
+        for (size_t r = 0; r < a.revisions.size() && r < b.revisions.size();
+             ++r) {
+            collect(a.revisions[r].groups, b.revisions[r].groups);
+        }
+    }
+    CHECK(!liveGroups.empty() && sharedGroups == liveGroups.size());
+    // The live groups of revisions, by pointer, as they stand now.
+    const auto liveUnchanged = [&]() {
+        size_t k = 0;
+        for (const auto &chain : live.chains) {
+            const auto check = [&](const RigExecGroupState<GfVec3f> &state) {
+                if (!state.published.data || state.published.count == 0) {
+                    return true;
+                }
+                if (k >= liveGroups.size()) {
+                    return false;
+                }
+                const LiveGroup &held = liveGroups[k++];
+                return state.published.data == held.data &&
+                       std::memcmp(held.data, held.bytes.data(),
+                                   held.bytes.size() * sizeof(GfVec3f)) == 0;
+            };
+            for (const auto &state : chain.baseGroups) {
+                if (!check(state)) return false;
+            }
+            for (const auto &revision : chain.revisions) {
+                for (const auto &state : revision.groups) {
+                    if (!check(state)) return false;
+                }
+            }
+        }
+        return k == liveGroups.size();
+    };
+    RigExecBackgroundScheduler scheduler;
+    const std::vector<RigExecValueOverride> noOverrides;
+    RigExecFrameInputs at1;
+    CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(1.0), noOverrides,
+                                   &at1, &error));
+    const RigExecRigPose warm1 =
+        RunWarmingJob(&evaluator, rig, frozen, at1, &scheduler, nullptr);
+    CheckPosesBitIdentical("range chain frame 1", live1, warm1);
+    CheckJobAccepted("range chain frame 1", at1, warm1);
+    CHECK(warm1.executedOpCount == 0);
+    RigExecFrameInputs at2;
+    CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(2.0), noOverrides,
+                                   &at2, &error));
+    const RigExecRigPose warm2 =
+        RunWarmingJob(&evaluator, rig, frozen, at2, &scheduler, nullptr);
+    // The frozen job wrote the groups M0's driver moved into its own
+    // buffers: live's published groups are where and what they were.
+    CHECK(liveUnchanged());
+    const RigExecRigPose live2 = evaluator.Evaluate(UsdTimeCode(2.0));
+    CHECK(live2.valid);
+    CheckPosesBitIdentical("range chain frame 2", live2, warm2);
+    CheckJobAccepted("range chain frame 2", at2, warm2);
+    CHECK(warm2.executedOpCount > 0);
+    // The points moved between the frames, so the second job computed them.
+    const auto one = warm1.movedProperties.find(target);
+    const auto two = warm2.movedProperties.find(target);
+    CHECK(one != warm1.movedProperties.end() &&
+          two != warm2.movedProperties.end() && one->second != two->second);
 }
 
 // The blend face (examples/04_BlendShapeFace.usda) warms bit-identically:
@@ -2262,7 +5106,6 @@ TestBlendFaceWarmsBitIdentical(const std::string &examplesDir)
     RigExecRigEvaluator evaluator(stage, rig);
     std::vector<std::string> errors;
     CHECK(evaluator.Compile(&errors));
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     evaluator.SetPublishWeightFields(true);
     CHECK(evaluator.Evaluate(UsdTimeCode(1001.0)).valid);
     CHECK(evaluator.Evaluate(UsdTimeCode(1016.0)).valid);
@@ -2351,7 +5194,6 @@ CheckExampleWarmsBitIdentical(const std::string &stagePath,
     RigExecRigEvaluator evaluator(stage, rig);
     std::vector<std::string> errors;
     CHECK(evaluator.Compile(&errors));
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     for (double frame : history) {
         CHECK(evaluator.Evaluate(UsdTimeCode(frame)).valid);
     }
@@ -2476,7 +5318,6 @@ TestIterativeMoversWarmBitIdentical()
         }
         RigExecRigEvaluator evaluator(stage, rig);
         CHECK(evaluator.Compile());
-        evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
         CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
         std::string error;
         CHECK(RigExecCanFreezeProgram(evaluator, &error));
@@ -2533,6 +5374,178 @@ TestIterativeMoversWarmBitIdentical()
             overridden, &scheduler, nullptr);
         const auto live = evaluator.Evaluate(UsdTimeCode(3.0));
         CheckPosesBitIdentical("iterative mover override", live, warmed);
+    }
+}
+
+// Frozen equals live, bit for bit, on the rigs whose lattices (a phased cage
+// among them), wires, deltaMush movers, projector targets and derived
+// normals the worker assembles from the job's leaves: each job carries a
+// leaf value for every key of those revisions and derived targets, and
+// serves live's pose at the stage's first frame and four frames on. (The
+// wrinkle, which no example ships, warms in
+// TestIterativeMoversWarmBitIdentical.)
+void
+TestFrozenAssemblesFromLeaves(const std::string &examplesDir)
+{
+    const std::string fixtures = examplesDir + "/../tests/fixtures/";
+    std::set<RigExecRevisionOp> warmed;
+    for (const std::string &stagePath :
+         {examplesDir + "/06_LatticeBulge.usda",
+          examplesDir + "/13_ReadPhases.usda",
+          examplesDir + "/2d/bust/bust_anim.usda",
+          fixtures + "projector_spaces.usda",
+          fixtures + "computed_path_reads.usda",
+          examplesDir + "/biped/Biped_stack_anim.usda"}) {
+        UsdStageRefPtr stage = UsdStage::Open(stagePath);
+        CHECK(stage);
+        if (!stage) {
+            continue;
+        }
+        SdfPath rig;
+        for (const UsdPrim &prim : stage->TraverseAll()) {
+            if (prim.GetTypeName() == "RigExecRoot") {
+                rig = prim.GetPath();
+                break;
+            }
+        }
+        CHECK(!rig.IsEmpty());
+        RigExecRigEvaluator evaluator(stage, rig);
+        std::vector<std::string> errors;
+        CHECK(evaluator.Compile(&errors));
+        const double start = stage->GetStartTimeCode();
+        CHECK(evaluator.Evaluate(UsdTimeCode(start)).valid);
+        std::shared_ptr<const RigExecFrozenProgram> frozen;
+        std::string error;
+        if (!RigExecFreezeProgram(evaluator, &frozen, &error)) {
+            std::printf("frozen leaves: %s does not freeze (%s)\n",
+                        stagePath.c_str(), error.c_str());
+            continue;
+        }
+        {
+            // The keys the worker reads instead of building them: the
+            // sampler's own, one per revision and four per weight object.
+            const RigExecBakedProgramImpl &B =
+                evaluator.GetBakedProgram()->GetStepGraph();
+            CHECK(frozen->moverDefaultWeightKeys.size() ==
+                  B.revisionIndex.size());
+            for (size_t r = 0; r < B.revisionIndex.size() &&
+                               r < frozen->moverDefaultWeightKeys.size();
+                 ++r) {
+                const auto &[c, i] = B.revisionIndex[r];
+                CHECK(frozen->moverDefaultWeightKeys[r] ==
+                      B.chains[size_t(c)]
+                          .revisions[size_t(i)]
+                          .moverPath.AppendProperty(
+                              TfToken("inputs:defaultWeight")));
+            }
+            CHECK(frozen->weightArrayKeys.size() ==
+                  4 * B.weightObjects.size());
+            for (size_t w = 0; w < B.weightObjects.size() &&
+                               4 * w + 3 < frozen->weightArrayKeys.size();
+                 ++w) {
+                const SdfPath &object = B.weightObjects[w].path;
+                CHECK(frozen->weightArrayKeys[4 * w] ==
+                      object.AppendProperty(
+                          TfToken("frozenWeight:targetPoints")));
+                CHECK(frozen->weightArrayKeys[4 * w + 3] ==
+                      object.AppendProperty(
+                          TfToken("frozenWeight:combineTargetCount")));
+            }
+        }
+        RigExecBackgroundScheduler scheduler;
+        for (const double frame : {start, start + 4.0}) {
+            RigExecFrameInputs inputs;
+            CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(frame), {},
+                                           &inputs, &error));
+            if (frame == start) {
+                // What one retained frame carries: the constant head leaves
+                // ride the shared table, not the frame. For comparison, the
+                // same vector with every constant added as a sample.
+                size_t constants = 0, varying = 0;
+                RigExecFrameInputs allSampled = inputs;
+                allSampled.headLeafConstants.reset();
+                if (const RigExecHeadLeafConstants *table =
+                        inputs.headLeafConstants.get()) {
+                    for (size_t j = 0; j < table->keys.size(); ++j) {
+                        if (table->varying[j]) {
+                            ++varying;
+                            continue;
+                        }
+                        ++constants;
+                        allSampled.Add(table->keys[j], table->values[j],
+                                       !table->values[j].IsEmpty());
+                    }
+                }
+                std::printf(
+                    "frozen leaves: %s samples %zu, head leaves %zu "
+                    "constant + %zu varying, retained sources %zu B (%zu B "
+                    "with the constants as samples)\n",
+                    stagePath.c_str(), inputs.values.size(), constants,
+                    varying,
+                    RigExecRetainedSourcesBytes(
+                        RigExecCaptureRetainedState(inputs, {}, 0, 0, 0)),
+                    RigExecRetainedSourcesBytes(
+                        RigExecCaptureRetainedState(allSampled, {}, 0, 0, 0)));
+            }
+            const RigExecBakedProgramImpl &B =
+                evaluator.GetBakedProgram()->GetStepGraph();
+            const auto carried = [&](const std::vector<VtValue> &values,
+                                     const RigExecBakedProgramImpl::
+                                         GeomRevision &revision) {
+                const bool held =
+                    revision.leaves.decl.assembles &&
+                    values.size() == revision.leaves.decl.keys.size();
+                if (!held) {
+                    std::printf("FAIL frozen leaves %s: %s travels without "
+                                "its leaves\n",
+                                stagePath.c_str(),
+                                revision.moverPath.GetText());
+                }
+                CHECK(held);
+                warmed.insert(revision.op);
+            };
+            CHECK(inputs.revisionLeaves.size() == B.revisionIndex.size());
+            for (size_t r = 0; r < B.revisionIndex.size() &&
+                               r < inputs.revisionLeaves.size();
+                 ++r) {
+                const auto &[c, i] = B.revisionIndex[r];
+                const auto &revision = B.chains[size_t(c)].revisions[size_t(i)];
+                if (revision.op == RigExecRevisionOp::Lattice ||
+                    revision.op == RigExecRevisionOp::Wire ||
+                    revision.op == RigExecRevisionOp::DeltaMush ||
+                    revision.op == RigExecRevisionOp::Wrinkle) {
+                    carried(inputs.revisionLeaves[r], revision);
+                }
+            }
+            CHECK(inputs.derivedLeaves.size() == B.derivedIndex.size());
+            for (size_t d = 0; d < B.derivedIndex.size() &&
+                               d < inputs.derivedLeaves.size();
+                 ++d) {
+                const auto &[c, i] = B.derivedIndex[d];
+                carried(inputs.derivedLeaves[d],
+                        B.chains[size_t(c)].derived[size_t(i)].revision);
+            }
+            const RigExecRigPose job = RunWarmingJob(&evaluator, rig, frozen,
+                                                     inputs, &scheduler,
+                                                     nullptr);
+            const RigExecRigPose live = evaluator.Evaluate(UsdTimeCode(frame));
+            CHECK(live.valid);
+            CheckPosesBitIdentical(TfStringPrintf("frozen leaves %s frame %g",
+                                                  stagePath.c_str(), frame)
+                                       .c_str(),
+                                   live, job);
+            CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
+        }
+        std::printf("frozen leaves: %s warmed\n", stagePath.c_str());
+    }
+    for (const RigExecRevisionOp op :
+         {RigExecRevisionOp::Lattice, RigExecRevisionOp::Wire,
+          RigExecRevisionOp::DeltaMush, RigExecRevisionOp::SurfaceProjector,
+          RigExecRevisionOp::ShaderDials, RigExecRevisionOp::RecomputeNormals}) {
+        if (!warmed.count(op)) {
+            std::printf("FAIL frozen leaves: no rig warmed op %d\n", int(op));
+        }
+        CHECK(warmed.count(op) == 1);
     }
 }
 
@@ -2597,7 +5610,6 @@ TestSurfaceSnapWarmsBitIdentical()
 )USD"));
     const SdfPath root("/Rig"), target("/Rig/Target.points");
     RigExecRigEvaluator evaluator(stage, root);
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     std::vector<std::string> errors;
     CHECK(evaluator.Compile(&errors));
     CHECK(errors.empty());
@@ -2675,7 +5687,6 @@ TestRegularLatticeWarmsBitIdentical()
 )USD"));
     const SdfPath root("/Rig");
     RigExecRigEvaluator evaluator(stage, root);
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     std::vector<std::string> errors;
     CHECK(evaluator.Compile(&errors));
     for (const auto &error : errors) std::printf("lattice compile: %s\n", error.c_str());
@@ -2732,6 +5743,92 @@ TestArmRigWarmsBitIdentical(const std::string &examplesDir)
 // The read phases (examples/13_ReadPhases.usda) warm bit-identically: a
 // lattice reading its cage at `final` through the run's snapshot store,
 // over two matrix movers that pose the cage first.
+
+// A retained workspace must retire a previous Final when its current raw
+// base is blocked, then recover through the same compiled graph.
+void
+TestPointFinalAvailabilitySurvivesRetainedJobs(const std::string &examplesDir)
+{
+    const auto stage=UsdStage::Open(examplesDir+"/13_ReadPhases.usda");
+    CHECK(stage); if(!stage)return;
+    stage->SetEditTarget(stage->GetSessionLayer());
+    const SdfPath rig("/ReadPhaseAsset/Rig");
+    const SdfPath cage("/ReadPhaseAsset/Geom/Cage.points");
+    const SdfPath slab("/ReadPhaseAsset/Geom/Slab.points");
+    const auto attribute=stage->GetAttributeAtPath(cage);
+    VtVec3fArray authored,rawSlab;
+    CHECK(attribute.Get(&authored));
+    CHECK(stage->GetAttributeAtPath(slab).Get(&rawSlab));
+    CHECK(attribute.Set(authored,UsdTimeCode(1001)));
+    CHECK(attribute.Set(SdfValueBlock(),UsdTimeCode(1002)));
+    CHECK(attribute.Set(authored,UsdTimeCode(1003)));
+    std::string rootBefore,sessionBefore;
+    CHECK(stage->GetRootLayer()->ExportToString(&rootBefore));
+    CHECK(stage->GetSessionLayer()->ExportToString(&sessionBefore));
+    RigExecRigEvaluator evaluator(stage,rig);
+    std::vector<std::string> errors;
+    CHECK(evaluator.Compile(&errors));
+    CHECK(evaluator.Evaluate(UsdTimeCode(1001)).valid);
+    const auto epoch=evaluator.GetBindingEpochDigest();
+    std::shared_ptr<const RigExecFrozenProgram> frozen;
+    std::string error;
+    CHECK(RigExecFreezeProgram(evaluator,&frozen,&error));
+    if(!frozen)return;
+    auto workspace=RigExecCreateFrozenWorkspace(frozen);
+    CHECK(workspace);if(!workspace)return;
+    const std::string fallback="diag /ReadPhaseAsset/Rig/Movers/Geometry/SlabLattice: read phase 'final' for "+cage.GetString()+" resolved to nothing; read the authored base";
+    RigExecFrozenEvalContext context;
+    context.frozen=frozen.get();context.workspace=workspace.get();
+    context.epochDigest=epoch;
+    const RigExecBakedProgram *program=evaluator.GetBakedProgram();
+    CHECK(program!=nullptr);if(!program)return;
+    context.slotCount=program->GetProviderCount();
+    if(evaluator.GetSolverGuidesEnabled())context.flags|=kRigExecFrozenSolverGuidesEnabled;
+    if(evaluator.GetPublishWeightFields())context.flags|=kRigExecFrozenPublishWeightFields;
+    VtVec3fArray first,recovered;
+    for(double frame:{1001.0,1002.0,1003.0}) {
+        const bool blocked=frame==1002.0;
+        RigExecFrameInputs inputs;
+        CHECK(RigExecSampleFrameInputs(evaluator,UsdTimeCode(frame),{},&inputs,&error));
+        CHECK(!inputs.HasChainResolvedInputs());
+        size_t sourceRows=0;
+        for(const auto &sample:inputs.values)if(sample.path==cage) {
+            ++sourceRows;CHECK(sample.hasValue!=blocked);
+            if(!blocked)CHECK(sample.value==VtValue(authored));
+        }
+        CHECK(sourceRows==1);
+        context.varyingInputCount=inputs.values.size();
+        const auto live=evaluator.Evaluate(UsdTimeCode(frame));
+        CHECK(live.valid && evaluator.GetBindingEpochDigest()==epoch);
+        RigExecFrozenRunReport report;
+        const auto pose=RigExecEvaluateFrozen(context,inputs,
+            RigExecMakeProductionStepRunner(),nullptr,rig,&report);
+        CHECK(report.ran && pose.valid);
+        CheckSameReadings("retained point Final availability",live,pose);
+        CHECK((std::find(pose.diagnostics.begin(),pose.diagnostics.end(),fallback)!=pose.diagnostics.end())==blocked);
+        CHECK((std::find(live.diagnostics.begin(),live.diagnostics.end(),fallback)!=live.diagnostics.end())==blocked);
+        CHECK((pose.movedProperties.count(cage)!=0)==!blocked);
+        const auto result=pose.movedProperties.find(slab);
+        CHECK(result!=pose.movedProperties.end() && result->second.IsHolding<VtVec3fArray>());
+        if(result!=pose.movedProperties.end() && result->second.IsHolding<VtVec3fArray>()) {
+            const auto &points=result->second.UncheckedGet<VtVec3fArray>();
+            if(blocked)CHECK(points==rawSlab);
+            else if(frame==1001.0)first=points;
+            else recovered=points;
+        }
+        RigExecFrozenRunReport heldReport;
+        const auto held=RigExecEvaluateFrozen(context,inputs,
+            RigExecMakeProductionStepRunner(),nullptr,rig,&heldReport);
+        CHECK(heldReport.ran && held.valid && heldReport.region.empty());
+        CheckSameReadings("held retained point Final availability",pose,held);
+    }
+    std::string rootAfter,sessionAfter;
+    CHECK(stage->GetRootLayer()->ExportToString(&rootAfter));
+    CHECK(stage->GetSessionLayer()->ExportToString(&sessionAfter));
+    CHECK(rootAfter==rootBefore && sessionAfter==sessionBefore);
+    CHECK(!first.empty() && !recovered.empty() && first!=recovered);
+}
+
 void
 TestReadPhasesWarmBitIdentical(const std::string &examplesDir)
 {
@@ -2786,7 +5883,6 @@ CheckConstraintStageWarmsBitIdentical(
     RigExecRigEvaluator evaluator(stage, rig);
     std::vector<std::string> errors;
     CHECK(evaluator.Compile(&errors));
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     for (double frame : history) {
         CHECK(evaluator.Evaluate(UsdTimeCode(frame)).valid);
     }
@@ -2849,7 +5945,7 @@ CheckConstraintStageWarmsBitIdentical(
             CHECK(digest != previousDigest);
             RigExecRigPose motion;
             RigExecComparePoses(previousLive, live, &motion);
-            CHECK(motion.bakedParityMismatches != 0);
+            CHECK(motion.comparisonMismatches != 0);
             if (expectSeedMotion) {
                 CHECK(previousSeeds != plain.stageSeeds);
             }
@@ -2984,16 +6080,11 @@ TestVolumeConstrainedSweepWarmsBitIdentical(const std::string &examplesDir)
         /*expectNative=*/1, /*expectDelta=*/1, /*expectSeedMotion=*/true);
 }
 
-// A value edit the live program routed but has not yet run travels into the
-// snapshot. The edit here is a time sample of a constraint's per-frame input
-// at the held time, which only its edited bit can route: the time does not
-// move. The generation right after it is answered by the dynamic path (an
-// override the program cannot place stands for one frame), so the program
-// never consumes the bit, and a snapshot taken then has to carry it -- its
-// first run is at its own lastTime, where nothing else dirties the
-// constraint, and without the bit it would republish the pre-edit pose.
+// Release a supported override after editing its authored source, then
+// freeze before live consumes that edit. A cold job at the snapshot's held
+// time must use the new source and match the subsequent live generation.
 void
-TestAFrozenRewarmAfterAFallbackCarriesTheEdit(const std::string &examplesDir)
+TestAFrozenRewarmAfterAReleasedOverrideCarriesTheEdit(const std::string &examplesDir)
 {
     UsdStageRefPtr stage = UsdStage::Open(examplesDir + "/aimtest.usda");
     CHECK(stage);
@@ -3009,7 +6100,6 @@ TestAFrozenRewarmAfterAFallbackCarriesTheEdit(const std::string &examplesDir)
     RigExecRigEvaluator evaluator(stage, rig);
     std::vector<std::string> errors;
     CHECK(evaluator.Compile(&errors));
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     const UsdTimeCode held(50.0);
     CHECK(evaluator.Evaluate(held).valid);
     const RigExecRigPose before = evaluator.Evaluate(held);
@@ -3019,34 +6109,20 @@ TestAFrozenRewarmAfterAFallbackCarriesTheEdit(const std::string &examplesDir)
     if (!program) {
         return;
     }
-    // An override on a folded value, restating the value it already has:
-    // the program cannot place it, so the generation falls back, and the
-    // dynamic path it falls back to answers the same pose.
-    RigExecValueOverride unplaceable;
-    bool found = false;
-    for (const SdfPath &path : program->GetStepGraph().folded) {
-        const UsdAttribute a = stage->GetAttributeAtPath(path);
-        VtValue value;
-        if (a && a.Get(&value) && !value.IsEmpty()) {
-            unplaceable.prim = path.GetPrimPath();
-            unplaceable.attribute = path.GetNameToken();
-            unplaceable.value = value;
-            found = true;
-            break;
-        }
-    }
-    CHECK(found);
-    if (!found) {
-        return;
-    }
-
+    RigExecValueOverride neutral;
+    neutral.prim = aim;
+    neutral.attribute = TfToken("inputs:defaultWeight");
+    CHECK(weight.Get(&neutral.value, held));
+    CHECK(neutral.value.IsHolding<float>());
+    const size_t generations = evaluator.GetBakedGenerationCount();
+    evaluator.SetInteractiveOverrides({neutral});
+    const auto overridden = evaluator.Evaluate(held);
+    CHECK(overridden.valid);
+    CHECK(evaluator.GetBakedGenerationCount() == generations + 1);
+    CheckPosesBitIdentical("neutral constraint envelope override", before, overridden);
     CHECK(weight.Set(0.25f, UsdTimeCode(100.0)));
     CHECK(evaluator.GetLastNoticeDisposition() ==
           RigExecNoticeDisposition::Edited);
-    const size_t generations = evaluator.GetBakedGenerationCount();
-    evaluator.SetInteractiveOverrides({unplaceable});
-    CHECK(evaluator.Evaluate(held).valid);
-    CHECK(evaluator.GetBakedGenerationCount() == generations);
     evaluator.SetInteractiveOverrides({});
     CHECK(evaluator.GetBakedProgram()->GetStepGraph().anyEdited);
 
@@ -3069,24 +6145,21 @@ TestAFrozenRewarmAfterAFallbackCarriesTheEdit(const std::string &examplesDir)
     CHECK(ran);
     const RigExecRigPose live = evaluator.Evaluate(held);
     CHECK(live.valid);
-    CheckPosesBitIdentical("rewarm at the snapshot's lastTime after a "
-                           "fallback",
+    CheckPosesBitIdentical("rewarm after a source edit and override release",
                            live, warmed);
     // Sensitivity: the edit moved the pose, so a snapshot that skipped the
     // constraint would have been caught above.
     RigExecRigPose moved;
     RigExecComparePoses(before, live, &moved);
-    CHECK(moved.bakedParityMismatches != 0);
+    CHECK(moved.comparisonMismatches != 0);
 }
 
 // A snapshot frozen BEFORE a routed value edit, which the live program has
 // since run and consumed: the snapshot's own history never saw the edit, and
 // the live program's pending flags are gone, so only the per-index edit
-// counts can say which steps a job cloned from it owes. The registry keeps
-// such a snapshot while the avar region is unchanged and asks
-// RigExecFrozenSnapshotOwesLiveEdits; the patch it then takes re-runs the
-// constraint in the job, at the snapshot's own lastTime where nothing else
-// would dirty it.
+// counts identify its outstanding edits. Cold jobs evaluate the captured
+// source vector: old inputs reproduce the pre-edit pose, and fresh inputs
+// reproduce the current pose from either the old or patched snapshot.
 void
 TestAStandingSnapshotPatchedAfterALiveRunCarriesTheEdit(
     const std::string &examplesDir)
@@ -3105,10 +6178,10 @@ TestAStandingSnapshotPatchedAfterALiveRunCarriesTheEdit(
     RigExecRigEvaluator evaluator(stage, rig);
     std::vector<std::string> errors;
     CHECK(evaluator.Compile(&errors));
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     const UsdTimeCode held(50.0);
     CHECK(evaluator.Evaluate(held).valid);
-    CHECK(evaluator.Evaluate(held).valid);
+    const RigExecRigPose before = evaluator.Evaluate(held);
+    CHECK(before.valid);
     const RigExecBakedProgram *program = evaluator.GetBakedProgram();
     CHECK(program != nullptr);
     if (!program) {
@@ -3123,6 +6196,8 @@ TestAStandingSnapshotPatchedAfterALiveRunCarriesTheEdit(
     }
     CHECK(!RigExecFrozenSnapshotOwesLiveEdits(*standing, *program));
     const uint64_t avarDigest = RigExecFrozenAvarRegionDigest(*program);
+    RigExecFrameInputs preEdit;
+    CHECK(RigExecSampleFrameInputs(evaluator, held, {}, &preEdit, &error));
 
     CHECK(weight.Set(0.25f, UsdTimeCode(100.0)));
     CHECK(evaluator.GetLastNoticeDisposition() ==
@@ -3137,15 +6212,22 @@ TestAStandingSnapshotPatchedAfterALiveRunCarriesTheEdit(
     RigExecFrameInputs at;
     CHECK(RigExecSampleFrameInputs(evaluator, held, {}, &at, &error));
     RigExecBackgroundScheduler scheduler;
-    // Sensitivity: the unpatched snapshot skips the constraint and warms
-    // the pre-edit pose.
+    // The pre-edit source vector remains immutable after the live edit.
     bool ran = false;
+    const RigExecRigPose oldInputs =
+        RunWarmingJob(&evaluator, rig, standing, preEdit, &scheduler, &ran);
+    CHECK(ran);
+    CheckPosesBitIdentical("standing snapshot with pre-edit inputs",
+                          before, oldInputs);
+    RigExecRigPose stale;
+    RigExecComparePoses(live, oldInputs, &stale);
+    CHECK(stale.comparisonMismatches != 0);
+    ran = false;
     const RigExecRigPose unpatched =
         RunWarmingJob(&evaluator, rig, standing, at, &scheduler, &ran);
     CHECK(ran);
-    RigExecRigPose stale;
-    RigExecComparePoses(live, unpatched, &stale);
-    CHECK(stale.bakedParityMismatches != 0);
+    CheckPosesBitIdentical("standing snapshot with fresh inputs",
+                          live, unpatched);
 
     std::shared_ptr<const RigExecFrozenProgram> patched;
     CHECK(RigExecPatchFrozenAvarConstants(*standing, *program, &patched,
@@ -3171,41 +6253,34 @@ TestFreezeIntoNullSnapshotRefuses()
     UsdStageRefPtr stage = MakeTinyRig();
     RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
     CHECK(evaluator.Compile());
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
     std::string error;
     CHECK(!RigExecFreezeProgram(evaluator, nullptr, &error));
     CHECK(error.find("no snapshot") != std::string::npos);
 }
 
-// CPU parity mode runs the dynamic path, which no snapshot can reproduce,
-// so freeze refuses there and only there: the same rig freezes with the
-// flag down.
+// Independent reference input facts are copied into an enabled snapshot.
 void
-TestCpuParityModeRefusesFreeze()
+TestCpuReferenceSnapshotPreservesInputs()
 {
     UsdStageRefPtr stage = MakeTinyRig();
     RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
     CHECK(evaluator.Compile());
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
     std::shared_ptr<const RigExecFrozenProgram> frozen;
     std::string error;
     CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
     CHECK(frozen != nullptr);
-    evaluator.cpuParityMode = true;
+    evaluator.cpuReference = true;
     frozen.reset();
-    CHECK(!RigExecFreezeProgram(evaluator, &frozen, &error));
-    CHECK(frozen == nullptr);
-    CHECK(error.find("CPU parity mode") != std::string::npos);
+    CHECK(RigExecFreezeProgram(evaluator,&frozen,&error));
+    CHECK(frozen != nullptr);
+    CHECK(frozen && frozen->program.oraclePublications.has_value());
 }
 
-// A pose-domain constraint with a bound weight object refuses freeze and
-// names it: the step resolves one envelope element through the live
-// oracle per frame. The static weight is bakeable, so the refusal is the
-// freeze gate's, not the bake's -- the message proves which.
+// A constraint consumes the explicit one-element field in a detached job.
 void
-TestPoseConstraintWeightObjectRefusesFreeze()
+TestPoseConstraintWeightFieldFreezes()
 {
     UsdStageRefPtr stage = UsdStage::CreateInMemory();
     stage->DefinePrim(SdfPath("/Asset"), TfToken("Scope"));
@@ -3219,7 +6294,6 @@ TestPoseConstraintWeightObjectRefusesFreeze()
     aim.SetSources({control.GetPath()});
     aim.SetWeightObject(weight.GetPath());
     RigExecRigEvaluator evaluator(stage, builder.GetRootPath());
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     std::vector<std::string> errors;
     CHECK(evaluator.Compile(&errors));
     CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
@@ -3227,13 +6301,91 @@ TestPoseConstraintWeightObjectRefusesFreeze()
     CHECK(evaluator.IsBakeable(&reasons));
     std::shared_ptr<const RigExecFrozenProgram> frozen;
     std::string error;
-    CHECK(!RigExecFreezeProgram(evaluator, &frozen, &error));
-    CHECK(frozen == nullptr);
-    if (error.find("weight object") == std::string::npos) {
-        ++failures;
-        std::printf("FAIL weight-object refusal names it: %s\n",
-                    error.c_str());
+    CHECK(RigExecFreezeProgram(evaluator,&frozen,&error));
+    CHECK(frozen != nullptr);
+    if (!frozen) return;
+    CHECK(frozen->program.weightFields.size() == 1);
+    if (frozen->program.weightFields.size() == 1) {
+        const auto &field = frozen->program.weightFields.front();
+        CHECK(field.form == RigExecBakedProgramImpl::WeightField::Form::EnvelopeConstraint);
+        CHECK(field.ok && field.count == 1);
+        CHECK(field.values == std::vector<float>{0.5f});
     }
+    RigExecFrameInputs inputs;
+    CHECK(RigExecSampleFrameInputs(evaluator,UsdTimeCode(1),{},&inputs,&error));
+    RigExecBackgroundScheduler scheduler;
+    bool ran = false;
+    const auto pose = RunWarmingJob(&evaluator,builder.GetRootPath(),frozen,inputs,&scheduler,&ran);
+    CHECK(ran);
+    CheckPosesBitIdentical("constraint field frozen",evaluator.Evaluate(UsdTimeCode(1)),pose);
+}
+
+// Optional raw-array keys are absent declarations, never an empty-path
+// source. A foreign empty row must not dirty an unchanged constraint.
+void
+TestUnboundConstraintArrayKeysIgnoreEmptyRows()
+{
+    const auto stage=UsdStage::CreateInMemory();
+    stage->DefinePrim(SdfPath("/Asset"),TfToken("Scope"));
+    auto builder=RigExecRigBuilder::Create(stage,SdfPath("/Asset/Rig"));
+    const auto control=builder.AddControl("Ctl");
+    const auto joint=builder.AddJoint("Jnt");
+    CHECK(stage->GetPrimAtPath(control.GetPath()).GetAttribute(TfToken("avars:tx")).Set(5.0));
+    auto chain=builder.NewMoverChain("Pose");
+    auto mover=chain.AddPositionConstraint("Move",joint.GetPath());
+    mover.SetSources({control.GetPath()});
+    const SdfPath weights=mover.GetPath().AppendProperty(TfToken("inputs:sourceWeights"));
+    CHECK(stage->GetPrimAtPath(mover.GetPath()).CreateAttribute(
+        TfToken("inputs:sourceWeights"),SdfValueTypeNames->FloatArray).Set(VtFloatArray()));
+    RigExecRigEvaluator evaluator(stage,builder.GetRootPath());
+    std::vector<std::string> errors;CHECK(evaluator.Compile(&errors));
+    const auto baseline=evaluator.Evaluate(UsdTimeCode(1));CHECK(baseline.valid);
+    if(!evaluator.GetBakedProgram())return;
+    const auto &B=evaluator.GetBakedProgram()->GetStepGraph();
+    CHECK(B.constraintArrays.size()==1);
+    std::shared_ptr<const RigExecFrozenProgram> frozen;std::string error;
+    CHECK(RigExecFreezeProgram(evaluator,&frozen,&error));if(!frozen)return;
+    CHECK(frozen->arrayKeys.size()==4);if(frozen->arrayKeys.size()!=4)return;
+    CHECK(frozen->arrayKeys[0]==weights);
+    CHECK(frozen->arrayKeys[1].IsEmpty() && frozen->arrayKeys[2].IsEmpty() && frozen->arrayKeys[3].IsEmpty());
+    RigExecFrameInputs inputs;
+    CHECK(RigExecSampleFrameInputs(evaluator,UsdTimeCode(1),{},&inputs,&error));
+    inputs.values.insert(inputs.values.begin(),{SdfPath(),VtValue(VtFloatArray{7.0f,9.0f}),true});
+    auto workspace=RigExecCreateFrozenWorkspace(frozen);CHECK(workspace);
+    RigExecFrozenEvalContext context;context.frozen=frozen.get();context.workspace=workspace.get();
+    context.epochDigest=evaluator.GetBindingEpochDigest();
+    context.slotCount=evaluator.GetBakedProgram()->GetProviderCount();
+    context.varyingInputCount=inputs.values.size();
+    const auto run=[&](const char *label,bool expectConstraint) {
+        RigExecFrozenRunReport report;
+        const auto pose=RigExecEvaluateFrozen(context,inputs,RigExecMakeProductionStepRunner(),
+            nullptr,builder.GetRootPath(),&report);
+        CHECK(report.ran && pose.valid);
+        const bool executed=std::any_of(report.region.begin(),report.region.end(),[&](const auto &entry) {
+            return entry.kind=="Constraint";
+        });
+        CHECK(executed==expectConstraint);
+        if(!expectConstraint)CheckPosesBitIdentical(label,baseline,pose);
+        return pose;
+    };
+    std::string before;CHECK(stage->GetRootLayer()->ExportToString(&before));
+    run("unbound constraint arrays",false);
+    run("unbound constraint arrays held",false);
+    auto named=std::find_if(inputs.values.begin(),inputs.values.end(),[&](const auto &sample){return sample.path==weights;});
+    CHECK(named!=inputs.values.end());if(named==inputs.values.end())return;
+    named->hasValue=true;named->value=VtValue(VtFloatArray{1.0f,1.0f});
+    const auto malformed=run("declared malformed weights",true);
+    CHECK(std::any_of(malformed.diagnostics.begin(),malformed.diagnostics.end(),[](const auto &line) {
+        return line.find("inputs:sourceWeights has 2 entries for 1 sources")!=std::string::npos;
+    }));
+    named->hasValue=false;named->value=VtValue();named->valueBlocked=true;
+    const auto missing=run("declared blocked weights",true);
+    CheckPosesBitIdentical("constraint weights neutral recovery",baseline,missing);
+    named->hasValue=true;named->value=VtValue(VtFloatArray());named->valueBlocked=false;
+    const auto restored=run("declared empty weights",true);
+    CheckPosesBitIdentical("constraint weights typed-empty recovery",baseline,restored);
+    run("constraint weights recovered held",false);
+    std::string after;CHECK(stage->GetRootLayer()->ExportToString(&after));CHECK(before==after);
 }
 
 // The Stream 0 9-mesh rig (reports/frame-cache-measurements.md §1): the
@@ -3244,6 +6396,15 @@ TestPoseConstraintWeightObjectRefusesFreeze()
 static constexpr size_t k9MeshCount = 9;
 static constexpr size_t k9MeshPointCount =
     RigExecGeometryParallelThreshold + 37;
+
+// The skin layouts a sampled vector carries leaves for.
+static size_t
+SkinLayouts(const RigExecFrameInputs &inputs)
+{
+    return size_t(std::count_if(
+        inputs.layoutLeaves.begin(), inputs.layoutLeaves.end(),
+        [](const std::vector<VtValue> &leaves) { return !leaves.empty(); }));
+}
 
 UsdStageRefPtr
 MakeAnimated9MeshRig()
@@ -3341,7 +6502,6 @@ Test9MeshWarmsBitIdentical()
     UsdStageRefPtr stage = MakeAnimated9MeshRig();
     const SdfPath rig("/Asset/Rig");
     RigExecRigEvaluator evaluator(stage, rig);
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     std::vector<std::string> errors;
     CHECK(evaluator.Compile(&errors));
     // The rig bakes: a refusal here would make a freeze decline expected
@@ -3375,9 +6535,9 @@ Test9MeshWarmsBitIdentical()
     CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(3.0), noOverrides,
                                    &at3, &error));
     CHECK(!at3.HasChainResolvedInputs());
-    std::printf("9mesh sampled inputs: %zu values, %zu revision packets\n",
-                at3.values.size(), at3.revisionPackets.size());
-    CHECK(at3.revisionPackets.size() == k9MeshCount);
+    std::printf("9mesh sampled inputs: %zu values, %zu skin layouts\n",
+                at3.values.size(), SkinLayouts(at3));
+    CHECK(SkinLayouts(at3) == k9MeshCount);
     const RigExecRigPose warmed3 =
         RunWarmingJob(&evaluator, rig, frozen, at3, &scheduler, nullptr);
     const RigExecRigPose live3 = evaluator.Evaluate(UsdTimeCode(3.0));
@@ -3437,7 +6597,6 @@ Check9MeshWarmsBitIdenticalAt(double frame)
     UsdStageRefPtr stage = MakeAnimated9MeshRig();
     const SdfPath rig("/Asset/Rig");
     RigExecRigEvaluator evaluator(stage, rig);
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     std::vector<std::string> errors;
     CHECK(evaluator.Compile(&errors));
     std::vector<std::string> reasons;
@@ -3463,7 +6622,7 @@ Check9MeshWarmsBitIdenticalAt(double frame)
     CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(frame), noOverrides,
                                    &probed, &error));
     CHECK(!probed.HasChainResolvedInputs());
-    CHECK(probed.revisionPackets.size() == k9MeshCount);
+    CHECK(SkinLayouts(probed) == k9MeshCount);
     const RigExecRigPose warmed = RunWarmingJob(
         &evaluator, rig, frozen, probed, &scheduler, nullptr);
     const RigExecRigPose live = evaluator.Evaluate(UsdTimeCode(frame));
@@ -3509,7 +6668,6 @@ TestBipedWarmsBitIdenticalAtSweepDistance(
     RigExecRigEvaluator evaluator(stage, rig);
     std::vector<std::string> errors;
     CHECK(evaluator.Compile(&errors));
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
     CHECK(evaluator.Evaluate(UsdTimeCode(2.0)).valid);
 
@@ -3547,9 +6705,1758 @@ TestStackAnimWarmsBitIdenticalAtSweepDistance(const std::string &examplesDir)
                                               "Biped_stack_anim.usda");
 }
 
+// Surface projectors whose providers are constrained controls
+// (tests/fixtures/projector_spaces.usda). The projector frames are built
+// from base and final of rigExec:space, rigExec:sources and
+// rigExec:sourceSpace, so the baked program must publish both matrices for
+// them although nothing else reads them. The bake must run at every frame,
+// live baked and a warming job must match the independent scalar reference exactly, and both
+// primvars must move. Both primvars must also differ from a walk with the
+// constraints disabled, so a final matrix replaced by its base cannot match.
+void
+TestProjectorSpacesMatchDynamic(const std::string &examplesDir)
+{
+    const std::string stagePath =
+        examplesDir + "/../tests/fixtures/projector_spaces.usda";
+    UsdStageRefPtr stage = UsdStage::Open(stagePath);
+    CHECK(stage);
+    if (!stage) {
+        return;
+    }
+    const SdfPath rig("/ProjectorAsset/Rig");
+    const SdfPath targets[2] = {
+        SdfPath("/ProjectorAsset/Geom/Ball.primvars:inSpace"),
+        SdfPath("/ProjectorAsset/Geom/Ball.primvars:fromSource")};
+    RigExecRigEvaluator evaluator(stage, rig);
+    std::vector<std::string> errors;
+    CHECK(evaluator.Compile(&errors));
+    CHECK(evaluator.IsBakeable());
+    RigExecRigEvaluator walk(stage, rig);
+    CHECK(walk.Compile(&errors));
+    walk.cpuReference = true;
+
+    // The same rig with every provider's final equal to its base.
+    UsdStageRefPtr unconstrainedStage = UsdStage::Open(stagePath);
+    CHECK(unconstrainedStage);
+    if (!unconstrainedStage) {
+        return;
+    }
+    unconstrainedStage->SetEditTarget(unconstrainedStage->GetSessionLayer());
+    for (const char *name : {"SpaceToDriver", "SourceToDriver",
+                             "SourceSpaceToDriver"}) {
+        const UsdPrim constraint = unconstrainedStage->GetPrimAtPath(
+            rig.AppendChild(TfToken("Constraints"))
+                .AppendChild(TfToken(name)));
+        CHECK(constraint);
+        if (!constraint) {
+            return;
+        }
+        CHECK(constraint.GetAttribute(TfToken("inputs:enabled"))
+                  .Set(false));
+    }
+    RigExecRigEvaluator unconstrained(unconstrainedStage, rig);
+    CHECK(unconstrained.Compile(&errors));
+    unconstrained.cpuReference = true;
+
+    GfMatrix4d previous[2];
+    // Live baked against the walk; true when the bake ran rather than
+    // falling back to the walk it is compared with.
+    const auto checkLive = [&](double frame, const RigExecRigPose &warmed) {
+        const size_t before = evaluator.GetBakedGenerationCount();
+        const RigExecRigPose live = evaluator.Evaluate(UsdTimeCode(frame));
+        CHECK(live.valid);
+        const bool ran = evaluator.GetBakedGenerationCount() == before + 1;
+        if (!ran) {
+            std::printf("FAIL projector spaces frame %g: the bake did not "
+                        "run\n", frame);
+        }
+        CHECK(ran);
+        const RigExecRigPose dynamic = walk.Evaluate(UsdTimeCode(frame));
+        CHECK(dynamic.valid);
+        CheckPosesBitIdentical(
+            TfStringPrintf("projector spaces baked frame %g", frame).c_str(),
+            dynamic, live);
+        if (warmed.valid) {
+            CheckPosesBitIdentical(
+                TfStringPrintf("projector spaces warmed frame %g", frame)
+                    .c_str(),
+                dynamic, warmed);
+        }
+        const RigExecRigPose baseOnly =
+            unconstrained.Evaluate(UsdTimeCode(frame));
+        CHECK(baseOnly.valid);
+        for (int k = 0; k < 2; ++k) {
+            const auto found = dynamic.movedProperties.find(targets[k]);
+            const auto foundBase = baseOnly.movedProperties.find(targets[k]);
+            if (found == dynamic.movedProperties.end() ||
+                !found->second.IsHolding<GfMatrix4d>() ||
+                foundBase == baseOnly.movedProperties.end() ||
+                !foundBase->second.IsHolding<GfMatrix4d>()) {
+                CHECK(false);
+                continue;
+            }
+            const GfMatrix4d matrix = found->second.UncheckedGet<GfMatrix4d>();
+            if (frame > 1.0) {
+                CHECK(matrix != previous[k]);
+            }
+            previous[k] = matrix;
+            const bool revised =
+                matrix != foundBase->second.UncheckedGet<GfMatrix4d>();
+            if (!revised) {
+                std::printf("FAIL projector spaces frame %g: %s ignores its "
+                            "providers' final matrices\n",
+                            frame, targets[k].GetText());
+            }
+            CHECK(revised);
+        }
+    };
+    checkLive(1.0, RigExecRigPose());
+    RigExecBackgroundScheduler scheduler;
+    std::vector<RigExecValueOverride> noOverrides;
+    std::string error;
+    for (double frame : {4.0, 7.0, 10.0}) {
+        std::shared_ptr<const RigExecFrozenProgram> frozen;
+        CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
+        if (!frozen) {
+            std::printf("FAIL projector spaces freeze refused: %s\n",
+                        error.c_str());
+            CHECK(false);
+            return;
+        }
+        RigExecFrameInputs inputs;
+        CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(frame),
+                                       noOverrides, &inputs, &error));
+        bool ran = false;
+        const RigExecRigPose warmed =
+            RunWarmingJob(&evaluator, rig, frozen, inputs, &scheduler, &ran);
+        CHECK(ran);
+        checkLive(frame, warmed);
+    }
+}
+
+// tests/fixtures/frame_record_fallbacks.usda, frozen: AtPrim read phases on
+// rigExec:transform resolve through the worker's own FrameMatrix records. A
+// warming job at frames 4 (C2 disabled, so its record is X as C1 left it)
+// and 8 matches live baked and the independent scalar reference bit for bit, and the frozen
+// program carries the live one's records.
+void
+TestFrameRecordFallbacksFreeze(const std::string &examplesDir)
+{
+    const char *label = "frame record fallbacks";
+    const std::string stagePath =
+        examplesDir + "/../tests/fixtures/frame_record_fallbacks.usda";
+    const SdfPath rig("/RecordAsset/Rig");
+    UsdStageRefPtr stage = UsdStage::Open(stagePath);
+    CHECK(stage);
+    if (!stage) {
+        return;
+    }
+    std::vector<std::string> errors;
+    std::string error;
+    RigExecRigEvaluator evaluator(stage, rig);
+    CHECK(evaluator.Compile(&errors));
+    CHECK(evaluator.IsBakeable());
+    RigExecRigEvaluator walk(stage, rig);
+    CHECK(walk.Compile(&errors));
+    walk.cpuReference = true;
+    CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
+    CHECK(walk.Evaluate(UsdTimeCode(1.0)).valid);
+
+    RigExecBackgroundScheduler scheduler;
+    std::vector<RigExecValueOverride> noOverrides;
+    for (const double frame : {4.0, 8.0}) {
+        std::shared_ptr<const RigExecFrozenProgram> frozen;
+        CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
+        if (!frozen) {
+            std::printf("FAIL %s: freeze refused: %s\n", label,
+                        error.c_str());
+            ++failures;
+            return;
+        }
+        CHECK(frozen->program.frameRecords.size() == 3);
+        RigExecFrameInputs inputs;
+        CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(frame),
+                                       noOverrides, &inputs, &error));
+        bool ran = false;
+        const RigExecRigPose warmed =
+            RunWarmingJob(&evaluator, rig, frozen, inputs, &scheduler, &ran);
+        CHECK(ran);
+        const size_t before = evaluator.GetBakedGenerationCount();
+        const RigExecRigPose live = evaluator.Evaluate(UsdTimeCode(frame));
+        CHECK(evaluator.GetBakedGenerationCount() == before + 1);
+        const RigExecRigPose dynamic = walk.Evaluate(UsdTimeCode(frame));
+        CHECK(live.valid && dynamic.valid);
+        const std::string where = TfStringPrintf("%s frame %g", label, frame);
+        CheckPosesBitIdentical((where + " warmed").c_str(), dynamic, warmed);
+        CheckPosesBitIdentical((where + " baked").c_str(), dynamic, live);
+    }
+}
+
+// tests/fixtures/solver_checkpoint.usda, frozen: AtPrim read phases that name
+// solver checkpoints resolve through the worker's own FrameMatrix records,
+// LegBlend's skipped one included. Warming jobs at frames 5 and 9 match live
+// baked and the independent scalar reference bit for bit, and the frozen program carries the
+// live one's three records.
+void
+TestSolverCheckpointFreezes(const std::string &examplesDir)
+{
+    const char *label = "solver checkpoint";
+    const std::string stagePath =
+        examplesDir + "/../tests/fixtures/solver_checkpoint.usda";
+    const SdfPath rig("/CheckpointAsset/Rig");
+    UsdStageRefPtr stage = UsdStage::Open(stagePath);
+    CHECK(stage);
+    if (!stage) {
+        return;
+    }
+    std::vector<std::string> errors;
+    std::string error;
+    RigExecRigEvaluator evaluator(stage, rig);
+    CHECK(evaluator.Compile(&errors));
+    CHECK(evaluator.IsBakeable());
+    RigExecRigEvaluator walk(stage, rig);
+    CHECK(walk.Compile(&errors));
+    walk.cpuReference = true;
+    CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
+    CHECK(walk.Evaluate(UsdTimeCode(1.0)).valid);
+
+    RigExecBackgroundScheduler scheduler;
+    std::vector<RigExecValueOverride> noOverrides;
+    for (const double frame : {5.0, 9.0}) {
+        std::shared_ptr<const RigExecFrozenProgram> frozen;
+        CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
+        if (!frozen) {
+            std::printf("FAIL %s: freeze refused: %s\n", label,
+                        error.c_str());
+            ++failures;
+            return;
+        }
+        CHECK(frozen->program.frameRecords.size() == 3);
+        RigExecFrameInputs inputs;
+        CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(frame),
+                                       noOverrides, &inputs, &error));
+        bool ran = false;
+        const RigExecRigPose warmed =
+            RunWarmingJob(&evaluator, rig, frozen, inputs, &scheduler, &ran);
+        CHECK(ran);
+        const size_t before = evaluator.GetBakedGenerationCount();
+        const RigExecRigPose live = evaluator.Evaluate(UsdTimeCode(frame));
+        CHECK(evaluator.GetBakedGenerationCount() == before + 1);
+        const RigExecRigPose dynamic = walk.Evaluate(UsdTimeCode(frame));
+        CHECK(live.valid && dynamic.valid);
+        const std::string where = TfStringPrintf("%s frame %g", label, frame);
+        CheckPosesBitIdentical((where + " warmed").c_str(), dynamic, warmed);
+        CheckPosesBitIdentical((where + " baked").c_str(), dynamic, live);
+    }
+}
+
+// tests/fixtures/preceding_own_chain.usda, frozen: Echo reads its own
+// chain at `preceding`, bound to the version entering it (2, after Lift and
+// Settle) in the frozen program as in the live one. Warming jobs at frames 5
+// and 9 match live baked and the independent scalar reference bit for bit. So does a
+// actual graph cone that runs Echo and the box's status sweep but not Settle's
+// fuse: frozen with LiftCtl raised, it re-runs Echo for a drag on Echo's
+// own weight, reading the version Settle left in the snapshot.
+void
+TestPrecedingOwnChainFreezes(const std::string &examplesDir)
+{
+    const char *label = "preceding own chain";
+    const std::string stagePath =
+        examplesDir + "/../tests/fixtures/preceding_own_chain.usda";
+    const SdfPath rig("/PrecedingAsset/Rig");
+    const SdfPath box("/PrecedingAsset/Geom/Box.points");
+    const SdfPath echo("/PrecedingAsset/Rig/Movers/Echo");
+    UsdStageRefPtr stage = UsdStage::Open(stagePath);
+    CHECK(stage);
+    if (!stage) {
+        return;
+    }
+    std::vector<std::string> errors;
+    std::string error;
+    RigExecRigEvaluator evaluator(stage, rig);
+    CHECK(evaluator.Compile(&errors));
+    CHECK(evaluator.IsBakeable());
+    RigExecRigEvaluator walk(stage, rig);
+    CHECK(walk.Compile(&errors));
+    walk.cpuReference = true;
+    CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
+    CHECK(walk.Evaluate(UsdTimeCode(1.0)).valid);
+
+    RigExecBackgroundScheduler scheduler;
+    std::vector<RigExecValueOverride> noOverrides;
+    for (const double frame : {5.0, 9.0}) {
+        std::shared_ptr<const RigExecFrozenProgram> frozen;
+        CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
+        if (!frozen) {
+            std::printf("FAIL %s: freeze refused: %s\n", label,
+                        error.c_str());
+            ++failures;
+            return;
+        }
+        int bound = 0;
+        for (size_t c = 0; c < frozen->program.chains.size(); ++c) {
+            const auto &chain = frozen->program.chains[c];
+            if (chain.target != box) {
+                continue;
+            }
+            for (const auto &revision : chain.revisions) {
+                if (revision.moverPath != echo) {
+                    continue;
+                }
+                for (const RigExecBakedPointsBinding &binding :
+                         revision.pointBindings) {
+                    CHECK(binding.input == box);
+                    CHECK(binding.candidates.size() == 1);
+                    if (binding.candidates.size() == 1) {
+                        CHECK(binding.candidates[0].chain == int(c));
+                        CHECK(binding.candidates[0].version == 2);
+                    }
+                    ++bound;
+                }
+            }
+        }
+        CHECK(bound == 1);
+        RigExecFrameInputs inputs;
+        CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(frame),
+                                       noOverrides, &inputs, &error));
+        bool ran = false;
+        const RigExecRigPose warmed =
+            RunWarmingJob(&evaluator, rig, frozen, inputs, &scheduler, &ran);
+        CHECK(ran);
+        const size_t before = evaluator.GetBakedGenerationCount();
+        const RigExecRigPose live = evaluator.Evaluate(UsdTimeCode(frame));
+        CHECK(evaluator.GetBakedGenerationCount() == before + 1);
+        const RigExecRigPose dynamic = walk.Evaluate(UsdTimeCode(frame));
+        CHECK(live.valid && dynamic.valid);
+        const std::string where = TfStringPrintf("%s frame %g", label, frame);
+        CheckPosesBitIdentical((where + " warmed").c_str(), dynamic, warmed);
+        CheckPosesBitIdentical((where + " baked").c_str(), dynamic, live);
+    }
+
+    // The box's points, compared by their bits.
+    const auto sameBox = [&](const char *what, const RigExecRigPose &expected,
+                             const RigExecRigPose &got) {
+        const auto e = expected.movedProperties.find(box);
+        const auto g = got.movedProperties.find(box);
+        const bool same =
+            got.valid && e != expected.movedProperties.end() &&
+            g != got.movedProperties.end() &&
+            e->second.IsHolding<VtVec3fArray>() &&
+            g->second.IsHolding<VtVec3fArray>() &&
+            e->second.UncheckedGet<VtVec3fArray>().size() ==
+                g->second.UncheckedGet<VtVec3fArray>().size() &&
+            std::memcmp(e->second.UncheckedGet<VtVec3fArray>().cdata(),
+                        g->second.UncheckedGet<VtVec3fArray>().cdata(),
+                        e->second.UncheckedGet<VtVec3fArray>().size() *
+                            sizeof(GfVec3f)) == 0;
+        if (!same) {
+            std::printf("FAIL %s: %s publishes another box than live\n",
+                        label, what);
+            ++failures;
+        }
+    };
+    // Raise the declared LiftCtl source in the session layer. The normal
+    // persistent workspace derives its affected operations from value edges.
+    const SdfPath settle("/PrecedingAsset/Rig/Movers/Settle");
+    UsdStageRefPtr raised = UsdStage::Open(stagePath);
+    CHECK(raised);
+    if (!raised) {
+        return;
+    }
+    raised->SetEditTarget(raised->GetSessionLayer());
+    CHECK(raised->GetAttributeAtPath(
+                    SdfPath("/PrecedingAsset/Rig/Controls/LiftCtl.avars:ty"))
+              .Set(0.75));
+    RigExecRigEvaluator coned(raised, rig);
+    CHECK(coned.Compile(&errors));
+    RigExecRigEvaluator coneWalk(raised, rig);
+    CHECK(coneWalk.Compile(&errors));
+    coneWalk.cpuReference = true;
+    RigExecValueOverride weight;
+    weight.prim = echo;
+    weight.attribute = TfToken("inputs:defaultWeight");
+    weight.value = VtValue(0.5f);
+    const UsdTimeCode at9(9.0);
+    const RigExecRigPose lifted = coned.Evaluate(at9);
+    CheckPosesBitIdentical("preceding own chain lifted baked",
+                           coneWalk.Evaluate(at9), lifted);
+    if (!coned.GetBakedProgram()) {
+        std::printf("FAIL %s: the raised rig does not bake\n", label);
+        ++failures;
+        return;
+    }
+    const RigExecBakedProgramImpl &B =
+        coned.GetBakedProgram()->GetStepGraph();
+    std::shared_ptr<const RigExecFrozenProgram> frozen;
+    CHECK(RigExecFreezeProgram(coned, &frozen, &error));
+    RigExecFrameInputs liftedInputs, weightedInputs;
+    CHECK(RigExecSampleFrameInputs(coned, at9, noOverrides, &liftedInputs,
+                                   &error));
+    CHECK(RigExecSampleFrameInputs(coned, at9, {weight}, &weightedInputs,
+                                   &error));
+    CHECK(!liftedInputs.HasChainResolvedInputs());
+    CHECK(!weightedInputs.HasChainResolvedInputs());
+    if (!frozen) {
+        std::printf("FAIL %s: no snapshot (%s)\n", label, error.c_str());
+        ++failures;
+        return;
+    }
+    RigExecFrozenEvalContext context;
+    context.epochDigest = coned.GetBindingEpochDigest();
+    context.slotCount = coned.GetBakedProgram()->GetProviderCount();
+    context.varyingInputCount = liftedInputs.values.size();
+    context.frozen = frozen.get();
+    auto workspace = RigExecCreateFrozenWorkspace(frozen);
+    context.workspace = workspace.get();
+    RigExecFrozenRunReport liftedReport;
+    const auto full = RigExecEvaluateFrozen(context,liftedInputs,
+        RigExecMakeProductionStepRunner(),nullptr,rig,&liftedReport);
+    CHECK(liftedReport.ran && full.valid);
+    sameBox("a held common-graph job under the lift",lifted,full);
+    coned.SetInteractiveOverrides({weight});
+    coneWalk.SetInteractiveOverrides({weight});
+    const RigExecRigPose weighted = coned.Evaluate(at9);
+    CheckPosesBitIdentical("preceding own chain weighted baked",
+                           coneWalk.Evaluate(at9), weighted);
+    context.varyingInputCount = weightedInputs.values.size();
+    RigExecFrozenRunReport weightedReport;
+    const auto cone = RigExecEvaluateFrozen(context,weightedInputs,
+        RigExecMakeProductionStepRunner(),nullptr,rig,&weightedReport);
+    CHECK(weightedReport.ran && cone.valid);
+    bool echoRan = false;
+    for (const auto &entry : weightedReport.region) {
+        echoRan = echoRan || entry.label.find(echo.GetString()) != std::string::npos;
+        CHECK(entry.label.find(settle.GetString()) == std::string::npos);
+    }
+    CHECK(echoRan);
+    sameBox("the exact common graph cone over Echo",weighted,cone);    // The weight moved the box, so the cone ran Echo rather than keeping
+    // what the snapshot held.
+    CHECK(weighted.movedProperties.count(box) &&
+          lifted.movedProperties.count(box) &&
+          weighted.movedProperties.at(box) != lifted.movedProperties.at(box));
+}
+
+// Consumer-owned current-phase fields and Base/Final placement producers
+// survive frozen source detachment. Both authored phase variants retain exact
+// live/frozen poses and independent scalar-reference checks.
+void
+TestVolumePlacementsFixtureFreezes(const std::string &examplesDir)
+{
+    const char *label = "volume placements";
+    const std::string stagePath =
+        examplesDir + "/../tests/fixtures/volume_placements.usda";
+    const SdfPath rig("/PlacementAsset/Rig");
+    const SdfPath sphereA("/PlacementAsset/Rig/Joints/A/SphereA");
+    const SdfPath sphereB("/PlacementAsset/Rig/Joints/B/SphereB");
+    std::vector<std::string> errors;
+    std::string error;
+    {
+        UsdStageRefPtr stage = UsdStage::Open(stagePath);
+        CHECK(stage);
+        if (!stage) {
+            return;
+        }
+        RigExecRigEvaluator evaluator(stage, rig);
+        CHECK(evaluator.Compile(&errors));
+        CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
+        CHECK(evaluator.GetBakedGenerationCount() == 1);
+        std::shared_ptr<const RigExecFrozenProgram> frozen;
+        CHECK(RigExecFreezeProgram(evaluator,&frozen,&error));
+        CHECK(frozen != nullptr);
+        CHECK(frozen && !frozen->program.weightFields.empty());
+        if (frozen) {
+            RigExecFrameInputs inputs;
+            CHECK(RigExecSampleFrameInputs(evaluator,UsdTimeCode(1),{},&inputs,&error));
+            RigExecBackgroundScheduler scheduler;
+            bool ran = false;
+            const auto pose = RunWarmingJob(&evaluator,rig,frozen,inputs,&scheduler,&ran);
+            CHECK(ran);
+            CheckPosesBitIdentical("current-phase field frozen",evaluator.Evaluate(UsdTimeCode(1)),pose);
+        }
+    }
+
+    UsdStageRefPtr stage = UsdStage::Open(stagePath);
+    CHECK(stage);
+    if (!stage) {
+        return;
+    }
+    stage->SetEditTarget(stage->GetSessionLayer());
+    const UsdPrim sphere = stage->GetPrimAtPath(sphereA);
+    CHECK(sphere);
+    if (!sphere) {
+        return;
+    }
+    CHECK(sphere.GetRelationship(TfToken("rigExec:weightTarget"))
+              .SetMetadata(TfToken("rigExecReadPhase"), std::string("base")));
+    RigExecRigEvaluator evaluator(stage, rig);
+    CHECK(evaluator.Compile(&errors));
+    CHECK(evaluator.IsBakeable());
+    RigExecRigEvaluator walk(stage, rig);
+    CHECK(walk.Compile(&errors));
+    walk.cpuReference = true;
+    // Both from frame 1, so their work counters compare at 5 and 10.
+    CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
+    CHECK(walk.Evaluate(UsdTimeCode(1.0)).valid);
+
+    RigExecBackgroundScheduler scheduler;
+    std::vector<RigExecValueOverride> noOverrides;
+    for (const double frame : {5.0, 10.0}) {
+        std::shared_ptr<const RigExecFrozenProgram> frozen;
+        CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
+        if (!frozen) {
+            std::printf("FAIL %s: freeze refused: %s\n", label,
+                        error.c_str());
+            ++failures;
+            return;
+        }
+        RigExecFrameInputs inputs;
+        CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(frame),
+                                       noOverrides, &inputs, &error));
+        bool ran = false;
+        const RigExecRigPose warmed =
+            RunWarmingJob(&evaluator, rig, frozen, inputs, &scheduler, &ran);
+        CHECK(ran);
+        const size_t before = evaluator.GetBakedGenerationCount();
+        const RigExecRigPose live = evaluator.Evaluate(UsdTimeCode(frame));
+        CHECK(evaluator.GetBakedGenerationCount() == before + 1);
+        const RigExecRigPose dynamic = walk.Evaluate(UsdTimeCode(frame));
+        CHECK(live.valid && dynamic.valid);
+        const std::string where = TfStringPrintf("%s frame %g", label, frame);
+        CheckPosesBitIdentical((where + " warmed").c_str(), live, warmed);
+        CheckPosesBitIdentical((where + " baked").c_str(), dynamic, live);
+        CHECK(warmed.weightFrames.size() == 2);
+        CHECK(warmed.weightFrames.count(sphereA) == 1);
+        CHECK(warmed.weightFrames.count(sphereB) == 1);
+    }
+    for (const double frame : {3.0, 7.0}) {
+        const std::string where =
+            TfStringPrintf("%s, base phase, frame %g", label, frame);
+        CheckFrozenWeightFramesMatchLive(&evaluator, rig, UsdTimeCode(frame),
+                                         where.c_str());
+        // Not vacuous: SphereB publishes its final placement, which is not
+        // the placement of its base frame.
+        const RigExecRigPose live = evaluator.Evaluate(UsdTimeCode(frame));
+        const RigExecBakedProgramImpl &B =
+            evaluator.GetBakedProgram()->GetStepGraph();
+        const auto slot = B.index.find(sphereB);
+        const auto published = live.weightFrames.find(sphereB);
+        CHECK(slot != B.index.end() && published != live.weightFrames.end());
+        if (slot == B.index.end() || published == live.weightFrames.end() ||
+            size_t(slot->second) >= B.baseLast.size()) {
+            continue;
+        }
+        const GfMatrix4d basePlacement = RigExecVolumePlacement(
+            B.base[size_t(B.baseLast[size_t(slot->second)])]);
+        CHECK(published->second != basePlacement);
+    }
+}
+
+// The frozen VolumePlacements step places through the shared gate
+// (RigExecVolumePlacement): a final frame flagged valid and non-degenerate
+// but holding a NaN point places at the identity, and frozen publishes what
+// the live step publishes for the same frame. The step bodies run on clones
+// of 11_VolumeWeights' program whose fin entry for one volume is poisoned
+// directly, so the step reads exactly a frame flagged valid and
+// non-degenerate yet non-finite, independent of what upstream compose and
+// commit steps would make of a non-finite authored value.
+void
+TestFrozenVolumePlacementUsesTheSharedGate(const std::string &examplesDir)
+{
+    const char *label = "frozen volume placement gate";
+    UsdStageRefPtr stage =
+        UsdStage::Open(examplesDir + "/11_VolumeWeights.usda");
+    CHECK(stage);
+    if (!stage) {
+        return;
+    }
+    SdfPath rig;
+    for (const UsdPrim &prim : stage->TraverseAll()) {
+        if (prim.GetTypeName() == "RigExecRoot") {
+            rig = prim.GetPath();
+            break;
+        }
+    }
+    CHECK(!rig.IsEmpty());
+    if (rig.IsEmpty()) {
+        return;
+    }
+    RigExecRigEvaluator evaluator(stage, rig);
+    CHECK(evaluator.Compile());
+    CHECK(evaluator.Evaluate(UsdTimeCode(1001.0)).valid);
+    const UsdTimeCode time(1012.0);
+    const RigExecRigPose live = evaluator.Evaluate(time);
+    CHECK(live.valid);
+    const RigExecBakedProgramImpl &B =
+        evaluator.GetBakedProgram()->GetStepGraph();
+
+    // The first published volume and its VolumePlacements step.
+    size_t slot = B.placedVolumes.size();
+    for (size_t i = 0; i < B.placedVolumes.size(); ++i) {
+        if (B.placedVolumes[i]) {
+            slot = i;
+            break;
+        }
+    }
+    size_t stepIndex = B.steps.size();
+    for (size_t k = 0; k < B.steps.size(); ++k) {
+        if (B.steps[k].kind == RigExecBakedStepKind::VolumePlacements &&
+            B.steps[k].object == int(slot) && B.steps[k].part == 1) {
+            stepIndex = k;
+        }
+    }
+    CHECK(slot < B.placedVolumes.size() && stepIndex < B.steps.size() &&
+          slot < B.finLast.size());
+    if (slot >= B.placedVolumes.size() || stepIndex >= B.steps.size() ||
+        slot >= B.finLast.size()) {
+        return;
+    }
+    const SdfPath volume = B.paths[slot];
+    const size_t finIndex = size_t(B.finLast[slot]);
+    CHECK((B.steps[stepIndex].reads==std::vector<RigExecBakedSlotRange>{
+        RigExecBakedOne(RigExecBakedSlotDomain::PoseFin,int(finIndex)),
+        RigExecBakedOne(RigExecBakedSlotDomain::RequiredStageFramesAdmission,0)}));
+    CHECK(B.steps[stepIndex].writes==std::vector<RigExecBakedSlotRange>{
+        RigExecBakedOne(RigExecBakedSlotDomain::WeightFrames,int(slot))});
+    // Not vacuous: live places this volume away from the identity.
+    const auto published = live.weightFrames.find(volume);
+    CHECK(published != live.weightFrames.end() &&
+          published->second != GfMatrix4d(1.0));
+
+    std::shared_ptr<const RigExecFrozenProgram> frozen;
+    std::string error;
+    CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
+    RigExecFrameInputs inputs;
+    CHECK(RigExecSampleFrameInputs(evaluator, time, {}, &inputs, &error));
+    if (!frozen) {
+        std::printf("FAIL %s: freeze refused: %s\n", label, error.c_str());
+        ++failures;
+        return;
+    }
+
+    // One coordinate made non-finite, once as a NaN and once as +inf, so
+    // both halves of the finite check are exercised.
+    struct Poison {
+        double value;
+        const char *what;
+    };
+    const Poison poisons[] = {
+        {std::numeric_limits<double>::quiet_NaN(), "a NaN final frame"},
+        {std::numeric_limits<double>::infinity(), "an infinite final frame"},
+    };
+    for (const Poison &poison : poisons) {
+        // The frozen worker, as a job clones it, with the poisoned final
+        // frame.
+        auto worker = std::make_unique<frozenDetail::_FrozenWorker>();
+        frozenDetail::_CloneImpl(frozen->program, &worker->B);
+        CHECK(finIndex < worker->B.fin.size() &&
+              stepIndex < worker->B.steps.size());
+        if (finIndex >= worker->B.fin.size() ||
+            stepIndex >= worker->B.steps.size()) {
+            return;
+        }
+        RigExecPointFrame poisoned = worker->B.fin[finIndex];
+        poisoned.points[1][0] = poison.value;
+        // The flags pass a validity-only gate, which would place at a
+        // non-finite matrix.
+        CHECK(poisoned.IsValid() && !poisoned.IsDegenerate());
+        worker->B.fin[finIndex] = poisoned;
+        worker->B.stage = UsdStageRefPtr();
+        RigExecBakedRunWeightStep(&worker->B,
+                                  &worker->B.steps[stepIndex], time);
+        std::map<SdfPath, GfMatrix4d> frozenFrames;
+        RigExecBakedPublishVolumePlacements(worker->B, &frozenFrames);
+        const auto frozenEntry = frozenFrames.find(volume);
+        CHECK(frozenEntry != frozenFrames.end());
+        if (frozenEntry != frozenFrames.end() &&
+            frozenEntry->second != GfMatrix4d(1.0)) {
+            std::printf("FAIL %s: %s publishes a non-identity placement for "
+                        "%s\n",
+                        label, volume.GetText(), poison.what);
+            ++failures;
+        }
+
+        // Live's step body and publication over the same frame.
+        auto liveCopy = std::make_unique<RigExecBakedProgramImpl>();
+        frozenDetail::_CloneImpl(B, liveCopy.get());
+        liveCopy->fin[finIndex] = poisoned;
+        RigExecBakedRunWeightStep(liveCopy.get(),
+                                  &liveCopy->steps[stepIndex], time);
+        std::map<SdfPath, GfMatrix4d> liveFrames;
+        RigExecBakedPublishVolumePlacements(*liveCopy, &liveFrames);
+        CHECK(liveFrames.count(volume) == 1 &&
+              liveFrames.at(volume) == GfMatrix4d(1.0));
+        CheckWeightFramesEqual(label, poison.what, liveFrames, frozenFrames);
+    }
+}
+
+// A rig whose provider ladder recomposes, for the frozen ladder cases below:
+// the stage, a session-layer edit authored before Compile, the frames its
+// rests move over, and a ladder channel to drag at the last of them.
+struct _RecomposingLadderCase {
+    const char *label = "";
+    std::string stagePath;
+    SdfPath rig;
+    std::function<void(const UsdStageRefPtr &)> edit;
+    std::vector<double> frames;
+    SdfPath dragPrim;
+    TfToken dragAttribute;
+    double dragValues[2] = {0.0, 0.0};
+    std::vector<SdfPath> varyingSources;
+    // Whether the authored rest sources move the watched provider over time.
+    bool varying = true;
+    // A joint whose final frame the moved rest moves.
+    SdfPath watched;
+};
+
+// A frozen job over a ladder that recomposes equals live, bit for bit: at
+// each frame, frozen from the live run before it (so the job's ladder leaves
+// differ from the clone's and its rest and ladder ops re-run), then under
+// two values of a drag on a ladder channel at a held frame, and after its
+// release. Each job is accepted, not declined.
+void
+CheckRecomposingLadderFreezes(const _RecomposingLadderCase &c)
+{
+    UsdStageRefPtr stage = UsdStage::Open(c.stagePath);
+    CHECK(stage);
+    if (!stage) {
+        return;
+    }
+    if (c.edit) {
+        stage->SetEditTarget(UsdEditTarget(stage->GetSessionLayer()));
+        c.edit(stage);
+    }
+    std::vector<std::string> errors;
+    std::string error;
+    RigExecRigEvaluator evaluator(stage, c.rig);
+    CHECK(evaluator.Compile(&errors));
+    CHECK(evaluator.IsBakeable());
+    CHECK(evaluator.Evaluate(UsdTimeCode(c.frames.front())).valid);
+    CHECK(evaluator.GetBakedProgram() != nullptr);
+    if (!evaluator.GetBakedProgram()) {
+        return;
+    }
+    const RigExecBakedProgramImpl &B =
+        evaluator.GetBakedProgram()->GetStepGraph();
+    CHECK(c.varying == !c.varyingSources.empty());
+    for (const auto &path : c.varyingSources) {
+        const auto attribute = stage->GetAttributeAtPath(path);
+        CHECK(attribute);
+        if (!attribute) continue;
+        CHECK(attribute.ValueMightBeTimeVarying());
+        VtValue first, last;
+        CHECK(attribute.Get(&first, UsdTimeCode(c.frames.front())));
+        CHECK(attribute.Get(&last, UsdTimeCode(c.frames.back())));
+        CHECK(!RigExecBakedHeadValueSame(first, last));
+    }
+    const auto target = B.index.find(c.dragPrim);
+    CHECK(target != B.index.end());
+    if (target == B.index.end()) return;
+    const uint32_t slot = uint32_t(target->second);
+    const auto contains = [](const auto &ranges, RigExecBakedSlotDomain domain,
+                             uint32_t value) {
+        return std::any_of(ranges.begin(), ranges.end(), [&](const auto &range) {
+            return range.domain == domain && range.begin <= value && value < range.end;
+        });
+    };
+    const auto producer = [&](RigExecBakedStepKind kind, RigExecBakedSlotDomain domain) {
+        size_t found = B.steps.size();
+        for (size_t i = 0; i < B.steps.size(); ++i) {
+            if (B.steps[i].kind != kind || !contains(B.steps[i].writes, domain, slot)) continue;
+            CHECK(found == B.steps.size());
+            found = i;
+        }
+        CHECK(found < B.steps.size());
+        return found;
+    };
+    const size_t rest = producer(RigExecBakedStepKind::RestCompose, RigExecBakedSlotDomain::Rest);
+    const size_t ladder = producer(RigExecBakedStepKind::LadderCompose, RigExecBakedSlotDomain::Ladder);
+    if (rest >= B.steps.size() || ladder >= B.steps.size()) return;
+    CHECK(contains(B.steps[ladder].reads, RigExecBakedSlotDomain::Rest, slot));
+    const auto &channels = B.ladders[size_t(slot)];
+    if (channels.spaceValues[0] >= 0)
+        CHECK(contains(B.steps[rest].reads, RigExecBakedSlotDomain::SpaceValue,
+                       uint32_t(channels.spaceValues[0])));
+    for (const auto &input : channels.restAvars) {
+        if (input.leaf < 0) continue;
+        const uint32_t leaf = B.leaves.Of<double>().id[size_t(input.leaf)];
+        CHECK(std::find(B.steps[rest].bindingLeaves.begin(),
+                        B.steps[rest].bindingLeaves.end(), leaf) !=
+              B.steps[rest].bindingLeaves.end());
+    }
+    const auto canonical = [&](size_t step) {
+        size_t found = B.opGraph.ops.size();
+        for (size_t i = 0; i < B.opGraph.ops.size(); ++i)
+            if (B.opGraph.ops[i].originalIndex == step) {
+                CHECK(found == B.opGraph.ops.size());
+                found = i;
+            }
+        CHECK(found < B.opGraph.ops.size());
+        return found;
+    };
+    const size_t restOp = canonical(rest), ladderOp = canonical(ladder);
+    if (restOp >= B.opGraph.ops.size() || ladderOp >= B.opGraph.ops.size()) return;
+    CHECK(RigExecCanFreezeProgram(evaluator, &error));
+
+    RigExecBackgroundScheduler scheduler;
+    const auto warm = [&](const std::string &where, double frame,
+                          const std::vector<RigExecValueOverride> &overrides)
+        -> RigExecRigPose {
+        std::shared_ptr<const RigExecFrozenProgram> frozen;
+        CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
+        if (!frozen) {
+            std::printf("FAIL %s: freeze refused: %s\n", where.c_str(),
+                        error.c_str());
+            ++failures;
+            return RigExecRigPose();
+        }
+        RigExecFrameInputs inputs;
+        CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(frame),
+                                       overrides, &inputs, &error));
+        const RigExecRigPose warmed = RunWarmingJob(
+            &evaluator, c.rig, frozen, inputs, &scheduler, nullptr);
+        CheckJobAccepted(where.c_str(), inputs, warmed);
+        evaluator.SetInteractiveOverrides(overrides);
+        const RigExecRigPose live = evaluator.Evaluate(UsdTimeCode(frame));
+        CHECK(live.valid);
+        CheckPosesBitIdentical((where + " warmed").c_str(), live, warmed);
+        if (!overrides.empty()) CHECK(B.opExecution.ran[restOp]);
+        const auto held = evaluator.Evaluate(UsdTimeCode(frame));
+        CheckPosesBitIdentical((where + " held").c_str(), live, held);
+        CHECK(!B.opExecution.ran[restOp]);
+        CHECK(!B.opExecution.ran[ladderOp]);
+        return warmed;
+    };
+    // A rest move shows in the joint's final frame or, where its default
+    // space carries the move, in its rest-to-pose matrix.
+    const auto watchedFrame = [&c](const RigExecRigPose &pose) {
+        const auto found = pose.jointFramesFinal.find(c.watched);
+        CHECK(found != pose.jointFramesFinal.end());
+        return found == pose.jointFramesFinal.end() ? RigExecPointFrame()
+                                                    : found->second;
+    };
+    const auto watchedMatrix = [&c](const RigExecRigPose &pose) {
+        const auto found = pose.jointMatricesFinal.find(c.watched);
+        CHECK(found != pose.jointMatricesFinal.end());
+        return found == pose.jointMatricesFinal.end() ? GfMatrix4d(1.0)
+                                                      : found->second;
+    };
+    const auto moved = [&](const std::string &what, const RigExecRigPose &a,
+                           const RigExecRigPose &b) {
+        const RigExecPointFrame x = watchedFrame(a), y = watchedFrame(b);
+        if (x.flags == y.flags && x.points == y.points &&
+            watchedMatrix(a) == watchedMatrix(b)) {
+            std::printf("FAIL %s %s: %s did not move\n", c.label,
+                        what.c_str(), c.watched.GetText());
+            ++failures;
+        }
+    };
+
+    // Forward over the frames, then back to the first.
+    std::vector<double> frames = c.frames;
+    frames.push_back(c.frames.front());
+    std::vector<RigExecRigPose> warmed;
+    for (const double frame : frames) {
+        warmed.push_back(warm(TfStringPrintf("%s frame %g", c.label, frame),
+                              frame, {}));
+    }
+    if (c.varying) {
+        moved("over the frames", warmed.front(), warmed[warmed.size() - 2]);
+    }
+
+    // A drag on a ladder channel at the held last frame, moved, released.
+    const double held = c.frames.back();
+    const auto drag = [&c](double value) {
+        return std::vector<RigExecValueOverride>{RigExecValueOverride{
+            c.dragPrim, TfToken(), c.dragAttribute, VtValue(value)}};
+    };
+    const RigExecRigPose settled = warmed[warmed.size() - 2];
+    const RigExecRigPose first = warm(
+        TfStringPrintf("%s dragged to %g", c.label, c.dragValues[0]), held,
+        drag(c.dragValues[0]));
+    moved("under the drag", settled, first);
+    warm(TfStringPrintf("%s dragged to %g", c.label, c.dragValues[1]), held,
+         drag(c.dragValues[1]));
+    const RigExecRigPose released =
+        warm(TfStringPrintf("%s released", c.label), held, {});
+    evaluator.SetInteractiveOverrides({});
+    CheckSameReadings(TfStringPrintf("%s released vs settled", c.label)
+                          .c_str(),
+                      settled, released);
+
+    // One snapshot serving every job, as the warmer's does: frozen from the
+    // live run at the first frame, and again from the run under the first
+    // drag, so a job's leaves and ladder flags differ from the clone's by
+    // more than one run. Values only: the work a job does follows from what
+    // its snapshot last ran, not from live's history.
+    struct _Job {
+        std::string what;
+        double frame;
+        std::vector<RigExecValueOverride> overrides;
+    };
+    std::vector<_Job> jobs;
+    for (const double frame : frames) {
+        jobs.push_back({TfStringPrintf("frame %g", frame), frame, {}});
+    }
+    jobs.push_back({TfStringPrintf("dragged to %g", c.dragValues[1]), held,
+                    drag(c.dragValues[1])});
+    jobs.push_back({"released", held, {}});
+    const auto sameValues = [&c](const std::string &what,
+                                 const RigExecRigPose &live,
+                                 const RigExecRigPose &warmed) {
+        CheckSameReadings(what.c_str(), live, warmed);
+        if (live.jointMatricesFinal != warmed.jointMatricesFinal ||
+            live.providerXforms != warmed.providerXforms ||
+            live.providerBaseXforms != warmed.providerBaseXforms) {
+            std::printf("FAIL %s: joint matrices or provider transforms "
+                        "differ\n", what.c_str());
+            ++failures;
+        }
+    };
+    const auto fromOneSnapshot =
+        [&](const std::string &where, double frame,
+            const std::vector<RigExecValueOverride> &overrides) {
+            evaluator.SetInteractiveOverrides(overrides);
+            CHECK(evaluator.Evaluate(UsdTimeCode(frame)).valid);
+            std::shared_ptr<const RigExecFrozenProgram> frozen;
+            CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
+            if (!frozen) {
+                return;
+            }
+            for (const _Job &job : jobs) {
+                const std::string what = TfStringPrintf(
+                    "%s, one snapshot %s: %s", c.label, where.c_str(),
+                    job.what.c_str());
+                RigExecFrameInputs inputs;
+                CHECK(RigExecSampleFrameInputs(evaluator,
+                                               UsdTimeCode(job.frame),
+                                               job.overrides, &inputs,
+                                               &error));
+                const RigExecRigPose warmed = RunWarmingJob(
+                    &evaluator, c.rig, frozen, inputs, &scheduler, nullptr);
+                CheckJobAccepted(what.c_str(), inputs, warmed);
+                evaluator.SetInteractiveOverrides(job.overrides);
+                const RigExecRigPose live =
+                    evaluator.Evaluate(UsdTimeCode(job.frame));
+                CHECK(live.valid);
+                sameValues(what, live, warmed);
+            }
+        };
+    fromOneSnapshot("at the first frame", c.frames.front(), {});
+    fromOneSnapshot("under the drag", held, drag(c.dragValues[0]));
+    evaluator.SetInteractiveOverrides({});
+}
+
+// The tail (examples/01_FkChainTail.usda) with testRigExecEpochRests'
+// animated rests on Seg2 -- a time-sampled rest:tx, a rest:space connected
+// to an animated driver, a property chain writing rest:space -- plus the
+// unedited tail, whose static ladder recomposes only under the drag. Each
+// freezes, and every job equals live.
+void
+TestRecomposingLaddersFreeze(const std::string &examplesDir)
+{
+    const SdfPath rig("/TailAsset/Rig");
+    const SdfPath joint("/TailAsset/Rig/Joints/Seg1/Seg2");
+    const SdfPath child = joint.AppendChild(TfToken("Seg3"));
+    const std::vector<double> frames{1001.0, 1005.0, 1009.0};
+    const auto translation = [](double x) {
+        GfMatrix4d m(1.0);
+        m.SetTranslateOnly(GfVec3d(x, 0.0, 0.0));
+        return m;
+    };
+    _RecomposingLadderCase base;
+    base.stagePath = examplesDir + "/01_FkChainTail.usda";
+    base.rig = rig;
+    base.frames = frames;
+    base.dragPrim = joint;
+    base.dragAttribute = TfToken("rest:tx");
+    base.dragValues[0] = 1.5;
+    base.dragValues[1] = 4.0;
+    base.watched = child;
+
+    _RecomposingLadderCase sampled = base;
+    sampled.varyingSources = {joint.AppendProperty(TfToken("rest:tx"))};
+    sampled.label = "a time-sampled rest";
+    sampled.edit = [&](const UsdStageRefPtr &stage) {
+        UsdAttribute restTx = stage->GetPrimAtPath(joint).CreateAttribute(
+            TfToken("rest:tx"), SdfValueTypeNames->Double);
+        restTx.Set(0.0, UsdTimeCode(frames[0]));
+        restTx.Set(3.0, UsdTimeCode(frames[1]));
+        restTx.Set(6.0, UsdTimeCode(frames[2]));
+    };
+    CheckRecomposingLadderFreezes(sampled);
+
+    _RecomposingLadderCase connected = base;
+    connected.varyingSources = {joint.AppendProperty(TfToken("inputs:restSpaceDriver"))};
+    connected.label = "a connected rest space";
+    connected.edit = [&](const UsdStageRefPtr &stage) {
+        const UsdPrim prim = stage->GetPrimAtPath(joint);
+        const UsdAttribute driver = prim.CreateAttribute(
+            TfToken("inputs:restSpaceDriver"), SdfValueTypeNames->Matrix4d);
+        driver.Set(translation(0.0), UsdTimeCode(frames[0]));
+        driver.Set(translation(2.5), UsdTimeCode(frames[1]));
+        driver.Set(translation(5.0), UsdTimeCode(frames[2]));
+        prim.CreateAttribute(TfToken("rest:space"),
+                             SdfValueTypeNames->Matrix4d)
+            .SetConnections({driver.GetPath()});
+    };
+    CheckRecomposingLadderFreezes(connected);
+
+    _RecomposingLadderCase chained = base;
+    chained.varyingSources = {rig.AppendPath(SdfPath("Movers/RestOffset.inputs:value"))};
+    chained.label = "a property chain on a rest";
+    chained.edit = [&](const UsdStageRefPtr &stage) {
+        const UsdPrim prim = stage->DefinePrim(
+            rig.AppendChild(TfToken("Movers"))
+                .AppendChild(TfToken("RestOffset")),
+            TfToken("RigExecMatrixMathMover"));
+        prim.ApplyAPI(TfToken("RigExecMoverAPI"));
+        prim.CreateAttribute(TfToken("rigExec:operation"),
+                             SdfValueTypeNames->Token)
+            .Set(TfToken("multiply"));
+        const UsdAttribute value = prim.CreateAttribute(
+            TfToken("inputs:value"), SdfValueTypeNames->Matrix4d);
+        value.Set(translation(1.0), UsdTimeCode(frames[0]));
+        value.Set(translation(2.0), UsdTimeCode(frames[1]));
+        value.Set(translation(3.0), UsdTimeCode(frames[2]));
+        prim.CreateAttribute(TfToken("inputs:defaultWeight"),
+                             SdfValueTypeNames->Float)
+            .Set(1.0f);
+        prim.CreateRelationship(TfToken("rigExec:moves"))
+            .SetTargets({joint.AppendProperty(TfToken("rest:space"))});
+    };
+    CheckRecomposingLadderFreezes(chained);
+
+    _RecomposingLadderCase still = base;
+    still.label = "a static ladder under a drag";
+    still.varying = false;
+    CheckRecomposingLadderFreezes(still);
+}
+
+// tests/fixtures/computed_ik_space.usda with Master's rest keyed (the
+// space rest testRigExecSolverBake's TestASpaceRestMoveReachesTheSolve
+// moves): the TwoBoneIk arm and the SplineIk tail measure their space from
+// Master's rest, so a job whose Solve did not refresh its space rest from
+// the rests its own rest ops composed would differ from live at 5 and 10.
+void
+TestARecomposedSpaceRestFreezes(const std::string &examplesDir)
+{
+    _RecomposingLadderCase c;
+    c.label = "a keyed space rest";
+    c.stagePath = examplesDir + "/../tests/fixtures/computed_ik_space.usda";
+    c.rig = SdfPath("/IkSpaceAsset/Rig");
+    const SdfPath master("/IkSpaceAsset/Rig/Controls/Master");
+    c.varyingSources = {master.AppendProperty(TfToken("rest:tx")),
+                        master.AppendProperty(TfToken("rest:ry"))};
+    c.edit = [&master](const UsdStageRefPtr &stage) {
+        const UsdPrim prim = stage->GetPrimAtPath(master);
+        const auto key = [&prim](const char *name, double last) {
+            UsdAttribute a = prim.CreateAttribute(TfToken(name),
+                                                  SdfValueTypeNames->Double);
+            a.Set(0.0, UsdTimeCode(1.0));
+            a.Set(last, UsdTimeCode(10.0));
+        };
+        key("rest:ry", 20.0);
+        key("rest:tx", 3.0);
+    };
+    c.frames = {1.0, 5.0, 10.0};
+    c.dragPrim = master;
+    c.dragAttribute = TfToken("rest:ry");
+    c.dragValues[0] = 15.0;
+    c.dragValues[1] = 25.0;
+    c.watched = SdfPath("/IkSpaceAsset/Rig/Joints/Shoulder/Elbow/Wrist");
+    CheckRecomposingLadderFreezes(c);
+
+    // Unkeyed, the ladder recomposes only under the drag, so the Solve
+    // refreshes on the drag and once after its release from changed rest slots,
+    // including in a job frozen while the drag stood.
+    _RecomposingLadderCase still = c;
+    still.label = "a static space rest under a drag";
+    still.edit = nullptr;
+    still.varying = false;
+    still.varyingSources.clear();
+    CheckRecomposingLadderFreezes(still);
+}
+
+// Actual property-result skin assembly and derived extent share the detached
+// body. The exporter and sampler use the original admitted program, never
+// manufactured runtime flags or a replacement numerical expected program.
+static void
+TestFrozenPropertySkinLayoutRecovery()
+{
+    auto stage=MakeTinyRig();
+    const SdfPath rig("/Asset/Rig"), mesh("/Asset/Geom/Mesh_0");
+    const SdfPath pointsPath=mesh.AppendProperty(TfToken("points"));
+    const SdfPath extentPath=mesh.AppendProperty(TfToken("extent"));
+    for(const auto &channel : {std::make_pair("AlongX","tx"),
+                              std::make_pair("AlongY","ty")}) {
+        const auto path=rig.AppendChild(TfToken(channel.first))
+            .AppendProperty(TfToken(std::string("avars:")+channel.second));
+        auto attribute=stage->GetAttributeAtPath(path);
+        CHECK(attribute.Clear());
+        CHECK(attribute.Set(channel.first==std::string("AlongX")?4.0:0.0));
+    }
+    auto extent=stage->GetPrimAtPath(mesh).CreateAttribute(
+        TfToken("extent"),SdfValueTypeNames->Float3Array);
+    CHECK(extent.Set(VtVec3fArray{GfVec3f(-9),GfVec3f(9)}));
+    const auto skin=stage->GetPrimAtPath(SdfPath("/Asset/Rig/Movers/Skin_0"));
+    CHECK(skin.GetAttribute(TfToken("inputs:defaultWeight")).Set(0.5f));
+    const auto channels=stage->DefinePrim(rig.AppendChild(TfToken("Channels")),TfToken("Scope"));
+    const auto envelope=channels.CreateAttribute(TfToken("weight"),SdfValueTypeNames->Float);
+    CHECK(envelope.Set(0.5f));
+    CHECK(skin.GetAttribute(TfToken("inputs:defaultWeight")).SetConnections({envelope.GetPath()}));
+    CHECK(skin.GetAttribute(TfToken("inputs:defaultWeight")).SetMetadata(
+        TfToken("rigExecReadPhase"), std::string("final")));
+    auto weights=skin.GetAttribute(TfToken("rigExec:jointWeights"));
+    const VtFloatArray full(kTinyPointCount*2,0.5f);
+    CHECK(weights.Set(full));
+    for(int frame=1;frame<=6;++frame) {
+        if(frame==3) CHECK(weights.Set(VtFloatArray{0.5f},UsdTimeCode(frame)));
+        else if(frame==4) CHECK(weights.Set(VtFloatArray(),UsdTimeCode(frame)));
+        else if(frame==5) CHECK(weights.Set(SdfValueBlock(),UsdTimeCode(frame)));
+        else CHECK(weights.Set(full,UsdTimeCode(frame)));
+    }
+    auto gain=stage->DefinePrim(rig.AppendPath(SdfPath("Movers/WeightGain")),
+        TfToken("RigExecFloatMathMover"));
+    gain.ApplyAPI(TfToken("RigExecMoverAPI"));
+    CHECK(gain.GetRelationship(TfToken("rigExec:moves")).SetTargets(
+        {envelope.GetPath()}));
+    CHECK(gain.CreateAttribute(TfToken("rigExec:operation"),SdfValueTypeNames->Token)
+        .Set(TfToken("multiply")));
+    auto factor=gain.CreateAttribute(TfToken("inputs:value"),SdfValueTypeNames->Float);
+    for(int frame=1;frame<=6;++frame)
+        CHECK(factor.Set(frame==2?0.5f:1.0f,UsdTimeCode(frame)));
+    CHECK(gain.GetAttribute(TfToken("inputs:defaultWeight")).Set(1.0f));
+    RigExecRigEvaluator evaluator(stage,rig);
+    CHECK(evaluator.Compile());
+    if(!evaluator.GetBakedProgram()) return;
+    RigExecBakeOpts options;options.time=1;
+    RigExecBakeResult baked;std::string error;
+    CHECK(RigExecBakeToBinary(evaluator,options,&baked,&error));
+    auto reader=RigExecRuntimeReader::Open(baked.bytes.data(),baked.bytes.size(),&error);
+    CHECK(reader);if(!reader)return;
+    RigExecInputSampler sampler;CHECK(sampler.Bind(stage,*reader,&error));
+    size_t factorSlot=0;
+    CHECK(reader->FindInput(factor.GetPath().GetString(),&factorSlot));
+    if(reader->FindInput(factor.GetPath().GetString(),&factorSlot)) {
+        const auto before=reader->GetInputValue(factorSlot);
+        RrInputValue wrong;wrong.tag=RrInputTag::Matrix4d;
+        CHECK(!reader->SetInputAt(factorSlot,wrong,&error));
+        CHECK(!error.empty());
+        const auto after=reader->GetInputValue(factorSlot);
+        CHECK(before.tag==after.tag && before.f32==after.f32);
+    }
+    CHECK(evaluator.Evaluate(UsdTimeCode(1)).valid);
+    const auto &B=evaluator.GetBakedProgram()->GetStepGraph();
+    bool walkedSkin=false,derivedExtent=false;
+    for(const auto &chain:B.chains) {
+        for(const auto &revision:chain.revisions)
+            if(revision.op==RigExecRevisionOp::Skin)
+                walkedSkin |= std::any_of(revision.leaves.walks.begin(),
+                    revision.leaves.walks.end(),[](int walk){return walk>=0;});
+        for(const auto &derived:chain.derived)
+            derivedExtent |= derived.target==extentPath;
+    }
+    CHECK(walkedSkin && derivedExtent);
+    std::shared_ptr<const RigExecFrozenProgram> frozen;
+    CHECK(RigExecFreezeProgram(evaluator,&frozen,&error));
+    if(!frozen)return;
+    auto workspace=RigExecCreateFrozenWorkspace(frozen);CHECK(workspace);
+    RigExecFrozenEvalContext context;
+    context.frozen=frozen.get();context.workspace=workspace.get();
+    context.epochDigest=evaluator.GetBindingEpochDigest();
+    context.slotCount=evaluator.GetBakedProgram()->GetProviderCount();
+    const auto checkRuntime=[&](const RigExecRigPose &pose) {
+        bool sawPoints=false,sawExtent=false;
+        for(const auto &output:reader->GetPoints()) {
+            sawPoints |= output.path==pointsPath.GetString();
+            sawExtent |= output.path==extentPath.GetString();
+            const auto found=pose.movedProperties.find(SdfPath(output.path));
+            CHECK(found!=pose.movedProperties.end());
+            if(found==pose.movedProperties.end())continue;
+            CHECK(found->second.IsHolding<VtVec3fArray>());
+            if(!found->second.IsHolding<VtVec3fArray>())continue;
+            const auto &values=found->second.Get<VtVec3fArray>();
+            CHECK(values.size()==output.points.size());
+            for(size_t k=0;k<std::min(values.size(),output.points.size());++k)
+                for(int axis=0;axis<3;++axis)
+                    CHECK(values[k][axis]==output.points[k][axis]);
+        }
+        CHECK(sawPoints && sawExtent);
+        CHECK(reader->GetDiagnostics()==pose.diagnostics);
+    };
+    const auto raw=stage->GetAttributeAtPath(pointsPath);
+    VtVec3fArray original;CHECK(raw.Get(&original));
+    for(int frame=1;frame<=6;++frame) {
+        RigExecFrameInputs inputs;
+        CHECK(RigExecSampleFrameInputs(evaluator,UsdTimeCode(frame),{},&inputs,&error));
+        context.varyingInputCount=inputs.values.size();
+        RigExecFrozenRunReport report;
+        const auto detached=RigExecEvaluateFrozen(context,inputs,
+            RigExecMakeProductionStepRunner(),nullptr,rig,&report);
+        const auto live=evaluator.Evaluate(UsdTimeCode(frame));
+        CHECK(report.ran && detached.valid && live.valid);
+        CheckPosesBitIdentical("skin property/layout recovery",live,detached);
+        CHECK(sampler.Apply(UsdTimeCode(frame),reader.get(),&error));
+        CHECK(reader->Execute(&error));checkRuntime(live);
+        const auto output=live.movedProperties.find(pointsPath);
+        CHECK(output!=live.movedProperties.end());
+        if(output==live.movedProperties.end())continue;
+        CHECK(output->second.IsHolding<VtVec3fArray>());
+        if(!output->second.IsHolding<VtVec3fArray>())continue;
+        const auto &values=output->second.Get<VtVec3fArray>();
+        CHECK(values.size()==original.size());
+        const float shift=frame==2?0.5f:(frame>=3 && frame<=5?0.0f:1.0f);
+        for(size_t k=0;k<std::min(values.size(),original.size());++k)
+            CHECK(values[k]==original[k]+GfVec3f(shift,0,0));
+        const auto derived=live.movedProperties.find(extentPath);
+        CHECK(derived!=live.movedProperties.end());
+        if(derived!=live.movedProperties.end())
+            CHECK(derived->second==VtValue(VtVec3fArray{
+                GfVec3f(shift,-1.75f,-0.875f),GfVec3f(3.5f+shift,0,0)}));
+        if(frame>=3 && frame<=5) CHECK(!live.diagnostics.empty());
+        // Same snapshot, source vector, and workspace: no producer may read
+        // stale previous-frame property opinions or change a clean result.
+        RigExecFrozenRunReport heldReport;
+        const auto held=RigExecEvaluateFrozen(context,inputs,
+            RigExecMakeProductionStepRunner(),nullptr,rig,&heldReport);
+        CHECK(heldReport.ran);
+        CheckPosesBitIdentical("skin held detached",detached,held);
+        for(const auto &entry:heldReport.region) {
+            CHECK(entry.step<B.steps.size());
+            if(entry.step<B.steps.size())CHECK(B.steps[entry.step].isSource);
+        }
+        const auto heldLive=evaluator.Evaluate(UsdTimeCode(frame));
+        CheckPosesBitIdentical("skin held live",live,heldLive);
+        CHECK(reader->Execute(&error));checkRuntime(live);
+    }
+}
+
+static void
+TestFrozenEnvelopeVolumesRecovery(const std::string &examples)
+{
+    auto stage=UsdStage::Open(examples+"/../tests/fixtures/oneloop_s9_envelope_volumes.usda");
+    CHECK(stage);if(!stage)return;
+    const SdfPath rig("/EnvelopeAsset/Rig");
+    RigExecRigEvaluator evaluator(stage,rig);CHECK(evaluator.Compile());
+    CHECK(evaluator.Evaluate(UsdTimeCode(1)).valid);
+    if(!evaluator.GetBakedProgram())return;
+    std::shared_ptr<const RigExecFrozenProgram> frozen;std::string error;
+    CHECK(RigExecFreezeProgram(evaluator,&frozen,&error));if(!frozen)return;
+    auto workspace=RigExecCreateFrozenWorkspace(frozen);
+    RigExecFrozenEvalContext context;context.frozen=frozen.get();context.workspace=workspace.get();
+    context.epochDigest=evaluator.GetBindingEpochDigest();
+    context.slotCount=evaluator.GetBakedProgram()->GetProviderCount();
+    for(int frame=1;frame<=6;++frame) {
+        RigExecFrameInputs inputs;
+        CHECK(RigExecSampleFrameInputs(evaluator,UsdTimeCode(frame),{},&inputs,&error));
+        context.varyingInputCount=inputs.values.size();
+        RigExecFrozenRunReport report;
+        const auto pose=RigExecEvaluateFrozen(context,inputs,
+            RigExecMakeProductionStepRunner(),nullptr,rig,&report);
+        const auto live=evaluator.Evaluate(UsdTimeCode(frame));
+        CHECK(report.ran && pose.valid && live.valid);
+        CheckPosesBitIdentical("envelope volume phase recovery",live,pose);
+        const auto scalar=pose.movedProperties.find(SdfPath("/EnvelopeAsset/Rig/Channels.base"));
+        CHECK(scalar!=pose.movedProperties.end());
+        if(scalar!=pose.movedProperties.end())CHECK(scalar->second==VtValue(
+            frame==1 || frame==3 || frame==6?10.0f:0.0f));
+        RigExecFrozenRunReport heldReport;
+        const auto held=RigExecEvaluateFrozen(context,inputs,
+            RigExecMakeProductionStepRunner(),nullptr,rig,&heldReport);
+        CHECK(heldReport.ran);
+        CheckPosesBitIdentical("held envelope volume",pose,held);
+        const auto &graph=evaluator.GetBakedProgram()->GetStepGraph();
+        for(const auto &entry:heldReport.region) {
+            CHECK(entry.step<graph.steps.size());
+            if(entry.step<graph.steps.size())CHECK(graph.steps[entry.step].isSource);
+        }
+    }
+}
+
+// RIGEXEC_VERIFY_CLONE_KEYS set to \p on for one scope (a freeze inside it
+// reads it), and put back as it was after.
+struct _CloneKeysJudgeScope {
+    explicit _CloneKeysJudgeScope(bool on)
+        : before(TfGetenv("RIGEXEC_VERIFY_CLONE_KEYS"))
+    {
+        TfSetenv("RIGEXEC_VERIFY_CLONE_KEYS", on ? "1" : "0");
+    }
+    ~_CloneKeysJudgeScope()
+    {
+        if (before.empty()) {
+            TfUnsetenv("RIGEXEC_VERIFY_CLONE_KEYS");
+        } else {
+            TfSetenv("RIGEXEC_VERIFY_CLONE_KEYS", before);
+        }
+    }
+    const std::string before;
+};
+
+// The chain revision \p mover runs, or null.
+static const RigExecBakedProgramImpl::GeomRevision *
+_RevisionOf(const RigExecBakedProgramImpl &B, const SdfPath &mover)
+{
+    for (const auto &chain : B.chains) {
+        for (const auto &revision : chain.revisions) {
+            if (revision.moverPath == mover) {
+                return &revision;
+            }
+        }
+    }
+    return nullptr;
+}
+
+// The capacity of every idle scratch buffer a clone lets go of.
+static size_t
+_HeldScratch(const RigExecBakedProgramImpl &B)
+{
+    size_t held = 0;
+    const auto revisionScratch =
+        [&held](const RigExecBakedProgramImpl::GeomRevision &revision) {
+            held += revision.resolveScratch.capacity() +
+                    revision.deltasSpare.capacity() +
+                    revision.wholeEntering.capacity();
+            for (const RigExecBakedPointsBinding &binding :
+                 revision.pointBindings) {
+                held += binding.gather.capacity();
+            }
+            for (const auto &channel : revision.blendChannels) {
+                for (const auto &sample : channel.samples) {
+                    held += sample.pointBinding.gather.capacity();
+                }
+            }
+        };
+    for (const auto &chain : B.chains) {
+        for (const auto &revision : chain.revisions) {
+            revisionScratch(revision);
+        }
+        for (const auto &derived : chain.derived) {
+            revisionScratch(derived.revision);
+        }
+    }
+    for (const auto &field : B.weightFields) {
+        held += field.enteringGather.capacity();
+        for (const auto &input : field.pointReads) {
+            held += input.binding.gather.capacity();
+        }
+    }
+    for (const auto &solver : B.solvers) {
+        held += solver.ribbonPointsBinding.gather.capacity();
+    }
+    return held;
+}
+
+// The blend face (examples/04_BlendShapeFace.usda) with Smile's weight keyed
+// in the session layer at frames 1-5, frame 5 repeating frame 3's weight.
+// The session's time samples are stronger than the root layer's spline;
+// BrowRaise holds its spline's first value (0) over those frames.
+static UsdStageRefPtr
+_KeyedBlendFace(const std::string &examplesDir)
+{
+    UsdStageRefPtr stage =
+        UsdStage::Open(examplesDir + "/04_BlendShapeFace.usda");
+    if (!stage) {
+        return stage;
+    }
+    stage->SetEditTarget(stage->GetSessionLayer());
+    const UsdAttribute weight = stage->GetAttributeAtPath(
+        SdfPath("/FaceAsset/Rig/BlendInputs/Smile.inputs:weight"));
+    CHECK(weight);
+    const float keys[5] = {0.2f, 0.6f, 0.9f, 0.4f, 0.9f};
+    for (int frame = 1; frame <= 5; ++frame) {
+        CHECK(weight.Set(keys[frame - 1], UsdTimeCode(double(frame))));
+    }
+    return stage;
+}
+
+static VtVec3fArray
+_FaceCardPoints(const RigExecRigPose &pose)
+{
+    const auto found =
+        pose.movedProperties.find(SdfPath("/FaceAsset/Geom/FaceCard.points"));
+    if (found == pose.movedProperties.end() ||
+        !found->second.IsHolding<VtVec3fArray>()) {
+        return VtVec3fArray();
+    }
+    return found->second.UncheckedGet<VtVec3fArray>();
+}
+
+static bool
+_SamePointBits(const VtVec3fArray &a, const VtVec3fArray &b)
+{
+    return a.size() == b.size() &&
+           (a.empty() ||
+            std::memcmp(a.cdata(), b.cdata(), a.size() * sizeof(GfVec3f)) ==
+                0);
+}
+
+// A freeze shares the live program's cone table rather than copying it, and
+// so does every lane cloned from the snapshot. A rebuild publishes a new
+// table; the snapshot and its lane keep the one they share.
+void
+TestAFreezeSharesTheConeTable(const std::string &examplesDir)
+{
+    UsdStageRefPtr stage = UsdStage::Open(examplesDir + "/biped/Biped.usda");
+    CHECK(stage);
+    if (!stage) {
+        return;
+    }
+    SdfPath rig;
+    for (const UsdPrim &prim : stage->TraverseAll()) {
+        if (prim.GetTypeName() == "RigExecRoot") {
+            rig = prim.GetPath();
+            break;
+        }
+    }
+    CHECK(!rig.IsEmpty());
+    if (rig.IsEmpty()) {
+        return;
+    }
+    RigExecRigEvaluator evaluator(stage, rig);
+    std::vector<std::string> errors;
+    CHECK(evaluator.Compile(&errors));
+    CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
+    const RigExecBakedProgram *program = evaluator.GetBakedProgram();
+    CHECK(program != nullptr);
+    if (!program) {
+        return;
+    }
+    const RigExecBakedProgramImpl &live = program->GetStepGraph();
+    const size_t clusters = live.clustering.clusters.size();
+    CHECK(clusters > 0);
+    CHECK(live.cones.cone != nullptr);
+    CHECK(live.cones.Cone().size() == clusters);
+    const void *const table = live.cones.cone.get();
+    std::shared_ptr<const RigExecFrozenProgram> frozen;
+    std::string error;
+    CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
+    if (!frozen) {
+        std::printf("FAIL cone sharing: freeze refused: %s\n", error.c_str());
+        ++failures;
+        return;
+    }
+    CHECK(frozen->program.cones.cone.get() == table);
+    auto lane = std::make_unique<RigExecBakedProgramImpl>();
+    frozenDetail::_CloneImpl(frozen->program, lane.get(),
+                             frozenDetail::_CloneVerdict::Inherit);
+    CHECK(lane->cones.cone.get() == table);
+
+    const size_t builds = evaluator.GetBakedProgramBuildCount();
+    CHECK(evaluator.Compile(&errors));
+    CHECK(evaluator.GetBakedProgramBuildCount() > builds);
+    const RigExecBakedProgram *rebuilt = evaluator.GetBakedProgram();
+    CHECK(rebuilt != nullptr);
+    if (rebuilt) {
+        const RigExecBakedProgramImpl &after = rebuilt->GetStepGraph();
+        CHECK(after.cones.cone != nullptr);
+        CHECK(after.cones.cone.get() != table);
+        CHECK(after.cones.Cone().size() == after.clustering.clusters.size());
+    }
+    CHECK(frozen->program.cones.cone.get() == table);
+    CHECK(frozen->program.cones.Cone().size() == clusters);
+    CHECK(lane->cones.cone.get() == table);
+}
+
+// A lane inherits its snapshot's settled clone verdict, and the judge
+// (RIGEXEC_VERIFY_CLONE_KEYS, read at freeze) agrees with it. A patched
+// snapshot settles its own verdict after the patch, and its jobs equal
+// live. A key edited after the settle is caught by the judge, which counts
+// without deciding, and a settle turns the verdict cold.
+void
+TestAWorkspaceInheritsTheVerdict()
+{
+    _TinyRigOptions options;
+    options.staticTx = true;
+    const SdfPath rig("/Asset/Rig");
+    std::string error;
+    RigExecBackgroundScheduler scheduler;
+
+    UsdStageRefPtr stage = MakeTinyRigWith(options);
+    RigExecRigEvaluator evaluator(stage, rig);
+    CHECK(evaluator.Compile());
+    CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
+    CHECK(evaluator.Evaluate(UsdTimeCode(2.0)).valid);
+    std::shared_ptr<const RigExecFrozenProgram> unjudged, frozen;
+    {
+        const _CloneKeysJudgeScope judge(false);
+        CHECK(RigExecFreezeProgram(evaluator, &unjudged, &error));
+    }
+    {
+        const _CloneKeysJudgeScope judge(true);
+        CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
+    }
+    CHECK(unjudged && frozen);
+    if (!unjudged || !frozen) {
+        std::printf("FAIL inherited verdict: freeze refused: %s\n",
+                    error.c_str());
+        ++failures;
+        return;
+    }
+    CHECK(!unjudged->program.verifyCloneKeys);
+    CHECK(frozen->program.verifyCloneKeys);
+    // A completed run's snapshot: its keys stand.
+    CHECK(frozen->program.opAdapter.everRan);
+    {
+        auto inherited = std::make_unique<RigExecBakedProgramImpl>();
+        frozenDetail::_CloneImpl(frozen->program, inherited.get(),
+                                 frozenDetail::_CloneVerdict::Inherit);
+        auto computed = std::make_unique<RigExecBakedProgramImpl>();
+        frozenDetail::_CloneImpl(frozen->program, computed.get());
+        CHECK(inherited->opAdapter.everRan ==
+              frozen->program.opAdapter.everRan);
+        CHECK(inherited->opAdapter.everRan == computed->opAdapter.everRan);
+        CHECK(inherited->opAdapter.retainedFirst ==
+              computed->opAdapter.retainedFirst);
+        CHECK(inherited->verifyCloneKeys);
+        CHECK(inherited->cloneVerdictMismatches == 0);
+    }
+    RigExecFrameInputs at3;
+    CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(3.0), {}, &at3,
+                                   &error));
+    const RigExecRigPose warmed3 =
+        RunWarmingJob(&evaluator, rig, frozen, at3, &scheduler, nullptr);
+    auto workspace = RigExecCreateFrozenWorkspace(frozen);
+    CHECK(workspace);
+    RigExecRigPose laned3;
+    if (workspace) {
+        RigExecFrozenEvalContext context;
+        context.frozen = frozen.get();
+        context.workspace = workspace.get();
+        context.epochDigest = evaluator.GetBindingEpochDigest();
+        context.slotCount = evaluator.GetBakedProgram()->GetProviderCount();
+        context.varyingInputCount = at3.values.size();
+        laned3 = RigExecEvaluateFrozen(
+            context, at3, RigExecMakeProductionStepRunner(), nullptr, rig);
+    }
+    const RigExecRigPose live3 = evaluator.Evaluate(UsdTimeCode(3.0));
+    CHECK(live3.valid);
+    CheckPosesBitIdentical("an inherited verdict's job, frame 3", live3,
+                           warmed3);
+    CheckPosesBitIdentical("an inherited verdict's workspace, frame 3",
+                           live3, laned3);
+
+    // A key that no longer describes its bytes, on a copy whose verdict was
+    // deferred (the source's, as copied).
+    auto poisoned = std::make_unique<RigExecBakedProgramImpl>();
+    frozenDetail::_CloneImpl(frozen->program, poisoned.get(),
+                             frozenDetail::_CloneVerdict::Defer);
+    CHECK(poisoned->opAdapter.everRan);
+    bool edited = false;
+    for (const auto &op : poisoned->opGraph.ops) {
+        for (const auto id : op.descriptor.writes) {
+            if (!edited && id < poisoned->opAdapter.values.size() &&
+                poisoned->opAdapter.values[size_t(id)].initialized) {
+                poisoned->opAdapter.values[size_t(id)].key.push_back('\x01');
+                edited = true;
+            }
+        }
+    }
+    CHECK(edited);
+    for (const bool judged : {true, false}) {
+        poisoned->verifyCloneKeys = judged;
+        auto inherited = std::make_unique<RigExecBakedProgramImpl>();
+        frozenDetail::_CloneImpl(*poisoned, inherited.get(),
+                                 frozenDetail::_CloneVerdict::Inherit);
+        CHECK(inherited->opAdapter.everRan);
+        CHECK(inherited->cloneVerdictMismatches == (judged ? 1u : 0u));
+    }
+    frozenDetail::_SettleCloneVerdict(poisoned.get());
+    CHECK(!poisoned->opAdapter.everRan);
+    CHECK(poisoned->opAdapter.retainedFirst.empty());
+    {
+        auto inherited = std::make_unique<RigExecBakedProgramImpl>();
+        frozenDetail::_CloneImpl(*poisoned, inherited.get(),
+                                 frozenDetail::_CloneVerdict::Inherit);
+        CHECK(!inherited->opAdapter.everRan);
+        CHECK(inherited->opAdapter.retainedFirst.empty());
+    }
+
+    // A patched snapshot: the patch moves the constant tx under the AlongX
+    // AvarInputs op's key, so its settled verdict is cold, exactly what a
+    // lane computing its own check finds.
+    UsdStageRefPtr patchStage = MakeTinyRigWith(options);
+    RigExecRigEvaluator patchEvaluator(patchStage, rig);
+    CHECK(patchEvaluator.Compile());
+    CHECK(patchEvaluator.Evaluate(UsdTimeCode(1.0)).valid);
+    CHECK(patchEvaluator.Evaluate(UsdTimeCode(2.0)).valid);
+    std::shared_ptr<const RigExecFrozenProgram> base, patched;
+    {
+        const _CloneKeysJudgeScope judge(true);
+        CHECK(RigExecFreezeProgram(patchEvaluator, &base, &error));
+    }
+    CHECK(base != nullptr);
+    if (!base) {
+        return;
+    }
+    CHECK(base->program.opAdapter.everRan);
+    patchStage->GetAttributeAtPath(SdfPath("/Asset/Rig/AlongX.avars:tx"))
+        .Set(TinyTx(2.0) + 1.5);
+    const RigExecBakedProgram *liveProgram = patchEvaluator.GetBakedProgram();
+    CHECK(liveProgram != nullptr);
+    if (!liveProgram) {
+        return;
+    }
+    RigExecFrameInputs patchedAt3;
+    CHECK(RigExecSampleFrameInputs(patchEvaluator, UsdTimeCode(3.0), {},
+                                   &patchedAt3, &error));
+    const RigExecRigPose patchedLive3 = patchEvaluator.Evaluate(UsdTimeCode(3.0));
+    CHECK(patchedLive3.valid);
+    CHECK(RigExecPatchFrozenAvarConstants(*base, *liveProgram, &patched,
+                                          &error));
+    CHECK(patched != nullptr);
+    if (!patched) {
+        return;
+    }
+    CHECK(patched->program.verifyCloneKeys);
+    CHECK(patched->program.avarConstantSerial ==
+          base->program.avarConstantSerial + 1);
+    CHECK(!patched->program.opAdapter.everRan);
+    {
+        auto inherited = std::make_unique<RigExecBakedProgramImpl>();
+        frozenDetail::_CloneImpl(patched->program, inherited.get(),
+                                 frozenDetail::_CloneVerdict::Inherit);
+        auto computed = std::make_unique<RigExecBakedProgramImpl>();
+        frozenDetail::_CloneImpl(patched->program, computed.get());
+        CHECK(inherited->opAdapter.everRan == computed->opAdapter.everRan);
+        CHECK(inherited->cloneVerdictMismatches == 0);
+    }
+    const RigExecRigPose patchedWarm3 = RunWarmingJob(
+        &patchEvaluator, rig, patched, patchedAt3, &scheduler, nullptr);
+    CheckPosesBitIdentical("a patched snapshot's job, frame 3", patchedLive3,
+                           patchedWarm3);
+}
+
+// RevisionStatic sums a blend's deltas into the buffer the packet before
+// last held: the packet's delta array alternates between two buffers and
+// the one it replaced waits as the spare. Every frame's points equal a
+// fresh evaluator's at that frame: frames 3 and 4 are summed into buffers
+// that held other weights' deltas, frame 5 into the one that held frame
+// 3's, whose weight it repeats.
+void
+TestBlendDeltasAlternateBuffers(const std::string &examplesDir)
+{
+    const SdfPath rig("/FaceAsset/Rig");
+    const SdfPath mover("/FaceAsset/Rig/Movers/Geometry/FaceShapes");
+    UsdStageRefPtr stage = _KeyedBlendFace(examplesDir);
+    CHECK(stage);
+    if (!stage) {
+        return;
+    }
+    RigExecRigEvaluator evaluator(stage, rig);
+    std::vector<std::string> errors;
+    CHECK(evaluator.Compile(&errors));
+    std::vector<const GfVec3f *> packet, spare;
+    std::vector<VtVec3fArray> points;
+    for (int frame = 1; frame <= 5; ++frame) {
+        const RigExecRigPose pose =
+            evaluator.Evaluate(UsdTimeCode(double(frame)));
+        CHECK(pose.valid);
+        const RigExecBakedProgram *program = evaluator.GetBakedProgram();
+        const RigExecBakedProgramImpl::GeomRevision *revision =
+            program ? _RevisionOf(program->GetStepGraph(), mover) : nullptr;
+        CHECK(revision != nullptr);
+        if (!revision) {
+            return;
+        }
+        CHECK(revision->op == RigExecRevisionOp::BlendShape);
+        CHECK(!revision->parameters.blendDeltas.empty());
+        packet.push_back(revision->parameters.blendDeltas.data());
+        spare.push_back(revision->deltasSpare.data());
+        points.push_back(_FaceCardPoints(pose));
+        CHECK(!points.back().empty());
+    }
+    // The cone verifier runs every frame twice and puts the first run's
+    // state back, which is the instrument's allocation, not the frame's.
+    if (!RigExecBakedVerifyConesRequested()) {
+        CHECK(packet[2] == packet[4]);
+        CHECK(packet[1] == packet[3]);
+        CHECK(packet[2] != packet[3]);
+        for (size_t k = 1; k < packet.size(); ++k) {
+            CHECK(spare[k] == packet[k - 1]);
+        }
+    }
+    // The weight moved every frame, and frame 5 repeats frame 3's.
+    CHECK(!_SamePointBits(points[2], points[3]));
+    CHECK(_SamePointBits(points[2], points[4]));
+    for (int frame = 1; frame <= 5; ++frame) {
+        RigExecRigEvaluator fresh(stage, rig);
+        CHECK(fresh.Compile(&errors));
+        const RigExecRigPose pose = fresh.Evaluate(UsdTimeCode(double(frame)));
+        CHECK(pose.valid);
+        if (!_SamePointBits(_FaceCardPoints(pose),
+                            points[size_t(frame - 1)])) {
+            std::printf("FAIL blend delta buffers: frame %d differs from a "
+                        "fresh evaluator's\n", frame);
+            ++failures;
+        }
+    }
+}
+
+// A freeze, and every lane cloned from it, lets go of the idle scratch the
+// live program holds -- the blend delta spare, the resolve, entering and
+// gather buffers -- and the snapshot's job still equals live bit for bit.
+void
+TestAClonesDropsIdleScratch(const std::string &examplesDir)
+{
+    const SdfPath rig("/FaceAsset/Rig");
+    const SdfPath mover("/FaceAsset/Rig/Movers/Geometry/FaceShapes");
+    UsdStageRefPtr stage = _KeyedBlendFace(examplesDir);
+    CHECK(stage);
+    if (!stage) {
+        return;
+    }
+    RigExecRigEvaluator evaluator(stage, rig);
+    std::vector<std::string> errors;
+    CHECK(evaluator.Compile(&errors));
+    for (int frame = 1; frame <= 3; ++frame) {
+        CHECK(evaluator.Evaluate(UsdTimeCode(double(frame))).valid);
+    }
+    const RigExecBakedProgram *program = evaluator.GetBakedProgram();
+    CHECK(program != nullptr);
+    if (!program) {
+        return;
+    }
+    // Not vacuous: after its second packet the live revision holds a spare.
+    const RigExecBakedProgramImpl::GeomRevision *live =
+        _RevisionOf(program->GetStepGraph(), mover);
+    CHECK(live != nullptr);
+    CHECK(live && live->deltasSpare.capacity() > 0);
+    CHECK(_HeldScratch(program->GetStepGraph()) > 0);
+    std::shared_ptr<const RigExecFrozenProgram> frozen;
+    std::string error;
+    CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
+    if (!frozen) {
+        std::printf("FAIL clone scratch: freeze refused: %s\n",
+                    error.c_str());
+        ++failures;
+        return;
+    }
+    auto lane = std::make_unique<RigExecBakedProgramImpl>();
+    frozenDetail::_CloneImpl(frozen->program, lane.get(),
+                             frozenDetail::_CloneVerdict::Inherit);
+    const RigExecBakedProgramImpl *const clones[] = {&frozen->program,
+                                                     lane.get()};
+    for (const RigExecBakedProgramImpl *clone : clones) {
+        CHECK(_RevisionOf(*clone, mover) != nullptr);
+        CHECK(_HeldScratch(*clone) == 0);
+    }
+    RigExecBackgroundScheduler scheduler;
+    RigExecFrameInputs at4;
+    CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(4.0), {}, &at4,
+                                   &error));
+    const RigExecRigPose warmed4 =
+        RunWarmingJob(&evaluator, rig, frozen, at4, &scheduler, nullptr);
+    const RigExecRigPose live4 = evaluator.Evaluate(UsdTimeCode(4.0));
+    CHECK(live4.valid);
+    CheckPosesBitIdentical("a clone without its idle scratch, frame 4", live4,
+                           warmed4);
+}
+
 int
 main(int argc, char **argv)
 {
+    TestFrozenPropertySkinLayoutRecovery();
+    if(argc>1)TestFrozenEnvelopeVolumesRecovery(argv[1]);
     TestValuesAreFoundByPath();
     TestAValuelessSourceIsStillRecorded();
     TestTheFirstSampleAtAPathWins();
@@ -3559,8 +8466,17 @@ main(int argc, char **argv)
     TestSamplerMatchesLiveReads();
     TestDigestMovesWithControls();
     TestProductionRunnerIsBitIdenticalToLive();
+    TestNestedSpaceSwitchesWarmBitIdentical();
+    TestAHeldFrameJobServesItsOwnDrag();
     TestChainedRigWarmsBitIdentical();
-    TestChainHookDeclinesWeightObjects();
+    TestRangeChainWarmsBitIdentical();
+    TestPhasedReadsWarmBitIdentical();
+    TestBlinkDragWarmsAsReleased();
+    TestBlinkDragEdgesWarmBitIdentical();
+    TestAPropertyEnvelopeFreezes();
+    TestPhasedReadDragRulesFrozen();
+    TestAChainTargetOwnValueKeyIsDistinct();
+    TestAChainMoverInputMovesTheDigest();
     TestSessionBindingsMatchFreshBind();
     TestBurstCacheMatchesPinnedSampling();
     TestBurstCacheWarmsBitIdentical();
@@ -3569,6 +8485,16 @@ main(int argc, char **argv)
     TestBurstDigestOrderFallback();
     TestBurstBuildDeclinesUnplaceable();
     TestStillCurrentDetectsConstantEdit();
+    TestConstantHeadLeavesRideASharedTable();
+    TestStaticLeavesFollowEdits();
+    // Held source-backed, base and blend reads.
+    TestASourceBackedEditReachesTheNextVector();
+    if (argc > 1) {
+        TestTheSamplerServesSourceBackedReads(argv[1]);
+        TestTheSamplerServesStaticBasesAndBlends(argv[1]);
+        TestABurstRereadsAConnectedAnimatedWeight(argv[1]);
+    }
+    TestOverridePathsTravelWithTheJob();
     TestPatchFrozenAvarConstants();
     if (argc > 1) {
         TestBipedWarmsBitIdentical(argv[1]);
@@ -3576,12 +8502,15 @@ main(int argc, char **argv)
         TestStackAnimWarmsBitIdentical(argv[1]);
         TestKeyedOperatorInputsWarmBitIdentical(argv[1]);
         TestStackAnimWarmsBitIdenticalAtSweepDistance(argv[1]);
+        TestSparseRawDefaultFrozenLifecycle();
         TestBlendFaceWarmsBitIdentical(argv[1]);
         TestLatticeStackWarmsBitIdentical(argv[1]);
+        TestFrozenAssemblesFromLeaves(argv[1]);
         TestSurfaceDrapeWarmsBitIdentical(argv[1]);
         TestRibbonSpineWarmsBitIdentical(argv[1]);
         TestArmRigWarmsBitIdentical(argv[1]);
         TestReadPhasesWarmBitIdentical(argv[1]);
+        TestPointFinalAvailabilitySurvivesRetainedJobs(argv[1]);
         TestConnectionReadPhasesWarmBitIdentical(argv[1]);
         TestAimXformTurretWarmsBitIdentical(argv[1]);
         TestAimtestWarmsBitIdentical(argv[1]);
@@ -3593,15 +8522,25 @@ main(int argc, char **argv)
         TestRotParComboWarmsBitIdentical(argv[1]);
         TestAimParComboFlattenedWarmsBitIdentical(argv[1]);
         TestVolumeConstrainedSweepWarmsBitIdentical(argv[1]);
-        TestAFrozenRewarmAfterAFallbackCarriesTheEdit(argv[1]);
+        TestAFrozenRewarmAfterAReleasedOverrideCarriesTheEdit(argv[1]);
         TestAStandingSnapshotPatchedAfterALiveRunCarriesTheEdit(argv[1]);
         TestVolumeWeightsBurstMatchesPlain(argv[1]);
-        TestUnresolvableTargetDeclinesSampling(argv[1]);
+        TestFrozenWeightFramesMatchLive(argv[1]);
+        TestUnavailableTargetSamplesLocalInvalidRoles(argv[1]);
+        TestProjectorSpacesMatchDynamic(argv[1]);
+        TestVolumePlacementsFixtureFreezes(argv[1]);
+        TestFrozenVolumePlacementUsesTheSharedGate(argv[1]);
+        TestFrameRecordFallbacksFreeze(argv[1]);
+        TestSolverCheckpointFreezes(argv[1]);
+        TestPrecedingOwnChainFreezes(argv[1]);
+        TestRecomposingLaddersFreeze(argv[1]);
+        TestARecomposedSpaceRestFreezes(argv[1]);
     } else {
         std::printf("skipping the biped (no examples directory given)\n");
     }
     Test9MeshWarmsBitIdentical();
     TestIterativeMoversWarmBitIdentical();
+    TestFrozenWholeRunSkippingVolumePlacementsPublishesLive();
     TestSurfaceSnapWarmsBitIdentical();
     TestRegularLatticeWarmsBitIdentical();
     Test9MeshWarmsBitIdenticalAtSweepDistance();
@@ -3609,18 +8548,27 @@ main(int argc, char **argv)
     TestFrozenRunIsBitIdentical();
     TestInconsistentRequestsDecline();
     TestGenerationFenceDropsStaleJobs();
-    TestRefusalRigsNeverEnqueue();
+    TestAdmissionAndRefusedJobs();
     TestSerialScopeIsThreadLocal();
     TestArenaIsolation();
     TestConcurrentFrozenRunsAgree();
     TestPurityAuditNamesEveryUnit();
     TestFreezeIntoNullSnapshotRefuses();
-    TestCpuParityModeRefusesFreeze();
-    TestPoseConstraintWeightObjectRefusesFreeze();
+    TestCpuReferenceSnapshotPreservesInputs();
+    TestPoseConstraintWeightFieldFreezes();
+    TestUnboundConstraintArrayKeysIgnoreEmptyRows();
     TestSamplerNullOutDeclines();
     TestBindIntoNullDeclines();
     TestStaleChainBindingsDeclineSampling();
     TestBurstBuildIntoNullDeclines();
+    // Clone verdicts, shared cones, blend delta buffers and
+    // clone scratch.
+    TestAWorkspaceInheritsTheVerdict();
+    if (argc > 1) {
+        TestAFreezeSharesTheConeTable(argv[1]);
+        TestBlendDeltasAlternateBuffers(argv[1]);
+        TestAClonesDropsIdleScratch(argv[1]);
+    }
 
     if (failures) {
         std::printf("%d FAILURE(S)\n", failures);

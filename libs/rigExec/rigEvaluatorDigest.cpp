@@ -5,6 +5,8 @@
 #include "rigEvaluatorConstraints.h"
 #include "parallel.h"
 #include "pathText.h"
+#include "crossDomainInputs.h"
+#include "moverGraph.h"
 #include "movers/moverRegistry.h"
 
 #include "pxr/base/work/dispatcher.h"
@@ -647,6 +649,60 @@ RigExecRigEvaluator::_ComputeStructureDigest(
         }
         digest += '|';
     }
+    digest += '|';
+
+    // Read phases on connections: every connected operator input, the set
+    // Compile resolves (_ForEachConnectedInput). Its record is a function of
+    // its type, its authored phase (absent, or the text), and the
+    // single-source walk up to the first property-chain target -- the
+    // chain targets themselves are the movers segment's -- so the walk is
+    // written to its end, hop by hop with each hop's type, and editing a
+    // phase or rewiring any hop re-epochs the rig.
+    _ForEachConnectedInput(
+        _stage->GetPrimAtPath(_rigPath),
+        [&](const UsdAttribute &input) {
+            digest += pathText(input.GetPath());
+            digest += ':';
+            digest += input.GetTypeName().GetAsToken().GetString();
+            VtValue element;
+            if(input.GetMetadata(TfToken(RigExecInputElementMetadataName),&element)) {
+                digest += "@element=";
+                digest += TfStringify(element);
+            }
+            if (input.HasAuthoredMetadata(phaseField)) {
+                VtValue phase;
+                input.GetMetadata(phaseField, &phase);
+                digest += "@phase=";
+                digest += TfStringify(phase);
+            }
+            SdfPathVector walked{input.GetPath()};
+            SdfPathVector sources = _AuthoredConnections(input);
+            for (;;) {
+                digest += "->";
+                for (const SdfPath &source : sources) {
+                    noteRead(source);
+                    digest += pathText(source);
+                    digest += ',';
+                }
+                if (sources.size() != 1 ||
+                    std::find(walked.begin(), walked.end(), sources[0]) !=
+                        walked.end()) {
+                    break;
+                }
+                const UsdAttribute next =
+                    _stage->GetAttributeAtPath(sources[0]);
+                if (!next) {
+                    digest += "missing";
+                    break;
+                }
+                digest += ':';
+                digest += next.GetTypeName().GetAsToken().GetString();
+                walked.push_back(sources[0]);
+                sources = _AuthoredConnections(next);
+            }
+            digest += '|';
+        },
+        [&noteRead](const SdfPath &prim) { noteRead(prim); });
     digest += '|';
 
     stampDigestRegion("Digest.OutputSets");
@@ -1600,6 +1656,47 @@ RigExecRigEvaluator::_ComputeStructureDigest(
                     digest += authored("extent") ? 'e' : '-';
                     digest += authored("widths") ? 'w' : '-';
                     digest += ',';
+                }
+            }
+            if(const auto *handler=RigExecFindMoverHandler(prim.GetTypeName())) {
+                if(handler->declareExternalInputs) for(const auto &target:targets) {
+                    const auto binding=RigExecResolveRevisionBinding(prim,target,{});
+                    digest += "externalStructure=";
+                    for(const auto &path:binding.externalStructure) {
+                        noteRead(path);digest += pathText(path);digest += ':';
+                        if(path.IsPropertyPath()) {
+                            const auto owner=_stage->GetPrimAtPath(path.GetPrimPath());
+                            const auto attribute=_stage->GetAttributeAtPath(path);
+                            const auto relationship=owner?owner.GetRelationship(path.GetNameToken()):UsdRelationship();
+                            digest += attribute?"attribute:":relationship?"relationship:":"missing:";
+                            if(attribute) {
+                                digest += attribute.GetTypeName().GetAsToken().GetString();
+                                digest += attribute.HasAuthoredValue()?":authored":":fallback";
+                                digest += attribute.GetResolveInfo(UsdTimeCode::Default()).ValueIsBlocked()?":blocked":":readable";
+                                digest += ":variability="+std::to_string(int(attribute.GetVariability()));
+                                digest += ":samples="+std::to_string(attribute.GetNumTimeSamples());
+                                for(const auto &source:_AuthoredConnections(attribute)) {
+                                    noteRead(source);digest += "->"+pathText(source);
+                                }
+                            } else if(relationship) {
+                                SdfPathVector sources;relationship.GetForwardedTargets(&sources);
+                                noteTargets(owner,path.GetNameToken(),sources,false);
+                                for(const auto &source:sources) digest += "->"+pathText(source);
+                            }
+                        } else {
+                            const auto structuralPrim=_stage->GetPrimAtPath(path);
+                            if(!structuralPrim) digest += "missing";
+                            else for(const auto &descendant:UsdPrimRange(structuralPrim,UsdPrimAllPrimsPredicate)) {
+                                noteRead(descendant.GetPath());
+                                digest += pathText(descendant.GetPath())+":"+descendant.GetTypeName().GetString();
+                                digest += descendant.IsActive()?"active":"inactive";
+                                for(const auto &child:descendant.GetAllChildren())
+                                    digest += ">"+pathText(child.GetPath());
+                                digest += ',';
+                            }
+                        }
+                        digest += '|';
+                    }
                 }
             }
             digest += ';';

@@ -4,7 +4,8 @@
 #define RIGEXEC_RUNTIME_POSE_INTERNAL_H
 
 #include "store.h"
-#include "rigExecMath/limbStretchKernel.h"
+#include "rigExecMath/autoClavicleKernel.h"
+#include "rigExecGraph/poseArithmetic.h"
 #include <array>
 #include <cmath>
 #include <string>
@@ -23,6 +24,10 @@ struct RrPoseSolverState;
 
 struct RrPoseScratch;
 
+/// The rest frames the pose scratch holds per slot: the constants until a
+/// prologue recomposes the ladder, then what it composed.
+const std::vector<RrPointFrame> &RrPoseRestFrames(const RrProgram *program);
+
 namespace runtimePoseDetail {
 
 RrMat4d
@@ -37,8 +42,7 @@ _RrComposeAvars(double tx, double ty, double tz, double sx, double sy,
                 const std::string &order);
 
 bool
-_RrLive(const RrProgram *program, const RigExecWireInput &input,
-        int32_t uid);
+_RrLive(const RrProgram *program, const RigExecWireInput &read);
 
 bool
 _RrLiveSolver(const RrProgram *program, size_t solver, int field);
@@ -189,6 +193,10 @@ void
 _RrSwingTwist(const RrQuatd &q, const RrVec3d &axis,
               RrQuatd *swing, RrQuatd *twist);
 
+// RigExecTransformFrame: every landmark carried by \p space, nothing else.
+RrPointFrame
+_RrTransformFrame(const RrPointFrame &frame, const RrMat4d &space);
+
 bool
 _RrRunConstraintStep(RrProgram *program, size_t step,
                      std::string *error);
@@ -213,11 +221,10 @@ struct RrPoseTwoBoneIkParams {
     double stretch = 1;
     double softness = 0;
     double preferredBendRadians = 0;
-    // RigExecTwoBoneIkParams' limb fields, field for field.
-    bool softDistancePolicy = false;
-    rigExec::RigExecLimbStretch limb;
-    double twistRadians = 0;
-    bool scaleSegments = false;
+    bool softDistancePolicy=false,scaleSegments=false;
+    RigExecLimbStretch limb;
+    double twistRadians=0;
+    RrMat4d space = RrMat4d(1.0);
 };
 
 // RigExecSplineIkRest, field for field.
@@ -243,6 +250,8 @@ struct RrPoseSolverState {
     RrPoseTwoBoneIkParams ikParams;
     double upperLengthBase = 0;
     double lowerLengthBase = 0;
+    // rigExec:space's rest landmarks (TwoBoneIk, SplineIk).
+    std::array<RrVec3d, 4> spaceRest;
     RrPoseSplineIkRest splineRest;
     std::vector<std::array<RrVec3d, 4>> splineJointRests;
     std::array<RrVec3d, 4> twistStartRest;
@@ -256,6 +265,9 @@ struct RrPoseScratch {
     // baked program's restM/restPts/restFrames/selfD/parentDinv/rotOrder/
     // posedAuthored(M)/restRoundTrip/defaultRoundTrip tables.
     std::vector<RrMat4d> restM, selfD, parentDinv, posedAuthoredM;
+    std::vector<RrMat4d> posedD, parentSpaceM;
+    std::vector<std::vector<RigExecSpaceCheckpointInputT<RrMat4d>>> checkpointInputs;
+    std::vector<char> parentSpaceAuthored;
     std::vector<RrMat4d> restRoundTrip, defaultRoundTrip;
     std::vector<std::array<RrVec3d, 4>> restPts;
     std::vector<RrPointFrame> restFrames;
@@ -266,10 +278,13 @@ struct RrPoseScratch {
     std::vector<unsigned char> rotationSign;
     std::vector<RrMat4d> lastRestM, lastSelfD, lastParentDinv;
     std::vector<RrMat4d> lastPosedAuthoredM;
+    std::vector<RrMat4d> lastPosedD, lastParentSpaceM;
+    std::vector<char> lastParentSpaceAuthored;
+    std::vector<unsigned char> lastRotationSign;
     std::vector<char> lastPosedAuthored;
     std::vector<uint32_t> lastRotOrder;
-    bool ladderRecomputed = false;
-    bool ladderDisturbed = false;
+    // A drag stood last run, so this run writes the constant avars back.
+    bool avarsDisturbed = false;
     // Interpolator enables, read by the prologue so the step reads no
     // input table.
     std::vector<char> interpEnabled;
@@ -282,17 +297,13 @@ struct RrPoseScratch {
     std::vector<std::vector<double>> interpScratch;
     // Solver live rests and per-run elements.
     std::vector<RrPoseSolverState> solvers;
-    // Commit record flags, written by the head and read by CommitApply.
+    // A constraint commit's exit flags, written by its constraint step on
+    // every run and read by the commit's FrameMatrix steps. Set to 1 at
+    // Open and never reset at the head of a run.
     std::vector<char> recordAfter, recordEveryTarget;
     // Constraint envelope scratch, one step's own storage.
     std::vector<std::vector<float>> weightScratch;
     std::vector<std::string> weightError;
-    // Weight-object path id -> index into the geometry weight objects.
-    std::unordered_map<uint32_t, size_t> weightIndex;
-    // The captured constraint envelopes, for the resolve arm the
-    // weight packets cannot serve (masked weights, failed capture).
-    std::vector<float> constraintWeights;
-    std::vector<char> constraintHaveWeight;
     // Geometry-domain constraint deltas. Conceptually framework-visible
     // (the Matrix revision reads them), but RrStore has no home for
     // them, so they live here until the framework grows one.

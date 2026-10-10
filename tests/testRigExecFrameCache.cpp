@@ -12,7 +12,8 @@
 //     RigExecRefusalControlDigest is the D7 time-plus-serial fallback for
 //     rigs with no baked program: the frame moves it, an edit moves it at
 //     every frame, a drag moves it, and it never equals a sampled digest
-//     under the same epoch.
+//     under the same epoch. Both fold the frame's upstream values as a
+//     block of their own, which folds nothing when there are none.
 //   * LRU. A per-rig byte cap with least-recently-used eviction, accounted
 //     in RigExecFrameCachePoseBytes; oversized entries are dropped, never
 //     partially stored.
@@ -22,10 +23,22 @@
 //   * DROP. Corrupt input is declined, never served: invalid poses,
 //     oversized entries, and null out-params all miss.
 #include "rigExec/frameCache.h"
+#include "rigExec/frameCacheSparsity.h"
 #include "rigExec/frozenContext.h"
+
+// These headers only name the baked program's implementation and the
+// frozen snapshot, so editing either rebuilds just the sources that read
+// them.
+#if defined(RIGEXEC_BAKED_PROGRAM_IMPL_H) || defined(RIGEXEC_FROZEN_PROGRAM_H)
+#error "a frame-cache or frozen-context header includes a program definition"
+#endif
+
+#include "pxr/base/gf/matrix4d.h"
+#include "pxr/base/vt/types.h"
 
 #include <atomic>
 #include <cstdio>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
@@ -527,6 +540,132 @@ TestDigestibleFlagsUnhashableValues()
     CHECK(RigExecControlStateDigestible(plain, {MakeOverride("/Rig/C", 1.0)}));
 }
 
+// The recorded fold order and the static table's level-1s are a faster
+// route to the plain digest, never another fold: a vector carrying both
+// digests and classifies exactly as its copy without them, first-win
+// duplicates, valueless and blocked samples, overrides, upstream values and
+// the burst route included. A vector whose path sequence moved since the
+// order was recorded, or a mark the table does not hold at its path, folds
+// plainly; and a marked sample folds its entry's level-1, which is why the
+// samplers serve entries verbatim.
+void
+TestRecordedOrderAndStaticTableFoldAsPlain()
+{
+    auto table = std::make_shared<RigExecFrozenStaticSamples>();
+    const auto entry = [](RigExecFrozenStaticSamples *t, const char *path,
+                          const VtValue &value, bool hasValue, bool blocked) {
+        RigExecSampledInput sample;
+        sample.path = SdfPath(path);
+        sample.value = value;
+        sample.hasValue = hasValue;
+        sample.valueBlocked = blocked;
+        sample.staticSample = int32_t(t->samples.size());
+        t->level1.push_back(RigExecSampleDigest(sample));
+        t->digestible.push_back(RigExecSampleDigestible(sample) ? 1 : 0);
+        t->samples.push_back(sample);
+    };
+    entry(table.get(), "/Rig/B.rigExec:providerRaw:rest:tx", VtValue(0.5),
+          true, false);
+    entry(table.get(), "/Rig/A.rigExec:providerRaw:parent:space",
+          VtValue(GfMatrix4d(2.0)), true, false);
+    entry(table.get(), "/Rig/C.rigExec:providerRaw:avars:rotationOrder",
+          VtValue(TfToken("zxy")), true, false);
+    entry(table.get(), "/Rig/D.rigExec:providerRaw:rest:rz", VtValue(),
+          false, true);
+
+    RigExecFrameInputs inputs;
+    inputs.time = UsdTimeCode(3.0);
+    inputs.Add(SdfPath("/Rig/Z.avars:tx"), VtValue(1.25));
+    for (const RigExecSampledInput &sample : table->samples) {
+        inputs.values.push_back(sample);
+    }
+    inputs.Add(SdfPath("/Rig/A.avars:ty"),
+               VtValue(VtFloatArray{1.0f, -0.0f}));
+    // A later sample at a served path: the served one wins.
+    inputs.Add(SdfPath("/Rig/B.rigExec:providerRaw:rest:tx"), VtValue(9.0));
+    inputs.Add(SdfPath("/Rig/E.inputs:weight"), VtValue(),
+               /*hasValue=*/false);
+    inputs.staticSamples = table;
+    inputs.digestOrder = RigExecRecordFrameDigestOrder(inputs.values);
+    CHECK(RigExecFrameDigestOrderMatches(inputs.digestOrder.get(),
+                                         inputs.values));
+    CHECK(!RigExecFrameDigestOrderMatches(nullptr, inputs.values));
+
+    const auto plainOf = [](const RigExecFrameInputs &v) {
+        RigExecFrameInputs plain = v;
+        plain.staticSamples.reset();
+        plain.digestOrder.reset();
+        return plain;
+    };
+    const RigExecFrameInputs plain = plainOf(inputs);
+    const uint64_t plainDigest = RigExecControlStateDigest(plain);
+    const std::vector<RigExecValueOverride> held{MakeOverride("/Rig/Z", 4.0)};
+    RigExecUpstreamValue up;
+    up.path = SdfPath("/Rig/A.avars:tz");
+    up.value = VtValue(2.0);
+    CHECK(RigExecControlStateDigest(inputs) == plainDigest);
+    CHECK(RigExecControlStateDigest(inputs, held) ==
+          RigExecControlStateDigest(plain, held));
+    CHECK(RigExecControlStateDigest(inputs, held, {up}) ==
+          RigExecControlStateDigest(plain, held, {up}));
+    CHECK(RigExecControlStateDigestible(inputs));
+    CHECK(RigExecControlStateDigestible(plain));
+
+    // The burst route: its first frame records its own order and the next
+    // reuses it, with or without the sampler's.
+    RigExecBurstSampleCache cache;
+    cache.usable = true;
+    CHECK(RigExecControlStateDigestWithBurstCache(inputs, {}, &cache) ==
+          plainDigest);
+    CHECK(RigExecControlStateDigestWithBurstCache(inputs, {}, &cache) ==
+          plainDigest);
+    RigExecFrameInputs unordered = inputs;
+    unordered.digestOrder.reset();
+    CHECK(RigExecControlStateDigestWithBurstCache(unordered, {}, &cache) ==
+          plainDigest);
+
+    // A fresh sample's value moves the digest through the recorded order.
+    RigExecFrameInputs moved = inputs;
+    moved.values[0].value = VtValue(1.5);
+    CHECK(RigExecFrameDigestOrderMatches(moved.digestOrder.get(),
+                                         moved.values));
+    CHECK(RigExecControlStateDigest(moved) ==
+          RigExecControlStateDigest(plainOf(moved)));
+    CHECK(RigExecControlStateDigest(moved) != plainDigest);
+
+    // Another path sequence than the recorded one folds plainly.
+    RigExecFrameInputs grown = inputs;
+    grown.Add(SdfPath("/Rig/F.inputs:x"), VtValue(2.0));
+    CHECK(!RigExecFrameDigestOrderMatches(grown.digestOrder.get(),
+                                          grown.values));
+    CHECK(RigExecControlStateDigest(grown) ==
+          RigExecControlStateDigest(plainOf(grown)));
+    CHECK(RigExecControlStateDigest(grown) != plainDigest);
+
+    // A mark naming an entry at another path is not that entry's.
+    RigExecFrameInputs foreign = inputs;
+    foreign.values[0].staticSample = 1;
+    CHECK(RigExecControlStateDigest(foreign) == plainDigest);
+
+    // A marked sample folds its entry's level-1, never its own bytes.
+    auto skewed = std::make_shared<RigExecFrozenStaticSamples>(*table);
+    skewed->level1[0] ^= 1;
+    RigExecFrameInputs viaSkewed = inputs;
+    viaSkewed.staticSamples = skewed;
+    CHECK(RigExecControlStateDigest(viaSkewed) != plainDigest);
+
+    // An unhashable entry is undigestible through the table, as plainly.
+    auto opaque = std::make_shared<RigExecFrozenStaticSamples>(*table);
+    entry(opaque.get(), "/Rig/G.rigExec:providerRaw:custom",
+          VtValue(Unhashable{3}), true, false);
+    CHECK(!opaque->digestible.back());
+    RigExecFrameInputs undigestible = inputs;
+    undigestible.staticSamples = opaque;
+    undigestible.values.push_back(opaque->samples.back());
+    CHECK(!RigExecControlStateDigestible(undigestible));
+    CHECK(!RigExecControlStateDigestible(plainOf(undigestible)));
+}
+
 // The D7 fallback digest keys the frame plus the stage-edit serial plus the
 // standing overrides: the same frame re-digests equal, another frame digests
 // apart (Default most of all), an edit (a moved serial) digests apart at
@@ -582,6 +721,135 @@ TestRefusalDigestKeysTimeAndOverrides()
     o.value = VtValue(Unhashable{5});
     CHECK(!o.value.CanHash());
     CHECK(!RigExecRefusalControlDigestible({o}));
+}
+
+RigExecUpstreamValue
+MakeUpstream(const char *path, const VtValue &value)
+{
+    return RigExecUpstreamValue{SdfPath(path), value, 0};
+}
+
+// Upstream values are key material in every digest: an entry, a moved
+// value, another path or another type digests apart, an empty list folds
+// nothing, the order given never matters, and the forms without an explicit
+// list fold the vector's own. An unhashable value bypasses the cache.
+void
+TestDigestSeesUpstream()
+{
+    const RigExecFrameInputs plain = MakeInputs({{"/Rig/A", 1.0}});
+    const std::vector<RigExecValueOverride> none;
+    const std::vector<RigExecUpstreamValue> noUpstream;
+    CHECK(RigExecControlStateDigest(plain, none, noUpstream) ==
+          RigExecControlStateDigest(plain, none));
+
+    RigExecFrameInputs placed = plain;
+    placed.upstream = {MakeUpstream("/Rig/U.avars:rz", VtValue(30.0))};
+    CHECK(RigExecControlStateDigest(placed) !=
+          RigExecControlStateDigest(plain));
+    CHECK(RigExecControlStateDigest(placed) ==
+          RigExecControlStateDigest(plain, none, placed.upstream));
+
+    RigExecFrameInputs moved = plain;
+    moved.upstream = {MakeUpstream("/Rig/U.avars:rz", VtValue(31.0))};
+    CHECK(RigExecControlStateDigest(moved) !=
+          RigExecControlStateDigest(placed));
+    RigExecFrameInputs elsewhere = plain;
+    elsewhere.upstream = {MakeUpstream("/Rig/U.avars:ry", VtValue(30.0))};
+    CHECK(RigExecControlStateDigest(elsewhere) !=
+          RigExecControlStateDigest(placed));
+    RigExecFrameInputs retyped = plain;
+    retyped.upstream = {MakeUpstream("/Rig/U.avars:rz", VtValue(30.0f))};
+    CHECK(RigExecControlStateDigest(retyped) !=
+          RigExecControlStateDigest(placed));
+
+    const std::vector<RigExecUpstreamValue> fwd{
+        MakeUpstream("/Rig/U.a", VtValue(1.0)),
+        MakeUpstream("/Rig/U.b", VtValue(2.0))};
+    const std::vector<RigExecUpstreamValue> rev{fwd[1], fwd[0]};
+    CHECK(RigExecControlStateDigest(plain, none, fwd) ==
+          RigExecControlStateDigest(plain, none, rev));
+
+    // The constant fold and the burst form carry the block as well.
+    CHECK(RigExecControlStateDigestWithConstants(plain, none, fwd, 9) ==
+          RigExecFoldConstantDigest(
+              RigExecControlStateDigest(plain, none, fwd), 9));
+    CHECK(RigExecControlStateDigestWithConstants(plain, none, fwd, 9) !=
+          RigExecControlStateDigestWithConstants(plain, none, 9));
+    CHECK(RigExecControlStateDigestWithBurstCache(placed, none, nullptr) ==
+          RigExecControlStateDigest(placed));
+
+    // The refusal digest: the dynamic walk reads upstream values too.
+    CHECK(RigExecRefusalControlDigest(UsdTimeCode(2.0), 7, none, noUpstream) ==
+          RigExecRefusalControlDigest(UsdTimeCode(2.0), 7, none));
+    CHECK(RigExecRefusalControlDigest(UsdTimeCode(2.0), 7, none,
+                                      placed.upstream) !=
+          RigExecRefusalControlDigest(UsdTimeCode(2.0), 7, none));
+    CHECK(RigExecRefusalControlDigest(UsdTimeCode(2.0), 7, none,
+                                      placed.upstream) !=
+          RigExecRefusalControlDigest(UsdTimeCode(2.0), 7, none,
+                                      moved.upstream));
+    CHECK(RigExecRefusalControlDigest(UsdTimeCode(2.0), 7, none,
+                                      placed.upstream) ==
+          RigExecRefusalControlDigest(UsdTimeCode(2.0), 7, none,
+                                      placed.upstream));
+
+    // Digestibility: an unhashable upstream value is a bypass.
+    CHECK(RigExecControlStateDigestible(placed));
+    RigExecFrameInputs unhashable = plain;
+    unhashable.upstream = {MakeUpstream("/Rig/U.x", VtValue(Unhashable{6}))};
+    CHECK(!RigExecControlStateDigestible(unhashable));
+    CHECK(RigExecRefusalControlDigestible(none, placed.upstream));
+    CHECK(!RigExecRefusalControlDigestible(none, unhashable.upstream));
+}
+
+// An upstream array keys by its fold hash: RigExecUpstreamFoldHash folds
+// the type and bytes once (never 0; 0 for a scalar), equal arrays hash
+// equal, and the digest folds the hash, not the bytes, so an entry carrying
+// another hash keys apart even over the same array. One handed over with
+// no hash folds its bytes.
+void
+TestDigestFoldsUpstreamArrayHashes()
+{
+    const RigExecFrameInputs plain = MakeInputs({{"/Rig/A", 1.0}});
+    const VtFloatArray weights{1.0f, 0.5f, 0.25f};
+    const VtFloatArray same{1.0f, 0.5f, 0.25f};
+    const VtFloatArray other{1.0f, 0.5f, 0.75f};
+    CHECK(RigExecUpstreamFoldHash(VtValue(30.0)) == 0);
+    const uint64_t hash = RigExecUpstreamFoldHash(VtValue(weights));
+    CHECK(hash != 0);
+    CHECK(RigExecUpstreamFoldHash(VtValue(same)) == hash);
+    CHECK(RigExecUpstreamFoldHash(VtValue(other)) != hash);
+    // Same bytes, another element type: another hash.
+    CHECK(RigExecUpstreamFoldHash(VtValue(VtIntArray{1, 2, 3})) !=
+          RigExecUpstreamFoldHash(VtValue(VtFloatArray{1.0f, 2.0f, 3.0f})));
+
+    const auto with = [&plain](const VtValue &value, uint64_t foldHash) {
+        RigExecFrameInputs inputs = plain;
+        inputs.upstream = {RigExecUpstreamValue{
+            SdfPath("/Rig/S.rigExec:jointWeights"), value, foldHash}};
+        return RigExecControlStateDigest(inputs);
+    };
+    const uint64_t keyed = with(VtValue(weights), hash);
+    CHECK(keyed != RigExecControlStateDigest(plain));
+    CHECK(with(VtValue(same), hash) == keyed);
+    CHECK(with(VtValue(other), RigExecUpstreamFoldHash(VtValue(other))) !=
+          keyed);
+    // The hash is what folds.
+    CHECK(with(VtValue(weights), hash + 1) != keyed);
+    // No hash: the bytes fold, distinctly from the hashed form.
+    CHECK(with(VtValue(weights), 0) == with(VtValue(same), 0));
+    CHECK(with(VtValue(weights), 0) != with(VtValue(other), 0));
+    // RigExecUpstreamValuesOf hashes an array and leaves a scalar at 0.
+    const std::vector<RigExecUpstreamValue> converted =
+        RigExecUpstreamValuesOf(
+            {RigExecValueOverride{SdfPath("/Rig/S"), TfToken(),
+                                  TfToken("rigExec:jointWeights"),
+                                  VtValue(weights)},
+             RigExecValueOverride{SdfPath("/Rig/U"), TfToken(),
+                                  TfToken("avars:rz"), VtValue(30.0)}});
+    CHECK(converted.size() == 2);
+    CHECK(converted.size() == 2 && converted[0].foldHash == hash &&
+          converted[1].foldHash == 0);
 }
 
 // The cap fits two entries: the third publish evicts the
@@ -855,7 +1123,10 @@ main()
     TestDigestSeesOverrides();
     TestDigestIgnoresTime();
     TestDigestibleFlagsUnhashableValues();
+    TestRecordedOrderAndStaticTableFoldAsPlain();
     TestRefusalDigestKeysTimeAndOverrides();
+    TestDigestSeesUpstream();
+    TestDigestFoldsUpstreamArrayHashes();
     TestLRUEvictsLeastRecentlyUsed();
     TestLookupRefreshesRecency();
     TestOverwriteRefreshesRecency();

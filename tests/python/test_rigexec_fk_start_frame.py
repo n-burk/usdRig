@@ -113,7 +113,7 @@ START_POSES = {
 
 
 def _build(mode, avars, start_avars, with_start, policy=None,
-           chain=CHAIN, evaluation_mode="reference", precompile=True):
+           chain=CHAIN, reference_check=True, precompile=True):
     """Author, pose, compile and evaluate one chain.
 
     mode: None leaves rigExec:controlSpace unauthored; 'parentRelative'
@@ -171,7 +171,7 @@ def _build(mode, avars, start_avars, with_start, policy=None,
     rig = rigexec.Rig(stage, "/Rig")
     if precompile:
         rig.compile()
-    rig.evaluation_mode = evaluation_mode
+    rig.cpu_reference = True
     pose = rig.evaluate(0)
     out = {
         "stage": stage,
@@ -182,8 +182,6 @@ def _build(mode, avars, start_avars, with_start, policy=None,
         "solver": [f.to_matrix4() for f in pose.solver_frames(fk.path)],
         "diagnostics": list(pose.diagnostics),
     }
-    if evaluation_mode == "parity":
-        out["parity_mismatches"] = pose.baked_parity_mismatches
     return out
 
 
@@ -400,18 +398,16 @@ def main():
     print("  policy=parent, no relationship: identical to authored")
 
     # -- 6b. ... in baked and parity evaluation too ------------------------
-    for mode in ("baked", "parity"):
+    for mode in ("graph",):
         got = _build("parentRelative", SCENARIOS["stacked"],
                      START_POSES["start_general"], False,
-                     policy="parent", evaluation_mode=mode)
+                     policy="parent", reference_check=True)
         want = _build("parentRelative", SCENARIOS["stacked"],
                       START_POSES["start_general"], True)
         for i, (a, b) in enumerate(zip(want["joints"], got["joints"])):
             assert _close_vec(a, b, 1e-9), (mode, i, a, b)
         for i, (a, b) in enumerate(zip(want["solver"], got["solver"])):
             assert _close_vec(a, b, 1e-9), (mode, i, a, b)
-        if mode == "parity":
-            assert got["parity_mismatches"] == 0, got["parity_mismatches"]
 
     # -- 7. Authored wins: policy plus the relationship is the
     # relationship alone. Ran twice it would square the start map; ran

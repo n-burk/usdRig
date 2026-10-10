@@ -6,6 +6,8 @@
 // parity-oracle branch, and registers the row that points at them.
 #include "moverRegistry.h"
 #include "moverExecCommon.h"
+#include "../moverGraph.h"
+#include "rigExecMath/geometryKernels.h"
 
 #include "pxr/exec/exec/builtinComputations.h"
 #include "pxr/exec/exec/registerSchema.h"
@@ -21,6 +23,12 @@ using rigExec::RigExecMoverExecTokens;
 PXR_NAMESPACE_USING_DIRECTIVE
 
 namespace {
+const TfToken _oraclePointFrame("rigExec:pointFrame");
+const TfToken _oracleRestFrame("rest");
+
+const TfToken _oracleToken0("rigExec:transform");
+const TfToken _oracleToken1("rigExec:transformSpace");
+
 
 RigExecMoverParameters
 _BuildMatrixMoverParameters(const VdfContext &ctx)
@@ -276,14 +284,14 @@ rigExec::RigExecOracleResult
 _OracleMatrixMover(const rigExec::RigExecMoverOracleContext &ctx)
 {
     using rigExec::RigExecOracleResult;
-    const UsdPrim &prim = ctx.prim;
+    const rigExec::RigExecOraclePrim &prim = ctx.prim;
     const SdfPath &moverPath = ctx.moverPath;
     std::vector<std::string> *diagnostics = ctx.diagnostics;
     VtVec3fArray &points = *ctx.points;
     // p' = q + w (T q - q) (spec §7.4).
     SdfPathVector transforms;
-    if (UsdRelationship rel =
-            prim.GetRelationship(TfToken("rigExec:transform"))) {
+    if (rigExec::RigExecOracleRelationship rel =
+            prim.GetRelationship(_oracleToken0)) {
         rel.GetTargets(&transforms);
     }
     if (transforms.size() != 1) {
@@ -292,11 +300,15 @@ _OracleMatrixMover(const rigExec::RigExecMoverOracleContext &ctx)
             ": transform must have exactly one target");
         return RigExecOracleResult::PassThrough;
     }
-    const bool final =
-        rigExec::RigExecPhaseForInput(prim, "rigExec:transform").kind ==
-        rigExec::RigExecReadPhaseKind::Final;
-    const auto &matrices =
-        final ? ctx.finalProviderMatrices : ctx.baseProviderMatrices;
+    const auto phase = rigExec::RigExecPhaseForInput(prim, "rigExec:transform");
+    const bool final = phase.kind == rigExec::RigExecReadPhaseKind::Final;
+    std::unordered_map<SdfPath,GfMatrix4d,SdfPath::Hash> matrices;
+    for (const char *name : {"rigExec:transform", "rigExec:transformSpace", "rigExec:referenceTransform", "rigExec:referenceTransformSpace"}) {
+        for (const auto &path : rigExec::RigExecRelationshipTargets(prim,name)) {
+            const auto *value = ctx.phasedMatrix ? ctx.phasedMatrix(path,phase,moverPath) : nullptr;
+            if (value) matrices[path] = *value;
+        }
+    }
     const auto matrixIt = matrices.find(transforms[0]);
     if (matrixIt == matrices.end()) {
         diagnostics->push_back(
@@ -318,8 +330,8 @@ _OracleMatrixMover(const rigExec::RigExecMoverOracleContext &ctx)
         return RigExecOracleResult::PassThrough;
     }
     SdfPathVector spaces;
-    if (UsdRelationship rel = prim.GetRelationship(
-            TfToken("rigExec:transformSpace"))) {
+    if (rigExec::RigExecOracleRelationship rel = prim.GetRelationship(
+            _oracleToken1)) {
         rel.GetTargets(&spaces);
     }
     if (!spaces.empty()) {
@@ -336,6 +348,39 @@ _OracleMatrixMover(const rigExec::RigExecMoverOracleContext &ctx)
             return RigExecOracleResult::PassThrough;
         }
         m = rigExec::RigExecMeasureInSpace(m, space);
+        TfToken pointFrame = _oracleRestFrame;
+        prim.GetAttribute(_oraclePointFrame).Get(&pointFrame,ctx.time);
+        if (pointFrame == "posed") {
+            const auto carries = rigExec::RigExecRelationshipTargets(prim,"rigExec:space");
+            if (!carries.empty()) {
+                const auto *carry = ctx.phasedMatrix ? ctx.phasedMatrix(carries[0],phase,moverPath) : nullptr;
+                if (!carry) return RigExecOracleResult::PassThrough;
+                m = carry->GetInverse() * m * *carry;
+            } else {
+                GfVec3d scale(1.0);
+                for (size_t column=0;column<3;++column) {
+                    const double length = GfVec3d(space[0][column],space[1][column],space[2][column]).GetLength();
+                    if (length > 0.0) scale[column] = length;
+                }
+                if (scale != GfVec3d(1.0)) {
+                    GfMatrix4d scaled(1.0),unscaled(1.0);
+                    scaled.SetScale(scale);
+                    unscaled.SetScale(GfVec3d(1.0/scale[0],1.0/scale[1],1.0/scale[2]));
+                    m = unscaled * m * scaled;
+                }
+            }
+            m[0][3]=0.0;m[1][3]=0.0;m[2][3]=0.0;m[3][3]=1.0;
+        }
+    }
+    TfToken weightBlend;
+    prim.GetAttribute(RigExecMoverExecTokens->weightBlendAttr).Get(&weightBlend,ctx.time);
+    if (weightBlend == "radial" && ctx.envelope) {
+        if (ctx.envelope->size() != points.size()) return RigExecOracleResult::PassThrough;
+        for (size_t i=0;i<points.size();++i) {
+            const GfMatrix4d partial=rigExec::RigExecPartialTransform(m,(*ctx.envelope)[i]);
+            points[i]=GfVec3f(partial.TransformAffine(GfVec3d(points[i])));
+        }
+        return RigExecOracleResult::Applied;
     }
     for (size_t i = 0; i < points.size(); ++i) {
         const GfVec3d moved = rigExec::RigExecApplyWeightedMatrix(

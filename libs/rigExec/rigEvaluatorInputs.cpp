@@ -2,6 +2,7 @@
 
 #include "rigEvaluatorInternal.h"
 #include "rigEvaluatorPropertyBindings.h"
+#include "inputReplay.h"
 #include "movers/moverRegistry.h"
 
 #include "pxr/usd/usd/attribute.h"
@@ -18,25 +19,6 @@ using namespace evaluatorDetail;
 namespace {
 
 const TfToken _restPointsAttr("rigExec:restPoints");
-
-// Every authored input computeRestFrame reads.
-// Exactly the seven AttributeValue inputs of the computation
-// (computations.cpp, RIGEXEC_REGISTER_XFORMABLE) -- rest:space and the six
-// rest avars. Its eighth input is the NamespaceAncestor's own
-// computeRestFrame, which reads these same seven on the ancestor, so the
-// closure over a provider and its RigExec ancestors is the closure over this
-// list. Nothing else can move a rest frame, which is what makes both the
-// epoch-constancy test and the override test below exact rather than
-// approximate.
-const std::vector<TfToken> &
-_RestInputNames()
-{
-    static const std::vector<TfToken> names = {
-        TfToken("rest:space"), TfToken("rest:tx"), TfToken("rest:ty"),
-        TfToken("rest:tz"),    TfToken("rest:rx"), TfToken("rest:ry"),
-        TfToken("rest:rz")};
-    return names;
-}
 
 // Whether any override in \p overrides could reach a cached blend sample
 // shape.
@@ -246,10 +228,17 @@ _IsWeightObjectType(const TfToken &typeName)
            typeName == _kCombineWeightType || _IsVolumeWeightType(typeName);
 }
 
-bool
-_IsRestInputName(const TfToken &name)
+std::vector<TfToken>
+_MakeRestInputNames()
 {
-    const std::vector<TfToken> &names = _RestInputNames();
+    return {TfToken("rest:space"), TfToken("rest:tx"), TfToken("rest:ty"),
+            TfToken("rest:tz"),    TfToken("rest:rx"), TfToken("rest:ry"),
+            TfToken("rest:rz")};
+}
+
+bool
+_IsRestInputName(const std::vector<TfToken> &names, const TfToken &name)
+{
     return std::find(names.begin(), names.end(), name) != names.end();
 }
 
@@ -263,14 +252,16 @@ _IsRestInputName(const TfToken &name)
 // attribute, which recomputes it every generation (the same guard the skin
 // layout already applies to its own three attributes).
 bool
-_ProviderRestMightVary(const UsdStageRefPtr &stage, const SdfPath &provider,
+_ProviderRestMightVary(const UsdStageRefPtr &stage,
+                       const std::vector<TfToken> &restInputNames,
+                       const SdfPath &provider,
                        const std::set<SdfPath> &chainTargets)
 {
     const UsdPrim prim = stage ? stage->GetPrimAtPath(provider) : UsdPrim();
     if (!prim) {
         return true;
     }
-    for (const TfToken &name : _RestInputNames()) {
+    for (const TfToken &name : restInputNames) {
         if (chainTargets.count(provider.AppendProperty(name))) {
             return true;
         }
@@ -298,8 +289,7 @@ void
 _ApplyInteractiveOverrides(
     const std::vector<RigExecValueOverride> &interactive,
     std::vector<RigExecValueOverride> *overrides,
-    RigExecResolvedInputs *resolved,
-    std::map<SdfPath, VtValue> *publishedProperties)
+    RigExecResolvedInputs *resolved)
 {
     for (const RigExecValueOverride &o : interactive) {
         if (overrides) {
@@ -320,21 +310,6 @@ _ApplyInteractiveOverrides(
         if (resolved && !o.attribute.IsEmpty()) {
             resolved->SetProperty(o.prim.AppendProperty(o.attribute), o.value);
         }
-        // A property a chain WRITES is also PUBLISHED, and the generation
-        // Hydra draws has to carry the same value exec was given -- otherwise
-        // the viewport shows the chain's arithmetic while every exec consumer
-        // sees the held one, which is the disagreement between the two
-        // delivery routes that this function exists to prevent.
-        // Only an entry that is already there is replaced. Inventing one would
-        // publish an avar as a moved property of the generation, and an avar
-        // is an input, not a result.
-        if (publishedProperties && !o.attribute.IsEmpty()) {
-            const auto it = publishedProperties->find(
-                o.prim.AppendProperty(o.attribute));
-            if (it != publishedProperties->end()) {
-                it->second = o.value;
-            }
-        }
     }
 }
 
@@ -350,18 +325,18 @@ RigExecRigEvaluator::_ClearValueCachesWholesale(bool avarValuesOnly)
     // Property chains can read numeric avars through scalar connections.
     // Their cached result must be dropped even for an avar-only notice.
     _propertyChainBindings.reset();
-    // Skin layouts, blend samples and base geometry cannot hold avar values.
+    // Skin layouts, blend samples and base geometry cannot hold avar values,
+    // and no avar is an array.
     if (avarValuesOnly) {
         return;
     }
+    _upstreamCounts.clear();
     // Dropped as answers and kept as candidates (see the caches' Clear), so
     // a re-read that finds the same arrays keeps the same pointer.
     _skinTopologies.Clear();
+    _skinTopologyObservationPending = true;
     _blendSampleShapes.Clear();
     _skinLayoutInputsValid = false;
-    for (auto &[target, live] : _liveGraphs) {
-        if (live) live->basePointsPushed = false;
-    }
 }
 
 void
@@ -429,6 +404,11 @@ RigExecRigEvaluator::_ClearValueCaches(const UsdNotice::ObjectsChanged &notice,
     if (avarValuesOnly) {
         return;
     }
+    // Upstream admission's stage counts (condition 4), by the same reach.
+    for (auto it = _upstreamCounts.begin(); it != _upstreamCounts.end();) {
+        it = reach.Reaches(it->first) ? _upstreamCounts.erase(it)
+                                      : std::next(it);
+    }
     // The skin layouts, and which properties can reach one. A layout is read
     // from its mover's own layout attributes, and _skinLayoutInputs holds
     // those plus every attribute along the connection walk a read of one
@@ -440,7 +420,7 @@ RigExecRigEvaluator::_ClearValueCaches(const UsdNotice::ObjectsChanged &notice,
     // stage as the notice left it: a layout attribute itself is a member
     // whatever its connections say, and a connection edit is a notice on the
     // member that carries it.
-    if (_skinLayoutInputsValid || _skinTopologies.GetSize() > 0) {
+    if (_skinLayoutInputsValid || GetSkinTopologyCacheSize() > 0) {
         if (!_skinLayoutInputsValid) {
             _ResolveSkinLayoutInputs();
         }
@@ -458,6 +438,7 @@ RigExecRigEvaluator::_ClearValueCaches(const UsdNotice::ObjectsChanged &notice,
         }
         if (hit) {
             _skinTopologies.Clear();
+            _skinTopologyObservationPending = true;
             _skinLayoutInputsValid = false;
         }
     }
@@ -495,25 +476,23 @@ RigExecRigEvaluator::_ClearValueCaches(const UsdNotice::ObjectsChanged &notice,
             }
         }
     }
-    // The base points a live graph pushed and will not re-read while they
-    // cannot vary: re-read once the notice reaches that target's points.
-    for (auto &[target, live] : _liveGraphs) {
-        if (live && live->basePointsPushed && reach.Reaches(target)) {
-            live->basePointsPushed = false;
-        }
-    }
+
 }
 
 void
 RigExecRigEvaluator::SetInteractiveOverrides(
     std::vector<RigExecValueOverride> overrides)
 {
+    if (_inputReplayObserver) _inputReplayObserver->Interactive(overrides);
     if (_scopedClearShadow) {
         _scopedClearShadow->SetInteractiveOverrides(overrides);
     }
     // Asked of BOTH sets before either is dropped: an override being lifted
     // off a layout attribute moves the value the layout was read with just
-    // as much as one being placed on it.
+    // as much as one being placed on it. The predicates read keys alone, so
+    // the two sets also cover every entry of _valueInputs this moves (an
+    // upstream value under a lifted override re-emerges at a key the old
+    // set names).
     const bool touchesLayout =
         _OverridesReachSkinLayout(_interactiveOverrides) ||
         _OverridesReachSkinLayout(overrides);
@@ -521,6 +500,7 @@ RigExecRigEvaluator::SetInteractiveOverrides(
         _OverridesReachBlendShapes(_interactiveOverrides) ||
         _OverridesReachBlendShapes(overrides);
     _interactiveOverrides = std::move(overrides);
+    _RebuildValueInputs();
     // The static-input cache is NOT dropped here. It used to be, as defence
     // in depth, on the reasoning that this "costs one map clear per drag
     // start" -- but a manipulator calls this on EVERY MOUSE SAMPLE, not once
@@ -565,6 +545,7 @@ RigExecRigEvaluator::SetInteractiveOverrides(
     // the re-read and not the deformation.
     if (touchesLayout) {
         _skinTopologies.Clear();
+        _skinTopologyObservationPending = true;
     }
     // The same rule for the blend sample shapes, which are the other cache a
     // drag must not pay to rebuild: see _OverridesReachBlendShapes.
@@ -581,6 +562,7 @@ RigExecRigEvaluator::SetInteractiveOverrides(
 void
 RigExecRigEvaluator::ClearInteractiveOverrides()
 {
+    if (_inputReplayObserver) _inputReplayObserver->ClearInteractive();
     if (_scopedClearShadow) {
         _scopedClearShadow->ClearInteractiveOverrides();
     }
@@ -589,12 +571,14 @@ RigExecRigEvaluator::ClearInteractiveOverrides()
     const bool touchesShapes =
         _OverridesReachBlendShapes(_interactiveOverrides);
     _interactiveOverrides.clear();
+    _RebuildValueInputs();
     // Both halves of a drag treat the caches the same way. The static-input
     // cache is kept on the way out for the same reasons it is kept on the
     // way in (see SetInteractiveOverrides): it never holds an override, so
     // there is nothing of the drag's in it to forget.
     if (touchesLayout) {
         _skinTopologies.Clear();
+        _skinTopologyObservationPending = true;
     }
     // The same rule for the blend sample shapes, which are the other cache a
     // drag must not pay to rebuild: see _OverridesReachBlendShapes.
@@ -605,11 +589,163 @@ RigExecRigEvaluator::ClearInteractiveOverrides()
 
 void
 RigExecRigEvaluator::_ApplyInteractiveOverridesToResolved(
-    RigExecResolvedInputs *resolved,
-    std::map<SdfPath, VtValue> *published) const
+    RigExecResolvedInputs *resolved) const
 {
     _ApplyInteractiveOverrides(_interactiveOverrides, /* overrides = */
-                               nullptr, resolved, published);
+                               nullptr, resolved);
+}
+
+void
+RigExecRigEvaluator::_ApplyValueInputsToResolved(
+    RigExecResolvedInputs *resolved) const
+{
+    _ApplyInteractiveOverrides(_valueInputs, /* overrides = */ nullptr,
+                               resolved);
+}
+
+void
+RigExecRigEvaluator::_RebuildValueInputs()
+{
+    // With no upstream value the list IS the interactive one, entry for
+    // entry, so every reader sees exactly what it saw before.
+    if (_upstreamAdmitted.empty()) {
+        _valueInputs = _interactiveOverrides;
+        return;
+    }
+    _valueInputs = _upstreamAdmitted;
+    _ApplyInteractiveOverrides(_interactiveOverrides, &_valueInputs,
+                               /* resolved = */ nullptr);
+}
+
+void
+RigExecRigEvaluator::SetUpstreamInputs(
+    std::vector<RigExecValueOverride> inputs)
+{
+    if (_inputReplayObserver) _inputReplayObserver->Upstream(inputs);
+    if (_scopedClearShadow) {
+        _scopedClearShadow->SetUpstreamInputs(inputs);
+    }
+    _upstreamRequested = std::move(inputs);
+    _AdmitUpstreamInputs();
+}
+
+std::vector<SdfPath>
+RigExecRigEvaluator::GetUpstreamInputPaths() const
+{
+    std::vector<SdfPath> paths;
+    paths.reserve(_upstreamAdmitted.size());
+    for (const RigExecValueOverride &o : _upstreamAdmitted) {
+        paths.push_back(o.prim.AppendProperty(o.attribute));
+    }
+    return paths;
+}
+
+void
+RigExecRigEvaluator::_AdmitUpstreamInputs()
+{
+    _AdmitUpstreamInputs(_upstreamAdmissionTime);
+}
+
+void
+RigExecRigEvaluator::_AdmitUpstreamInputs(UsdTimeCode time)
+{
+    _upstreamAdmissionTime = time;
+    std::vector<RigExecValueOverride> admitted;
+    std::vector<std::string> dropLines;
+    if (_upstreamRequested.empty()) {
+        _SetUpstreamAdmitted(std::move(admitted), std::move(dropLines));
+        return;
+    }
+    // Condition 3 against the program standing now. With none (an epoch
+    // that cannot bake, or a mode that runs no program) conditions 1 and 2
+    // decide: the walk reads every attribute through the same overlay, and
+    // such an epoch has no file to agree with.
+    const std::map<SdfPath, TfType> *listed =
+        _bakedProgram ? &_bakedProgram->GetUpstreamAdmissible() : nullptr;
+    // The array part, from the compiled epoch in every mode (program or
+    // none), and only while array admission is on and an array is given.
+    std::map<SdfPath, TfType> arrays;
+    if (RigExecUpstreamArrayAdmission() &&
+        std::any_of(_upstreamRequested.begin(), _upstreamRequested.end(),
+                    [](const RigExecValueOverride &o) {
+                        return o.value.IsArrayValued();
+                    })) {
+        for (const RigExecUpstreamArrayRow &row :
+             RigExecBakedUpstreamAdmissibleArrays(*this)) {
+            arrays.emplace_hint(arrays.end(), row.path, row.type);
+        }
+    }
+    // One entry per attribute, the last given winning, sorted by path.
+    std::map<SdfPath, const RigExecValueOverride *> byPath;
+    for (const RigExecValueOverride &o : _upstreamRequested) {
+        const SdfPath path = o.attribute.IsEmpty() || o.prim.IsEmpty()
+                                 ? SdfPath()
+                                 : o.prim.AppendProperty(o.attribute);
+        const auto drop = [&](const std::string &reason) {
+            dropLines.push_back(
+                "upstream input " +
+                (path.IsEmpty() ? o.prim.GetString() : path.GetString()) +
+                ": " + reason + "; ignored");
+        };
+        if (path.IsEmpty() || !o.computation.IsEmpty()) {
+            drop("names no attribute");
+            continue;
+        }
+        const std::string reason = RigExecUpstreamDropReason(
+            _stage, listed, path, o.value, time, &_upstreamCounts, &arrays);
+        if (!reason.empty()) {
+            drop(reason);
+            continue;
+        }
+        byPath[path] = &o;
+    }
+    admitted.reserve(byPath.size());
+    for (const auto &[path, o] : byPath) {
+        admitted.push_back(*o);
+    }
+    _SetUpstreamAdmitted(std::move(admitted), std::move(dropLines));
+}
+
+void
+RigExecRigEvaluator::_SetUpstreamAdmitted(
+    std::vector<RigExecValueOverride> admitted,
+    std::vector<std::string> dropLines)
+{
+    _upstreamDropLines = std::move(dropLines);
+    if (admitted == _upstreamAdmitted) {
+        return;
+    }
+    // The entries placed, moved or lifted. The skin layouts and blend
+    // shapes are read through the overlay these values ride, so the reach
+    // test an interactive change takes decides what they drop.
+    std::vector<RigExecValueOverride> moved;
+    for (const RigExecValueOverride &o : admitted) {
+        if (std::find(_upstreamAdmitted.begin(), _upstreamAdmitted.end(),
+                      o) == _upstreamAdmitted.end()) {
+            moved.push_back(o);
+        }
+    }
+    for (const RigExecValueOverride &o : _upstreamAdmitted) {
+        if (std::find(admitted.begin(), admitted.end(), o) ==
+            admitted.end()) {
+            moved.push_back(o);
+        }
+    }
+    _upstreamAdmitted = std::move(admitted);
+    _RebuildValueInputs();
+    // The chain bases answer from the upstream values alone; a base placed,
+    // moved or lifted is re-read by the next generation.
+    _upstreamValues.clear();
+    for (const RigExecValueOverride &o : _upstreamAdmitted) {
+        _upstreamValues[o.prim.AppendProperty(o.attribute)] = o.value;
+    }
+    if (_OverridesReachSkinLayout(moved)) {
+        _skinTopologies.Clear();
+        _skinTopologyObservationPending = true;
+    }
+    if (_OverridesReachBlendShapes(moved)) {
+        _blendSampleShapes.Clear();
+    }
 }
 
 } // namespace rigExec

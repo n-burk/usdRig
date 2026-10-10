@@ -18,6 +18,13 @@
 PXR_NAMESPACE_USING_DIRECTIVE
 
 namespace {
+const TfToken _oracleToken0("rigExec:influences");
+const TfToken _oracleToken1("rigExec:jointIndices");
+const TfToken _oracleToken2("rigExec:jointWeights");
+const TfToken _oracleToken3("rigExec:elementSize");
+const TfToken _oracleToken4("rigExec:skinningMethod");
+const TfToken _oracleToken5("classicLinear");
+
 
 void
 _BindSkinMover(const rigExec::RigExecMoverBindContext &ctx)
@@ -168,10 +175,10 @@ rigExec::RigExecOracleResult
 _OracleSkinMover(const rigExec::RigExecMoverOracleContext &ctx)
 {
     using rigExec::RigExecOracleResult;
-    const UsdPrim &prim = ctx.prim;
+    const rigExec::RigExecOraclePrim &prim = ctx.prim;
     const SdfPath &moverPath = ctx.moverPath;
     const UsdTimeCode time = ctx.time;
-    const rigExec::RigExecResolvedInputs &resolved = ctx.resolved;
+    const rigExec::RigExecOracleScene &resolved = ctx.resolved;
     std::vector<std::string> *diagnostics = ctx.diagnostics;
     VtVec3fArray &points = *ctx.points;
     // p' = (1 - sum_k w_k) p + sum_k w_k T_k p per point, in double,
@@ -179,15 +186,19 @@ _OracleSkinMover(const rigExec::RigExecMoverOracleContext &ctx)
     // RigExecAssembleSkinParameters and of the SIMD kernel on
     // purpose, so parity is a real check.
     SdfPathVector influences;
-    if (UsdRelationship rel =
-            prim.GetRelationship(TfToken("rigExec:influences"))) {
+    if (rigExec::RigExecOracleRelationship rel =
+            prim.GetRelationship(_oracleToken0)) {
         rel.GetTargets(&influences);
     }
     const bool final =
         rigExec::RigExecPhaseForInput(prim, "rigExec:influences").kind ==
         rigExec::RigExecReadPhaseKind::Final;
-    const auto &matrices =
-        final ? ctx.finalProviderMatrices : ctx.baseProviderMatrices;
+    const auto phase = rigExec::RigExecPhaseForInput(prim,"rigExec:influences");
+    std::unordered_map<SdfPath,GfMatrix4d,SdfPath::Hash> matrices;
+    for (const auto &provider : influences) {
+        const auto *value = ctx.phasedMatrix ? ctx.phasedMatrix(provider,phase,moverPath) : nullptr;
+        if (value) matrices[provider] = *value;
+    }
     std::vector<GfMatrix4d> transforms;
     bool failed = false;
     for (const SdfPath &provider : influences) {
@@ -208,25 +219,25 @@ _OracleSkinMover(const rigExec::RigExecMoverOracleContext &ctx)
     VtIntArray indices;
     VtFloatArray weights;
     int elementSize = 1;
-    TfToken method("classicLinear");
-    if (const UsdAttribute a = prim.GetAttribute(
-            TfToken("rigExec:jointIndices"))) {
+    TfToken method = _oracleToken5;
+    if (const rigExec::RigExecOracleAttribute a = prim.GetAttribute(
+            _oracleToken1)) {
         if (!resolved.Get(a.GetPath(), &indices)) {
             a.Get(&indices, time);
         }
     }
-    if (const UsdAttribute a = prim.GetAttribute(
-            TfToken("rigExec:jointWeights"))) {
+    if (const rigExec::RigExecOracleAttribute a = prim.GetAttribute(
+            _oracleToken2)) {
         if (!resolved.Get(a.GetPath(), &weights)) {
             a.Get(&weights, time);
         }
     }
-    if (const UsdAttribute a = prim.GetAttribute(
-            TfToken("rigExec:elementSize"))) {
+    if (const rigExec::RigExecOracleAttribute a = prim.GetAttribute(
+            _oracleToken3)) {
         a.Get(&elementSize, time);
     }
-    if (const UsdAttribute a = prim.GetAttribute(
-            TfToken("rigExec:skinningMethod"))) {
+    if (const rigExec::RigExecOracleAttribute a = prim.GetAttribute(
+            _oracleToken4)) {
         a.Get(&method, time);
     }
     if (method != "classicLinear" && method != "dualQuaternion") {

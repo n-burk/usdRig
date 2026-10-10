@@ -1,0 +1,57 @@
+// Reviewed fixture/root coverage for the property-head authored census.
+// Expected owners, source bindings and phases are read from authored inputs.
+#ifndef RIGEXEC_TEST_PROMOTION_CASES_H
+#define RIGEXEC_TEST_PROMOTION_CASES_H
+namespace rigExecTest {
+struct RigExecPromotionCase { const char *fixture; const char *rig; };
+inline constexpr RigExecPromotionCase rigExecPromotionCases[] = {
+    {"examples/01_FkChainTail.usda", "/TailAsset/Rig"},
+    {"examples/02_TwoBoneIkLeg.usda", "/LegAsset/Rig"},
+    {"examples/03_IkFkBlendClamp.usda", "/BlendArmAsset/Rig"},
+    {"examples/04_BlendShapeFace.usda", "/FaceAsset/Rig"},
+    {"examples/05_TwistRibbonSpine.usda", "/SpineAsset/Rig"},
+    {"examples/06_LatticeBulge.usda", "/LatticeAsset/Rig"},
+    {"examples/07_SurfaceDrape.usda", "/DrapeAsset/Rig"},
+    {"examples/08_AimEyes.usda", "/EyesAsset/Rig"},
+    {"examples/09_PropertyMathMovers.usda", "/PropMathAsset/Rig"},
+    {"examples/10_AimXformTurret.usda", "/TurretAsset/Rig"},
+    {"examples/11_VolumeWeights.usda", "/VolumeAsset/Rig"},
+    {"examples/13_ReadPhases.usda", "/ReadPhaseAsset/Rig"},
+    {"examples/14_VolumeConstrainedSweep.usda", "/SweepAsset/Rig"},
+    {"examples/15_TransformMatrixMover.usda", "/TransformMoverAsset/Rig"},
+    {"examples/16_ConnectionReadPhases.usda", "/PhaseConnectAsset/Rig"},
+    {"examples/ArmRig.usda", "/ArmAsset/Rig"},
+    {"examples/ArmShotAnim.usda", "/Shot/HeroArm/Rig"},
+    {"examples/aimtest.usda", "/World/RigRoot"},
+    {"examples/aimtest_points.usda", "/World/RigRoot"},
+    {"examples/biped/Biped.usda", "/Biped/Rig"},
+    {"examples/biped/Biped_anim.usda", "/Biped/Rig"},
+    {"examples/biped/Biped_body.usda", "/Biped/Rig"},
+    {"examples/biped/Biped_stack.usda", "/Biped/Rig"},
+    {"examples/biped/Biped_stack_anim.usda", "/Biped/Rig"},
+    {"examples/rigexec_flat.usda", "/World/RigRoot"},
+    {"examples/rotateConstraint.usda", "/World/RigRoot"},
+    {"examples/spider_legs_assembly_ref.usda", "/World/RigExecRoot1"},
+    {"tests/fixtures/computed_chains.usda", "/Asset/Rig"},
+    {"tests/fixtures/computed_ik_space.usda", "/IkSpaceAsset/Rig"},
+    {"tests/fixtures/computed_path_reads.usda", "/PathReadAsset/Rig"},
+    {"tests/fixtures/computed_weights.usda", "/Asset/Rig"},
+    {"tests/fixtures/frame_record_fallbacks.usda", "/RecordAsset/Rig"},
+    {"tests/fixtures/oneloop_cross_domain.usda", "/CrossAsset/Rig"},
+    {"tests/fixtures/oneloop_cycle.usda", "/CycleAsset/Rig"},
+    {"tests/fixtures/oneloop_two_limbs.usda", "/LimbsAsset/Rig"},
+    {"tests/fixtures/phased_blend_samples.usda", "/Asset/Rig"},
+    {"tests/fixtures/preceding_own_chain.usda", "/PrecedingAsset/Rig"},
+    {"tests/fixtures/projector_spaces.usda", "/ProjectorAsset/Rig"},
+    {"tests/fixtures/raw_skin_layouts.usda", "/RawSkinAsset/Rig"},
+    {"tests/fixtures/solver_checkpoint.usda", "/CheckpointAsset/Rig"},
+    {"tests/fixtures/space_switch_carry.usda", "/Rig"},
+    {"tests/fixtures/space_switch_dial.usda", "/Rig"},
+    {"tests/fixtures/space_switch_nested.usda", "/Rig"},
+    {"tests/fixtures/space_switch_same_round.usda", "/Rig"},
+    {"tests/fixtures/upstream_inputs.usda", "/LimbsAsset/Rig"},
+    {"tests/fixtures/upstream_inputs_chunked.usda", "/LimbsAsset/Rig"},
+    {"tests/fixtures/volume_placements.usda", "/PlacementAsset/Rig"},
+};
+} // namespace rigExecTest
+#endif

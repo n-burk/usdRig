@@ -1,19 +1,37 @@
 // RigExec baked playback for Hydra (M2b). See playback.h for the contract.
 #include "playback.h"
+#include "rigExecRuntime/stageArrayInputs.h"
+#include "rigExec/bakedProgram.h"
+#include "rigExec/bakedSchedule.h"
 #include "rigExec/movers/moverRegistry.h"
+#include "rigExec/parallel.h"
 
+#include "pxr/base/tf/getenv.h"
+#include "pxr/base/tf/staticTokens.h"
+#include "pxr/base/work/dispatcher.h"
+#include "pxr/base/work/withScopedParallelism.h"
 #include "pxr/usd/sdf/assetPath.h"
 #include "pxr/usd/usd/attribute.h"
 #include "pxr/usd/usd/primRange.h"
 #include "pxr/usd/usdGeom/xformable.h"
 
-#include <cmath>
 #include <fstream>
-#include <limits>
+#include <set>
+#include <string>
+#include <vector>
 
 namespace rigExec {
 
 namespace {
+
+TF_DEFINE_PRIVATE_TOKENS(
+    _playbackTokens,
+    ((asset, "rigExec:asset"))
+    ((generated, "__RigExecGenerated"))
+    (points)
+    (normals)
+    (extent)
+);
 
 // FNV-1a 64 over the file bytes: the binding-epoch digest. Only stability
 // per file is required (a binary's published prim set never changes), so
@@ -44,8 +62,7 @@ RigExecPlaybackAssetFor(const UsdPrim &rig, std::string *resolvedPath)
     if (!rig || !resolvedPath) {
         return false;
     }
-    static const TfToken assetName("rigExec:asset");
-    const UsdAttribute attribute = rig.GetAttribute(assetName);
+    const UsdAttribute attribute = rig.GetAttribute(_playbackTokens->asset);
     if (!attribute) {
         return false;
     }
@@ -76,6 +93,8 @@ RigExecBakedPlayback::RigExecBakedPlayback(
 {
 }
 
+RigExecBakedPlayback::~RigExecBakedPlayback() = default;
+
 bool
 RigExecBakedPlayback::Open(const std::string &resolvedPath,
                            std::string *error)
@@ -99,12 +118,6 @@ RigExecBakedPlayback::Open(const std::string &resolvedPath,
         }
         return false;
     }
-    if (reader->GetFrameTimes().empty()) {
-        if (error) {
-            *error = resolvedPath + " carries no baked frames";
-        }
-        return false;
-    }
     // Plugin movers play through the kernel their plugin registered. One
     // with none loaded here passes its points through: said once here, and
     // in the diagnostics of every frame it does.
@@ -124,40 +137,224 @@ RigExecBakedPlayback::Open(const std::string &resolvedPath,
                     resolvedPath.c_str(), why.c_str());
         }
     }
+    // The inputs bind once the kernels are in: a binary baked from this
+    // stage resolves every one, so a miss is said once, here.
+    RigExecInputSampler sampler;
+    if (!sampler.Bind(_stage, *reader, &why)) {
+        if (error) {
+            *error = "cannot play " + resolvedPath + ": " + why;
+        }
+        return false;
+    }
+    const std::vector<std::string> &warnings = sampler.GetWarnings();
+    if (!warnings.empty()) {
+        std::string named;
+        for (size_t i = 0; i < warnings.size() && i < 4; ++i) {
+            named += (i ? "; " : "") + warnings[i];
+        }
+        if (warnings.size() > 4) {
+            named += "; ...";
+        }
+        TF_WARN("rigExec: %s: %zu input(s) keep their bake-time value: %s",
+                resolvedPath.c_str(), warnings.size(), named.c_str());
+    }
+    _sampler = std::move(sampler);
+    // Static inputs are read again only after a stage notice, which the
+    // registry forwards (NoteStageChanged).
+    _sampler.SetStaticInputSkip(true);
     _epochDigest = _PlaybackDigestBytes(bytes);
     _reader = std::move(reader);
+    // In-tree playback runs the reader's clusters in parallel by default
+    // (RIGEXEC_RUNTIME_DISPATCH=0 opts out); the serial schedule knob and
+    // the library's parallel switch keep meaning serial.
+    _dispatchExecute =
+        TfGetenvBool("RIGEXEC_RUNTIME_DISPATCH", true) &&
+        RigExecParallelEvaluationEnabled() &&
+        RigExecBakedScheduleModeFromEnvironment() ==
+            RigExecBakedScheduleMode::Parallel;
     _assetPath = resolvedPath;
+    // Admission condition 3 in playback: a listed input, holding its tag's
+    // type, including the evaluator's admitted arrays.
+    _listedInputs.clear();
+    for (size_t i = 0; i < _reader->GetInputCount(); ++i) {
+        const RigExecRuntimeInputInfo &info = _reader->GetInputInfo(i);
+        if (SdfPath::IsValidPathString(info.name)) {
+            _listedInputs.emplace(SdfPath(info.name),
+                                  RigExecInputTagType(info.type));
+        }
+    }
+    _upstreamApplied.clear();
+    _AdmitUpstream(UsdTimeCode(_reader->GetBakeTime()));
+    return true;
+}
+
+void
+RigExecBakedPlayback::SetUpstreamInputs(
+    std::vector<RigExecUpstreamValue> values)
+{
+    _upstreamRequested = std::move(values);
+    _AdmitUpstream(_upstreamTime);
+}
+
+std::vector<SdfPath>
+RigExecBakedPlayback::GetUpstreamInputPaths() const
+{
+    std::vector<SdfPath> paths;
+    paths.reserve(_upstreamAdmitted.size());
+    for (const auto &[path, key] : _upstreamAdmitted) {
+        paths.push_back(path);
+    }
+    return paths;
+}
+
+void
+RigExecBakedPlayback::_AdmitUpstream(UsdTimeCode time)
+{
+    _upstreamTime = time;
+    _upstreamAdmitted.clear();
+    _upstreamDropLines.clear();
+    if (!_reader) {
+        return;
+    }
+    // Live's rule over what a playback session has: the file's listed
+    // inputs stand for the program's admissible set, which equals them over
+    // unconnected attributes with a stage value. Each entry is judged
+    // before the last-wins rule, and the reason text is live's.
+    for (const RigExecUpstreamValue &entry : _upstreamRequested) {
+        const auto drop = [&](const std::string &reason) {
+            _upstreamDropLines.push_back("upstream input " +
+                                         entry.path.GetString() + ": " +
+                                         reason + "; ignored");
+        };
+        if (!entry.path.IsPrimPropertyPath()) {
+            drop("names no attribute");
+            continue;
+        }
+        std::string reason = RigExecUpstreamDropReason(
+            _stage, &_listedInputs, entry.path, entry.value, time, nullptr,
+            &_listedInputs);
+        size_t index = 0;
+        if (reason.empty() &&
+            !_reader->FindInput(entry.path.GetString(), &index)) {
+            reason = "no listed read reaches it";
+        }
+        // Only a file baked from another stage types an input apart from
+        // its attribute.
+        if (reason.empty() &&
+            entry.value.GetType() !=
+                RigExecInputTagType(_reader->GetInputInfo(index).type)) {
+            reason = std::string("the file's input holds a ") +
+                     RigExecInputTagName(_reader->GetInputInfo(index).type);
+        }
+        if (!reason.empty()) {
+            drop(reason);
+            continue;
+        }
+        // Authored array sets reach both time and rest reads. Their lift
+        // restores the stage sample at playback time for Animated slots.
+        const RigExecRuntimeInputInfo &info = _reader->GetInputInfo(index);
+        _UpstreamKey key;
+        key.index = index;
+        key.name = info.name;
+        key.tag = info.type;
+        key.animated = info.animated;
+        key.attribute = _stage->GetAttributeAtPath(entry.path);
+        key.value = entry.value;
+        _upstreamAdmitted[entry.path] = std::move(key);
+    }
+}
+
+bool
+RigExecBakedPlayback::_LiftUpstream(const _UpstreamKey &key,
+                                    UsdTimeCode time, bool sampled,
+                                    std::string *error)
+{
+    // A non-Animated input's default is the bake-time stage value, which is
+    // the stage value at every time. An Animated one takes the stage at
+    // this time: Apply already read it when it sampled, else one read here.
+    const bool sampledArray = !RrInputTagIsArray(key.tag) ||
+        RigExecRuntimeStageArrayInputs::CanSample(*_reader, key.index);
+    if (!key.animated || !sampledArray) {
+        // A static input the sampler binds is read again at the next
+        // sampling Apply, over this reset (see _ApplyUpstream).
+        _sampler.NoteStageChanged();
+        return _reader->ResetInput(key.name, error);
+    }
+    return sampled || RigExecSampleInputAt(key.attribute, key.index,
+                                           key.name, key.tag, time,
+                                           _reader.get(), error);
+}
+
+bool
+RigExecBakedPlayback::_ApplyUpstream(UsdTimeCode time, bool sampled,
+                                     std::string *error)
+{
+    for (const auto &[path, key] : _upstreamApplied) {
+        if (!_upstreamAdmitted.count(path) &&
+            !_LiftUpstream(key, time, sampled, error)) {
+            return false;
+        }
+    }
+    std::map<SdfPath, _UpstreamKey> applied;
+    std::vector<SdfPath> refused;
+    for (const auto &[path, key] : _upstreamAdmitted) {
+        const auto was = _upstreamApplied.find(path);
+        const bool moved =
+            was == _upstreamApplied.end() || was->second.value != key.value;
+        // Apply overwrote an Animated input with the stage at the new time.
+        if (moved || (key.animated && sampled)) {
+            // SetSampledInputAt: the value stands where the stage value
+            // stood, and a stage value may be non-finite. A Token is set by
+            // its text, which the reader interns when the file lacks it.
+            RrInputValue value;
+            std::string why;
+            RigExecRuntimeArray array;
+            const bool set =
+                RrInputTagIsArray(key.tag)
+                    ? RigExecInputArrayFrom(key.value, key.tag, &array) &&
+                          _reader->SetInputArrayAt(key.index, array, &why)
+                    : key.tag == RrInputTag::Token
+                    ? _reader->SetInputToken(
+                          key.name,
+                          key.value.UncheckedGet<TfToken>().GetString(),
+                          &why)
+                    : RigExecInputValueFrom(key.value, key.tag, &value) &&
+                          _reader->SetSampledInputAt(key.index, value, &why);
+            if (!set) {
+                // A refused set lifts the key, reported as live reports a
+                // dropped one.
+                _upstreamDropLines.push_back(
+                    "upstream input " + path.GetString() + ": " +
+                    (why.empty() ? std::string("the input refused it")
+                                 : why) +
+                    "; ignored");
+                refused.push_back(path);
+                if (!_LiftUpstream(key, time, sampled, error)) {
+                    return false;
+                }
+                continue;
+            }
+            // The sampler skips a static input it binds until it refreshes,
+            // and a write here is not the stage's value: the next sampling
+            // Apply refreshes and reads the stage over it, as every
+            // sampling Apply reads an Animated input.
+            if (!key.animated) {
+                _sampler.NoteStageChanged();
+            }
+        }
+        applied.emplace(path, key);
+    }
+    for (const SdfPath &path : refused) {
+        _upstreamAdmitted.erase(path);
+    }
+    _upstreamApplied = std::move(applied);
     return true;
 }
 
 SdfPath
 RigExecBakedPlayback::GetGeneratedScope() const
 {
-    return _rigPath.AppendChild(TfToken("__RigExecGenerated"));
-}
-
-double
-RigExecBakedPlayback::MapTimeToFrame(UsdTimeCode time) const
-{
-    if (!_reader) {
-        return 0.0;
-    }
-    const std::vector<double> frames = _reader->GetFrameTimes();
-    if (frames.empty()) {
-        return 0.0;
-    }
-    const double t = time.IsDefault() ? 0.0 : time.GetValue();
-    double best = frames[0];
-    double gap = std::fabs(frames[0] - t);
-    for (size_t i = 1; i < frames.size(); ++i) {
-        const double next = std::fabs(frames[i] - t);
-        // Strictly smaller wins, so a tie keeps the lower frame.
-        if (next < gap) {
-            gap = next;
-            best = frames[i];
-        }
-    }
-    return best;
+    return _rigPath.AppendChild(_playbackTokens->generated);
 }
 
 RigExecImagingBridge::PublishResult
@@ -168,8 +365,34 @@ RigExecBakedPlayback::EvaluateAndPublishResult(UsdTimeCode time)
         return result;
     }
     std::string why;
-    if (!_reader->SetFrame(MapTimeToFrame(time), &why) ||
-        !_reader->Execute(&why)) {
+    bool sampled = false;
+    // Upstream values go in after Apply, never through
+    // _sampler.Invalidate(): an invalidated Apply touches every Animated
+    // input, so every varying step would re-run for a change that reaches
+    // only its own readers.
+    bool ran = _sampler.Apply(time, _reader.get(), &why, &sampled);
+    if (ran) {
+        _AdmitUpstream(time);
+        ran = _ApplyUpstream(time, sampled, &why);
+    }
+    if (ran && _dispatchExecute && !RigExecFrozenSerialActive()) {
+        // The dispatcher lives for this Execute only, in its own arena; the
+        // reader forgets it before it goes. A frozen serial scope keeps
+        // the reader serial, as it keeps the native schedule.
+        pxr::WorkWithScopedParallelism([&] {
+            pxr::WorkDispatcher dispatcher;
+            _reader->SetTaskDispatch(
+                [&dispatcher](std::function<void()> task) {
+                    dispatcher.Run(std::move(task));
+                },
+                [&dispatcher] { dispatcher.Wait(); });
+            ran = _reader->Execute(&why);
+            _reader->SetTaskDispatch(nullptr, nullptr);
+        });
+    } else if (ran) {
+        ran = _reader->Execute(&why);
+    }
+    if (!ran) {
         // The bridge's rule: a rig that cannot evaluate stops driving the
         // scene, and the next good generation re-announces its epoch.
         result.dirtied = _store->Publish(nullptr);
@@ -179,17 +402,16 @@ RigExecBakedPlayback::EvaluateAndPublishResult(UsdTimeCode time)
 
     auto snapshot = std::make_shared<RigExecImagingSnapshot>();
     snapshot->generation = ++_generation;
-    // The REQUESTED time, not the baked frame it mapped to: the merge
-    // only accepts a generation that describes the stage/time it asked
-    // for, and the mapping is this class's internal answer.
+    // The requested time: the merge only accepts a generation that
+    // describes the stage/time it asked for.
     snapshot->stage = UsdStageWeakPtr(_stage);
     snapshot->sampleTimeIsDefault = time.IsDefault();
     snapshot->sampleTime = time.IsDefault() ? 0.0 : time.GetValue();
     snapshot->assetRoot = _assetRoot;
 
-    static const TfToken pointsName("points");
-    static const TfToken normalsName("normals");
-    static const TfToken extentName("extent");
+    const TfToken &pointsName = _playbackTokens->points;
+    const TfToken &normalsName = _playbackTokens->normals;
+    const TfToken &extentName = _playbackTokens->extent;
     for (const RigExecRuntimePoints &moved : _reader->GetPoints()) {
         if (!_PlaybackPathOk(moved.path)) {
             continue;

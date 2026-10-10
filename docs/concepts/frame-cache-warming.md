@@ -33,11 +33,14 @@ re-evaluation.
   result is recoverable, a plausible wrong one is not. A new edit cancels
   in-flight warming for that rig, and stale results are dropped, never
   published.
-- **Background workers handle supported frozen programs.** Other operations
-  warm through a privately owned stage and evaluator. The idle tick queues
-  one missing frame when prior jobs have drained; it does not evaluate the
-  live rig. Warming pauses during edits and playback and never changes the
-  displayed frame.
+- **Background workers run frozen programs.** Every operation, including
+  affine frame providers and external movers, warms from captured inputs on
+  the workers; no worker opens or evaluates a stage. A rig whose inputs
+  cannot all be frozen still caches each frame you visit, and once the
+  workers drain the idle tick fills at most one missing frame of the
+  requested range through the same compiled graph on the owning thread.
+  That fill pauses during edits, drags and playback, and does not change
+  the displayed frame.
 - **Never serves the playhead from the pool.** A miss at the requested frame
   evaluates live on the calling thread and is never slower than with the
   cache off.
@@ -49,31 +52,20 @@ re-evaluation.
   eviction past the cap. Long sessions cannot grow it.
 - **CPU:** two background workers at below-normal priority. They run hot
   while the UI is idle and yield while it is busy.
-- **Dynamic fallback:** one captured stage per context and one private
-  evaluator per warmed rig. Capture runs on the stage's owner thread when
-  fallback is needed. Value edits copy only the changed, fully composed
-  properties; retained patches are bounded by the number of edited properties.
-  Structural edits recapture the stage on the owner thread; they can cost
-  more than a value edit.
 - **One short burst per edit:** sampling the ±8 neighborhood's inputs at
   enqueue costs about 1.2 ms on the heaviest measured rig, then the pool
   drains it in about 25 ms.
 
 ## Viewport evaluation
 
-usdview prepares an executable program by default so the background workers
-can fill the animation range before playback. Explicit evaluation modes and
-an authored `rigExec:baked = false` retain their requested behavior. Rigs that
-cannot prepare or freeze a program queue the requested range one frame per
-idle tick against a private stage. Every valid live result can also be cached as you visit frames.
-These fallback entries use frame time and the stage edit serial, so adding
-an operation does not require adding a separate cache input sampler.
-Background sampling also discards its saved static inputs after a stage
-edit, including edits that keep the same executable program and bindings.
+usdview evaluates the compiled operation graph and can sample detached inputs
+for background workers to fill the animation range. Every job executes frozen
+state without querying the stage. Source edits invalidate incompatible entries
+and discard saved static samples, including edits that retain the same program
+and bindings. Visited-frame caching uses the same published pose values.
 
-Set `RIGEXEC_DYNAMIC_RUNS_PROGRAM=0` to opt out of the viewport default.
-This leaves visited-frame caching and private-stage background warming
-enabled, and preserves dynamic evaluation inside those workers.
+A rig that cannot compile or provide a complete frozen input vector reports the
+reason. It does not select a different evaluator.
 
 ## Switches
 
@@ -85,11 +77,10 @@ enabled, and preserves dynamic evaluation inside those workers.
 
 ## Limits worth knowing
 
-- **Rigs that decline the bake** (see [Baked and dynamic
-  evaluation](baked-vs-dynamic.md)) use the private-stage fallback. Frozen
-  programs remain the preferred route because they avoid a second stage and
-  evaluator. Failed fallback frames retry after a new source revision or
-  an explicit range/cache reset.
+- **Incomplete frozen inputs** prevent worker-thread warming; the host can
+  still evaluate a valid scene program on its owning thread. An owning-thread
+  fill that fails is retried only after a stage edit, a new range request or
+  a cache clear. Compilation failures remain invalid poses with diagnostics.
 - **`.rigexec` playback sessions** are unchanged and never consult the
   frame cache.
 - The cache is **in memory only** — there is no on-disk persistence, so
@@ -99,10 +90,11 @@ enabled, and preserves dynamic evaluation inside those workers.
 
 See [architecture](../specs/spec.md), `libs/rigExec/frameCache.cpp`, and
 `libs/rigExec/backgroundScheduler.cpp` for cache ownership and scheduling.
-`libs/rigExecImaging/fallbackStage.cpp` captures immutable property snapshots
-on the owner thread and applies them only inside worker-owned stages. Worker
-results use the live enqueue-time cache key and generation/time fences; edits,
-undo, stage replacement, and deactivation cannot publish an older revision.
+The owning thread samples a job's inputs before dispatch; the job runs on a
+worker-owned arena and publishes only while its generation and time fence are
+current. Value edits retire the affected times, structural edits retire every
+time, and stage replacement or deactivation cancels the rig's outstanding
+work.
 
 ## Verification
 

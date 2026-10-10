@@ -8,6 +8,7 @@
 // the row that points at them.
 #include "moverRegistry.h"
 #include "moverExecCommon.h"
+#include "../moverGraph.h"
 
 #include "rigExecMath/geometryKernels.h"
 
@@ -28,6 +29,17 @@ using rigExec::RigExecMoverExecTokens;
 PXR_NAMESPACE_USING_DIRECTIVE
 
 namespace {
+const TfToken _oracleToken0("rigExec:blendInputs");
+const TfToken _oracleToken1("inputs:weight");
+const TfToken _oracleToken2("rigExec:samples");
+const TfToken _oracleToken3("rigExec:targetPoints");
+const TfToken _oracleToken4("rigExec:blendShape");
+const TfToken _oracleToken5("rigExec:activation");
+const TfToken _oracleToken6("rigExec:deltaSpace");
+const TfToken _oracleToken7("faceVertexCounts");
+const TfToken _oracleToken8("faceVertexIndices");
+const TfToken _oracleToken9("target");
+
 
 // Interned once at load: validation asks per sample, and interning takes
 // the token registry's lock.
@@ -267,19 +279,19 @@ rigExec::RigExecOracleResult
 _OracleBlendShapeMover(const rigExec::RigExecMoverOracleContext &ctx)
 {
     using rigExec::RigExecOracleResult;
-    const UsdStageRefPtr &stage = ctx.stage;
-    const UsdPrim &prim = ctx.prim;
+    const rigExec::RigExecOracleScene &stage = ctx.stage;
+    const rigExec::RigExecOraclePrim &prim = ctx.prim;
     const SdfPath &moverPath = ctx.moverPath;
     const SdfPath &target = ctx.target;
     const UsdTimeCode time = ctx.time;
-    const rigExec::RigExecResolvedInputs &resolved = ctx.resolved;
+    const rigExec::RigExecOracleScene &resolved = ctx.resolved;
     std::vector<std::string> *diagnostics = ctx.diagnostics;
     VtVec3fArray &points = *ctx.points;
     const VtVec3fArray &basePoints = ctx.basePoints;
     // p'_i = p_i + sum_k alpha_k(w_k) d_{k,i} (spec §7.3).
     SdfPathVector inputs;
-    if (UsdRelationship rel =
-            prim.GetRelationship(TfToken("rigExec:blendInputs"))) {
+    if (rigExec::RigExecOracleRelationship rel =
+            prim.GetRelationship(_oracleToken0)) {
         rel.GetTargets(&inputs);
     }
     // Active inputs accumulate in canonical input-path order
@@ -289,7 +301,7 @@ _OracleBlendShapeMover(const rigExec::RigExecMoverOracleContext &ctx)
     VtVec3fArray next = points;
     bool failed = false;
     for (const SdfPath &inputPath : inputs) {
-        const UsdPrim input = stage->GetPrimAtPath(inputPath);
+        const rigExec::RigExecOraclePrim input = stage->GetPrimAtPath(inputPath);
         if (!input) {
             diagnostics->push_back(
                 "MoverFailed " + moverPath.GetString() +
@@ -309,7 +321,7 @@ _OracleBlendShapeMover(const rigExec::RigExecMoverOracleContext &ctx)
         // has always used _resolvedInputs here; this is the oracle
         // catching up to it.
         resolved.GetAttribute(
-            input.GetAttribute(TfToken("inputs:weight")), time,
+            input.GetAttribute(_oracleToken1), time,
             &channel);
         if (!std::isfinite(channel)) {
             diagnostics->push_back(
@@ -320,8 +332,8 @@ _OracleBlendShapeMover(const rigExec::RigExecMoverOracleContext &ctx)
             break;
         }
         SdfPathVector samplePaths;
-        if (UsdRelationship rel = input.GetRelationship(
-                TfToken("rigExec:samples"))) {
+        if (rigExec::RigExecOracleRelationship rel = input.GetRelationship(
+                _oracleToken2)) {
             rel.GetTargets(&samplePaths);
         }
 
@@ -346,7 +358,7 @@ _OracleBlendShapeMover(const rigExec::RigExecMoverOracleContext &ctx)
             break;
         }
         for (const SdfPath &samplePath : samplePaths) {
-            const UsdPrim sample =
+            const rigExec::RigExecOraclePrim sample =
                 stage->GetPrimAtPath(samplePath.GetPrimPath());
             if (!sample) {
                 diagnostics->push_back(
@@ -357,12 +369,12 @@ _OracleBlendShapeMover(const rigExec::RigExecMoverOracleContext &ctx)
                 break;
             }
             SdfPathVector shapeTargets, sparseTargets;
-            if (UsdRelationship rel = sample.GetRelationship(
-                    TfToken("rigExec:targetPoints"))) {
+            if (rigExec::RigExecOracleRelationship rel = sample.GetRelationship(
+                    _oracleToken3)) {
                 rel.GetTargets(&shapeTargets);
             }
-            if (UsdRelationship rel = sample.GetRelationship(
-                    TfToken("rigExec:blendShape"))) {
+            if (rigExec::RigExecOracleRelationship rel = sample.GetRelationship(
+                    _oracleToken4)) {
                 rel.GetTargets(&sparseTargets);
             }
             if (shapeTargets.size() + sparseTargets.size() != 1) {
@@ -408,9 +420,9 @@ _OracleBlendShapeMover(const rigExec::RigExecMoverOracleContext &ctx)
                     }
                 }
                 s.activation = 1;
-                if (UsdAttribute a = sample.GetAttribute(
-                        TfToken("rigExec:activation"))) {
-                    a.Get(&s.activation, time);
+                if (rigExec::RigExecOracleAttribute a = sample.GetAttribute(
+                        _oracleToken5)) {
+                    resolved.GetAttribute(a, time, &s.activation);
                 }
                 if (!std::isfinite(s.activation) ||
                     s.activation <= 0) {
@@ -424,7 +436,7 @@ _OracleBlendShapeMover(const rigExec::RigExecMoverOracleContext &ctx)
                 samples.push_back(std::move(s));
                 continue;
             }
-            const UsdAttribute shapeAttr =
+            const rigExec::RigExecOracleAttribute shapeAttr =
                 stage->GetAttributeAtPath(shapeTargets[0]);
             bool gotShape = shapeAttr && shapeAttr.Get(&s.shape, time);
             // A phased sample read answers from the recorded
@@ -448,9 +460,9 @@ _OracleBlendShapeMover(const rigExec::RigExecMoverOracleContext &ctx)
                 break;
             }
             s.activation = 1;
-            if (UsdAttribute a = sample.GetAttribute(
-                    TfToken("rigExec:activation"))) {
-                a.Get(&s.activation, time);
+            if (rigExec::RigExecOracleAttribute a = sample.GetAttribute(
+                    _oracleToken5)) {
+                resolved.GetAttribute(a, time, &s.activation);
             }
             if (!std::isfinite(s.activation) || s.activation <= 0) {
                 diagnostics->push_back(
@@ -522,14 +534,14 @@ _OracleBlendShapeMover(const rigExec::RigExecMoverOracleContext &ctx)
         }
     }
     if (!failed) {
-        TfToken space("target");
-        prim.GetAttribute(TfToken("rigExec:deltaSpace")).Get(&space);
+        TfToken space = _oracleToken9;
+        prim.GetAttribute(_oracleToken6).Get(&space);
         if (space == "surfaceFrame") {
             VtIntArray counts, indices;
             stage->GetPrimAtPath(target.GetPrimPath()).GetAttribute(
-                TfToken("faceVertexCounts")).Get(&counts, time);
+                _oracleToken7).Get(&counts, time);
             stage->GetPrimAtPath(target.GetPrimPath()).GetAttribute(
-                TfToken("faceVertexIndices")).Get(&indices, time);
+                _oracleToken8).Get(&indices, time);
             std::vector<GfVec3f> deltas(next.size()), transported;
             for (size_t i = 0; i < next.size(); ++i) {
                 deltas[i] = next[i] - points[i];

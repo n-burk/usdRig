@@ -56,6 +56,9 @@ two `frames` providers, define local/common point conversion and the nearest
 point metric. Directional projection and above-surface normal projection
 are not implemented by these nearest-surface settings.
 
+`.rigexec` exports carry these settings from format revision 21. A revision
+20 file has none of them and plays the legacy closest-point snap.
+
 ## Wiring
 
 | Relationship | Points to | Required |

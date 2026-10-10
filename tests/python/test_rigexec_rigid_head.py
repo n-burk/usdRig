@@ -200,7 +200,7 @@ def main():
     # Baked only: it is the path the biped runs, and one compile is what
     # keeps this file inside the suite's timeout.
     rig = rigexec.Rig(stage, _RIG)
-    rig.evaluation_mode = "baked"
+    rig.cpu_reference = True
 
     _check_head_is_rigid(rig, hip)
     _check_the_rig_still_scales(rig, main_ctl)

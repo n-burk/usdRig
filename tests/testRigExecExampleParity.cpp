@@ -1,17 +1,6 @@
-// Every shipped example, under the parity check, with a drag standing on it.
-// The per-example ctest entries (example_parity_*) hold each rig against the
-// dynamic path frame by frame; this is the half they cannot reach, because
-// rigExecPose has no gizmo. An interactive override the program cannot place
-// is not a wrong answer -- the whole generation falls back to the dynamic
-// path and every published value still agrees -- so a numeric comparison
-// passes and the only visible symptom is that the drag got slow. What this
-// suite asserts, per fixture, is therefore that the generations under a drag
-// CAME FROM THE PROGRAM, and that the parity check found nothing.
-// The fixtures come from tests/exampleFixtures.cmake through the generated
-// header: one table, read here and by the ctest entries, so the two cannot
-// disagree about which frames a rig is tested at or which prim a drag lands
-// on. A fixture that does not bake yet is skipped and reported, and turns
-// itself on when its operator group removes the refusal.
+// Every registered example runs through the shared graph, including held
+// interactive drags and their release. Independent scalar reference checks
+// remain enabled; compile or admission refusal is a failure, never a skip.
 // argv[1] = path to the examples directory.
 #include "rigExec/rigEvaluator.h"
 #include "rigExec/types.h"
@@ -73,8 +62,7 @@ ParseFrames(const std::string &text)
 
 // A drag is a value, and the value has to be the attribute's own type: an
 // override holding a double where the input is a float never reaches the
-// input, and the generation then falls back for a reason that reads like the
-// program declining rather than like the table being wrong.
+// input, so the fixture must provide the exact declared scalar type.
 bool
 BumpedValue(const UsdAttribute &attribute, double delta, VtValue *out)
 {
@@ -119,10 +107,11 @@ DragOne(const std::string &where, RigExecRigEvaluator *rig,
                 std::printf("FAIL %s: an invalid generation under a drag\n",
                             where.c_str());
             }
-            if (pose.bakedParityMismatches) {
+            CHECK(pose.referenceMismatches == 0);
+            if (pose.comparisonMismatches) {
                 ++failures;
                 std::printf("FAIL %s: %zu baked parity mismatch(es) at %g\n",
-                            where.c_str(), pose.bakedParityMismatches,
+                            where.c_str(), pose.comparisonMismatches,
                             frame.GetValue());
                 for (const std::string &diagnostic : pose.diagnostics) {
                     std::printf("    %s\n", diagnostic.c_str());
@@ -131,9 +120,7 @@ DragOne(const std::string &where, RigExecRigEvaluator *rig,
             ++*generations;
         }
     }
-    // The assertion the numeric comparison cannot make: an override the
-    // program could not place sends the generation down the dynamic path,
-    // where it computes the same answer more slowly and silently.
+    // Every requested generation must execute through the graph.
     if (rig->GetBakedGenerationCount() != *generations) {
         ++failures;
         std::printf("FAIL %s: %zu of %zu generation(s) came from the "
@@ -171,7 +158,7 @@ TestOneFixture(const std::string &examplesDir,
     // entries ask for them, so this suite must too or the two halves of the
     // table measure different things.
     rig.SetSolverGuidesEnabled(true);
-    rig.SetEvaluationMode(RigExecEvaluationMode::BakedWithParityCheck);
+    rig.cpuReference = true;
     std::vector<std::string> errors;
     if (!rig.Compile(&errors)) {
         ++failures;
@@ -181,13 +168,11 @@ TestOneFixture(const std::string &examplesDir,
         }
         return;
     }
-    // A fixture the table calls bakeable that refuses is a failure here
-    // rather than a skip: everything below would then compare the dynamic
-    // path with itself and pass having proved nothing.
+    // All registered fixtures require graph admission.
     std::vector<std::string> reasons;
     if (!rig.IsBakeable(&reasons)) {
         ++failures;
-        std::printf("FAIL %s: the table says it bakes, and it declined\n",
+        std::printf("FAIL %s: graph admission declined\n",
                     where.c_str());
         for (const std::string &reason : reasons) {
             std::printf("    %s\n", reason.c_str());
@@ -201,10 +186,11 @@ TestOneFixture(const std::string &examplesDir,
         const RigExecRigPose pose = rig.Evaluate(frame);
         ++generations;
         CHECK(pose.valid);
-        if (pose.bakedParityMismatches) {
+        CHECK(pose.referenceMismatches == 0);
+        if (pose.comparisonMismatches) {
             ++failures;
             std::printf("FAIL %s: %zu baked parity mismatch(es) at %g\n",
-                        where.c_str(), pose.bakedParityMismatches,
+                        where.c_str(), pose.comparisonMismatches,
                         frame.GetValue());
             for (const std::string &diagnostic : pose.diagnostics) {
                 std::printf("    %s\n", diagnostic.c_str());
@@ -260,14 +246,12 @@ TestOneFixture(const std::string &examplesDir,
         }
     }
 
-    // Releasing a drag must leave the rig on the path it was asked for, not
-    // stranded on the one a fallback took.
+    // Releasing a drag must restore authored inputs.
     const RigExecRigPose released = rig.Evaluate(frames.front());
     ++generations;
     CHECK(released.valid);
-    CHECK(released.bakedParityMismatches == 0);
-    CHECK(rig.GetEvaluationMode() ==
-          RigExecEvaluationMode::BakedWithParityCheck);
+    CHECK(released.referenceMismatches == 0);
+    CHECK(released.comparisonMismatches == 0);
     CHECK(rig.GetBakedGenerationCount() == generations);
     std::printf("  %-34s %2zu frame(s), %zu generation(s) from the program\n",
                 where.c_str(), frames.size(),
@@ -304,19 +288,16 @@ main(int argc, char **argv)
 
     size_t baked = 0;
     for (const RigExecExampleFixture &fixture : kRigExecExampleFixtures) {
-        if (!fixture.bakesToday) {
-            std::printf("  %-34s skipped, waiting on %s\n", fixture.stage,
-                        fixture.blockedBy);
-            continue;
-        }
         TestOneFixture(examplesDir, fixture);
         ++baked;
     }
     // An empty sweep passes silently and proves nothing, and the table
     // shrinking to no bakeable fixture is a regression rather than a rest.
     CHECK(baked > 0);
+    CHECK(baked == sizeof(kRigExecExampleFixtures) /
+                   sizeof(kRigExecExampleFixtures[0]));
 
-    std::printf("%s: %zu bakeable fixture(s) of %zu, %d failure(s)\n",
+    std::printf("%s: %zu registered fixture(s) of %zu, %d failure(s)\n",
                 failures ? "FAILED" : "ok", baked,
                 sizeof(kRigExecExampleFixtures) /
                     sizeof(kRigExecExampleFixtures[0]),

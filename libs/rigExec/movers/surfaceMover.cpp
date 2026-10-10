@@ -13,6 +13,7 @@
 #include "pxr/exec/exec/registerSchema.h"
 #include "pxr/exec/vdf/context.h"
 #include "pxr/exec/vdf/readIterator.h"
+#include "pxr/usd/usd/attribute.h"
 
 using rigExec::RigExecMoverParameters;
 using rigExec::RigExecMoverExecTokens;
@@ -20,22 +21,34 @@ using rigExec::RigExecMoverExecTokens;
 PXR_NAMESPACE_USING_DIRECTIVE
 
 namespace {
+const TfToken _oracleToken0("rigExec:surface");
+const TfToken _oracleToken1("points");
+const TfToken _oracleToken2("faceVertexCounts");
+const TfToken _oracleToken3("faceVertexIndices");
+// The settings' fallbacks, built once: an oracle builds no token from text.
+const TfToken _onSurfaceToken("onSurface");
+const TfToken _insideToken("inside");
+const TfToken _outsideToken("outside");
+const TfToken _outsideSurfaceToken("outsideSurface");
+const TfToken _localToken("local");
+const TfToken _commonToken("common");
+
 
 bool SetSettings(RigExecMoverParameters *p, const TfToken &snap, const TfToken &space,
                  float offset, const std::vector<float> &mask, const std::vector<int> &triangles,
                  const GfMatrix4d &surface, const GfMatrix4d &target)
 {
     using namespace rigExec;
-    if(snap==TfToken("onSurface"))p->surfaceSettings.mode=RigExecSurfaceSnapMode::OnSurface;
-    else if(snap==TfToken("inside"))p->surfaceSettings.mode=RigExecSurfaceSnapMode::Inside;
-    else if(snap==TfToken("outside"))p->surfaceSettings.mode=RigExecSurfaceSnapMode::Outside;
-    else if(snap==TfToken("outsideSurface"))p->surfaceSettings.mode=RigExecSurfaceSnapMode::OutsideSurface;
+    if(snap==_onSurfaceToken)p->surfaceSettings.mode=RigExecSurfaceSnapMode::OnSurface;
+    else if(snap==_insideToken)p->surfaceSettings.mode=RigExecSurfaceSnapMode::Inside;
+    else if(snap==_outsideToken)p->surfaceSettings.mode=RigExecSurfaceSnapMode::Outside;
+    else if(snap==_outsideSurfaceToken)p->surfaceSettings.mode=RigExecSurfaceSnapMode::OutsideSurface;
     else return false;
     p->surfaceSettings.offset=offset;p->surfaceSettings.mask=mask;p->surfaceSettings.triangles=triangles;
     if(!std::isfinite(offset) || !RigExecSurfaceSnapValidMatrix(surface) || !RigExecSurfaceSnapValidMatrix(target))return false;
-    if(space==TfToken("local")) {
+    if(space==_localToken) {
         p->targetToSurface=target*rigExec::RigExecSurfaceSnapAffineInverse(surface);p->surfaceToTarget=surface*rigExec::RigExecSurfaceSnapAffineInverse(target);
-    } else if(space==TfToken("common")) {
+    } else if(space==_commonToken) {
         p->targetToSurface=rigExec::RigExecSurfaceSnapAffineInverse(surface);p->surfaceToMetric=rigExec::RigExecSurfaceSnapAffineInverse(surface);p->surfaceToTarget=surface;
     } else return false;
     return true;
@@ -116,15 +129,15 @@ rigExec::RigExecOracleResult
 _OracleSurfaceMover(const rigExec::RigExecMoverOracleContext &ctx)
 {
     using rigExec::RigExecOracleResult;
-    const UsdStageRefPtr &stage = ctx.stage;
-    const UsdPrim &prim = ctx.prim;
+    const rigExec::RigExecOracleScene &stage = ctx.stage;
+    const rigExec::RigExecOraclePrim &prim = ctx.prim;
     const SdfPath &moverPath = ctx.moverPath;
     const UsdTimeCode time = ctx.time;
     std::vector<std::string> *diagnostics = ctx.diagnostics;
     VtVec3fArray &points = *ctx.points;
     SdfPathVector surfaces;
-    if (UsdRelationship rel =
-            prim.GetRelationship(TfToken("rigExec:surface"))) {
+    if (rigExec::RigExecOracleRelationship rel =
+            prim.GetRelationship(_oracleToken0)) {
         rel.GetTargets(&surfaces);
     }
     if (surfaces.empty()) {
@@ -134,16 +147,15 @@ _OracleSurfaceMover(const rigExec::RigExecMoverOracleContext &ctx)
     VtVec3fArray surfacePoints;
     VtIntArray counts, indices;
     rigExec::RigExecReadPhasedPoints(
-        stage, ctx.snapshots, time, prim, "rigExec:surface",
-        surfacePrim.AppendProperty(TfToken("points")), moverPath,
-        &surfacePoints);
-    if (const UsdPrim s = stage->GetPrimAtPath(surfacePrim)) {
-        s.GetAttribute(TfToken("faceVertexCounts")).Get(&counts, time);
-        s.GetAttribute(TfToken("faceVertexIndices"))
+        ctx, "rigExec:surface",
+        surfacePrim.AppendProperty(_oracleToken1), &surfacePoints);
+    if (const rigExec::RigExecOraclePrim s = stage->GetPrimAtPath(surfacePrim)) {
+        s.GetAttribute(_oracleToken2).Get(&counts, time);
+        s.GetAttribute(_oracleToken3)
             .Get(&indices, time);
     }
     VtIntArray explicitTriangles;
-    prim.GetAttribute(TfToken("rigExec:triangles")).Get(&explicitTriangles,time);
+    prim.GetAttribute("rigExec:triangles").Get(&explicitTriangles,time);
     if (surfacePoints.empty() || (counts.empty() && explicitTriangles.empty())) {
         diagnostics->push_back(
             "MoverFailed " + moverPath.GetString() +
@@ -152,7 +164,7 @@ _OracleSurfaceMover(const rigExec::RigExecMoverOracleContext &ctx)
     }
     std::vector<GfVec3f> scratch(points.begin(), points.end());
     const auto read=[&](const char *name,auto fallback) {
-        const auto a=prim.GetAttribute(TfToken(name));if(a)ctx.resolved.GetAttribute(a,time,&fallback);return fallback;
+        const auto a=prim.GetAttribute(name);if(a)ctx.resolved.GetAttribute(a,time,&fallback);return fallback;
     };
     auto surface=read("rigExec:surfaceMatrix",GfMatrix4d(1.0)),target=read("rigExec:targetMatrix",GfMatrix4d(1.0));
     if(!rigExec::RigExecSurfaceSnapValidMatrix(surface) || !rigExec::RigExecSurfaceSnapValidMatrix(target))return RigExecOracleResult::PassThrough;
@@ -168,7 +180,7 @@ _OracleSurfaceMover(const rigExec::RigExecMoverOracleContext &ctx)
     }
     const auto mask=read("rigExec:mask",VtFloatArray());const auto triangles=read("rigExec:triangles",VtIntArray());
     RigExecMoverParameters params;
-    if(!SetSettings(&params,read("rigExec:snapMode",TfToken("onSurface")),read("rigExec:pointSpace",TfToken("local")),
+    if(!SetSettings(&params,read("rigExec:snapMode",_onSurfaceToken),read("rigExec:pointSpace",_localToken),
                     read("rigExec:offset",0.f),{mask.begin(),mask.end()},{triangles.begin(),triangles.end()},surface,target))
         return RigExecOracleResult::PassThrough;
     if(rigExec::RigExecSurfaceSnapIsLegacy(params.surfaceSettings,params.targetToSurface,params.surfaceToTarget,params.surfaceToMetric)) {

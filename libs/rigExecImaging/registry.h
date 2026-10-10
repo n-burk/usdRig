@@ -98,10 +98,22 @@
 #include <vector>
 
 namespace rigExec {
-class RigExecFallbackStageSource;
-class RigExecFallbackStageMirror;
 
 class RigExecImagingDirectory;
+struct RigExecWarmWorkspacePool;
+
+/// The span an upstream pull reconstructs (RigExecImagingRegistry::
+/// GetUpstreamPullWindow).
+struct RigExecUpstreamPullWindow {
+    double lo = 0.0;
+    double hi = 0.0;
+    /// The stage reconstructs held, not linear (UsdInterpolationTypeHeld).
+    bool held = false;
+    /// The context's current time, when numeric: a pull's T0 before its
+    /// chain has read any trigger.
+    bool haveTime = false;
+    double time = 0.0;
+};
 
 class RigExecImagingRegistry : public TfWeakBase {
 public:
@@ -202,6 +214,12 @@ public:
     /// Cache hits are not pulls and are not counted.
     size_t GetSessionEvaluationCount(const SdfPath &rigPath);
 
+    /// Read the existing live evaluator on the stage owner thread. Never
+    /// evaluates, compiles, changes time, or constructs a second evaluator.
+    std::string LiveDebugJson(const SdfPath &rig, const std::string &knownGraph,
+                              const std::string &knownGeneration);
+    bool SetLiveOpTiming(const SdfPath &rig, bool enabled);
+
     /// The primary warming trigger: call on drag release / value commit, on
     /// the UI thread. Enqueues the scrub neighbors (+-1..N of the playhead)
     /// plus the nearest-frame-first sweep of the surrounding range for every
@@ -218,13 +236,12 @@ public:
     /// The secondary warming trigger: call from the frame loop when the UI
     /// is idle. Enqueues the sweep only (neighbors belong to the commit
     /// trigger) with the same runner, gate, and generation rules. Once
-    /// workers drain, production queues at most one missing explicit-range
-    /// frame on a private stage for rigs that cannot freeze their program.
-    /// This never evaluates the live stage or changes the published viewport.
+    /// workers drain, production fills at most one missing explicit-range
+    /// frame on this thread without changing the published viewport.
     size_t OnIdle(
         RigExecFrozenStepRunner runner = RigExecFrozenStepRunner());
 
-    /// Factory calls plus private-stage job submissions. Idle drivers use
+    /// Factory calls plus calling-thread fill attempts. Idle drivers use
     /// this to distinguish advancing past failed frames from no work.
     size_t GetWarmingProgressCount();
 
@@ -233,9 +250,9 @@ public:
     /// A null \p runner builds the production runner (see OnEditCommitted).
     /// Empty work when no faithful job exists: unknown or playback rig,
     /// default or non-finite time, stale generation, refusal rig (D7: no
-    /// background job, ever), unsampleable inputs, a chain the sampling
-    /// hook declined (no job is ever built from stale chain values), or an
-    /// undigestible held type. A built job also records its time's
+    /// background job, ever), unsampleable inputs, a vector carrying a stale
+    /// sample (no job is ever built from stale values), or an undigestible
+    /// held type. A built job also records its time's
     /// freshness proof, so a completion is servable without a live visit.
     /// The scheduler triggers build their factories from this; tests drive
     /// it directly for deterministic fence coverage.
@@ -252,6 +269,15 @@ public:
     /// to the plain per-frame route, which re-derives everything exactly
     /// as before -- including a null cache, which is what the direct
     /// test drivers pass.
+    /// Instance-only testing observer of an actual valid default-worker
+    /// publication. Copied when building work; called after all publication
+    /// locks are released. Install/remove on the owner thread with no factory
+    /// construction in progress and all background work drained.
+    using WarmPublishObserver = std::function<void(const SdfPath &,
+        UsdTimeCode, const RigExecFrameCacheKey &, RigExecFrameGeneration,
+        const RigExecRigPose &, const std::shared_ptr<RigExecFrameCache> &)>;
+    void SetWarmPublishObserverForTesting(WarmPublishObserver observer);
+
     RigExecWarmFactoryResult BuildWarmWork(
         const SdfPath &rig, UsdTimeCode time,
         RigExecFrameGeneration generation, RigExecFrozenStepRunner runner,
@@ -368,6 +394,10 @@ public:
     /// never need it. Valid while the session stays activated, and only
     /// under the caller's own serialization with triggers.
     RigExecImagingBridge *GetBridge(const SdfPath &rig);
+
+    /// One rig's playback session, or null when the rig is unknown or
+    /// evaluates live. For tests, under the same terms as GetBridge.
+    RigExecBakedPlayback *GetPlayback(const SdfPath &rig);
 
     /// Every (time, key) completion the warm index holds for the rig, in
     /// index order. For tests pinning the 2.2 re-resolve lanes (which key
@@ -520,6 +550,46 @@ public:
     /// Whether \p path was noted by NoteRigRoot and is still pending.
     bool IsNotedRigRoot(const SdfPath &path);
 
+    // -- upstream inputs (upstreamTable.h) ------------------------------------
+    //
+    // A chain's results index pulls its `rigExecInputs` sources with no lock
+    // held and hands the table here. The chain that delivered the last
+    // table (a trigger's, or a source change's) supplies every session's
+    // values; a key two chains publish differently is reported. Each live
+    // session keeps its share of that table (keys at or under its asset or
+    // read roots) and an upstream serial that moves when the sources, the
+    // window or a frame value change -- not when only T0 moves. A serial
+    // move cancels the rig's warming generation, so a completed warm row
+    // always postdates the last source change (the fast path serves rows
+    // with no digest compare). Before a live evaluation the bridge receives
+    // the table's values at the evaluated time; warming reads the job
+    // time's values from the table alone. A playback session takes the same
+    // hand-off and applies the values to its binary's inputs.
+
+    /// The window a pull reconstructs: the union of the sessions' warm
+    /// ranges, or the stage's start and end time codes when no session set
+    /// one. Takes the lock briefly; the caller pulls after it returns.
+    RigExecUpstreamPullWindow GetUpstreamPullWindow();
+
+    /// Stores \p table as \p chain's pulled sources (an empty table lifts
+    /// them), makes \p chain the one that supplies the values, and updates
+    /// every session's share. Call with no lock held.
+    void SetUpstreamTable(const RigExecResultsSceneIndex *chain,
+                          std::shared_ptr<const RigExecUpstreamTable> table);
+
+    /// Forgets \p chain's table (the chain is going away or rebinding).
+    void DropUpstreamTable(const RigExecResultsSceneIndex *chain);
+
+    /// Re-evaluates and republishes at the current time with the values the
+    /// tables now give (after a source change). False when inactive.
+    bool RefreshUpstreamInputs();
+
+    /// The rig's share of the supplying chain's table (null when none) and
+    /// its upstream serial. For tests.
+    std::shared_ptr<const RigExecUpstreamTable> GetUpstreamTable(
+        const SdfPath &rig);
+    uint64_t GetUpstreamSerial(const SdfPath &rig);
+
     ~RigExecImagingRegistry();
 
 private:
@@ -603,6 +673,10 @@ private:
         bool readRootsDirty = true;
         bool dirty = true;
         size_t evaluationCount = 0;
+        const RigExecBakedProgram *debugProgram = nullptr;
+        uint64_t debugEpoch = 0;
+        size_t debugBuildCount = 0;
+        std::string debugGraphKey;
         // The session's single-entry frozen snapshot cache, keyed by the
         // program object, the binding epoch, and the patchable avar
         // region's digest. Refreshed once per warming burst, in
@@ -624,6 +698,7 @@ private:
         /// Impossible until the first refresh verifies one.
         uint64_t frozenSerial = ~uint64_t(0);
         std::shared_ptr<const RigExecFrozenProgram> frozen;
+        std::shared_ptr<RigExecWarmWorkspacePool> warmWorkspaces;
         /// The named cause of the standing snapshot's freeze refusal, empty
         /// when the last refresh froze (or had no program to freeze): a
         /// refusal parks a validly empty entry AND says why, so the
@@ -666,10 +741,11 @@ private:
         /// playhead-relative sweep instead.
         std::vector<double> warmRange;
         bool warmRangeActive = false;
-        // Private-stage failures retry after an edit or range request;
-        // frozen-worker declines never suppress this independent route.
+        // Failed calling-thread fills retry after an edit or range request.
+        // Frozen-worker declines do not suppress this generic fallback.
+        uint64_t fallbackSerial = ~uint64_t(0);
+        std::set<double> fallbackDeclined;
         size_t fallbackAttempts = 0;
-        std::shared_ptr<RigExecFallbackStageMirror> fallbackMirror;
         // The session's epoch-pinned chain bindings, refreshed with the
         // snapshot and verified per burst (a constant edited mid-epoch
         // moves no digest, so the pins are re-read, not trusted -- once,
@@ -699,9 +775,32 @@ private:
         /// frames stay visitable). Times only: the trigger skips the
         /// playhead.
         std::vector<double> pendingRewarm;
+        /// The session's share of the supplying chain's upstream table
+        /// (null when no key is its), and the serial that moves with its
+        /// sources, window or frame values (see "upstream inputs" above).
+        std::shared_ptr<const RigExecUpstreamTable> upstream;
+        uint64_t upstreamSerial = 0;
+        /// The burst's upstream pins: the uniform values it was built
+        /// under and the serial they came from. While a source varies no
+        /// burst is built (burstUpstreamVaries): those frames take the
+        /// plain per-frame route, which reads each job time's values.
+        std::vector<RigExecUpstreamValue> burstUpstream;
+        uint64_t burstUpstreamSerial = ~uint64_t(0);
+        bool burstUpstreamVaries = false;
     };
 
     using RigSessions = std::vector<RigSession>;
+
+    /// Recomputes \p session's share of the supplying chain's table; moves
+    /// its serial, and cancels its warming generation, when the sources
+    /// differ from the share it held. _mutex held.
+    void _UpdateSessionUpstreamLocked(RigSession *session);
+
+    /// Hands \p session's bridge the values at \p time when they differ
+    /// from the ones it holds, and marks the session dirty. A varying key
+    /// with no value at \p time (outside the window) is left out. _mutex
+    /// held.
+    void _HandOffUpstreamLocked(RigSession *session, UsdTimeCode time);
 
     bool _EvaluateSessions(
         RigSessions *sessions,
@@ -887,9 +986,9 @@ private:
     /// (the compute-extent callback runs on arbitrary threads).
     const std::shared_ptr<RigExecSnapshotStore> _store;
     RigSessions _sessions;
+    uint64_t _nextDebugGraph = 0;
     /// The active stage (strong while active, reset by Deactivate).
     UsdStageRefPtr _stage;
-    std::shared_ptr<RigExecFallbackStageSource> _fallbackSource;
     /// The stage a preview in progress resolves on (see BeginPreview).
     /// Weak: the directory holds this context until its stage dies, so a
     /// preview abandoned mid-drag must not keep that stage alive.
@@ -941,10 +1040,19 @@ private:
     /// transitions (scheduler hook) record here; the strip queries it.
     /// A leaf under both _mutex and the scheduler mutex.
     std::shared_ptr<RigExecWarmFrameIndex> _warmIndex;
+    /// Owner-thread state; workers receive a copy during factory construction.
+    WarmPublishObserver _warmPublishObserver;
     /// The triggers' sampling budget (see SetWarmSamplingBudget).
     size_t _warmSamplingMaxInvocations = 16;
     double _warmSamplingMaxMs = 8.0;
     TfNotice::Key _changeKey;
+    /// Each bound chain's last pulled table, and the chain whose table
+    /// supplies the sessions (the last to hand one over). Keys are
+    /// identities only: a chain drops its entry before it goes. _mutex held.
+    std::map<const RigExecResultsSceneIndex *,
+             std::shared_ptr<const RigExecUpstreamTable>>
+        _upstreamTables;
+    const RigExecResultsSceneIndex *_upstreamChain = nullptr;
 };
 
 }  // namespace rigExec

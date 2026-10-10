@@ -44,11 +44,9 @@ namespace rigExec {
 struct RigExecFrameInputs;
 struct RigExecSampledInput;
 struct RigExecBurstSampleCache;
+struct RigExecUpstreamValue;
 
-/// Default per-rig byte cap: holds the 200-frame stack full range
-/// (slot-backed retained state, measured at 5.4 MB/frame, 1.08 GB in all)
-/// with headroom. A cap below the full range never converges to cached: the
-/// LRU keeps evicting the frame the warmer just filled.
+/// Default per-rig byte cap for published poses and retained source snapshots.
 constexpr size_t kRigExecFrameCacheDefaultByteCap = size_t(1280) * 1024 * 1024;
 
 /// What a cached pose is a function of. Time is deliberately absent: see the
@@ -133,11 +131,35 @@ struct RigExecFrameCacheStats {
 /// the values, in program order: they are fresh stage reads, so a moved
 /// constraint target moves the digest.
 ///
+/// Before the seeds, as a tagged block ("vary"), the transport values no
+/// sample covers that can move with the time
+/// (RigExecFrameInputs::varyingLayoutRows and varyingRevisionLeaves): a
+/// skin layout that is not fixed, an external mover's varying input. Each
+/// folds its row (and key) and its values bitwise, with no type name. Both
+/// lists empty fold nothing, so a rig without such inputs keys as before.
+///
+/// Upstream values fold after the seeds, as a tagged block ("ups"), sorted
+/// by path: each entry's path and type, then the value
+/// (RigExecUpstreamValue): a scalar through its bits, an array through its
+/// `foldHash` (RigExecUpstreamFoldHash), so a key folds O(1) per array. An
+/// empty list folds nothing. The forms without \p upstream fold
+/// `inputs.upstream`, the values the vector was sampled under.
+///
 /// Within-process only, like the key hash: never persisted.
+/// The fold hash of an upstream array \p value
+/// (RigExecUpstreamValue::foldHash): its type and bytes, as the control
+/// digest folds a value, and never 0 (0 marks a scalar). 0 for a value
+/// that is not an array.
+uint64_t RigExecUpstreamFoldHash(const VtValue &value);
+
 uint64_t RigExecControlStateDigest(const RigExecFrameInputs &inputs);
 uint64_t RigExecControlStateDigest(
     const RigExecFrameInputs &inputs,
     const std::vector<RigExecValueOverride> &overrides);
+uint64_t RigExecControlStateDigest(
+    const RigExecFrameInputs &inputs,
+    const std::vector<RigExecValueOverride> &overrides,
+    const std::vector<RigExecUpstreamValue> &upstream);
 
 /// Level-1 digest of one sampled input: its path, its valuelessness, and
 /// its value folded exactly as the control digest folds one sample. The
@@ -145,6 +167,38 @@ uint64_t RigExecControlStateDigest(
 /// memoizes the level-1s of time-invariant samples and folds only the
 /// rest per frame. Within-process only, like the key hash.
 uint64_t RigExecSampleDigest(const RigExecSampledInput &sample);
+
+/// Whether the control digest folds \p sample exactly: valueless, or a
+/// value of a type it folds bitwise or VtValue hashes.
+bool RigExecSampleDigestible(const RigExecSampledInput &sample);
+
+/// The fold order of one sample path sequence (defined in frameCache.cpp):
+/// per first-win path in sorted order, its index in the sequence and the
+/// level-1 state after the path (the "src" tag and the path's text, as
+/// RigExecSampleDigest folds them). Recorded on the owning thread and
+/// immutable after; a digest takes it only while the vector repeats the
+/// recorded path sequence elementwise.
+struct RigExecFrameDigestOrder;
+
+/// Records the fold order of \p values' path sequence.
+std::shared_ptr<const RigExecFrameDigestOrder> RigExecRecordFrameDigestOrder(
+    const std::vector<RigExecSampledInput> &values);
+
+/// Whether \p order was recorded from \p values' path sequence; false for a
+/// null order.
+bool RigExecFrameDigestOrderMatches(
+    const RigExecFrameDigestOrder *order,
+    const std::vector<RigExecSampledInput> &values);
+
+/// The text bytes of every path in \p order's recorded sequence (the sum of
+/// GetString().size(), duplicates included), computed once when the order
+/// was recorded. 0 for null.
+size_t RigExecFrameDigestOrderPathTextBytes(const RigExecFrameDigestOrder *order);
+
+/// Whether \p path is one of \p order's first-win paths (binary search over
+/// the recorded sorted order). False for null.
+bool RigExecFrameDigestOrderHasPath(const RigExecFrameDigestOrder *order,
+                                    const SdfPath &path);
 
 /// Folds an epoch-constant digest (plan D3: RigExecEpochConstantDigest, the
 /// value-sensitive avar-constant region the epoch digest no longer covers)
@@ -164,6 +218,11 @@ uint64_t RigExecControlStateDigestWithConstants(
     const RigExecFrameInputs &inputs,
     const std::vector<RigExecValueOverride> &overrides,
     uint64_t constantDigest);
+uint64_t RigExecControlStateDigestWithConstants(
+    const RigExecFrameInputs &inputs,
+    const std::vector<RigExecValueOverride> &overrides,
+    const std::vector<RigExecUpstreamValue> &upstream,
+    uint64_t constantDigest);
 
 /// The control-state digest of a burst-cached vector: identical to
 /// RigExecControlStateDigest for the same inputs, but level-1s served
@@ -177,8 +236,15 @@ uint64_t RigExecControlStateDigestWithBurstCache(
     const RigExecFrameInputs &inputs,
     const std::vector<RigExecValueOverride> &overrides,
     RigExecBurstSampleCache *cache);
+uint64_t RigExecControlStateDigestWithBurstCache(
+    const RigExecFrameInputs &inputs,
+    const std::vector<RigExecValueOverride> &overrides,
+    const std::vector<RigExecUpstreamValue> &upstream,
+    RigExecBurstSampleCache *cache);
 
-/// Whether every value in \p inputs and \p overrides can be digested exactly.
+/// Whether every value in \p inputs (its upstream values and the varying
+/// transport values included) and \p overrides can be digested exactly; a
+/// varying transport row or key the vector does not hold answers false.
 /// An unhashable held type (one VtValue cannot hash and the digest has no
 /// bitwise fold for) answers false, and the frame must bypass the cache --
 /// the digest still folds the type name so it stays defined, but two
@@ -203,18 +269,26 @@ bool RigExecControlStateDigestible(
 /// digest from ever equaling a sampled digest under the same epoch (a mode
 /// toggle crosses the two without moving the epoch). Overrides fold exactly
 /// as in RigExecControlStateDigest, so a drag always digests apart from the
-/// authored frame it started from.
+/// authored frame it started from, and so do \p upstream values, which the
+/// dynamic walk reads authored-level.
 ///
 /// Within-process only, like the key hash: never persisted.
 uint64_t RigExecRefusalControlDigest(
     UsdTimeCode time, uint64_t stageEditSerial,
     const std::vector<RigExecValueOverride> &overrides);
+uint64_t RigExecRefusalControlDigest(
+    UsdTimeCode time, uint64_t stageEditSerial,
+    const std::vector<RigExecValueOverride> &overrides,
+    const std::vector<RigExecUpstreamValue> &upstream);
 
-/// Whether every override in \p overrides can be digested exactly (time
-/// always folds). False bypasses the cache, as in
-/// RigExecControlStateDigestible.
+/// Whether every override in \p overrides (and upstream value in
+/// \p upstream) can be digested exactly (time always folds). False bypasses
+/// the cache, as in RigExecControlStateDigestible.
 bool RigExecRefusalControlDigestible(
     const std::vector<RigExecValueOverride> &overrides);
+bool RigExecRefusalControlDigestible(
+    const std::vector<RigExecValueOverride> &overrides,
+    const std::vector<RigExecUpstreamValue> &upstream);
 
 /// One entry the cache dropped: its key and the time it was published for.
 /// Reported so the per-frame index retires the time without scanning the
@@ -238,8 +312,7 @@ using RigExecFrameCacheEvictionCallback =
 /// on, recorded at publish so a later edit retires and re-runs only the
 /// entries that touched what moved. A full evaluation depends on every
 /// cluster, every weight object, and every constant region of its program
-/// (see RigExecFullEvalProvenance); a partial cone re-run (plan 2.2)
-/// records the subset it ran against retained state. Aliases name every
+/// (see RigExecFullEvalProvenance). Aliases name every
 /// frame served under the key, starting with the publishing time.
 struct RigExecEntryProvenance {
     /// Clusters whose computation produced the entry, sorted and unique.
@@ -276,7 +349,7 @@ constexpr size_t kRigExecProvenanceAliasCap = 1024;
 /// map, by the same counting reports/frame-cache-measurements.md measures
 /// (SdfPath keys at sizeof(SdfPath), path strings interned and excluded, map
 /// node overhead excluded). Publish counts this per entry; Stream D adds the
-/// retained arena beside it.
+/// retained source snapshot beside it.
 size_t RigExecFrameCachePoseBytes(const RigExecRigPose &pose);
 
 /// The (epochDigest, controlDigest) store. See the file header for the key
@@ -308,8 +381,7 @@ public:
                  const RigExecRigPose &pose,
                  const RigExecEntryProvenance *provenance = nullptr);
     /// The sparse-reuse (Stream D) Publish: stores \p pose plus the retained
-    /// cross-frame state -- the source snapshot and slot arena a partial
-    /// cone re-runs against -- accounted at \p retainedBytes beside the
+    /// source snapshot, accounted at \p retainedBytes beside the
     /// pose's own bytes. \p retained is opaque here (a
     /// RigExecRetainedFrameState to frameCacheSparsity.h); a null handle
     /// with nonzero bytes is declined, like an invalid pose. Otherwise the

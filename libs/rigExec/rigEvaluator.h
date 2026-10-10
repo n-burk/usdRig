@@ -1,22 +1,16 @@
-// RigExec rig evaluator, v0.1-alpha.
-// Transforms and solvers evaluate through OpenExec; the geometry mover
-// chains evaluate through the in-memory RigExecMoverGraph. NOTHING is
-// authored: the engine has no compiler, no generated prims, and no derived
-// evaluation stage (spec §7.2 revised — the source stage is never written).
-// A staged CPU implementation of the same kernels over the same composed
-// reverse-sibling post-order walk (spec §4.2) is retained behind
-// cpuParityMode as the scalar parity reference.
+// Compiles source scene facts into the authoritative native operation program.
+// Optional scalar reference checks run over detached independent source inputs.
 #ifndef RIGEXEC_RIG_EVALUATOR_H
 #define RIGEXEC_RIG_EVALUATOR_H
 
 #include "bakedProgram.h"
-#include "moverGraph.h"
+#include "liveOperationGraph.h"
+#include "moverGraphCaches.h"
+#include "moverGraphTypes.h"
 #include "profiler.h"
 #include "solverKernels.h"
 #include "tapSet.h"
-#include "types.h"
 
-#include "rigExecMath/autoClavicleKernel.h"
 #include "rigExecMath/rbf.h"
 #include "rigExecMath/solvers.h"
 
@@ -31,7 +25,6 @@
 #include "pxr/usd/usd/prim.h"
 #include "pxr/usd/usdGeom/xformCache.h"
 
-#include <algorithm>
 #include <list>
 #include <map>
 #include <set>
@@ -43,27 +36,44 @@
 
 namespace rigExec {
 
+struct RigExecSceneDescriptors;
+struct RigExecScenePoseInterpolatorDescriptor;
+struct RigExecSceneSpaceSwitchDescriptor;
+
 /// One discovered mover application (spec §4.2): the reverse-sibling
 /// post-order ordinal plus canonicalized targets.
+struct RigExecMoverHandler;
 struct RigExecMoverRecord {
     SdfPath moverPath;
     TfToken schemaType;
+    const RigExecMoverHandler *handler = nullptr;
     std::vector<SdfPath> targets;  ///< canonicalized (prim -> .points etc.)
     int ordinal = 0;
     bool enabledFallback = true;
 };
 
-/// An operator input whose connection reads a property chain at a declared
-/// phase rather than its final value: rigExecReadPhase on the input.
+/// An operator input whose connection reads a property chain at a phase:
+/// rigExecReadPhase on the input, `base` when none is authored.
 /// `applied` is how many of the chain's revisions the value includes -- 0
-/// for `base`, the revision count through a named prim for a checkpoint.
-/// The value is published on the consumer itself, so every reader of the
-/// input gets it through the routes a chain result takes.
+/// for `base`, the revision count through a named prim for a checkpoint,
+/// every revision for `final`. The value is published on the consumer
+/// itself, so every reader of the input gets it through the routes a chain
+/// result takes, whatever an intermediate hop of its connection declares.
+///
+/// `hops` is the consumer followed by every attribute its connection walk
+/// passes before the target. An interactive override on any of them is
+/// what the overlay walk meets first, so the record publishes nothing
+/// while one stands. An override on the target is the chain's base: the
+/// revisions run from it, and every record reads the chain's history from
+/// there, as it would with that value authored on the target.
 struct RigExecPhasedConnection {
     SdfPath consumer;
     SdfValueTypeName consumerType;
     SdfPath target;
     size_t applied = 0;
+    SdfPathVector hops;
+    /// Declared `final` (then `applied` is the revision count).
+    bool final = false;
 };
 
 /// One weight object's resolved field, as a mover actually consumed it.
@@ -73,7 +83,7 @@ struct RigExecPhasedConnection {
 /// driven modulation, a placed volume, or a composition of those.
 struct RigExecResolvedWeightField {
     SdfPath target;              ///< canonical points property weighted
-    std::vector<float> weights;  ///< one per logical element
+    VtFloatArray weights;  ///< one per logical element
 };
 
 /// One evaluated generation of a rig.
@@ -143,7 +153,7 @@ struct RigExecRigPose {
     std::map<SdfPath, VtValue> movedProperties;
 
     /// CPU reference-kernel results for the same chains, filled only when
-    /// RigExecRigEvaluator::cpuParityMode is set (scalar-reference
+    /// RigExecRigEvaluator::cpuReference is set (scalar-reference
     /// parity, spec §7.4).
     std::map<SdfPath, VtValue> movedPropertiesCpu;
 
@@ -178,31 +188,18 @@ struct RigExecRigPose {
     /// (spec §6.6: disabled/failed movers pass through with diagnostics).
     std::vector<std::string> diagnostics;
 
-    /// Independent scalar-reference comparisons, when cpuParityMode is on.
+    /// Independent scalar-reference comparisons, when cpuReference is on.
     /// Both are zero when no reference checks ran; callers must check the
     /// agreement count to distinguish that from a verified generation.
-    size_t moverGraphParityMismatches = 0;
-    size_t moverGraphParityAgreements = 0;
+    size_t referenceMismatches = 0;
+    size_t referenceAgreements = 0;
 
-    /// Disagreements between the baked program and the dynamic path, when
-    /// the evaluation mode is BakedWithParityCheck. Zero in every other
-    /// mode, including Baked -- nothing compared is not the same fact as
-    /// nothing differed, so read it beside GetEvaluationMode.
-    size_t bakedParityMismatches = 0;
+    /// Exact pose comparison disagreements from explicit verification tools.
+    size_t comparisonMismatches = 0;
 
-    /// Dependency levels evaluated to resolve solver->joint overrides.
-    /// Retains the public name used by clients of the former fixed-point
-    /// evaluator; resolution now follows the compiled DAG once per level.
-    size_t solverOverrideRounds = 0;
-    bool solverOverridesConverged = true;
-    /// Aggregate solver computations requested by the dependency schedule.
-    size_t solverEvaluations = 0;
+    /// Operation bodies actually executed by the common graph this generation.
+    size_t executedOpCount = 0;
 
-    /// Work performed by the persistent geometry graphs this generation.
-    /// Unchanged inputs execute no revisions and rebuild no schedules.
-    size_t moverGraphRevisionsCreated = 0;
-    size_t moverGraphRevisionsExecuted = 0;
-    size_t moverGraphSchedulesBuilt = 0;
 };
 
 /// One provider, as the pose walk currently holds it: the frame it was
@@ -229,6 +226,31 @@ using RigExecPoseFrameEnumerator =
 /// Answers the FINAL frame of one provider; false when the walk holds none.
 using RigExecPoseFrameLookup =
     TfFunctionRef<bool(const SdfPath &provider, RigExecPointFrame *frame)>;
+
+/// Volume placements held outside the evaluator -- the baked program's
+/// slot-indexed table -- for the CPU oracle to read in place of its own map.
+/// Borrowed pointers, no allocation. A path resolves when \p index maps it to
+/// a slot below \p count whose \p placed byte is set; any other path has no
+/// placement, as a path missing from the evaluator's map has none.
+struct RigExecVolumePlacementView {
+    const std::map<SdfPath, int> *index = nullptr;
+    const char *placed = nullptr;
+    const GfMatrix4d *placements = nullptr;
+    size_t count = 0;
+    const std::map<SdfPath, GfMatrix4d> *byPath = nullptr;
+
+    const GfMatrix4d *Find(const SdfPath &path) const
+    {
+        if (byPath) { const auto found=byPath->find(path); return found==byPath->end()?nullptr:&found->second; }
+        if (!index) return nullptr;
+        const auto it = index->find(path);
+        if (it == index->end() || it->second < 0 ||
+            size_t(it->second) >= count || !placed[it->second]) {
+            return nullptr;
+        }
+        return placements + it->second;
+    }
+};
 
 /// Rides \p frame on the revision of the deepest provider above \p xformPath
 /// that the walk has already moved.
@@ -275,6 +297,8 @@ bool RigExecPrepareRestDerivedIkChain(
 /// chains read, which is a value-resolution cache and therefore something
 /// only the routine that fills it should be able to reach.
 struct RigExecPropertyChainBindings;
+class RigExecGoldenSuiteObserver;
+class RigExecInputReplayObserver;
 
 /// What one stage notice did to the baked program (plan 2.1): the
 /// evaluator's per-notice disposition, classifying the three branches of
@@ -282,7 +306,7 @@ struct RigExecPropertyChainBindings;
 /// re-resolve at the granularity the branch allows instead of cancelling
 /// the warming generation wholesale.
 enum class RigExecNoticeDisposition {
-    /// No baked program stood to classify against (D7, or dynamic mode):
+    /// No compiled program stood to classify against:
     /// the notice reached no program at all.
     None,
     /// Default-only avar value edits, patched in place (plus the patched
@@ -307,13 +331,11 @@ enum class RigExecNoticeDisposition {
     Stale,
 };
 
+/// Calls and stage edits on this evaluator's stage are serialized by its
+/// owning thread. Frozen workers use snapshots and join before owner adoption.
 class RigExecRigEvaluator : public TfWeakBase {
 public:
-    /// preferProgram enables background-cache-compatible evaluation when no
-    /// attribute, environment setting, or caller selected a mode.
     RigExecRigEvaluator(const UsdStageRefPtr &stage, const SdfPath &rigPath);
-    RigExecRigEvaluator(const UsdStageRefPtr &stage, const SdfPath &rigPath,
-                        bool preferProgram);
     ~RigExecRigEvaluator();
 
     /// Discovers joints and movers, validates targets, and prepares the
@@ -326,55 +348,10 @@ public:
     /// Evaluates one complete generation at an explicit time.
     RigExecRigPose Evaluate(UsdTimeCode time);
 
-    /// Which path Evaluate takes; see RigExecEvaluationMode.
-    ///
-    /// Baked is a REQUEST. Compile builds the program only for an epoch the
-    /// program can express, and Evaluate falls back to the dynamic path
-    /// whenever there is no program, so setting this can never change an
-    /// answer -- only how fast it arrives. Setting it on a compiled rig
-    /// builds the program immediately when the epoch is clean, and on the
-    /// next Evaluate otherwise -- a scene edit standing between the compile
-    /// and the request must not leave the mode asking for a program that is
-    /// never built.
-    ///
-    /// RIGEXEC_BAKE_REQUIRED=1 in the environment makes that fallback SAY so.
-    /// A suite whose fixtures all decline the bake reports zero parity
-    /// mismatches and goes green having compared nothing, which is the one
-    /// way a parity run can lie; with the variable set, a generation that
-    /// runs dynamically while this mode asks for the program publishes one
-    /// "baked parity mismatch: bake required, evaluated dynamically: <why>"
-    /// diagnostic and counts it on RigExecRigPose::bakedParityMismatches.
-    /// It changes no evaluated value, and the two modes that never ask for
-    /// the program, Dynamic and ExecReference, ignore it entirely. Read
-    /// once per process, so a tool must setenv before the first evaluator.
-    /// Calling this makes the caller the OWNER of the mode: the source
-    /// below becomes Explicit and nothing weaker moves it again -- not the
-    /// rig's own rigExec:baked, not a recompile, not a notice. That holds
-    /// even when the mode asked for is the one already in force, because
-    /// what the call settles is who decides, not only what was decided.
-    void SetEvaluationMode(RigExecEvaluationMode mode);
-    RigExecEvaluationMode GetEvaluationMode() const {
-        return _evaluationMode;
-    }
-
-    /// Who chose the mode above; see RigExecEvaluationModeSource.
-    ///
-    /// Read it beside the mode whenever "is this rig baked" is not the whole
-    /// question: a tool deciding whether it may set the mode, a test
-    /// separating the environment's answer from the stage's, and the
-    /// fallback report, which is loud for an asset that asked through its
-    /// attribute and silent for an evaluator that inherited the mode from a
-    /// session-wide variable.
-    RigExecEvaluationModeSource GetEvaluationModeSource() const {
-        return _evaluationModeSource;
-    }
-
     /// Whether the compiled epoch can be baked, appending one reason per
     /// feature that stops it.
     ///
-    /// A rig that will not bake should say WHICH of its features stopped it:
-    /// "it fell back" is not actionable, and a silent fallback reads as the
-    /// mode not working.
+    /// Refused export admission names the unsupported source feature.
     bool IsBakeable(std::vector<std::string> *reasons = nullptr) const;
 
     /// Every constraint operator this evaluator registers, by schema type,
@@ -401,9 +378,7 @@ public:
 
     /// How many generations the baked program has answered.
     ///
-    /// Also observable for a test's sake, and for the same reason: a baked
-    /// test that silently fell back would compare the dynamic path with
-    /// itself and pass while proving nothing.
+    /// Observable for tests of generation execution and reuse.
     size_t GetBakedGenerationCount() const {
         return _bakedGenerations;
     }
@@ -431,7 +406,7 @@ public:
     size_t GetBakedClusterCount() const;
     size_t GetBakedClustersRunLastGeneration() const;
 
-    /// The standing baked program, or null where this generation is dynamic.
+    /// The standing compiled program, or null when compilation failed.
     ///
     /// For the suites that assert on the program's STRUCTURE -- what a
     /// drag's cone may reach, which entry holds which version -- against the
@@ -441,8 +416,14 @@ public:
         return _bakedProgram.get();
     }
 
+    /// The baked program's op trace and op graph for the last generation,
+    /// or empty when the program did not answer it (bakedTrace.h).
+    std::vector<RigExecOpTraceEntry> GetLastOpTrace() const;
+    std::vector<RigExecOpGraphNode> GetOpGraph() const;
+
     /// How many skin layouts the epoch's topology cache is holding answers
-    /// for.
+    /// for. The cache is the dynamic walk's; a baked program builds its
+    /// layouts in its SkinTopology ops and never fills it.
     ///
     /// The other thing about an interactive generation that a published pose
     /// cannot show: dropping the layouts and re-reading them publishes
@@ -472,9 +453,11 @@ public:
     /// reaches a consumer and they must not disagree: as an exec override
     /// for everything exec computes, and through _resolvedInputs for the
     /// property chains and the CPU oracle that exec never runs. An override
-    /// replaces any earlier one on the same key rather than joining it, and
-    /// outranks a property chain's result, which is the manipulator's edit
-    /// winning over the rig's own arithmetic for as long as it is held.
+    /// replaces any earlier one on the same key rather than joining it. One
+    /// on a property math movers revise is that property's base: the chain
+    /// revises it as it would the value authored there and publishes its
+    /// own result, so every reader sees while the drag is held what it sees
+    /// once the value is authored, in every evaluator.
     ///
     /// Setting them does not evaluate; the caller decides when to publish.
     void SetInteractiveOverrides(std::vector<RigExecValueOverride> overrides);
@@ -488,6 +471,44 @@ public:
         return !_interactiveOverrides.empty();
     }
 
+    /// Values an upstream scene index publishes for authored attributes:
+    /// authored-level, so each replaces the stage value of its attribute at
+    /// every time, below any interactive override on the same key. Each
+    /// entry names an attribute (\p attribute set, no computation). The list
+    /// replaces the last one; an empty list lifts every value. Setting it
+    /// does not evaluate.
+    ///
+    /// A value is admitted only on an attribute that is unconnected, has a
+    /// stage value, holds one of the eight input-slot types the value holds
+    /// exactly, and (while a baked program stands) is read through a read a
+    /// bake lists as an input. An array value (only while
+    /// RigExecUpstreamArrayAdmission is on) must also hold as many elements
+    /// as the stage value at the generation's time. Every other key is
+    /// ignored, and each generation reports "upstream input <path>:
+    /// <reason>; ignored". Admission is re-decided at every Evaluate,
+    /// against the program then standing.
+    void SetUpstreamInputs(std::vector<RigExecValueOverride> inputs);
+
+    /// Whether the caller has upstream values set (admitted or not).
+    bool HasUpstreamInputs() const { return !_upstreamRequested.empty(); }
+
+    /// The list SetUpstreamInputs last received.
+    const std::vector<RigExecValueOverride> &GetUpstreamInputs() const {
+        return _upstreamRequested;
+    }
+
+    /// The admitted keys, sorted.
+    std::vector<SdfPath> GetUpstreamInputPaths() const;
+
+    /// The roles the next baked program is built with (RigExecBakedRoleMode)
+    /// and, for Export, the paths it must leave listed (admitted upstream
+    /// inputs and presentation inputs). A change marks the program stale; the
+    /// next Evaluate rebuilds.
+    void SetBakedRoleMode(RigExecBakedRoleMode mode,
+                          std::set<SdfPath> exportKeep = {});
+    RigExecBakedRoleMode GetBakedRoleMode() const { return _bakedRoleMode; }
+    const std::set<SdfPath> &GetBakedExportKeep() const { return _bakedExportKeep; }
+
     /// Whether each generation resolves RigExecRigPose::weightFields.
     ///
     /// The influence overlay is a per-POINT field: resolving it walks every
@@ -498,21 +519,13 @@ public:
     /// bridge turns this off and the overlay costs nothing until it is asked
     /// for. Defaults to ON: a caller that never sets it (every test, every
     /// tool, the Python bindings) sees the field exactly as before.
-    void SetPublishWeightFields(bool publish) {
-        _publishWeightFields = publish;
-        if (_scopedClearShadow) {
-            _scopedClearShadow->SetPublishWeightFields(publish);
-        }
-    }
+    void SetPublishWeightFields(bool publish);
     bool GetPublishWeightFields() const { return _publishWeightFields; }
 
     /// The rig prim this evaluator was constructed with, for tools that
-    /// report on the bake (a bake manifest names its rig).
+    /// report on the bake (a .rigexec file's rig field names it).
     const SdfPath &GetRigPath() const { return _rigPath; }
-
-    /// Target-local spatial matrix primvars produced by SurfaceProjector
-    /// revisions in the compiled epoch. ShaderDials and property matrices
-    /// are not spatial frames and are excluded.
+    /// Target-local spatial matrix primvars in this compiled epoch.
     std::vector<SdfPath> GetSurfaceProjectorTargets() const;
 
     /// Composed mover-stack applications: descendants before their mover
@@ -523,16 +536,21 @@ public:
     }
 
     /// The read phases the last compile resolved on operator inputs'
-    /// connections: the movers' inputs in mover order, then the solvers'.
-    /// A connection with no declaration, or one declaring `final`, reads
-    /// the chain's final value and has none.
+    /// connections, in _ForEachConnectedInput order. Every connected input
+    /// whose walk reaches a property-chain target has one -- `base` when it
+    /// declares nothing -- except where the overlay walk already answers:
+    /// a `final` whose walk passes no recorded hop reads the target's
+    /// published value (unless it is a double reading a float chain, which
+    /// only a record widens), and an undeclared input that math movers
+    /// revise themselves, or whose value type differs from the target's,
+    /// never reads the chain through its connection.
     const std::vector<RigExecPhasedConnection> &GetPhasedConnections() const {
         return _phasedConnections;
     }
 
     /// Whether the last compile has a property chain revising \p attribute.
-    /// An override on such a property replaces the chain's final value,
-    /// while an authored value is the base the chain revises.
+    /// An override on such a property and a value authored there are both
+    /// the base the chain revises.
     bool IsPropertyChainTarget(const SdfPath &attribute) const {
         return _propertyChains.count(attribute) > 0;
     }
@@ -552,59 +570,13 @@ public:
     /// recompilation on the next Evaluate (spec §4.2, §6.3).
     size_t GetBindingEpochDigest() const { return _structureDigest; }
 
-    /// How the compiled geometry chain walk is batched.
-    ///
-    /// A level is a run of chains that do not read one another, so the walk
-    /// may hand each of them to its own task; the levels run one after
-    /// another, in order, and concatenating them reproduces the compiled
-    /// chain order exactly. A level a rig cannot safely spread out -- one
-    /// that is too short to pay for the dispatch, or that holds a phased
-    /// read or two chains sharing a weight object -- says
-    /// so here and is walked in order like any other.
-    size_t GetChainLevelCount() const { return _chainPlan.levels.size(); }
-
-    /// How many providers the compiled epoch holds a constant rest frame
-    /// for, or 0 when it declined to.
-    ///
-    /// Observable because the decision is the thing worth testing: a rig
-    /// whose rest channels can move within the epoch must keep the per-frame
-    /// rest taps, and a test that only compared numbers could pass on
-    /// arithmetic that happened to coincide. Zero means the epoch declined
-    /// -- every rest is pulled per frame with the pose.
-    size_t GetEpochRestFrameCount() const { return _epochRestFrames.size(); }
-
-    /// How many live geometry-chain graph nodes the evaluator holds.
-    ///
-    /// Compile pre-creates one per retained chain target so a level-parallel
-    /// walk never inserts into the map it is reading. Observable so a test
-    /// can assert that an Evaluate which ran a parallel level did not grow
-    /// it -- the invariant that makes the walk memory-safe, which otherwise
-    /// only a race would reveal.
-    size_t GetLiveGraphCount() const { return _liveGraphs.size(); }
-
-    /// The chain targets of one level, in walk order. Empty out of range.
-    std::vector<SdfPath> GetChainLevelTargets(size_t level) const;
-
-    /// Whether Compile classified \p level as safe to run one task per
-    /// chain. False out of range, and false for every level when the rig
-    /// has none.
-    bool IsChainLevelParallel(size_t level) const;
-
-    /// Aggregate solver path -> its dependency level in the compiled pose
-    /// schedule. Level 0 holds solvers with no solver prerequisites; each
-    /// other solver sits exactly one schedule wave above its deepest
-    /// prerequisite. Diagnostic access for the level audit: evaluation order
-    /// itself comes from the interleaved pose steps.
-    std::map<SdfPath, size_t> GetSolverBatchLevels() const
-    {
-        std::map<SdfPath, size_t> levels;
-        for (const _SolverBatch &batch : _solverBatches) {
-            for (const auto &[solver, tap] : batch.solvers) {
-                levels[solver] = batch.level;
-            }
-        }
-        return levels;
-    }
+    /// Number of actual retained, valid provider rest frames whose complete
+    /// selected source closure is constant in the current compiled epoch.
+    /// Build captures and composes these frames before the first Evaluate.
+    /// Animated and produced rest inputs remain supported and run through
+    /// the graph; they exclude only the affected providers and descendants
+    /// from this count. Constant authored connections can remain static.
+    size_t GetEpochRestFrameCount() const;
 
     /// Transform provider -> the pose steps that write it, in the order the
     /// pose walk runs them: the aggregate solvers that name it on
@@ -615,6 +587,18 @@ public:
     ///
     /// Diagnostic access only -- evaluation order itself comes from the
     /// interleaved pose steps, and this is read back from them.
+    /// The compiled epoch as one operation graph: every solver batch and
+    /// solver, frame constraint, geometry chain and revision, property
+    /// chain and revision, exec tap, provider value, space switch and
+    /// pose interpolator, with every dependency the compile derived.
+    ///
+    /// Diagnostic access for the graph visualizer and the compile-accounting
+    /// suite; evaluation itself never reads it. Ids are stable within the
+    /// epoch (see liveOperationGraph.h) and each node names the profiler
+    /// scope that fires it, so a generation's profile events attribute
+    /// straight onto the structure. Empty before the first Compile.
+    RigExecLiveOperationGraph DescribeLiveOperations() const;
+
     const std::map<SdfPath, std::vector<SdfPath>> &GetFrameChains() const
     {
         return _frameChains;
@@ -623,7 +607,12 @@ public:
     /// When set, Evaluate verifies geometry against the CPU reference and
     /// publishes that reference in RigExecRigPose::movedPropertiesCpu.
     /// Disabled for interactive use so every deformation runs only once.
-    bool cpuParityMode = false;
+    bool cpuReference = false;
+
+    /// Owner-thread opt-in to bounded, last-run operation timings. No
+    /// profiler events or locks are introduced in computation bodies.
+    void SetOpTimingEnabled(bool enabled) { _opTimingEnabled = enabled; }
+    bool GetOpTimingEnabled() const { return _opTimingEnabled; }
 
     /// When set, Compile and Evaluate record scoped phase timings (property
     /// chains, first-frame pose, each solver batch and constraint, the exec
@@ -646,13 +635,7 @@ public:
     /// consumer (batch export, benchmarking) that never reads
     /// RigExecRigPose::solverFrames disables them here and skips the whole
     /// guide request. Enabled by default, so existing callers see no change.
-    void SetSolverGuidesEnabled(bool enabled)
-    {
-        _solverGuidesEnabled = enabled;
-        if (_scopedClearShadow) {
-            _scopedClearShadow->SetSolverGuidesEnabled(enabled);
-        }
-    }
+    void SetSolverGuidesEnabled(bool enabled);
 
     bool GetSolverGuidesEnabled() const
     {
@@ -726,39 +709,6 @@ public:
 
 private:
 
-    VtVec3fArray _EvaluateChain(
-        const SdfPath &target,
-        const std::vector<const RigExecMoverRecord *> &chain,
-        const RigExecRigPose &pose,
-        const std::unordered_map<SdfPath, GfMatrix4d, SdfPath::Hash> &baseProviderMatrices,
-        const std::unordered_map<SdfPath, GfMatrix4d, SdfPath::Hash> &finalProviderMatrices,
-        UsdTimeCode time,
-        std::vector<std::string> *diagnostics,
-        const std::unordered_map<SdfPath, GfMatrix4d, SdfPath::Hash> &geometryConstraintDeltas) const;
-
-    /// CPU-side resolution of one weight object's field, the parity
-    /// oracle's mirror of the exec computeWeightPacket kernels.
-    ///
-    /// \p currentPoints, when non-null, are the IN-FLIGHT points at the
-    /// consuming operation's position in the mover stack. A volumetric
-    /// weight whose rigExec:weightTarget reads `preceding` measures against
-    /// those; everything else ignores them and reads the authored base.
-    /// Passing null where `preceding` was authored is an error rather than
-    /// a silent fall back to the base, because the two fields differ and
-    /// quietly publishing the wrong one is exactly the failure the
-    /// parity harness exists to catch.
-    bool _ResolveWeights(
-        const SdfPath &weightPrimPath, size_t count, UsdTimeCode time,
-        std::vector<float> *weights, std::string *error,
-        const std::vector<GfVec3f> *currentPoints = nullptr) const;
-
-    /// The volumetric half of _ResolveWeights: sphere, plane, curve, and
-    /// the combine that folds them.
-    bool _ResolveVolumeWeights(
-        const UsdPrim &prim, size_t count, UsdTimeCode time,
-        std::vector<float> *weights, std::string *error,
-        const std::vector<GfVec3f> *currentPoints) const;
-
     /// Reads \p prim's points-bearing target relationship and returns its
     /// authored value at \p time. Accepts either an exact property path
     /// or a prim path canonicalizing to .points.
@@ -770,12 +720,8 @@ private:
     /// the epoch digest, and clears the structure-dirty flag. False when the
     /// compile failed, with \p diagnostics saying why.
     ///
-    /// Hoisted out of the dynamic generation because the evaluation-mode
-    /// dispatch has to run BEFORE that generation and cannot choose a path
-    /// until the epoch has settled -- otherwise the first frame of every
-    /// session, and the first after every structural edit, runs dynamically
-    /// for no reason other than the order of two statements. Idempotent: the
-    /// dynamic generation calls it again and it does nothing.
+    /// Settle source notices and compile admission before dispatching the
+    /// operation graph. Repeated settled calls do nothing.
     bool _SettleEpoch(std::vector<std::string> *diagnostics);
 
     /// The whole of Compile but for forgetting the failure memo: what the
@@ -802,9 +748,11 @@ private:
     };
 
     /// Discover and validate movers without changing the active epoch.
+    /// \p inertMovers receives each mover prim with an empty rigExec:moves.
     bool _DiscoverMovers(std::vector<RigExecMoverRecord> &movers,
                          std::vector<_SurfaceProjectorRecord> &projectors,
-                         size_t &inertMovers, std::vector<std::string> *errors,
+                         SdfPathVector &inertMovers,
+                         std::vector<std::string> *errors,
                          _CompileFailure *failure) const;
 
     /// Whether \p path is an operation the current compile set aside.
@@ -824,51 +772,47 @@ private:
     /// exactly as a real compile would write them.
     bool _CompileUnlessKnownBroken(std::vector<std::string> *diagnostics);
 
-    /// Whether _failedCompile holds a failure of the stage and mode this
+    /// Whether _failedCompile holds a failure of the stage this
     /// compile would read now.
     bool _FailedCompileMemoMatches() const;
-    /// Whether _bakeBail still answers for this epoch and stage.
-    bool _BakeBailMemoMatches() const {
-        return _bakeBail.valid && _bakeBail.stageEditSerial == _stageEditSerial;
-    }
-
-    /// The dynamic generation: OpenExec plus the in-memory pose walk. This
-    /// is Evaluate's whole body when the mode is Dynamic, the fallback
-    /// whenever the program cannot run, and the reference the parity mode
-    /// compares against. \p diagnostics seeds the published pose, so
-    /// anything _SettleEpoch already said is said once.
-    RigExecRigPose _EvaluateDynamic(UsdTimeCode time,
-                                    std::vector<std::string> diagnostics = {});
-
-    /// Consume the completed pose and publish geometry revisions. False
-    /// refuses the generation when the scalar parity check disagrees.
-    bool _EvaluateGeometry(
-        UsdTimeCode time, const RigExecSnapshot &snapshot,
-        const std::unordered_map<SdfPath, GfMatrix4d, SdfPath::Hash> &finalMatrices,
-        const std::unordered_map<SdfPath, GfMatrix4d, SdfPath::Hash> &constraintDeltas,
-        UsdGeomXformCache &xformCache,
-        RigExecRigPose &pose);
-
-    /// Applies the standing interactive overrides to \p resolved, replacing
-    /// matching entries of \p published when one is given -- the same two
-    /// applications _EvaluateDynamic performs around the property chains.
+    /// Applies the standing interactive overrides to \p resolved -- the
+    /// owning-thread sampling input layer before graph execution.
     ///
     /// The baked program runs the chains itself and needs the overrides at
-    /// exactly those two points; it calls this rather than carrying a second
-    /// copy of the ordering rule, because a second copy is a second answer.
+    /// exactly that point; it calls this rather than carrying a second copy
+    /// of the ordering rule, because a second copy is a second answer.
     void _ApplyInteractiveOverridesToResolved(
-        RigExecResolvedInputs *resolved,
-        std::map<SdfPath, VtValue> *published) const;
+        RigExecResolvedInputs *resolved) const;
+    /// The same for the admitted source input values.
+    void _ApplyValueInputsToResolved(RigExecResolvedInputs *resolved) const;
 
-    /// Builds the baked program for the current epoch, or drops it. No-op
-    /// unless the mode asks for one and the epoch is settled.
+    /// Re-decides which of _upstreamRequested are admitted, against the
+    /// stage and the program standing now, and installs the answer
+    /// (_SetUpstreamAdmitted), at \p time (condition 4) or, with none
+    /// given, at the last generation's. Owning thread.
+    void _AdmitUpstreamInputs();
+    void _AdmitUpstreamInputs(UsdTimeCode time);
+    /// Installs \p admitted (sorted by path) and its drop lines: rebuilds
+    /// _valueInputs and drops the skin layouts and blend shapes a placed,
+    /// moved or lifted value can reach. A list equal to the standing one
+    /// changes nothing.
+    void _SetUpstreamAdmitted(std::vector<RigExecValueOverride> admitted,
+                              std::vector<std::string> dropLines);
+    /// _upstreamAdmitted merged with _interactiveOverrides into _valueInputs.
+    void _RebuildValueInputs();
+
+    /// Builds the compiled program for the settled epoch, or drops it on
+    /// failed admission.
     /// Rebuilds the baked program, handing the outgoing one's persistent
     /// geometry state to its replacement (RigExecBakedProgram::
     /// AdoptGeometryStateFrom). \p outgoing is passed rather than read off
     /// the member because Compile retires the program at its head, where a
     /// failure has to drop it, and rebuilds at its tail.
     void _RebuildBakedProgram(
-        std::unique_ptr<RigExecBakedProgram> outgoing = nullptr);
+        std::unique_ptr<RigExecBakedProgram> outgoing = nullptr,
+        const RigExecSceneDescriptors *scene = nullptr,
+        const UsdStageWeakPtr &sceneStage = UsdStageWeakPtr(),
+        uint64_t sceneSerial = 0);
 
     /// The structure digest in three segments: the discovered output sets
     /// (joints, controls, volume guides, pose interpolators), the solver
@@ -1043,66 +987,9 @@ private:
 
     UsdStageRefPtr _stage;
     SdfPath _rigPath;
-    /// Whether the requests only the DYNAMIC path pulls were left
-    /// unprepared by Compile, to be prepared at first use instead.
-    ///
-    /// A baked session never pulls them: every runtime TapSet::Evaluate is
-    /// inside _EvaluateDynamic, and a baked frame reaches none of them --
-    /// so preparing them at Compile builds an exec network the session then
-    /// never asks a question of. Set only when the session asked for the
-    /// program outright (Baked), or ran Dynamic on the program
-    /// (RigExecEvaluationModeRunsProgram). The walk needs them on the next
-    /// frame wherever it is the answer -- Dynamic without the program,
-    /// ExecReference -- and Parity pulls both paths every frame, so those
-    /// keep preparing eagerly.
-    ///
-    /// What this moves, and what it does not: the three requests below are
-    /// deferred, and only those. The rest request is not -- the program's
-    /// own epoch rest frames come from it. Nor are the guide and
-    /// connected-pose requests, whose FAILURE is load-bearing at compile:
-    /// a guide request that will not prepare retires the guide taps, which
-    /// the baked frame path reads, and a connected-pose provider is one of
-    /// the things that refuses the bake.
-    ///
-    /// The cost of a failure moves with the work. Today a request that
-    /// cannot be prepared fails the compile; deferred, it fails the first
-    /// dynamic generation instead, with a diagnostic on the pose. A rig
-    /// that bakes never reaches either.
-    ///
-    /// The exec warm-up goes with them: a deferred epoch's compile warms no
-    /// network, because what it still prepares asks for a few providers
-    /// only. The first realization therefore compiles most of the network
-    /// itself, and the DeferredExecPrep scope carries that cost.
-    bool _execPrepDeferred = false;
-    /// Prepares what _execPrepDeferred left, once. False, with \p pose told
-    /// why, when a request will not prepare.
-    bool _RealizeDeferredExecPrep(RigExecRigPose *pose);
-    /// What this session's evaluation mode will be, asked without changing
-    /// it: _RefreshAttributeEvaluationMode runs at the tail of Compile, and
-    /// the deferral decision is made well before that.
-    RigExecEvaluationMode _PeekEvaluationMode() const;
-    /// Whether this evaluator's mode builds and runs the program; see
-    /// RigExecEvaluationModeRunsProgram. The gates that REPORT a fallback
-    /// ask RigExecEvaluationModeWantsProgram instead.
-    bool _ModeRunsProgram(RigExecEvaluationMode mode) const {
-        return (_preferProgram && mode == RigExecEvaluationMode::Dynamic &&
-                _evaluationModeSource == RigExecEvaluationModeSource::Default) ||
-               RigExecEvaluationModeRunsProgram(mode, _evaluationModeSource);
-    }
-    bool _ModeRunsProgram() const { return _ModeRunsProgram(_evaluationMode); }
-    std::unique_ptr<RigExecTapSet> _taps;
-    /// Observational solver-guide taps in their own prepared request: a
-    /// failing or unused aggregate solver degrades guide drawing with a
-    /// diagnostic instead of invalidating the rig snapshot.
-    std::unique_ptr<RigExecTapSet> _guideTaps;
-    /// Last observational guide request. Guides reuse the cached snapshot
-    /// only when the time, override tuple, and tap dirtiness all match; the
-    /// taps stay observational, so a stale cache can only omit guides, but
-    /// the epoch reset below keeps even that from surviving Compile.
-    std::vector<RigExecValueOverride> _guideInputs;
-    UsdTimeCode _guideTime = UsdTimeCode::Default();
-    RigExecSnapshot _guideSnapshot;
-    bool _guideDirty = true;
+    /// The seven rest input names (evaluatorDetail::_MakeRestInputNames),
+    /// built in the constructor.
+    std::vector<TfToken> _restInputNames;
     bool _solverGuidesEnabled = true;
 
     std::vector<SdfPath> _jointPaths;
@@ -1113,7 +1000,6 @@ private:
     /// never fails Compile.
     std::vector<SdfPath> _controlPaths;
     /// Base computePointFrame per control, parallel to _controlPaths.
-    std::vector<RigExecTapId> _controlFrameTaps;
     /// Joint -> the ORDERED STACK of solvers that write it, each with the
     /// element of that solver's aggregate the joint takes. Held in memory
     /// rather than authored.
@@ -1137,120 +1023,10 @@ private:
     /// wrong -- so every count() user of this map is unaffected by the
     /// stack and must stay a membership test.
     std::map<SdfPath, std::vector<std::pair<SdfPath, int>>> _jointSolverBinding;
-    /// Small time-keyed LRU of authoritative exec snapshots.
-    ///
-    /// A frame is fully determined by (time, input overrides). Repeated
-    /// evaluation of recently-seen frames should not re-pull the upstream
-    /// network: a single-entry cache thrashed on every interleave between
-    /// distinct frames, forcing full recomputation on each pass. This LRU
-    /// holds a handful of (time, inputs, snapshot) entries so that a frame
-    /// visited within the last few distinct-frame cycles hits instead of
-    /// missing. Genuine stage edits set the caller's dirty flag, which
-    /// vetoes the hit independently of this cache; the tap-level
-    /// ConsumeDirty is no longer consulted here because exec's time/value
-    /// callbacks fire across sibling frames that share the system and
-    /// would spuriously invalidate the entry just computed.
-    struct _SnapshotCache {
-        static constexpr std::size_t capacity = 4;
-        struct Entry {
-            UsdTimeCode time;
-            std::vector<RigExecValueOverride> inputs;
-            RigExecSnapshot snapshot;
-        };
-        /// Most-recently-used first.
-        std::list<Entry> lru;
-        std::map<UsdTimeCode, std::list<Entry>::iterator> index;
-
-        /// Returns the live entry whose time AND inputs match, or null.
-        Entry *Find(const std::vector<RigExecValueOverride> &inputs,
-                    UsdTimeCode time)
-        {
-            if (lru.empty()) return nullptr;
-            auto it = index.find(time);
-            if (it == index.end()) return nullptr;
-            auto pos = it->second;
-            Entry &e = *pos;
-            if (e.inputs == inputs) {
-                lru.splice(lru.begin(), lru, pos);
-                return &e;
-            }
-            return nullptr;
-        }
-
-        void Store(std::vector<RigExecValueOverride> inputs, UsdTimeCode time,
-                   const RigExecSnapshot &snap)
-        {
-            auto existing = index.find(time);
-            if (existing != index.end()) {
-                Entry &e = *existing->second;
-                e.inputs = std::move(inputs);
-                e.snapshot = snap;
-                lru.splice(lru.begin(), lru, existing->second);
-                return;
-            }
-            lru.push_front(Entry{time, std::move(inputs), snap});
-            index[time] = lru.begin();
-            if (lru.size() > capacity) {
-                index.erase(lru.back().time);
-                lru.pop_back();
-            }
-        }
-
-        void Clear()
-        {
-            lru.clear();
-            index.clear();
-        }
-    };
-    /// One aggregate solver's step in the pose walk. Earlier aggregate and
-    /// joint outputs are supplied as overrides, so downstream requests reuse
-    /// them.
-    ///
-    /// A batch is still ONE solver and one pose step -- the baked walk, the
-    /// level audit and the solver-input index all read it that way -- but it
-    /// need not own the exec request it is evaluated by. Adjacent solvers of
-    /// one ready level that cannot observe each other's overrides share their
-    /// LEADER's request (see "one exec request per run" in Compile): the
-    /// leader owns the tap set, the request cache and the snapshot for all
-    /// of them. A follower holds none of those: only its tap id in the
-    /// leader's set, and, like every batch, its own input fingerprint and
-    /// dirty flag (see `cache`).
     struct _SolverBatch {
-        /// Null on a follower: its tap lives in the leader's set.
-        std::unique_ptr<RigExecTapSet> taps;
-        std::map<SdfPath, RigExecTapId> solvers;
-        std::set<SdfPath> dependencies;
-        std::set<SdfPath> frameInputs;
-        /// The joints whose REST this batch's solver measures from, and the
-        /// pose step that wrote each one just before it -- empty where none
-        /// did, which means "pin the authored rest" (spec §4.2, "the incoming
-        /// frame replaces the authored rest"). EMPTY on every rig with no
-        /// pose step below a solver that writes one of its joints, and then
-        /// the batch pushes no computeRestFrame override at all.
-        std::map<SdfPath, SdfPath> restInputs;
-        size_t level = 0;
-        /// The batch whose request evaluates this one: its own index unless
-        /// it is a follower. A follower's pose step always comes after its
-        /// leader's, with only the leader's other followers between them.
-        size_t leader = 0;
-        /// On a leader, the followers riding its request, in pose-walk
-        /// order. Empty on a follower and on a leader that evaluates alone.
-        std::vector<size_t> followers;
-        /// Per SOLVER, on every batch: the time-keyed LRU of this solver's
-        /// own tail, and whether an edit reached what it reads. On a batch
-        /// that evaluates alone this is also its request's cache. In a shared
-        /// request it is the solver's input fingerprint: the request
-        /// re-resolves when any member misses, but only the members that
-        /// missed count as re-solved, exactly as they did when each had a
-        /// request of its own (the incremental-evaluation counter the suite
-        /// reads, RigExecRigPose::solverEvaluations).
-        _SnapshotCache cache;
-        bool dirty = true;
-        /// Leader-only: the shared request's cache, keyed by the whole
-        /// merged tail. Cleared by any edit that reaches any member.
-        _SnapshotCache requestCache;
-        /// Leader-only: what the request last resolved to.
-        RigExecSnapshot snapshot;
+        std::set<SdfPath> solvers;
+        std::set<SdfPath> dependencies,frameInputs;
+        std::map<SdfPath,SdfPath> restInputs;
     };
     std::vector<_SolverBatch> _solverBatches;
     std::map<SdfPath, std::vector<std::pair<SdfPath, int>>> _solverJoints;
@@ -1266,65 +1042,17 @@ private:
     /// which re-derives the order; the baked program has no exec to ask, so
     /// it orders its guide-only pass over these edges instead.
     std::map<SdfPath, std::set<SdfPath>> _solverDependencies;
-    /// Authored input prim -> batches reading it. Override-only Exec requests
-    /// do not re-arm repeated value-invalidation callbacks in this USD build.
-    std::map<SdfPath, std::set<size_t>> _solverInputBatches;
-    /// True while _solverInputBatches does not describe _solverBatches.
-    ///
-    /// The index exists for one reader, the notice handler, and routes an
-    /// edit into batch.dirty and batch.cache, which only _EvaluateDynamic's
-    /// pose walk reads; a baked frame never does. So a deferred epoch (see
-    /// _execPrepDeferred) commits its batches without it, and
-    /// _RealizeDeferredExecPrep builds it on the way into the first dynamic
-    /// generation. Until then the handler cannot say which batches an edit
-    /// reached, so it says all of them -- which loses nothing, because a
-    /// batch computes nothing to cache before that same realization.
-    ///
-    /// Set and cleared only where _solverBatches is committed and where the
-    /// index is realized, so whichever epoch's batches stand, their index
-    /// state stands with them.
-    bool _solverInputIndexAbsent = false;
-    /// What the deferred build needs from the compile and cannot read back
-    /// off the stage without re-walking every pose closure: each solver's
-    /// provider closure and the attributes that closure read. Held only while
-    /// _solverInputIndexAbsent, and released by the build.
-    struct _SolverInputIndexInputs;
-    std::unique_ptr<_SolverInputIndexInputs> _solverInputIndexInputs;
-    /// Interleaves dependency-ready aggregate batches with the authored
-    /// constraint walk. Frame inputs to solvers consume the current pose.
-    struct _PoseStep {
-        bool solverBatch = false;
-        size_t index = 0;
-    };
-    std::vector<_PoseStep> _poseSteps;
-    /// Seed only transform providers before solving; geometry/aggregate taps
-    /// are evaluated after the complete pose dependency schedule.
-    std::unique_ptr<RigExecTapSet> _firstFramePoseTaps;
-    _SnapshotCache _firstFramePoseCache;
-    bool _firstFramePoseDirty = true;
-    /// Vetoes a hit in _authSnapTimeKeyed. The stage-notice handler and every
-    /// compile set it; the next stored authoritative snapshot clears it.
-    bool _authSnapshotDirty = true;
-    /// Time-keyed authoritative snapshot cache. jointOverrides is a pure
-    /// function of (epoch, time), so a repeat evaluation of the same frame
-    /// reuses the snapshot without rebuilding the 800+ element override
-    /// vector or re-hashing it. Cleared on any genuine stage edit.
-    std::map<UsdTimeCode, RigExecSnapshot> _authSnapTimeKeyed;
-    std::map<SdfPath, RigExecTapId> _firstFramePoseFrames;
-    /// Per-frame rest taps, used only when some provider's rest inputs can
-    /// vary with time; otherwise the rests are evaluated once per epoch into
-    /// _epochRestFrames and this is empty (see _restTaps).
-    std::map<SdfPath, RigExecTapId> _firstFramePoseRests;
-    /// A provider's rest frame is a function of its rest channels and its
-    /// ancestors', none of which move with time on a rig whose rests are not
-    /// animated. Asking exec for all of them on every frame recomputes a
-    /// constant: they are pulled once at Compile through this request, and
-    /// refreshed only when an edit arrives that no recompile covered.
-    std::unique_ptr<RigExecTapSet> _restTaps;
-    std::map<SdfPath, RigExecTapId> _restTapIds;
-    std::map<SdfPath, RigExecPointFrame> _epochRestFrames;
+    /// Operation producers from discovery, independent of legacy walk numbering.
+    std::map<SdfPath, std::set<SdfPath>> _nativePoseDependencies;
+    std::map<SdfPath,int> _nativePoseOrdinals;
+    std::set<SdfPath> _nativeProviderPaths;
+    /// Original rest-epoch classification footprint, independent of extra
+    /// native geometry frame sources. Owner-only observable transition facts.
+    std::set<SdfPath> _restEpochProviderPaths;
+    bool _epochRestsConstant = true;
+    std::map<SdfPath,RigExecPointFrame> _epochRestFrames;
     /// The rest gate (_NoteRestEdits). The epoch's rest paths are every
-    /// _RestInputNames() property of every key of _restTapIds, which is
+    /// _restInputNames property of every key of _restTapIds, which is
     /// every provider and every provider ancestor the rests read, so the
     /// set is kept as that map and the name list rather than spelled out.
     /// A notice that resyncs or changes one of those paths, or resyncs a
@@ -1338,10 +1066,8 @@ private:
     /// (_EpochRestsMightVary), consumed by the next settle.
     std::set<SdfPath> _restEditedProviders;
     /// _epochRestFrames no longer holds what the stage says. Consumed by
-    /// the one reader of their values, the dynamic walk, at the head of
-    /// _EvaluateDynamic; inline in _SettleEpoch when the epoch has no
-    /// program, which is where the re-pull always used to be. A failed
-    /// re-pull leaves it set.
+    /// the owning-thread epoch settle before the graph reads captured rest
+    /// facts. A failed refresh leaves it set.
     bool _epochRestFramesStale = false;
     /// The time the epoch's rests were pulled at, and the time the first-frame-pose
     /// request is warmed at: the stage's start time code, always a real
@@ -1356,31 +1082,6 @@ private:
     /// Direct posed providers read by transform expressions, including
     /// parent:space reached through connected default-space expressions.
     std::map<SdfPath, std::set<SdfPath>> _poseProviderInputs;
-    /// Reverse expression dependencies in the dense provider index. A frame
-    /// write invalidates only refreshes that can read that frame.
-    std::vector<std::vector<int>> _poseRefreshDependents;
-    std::map<SdfPath, std::unique_ptr<RigExecTapSet>> _connectedPoseTaps;
-    // Providers with the same direct frame inputs share an override-bearing
-    // request. Schedules remain lazy; compiling a large rig does not prepare
-    // every individual or grouped request.
-    struct _ConnectedPoseBatch {
-        std::unique_ptr<RigExecTapSet> taps;
-        std::map<SdfPath, RigExecTapId> outputs;
-    };
-    std::vector<_ConnectedPoseBatch> _connectedPoseBatches;
-    std::map<SdfPath, size_t> _connectedPoseBatchIndex;
-    /// Sorted attribute closures for connected-pose cache fingerprints.
-    /// An unrelated dragged channel cannot change that provider's result.
-    std::map<SdfPath, std::vector<SdfPath>> _connectedPoseOverrideInputs;
-    std::map<SdfPath, std::vector<SdfPath>> _connectedPoseLocalOverrideInputs;
-    struct _ConnectedPoseResult {
-        std::vector<RigExecValueOverride> inputs;
-        UsdTimeCode time = UsdTimeCode::Default();
-        RigExecPointFrame base;
-        RigExecPointFrame current;
-        bool cached = false;
-    };
-    std::map<SdfPath, _ConnectedPoseResult> _connectedPoseCache;
     /// Namespace-pose predicate answers that are stage-constant: parent:space
     /// has no time samples, so the answer does not vary with evaluation time.
     /// Populated lazily on cache miss; cleared on epoch change with
@@ -1394,7 +1095,7 @@ private:
     /// Cleared on epoch change with _namespaceInheritsCache.
     std::unordered_map<SdfPath, SdfPath, SdfPath::Hash> _nearestBlockingCache;
     /// Hierarchical (first-frame-pose) providers, compiled once per epoch.
-    /// Replaces the per-frame std::set build in _EvaluateDynamic.
+    /// Reused by the owning-thread source sampler across evaluations.
     std::unordered_set<SdfPath, SdfPath::Hash> _hierarchicalProviderSet;
     /// Dense provider index: SdfPath → index into _providerPaths.
     /// Built once per epoch from the union of all paths the frame-domain
@@ -1406,36 +1107,17 @@ private:
     /// are seeded providers, in SdfPath order. Replaces the per-candidate
     /// finalFrames prefix walk in commitConstraintFrames.
     std::vector<std::vector<int>> _hierDescendants;
-    std::vector<RigExecTapId> _jointFrameTaps;
-    std::vector<RigExecTapId> _jointFinalFrameTaps;
-    std::vector<RigExecTapId> _jointFinalMatrixTaps;
-    std::map<SdfPath, RigExecTapId> _solverArrayTaps;
+    std::set<SdfPath> _nativeGuideSolvers;
 
-    /// One compiled RigExecPoseInterpolator: its solved RBF constant, its
-    /// driver, and the weight property of every pose it publishes.
-    ///
-    /// NOT A MOVER, and it cannot be one. A mover's inputs are resolved by
-    /// the property chains, which run before exec does and therefore cannot
-    /// see the pose; an interpolator reads the FINAL pose of a driver joint
-    /// and writes floats that the geometry chains then consume. So it is its
-    /// own phase of _EvaluateDynamic, sitting between the two.
-    ///
-    /// The solve -- inverting the matrix of every pose's kernel value at
-    /// every other pose -- is a constant of the authored data, so it happens
-    /// once here and the per-frame work is one kernel row, a multiply and a
-    /// divide (libs/rigExecMath/rbf.h). Everything that constant is a
-    /// function of is hashed into the epoch digest, or an edit to a pose
-    /// rotation would leave a stale inverse behind.
+    /// Detached pose-interpolator discovery and solved immutable structure.
     struct _PoseInterpolator {
+        std::shared_ptr<const RigExecScenePoseInterpolatorDescriptor> descriptor;
         SdfPath prim;
         SdfPath driver;
         /// The driver's namespace ancestor that publishes a frame, or empty
         /// when there is none and the driver's local rotation is its world
         /// one. Resolved at compile: namespace topology does not move.
         SdfPath driverParent;
-        bool allowNegativeWeights = true;
-        /// rigExec:enableTranslation: measure the driver's translation too.
-        bool enableTranslation = false;
         /// rigExec:driverAttributes: a NUMERIC driver. One to three float or
         /// double properties read in order as the driver's position, in
         /// place of a transform's translation; empty on a transform-driven
@@ -1448,11 +1130,10 @@ private:
         /// left out of the solve entirely (schema: leaving it in would keep
         /// it in every other pose's matrix row) and publishes a hard zero.
         std::vector<SdfPath> disabledPoseWeights;
-        RigExecRbfSolver solver;
     };
     std::vector<_PoseInterpolator> _poseInterpolators;
     /// Every weight property the phase publishes, flat and in publish order.
-    /// Read by the ordering assertion at the head of the geometry chains.
+    /// Readers bind these property identities before common graph compilation.
     std::vector<SdfPath> _poseWeightProperties;
 
     /// Discovers, validates and SOLVES the rig's pose interpolators into
@@ -1462,17 +1143,9 @@ private:
         const std::vector<SdfPath> &controls,
         std::vector<_PoseInterpolator> *out,
         std::vector<std::string> *notes,
-        std::string *error, SdfPath *operation) const;
-
-    /// The pose-interpolator phase: one weight per pose, into
-    /// _resolvedInputs and into \p pose->movedProperties.
-    void _EvaluatePoseInterpolators(
-        UsdTimeCode time,
-        const std::vector<RigExecPointFrame> &restFrames,
-        const std::vector<char> &restLive,
-        const std::vector<RigExecPointFrame> &finalFrames,
-        const std::vector<char> &finalLive,
-        RigExecRigPose *pose);
+        std::string *error, SdfPath *operation,
+        RigExecSceneDescriptors *capturedScene = nullptr,
+        RigExecProfiler *profile = nullptr) const;
 
     /// Compiled mover-graph input bindings.
     ///
@@ -1485,21 +1158,14 @@ private:
         SdfPath target;
         RigExecRevisionOp op;
         RigExecRevisionBinding binding;
-        RigExecTapId transformTap = -1;
         /// computeMatrix of binding.transformSpace, or -1 (matrix).
-        RigExecTapId transformSpaceTap = -1;
         /// computeMatrix of binding.carrySpace, or -1 (matrix): the rig's
         /// own rest->pose map, normally a TRS master's. The baked path's
         /// counterpart is carrySpaceSlot against the same base/final
         /// matrix table, so the two paths read the same value.
-        RigExecTapId carrySpaceTap = -1;
         /// Surface projector only: computeRestFrame of transform,
         /// transformSpace and carrySpace, for their world frames.
-        RigExecTapId projectorRestTaps[3] = {-1, -1, -1};
         /// computeMatrix per binding.influences entry, in that order (skin).
-        std::vector<RigExecTapId> influenceTaps;
-        RigExecTapId weightTap = -1;
-        RigExecTapId driverFramesTap = -1;
         /// The mover asked for the provider's FINAL frame, so its transform
         /// is the aim-revised matrix computed in memory rather than the
         /// provider's own tapped computeMatrix.
@@ -1520,28 +1186,6 @@ private:
     };
     /// Exact points target -> its revisions, in mover execution order.
     std::map<SdfPath, std::vector<_GraphRevision>> _graphChains;
-    struct _LiveGraph {
-        RigExecMoverGraph graph;
-        VdfMaskedOutput source;
-        std::vector<VdfMaskedOutput> revisions;
-        std::vector<std::pair<SdfPath, RigExecRevisionOp>> identities;
-        /// The authored base points currently standing in `source`, and
-        /// whether they can still be standing there next frame.
-        ///
-        /// An authored base that is not time-varying is the same array at
-        /// every time code in the epoch, so re-reading it and comparing it
-        /// element by element against what the source already holds can only
-        /// ever conclude "unchanged". Kept so that conclusion is reached once
-        /// instead of once per frame; discarded by every change notice,
-        /// because a value edit to the points is exactly what would make it
-        /// wrong and does not begin a new epoch.
-        VtVec3fArray basePoints;
-        bool basePointsPushed = false;
-        bool basePointsStatic = false;
-    };
-    /// Graph topology and computed checkpoints survive value/rest edits.
-    /// Structural edits splice retained nodes by mover identity and operation.
-    std::map<SdfPath, std::unique_ptr<_LiveGraph>> _liveGraphs;
     /// What this generation's property chains resolved, consulted by every
     /// static input read the evaluator and the packet assemblers make.
     ///
@@ -1556,42 +1200,36 @@ private:
     RigExecStaticInputCache _staticInputs;
     /// Uncommitted manipulation values; see SetInteractiveOverrides.
     std::vector<RigExecValueOverride> _interactiveOverrides;
+    /// SetUpstreamInputs' list as given, the admitted part of it (sorted by
+    /// path, one entry per attribute) and the drop lines each generation
+    /// reports.
+    std::vector<RigExecValueOverride> _upstreamRequested;
+    std::vector<RigExecValueOverride> _upstreamAdmitted;
+    std::vector<std::string> _upstreamDropLines;
+    /// The time admission last judged condition 4 at (the last Evaluate's).
+    UsdTimeCode _upstreamAdmissionTime = UsdTimeCode::Default();
+    /// Condition 4's memo (path -> stage element count): filled by
+    /// admission, dropped by any notice that reaches the path. Owning
+    /// thread.
+    RigExecUpstreamCountMemo _upstreamCounts;
+    /// The admitted upstream values alone, by path: the chain base reads
+    /// (runChain) answer from it and never from the interactive list.
+    /// Rebuilt with the admitted list on the owning thread; read-only while
+    /// a generation runs.
+    std::map<SdfPath, VtValue> _upstreamValues;
+    /// The values the dynamic walk places: the admitted upstream values
+    /// merged with _interactiveOverrides, interactive winning on a key.
+    /// Rebuilt by SetInteractiveOverrides, ClearInteractiveOverrides and
+    /// every change of the admitted list; read wherever the walk decides
+    /// what value an attribute holds or whether a cache still holds.
+    std::vector<RigExecValueOverride> _valueInputs;
 
-    /// What every chain held at every point in the walk this generation.
-    ///
-    /// Only a phased read consults it, but it is filled unconditionally: the
-    /// entries are copy-on-write handles to arrays the chain materialized
-    /// anyway, so the cost of always having them is far below the cost of
-    /// deciding per chain whether anyone will ask.
-    RigExecChainSnapshots _chainSnapshots;
-
-    struct _ChainLevel {
-        std::vector<SdfPath> targets;
-        bool parallel = false;
-    };
-
-    // Compiled together: ordered chains, contiguous parallel levels, and the
-    // intermediate revisions needed by phased reads. Installed after validation.
-    struct _ChainPlan {
-        std::vector<SdfPath> order;
-        std::vector<_ChainLevel> levels;
-        std::map<SdfPath, std::set<SdfPath>> snapshots;
-    };
-    _ChainPlan _chainPlan;
-
-    static bool _CompileChainPlan(
+    std::map<SdfPath,std::set<SdfPath>> _nativePhaseCheckpoints;
+    static bool _ValidateNativePhases(
         const std::map<SdfPath, std::vector<_GraphRevision>> &graphChains,
         const std::map<SdfPath, std::vector<SdfPath>> &frameChains,
         const std::vector<RigExecMoverRecord> &movers,
-        const std::set<SdfPath> &currentPhaseWeights,
-        _ChainPlan *plan, _CompileFailure *failure);
-
-    // Graph independence alone is insufficient: chains can share mutable
-    // weight state or other per-generation caches.
-    static bool _IsChainLevelParallelSafe(
-        const std::vector<SdfPath> &targets,
-        const std::map<SdfPath, std::vector<_GraphRevision>> &graphChains,
-        const std::set<SdfPath> &currentPhaseWeights);
+        std::map<SdfPath,std::set<SdfPath>> *checkpoints, _CompileFailure *failure);
 
     /// Per-epoch skin layouts, keyed by mover path.
     ///
@@ -1610,6 +1248,7 @@ private:
     /// about which epoch's connections they describe.
     mutable std::set<SdfPath> _skinLayoutInputs;
     mutable bool _skinLayoutInputsValid = false;
+    bool _skinTopologyObservationPending = false;
     /// Fills _skinLayoutInputs from the standing mover order.
     void _ResolveSkinLayoutInputs() const;
     /// Whether any override in \p overrides can change a cached skin layout.
@@ -1659,7 +1298,7 @@ private:
     /// Builds the shadow when the variable asks for one and there is none.
     void _EnsureScopedClearShadow();
     /// Evaluates the shadow at \p time and appends to \p pose every way
-    /// the two disagree, counted on bakedParityMismatches.
+    /// the two disagree, counted on comparisonMismatches.
     void _VerifyScopedClears(UsdTimeCode time, RigExecRigPose *pose);
     /// Evaluate's body; Evaluate adds the shadow comparison around it.
     RigExecRigPose _EvaluateGeneration(UsdTimeCode time);
@@ -1671,7 +1310,6 @@ private:
     /// of frameTap/xformPath is populated by Compile().
     struct _FrameSourceBinding {
         SdfPath sourcePath;
-        RigExecTapId frameTap = -1;
         SdfPath xformPath;
     };
 
@@ -1697,8 +1335,6 @@ private:
         /// carry. Both stay -1 when no space is named, and the kernel then
         /// runs its untouched branch.
         SdfPath spacePath;
-        RigExecTapId spacePosedTap = -1;
-        RigExecTapId spaceDefaultTap = -1;
         /// rigExec:blendShear (Scale, Parent): blend the sources' shear when
         /// every scale axis is governed. Off is the FBX behaviour.
         bool blendShear = false;
@@ -1740,142 +1376,15 @@ private:
         RigExecConstraintAxisMask precompScale;
     };
 
-    /// One compiled RigExecSpaceSwitch: a labelled parent-space list for one
-    /// xformable, with a live index selecting between them.
-    ///
-    /// The switch does not write a pose. It replaces the target's composed
-    /// frame with the SAME compose taken against another parent:
-    ///
-    ///     world = avars * default:space * inverse(source default:space)
-    ///                   * source posed:space
-    ///
-    /// which is the ordinary ladder with the namespace parent's pair of
-    /// spaces swapped for the selected source's pair. Both halves come from
-    /// one source, so at rest they cancel and no space can move the rig.
-    ///
-    /// It is published as a value override on the target's computePointFrame,
-    /// not as an authored parent:space, for two reasons. A matrix expression
-    /// treats an IDENTITY authored value as "use the fallback", and world
-    /// space is exactly the identity, so the one space an animator reaches
-    /// for most would silently mean "no switch at all". And an override on
-    /// the computation is what every namespace descendant already reads
-    /// through NamespaceAncestor<computePointFrame>, so the children of a
-    /// switched control follow it without a propagation pass.
-    /// The correction is taken against the frame exec ALREADY composed for
-    /// the target rather than by recomposing its avars here:
-    ///
-    ///     exec:  W = avars * D * inverse(parentDefault) * parentPosed
-    ///     so:    W * inverse(parentPosed) * parentDefault = avars * D
-    ///     and:   W' = W * inverse(parentPosed) * parentDefault
-    ///                   * inverse(source default) * source posed
-    ///
-    /// which is the switched compose exactly, with no second opinion about
-    /// rotation order, unit scale or avar order to drift from exec's.
+    /// Detached switch structure and the provider paths needed by closure.
     struct _SpaceSwitch {
-        SdfPath switchPath;
-        SdfPath target;
-        /// computePointFrame of the target: the unswitched compose.
-        RigExecTapId targetPosedTap = -1;
-        /// The namespace frame provider the target would otherwise follow.
-        /// Both taps stay -1 when there is none, and the pair reads as
-        /// identity, which is what exec resolves for it.
-        RigExecTapId parentPosedTap = -1;
-        RigExecTapId parentDefaultTap = -1;
-        /// rigExec:space -- the provider whose own rest->pose map carries
-        /// the whole rig (the TRS masters on the biped). A filtered source
-        /// needs it: `local` below is composed over the target's DEFAULT
-        /// ancestors, so a master's motion reaches a switched control only
-        /// through the source's motion, and a twist or swing filter cuts
-        /// that carry away with the part it was asked to drop. Naming the
-        /// space lets the filter run on the master-free motion and the
-        /// carry be re-applied afterwards. Both taps stay -1 when no space
-        /// is named, and the pair reads as identity -- which is exactly the
-        /// pre-masters behaviour.
-        SdfPath spacePath;
-        RigExecTapId spacePosedTap = -1;
-        RigExecTapId spaceDefaultTap = -1;
-        struct Source {
-            /// Empty for a source that is not an xformable provider, which
-            /// contributes identity -- how "world" is spelled without
-            /// inventing a prim to stand for it.
-            SdfPath path;
-            RigExecTapId posedTap = -1;
-            RigExecTapId defaultTap = -1;
-            /// Which part of this source's rotation reaches the target. A
-            /// pole vector in its hand's space takes the forearm's TWIST and
-            /// not its swing; everything else takes the whole rotation.
-            RigExecRotationFilter filter = RigExecRotationFilter::All;
-        };
+        std::shared_ptr<const RigExecSceneSpaceSwitchDescriptor> descriptor;
+        SdfPath switchPath,target,spacePath;
+        struct Source {SdfPath path;};
         std::vector<Source> sources;
-        std::vector<std::string> labels;
-        /// Optional float/double property supplying the index, so the
-        /// animator-facing channel can live on the control beside its avars.
-        SdfPath activeAttribute;
-        double activeFallback = 0.0;
-        /// Per-axis masks over the delta the space contributes, expressed in
-        /// the target's own default frame: translation, rotation, scale.
-        bool affectTranslation[3] = {true, true, true};
-        bool affectRotation[3] = {true, true, true};
-        bool affectScale[3] = {true, true, true};
-        /// Twist axis for the per-source filters, in the SOURCE's own rest
-        /// axes. One axis serves every filtered source of one switch.
-        GfVec3d twistAxis = GfVec3d(1, 0, 0);
-        /// Resolution round. A switch reading a space that some OTHER switch
-        /// moves -- a pole vector in its own IK handle's space, a head whose
-        /// namespace parent hangs under a switched neck -- cannot be
-        /// resolved from the same seed as that switch; it needs the seed
-        /// RE-EVALUATED with that switch's answer standing. So switches are
-        /// banded: everything in band 0 resolves from the plain seed, the
-        /// seed is pulled again, band 1 resolves from that, and so on. Most
-        /// rigs have exactly one band.
-        ///
-        /// Re-evaluating rather than correcting the source frame by hand is
-        /// deliberate: exec recomposing a descendant of a switched control
-        /// is the same arithmetic the baked program's compose performs, and
-        /// the two are compared bit for bit.
-        int band = 0;
     };
-    /// Sorted by band, so one pass over them resolves the whole set.
+    /// Ordered discovery identities; common graph owns execution order.
     std::vector<_SpaceSwitch> _spaceSwitches;
-    /// The switched seed, and the overrides that produced it. A rig whose
-    /// spaces did not move this frame re-uses the snapshot rather than
-    /// paying a second seed evaluation for the same answer -- which is
-    /// every frame of ordinary animation, because an active-space channel is
-    /// stepped once and then held.
-    std::vector<RigExecValueOverride> _lastSpaceSwitchOverrides;
-    RigExecSnapshot _spaceSwitchSnapshot;
-
-    /// One compiled RigExecAutoClavicle. Like a space switch it writes no
-    /// pose: it republishes its target's composed frame, translated by
-    /// RigExecAutoClavicleShift, as a value override on computePointFrame,
-    /// after every switch has resolved, so the target's descendants and the
-    /// solvers read the moved frame.
-    struct _AutoClavicle {
-        SdfPath nodePath;
-        SdfPath target, pivot, anchor;
-        SdfPath fk[3];
-        SdfPath ikTarget, pole;
-        SdfPath ikBlendAttribute, amountAttribute;
-        /// The two-bone IK this limb's IK target and pole drive, when it
-        /// stretches and pins (stretchPolicy softDistance); empty otherwise.
-        SdfPath limbSolver;
-        /// Rest frames of that solver's three joints, for its bone lengths.
-        RigExecTapId limbJointRestTap[3] = {-1, -1, -1};
-        RigExecAutoClavicleConstants constants;
-        RigExecTapId targetPosedTap = -1;
-        RigExecTapId pivotPosedTap = -1;
-        RigExecTapId anchorPosedTap = -1;
-        RigExecTapId anchorDefaultTap = -1;
-        RigExecTapId fkPosedTap = -1;
-        RigExecTapId fkDefaultTap[3] = {-1, -1, -1};
-        RigExecTapId ikTargetPosedTap = -1;
-        RigExecTapId polePosedTap = -1;
-    };
-    std::vector<_AutoClavicle> _autoClavicles;
-    /// As for the switches: the overrides last published and the seed they
-    /// produced, so a held pose pays no second evaluation.
-    std::vector<RigExecValueOverride> _lastAutoClavicleOverrides;
-    RigExecSnapshot _autoClavicleSnapshot;
 
     /// One property-domain revision: a float/vec3f/matrix math mover's
     /// operation over the preceding value of an exact scalar property.
@@ -1891,14 +1400,17 @@ private:
     };
 
     /// Bind property revisions and order their attribute/weight dependencies,
-    /// and resolve the read phases declared on connected inputs of the
-    /// movers and of \p solvers.
+    /// and resolve the read phase of every connected operator input
+    /// (_ForEachConnectedInput). \p movers and \p solvers name the
+    /// operation a bad declaration sets aside; an input that only
+    /// \p inertMovers or operations already set aside read is not resolved.
     bool _CompilePropertyChains(
         const std::vector<RigExecMoverRecord> &movers,
         std::map<SdfPath, std::vector<_PropertyRevision>> &chains,
         std::vector<SdfPath> &order,
         std::vector<RigExecPhasedConnection> &phased,
         const std::vector<UsdPrim> &solvers,
+        const SdfPathVector &inertMovers,
         _CompileFailure *failure) const;
     /// Exact scalar property target -> its revisions, in mover execution order.
     std::map<SdfPath, std::vector<_PropertyRevision>> _propertyChains;
@@ -1930,108 +1442,11 @@ private:
     /// entries describe.
     std::unique_ptr<RigExecPropertyChainBindings> _propertyChainBindings;
 
-    /// Evaluates every property chain at \p time.
-    ///
-    /// Fills \p results with the final value per target and appends one
-    /// attribute override per target to \p overrides, so a consuming
-    /// computation reads the revised value with nothing authored anywhere.
-    /// Diagnostics record pass-throughs and failures (spec §6.6).
-    void _EvaluatePropertyChains(
-        UsdTimeCode time,
-        std::map<SdfPath, VtValue> *results,
-        std::vector<RigExecValueOverride> *overrides,
-        std::vector<std::string> *diagnostics);
-    /// Folds any plain Xformable lying between the asset root and a provider
-    /// into that provider's seeded frames.
-    ///
-    /// Exec resolves a provider's parent space through a NamespaceAncestor
-    /// that only RigExec types satisfy, so a `Scope` is correctly skipped and
-    /// an `Xform` is silently dropped with it. This composes what was
-    /// dropped, at evaluation, from the stage -- nothing is authored, and the
-    /// rig follows the Xform wherever the author put it. See
-    /// docs/superpowers/specs/2026-09-09-intervening-xform-design.md.
-    ///
-    /// Returns false only when a frame cannot be resolved at all; a rig with
-    /// no such Xform returns true having done no work.
-    bool _ComposeInterveningXforms(
-        const UsdPrim &assetRoot,
-        UsdGeomXformCache *xformCache,
-        std::vector<RigExecPointFrame> *restFrames,
-        std::vector<char> *restLive,
-        std::map<SdfPath, RigExecPointFrame> *baseFrames,
-        std::vector<RigExecPointFrame> *finalFrames,
-        std::vector<char> *finalLive,
-        RigExecRigPose *pose) const;
-
-    /// The frame a plain Xformable contributes to the pose: its transform
-    /// relative to the asset root, at \p xformCache's time.
-    ///
-    /// A constraint target that is not a RigExec type, and a constraint
-    /// source that is not a provider, both enter the walk this way -- read
-    /// off the stage, never through exec, because a plain Xform has no
-    /// computePointFrame to ask. False when \p path is not an Xformable or
-    /// the asset root is gone; \p outFrame and \p outMatrix are optional
-    /// and carry the same transform in the pose's two currencies.
-    ///
-    /// resetXformStack between the two is deliberately NOT diagnosed here:
-    /// ComputeRelativeTransform stops accumulating at it and the partial
-    /// matrix is what the pose has always used.
-    bool _FrameFromXformRelativeToAsset(const UsdPrim &assetRoot,
-                                        UsdGeomXformCache *xformCache,
-                                        const SdfPath &path,
-                                        RigExecPointFrame *outFrame,
-                                        GfMatrix4d *outMatrix) const;
-
-    /// Resolves a constraint source that is a native Xformable, carrying the
-    /// delta of the deepest provider the walk has already revised above it.
-    ///
-    /// A native source that is not itself a written provider may still sit
-    /// beneath a constrained transform provider. The closest revised
-    /// ancestor contains all higher ancestor deltas, so applying it once to
-    /// the stage-derived source frame applies all of them. \p providers
-    /// enumerates the walk's frame store; the search over it -- strict
-    /// prefix, points actually moved, deepest wins -- is here so the dense
-    /// baked program and the map walk pick the same ancestor and compute the
-    /// same delta.
-    bool _ResolveNativeXformSource(
-        const UsdPrim &assetRoot,
-        UsdGeomXformCache *xformCache,
-        const SdfPath &xformPath,
-        const RigExecPoseFrameEnumerator &providers,
-        RigExecPointFrame *out) const;
-
-    /// Republishes every volume weight object's placement from the frames
-    /// the walk holds NOW.
-    ///
-    /// A volume's field is measured in the space its own provider frame
-    /// places it, so a constraint that moves the volume has to be visible to
-    /// every weight resolved after it -- which means re-running this after
-    /// every commit, not once before the walk. \p finalFrameOf is the walk's
-    /// frame store; a provider it cannot answer for, or a frame no matrix
-    /// can be built from, places at the identity.
-    void _UpdateVolumePlacements(const RigExecPoseFrameLookup &finalFrameOf,
-                                 RigExecRigPose *pose);
-
-    /// One per-frame array of constraint source parameters, read RAW.
-    ///
-    /// Straight off the attribute at the frame's time: no connection walk,
-    /// no resolved-input lookup, no interactive override. A source weight is
-    /// an input of the constraint OPERATOR, not of the rig, and the
-    /// evaluator and the baked program have to read it the same way -- so
-    /// both read it here, and the cardinality diagnostic has one wording
-    /// rather than one per caller. An absent or empty array is not a
-    /// failure: it means the neutral value on every source. The name
-    /// arrives already interned: both frame paths read it every frame.
-    static bool _ReadConstraintSourceWeights(
-        const UsdPrim &prim, const TfToken &name, size_t count,
-        UsdTimeCode time, std::vector<std::string> *diagnostics,
-        std::vector<double> *weights);
-
-    /// The same read for a per-source offset array, whose neutral is zero.
-    static bool _ReadConstraintSourceOffsets(
-        const UsdPrim &prim, const TfToken &name, size_t count,
-        UsdTimeCode time, std::vector<std::string> *diagnostics,
-        std::vector<GfVec3d> *offsets);
+    /// Samples an ordinary Xformable relative to the asset at the source boundary.
+    bool _FrameFromXformRelativeToAsset(
+        const UsdPrim &assetRoot, UsdGeomXformCache *xformCache,
+        const SdfPath &path, RigExecPointFrame *outFrame,
+        GfMatrix4d *outMatrix) const;
 
     /// Whether a SingleChainIK chain's joints can move with time at all.
     ///
@@ -2043,58 +1458,12 @@ private:
     /// sample or a connection -- so it is settled for the epoch.
     bool _IkUsesAnimatedTs(const std::vector<SdfPath> &chain) const;
 
-    /// The one diagnostic RIGEXEC_BAKE_REQUIRED exists to produce: says on
-    /// \p pose that this generation ran dynamically while the mode asked for
-    /// the program, and why. No-op unless the variable is set and the mode
-    /// is Baked or BakedWithParityCheck. Publishes no value of its own.
-    void _ReportBakeRequired(const std::string &detail,
-                             RigExecRigPose *pose) const;
-
-    /// The same fact, said to the ARTIST instead of to the harness: a plain
-    /// line on \p pose reporting that the rig's rigExec:baked asked for the
-    /// program and this generation was answered dynamically anyway, and why.
-    /// No-op unless the attribute is what chose the mode. Publishes no value
-    /// of its own, carries no "baked parity mismatch" prefix and moves no
-    /// counter -- an authored attribute is a REQUEST, and a request that
-    /// cannot be met is news, not a failure.
-    void _ReportAttributeBakeFallback(const std::string &detail,
-                                      RigExecRigPose *pose) const;
-
-    /// Whether either report above would say anything about a fallback.
-    ///
-    /// The detail string they share costs an allocation to assemble and the
-    /// ordinary dynamic path passes the same point on EVERY generation, so
-    /// it is assembled only where somebody is listening.
-    bool _FallbackIsWorthAnnouncing() const;
-
-    /// Whether a refused bake has to say WHICH feature refused it.
-    ///
-    /// Not a gate on the work: the bakeability walk collects its refusals
-    /// either way, because the list IS the answer. What it gates is whether
-    /// they are KEPT -- carried on the epoch and reported once per
-    /// generation -- and only two callers report them:
-    /// RIGEXEC_BAKE_REQUIRED, and a rig that asked for the program through
-    /// its own attribute and is owed the reason it did not get one.
-    bool _WantsBakeRefusalReasons() const;
-
-    /// Re-reads the rig's rigExec:baked and moves the mode to what it asks
-    /// for, unless something stronger already chose (see
-    /// RigExecEvaluationModeSource). Returns true when the mode MOVED, which
-    /// is what a caller has to build or drop a program for.
-    bool _RefreshAttributeEvaluationMode();
-
-    /// Whether \p notice names the rig's rigExec:baked attribute -- changed
-    /// in place, or resynced along with a prim above it.
-    bool _NoticeNamesTheBakedAttribute(
-        const UsdNotice::ObjectsChanged &notice) const;
     /// Re-pulls the epoch's rest frames after a stage edit no recompile
     /// covered, and clears _epochRestFramesStale. Returns false when the
     /// request could not produce them, which is what an incomplete per-frame
     /// rest tap used to mean, and leaves the flag set.
-    bool _RefreshEpochRestFrames();
     /// Whether any of \p providers has a rest channel that can no longer be
     /// held as an epoch constant.
-    bool _EpochRestsMightVary(const std::set<SdfPath> &providers) const;
     /// The rest gate: records which epoch rest paths \p notice reached (see
     /// _restEditedProviders).
     void _NoteRestEdits(const UsdNotice::ObjectsChanged &notice);
@@ -2119,7 +1488,6 @@ private:
     std::map<SdfPath, std::vector<SdfPath>> _frameChains;
     /// Provider -> base computePointFrame tap, for providers that are not
     /// joints (joints already have _jointFrameTaps).
-    std::map<SdfPath, RigExecTapId> _providerBaseFrameTaps;
 
     /// Points target -> the derived normals/extent revisions it feeds.
     ///
@@ -2166,11 +1534,9 @@ private:
     /// in this epoch, and the matrices the current generation resolved
     /// them to. The CPU oracle reads the resolved matrix rather than
     /// recomputing the xformable frame chain a second time.
-    std::map<SdfPath, RigExecTapId> _volumeWeightMatrixTaps;
-    std::map<SdfPath, GfMatrix4d> _volumeWeightMatrices;
+    std::set<SdfPath> _nativeVolumeProviders;
 
     bool _publishWeightFields = true;
-    bool _preferProgram = false;
     /// The compiled epoch flattened into an exec-free op list, built at the
     /// end of Compile when the mode asks for one.
     ///
@@ -2181,6 +1547,8 @@ private:
     /// below; the rebuild happens at the next Evaluate, once the dynamic
     /// generation has settled whether the epoch itself moved. A notice that
     /// misses the index leaves the program standing.
+    std::unique_ptr<RigExecGoldenSuiteObserver> _goldenSuiteObserver;
+    std::unique_ptr<RigExecInputReplayObserver> _inputReplayObserver;
     std::unique_ptr<RigExecBakedProgram> _bakedProgram;
     /// Whether _bakedProgram has published a generation.
     ///
@@ -2192,6 +1560,10 @@ private:
     /// dynamic path does. See _RebuildBakedProgram.
     bool _bakedProgramPublished = false;
     bool _bakedProgramStale = false;
+    /// What Build gives range-chain revisions (SetBakedRoleMode): Live but
+    /// for the bake, which holds Export with its keep-set.
+    RigExecBakedRoleMode _bakedRoleMode = RigExecBakedRoleMode::Live;
+    std::set<SdfPath> _bakedExportKeep;
     /// This epoch already asked for a program and was refused.
     ///
     /// The refusal is a property of the compiled epoch, so re-asking inside
@@ -2201,42 +1573,13 @@ private:
     bool _bakeRefused = false;
     /// Why it refused, when anyone asked to be told.
     ///
-    /// Build is handed a reasons vector only under RIGEXEC_BAKE_REQUIRED:
-    /// filling it walks every refusal on the rig instead of stopping at the
-    /// first, and production pays nothing to collect strings nobody reads.
-    /// Cleared wherever _bakeRefused is, for the same reason.
+    /// Concrete admission reasons retained for the failed epoch.
     std::vector<std::string> _bakeRefusalReasons;
-    /// The program gave a generation back for a cause only the dynamic walk
-    /// can answer (RigExecBakedBail::Step or ::Publish), and was dropped. A
-    /// StageFrames bail is never memoized: the program answers it itself and
-    /// stays.
-    ///
-    /// A bail is a property of what the program was built from, the way a
-    /// refusal is: a rig left mid-edit -- a blend that publishes fewer frames
-    /// than it names joints -- bails on every frame of the epoch, and a
-    /// rebuild only to be given the same generation back costs a whole Bake
-    /// per frame. So the lazy build in Evaluate is not asked again while the
-    /// key still matches, and the walk answers.
-    ///
-    /// Keyed on the stage edit serial as well as the epoch: with the program
-    /// gone no notice can be classified against its capture index, and the
-    /// edit that finishes the rig may be a value no digest reads. Any notice
-    /// is therefore one more chance, at the cost of one build per edit
-    /// rather than one per frame. Cleared wherever _bakeRefused is. The time
-    /// is not part of the key, so a rig that bails on some frames only is
-    /// answered by the walk for the rest of the key's life -- the same
-    /// answer, a slower path.
-    struct _BakeBailMemo {
-        bool valid = false;
-        uint64_t stageEditSerial = 0;
-    };
-    _BakeBailMemo _bakeBail;
     size_t _bakedProgramBuilds = 0;
     size_t _bakedProgramBuildAttempts = 0;
     size_t _bakedGenerations = 0;
-    RigExecEvaluationMode _evaluationMode = RigExecEvaluationMode::Dynamic;
-    RigExecEvaluationModeSource _evaluationModeSource =
-        RigExecEvaluationModeSource::Default;
+    /// Whether the last generation's region ran through _bakedProgram.
+    bool _lastGenerationRanProgram = false;
 
     size_t _structureDigest = 0;
     /// What the digest in _structureDigest read outside the rig, which is
@@ -2257,14 +1600,9 @@ private:
     uint64_t _stageEditSerial = 0;
     /// The last settle-path compile, when it failed.
     ///
-    /// A compile's outcome is a function of the composed stage and of the
-    /// mode, so the key is both: every notice bumps _stageEditSerial, and
-    /// the mode is what decides whether the dynamic-only preparations run
-    /// -- and so whether they can fail -- while SetEvaluationMode moves it
-    /// with no notice at all. The mode is the peeked one plus its source,
-    /// the pair Compile itself reads. Forgotten by the public Compile, by
-    /// SetEvaluationMode and by _RefreshAttributeEvaluationMode, each of
-    /// which asks the question again, and by a compile that succeeds.
+    /// A compile's outcome is a function of the composed stage. Every notice
+    /// bumps _stageEditSerial; public Compile forgets this memo and a
+    /// successful compile clears it.
     ///
     /// \c errors is what the compile appended and nothing else: the
     /// settle's "structural recompilation failed" is the caller's line, and
@@ -2272,9 +1610,6 @@ private:
     struct _FailedCompileMemo {
         bool valid = false;
         uint64_t stageEditSerial = 0;
-        RigExecEvaluationMode mode = RigExecEvaluationMode::Dynamic;
-        RigExecEvaluationModeSource modeSource =
-            RigExecEvaluationModeSource::Default;
         std::vector<std::string> errors;
     };
     _FailedCompileMemo _failedCompile;
@@ -2302,11 +1637,60 @@ private:
     /// Scoped phase timings for Compile and Evaluate. Off unless profiling
     /// is enabled; see SetProfilingEnabled.
     RigExecProfiler _profiler;
+    bool _opTimingEnabled = false;
 
     /// The program is built from the compiled epoch tables above, which are
     /// private because they are not a published surface -- not because the
     /// one class whose whole job is to flatten them should re-derive them.
     friend class RigExecBakedProgram;
+    friend class RigExecInputReplayHeldProgram;
+};
+
+/// Temporarily changes upstream array admission for tests (on by default):
+/// array values of the leaf reads a bake lists as array input slots.
+/// Restore the previous setting after the test. Not for use while an
+/// evaluation runs.
+void RigExecSetUpstreamArrayAdmissionForTesting(bool on);
+
+/// Lifts \p evaluator's upstream values for its lifetime and puts the same
+/// list back when it ends. Lifting and placing them again are ordinary
+/// upstream changes, so the next generation applies them with no rebuild.
+class RigExecScopedUpstreamSuspension
+{
+public:
+    explicit RigExecScopedUpstreamSuspension(RigExecRigEvaluator &evaluator)
+        : _evaluator(evaluator), _saved(evaluator.GetUpstreamInputs())
+    {
+        _evaluator.SetUpstreamInputs({});
+    }
+    ~RigExecScopedUpstreamSuspension()
+    {
+        _evaluator.SetUpstreamInputs(std::move(_saved));
+    }
+    RigExecScopedUpstreamSuspension(const RigExecScopedUpstreamSuspension &) =
+        delete;
+    RigExecScopedUpstreamSuspension &operator=(
+        const RigExecScopedUpstreamSuspension &) = delete;
+
+private:
+    RigExecRigEvaluator &_evaluator;
+    std::vector<RigExecValueOverride> _saved;
+};
+
+/// Holds \p evaluator in \p mode (with \p exportKeep) for a scope (the bake)
+/// and restores the previous mode and keep-set after.
+class RigExecScopedBakedRoleMode {
+public:
+    RigExecScopedBakedRoleMode(RigExecRigEvaluator &evaluator,
+                               RigExecBakedRoleMode mode,
+                               std::set<SdfPath> exportKeep = {});
+    ~RigExecScopedBakedRoleMode();
+    RigExecScopedBakedRoleMode(const RigExecScopedBakedRoleMode &) = delete;
+    RigExecScopedBakedRoleMode &operator=(const RigExecScopedBakedRoleMode &) = delete;
+private:
+    RigExecRigEvaluator &_evaluator;
+    RigExecBakedRoleMode _previous;
+    std::set<SdfPath> _previousKeep;
 };
 
 /// Test and diagnostic access to the constraint handler registry -- the one

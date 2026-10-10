@@ -3,6 +3,7 @@
 #include "rigEvaluatorInternal.h"
 #include "rigEvaluatorConstraints.h"
 #include "movers/moverRegistry.h"
+#include "moverGraph.h"
 
 #include "pxr/usd/usd/attribute.h"
 #include "pxr/usd/usd/prim.h"
@@ -100,24 +101,18 @@ _ValidateWeightObjectDomain(
                  weightPath.GetString();
         return false;
     }
-    if (!visiting->insert(weightPath).second) {
-        *error = weightPath.GetString() +
-                 ": weight object composition contains a cycle";
-        return false;
-    }
+    // This object is already being validated on the current closure path.
+    // Keep the authored back-edge for the common operation SCC; every unique
+    // object still receives the domain, type and target checks below.
+    if (!visiting->insert(weightPath).second) return true;
     struct _EraseOnReturn {
         std::set<SdfPath> *paths;
         SdfPath path;
         ~_EraseOnReturn() { paths->erase(path); }
     } erase{visiting, weightPath};
 
-    if (!pointDomain && _IsVolumeWeightType(weightPrim.GetTypeName())) {
-        *error = weightPath.GetString() +
-                 ": volumetric weights require a point domain";
-        return false;
-    }
-
     const TfToken typeName = weightPrim.GetTypeName();
+    const bool volumeEnvelope = !pointDomain && _IsVolumeWeightType(typeName);
     auto readToken = [&weightPrim](const char *name, const char *fallback) {
         TfToken value(fallback);
         if (const UsdAttribute attr =
@@ -323,7 +318,7 @@ _ValidateWeightObjectDomain(
             return false;
         }
     }
-    if (operationDomain) {
+    if (operationDomain && !volumeEnvelope) {
         if (representation != "constant") {
             *error = weightPath.GetString() +
                      ": an atomic multi-target mover requires a constant "
@@ -404,7 +399,7 @@ bool
 RigExecRigEvaluator::_DiscoverMovers(
     std::vector<RigExecMoverRecord> &newMovers,
     std::vector<_SurfaceProjectorRecord> &newSurfaceProjectors,
-    size_t &inertMovers,
+    SdfPathVector &inertMovers,
     std::vector<std::string> *errors, _CompileFailure *failure) const
 {
     const auto fail = [failure](const std::string &message,
@@ -430,7 +425,7 @@ RigExecRigEvaluator::_DiscoverMovers(
     /// Mover-bearing prims discovered but skipped because nothing is wired to
     /// their rigExec:moves yet. They are not outputs, but they ARE evidence
     /// that the rig root points somewhere real.
-    inertMovers = 0;
+    inertMovers.clear();
     const UsdPrim moverRig = _stage->GetPrimAtPath(_rigPath);
     int ordinal = 0;
     if (moverRig) {
@@ -486,7 +481,7 @@ RigExecRigEvaluator::_DiscoverMovers(
                 // would otherwise announce itself, while an authored but
                 // empty write set is a wire the author meant to connect.
                 // So it is skipped and SAID, never skipped silently.
-                ++inertMovers;
+                inertMovers.push_back(prim.GetPath());
                 reportNotice("Mover has no moves targets: " +
                              prim.GetPath().GetString() +
                              "; it is inert this generation");
@@ -496,6 +491,7 @@ RigExecRigEvaluator::_DiscoverMovers(
             RigExecMoverRecord record;
             record.moverPath = prim.GetPath();
             record.schemaType = prim.GetTypeName();
+            record.handler = RigExecFindMoverHandler(record.schemaType);
             record.ordinal = ordinal++;
 
             // Structural/topology properties are never writable move

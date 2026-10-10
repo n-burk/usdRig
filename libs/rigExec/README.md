@@ -1,56 +1,60 @@
 # Evaluator implementation
 
-`RigExecRigEvaluator` owns the binding epoch and generation caches. Its public
-API is in `rigEvaluator.h`; implementation files divide the work by responsibility.
-The `rigEvaluator*` helper headers are private implementation details.
+`RigExecRigEvaluator` owns the source binding epoch and compiled program.
+Compilation resolves each consumer's read phase to a typed value version.
+The shared operation compiler derives dependencies from those producers,
+reports cycles, assigns canonical IDs and lowers safe linear clusters.
 
 | File | Responsibility |
 | --- | --- |
-| `rigEvaluator.cpp` | Lifecycle, evaluation-mode selection, baked fallback, generation dispatch |
-| `rigEvaluatorCompile.cpp` | Compile attempts, epoch replacement, request preparation, failed-compile memo |
-| `rigEvaluatorValidation.cpp` | Mover discovery, scalar connections, weight-domain validation |
-| `rigEvaluatorDependencies.cpp` | Rig discovery, pose-input closures, solver-input index |
-| `rigEvaluatorChainPlan.cpp` | Chain dependency order, parallel levels, revision snapshots |
-| `rigEvaluatorDigest.cpp` | Structural fingerprints and digest settlement |
-| `rigEvaluatorNotices.cpp` | USD notice classification and epoch invalidation |
-| `rigEvaluatorInputs.cpp` | Shared reads, interactive overrides, value-cache invalidation |
-| `rigEvaluatorProperties.cpp` | Property-chain compilation, binding, evaluation |
-| `rigEvaluatorPose.cpp` | Constraint dispatch, pose interpolators, rest-frame composition |
-| `rigEvaluatorDynamic.cpp` | Solver and constraint execution, pose publication |
-| `rigEvaluatorGeometry.cpp` | Weight resolution, skin inputs, scalar geometry oracle |
-| `rigEvaluatorGeometryEvaluation.cpp` | Persistent geometry graphs, parallel chain execution, geometry publication |
+| `rigEvaluator.cpp` | Lifecycle, epoch settlement, generation dispatch and publication |
+| `rigEvaluatorCompile.cpp` | Discovery, validation, candidate bindings and epoch replacement |
+| `rigEvaluatorNotices.cpp` | Source notice classification and invalidation |
+| `rigEvaluatorInputs.cpp` | Requested interactive/upstream inputs and admission |
+| `bakedProgram.cpp` | Typed input binding and compiled domain records |
+| `bakedPose.cpp`, `bakedProperties.cpp`, `bakedGeometry.cpp`, `bakedWeights.cpp` | Domain descriptors and pure operation bodies |
+| `bakedOpGraph.cpp`, `bakedOpValues.cpp` | Native graph adapter, exact value keys and unavailable cycle outputs |
+| `bakedSchedule.cpp` | Operation dispatch, timing and graph reports |
+| `rigExecGraph/opGraph.cpp` | Common producer compiler, SCC reporting, clusters and readiness executor |
+| `rigExecGraph/sceneProgramLowering.cpp` | Detached typed graph assembly from composed scene descriptors |
 
-Compilation discovers and validates inputs, builds candidate bindings and
-schedules, prepares requests, then installs the epoch. A failed phase returns
-the diagnostic and operation paths through `_CompileFailure`; the attempt owns
-cleanup and diagnostic publication. Candidate tables stay local until commit.
+At each evaluation, the host samples source inputs before executing the
+common graph. Operations wait for their declared predecessors. Exact
+changes in value, type, count, validity and diagnostics determine whether
+readers execute; unchanged retained outputs stop propagation. Consumer
+reads select their bound versions without querying the source stage in a
+computation body. Independent branches use separate output slots and join
+before publication.
 
-A dynamic generation settles the epoch, resolves properties and interactive
-overrides, executes the pose schedule, and publishes the final pose. Pose
-interpolators then publish weights before `_EvaluateGeometry` consumes the
-snapshot and pose results. Independent geometry chains write separate work
-buffers, which merge in dependency order.
-
-Keep shared helper declarations in the private headers and single-file helpers
-in anonymous namespaces. Evaluation reads the source stage without authoring it.
-Run `bin/build_rigexec.bat` (Windows) or `bin/build_rigexec.sh` to build and run
-CTest, including dynamic/baked parity, invalidation, and round-trip coverage.
+The evaluator reads the source stage without authoring it. Keep shared
+helper declarations in private headers and local helpers in anonymous
+namespaces. Run `bin/build_rigexec.bat` or `bin/build_rigexec.sh` to build
+and run CTest, including invalidation and binary round-trip coverage.
 
 ## Frozen evaluation
 
-Frozen evaluation separates stage access from worker execution:
+Frozen evaluation separates source access from retained worker execution:
 
 | File | Responsibility |
 | --- | --- |
-| `frozenContext.cpp` | Public entry points, frame-input containers, serial scopes, purity audit |
-| `frozenSampling.cpp` | Stage-side frame sampling and burst caches |
-| `frozenPropertySampling.cpp` | Stage-side property-chain discovery, binding, and evaluation |
-| `frozenSnapshot.cpp` | Program snapshots and constant patching |
-| `frozenDigest.cpp` | Frame-input and epoch-constant fingerprints |
-| `frozenWorker.cpp` | Worker prologue, execution, publication, partial-cone restoration |
-| `frozenGeometry.cpp` | Worker-side weight and geometry assembly from sampled values |
+| `frozenContext.cpp` | Public frame inputs, serial scopes and purity audit |
+| `frozenSampling.cpp`, `frozenPropertySampling.cpp` | Source-side input capture |
+| `frozenSnapshot.cpp` | Immutable program snapshots and constant patches |
+| `frozenDigest.cpp` | Input and epoch fingerprints |
+| `frozenWorker.cpp` | Typed input prologue, common executor and publication |
 
-`frozenContextInternal.h` declares the shared worker state and helpers. Its
-field visitors define the input order once for sampling, snapshot capture, and
-worker patching. Workers use sampled values and private state; copied USD
-handles must remain unused during execution.
+`frozenContextInternal.h` defines worker state. Field visitors retain the
+same input order for sampling, snapshots and patches. Each workspace pins
+its program snapshot and owns mutable values and scratch. Workers consume
+sampled values through the same domain bodies and readiness executor;
+retained USD handles remain unused in worker execution.
+
+## Independent checks
+
+`scalarReference.cpp` and `weightReference.cpp` judge captured inputs
+independently of production graph results. `bakedExecCrossCheckRows.cpp`
+compares eligible operation rows with owning OpenExec requests and records
+explicit reasons when no equivalent row exists. `goldenPose.cpp` encodes
+published values with exact floating-point bits; `goldenSuite.cpp` checks
+complete evaluator histories. `inputReplay.cpp` records caller actions and
+source edits for replay against a separately instrumented original host.

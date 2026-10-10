@@ -1,0 +1,161 @@
+#usda 1.0
+(
+    defaultPrim = "EnvelopeAsset"
+    doc = "S9 singleton volume envelopes on property and pose consumers; independent geometry sample version and Base/Final placement. Original walk refusal is NoEquivalent."
+)
+def Xform "EnvelopeAsset"
+{
+    def RigExecRoot "Rig"
+    {
+        uniform token rigExec:partition = "EnvelopeAsset"
+        def Scope "Controls"
+        {
+            def RigExecControl "VolumeMove" (prepend apiSchemas = ["RigExecControlAPI"])
+            {
+                double avars:tx = 2
+            }
+            def RigExecControl "Pull" (prepend apiSchemas = ["RigExecControlAPI"])
+            {
+                double avars:tx = 6
+            }
+            def RigExecControl "Half" (prepend apiSchemas = ["RigExecControlAPI"])
+            {
+                double avars:tx = 0.5
+            }
+        }
+        def Scope "Joints"
+        {
+            def RigExecJoint "Base" {}
+            def RigExecJoint "Final" {}
+        }
+        def Scope "Channels"
+        {
+            custom float base = 0
+            custom float final = 0
+            custom float geometry = 0
+        }
+        def Scope "Weights"
+        {
+            def RigExecSphereWeight "SphereBase"
+            {
+                rel rigExec:weightTarget = </EnvelopeAsset/Rig/Channels.base>
+                rel rigExec:sampleSource = </EnvelopeAsset/Geom/Samples.points>
+                float inputs:falloffMin = 0
+                float inputs:falloffMax = 1
+            }
+            def RigExecSphereWeight "SphereFinal"
+            {
+                rel rigExec:weightTarget = </EnvelopeAsset/Rig/Channels.final>
+                rel rigExec:sampleSource = </EnvelopeAsset/Geom/Samples.points>
+                float inputs:falloffMin = 0
+                float inputs:falloffMax = 1
+            }
+            def RigExecSphereWeight "PoseBase"
+            {
+                rel rigExec:weightTarget = </EnvelopeAsset/Rig/Joints/Base>
+                rel rigExec:sampleSource = </EnvelopeAsset/Geom/Samples.points>
+                float inputs:falloffMin = 0
+                float inputs:falloffMax = 1
+            }
+            def RigExecSphereWeight "PoseFinal"
+            {
+                rel rigExec:weightTarget = </EnvelopeAsset/Rig/Joints/Final>
+                rel rigExec:sampleSource = </EnvelopeAsset/Geom/Samples.points>
+                float inputs:falloffMin = 0
+                float inputs:falloffMax = 1
+            }
+            def RigExecSphereWeight "Geometry"
+            {
+                rel rigExec:weightTarget = </EnvelopeAsset/Rig/Channels.geometry>
+                rel rigExec:sampleSource = </EnvelopeAsset/Geom/Lifted.points> (rigExecReadPhase = "final")
+                float inputs:falloffMin = 0
+                float inputs:falloffMax = 1
+            }
+        }
+        def Scope "Properties"
+        {
+            def RigExecFloatMathMover "Base" (prepend apiSchemas = ["RigExecMoverAPI"])
+            {
+                rel rigExec:moves = </EnvelopeAsset/Rig/Channels.base>
+                rel rigExec:weightObject = </EnvelopeAsset/Rig/Weights/SphereBase>
+                uniform token rigExec:operation = "add"
+                float inputs:value = 10
+            }
+            def RigExecFloatMathMover "Final" (prepend apiSchemas = ["RigExecMoverAPI"])
+            {
+                rel rigExec:moves = </EnvelopeAsset/Rig/Channels.final>
+                rel rigExec:weightObject = </EnvelopeAsset/Rig/Weights/SphereFinal> (rigExecReadPhase = "final")
+                uniform token rigExec:operation = "add"
+                float inputs:value = 10
+            }
+            def RigExecFloatMathMover "Geometry" (prepend apiSchemas = ["RigExecMoverAPI"])
+            {
+                rel rigExec:moves = </EnvelopeAsset/Rig/Channels.geometry>
+                rel rigExec:weightObject = </EnvelopeAsset/Rig/Weights/Geometry>
+                uniform token rigExec:operation = "add"
+                float inputs:value = 10
+            }
+        }
+        def Scope "Constraints"
+        {
+            def RigExecPositionConstraint "VolumeMoveSphereBase" (prepend apiSchemas = ["RigExecMoverAPI"])
+            {
+                rel rigExec:moves = </EnvelopeAsset/Rig/Weights/SphereBase>
+                rel rigExec:sources = </EnvelopeAsset/Rig/Controls/VolumeMove>
+            }
+            def RigExecPositionConstraint "VolumeMoveSphereFinal" (prepend apiSchemas = ["RigExecMoverAPI"])
+            {
+                rel rigExec:moves = </EnvelopeAsset/Rig/Weights/SphereFinal>
+                rel rigExec:sources = </EnvelopeAsset/Rig/Controls/VolumeMove>
+            }
+            def RigExecPositionConstraint "VolumeMovePoseBase" (prepend apiSchemas = ["RigExecMoverAPI"])
+            {
+                rel rigExec:moves = </EnvelopeAsset/Rig/Weights/PoseBase>
+                rel rigExec:sources = </EnvelopeAsset/Rig/Controls/VolumeMove>
+            }
+            def RigExecPositionConstraint "VolumeMovePoseFinal" (prepend apiSchemas = ["RigExecMoverAPI"])
+            {
+                rel rigExec:moves = </EnvelopeAsset/Rig/Weights/PoseFinal>
+                rel rigExec:sources = </EnvelopeAsset/Rig/Controls/VolumeMove>
+            }
+            def RigExecPositionConstraint "Base" (prepend apiSchemas = ["RigExecMoverAPI"])
+            {
+                rel rigExec:moves = </EnvelopeAsset/Rig/Joints/Base>
+                rel rigExec:sources = </EnvelopeAsset/Rig/Controls/Pull>
+                rel rigExec:weightObject = </EnvelopeAsset/Rig/Weights/PoseBase>
+            }
+            def RigExecPositionConstraint "Final" (prepend apiSchemas = ["RigExecMoverAPI"])
+            {
+                rel rigExec:moves = </EnvelopeAsset/Rig/Joints/Final>
+                rel rigExec:sources = </EnvelopeAsset/Rig/Controls/Pull>
+                rel rigExec:weightObject = </EnvelopeAsset/Rig/Weights/PoseFinal> (rigExecReadPhase = "final")
+            }
+        }
+        def Scope "Geometry"
+        {
+            def RigExecMatrixMover "Half" (prepend apiSchemas = ["RigExecMoverAPI"])
+            {
+                rel rigExec:moves = </EnvelopeAsset/Geom/Lifted.points>
+                rel rigExec:transform = </EnvelopeAsset/Rig/Controls/Half>
+            }
+        }
+    }
+    def Scope "Geom"
+    {
+        def Points "Samples"
+        {
+            point3f[] points = [(0,0,0)]
+            point3f[] points.timeSamples = {
+                1: [(0,0,0)],
+                2: [(0,0,0),(0,0,0)],
+                3: [(0,0,0)],
+                4: [],
+                5: None,
+                6: [(0,0,0)]
+            }
+        }
+        def Points "Lifted" {
+            point3f[] points = [(0,0,0)]
+        }
+    }
+}

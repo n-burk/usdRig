@@ -148,14 +148,14 @@ _JsonDefault(const TfToken &name, const VtValue &value)
     // the conversion is made here for the default and by the scene index
     // for an authored value.
     if (name == _tokens->opacityMode) {
-        std::string token;
+        bool isPresence = false;
         if (value.IsHolding<TfToken>()) {
-            token = value.UncheckedGet<TfToken>().GetString();
+            isPresence = value.UncheckedGet<TfToken>() == _tokens->presence;
         } else if (value.IsHolding<std::string>()) {
-            token = value.UncheckedGet<std::string>();
+            isPresence = value.UncheckedGet<std::string>() ==
+                         _tokens->presence.GetString();
         }
-        return _JsonNumber(token == _tokens->presence.GetString() ? 0 : 1,
-                           true);
+        return _JsonNumber(isPresence ? 0 : 1, true);
     }
     return std::string();
 }
@@ -626,15 +626,15 @@ _WrapNetwork(const SdfPath &materialPath,
     const VtValue mode =
         interface.GetNodeParameterValue(node, _tokens->opacityMode);
     if (!mode.IsEmpty() && !mode.IsHolding<int>()) {
-        std::string token;
+        bool isPresence = false;
         if (mode.IsHolding<TfToken>()) {
-            token = mode.UncheckedGet<TfToken>().GetString();
+            isPresence = mode.UncheckedGet<TfToken>() == _tokens->presence;
         } else if (mode.IsHolding<std::string>()) {
-            token = mode.UncheckedGet<std::string>();
+            isPresence = mode.UncheckedGet<std::string>() ==
+                         _tokens->presence.GetString();
         }
         interface.SetNodeParameterValue(
-            node, _tokens->opacityMode,
-            VtValue(token == _tokens->presence.GetString() ? 0 : 1));
+            node, _tokens->opacityMode, VtValue(isPresence ? 0 : 1));
     }
     return interface.Finish();
 }

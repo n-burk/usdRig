@@ -1,5 +1,7 @@
 // This executable deliberately links only rigExecRuntime/rigExecBinary.
-// The companion bake fixture supplies the authored sample; no USD is loaded.
+// The companion bake fixture supplies the authored sample baked at frame 1;
+// no USD is loaded. Playback sets the mover's inputs:defaultWeight to the
+// values its stage keys at frames 1, 24 and 48 (0, 1, 0).
 #include "rigExecRuntime/runtime.h"
 #include <fstream>
 #include <iostream>
@@ -17,8 +19,14 @@ int main(int argc, char **argv)
         auto reader = rigExec::RigExecRuntimeReader::Open(
             bytes.data(), bytes.size(), &error);
         if (!reader) throw std::runtime_error(error);
-        auto evaluate = [&](double frame) {
-            if (!reader->SetFrame(frame, &error) || !reader->Execute(&error))
+        const std::string weight =
+            "/Rig/Movers/Deform/Detail.inputs:defaultWeight";
+        if (reader->GetBakeTime() != 1 || !reader->FindInput(weight, nullptr))
+            throw std::runtime_error("expected a bake at frame 1 with " +
+                                     weight + " as an input");
+        auto evaluate = [&](double value) {
+            if (!reader->SetInput(weight, value, &error) ||
+                !reader->Execute(&error))
                 throw std::runtime_error(error);
             for (const auto &value : reader->GetPoints()) {
                 if (value.path == "/Rig/Body.points" && value.points.size() == 6)
@@ -26,8 +34,8 @@ int main(int argc, char **argv)
             }
             throw std::runtime_error("missing deltaMush mesh");
         };
-        const auto before = evaluate(1), full = evaluate(24), reset = evaluate(48);
-        if (before == full || before != reset || evaluate(24) != full)
+        const auto before = evaluate(0), full = evaluate(1), reset = evaluate(0);
+        if (before == full || before != reset || evaluate(1) != full)
             throw std::runtime_error("deltaMush playback/seek/reset failed");
         std::cout << "DeltaMush binary playback passed without USD\n";
     } catch (const std::exception &e) {

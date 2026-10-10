@@ -81,7 +81,8 @@
 //   * RETIRE. One control retires exactly the affected frames; the next
 //     commit re-warms them first; re-warmed frames are bit-identical.
 //   * PROOFS. Proofs carry their sampled-path set: constant patches retire
-//     none, varying edits retire all.
+//     none, varying edits retire all. The set is the vector's shared digest
+//     order, and retiring by control id matches the path-text rule.
 //   * DRAG. Warming under a drag admits override identities with exact
 //     seeds; release re-warms what the commit retired.
 //   * FENCED-CLEAR. Clear with jobs queued and running, then drain: late
@@ -102,6 +103,8 @@
 #include "rigExecImaging/registry.h"
 #include "rigExecBake/bake.h"
 #include "rigExec/backgroundScheduler.h"
+#include "rigExec/bakedProgramImpl.h"
+#include "rigExec/goldenPose.h"
 #include "rigExec/frameCache.h"
 #include "rigExec/frameCacheSparsity.h"
 #include "rigExec/frozenContext.h"
@@ -133,6 +136,7 @@
 #include <limits>
 #include <map>
 #include <mutex>
+#include <set>
 #include <string>
 #include <thread>
 #include <utility>
@@ -568,6 +572,254 @@ TestStaticControlEditInvalidatesCachedFrames()
     }
 }
 
+// A two-joint rig whose root rest:tx is animated, each joint under an
+// authored non-identity default:space, skinning one mesh: an edit of the
+// root rest moves both rests and neither ladder.
+UsdStageRefPtr
+MakeRestRig()
+{
+    UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    stage->SetStartTimeCode(1.0);
+    stage->SetEndTimeCode(3.0);
+    stage->DefinePrim(SdfPath("/Asset"), TfToken("Scope"));
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    stage->DefinePrim(SdfPath("/Asset/Rig/Joints"), TfToken("Scope"));
+    const UsdPrim root = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Joints/Root"), TfToken("RigExecJoint"));
+    const UsdPrim child = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Joints/Root/Child"), TfToken("RigExecJoint"));
+    const UsdAttribute restTx =
+        root.CreateAttribute(TfToken("rest:tx"), SdfValueTypeNames->Double);
+    restTx.Set(1.0, UsdTimeCode(1.0));
+    restTx.Set(2.0, UsdTimeCode(2.0));
+    restTx.Set(4.0, UsdTimeCode(3.0));
+    child.CreateAttribute(TfToken("rest:tx"), SdfValueTypeNames->Double)
+        .Set(1.0);
+    GfMatrix4d rootSpace(1.0), childSpace(1.0);
+    rootSpace.SetTranslateOnly(GfVec3d(0.0, 1.0, 0.0));
+    childSpace.SetTranslateOnly(GfVec3d(0.0, 0.0, 1.0));
+    root.CreateAttribute(TfToken("default:space"),
+                         SdfValueTypeNames->Matrix4d).Set(rootSpace);
+    child.CreateAttribute(TfToken("default:space"),
+                          SdfValueTypeNames->Matrix4d).Set(childSpace);
+    stage->DefinePrim(SdfPath("/Asset/Rig/Movers"), TfToken("Scope"));
+    const SdfPath meshPath("/Asset/Geom/Mesh_0");
+    const UsdPrim prim = stage->DefinePrim(meshPath, TfToken("Mesh"));
+    VtVec3fArray points(kTinyPointCount);
+    for (size_t i = 0; i < kTinyPointCount; ++i) {
+        points[i] = GfVec3f(float(i) * 0.5f, float(i) * -0.25f, 0.125f);
+    }
+    prim.GetAttribute(TfToken("points")).Set(points);
+    const UsdPrim skin = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Movers/Skin_0"), TfToken("RigExecSkinMover"));
+    skin.ApplyAPI(TfToken("RigExecMoverAPI"));
+    skin.GetRelationship(TfToken("rigExec:moves"))
+        .SetTargets({meshPath.AppendProperty(TfToken("points"))});
+    skin.GetAttribute(TfToken("inputs:defaultWeight")).Set(1.0f);
+    skin.CreateRelationship(TfToken("rigExec:influences"))
+        .SetTargets({root.GetPath(), child.GetPath()});
+    skin.CreateAttribute(TfToken("rigExec:elementSize"),
+                         SdfValueTypeNames->Int).Set(2);
+    VtIntArray indices(kTinyPointCount * 2);
+    VtFloatArray weights(kTinyPointCount * 2);
+    for (size_t i = 0; i < kTinyPointCount; ++i) {
+        indices[i * 2] = 0;
+        indices[i * 2 + 1] = 1;
+        weights[i * 2] = 0.5f;
+        weights[i * 2 + 1] = 0.5f;
+    }
+    skin.CreateAttribute(TfToken("rigExec:jointIndices"),
+                         SdfValueTypeNames->IntArray).Set(indices);
+    skin.CreateAttribute(TfToken("rigExec:jointWeights"),
+                         SdfValueTypeNames->FloatArray).Set(weights);
+    return stage;
+}
+
+// A rest edit is seeded through the head tier (the rest and ladder ops'
+// closure), so a frame it moved is not served from the cache: revisited
+// after the edit, frame 1 equals the cache-off session's, and differs from
+// the frame before the edit.
+void
+TestARestEditIsNotServedStale()
+{
+    std::printf("progress: TestARestEditIsNotServedStale\n");
+    std::fflush(stdout);
+    const SdfPath rig("/Asset/Rig");
+    auto drive = [&](UsdStageRefPtr stage, _GenerationGeometry *before,
+                     _GenerationGeometry *after) {
+        RigExecImagingRegistry &registry =
+            RigExecImagingRegistry::GetInstance();
+        std::vector<std::string> errors;
+        CHECK(registry.Activate(stage, rig, UsdTimeCode(1.0), &errors));
+        CHECK(registry.SetTime(UsdTimeCode(2.0)));
+        CHECK(registry.SetTime(UsdTimeCode(3.0)));
+        CHECK(registry.SetTime(UsdTimeCode(1.0)));
+        *before = _CaptureGeometry(registry.GetStore()->Get());
+        CHECK(registry.SetTime(UsdTimeCode(2.0)));
+        stage->GetPrimAtPath(SdfPath("/Asset/Rig/Joints/Root"))
+            .GetAttribute(TfToken("rest:tx"))
+            .Set(1.75, UsdTimeCode(1.0));
+        CHECK(registry.SetTime(UsdTimeCode(1.0)));
+        *after = _CaptureGeometry(registry.GetStore()->Get());
+        CHECK(!after->points.empty());
+        registry.Deactivate();
+    };
+
+    _GenerationGeometry referenceBefore, reference;
+    SetEnv("RIGEXEC_FRAME_CACHE", "off");
+    drive(MakeRestRig(), &referenceBefore, &reference);
+    CHECK(!_SameGeometry(referenceBefore, reference));
+
+    _GenerationGeometry cachedBefore, cached;
+    SetEnv("RIGEXEC_FRAME_CACHE", "on");
+    SetEnv("RIGEXEC_FRAME_CACHE_VERIFY", "0");
+    drive(MakeRestRig(), &cachedBefore, &cached);
+    CHECK(_SameGeometry(referenceBefore, cachedBefore));
+    if (!_SameGeometry(reference, cached)) {
+        std::printf("cache-on served a pre-edit pose at frame 1 after a "
+                    "rest edit\n");
+        CHECK(false);
+    }
+}
+
+// WARM over a recomposing ladder. MakeRestRig's root rest:tx is animated,
+// so its provider ladder recomposes every frame; the rig freezes, and the
+// production worker warms frames 2 and 3 by running the rest and ladder ops
+// from each job's sampled ladder leaves. A scrub over the range then serves
+// every frame from the cache with no evaluation, and each served frame
+// equals the live evaluation of it after the cache is cleared.
+void
+TestAnAnimatedRestRigServesWarmedHits()
+{
+    std::printf("progress: TestAnAnimatedRestRigServesWarmedHits\n");
+    std::fflush(stdout);
+    SetEnv("RIGEXEC_FRAME_CACHE", "on");
+    SetEnv("RIGEXEC_FRAME_CACHE_VERIFY", "0");
+    if (RigExecFrameCacheModeFromEnvironment() ==
+            RigExecFrameCacheMode::Off ||
+        RigExecFrameCacheVerifyRequested()) {
+        return;
+    }
+    RigExecImagingRegistry &registry = RigExecImagingRegistry::GetInstance();
+    if (!RigExecBackgroundWarmingEnabled()) {
+        std::printf("SKIP TestAnAnimatedRestRigServesWarmedHits: warming "
+                    "unavailable in this process\n");
+        return;
+    }
+    const UsdStageRefPtr stage = MakeRestRig();
+    const SdfPath rig("/Asset/Rig");
+    const std::vector<double> frames{1.0, 2.0, 3.0};
+    std::vector<std::string> errors;
+    CHECK(registry.Activate(stage, rig, UsdTimeCode(1.0), &errors));
+    RigExecImagingBridge *bridge = registry.GetBridge(rig);
+    CHECK(bridge != nullptr);
+    if (!bridge) {
+        registry.Deactivate();
+        return;
+    }
+    const RigExecBakedProgram *program =
+        bridge->GetEvaluator().GetBakedProgram();
+    CHECK(program != nullptr);
+    // Not vacuous: the ladder is read per frame, which the freeze refused
+    // before the worker ran the rest tier.
+    CHECK(program && program->GetStepGraph().ladderVarying);
+    std::string why;
+    CHECK(RigExecCanFreezeProgram(bridge->GetEvaluator(), &why));
+    if (!why.empty()) {
+        std::printf("    freeze refused: %s\n", why.c_str());
+    }
+    CHECK(registry.SetWarmRange(rig, frames));
+    const RigExecBackgroundSchedulerStats before =
+        registry.GetBackgroundStats();
+    for (size_t tick = 0; tick < frames.size() + 4; ++tick) {
+        bool allCached = true;
+        for (const RigExecWarmFrameState state :
+             registry.GetFrameStates(rig, frames)) {
+            allCached = allCached && state == RigExecWarmFrameState::Cached;
+        }
+        if (allCached) {
+            break;
+        }
+        CHECK(registry.OnIdle() >= 0);
+        registry.WaitUntilBackgroundIdle();
+    }
+    for (const RigExecWarmFrameState state :
+         registry.GetFrameStates(rig, frames)) {
+        CHECK(state == RigExecWarmFrameState::Cached);
+    }
+    const RigExecBackgroundSchedulerStats stats =
+        registry.GetBackgroundStats();
+    // Frame 1 is the Activate memo; 2 and 3 are warmed by frozen jobs.
+    CHECK(stats.published - before.published == frames.size() - 1);
+    CHECK(stats.declinedInvalid - before.declinedInvalid == 0);
+    CHECK(stats.declinedFreezeRefused - before.declinedFreezeRefused == 0);
+    CHECK(stats.declinedUnsampleable - before.declinedUnsampleable == 0);
+
+    const size_t evalsBefore = registry.GetSessionEvaluationCount(rig);
+    const size_t hitsBefore = registry.GetFrameCacheStats(rig).hits;
+    std::map<double, _GenerationGeometry> warmed;
+    for (const double frame : {3.0, 2.0, 1.0}) {
+        CHECK(registry.SetTime(UsdTimeCode(frame)));
+        warmed[frame] = _CaptureGeometry(registry.GetStore()->Get());
+        CHECK(!warmed[frame].points.empty());
+    }
+    CHECK(registry.GetSessionEvaluationCount(rig) == evalsBefore);
+    CHECK(registry.GetFrameCacheStats(rig).hits - hitsBefore ==
+          frames.size());
+    // The rests moved the mesh between the warmed frames.
+    CHECK(!_SameGeometry(warmed[2.0], warmed[3.0]));
+    registry.ClearFrameCache(rig);
+    for (const double frame : {2.0, 3.0, 1.0}) {
+        CHECK(registry.SetTime(UsdTimeCode(frame)));
+        const _GenerationGeometry live =
+            _CaptureGeometry(registry.GetStore()->Get());
+        if (!_SameGeometry(warmed[frame], live)) {
+            std::printf("warmed-vs-live differs at frame %g on the animated "
+                        "rest rig\n", frame);
+            CHECK(false);
+        }
+    }
+    CHECK(registry.GetSessionEvaluationCount(rig) ==
+          evalsBefore + frames.size());
+
+    // A value edit on the child's static rest, and the range warmed again:
+    // each frame served after it equals its live evaluation, so nothing
+    // keyed before the edit is served after it.
+    stage->GetPrimAtPath(SdfPath("/Asset/Rig/Joints/Root/Child"))
+        .GetAttribute(TfToken("rest:tx"))
+        .Set(2.5);
+    for (size_t tick = 0; tick < frames.size() + 4; ++tick) {
+        bool allCached = true;
+        for (const RigExecWarmFrameState state :
+             registry.GetFrameStates(rig, frames)) {
+            allCached = allCached && state == RigExecWarmFrameState::Cached;
+        }
+        if (allCached) {
+            break;
+        }
+        CHECK(registry.OnIdle() >= 0);
+        registry.WaitUntilBackgroundIdle();
+    }
+    std::map<double, _GenerationGeometry> edited;
+    for (const double frame : {3.0, 2.0, 1.0}) {
+        CHECK(registry.SetTime(UsdTimeCode(frame)));
+        edited[frame] = _CaptureGeometry(registry.GetStore()->Get());
+    }
+    CHECK(!_SameGeometry(edited[2.0], warmed[2.0]));
+    registry.ClearFrameCache(rig);
+    for (const double frame : {2.0, 3.0, 1.0}) {
+        CHECK(registry.SetTime(UsdTimeCode(frame)));
+        if (!_SameGeometry(edited[frame],
+                           _CaptureGeometry(registry.GetStore()->Get()))) {
+            std::printf("served-vs-live differs at frame %g after a static "
+                        "rest edit\n", frame);
+            CHECK(false);
+        }
+    }
+    registry.ClearFrameCache(rig);
+    registry.Deactivate();
+}
+
 // EPOCH. A stage notice that hits the baked capture index drops the epoch's
 // cached frames eagerly on the notice -- while the epoch half still names
 // them -- instead of leaving them for LRU; a notice that misses the index
@@ -683,9 +935,9 @@ TestPlaybackBypassesCache(
     UsdStageRefPtr stage = MakeTinyRig();
     const SdfPath rig("/Asset/Rig");
     RigExecRigEvaluator evaluator(stage, rig);
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+
     RigExecBakeOpts opts;
-    opts.frames = {1.0, 2.0, 3.0, 4.0};
+    opts.time = 1.0;
     RigExecBakeResult baked;
     std::string error;
     CHECK(RigExecBakeToBinary(evaluator, opts, &baked, &error));
@@ -1033,9 +1285,7 @@ TestCommitOfPreviewedPoseSkipsEvaluation()
     registry.Deactivate();
 }
 
-// A first session-layer write creates empty ancestor overs as well as the
-// value spec. Those inert prim notices must not re-evaluate the final preview.
-// Real metadata, another value, or structural changes still do.
+// First-session ancestor overs do not invalidate an exact preview commit.
 void
 TestFirstSessionCommitOfPreviewedPose()
 {
@@ -1152,13 +1402,11 @@ TestFirstSessionCommitOfPreviewedPose()
     SetEnv("RIGEXEC_FRAME_CACHE", "on");
 }
 
-// SETTLE, declined. A drag on a property a chain revises stands in for the
-// chain's final value, while the committed value is the base the chain
-// revises: the same number is a different pose, so the commit evaluates.
+// A chain revises the preview and authored value as its base in both cases.
 void
-TestCommitOfAChainTargetEvaluates()
+TestCommitOfAChainTargetSettles()
 {
-    std::printf("progress: TestCommitOfAChainTargetEvaluates\n");
+    std::printf("progress: TestCommitOfAChainTargetSettles\n");
     std::fflush(stdout);
     SetEnv("RIGEXEC_FRAME_CACHE", "on");
     UsdStageRefPtr stage = MakeTinyRig();
@@ -1188,19 +1436,34 @@ TestCommitOfAChainTargetEvaluates()
     const size_t pulls = registry.GetSessionEvaluationCount(rig);
     CHECK(registry.EndPreview(/* publish = */ false));
     tx.Set(sample, UsdTimeCode(2.0));
-    CHECK(registry.GetSessionEvaluationCount(rig) == pulls + 1);
-    const _GenerationGeometry committed =
-        _CaptureGeometry(registry.GetStore()->Get());
-    CHECK(!_SameGeometry(previewed, committed));
+    CHECK(registry.GetSessionEvaluationCount(rig) == pulls);
+    CHECK(_SameGeometry(previewed,
+                        _CaptureGeometry(registry.GetStore()->Get())));
     {
         RigExecImagingBridge fresh(stage, rig);
         CHECK(fresh.Compile());
         CHECK(fresh.EvaluateAndPublishResult(UsdTimeCode(2.0)).ok);
-        CHECK(_SameGeometry(committed,
+        CHECK(_SameGeometry(previewed,
                             _CaptureGeometry(fresh.GetStore()->Get())));
     }
     registry.ClearFrameCache(rig);
     registry.Deactivate();
+    // The chain revised the drag: the previewed pose is the doubled sample
+    // authored on a rig without the chain.
+    tx.Set(2.0 * sample, UsdTimeCode(2.0));
+    stage->RemovePrim(gain.GetPath());
+    RigExecImagingBridge unrevised(stage, rig);
+    CHECK(unrevised.Compile());
+    CHECK(unrevised.EvaluateAndPublishResult(UsdTimeCode(2.0)).ok);
+    // The points only: the chain's own result is a moved value only the
+    // chained rig publishes.
+    _GenerationGeometry previewedPoints = previewed;
+    _GenerationGeometry unrevisedPoints =
+        _CaptureGeometry(unrevised.GetStore()->Get());
+    previewedPoints.movedFloats.clear();
+    unrevisedPoints.movedFloats.clear();
+    CHECK(!previewedPoints.points.empty());
+    CHECK(_SameGeometry(previewedPoints, unrevisedPoints));
 }
 
 // PRODUCTION. The C-API trigger path -- no injected runner -- enqueues real
@@ -1323,7 +1586,7 @@ TestProductionTriggerPathEnqueuesAndFences()
 // the animated posed:space is what makes frames genuinely differ, and
 // per-time memos cannot cross-serve undetected.
 UsdStageRefPtr
-MakeRefusalRig()
+MakeConnectedSpaceRig()
 {
     UsdStageRefPtr stage = UsdStage::CreateInMemory();
     stage->DefinePrim(SdfPath("/Asset"), TfToken("Scope"));
@@ -1345,7 +1608,7 @@ MakeRefusalRig()
                                             TfToken("RigExecJoint"));
     joint.GetAttribute(TfToken("avars:ty")).Set(2.0);
 
-    // The refusal. The connection is to the control's own posed:space, which
+    // The connection is to the control's own posed:space, which
     // is the identity the joint would have composed anyway -- so the rig
     // still evaluates to a comparable pose, and the only thing the
     // connection changes is that a value which was an epoch constant is now
@@ -1379,7 +1642,7 @@ MakeRefusalRig()
 // The program bakes, but its weighted property chain reads a live weight
 // oracle and therefore cannot freeze its complete inputs.
 UsdStageRefPtr
-MakeUnfreezableBakedRig()
+MakePropertyChainRig()
 {
     UsdStageRefPtr stage = MakeTinyRig();
     const UsdPrim gain = stage->DefinePrim(
@@ -1408,15 +1671,15 @@ MakeUnfreezableBakedRig()
 }
 
 void
-TestUnfreezableBakedRigMemoizesCompletePoses()
+TestPropertyChainRigMemoizesCompletePoses()
 {
-    std::printf("progress: TestUnfreezableBakedRigMemoizesCompletePoses\n");
+    std::printf("progress: TestPropertyChainRigMemoizesCompletePoses\n");
     SetEnv("RIGEXEC_FRAME_CACHE", "on");
     SetEnv("RIGEXEC_FRAME_CACHE_VERIFY", "0");
     if (RigExecFrameCacheModeFromEnvironment() == RigExecFrameCacheMode::Off) {
         return;
     }
-    const UsdStageRefPtr stage = MakeUnfreezableBakedRig();
+    const UsdStageRefPtr stage = MakePropertyChainRig();
     RigExecImagingBridge bridge(stage, SdfPath("/Asset/Rig"));
     CHECK(bridge.Compile());
     std::map<double, _GenerationGeometry> live;
@@ -1426,10 +1689,10 @@ TestUnfreezableBakedRigMemoizesCompletePoses()
         live[time] = _CaptureGeometry(bridge.GetStore()->Get());
         RigExecFreshProof proof;
         CHECK(bridge.GetFreshProof(UsdTimeCode(time), &proof));
-        CHECK(!proof.sampledInputs);
+        CHECK(proof.sampledInputs);
     }
     CHECK(bridge.GetEvaluator().GetBakedProgram() != nullptr);
-    CHECK(!RigExecCanFreezeProgram(bridge.GetEvaluator()));
+    CHECK(RigExecCanFreezeProgram(bridge.GetEvaluator()));
     CHECK(!_SameGeometry(live[1.0], live[2.0]));
     for (double time : {3.0, 1.0, 4.0, 2.0}) {
         const auto result = bridge.EvaluateAndPublishResult(UsdTimeCode(time));
@@ -1448,162 +1711,54 @@ TestUnfreezableBakedRigMemoizesCompletePoses()
 }
 
 void
-TestIdleFallbackWarmsCompletePoses()
+TestSupportedSourcesWarmCompletePoses()
 {
-    std::printf("progress: TestIdleFallbackWarmsCompletePoses\n");
     SetEnv("RIGEXEC_FRAME_CACHE", "on");
     SetEnv("RIGEXEC_FRAME_CACHE_VERIFY", "0");
-    if (!RigExecBackgroundWarmingEnabled()) {
-        return;
-    }
+    if (!RigExecBackgroundWarmingEnabled()) return;
     const SdfPath rig("/Asset/Rig");
     const std::vector<double> range{1.0, 2.0, 3.0, 4.0};
     auto &registry = RigExecImagingRegistry::GetInstance();
-    for (bool baked : {false, true}) {
-        const auto stage = baked ? MakeUnfreezableBakedRig() : MakeRefusalRig();
-        const UsdAttribute unrelated = stage->DefinePrim(SdfPath("/Unrelated"))
-            .CreateAttribute(TfToken("value"), SdfValueTypeNames->Double);
-        unrelated.Set(0.0);
+    for (bool propertyChain : {false, true}) {
+        const auto stage = propertyChain ? MakePropertyChainRig() : MakeConnectedSpaceRig();
         std::string sourceBefore;
         stage->GetRootLayer()->ExportToString(&sourceBefore);
         RigExecImagingBridge reference(stage, rig);
         CHECK(reference.Compile());
-        std::map<double, _GenerationGeometry> live;
+        std::map<double, _GenerationGeometry> expected;
         for (double time : range) {
             CHECK(reference.EvaluateAndPublishResult(UsdTimeCode(time)).ok);
-            live[time] = _CaptureGeometry(reference.GetStore()->Get());
+            expected[time] = _CaptureGeometry(reference.GetStore()->Get());
         }
+        CHECK(RigExecCanFreezeProgram(reference.GetEvaluator()));
         std::vector<std::string> errors;
         CHECK(registry.Activate(stage, rig, UsdTimeCode(1.0), &errors));
         CHECK(registry.SetWarmRange(rig, range));
         const auto snapshot = registry.GetStore()->Get();
-        const size_t before = registry.GetSessionEvaluationCount(rig);
-        for (int tick = 0; tick != 3; ++tick) {
-            CHECK(registry.OnIdle() == 1);
+        for (int tick = 0; tick != 8; ++tick) {
+            registry.OnIdle();
             registry.WaitUntilBackgroundIdle();
-            CHECK(registry.GetStore()->Get() == snapshot);
-            CHECK(registry.GetSessionEvaluationCount(rig) == before);
         }
-        for (const auto state : registry.GetFrameStates(rig, range)) {
+        CHECK(registry.GetStore()->Get() == snapshot);
+        for (auto state : registry.GetFrameStates(rig, range)) {
             CHECK(state == RigExecWarmFrameState::Cached);
         }
-        CHECK(registry.OnIdle() == 0);
-        CHECK(registry.GetSessionEvaluationCount(rig) == before);
-        // Exhaust the bounded proof table without evicting cached poses.
-        // Serial-keyed entries remain directly reachable through the index.
-        RigExecFrameInputs unrelatedInputs;
-        for (int i = 0; i != 1100; ++i) {
-            registry.GetBridge(rig)->NoteWarmingEnqueued(
-                UsdTimeCode(1000.0 + i), 1, 1, unrelatedInputs);
-        }
-        RigExecFreshProof retired;
-        CHECK(!registry.GetBridge(rig)->GetFreshProof(UsdTimeCode(2.0), &retired));
-        for (double time : {2.0, 4.0, 3.0, 1.0}) {
+        for (double time : range) {
             CHECK(registry.SetTime(UsdTimeCode(time)));
-            CHECK(_SameGeometry(live[time], _CaptureGeometry(registry.GetStore()->Get())));
+            CHECK(_SameGeometry(expected[time], _CaptureGeometry(registry.GetStore()->Get())));
         }
-        CHECK(registry.GetSessionEvaluationCount(rig) == before);
         std::string sourceAfter;
         stage->GetRootLayer()->ExportToString(&sourceAfter);
-        CHECK(sourceAfter == sourceBefore);
-
-        // Clear preserves the selected range. Idle fills even the held
-        // playhead, without a new range request or snapshot publication.
-        registry.ClearFrameCache(rig);
-        const auto clearedPlayhead = registry.GetStore()->Get();
-        const size_t cleared = registry.GetSessionEvaluationCount(rig);
-        const size_t progress = registry.GetWarmingProgressCount();
-        const size_t factories = registry.GetBackgroundStats().factoryInvocations;
-        for (int tick = 0; tick != 4; ++tick) {
-            CHECK(registry.OnIdle() == 1);
-            registry.WaitUntilBackgroundIdle();
-            CHECK(registry.GetStore()->Get() == clearedPlayhead);
-        }
-        CHECK(registry.GetSessionEvaluationCount(rig) == cleared);
-        CHECK(registry.GetWarmingProgressCount() == progress + 4 +
-              registry.GetBackgroundStats().factoryInvocations - factories);
-        for (const auto state : registry.GetFrameStates(rig, range)) {
-            CHECK(state == RigExecWarmFrameState::Cached);
-        }
-
-        // Disabling warming and an active manipulation each prevent the
-        // private-stage fallback, just as they prevent frozen warming.
-        registry.ClearFrameCache(rig);
-        SetEnv("RIGEXEC_FRAME_CACHE", "warm-off");
-        const size_t disabled = registry.GetSessionEvaluationCount(rig);
-        CHECK(registry.OnIdle() == 0);
-        CHECK(registry.GetSessionEvaluationCount(rig) == disabled);
-        SetEnv("RIGEXEC_FRAME_CACHE", "on");
-        CHECK(registry.BeginPreview(baked ? "/Asset/Rig/AlongX.avars:tx"
-                                          : "/Asset/Rig/Root.avars:tx") == 1);
-        const size_t preview = registry.GetSessionEvaluationCount(rig);
-        CHECK(registry.OnIdle() == 0);
-        CHECK(registry.GetSessionEvaluationCount(rig) == preview);
-        CHECK(registry.EndPreview());
-        for (int tick = 0; tick != 3; ++tick) {
-            registry.OnIdle();
-            registry.WaitUntilBackgroundIdle();
-        }
-        // Edit a frozen-unsupported input, then fill and read its revised
-        // pose without either publishing the idle frame or pulling live.
-        if (baked) {
-            stage->GetAttributeAtPath(SdfPath("/Asset/Rig/Movers/TxGain.inputs:value"))
-                .Set(8.0f, UsdTimeCode(2.0));
-        } else {
-            GfMatrix4d space(1.0);
-            space.SetTranslate(GfVec3d(999.0, 0, 0));
-            stage->GetAttributeAtPath(SdfPath("/Asset/Rig/Root.posed:space"))
-                .Set(space, UsdTimeCode(2.0));
-        }
-        const auto editedPlayhead = registry.GetStore()->Get();
-        for (int tick = 0; tick != 3; ++tick) {
-            registry.OnIdle();
-            registry.WaitUntilBackgroundIdle();
-            CHECK(registry.GetStore()->Get() == editedPlayhead);
-        }
-        for (const auto state : registry.GetFrameStates(rig, range)) {
-            CHECK(state == RigExecWarmFrameState::Cached);
-        }
-        const size_t rewarmed = registry.GetSessionEvaluationCount(rig);
-        CHECK(registry.SetTime(UsdTimeCode(2.0)));
-        CHECK(registry.GetSessionEvaluationCount(rig) == rewarmed);
-        CHECK(!_SameGeometry(live[2.0], _CaptureGeometry(registry.GetStore()->Get())));
-        CHECK(reference.EvaluateAndPublishResult(UsdTimeCode(2.0)).ok);
-        CHECK(_SameGeometry(_CaptureGeometry(reference.GetStore()->Get()),
-                            _CaptureGeometry(registry.GetStore()->Get())));
-        // Opaque keys include the stage serial, so even an unrelated edit
-        // must retire their green index rows and permit automatic refill.
-        const auto beforeUnrelated = registry.GetStore()->Get();
-        const size_t beforeUnrelatedPulls = registry.GetSessionEvaluationCount(rig);
-        unrelated.Set(1.0);
-        CHECK(registry.GetStore()->Get() == beforeUnrelated);
-        for (const auto state : registry.GetFrameStates(rig, range)) {
-            CHECK(state == RigExecWarmFrameState::Dirty);
-        }
-        for (int tick = 0; tick != 4; ++tick) {
-            CHECK(registry.OnIdle() == 1);
-            registry.WaitUntilBackgroundIdle();
-            CHECK(registry.GetStore()->Get() == beforeUnrelated);
-        }
-        CHECK(registry.GetSessionEvaluationCount(rig) == beforeUnrelatedPulls);
-        for (const auto state : registry.GetFrameStates(rig, range)) {
-            CHECK(state == RigExecWarmFrameState::Cached);
-        }
-        CHECK(registry.SetTime(UsdTimeCode(1.0)));
-        CHECK(registry.GetSessionEvaluationCount(rig) == beforeUnrelatedPulls);
+        CHECK(sourceBefore == sourceAfter);
         registry.Deactivate();
     }
 }
 
-// D7 end to end: a bake-refusal rig memoizes the UI thread's own live
-// evaluations and serves repeats with zero evaluator pulls, while no
-// background job is ever created for it -- and a value edit retires the
-// time-keyed memos, so the next visit evaluates live and serves the edited
-// pose rather than a stale one.
+// Connected source-space values participate in cache keys and edit invalidation.
 void
-TestRefusalRigMemoizesUiThreadResults()
+TestConnectedSpaceRigMemoizesResults()
 {
-    std::printf("progress: TestRefusalRigMemoizesUiThreadResults\n");
+    std::printf("progress: TestConnectedSpaceRigMemoizesResults\n");
     std::fflush(stdout);
     SetEnv("RIGEXEC_FRAME_CACHE", "on");
     SetEnv("RIGEXEC_FRAME_CACHE_VERIFY", "0");
@@ -1611,60 +1766,17 @@ TestRefusalRigMemoizesUiThreadResults()
     const bool readsOn =
         RigExecFrameCacheModeFromEnvironment() != RigExecFrameCacheMode::Off;
 
-    // The fixture still refuses the bake: without this, the "zero jobs"
-    // assertions below would pass on a rig that warms.
-    {
-        UsdStageRefPtr probeStage = MakeRefusalRig();
-        RigExecRigEvaluator probe(probeStage, SdfPath("/Asset/Rig"));
-        probe.SetEvaluationMode(RigExecEvaluationMode::Baked);
-        std::vector<std::string> errors;
-        CHECK(probe.Compile(&errors));
-        std::vector<std::string> reasons;
-        CHECK(!probe.IsBakeable(&reasons));
-        CHECK(!reasons.empty());
-        bool named = false;
-        for (const std::string &reason : reasons) {
-            if (reason.find("connected posed:space") != std::string::npos) {
-                named = true;
-            }
-        }
-        CHECK(named);
-    }
-
-    UsdStageRefPtr stage = MakeRefusalRig();
+    UsdStageRefPtr stage = MakeConnectedSpaceRig();
     const SdfPath rig("/Asset/Rig");
     RigExecImagingRegistry &registry = RigExecImagingRegistry::GetInstance();
     std::vector<std::string> errors;
     CHECK(registry.Activate(stage, rig, UsdTimeCode(1.0), &errors));
     CHECK(registry.GetSessionEvaluationCount(rig) == 1);
 
-    // No background job for a refusal rig, by every route: direct builds
-    // (injected and production runners) decline, and both triggers enqueue
-    // nothing while the pool sits idle.
-    const RigExecFrameGeneration gen = registry.CurrentFrameGeneration(rig);
-    const RigExecWarmFactoryResult refusedInjected =
-        registry.BuildWarmWork(rig, UsdTimeCode(2.0), gen, _TestKernel);
-    CHECK(!refusedInjected.work);
-    CHECK(refusedInjected.skip == RigExecWarmSkipReason::D7Exempt);
-    const RigExecWarmFactoryResult refusedProduction =
-        registry.BuildWarmWork(
-            rig, UsdTimeCode(2.0), gen, RigExecFrozenStepRunner());
-    CHECK(!refusedProduction.work);
-    CHECK(refusedProduction.skip == RigExecWarmSkipReason::D7Exempt);
-    CHECK(!refusedProduction.detail.empty());
-    CHECK(registry.GetLastWarmSkipReason(rig) ==
-          RigExecWarmSkipReason::D7Exempt);
-    CHECK(registry.GetLastWarmSkipDetail(rig) == refusedProduction.detail);
-    const RigExecBackgroundSchedulerStats bgBefore =
-        registry.GetBackgroundStats();
-    CHECK(registry.OnEditCommitted() == 0);
-    CHECK(registry.OnIdle() == 0);
-    CHECK(registry.OnEditCommitted(_TestKernel) == 0);
-    CHECK(registry.OnIdle(_TestKernel) == 0);
-    const RigExecBackgroundSchedulerStats bgAfter =
-        registry.GetBackgroundStats();
-    CHECK(bgAfter.completed == bgBefore.completed);
-    CHECK(bgAfter.queuedDepth == 0 && bgAfter.running == 0);
+    const auto work = registry.BuildWarmWork(
+        rig, UsdTimeCode(2.0), registry.CurrentFrameGeneration(rig),
+        RigExecFrozenStepRunner());
+    CHECK(work.work);
 
     // Cold pass: every new frame evaluates live and memoizes.
     std::map<double, _GenerationGeometry> firstPass;
@@ -1679,7 +1791,7 @@ TestRefusalRigMemoizesUiThreadResults()
     // Sensitivity: frames genuinely differ, so a memo served at the wrong
     // frame would be caught by the geometry comparisons below.
     if (_SameGeometry(firstPass[1.0], firstPass[2.0])) {
-        std::printf("refusal frames do not differ: the rig is static\n");
+        std::printf("connected-space frames do not differ: the rig is static\n");
         CHECK(false);
     }
     const RigExecFrameCacheStats coldStats =
@@ -1687,6 +1799,9 @@ TestRefusalRigMemoizesUiThreadResults()
     if (readsOn) {
         CHECK(coldStats.published == 4);
         CHECK(coldStats.hits == 0);
+        // The explicitly built but unrun frame2 job installed its fresh
+        // input proof. The cold proven-key consultation misses once.
+        CHECK(coldStats.misses == 1);
     } else {
         CHECK(coldStats.published == 0);
     }
@@ -1699,7 +1814,7 @@ TestRefusalRigMemoizesUiThreadResults()
         const _GenerationGeometry now =
             _CaptureGeometry(registry.GetStore()->Get());
         if (!_SameGeometry(firstPass[frame], now)) {
-            std::printf("refusal generation differs at frame %g\n", frame);
+            std::printf("connected-space generation differs at frame %g\n", frame);
             CHECK(false);
         }
     }
@@ -1714,12 +1829,11 @@ TestRefusalRigMemoizesUiThreadResults()
     } else {
         CHECK(pulls == 4);
         CHECK(warmStats.hits == revisits);
-        // No store miss was ever counted: the lookup runs only under a
-        // freshness proof, and every proven lookup hit.
-        CHECK(warmStats.misses == 0);
+        // Warm revisits add no misses to the earlier cold consultation.
+        CHECK(warmStats.misses == coldStats.misses);
     }
 
-    // An edit retires the refusal memos: the stage-edit serial folded into
+    // An edit retires the connected-space memos: the stage-edit serial folded into
     // the digest moves at every frame, so the next visit evaluates live,
     // serves the edited pose, and memoizes it again.
     if (readsOn && !verify) {
@@ -1742,7 +1856,7 @@ TestRefusalRigMemoizesUiThreadResults()
         const _GenerationGeometry edited =
             _CaptureGeometry(registry.GetStore()->Get());
         if (_SameGeometry(firstPass[2.0], edited)) {
-            std::printf("refusal edit did not move the frame-2 pose\n");
+            std::printf("connected-space edit did not move the frame-2 pose\n");
             CHECK(false);
         }
         // And the edited pose memoizes: a scrub away and back is free.
@@ -1753,7 +1867,7 @@ TestRefusalRigMemoizesUiThreadResults()
         const _GenerationGeometry again =
             _CaptureGeometry(registry.GetStore()->Get());
         if (!_SameGeometry(edited, again)) {
-            std::printf("refusal re-memoized pose differs at frame 2\n");
+            std::printf("connected-space re-memoized pose differs at frame 2\n");
             CHECK(false);
         }
     }
@@ -2570,52 +2684,160 @@ TestWarmRangeCursorSkipsVisited()
     registry.Deactivate();
 }
 
-// CURSOR. A refusal (D7) rig never counts visited: no factory, no
-// completions, no invocations -- across repeated triggers over a set range.
-// (Frame 2.0 reads Cached: Activate's initial evaluation memoized it
-// through the live path, a genuine cached frame for the strip. The null
-// factory takes no per-frame verdicts, so no streaks advance and the
-// cursor keeps proposing; each trigger instead records the session-level
-// D7Exempt skip, naming the cause without warming anything.)
+// Connected source-space rigs warm through the production graph runner.
 void
-TestRefusalRigNeverCountsVisited()
+TestConnectedSpaceRigWarmsRange()
 {
-    std::printf("progress: TestRefusalRigNeverCountsVisited\n");
+    SetEnv("RIGEXEC_FRAME_CACHE", "on");
+    SetEnv("RIGEXEC_FRAME_CACHE_VERIFY", "0");
+    if (!RigExecBackgroundWarmingEnabled()) return;
+    const SdfPath rig("/Asset/Rig");
+    const std::vector<double> range{1.0, 2.0, 3.0, 4.0};
+    auto &registry = RigExecImagingRegistry::GetInstance();
+    for (bool propertyChain : {false}) {
+        const auto stage = propertyChain ? MakePropertyChainRig() : MakeConnectedSpaceRig();
+        std::string sourceBefore;
+        stage->GetRootLayer()->ExportToString(&sourceBefore);
+        RigExecImagingBridge reference(stage, rig);
+        CHECK(reference.Compile());
+        std::map<double, _GenerationGeometry> expected;
+        for (double time : range) {
+            CHECK(reference.EvaluateAndPublishResult(UsdTimeCode(time)).ok);
+            expected[time] = _CaptureGeometry(reference.GetStore()->Get());
+        }
+        CHECK(RigExecCanFreezeProgram(reference.GetEvaluator()));
+        std::vector<std::string> errors;
+        CHECK(registry.Activate(stage, rig, UsdTimeCode(1.0), &errors));
+        CHECK(registry.SetWarmRange(rig, range));
+        const auto snapshot = registry.GetStore()->Get();
+        for (int tick = 0; tick != 8; ++tick) {
+            registry.OnIdle();
+            registry.WaitUntilBackgroundIdle();
+        }
+        CHECK(registry.GetStore()->Get() == snapshot);
+        for (auto state : registry.GetFrameStates(rig, range)) {
+            CHECK(state == RigExecWarmFrameState::Cached);
+        }
+        for (double time : range) {
+            CHECK(registry.SetTime(UsdTimeCode(time)));
+            CHECK(_SameGeometry(expected[time], _CaptureGeometry(registry.GetStore()->Get())));
+        }
+        std::string sourceAfter;
+        stage->GetRootLayer()->ExportToString(&sourceAfter);
+        CHECK(sourceBefore == sourceAfter);
+        registry.Deactivate();
+    }
+}
+
+// A Copy Frame provider poses the joint that a Layered Skin Mover (a core
+// external revision) skins with a per-point mask. The animated source makes
+// every frame distinct.
+UsdStageRefPtr
+MakeAffineLayeredSkinRig()
+{
+    UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    stage->DefinePrim(SdfPath("/Asset"), TfToken("Scope"));
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    const UsdPrim source = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Controls/Source"), TfToken("RigExecControl"));
+    const UsdAttribute tx = source.GetAttribute(TfToken("avars:tx"));
+    for (int t = 1; t <= 4; ++t) {
+        CHECK(tx.Set(2.0 + 0.5 * double(t), UsdTimeCode(double(t))));
+    }
+    const UsdPrim copy = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Computations/Copy"), TfToken("RigExecCopyFrame"));
+    CHECK(copy.GetRelationship(TfToken("rigExec:source"))
+              .SetTargets({source.GetPath()}));
+    CHECK(copy.GetRelationship(TfToken("rigExec:poseInputs"))
+              .SetTargets({source.GetPath()}));
+    const UsdPrim joint = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Joints/Influence"), TfToken("RigExecJoint"));
+    CHECK(joint.CreateAttribute(TfToken("posed:space"),
+                                SdfValueTypeNames->Matrix4d)
+              .SetConnections({copy.GetPath().AppendProperty(
+                  TfToken("outputs:matrix"))}));
+    stage->DefinePrim(SdfPath("/Asset/Geom"), TfToken("Scope"));
+    const SdfPath cloud("/Asset/Geom/Cloud");
+    const UsdPrim points = stage->DefinePrim(cloud, TfToken("Points"));
+    CHECK(points.GetAttribute(TfToken("points"))
+              .Set(VtVec3fArray{GfVec3f(0, 0, 0), GfVec3f(0, 1, 0)}));
+    const UsdPrim skin = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Movers/Skin"),
+        TfToken("RigExecLayeredSkinMover"));
+    CHECK(skin.ApplyAPI(TfToken("RigExecMoverAPI")));
+    CHECK(skin.GetRelationship(TfToken("rigExec:moves"))
+              .SetTargets({cloud.AppendProperty(TfToken("points"))}));
+    CHECK(skin.GetRelationship(TfToken("rigExec:influences"))
+              .SetTargets({joint.GetPath()}));
+    CHECK(skin.GetAttribute(TfToken("rigExec:jointIndices"))
+              .Set(VtIntArray{0, 0}));
+    CHECK(skin.GetAttribute(TfToken("rigExec:jointWeights"))
+              .Set(VtFloatArray{1.0f, 1.0f}));
+    CHECK(skin.GetAttribute(TfToken("inputs:mask"))
+              .Set(VtFloatArray{0.25f, 0.75f}));
+    return stage;
+}
+
+// Affine frame providers and core external movers warm on the frame-cache
+// workers like every other operation: the range fills without an
+// owner-thread pull and serves the reference poses bit for bit.
+void
+TestAffineProvidersAndExternalMoversWarmFrozen()
+{
+    std::printf("progress: TestAffineProvidersAndExternalMoversWarmFrozen\n");
     std::fflush(stdout);
     SetEnv("RIGEXEC_FRAME_CACHE", "on");
     SetEnv("RIGEXEC_FRAME_CACHE_VERIFY", "0");
+    if (!RigExecBackgroundWarmingEnabled()) return;
     const SdfPath rig("/Asset/Rig");
-    RigExecImagingRegistry &registry = RigExecImagingRegistry::GetInstance();
-    std::vector<std::string> errors;
-    UsdStageRefPtr stage = MakeRefusalRig();
-    CHECK(registry.Activate(stage, rig, UsdTimeCode(2.0), &errors));
-    if (!RigExecBackgroundWarmingEnabled()) {
-        registry.Deactivate();
-        return;
+    const std::vector<double> range{1.0, 2.0, 3.0, 4.0};
+    auto &registry = RigExecImagingRegistry::GetInstance();
+    const UsdStageRefPtr stage = MakeAffineLayeredSkinRig();
+    std::string sourceBefore;
+    stage->GetRootLayer()->ExportToString(&sourceBefore);
+    RigExecImagingBridge reference(stage, rig);
+    CHECK(reference.Compile());
+    std::map<double, _GenerationGeometry> expected;
+    for (double time : range) {
+        CHECK(reference.EvaluateAndPublishResult(UsdTimeCode(time)).ok);
+        expected[time] = _CaptureGeometry(reference.GetStore()->Get());
     }
-    CHECK(registry.SetWarmRange(rig, {1.0, 2.0, 3.0, 4.0}));
-    const size_t invocationsBefore =
-        registry.GetBackgroundStats().factoryInvocations;
-    for (int i = 0; i < 5; ++i) {
-        CHECK(registry.OnIdle(_TestKernel) == 0);
+    CHECK(!expected[1.0].points.empty());
+    CHECK(!_SameGeometry(expected[1.0], expected[2.0]));
+    std::string freezeError;
+    const bool freezes =
+        RigExecCanFreezeProgram(reference.GetEvaluator(), &freezeError);
+    if (!freezes) {
+        std::printf("affine/layered skin rig cannot freeze: %s\n",
+                    freezeError.c_str());
+    }
+    CHECK(freezes);
+    std::vector<std::string> errors;
+    CHECK(registry.Activate(stage, rig, UsdTimeCode(1.0), &errors));
+    CHECK(registry.SetWarmRange(rig, range));
+    const auto snapshot = registry.GetStore()->Get();
+    const size_t pulls = registry.GetSessionEvaluationCount(rig);
+    for (int tick = 0; tick != 8; ++tick) {
+        registry.OnIdle();
         registry.WaitUntilBackgroundIdle();
     }
-    CHECK(registry.GetBackgroundStats().factoryInvocations ==
-          invocationsBefore);
-    // The session-level verdict: a factory-less trigger names its cause.
-    CHECK(registry.GetLastWarmSkipReason(rig) ==
-          RigExecWarmSkipReason::D7Exempt);
-    CHECK(!registry.GetLastWarmSkipDetail(rig).empty());
-    {
-        const std::vector<RigExecWarmFrameState> got =
-            registry.GetFrameStates(rig, {1.0, 2.0, 3.0, 4.0});
-        CHECK(got.size() == 4);
-        CHECK(got[0] == RigExecWarmFrameState::Uncached);
-        CHECK(got[1] == RigExecWarmFrameState::Cached);
-        CHECK(got[2] == RigExecWarmFrameState::Uncached);
-        CHECK(got[3] == RigExecWarmFrameState::Uncached);
+    CHECK(registry.GetStore()->Get() == snapshot);
+    for (auto state : registry.GetFrameStates(rig, range)) {
+        CHECK(state == RigExecWarmFrameState::Cached);
     }
-    registry.ClearFrameCache(rig);
+    for (double time : range) {
+        CHECK(registry.SetTime(UsdTimeCode(time)));
+        CHECK(_SameGeometry(expected[time],
+                            _CaptureGeometry(registry.GetStore()->Get())));
+    }
+    // Neither the idle owner-thread fill nor the visits pulled the live
+    // evaluator: the workers produced every frame.
+    if (!RigExecFrameCacheVerifyRequested()) {
+        CHECK(registry.GetSessionEvaluationCount(rig) == pulls);
+    }
+    std::string sourceAfter;
+    stage->GetRootLayer()->ExportToString(&sourceAfter);
+    CHECK(sourceBefore == sourceAfter);
     registry.Deactivate();
 }
 
@@ -2672,12 +2894,61 @@ TestWarmFrameStreaks()
     CHECK(index.IsVisitable(rig, 2.0, 4, 7));
 }
 
+// Progress is bounded to a request and never grants a cache hit. Eviction,
+// failure, late request tokens, epoch changes and cancellation are distinct.
+void TestWarmRangeProgress()
+{
+    RigExecWarmFrameIndex index;
+    const SdfPath rig("/Asset/Rig");
+    const RigExecFrameCacheKey key{7, 9};
+    index.NoteGeneration(rig, 3);
+    index.SetRequest(rig, {1.0, 2.0}, 3, 7);
+    const uint64_t first = index.RequestToken(rig);
+    index.NoteCompleted(rig, 1.0, key, 3);
+    index.NoteRequestPublished(rig, 1.0, key, 3, first);
+    index.NoteEvicted(rig, key, 1.0);
+    CHECK(index.State(rig, 1.0, 3, 7) == RigExecWarmFrameState::Uncached);
+    RigExecFrameCacheKey found;
+    CHECK(!index.FindCachedKey(rig, 1.0, 3, 7, &found));
+    CHECK(index.IsVisitable(rig, 1.0, 3, 7)); // explicit foreground miss
+    CHECK(!index.IsCursorVisitable(rig, 1.0, 3, 7)); // finite range progressed
+    CHECK(index.IsCursorVisitable(rig, 2.0, 3, 7)); // never published
+    CHECK(index.IsCursorVisitable(rig, 1.0, 3, 8)); // different epoch
+    index.InvalidateRequest(rig);
+    index.NoteRequestPublished(rig, 1.0, key, 3, first); // late fenced job
+    CHECK(index.IsCursorVisitable(rig, 1.0, 3, 7));
+    const uint64_t second = index.RequestToken(rig);
+    index.NoteRequestPublished(rig, 1.0, key, 2, second); // stale generation
+    CHECK(index.IsCursorVisitable(rig, 1.0, 3, 7));
+    index.NoteRequestPublished(rig, 1.0, key, 3, second);
+    CHECK(!index.IsCursorVisitable(rig, 1.0, 3, 7));
+    index.NoteDirtied(rig, 1.0); // source change after eviction still matters
+    CHECK(index.IsCursorVisitable(rig, 1.0, 3, 7));
+    index.SetRequest(rig, {2.0}, 3, 7);
+    index.NoteRequestPublished(rig, 1.0, key, 3, index.RequestToken(rig));
+    CHECK(index.IsCursorVisitable(rig, 1.0, 3, 7)); // outside request ignored
+    RigExecWarmTransition failed;
+    failed.rig = rig; failed.timeValue = 2.0;
+    failed.kind = RigExecWarmTransitionKind::Finished;
+    failed.outcome = RigExecWarmOutcome::DeclinedInvalid;
+    index.NoteTransition(failed);
+    CHECK(index.IsCursorVisitable(rig, 2.0, 3, 7)); // failure is not progress
+    index.NoteGeneration(rig, 4);
+    index.NoteRequestPublished(rig, 2.0, key, 3, index.RequestToken(rig));
+    CHECK(index.IsCursorVisitable(rig, 2.0, 4, 7));
+    index.NoteRequestPublished(rig, 2.0, key, 4, index.RequestToken(rig));
+    CHECK(!index.IsCursorVisitable(rig, 2.0, 4, 7)); // recovery
+    index.ResetRig(rig);
+    CHECK(index.RequestToken(rig) == 0);
+    CHECK(index.IsCursorVisitable(rig, 2.0, 4, 7));
+}
+
 // STACK. The full-range cursor over the layered stack anim: a registry-level
 // idle driver (the headless shape of the plugin's recurring driver) warms
 // every in-range frame -- published grows once per warmed frame, no trigger
 // exceeds the sampling budget, the stack declines nothing, warmed frames
-// serve a full scrub without evaluating, and warmed poses are bit-identical
-// to live.
+// each published job result reads back exactly, retained entries serve
+// without evaluating, and spread background poses are bit-identical to live.
 void
 TestStackFullRangeCursorWarmsEveryFrame(const std::string &examplesDir)
 {
@@ -2728,8 +2999,115 @@ TestStackFullRangeCursorWarmsEveryFrame(const std::string &examplesDir)
     }
     std::vector<std::string> errors;
     CHECK(registry.Activate(stage, rig, UsdTimeCode(start), &errors));
+    // Every requested frame must actually publish and its full job result
+    // must survive cache transport exactly before any later eviction.
+    // Only compact keys/counts survive the callback, not 200 full poses.
+    struct PublishedFrame {
+        RigExecFrameCacheKey key{0, 0};
+        size_t count = 0;
+    };
+    const std::vector<double> spots = {
+        frames[frames.size() / 4], frames[frames.size() / 2],
+        frames[3 * frames.size() / 4]};
+    std::map<double, uint64_t> backgroundDigests;
+    const auto poseDigest = [](const RigExecRigPose &pose, uint64_t *digest) {
+        std::vector<RigExecGoldenValue> values;
+        if (!RigExecEncodeGoldenPose(pose, &values)) return false;
+        *digest = RigExecGoldenDigest(RigExecGoldenVisit(
+            "background-native", 0, pose, values, true));
+        return true;
+    };
+    struct PublicationCell {
+        std::atomic<uint8_t> state{0}; // one claim; release-ready after payload
+        std::atomic<size_t> count{0};
+        RigExecFrameCacheKey key{0, 0};
+        uint64_t digest = 0;
+        bool exact = false;
+        bool encoded = false;
+        bool spot = false;
+    };
+    static_assert(std::atomic<uint8_t>::is_always_lock_free &&
+                  std::atomic<size_t>::is_always_lock_free,
+                  "publication observations must not introduce hidden locks");
+    std::unique_ptr<PublicationCell[]> publicationCells(new PublicationCell[frames.size()]);
+    std::map<double, PublishedFrame> publications; // owner only
+    std::atomic<bool> publicationFailure{false};
+    static_assert(std::atomic<bool>::is_always_lock_free,
+                  "publication failure flag must be lock-free");
+    const auto mergePublications = [&]() {
+        for (size_t i = 0; i < frames.size(); ++i) {
+            const auto &cell = publicationCells[i];
+            if (cell.state.load(std::memory_order_acquire) != 2) continue;
+            if (cell.spot && cell.exact && cell.encoded)
+                backgroundDigests[frames[i]] = cell.digest;
+            if (cell.exact) {
+                auto &row = publications[frames[i]];
+                row.key = cell.key;
+                row.count = cell.count.load(std::memory_order_relaxed);
+            }
+        }
+    };
+    const RigExecFrameGeneration generation = registry.CurrentFrameGeneration(rig);
+    registry.SetWarmPublishObserverForTesting(
+        [&](const SdfPath &publishedRig, UsdTimeCode time,
+            const RigExecFrameCacheKey &key, RigExecFrameGeneration token,
+            const RigExecRigPose &result,
+            const std::shared_ptr<RigExecFrameCache> &cache) {
+            if (!time.IsNumeric()) {
+                publicationFailure.store(true, std::memory_order_relaxed);
+                return;
+            }
+            const auto position = std::lower_bound(frames.begin(), frames.end(), time.GetValue());
+            if (position == frames.end() || *position != time.GetValue()) {
+                publicationFailure.store(true, std::memory_order_relaxed);
+                return;
+            }
+            auto &cell = publicationCells[size_t(position - frames.begin())];
+            cell.count.fetch_add(1, std::memory_order_relaxed);
+            uint8_t empty = 0;
+            if (!cell.state.compare_exchange_strong(empty, uint8_t(1),
+                    std::memory_order_relaxed, std::memory_order_relaxed)) {
+                // Duplicate observation never blocks or overwrites payload.
+                publicationFailure.store(true, std::memory_order_relaxed);
+                return;
+            }
+            RigExecRigPose served, comparison;
+            const bool found = cache && cache->Lookup(key, &served);
+            if (found) RigExecComparePoses(result, served, &comparison);
+            const bool exact = publishedRig == rig && time.IsNumeric() &&
+                token == generation && result.valid && found && served.valid &&
+                result.time == time && served.time == time &&
+                comparison.comparisonMismatches == 0 &&
+                std::binary_search(frames.begin(), frames.end(), time.GetValue());
+            uint64_t digest = 0;
+            const bool spot = std::find(spots.begin(), spots.end(),
+                time.GetValue()) != spots.end();
+            const bool encoded = !spot || poseDigest(result, &digest);
+            cell.key = key;
+            cell.digest = digest;
+            cell.spot = spot;
+            cell.exact = exact;
+            cell.encoded = encoded;
+            if (!encoded || !exact) publicationFailure.store(true, std::memory_order_relaxed);
+            cell.state.store(2, std::memory_order_release);
+        });
+    // Activate published the playhead natively. Run one genuine default
+    // closure for that same input/time to verify its cache transport too;
+    // the range cursor correctly never queues the playhead itself.
+    RigExecWarmFactoryResult playheadWork = registry.BuildWarmWork(
+        rig, UsdTimeCode(start), generation, RigExecFrozenStepRunner());
+    CHECK(static_cast<bool>(playheadWork.work));
+    RigExecWarmRequest playheadRequest;
+    playheadRequest.rig = rig;
+    playheadRequest.time = UsdTimeCode(start);
+    playheadRequest.generation = generation;
+    playheadRequest.fenceToken = registry.CurrentFenceToken(rig, UsdTimeCode(start));
+    if (playheadWork.work)
+        CHECK(playheadWork.work(playheadRequest) == RigExecWarmOutcome::Published);
+    // The 1 GiB logical cap deliberately cannot retain all 200 stack frames.
     if (!registry.SetWarmRange(rig, frames)) {
         CHECK(false);
+        registry.SetWarmPublishObserverForTesting({});
         registry.Deactivate();
         return;
     }
@@ -2745,44 +3123,31 @@ TestStackFullRangeCursorWarmsEveryFrame(const std::string &examplesDir)
     }
     const RigExecBackgroundSchedulerStats before =
         registry.GetBackgroundStats();
-    // The recurring-driver shape: tick, drain, re-query, until every frame
-    // is cached or the bound trips (a stuck frame fails loudly below).
+    // Drive the existing scheduler until all unique requested publications
+    // have been verified, rather than reheating already completed evictions.
     const size_t maxTicks = frames.size() + 8;
     size_t ticks = 0;
     for (; ticks < maxTicks; ++ticks) {
-        const std::vector<RigExecWarmFrameState> states =
-            registry.GetFrameStates(rig, frames);
-        CHECK(states.size() == frames.size());
-        bool allCached = states.size() == frames.size();
-        for (const RigExecWarmFrameState state : states) {
-            allCached = allCached && state == RigExecWarmFrameState::Cached;
-        }
-        if (allCached) {
-            break;
-        }
+        mergePublications();
+        if (publications.size() == frames.size()) break;
         const size_t invocationsBefore =
             registry.GetBackgroundStats().factoryInvocations;
         const int enqueued = registry.OnIdle();
         CHECK(enqueued >= 0);
-        CHECK(enqueued >= 0 &&
-              static_cast<size_t>(enqueued) <= budget);
+        CHECK(enqueued >= 0 && static_cast<size_t>(enqueued) <= budget);
         CHECK(registry.GetBackgroundStats().factoryInvocations -
-                  invocationsBefore <=
-              budget);
+                  invocationsBefore <= budget);
         registry.WaitUntilBackgroundIdle();
     }
     CHECK(ticks < maxTicks);
-    {
-        const std::vector<RigExecWarmFrameState> states =
-            registry.GetFrameStates(rig, frames);
-        CHECK(states.size() == frames.size());
-        for (size_t i = 0; i < states.size() && i < frames.size(); ++i) {
-            if (states[i] != RigExecWarmFrameState::Cached) {
-                std::printf("frame %g never cached (state %d)\n", frames[i],
-                            int(states[i]));
-                CHECK(false);
-            }
-        }
+    registry.SetWarmPublishObserverForTesting({}); // all jobs drained
+    mergePublications();
+    CHECK(!publicationFailure.load(std::memory_order_relaxed));
+    CHECK(publications.size() == frames.size());
+    for (const double time : frames) {
+        const auto found = publications.find(time);
+        CHECK(found != publications.end());
+        if (found != publications.end()) CHECK(found->second.count == 1);
     }
     const RigExecBackgroundSchedulerStats stats =
         registry.GetBackgroundStats();
@@ -2793,40 +3158,68 @@ TestStackFullRangeCursorWarmsEveryFrame(const std::string &examplesDir)
     CHECK(stats.completed - before.completed ==
           stats.published - before.published);
     CHECK(stats.queuedDepth == 0 && stats.running == 0);
-    // A full scrub serves without evaluating: every SetTime hits (the first
-    // may be a same-frame no-op that reads nothing).
+    const RigExecFrameCacheStats cacheStats = registry.GetFrameCacheStats(rig);
+    CHECK(cacheStats.bytes <= kRigExecFrameCacheDefaultByteCap);
+    CHECK(cacheStats.evictions > 0);
+    CHECK(cacheStats.entryCount < frames.size());
+    // Still-resident publications must serve without an evaluator pull.
+    // Progress alone is never considered cached: evicted frames are absent.
+    const auto retained = registry.GetCompletedKeys(rig);
+    CHECK(retained.size() == cacheStats.entryCount);
     const size_t evalsBefore = registry.GetSessionEvaluationCount(rig);
     const size_t hitsBefore = registry.GetFrameCacheStats(rig).hits;
-    for (const double frame : frames) {
-        CHECK(registry.SetTime(UsdTimeCode(frame)));
+    for (const auto &[time, key] : retained) {
+        const auto found = publications.find(time.GetValue());
+        CHECK(found != publications.end());
+        if (found != publications.end()) CHECK(found->second.key == key);
+        CHECK(registry.SetTime(time));
     }
     CHECK(registry.GetSessionEvaluationCount(rig) == evalsBefore);
     const size_t hits = registry.GetFrameCacheStats(rig).hits - hitsBefore;
-    CHECK(hits == frames.size() || hits + 1 == frames.size());
+    CHECK(hits == retained.size() || hits + 1 == retained.size());
     // Warmed-vs-live bit identity on three spread frames: capture warmed,
     // clear, re-evaluate live, compare exactly.
-    const std::vector<double> spots = {
-        frames[frames.size() / 4], frames[frames.size() / 2],
-        frames[3 * frames.size() / 4]};
     std::map<double, _GenerationGeometry> warmed;
+    size_t spotMisses = 0;
     for (const double frame : spots) {
+        const auto state = registry.GetFrameStates(rig, {frame});
+        CHECK(state.size() == 1);
+        if (state.size() == 1 && state[0] != RigExecWarmFrameState::Cached)
+            ++spotMisses;
         CHECK(registry.SetTime(UsdTimeCode(frame)));
         warmed[frame] = _CaptureGeometry(registry.GetStore()->Get());
         CHECK(!warmed[frame].points.empty());
     }
-    CHECK(registry.GetSessionEvaluationCount(rig) == evalsBefore);
+    // A foreground visit to an evicted completed frame must evaluate;
+    // a resident one still hits. The following three exact live comparisons
+    // retain the original independent numeric/sensitivity witness.
+    const size_t evalsAfterWarmSpots = registry.GetSessionEvaluationCount(rig);
+    CHECK(evalsAfterWarmSpots == evalsBefore + spotMisses);
     registry.ClearFrameCache(rig);
     for (const double frame : spots) {
         CHECK(registry.SetTime(UsdTimeCode(frame)));
         const _GenerationGeometry live =
             _CaptureGeometry(registry.GetStore()->Get());
+        // The native generation just evaluated above is held here; its
+        // publication maps are independently compared to the original
+        // default-worker result, even when that cache entry was evicted.
+        RigExecImagingBridge *bridge = registry.GetBridge(rig);
+        CHECK(bridge != nullptr);
+        uint64_t liveDigest = 0;
+        CHECK(backgroundDigests.count(frame) == 1);
+        if (bridge) {
+            auto &evaluator = const_cast<RigExecRigEvaluator &>(bridge->GetEvaluator());
+            CHECK(poseDigest(evaluator.Evaluate(UsdTimeCode(frame)),
+                &liveDigest));
+            CHECK(backgroundDigests[frame] == liveDigest);
+        }
         if (!_SameGeometry(warmed[frame], live)) {
             std::printf("warmed-vs-live differs at frame %g\n", frame);
             CHECK(false);
         }
     }
     CHECK(registry.GetSessionEvaluationCount(rig) ==
-          evalsBefore + spots.size());
+          evalsAfterWarmSpots + spots.size());
     registry.ClearFrameCache(rig);
     registry.Deactivate();
 }
@@ -3467,8 +3860,9 @@ TestProofScopingRetiresOnlyIntersecting()
         CHECK(bridge->GetFreshProofCount() == 2);
         RigExecFreshProof proof;
         CHECK(bridge->GetFreshProof(UsdTimeCode(1.0), &proof));
-        // The dependency set is recorded: non-empty, sorted, unique.
-        CHECK(!proof.paths.empty());
+        // The dependency set is recorded: the shared digest order or path
+        // text, the text sorted and unique.
+        CHECK(proof.order || !proof.paths.empty());
         CHECK(std::is_sorted(proof.paths.begin(), proof.paths.end()));
         CHECK(std::adjacent_find(proof.paths.begin(), proof.paths.end()) ==
               proof.paths.end());
@@ -3504,6 +3898,176 @@ TestProofScopingRetiresOnlyIntersecting()
         CHECK(bridge->GetFreshProof(UsdTimeCode(2.0), &retired));
         registry.Deactivate();
     }
+}
+
+// PROOFS BY ORDER. A proof holds its sampled vector's recorded digest order
+// instead of every sample path's text: memoized frames of one path sequence
+// share one order, and retiring by control id retires exactly the proofs
+// the text-set rule retires -- a canonical path id by path, anything else
+// (override ids, non-paths, other spellings of a path) by text only.
+void
+TestProofsShareTheDigestOrder()
+{
+    std::printf("progress: TestProofsShareTheDigestOrder\n");
+    std::fflush(stdout);
+    SetEnv("RIGEXEC_FRAME_CACHE", "on");
+    SetEnv("RIGEXEC_FRAME_CACHE_VERIFY", "0");
+    if (RigExecFrameCacheModeFromEnvironment() ==
+        RigExecFrameCacheMode::Off) {
+        return;
+    }
+    const UsdStageRefPtr stage = MakeTinyRig();
+    RigExecImagingBridge bridge(stage, SdfPath("/Asset/Rig"));
+    CHECK(bridge.Compile());
+    const std::vector<RigExecValueOverride> none;
+
+    // Warming proofs recorded beside the memoized frames: an ordered vector
+    // with a repeated, an empty and a variant-selection path; an ordered
+    // vector under a standing override; and a vector with no order, which
+    // keeps the path text.
+    const SdfPath variant = SdfPath("/V")
+                                .AppendVariantSelection("v", "a")
+                                .AppendProperty(TfToken("x"));
+    RigExecFrameInputs repeated;
+    repeated.Add(SdfPath("/P/A.x"), VtValue(1.0));
+    repeated.Add(SdfPath("/P/B.y"), VtValue(2.0));
+    repeated.Add(SdfPath("/P/A.x"), VtValue(3.0));
+    repeated.Add(SdfPath(), VtValue(4.0));
+    repeated.Add(variant, VtValue(5.0));
+    repeated.digestOrder = RigExecRecordFrameDigestOrder(repeated.values);
+    RigExecFrameInputs overridden;
+    overridden.Add(SdfPath("/P/A.x"), VtValue(6.0));
+    overridden.Add(SdfPath("/R.w"), VtValue(7.0));
+    overridden.digestOrder = RigExecRecordFrameDigestOrder(overridden.values);
+    RigExecFrameInputs unordered;
+    unordered.Add(SdfPath("/P/B.y"), VtValue(8.0));
+    unordered.Add(SdfPath("/Q.z"), VtValue(9.0));
+    const std::vector<RigExecValueOverride> standing{RigExecValueOverride{
+        SdfPath("/Asset/Rig/AlongX"), TfToken(), TfToken("avars:tx"),
+        VtValue(3.0)}};
+    const std::vector<double> memoized{1.0, 2.0, 3.0};
+    const std::vector<double> warmed{11.0, 12.0, 13.0};
+
+    // Drops every proof, then records the memoized and the warming ones.
+    const auto record = [&]() {
+        bridge.ClearFrameCache();
+        for (double time : memoized) {
+            const auto result =
+                bridge.EvaluateAndPublishResult(UsdTimeCode(time));
+            CHECK(result.ok && !result.cacheHit);
+        }
+        bridge.NoteWarmingEnqueued(UsdTimeCode(11.0), 11, 11, repeated);
+        bridge.NoteWarmingEnqueued(UsdTimeCode(13.0), 13, 13, unordered);
+        bridge.SetInteractiveOverrides(standing);
+        bridge.NoteWarmingEnqueued(UsdTimeCode(12.0), 12, 12, overridden);
+        bridge.ClearInteractiveOverrides();
+        CHECK(bridge.GetFreshProofCount() ==
+              memoized.size() + warmed.size());
+    };
+
+    // Today's rule per proof, from the vector and overrides it was recorded
+    // from: every non-empty sample path's text plus the override ids. The
+    // memoized vectors are re-sampled here and pinned to their proofs by
+    // the unfolded digest.
+    std::map<double, std::set<std::string>> reference;
+    const auto addReference =
+        [&reference](double time, const RigExecFrameInputs &inputs,
+                     const std::vector<RigExecValueOverride> &overrides) {
+            std::set<std::string> &ids = reference[time];
+            for (const RigExecSampledInput &sample : inputs.values) {
+                if (!sample.path.IsEmpty()) {
+                    ids.insert(sample.path.GetString());
+                }
+            }
+            for (const RigExecValueOverride &o : overrides) {
+                ids.insert(RigExecControlIdForOverride(o));
+            }
+        };
+    record();
+    std::map<double, RigExecFreshProof> proofs;
+    for (double time : memoized) {
+        CHECK(bridge.GetFreshProof(UsdTimeCode(time), &proofs[time]));
+        RigExecFrameInputs sampled;
+        CHECK(RigExecSampleFrameInputs(bridge.GetEvaluator(),
+                                       UsdTimeCode(time), none, &sampled));
+        CHECK(!sampled.values.empty());
+        CHECK(RigExecControlStateDigest(sampled, none) ==
+              proofs[time].unfolded);
+        addReference(time, sampled, none);
+    }
+    // The varying edit test's control: every memoized proof names it.
+    CHECK(reference[1.0].count("/Asset/Rig/AlongX.avars:tx") == 1);
+    addReference(11.0, repeated, none);
+    addReference(12.0, overridden, standing);
+    addReference(13.0, unordered, none);
+    for (double time : warmed) {
+        CHECK(bridge.GetFreshProof(UsdTimeCode(time), &proofs[time]));
+    }
+
+    // One order for every memoized frame, and no sample text beside it.
+    CHECK(proofs[1.0].order != nullptr);
+    CHECK(proofs[1.0].order == proofs[2.0].order);
+    CHECK(proofs[2.0].order == proofs[3.0].order);
+    for (double time : memoized) {
+        CHECK(proofs[time].sampledInputs);
+        CHECK(proofs[time].paths.empty());
+    }
+    CHECK(proofs[11.0].order == repeated.digestOrder);
+    CHECK(proofs[11.0].paths.empty());
+    CHECK(proofs[12.0].order == overridden.digestOrder);
+    CHECK(proofs[12.0].paths ==
+          std::vector<std::string>{RigExecControlIdForOverride(standing[0])});
+    CHECK(proofs[13.0].order == nullptr);
+    CHECK(proofs[13.0].paths ==
+          std::vector<std::string>(reference[13.0].begin(),
+                                   reference[13.0].end()));
+
+    // Every id any proof names, plus ids that name none: other spellings of
+    // a named path (the second is a valid, non-canonical one), a relative
+    // path, a prim path, a non-path and the empty id.
+    std::set<std::string> candidates;
+    for (const auto &entry : reference) {
+        candidates.insert(entry.second.begin(), entry.second.end());
+    }
+    candidates.insert({"/P/../P/A.x", "/V{ v = a }.x", "P/A.x", "/P",
+                       "not a path", ""});
+    std::vector<double> times = memoized;
+    times.insert(times.end(), warmed.begin(), warmed.end());
+    const auto retireAndCompare =
+        [&](const std::vector<std::string> &controls) {
+            record();
+            std::set<double> expected;
+            for (const auto &[time, ids] : reference) {
+                for (const std::string &id : controls) {
+                    if (ids.count(id)) {
+                        expected.insert(time);
+                    }
+                }
+            }
+            const size_t retired = bridge.RetireProofsForControls(controls);
+            if (retired != expected.size()) {
+                std::printf("retiring <%s>: %zu proofs, expected %zu\n",
+                            controls.front().c_str(), retired,
+                            expected.size());
+                CHECK(false);
+            }
+            for (double time : times) {
+                RigExecFreshProof held;
+                if (bridge.GetFreshProof(UsdTimeCode(time), &held) ==
+                    (expected.count(time) != 0)) {
+                    std::printf("retiring <%s>: proof %g wrongly %s\n",
+                                controls.front().c_str(), time,
+                                expected.count(time) ? "kept" : "retired");
+                    CHECK(false);
+                }
+            }
+        };
+    for (const std::string &id : candidates) {
+        retireAndCompare({id});
+    }
+    // A sampled path, an override id and a non-path in one call.
+    retireAndCompare({"/Q.z", RigExecControlIdForOverride(standing[0]),
+                      "not a path"});
 }
 
 // ROUTED THROUGH A CONNECTION. A property-chain mover's input connected to a
@@ -3661,7 +4225,7 @@ TestWrinkleParameterEditsRetireAndRewarm()
         {"inputs:smoothingIterations", VtValue(0), VtValue(2)},
         {"inputs:enabled", VtValue(true), VtValue(false), true, true},
         {"inputs:defaultWeight", VtValue(1.0f), VtValue(0.0f), true, true}};
-    for (bool baked : {true, false}) {
+    { // All authored parameter cases use the same compiled graph.
         for (const Parameter &parameter : parameters) {
             for (int authored = 0; authored != 5; ++authored) {
                 const bool late = authored >= 3;
@@ -3672,7 +4236,7 @@ TestWrinkleParameterEditsRetireAndRewarm()
                     continue;
                 }
                 std::printf("  %s, %s, %s\n", parameter.name,
-                            baked ? "baked" : "dynamic",
+                            "graph",
                             authored == 0 ? "schema fallback" :
                             authored == 1 ? "default" :
                             authored == 2 ? "time samples" :
@@ -3683,7 +4247,6 @@ TestWrinkleParameterEditsRetireAndRewarm()
                 stage->SetEndTimeCode(3.0);
                 stage->DefinePrim(SdfPath("/Asset"), TfToken("Scope"));
                 const UsdPrim root = stage->DefinePrim(rig, TfToken("RigExecRoot"));
-                CHECK(root.GetAttribute(TfToken("rigExec:baked")).Set(baked));
                 const UsdPrim mesh = stage->DefinePrim(meshPath, TfToken("Mesh"));
                 CHECK(mesh.GetAttribute(TfToken("faceVertexCounts")).Set(counts));
                 CHECK(mesh.GetAttribute(TfToken("faceVertexIndices")).Set(indices));
@@ -4112,6 +4675,295 @@ TestOverlayMidWarmingServesNoStalePose()
     registry.Deactivate();
 }
 
+// MakeTinyRig over frames 1-3 with every control static (AlongX's tx held
+// at a default too): no sample in `values` moves between frames.
+UsdStageRefPtr
+MakeStaticTinyRig()
+{
+    UsdStageRefPtr stage = MakeTinyRig(/*staticY=*/true);
+    stage->SetStartTimeCode(1.0);
+    stage->SetEndTimeCode(3.0);
+    UsdAttribute tx =
+        stage->GetAttributeAtPath(SdfPath("/Asset/Rig/AlongX.avars:tx"));
+    tx.Clear();
+    tx.Set(10.0);
+    return stage;
+}
+
+// Every point's weights on AlongX and AlongY.
+VtFloatArray
+TinyWeights(float alongX, float alongY)
+{
+    VtFloatArray out(kTinyPointCount * 2);
+    for (size_t i = 0; i < kTinyPointCount; ++i) {
+        out[i * 2] = alongX;
+        out[i * 2 + 1] = alongY;
+    }
+    return out;
+}
+
+// rigExec:jointWeights time samples at 1, 2 and 3 that put the points of
+// each frame somewhere else.
+void
+AuthorWeightSamples(const UsdStageRefPtr &stage)
+{
+    const UsdAttribute layout = stage->GetAttributeAtPath(
+        SdfPath("/Asset/Rig/Movers/Skin_0.rigExec:jointWeights"));
+    layout.Set(TinyWeights(1.0f, 0.0f), UsdTimeCode(1.0));
+    layout.Set(TinyWeights(0.0f, 1.0f), UsdTimeCode(2.0));
+    layout.Set(TinyWeights(0.5f, 0.5f), UsdTimeCode(3.0));
+}
+
+// MakeStaticTinyRig with rigExec:jointWeights time-sampled (and a default,
+// at which compile validates the layout): the layout is not epoch state,
+// and the weights are all that moves.
+UsdStageRefPtr
+MakeAnimatedWeightsRig()
+{
+    UsdStageRefPtr stage = MakeStaticTinyRig();
+    stage->GetAttributeAtPath(
+             SdfPath("/Asset/Rig/Movers/Skin_0.rigExec:jointWeights"))
+        .Set(TinyWeights(1.0f, 0.0f));
+    AuthorWeightSamples(stage);
+    return stage;
+}
+
+// D1 for a time-varying skin layout. With every control static, no sample
+// in `values` moves between frames; the weights do, so the control digest
+// must fold them or every frame shares one key and a revisit serves the
+// points the last frame published under it. Visiting 1, 2, 1, 3, 2, each
+// visit equals the cache-off session's, and the two revisits hit. The
+// plain and burst digests key the three frames apart and agree.
+void
+TestTimeSampledSkinWeightsKeyFramesApart()
+{
+    std::printf("progress: TestTimeSampledSkinWeightsKeyFramesApart\n");
+    std::fflush(stdout);
+    const SdfPath rig("/Asset/Rig");
+    const std::vector<double> visits = {1.0, 2.0, 1.0, 3.0, 2.0};
+    const auto drive = [&](std::vector<_GenerationGeometry> *out,
+                           size_t *pulls, RigExecFrameCacheStats *stats) {
+        UsdStageRefPtr stage = MakeAnimatedWeightsRig();
+        RigExecImagingRegistry &registry =
+            RigExecImagingRegistry::GetInstance();
+        std::vector<std::string> errors;
+        CHECK(registry.Activate(stage, rig, UsdTimeCode(visits[0]), &errors));
+        out->push_back(_CaptureGeometry(registry.GetStore()->Get()));
+        for (size_t i = 1; i < visits.size(); ++i) {
+            CHECK(registry.SetTime(UsdTimeCode(visits[i])));
+            out->push_back(_CaptureGeometry(registry.GetStore()->Get()));
+        }
+        *pulls = registry.GetSessionEvaluationCount(rig);
+        *stats = registry.GetFrameCacheStats(rig);
+        registry.Deactivate();
+    };
+
+    SetEnv("RIGEXEC_FRAME_CACHE", "off");
+    std::vector<_GenerationGeometry> reference;
+    size_t pulls = 0;
+    RigExecFrameCacheStats stats;
+    drive(&reference, &pulls, &stats);
+    CHECK(reference.size() == visits.size());
+    if (reference.size() != visits.size()) {
+        return;
+    }
+    // The weights move the points: frames 1, 2 and 3 all differ.
+    CHECK(!reference[0].points.empty());
+    CHECK(!_SameGeometry(reference[0], reference[1]));
+    CHECK(!_SameGeometry(reference[0], reference[3]));
+    CHECK(!_SameGeometry(reference[1], reference[3]));
+
+    SetEnv("RIGEXEC_FRAME_CACHE", "on");
+    SetEnv("RIGEXEC_FRAME_CACHE_VERIFY", "0");
+    std::vector<_GenerationGeometry> cached;
+    drive(&cached, &pulls, &stats);
+    CHECK(cached.size() == visits.size());
+    for (size_t i = 0; i < visits.size() && i < cached.size(); ++i) {
+        if (!_SameGeometry(reference[i], cached[i])) {
+            std::printf("visit %zu: cache-on served another frame's points "
+                        "at %g\n", i, visits[i]);
+            CHECK(false);
+        }
+    }
+    if (RigExecFrameCacheModeFromEnvironment() !=
+            RigExecFrameCacheMode::Off &&
+        !RigExecFrameCacheVerifyRequested()) {
+        // Three distinct frames evaluate; both revisits are served.
+        CHECK(pulls == 3);
+        CHECK(stats.hits == 2);
+    }
+
+    // The keys themselves, on the plain and the burst routes.
+    UsdStageRefPtr stage = MakeAnimatedWeightsRig();
+    RigExecRigEvaluator evaluator(stage, rig);
+    std::vector<std::string> errors;
+    CHECK(evaluator.Compile(&errors));
+    CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
+    CHECK(evaluator.GetBakedProgram() != nullptr);
+    if (!evaluator.GetBakedProgram()) {
+        return;
+    }
+    const std::vector<RigExecValueOverride> none;
+    RigExecChainSampleBindings pinned;
+    std::string error;
+    CHECK(RigExecBindChainSampleInputs(evaluator, &pinned, &error));
+    RigExecBurstSampleCache burst;
+    CHECK(RigExecBuildBurstSampleCache(
+        *evaluator.GetBakedProgram(), pinned, none,
+        RigExecFrameCacheEpochDigest(evaluator), &burst, &error));
+    std::vector<uint64_t> digests;
+    for (double frame : {1.0, 2.0, 3.0}) {
+        RigExecFrameInputs plain, burstInputs;
+        CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(frame), none,
+                                       &plain, &error));
+        CHECK(RigExecSampleFrameInputsWithBurstCache(
+            evaluator, UsdTimeCode(frame), none, &burst, &burstInputs,
+            &error));
+        CHECK(RigExecControlStateDigestible(plain, none));
+        const uint64_t digest = RigExecControlStateDigest(plain, none);
+        CHECK(RigExecControlStateDigestWithBurstCache(burstInputs, none,
+                                                      &burst) == digest);
+        digests.push_back(digest);
+        // The one skin's row is listed and is key material.
+        CHECK(plain.varyingLayoutRows == std::vector<uint32_t>{0});
+        CHECK(plain.varyingRevisionLeaves.empty());
+        CHECK(burstInputs.varyingLayoutRows == plain.varyingLayoutRows);
+    }
+    CHECK(digests.size() == 3 && digests[0] != digests[1] &&
+          digests[0] != digests[2] && digests[1] != digests[2]);
+
+    // A fixed layout lists nothing and keys exactly as before: its row is
+    // not key material (it reads one value at every time).
+    const auto perturbedLayoutDigest = [&](RigExecFrameInputs inputs) {
+        for (std::vector<VtValue> &row : inputs.layoutLeaves) {
+            for (VtValue &value : row) {
+                if (value.IsHolding<VtFloatArray>()) {
+                    VtFloatArray weights = value.UncheckedGet<VtFloatArray>();
+                    if (!weights.empty()) {
+                        weights[0] += 0.25f;
+                    }
+                    value = VtValue(weights);
+                }
+            }
+        }
+        return RigExecControlStateDigest(inputs, none);
+    };
+    RigExecFrameInputs animatedInputs;
+    CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(2.0), none,
+                                   &animatedInputs, &error));
+    CHECK(perturbedLayoutDigest(animatedInputs) !=
+          RigExecControlStateDigest(animatedInputs, none));
+    UsdStageRefPtr fixedStage = MakeTinyRig(/*staticY=*/true);
+    RigExecRigEvaluator fixed(fixedStage, rig);
+    CHECK(fixed.Compile(&errors));
+    CHECK(fixed.Evaluate(UsdTimeCode(1.0)).valid);
+    RigExecFrameInputs fixedInputs;
+    CHECK(RigExecSampleFrameInputs(fixed, UsdTimeCode(2.0), none,
+                                   &fixedInputs, &error));
+    CHECK(fixedInputs.layoutLeaves.size() == 1 &&
+          !fixedInputs.layoutLeaves[0].empty());
+    CHECK(fixedInputs.varyingLayoutRows.empty());
+    CHECK(fixedInputs.varyingRevisionLeaves.empty());
+    CHECK(perturbedLayoutDigest(fixedInputs) ==
+          RigExecControlStateDigest(fixedInputs, none));
+
+    // A notice the program cannot route (prim metadata on the skin) moves
+    // the program stamp; fixedness, asked again before the next run, still
+    // holds, so the row stays unlisted and the key stands.
+    fixedStage->GetPrimAtPath(SdfPath("/Asset/Rig/Movers/Skin_0"))
+        .SetDocumentation("weights painted once");
+    CHECK(fixed.GetLastNoticeDisposition() ==
+          RigExecNoticeDisposition::StampBumped);
+    RigExecFrameInputs bumpedInputs;
+    CHECK(RigExecSampleFrameInputs(fixed, UsdTimeCode(2.0), none,
+                                   &bumpedInputs, &error));
+    CHECK(bumpedInputs.varyingLayoutRows.empty());
+    CHECK(RigExecControlStateDigest(bumpedInputs, none) ==
+          RigExecControlStateDigest(fixedInputs, none));
+}
+
+// D1 across an in-session edit that makes a fixed layout time-varying.
+// Under static controls frames 1-3 share one key, and the program asks
+// layout fixedness again only on its next run: every lookup or warm job
+// sampled before that run must already key the layout as varying, or the
+// notice path's playhead re-evaluation hits the pre-edit entry and so does
+// every later visit. Routed (the samples alone: Edited, which marks the
+// layout's reads) and stamp-bumped (the same samples and prim metadata in
+// one change block: StampBumped, which marks nothing), every capture after
+// the edit equals the cache-off session's.
+void
+TestInSessionWeightSamplesKeyFramesApart()
+{
+    std::printf("progress: TestInSessionWeightSamplesKeyFramesApart\n");
+    std::fflush(stdout);
+    const SdfPath rig("/Asset/Rig");
+    const std::vector<double> visits = {1.0, 2.0, 3.0, 1.0, 2.0};
+    for (const bool bumped : {false, true}) {
+        const auto drive = [&](std::vector<_GenerationGeometry> *out) {
+            UsdStageRefPtr stage = MakeStaticTinyRig();
+            RigExecImagingRegistry &registry =
+                RigExecImagingRegistry::GetInstance();
+            std::vector<std::string> errors;
+            CHECK(registry.Activate(stage, rig, UsdTimeCode(1.0), &errors));
+            CHECK(registry.SetTime(UsdTimeCode(2.0)));
+            CHECK(registry.SetTime(UsdTimeCode(3.0)));
+            {
+                SdfChangeBlock changes;
+                AuthorWeightSamples(stage);
+                if (bumped) {
+                    stage->GetPrimAtPath(SdfPath("/Asset/Rig/Movers/Skin_0"))
+                        .SetDocumentation("weights painted per frame");
+                }
+            }
+            RigExecImagingBridge *bridge = registry.GetBridge(rig);
+            CHECK(bridge != nullptr);
+            if (bridge) {
+                CHECK(bridge->GetEvaluator().GetLastNoticeDisposition() ==
+                      (bumped ? RigExecNoticeDisposition::StampBumped
+                              : RigExecNoticeDisposition::Edited));
+            }
+            // The playhead the notice path re-evaluated, then each visit.
+            out->push_back(_CaptureGeometry(registry.GetStore()->Get()));
+            for (double time : visits) {
+                CHECK(registry.SetTime(UsdTimeCode(time)));
+                out->push_back(_CaptureGeometry(registry.GetStore()->Get()));
+            }
+            registry.Deactivate();
+        };
+
+        SetEnv("RIGEXEC_FRAME_CACHE", "off");
+        std::vector<_GenerationGeometry> reference;
+        drive(&reference);
+        CHECK(reference.size() == visits.size() + 1);
+        if (reference.size() != visits.size() + 1) {
+            return;
+        }
+        // The samples move the points: the playhead (3), 1 and 2 differ.
+        CHECK(!reference[0].points.empty());
+        CHECK(!_SameGeometry(reference[0], reference[1]));
+        CHECK(!_SameGeometry(reference[0], reference[2]));
+        CHECK(!_SameGeometry(reference[1], reference[2]));
+
+        SetEnv("RIGEXEC_FRAME_CACHE", "on");
+        SetEnv("RIGEXEC_FRAME_CACHE_VERIFY", "0");
+        std::vector<_GenerationGeometry> cached;
+        drive(&cached);
+        CHECK(cached.size() == reference.size());
+        size_t stale = 0;
+        for (size_t i = 0; i < reference.size() && i < cached.size(); ++i) {
+            if (!_SameGeometry(reference[i], cached[i])) {
+                ++stale;
+            }
+        }
+        if (stale != 0) {
+            std::printf("%s edit: %zu of %zu captures served another "
+                        "frame's points\n", bumped ? "stamp-bumped" : "routed",
+                        stale, reference.size());
+            CHECK(false);
+        }
+    }
+}
+
 }  // namespace
 
 
@@ -4121,9 +4973,9 @@ TestOverlayMidWarmingServesNoStalePose()
 // contract that replaces the check: a chain mover's constant edited
 // mid-epoch -- which moves no epoch digest -- rebinds them; an edit to a
 // control that no chain reads does not; and the trusted sample always
-// digests exactly as the self-binding sampler's. The negative control proves
-// the rebind is load-bearing: bindings taken BEFORE the edit digest
-// differently once it has landed.
+// digests exactly as the self-binding sampler's. Since the frozen worker runs
+// the chains itself, the bindings carry no value into a sample: bindings
+// taken BEFORE the edit digest the same once it has landed.
 struct _ChainNoticeForward : public TfWeakBase {
     RigExecImagingBridge *bridge = nullptr;
     void OnChanged(const UsdNotice::ObjectsChanged &notice,
@@ -4200,8 +5052,10 @@ TestLiveChainBindingsFollowNotices()
     bound = bridge.AcquireChainBindings(&now);
     CHECK(bound != nullptr && now != first);
     CHECK(bound && digestsAgree(*bound));
-    // ...and the pre-edit bindings would have served a stale constant.
-    CHECK(!digestsAgree(before));
+    // The pre-edit bindings sample the same vector: they are the epoch's
+    // currency check only, and the sampled values (head leaves included)
+    // are read off the stage at the job's time, never through them.
+    CHECK(digestsAgree(before));
 
     TfNotice::Revoke(key);
 }
@@ -4210,53 +5064,20 @@ int
 main(int argc, char **argv)
 {
     const std::string examplesDir = argc > 1 ? argv[1] : "";
-    // Baked unless the outer environment chose a mode: the bridge's
-    // evaluators inherit the session mode, and only a baked program can be
-    // sampled for cache keys. Read once per process by the evaluator, so
-    // this must precede the first construction.
-#ifdef _WIN32
-    char *outerMode = nullptr;
-    size_t outerModeSize = 0;
-    const bool outerChoseMode =
-        _dupenv_s(&outerMode, &outerModeSize, "RIGEXEC_EVALUATION_MODE") == 0 &&
-        outerMode && *outerMode;
-    free(outerMode);
-#else
-    const char *outerMode = getenv("RIGEXEC_EVALUATION_MODE");
-    const bool outerChoseMode = outerMode && *outerMode;
-#endif
-    const bool defaultMode = argc > 2 && std::string(argv[2]) == "--default-mode";
-    if (!outerChoseMode && !defaultMode) {
-        SetEnv("RIGEXEC_EVALUATION_MODE", "baked");
-    }
-    if (defaultMode) {
-        UsdStageRefPtr stage = MakeTinyRig();
-        const SdfPath rig("/Asset/Rig");
-        RigExecImagingBridge bridge(stage, rig);
-        CHECK(bridge.Compile());
+    // A legacy custom attribute cannot choose a different evaluator.
+    {
+        auto stage=MakeTinyRig(); const SdfPath rig("/Asset/Rig");
+        RigExecImagingBridge bridge(stage,rig); CHECK(bridge.Compile());
         CHECK(bridge.EvaluateAndPublishResult(UsdTimeCode(1)).ok);
-        CHECK(bridge.GetEvaluator().GetBakedProgram() != nullptr);
-        CHECK(bridge.GetEvaluator().GetEvaluationModeSource() ==
-              RigExecEvaluationModeSource::Default);
-        RigExecRigEvaluator explicitMode(stage, rig, true);
-        CHECK(explicitMode.Compile());
-        CHECK(explicitMode.Evaluate(UsdTimeCode(1)).valid);
-        CHECK(explicitMode.GetBakedProgram() != nullptr);
-        explicitMode.SetEvaluationMode(RigExecEvaluationMode::Dynamic);
-        CHECK(explicitMode.Evaluate(UsdTimeCode(2)).valid);
-        CHECK(explicitMode.GetBakedProgram() == nullptr);
-        const UsdAttribute baked = stage->GetPrimAtPath(rig).GetAttribute(
-            TfToken("rigExec:baked"));
-        baked.Set(false);
+        CHECK(bridge.GetEvaluator().GetBakedProgram()!=nullptr);
+        const auto legacy=stage->GetPrimAtPath(rig).CreateAttribute(
+            TfToken("rigExec:baked"),SdfValueTypeNames->Bool,true);
+        CHECK(legacy.Set(false));
         CHECK(bridge.EvaluateAndPublishResult(UsdTimeCode(2)).ok);
-        CHECK(bridge.GetEvaluator().GetBakedProgram() == nullptr);
-        RigExecImagingBridge optedOut(stage, rig);
-        CHECK(optedOut.Compile());
-        CHECK(optedOut.EvaluateAndPublishResult(UsdTimeCode(1)).ok);
-        CHECK(optedOut.GetEvaluator().GetBakedProgram() == nullptr);
-        baked.Clear();
+        CHECK(bridge.GetEvaluator().GetBakedProgram()!=nullptr);
+        CHECK(legacy.Set(true));
         CHECK(bridge.EvaluateAndPublishResult(UsdTimeCode(3)).ok);
-        CHECK(bridge.GetEvaluator().GetBakedProgram() != nullptr);
+        CHECK(bridge.GetEvaluator().GetBakedProgram()!=nullptr);
     }
     const auto scratch =
         std::filesystem::temp_directory_path() /
@@ -4269,6 +5090,8 @@ main(int argc, char **argv)
     TestScrubWarmsThenHits();
     TestCacheOffMatchesCacheOn();
     TestStaticControlEditInvalidatesCachedFrames();
+    TestARestEditIsNotServedStale();
+    TestAnAnimatedRestRigServesWarmedHits();
     TestCaptureIndexHitDropsEpochEagerly();
     TestOverlayChangeClearsCache();
     TestPlaybackBypassesCache(scratch);
@@ -4284,17 +5107,19 @@ main(int argc, char **argv)
     TestFrameStatesEvictionRetires();
     TestSamplingBudgetShapesTriggers();
     TestWarmRangeCursorSkipsVisited();
-    TestRefusalRigNeverCountsVisited();
+    TestConnectedSpaceRigWarmsRange();
+    TestAffineProvidersAndExternalMoversWarmFrozen();
     TestWarmFrameStreaks();
+    TestWarmRangeProgress();
     TestCommitDuringPreviewExcludesPlayhead();
     TestCommitOfPreviewedPoseSkipsEvaluation();
     TestFirstSessionCommitOfPreviewedPose();
-    TestCommitOfAChainTargetEvaluates();
+    TestCommitOfAChainTargetSettles();
     TestProductionTriggerPathEnqueuesAndFences();
     TestWarmedCompletionServesWithoutEvaluating();
-    TestRefusalRigMemoizesUiThreadResults();
-    TestUnfreezableBakedRigMemoizesCompletePoses();
-    TestIdleFallbackWarmsCompletePoses();
+    TestConnectedSpaceRigMemoizesResults();
+    TestPropertyChainRigMemoizesCompletePoses();
+    TestSupportedSourcesWarmCompletePoses();
     TestInteractiveDragBypassesCache();
     TestProfilerFrameCacheLane();
     TestCachedServeSkipsLookupSample();
@@ -4311,7 +5136,10 @@ main(int argc, char **argv)
     TestClearWhileWarmingKeepsCacheEmpty();
     TestFencedClearSerializesAfterPausedInsert();
     TestOverlayMidWarmingServesNoStalePose();
+    TestTimeSampledSkinWeightsKeyFramesApart();
+    TestInSessionWeightSamplesKeyFramesApart();
     TestLiveChainBindingsFollowNotices();
+    TestProofsShareTheDigestOrder();
     if (failures == 0) {
         std::printf("testRigExecImagingFrameCache: all tests passed\n");
     } else {

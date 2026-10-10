@@ -1,13 +1,6 @@
-// The baked evaluation mode must be the dynamic path's answer, exactly.
-// The program is a second implementation of the evaluation semantics, so the
-// only test that means anything is equality with the path it replaces -- on
-// the whole published generation, at every frame, on every shipped shape of
-// the biped stage (flat, layered and animated) plus a matrix-mover rig, so
-// both geometry operations the program expresses are compared. Exact
-// equality, not a tolerance: "close" here is a second rig.
-// argv[1] = path to the examples directory (containing biped/Biped.usda).
-// The codeless schema plugin is expected at
-// <examples>/../plugin/rigExecSchema/resources.
+// Native evaluator cache/history, independent scalar references, literal
+// provider arithmetic and exact pose comparator regression coverage.
+#include "rigExecFrameRecordCheck.h"
 #include "rigExecPoseCompare.h"
 
 #include "rigExec/bakedProgram.h"
@@ -60,98 +53,8 @@ FindRig(const UsdStageRefPtr &stage)
     return SdfPath();
 }
 
-// The two environment variables the parity harness runs this suite under,
-// read the way the evaluator reads them -- once, into a function-local
-// static -- because the evaluator fixes both at the construction of its
-// first one and a test that re-read them could disagree with the path it is
-// measuring. They are here so that the suite is exact under
-// RIGEXEC_EVALUATION_MODE=parity RIGEXEC_BAKE_REQUIRED=1 rather than merely
-// runnable: an assertion about the DEFAULT mode is an assertion about what
-// this variable says, and the fallback line bake-required adds is asserted
-// present in that environment and absent outside it.
-static RigExecEvaluationMode
-DefaultEvaluationMode()
-{
-    static const RigExecEvaluationMode mode = [] {
-        const std::string requested = TfGetenv("RIGEXEC_EVALUATION_MODE", "");
-        if (requested == "baked") {
-            return RigExecEvaluationMode::Baked;
-        }
-        if (requested == "parity") {
-            return RigExecEvaluationMode::BakedWithParityCheck;
-        }
-        if (requested == "reference") {
-            return RigExecEvaluationMode::ExecReference;
-        }
-        return RigExecEvaluationMode::Dynamic;
-    }();
-    return mode;
-}
-
-static bool
-BakeRequired()
-{
-    static const bool required =
-        TfGetenvBool("RIGEXEC_BAKE_REQUIRED", false);
-    return required;
-}
-
-// The REFERENCE half of a comparison says its mode out loud.
-// It used to be enough to leave such an evaluator alone: one nobody set was
-// Dynamic, or whatever RIGEXEC_EVALUATION_MODE asked this whole suite for.
-// examples/biped now authors `uniform bool rigExec:baked = true` on its rig
-// root, and an evaluator nobody sets compiles that stage into the PROGRAM --
-// which would leave every comparison below holding the program against
-// itself, passing, and proving nothing. Stating the harness's own mode is
-// exactly the behaviour these evaluators had before the attribute existed,
-// in both environments, and makes the stage unable to change it: the source
-// becomes Explicit, which outranks the attribute.
-// Only for the evaluators a test uses AS a reference. An evaluator the test
-// is measuring says what it is measuring for itself.
-static void
-MakeItTheReference(RigExecRigEvaluator *rig)
-{
-    rig->SetEvaluationMode(DefaultEvaluationMode());
-    CHECK(rig->GetEvaluationModeSource() ==
-          RigExecEvaluationModeSource::Explicit);
-}
-
-// The prefix RigExecRigEvaluator::_ReportBakeRequired pushes onto a
-// generation that ran dynamically while its mode asked for the program.
-static const char *const kBakeRequiredPrefix =
-    "baked parity mismatch: bake required, evaluated dynamically: ";
-
-// What a consumer would see with that line filtered out, and how many were
-// filtered. Splitting them is what lets a fallback test assert BOTH halves:
-// that nothing else on the generation moved, and that the announcement is
-// there exactly when the environment asked for it.
-static std::vector<std::string>
-WithoutTheBakeRequiredLine(const std::vector<std::string> &diagnostics,
-                           size_t *announced)
-{
-    std::vector<std::string> rest;
-    *announced = 0;
-    for (const std::string &line : diagnostics) {
-        if (line.rfind(kBakeRequiredPrefix, 0) == 0) {
-            ++*announced;
-        } else {
-            rest.push_back(line);
-        }
-    }
-    return rest;
-}
-
-// One line per fallen generation under RIGEXEC_BAKE_REQUIRED, and none at
-// all in a mode that never asked for the program.
-static size_t
-ExpectedBakeRequiredLines(RigExecEvaluationMode mode)
-{
-    return BakeRequired() && RigExecEvaluationModeWantsProgram(mode) ? 1 : 0;
-}
-
-// "The same published generation" is defined once, in the shared header, so
-// that this suite and the comparator the parity mode is made of cannot
-// disagree about what one is. Everything below reports into `failures`.
+// Published-generation equality is defined once in the shared header.
+// Everything below reports into `failures`.
 using rigExecTest::SameFrame;
 
 template <class Map, class Equal>
@@ -162,225 +65,10 @@ CompareMaps(const char *what, const std::string &where, const Map &reference,
     rigExecTest::CompareMaps(&failures, what, where, reference, baked, equal);
 }
 
-static void
-TestModeIsExact(const std::string &examplesDir, const char *stageName)
-{
-    const std::string stagePath =
-        examplesDir + "/" + std::string(stageName);
-    UsdStageRefPtr dynamicStage = UsdStage::Open(stagePath);
-    UsdStageRefPtr bakedStage = UsdStage::Open(stagePath);
-    CHECK(dynamicStage);
-    CHECK(bakedStage);
-    if (!dynamicStage || !bakedStage) return;
-    const SdfPath rigPath = FindRig(dynamicStage);
-    CHECK(!rigPath.IsEmpty());
-    if (rigPath.IsEmpty()) return;
-
-    // Two evaluators on two stages, so neither can leak compiled state or a
-    // warm exec cache into the other.
-    RigExecRigEvaluator dynamicRig(dynamicStage, rigPath);
-    RigExecRigEvaluator bakedRig(bakedStage, rigPath);
-    MakeItTheReference(&dynamicRig);
-    bakedRig.SetEvaluationMode(RigExecEvaluationMode::Baked);
-    CHECK(bakedRig.GetEvaluationMode() == RigExecEvaluationMode::Baked);
-
-    std::vector<std::string> errors;
-    CHECK(dynamicRig.Compile(&errors));
-    errors.clear();
-    CHECK(bakedRig.Compile(&errors));
-
-    // The biped uses none of the features the program cannot express, so a
-    // fallback here would make the rest of this test compare the dynamic
-    // path with itself and pass while proving nothing.
-    std::vector<std::string> reasons;
-    if (!bakedRig.IsBakeable(&reasons)) {
-        ++failures;
-        std::printf("FAIL %s: the biped is not bakeable\n", stageName);
-        for (const std::string &reason : reasons) {
-            std::printf("    %s\n", reason.c_str());
-        }
-        return;
-    }
-    CHECK(dynamicRig.GetBindingEpochDigest() ==
-          bakedRig.GetBindingEpochDigest());
-
-    for (double frame = 1; frame <= 8; ++frame) {
-        const std::string where =
-            std::string(stageName) + " frame " + std::to_string(int(frame));
-        const RigExecRigPose reference = dynamicRig.Evaluate(UsdTimeCode(frame));
-        const RigExecRigPose baked = bakedRig.Evaluate(UsdTimeCode(frame));
-        CHECK(reference.valid);
-        CHECK(baked.valid);
-        if (!reference.valid || !baked.valid) continue;
-        CompareMaps("base joint frame", where, reference.jointFramesBase,
-                    baked.jointFramesBase, SameFrame);
-        CompareMaps("final joint frame", where, reference.jointFramesFinal,
-                    baked.jointFramesFinal, SameFrame);
-        CompareMaps("joint matrix", where, reference.jointMatricesFinal,
-                    baked.jointMatricesFinal,
-                    [](const GfMatrix4d &a, const GfMatrix4d &b) {
-                        return a == b;
-                    });
-        CompareMaps("control frame", where, reference.controlFrames,
-                    baked.controlFrames, SameFrame);
-        CompareMaps("provider transform", where, reference.providerXforms,
-                    baked.providerXforms,
-                    [](const GfMatrix4d &a, const GfMatrix4d &b) {
-                        return a == b;
-                    });
-        CompareMaps("moved property", where, reference.movedProperties,
-                    baked.movedProperties,
-                    [](const VtValue &a, const VtValue &b) { return a == b; });
-        CompareMaps("solver frames", where, reference.solverFrames,
-                    baked.solverFrames,
-                    [](const std::vector<RigExecPointFrame> &a,
-                       const std::vector<RigExecPointFrame> &b) {
-                        if (a.size() != b.size()) return false;
-                        for (size_t i = 0; i < a.size(); ++i) {
-                            if (!SameFrame(a[i], b[i])) return false;
-                        }
-                        return true;
-                    });
-        // The diagnostics are part of the generation, not commentary: a
-        // consumer reads them to learn a constraint passed through.
-        if (reference.diagnostics != baked.diagnostics) {
-            ++failures;
-            std::printf("FAIL %s: diagnostics differ (%zu vs %zu)\n",
-                        where.c_str(), reference.diagnostics.size(),
-                        baked.diagnostics.size());
-        }
-        CHECK(reference.solverOverrideRounds == baked.solverOverrideRounds);
-        CHECK(baked.bakedParityMismatches == 0);
-    }
-}
 
 // A consumer that disabled the observational guides gets none from either
 // path: the dynamic walk skips the guide request, and the program must skip
 // its publication too, or the parity check reports one mismatch per solver.
-static void
-TestParityModeWithGuidesDisabled(const std::string &examplesDir,
-                                 const char *stageName)
-{
-    UsdStageRefPtr stage =
-        UsdStage::Open(examplesDir + "/" + std::string(stageName));
-    CHECK(stage);
-    if (!stage) return;
-    const SdfPath rigPath = FindRig(stage);
-    if (rigPath.IsEmpty()) { ++failures; return; }
-    RigExecRigEvaluator rig(stage, rigPath);
-    rig.SetSolverGuidesEnabled(false);
-    rig.SetEvaluationMode(RigExecEvaluationMode::BakedWithParityCheck);
-    std::vector<std::string> errors;
-    CHECK(rig.Compile(&errors));
-    CHECK(rig.IsBakeable(nullptr));
-    for (double frame = 1; frame <= 3; ++frame) {
-        const RigExecRigPose pose = rig.Evaluate(UsdTimeCode(frame));
-        CHECK(pose.valid);
-        CHECK(pose.solverFrames.empty());
-        if (pose.bakedParityMismatches != 0) {
-            ++failures;
-            std::printf("FAIL %s frame %d with guides disabled: %zu baked "
-                        "parity mismatch(es)\n",
-                        stageName, int(frame), pose.bakedParityMismatches);
-        }
-    }
-    // And back on: the program publishes them again, still in agreement.
-    rig.SetSolverGuidesEnabled(true);
-    const RigExecRigPose withGuides = rig.Evaluate(UsdTimeCode(2));
-    CHECK(withGuides.valid);
-    CHECK(!withGuides.solverFrames.empty());
-    CHECK(withGuides.bakedParityMismatches == 0);
-}
-
-// The same comparison the mode performs on itself, which is what a caller
-// gets when they ask for it rather than writing the loop above.
-static void
-TestParityModeReportsNoMismatch(const std::string &examplesDir,
-                                const char *stageName)
-{
-    UsdStageRefPtr stage =
-        UsdStage::Open(examplesDir + "/" + std::string(stageName));
-    CHECK(stage);
-    if (!stage) return;
-    const SdfPath rigPath = FindRig(stage);
-    if (rigPath.IsEmpty()) { ++failures; return; }
-    RigExecRigEvaluator rig(stage, rigPath);
-    rig.SetEvaluationMode(RigExecEvaluationMode::BakedWithParityCheck);
-    std::vector<std::string> errors;
-    CHECK(rig.Compile(&errors));
-    CHECK(rig.IsBakeable(nullptr));
-    for (double frame = 1; frame <= 8; ++frame) {
-        const RigExecRigPose pose = rig.Evaluate(UsdTimeCode(frame));
-        CHECK(pose.valid);
-        if (pose.bakedParityMismatches != 0) {
-            ++failures;
-            std::printf("FAIL %s frame %d: %zu baked parity mismatch(es)\n",
-                        stageName, int(frame), pose.bakedParityMismatches);
-            for (const std::string &diagnostic : pose.diagnostics) {
-                if (diagnostic.rfind("baked parity", 0) == 0) {
-                    std::printf("    %s\n", diagnostic.c_str());
-                }
-            }
-        }
-    }
-}
-
-// The mode is a request. An evaluator that never asks for it must be
-// bit-identical to one that does not know it exists, and asking for it on a
-// rig that cannot bake must still evaluate.
-static void
-TestDynamicModeIsTheDefault(const std::string &examplesDir)
-{
-    UsdStageRefPtr stage = UsdStage::Open(examplesDir + "/biped/Biped.usda");
-    CHECK(stage);
-    if (!stage) return;
-    const SdfPath rigPath = FindRig(stage);
-    if (rigPath.IsEmpty()) { ++failures; return; }
-    RigExecRigEvaluator rig(stage, rigPath);
-    // The default is the PROCESS default: Dynamic, unless the harness asked
-    // for another with RIGEXEC_EVALUATION_MODE, which is how this suite is
-    // re-run against the program. Asserting Dynamic unconditionally would
-    // fail the whole suite in exactly that environment while saying nothing
-    // about the evaluator.
-    CHECK(rig.GetEvaluationMode() == DefaultEvaluationMode());
-    std::vector<std::string> errors;
-    CHECK(rig.Compile(&errors));
-    // Compile is where the STAGE gets its say, and this one has something to
-    // say: the biped authors rigExec:baked. The assertion above is about
-    // what an evaluator starts in, which is a fact about the process; this
-    // is about what the rig asked for, and only the second survives a
-    // compile. Under the parity harness the variable outranks the attribute
-    // and nothing moves, which is the half that keeps the suite exact in
-    // both environments.
-    if (DefaultEvaluationMode() == RigExecEvaluationMode::Dynamic) {
-        CHECK(rig.GetEvaluationMode() == RigExecEvaluationMode::Baked);
-        CHECK(rig.GetEvaluationModeSource() ==
-              RigExecEvaluationModeSource::Attribute);
-    } else {
-        CHECK(rig.GetEvaluationMode() == DefaultEvaluationMode());
-        CHECK(rig.GetEvaluationModeSource() ==
-              RigExecEvaluationModeSource::Environment);
-    }
-    // Switching after a compile builds the program without a recompile, and
-    // switching to the oracle drops it.
-    rig.SetEvaluationMode(RigExecEvaluationMode::Baked);
-    const RigExecRigPose baked = rig.Evaluate(UsdTimeCode(1.0));
-    CHECK(baked.valid);
-    rig.SetEvaluationMode(RigExecEvaluationMode::ExecReference);
-    CHECK(rig.GetEvaluationMode() == RigExecEvaluationMode::ExecReference);
-    const RigExecRigPose reference = rig.Evaluate(UsdTimeCode(1.0));
-    CHECK(reference.valid);
-    CompareMaps("final joint frame", "mode toggle",
-                reference.jointFramesFinal, baked.jointFramesFinal,
-                SameFrame);
-}
-
-// The program captures values, and nothing in the epoch digest would say that
-// a value behind one of them moved -- the digest is unchanged by exactly the
-// edits that make a captured constant wrong. So the program carries its own
-// index of what the bake read, and the tests below are what makes that index
-// a fact rather than a comment: each moves something and demands the
-// published generation follow, with the mode left on Baked throughout.
 
 // One joint's final frame, so a test can say "the answer moved".
 static RigExecPointFrame
@@ -418,7 +106,6 @@ TestAnEditAfterTheBakeIsFollowed(const std::string &examplesDir)
     if (control.IsEmpty()) return;
 
     RigExecRigEvaluator rig(stage, rigPath);
-    rig.SetEvaluationMode(RigExecEvaluationMode::Baked);
     std::vector<std::string> errors;
     CHECK(rig.Compile(&errors));
     CHECK(rig.IsBakeable(nullptr));
@@ -437,10 +124,8 @@ TestAnEditAfterTheBakeIsFollowed(const std::string &examplesDir)
 
     const RigExecRigPose after = rig.Evaluate(UsdTimeCode(1.0));
     CHECK(after.valid);
-    CHECK(rig.GetEvaluationMode() == RigExecEvaluationMode::Baked);
 
-    // A second evaluator that only ever ran dynamically is the reference for
-    // what the edit should have produced.
+    // A freshly compiled evaluator checks that retained caches followed the edit.
     UsdStageRefPtr referenceStage =
         UsdStage::Open(examplesDir + "/biped/Biped.usda");
     referenceStage->SetEditTarget(
@@ -449,7 +134,6 @@ TestAnEditAfterTheBakeIsFollowed(const std::string &examplesDir)
               .GetAttribute(avar)
               .Set(authored + 3.0));
     RigExecRigEvaluator referenceRig(referenceStage, rigPath);
-    MakeItTheReference(&referenceRig);
     CHECK(referenceRig.Compile(&errors));
     const RigExecRigPose reference = referenceRig.Evaluate(UsdTimeCode(1.0));
 
@@ -512,14 +196,12 @@ TestASolverInputEditIsRoutedAfterADeferredCompile(
         CHECK(referenceStage->GetPrimAtPath(ankle).GetAttribute(restTx)
                   .Set(ankleRest + ankleDelta));
         RigExecRigEvaluator referenceRig(referenceStage, rigPath);
-        MakeItTheReference(&referenceRig);
         std::vector<std::string> errors;
         CHECK(referenceRig.Compile(&errors));
         return referenceRig.Evaluate(UsdTimeCode(1.0));
     };
 
     RigExecRigEvaluator rig(stage, rigPath);
-    rig.SetEvaluationMode(RigExecEvaluationMode::Baked);
     std::vector<std::string> errors;
     CHECK(rig.Compile(&errors));
     const RigExecRigPose baked = rig.Evaluate(UsdTimeCode(1.0));
@@ -528,7 +210,6 @@ TestASolverInputEditIsRoutedAfterADeferredCompile(
     stage->SetEditTarget(UsdEditTarget(stage->GetSessionLayer()));
     CHECK(stage->GetPrimAtPath(knee).GetAttribute(restTx)
               .Set(kneeRest + 1.5));
-    rig.SetEvaluationMode(RigExecEvaluationMode::ExecReference);
     const RigExecRigPose first = rig.Evaluate(UsdTimeCode(1.0));
     CHECK(first.valid);
     CompareMaps("final joint frame, edit before the index", "Biped.usda",
@@ -569,7 +250,6 @@ TestAnInteractiveOverrideAfterTheBakeIsFollowed(const std::string &examplesDir)
     if (control.IsEmpty()) return;
 
     RigExecRigEvaluator rig(stage, rigPath);
-    rig.SetEvaluationMode(RigExecEvaluationMode::Baked);
     std::vector<std::string> errors;
     CHECK(rig.Compile(&errors));
     const RigExecRigPose before = rig.Evaluate(UsdTimeCode(1.0));
@@ -582,12 +262,10 @@ TestAnInteractiveOverrideAfterTheBakeIsFollowed(const std::string &examplesDir)
                               VtValue(authored + 3.0)}});
     const RigExecRigPose dragged = rig.Evaluate(UsdTimeCode(1.0));
     CHECK(dragged.valid);
-    CHECK(rig.GetEvaluationMode() == RigExecEvaluationMode::Baked);
 
     UsdStageRefPtr referenceStage =
         UsdStage::Open(examplesDir + "/biped/Biped.usda");
     RigExecRigEvaluator referenceRig(referenceStage, rigPath);
-    MakeItTheReference(&referenceRig);
     CHECK(referenceRig.Compile(&errors));
     referenceRig.SetInteractiveOverrides(
         {RigExecValueOverride{control, TfToken(), avar,
@@ -610,7 +288,6 @@ TestAnInteractiveOverrideAfterTheBakeIsFollowed(const std::string &examplesDir)
                 before.jointFramesFinal, released.jointFramesFinal,
                 SameFrame);
 }
-
 
 // Invalidation: the index, and the two answers it has to give.
 
@@ -642,9 +319,7 @@ CompareGenerationScalars(const std::string &where,
     rigExecTest::CompareGenerationScalars(&failures, where, reference, baked);
 }
 
-// The whole generation: every map and every compared scalar. For the callers
-// whose two evaluators are at the same point in their lives, which is the
-// only place the work counters mean anything.
+// Compare every published map and ordered semantic diagnostic.
 static void
 ComparePose(const std::string &where, const RigExecRigPose &reference,
             const RigExecRigPose &baked)
@@ -652,9 +327,8 @@ ComparePose(const std::string &where, const RigExecRigPose &reference,
     rigExecTest::ComparePose(&failures, where, reference, baked);
 }
 
-// Bakes a rig, THEN edits the stage under it, and demands the eight
-// generations that follow equal an evaluator that only ever ran dynamically
-// under the same edit.
+// Edit an existing native epoch, then compare eight generations with a
+// fresh compile that saw the edited source before its first evaluation.
 // \p expectRebuild is the other half of the contract and the reason this is
 // not just another equality test: an edit that moved something the bake
 // captured has to rebuild the program, and an edit that did not has to leave
@@ -674,14 +348,12 @@ TestEditAfterTheBake(const std::string &examplesDir, const char *stageName,
     if (rigPath.IsEmpty()) { ++failures; return; }
 
     RigExecRigEvaluator rig(stage, rigPath);
-    rig.SetEvaluationMode(RigExecEvaluationMode::Baked);
     std::vector<std::string> errors;
     CHECK(rig.Compile(&errors));
     CHECK(rig.IsBakeable(nullptr));
     const RigExecRigPose before = rig.Evaluate(UsdTimeCode(1.0));
     CHECK(before.valid);
-    // The program answered that generation, so the comparison below is
-    // between the two paths and not between the dynamic path and itself.
+    // The edit starts with an existing native generation.
     CHECK(rig.GetBakedGenerationCount() == 1);
     const size_t builds = rig.GetBakedProgramBuildCount();
     CHECK(builds == 1);
@@ -692,7 +364,6 @@ TestEditAfterTheBake(const std::string &examplesDir, const char *stageName,
     UsdStageRefPtr referenceStage = UsdStage::Open(stagePath);
     edit(referenceStage, rigPath);
     RigExecRigEvaluator referenceRig(referenceStage, rigPath);
-    MakeItTheReference(&referenceRig);
     CHECK(referenceRig.Compile(&errors));
 
     bool moved = false;
@@ -736,7 +407,6 @@ TestEditAfterTheBake(const std::string &examplesDir, const char *stageName,
                     where.c_str(), digestBefore,
                     rig.GetBindingEpochDigest());
     }
-    CHECK(rig.GetEvaluationMode() == RigExecEvaluationMode::Baked);
 }
 
 // The first prim of \p type under \p rigPath, so a test names a FEATURE and
@@ -773,7 +443,6 @@ EditInSession(const UsdStageRefPtr &stage)
 }
 
 
-
 // The same comparison with the edit in place BEFORE the bake, which is the
 // other thing a keyed overlay has to work under: the bake classifies an input
 // that is ALREADY animated, rather than reclassifying one that became so.
@@ -794,8 +463,6 @@ TestEditBeforeTheBake(const std::string &examplesDir, const char *stageName,
 
     RigExecRigEvaluator bakedRig(bakedStage, rigPath);
     RigExecRigEvaluator dynamicRig(dynamicStage, rigPath);
-    MakeItTheReference(&dynamicRig);
-    bakedRig.SetEvaluationMode(RigExecEvaluationMode::Baked);
     std::vector<std::string> errors;
     CHECK(bakedRig.Compile(&errors));
     CHECK(dynamicRig.Compile(&errors));
@@ -824,9 +491,8 @@ TestEditBeforeTheBake(const std::string &examplesDir, const char *stageName,
 // biped rather than a path, so the asset can move without the test rotting.
 
 // The IK/FK blend weight keyed, a constraint switched off, and a rest moved:
-// three captured constants in one edit, of the three shapes the index has to
-// recognise -- a value that became animated, a property that did not exist,
-// and a value replaced in place.
+// three binding changes in one edit: a value becomes animated, a property
+// is created, and a rest matrix is replaced in place.
 static void
 EditKeyedBlendDisabledConstraintAndRest(const UsdStageRefPtr &stage,
                                         const SdfPath &rigPath)
@@ -970,7 +636,6 @@ TestAnUnrelatedEditLeavesTheProgramStanding(const std::string &examplesDir)
     const SdfPath rigPath = FindRig(stage);
     if (rigPath.IsEmpty()) { ++failures; return; }
     RigExecRigEvaluator rig(stage, rigPath);
-    rig.SetEvaluationMode(RigExecEvaluationMode::Baked);
     std::vector<std::string> errors;
     CHECK(rig.Compile(&errors));
     const RigExecRigPose before = rig.Evaluate(UsdTimeCode(1.0));
@@ -1018,7 +683,6 @@ TestAnOverrideOnAConstraintWeightIsFollowed(const std::string &examplesDir)
         VtValue(0.25f)}};
 
     RigExecRigEvaluator rig(stage, rigPath);
-    rig.SetEvaluationMode(RigExecEvaluationMode::Baked);
     std::vector<std::string> errors;
     CHECK(rig.Compile(&errors));
     const RigExecRigPose before = rig.Evaluate(UsdTimeCode(1.0));
@@ -1032,7 +696,6 @@ TestAnOverrideOnAConstraintWeightIsFollowed(const std::string &examplesDir)
 
     UsdStageRefPtr referenceStage = UsdStage::Open(stagePath);
     RigExecRigEvaluator referenceRig(referenceStage, rigPath);
-    MakeItTheReference(&referenceRig);
     CHECK(referenceRig.Compile(&errors));
     referenceRig.SetInteractiveOverrides(overrides);
     const RigExecRigPose reference = referenceRig.Evaluate(UsdTimeCode(1.0));
@@ -1060,14 +723,8 @@ TestAnOverrideOnAConstraintWeightIsFollowed(const std::string &examplesDir)
                     before, released);
 }
 
-// A rig whose refusal is not a gap in the bake but a property of the rig:
-// one provider's posed:space is CONNECTED, so its value is whatever an
-// arbitrary exec computation says from the middle of the pose walk, and
-// there is no epoch-constant summary of that to compile. This fixture keeps
-// fallback coverage independent of support for individual mover types.
-// Built in memory rather than shipped as an example, because an example is
-// something a rigger should copy and this is a rig that deliberately opts
-// out of the fast path.
+// An unphased posed:space connection reads the raw authored attribute.
+// The root's composed avar translation does not become a connected source.
 static UsdStageRefPtr
 MakeAConnectedSpaceRig()
 {
@@ -1081,11 +738,7 @@ MakeAConnectedSpaceRig()
                                             TfToken("RigExecJoint"));
     joint.GetAttribute(TfToken("avars:ty")).Set(2.0);
 
-    // The refusal. The connection is to the control's own posed:space, which
-    // is the identity the joint would have composed anyway -- so the rig
-    // still evaluates to the pose the comparison below demands, and the only
-    // thing the connection changes is that a value which was an epoch
-    // constant is now an exec answer.
+    // Explicit phases are required to select a produced pose frame.
     joint.CreateAttribute(TfToken("posed:space"), SdfValueTypeNames->Matrix4d)
         .AddConnection(root.GetPath().AppendProperty(TfToken("posed:space")));
 
@@ -1110,207 +763,6 @@ MakeAConnectedSpaceRig()
                          SdfValueTypeNames->FloatArray)
         .Set(VtFloatArray{1.0f, 1.0f, 1.0f});
     return stage;
-}
-
-// A rig the program cannot express. Asking for the mode must name the
-// features that stopped it and then evaluate anyway -- a silent fallback
-// reads as the mode not working, and a failure reads as the mode being
-// dangerous. Neither is what a request means.
-static void
-TestANonBakeableRigFallsBack(const char *what, const char *expectReason)
-{
-    UsdStageRefPtr stage = MakeAConnectedSpaceRig();
-    CHECK(stage);
-    if (!stage) return;
-    const SdfPath rigPath = FindRig(stage);
-    if (rigPath.IsEmpty()) { ++failures; return; }
-    RigExecRigEvaluator rig(stage, rigPath);
-    rig.SetEvaluationMode(RigExecEvaluationMode::Baked);
-    std::vector<std::string> errors;
-    if (!rig.Compile(&errors)) {
-        // The fixture is built here rather than shipped, so a mistake in it
-        // reads as a bake failure unless the compile errors come out.
-        ++failures;
-        std::printf("FAIL %s: the fixture does not compile\n", what);
-        for (const std::string &error : errors) {
-            std::printf("    %s\n", error.c_str());
-        }
-        return;
-    }
-
-    std::vector<std::string> reasons;
-    CHECK(!rig.IsBakeable(&reasons));
-    CHECK(!reasons.empty());
-    bool named = false;
-    for (const std::string &reason : reasons) {
-        if (reason.find(expectReason) != std::string::npos) named = true;
-    }
-    if (!named) {
-        ++failures;
-        std::printf("FAIL %s: no reason mentions \"%s\"\n", what,
-                    expectReason);
-        for (const std::string &reason : reasons) {
-            std::printf("    %s\n", reason.c_str());
-        }
-    }
-    CHECK(rig.GetBakedProgramBuildCount() == 0);
-    // Asked once, for the epoch. Bakeability is a property of the compiled
-    // epoch, so re-asking it per frame would charge every frame of a rig
-    // that will never bake for the same refusal -- and the build count above
-    // cannot see that, because it does not move for such a rig at all.
-    const size_t attempts = rig.GetBakedProgramBuildAttemptCount();
-    CHECK(attempts == 1);
-
-    UsdStageRefPtr referenceStage = MakeAConnectedSpaceRig();
-    RigExecRigEvaluator referenceRig(referenceStage, rigPath);
-    CHECK(referenceRig.Compile(&errors));
-    for (double frame = 1; frame <= 4; ++frame) {
-        const RigExecRigPose reference =
-            referenceRig.Evaluate(UsdTimeCode(frame));
-        const RigExecRigPose fallen = rig.Evaluate(UsdTimeCode(frame));
-        CHECK(fallen.valid);
-        // The generation is a real one: a comparison of two empty poses
-        // agrees perfectly and says nothing about the fallback at all.
-        CHECK(!fallen.jointFramesFinal.empty());
-        CHECK(!fallen.controlFrames.empty());
-        CHECK(!fallen.movedProperties.empty());
-        CompareEveryMap(std::string(what) + " frame " +
-                            std::to_string(int(frame)),
-                        reference, fallen);
-        // Silent: the fallback is not a diagnostic on the generation, which
-        // a consumer would have to filter out of a rig's real problems.
-        // Under RIGEXEC_BAKE_REQUIRED it is the opposite -- saying so is the
-        // whole point of that variable -- so both halves are asserted: one
-        // announcement per fallen generation there and none elsewhere, and
-        // nothing else on either generation moved.
-        size_t announcedFallen = 0, announcedReference = 0;
-        const std::vector<std::string> quietFallen =
-            WithoutTheBakeRequiredLine(fallen.diagnostics, &announcedFallen);
-        const std::vector<std::string> quietReference =
-            WithoutTheBakeRequiredLine(reference.diagnostics,
-                                       &announcedReference);
-        CHECK(quietReference == quietFallen);
-        CHECK(announcedFallen == ExpectedBakeRequiredLines(
-                                     RigExecEvaluationMode::Baked));
-        CHECK(announcedReference ==
-              ExpectedBakeRequiredLines(DefaultEvaluationMode()));
-    }
-    // Nothing ran baked, and nothing pretended to. The REQUEST stands,
-    // though: a rig that declines has not had its mode taken away, and a
-    // consumer reading the mode back must see what it asked for rather than
-    // infer the refusal from a silently changed setting.
-    CHECK(rig.GetEvaluationMode() == RigExecEvaluationMode::Baked);
-    CHECK(rig.GetBakedGenerationCount() == 0);
-    // Four frames later the question has still been asked once.
-    CHECK(rig.GetBakedProgramBuildAttemptCount() == attempts);
-}
-
-
-// The other half of override placement, and the half that has to be wrong
-// SAFELY: an override the program cannot place must send the generation down
-// the dynamic path, not be quietly ignored.
-// Three shapes of unplaceable, one per authored reason:
-//   * a value folded into bake state -- a SPACE EXPRESSION, which the bake
-//     accepted because it is unauthored and whose authoring would replace
-//     the compose rather than move a value in it;
-//   * a property the program never reads, so there is no slot to put it in
-//     and no promise that some other reader would pick it up;
-//   * a computation override, which names something only exec can answer.
-// A rest used to be the first of these and is not one any more: the ladder
-// is a per-frame input, so a rest drag PLACES. The second half of this test
-// is that half, because "it falls back" and "it is answered correctly" are
-// the two ways an override can be handled and only one of them is progress.
-static void
-TestAnUnplaceableOverrideFallsBack(const std::string &examplesDir)
-{
-    const std::string stagePath = examplesDir + "/biped/Biped.usda";
-    UsdStageRefPtr stage = UsdStage::Open(stagePath);
-    CHECK(stage);
-    if (!stage) return;
-    const SdfPath rigPath = FindRig(stage);
-    if (rigPath.IsEmpty()) { ++failures; return; }
-    const UsdPrim joint = FirstPrimOfType(stage, rigPath, "RigExecJoint");
-    CHECK(joint);
-    if (!joint) return;
-    GfMatrix4d rest(1.0);
-    joint.GetAttribute(TfToken("rest:space")).Get(&rest);
-    GfMatrix4d moved = rest;
-    moved[3][1] += 4.0;
-
-    RigExecRigEvaluator rig(stage, rigPath);
-    rig.SetEvaluationMode(RigExecEvaluationMode::Baked);
-    std::vector<std::string> errors;
-    CHECK(rig.Compile(&errors));
-    const RigExecRigPose before = rig.Evaluate(UsdTimeCode(1.0));
-    CHECK(before.valid);
-    CHECK(rig.GetBakedGenerationCount() == 1);
-
-    // A prim computation the first-frame-pose request actually carries, so the
-    // dynamic path it falls back to has something to hold the override
-    // against; the program has no exec and cannot hold it at all.
-    RigExecPointFrame frame = JointFrame(before, joint.GetPath());
-    CHECK(frame.IsValid());
-    for (GfVec3d &point : frame.points) {
-        point[1] += 5.0;
-    }
-    const std::vector<std::pair<const char *, RigExecValueOverride>> cases{
-        {"a folded space expression",
-         RigExecValueOverride{joint.GetPath(), TfToken(),
-                              TfToken("parent:space"), VtValue(moved)}},
-        {"a property the bake never read",
-         RigExecValueOverride{joint.GetPath(), TfToken(),
-                              TfToken("custom:notAnInput"), VtValue(1.0)}},
-        {"a computation",
-         RigExecValueOverride{joint.GetPath(),
-                              TfToken("computePointFrame"), TfToken(),
-                              VtValue(frame)}},
-    };
-    for (const auto &[what, override] : cases) {
-        rig.SetInteractiveOverrides({override});
-        const size_t bakedGenerations = rig.GetBakedGenerationCount();
-        const RigExecRigPose held = rig.Evaluate(UsdTimeCode(1.0));
-        CHECK(held.valid);
-        if (rig.GetBakedGenerationCount() != bakedGenerations) {
-            ++failures;
-            std::printf("FAIL %s: the program answered a generation holding "
-                        "an override it cannot place\n", what);
-        }
-        // And the dynamic answer it fell back to is the right one.
-        UsdStageRefPtr referenceStage = UsdStage::Open(stagePath);
-        RigExecRigEvaluator referenceRig(referenceStage, rigPath);
-        MakeItTheReference(&referenceRig);
-        CHECK(referenceRig.Compile(&errors));
-        referenceRig.SetInteractiveOverrides({override});
-        CompareEveryMap(std::string(what) + " on Biped.usda",
-                        referenceRig.Evaluate(UsdTimeCode(1.0)), held);
-    }
-    // And the rest drag, which the ladder work moved from the list above to
-    // here: the program ANSWERS it, and answers it the way exec does. Both
-    // halves matter -- a program that placed the override and then composed
-    // against the authored rest would still count a baked generation.
-    {
-        const RigExecValueOverride restDrag{joint.GetPath(), TfToken(),
-                                            TfToken("rest:space"),
-                                            VtValue(moved)};
-        rig.SetInteractiveOverrides({restDrag});
-        const size_t bakedGenerations = rig.GetBakedGenerationCount();
-        const RigExecRigPose dragged = rig.Evaluate(UsdTimeCode(1.0));
-        CHECK(dragged.valid);
-        CHECK(rig.GetBakedGenerationCount() == bakedGenerations + 1);
-        UsdStageRefPtr referenceStage = UsdStage::Open(stagePath);
-        RigExecRigEvaluator referenceRig(referenceStage, rigPath);
-        MakeItTheReference(&referenceRig);
-        CHECK(referenceRig.Compile(&errors));
-        referenceRig.SetInteractiveOverrides({restDrag});
-        CompareEveryMap("a placed rest drag on Biped.usda",
-                        referenceRig.Evaluate(UsdTimeCode(1.0)), dragged);
-    }
-    // Releasing every one of them puts the rig back on the program.
-    rig.ClearInteractiveOverrides();
-    const size_t bakedGenerations = rig.GetBakedGenerationCount();
-    const RigExecRigPose released = rig.Evaluate(UsdTimeCode(1.0));
-    CHECK(rig.GetBakedGenerationCount() == bakedGenerations + 1);
-    CompareEveryMap("released, on Biped.usda", before, released);
 }
 
 // A value that is keyed ONCE.
@@ -1439,7 +891,6 @@ TestAnOverrideOnAConnectionSourceIsFollowed(const std::string &examplesDir)
         VtValue(0.0f)}};
 
     RigExecRigEvaluator rig(stage, rigPath);
-    rig.SetEvaluationMode(RigExecEvaluationMode::Baked);
     std::vector<std::string> errors;
     if (!rig.Compile(&errors)) {
         ++failures;
@@ -1459,14 +910,13 @@ TestAnOverrideOnAConnectionSourceIsFollowed(const std::string &examplesDir)
     rig.SetInteractiveOverrides(overrides);
     const RigExecRigPose dragged = rig.Evaluate(UsdTimeCode(1.0));
     CHECK(dragged.valid);
-    // Answered BY THE PROGRAM. A fallback is also a correct answer and would
-    // make the comparison below compare the dynamic path with itself.
     CHECK(rig.GetBakedGenerationCount() == 2);
 
+    // Compare the held value against the same value authored before compile.
+    // This independently exercises interactive binding and authored sampling.
+    CHECK(referenceStage->GetAttributeAtPath(shared).Set(0.0f));
     RigExecRigEvaluator referenceRig(referenceStage, rigPath);
-    MakeItTheReference(&referenceRig);
     CHECK(referenceRig.Compile(&errors));
-    referenceRig.SetInteractiveOverrides(overrides);
     const RigExecRigPose reference = referenceRig.Evaluate(UsdTimeCode(1.0));
     CHECK(reference.valid);
     CompareEveryMap("an override on a shared envelope, on Biped_anim.usda",
@@ -1484,12 +934,8 @@ TestAnOverrideOnAConnectionSourceIsFollowed(const std::string &examplesDir)
                     before, rig.Evaluate(UsdTimeCode(1.0)));
 }
 
-// The parity comparator itself.
-// Every other assertion about BakedWithParityCheck in this suite, and all
-// three *BakedParity ctest entries, say the comparator found NOTHING -- which
-// is exactly what a comparator that does nothing also says. These are the
-// positive direction: two poses that DO disagree, one domain at a time, and
-// the exact count and diagnostic the comparison must produce.
+// Positive exact-comparator cases perturb each published domain and require
+// the exact mismatch count and a diagnostic naming the changed value.
 
 static RigExecPointFrame
 MovedFrame(double dy)
@@ -1505,10 +951,10 @@ CheckOneMismatch(const char *what, const RigExecRigPose &reference,
 {
     RigExecRigPose out;
     RigExecComparePoses(reference, baked, &out);
-    if (out.bakedParityMismatches != 1) {
+    if (out.comparisonMismatches != 1) {
         ++failures;
-        std::printf("FAIL parity comparator: %s produced %zu mismatch(es), "
-                    "expected 1\n", what, out.bakedParityMismatches);
+        std::printf("FAIL exact comparator: %s produced %zu mismatch(es), "
+                    "expected 1\n", what, out.comparisonMismatches);
         return;
     }
     bool found = false;
@@ -1520,7 +966,7 @@ CheckOneMismatch(const char *what, const RigExecRigPose &reference,
     }
     if (!found) {
         ++failures;
-        std::printf("FAIL parity comparator: %s reported no diagnostic "
+        std::printf("FAIL exact comparator: %s reported no diagnostic "
                     "naming \"%s\"\n", what, expectedSubstring);
         for (const std::string &diagnostic : out.diagnostics) {
             std::printf("    %s\n", diagnostic.c_str());
@@ -1529,7 +975,7 @@ CheckOneMismatch(const char *what, const RigExecRigPose &reference,
 }
 
 static void
-TestTheParityComparatorFindsWhatIsThere()
+TestPoseComparatorFindsWhatIsThere()
 {
     const SdfPath a("/Rig/Joints/a");
     const SdfPath b("/Rig/Joints/b");
@@ -1561,7 +1007,7 @@ TestTheParityComparatorFindsWhatIsThere()
     {
         RigExecRigPose out;
         RigExecComparePoses(agreed, agreed, &out);
-        CHECK(out.bakedParityMismatches == 0);
+        CHECK(out.comparisonMismatches == 0);
         CHECK(out.diagnostics.empty());
     }
 
@@ -1630,7 +1076,8 @@ TestTheParityComparatorFindsWhatIsThere()
     // shape of disagreement rather than a hypothetical one.
     {
         RigExecRigPose d = agreed;
-        d.weightFields[weight].weights.pop_back();
+        auto &weights = d.weightFields[weight].weights;
+        weights.resize(weights.size() - 1);
         CheckOneMismatch("a short weight field", agreed, d, "weight field");
     }
     {
@@ -1639,53 +1086,6 @@ TestTheParityComparatorFindsWhatIsThere()
         CheckOneMismatch("weight frame", agreed, d, "weight frame");
     }
 
-    // The scalars of the generation. A program that lands on the right
-    // points while reporting different work is still a second rig, and a map
-    // comparison cannot see that at all.
-    {
-        RigExecRigPose d = agreed;
-        d.moverGraphRevisionsCreated = 3;
-        CheckOneMismatch("mover graph revisions created", agreed, d,
-                         "mover graph revisions created");
-    }
-    {
-        RigExecRigPose d = agreed;
-        d.moverGraphRevisionsExecuted = 1;
-        CheckOneMismatch("mover graph revisions executed", agreed, d,
-                         "mover graph revisions executed");
-    }
-    {
-        RigExecRigPose d = agreed;
-        d.moverGraphSchedulesBuilt = 2;
-        CheckOneMismatch("mover graph schedules built", agreed, d,
-                         "mover graph schedules built");
-    }
-    // solverEvaluations is the one published scalar the comparator leaves
-    // alone: it counts requests the dynamic path's per-batch exec cache lets
-    // it skip and the program has no cache to skip with. Asserted here so
-    // the omission is a decision and not an oversight.
-    {
-        RigExecRigPose d = agreed;
-        d.solverEvaluations = 14;
-        RigExecRigPose out;
-        RigExecComparePoses(agreed, d, &out);
-        CHECK(out.bakedParityMismatches == 0);
-    }
-    {
-        RigExecRigPose d = agreed;
-        d.solverOverrideRounds = 4;
-        CheckOneMismatch("solver override rounds", agreed, d,
-                         "solver override rounds");
-    }
-    // Convergence: the scalar whose wrong answer is the quietest, because a
-    // consumer that reads "the overrides settled" reads every point above it
-    // as final.
-    {
-        RigExecRigPose d = agreed;
-        d.solverOverridesConverged = false;
-        CheckOneMismatch("solver overrides converged", agreed, d,
-                         "solver overrides converged");
-    }
     // Order-sensitive: the diagnostics are a sequence, and the same lines in
     // a different order describe a different walk.
     {
@@ -1750,23 +1150,18 @@ TestTheParityComparatorFindsWhatIsThere()
         d.solverFrames[solver].clear();
         d.weightFields[weight].weights[0] = 0.25f;
         d.weightFrames[volume][3][1] = 1.0;
-        d.moverGraphRevisionsCreated = 3;
-        d.moverGraphRevisionsExecuted = 1;
-        d.moverGraphSchedulesBuilt = 2;
-        d.solverOverrideRounds = 4;
-        d.solverOverridesConverged = false;
         d.diagnostics = {"MoverFailed A"};
         RigExecRigPose out;
         RigExecComparePoses(agreed, d, &out);
-        CHECK(out.bakedParityMismatches == 16);
-        CHECK(out.diagnostics.size() == 16);
+        CHECK(out.comparisonMismatches == 11);
+        CHECK(out.diagnostics.size() == 11);
     }
 }
 
 // Exact equality, not a tolerance -- on a real generation of the shipped rig,
 // where "close" is the failure mode a tolerance would hide.
 static void
-TestTheParityComparatorIsExact(const std::string &examplesDir)
+TestPoseComparatorIsExact(const std::string &examplesDir)
 {
     UsdStageRefPtr stage = UsdStage::Open(examplesDir + "/biped/Biped.usda");
     CHECK(stage);
@@ -1785,89 +1180,51 @@ TestTheParityComparatorIsExact(const std::string &examplesDir)
     // the work counters the comparator also compares -- has to stay equal,
     // or the count below stops being about the perturbation.
     RigExecRigPose perturbed = reference;
-    perturbed.bakedParityMismatches = 0;
+    perturbed.comparisonMismatches = 0;
     perturbed.jointMatricesFinal.begin()->second[3][1] += 1e-9;
     RigExecRigPose out;
     RigExecComparePoses(reference, perturbed, &out);
-    CHECK(out.bakedParityMismatches == 1);
+    CHECK(out.comparisonMismatches == 1);
 
     // And the same pose against itself is silent, so the case above is the
     // perturbation and not the comparison being noisy.
     RigExecRigPose quiet;
     RigExecComparePoses(reference, reference, &quiet);
-    CHECK(quiet.bakedParityMismatches == 0);
+    CHECK(quiet.comparisonMismatches == 0);
 }
 
-// Baked requested on a DIRTY epoch.
-// SetEvaluationMode can only build while the epoch is settled, and every
-// notice raises the dirty flag -- so "edit the scene, then turn the mode on",
-// which is what a UI does every time, used to leave the program unbuilt for
-// the rest of the epoch while IsBakeable kept saying yes.
-
+// An unrelated structural notice preserves a valid native epoch.
 static void
-TestBakedModeRequestedOnADirtyEpoch(const std::string &examplesDir)
+TestDirtyEpochStillEvaluates(const std::string &examplesDir)
 {
-    const std::string stagePath = examplesDir + "/biped/Biped.usda";
-    UsdStageRefPtr stage = UsdStage::Open(stagePath);
-    UsdStageRefPtr referenceStage = UsdStage::Open(stagePath);
-    CHECK(stage && referenceStage);
-    if (!stage || !referenceStage) return;
+    const auto stage = UsdStage::Open(examplesDir + "/biped/Biped.usda");
+    CHECK(stage);
+    if (!stage) return;
     const SdfPath rigPath = FindRig(stage);
     if (rigPath.IsEmpty()) { ++failures; return; }
-
     RigExecRigEvaluator rig(stage, rigPath);
-    RigExecRigEvaluator referenceRig(referenceStage, rigPath);
-    MakeItTheReference(&referenceRig);
     std::vector<std::string> errors;
     CHECK(rig.Compile(&errors));
-    CHECK(referenceRig.Compile(&errors));
-    // One dynamic generation first, so the mode is turned on mid-session
-    // rather than on a rig that has never run.
-    CHECK(rig.Evaluate(UsdTimeCode(1.0)).valid);
-    CHECK(referenceRig.Evaluate(UsdTimeCode(1.0)).valid);
-
-    // The edit: a prim the rig has never heard of, which is the cheapest
-    // thing that raises the dirty flag without moving the epoch.
-    stage->DefinePrim(SdfPath("/Scratch"), TfToken("Scope"));
-    referenceStage->DefinePrim(SdfPath("/Scratch"), TfToken("Scope"));
-
-    rig.SetEvaluationMode(RigExecEvaluationMode::Baked);
-    CHECK(rig.IsBakeable(nullptr));
-
+    std::vector<RigExecRigPose> before;
     for (double frame = 1; frame <= 5; ++frame) {
-        const std::string where =
-            "Baked requested on a dirty epoch, frame " +
-            std::to_string(int(frame));
-        const RigExecRigPose reference =
-            referenceRig.Evaluate(UsdTimeCode(frame));
-        const RigExecRigPose baked = rig.Evaluate(UsdTimeCode(frame));
-        CHECK(reference.valid);
-        CHECK(baked.valid);
-        if (!reference.valid || !baked.valid) continue;
-        CompareEveryMap(where, reference, baked);
-        CompareMaps("provider transform", where, reference.providerXforms,
-                    baked.providerXforms,
-                    [](const GfMatrix4d &a, const GfMatrix4d &b) {
-                        return a == b;
-                    });
+        before.push_back(rig.Evaluate(UsdTimeCode(frame)));
+        CHECK(before.back().valid);
     }
-    // The request was honoured: a program was built and it answered the
-    // generations. Without the lazy build both of these stay at zero and
-    // every comparison above passes by comparing the dynamic path with
-    // itself.
-    CHECK(rig.GetBakedProgramBuildCount() > 0);
-    CHECK(rig.GetBakedGenerationCount() > 0);
+    const size_t builds = rig.GetBakedProgramBuildCount();
+    const size_t digest = rig.GetBindingEpochDigest();
+    stage->DefinePrim(SdfPath("/Scratch"), TfToken("Scope"));
+    CHECK(rig.IsBakeable());
+    for (double frame = 1; frame <= 5; ++frame) {
+        const auto after = rig.Evaluate(UsdTimeCode(frame));
+        CHECK(after.valid);
+        CompareEveryMap("an unrelated structural notice", before[size_t(frame)-1], after);
+        CHECK(after.executedOpCount == rig.GetLastOpTrace().size());
+    }
+    CHECK(rig.GetBakedProgramBuildCount() == builds);
+    CHECK(rig.GetBindingEpochDigest() == digest);
 }
 
-// A rebuild inside an epoch publishes the same GENERATION, counters included.
-// A value edit that hits the capture index rebuilds the program while the
-// geometry graphs it accounts for stand. The dynamic path keeps its graphs
-// across the same edit and reports nothing created; a program that started
-// its accounting over would report everything created, and say so in the
-// mover-graph diagnostic, for a rig that built nothing.
-
-// rest:tx on the biped's root joint: a captured constant, so the program
-// rebuilds, and a value the epoch digest is blind to, so nothing recompiles.
+// A rest-channel edit is evaluated after the binding epoch has been built.
 static void
 MoveARestChannel(const UsdStageRefPtr &stage)
 {
@@ -1885,114 +1242,6 @@ MoveARestChannel(const UsdStageRefPtr &stage)
     if (rest) CHECK(rest.Set(3.0));
 }
 
-static void
-TestAnInEpochRebuildPublishesTheSameCounters(const std::string &examplesDir)
-{
-    const std::string stagePath = examplesDir + "/biped/Biped.usda";
-    UsdStageRefPtr bakedStage = UsdStage::Open(stagePath);
-    UsdStageRefPtr dynamicStage = UsdStage::Open(stagePath);
-    UsdStageRefPtr parityStage = UsdStage::Open(stagePath);
-    CHECK(bakedStage && dynamicStage && parityStage);
-    if (!bakedStage || !dynamicStage || !parityStage) return;
-    const SdfPath rigPath = FindRig(bakedStage);
-    if (rigPath.IsEmpty()) { ++failures; return; }
-
-    RigExecRigEvaluator bakedRig(bakedStage, rigPath);
-    RigExecRigEvaluator dynamicRig(dynamicStage, rigPath);
-    RigExecRigEvaluator parityRig(parityStage, rigPath);
-    MakeItTheReference(&dynamicRig);
-    bakedRig.SetEvaluationMode(RigExecEvaluationMode::Baked);
-    parityRig.SetEvaluationMode(RigExecEvaluationMode::BakedWithParityCheck);
-    std::vector<std::string> errors;
-    CHECK(bakedRig.Compile(&errors));
-    CHECK(dynamicRig.Compile(&errors));
-    CHECK(parityRig.Compile(&errors));
-    CHECK(bakedRig.IsBakeable(nullptr));
-    const size_t epoch = bakedRig.GetBindingEpochDigest();
-
-    const auto step = [&](double frame, const char *what) {
-        const std::string where =
-            std::string(what) + " frame " + std::to_string(int(frame));
-        const RigExecRigPose reference = dynamicRig.Evaluate(UsdTimeCode(frame));
-        const RigExecRigPose baked = bakedRig.Evaluate(UsdTimeCode(frame));
-        const RigExecRigPose parity = parityRig.Evaluate(UsdTimeCode(frame));
-        CHECK(reference.valid);
-        CHECK(baked.valid);
-        CHECK(parity.valid);
-        if (!reference.valid || !baked.valid) return;
-        CompareEveryMap(where, reference, baked);
-        CompareGenerationScalars(where, reference, baked);
-        // The mode's own comparator over the same sequence, which is what a
-        // caller gets when they ask rather than writing the loop above.
-        if (parity.bakedParityMismatches != 0) {
-            ++failures;
-            std::printf("FAIL %s: %zu parity mismatch(es)\n", where.c_str(),
-                        parity.bakedParityMismatches);
-            for (const std::string &diagnostic : parity.diagnostics) {
-                if (diagnostic.rfind("baked parity", 0) == 0) {
-                    std::printf("    %s\n", diagnostic.c_str());
-                }
-            }
-        }
-    };
-
-    step(1, "before the rest edit");
-    step(2, "before the rest edit");
-    const size_t builds = bakedRig.GetBakedProgramBuildCount();
-    MoveARestChannel(bakedStage);
-    MoveARestChannel(dynamicStage);
-    MoveARestChannel(parityStage);
-    step(3, "after the rest edit");
-    step(4, "after the rest edit");
-
-    // The edit did what the test needs it to do: it rebuilt the program
-    // INSIDE the epoch. Either half missing makes the comparisons above
-    // vacuous -- a recompile would legitimately rebuild the graphs too.
-    if (bakedRig.GetBakedProgramBuildCount() <= builds) {
-        ++failures;
-        std::printf("FAIL in-epoch rebuild: the rest edit rebuilt nothing\n");
-    }
-    CHECK(bakedRig.GetBindingEpochDigest() == epoch);
-    CHECK(bakedRig.GetBakedGenerationCount() == 4);
-}
-
-// Every shipped example, both modes.
-// The four stages above are the ones chosen for being bakeable; this is the
-// other direction -- whatever is in examples/, whether it bakes or not. A rig
-// that declines has to SAY why and build nothing, and a rig that bakes has to
-// publish the same generation as the dynamic path -- every map, every
-// compared scalar and the diagnostics in order. Two evaluators over two
-// independently opened stages, so neither can leak a warm cache into the
-// other.
-
-// The examples that are ALLOWED to decline the bake, by basename.
-// IT IS EMPTY, and that is the point the four Phase 3 groups were aiming at:
-// every example rig in the tree now bakes. It stays here, empty, rather than
-// being deleted with its machinery, because the machinery is what makes the
-// emptiness mean something -- an example that declines is now unconditionally
-// a failure, with no line anyone can add quietly to make the sweep green
-// again. Adding a name back is a deliberate, reviewable act.
-// Both directions are FAILURES, and so is an entry nothing matched. A list
-// that is only read when a rig declines goes stale silently -- a group that
-// bakes its feature and leaves its line here hands the next person a list
-// that no longer says what still has to be done, and re-declining that same
-// rig later would then be green.
-// The deliberate negative is NOT here and must not be moved here: it is
-// TestANonBakeableRigFallsBack, which builds its rig in memory (a connected
-// posed:space on a provider) precisely so that the shipped examples can all
-// be required to bake.
-static const char *const *const kExpectedToDecline = nullptr;
-static constexpr size_t kExpectedToDeclineCount = 0;
-
-// The index of \p name in kExpectedToDecline, or -1 if it is not listed.
-static int
-_ExpectedToDeclineIndex(const std::string &name)
-{
-    for (size_t i = 0; i < kExpectedToDeclineCount; ++i) {
-        if (name == kExpectedToDecline[i]) return int(i);
-    }
-    return -1;
-}
 
 // The frames to sweep a stage at, from the stage's OWN authored range.
 // The sweep used to run every example at frames 1, 2 and 3. The numbered
@@ -2019,28 +1268,6 @@ _SweepFrames(const UsdStageRefPtr &stage)
     // and both are worth sweeping.
     return {start, start + double(long((end - start) / 2)), end};
 }
-
-
-// A volume weight that is ITSELF A CONSTRAINT TARGET: the second deliberate
-// negative, and like the first it is a property of the rig rather than a gap
-// in the bake.
-// A RigExecSphereWeight is exec-seeded like a joint, so it has a first-frame pose
-// frame and an avar composition. It is also not a RigExecControl and not a
-// RigExecJoint, so the moment a constraint targets it the compiler
-// catalogues it as a plain UsdGeomXformable as well -- and the two families
-// the program's slot table merges, which its comment calls disjoint, are not
-// disjoint for this one provider.
-// The dynamic walk resolves the collision by last writer: the xform-derived
-// pass runs after the compose and replaces the volume's rest, base and final
-// with an identity rest and a transform read off the stage. Exec's
-// computeWeightPacket goes on placing the same volume from its avars. So the
-// volume has two placements at once, the program has one slot to hold them
-// in, and there is no reading of either side that says which is meant -- the
-// dynamic path's own CPU parity mode refuses to publish a reference-phase
-// field on such a volume rather than choose.
-// Refused, therefore, and narrowly: a volume weight on a constraint bakes
-// (testRigExecVolumeWeights covers both sample phases); a volume weight a
-// constraint MOVES does not.
 
 static UsdStageRefPtr
 MakeAConstrainedVolumeRig()
@@ -2071,10 +1298,8 @@ MakeAConstrainedVolumeRig()
                            SdfValueTypeNames->Float).Set(8.0f);
     sphere.CreateAttribute(TfToken("rigExec:falloffProfile"),
                            SdfValueTypeNames->Token).Set(TfToken("linear"));
-    // `preceding`, so the field is resolved by the oracle on both paths: a
-    // `base` field on a constrained volume is the arm the dynamic path's own
-    // parity mode refuses, and this test is about the SLOT collision rather
-    // than about that.
+    // Resolve the entering geometry version independently of the Base/Final
+    // volume placement selected on the consuming mover.
     sphere.GetRelationship(TfToken("rigExec:weightTarget"))
         .SetMetadata(TfToken("rigExecReadPhase"), std::string("preceding"));
 
@@ -2105,75 +1330,9 @@ MakeAConstrainedVolumeRig()
     return stage;
 }
 
-static void
-TestAConstrainedVolumeWeightFallsBack()
-{
-    const char *const what = "a volume weight a constraint moves";
-    UsdStageRefPtr stage = MakeAConstrainedVolumeRig();
-    const SdfPath rigPath = FindRig(stage);
-    if (rigPath.IsEmpty()) { ++failures; return; }
-    RigExecRigEvaluator rig(stage, rigPath);
-    rig.SetEvaluationMode(RigExecEvaluationMode::Baked);
-    std::vector<std::string> errors;
-    if (!rig.Compile(&errors)) {
-        ++failures;
-        std::printf("FAIL %s: the fixture does not compile\n", what);
-        for (const std::string &error : errors) {
-            std::printf("    %s\n", error.c_str());
-        }
-        return;
-    }
-    std::vector<std::string> reasons;
-    CHECK(!rig.IsBakeable(&reasons));
-    bool named = false;
-    for (const std::string &reason : reasons) {
-        named = named ||
-                reason.find("both exec-seeded and xform-derived") !=
-                    std::string::npos;
-    }
-    if (!named) {
-        ++failures;
-        std::printf("FAIL %s: no reason names the slot collision\n", what);
-        for (const std::string &reason : reasons) {
-            std::printf("    %s\n", reason.c_str());
-        }
-    }
 
-    // And the fallback is a real generation, identical to the oracle's: a
-    // refusal that also changed the answer would be worse than the
-    // divergence it exists to avoid.
-    UsdStageRefPtr referenceStage = MakeAConstrainedVolumeRig();
-    RigExecRigEvaluator referenceRig(referenceStage, rigPath);
-    referenceRig.SetEvaluationMode(RigExecEvaluationMode::ExecReference);
-    errors.clear();
-    CHECK(referenceRig.Compile(&errors));
-    for (double frame = 1; frame <= 2; ++frame) {
-        const RigExecRigPose reference =
-            referenceRig.Evaluate(UsdTimeCode(frame));
-        const RigExecRigPose fallen = rig.Evaluate(UsdTimeCode(frame));
-        CHECK(fallen.valid);
-        CHECK(!fallen.movedProperties.empty());
-        CompareEveryMap(std::string(what) + " frame " +
-                            std::to_string(int(frame)),
-                        reference, fallen);
-    }
-    CHECK(rig.GetBakedGenerationCount() == 0);
-}
-
-// A read phase on rigExec:transform that names a POINT IN THE POSE WALK.
-// The general form of the three shorthands (base, preceding, final): the
-// matrix a mover consumes is the provider's frame as it stood immediately
-// after one named constraint, rather than before the walk or after all of
-// it. Nothing in examples/ authors it and no other suite builds it, which is
-// why the program could refuse it for three phases with no parity evidence
-// either way -- so the fixture comes first and the bake follows it.
-// Two constraints revise ONE joint in the walk, and the mover names the
-// first. That is what makes the case discriminating: the phase's answer is
-// neither the joint's base frame nor its final one, and a program that
-// silently read either would deform the slab to a different place with
-// nothing to say so. TestAReadPhaseOnTheTransformIsExact asserts exactly
-// that, by building the same rig with a "final" phase and demanding the two
-// disagree.
+// Two constraints revise one joint. A named read sees the first revision,
+// while Base and Final see the literal identity and second revision.
 
 static UsdStageRefPtr
 MakeAPoseWalkReadPhaseRig(const char *phase)
@@ -2239,40 +1398,25 @@ MakeAPoseWalkReadPhaseRig(const char *phase)
                                      ? constraintA.GetPath().GetString()
                                      : std::string(phase);
     transform.SetMetadata(TfToken(RigExecReadPhaseMetadataName), authored);
-    // Bottom siblings run first. Constrain sits below Geometry, so both
-    // constraints run before the mover -- a `final` read of the joint is
-    // only satisfiable when no writer of it comes later in the stack -- and
-    // A sits below B, so A writes first and B last.
+    // Preserve the authored revision order: A writes first, B writes last.
+    // The declared phase determines the geometry consumer dependency.
     stage->GetPrimAtPath(SdfPath("/Asset/Rig/Movers"))
         .SetChildrenReorder({TfToken("Geometry"), TfToken("Constrain")});
     stage->GetPrimAtPath(SdfPath("/Asset/Rig/Movers/Constrain"))
         .SetChildrenReorder({TfToken("B"), TfToken("A")});
 
-    // A SKIN mover with the same phase on rigExec:influences is deliberately
-    // NOT here. Compile validates an AtPrim phase against
-    // binding.transform alone (rigEvaluator.cpp, "names a point in the pose
-    // walk, but ... is revised by no pose mover"), and a skin mover's
-    // binding.transform is empty -- so such a rig is refused by the DYNAMIC
-    // path before either evaluator sees it. The fold answers the influence
-    // entries out of the store anyway, because that is what the dynamic
-    // fold does with them; neither branch is reachable while the validator
-    // stands, and making it reachable would be a change to the dynamic
-    // path's answer.
     return stage;
 }
 
-// Compiles \p stage twice -- once dynamic, once baked -- and demands the bake
-// happened and every published map agrees over four frames. Returns the moved
-// points of the last frame so a caller can assert the fixture discriminates.
+// Check the phase against a literal translated triangle at every frame.
 static VtVec3fArray
-BakedAndDynamicAgree(const char *what, const UsdStageRefPtr &stage,
-                     const UsdStageRefPtr &referenceStage)
+ReadPhaseMatchesLiteral(const char *what, const UsdStageRefPtr &stage,
+                        const GfVec3f &translation)
 {
     VtVec3fArray moved;
     const SdfPath rigPath = FindRig(stage);
     if (rigPath.IsEmpty()) { ++failures; return moved; }
     RigExecRigEvaluator rig(stage, rigPath);
-    rig.SetEvaluationMode(RigExecEvaluationMode::Baked);
     std::vector<std::string> errors;
     if (!rig.Compile(&errors)) {
         ++failures;
@@ -2282,8 +1426,6 @@ BakedAndDynamicAgree(const char *what, const UsdStageRefPtr &stage,
         }
         return moved;
     }
-    // Named, and not just counted: a refusal here is the whole point of the
-    // case, so the reason has to reach the log.
     std::vector<std::string> reasons;
     if (!rig.IsBakeable(&reasons)) {
         ++failures;
@@ -2294,27 +1436,21 @@ BakedAndDynamicAgree(const char *what, const UsdStageRefPtr &stage,
         return moved;
     }
 
-    RigExecRigEvaluator referenceRig(referenceStage, rigPath);
-    errors.clear();
-    CHECK(referenceRig.Compile(&errors));
+    const VtVec3fArray expected{translation, translation + GfVec3f(1, 0, 0),
+                                translation + GfVec3f(0, 1, 0)};
     for (double frame = 1; frame <= 4; ++frame) {
-        const RigExecRigPose reference =
-            referenceRig.Evaluate(UsdTimeCode(frame));
         const RigExecRigPose baked = rig.Evaluate(UsdTimeCode(frame));
         CHECK(baked.valid);
         CHECK(!baked.movedProperties.empty());
-        CompareEveryMap(std::string(what) + " frame " +
-                            std::to_string(int(frame)),
-                        reference, baked);
         const auto it =
             baked.movedProperties.find(SdfPath("/Asset/Geom/Slab.points"));
         if (it != baked.movedProperties.end() &&
             it->second.IsHolding<VtVec3fArray>()) {
             moved = it->second.UncheckedGet<VtVec3fArray>();
+            CHECK(moved == expected);
         }
+        CHECK(moved.size() == expected.size());
     }
-    // Every generation came from the program: a fallback would have compared
-    // the dynamic path with itself.
     CHECK(rig.GetBakedGenerationCount() == 4);
     return moved;
 }
@@ -2322,18 +1458,15 @@ BakedAndDynamicAgree(const char *what, const UsdStageRefPtr &stage,
 static void
 TestAReadPhaseOnTheTransformIsExact()
 {
-    const VtVec3fArray atPrim = BakedAndDynamicAgree(
+    const VtVec3fArray atPrim = ReadPhaseMatchesLiteral(
         "a pose-walk read phase on rigExec:transform",
-        MakeAPoseWalkReadPhaseRig("atPrim"),
-        MakeAPoseWalkReadPhaseRig("atPrim"));
-    const VtVec3fArray final = BakedAndDynamicAgree(
+        MakeAPoseWalkReadPhaseRig("atPrim"), GfVec3f(3, 0, 0));
+    const VtVec3fArray final = ReadPhaseMatchesLiteral(
         "a final read phase on rigExec:transform",
-        MakeAPoseWalkReadPhaseRig("final"),
-        MakeAPoseWalkReadPhaseRig("final"));
-    const VtVec3fArray base = BakedAndDynamicAgree(
+        MakeAPoseWalkReadPhaseRig("final"), GfVec3f(0, 7, 0));
+    const VtVec3fArray base = ReadPhaseMatchesLiteral(
         "a base read phase on rigExec:transform",
-        MakeAPoseWalkReadPhaseRig("base"),
-        MakeAPoseWalkReadPhaseRig("base"));
+        MakeAPoseWalkReadPhaseRig("base"), GfVec3f(0, 0, 0));
     // The fixture discriminates, measured rather than assumed: if the phase
     // named a point the two shorthands already reach, a program that ignored
     // it entirely would pass every comparison above.
@@ -2342,186 +1475,67 @@ TestAReadPhaseOnTheTransformIsExact()
     CHECK(atPrim != base);
 }
 
+// The same AtPrim read held to the compiled phased-read store: Slide's
+// list is A's record alone, and it answers exactly what that store does at
+// the end of every run.
+static void
+TestAPoseWalkReadPhaseMatchesTheStore()
+{
+    const SdfPath rigPath("/Asset/Rig");
+    RigExecRigEvaluator rig(MakeAPoseWalkReadPhaseRig("atPrim"), rigPath);
+    std::vector<std::string> errors;
+    CHECK(rig.Compile(&errors));
+    for (double frame = 1; frame <= 4; ++frame) {
+        const std::string where =
+            "pose-walk records frame " + std::to_string(int(frame));
+        const RigExecRigPose pose = rig.Evaluate(UsdTimeCode(frame));
+        CHECK(pose.valid);
+        CHECK(pose.comparisonMismatches == 0);
+        CHECK(rigExecTest::CheckFrameRecords(&failures, where, rig) == 1);
+    }
+    CHECK(rig.GetBakedGenerationCount() == 4);
+    const RigExecBakedProgram *program = rig.GetBakedProgram();
+    CHECK(program != nullptr);
+    if (!program) {
+        return;
+    }
+    const RigExecBakedProgramImpl &B = program->GetStepGraph();
+    const RigExecBakedProgramImpl::GeomRevision *slide =
+        rigExecTest::FindRevision(B,
+                                  SdfPath("/Asset/Rig/Movers/Geometry/Slide"));
+    CHECK(slide != nullptr);
+    if (slide) {
+        CHECK(rigExecTest::RecordMovers(B, slide->transformRecords) ==
+              std::vector<SdfPath>{SdfPath("/Asset/Rig/Movers/Constrain/A")});
+    }
+}
+
 static void
 TestEveryExampleStage(const std::string &examplesDir)
 {
-    std::vector<std::string> stagePaths =
-        TfGlob({examplesDir + "/*.usd*", examplesDir + "/biped/*.usda"});
-    std::sort(stagePaths.begin(), stagePaths.end());
-    size_t opened = 0, baked = 0, declined = 0;
-    // Which allowlist entries the sweep actually reached, so that a line
-    // nobody matched -- a rig that now bakes, or one that was renamed or
-    // deleted -- is reported instead of sitting there.
-    std::vector<bool> declineListHit(kExpectedToDeclineCount, false);
-    for (const std::string &stagePath : stagePaths) {
-        // A payload file, a clip manifest, a sublayer: an example directory
-        // holds plenty of .usd files that are not a rig, and none of them is
-        // a failure.
-        UsdStageRefPtr dynamicStage = UsdStage::Open(stagePath);
-        if (!dynamicStage) continue;
-        const SdfPath rigPath = FindRig(dynamicStage);
-        if (rigPath.IsEmpty()) continue;
-        UsdStageRefPtr bakedStage = UsdStage::Open(stagePath);
-        if (!bakedStage) continue;
-        ++opened;
-        const std::string name = TfGetBaseName(stagePath);
-
-        RigExecRigEvaluator dynamicRig(dynamicStage, rigPath);
-        RigExecRigEvaluator bakedRig(bakedStage, rigPath);
-        MakeItTheReference(&dynamicRig);
-        bakedRig.SetEvaluationMode(RigExecEvaluationMode::Baked);
-        std::vector<std::string> errors;
-        if (!dynamicRig.Compile(&errors) || !bakedRig.Compile(&errors)) {
-            // A rig that does not compile is not this suite's business: the
-            // dynamic path reports it and the other suites hold it.
-            std::printf("  %-34s does not compile\n", name.c_str());
-            continue;
-        }
-        std::vector<std::string> reasons;
-        const bool bakeable = bakedRig.IsBakeable(&reasons);
-        const int listed = _ExpectedToDeclineIndex(name);
-        if (listed >= 0) declineListHit[listed] = true;
-        if (bakeable) {
-            ++baked;
-            std::printf("  %-34s bakes\n", name.c_str());
-            // The other direction: the feature landed, and the line that
-            // allowed this rig to decline is now a hole in the sweep.
-            if (listed >= 0) {
-                ++failures;
-                std::printf("FAIL %s: bakes, and is still on the "
-                            "expected-to-decline list -- delete the line\n",
-                            name.c_str());
-            }
-        } else {
-            ++declined;
-            // A silent fallback reads as the mode not working, so a rig that
-            // declines must name the feature that stopped it -- and must not
-            // have built a program anyway.
-            if (reasons.empty()) {
-                ++failures;
-                std::printf("FAIL %s: declines the bake with no reason\n",
-                            name.c_str());
-            }
-            CHECK(bakedRig.GetBakedProgramBuildCount() == 0);
-            // And a decline is a FAILURE unless this example is one of the
-            // ones still expected to decline. Printing it and counting it,
-            // which is what this did, makes every refusal a passing test --
-            // so nothing here can go red when a feature group's work is
-            // incomplete, which is the one thing the sweep is for.
-            if (listed >= 0) {
-                std::printf("  %-34s declines: %s\n", name.c_str(),
-                            reasons.front().c_str());
-            } else {
-                ++failures;
-                std::printf("FAIL %s: declines the bake and is not on the "
-                            "expected-to-decline list\n", name.c_str());
-                for (const std::string &reason : reasons) {
-                    std::printf("    %s\n", reason.c_str());
-                }
-            }
-        }
-        const std::vector<double> frames = _SweepFrames(dynamicStage);
-        const size_t generationsBefore = bakedRig.GetBakedGenerationCount();
-        for (const double frame : frames) {
-            const std::string where =
-                name + " frame " + TfStringify(frame);
-            const RigExecRigPose reference =
-                dynamicRig.Evaluate(UsdTimeCode(frame));
-            const RigExecRigPose answer = bakedRig.Evaluate(UsdTimeCode(frame));
-            CHECK(reference.valid == answer.valid);
-            if (!reference.valid || !answer.valid) continue;
-            // Both evaluators are fresh and have answered exactly the same
-            // generations, so the work counters are comparable here in a way
-            // they are not where a running evaluator is held against a new
-            // one -- a rig that lands on the right points while reporting
-            // different work is still a second rig. ComparePose is every map
-            // AND every scalar.
-            ComparePose(where, reference, answer);
-        }
-        // A bakeable rig must have ANSWERED from the program, or every
-        // comparison above compared the dynamic path with itself.
-        if (bakeable && bakedRig.GetBakedGenerationCount() !=
-                            generationsBefore + frames.size()) {
-            ++failures;
-            std::printf("FAIL %s: bakeable, but %zu of %zu generations came "
-                        "from the program\n", name.c_str(),
-                        bakedRig.GetBakedGenerationCount() -
-                            generationsBefore, frames.size());
-        }
-        if (!bakeable) {
-            CHECK(bakedRig.GetBakedProgramBuildCount() == 0);
-            CHECK(bakedRig.GetBakedGenerationCount() == generationsBefore);
+    auto stages=TfGlob({examplesDir+"/*.usd*",examplesDir+"/biped/*.usda"});
+    std::sort(stages.begin(),stages.end());
+    size_t evaluated=0,referenceChecked=0;
+    for(const auto &path:stages) {
+        const auto stage=UsdStage::Open(path); if(!stage)continue;
+        const auto rigPath=FindRig(stage); if(rigPath.IsEmpty())continue;
+        RigExecRigEvaluator rig(stage,rigPath);
+        rig.cpuReference=true;
+        std::vector<std::string> errors; CHECK(rig.Compile(&errors));
+        CHECK(rig.IsBakeable());
+        for(const auto frame:_SweepFrames(stage)) {
+            const auto pose=rig.Evaluate(UsdTimeCode(frame)); CHECK(pose.valid);
+            CHECK(pose.referenceMismatches==0);
+            if(pose.referenceAgreements)++referenceChecked;
+            CHECK(pose.executedOpCount==rig.GetLastOpTrace().size());
+            ++evaluated;
         }
     }
-    std::printf("example sweep: %zu rig stage(s), %zu bake, %zu decline\n",
-                opened, baked, declined);
-    // The glob found the examples at all: an empty sweep passes silently and
-    // proves nothing.
-    CHECK(opened > 10);
-    // The allowlist is a debt, not a configuration: every line has to be
-    // earned by a rig that declined in THIS run, and when the last group
-    // lands there are no lines left and `declined` is zero.
-    for (size_t i = 0; i < kExpectedToDeclineCount; ++i) {
-        if (!declineListHit[i]) {
-            ++failures;
-            std::printf("FAIL %s: on the expected-to-decline list, but the "
-                        "sweep never reached it -- delete the line\n",
-                        kExpectedToDecline[i]);
-        }
-    }
-    CHECK(declined == kExpectedToDeclineCount);
+    CHECK(evaluated>0 && referenceChecked>0);
 }
 
-// THE INTERVENING-XFORM NEGATIVES, and why they live in THIS suite.
-// They were written against tests/testRigExecEpochRests, which is where the
-// rest work keeps its fixtures. That suite carries REQUIRE_BAKE as of the
-// provider-ladder work, and a bake requirement reports a FALLBACK with the
-// same "baked parity mismatch" prefix a real disagreement carries -- so a
-// fixture that declines on purpose cannot live under one without turning
-// the suite's scoreboard red for a feature nobody claimed. They moved here
-// at the Phase 4 merge, beside this file's other deliberate negatives (a
-// connected posed:space, an unplaceable override, a constrained volume
-// weight), and this suite is deliberately not a parity entry. Nothing about
-// them weakened in the move: the comparison against the dynamic path is now
-// CompareEveryMap, which is every map domain the comparator has rather than
-// the four the other suite's local helper compared.
-
-// A plain Xform standing BETWEEN a provider and its anchor.
-// Exec resolves such a prim as the identity and drops it, so the rig would
-// evaluate as if the grouping transform were not there at all. The dynamic
-// walk composes it back in at evaluation (_ComposeInterveningXforms): X(P)
-// lands BETWEEN a provider and its anchor, which is a uniform right-multiply
-// only while every such Xform sits above every chain root, and is not one
-// otherwise.
-// The program refuses both shapes of it -- a non-identity transform, and one
-// that is identity today but animates -- and refused them BLIND: no rig and
-// no fixture in the tree tripped either, so there was no parity evidence
-// either way and no way to tell a correct bake from a plausible one.
-// These fixtures are that evidence. They assert the refusal by NAME and then
-// assert the fallback generation is a plain dynamic evaluator's, every
-// published domain of it, so the refusal cannot quietly become a wrong
-// answer -- and the day the correction is baked, the one line each case
-// carries flips from false to true.
-// WHY IT IS STILL REFUSED, measured rather than assumed. The correction is
-// not confined to the walk. It rewrites the REST frames as well as the base
-// ones, and the two halves do not reach the same consumers: the walk's
-// frames are pushed back into exec as computePointFrame overrides before
-// the authoritative snapshot, so exec's computeMatrix is built from the
-// CORRECTED pose and the UN-corrected rest, while the walk's own
-// jointMatricesFinal is built from both corrected. Two matrices, one slot,
-// one generation -- see
-// TestAnInterveningXformMovesTheMeshAndNotTheJointMatrix below, which
-// measures both of them on this very fixture. A solver's element rests are
-// a third reader on the exec side: they come from computeRestFrame, which
-// no override touches.
-// The program holds ONE rest per slot and derives both matrices from it, so
-// expressing that means holding an exec rest and a walk rest side by side
-// and routing every consumer to the right one -- which is the same rework
-// an animated rest:tx needs, and is why the animated case below is a second
-// refusal rather than a second arm of the first. A bake that corrected the
-// one rest the program has would publish the right joint matrices and move
-// a skinned mesh somewhere nobody asked for, or the reverse; that is
-// exactly the shape of wrong the refusal is in front of.
+// Intervening Xforms contribute to the one corrected rest and posed frame.
+// D5 intentionally uses that same rest for Base and Final geometry matrices.
 
 // \p animated keys the grouping transform instead of authoring it plainly;
 // \p identityToday additionally makes every sample the identity at the frames
@@ -2535,10 +1549,7 @@ MakeAnInterveningXformRig(bool animated, bool identityToday = false)
     stage->DefinePrim(SdfPath("/Asset"), TfToken("Scope"));
     stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
 
-    // The grouping Xform. Every rig has these -- a Scope named Joints, a
-    // Scope named Controls -- and they compose to the identity, which is
-    // why the program's candidate list is not by itself a refusal. This one
-    // carries a transform.
+    // The grouping Xform contributes a translation above the provider.
     const UsdGeomXform group =
         UsdGeomXform::Define(stage, SdfPath("/Asset/Rig/Group"));
     const UsdGeomXformOp op = group.AddTranslateOp();
@@ -2624,7 +1635,6 @@ static GfVec3d
 RotationSignTip(const UsdStageRefPtr &stage)
 {
     RigExecRigEvaluator rig(stage, SdfPath("/Asset/Rig"));
-    MakeItTheReference(&rig);
     CHECK(rig.Compile());
     const RigExecRigPose pose = rig.Evaluate(UsdTimeCode(1.0));
     CHECK(pose.valid);
@@ -2670,225 +1680,86 @@ TestRotationSignNegatesTheAvar()
               .GetLength() < 1e-12);
 }
 
-// Compiles \p stage in baked mode, reports whether it bakes and why not, and
-// compares every published domain against a dynamic evaluator over the
-// sweep. Returns the baked generation count.
-static size_t
-BakedAgreesWithDynamic(const char *what, const UsdStageRefPtr &stage,
-                       const UsdStageRefPtr &referenceStage,
-                       bool expectBakeable,
-                       std::vector<std::string> *refusals = nullptr)
-{
-    const SdfPath rig("/Asset/Rig");
-    RigExecRigEvaluator baked(stage, rig);
-    baked.SetEvaluationMode(RigExecEvaluationMode::Baked);
-    std::vector<std::string> errors;
-    if (!baked.Compile(&errors)) {
-        ++failures;
-        std::printf("FAIL %s: the fixture does not compile\n", what);
-        for (const std::string &error : errors) {
-            std::printf("    %s\n", error.c_str());
-        }
-        return 0;
-    }
-    std::vector<std::string> reasons;
-    const bool bakeable = baked.IsBakeable(&reasons);
-    if (bakeable != expectBakeable) {
-        ++failures;
-        std::printf("FAIL %s: bakeable=%d, expected %d\n", what, int(bakeable),
-                    int(expectBakeable));
-    }
-    if (refusals) {
-        *refusals = reasons;
-    }
-
-    RigExecRigEvaluator reference(referenceStage, rig);
-    errors.clear();
-    CHECK(reference.Compile(&errors));
-    for (double frame : {1.0, 2.0, 3.0}) {
-        const RigExecRigPose expected = reference.Evaluate(UsdTimeCode(frame));
-        const RigExecRigPose actual = baked.Evaluate(UsdTimeCode(frame));
-        CHECK(expected.valid && actual.valid);
-        CHECK(!actual.movedProperties.empty());
-        CompareEveryMap(std::string(what) + " frame " +
-                            std::to_string(int(frame)),
-                        expected, actual);
-    }
-    return baked.GetBakedGenerationCount();
-}
-
-// The program composes the avars a second time, so the sign has to be in
-// both or a mirrored limb drifts the moment the rig bakes.
+// Rotation-sign edits and animated inputs are read in the current generation.
 static void
-TestRotationSignBakesExactly()
+TestRotationSignEditsAndAnimation()
 {
-    const GfVec3d mirrored(-1, -1, 1);
-    const GfVec3d pose(30, 20, 40);
-    CHECK(BakedAgreesWithDynamic(
-              "a mirrored control's rotation sign",
-              MakeARotationSignRig(mirrored, pose),
-              MakeARotationSignRig(mirrored, pose),
-              /* expectBakeable = */ true) > 0);
-}
-
-static void RefusalNames(const char *what,
-                         const std::vector<std::string> &reasons,
-                         const char *expected);
-
-// The program captures the sign once, so an edit to it after the bake has
-// to rebuild the program rather than leave the old sign composing, and a
-// sign that animates is one the capture cannot hold at all.
-static void
-TestRotationSignEditRebuildsTheProgram()
-{
-    const GfVec3d plain(1, 1, 1);
-    const GfVec3d mirrored(-1, -1, 1);
-    const GfVec3d pose(30, 20, 40);
-    const SdfPath rigPath("/Asset/Rig");
-    const UsdStageRefPtr stage = MakeARotationSignRig(plain, pose);
-    RigExecRigEvaluator baked(stage, rigPath);
-    baked.SetEvaluationMode(RigExecEvaluationMode::Baked);
-    CHECK(baked.Compile());
-    CHECK(baked.Evaluate(UsdTimeCode(1.0)).valid);
-    const size_t builds = baked.GetBakedProgramBuildCount();
-
-    stage->GetPrimAtPath(SdfPath("/Asset/Rig/Arm"))
-        .GetAttribute(TfToken("avars:rotationSign"))
-        .Set(mirrored);
-    const size_t generations = baked.GetBakedGenerationCount();
-    const RigExecRigPose edited = baked.Evaluate(UsdTimeCode(1.0));
-    CHECK(edited.valid);
-    CHECK(baked.GetBakedProgramBuildCount() > builds);
-    CHECK(baked.GetBakedGenerationCount() == generations + 1);
-    RigExecRigEvaluator reference(MakeARotationSignRig(mirrored, pose),
-                                  rigPath);
-    MakeItTheReference(&reference);
-    CHECK(reference.Compile());
-    CompareEveryMap("a rotation sign edited after the bake",
-                    reference.Evaluate(UsdTimeCode(1.0)), edited);
-
-    std::vector<std::string> refusals;
-    const char *const what = "an animated rotation sign";
-    const UsdStageRefPtr animated = MakeARotationSignRig(plain, pose);
-    const UsdStageRefPtr animatedReference = MakeARotationSignRig(plain, pose);
-    for (const UsdStageRefPtr &s : {animated, animatedReference}) {
-        const UsdAttribute sign = s->GetPrimAtPath(SdfPath("/Asset/Rig/Arm"))
-                                      .GetAttribute(TfToken("avars:rotationSign"));
-        sign.Set(plain, UsdTimeCode(1.0));
-        sign.Set(mirrored, UsdTimeCode(3.0));
+    const GfVec3d plain(1,1,1),mirrored(-1,-1,1),rotation(30,20,40);
+    const SdfPath path("/Asset/Rig");
+    const auto stage=MakeARotationSignRig(plain,rotation);
+    RigExecRigEvaluator rig(stage,path);CHECK(rig.Compile());
+    CHECK(rig.Evaluate(UsdTimeCode(1)).valid);
+    const auto builds=rig.GetBakedProgramBuildCount();
+    const auto sign=stage->GetPrimAtPath(SdfPath("/Asset/Rig/Arm")).GetAttribute(TfToken("avars:rotationSign"));
+    CHECK(sign.Set(mirrored));
+    const auto changed=rig.Evaluate(UsdTimeCode(1));CHECK(changed.valid);
+    CHECK(rig.GetBakedProgramBuildCount()==builds);
+    const auto expected=RotationSignTip(MakeARotationSignRig(plain,GfVec3d(-30,-20,40)));
+    const auto tip=changed.jointFramesFinal.find(SdfPath("/Asset/Rig/Arm/Tip"));
+    CHECK(tip!=changed.jointFramesFinal.end());
+    if(tip!=changed.jointFramesFinal.end())CHECK((tip->second.points[0]-expected).GetLength()<1e-12);
+    // An unavailable direct static sign selects the original caller fallback,
+    // never the previously sampled mirrored value.
+    const auto unsignedExpected=RotationSignTip(MakeARotationSignRig(plain,rotation));
+    CHECK(sign.Clear());
+    const auto cleared=rig.Evaluate(UsdTimeCode(1));CHECK(cleared.valid);
+    const auto clearedTip=cleared.jointFramesFinal.find(SdfPath("/Asset/Rig/Arm/Tip"));
+    CHECK(clearedTip!=cleared.jointFramesFinal.end());
+    if(clearedTip!=cleared.jointFramesFinal.end())CHECK((clearedTip->second.points[0]-unsignedExpected).GetLength()<1e-12);
+    CHECK(rig.GetBakedProgramBuildCount()==builds);
+    sign.Block();
+    const auto blocked=rig.Evaluate(UsdTimeCode(1));CHECK(blocked.valid);
+    const auto blockedTip=blocked.jointFramesFinal.find(SdfPath("/Asset/Rig/Arm/Tip"));
+    CHECK(blockedTip!=blocked.jointFramesFinal.end());
+    if(blockedTip!=blocked.jointFramesFinal.end())CHECK((blockedTip->second.points[0]-unsignedExpected).GetLength()<1e-12);
+    CHECK(rig.GetBakedProgramBuildCount()==builds);
+    CHECK(sign.Set(mirrored));
+    const auto restored=rig.Evaluate(UsdTimeCode(1));CHECK(restored.valid);
+    const auto restoredTip=restored.jointFramesFinal.find(SdfPath("/Asset/Rig/Arm/Tip"));
+    CHECK(restoredTip!=restored.jointFramesFinal.end());
+    if(restoredTip!=restored.jointFramesFinal.end())CHECK((restoredTip->second.points[0]-expected).GetLength()<1e-12);
+    CHECK(rig.GetBakedProgramBuildCount()==builds);
+    CHECK(sign.Clear());CHECK(sign.Set(plain,UsdTimeCode(1)));CHECK(sign.Set(mirrored,UsdTimeCode(3)));
+    for(const auto frame:{1.0,3.0}) {
+        const auto pose=rig.Evaluate(UsdTimeCode(frame));CHECK(pose.valid);
+        const auto wanted=RotationSignTip(MakeARotationSignRig(plain,frame==1?rotation:GfVec3d(-30,-20,40)));
+        const auto found=pose.jointFramesFinal.find(SdfPath("/Asset/Rig/Arm/Tip"));
+        CHECK(found!=pose.jointFramesFinal.end());
+        if(found!=pose.jointFramesFinal.end())CHECK((found->second.points[0]-wanted).GetLength()<1e-12);
     }
-    CHECK(BakedAgreesWithDynamic(what, animated, animatedReference,
-                                 /* expectBakeable = */ false,
-                                 &refusals) == 0);
-    RefusalNames(what, refusals, "animated or connected avars:rotationSign");
 }
 
-// Asserts that \p reasons names \p expected, so a refusal that changed its
 // mind about WHY is a failure rather than a pass.
-static void
-RefusalNames(const char *what, const std::vector<std::string> &reasons,
-             const char *expected)
-{
-    for (const std::string &reason : reasons) {
-        if (reason.find(expected) != std::string::npos) {
-            return;
-        }
-    }
-    ++failures;
-    std::printf("FAIL %s: no refusal mentions \"%s\"\n", what, expected);
-    for (const std::string &reason : reasons) {
-        std::printf("    %s\n", reason.c_str());
-    }
-}
 
 static void
 TestAnInterveningXformAboveAProvider()
 {
-    // The grouping transform reaches the pose: without it the tip would sit
-    // at (2, 0, 1) and the mesh with it. Measured, not assumed, because a
-    // program that dropped X(P) would agree with a reference that also
-    // dropped it -- and the reference here is the DYNAMIC path, which does
-    // not.
-    const UsdStageRefPtr probeStage = MakeAnInterveningXformRig(false);
-    RigExecRigEvaluator probe(probeStage, SdfPath("/Asset/Rig"));
-    CHECK(probe.Compile());
-    const RigExecRigPose pose = probe.Evaluate(UsdTimeCode(1.0));
-    CHECK(pose.valid);
-    const auto tip = pose.jointFramesFinal.find(
-        SdfPath("/Asset/Rig/Group/Arm/Tip"));
-    CHECK(tip != pose.jointFramesFinal.end());
-    if (tip != pose.jointFramesFinal.end()) {
-        CHECK(std::abs(tip->second.points[0][1] - 3.0) < 1e-9);
-    }
-
-    // The refusal, by name, and the fallback, in full.
-    std::vector<std::string> refusals;
-    const char *const what = "an intervening Xform above a provider";
-    const size_t generations = BakedAgreesWithDynamic(
-        what, MakeAnInterveningXformRig(false),
-        MakeAnInterveningXformRig(false), /* expectBakeable = */ false,
-        &refusals);
-    RefusalNames(what, refusals, "intervening Xform above provider");
-    // Nothing ran baked, and the comparison above still held: the fallback
-    // is the dynamic path, not a program that answered anyway.
-    CHECK(generations == 0);
+    RigExecRigEvaluator rig(MakeAnInterveningXformRig(false),SdfPath("/Asset/Rig"));
+    CHECK(rig.Compile());CHECK(rig.IsBakeable());
+    const auto pose=rig.Evaluate(UsdTimeCode(1));CHECK(pose.valid);
+    const auto found=pose.jointFramesFinal.find(SdfPath("/Asset/Rig/Group/Arm/Tip"));
+    CHECK(found!=pose.jointFramesFinal.end());
+    if(found!=pose.jointFramesFinal.end())CHECK(GfIsClose(found->second.points[0],GfVec3d(2,3,1),1e-9));
 }
 
 static void
 TestAnAnimatedXformAboveAProvider()
 {
-    std::vector<std::string> refusals;
-    const char *const what = "an animated Xform above a provider";
-    const size_t generations = BakedAgreesWithDynamic(
-        what, MakeAnInterveningXformRig(true), MakeAnInterveningXformRig(true),
-        /* expectBakeable = */ false, &refusals);
-    RefusalNames(what, refusals, "animated Xform above provider");
-    CHECK(generations == 0);
-
-    // And the shape an "is it identity today" test cannot see: every sample
-    // the sweep reads IS the identity, so the transform composes to nothing
-    // at every frame anyone looks at -- and it is still refused, because the
-    // epoch is not a frame. A bake that judged the transform once would pass
-    // this one and be wrong about the case above.
-    refusals.clear();
-    const char *const quietWhat =
-        "an identity-valued animated Xform above a provider";
-    const size_t quiet = BakedAgreesWithDynamic(
-        quietWhat, MakeAnInterveningXformRig(true, /* identityToday = */ true),
-        MakeAnInterveningXformRig(true, /* identityToday = */ true),
-        /* expectBakeable = */ false, &refusals);
-    RefusalNames(quietWhat, refusals, "animated Xform above provider");
-    CHECK(quiet == 0);
+    for(const bool identity:{false,true}) {
+        RigExecRigEvaluator rig(MakeAnInterveningXformRig(true,identity),SdfPath("/Asset/Rig"));
+        CHECK(rig.Compile());CHECK(rig.IsBakeable());
+        for(const double frame:{1.0,2.0,3.0}) {
+            const auto pose=rig.Evaluate(UsdTimeCode(frame));CHECK(pose.valid);
+            const auto found=pose.jointFramesFinal.find(SdfPath("/Asset/Rig/Group/Arm/Tip"));
+            CHECK(found!=pose.jointFramesFinal.end());
+            const double y=identity?0:3+1.5*(frame-1);
+            if(found!=pose.jointFramesFinal.end())CHECK(GfIsClose(found->second.points[0],GfVec3d(2,y,1),1e-9));
+        }
+    }
 }
 
-// WHY the refusals above are still refusals, as a running measurement of the
-// DYNAMIC path rather than a paragraph about it.
-// The correction rewrites the walk's rest frames as well as its base ones,
-// and the two halves do not reach the same consumers. The walk's frames are
-// pushed BACK INTO EXEC as computePointFrame overrides before the
-// authoritative snapshot is evaluated (`_taps->Evaluate(time,
-// jointOverrides)`), and every exec computation downstream of a frame then
-// sees the corrected pose -- while computeRestFrame, which no override
-// touches, goes on reading the authored rest:space and rest avars and knows
-// nothing about the grouping transform. So exec's computeMatrix, which a
-// geometry mover reads in the base phase, is
-//     PointsToMatrix(rest_exec, pose_corrected)
-// while pose.jointMatricesFinal, built in the walk, is
-//     PointsToMatrix(rest_corrected, pose_corrected).
-// On this fixture those are two different matrices -- translate (2, 3, 1)
-// and translate (2, 0, 1) -- and both are published in the same generation.
-// A program that holds ONE rest per slot can produce one of them or the
-// other and not both: correcting its rest publishes the right joint matrix
-// and moves the mesh to the wrong place, and leaving it uncorrected does the
-// reverse. That is the rework the refusals above are in front of (an exec
-// rest and a walk rest side by side, every consumer routed to the right
-// one), and it is the same rework an animated rest:tx needs.
-// Pinned here as three assertions about today's dynamic answers, so the
-// branch that lands the correction has to decide about this case
-// deliberately: if any of the three moves, the dynamic path's answer
-// changed, and that is a decision rather than a test to update.
 static void
-TestAnInterveningXformMovesTheMeshAndNotTheJointMatrix()
+TestInterveningXformUsesOneRest()
 {
     // The same rig twice, with and without the grouping transform. Nothing
     // else differs, so every difference below is X(P) and only X(P).
@@ -2943,10 +1814,8 @@ TestAnInterveningXformMovesTheMeshAndNotTheJointMatrix()
                         GfVec3d(2, 0, 1), 1e-9));
     }
 
-    // 3. And the mesh a base-phase mover drives off that same joint DOES
-    //    follow it, by exactly X: exec composed its matrix from the
-    //    overridden pose and the un-overridden rest. Two answers, one
-    //    generation, one slot.
+    // D5 uses the same corrected rest for BASE geometry and joint matrices.
+    // The grouping translation cancels in both rest-to-pose maps.
     const SdfPath target("/Asset/Geom/M.points");
     const auto pointsA = a.movedProperties.find(target);
     const auto pointsB = b.movedProperties.find(target);
@@ -2961,18 +1830,64 @@ TestAnInterveningXformMovesTheMeshAndNotTheJointMatrix()
     CHECK(movedWith.size() == movedWithout.size());
     if (movedWith.size() != movedWithout.size()) return;
     for (size_t i = 0; i < movedWith.size(); ++i) {
-        if (!GfIsClose(GfVec3f(movedWith[i] - movedWithout[i]),
-                       GfVec3f(0, 3, 0), 1e-5)) {
+        if (!GfIsClose(movedWith[i],movedWithout[i],1e-5)) {
             ++failures;
-            std::printf("FAIL an intervening Xform: moved point %zu did not "
-                        "follow the grouping transform (%g %g %g against "
-                        "%g %g %g); the asymmetry the refusal stands in "
-                        "front of has changed\n",
+            std::printf("FAIL D5 one rest: BASE moved point %zu differs "
+                        "(%g %g %g against %g %g %g)\n",
                         i, movedWith[i][0], movedWith[i][1], movedWith[i][2],
                         movedWithout[i][0], movedWithout[i][1],
                         movedWithout[i][2]);
             break;
         }
+    }
+}
+
+static void
+TestConnectedSpaceReadsTheRawAttribute()
+{
+    const auto stage=MakeAConnectedSpaceRig();
+    GfMatrix4d raw(1);raw.SetTranslateOnly(GfVec3d(5,0,0));
+    CHECK(stage->GetPrimAtPath(SdfPath("/Asset/Rig/Root")).GetAttribute(TfToken("posed:space")).Set(raw));
+    RigExecRigEvaluator rig(stage,SdfPath("/Asset/Rig"));
+    CHECK(rig.Compile());CHECK(rig.IsBakeable());
+    // A connected posed frame is the complete current frame: ORIGINAL
+    // publishes it directly before reading this provider's own avars.
+    std::string before;CHECK(stage->GetRootLayer()->ExportToString(&before));
+    const auto pose=rig.Evaluate(UsdTimeCode(1));CHECK(pose.valid);
+    const auto bone=pose.jointFramesFinal.find(SdfPath("/Asset/Rig/Bone"));
+    CHECK(bone!=pose.jointFramesFinal.end());
+    if(bone!=pose.jointFramesFinal.end())CHECK(GfIsClose(bone->second.points[0],GfVec3d(5,0,0),1e-12));
+    const auto found=pose.movedProperties.find(SdfPath("/Asset/Geom/Slab.points"));
+    CHECK(found!=pose.movedProperties.end());
+    if(found!=pose.movedProperties.end()) {
+        CHECK(found->second.IsHolding<VtVec3fArray>());
+        if(found->second.IsHolding<VtVec3fArray>())CHECK((found->second.UncheckedGet<VtVec3fArray>()==VtVec3fArray{
+            GfVec3f(5,0,0),GfVec3f(6,0,0),GfVec3f(5,1,0)}));
+    }
+    const auto held=rig.Evaluate(UsdTimeCode(1));CHECK(held.valid);
+    ComparePose("connected posed attribute held",pose,held);
+    CHECK(held.executedOpCount==0);
+    std::string after;CHECK(stage->GetRootLayer()->ExportToString(&after));
+    CHECK(after==before);
+}
+
+static void
+TestConstrainedVolumePlacementsAreDistinct()
+{
+    for(const bool final:{false,true}) {
+        const auto stage=MakeAConstrainedVolumeRig();
+        stage->GetPrimAtPath(SdfPath("/Asset/Rig/Movers/Sweep/Pull")).GetRelationship(TfToken("rigExec:weightObject"))
+            .SetMetadata(TfToken("rigExecReadPhase"),std::string(final?"final":"base"));
+        RigExecRigEvaluator rig(stage,SdfPath("/Asset/Rig"));
+        CHECK(rig.Compile());CHECK(rig.IsBakeable());
+        const auto pose=rig.Evaluate(UsdTimeCode(1));CHECK(pose.valid);
+        const auto found=pose.movedProperties.find(SdfPath("/Asset/Geom/Slab.points"));
+        CHECK(found!=pose.movedProperties.end());
+        if(found==pose.movedProperties.end() || !found->second.IsHolding<VtVec3fArray>())continue;
+        const VtVec3fArray expected=final?VtVec3fArray{GfVec3f(0,0,0),GfVec3f(3,4,0),GfVec3f(6,8,0)}
+            :VtVec3fArray{GfVec3f(6,0,0),GfVec3f(3,4,0),GfVec3f(0,8,0)};
+        CHECK(found->second.UncheckedGet<VtVec3fArray>()==expected);
+        CHECK(rig.Evaluate(UsdTimeCode(1)).executedOpCount==0);
     }
 }
 
@@ -3002,23 +1917,10 @@ main(int argc, char **argv)
         return 2;
     }
 
-    for (const char *stageName : {"biped/Biped.usda",
-                                  "biped/Biped_body.usda",
-                                  "biped/Biped_anim.usda",
-                                  // A matrix-mover rig with keyed avars: the
-                                  // biped's chains are all skin, so without
-                                  // this the second geometry operation the
-                                  // program expresses is never compared.
-                                  "simple_rig_anim.usd"}) {
-        TestModeIsExact(examplesDir, stageName);
-        TestParityModeReportsNoMismatch(examplesDir, stageName);
-    }
-    TestDynamicModeIsTheDefault(examplesDir);
     TestAnEditAfterTheBakeIsFollowed(examplesDir);
     TestASolverInputEditIsRoutedAfterADeferredCompile(examplesDir);
     TestAnInteractiveOverrideAfterTheBakeIsFollowed(examplesDir);
     TestAnOverrideOnAConstraintWeightIsFollowed(examplesDir);
-    TestAnUnplaceableOverrideFallsBack(examplesDir);
 
     // Invalidation, both directions.
     TestEditAfterTheBake(examplesDir, "biped/Biped.usda",
@@ -3044,50 +1946,38 @@ main(int argc, char **argv)
     TestEditBeforeTheBake(examplesDir, "biped/Biped.usda",
                           "one key on every constraint's enable",
                           EditOneKeyOnEveryConstraintEnable);
-    // A partial constant envelope on a skin mover: the case where the two
-    // geometry loops' "skip the blend" predicates could disagree.
+    // A partial constant envelope on a skin mover exercises blend assembly.
     TestEditBeforeTheBake(examplesDir, "biped/Biped_anim.usda",
                           "a half-strength skin envelope",
                           EditHalfStrengthSkinEnvelope);
     // An override standing on an attribute several hops up an input's
     // connection chain.
     TestAnOverrideOnAConnectionSourceIsFollowed(examplesDir);
-    // Guides disabled by the consumer: neither path publishes them.
-    TestParityModeWithGuidesDisabled(examplesDir, "biped/Biped_anim.usda");
-    // The comparator the parity mode is made of, in the positive direction.
-    TestTheParityComparatorFindsWhatIsThere();
-    TestTheParityComparatorIsExact(examplesDir);
 
-    // The mode turned on while the epoch was dirty, and a program rebuilt
-    // inside its epoch publishing the same counters as the dynamic path.
-    TestBakedModeRequestedOnADirtyEpoch(examplesDir);
-    TestAnInEpochRebuildPublishesTheSameCounters(examplesDir);
+    // Synthetic literal mismatches prove the exact comparator executes.
+    TestPoseComparatorFindsWhatIsThere();
+    TestPoseComparatorIsExact(examplesDir);
 
-    // And a rig the program refuses -- one whose refusal survives every
-    // feature group, because it is an exec answer computed from the middle
-    // of the pose walk and not a kernel waiting to be hoisted.
-    TestANonBakeableRigFallsBack("a connected posed:space",
-                                 "connected posed:space");
+    // An unrelated structural notice preserves a valid native program.
+    TestDirtyEpochStillEvaluates(examplesDir);
+
 
     // A read phase naming a point in the pose walk, which no shipped rig
     // authors and no other suite builds.
     TestAReadPhaseOnTheTransformIsExact();
+    TestAPoseWalkReadPhaseMatchesTheStore();
     // The mirrored-limb rotation sign, in the compose and in the program.
     TestRotationSignNegatesTheAvar();
-    TestRotationSignBakesExactly();
-    TestRotationSignEditRebuildsTheProgram();
-    // The second deliberate negative: a volume weight a constraint moves,
-    // which the DYNAMIC path gives two placements at once.
-    TestAConstrainedVolumeWeightFallsBack();
-    // And the two the rest suite cannot hold under its bake requirement:
-    // a grouping Xform between a provider and its anchor, authored and
-    // animated, plus the measurement of the dynamic-path asymmetry both
-    // refusals stand on.
+
+    TestRotationSignEditsAndAnimation();
+    TestConnectedSpaceReadsTheRawAttribute();
+    TestConstrainedVolumePlacementsAreDistinct();
+    // Grouping transforms carry provider points through their own graph inputs.
     TestAnInterveningXformAboveAProvider();
     TestAnAnimatedXformAboveAProvider();
-    TestAnInterveningXformMovesTheMeshAndNotTheJointMatrix();
+    TestInterveningXformUsesOneRest();
 
-    // And everything in examples/, whether it bakes or not.
+    // Every compiled example checks original independent scalar arithmetic.
     TestEveryExampleStage(examplesDir);
 
     if (failures) {

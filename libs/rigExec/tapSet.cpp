@@ -21,6 +21,25 @@
 #include <set>
 
 namespace rigExec {
+namespace {
+const TfToken finalPhase("final");
+const VtValue emptySnapshotValue;
+const RigExecValueAddress emptyTapAddress;
+}
+const TfToken &RigExecFinalPhase()
+{
+    return finalPhase;
+}
+const VtValue &RigExecSnapshot::Get(RigExecTapId tap) const
+{
+    return tap >= 0 && static_cast<size_t>(tap) < _values.size()
+        ? _values[tap] : emptySnapshotValue;
+}
+const RigExecValueAddress &RigExecTapSet::GetAddress(RigExecTapId tap) const
+{
+    return tap >= 0 && static_cast<size_t>(tap) < _addresses.size()
+        ? _addresses[tap] : emptyTapAddress;
+}
 
 TF_REGISTRY_FUNCTION(TfDebug)
 {
@@ -57,8 +76,9 @@ private:
 };
 }  // namespace
 
-// Requests share the stock compiler and value cache within a stage partition.
-// The weak tables do not extend stage or evaluator lifetimes.
+// Requests share the stock compiler and value cache for a stage. Replacing a
+// tap list therefore changes requests, not the underlying execution network.
+// The weak table does not extend stage or evaluator lifetimes.
 class RigExecTapContext : public TfWeakBase {
 public:
     explicit RigExecTapContext(const UsdStageRefPtr &stage) : _stage(stage) {}
@@ -83,16 +103,6 @@ public:
         return context;
     }
 
-    std::shared_ptr<RigExecTapContext> Partition(
-        const std::shared_ptr<RigExecTapContext> &parent, size_t partition) {
-        std::lock_guard<std::mutex> lock(_childrenMutex);
-        if (auto child = _children[partition].lock()) return child;
-        auto child = std::make_shared<RigExecTapContext>(_stage);
-        child->_parent = parent;
-        _children[partition] = child;
-        return child;
-    }
-
     ExecUsdSystem *GetSystem() {
         if (!_system) {
             _system = std::make_unique<ExecUsdSystem>(UsdStageConstRefPtr(_stage));
@@ -106,17 +116,6 @@ public:
     }
 
     void PrepareStageChange(const UsdNotice::ObjectsChanged &notice) {
-        // Synchronous notice consumers must retire every partition before
-        // Esf handles deletion, including contexts whose callbacks are later.
-        {
-            std::lock_guard<std::mutex> lock(_childrenMutex);
-            for (auto it = _children.begin(); it != _children.end();) {
-                if (auto child = it->second.lock()) {
-                    child->PrepareStageChange(notice);
-                    ++it;
-                } else it = _children.erase(it);
-            }
-        }
         if (!_system) return;
         bool removed = false;
         for (const SdfPath &path : notice.GetResyncedPaths()) {
@@ -142,23 +141,15 @@ private:
                            const UsdStageWeakPtr &) {
         PrepareStageChange(notice);
     }
-    std::shared_ptr<RigExecTapContext> _parent;
-    std::mutex _childrenMutex;
-    std::map<size_t, std::weak_ptr<RigExecTapContext>> _children;
     UsdStageRefPtr _stage;
     std::unique_ptr<ExecUsdSystem> _system;
     TfNotice::Key _notice;
 };
 
 RigExecTapSet::RigExecTapSet(const UsdStageRefPtr &stage)
-    : RigExecTapSet(stage, 0) {}
-
-RigExecTapSet::RigExecTapSet(const UsdStageRefPtr &stage, size_t partition)
     : _stage(stage)
     , _context(RigExecTapContext::Find(stage, true))
 {
-    _partition = partition;
-    if (partition) _context = _context->Partition(_context, partition);
     _context->clients.insert(this);
 }
 
@@ -181,7 +172,6 @@ void RigExecTapSet::PrepareStageChange(
 RigExecTapId
 RigExecTapSet::Add(const RigExecValueAddress &address)
 {
-    _residualTaps.reset();
     _addresses.push_back(address);
     _resolutions.emplace_back();
     _prepared = false;
@@ -192,7 +182,6 @@ RigExecTapId
 RigExecTapSet::AddResolved(
     const RigExecValueAddress &publicAddress, const SdfPath &privateProvider)
 {
-    _residualTaps.reset();
     _addresses.push_back(publicAddress);
     _resolutions.push_back(privateProvider);
     _prepared = false;
@@ -291,35 +280,11 @@ RigExecTapSet::Evaluate(UsdTimeCode time)
 }
 
 RigExecSnapshot
-RigExecTapSet::EvaluateWithSuppliedResults(
-    UsdTimeCode time, const std::vector<RigExecValueOverride> &overrides,
-    std::vector<VtValue> supplied)
-{
-    if (supplied.size() != _addresses.size()) return {};
-    std::vector<size_t> missing;
-    for (size_t i = 0; i < supplied.size(); ++i)
-        if (supplied[i].IsEmpty()) missing.push_back(i);
-    if (!_residualTaps || missing != _residualIndices) {
-        _residualTaps = std::make_unique<RigExecTapSet>(_stage, _partition);
-        _residualIndices = missing;
-        for (size_t i : missing)
-            _residualTaps->AddResolved(_addresses[i], _resolutions[i]);
-    }
-    const RigExecSnapshot residual = _residualTaps->Evaluate(time, overrides);
-    if (!residual.IsComplete()) return residual;
-    for (size_t i = 0; i < missing.size(); ++i)
-        supplied[missing[i]] = residual.Get(i);
-    RigExecSnapshot result;
-    result._time = time;
-    result._values = std::move(supplied);
-    result._valid = result._complete = true;
-    return result;
-}
-
-RigExecSnapshot
 RigExecTapSet::Evaluate(
-    UsdTimeCode time, const std::vector<RigExecValueOverride> &overrides)
+    UsdTimeCode time, const std::vector<RigExecValueOverride> &overrides,
+    size_t *dropped)
 {
+    if (dropped) *dropped = 0;
     // Rebuild on expiry as well as on an explicit tap-list change. A request
     // can be invalidated under us by a structural edit -- a prim deactivated
     // and reactivated, a variant switched away and back, a payload unloaded
@@ -356,11 +321,13 @@ RigExecTapSet::Evaluate(
     for (const RigExecValueOverride &o : overrides) {
         const UsdPrim prim = _stage->GetPrimAtPath(o.prim);
         if (!prim) {
+            if (dropped) ++*dropped;
             continue;
         }
         if (!o.attribute.IsEmpty()) {
             const UsdAttribute attr = prim.GetAttribute(o.attribute);
             if (!attr) {
+                if (dropped) ++*dropped;
                 continue;
             }
             execOverrides.push_back(
@@ -372,8 +339,6 @@ RigExecTapSet::Evaluate(
                                  o.value});
     }
 
-    // Override sub-executors read their partition's unmodified cache.
-    if (_partition && !execOverrides.empty()) system->Compute(*_request);
     _DebugTimer computeTimer(execOverrides.empty()
                              ? "Compute" : "ComputeWithOverrides");
     ExecUsdCacheView view = execOverrides.empty()

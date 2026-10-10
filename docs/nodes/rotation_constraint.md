@@ -35,7 +35,7 @@ envelope.
 
 ## How it works
 
-It runs in the pose phase, on the single composed mover walk, after the
+It runs in the pose phase at its place in the pose stack, once the
 constrained provider's incoming frame is known. The kernel decomposes
 that incoming frame, converts each source's orientation to Euler degrees
 in `rigExec:rotationOrder`, and accumulates weighted *shortest* per-axis

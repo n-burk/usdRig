@@ -1,12 +1,15 @@
 // RigExec geometry mover kernels implementation.
 #include "geometryKernels.h"
 #include "deltaMushKernel.h"
+#include "latticeKernel.h"
+#include "spatialAccel.h"
 #include "wrinkleKernel.h"
 #include "pxr/base/gf/vec3d.h"
 #include "pxr/base/gf/rotation.h"
 
 #include <algorithm>
 #include <cmath>
+#include <memory>
 #include <limits>
 #include <map>
 #include <set>
@@ -57,45 +60,7 @@ RigExecApplyVolumeCorrect(
     }
 }
 
-namespace {
 
-// Edge adjacency (unique undirected edges) from standard polygon topology.
-std::vector<std::vector<int>>
-_BuildAdjacency(
-    size_t pointCount,
-    const std::vector<int> &faceVertexCounts,
-    const std::vector<int> &faceVertexIndices)
-{
-    std::vector<std::set<int>> adjacency(pointCount);
-    size_t offset = 0;
-    for (int faceCount : faceVertexCounts) {
-        for (int c = 0; c < faceCount; ++c) {
-            const size_t ia = offset + c;
-            const size_t ib = offset + (c + 1) % faceCount;
-            if (ia >= faceVertexIndices.size() ||
-                ib >= faceVertexIndices.size()) {
-                return {};
-            }
-            const int a = faceVertexIndices[ia];
-            const int b = faceVertexIndices[ib];
-            if (a < 0 || b < 0 ||
-                static_cast<size_t>(a) >= pointCount ||
-                static_cast<size_t>(b) >= pointCount) {
-                return {};
-            }
-            adjacency[a].insert(b);
-            adjacency[b].insert(a);
-        }
-        offset += faceCount;
-    }
-    std::vector<std::vector<int>> result(pointCount);
-    for (size_t i = 0; i < pointCount; ++i) {
-        result[i].assign(adjacency[i].begin(), adjacency[i].end());
-    }
-    return result;
-}
-
-}  // namespace
 
 bool
 RigExecTransportSurfaceOffsets(
@@ -134,7 +99,9 @@ RigExecSurfaceFrameAtHit(
 {
     return RigExecSurfaceFrameAtHitT(
         points, faceVertexCounts, faceVertexIndices, hit, upHint,
-        &RigExecComputeVertexNormals, frame);
+        static_cast<RigExecVertexNormalsFn>(
+            &RigExecComputeVertexNormals),
+        frame);
 }
 
 bool
@@ -157,26 +124,18 @@ RigExecRaycastSurfaceFrame(
                                     faceVertexIndices, hit, upHint, frame);
 }
 
-GfMatrix4d
-RigExecPartialTransform(const GfMatrix4d &transform, double weight)
+RigExecPartialDecomposition
+RigExecDecomposePartialTransform(const GfMatrix4d &transform)
 {
-    const double w = GfClamp(weight, 0.0, 1.0);
-    if (w <= 0.0) {
-        return GfMatrix4d(1.0);
-    }
-    if (w >= 1.0) {
-        return transform;
-    }
-
+    RigExecPartialDecomposition d;
     // Row lengths are the scale; dividing them out leaves the rotation.
     GfMatrix4d basis = transform;
     basis.SetTranslateOnly(GfVec3d(0));
-    GfVec3d scale(1.0);
     for (int axis = 0; axis < 3; ++axis) {
         const GfVec3d row(basis.GetRow3(axis));
         const double length = row.GetLength();
         if (length > 1e-12) {
-            scale[axis] = length;
+            d.scale[axis] = length;
             basis.SetRow3(axis, row / length);
         }
     }
@@ -197,41 +156,124 @@ RigExecPartialTransform(const GfMatrix4d &transform, double weight)
     // So recover the pivot the transform actually turns about -- its
     // screw axis -- and turn a fraction about that.
     const GfRotation rotation = basis.ExtractRotation();
-    const GfVec3d axis = rotation.GetAxis().GetNormalized();
-    const double angle = rotation.GetAngle();
-    const GfVec3d translation = transform.ExtractTranslation();
-
-    GfMatrix4d scaled(1.0);
-    scaled.SetScale(GfVec3d(1.0 + (scale[0] - 1.0) * w,
-                            1.0 + (scale[1] - 1.0) * w,
-                            1.0 + (scale[2] - 1.0) * w));
-
-    GfMatrix4d out(1.0);
-    out.SetRotate(GfRotation(axis, angle * w));
-    out = scaled * out;
+    d.axis = rotation.GetAxis().GetNormalized();
+    d.angle = rotation.GetAngle();
+    d.translation = transform.ExtractTranslation();
 
     // Below about a tenth of a degree there is no meaningful axis to
     // turn about and the chord and the arc agree to within float noise,
     // so the straight blend is both correct and better conditioned.
-    const double radians = GfDegreesToRadians(angle);
-    if (std::abs(std::sin(0.5 * radians)) < 1e-4) {
-        out.SetTranslateOnly(translation * w);
-        return out;
+    const double radians = GfDegreesToRadians(d.angle);
+    d.smallAngle = std::abs(std::sin(0.5 * radians)) < 1e-4;
+    if (d.smallAngle) {
+        return d;
     }
 
     // Split the translation into the part along the axis (a screw's own
     // travel, which stays linear in w) and the part across it, which is
     // (I - R) applied to the pivot and so names where the pivot is.
-    const double along = GfDot(translation, axis);
-    const GfVec3d across = translation - axis * along;
+    d.along = GfDot(d.translation, d.axis);
+    const GfVec3d across = d.translation - d.axis * d.along;
     const double half = 0.5 / std::tan(0.5 * radians);
-    const GfVec3d pivot = across * 0.5 + GfCross(axis, across) * half;
+    d.pivot = across * 0.5 + GfCross(d.axis, across) * half;
+    return d;
+}
+
+GfMatrix4d
+RigExecApplyPartialDecomposition(
+    const RigExecPartialDecomposition &d, double w)
+{
+    GfMatrix4d scaled(1.0);
+    scaled.SetScale(GfVec3d(1.0 + (d.scale[0] - 1.0) * w,
+                            1.0 + (d.scale[1] - 1.0) * w,
+                            1.0 + (d.scale[2] - 1.0) * w));
+
+    GfMatrix4d out(1.0);
+    out.SetRotate(GfRotation(d.axis, d.angle * w));
+    out = scaled * out;
+
+    if (d.smallAngle) {
+        out.SetTranslateOnly(d.translation * w);
+        return out;
+    }
 
     // p' = R_w (p - pivot) + pivot + w * along * axis.
     const GfMatrix4d partial = out;
-    out.SetTranslateOnly(pivot - partial.TransformDir(pivot)
-                         + axis * (along * w));
+    out.SetTranslateOnly(d.pivot - partial.TransformDir(d.pivot)
+                         + d.axis * (d.along * w));
     return out;
+}
+
+GfMatrix4d
+RigExecPartialTransform(const GfMatrix4d &transform, double weight)
+{
+    const double w = GfClamp(weight, 0.0, 1.0);
+    if (w <= 0.0) {
+        return GfMatrix4d(1.0);
+    }
+    if (w >= 1.0) {
+        return transform;
+    }
+    return RigExecApplyPartialDecomposition(
+        RigExecDecomposePartialTransform(transform), w);
+}
+
+void
+RigExecApplyLaplacianSmoothWithAdjacency(
+    std::vector<GfVec3f> *points,
+    const RigExecMeshAdjacency &adjacency,
+    double strength,
+    const GfVec3f *source,
+    size_t sourceCount)
+{
+    const double s = std::min(std::max(strength, 0.0), 1.0);
+    if (points->empty() || s <= 0.0) {
+        return;
+    }
+    if (!adjacency.Covers(points->size())) {
+        return;  // invalid topology: pass through
+    }
+    std::vector<GfVec3f> owned;
+    const GfVec3f *src = source;
+    if (!src || sourceCount != points->size()) {
+        if (src) {
+            return;  // a short range reads OOB: pass through instead
+        }
+        owned = *points;
+        src = owned.data();
+    }
+    for (size_t i = 0; i < points->size(); ++i) {
+        if (adjacency.neighbors[i].empty()) {
+            continue;
+        }
+        GfVec3f average(0);
+        for (int n : adjacency.neighbors[i]) {
+            average += src[n];
+        }
+        average /= float(adjacency.neighbors[i].size());
+        (*points)[i] = src[i] + (average - src[i]) * float(s);
+    }
+}
+
+void
+RigExecApplyLaplacianSmooth(
+    std::vector<GfVec3f> *points,
+    const int *faceVertexCounts, size_t faceVertexCountsSize,
+    const int *faceVertexIndices, size_t faceVertexIndicesSize,
+    double strength,
+    const GfVec3f *source,
+    size_t sourceCount)
+{
+    const double s = std::min(std::max(strength, 0.0), 1.0);
+    if (points->empty() || s <= 0.0) {
+        return;
+    }
+    RigExecMeshAdjacency adjacency;
+    RigExecBuildMeshAdjacency(
+        points->size(), faceVertexCounts, faceVertexCountsSize,
+        faceVertexIndices, faceVertexIndicesSize, &adjacency);
+    RigExecApplyLaplacianSmoothWithAdjacency(
+        points, adjacency, strength, source, sourceCount);
 }
 
 void
@@ -239,29 +281,14 @@ RigExecApplyLaplacianSmooth(
     std::vector<GfVec3f> *points,
     const std::vector<int> &faceVertexCounts,
     const std::vector<int> &faceVertexIndices,
-    double strength)
+    double strength,
+    const GfVec3f *source,
+    size_t sourceCount)
 {
-    const double s = std::min(std::max(strength, 0.0), 1.0);
-    if (points->empty() || s <= 0.0) {
-        return;
-    }
-    const std::vector<std::vector<int>> adjacency = _BuildAdjacency(
-        points->size(), faceVertexCounts, faceVertexIndices);
-    if (adjacency.empty()) {
-        return;  // invalid topology: pass through
-    }
-    const std::vector<GfVec3f> source = *points;
-    for (size_t i = 0; i < source.size(); ++i) {
-        if (adjacency[i].empty()) {
-            continue;
-        }
-        GfVec3f average(0);
-        for (int n : adjacency[i]) {
-            average += source[n];
-        }
-        average /= float(adjacency[i].size());
-        (*points)[i] = source[i] + (average - source[i]) * float(s);
-    }
+    RigExecApplyLaplacianSmooth(
+        points, faceVertexCounts.data(), faceVertexCounts.size(),
+        faceVertexIndices.data(), faceVertexIndices.size(), strength,
+        source, sourceCount);
 }
 
 bool
@@ -271,8 +298,14 @@ RigExecApplyDeltaMush(
     int iterations, double step, bool pinBorders,
     double distanceWeight, double displacement,
     const RigExecDeltaMushSettings &settings,
-    const GfMatrix4d &computationToTarget)
+    const GfMatrix4d &computationToTarget,
+    const RigExecDeltaMushRest *restData)
 {
+    if (restData) {
+        return RigExecApplyDeltaMushInSpaceWithRestData<GfVec3f, GfVec3d,
+                                                        GfMatrix4d>(
+            points, *restData, displacement, computationToTarget);
+    }
     return RigExecApplyDeltaMushInSpaceKernel<GfVec3f, GfVec3d, GfMatrix4d>(
         points, rest, counts, indices, iterations, step, pinBorders,
         distanceWeight, displacement, settings, computationToTarget);
@@ -282,25 +315,39 @@ bool
 RigExecApplyWrinkle(
     std::vector<GfVec3f> *points, const std::vector<GfVec3f> &rest,
     const std::vector<int> &counts, const std::vector<int> &indices,
-    const RigExecWrinkleSettings &settings)
+    const RigExecWrinkleSettings &settings,
+    const RigExecWrinkleMesh *topology)
 {
+    if (topology) {
+        return RigExecApplyWrinkleWithTopology<GfVec3f, GfVec3d>(
+            points, rest, counts, indices, settings, *topology);
+    }
     return RigExecApplyWrinkleKernel<GfVec3f, GfVec3d>(
         points, rest, counts, indices, settings);
 }
 
 std::vector<GfVec3f>
 RigExecComputeVertexNormals(
-    const std::vector<GfVec3f> &points,
-    const std::vector<int> &faceVertexCounts,
-    const std::vector<int> &faceVertexIndices)
+    const GfVec3f *points, size_t pointsSize,
+    const int *faceVertexCounts, size_t faceVertexCountsSize,
+    const int *faceVertexIndices, size_t faceVertexIndicesSize)
 {
-    std::vector<GfVec3f> normals(points.size(), GfVec3f(0));
+    // A null range with a nonzero size answers like a mesh with no
+    // usable faces: zero normals. A null range with size zero is the
+    // empty range, which the walk below already handles.
+    if ((pointsSize > 0 && !points) ||
+        (faceVertexCountsSize > 0 && !faceVertexCounts) ||
+        (faceVertexIndicesSize > 0 && !faceVertexIndices)) {
+        return std::vector<GfVec3f>(pointsSize, GfVec3f(0));
+    }
+    std::vector<GfVec3f> normals(pointsSize, GfVec3f(0));
     std::vector<int> ring;
     size_t offset = 0;
-    for (int faceCount : faceVertexCounts) {
+    for (size_t f = 0; f < faceVertexCountsSize; ++f) {
+        const int faceCount = faceVertexCounts[f];
         if (faceCount < 3 ||
             offset + static_cast<size_t>(faceCount) >
-                faceVertexIndices.size()) {
+                faceVertexIndicesSize) {
             return normals;
         }
         // Gather the face once, dropping indices that do not address a
@@ -308,7 +355,7 @@ RigExecComputeVertexNormals(
         ring.clear();
         for (int k = 0; k < faceCount; ++k) {
             const int v = faceVertexIndices[offset + k];
-            if (v >= 0 && static_cast<size_t>(v) < points.size()) {
+            if (v >= 0 && static_cast<size_t>(v) < pointsSize) {
                 ring.push_back(v);
             }
         }
@@ -373,18 +420,33 @@ RigExecComputeVertexNormals(
 }
 
 std::vector<GfVec3f>
-RigExecComputeExtent(
-    const std::vector<GfVec3f> &points, const std::vector<float> &widths)
+RigExecComputeVertexNormals(
+    const std::vector<GfVec3f> &points,
+    const std::vector<int> &faceVertexCounts,
+    const std::vector<int> &faceVertexIndices)
 {
-    if (points.empty()) {
+    return RigExecComputeVertexNormals(
+        points.data(), points.size(), faceVertexCounts.data(),
+        faceVertexCounts.size(), faceVertexIndices.data(),
+        faceVertexIndices.size());
+}
+
+std::vector<GfVec3f>
+RigExecComputeExtent(
+    const GfVec3f *points, size_t pointsSize,
+    const float *widths, size_t widthsSize)
+{
+    if (pointsSize == 0 || !points) {
         return {};
     }
+    // A null widths range reads as no widths, whatever its size claims.
+    const size_t widthsCount = widths ? widthsSize : 0;
     GfVec3f lo = points[0], hi = points[0];
-    for (size_t i = 0; i < points.size(); ++i) {
+    for (size_t i = 0; i < pointsSize; ++i) {
         float pad = 0.0f;
-        if (widths.size() == points.size()) {
+        if (widthsCount == pointsSize) {
             pad = widths[i] * 0.5f;
-        } else if (widths.size() == 1) {
+        } else if (widthsCount == 1) {
             pad = widths[0] * 0.5f;
         }
         for (int a = 0; a < 3; ++a) {
@@ -395,20 +457,27 @@ RigExecComputeExtent(
     return {lo, hi};
 }
 
-namespace {
-
-double
-_Bernstein(int degree, int index, double t)
+std::vector<GfVec3f>
+RigExecComputeExtent(
+    const std::vector<GfVec3f> &points, const std::vector<float> &widths)
 {
-    double coefficient = 1.0;
-    for (int k = 0; k < index; ++k) {
-        coefficient *= double(degree - k) / double(index - k);
-    }
-    return coefficient * std::pow(t, index) *
-           std::pow(1.0 - t, degree - index);
+    return RigExecComputeExtent(
+        points.data(), points.size(), widths.data(), widths.size());
 }
 
-}  // namespace
+void
+RigExecApplyLattice(
+    std::vector<GfVec3f> *points,
+    const GfVec3f *restPoints, size_t restPointsSize,
+    const GfVec3f *restCage, size_t restCageSize,
+    const GfVec3f *posedCage, size_t posedCageSize,
+    const GfVec3i &divisions)
+{
+    RigExecApplyLatticeKernel(
+        points, restPoints, restPointsSize, restCage, restCageSize,
+        posedCage, posedCageSize, divisions[0], divisions[1], divisions[2],
+        static_cast<RigExecSurfaceKernelCache<GfVec3f, GfVec3d> *>(nullptr));
+}
 
 void
 RigExecApplyLattice(
@@ -418,55 +487,24 @@ RigExecApplyLattice(
     const std::vector<GfVec3f> &posedCage,
     const GfVec3i &divisions)
 {
-    const size_t cageCount = size_t(divisions[0]) * size_t(divisions[1]) *
-                             size_t(divisions[2]);
-    if (points->empty() || restPoints.size() != points->size() ||
-        restCage.size() != cageCount || posedCage.size() != cageCount ||
-        divisions[0] < 2 || divisions[1] < 2 || divisions[2] < 2) {
-        return;  // invalid cage description: pass through
-    }
+    RigExecApplyLattice(
+        points, restPoints.data(), restPoints.size(), restCage.data(),
+        restCage.size(), posedCage.data(), posedCage.size(), divisions);
+}
 
-    // Rest cage bound defines the bind space.
-    GfVec3f lo = restCage[0], hi = restCage[0];
-    for (const GfVec3f &c : restCage) {
-        for (int a = 0; a < 3; ++a) {
-            lo[a] = std::min(lo[a], c[a]);
-            hi[a] = std::max(hi[a], c[a]);
-        }
-    }
-    const GfVec3f size = hi - lo;
-    if (size[0] <= 0 || size[1] <= 0 || size[2] <= 0) {
-        return;
-    }
-
-    // Cage deltas preserve identity when the cage is at rest.
-    std::vector<GfVec3f> cageDeltas(cageCount);
-    for (size_t i = 0; i < cageCount; ++i) {
-        cageDeltas[i] = posedCage[i] - restCage[i];
-    }
-
-    const int dx = divisions[0], dy = divisions[1], dz = divisions[2];
-    for (size_t i = 0; i < points->size(); ++i) {
-        // Bind coordinates from the REST point, clamped into the cage.
-        GfVec3f uvw;
-        for (int a = 0; a < 3; ++a) {
-            uvw[a] = std::min(
-                1.0f, std::max(0.0f, (restPoints[i][a] - lo[a]) / size[a]));
-        }
-        GfVec3f delta(0);
-        for (int c = 0; c < dz; ++c) {
-            const double bc = _Bernstein(dz - 1, c, uvw[2]);
-            for (int b = 0; b < dy; ++b) {
-                const double bb = _Bernstein(dy - 1, b, uvw[1]);
-                for (int a = 0; a < dx; ++a) {
-                    const double ba = _Bernstein(dx - 1, a, uvw[0]);
-                    delta += cageDeltas[(c * dy + b) * dx + a] *
-                             float(ba * bb * bc);
-                }
-            }
-        }
-        (*points)[i] += delta;
-    }
+void
+RigExecApplyLattice(
+    std::vector<GfVec3f> *points,
+    const std::vector<GfVec3f> &restPoints,
+    const std::vector<GfVec3f> &restCage,
+    const std::vector<GfVec3f> &posedCage,
+    const GfVec3i &divisions,
+    RigExecSurfaceKernelCache<GfVec3f, GfVec3d> *cache)
+{
+    RigExecApplyLatticeKernel(
+        points, restPoints.data(), restPoints.size(), restCage.data(),
+        restCage.size(), posedCage.data(), posedCage.size(), divisions[0],
+        divisions[1], divisions[2], cache);
 }
 
 namespace {
@@ -505,37 +543,149 @@ _ClosestPointOnTriangle(
     return a + ab * v + ac * w;
 }
 
+// Whether an owned key still describes a borrowed range: same size and
+// same values. A null range only ever matches the empty key, and the
+// projector returns before validation on a null range with a nonzero
+// size, so every validated call below compares against real storage.
+template <typename T>
+bool
+_RangeMatches(const std::vector<T> &key, const T *data, size_t size)
+{
+    return key.size() == size &&
+        (size == 0 || std::equal(key.begin(), key.end(), data));
+}
+
 }  // namespace
+
+void
+RigExecBuildSurfaceAccel(
+    const int *faceVertexCounts, size_t faceVertexCountsSize,
+    const int *faceVertexIndices, size_t faceVertexIndicesSize,
+    const GfVec3f *surfacePoints, size_t surfacePointsSize,
+    RigExecSurfaceAccel *accel)
+{
+    if (!accel) {
+        return;
+    }
+    RigExecSurfaceAccel built;
+    if (faceVertexCounts) {
+        built.counts.assign(faceVertexCounts,
+                            faceVertexCounts + faceVertexCountsSize);
+    }
+    if (faceVertexIndices) {
+        built.indices.assign(faceVertexIndices,
+                             faceVertexIndices + faceVertexIndicesSize);
+    }
+    if (surfacePoints) {
+        built.points.assign(surfacePoints,
+                            surfacePoints + surfacePointsSize);
+    }
+    built.fan = std::make_shared<const RigExecFanTrisH7>(
+        RigExecBuildFanTrisH7(
+            faceVertexCounts, faceVertexCountsSize,
+            faceVertexIndices, faceVertexIndicesSize,
+            surfacePointsSize));
+    if (!built.fan->truncated &&
+        built.fan->tris.size() >= kRigExecBvhMinTris &&
+        (surfacePointsSize == 0 || surfacePoints)) {
+        auto bvh = std::make_shared<RigExecTriangleBvh<GfVec3f>>();
+        if (bvh->Build(surfacePoints, surfacePointsSize,
+                       built.fan->tris.data(),
+                       built.fan->tris.size())) {
+            built.bvh = std::move(bvh);
+        }
+        // Build failed (non-finite surface points): the null bvh runs the
+        // verbatim loop, whose NaN behavior is the defined one.
+    }
+    *accel = std::move(built);
+}
+
+void
+RigExecBuildSurfaceAccel(
+    const std::vector<int> &faceVertexCounts,
+    const std::vector<int> &faceVertexIndices,
+    const std::vector<GfVec3f> &surfacePoints,
+    RigExecSurfaceAccel *accel)
+{
+    RigExecBuildSurfaceAccel(
+        faceVertexCounts.data(), faceVertexCounts.size(),
+        faceVertexIndices.data(), faceVertexIndices.size(),
+        surfacePoints.data(), surfacePoints.size(), accel);
+}
 
 void
 RigExecApplySurfaceProject(
     std::vector<GfVec3f> *points,
-    const std::vector<GfVec3f> &surfacePoints,
-    const std::vector<int> &faceVertexCounts,
-    const std::vector<int> &faceVertexIndices,
-    double weight)
+    const GfVec3f *surfacePoints, size_t surfacePointsSize,
+    const int *faceVertexCounts, size_t faceVertexCountsSize,
+    const int *faceVertexIndices, size_t faceVertexIndicesSize,
+    double weight,
+    const RigExecSurfaceAccel *accel)
 {
     const double w = std::min(std::max(weight, 0.0), 1.0);
-    if (points->empty() || surfacePoints.empty() || w <= 0.0) {
+    if (points->empty() || surfacePointsSize == 0 || w <= 0.0) {
+        return;
+    }
+    if (!surfacePoints ||
+        (faceVertexCountsSize > 0 && !faceVertexCounts) ||
+        (faceVertexIndicesSize > 0 && !faceVertexIndices)) {
+        return;  // a null range with a nonzero size: pass through
+    }
+    // One fan triangulation for the whole call instead of one per point.
+    // A truncated walk returns with no point modified: the nested walk
+    // below always meets the overrun during its first point.
+    RigExecSurfaceAccel unretained;
+    // A stale entry -- same cardinality but new topology or, on the
+    // BVH path, new points -- rebuilds rather than answering wrong.
+    // The fan only depends on the topology and the point count, so
+    // below the gate the values are not compared: the verbatim loop
+    // walks the current inputs either way.
+    if (!accel || !accel->fan ||
+        !_RangeMatches(accel->counts, faceVertexCounts,
+                       faceVertexCountsSize) ||
+        !_RangeMatches(accel->indices, faceVertexIndices,
+                       faceVertexIndicesSize) ||
+        accel->points.size() != surfacePointsSize ||
+        (accel->bvh && !_RangeMatches(accel->points, surfacePoints,
+                                      surfacePointsSize))) {
+        RigExecBuildSurfaceAccel(
+            faceVertexCounts, faceVertexCountsSize,
+            faceVertexIndices, faceVertexIndicesSize,
+            surfacePoints, surfacePointsSize, &unretained);
+        accel = &unretained;
+    }
+    const RigExecFanTrisH7 &fan = *accel->fan;
+    if (fan.truncated) {
+        return;
+    }
+    if (fan.tris.size() >= kRigExecBvhMinTris &&
+        points->size() >= kRigExecBvhMinQueries && accel->bvh) {
+        for (GfVec3f &p : *points) {
+            const GfVec3f best = accel->bvh->QueryNearest(
+                p, surfacePoints, fan.tris.data(),
+                _ClosestPointOnTriangle);
+            p = p + (best - p) * float(w);
+        }
         return;
     }
     for (GfVec3f &p : *points) {
         float bestDistSq = std::numeric_limits<float>::max();
         GfVec3f best = p;
         size_t offset = 0;
-        for (int faceCount : faceVertexCounts) {
+        for (size_t f = 0; f < faceVertexCountsSize; ++f) {
+            const int faceCount = faceVertexCounts[f];
             for (int c = 1; c + 1 < faceCount; ++c) {
                 const size_t i2 = offset + c + 1;
-                if (i2 >= faceVertexIndices.size()) {
+                if (i2 >= faceVertexIndicesSize) {
                     return;
                 }
                 const int ia = faceVertexIndices[offset];
                 const int ib = faceVertexIndices[offset + c];
                 const int ic = faceVertexIndices[i2];
                 if (ia < 0 || ib < 0 || ic < 0 ||
-                    size_t(ia) >= surfacePoints.size() ||
-                    size_t(ib) >= surfacePoints.size() ||
-                    size_t(ic) >= surfacePoints.size()) {
+                    size_t(ia) >= surfacePointsSize ||
+                    size_t(ib) >= surfacePointsSize ||
+                    size_t(ic) >= surfacePointsSize) {
                     continue;
                 }
                 const GfVec3f q = _ClosestPointOnTriangle(
@@ -551,6 +701,22 @@ RigExecApplySurfaceProject(
         }
         p = p + (best - p) * float(w);
     }
+}
+
+void
+RigExecApplySurfaceProject(
+    std::vector<GfVec3f> *points,
+    const std::vector<GfVec3f> &surfacePoints,
+    const std::vector<int> &faceVertexCounts,
+    const std::vector<int> &faceVertexIndices,
+    double weight,
+    const RigExecSurfaceAccel *accel)
+{
+    RigExecApplySurfaceProject(
+        points, surfacePoints.data(), surfacePoints.size(),
+        faceVertexCounts.data(), faceVertexCounts.size(),
+        faceVertexIndices.data(), faceVertexIndices.size(), weight,
+        accel);
 }
 
 namespace {
@@ -573,14 +739,15 @@ _BsplinePoint(
 
 RigExecCurveFrameSamples
 RigExecSampleCurveRMF(
-    const std::vector<GfVec3f> &controlPoints, int sampleCount)
+    const GfVec3f *controlPoints, size_t controlPointsSize,
+    int sampleCount)
 {
     RigExecCurveFrameSamples samples;
     // The short-curve branch below interpolates segments [i, i + 1].  A
     // single point has no segment; accepting it makes `size() - 2` equal -1
-    // and indexes before the vector.  Treat it like every other degenerate
+    // and indexes before the range.  Treat it like every other degenerate
     // driver and publish no frames.
-    if (sampleCount < 2 || controlPoints.size() < 2) {
+    if (sampleCount < 2 || controlPointsSize < 2 || !controlPoints) {
         return samples;
     }
 
@@ -590,7 +757,7 @@ RigExecSampleCurveRMF(
     const int dense = std::max(sampleCount * 16, 64);
     std::vector<GfVec3f> densePoints;
     densePoints.reserve(dense + 1);
-    const int spans = static_cast<int>(controlPoints.size()) - 3;
+    const int spans = static_cast<int>(controlPointsSize) - 3;
     for (int i = 0; i <= dense; ++i) {
         const float u = float(i) / float(dense);
         if (spans >= 1) {
@@ -601,9 +768,9 @@ RigExecSampleCurveRMF(
                 controlPoints[span], controlPoints[span + 1],
                 controlPoints[span + 2], controlPoints[span + 3], t));
         } else {
-            const float s = u * (controlPoints.size() - 1);
+            const float s = u * (controlPointsSize - 1);
             const int seg = std::min(
-                int(controlPoints.size()) - 2, int(s));
+                int(controlPointsSize) - 2, int(s));
             densePoints.push_back(
                 controlPoints[seg] +
                 (controlPoints[seg + 1] - controlPoints[seg]) * (s - seg));
@@ -700,17 +867,28 @@ RigExecSampleCurveRMF(
     return samples;
 }
 
+RigExecCurveFrameSamples
+RigExecSampleCurveRMF(
+    const std::vector<GfVec3f> &controlPoints, int sampleCount)
+{
+    return RigExecSampleCurveRMF(
+        controlPoints.data(), controlPoints.size(), sampleCount);
+}
+
 void
 RigExecApplyRibbonTransport(
     std::vector<GfVec3f> *points,
-    const std::vector<GfVec2f> &bindCoords,
+    const GfVec2f *bindCoords, size_t bindCoordsSize,
     const RigExecCurveFrameSamples &restSamples,
     const RigExecCurveFrameSamples &posedSamples)
 {
     const size_t sampleCount = restSamples.GetSize();
-    if (points->empty() || bindCoords.size() != points->size() ||
+    if (points->empty() || bindCoordsSize != points->size() ||
         sampleCount < 2 || posedSamples.GetSize() != sampleCount) {
         return;  // invalid binding: pass through
+    }
+    if (!bindCoords) {
+        return;  // a null range with a nonzero size: pass through
     }
 
     // Per-sample rigid maps from the rest frame to the posed frame.
@@ -740,6 +918,18 @@ RigExecApplyRibbonTransport(
         const GfVec3d b = maps[k + 1].TransformAffine(GfVec3d((*points)[i]));
         (*points)[i] = GfVec3f(a + (b - a) * double(t));
     }
+}
+
+void
+RigExecApplyRibbonTransport(
+    std::vector<GfVec3f> *points,
+    const std::vector<GfVec2f> &bindCoords,
+    const RigExecCurveFrameSamples &restSamples,
+    const RigExecCurveFrameSamples &posedSamples)
+{
+    RigExecApplyRibbonTransport(
+        points, bindCoords.data(), bindCoords.size(), restSamples,
+        posedSamples);
 }
 
 }  // namespace rigExec
@@ -809,10 +999,9 @@ RigExecBuildWireBasis(const GfVec2f *bindCoords, size_t bindCount,
                       RigExecWireBasis *basis)
 {
     const size_t n = controlPointCount;
-    if (!basis || !bindCoords || order < 1 || order > 16 || n < size_t(order) ||
-        knots.size() != n + size_t(order) ||
-        !(knots[size_t(order - 1)] < knots[n]) ||
-        (bindCount != meshPointCount && bindCount != indices.size())) {
+    if (!basis ||
+        !RigExecWireBasisInputsAreUsable(bindCoords, bindCount, meshPointCount,
+                                         indices.size(), order, knots, n)) {
         return false;
     }
     const bool parallel = bindCount == indices.size();
@@ -868,6 +1057,19 @@ RigExecBuildWireBasis(const GfVec2f *bindCoords, size_t bindCount,
 }
 
 bool
+RigExecWireBasisInputsAreUsable(const GfVec2f *bindCoords, size_t bindCount,
+                                size_t meshPointCount, size_t indexCount,
+                                int order, const std::vector<double> &knots,
+                                size_t controlPointCount)
+{
+    const size_t n = controlPointCount;
+    return bindCoords && order >= 1 && order <= 16 && n >= size_t(order) &&
+           knots.size() == n + size_t(order) &&
+           knots[size_t(order - 1)] < knots[n] &&
+           (bindCount == meshPointCount || bindCount == indexCount);
+}
+
+bool
 RigExecApplyWireBasis(std::vector<GfVec3f> *points,
                       const RigExecWireBasis &basis,
                       const std::vector<int> &indices,
@@ -875,19 +1077,56 @@ RigExecApplyWireBasis(std::vector<GfVec3f> *points,
                       const std::vector<GfVec3f> &restControlPoints,
                       const std::vector<GfVec3f> &posedControlPoints)
 {
+    return RigExecApplyWireBasisRange(points, basis, indices, weights,
+                                      restControlPoints, posedControlPoints,
+                                      0, points ? points->size() : 0);
+}
+
+bool
+RigExecApplyWireBasisRange(std::vector<GfVec3f> *points,
+                           const RigExecWireBasis &basis,
+                           const std::vector<int> &indices,
+                           const std::vector<float> &weights,
+                           const std::vector<GfVec3f> &restControlPoints,
+                           const std::vector<GfVec3f> &posedControlPoints,
+                           size_t begin, size_t end)
+{
+    if (!points) {
+        return false;
+    }
+    end = std::min(end, points->size());
+    begin = std::min(begin, end);
+    return RigExecApplyWireBasisGroup(points->data() + begin, begin, end,
+                                      basis, indices, weights,
+                                      restControlPoints, posedControlPoints);
+}
+
+bool
+RigExecApplyWireBasisGroup(GfVec3f *out, size_t begin, size_t end,
+                           const RigExecWireBasis &basis,
+                           const std::vector<int> &indices,
+                           const std::vector<float> &weights,
+                           const std::vector<GfVec3f> &restControlPoints,
+                           const std::vector<GfVec3f> &posedControlPoints)
+{
     const size_t n = basis.byControlPoint.size();
-    if (!points || restControlPoints.size() != n ||
+    if ((!out && begin < end) || restControlPoints.size() != n ||
         posedControlPoints.size() != n || indices.size() != weights.size()) {
         return false;
     }
-    GfVec3f *data = points->data();
+    // Control-point-major, as the whole call: a point's additions arrive in
+    // control point order whichever range it is applied in.
     for (size_t j = 0; j < n; ++j) {
         const GfVec3f delta = posedControlPoints[j] - restControlPoints[j];
         if (delta == GfVec3f(0.0f)) {
             continue;  // a control point at rest moves nothing
         }
         for (const auto &[k, coefficient] : basis.byControlPoint[j]) {
-            data[size_t(indices[k])] += delta * (coefficient * weights[k]);
+            const int index = indices[k];
+            if (index < 0 || size_t(index) < begin || size_t(index) >= end) {
+                continue;
+            }
+            out[size_t(index) - begin] += delta * (coefficient * weights[k]);
         }
     }
     return true;
@@ -947,17 +1186,37 @@ RigExecApplyWire(std::vector<GfVec3f> *points,
                  const RigExecNurbsCurve &restCurve,
                  const RigExecNurbsCurve &posedCurve,
                  const GfVec2f *bindCoords, size_t bindCount,
-                 double dropoffDistance, size_t begin, size_t end)
+                 double dropoffDistance, size_t begin, size_t end,
+                 const GfVec3f *restEvals, size_t restEvalCount)
 {
-    if (!points || !bindCoords || !restCurve.IsValid() ||
-        !posedCurve.IsValid() ||
-        restCurve.order != posedCurve.order ||
-        restCurve.points->size() != posedCurve.points->size() ||
-        *restCurve.knots != *posedCurve.knots ||
-        bindCount != points->size()) {
+    if (!points) {
         return false;
     }
     end = std::min(end, points->size());
+    begin = std::min(begin, end);
+    return RigExecApplyWireGroup(points->data() + begin, begin, end,
+                                 points->size(), restCurve, posedCurve,
+                                 bindCoords, bindCount, dropoffDistance,
+                                 restEvals, restEvalCount);
+}
+
+bool
+RigExecApplyWireGroup(GfVec3f *out, size_t begin, size_t end, size_t count,
+                      const RigExecNurbsCurve &restCurve,
+                      const RigExecNurbsCurve &posedCurve,
+                      const GfVec2f *bindCoords, size_t bindCount,
+                      double dropoffDistance, const GfVec3f *restEvals,
+                      size_t restEvalCount)
+{
+    if (!RigExecWireInputsAreUsable(restCurve, posedCurve, bindCoords,
+                                    bindCount, count) ||
+        (restEvals && restEvalCount != count)) {
+        return false;
+    }
+    end = std::min(end, count);
+    if (begin < end && !out) {
+        return false;
+    }
     for (size_t i = begin; i < end; ++i) {
         const double u = bindCoords[i][0];
         const double d = bindCoords[i][1];
@@ -969,10 +1228,26 @@ RigExecApplyWire(std::vector<GfVec3f> *points,
         if (f <= 0.0) {
             continue;
         }
-        const GfVec3f delta = posedCurve.Evaluate(u) - restCurve.Evaluate(u);
-        (*points)[i] += delta * float(f);
+        const GfVec3f rest = restEvals ? restEvals[i] : restCurve.Evaluate(u);
+        const GfVec3f delta = posedCurve.Evaluate(u) - rest;
+        out[i - begin] += delta * float(f);
     }
     return true;
+}
+
+bool
+RigExecWireInputsAreUsable(const RigExecNurbsCurve &restCurve,
+                           const RigExecNurbsCurve &posedCurve,
+                           const GfVec2f *bindCoords, size_t bindCount,
+                           size_t pointCount)
+{
+    // The knot vectors compare by value, so a NaN knot fails even when both
+    // curves share one vector.
+    return bindCoords && restCurve.IsValid() && posedCurve.IsValid() &&
+           restCurve.order == posedCurve.order &&
+           restCurve.points->size() == posedCurve.points->size() &&
+           !(*restCurve.knots != *posedCurve.knots) &&
+           bindCount == pointCount;
 }
 
 bool

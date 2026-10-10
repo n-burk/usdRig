@@ -20,16 +20,22 @@
 #include "pxr/base/gf/vec3d.h"
 #include "pxr/base/gf/vec3f.h"
 #include "pxr/base/gf/vec3h.h"
+#include "pxr/base/gf/vec3i.h"
 #include "pxr/base/gf/vec4d.h"
 #include "pxr/base/gf/vec4f.h"
 #include "pxr/base/gf/vec4h.h"
 #include "pxr/base/vt/array.h"
 
+#include <algorithm>
 #include <cstring>
 #include <map>
+#include <memory>
 #include <string>
 #include <tuple>
 #include <type_traits>
+#include <typeinfo>
+#include <utility>
+#include <vector>
 
 namespace rigExec {
 
@@ -115,6 +121,18 @@ _FoldPointFrame(uint64_t hash, const RigExecPointFrame &frame)
     return _FoldScalar(hash, frame.flags);
 }
 
+// The constant head leaves: their table's own digest, which folds each
+// leaf as a sample (RigExecHeadLeafConstants). Null folds nothing.
+uint64_t
+_FoldHeadLeafConstants(uint64_t hash, const RigExecFrameInputs &inputs)
+{
+    if (!inputs.headLeafConstants) {
+        return hash;
+    }
+    hash = _FoldBytes(hash, "head", 5);
+    return _FoldU64(hash, inputs.headLeafConstants->digest);
+}
+
 // How one frame's stage seeds fold into the control digest: a tag, the six
 // counts, then every entry bitwise, in program order (no sort: the vectors
 // parallel the program tables positionally). The seeds are fresh stage
@@ -158,6 +176,12 @@ _FoldStageSeeds(uint64_t hash, const RigExecStageFrameSeeds &seeds)
     for (const RigExecPointFrame &frame : seeds.nativeFrames) {
         hash = _FoldPointFrame(hash, frame);
     }
+    hash = _FoldU64(hash, static_cast<uint64_t>(seeds.intervening.size()));
+    for (const GfMatrix4d &matrix : seeds.intervening)
+        for (int row = 0; row < 4; ++row)
+            for (int column = 0; column < 4; ++column)
+                hash = _FoldScalar(hash, matrix[row][column]);
+    for (char reset : seeds.interveningReset) hash = _FoldScalar(hash, reset);
     return hash;
 }
 
@@ -235,6 +259,11 @@ _FoldArray(uint64_t hash, const VtArray<T> &array)
     return hash;
 }
 
+// _FoldVtValue past the type name and its separator: a non-empty value's
+// storage.
+uint64_t
+_FoldVtValueAfterName(uint64_t hash, const VtValue &value);
+
 uint64_t
 _FoldVtValue(uint64_t hash, const VtValue &value)
 {
@@ -243,7 +272,45 @@ _FoldVtValue(uint64_t hash, const VtValue &value)
     }
     hash = _FoldString(hash, value.GetTypeName());
     hash = _FoldBytes(hash, "\x1f", 1);
+    return _FoldVtValueAfterName(hash, value);
+}
 
+// The type names one digest call folds, by type_info address, so a vector
+// of a few types spells each name once instead of once per sample. Local to
+// the call: two addresses of one type only spell its name twice.
+class _TypeNames {
+public:
+    const std::string &Of(const VtValue &value)
+    {
+        const std::type_info *type = &value.GetTypeid();
+        for (const auto &[known, name] : _names) {
+            if (known == type) {
+                return name;
+            }
+        }
+        _names.emplace_back(type, value.GetTypeName());
+        return _names.back().second;
+    }
+
+private:
+    std::vector<std::pair<const std::type_info *, std::string>> _names;
+};
+
+// _FoldVtValue with the type name from \p names: the same stream.
+uint64_t
+_FoldVtValue(uint64_t hash, const VtValue &value, _TypeNames *names)
+{
+    if (value.IsEmpty()) {
+        return _FoldBytes(hash, "empty", 5);
+    }
+    hash = _FoldString(hash, names->Of(value));
+    hash = _FoldBytes(hash, "\x1f", 1);
+    return _FoldVtValueAfterName(hash, value);
+}
+
+uint64_t
+_FoldVtValueAfterName(uint64_t hash, const VtValue &value)
+{
     // Bitwise for everything holding floating point: TfHash deliberately
     // conflates +0.0 and -0.0, but the evaluator need not evaluate them
     // equally, so the digest folds storage instead.
@@ -342,6 +409,86 @@ _FoldVtValue(uint64_t hash, const VtValue &value)
     return _FoldBytes(hash, "unhashable", 10);
 }
 
+// One transport leaf, by the holders RigExecSampleRevisionLeaf answers: a
+// holder tag, then its storage bitwise. Folds no type name, so it neither
+// allocates nor demangles; any other holder (none is sampled) takes the
+// general fold under a tag of its own.
+uint64_t
+_FoldLeafValue(uint64_t hash, const VtValue &value)
+{
+    if (value.IsEmpty()) {
+        return _FoldU64(hash, 0);
+    }
+#define _RIGEXEC_FOLD_LEAF(tag, type, expr)            \
+    if (value.IsHolding<type>()) {                     \
+        const type &held = value.UncheckedGet<type>(); \
+        hash = _FoldU64(hash, tag);                    \
+        return expr;                                   \
+    }
+    _RIGEXEC_FOLD_LEAF(1, VtIntArray, _FoldArray(hash, held));
+    _RIGEXEC_FOLD_LEAF(2, VtFloatArray, _FoldArray(hash, held));
+    _RIGEXEC_FOLD_LEAF(3, int, _FoldScalar(hash, held));
+    _RIGEXEC_FOLD_LEAF(4, float, _FoldScalar(hash, held));
+    _RIGEXEC_FOLD_LEAF(5, double, _FoldScalar(hash, held));
+    _RIGEXEC_FOLD_LEAF(6, bool, _FoldScalar(hash, held));
+    _RIGEXEC_FOLD_LEAF(7, GfVec3f, _FoldBytes(hash, held.data(), 3 * sizeof(float)));
+    _RIGEXEC_FOLD_LEAF(8, GfVec3d, _FoldBytes(hash, held.data(), 3 * sizeof(double)));
+    _RIGEXEC_FOLD_LEAF(9, GfVec3i, _FoldBytes(hash, held.data(), 3 * sizeof(int)));
+    _RIGEXEC_FOLD_LEAF(10, GfMatrix4d, _FoldBytes(hash, held.data(), 16 * sizeof(double)));
+    _RIGEXEC_FOLD_LEAF(11, VtArray<GfVec2f>, _FoldArray(hash, held));
+    _RIGEXEC_FOLD_LEAF(12, VtVec3fArray, _FoldArray(hash, held));
+    _RIGEXEC_FOLD_LEAF(13, VtDoubleArray, _FoldArray(hash, held));
+    // The token's own string, length first; an empty token reads no
+    // string at all.
+    _RIGEXEC_FOLD_LEAF(14, TfToken,
+                       held.IsEmpty()
+                           ? _FoldU64(hash, 0)
+                           : _FoldString(_FoldU64(hash, held.size()),
+                                         held.GetString()));
+#undef _RIGEXEC_FOLD_LEAF
+    return _FoldVtValue(_FoldU64(hash, 15), value);
+}
+
+// The transport values no sample covers that can move with the time
+// (RigExecFrameInputs::varyingLayoutRows, varyingRevisionLeaves): a tag, then
+// per list its count and per entry its coordinates and values. A coordinate
+// the vector does not hold folds a marker (RigExecControlStateDigestible
+// refuses it). Both lists empty fold nothing.
+uint64_t
+_FoldVaryingTransport(uint64_t hash, const RigExecFrameInputs &inputs)
+{
+    if (inputs.varyingLayoutRows.empty() &&
+        inputs.varyingRevisionLeaves.empty()) {
+        return hash;
+    }
+    constexpr uint64_t kAbsent = ~uint64_t(0);
+    hash = _FoldBytes(hash, "vary\x1f", 5);
+    hash = _FoldU64(hash,
+                    static_cast<uint64_t>(inputs.varyingLayoutRows.size()));
+    for (const uint32_t row : inputs.varyingLayoutRows) {
+        hash = _FoldU64(hash, row);
+        if (row >= inputs.layoutLeaves.size()) {
+            hash = _FoldU64(hash, kAbsent);
+            continue;
+        }
+        const std::vector<VtValue> &values = inputs.layoutLeaves[row];
+        hash = _FoldU64(hash, static_cast<uint64_t>(values.size()));
+        for (const VtValue &value : values) {
+            hash = _FoldLeafValue(hash, value);
+        }
+    }
+    hash = _FoldU64(hash,
+                    static_cast<uint64_t>(inputs.varyingRevisionLeaves.size()));
+    for (const auto &[row, key] : inputs.varyingRevisionLeaves) {
+        hash = _FoldU64(hash, (uint64_t(row) << 32) | uint64_t(key));
+        hash = row < inputs.revisionLeaves.size() &&
+                       key < inputs.revisionLeaves[row].size()
+                   ? _FoldLeafValue(hash, inputs.revisionLeaves[row][key])
+                   : _FoldU64(hash, kAbsent);
+    }
+    return hash;
+}
+
 // Payload bytes of one VtValue, by the bench's counting: array payloads and
 // scalar sizes; unknown types count the shell (the report says so).
 size_t
@@ -395,6 +542,48 @@ RigExecControlStateDigest(const RigExecFrameInputs &inputs)
     return RigExecControlStateDigest(inputs, noOverrides);
 }
 
+// The upstream block: a tag, the count, then per path (sorted, the last
+// entry of a path winning) its path and value type, then the value. Empty
+// folds nothing, so a frame with no upstream value keys as before.
+uint64_t
+_FoldUpstream(uint64_t hash, const std::vector<RigExecUpstreamValue> &upstream)
+{
+    if (upstream.empty()) {
+        return hash;
+    }
+    std::map<SdfPath, const RigExecUpstreamValue *> byPath;
+    for (const RigExecUpstreamValue &value : upstream) {
+        byPath[value.path] = &value;
+    }
+    hash = _FoldBytes(hash, "ups\x1f", 4);
+    hash = _FoldU64(hash, static_cast<uint64_t>(byPath.size()));
+    for (const auto &[path, value] : byPath) {
+        hash = _FoldString(hash, path.GetString());
+        hash = _FoldBytes(hash, "\x1f", 1);
+        hash = _FoldString(hash, value->value.GetTypeName());
+        hash = _FoldBytes(hash, "\x1f", 1);
+        // An array folds the hash its producer computed once
+        // (RigExecUpstreamFoldHash); one handed over without folds its
+        // bytes.
+        hash = value->value.IsArrayValued() && value->foldHash != 0
+                   ? _FoldU64(hash, value->foldHash)
+                   : _FoldVtValue(hash, value->value);
+    }
+    return hash;
+}
+
+uint64_t
+RigExecUpstreamFoldHash(const VtValue &value)
+{
+    if (!value.IsArrayValued()) {
+        return 0;
+    }
+    uint64_t hash = 1469598103934665603ull;
+    hash = _FoldString(hash, value.GetTypeName());
+    hash = _FoldVtValue(hash, value);
+    return hash != 0 ? hash : 1;
+}
+
 uint64_t
 _FoldOverrides(uint64_t hash,
                const std::vector<RigExecValueOverride> &overrides)
@@ -421,21 +610,156 @@ _FoldOverrides(uint64_t hash,
     return hash;
 }
 
+namespace {
+
+// A level-1's state after its path: the "src" tag and the path's text.
 uint64_t
-RigExecSampleDigest(const RigExecSampledInput &sample)
+_SamplePrefix(const SdfPath &path)
 {
     uint64_t hash = 1469598103934665603ull;
     hash = _FoldBytes(hash, "src\x1f", 4);
-    hash = _FoldString(hash, sample.path.GetString());
+    return _FoldString(hash, path.GetString());
+}
+
+// The rest of a level-1 from its path's state \p prefix.
+template <class Fold>
+uint64_t
+_SampleFromPrefix(uint64_t hash, const RigExecSampledInput &sample,
+                  Fold &&foldValue)
+{
     hash = _FoldBytes(hash, sample.hasValue ? "\x01" : "\x00", 1);
+    hash = _FoldBytes(hash, sample.valueBlocked ? "\x01" : "\x00", 1);
     if (sample.hasValue) {
-        hash = _FoldVtValue(hash, sample.value);
+        hash = foldValue(hash, sample.value);
     } else {
         // Valueless is a value of its own: only hasValue decides, so a
         // stale VtValue riding along cannot move the digest.
         hash = _FoldBytes(hash, "novalue", 7);
     }
     return hash;
+}
+
+// Whether \p sample is marked as copying an entry of \p inputs' static
+// samples table, and which (RigExecSampledInput::staticSample).
+bool
+_StaticEntry(const RigExecFrameInputs &inputs,
+             const RigExecSampledInput &sample, size_t *entry)
+{
+    const RigExecFrozenStaticSamples *table = inputs.staticSamples.get();
+    if (!table || sample.staticSample < 0 ||
+        size_t(sample.staticSample) >= table->samples.size() ||
+        table->level1.size() != table->samples.size() ||
+        table->digestible.size() != table->samples.size() ||
+        table->samples[size_t(sample.staticSample)].path != sample.path) {
+        return false;
+    }
+    *entry = size_t(sample.staticSample);
+    return true;
+}
+
+// One sample's level-1 under a recorded order: the static table's memo for
+// a sample copied from it, else folded from the recorded path state.
+uint64_t
+_OrderedLevel1(const RigExecFrameInputs &inputs,
+               const RigExecSampledInput &sample, uint64_t prefix,
+               _TypeNames *names)
+{
+    size_t entry = 0;
+    if (_StaticEntry(inputs, sample, &entry)) {
+        return inputs.staticSamples->level1[entry];
+    }
+    return _SampleFromPrefix(prefix, sample,
+                             [names](uint64_t hash, const VtValue &value) {
+                                 return _FoldVtValue(hash, value, names);
+                             });
+}
+
+}  // namespace
+
+uint64_t
+RigExecSampleDigest(const RigExecSampledInput &sample)
+{
+    return _SampleFromPrefix(_SamplePrefix(sample.path), sample,
+                             [](uint64_t hash, const VtValue &value) {
+                                 return _FoldVtValue(hash, value);
+                             });
+}
+
+bool
+RigExecSampleDigestible(const RigExecSampledInput &sample)
+{
+    return !sample.hasValue ||
+           _ClassifyVtValue(sample.value) != _ValueFold::Unhashable;
+}
+
+// `paths` is the recorded sequence; `order[j]` the index of the j-th
+// first-win path in sorted order and `prefix[j]` its _SamplePrefix;
+// `pathTextBytes` the text bytes of every path in `paths`.
+struct RigExecFrameDigestOrder {
+    std::vector<SdfPath> paths;
+    std::vector<uint32_t> order;
+    std::vector<uint64_t> prefix;
+    size_t pathTextBytes = 0;
+};
+
+std::shared_ptr<const RigExecFrameDigestOrder>
+RigExecRecordFrameDigestOrder(const std::vector<RigExecSampledInput> &values)
+{
+    auto order = std::make_shared<RigExecFrameDigestOrder>();
+    order->paths.reserve(values.size());
+    // First sample per path wins, sorted by path: the plain digest's map.
+    std::map<SdfPath, uint32_t> ordered;
+    for (size_t i = 0; i < values.size(); ++i) {
+        order->paths.push_back(values[i].path);
+        order->pathTextBytes += values[i].path.GetString().size();
+        ordered.emplace(values[i].path, uint32_t(i));
+    }
+    order->order.reserve(ordered.size());
+    order->prefix.reserve(ordered.size());
+    for (const auto &[path, index] : ordered) {
+        order->order.push_back(index);
+        order->prefix.push_back(_SamplePrefix(path));
+    }
+    return order;
+}
+
+bool
+RigExecFrameDigestOrderMatches(const RigExecFrameDigestOrder *order,
+                               const std::vector<RigExecSampledInput> &values)
+{
+    if (!order || order->paths.size() != values.size() ||
+        order->prefix.size() != order->order.size()) {
+        return false;
+    }
+    for (size_t i = 0; i < values.size(); ++i) {
+        if (order->paths[i] != values[i].path) {
+            return false;
+        }
+    }
+    return true;
+}
+
+size_t
+RigExecFrameDigestOrderPathTextBytes(const RigExecFrameDigestOrder *order)
+{
+    return order ? order->pathTextBytes : 0;
+}
+
+bool
+RigExecFrameDigestOrderHasPath(const RigExecFrameDigestOrder *order,
+                               const SdfPath &path)
+{
+    if (!order) {
+        return false;
+    }
+    // `order` lists the first-win paths ascending by SdfPath's operator<,
+    // the recording map's own comparison.
+    const auto found = std::lower_bound(
+        order->order.begin(), order->order.end(), path,
+        [order](uint32_t index, const SdfPath &key) {
+            return order->paths[index] < key;
+        });
+    return found != order->order.end() && order->paths[*found] == path;
 }
 
 uint64_t
@@ -459,8 +783,28 @@ RigExecControlStateDigestWithConstants(
 }
 
 uint64_t
+RigExecControlStateDigestWithConstants(
+    const RigExecFrameInputs &inputs,
+    const std::vector<RigExecValueOverride> &overrides,
+    const std::vector<RigExecUpstreamValue> &upstream,
+    uint64_t constantDigest)
+{
+    return RigExecFoldConstantDigest(
+        RigExecControlStateDigest(inputs, overrides, upstream),
+        constantDigest);
+}
+
+uint64_t
 RigExecControlStateDigest(const RigExecFrameInputs &inputs,
                          const std::vector<RigExecValueOverride> &overrides)
+{
+    return RigExecControlStateDigest(inputs, overrides, inputs.upstream);
+}
+
+uint64_t
+RigExecControlStateDigest(const RigExecFrameInputs &inputs,
+                         const std::vector<RigExecValueOverride> &overrides,
+                         const std::vector<RigExecUpstreamValue> &upstream)
 {
     // First sample per path wins, matching FrameInputs::Find; the survivors
     // sort by path so enqueue order cannot move the digest. Two levels --
@@ -468,16 +812,33 @@ RigExecControlStateDigest(const RigExecFrameInputs &inputs,
     // burst can memoize the time-invariant level-1s and fold only the rest
     // per frame. The digest always folds the served vector's contents: a
     // memoized level-1 names the value the sampler served, never a re-read.
-    std::map<SdfPath, const RigExecSampledInput *> ordered;
-    for (const RigExecSampledInput &sampled : inputs.values) {
-        ordered.emplace(sampled.path, &sampled);
-    }
     uint64_t hash = 1469598103934665603ull;
-    hash = _FoldU64(hash, static_cast<uint64_t>(ordered.size()));
-    for (const auto &kv : ordered) {
-        hash = _FoldU64(hash, RigExecSampleDigest(*kv.second));
+    const RigExecFrameDigestOrder *recorded = inputs.digestOrder.get();
+    if (RigExecFrameDigestOrderMatches(recorded, inputs.values)) {
+        // The order the sampler recorded for this path sequence: the same
+        // first-win paths in the same sorted order, each path's state
+        // precomputed.
+        _TypeNames names;
+        hash = _FoldU64(hash, static_cast<uint64_t>(recorded->order.size()));
+        for (size_t j = 0; j < recorded->order.size(); ++j) {
+            hash = _FoldU64(
+                hash, _OrderedLevel1(inputs, inputs.values[recorded->order[j]],
+                                     recorded->prefix[j], &names));
+        }
+    } else {
+        std::map<SdfPath, const RigExecSampledInput *> ordered;
+        for (const RigExecSampledInput &sampled : inputs.values) {
+            ordered.emplace(sampled.path, &sampled);
+        }
+        hash = _FoldU64(hash, static_cast<uint64_t>(ordered.size()));
+        for (const auto &kv : ordered) {
+            hash = _FoldU64(hash, RigExecSampleDigest(*kv.second));
+        }
     }
+    hash = _FoldHeadLeafConstants(hash, inputs);
+    hash = _FoldVaryingTransport(hash, inputs);
     hash = _FoldStageSeeds(hash, inputs.stageSeeds);
+    hash = _FoldUpstream(hash, upstream);
 
     return _FoldOverrides(hash, overrides);
 }
@@ -488,12 +849,23 @@ RigExecControlStateDigestWithBurstCache(
     const std::vector<RigExecValueOverride> &overrides,
     RigExecBurstSampleCache *cache)
 {
+    return RigExecControlStateDigestWithBurstCache(inputs, overrides,
+                                                   inputs.upstream, cache);
+}
+
+uint64_t
+RigExecControlStateDigestWithBurstCache(
+    const RigExecFrameInputs &inputs,
+    const std::vector<RigExecValueOverride> &overrides,
+    const std::vector<RigExecUpstreamValue> &upstream,
+    RigExecBurstSampleCache *cache)
+{
     // Anything the cache cannot serve falls back to the plain digest:
     // same answer, full cost. Overrides first: a differing list means a
     // differing vector shape and differing placement, which the recorded
     // order and the static maps do not describe.
     if (!cache || !cache->usable || overrides != cache->overrides) {
-        return RigExecControlStateDigest(inputs, overrides);
+        return RigExecControlStateDigest(inputs, overrides, upstream);
     }
     if (cache->sortedOrder.empty()) {
         // First frame of the burst: record the emission indices in
@@ -521,37 +893,67 @@ RigExecControlStateDigestWithBurstCache(
         // emits the same path sequence every frame (every Add guard is
         // validity-only), so this is a foreign vector, not a later frame.
         // The size check short-circuits first, so front/back are safe.
-        return RigExecControlStateDigest(inputs, overrides);
+        return RigExecControlStateDigest(inputs, overrides, upstream);
     }
+    // The level-1 of a sample one of the burst's maps served, from its memo;
+    // false for any other sample.
+    const auto burstLevel1 = [cache](const RigExecSampledInput &sample,
+                                     uint64_t *level1) {
+        if (sample.burstSampleRoute != RigExecBurstRouteStage &&
+            sample.burstSampleRoute != RigExecBurstRouteResolved) {
+            return false;
+        }
+        auto &memo = sample.burstSampleRoute == RigExecBurstRouteStage
+                         ? cache->staticStage
+                         : cache->staticResolved;
+        const auto found = memo.find(sample.path);
+        if (found == memo.end()) {
+            return false;
+        }
+        if (!found->second.digestValid) {
+            found->second.digest = RigExecSampleDigest(sample);
+            found->second.digestValid = true;
+        }
+        *level1 = found->second.digest;
+        return true;
+    };
     uint64_t hash = 1469598103934665603ull;
-    hash = _FoldU64(hash, static_cast<uint64_t>(cache->sortedOrder.size()));
-    for (size_t i : cache->sortedOrder) {
-        const RigExecSampledInput &sample = inputs.values[i];
-        uint64_t level1 = 0;
-        bool memoized = false;
-        if (sample.burstSampleRoute == RigExecBurstRouteStage ||
-            sample.burstSampleRoute == RigExecBurstRouteResolved) {
-            auto &memo = sample.burstSampleRoute == RigExecBurstRouteStage
-                             ? cache->staticStage
-                             : cache->staticResolved;
-            const auto found = memo.find(sample.path);
-            if (found != memo.end()) {
-                if (!found->second.digestValid) {
-                    found->second.digest = RigExecSampleDigest(sample);
-                    found->second.digestValid = true;
-                }
-                level1 = found->second.digest;
-                memoized = true;
+    const RigExecFrameDigestOrder *recorded = inputs.digestOrder.get();
+    if (RigExecFrameDigestOrderMatches(recorded, inputs.values)) {
+        // The sampler's recorded order is this vector's exact first-win sort,
+        // which the burst's order describes too; it also carries each path's
+        // state and the static table's level-1s.
+        _TypeNames names;
+        hash = _FoldU64(hash, static_cast<uint64_t>(recorded->order.size()));
+        for (size_t j = 0; j < recorded->order.size(); ++j) {
+            const RigExecSampledInput &sample =
+                inputs.values[recorded->order[j]];
+            uint64_t level1 = 0;
+            if (!burstLevel1(sample, &level1)) {
+                level1 = _OrderedLevel1(inputs, sample, recorded->prefix[j],
+                                        &names);
             }
+            hash = _FoldU64(hash, level1);
         }
-        if (!memoized) {
-            level1 = RigExecSampleDigest(sample);
+    } else {
+        hash = _FoldU64(hash,
+                        static_cast<uint64_t>(cache->sortedOrder.size()));
+        for (size_t i : cache->sortedOrder) {
+            const RigExecSampledInput &sample = inputs.values[i];
+            uint64_t level1 = 0;
+            if (!burstLevel1(sample, &level1)) {
+                level1 = RigExecSampleDigest(sample);
+            }
+            hash = _FoldU64(hash, level1);
         }
-        hash = _FoldU64(hash, level1);
     }
+    hash = _FoldHeadLeafConstants(hash, inputs);
+    // Per-frame values with no memo, folded as the plain digest folds them.
+    hash = _FoldVaryingTransport(hash, inputs);
     // The seeds fold fresh every frame, exactly as in the plain digest:
     // they are per-frame stage reads, so no static memo serves them.
     hash = _FoldStageSeeds(hash, inputs.stageSeeds);
+    hash = _FoldUpstream(hash, upstream);
     return _FoldOverrides(hash, overrides);
 }
 
@@ -559,6 +961,15 @@ uint64_t
 RigExecRefusalControlDigest(
     UsdTimeCode time, uint64_t stageEditSerial,
     const std::vector<RigExecValueOverride> &overrides)
+{
+    return RigExecRefusalControlDigest(time, stageEditSerial, overrides, {});
+}
+
+uint64_t
+RigExecRefusalControlDigest(
+    UsdTimeCode time, uint64_t stageEditSerial,
+    const std::vector<RigExecValueOverride> &overrides,
+    const std::vector<RigExecUpstreamValue> &upstream)
 {
     uint64_t hash = 1469598103934665603ull;
     // The domain tag: a refusal digest must never equal a sampled digest
@@ -576,6 +987,7 @@ RigExecRefusalControlDigest(
         const double value = time.GetValue();
         hash = _FoldScalar(hash, value);
     }
+    hash = _FoldUpstream(hash, upstream);
     return _FoldOverrides(hash, overrides);
 }
 
@@ -595,7 +1007,40 @@ RigExecControlStateDigestible(
         if (!sampled.hasValue) {
             continue;
         }
+        size_t entry = 0;
+        if (_StaticEntry(inputs, sampled, &entry)) {
+            if (!inputs.staticSamples->digestible[entry]) {
+                return false;
+            }
+            continue;
+        }
         if (_ClassifyVtValue(sampled.value) == _ValueFold::Unhashable) {
+            return false;
+        }
+    }
+    if (inputs.headLeafConstants && !inputs.headLeafConstants->digestible) {
+        return false;
+    }
+    for (const uint32_t row : inputs.varyingLayoutRows) {
+        if (row >= inputs.layoutLeaves.size()) {
+            return false;
+        }
+        for (const VtValue &value : inputs.layoutLeaves[row]) {
+            if (_ClassifyVtValue(value) == _ValueFold::Unhashable) {
+                return false;
+            }
+        }
+    }
+    for (const auto &[row, key] : inputs.varyingRevisionLeaves) {
+        if (row >= inputs.revisionLeaves.size() ||
+            key >= inputs.revisionLeaves[row].size() ||
+            _ClassifyVtValue(inputs.revisionLeaves[row][key]) ==
+                _ValueFold::Unhashable) {
+            return false;
+        }
+    }
+    for (const RigExecUpstreamValue &value : inputs.upstream) {
+        if (_ClassifyVtValue(value.value) == _ValueFold::Unhashable) {
             return false;
         }
     }
@@ -611,9 +1056,23 @@ bool
 RigExecRefusalControlDigestible(
     const std::vector<RigExecValueOverride> &overrides)
 {
-    // Time always folds; only the overrides can carry an unhashable type.
+    return RigExecRefusalControlDigestible(overrides, {});
+}
+
+bool
+RigExecRefusalControlDigestible(
+    const std::vector<RigExecValueOverride> &overrides,
+    const std::vector<RigExecUpstreamValue> &upstream)
+{
+    // Time always folds; only the overrides and the upstream values can
+    // carry an unhashable type.
     for (const RigExecValueOverride &o : overrides) {
         if (_ClassifyVtValue(o.value) == _ValueFold::Unhashable) {
+            return false;
+        }
+    }
+    for (const RigExecUpstreamValue &value : upstream) {
+        if (_ClassifyVtValue(value.value) == _ValueFold::Unhashable) {
             return false;
         }
     }

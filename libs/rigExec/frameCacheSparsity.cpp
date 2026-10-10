@@ -1,5 +1,7 @@
 // RigExec sparse cross-frame reuse. See frameCacheSparsity.h.
 #include "frameCacheSparsity.h"
+#include "bakedOpValues.h"
+#include "bakedProgramImpl.h"
 
 #include "pxr/base/tf/getenv.h"
 
@@ -49,7 +51,7 @@ RigExecStream0SparsityDecision()
 size_t
 RigExecRetainedFrameState::RetainedBytes() const
 {
-    return slotBytes + RigExecRetainedSourcesBytes(*this);
+    return RigExecRetainedSourcesBytes(*this);
 }
 
 namespace {
@@ -104,9 +106,21 @@ _ArrayBytes(const VtValue &value)
 size_t
 RigExecRetainedSourcesBytes(const RigExecRetainedFrameState &state)
 {
+    // The constant head leaves and the static samples (staticSamples) are
+    // tables every frame sampled under one program state shares, so no
+    // frame counts them; a retained frame keeps its state's tables alive.
     size_t total = sizeof(RigExecRetainedFrameState);
+    // A vector that still repeats its recorded digest order counts the
+    // order's path text total, recorded once: the same sum per sample.
+    const RigExecFrameDigestOrder *order = state.inputs.digestOrder.get();
+    const bool ordered =
+        RigExecFrameDigestOrderMatches(order, state.inputs.values);
+    if (ordered) {
+        total += RigExecFrameDigestOrderPathTextBytes(order);
+    }
     for (const RigExecSampledInput &sampled : state.inputs.values) {
-        total += sampled.path.GetString().size() + sizeof(bool);
+        total += ordered ? sizeof(bool)
+                         : sampled.path.GetString().size() + sizeof(bool);
         if (sampled.hasValue) {
             total += _ArrayBytes(sampled.value);
         }
@@ -114,6 +128,11 @@ RigExecRetainedSourcesBytes(const RigExecRetainedFrameState &state)
     for (const RigExecValueOverride &o : state.overrides) {
         total += o.prim.GetString().size() + o.computation.GetString().size() +
                  o.attribute.GetString().size() + _ArrayBytes(o.value);
+    }
+    // Upstream values as the samples: path bytes plus the payload, shared
+    // buffers counted per frame (an over-count, on the cap's safe side).
+    for (const RigExecUpstreamValue &value : state.inputs.upstream) {
+        total += value.path.GetString().size() + _ArrayBytes(value.value);
     }
     return total;
 }
@@ -128,7 +147,23 @@ RigExecSameSourceValue(const VtValue &a, bool aHas, const VtValue &b,
     if (!aHas) {
         return true;
     }
-    return a == b;
+    return RigExecExactSourceValueEqual(a, b);
+}
+
+bool
+RigExecSameUpstream(const std::vector<RigExecUpstreamValue> &a,
+                    const std::vector<RigExecUpstreamValue> &b)
+{
+    if (a.size() != b.size()) {
+        return false;
+    }
+    for (size_t i = 0; i < a.size(); ++i) {
+        if (a[i].path != b[i].path || a[i].foldHash != b[i].foldHash ||
+            !RigExecSameSourceValue(a[i].value, true, b[i].value, true)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 std::vector<RigExecControlId>
@@ -149,7 +184,8 @@ RigExecChangedControls(const RigExecRetainedFrameState &cached,
         const auto found = after.find(kv.first);
         if (found == after.end()) {
             changed.push_back(RigExecControlIdForPath(kv.first));
-        } else if (!RigExecSameSourceValue(kv.second->value,
+        } else if (kv.second->valueBlocked != found->second->valueBlocked ||
+                   !RigExecSameSourceValue(kv.second->value,
                                            kv.second->hasValue,
                                            found->second->value,
                                            found->second->hasValue)) {
@@ -159,6 +195,62 @@ RigExecChangedControls(const RigExecRetainedFrameState &cached,
     for (const auto &kv : after) {
         if (!before.count(kv.first)) {
             changed.push_back(RigExecControlIdForPath(kv.first));
+        }
+    }
+    // Layout sources have their own row/key routes: a same-path resolved
+    // ordinary sample must not shadow a raw layout read.
+    const auto &oldRows=cached.inputs.layoutLeaves;
+    const auto &newRows=requested.layoutLeaves;
+    const auto &oldPaths=cached.inputs.layoutSourcePaths;
+    const auto &newPaths=requested.layoutSourcePaths;
+    const size_t rowCount=std::max(oldRows.size(),newRows.size());
+    for(size_t row=0;row<rowCount;++row) {
+        const size_t oldCount=row<oldRows.size()?oldRows[row].size():0;
+        const size_t newCount=row<newRows.size()?newRows[row].size():0;
+        const size_t oldPathCount=row<oldPaths.size()?oldPaths[row].size():0;
+        const size_t newPathCount=row<newPaths.size()?newPaths[row].size():0;
+        const size_t count=std::max(std::max(oldCount,newCount),std::max(oldPathCount,newPathCount));
+        for(size_t key=0;key<count;++key) {
+            const bool haveOld=key<oldCount && key<oldPathCount;
+            const bool haveNew=key<newCount && key<newPathCount;
+            const bool same=haveOld && haveNew && oldPaths[row][key]==newPaths[row][key] &&
+                RigExecExactSourceValueEqual(oldRows[row][key],newRows[row][key]);
+            if(!same) {
+                if(key<oldPathCount) changed.push_back(RigExecControlIdForPath(oldPaths[row][key]));
+                if(key<newPathCount) changed.push_back(RigExecControlIdForPath(newPaths[row][key]));
+            }
+        }
+    }
+    // The constant head leaves, by key: one shared table is no change.
+    if (cached.inputs.headLeafConstants != requested.headLeafConstants) {
+        const auto constantsOf = [](const RigExecFrameInputs &inputs) {
+            std::map<SdfPath, const VtValue *> out;
+            if (const RigExecHeadLeafConstants *table =
+                    inputs.headLeafConstants.get()) {
+                for (size_t j = 0; j < table->keys.size(); ++j) {
+                    if (!table->varying[j]) {
+                        out.emplace(table->keys[j], &table->values[j]);
+                    }
+                }
+            }
+            return out;
+        };
+        const std::map<SdfPath, const VtValue *> was =
+            constantsOf(cached.inputs);
+        const std::map<SdfPath, const VtValue *> is = constantsOf(requested);
+        for (const auto &kv : was) {
+            const auto found = is.find(kv.first);
+            if (found == is.end() ||
+                !RigExecSameSourceValue(*kv.second, !kv.second->IsEmpty(),
+                                        *found->second,
+                                        !found->second->IsEmpty())) {
+                changed.push_back(RigExecControlIdForPath(kv.first));
+            }
+        }
+        for (const auto &kv : is) {
+            if (!was.count(kv.first)) {
+                changed.push_back(RigExecControlIdForPath(kv.first));
+            }
         }
     }
 
@@ -192,136 +284,71 @@ RigExecChangedControls(const RigExecRetainedFrameState &cached,
     return changed;
 }
 
-RigExecSparsePlan
-RigExecPlanSparseReuse(const RigExecOutputAffectedIndex &index,
-                       RigExecTaskListCache *memo,
-                       const RigExecRetainedFrameState &cached,
-                       uint64_t requestEpoch,
-                       const RigExecFrameInputs &requested,
-                       const std::vector<RigExecValueOverride> &requestedOverrides,
-                       const RigExecBakedClusterSet *affectingRequested)
+namespace {
+
+// Whether two samples list the same external inputs the control digest
+// folds (RigExecFrameInputs::varyingRevisionLeaves) with the same values.
+bool
+_SameVaryingRevisionLeaves(const RigExecFrameInputs &a,
+                           const RigExecFrameInputs &b)
 {
-    RigExecSparsePlan plan;
-    plan.clusters.Resize(index.ClusterCount());
-    if (index.Empty() || index.EpochDigest() != requestEpoch ||
-        cached.epochDigest != requestEpoch) {
-        return plan;
+    if (a.varyingRevisionLeaves != b.varyingRevisionLeaves) {
+        return false;
     }
-    if (cached.clusterCount != index.ClusterCount()) {
-        // The topology moved under a standing epoch: nothing memoized for
-        // this epoch can be trusted, and no plan can be drawn.
-        plan.topologyChanged = true;
-        if (memo) {
-            memo->InvalidateEpoch(requestEpoch);
-        }
-        return plan;
-    }
-    plan.changedControls = RigExecChangedControls(cached, requested,
-                                                  requestedOverrides);
-
-    RigExecBakedClusterSet dirty;
-    dirty.Resize(index.ClusterCount());
-    if (plan.changedControls.empty()) {
-        // §7's time rule, cross-frame: at a standing time nothing outside
-        // the compared sources can have moved, so the cone is empty and the
-        // retained pose is the answer. At a moved time the always-dirty
-        // steps re-run -- their external reads are functions of time the
-        // source vector does not name -- and their cones carry the rest.
-        if (requested.time != cached.inputs.time) {
-            dirty.Union(index.Always());
-            dirty.Union(index.Varying());
-        }
-    } else if (memo) {
-        for (const RigExecControlId &control : plan.changedControls) {
-            RigExecBakedClusterSet selected;
-            if (memo->Lookup(requestEpoch, control, &selected)) {
-                plan.memoUsed = true;
-            } else {
-                selected = index.AffectedByControls({control});
-                memo->Store(requestEpoch, control, selected);
-            }
-            dirty.Union(selected);
-        }
-        if (requested.time != cached.inputs.time) {
-            dirty.Union(index.Always());
-            dirty.Union(index.Varying());
-        }
-    } else {
-        dirty = index.AffectedByControls(plan.changedControls);
-        if (requested.time != cached.inputs.time) {
-            dirty.Union(index.Always());
-            dirty.Union(index.Varying());
+    const auto leaf = [](const RigExecFrameInputs &inputs, uint32_t row,
+                         uint32_t key) -> const VtValue * {
+        return row < inputs.revisionLeaves.size() &&
+                       key < inputs.revisionLeaves[row].size()
+                   ? &inputs.revisionLeaves[row][key]
+                   : nullptr;
+    };
+    for (const auto &[row, key] : a.varyingRevisionLeaves) {
+        const VtValue *was = leaf(a, row, key);
+        const VtValue *is = leaf(b, row, key);
+        if (!was || !is ||
+            !RigExecSameSourceValue(*was, !was->IsEmpty(), *is,
+                                    !is->IsEmpty())) {
+            return false;
         }
     }
-
-    // dirty ∩ affecting(requested): a control that moved but reaches
-    // nothing the request reads is still a hit.
-    // Standing overrides dirty their cones even when no control value
-    // moved between the retained frame and the request: the executor
-    // dirties override-step clusters while an override stands (plan 2.1
-    // planner/executor parity), so reuse must re-run them too.
-    if (!requestedOverrides.empty()) {
-        dirty.Union(index.Override());
-    }
-    RigExecBakedClusterSet closed = dirty;
-    if (affectingRequested) {
-        closed = RigExecIntersectClusterSets(dirty, *affectingRequested);
-    }
-    if (!closed.Any()) {
-        plan.verdict = RigExecSparseVerdict::Hit;
-        return plan;
-    }
-    plan.verdict = RigExecSparseVerdict::Partial;
-    plan.clusters = closed;
-    return plan;
+    return true;
 }
 
-RigExecSparseExecution
-RigExecRunSparsePlan(const RigExecSparsePlan &plan,
-                     const std::vector<int> &clusterOrder,
-                     RigExecClusterRunner runner)
+}  // namespace
+
+bool
+RigExecCanReuseRetainedPose(const RigExecOutputAffectedIndex &index,
+                           const RigExecRetainedFrameState &cached,
+                           uint64_t requestEpoch,
+                           const RigExecFrameInputs &requested,
+                           const std::vector<RigExecValueOverride> &overrides)
 {
-    RigExecSparseExecution execution;
-    execution.completed = false;
-    if (plan.verdict == RigExecSparseVerdict::Miss || !runner) {
-        return execution;
+    // The external inputs the control digest folds have no control id the
+    // index routes, so any difference among them misses, like upstream.
+    if (index.Empty() || index.EpochDigest() != requestEpoch ||
+        cached.epochDigest != requestEpoch ||
+        cached.clusterCount != index.ClusterCount() ||
+        !RigExecSameUpstream(cached.inputs.upstream, requested.upstream) ||
+        !_SameVaryingRevisionLeaves(cached.inputs, requested)) {
+        return false;
     }
-    // A runner executes one cluster against the slots its predecessors
-    // left, so a planned cluster has to run after every planned
-    // predecessor. Cluster ids number level-packing bins, not dependencies
-    // (a cluster may have a higher-numbered predecessor), so the walk is the
-    // program's topological order filtered to the plan -- never increasing
-    // id. The order is Build's, and an order that does not cover the plan
-    // (a foreign or cyclic clustering) runs nothing rather than a subset.
-    const size_t planBits = plan.clusters.words.size() * 64;
-    const auto planned = [&plan, planBits](int cluster) {
-        return cluster >= 0 && size_t(cluster) < planBits &&
-               plan.clusters.Test(cluster);
+    const auto completeLayouts=[](const RigExecFrameInputs &inputs) {
+        if(inputs.layoutLeaves.size()!=inputs.layoutSourcePaths.size()) return false;
+        for(size_t row=0;row<inputs.layoutLeaves.size();++row) {
+            if(inputs.layoutLeaves[row].size()!=inputs.layoutSourcePaths[row].size()) return false;
+            for(const auto &path:inputs.layoutSourcePaths[row]) if(path.IsEmpty()) return false;
+        }
+        return true;
     };
-    size_t covered = 0;
-    for (const int cluster : clusterOrder) {
-        if (planned(cluster)) {
-            ++covered;
-        }
+    if(!completeLayouts(cached.inputs) || !completeLayouts(requested)) return false;
+    auto dirty = index.AffectedByControls(
+        RigExecChangedControls(cached, requested, overrides));
+    if (requested.time != cached.inputs.time) {
+        dirty.Union(index.Always());
+        dirty.Union(index.Varying());
     }
-    if (covered != plan.clusters.Count()) {
-        return execution;
-    }
-    // Hit executes the empty set and completes: zero work is the answer,
-    // not an unevaluated frame.
-    execution.completed = true;
-    for (const int cluster : clusterOrder) {
-        if (!planned(cluster)) {
-            continue;
-        }
-        if (!runner(cluster)) {
-            execution.completed = false;
-            return execution;
-        }
-        ++execution.executed;
-        execution.executedClusters.push_back(cluster);
-    }
-    return execution;
+    if (!overrides.empty()) dirty.Union(index.Override());
+    return !dirty.Any();
 }
 
 RigExecEntryProvenance
@@ -370,17 +397,6 @@ RigExecCaptureRetainedState(
     state.clusterCount = clusterCount;
     state.constantDigest = constantDigest;
     return state;
-}
-
-RigExecClusterRunner
-RigExecMakeClusterRunner(RigExecClusterRebindContext context)
-{
-    return [context](int cluster) {
-        if (!context.program || !context.runCluster) {
-            return false;
-        }
-        return context.runCluster(*context.program, cluster);
-    };
 }
 
 void
@@ -472,7 +488,7 @@ RigExecVerifyHitWithLive(const RigExecRigPose &cached,
     }
     RigExecRigPose out;
     RigExecComparePoses(run, cached, &out);
-    verdict.mismatches = out.bakedParityMismatches;
+    verdict.mismatches = out.comparisonMismatches;
     verdict.match = verdict.mismatches == 0;
     if (verdict.match) {
         return verdict;

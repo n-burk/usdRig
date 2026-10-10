@@ -446,6 +446,109 @@ void TestRuntimeTemplateParity()
     }
 }
 
+void TestWrinkleSplitMatchesSingleCall()
+{
+    // H1: the build/apply split answers the single-call kernel
+    // bit-identically across bending rules, and verdicts invalid
+    // topology the same way.
+    const Mesh mesh;
+    const auto posed = Compress(mesh.rest);
+    for (const auto topology : {RigExecWrinkleTopology::Cloth, RigExecWrinkleTopology::SurfaceStruts}) {
+        for (int neighborDistance : {1, 2, 3}) {
+            RigExecWrinkleSettings settings;
+            settings.topology = topology;
+            settings.neighborDistance = neighborDistance;
+            settings.smoothingIterations = 1;
+            RigExecWrinkleMesh cached;
+            CHECK(RigExecBuildWrinkleMesh(mesh.rest.size(), mesh.counts,
+                                          mesh.indices, topology,
+                                          neighborDistance, &cached));
+            CHECK(cached.Covers(mesh.rest.size(), mesh.counts, mesh.indices,
+                                topology, neighborDistance));
+            auto split = posed, single = posed;
+            const bool splitOk =
+                RigExecApplyWrinkleWithTopology<GfVec3f, GfVec3d>(
+                    &split, mesh.rest, mesh.counts, mesh.indices,
+                    settings, cached);
+            CHECK(splitOk);
+            CHECK(RigExecApplyWrinkle(
+                &single, mesh.rest, mesh.counts, mesh.indices, settings));
+            CHECK(SameBits(split, single));
+            auto entry = posed;
+            CHECK(RigExecApplyWrinkle(&entry, mesh.rest, mesh.counts,
+                                      mesh.indices, settings, &cached));
+            CHECK(SameBits(entry, single));
+        }
+    }
+    // The runtime instantiation splits the same way.
+    {
+        RigExecWrinkleSettings settings;
+        RigExecWrinkleMesh cached;
+        CHECK(RigExecBuildWrinkleMesh(mesh.rest.size(), mesh.counts,
+                                      mesh.indices, settings.topology,
+                                      settings.neighborDistance, &cached));
+        std::vector<RrVec3f> rest, split, single;
+        for (const auto &p : mesh.rest) rest.emplace_back(p[0], p[1], p[2]);
+        for (const auto &p : posed) {
+            split.emplace_back(p[0], p[1], p[2]);
+            single.emplace_back(p[0], p[1], p[2]);
+        }
+        const bool rrSplitOk =
+            RigExecApplyWrinkleWithTopology<RrVec3f, RrVec3d>(
+                &split, rest, mesh.counts, mesh.indices, settings,
+                cached);
+        CHECK(rrSplitOk);
+        const bool rrSingleOk = RigExecApplyWrinkleKernel<RrVec3f, RrVec3d>(
+            &single, rest, mesh.counts, mesh.indices, settings);
+        CHECK(rrSingleOk);
+        CHECK(split.size() == single.size());
+        for (size_t i = 0; i < single.size(); ++i)
+            CHECK(std::memcmp(split[i].data(), single[i].data(), 3 * sizeof(float)) == 0);
+    }
+    // Invalid topology: the build rejects, and the apply fails closed
+    // on a mismatched entry -- with the points untouched in every case.
+    const std::vector<GfVec3f> rest{{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}};
+    const std::vector<int> counts{4}, indices{0, 1, 2, 3};
+    const auto quad = Compress(rest);
+    RigExecWrinkleMesh good;
+    CHECK(RigExecBuildWrinkleMesh(4, counts, indices,
+                                  RigExecWrinkleTopology::Cloth, 2, &good));
+    for (const std::vector<int> badCounts :
+         {std::vector<int>{2}, {3}, {5}}) {
+        RigExecWrinkleMesh bad;
+        CHECK(!RigExecBuildWrinkleMesh(4, badCounts, indices,
+                                       RigExecWrinkleTopology::Cloth, 2,
+                                       &bad));
+        CHECK(!bad.valid);
+    }
+    for (const std::vector<int> badIndices :
+         {std::vector<int>{0, 1, 2, 2}, {0, 1, 2, 4}, {0, 1, 2, 3, 0}}) {
+        RigExecWrinkleMesh bad;
+        CHECK(!RigExecBuildWrinkleMesh(4, counts, badIndices,
+                                       RigExecWrinkleTopology::Cloth, 2,
+                                       &bad));
+        CHECK(!bad.valid);
+    }
+    {
+        auto actual = quad;
+        const bool mismatchOk =
+            RigExecApplyWrinkleWithTopology<GfVec3f, GfVec3d>(
+                &actual, rest, counts, {0, 1, 3, 2},
+                RigExecWrinkleSettings(), good);
+        CHECK(!mismatchOk);
+        CHECK(SameBits(actual, quad));
+        const RigExecWrinkleMesh empty;
+        const bool emptyOk =
+            RigExecApplyWrinkleWithTopology<GfVec3f, GfVec3d>(
+                &actual, rest, counts, indices,
+                RigExecWrinkleSettings(), empty);
+        CHECK(!emptyOk);
+        CHECK(SameBits(actual, quad));
+        CHECK(!RigExecApplyWrinkle(&actual, rest, counts, {0, 1, 2, 2}));
+        CHECK(SameBits(actual, quad));
+    }
+}
+
 } // namespace
 
 int main()
@@ -460,6 +563,7 @@ int main()
         TestScaleOrientationAndDegenerate();
         TestAtomicValidation();
         TestRuntimeTemplateParity();
+        TestWrinkleSplitMatchesSingleCall();
         std::cout << "Wrinkle math tests passed\n";
         return 0;
     } catch (const std::exception &error) {

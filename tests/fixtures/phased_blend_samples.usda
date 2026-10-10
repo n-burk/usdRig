@@ -1,0 +1,147 @@
+#usda 1.0
+(
+    """
+    Test fixture: dense blend samples whose points carry a read phase. Blend
+    deforms Body.points by two samples of Shape.points, which two matrix
+    movers lift in walk order: LiftA (driven by CtlA's animated ty), then
+    Blend, then LiftB (driven by CtlB's animated tx). The `final` sample is
+    bound to Shape's published points, after both lifts; the `preceding`
+    sample to the version LiftA left, the last writer of the shape before
+    the blend. At frame 1 both lifts are identity, so the bound versions
+    equal the authored shape; at every later frame they move with the
+    controls. Playback computes each sample from its bound version on every
+    run rather than replaying the points of the bake's run, so a binary
+    baked at frame 1 must follow live baked at frames 3 and 7 and under a
+    drag of CtlB. testRigExecPhaseBindings holds the program's bindings to
+    the dynamic walk on the same rig.
+    """
+    defaultPrim = "Asset"
+    endTimeCode = 9
+    startTimeCode = 1
+)
+
+def Xform "Asset"
+{
+    def RigExecRoot "Rig"
+    {
+        def Scope "Controls"
+        {
+            def RigExecControl "CtlA" (prepend apiSchemas = ["RigExecControlAPI"])
+            {
+                double avars:ty = 0
+                double avars:ty.spline = {
+                    1: 0; pre (0, 0); post linear,
+                    9: 2; post linear,
+                }
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+            }
+            def RigExecControl "CtlB" (prepend apiSchemas = ["RigExecControlAPI"])
+            {
+                double avars:tx = 0
+                double avars:tx.spline = {
+                    1: 0; pre (0, 0); post linear,
+                    9: 1; post linear,
+                }
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+            }
+        }
+        def Scope "Solvers"
+        {
+            def RigExecFkChain "ChainA"
+            {
+                rel rigExec:controls = </Asset/Rig/Controls/CtlA>
+                rel rigExec:joints = </Asset/Rig/Joints/A>
+            }
+            def RigExecFkChain "ChainB"
+            {
+                rel rigExec:controls = </Asset/Rig/Controls/CtlB>
+                rel rigExec:joints = </Asset/Rig/Joints/B>
+            }
+        }
+        def Scope "Joints"
+        {
+            def RigExecJoint "A"
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+            }
+            def RigExecJoint "B"
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+            }
+        }
+        def Scope "Movers"
+        {
+            # Walked last child first: LiftA, then Blend, then LiftB.
+            reorder nameChildren = ["LiftB", "Blend", "LiftA"]
+            def RigExecMatrixMover "LiftB" (prepend apiSchemas = ["RigExecMoverAPI"])
+            {
+                rel rigExec:transform = </Asset/Rig/Joints/B> (rigExecReadPhase = "final")
+                rel rigExec:weightObject = </Asset/Rig/Weights/ShapeW>
+                rel rigExec:moves = </Asset/Geom/Shape.points>
+            }
+            def RigExecBlendShapeMover "Blend" (prepend apiSchemas = ["RigExecMoverAPI"])
+            {
+                rel rigExec:moves = </Asset/Geom/Body.points>
+                rel rigExec:blendInputs = [</Asset/Rig/BlendInputs/Final>, </Asset/Rig/BlendInputs/Preceding>]
+                rel rigExec:weightObject = </Asset/Rig/Weights/BodyW>
+            }
+            def RigExecMatrixMover "LiftA" (prepend apiSchemas = ["RigExecMoverAPI"])
+            {
+                rel rigExec:transform = </Asset/Rig/Joints/A> (rigExecReadPhase = "final")
+                rel rigExec:weightObject = </Asset/Rig/Weights/ShapeW>
+                rel rigExec:moves = </Asset/Geom/Shape.points>
+            }
+        }
+        def Scope "BlendInputs"
+        {
+            def RigExecBlendInput "Final"
+            {
+                float inputs:weight = 0.5
+                rel rigExec:samples = </Asset/Rig/BlendInputs/Final/Full>
+                def RigExecBlendSample "Full"
+                {
+                    float rigExec:activation = 1
+                    rel rigExec:targetPoints = </Asset/Geom/Shape.points> (rigExecReadPhase = "final")
+                }
+            }
+            def RigExecBlendInput "Preceding"
+            {
+                float inputs:weight = 0.25
+                rel rigExec:samples = </Asset/Rig/BlendInputs/Preceding/Full>
+                def RigExecBlendSample "Full"
+                {
+                    float rigExec:activation = 1
+                    rel rigExec:targetPoints = </Asset/Geom/Shape.points> (rigExecReadPhase = "preceding")
+                }
+            }
+        }
+        def Scope "Weights"
+        {
+            def RigExecStaticWeight "ShapeW"
+            {
+                uniform float rigExec:defaultWeight = 1
+                uniform token rigExec:rangePolicy = "strict"
+                uniform token rigExec:representation = "constant"
+                rel rigExec:weightTarget = </Asset/Geom/Shape.points>
+            }
+            def RigExecStaticWeight "BodyW"
+            {
+                uniform float rigExec:defaultWeight = 1
+                uniform token rigExec:rangePolicy = "strict"
+                uniform token rigExec:representation = "constant"
+                rel rigExec:weightTarget = </Asset/Geom/Body.points>
+            }
+        }
+    }
+    def Scope "Geom"
+    {
+        def Points "Body"
+        {
+            point3f[] points = [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)]
+        }
+        def Points "Shape"
+        {
+            point3f[] points = [(0, 0, 1), (1, 0, 1), (1, 1, 1), (0, 1, 1)]
+        }
+    }
+}

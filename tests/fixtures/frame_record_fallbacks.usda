@@ -1,0 +1,215 @@
+#usda 1.0
+(
+    """
+    Test fixture: AtPrim read phases on rigExec:transform resolved through
+    the walk's frame records. Three constraints revise the joint X in walk
+    order: C1 (position), C2 (rotation) and C3 (position). C1 and C2 sit in
+    Group, C2 running last there; C3 runs after Group. C2's inputs:enabled
+    is keyed false at frame 4, and its disabled exit still records X, as it
+    stood after C1. Matrix movers read X's matrix at:
+      R1  C1                      after C1
+      R2  Group (resolves to C2)  after C2; its list also holds C1's record,
+                                  because R1 names it
+      R4  C2                      after C2
+      R5  Constrain (C3)          after C3
+      RB  base                    the base matrix
+    R2's defaultWeight is connected to Dial, so a drag on Dial moves R2 and
+    no other reader; Late is C3's source, so a drag on it re-runs C3's
+    record alone. testRigExecPhaseBindings holds dynamic and baked to each
+    other and to the dynamic walk's store at frames 1, 4 and 8 and under
+    both drags (also with CONE_VERIFY), checks which record steps each drag
+    re-runs, checks the record lists with and without R1, and rebinds one
+    record to show the fold reads the records; testRigExecFrozenContext
+    holds frozen to both.
+    """
+    defaultPrim = "RecordAsset"
+    endTimeCode = 8
+    startTimeCode = 1
+    upAxis = "Y"
+)
+
+def Xform "RecordAsset"
+{
+    def RigExecRoot "Rig"
+    {
+        def Scope "Controls"
+        {
+            def RigExecControl "Lead" (
+                prepend apiSchemas = ["RigExecControlAPI"]
+            )
+            {
+                double avars:tx = 0
+                double avars:tx.timeSamples = {
+                    1: 0.5,
+                    8: 2,
+                }
+                double avars:ty = 1
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (1, 0, 0, 1) )
+            }
+
+            def RigExecControl "Turn" (
+                prepend apiSchemas = ["RigExecControlAPI"]
+            )
+            {
+                double avars:ry = 0
+                double avars:ry.timeSamples = {
+                    1: 10,
+                    8: 60,
+                }
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+            }
+
+            def RigExecControl "Late" (
+                prepend apiSchemas = ["RigExecControlAPI"]
+            )
+            {
+                double avars:tz = 0
+                double avars:tz.timeSamples = {
+                    1: 0,
+                    8: -1.5,
+                }
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 3, 1) )
+            }
+
+            def RigExecControl "Dial" (
+                prepend apiSchemas = ["RigExecControlAPI"]
+            )
+            {
+                double avars:amount = 1
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+            }
+        }
+
+        def Scope "Joints"
+        {
+            def RigExecJoint "X"
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0.5, 0, 1) )
+            }
+        }
+
+        # The last child runs first: Constrain before Geometry, Group before
+        # C3, and C1 before C2.
+        def Scope "Movers"
+        {
+            def Scope "Geometry"
+            {
+                def RigExecMatrixMover "R1" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    rel rigExec:moves = </RecordAsset/Geom/P1.points>
+                    rel rigExec:transform = </RecordAsset/Rig/Joints/X> (
+                        rigExecReadPhase = "/RecordAsset/Rig/Movers/Constrain/Group/C1"
+                    )
+                }
+
+                def RigExecMatrixMover "R2" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    float inputs:defaultWeight = 1
+                    float inputs:defaultWeight.connect = </RecordAsset/Rig/Controls/Dial.avars:amount>
+                    rel rigExec:moves = </RecordAsset/Geom/P2.points>
+                    rel rigExec:transform = </RecordAsset/Rig/Joints/X> (
+                        rigExecReadPhase = "/RecordAsset/Rig/Movers/Constrain/Group"
+                    )
+                }
+
+                def RigExecMatrixMover "R4" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    rel rigExec:moves = </RecordAsset/Geom/P4.points>
+                    rel rigExec:transform = </RecordAsset/Rig/Joints/X> (
+                        rigExecReadPhase = "/RecordAsset/Rig/Movers/Constrain/Group/C2"
+                    )
+                }
+
+                def RigExecMatrixMover "R5" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    rel rigExec:moves = </RecordAsset/Geom/P5.points>
+                    rel rigExec:transform = </RecordAsset/Rig/Joints/X> (
+                        rigExecReadPhase = "/RecordAsset/Rig/Movers/Constrain"
+                    )
+                }
+
+                def RigExecMatrixMover "RB" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    rel rigExec:moves = </RecordAsset/Geom/PB.points>
+                    rel rigExec:transform = </RecordAsset/Rig/Joints/X> (
+                        rigExecReadPhase = "base"
+                    )
+                }
+            }
+
+            def Scope "Constrain"
+            {
+                def RigExecPositionConstraint "C3" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    rel rigExec:moves = </RecordAsset/Rig/Joints/X>
+                    rel rigExec:sources = </RecordAsset/Rig/Controls/Late>
+                }
+
+                def Scope "Group"
+                {
+                    def RigExecRotationConstraint "C2" (
+                        prepend apiSchemas = ["RigExecMoverAPI"]
+                    )
+                    {
+                        bool inputs:enabled = 1
+                        bool inputs:enabled.timeSamples = {
+                            1: 1,
+                            4: 0,
+                            5: 1,
+                        }
+                        rel rigExec:moves = </RecordAsset/Rig/Joints/X>
+                        rel rigExec:sources = </RecordAsset/Rig/Controls/Turn>
+                    }
+
+                    def RigExecPositionConstraint "C1" (
+                        prepend apiSchemas = ["RigExecMoverAPI"]
+                    )
+                    {
+                        rel rigExec:moves = </RecordAsset/Rig/Joints/X>
+                        rel rigExec:sources = </RecordAsset/Rig/Controls/Lead>
+                    }
+                }
+            }
+        }
+    }
+
+    def Scope "Geom"
+    {
+        def Points "P1"
+        {
+            point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1)]
+        }
+
+        def Points "P2"
+        {
+            point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1)]
+        }
+
+        def Points "P4"
+        {
+            point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1)]
+        }
+
+        def Points "P5"
+        {
+            point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1)]
+        }
+
+        def Points "PB"
+        {
+            point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1)]
+        }
+    }
+}

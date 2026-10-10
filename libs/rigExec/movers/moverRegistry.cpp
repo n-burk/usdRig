@@ -1,6 +1,8 @@
 // RigExec mover registry storage and shared stage-reading helpers.
 #include "moverRegistry.h"
 #include "moverExecCommon.h"
+#include "../moverGraph.h"
+#include "rigExecGraph/geometryProgram.h"
 
 #include "pxr/base/plug/plugin.h"
 #include "pxr/base/plug/registry.h"
@@ -88,19 +90,21 @@ RigExecRegisterMoverHandler(RigExecMoverHandler handler, std::string *error)
         handler.resolveOp(TfToken()) == RigExecRevisionOp::External;
     if (external || handler.assembleExternal || handler.applyExternal) {
         if (!external || handler.domain != RigExecMoverDomain::Points ||
-            !handler.assembleExternal || !handler.applyExternal) {
+            !handler.declareExternalInputs || !handler.compileScene || !handler.assembleExternal || !handler.applyExternal) {
             return fail(std::string(handler.schemaType) +
                 ": external movers require the External points operation "
-                "and both assembleExternal and applyExternal callbacks");
+                "and declareExternalInputs, compileScene, assembleExternal and applyExternal callbacks");
         }
         if (!handler.oracle) {
             handler.hasScalarOracle = false;
         }
     }
+    const bool applies = handler.runtimeKernel.apply ||
+                         handler.runtimeKernel.applyWithProviders;
     if ((handler.encodeExternal || handler.runtimeKernel.prepare ||
-         handler.runtimeKernel.apply) &&
-        (!external || (handler.runtimeKernel.prepare != nullptr) !=
-                          (handler.runtimeKernel.apply != nullptr))) {
+         applies) &&
+        (!external ||
+         (handler.runtimeKernel.prepare != nullptr) != applies)) {
         return fail(std::string(handler.schemaType) +
             ": .rigexec export and playback callbacks belong to external "
             "movers, and a playback kernel needs both prepare and apply");
@@ -228,27 +232,30 @@ RigExecPhasedConsumerValue(const VtValue &chainValue,
 
 void
 RigExecReadPhasedPoints(
-    const UsdStageRefPtr &stage,
-    const RigExecChainSnapshots &snapshots,
-    UsdTimeCode time,
-    const UsdPrim &prim,
+    const RigExecMoverOracleContext &ctx,
     const char *relName,
     const SdfPath &pointsPath,
-    const SdfPath &readerMover,
     VtVec3fArray *out)
 {
-    const RigExecReadPhase phase = RigExecPhaseForInput(prim, relName);
+    const RigExecReadPhase phase = RigExecPhaseForInput(ctx.prim, relName);
+    // The reader's own record is made after it reads, so no snapshot holds
+    // `preceding` on its own chain; the points entering it are that value.
+    if (phase.kind == RigExecReadPhaseKind::Preceding &&
+        pointsPath == ctx.target && ctx.entering) {
+        *out = *ctx.entering;
+        return;
+    }
     if (!phase.IsBase()) {
-        if (const VtValue *v = snapshots.Lookup(
-                pointsPath, phase, readerMover)) {
+        if (const VtValue *v = ctx.phasedPoints ? ctx.phasedPoints(
+                pointsPath, phase, ctx.moverPath) : nullptr) {
             if (v->IsHolding<VtVec3fArray>()) {
                 *out = v->UncheckedGet<VtVec3fArray>();
                 return;
             }
         }
     }
-    if (const UsdAttribute a = stage->GetAttributeAtPath(pointsPath)) {
-        a.Get(out, time);
+    if (const RigExecOracleAttribute a = ctx.stage->GetAttributeAtPath(pointsPath)) {
+        a.Get(out, ctx.time);
     }
 }
 
@@ -408,31 +415,7 @@ RigExecResolveBlendSampleLayout(
     offsetsAttr.Get(&offsets);
     indicesAttr.Get(&indices);
 
-    // An empty pointIndices means the offsets are dense and parallel to the
-    // base points -- UsdSkelBlendShape's own convention, kept rather than
-    // invented so an authored blend shape from anywhere else reads correctly.
-    if (!indices.empty()) {
-        if (indices.size() != offsets.size()) {
-            return cacheable;   // stable and wrong; cached as invalid
-        }
-        for (int index : indices) {
-            if (index < 0 || size_t(index) >= pointCount) {
-                return cacheable;
-            }
-        }
-    } else if (!offsets.empty() && offsets.size() != pointCount) {
-        return cacheable;
-    }
-    for (const GfVec3f &offset : offsets) {
-        if (!std::isfinite(offset[0]) || !std::isfinite(offset[1]) ||
-            !std::isfinite(offset[2])) {
-            return cacheable;
-        }
-    }
-
-    layout->offsets.assign(offsets.begin(), offsets.end());
-    layout->indices.assign(indices.begin(), indices.end());
-    layout->valid = true;
+    RigExecBuildGeometryBlendLayout(offsets,indices,pointCount,layout);
     return cacheable;
 }
 

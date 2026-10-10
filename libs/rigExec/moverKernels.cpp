@@ -5,7 +5,7 @@
 // computePointFrameArray. The geometry writer callbacks that used to live
 // here belonged to compiler-authored hidden application prims; those, the
 // compiler, and its derived stage are all gone -- point chains evaluate
-// through the in-memory RigExecMoverGraph instead.
+// through the shared typed operation graph.
 #include "types.h"
 #include "moverGraph.h"
 #include "frameExtraction.h"
@@ -153,6 +153,19 @@ TF_DEFINE_PRIVATE_TOKENS(
 );
 
 namespace {
+// Immutable worker operands are constructed before computation dispatch.
+const TfToken _workerConstant("constant");
+const TfToken _workerStrict("strict");
+const TfToken _workerDense("dense");
+const TfToken _workerClamp("clamp");
+const TfToken _workerSphereType("RigExecSphereWeight");
+const TfToken _workerPlaneType("RigExecPlaneWeight");
+const TfToken _workerYAxis("y");
+const TfToken _workerUnbounded("unbounded");
+const TfToken _workerBounded("bounded");
+const TfToken _workerCurveType("RigExecCurveWeight");
+const TfToken _workerMultiply("multiply");
+
 
 // Weight objects (spec §4.1).
 // The packet arithmetic lives in weightPackets.h, not here: the baked
@@ -203,8 +216,8 @@ _Scalar(const VdfContext &ctx, const TfToken &input, float fallback)
 RigExecWeightPacket
 _BuildStaticWeightPacket(const VdfContext &ctx)
 {
-    static const TfToken constant("constant");
-    static const TfToken strict("strict");
+    const TfToken &constant = _workerConstant;
+    const TfToken &strict = _workerStrict;
     rigExec::RigExecStaticWeightInputs inputs;
     const TfToken *repr =
         ctx.GetInputValuePtr<TfToken>(_tokens->representation);
@@ -226,8 +239,8 @@ _BuildStaticWeightPacket(const VdfContext &ctx)
 RigExecWeightPacket
 _BuildDynamicWeightPacket(const VdfContext &ctx)
 {
-    static const TfToken constant("constant");
-    static const TfToken strict("strict");
+    const TfToken &constant = _workerConstant;
+    const TfToken &strict = _workerStrict;
     rigExec::RigExecDynamicWeightInputs inputs;
     const TfToken *repr =
         ctx.GetInputValuePtr<TfToken>(_tokens->representation);
@@ -281,8 +294,8 @@ _ReadAxisScales(const VdfContext &ctx, GfVec3f *scales)
 rigExec::RigExecVolumeWeightInputs
 _ReadVolumeWeightInputs(const VdfContext &ctx)
 {
-    static const TfToken dense("dense");
-    static const TfToken clamp("clamp");
+    const TfToken &dense = _workerDense;
+    const TfToken &clamp = _workerClamp;
     rigExec::RigExecVolumeWeightInputs inputs;
     const TfToken *repr =
         ctx.GetInputValuePtr<TfToken>(_tokens->representation);
@@ -312,7 +325,7 @@ _ReadVolumeWeightPoints(
 RigExecWeightPacket
 _BuildSphereWeightPacket(const VdfContext &ctx)
 {
-    static const TfToken sphereType("RigExecSphereWeight");
+    const TfToken &sphereType = _workerSphereType;
     rigExec::RigExecVolumeWeightInputs inputs = _ReadVolumeWeightInputs(ctx);
     _ReadAxisScales(ctx, &inputs.scales);
     inputs.positiveScales[0] = _Scalar(ctx, _tokens->inputsScaleXPos, 1.0f);
@@ -331,10 +344,10 @@ _BuildSphereWeightPacket(const VdfContext &ctx)
 RigExecWeightPacket
 _BuildPlaneWeightPacket(const VdfContext &ctx)
 {
-    static const TfToken planeType("RigExecPlaneWeight");
-    static const TfToken yAxis("y");
-    static const TfToken unbounded("unbounded");
-    static const TfToken bounded("bounded");
+    const TfToken &planeType = _workerPlaneType;
+    const TfToken &yAxis = _workerYAxis;
+    const TfToken &unbounded = _workerUnbounded;
+    const TfToken &bounded = _workerBounded;
     rigExec::RigExecVolumeWeightInputs inputs = _ReadVolumeWeightInputs(ctx);
     const TfToken *axis = ctx.GetInputValuePtr<TfToken>(_tokens->planeAxisAttr);
     const TfToken *bounds =
@@ -357,7 +370,7 @@ _BuildPlaneWeightPacket(const VdfContext &ctx)
 RigExecWeightPacket
 _BuildCurveWeightPacket(const VdfContext &ctx)
 {
-    static const TfToken curveType("RigExecCurveWeight");
+    const TfToken &curveType = _workerCurveType;
     rigExec::RigExecVolumeWeightInputs inputs = _ReadVolumeWeightInputs(ctx);
     _ReadAxisScales(ctx, &inputs.scales);
     if (rigExec::RigExecVolumeWeightCanBuild(curveType, inputs)) {
@@ -370,9 +383,9 @@ _BuildCurveWeightPacket(const VdfContext &ctx)
 RigExecWeightPacket
 _BuildCombineWeightPacket(const VdfContext &ctx)
 {
-    static const TfToken dense("dense");
-    static const TfToken clamp("clamp");
-    static const TfToken multiply("multiply");
+    const TfToken &dense = _workerDense;
+    const TfToken &clamp = _workerClamp;
+    const TfToken &multiply = _workerMultiply;
     const TfToken *repr =
         ctx.GetInputValuePtr<TfToken>(_tokens->representation);
     const TfToken *policy = ctx.GetInputValuePtr<TfToken>(_tokens->rangePolicy);
@@ -380,11 +393,11 @@ _BuildCombineWeightPacket(const VdfContext &ctx)
         ctx.GetInputValuePtr<TfToken>(_tokens->combineModeAttr);
     // Authored target order is preserved: subtract and overlay are order
     // dependent by design (see the schema doc).
-    std::vector<RigExecWeightPacket> inputs;
+    std::vector<const RigExecWeightPacket *> inputs;
     {
         VdfReadIterator<RigExecWeightPacket> it(ctx, _tokens->inputPackets);
         for (; !it.IsAtEnd(); ++it) {
-            inputs.push_back(*it);
+            inputs.push_back(&*it);
         }
     }
     // rigExec:weightTarget is only ever read for its SIZE, when no input
@@ -478,7 +491,7 @@ _EvaluateMatrixPointArrayExpression(const VdfContext &ctx)
     }
     // Resolve the common envelope first so a cardinality failure passes
     // through before any output is written.
-    std::vector<float> weights(count);
+    std::vector<float> weights;
     if (!params->weights.ResolveAll(count, &weights)) {
         passThrough();
         return;
@@ -486,9 +499,8 @@ _EvaluateMatrixPointArrayExpression(const VdfContext &ctx)
     // CPU SIMD over the contiguous elements (spec 6.5): parity-gated
     // against the scalar reference; RIGEXEC_ENABLE_SIMD=false forces the
     // scalar path for debugging.
-    static const bool useSimd = TfGetenvBool("RIGEXEC_ENABLE_SIMD", true);
     auto out = VdfReadWriteIterator<GfVec3f>::Allocate(ctx, count);
-    if (useSimd) {
+    if (rigExec::RigExecSimdEnabled()) {
         std::vector<GfVec3f> scratch;
         scratch.reserve(count);
         for (; !previous.IsAtEnd(); ++previous) {

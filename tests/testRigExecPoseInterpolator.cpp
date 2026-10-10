@@ -488,10 +488,10 @@ TestParityWithTheSolverDrivenDirectly()
 // The same rig through the BAKED PROGRAM, where the interpolator is a step
 // rather than a phase: it reads its driver's last frame version out of the
 // slots and writes a PoseWeight range the blend channel's assemble reads.
-// Parity compares the published weights and the deformed mesh exactly, and
+// Numeric checks compare the published weights and the deformed mesh, and
 // the disabled cases are the ones a step that read no enable would miss.
 void
-TestParityThroughTheBakedProgram()
+TestInterpolatorVersionDependencies()
 {
     UsdStageRefPtr stage = MakeRig();
     RigExecRigEvaluator evaluator(stage, kRig);
@@ -506,21 +506,14 @@ TestParityThroughTheBakedProgram()
         }
         return;
     }
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::BakedWithParityCheck);
+
     const RigExecRbfSolver reference = ReferenceSolver();
     for (double degrees : {0.0, 22.5, 45.0, -33.0}) {
         SetRotation(stage, kDriver, degrees);
         const RigExecRigPose pose = evaluator.Evaluate(UsdTimeCode::Default());
         CHECK(pose.valid);
         CHECK(evaluator.GetBakedProgram() != nullptr);
-        if (pose.bakedParityMismatches) {
-            ++failures;
-            std::printf("FAIL baked parity at %.1f deg: %zu mismatch(es)\n",
-                        degrees, pose.bakedParityMismatches);
-            for (const std::string &line : pose.diagnostics) {
-                std::printf("  %s\n", line.c_str());
-            }
-        }
+
         const GfQuatf q = AboutZ(degrees);
         std::vector<double> expected;
         reference.Evaluate(
@@ -537,7 +530,7 @@ TestParityThroughTheBakedProgram()
     SetRotation(stage, kDriver, 45.0);
     SetRotation(stage, kParent, 30.0);
     const RigExecRigPose carried = evaluator.Evaluate(UsdTimeCode::Default());
-    CHECK(carried.bakedParityMismatches == 0);
+
     CheckWeights(carried, 0.0, 1.0, 0.0, "program, parent turned");
     CHECK(std::abs(MeshDisplacement(carried) - kDelta) < 1e-4);
 
@@ -546,13 +539,13 @@ TestParityThroughTheBakedProgram()
     stage->GetPrimAtPath(kInterpolator)
         .GetAttribute(TfToken("inputs:enabled")).Set(false);
     const RigExecRigPose off = evaluator.Evaluate(UsdTimeCode::Default());
-    CHECK(off.bakedParityMismatches == 0);
+
     CheckWeights(off, 0.0, 0.0, 0.0, "program, interpolator disabled");
     CHECK(std::abs(MeshDisplacement(off)) < 1e-5);
     stage->GetPrimAtPath(kInterpolator)
         .GetAttribute(TfToken("inputs:enabled")).Set(true);
     const RigExecRigPose on = evaluator.Evaluate(UsdTimeCode::Default());
-    CHECK(on.bakedParityMismatches == 0);
+
     CheckWeights(on, 0.0, 1.0, 0.0, "program, enabled again");
 
     // And a drag on the driver, which is the case the cone exists for: the
@@ -560,7 +553,7 @@ TestParityThroughTheBakedProgram()
     evaluator.SetInteractiveOverrides({RigExecValueOverride{
         kDriver, TfToken(), TfToken("avars:rz"), VtValue(22.5)}});
     const RigExecRigPose dragged = evaluator.Evaluate(UsdTimeCode::Default());
-    CHECK(dragged.bakedParityMismatches == 0);
+
     CHECK(Weight(dragged, "neutral") > 0.3);
     CHECK(Weight(dragged, "Forward") > 0.3);
     evaluator.ClearInteractiveOverrides();
@@ -627,7 +620,7 @@ main()
     TestADisabledInterpolatorPublishesZeros();
     TestADisabledPoseLeavesTheSolve();
     TestParityWithTheSolverDrivenDirectly();
-    TestParityThroughTheBakedProgram();
+    TestInterpolatorVersionDependencies();
     TestStructuralValidation();
 
     if (failures) {

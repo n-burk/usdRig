@@ -14,16 +14,22 @@
 // another solver reads is a PRODUCER with no stack position at all and is
 // scheduled by data flow.
 // The order decides the RELATIVE order of two steps that touch the same
-// joint, and nothing else: two limbs that share no joint share a Kahn level
-// and evaluate concurrently (TestUnrelatedLimbsShareALevel).
+// joint, and nothing else: unrelated limbs have no producer dependency
+// between them (TestUnrelatedLimbsHaveIndependentDependencies).
 // Every fixture here is authored as .usda TEXT rather than built prim by
 // prim, because the thing under test is COMPOSED ORDER: `reorder nameChildren`
 // is a layer opinion, and authoring it the way a rigger does is the only way
 // the test exercises what a rigger would hit.
 // argv[1] = path to the examples directory (for the schema plugin).
+#include "rigExec/inputReplay.h"
+#include "rigExecFrameRecordCheck.h"
+#include "rigExecOpTrace.h"
+#include "rigExecGraphDependencyCheck.h"
 #include "rigExecPoseCompare.h"
 
+#include "rigExec/backgroundScheduler.h"
 #include "rigExec/bakedProgram.h"
+#include "rigExec/frozenContext.h"
 #include "rigExec/rigEvaluator.h"
 
 #include "pxr/base/gf/matrix4d.h"
@@ -36,8 +42,12 @@
 #include "pxr/usd/usd/relationship.h"
 #include "pxr/usd/usd/stage.h"
 
+#include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <tuple>
 #include <map>
+#include <memory>
 #include <set>
 #include <cstdio>
 #include <string>
@@ -390,7 +400,7 @@ UsdStageRefPtr
 MakeStage(const RigSpec &spec)
 {
     const SdfLayerRefPtr layer = SdfLayer::CreateAnonymous(".usda");
-    if (!layer || !layer->ImportFromString(RigText(spec))) {
+    if (!layer || !rigExec::RigExecInputReplayImportFromString(layer, RigText(spec))) {
         std::printf("FAIL: the stacking fixture does not parse\n");
         ++failures;
         return UsdStageRefPtr();
@@ -458,7 +468,7 @@ SameJoint(const RigExecRigPose &a, const RigExecRigPose &b,
 /// rigExec:transform's rigExecReadPhase as "base" or "final" only -- it has
 /// no AtPrim branch, so ANY AtPrim transform phase, solver-named or
 /// constraint-named, reads the base matrix there and disagrees with the
-/// graph. No shipped rig authors an AtPrim transform phase; the baked parity
+/// graph. No shipped rig authors an AtPrim transform phase; the published-version
 /// harness below still judges every stacking fixture that carries no such
 /// phase.
 RigExecRigPose
@@ -473,7 +483,7 @@ Evaluate(const char *what, const UsdStageRefPtr &stage, double time,
         return pose;
     }
     RigExecRigEvaluator evaluator(stage, kRigPath);
-    evaluator.cpuParityMode = parity;
+    evaluator.cpuReference = parity;
     if (!evaluator.Compile(&out)) {
         ++failures;
         std::printf("FAIL %s: the fixture does not compile\n", what);
@@ -766,7 +776,7 @@ UsdStageRefPtr
 OpenText(const std::string &text)
 {
     const SdfLayerRefPtr layer = SdfLayer::CreateAnonymous(".usda");
-    if (!layer || !layer->ImportFromString(text)) {
+    if (!layer || !rigExec::RigExecInputReplayImportFromString(layer, text)) {
         std::printf("FAIL: a hand-written stacking fixture does not parse\n");
         ++failures;
         return UsdStageRefPtr();
@@ -778,18 +788,18 @@ OpenText(const std::string &text)
 // stacking fixtures.
 
 void
-CheckParity(const char *what, const RigSpec &spec,
+CheckEvaluatorConsistency(const char *what, const RigSpec &spec,
             const std::vector<double> &frames, bool expectBaked)
 {
-    const UsdStageRefPtr referenceStage = MakeStage(spec);
+    const UsdStageRefPtr baselineStage = MakeStage(spec);
     const UsdStageRefPtr bakedStage = MakeStage(spec);
-    CHECK(referenceStage && bakedStage);
-    if (!referenceStage || !bakedStage) return;
+    CHECK(baselineStage && bakedStage);
+    if (!baselineStage || !bakedStage) return;
 
-    RigExecRigEvaluator reference(referenceStage, kRigPath);
+    RigExecRigEvaluator baseline(baselineStage, kRigPath);
     RigExecRigEvaluator baked(bakedStage, kRigPath);
     std::vector<std::string> errors;
-    if (!reference.Compile(&errors) || !baked.Compile(&errors)) {
+    if (!baseline.Compile(&errors) || !baked.Compile(&errors)) {
         ++failures;
         std::printf("FAIL %s: the fixture does not compile\n", what);
         for (const std::string &error : errors) {
@@ -797,7 +807,7 @@ CheckParity(const char *what, const RigSpec &spec,
         }
         return;
     }
-    baked.SetEvaluationMode(RigExecEvaluationMode::BakedWithParityCheck);
+
 
     std::vector<std::string> reasons;
     const bool bakeable = baked.IsBakeable(&reasons);
@@ -822,17 +832,10 @@ CheckParity(const char *what, const RigSpec &spec,
     for (const double frame : sweep) {
         const std::string where =
             std::string(what) + " frame " + std::to_string(frame);
-        const RigExecRigPose a = reference.Evaluate(UsdTimeCode(frame));
+        const RigExecRigPose a = baseline.Evaluate(UsdTimeCode(frame));
         const RigExecRigPose b = baked.Evaluate(UsdTimeCode(frame));
         CHECK(a.valid && b.valid);
-        if (b.bakedParityMismatches) {
-            ++failures;
-            std::printf("FAIL %s: %zu baked parity mismatch(es)\n",
-                        where.c_str(), b.bakedParityMismatches);
-            for (const std::string &line : b.diagnostics) {
-                std::printf("    %s\n", line.c_str());
-            }
-        }
+
         ++generations;
         rigExecTest::ComparePose(&failures, where, a, b);
     }
@@ -842,6 +845,137 @@ CheckParity(const char *what, const RigSpec &spec,
                     "program\n", what, baked.GetBakedGenerationCount(),
                     generations);
     }
+}
+
+// The baked half of the checkpoint cases: a read phase naming a solver reads
+// a FrameMatrix record on that solver's commit.
+
+/// A frozen warming job's pose at \p time: \p evaluator's program frozen, the
+/// frame sampled, and the job run through the production runner.
+RigExecRigPose
+WarmFrozen(const std::string &what, RigExecRigEvaluator *evaluator,
+           const SdfPath &rig, double time)
+{
+    std::shared_ptr<const RigExecFrozenProgram> frozen;
+    std::string error;
+    if (!RigExecFreezeProgram(*evaluator, &frozen, &error) || !frozen) {
+        ++failures;
+        std::printf("FAIL %s: the freeze refused: %s\n", what.c_str(),
+                    error.c_str());
+        return RigExecRigPose();
+    }
+    RigExecFrameInputs inputs;
+    if (!RigExecSampleFrameInputs(*evaluator, UsdTimeCode(time), {}, &inputs,
+                                  &error)) {
+        ++failures;
+        std::printf("FAIL %s: sampling refused: %s\n", what.c_str(),
+                    error.c_str());
+        return RigExecRigPose();
+    }
+    RigExecBackgroundScheduler scheduler;
+    RigExecFrozenEvalContext context;
+    context.epochDigest = evaluator->GetBindingEpochDigest();
+    context.generation = scheduler.CurrentGeneration(rig);
+    context.slotCount = evaluator->GetBakedProgram()->GetProviderCount();
+    context.programDigest = 0;
+    context.varyingInputCount = inputs.values.size();
+    context.flags = 0;
+    if (evaluator->GetPublishWeightFields()) {
+        context.flags |= kRigExecFrozenPublishWeightFields;
+    }
+    if (evaluator->GetSolverGuidesEnabled()) {
+        context.flags |= kRigExecFrozenSolverGuidesEnabled;
+    }
+    context.frozen = frozen.get();
+    return RigExecEvaluateFrozen(context, inputs,
+                                 RigExecMakeProductionStepRunner(), &scheduler,
+                                 rig);
+}
+
+/// One checkpoint rig run through live and frozen canonical programs.
+struct CheckpointRun {
+    /// canonical program, left after the last frame for structure and
+    /// drag checks.
+    std::unique_ptr<RigExecRigEvaluator> baked;
+    /// The baseline canonical pose per frame.
+    std::map<double, RigExecRigPose> walked;
+};
+
+/// Live canonical evaluators and a frozen warming job must publish exactly
+/// equal checkpoint generations. Every reader also retains an explicit
+/// numeric version assertion. cpuReference is kept off for this comparison.
+CheckpointRun
+CheckCheckpointBakes(const std::string &what, const UsdStageRefPtr &stage,
+                     const SdfPath &rig, const std::vector<double> &frames,
+                     size_t answered)
+{
+    CheckpointRun run;
+    if (!stage || frames.empty()) {
+        CHECK(stage && !frames.empty());
+        return run;
+    }
+    RigExecRigEvaluator walk(stage, rig);
+
+    RigExecRigEvaluator plain(stage, rig);
+
+    run.baked = std::make_unique<RigExecRigEvaluator>(stage, rig);
+
+    std::vector<std::string> errors;
+    if (!walk.Compile(&errors) || !plain.Compile(&errors) ||
+        !run.baked->Compile(&errors)) {
+        ++failures;
+        std::printf("FAIL %s: the fixture does not compile\n", what.c_str());
+        for (const std::string &error : errors) {
+            std::printf("    %s\n", error.c_str());
+        }
+        run.baked.reset();
+        return run;
+    }
+    std::vector<std::string> reasons;
+    if (!run.baked->IsBakeable(&reasons)) {
+        ++failures;
+        std::printf("FAIL %s: the rig does not bake\n", what.c_str());
+        for (const std::string &reason : reasons) {
+            std::printf("    %s\n", reason.c_str());
+        }
+        run.baked.reset();
+        return run;
+    }
+    // All three from the same first frame, so their work counters compare.
+    const UsdTimeCode first(frames.front());
+    CHECK(walk.Evaluate(first).valid);
+    CHECK(plain.Evaluate(first).valid);
+    CHECK(run.baked->Evaluate(first).valid);
+    for (const double frame : frames) {
+        const std::string where = what + " frame " + std::to_string(frame);
+        // Frozen from the program the last live run left, before this
+        // frame runs live.
+        const RigExecRigPose warmed = WarmFrozen(where, &plain, rig, frame);
+        size_t generations = plain.GetBakedGenerationCount();
+        const RigExecRigPose live = plain.Evaluate(UsdTimeCode(frame));
+        CHECK(plain.GetBakedGenerationCount() == generations + 1);
+        generations = run.baked->GetBakedGenerationCount();
+        const RigExecRigPose checked = run.baked->Evaluate(UsdTimeCode(frame));
+        CHECK(run.baked->GetBakedGenerationCount() == generations + 1);
+
+        const RigExecRigPose walked = walk.Evaluate(UsdTimeCode(frame));
+        CHECK(walked.valid && live.valid && checked.valid && warmed.valid);
+        rigExecTest::ComparePose(&failures, where + " baked", walked, live);
+        rigExecTest::ComparePose(&failures, where + " checked", walked,
+                                 checked);
+        rigExecTest::ComparePose(&failures, where + " frozen", walked,
+                                 warmed);
+        const size_t fromRecords =
+            rigExecTest::CheckFrameRecords(&failures, where, *run.baked);
+        if (fromRecords != answered) {
+            ++failures;
+            std::printf("FAIL %s: %zu reader(s) answered from a record, "
+                        "expected %zu\n",
+                        where.c_str(), fromRecords, answered);
+        }
+        run.walked[frame] = walked;
+    }
+    return run;
 }
 
 // The cases.
@@ -858,7 +992,7 @@ TestCompilesAndChains()
     CHECK(stage);
     if (!stage) return;
     RigExecRigEvaluator evaluator(stage, kRigPath);
-    evaluator.cpuParityMode = true;
+    evaluator.cpuReference = true;
     std::vector<std::string> errors;
     CHECK(evaluator.Compile(&errors));
     if (!errors.empty()) {
@@ -921,7 +1055,7 @@ TestLastWriterWins()
         }
         // Both solvers evaluated: one of them being inert would make the
         // comparisons above pass for the wrong reason.
-        CHECK(stacked.solverEvaluations == 2);
+
         CHECK(stacked.solverFrames.count(kLegFk) == 1);
         CHECK(stacked.solverFrames.count(kLegIk) == 1);
     }
@@ -980,7 +1114,7 @@ TestReorderFlipsTheStack()
     CHECK(liveStage);
     if (!liveStage) return;
     RigExecRigEvaluator live(liveStage, kRigPath);
-    live.cpuParityMode = true;
+    live.cpuReference = true;
     std::vector<std::string> liveErrors;
     CHECK(live.Compile(&liveErrors));
     const RigExecRigPose before = live.Evaluate(UsdTimeCode(5.0));
@@ -1045,16 +1179,27 @@ TestCheckpointSeesTheEarlierWriter()
     CHECK(Near(GfVec3d(atCheckpoint), GfVec3d(atFkOnly), 1e-4));
     CHECK(!Near(GfVec3d(atFkOnly), GfVec3d(atIkOnly), 1e-4));
 
-    // ... and naming a solver is refused by the bake, because the baked
-    // phased-read store is written per CONSTRAINT and has no solver
-    // equivalent. A silent fall back to a different value is the one thing
-    // this program refuses.
-    RigExecRigEvaluator evaluator(atFkStage, kRigPath);
-    std::vector<std::string> errors;
-    CHECK(evaluator.Compile(&errors));
-    std::vector<std::string> reasons;
-    CHECK(!RigExecBakedProgram::IsBakeable(evaluator, &reasons));
-    CHECK(Mentions(reasons, "read phase names a solver checkpoint"));
+    // ... and the checkpoint bakes: the program reads LegFK's record of the
+    // knee, and so does a frozen warming job, bit for bit the walk's.
+    const CheckpointRun run = CheckCheckpointBakes(
+        "checkpoint probe", atFkStage, kRigPath, {1.0, 3.0, 5.0}, 1);
+    if (!run.baked) return;
+    const auto walked = run.walked.find(5.0);
+    GfVec3f walkedPoint;
+    CHECK(walked != run.walked.end() &&
+          ProbePoint(walked->second, &walkedPoint));
+    CHECK(walkedPoint == atCheckpoint);
+    const RigExecBakedProgram *program = run.baked->GetBakedProgram();
+    CHECK(program != nullptr);
+    if (!program) return;
+    const RigExecBakedProgramImpl &B = program->GetStepGraph();
+    const RigExecBakedProgramImpl::GeomRevision *probe =
+        rigExecTest::FindRevision(B, SdfPath("/Asset/Rig/Movers/KneeProbe"));
+    CHECK(probe != nullptr);
+    if (probe) {
+        CHECK(rigExecTest::RecordMovers(B, probe->transformRecords) ==
+              std::vector<SdfPath>{kLegFk});
+    }
 }
 
 /// The tear: a later writer replaces only the joints it NAMES.
@@ -1118,7 +1263,7 @@ TestDataFlowOutranksTheNamespace()
     CHECK(stage);
     if (!stage) return;
     RigExecRigEvaluator evaluator(stage, kRigPath);
-    evaluator.cpuParityMode = true;
+    evaluator.cpuReference = true;
     std::vector<std::string> errors;
     CHECK(evaluator.Compile(&errors));
     const std::string hipLine =
@@ -1181,13 +1326,13 @@ TestFallbackVerdictUnderStack(bool ikLast)
 
     RigExecRigEvaluator dynamicRig(dynamicStage, kRigPath);
     RigExecRigEvaluator bakedRig(bakedStage, kRigPath);
-    // The verdict is judged against the exec walk itself, not against
+    // The verdict is judged against a separately initialized canonical evaluator, not against
     // whatever the default mode runs.
-    dynamicRig.SetEvaluationMode(RigExecEvaluationMode::ExecReference);
+
     std::vector<std::string> errors;
     CHECK(dynamicRig.Compile(&errors));
     CHECK(bakedRig.Compile(&errors));
-    bakedRig.SetEvaluationMode(RigExecEvaluationMode::BakedWithParityCheck);
+
     std::vector<std::string> reasons;
     if (!bakedRig.IsBakeable(&reasons)) {
         ++failures;
@@ -1202,7 +1347,7 @@ TestFallbackVerdictUnderStack(bool ikLast)
         const RigExecRigPose a = dynamicRig.Evaluate(UsdTimeCode(time));
         const RigExecRigPose b = bakedRig.Evaluate(UsdTimeCode(time));
         CHECK(a.valid && b.valid);
-        CHECK(b.bakedParityMismatches == 0);
+
         // The verdict names the writer that published nothing AND the frame
         // the joint kept -- never "fell back to its rest chain", which is
         // what it would say if the other writer had not run.
@@ -1212,7 +1357,7 @@ TestFallbackVerdictUnderStack(bool ikLast)
                        "the joint keeps the frame /Asset/Rig/Solvers/LegFK "
                        "left"));
         CHECK(!Mentions(a.diagnostics, "fell back to its rest chain"));
-        // Identical on both paths, line for line.
+        // Identical on both canonical evaluators, line for line.
         if (a.diagnostics != b.diagnostics) {
             ++failures;
             std::printf("FAIL %s: the paths disagree about the verdict\n",
@@ -1281,7 +1426,7 @@ TestConstraintObservesTopOfStack()
     CHECK(SameJoint(a, none, kAnkle));
     // Both writers ran: an inert one would make the lines above pass for the
     // wrong reason.
-    CHECK(a.solverEvaluations == 2);
+
 }
 
 /// Every joint's writer list is a restriction of ONE order.
@@ -1299,7 +1444,7 @@ TestPartialSubsetsAgreeOnOneOrder()
     CHECK(stage);
     if (!stage) return;
     RigExecRigEvaluator evaluator(stage, kRigPath);
-    evaluator.cpuParityMode = true;
+    evaluator.cpuReference = true;
     std::vector<std::string> errors;
     if (!evaluator.Compile(&errors)) {
         ++failures;
@@ -1352,7 +1497,7 @@ TestConstraintMediatedOrderIsRespected()
         CHECK(stage);
         if (!stage) continue;
         RigExecRigEvaluator evaluator(stage, kRigPath);
-        evaluator.cpuParityMode = true;
+        evaluator.cpuReference = true;
         std::vector<std::string> errors;
         if (!evaluator.Compile(&errors)) {
             ++failures;
@@ -1419,7 +1564,7 @@ TestDuplicateJointOnOneSolverIsUnauthorable()
     // Deduped to two distinct joints, so the FK is a single writer of each
     // and the rig compiles silently.
     RigExecRigEvaluator evaluator(stage, kRigPath);
-    evaluator.cpuParityMode = true;
+    evaluator.cpuReference = true;
     std::vector<std::string> errors;
     CHECK(evaluator.Compile(&errors));
     CHECK(errors.empty());
@@ -1608,6 +1753,329 @@ TestReadPhasesOverTheUnifiedStack()
     CHECK(probe("final, movers first", "final", false, &fedFinal));
     CHECK(Near(GfVec3d(fedBase), GfVec3d(fedFinal), 1e-4));
     CHECK(!Near(GfVec3d(fedMovers), GfVec3d(fedFinal), 1e-4));
+
+    // The AtPrim(Solvers) probe names the IK's checkpoint, and bakes and
+    // freezes to the walk's knee, bit for bit.
+    RigSpec spec = Stacked();
+    spec.fk = false;
+    spec.kneeMove = true;
+    spec.probePhase = "/Asset/Rig/Solvers";
+    spec.rigOrder = SolversLast();
+    const CheckpointRun run =
+        CheckCheckpointBakes("AtPrim(Solvers) checkpoint, solvers last",
+                             MakeStage(spec), kRigPath, {1.0, 3.0, 5.0}, 1);
+    if (!run.baked) return;
+    const auto walked = run.walked.find(5.0);
+    GfVec3f walkedPoint;
+    CHECK(walked != run.walked.end() &&
+          ProbePoint(walked->second, &walkedPoint));
+    CHECK(Near(GfVec3d(walkedPoint), GfVec3d(atSolvers), 1e-6));
+    const RigExecBakedProgram *program = run.baked->GetBakedProgram();
+    CHECK(program != nullptr);
+    if (!program) return;
+    const RigExecBakedProgramImpl &B = program->GetStepGraph();
+    const RigExecBakedProgramImpl::GeomRevision *knee =
+        rigExecTest::FindRevision(B, SdfPath("/Asset/Rig/Movers/KneeProbe"));
+    CHECK(knee != nullptr);
+    if (knee) {
+        CHECK(rigExecTest::RecordMovers(B, knee->transformRecords) ==
+              std::vector<SdfPath>{kLegIk});
+    }
+}
+
+/// The AtPrim(Movers) probe held to the selected compiled producer versions,
+/// baked, in both rig orders. Movers holds the constraint, while the IK writing the
+/// same knee sits in Solvers, so the probe's list is KneeMove's record alone
+/// whether the record lands after the IK's write or before it.
+void
+TestAtPrimMoversRecordsMatchTheStore()
+{
+    for (const bool solversLast : {true, false}) {
+        const std::string what = solversLast
+                                     ? "AtPrim(Movers) records, solvers last"
+                                     : "AtPrim(Movers) records, movers first";
+        RigSpec spec = Stacked();
+        spec.fk = false;
+        spec.kneeMove = true;
+        spec.probePhase = "/Asset/Rig/Movers";
+        if (solversLast) spec.rigOrder = SolversLast();
+        const UsdStageRefPtr stage = MakeStage(spec);
+        CHECK(stage);
+        if (!stage) return;
+        RigExecRigEvaluator evaluator(stage, kRigPath);
+
+        std::vector<std::string> errors;
+        CHECK(evaluator.Compile(&errors));
+        std::vector<std::string> reasons;
+        CHECK(evaluator.IsBakeable(&reasons));
+        for (const std::string &reason : reasons) {
+            std::printf("    %s: %s\n", what.c_str(), reason.c_str());
+        }
+        for (const double frame : {1.0, 5.0}) {
+            const std::string where =
+                what + " frame " + std::to_string(int(frame));
+            const RigExecRigPose pose = evaluator.Evaluate(UsdTimeCode(frame));
+            CHECK(pose.valid);
+
+            CHECK(rigExecTest::CheckFrameRecords(&failures, where,
+                                                 evaluator) == 1);
+        }
+        CHECK(evaluator.GetBakedGenerationCount() == 2);
+        const RigExecBakedProgram *program = evaluator.GetBakedProgram();
+        CHECK(program != nullptr);
+        if (!program) continue;
+        const RigExecBakedProgramImpl &B = program->GetStepGraph();
+        const RigExecBakedProgramImpl::GeomRevision *probe =
+            rigExecTest::FindRevision(B,
+                                      SdfPath("/Asset/Rig/Movers/KneeProbe"));
+        CHECK(probe != nullptr);
+        if (probe) {
+            CHECK(rigExecTest::RecordMovers(B, probe->transformRecords) ==
+                  std::vector<SdfPath>{SdfPath("/Asset/Rig/Movers/KneeMove")});
+        }
+    }
+}
+
+/// tests/fixtures/solver_checkpoint.usda: AtPrim read phases that name solver
+/// checkpoints, baked and frozen. The knee's writers, in walk order, are
+/// LegFK, KneeMove, LegBlend and LegZ. LegBlend never publishes the knee (its
+/// element 2 is past a two-element aggregate), so its record is skipped every
+/// run: P3, at the Stack scope, names it and falls to LegFK's record while P1
+/// names that one, and to `base` -- LegZ's knee -- without P1. Had the skipped
+/// record been read, P3 would see the knee KneeMove left, which is neither.
+void
+TestSolverCheckpointsBake(const std::string &examplesDir)
+{
+    const std::string stagePath =
+        examplesDir + "/../tests/fixtures/solver_checkpoint.usda";
+    const SdfPath rig("/CheckpointAsset/Rig");
+    const SdfPath knee("/CheckpointAsset/Rig/Joints/Hip/Knee");
+    const SdfPath legFk("/CheckpointAsset/Rig/Stack/LegFK");
+    const SdfPath legBlend("/CheckpointAsset/Rig/Stack/LegBlend");
+    const SdfPath legZ("/CheckpointAsset/Rig/Late/LegZ");
+    const auto reader = [](const char *name) {
+        return SdfPath("/CheckpointAsset/Rig/Movers").AppendChild(
+            TfToken(name));
+    };
+    const auto points = [](const RigExecRigPose &pose, const char *name) {
+        const auto it = pose.movedProperties.find(
+            SdfPath("/CheckpointAsset/Geom")
+                .AppendChild(TfToken(name))
+                .AppendProperty(TfToken("points")));
+        return it != pose.movedProperties.end() &&
+                       it->second.IsHolding<VtVec3fArray>()
+                   ? it->second.UncheckedGet<VtVec3fArray>()
+                   : VtVec3fArray();
+    };
+    const std::vector<double> frames{1.0, 5.0, 9.0};
+    std::map<double, VtVec3fArray> namedP3;
+    for (const bool withP1 : {true, false}) {
+        const std::string label =
+            withP1 ? "solver checkpoints" : "solver checkpoints without P1";
+        const UsdStageRefPtr stage = UsdStage::Open(stagePath);
+        CHECK(stage);
+        if (!stage) return;
+        stage->SetEditTarget(stage->GetSessionLayer());
+        if (!withP1) {
+            CHECK(stage->GetPrimAtPath(reader("P1")).SetActive(false));
+        }
+        // With P1: P1, P2 and P3 answer from a record. Without it, P2 alone;
+        // P3's one record is skipped and it reads `base`.
+        const CheckpointRun run =
+            CheckCheckpointBakes(label, stage, rig, frames, withP1 ? 3 : 1);
+        if (!run.baked) return;
+        const RigExecBakedProgram *program = run.baked->GetBakedProgram();
+        CHECK(program != nullptr);
+        if (!program) return;
+        const RigExecBakedProgramImpl &B = program->GetStepGraph();
+
+        // The records: one per named (knee, solver) pair, in walk order, on
+        // the solvers' commits.
+        const std::vector<SdfPath> writers =
+            withP1 ? std::vector<SdfPath>{legFk, legBlend, legZ}
+                   : std::vector<SdfPath>{legBlend, legZ};
+        std::vector<int> all;
+        for (size_t r = 0; r < B.frameRecords.size(); ++r) {
+            all.push_back(int(r));
+        }
+        CHECK(rigExecTest::RecordMovers(B, all) == writers);
+        int blendRecord = -1;
+        for (size_t r = 0; r < B.frameRecords.size(); ++r) {
+            const RigExecBakedFrameRecord &record = B.frameRecords[r];
+            CHECK(B.paths[size_t(record.slot)] == knee);
+            CHECK(record.target == -1);
+            const RigExecBakedCommit &commit = B.commits[size_t(record.commit)];
+            CHECK(commit.solverOutput);
+            CHECK(record.position >= 0 &&
+                  size_t(record.position) < commit.slots.size());
+            if (record.position >= 0 &&
+                size_t(record.position) < commit.slots.size()) {
+                CHECK(commit.slots[size_t(record.position)] == record.slot);
+                CHECK(record.version ==
+                      commit.slotWrites[size_t(record.position)]);
+            }
+            if (record.mover == legBlend) {
+                blendRecord = int(r);
+            }
+        }
+        CHECK(blendRecord >= 0);
+        const auto list = [&](const char *name) {
+            const RigExecBakedProgramImpl::GeomRevision *revision =
+                rigExecTest::FindRevision(B, reader(name));
+            CHECK(revision != nullptr);
+            return revision
+                       ? rigExecTest::RecordMovers(B, revision->transformRecords)
+                       : std::vector<SdfPath>{SdfPath("/missing")};
+        };
+        if (withP1) {
+            CHECK(list("P1") == std::vector<SdfPath>{legFk});
+            CHECK(list("P3") == (std::vector<SdfPath>{legBlend, legFk}));
+        } else {
+            CHECK(list("P3") == std::vector<SdfPath>{legBlend});
+        }
+        CHECK(list("P2") == std::vector<SdfPath>{legZ});
+        CHECK(list("PB").empty());
+        // LegBlend's record is the one skipped; every other is valid.
+        for (size_t r = 0; r < B.frameRecords.size(); ++r) {
+            CHECK(B.frameMatrixValid[r] == (int(r) == blendRecord ? 0 : 1));
+        }
+
+        for (const double frame : frames) {
+            const std::string where = label + " frame " + std::to_string(frame);
+            const RigExecRigPose &pose = run.walked.at(frame);
+            const VtVec3fArray p2 = points(pose, "P2");
+            const VtVec3fArray p3 = points(pose, "P3");
+            const VtVec3fArray pb = points(pose, "PB");
+            CHECK(!p2.empty() && !p3.empty() && !pb.empty());
+            if (withP1) {
+                const VtVec3fArray p1 = points(pose, "P1");
+                // P3 falls past the skipped record to LegFK's, exactly.
+                CHECK(p3 == p1);
+                CHECK(p1 != p2);
+                CHECK(p1 != pb);
+                namedP3[frame] = p3;
+            } else {
+                // ... and with nothing else named, to `base`.
+                CHECK(p3 == pb);
+                CHECK(p3 != namedP3[frame]);
+            }
+            // `base` is LegZ's knee: the last solver writes it.
+            CHECK(p2.size() == pb.size());
+            for (size_t i = 0; i < p2.size() && i < pb.size(); ++i) {
+                if ((GfVec3d(p2[i]) - GfVec3d(pb[i])).GetLength() > 1e-5) {
+                    ++failures;
+                    std::printf("FAIL %s: P2 is not `base`\n", where.c_str());
+                    break;
+                }
+            }
+        }
+
+        // Drags, on the canonical program evaluator: each generation is
+        // checked against published numeric versions, its records against
+        // current stored matrices, and executed ops against the declared cone.
+        RigExecRigEvaluator &baked = *run.baked;
+        const auto ranRecords = [&B]() {
+            std::vector<SdfPath> ran;
+            for (size_t id=0;id<B.steps.size();++id) {
+                const auto &step=B.steps[id];
+                if (step.kind == RigExecBakedStepKind::FrameMatrix &&
+                    id<B.opExecution.ran.size() && B.opExecution.ran[id]) {
+                    ran.push_back(B.frameRecords[size_t(step.object)].mover);
+                }
+            }
+            std::sort(ran.begin(), ran.end());
+            return ran;
+        };
+        const auto foldRan = [&B](const SdfPath &mover) {
+            for (size_t id=0;id<B.steps.size();++id) {
+                const auto &step=B.steps[id];
+                if (step.kind != RigExecBakedStepKind::InfluenceFold) {
+                    continue;
+                }
+                const auto [c, r] = B.revisionIndex[size_t(step.object)];
+                if (B.chains[size_t(c)].revisions[size_t(r)].moverPath ==
+                    mover) {
+                    return id<B.opExecution.ran.size() && B.opExecution.ran[id];
+                }
+            }
+            return false;
+        };
+        const auto drag = [&](const std::string &what, const char *control,
+                              const char *avar, double value,
+                              std::vector<SdfPath> expectRan) {
+            const std::string where = label + " " + what;
+            const RigExecRigPose before = baked.Evaluate(UsdTimeCode(9.0));
+            baked.SetInteractiveOverrides({RigExecValueOverride{
+                SdfPath("/CheckpointAsset/Rig/Controls").AppendChild(
+                    TfToken(control)),
+                TfToken(), TfToken(avar), VtValue(value)}});
+            const RigExecRigPose dragged = baked.Evaluate(UsdTimeCode(9.0));
+            CHECK(dragged.valid);
+
+            if (rigExecTest::CheckFrameRecords(&failures, where, baked) !=
+                (withP1 ? 3u : 1u)) {
+                ++failures;
+                std::printf("FAIL %s: the records answered differently\n",
+                            where.c_str());
+            }
+            std::sort(expectRan.begin(), expectRan.end());
+            if (ranRecords() != expectRan) {
+                ++failures;
+                std::printf("FAIL %s: the FrameMatrix steps that ran:\n",
+                            where.c_str());
+                for (const SdfPath &mover : ranRecords()) {
+                    std::printf("    %s\n", mover.GetText());
+                }
+            }
+            CHECK(B.frameMatrixValid[size_t(blendRecord)] == 0);
+            // Read before the release re-runs the program.
+            const bool p3Fold = foldRan(reader("P3"));
+            baked.ClearInteractiveOverrides();
+            const RigExecRigPose released = baked.Evaluate(UsdTimeCode(9.0));
+            CHECK(released.valid);
+            for (const char *name : {"P2", "P3", "PB"}) {
+                CHECK(points(released, name) == points(before, name));
+            }
+            return std::make_tuple(before, dragged, p3Fold);
+        };
+        const auto movedBetween = [&points](const RigExecRigPose &before,
+                                            const RigExecRigPose &after) {
+            return [&points, &before, &after](const char *name) {
+                return points(after, name) != points(before, name);
+            };
+        };
+        {
+            // ZKnee drives LegZ alone: its record re-runs, nothing else's.
+            // P3 follows `base` only where it has no valid record to read.
+            const auto [before, dragged, p3Fold] =
+                drag("ZKnee dragged", "ZKnee", "avars:rx", 40.0, {legZ});
+            const auto moved = movedBetween(before, dragged);
+            (void)p3Fold;
+            CHECK(moved("P2") && moved("PB"));
+            CHECK(moved("P3") == !withP1);
+            if (withP1) {
+                CHECK(!moved("P1"));
+            }
+        }
+        {
+            // KneeTarget moves the knee KneeMove leaves, which LegBlend and
+            // LegZ both read: their records re-run, LegFK's stays clean, and
+            // P3's fold re-runs over LegFK's kept record.
+            const auto [before, dragged, p3Fold] = drag(
+                "KneeTarget dragged", "KneeTarget", "avars:tx", 0.8,
+                {legBlend, legZ});
+            const auto moved = movedBetween(before, dragged);
+            CHECK(p3Fold);
+            CHECK(moved("P2"));
+            if (withP1) {
+                CHECK(!moved("P3") && !moved("P1"));
+                CHECK(points(dragged, "P3") == points(dragged, "P1"));
+            } else {
+                CHECK(moved("P3"));
+                CHECK(points(dragged, "P3") == points(dragged, "PB"));
+            }
+        }
+    }
 }
 
 /// A PRODUCER carries no stack position, and the classic blend still works.
@@ -1663,7 +2131,7 @@ TestProducersCarryNoStackPosition()
     CHECK(stage);
     if (!stage) return;
     RigExecRigEvaluator evaluator(stage, kRigPath);
-    evaluator.cpuParityMode = true;
+    evaluator.cpuReference = true;
     std::vector<std::string> errors;
     if (!evaluator.Compile(&errors)) {
         ++failures;
@@ -1697,8 +2165,8 @@ TestProducersCarryNoStackPosition()
 /// The compile-time contradiction check (spec 4.2) survives as a forward
 /// guard for the day a consumed solver is allowed to hold a stack position:
 /// it compares two STACK STEPS, and a producer is never one.
-void
-TestAggregateContradictionIsRejected()
+std::string
+AggregateProducerText()
 {
     std::string text =
         Head(FkControls("Fk", 30),
@@ -1723,11 +2191,17 @@ TestAggregateContradictionIsRejected()
         "        }\n"
         "    }\n"
         "}\n";
-    const UsdStageRefPtr stage = OpenText(text);
+    return text;
+}
+
+void
+TestAggregateContradictionIsRejected()
+{
+    const UsdStageRefPtr stage = OpenText(AggregateProducerText());
     CHECK(stage);
     if (!stage) return;
     RigExecRigEvaluator evaluator(stage, kRigPath);
-    evaluator.cpuParityMode = true;
+    evaluator.cpuReference = true;
     std::vector<std::string> errors;
     // Definition order Blend, Producer -> reversed -> Producer runs FIRST,
     // which agrees with the aggregate edge.
@@ -1745,7 +2219,7 @@ TestAggregateContradictionIsRejected()
     if (!solvers) return;
     solvers.SetChildrenReorder({TfToken("Producer"), TfToken("Blend")});
     RigExecRigEvaluator flipped(stage, kRigPath);
-    flipped.cpuParityMode = true;
+    flipped.cpuReference = true;
     std::vector<std::string> flippedErrors;
     if (!flipped.Compile(&flippedErrors)) {
         ++failures;
@@ -1763,6 +2237,34 @@ TestAggregateContradictionIsRejected()
     CHECK(SameJoint(agreeing, after, SdfPath("/Asset/Rig/Joints/Tip")));
 }
 
+/// The blend above reads its producer's aggregate from the generation it
+/// answers, in either hierarchy order: frame 5 then frame 2 publishes what
+/// frame 2 alone does, on the walk and on the program.
+void
+TestAggregateReadIsHistoryIndependent()
+{
+    const auto make = [](bool flipped) {
+        return [flipped]() {
+            const UsdStageRefPtr stage = OpenText(AggregateProducerText());
+            if (stage && flipped) {
+                stage->GetPrimAtPath(SdfPath("/Asset/Rig/Solvers"))
+                    .SetChildrenReorder(
+                        {TfToken("Producer"), TfToken("Blend")});
+            }
+            return stage;
+        };
+    };
+    const rigExecTest::EvaluationState frame5{UsdTimeCode(5.0), {}};
+    const rigExecTest::EvaluationState frame2{UsdTimeCode(2.0), {}};
+    {
+        rigExecTest::CheckHistoryIndependent(
+            &failures, "blend of a producer", make(false), kRigPath,
+            frame5, frame2);
+        rigExecTest::CheckHistoryIndependent(
+            &failures, "blend of a producer, flipped", make(true), kRigPath, frame5, frame2);
+    }
+}
+
 /// Two unrelated stacked limbs stay in the SAME Kahn level.
 ///
 /// The hierarchical order decides the RELATIVE order of two steps that write
@@ -1773,11 +2275,12 @@ TestAggregateContradictionIsRejected()
 ///
 /// The fixture is two independent limbs, each a two-solver stack over its own
 /// three joints with its own controls and its own constraint. Nothing is
-/// shared. Every solver of the left limb must therefore sit in the same
+/// shared. Every step of the left limb must therefore sit in the same
 /// dependency level as its opposite number on the right, and the whole rig
-/// must use no more levels than one limb alone does.
+/// must use no more levels than one limb alone does -- with the constraints
+/// above the solvers and with them below, feeding the solvers.
 void
-TestUnrelatedLimbsShareALevel()
+TestUnrelatedLimbsHaveIndependentDependencies()
 {
     const auto limb = [](const char *side) {
         const std::string s(side);
@@ -1860,7 +2363,7 @@ TestUnrelatedLimbsShareALevel()
             "[\"origin\", \"scale\"]\n"
             "            }\n";
     };
-    const auto build = [&](bool bothLimbs) {
+    const auto build = [&](bool bothLimbs, bool solversLast) {
         std::string controls = limb("L");
         std::string jointText = joints("L");
         std::string solverText = solvers("L");
@@ -1871,18 +2374,21 @@ TestUnrelatedLimbsShareALevel()
             solverText += solvers("R");
             moverText += aim("R");
         }
-        // Solvers at the BOTTOM of the rig, the classic "solve, then
-        // revise" shape: every solver runs before every constraint, so the
-        // constraint chain -- one serial chain over the movers, as it has
-        // always been -- cannot stagger them, and what is left in the solver
-        // levels is the per-joint stacking and nothing else.
+        // solversLast: Solvers at the BOTTOM of the rig, the classic
+        // "solve, then revise" shape, where every solver runs before every
+        // constraint. Otherwise Movers sit at the bottom and each aim FEEDS
+        // its own limb's solvers, so the solver levels also show that the
+        // two aims are not ordered against each other.
         std::string text = Head(controls, jointText);
         const std::string partition =
             "        uniform token rigExec:partition = \"Asset\"\n";
         text.replace(text.find(partition), partition.size(),
                      partition +
-                     "        reorder nameChildren = [\"Controls\", "
-                     "\"Joints\", \"Movers\", \"Solvers\"]\n");
+                     (solversLast
+                          ? "        reorder nameChildren = [\"Controls\", "
+                            "\"Joints\", \"Movers\", \"Solvers\"]\n"
+                          : "        reorder nameChildren = [\"Controls\", "
+                            "\"Joints\", \"Solvers\", \"Movers\"]\n"));
         return
             text +
             "\n"
@@ -1896,57 +2402,38 @@ TestUnrelatedLimbsShareALevel()
             "    }\n"
             "}\n";
     };
-    // Head() always emits the Hip/Knee/Ankle chain of its own; the limbs
-    // above are appended beside it and nothing names it, so it is inert.
-    const UsdStageRefPtr one = OpenText(build(false));
-    const UsdStageRefPtr two = OpenText(build(true));
-    CHECK(one && two);
-    if (!one || !two) return;
-
-    const auto levelsOf = [](const UsdStageRefPtr &stage,
-                             const char *what) {
-        RigExecRigEvaluator evaluator(stage, kRigPath);
-        evaluator.cpuParityMode = true;
+    const auto graphOf = [](const UsdStageRefPtr &stage) {
+        RigExecRigEvaluator evaluator(stage,kRigPath);
         std::vector<std::string> errors;
-        std::map<SdfPath, size_t> levels;
-        if (!evaluator.Compile(&errors)) {
-            ++failures;
-            std::printf("FAIL %s: the parallel fixture does not compile\n",
-                        what);
-            for (const std::string &error : errors) {
-                std::printf("    %s\n", error.c_str());
-            }
-            return levels;
-        }
+        CHECK(evaluator.Compile(&errors));
         CHECK(evaluator.Evaluate(UsdTimeCode(5.0)).valid);
-        levels = evaluator.GetSolverBatchLevels();
-        return levels;
+        return evaluator.GetOpGraph();
     };
-    const std::map<SdfPath, size_t> single = levelsOf(one, "one limb");
-    const std::map<SdfPath, size_t> pair = levelsOf(two, "two limbs");
-    if (single.empty() || pair.empty()) return;
-
-    CHECK(single.size() == 2);
-    CHECK(pair.size() == 4);
-    // The second limb adds SOLVERS, never LEVELS: it is independent, so it
-    // runs beside the first and not after it.
-    const auto distinct = [](const std::map<SdfPath, size_t> &levels) {
-        std::set<size_t> seen;
-        for (const auto &[solver, level] : levels) seen.insert(level);
-        return seen.size();
+    const auto operations=[](const auto &graph,const char *side) {
+        std::vector<size_t> ids;
+        for(const char *name:{"Solvers/IK","Solvers/FK","Movers/Aim"}) {
+            const std::string text(name);const auto slash=text.find('/');
+            const SdfPath path("/Asset/Rig/"+text.substr(0,slash+1)+side+text.substr(slash+1));
+            const size_t id=rigExecTest::FindOperation(graph,path,slash==7?"Solve":"Constraint");
+            CHECK(id<graph.size());ids.push_back(id);
+        }
+        return ids;
     };
-    CHECK(distinct(single) == distinct(pair));
-    // ... and each solver sits in exactly its opposite number's level.
-    for (const char *name : {"IK", "FK"}) {
-        const auto left = pair.find(
-            SdfPath(std::string("/Asset/Rig/Solvers/L") + name));
-        const auto right = pair.find(
-            SdfPath(std::string("/Asset/Rig/Solvers/R") + name));
-        CHECK(left != pair.end() && right != pair.end());
-        if (left == pair.end() || right == pair.end()) continue;
-        CHECK(left->second == right->second);
-        const auto alone = single.find(left->first);
-        CHECK(alone != single.end() && alone->second == left->second);
+    for(const bool solversLast:{true,false}) {
+        const auto single=graphOf(OpenText(build(false,solversLast)));
+        const auto pair=graphOf(OpenText(build(true,solversLast)));
+        const auto alone=operations(single,"L"),left=operations(pair,"L"),right=operations(pair,"R");
+        // Every directed dependency within one limb survives adding the other.
+        for(size_t i=0;i<left.size();++i)for(size_t j=0;j<left.size();++j)if(i!=j) {
+            const bool expected=rigExecTest::HasDependencyPath(single,alone[i],alone[j]);
+            CHECK(rigExecTest::HasDependencyPath(pair,left[i],left[j])==expected);
+            CHECK(rigExecTest::HasDependencyPath(pair,right[i],right[j])==expected);
+        }
+        // No actual producer edge serializes the unrelated limbs.
+        for(size_t l:left)for(size_t r:right) {
+            CHECK(!rigExecTest::HasDependencyPath(pair,l,r));
+            CHECK(!rigExecTest::HasDependencyPath(pair,r,l));
+        }
     }
 }
 
@@ -2019,34 +2506,34 @@ ControlFollowText(const char *controlsPhase)
     return text;
 }
 
-/// The baked half for a hand-written fixture: CheckParity's comparison,
+/// The baked half for a hand-written fixture: CheckEvaluatorConsistency's comparison,
 /// over stages opened from \p text, with the program required.
 void
 CheckTextParity(const char *what, const std::string &text,
                 const std::vector<double> &frames)
 {
-    const UsdStageRefPtr referenceStage = OpenText(text);
+    const UsdStageRefPtr baselineStage = OpenText(text);
     const UsdStageRefPtr bakedStage = OpenText(text);
-    CHECK(referenceStage && bakedStage);
-    if (!referenceStage || !bakedStage) return;
-    RigExecRigEvaluator reference(referenceStage, kRigPath);
+    CHECK(baselineStage && bakedStage);
+    if (!baselineStage || !bakedStage) return;
+    RigExecRigEvaluator baseline(baselineStage, kRigPath);
     RigExecRigEvaluator baked(bakedStage, kRigPath);
     std::vector<std::string> errors;
-    if (!reference.Compile(&errors) || !baked.Compile(&errors)) {
+    if (!baseline.Compile(&errors) || !baked.Compile(&errors)) {
         ++failures;
         std::printf("FAIL %s: the fixture does not compile\n", what);
         return;
     }
-    baked.SetEvaluationMode(RigExecEvaluationMode::BakedWithParityCheck);
+
     std::vector<std::string> reasons;
     CHECK(baked.IsBakeable(&reasons));
     for (const double frame : frames) {
         const std::string where =
             std::string(what) + " frame " + std::to_string(frame);
-        const RigExecRigPose a = reference.Evaluate(UsdTimeCode(frame));
+        const RigExecRigPose a = baseline.Evaluate(UsdTimeCode(frame));
         const RigExecRigPose b = baked.Evaluate(UsdTimeCode(frame));
         CHECK(a.valid && b.valid);
-        CHECK(b.bakedParityMismatches == 0);
+
         rigExecTest::ComparePose(&failures, where, a, b);
     }
     CHECK(baked.GetBakedGenerationCount() == frames.size());
@@ -2082,6 +2569,526 @@ TestSolverInputReadPhaseFollowsAConstraintAbove()
                     {1, 3, 5});
 }
 
+/// Constraint B reads a control constraint A moves: B's source is the
+/// control itself, or (\p child) a namespace child the move propagates to.
+/// A third constraint D, at the bottom of the stack, writes the same target
+/// as one of the two and so delays it into a later Kahn level. Mover order
+/// adds no edge between constraints, so the constraint -> constraint frame
+/// edges alone put B after A or before it; the values pin which.
+///   \p aBelowB: D moves Ctl, A moves Ctl again, B reads after A.
+///   otherwise:  D moves OutB, B moves it again reading Ctl, A moves Ctl.
+std::string
+ConstraintReadsConstraintText(bool aBelowB, bool child)
+{
+    const auto position = [](const char *name, const char *moves,
+                             const char *source) {
+        return std::string(
+                   "            def RigExecPositionConstraint \"") +
+               name + "\" (\n"
+               "                prepend apiSchemas = [\"RigExecMoverAPI\"]\n"
+               "            )\n"
+               "            {\n"
+               "                float inputs:defaultWeight = 1\n"
+               "                rel rigExec:sources = <" + source + ">\n"
+               "                rel rigExec:moves = <" + moves + ">\n"
+               "            }\n";
+    };
+    const char *ctl = "/Asset/Rig/Controls/Ctl";
+    const char *read = child ? "/Asset/Rig/Controls/Ctl/Child"
+                             : "/Asset/Rig/Controls/Ctl";
+    const char *srcA = "/Asset/Rig/Controls/SrcA";
+    const char *srcD = "/Asset/Rig/Controls/SrcD";
+    const char *outB = "/Asset/Rig/Controls/OutB";
+    std::string text = Head(
+        "            def RigExecControl \"Ctl\"\n"
+        "            {\n"
+        "                matrix4d rest:space = " + Rest(0, 0, 0) + "\n"
+        "\n"
+        "                def RigExecControl \"Child\"\n"
+        "                {\n"
+        "                    matrix4d rest:space = " + Rest(2, 0, 0) + "\n"
+        "                }\n"
+        "            }\n"
+        "            def RigExecControl \"SrcA\"\n"
+        "            {\n"
+        "                matrix4d rest:space = " + Rest(10, 0, 0) + "\n"
+        "            }\n"
+        "            def RigExecControl \"SrcD\"\n"
+        "            {\n"
+        "                matrix4d rest:space = " + Rest(0, 0, 7) + "\n"
+        "            }\n"
+        "            def RigExecControl \"OutB\"\n"
+        "            {\n"
+        "                matrix4d rest:space = " + Rest(0, 5, 0) + "\n"
+        "            }\n");
+    // Definition order is top to bottom; the stack runs bottom first.
+    const std::string a = position("A", ctl, srcA);
+    const std::string b = position("B", outB, read);
+    const std::string d = aBelowB ? position("D", ctl, srcD)
+                                  : position("D", outB, srcD);
+    text +=
+        "\n"
+        "        def Scope \"Movers\"\n"
+        "        {\n" +
+        (aBelowB ? b + a + d : a + b + d) +
+        "        }\n"
+        "    }\n"
+        "}\n";
+    return text;
+}
+
+void
+TestConstraintReadsAConstraintInStackOrder()
+{
+    for (const bool aBelowB : {true, false}) {
+        for (const bool child : {false, true}) {
+            const std::string what =
+                std::string(aBelowB ? "A below B" : "A above B") +
+                (child ? ", B reads Ctl's child" : ", B reads Ctl");
+            const std::string text =
+                ConstraintReadsConstraintText(aBelowB, child);
+            const UsdStageRefPtr stage = OpenText(text);
+            CHECK(stage);
+            if (!stage) continue;
+            const RigExecRigPose pose =
+                Evaluate(what.c_str(), stage, 1.0, nullptr);
+            if (!pose.valid) continue;
+            const auto ctl =
+                pose.controlFrames.find(SdfPath("/Asset/Rig/Controls/Ctl"));
+            const auto out =
+                pose.controlFrames.find(SdfPath("/Asset/Rig/Controls/OutB"));
+            CHECK(ctl != pose.controlFrames.end());
+            CHECK(out != pose.controlFrames.end());
+            if (ctl == pose.controlFrames.end() ||
+                out == pose.controlFrames.end()) {
+                continue;
+            }
+            // A writes Ctl last either way.
+            const GfVec3d ctlFinal(10, 0, 0);
+            // B reads Ctl at B's place in the stack: after A when A is below
+            // it, the rest frame otherwise; the child rides 2 along x.
+            const GfVec3d ctlRead = aBelowB ? ctlFinal : GfVec3d(0, 0, 0);
+            const GfVec3d expected =
+                ctlRead + (child ? GfVec3d(2, 0, 0) : GfVec3d(0));
+            CHECK(Near(ctl->second.Origin(), ctlFinal, 1e-6));
+            CHECK(Near(out->second.Origin(), expected, 1e-6));
+            if (!Near(out->second.Origin(), expected, 1e-6)) {
+                const GfVec3d o = out->second.Origin();
+                std::printf("    %s: OutB at (%g, %g, %g)\n", what.c_str(),
+                            o[0], o[1], o[2]);
+            }
+            CheckTextParity(what.c_str(), text, {1});
+        }
+    }
+}
+
+/// Constraint B reads beneath a solver-bound joint, the Knee, which an FK
+/// chain at the bottom of the stack writes. Constraint A moves \p aMoves:
+/// the Knee's parent, the Hip, or the Knee itself. B's source is the Ankle,
+/// a provider under the Knee, or (\p xformSource) Tip, a native Xform under
+/// it. E and D, at the bottom of the movers, move A's target first, which
+/// delays A past B in the Kahn order unless an A -> B edge holds B back;
+/// one delaying constraint does not separate them. As above, only the frame
+/// edges order A against B; the values pin which writers reach B's source.
+/// Mover stack: KneeFK, E, D, A, B.
+std::string
+ConstraintReadsUnderASolvedJointText(const char *aMoves, bool xformSource)
+{
+    const auto position = [](const char *name, const std::string &moves,
+                             const char *source) {
+        return std::string(
+                   "            def RigExecPositionConstraint \"") +
+               name + "\" (\n"
+               "                prepend apiSchemas = [\"RigExecMoverAPI\"]\n"
+               "            )\n"
+               "            {\n"
+               "                float inputs:defaultWeight = 1\n"
+               "                rel rigExec:sources = <" + source + ">\n"
+               "                rel rigExec:moves = <" + moves + ">\n"
+               "            }\n";
+    };
+    const std::string moved = std::string("/Asset/Rig/Joints/") + aMoves;
+    const char *read = xformSource ? "/Asset/Rig/Joints/Hip/Knee/Tip"
+                                   : "/Asset/Rig/Joints/Hip/Knee/Ankle";
+    std::string text = Head(
+        "            def RigExecControl \"SrcA\"\n"
+        "            {\n"
+        "                matrix4d rest:space = " + Rest(10, 0, 0) + "\n"
+        "            }\n"
+        "            def RigExecControl \"SrcD\"\n"
+        "            {\n"
+        "                matrix4d rest:space = " + Rest(0, 0, 7) + "\n"
+        "            }\n"
+        "            def RigExecControl \"SrcE\"\n"
+        "            {\n"
+        "                matrix4d rest:space = " + Rest(0, 6, 6) + "\n"
+        "            }\n"
+        "            def RigExecControl \"OutB\"\n"
+        "            {\n"
+        "                matrix4d rest:space = " + Rest(0, 5, 0) + "\n"
+        "            }\n"
+        "            def RigExecControl \"FkKnee\"\n"
+        "            {\n"
+        "                matrix4d rest:space = " + Rest(4, 1, 0) + "\n"
+        "            }\n");
+    const std::string ankle = "                    def RigExecJoint \"Ankle\"";
+    text.insert(text.find(ankle),
+                "                    def Xform \"Tip\"\n"
+                "                    {\n"
+                "                        double3 xformOp:translate = "
+                "(0, 3, 0)\n"
+                "                        uniform token[] xformOpOrder = "
+                "[\"xformOp:translate\"]\n"
+                "                    }\n");
+    const std::string partition =
+        "        uniform token rigExec:partition = \"Asset\"\n";
+    text.replace(text.find(partition), partition.size(),
+                 partition +
+                 "        reorder nameChildren = [\"Controls\", "
+                 "\"Joints\", \"Movers\", \"Solvers\"]\n");
+    text +=
+        "\n"
+        "        def Scope \"Solvers\"\n"
+        "        {\n" +
+        Chain("KneeFK", "</Asset/Rig/Controls/FkKnee>",
+              "</Asset/Rig/Joints/Hip/Knee>") +
+        "        }\n"
+        "\n"
+        "        def Scope \"Movers\"\n"
+        "        {\n" +
+        position("B", "/Asset/Rig/Controls/OutB", read) +
+        position("A", moved, "/Asset/Rig/Controls/SrcA") +
+        position("D", moved, "/Asset/Rig/Controls/SrcD") +
+        position("E", moved, "/Asset/Rig/Controls/SrcE") +
+        "        }\n"
+        "    }\n"
+        "}\n";
+    return text;
+}
+
+void
+TestConstraintReadsUnderASolvedJoint()
+{
+    for (const char *aMoves : {"Hip", "Hip/Knee"}) {
+        for (const bool xformSource : {false, true}) {
+            const std::string what =
+                std::string("A moves ") + aMoves +
+                (xformSource ? ", B reads Tip" : ", B reads Ankle");
+            const std::string text =
+                ConstraintReadsUnderASolvedJointText(aMoves, xformSource);
+            const UsdStageRefPtr stage = OpenText(text);
+            CHECK(stage);
+            if (!stage) continue;
+            const RigExecRigPose pose =
+                Evaluate(what.c_str(), stage, 1.0, nullptr);
+            if (!pose.valid) continue;
+            const auto out =
+                pose.controlFrames.find(SdfPath("/Asset/Rig/Controls/OutB"));
+            CHECK(out != pose.controlFrames.end());
+            if (out == pose.controlFrames.end()) continue;
+            // The FK chain puts the Knee at its control, (4, 1, 0); A then
+            // moves the Hip from (0, 8, 0) to (10, 0, 0), or the Knee to
+            // (10, 0, 0). Tip's stage frame is (0, 3, 0).
+            const bool hip = std::string(aMoves) == "Hip";
+            GfVec3d expected;
+            if (hip) {
+                // The Knee stops A's move: the Ankle stays on the solved
+                // Knee, while the native Tip rides the Hip's delta.
+                expected = xformSource ? GfVec3d(10, -5, 0)
+                                       : GfVec3d(8, 1, 0);
+            } else {
+                // A's own write to the solved Knee reaches both.
+                expected = xformSource ? GfVec3d(6, 2, 0)
+                                       : GfVec3d(14, 0, 0);
+            }
+            CHECK(Near(out->second.Origin(), expected, 1e-6));
+            if (!Near(out->second.Origin(), expected, 1e-6)) {
+                const GfVec3d o = out->second.Origin();
+                std::printf("    %s: OutB at (%g, %g, %g)\n", what.c_str(),
+                            o[0], o[1], o[2]);
+            }
+            CheckTextParity(what.c_str(), text, {1});
+        }
+    }
+}
+
+/// Two limbs, each an FK chain with an aim constraint on its knee and a
+/// position constraint that pins a Tip control to that knee. The aims share
+/// no frame with each other, nor do the tips; each tip reads the frame its
+/// own limb's aim writes. Movers are defined LTip, RTip, LAim, RAim, so the
+/// stack runs RAim, LAim, RTip, LTip and every adjacent pair in it crosses
+/// from one limb to the other.
+std::string
+IndependentConstraintsText()
+{
+    const auto controls = [](const char *side, int degrees) {
+        const std::string s(side);
+        return FkControls((s + "Fk").c_str(), degrees) +
+               "            def RigExecControl \"" + s + "Pole\"\n"
+               "            {\n"
+               "                matrix4d rest:space = " + Rest(4, 12, 3) +
+               "\n"
+               "            }\n"
+               "            def RigExecControl \"" + s + "Tip\"\n"
+               "            {\n"
+               "                matrix4d rest:space = " + Rest(0, 0, 0) +
+               "\n"
+               "            }\n";
+    };
+    const auto joints = [](const char *side) {
+        const std::string s(side);
+        return
+            "            def RigExecJoint \"" + s + "Hip\"\n"
+            "            {\n"
+            "                matrix4d rest:space = " + Rest(0, 8, 0) + "\n"
+            "\n"
+            "                def RigExecJoint \"Knee\"\n"
+            "                {\n"
+            "                    matrix4d rest:space = " + Rest(4, 0, 0) +
+            "\n"
+            "\n"
+            "                    def RigExecJoint \"Ankle\"\n"
+            "                    {\n"
+            "                        matrix4d rest:space = " + Rest(4, 0, 0) +
+            "\n"
+            "                    }\n"
+            "                }\n"
+            "            }\n";
+    };
+    const auto chain = [](const char *side) {
+        const std::string s(side);
+        return Chain((s + "FK").c_str(),
+                     "</Asset/Rig/Controls/" + s + "FkHip>, "
+                     "</Asset/Rig/Controls/" + s + "FkHip/Knee>, "
+                     "</Asset/Rig/Controls/" + s + "FkHip/Knee/Ankle>",
+                     "</Asset/Rig/Joints/" + s + "Hip>, "
+                     "</Asset/Rig/Joints/" + s + "Hip/Knee>, "
+                     "</Asset/Rig/Joints/" + s + "Hip/Knee/Ankle>");
+    };
+    const auto aim = [](const char *side) {
+        const std::string s(side);
+        return
+            "            def RigExecAimConstraint \"" + s + "Aim\" (\n"
+            "                prepend apiSchemas = [\"RigExecMoverAPI\"]\n"
+            "            )\n"
+            "            {\n"
+            "                float inputs:defaultWeight = 1\n"
+            "                uniform token rigExec:aimAxis = \"x\"\n"
+            "                rel rigExec:aimTarget = "
+            "</Asset/Rig/Controls/" + s + "Pole>\n"
+            "                rel rigExec:moves = "
+            "</Asset/Rig/Joints/" + s + "Hip/Knee>\n"
+            "                uniform token[] rigExec:preserve = "
+            "[\"origin\", \"scale\"]\n"
+            "            }\n";
+    };
+    const auto tip = [](const char *side) {
+        const std::string s(side);
+        return
+            "            def RigExecPositionConstraint \"" + s + "Tip\" (\n"
+            "                prepend apiSchemas = [\"RigExecMoverAPI\"]\n"
+            "            )\n"
+            "            {\n"
+            "                float inputs:defaultWeight = 1\n"
+            "                rel rigExec:sources = "
+            "</Asset/Rig/Joints/" + s + "Hip/Knee>\n"
+            "                rel rigExec:moves = "
+            "</Asset/Rig/Controls/" + s + "Tip>\n"
+            "            }\n";
+    };
+    std::string text = Head(controls("L", 30) + controls("R", -20),
+                            joints("L") + joints("R"));
+    const std::string partition =
+        "        uniform token rigExec:partition = \"Asset\"\n";
+    text.replace(text.find(partition), partition.size(),
+                 partition +
+                 "        reorder nameChildren = [\"Controls\", "
+                 "\"Joints\", \"Movers\", \"Solvers\"]\n");
+    text +=
+        "\n"
+        "        def Scope \"Solvers\"\n"
+        "        {\n" + chain("L") + chain("R") +
+        "        }\n"
+        "\n"
+        "        def Scope \"Movers\"\n"
+        "        {\n" + tip("L") + tip("R") + aim("L") + aim("R") +
+        "        }\n"
+        "    }\n"
+        "}\n";
+    return text;
+}
+
+/// Constraints are parallelized opportunistically: only the frames they read
+/// and write order them, never their place in the mover stack alone.
+///
+/// In the pose schedule the two aims share a Kahn level, as do the two tips,
+/// and each tip sits in a later level than its own limb's aim. In the baked
+/// op graph no step of one limb's constraints reaches a step of the other's,
+/// while each tip stays downstream of its own aim; both canonical evaluators publish the
+/// same pose, with each tip on its own knee.
+void
+TestIndependentConstraintsShareALevel()
+{
+    const std::string text = IndependentConstraintsText();
+    const SdfPath lAim("/Asset/Rig/Movers/LAim");
+    const SdfPath rAim("/Asset/Rig/Movers/RAim");
+    const SdfPath lTip("/Asset/Rig/Movers/LTip");
+    const SdfPath rTip("/Asset/Rig/Movers/RTip");
+
+    // The dynamic pose schedule.
+    {
+        const UsdStageRefPtr stage = OpenText(text);
+        CHECK(stage);
+        if (!stage) return;
+        RigExecRigEvaluator evaluator(stage, kRigPath);
+        evaluator.cpuReference = true;
+        std::vector<std::string> errors;
+        if (!evaluator.Compile(&errors)) {
+            ++failures;
+            std::printf("FAIL independent constraints: the fixture does not "
+                        "compile\n");
+            for (const std::string &error : errors) {
+                std::printf("    %s\n", error.c_str());
+            }
+            return;
+        }
+        const auto graph=evaluator.GetOpGraph();
+        const size_t la=rigExecTest::FindOperation(graph,lAim,"Constraint");
+        const size_t ra=rigExecTest::FindOperation(graph,rAim,"Constraint");
+        const size_t lt=rigExecTest::FindOperation(graph,lTip,"Constraint");
+        const size_t rt=rigExecTest::FindOperation(graph,rTip,"Constraint");
+        CHECK(la<graph.size() && ra<graph.size() && lt<graph.size() && rt<graph.size());
+        CHECK(rigExecTest::HasDependencyPath(graph,la,lt));
+        CHECK(rigExecTest::HasDependencyPath(graph,ra,rt));
+        for(size_t left:{la,lt})for(size_t right:{ra,rt}) {
+            CHECK(!rigExecTest::HasDependencyPath(graph,left,right));
+            CHECK(!rigExecTest::HasDependencyPath(graph,right,left));
+        }
+        const RigExecRigPose pose = evaluator.Evaluate(UsdTimeCode(5.0));
+        CHECK(pose.valid);
+        for (const char *side : {"L", "R"}) {
+            const std::string s(side);
+            const auto knee = pose.jointFramesFinal.find(
+                SdfPath("/Asset/Rig/Joints/" + s + "Hip/Knee"));
+            const auto tipFrame = pose.controlFrames.find(
+                SdfPath("/Asset/Rig/Controls/" + s + "Tip"));
+            CHECK(knee != pose.jointFramesFinal.end());
+            CHECK(tipFrame != pose.controlFrames.end());
+            if (knee == pose.jointFramesFinal.end() ||
+                tipFrame == pose.controlFrames.end()) {
+                continue;
+            }
+            CHECK(Near(tipFrame->second.Origin(), knee->second.Origin(),
+                       1e-6));
+        }
+        // The limbs curl differently, so each tip found its own knee.
+        const auto lTipFrame =
+            pose.controlFrames.find(SdfPath("/Asset/Rig/Controls/LTip"));
+        const auto rTipFrame =
+            pose.controlFrames.find(SdfPath("/Asset/Rig/Controls/RTip"));
+        if (lTipFrame != pose.controlFrames.end() &&
+            rTipFrame != pose.controlFrames.end()) {
+            CHECK(!Near(lTipFrame->second.Origin(),
+                        rTipFrame->second.Origin(), 1e-3));
+        }
+    }
+
+    // The baked op graph.
+    {
+        const UsdStageRefPtr stage = OpenText(text);
+        CHECK(stage);
+        if (!stage) return;
+        RigExecRigEvaluator evaluator(stage, kRigPath);
+        std::vector<std::string> errors;
+        if (!evaluator.Compile(&errors)) {
+            ++failures;
+            return;
+        }
+
+        std::vector<std::string> reasons;
+        CHECK(evaluator.IsBakeable(&reasons));
+        CHECK(evaluator.Evaluate(UsdTimeCode(5.0)).valid);
+        CHECK(evaluator.GetBakedGenerationCount() == 1);
+        const std::vector<RigExecOpGraphNode> graph = evaluator.GetOpGraph();
+        CHECK(!graph.empty());
+        if (graph.empty()) return;
+        // Every step a mover owns (its Constraint step and its commit
+        // steps), and its Constraint step alone.
+        const auto stepsOf = [&graph](const SdfPath &mover) {
+            return rigExecTest::FindOpGraphSteps(graph, "",
+                                                 mover.GetString());
+        };
+        const auto constraintOf = [&graph](const SdfPath &mover) {
+            const std::vector<size_t> steps = rigExecTest::FindOpGraphSteps(
+                graph, "Constraint", mover.GetString());
+            return steps.size() == 1 ? steps[0] : SIZE_MAX;
+        };
+        for (const SdfPath &mover : {lAim, rAim, lTip, rTip}) {
+            CHECK(constraintOf(mover) != SIZE_MAX);
+        }
+        if (constraintOf(lAim) == SIZE_MAX || constraintOf(rAim) == SIZE_MAX ||
+            constraintOf(lTip) == SIZE_MAX || constraintOf(rTip) == SIZE_MAX) {
+            return;
+        }
+        // No path, either way round, between one limb's constraints and the
+        // other's.
+        const auto reaches = [&](const std::vector<SdfPath> &from,
+                                 const std::vector<SdfPath> &to) {
+            std::vector<size_t> seeds;
+            for (const SdfPath &mover : from) {
+                const std::vector<size_t> steps = stepsOf(mover);
+                seeds.insert(seeds.end(), steps.begin(), steps.end());
+            }
+            const std::vector<char> cone =
+                rigExecTest::OpGraphForwardCone(graph, seeds);
+            for (const SdfPath &mover : to) {
+                for (const size_t step : stepsOf(mover)) {
+                    if (cone[step]) return true;
+                }
+            }
+            return false;
+        };
+        CHECK(!reaches({lAim, lTip}, {rAim, rTip}));
+        CHECK(!reaches({rAim, rTip}, {lAim, lTip}));
+        // The pair that shares a frame stays ordered.
+        CHECK(reaches({lAim}, {lTip}));
+        CHECK(reaches({rAim}, {rTip}));
+        CHECK(!reaches({lTip}, {lAim}));
+        CHECK(!reaches({rTip}, {rAim}));
+        // The shared frame is an actual typed producer read, and its writer
+        // precedes the consuming constraint in the canonical operation graph.
+        const auto sharedFrameProducer = [&](const SdfPath &writer,
+                                             const SdfPath &reader) {
+            const size_t consumer = constraintOf(reader);
+            for (size_t producer : stepsOf(writer)) {
+                for (const auto &write : graph[producer].writes) {
+                    if (write.domain != "PoseFin") continue;
+                    for (const auto &read : graph[consumer].reads) {
+                        if (read.domain == write.domain &&
+                            read.first <= write.last && write.first <= read.last) {
+                            CHECK(graph[producer].step < graph[consumer].step);
+                            const auto cone = rigExecTest::OpGraphForwardCone(graph, {producer});
+                            CHECK(cone[consumer]);
+                            return true;
+                        }
+                    }
+                }
+            }
+            return false;
+        };
+        CHECK(sharedFrameProducer(lAim,lTip));
+        CHECK(sharedFrameProducer(rAim,rTip));
+        for (const auto &node : graph)
+            for (const size_t predecessor : node.preds) {
+                CHECK(predecessor < graph.size());
+                if (predecessor < graph.size())
+                    CHECK(graph[predecessor].step < node.step);
+            }
+    }
+
+    CheckTextParity("independent constraints", text, {1, 3, 5});
+}
+
 int
 main(int argc, char **argv)
 {
@@ -2112,15 +3119,21 @@ main(int argc, char **argv)
     TestConstraintAboveASolverRevisesIt();
     TestFkChainComposesOverTheIncomingFrame();
     TestReadPhasesOverTheUnifiedStack();
+    TestAtPrimMoversRecordsMatchTheStore();
+    TestSolverCheckpointsBake(argv[1]);
     TestProducersCarryNoStackPosition();
     TestAggregateContradictionIsRejected();
-    TestUnrelatedLimbsShareALevel();
+    TestAggregateReadIsHistoryIndependent();
+    TestUnrelatedLimbsHaveIndependentDependencies();
     TestSolverInputReadPhaseFollowsAConstraintAbove();
+    TestConstraintReadsAConstraintInStackOrder();
+    TestConstraintReadsUnderASolvedJoint();
+    TestIndependentConstraintsShareALevel();
 
-    // The baked half. Every fixture below stacks and carries no solver-named
-    // read phase, so every one of them bakes: the SSA ladder gives each
-    // commit on a slot its own version, and two solver commits on one slot is
-    // the shape that machinery was built for.
+    // The baked half. Every fixture below stacks, and every one of them
+    // bakes: the SSA ladder gives each commit on a slot its own version, and
+    // two solver commits on one slot is the shape that machinery was built
+    // for.
     const std::vector<double> frames{1, 2, 3, 4, 5};
     {
         RigSpec reordered = Stacked();
@@ -2135,21 +3148,21 @@ main(int argc, char **argv)
         dataFlow.fkJoints =
             "</Asset/Rig/Joints/Hip>, </Asset/Rig/Joints/Hip/Knee>";
 
-        CheckParity("stacked fk + ik", Stacked(), frames, true);
-        CheckParity("stacked fk + ik, reordered", reordered, frames, true);
-        CheckParity("stacked with a partial subset", tear, frames, true);
-        CheckParity("stacked, ordered by data flow", dataFlow, frames, true);
+        CheckEvaluatorConsistency("stacked fk + ik", Stacked(), frames, true);
+        CheckEvaluatorConsistency("stacked fk + ik, reordered", reordered, frames, true);
+        CheckEvaluatorConsistency("stacked with a partial subset", tear, frames, true);
+        CheckEvaluatorConsistency("stacked, ordered by data flow", dataFlow, frames, true);
 
         // Three writers on one joint, and a pose constraint sitting on top of
         // a stacked one: two writers is the shape that is easy to get right
         // by accident, and a constraint over a stack is where the walk order
-        // and the commit order have to be the same order on both paths.
+        // and the commit order have to be the same order on both canonical evaluators.
         RigSpec three = Stacked();
         three.fk2 = true;
         RigSpec aim = Stacked();
         aim.kneeAim = true;
-        CheckParity("three writers on one joint", three, frames, true);
-        CheckParity("a constraint over a stacked joint", aim, frames, true);
+        CheckEvaluatorConsistency("three writers on one joint", three, frames, true);
+        CheckEvaluatorConsistency("a constraint over a stacked joint", aim, frames, true);
 
         // The unified stack, both ways round. A LIVE rest -- a solver
         // measuring from the frame a constraint below it left -- is the one
@@ -2163,11 +3176,11 @@ main(int argc, char **argv)
         RigSpec fedFk = Stacked();
         fedFk.ik = false;
         fedFk.kneeMove = true;
-        CheckParity("a constraint BELOW a solver feeds it", fed, frames,
+        CheckEvaluatorConsistency("a constraint BELOW a solver feeds it", fed, frames,
                     true);
-        CheckParity("a constraint ABOVE a solver revises it", above, frames,
+        CheckEvaluatorConsistency("a constraint ABOVE a solver revises it", above, frames,
                     true);
-        CheckParity("an fk chain over a constrained joint", fedFk, frames,
+        CheckEvaluatorConsistency("an fk chain over a constrained joint", fedFk, frames,
                     true);
         // Both solver kinds over the same constrained joint, and the three
         // writers case on top of it: the live rest is the one place the
@@ -2177,9 +3190,9 @@ main(int argc, char **argv)
         fedBoth.kneeMove = true;
         RigSpec fedThree = fedBoth;
         fedThree.fk2 = true;
-        CheckParity("both solvers over a constrained joint", fedBoth, frames,
+        CheckEvaluatorConsistency("both solvers over a constrained joint", fedBoth, frames,
                     true);
-        CheckParity("three writers over a constrained joint", fedThree,
+        CheckEvaluatorConsistency("three writers over a constrained joint", fedThree,
                     frames, true);
     }
 

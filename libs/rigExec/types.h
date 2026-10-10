@@ -10,16 +10,28 @@
 #include "rigExecMath/surfaceSnapKernel.h"
 #include "rigExecMath/latticeKernel.h"
 
+#include "pxr/base/gf/matrix4d.h"
 #include "pxr/base/gf/vec2f.h"
+#include "pxr/base/gf/vec3d.h"
 #include "pxr/base/gf/vec3f.h"
 #include "pxr/base/gf/vec3i.h"
 #include "pxr/base/vt/array.h"
+#include "pxr/base/tf/token.h"
 #include "pxr/base/vt/value.h"
 
+#include <array>
 #include <memory>
+#include <string>
 #include <vector>
 
 namespace rigExec {
+
+struct RigExecMoverHandler;
+
+// Defined in rigExecMath/deltaMushKernel.h; the alias is the one
+// rigExecMath/geometryKernels.h declares. Packets hold it by shared_ptr.
+template<class Point, class Wide> struct RigExecDeltaMushRestData;
+using RigExecDeltaMushRest = RigExecDeltaMushRestData<GfVec3f, GfVec3d>;
 
 /// Retain the shared computation/type registration library in headless hosts.
 void RigExecLoadComputations();
@@ -98,7 +110,15 @@ struct RigExecWeightPacket {
     /// Resolves the complete normalized field for a count-element target.
     /// Returns false for an invalid packet, a cardinality mismatch, or a
     /// non-finite/out-of-range element; resolved is unchanged on failure.
+    /// Both overloads share one definition; the VtFloatArray one lets
+    /// publication resolve straight into the shared handle.
     bool ResolveAll(size_t count, std::vector<float> *resolved) const;
+    bool ResolveAll(size_t count, VtFloatArray *resolved) const;
+
+    /// Whether ResolveAll(count, ...) succeeds, without writing anything: the
+    /// validation ResolveAll itself runs before it writes, so the two cannot
+    /// disagree.
+    bool ResolvesAll(size_t count) const;
 };
 
 /// Baked distance-to-weight remap for one volumetric weight object
@@ -181,11 +201,25 @@ struct RigExecBlendSampleLayout {
 struct RigExecBlendSampleData {
     float activation = 1.0f;
     std::vector<GfVec3f> points;
+    // Synchronous packet gather may borrow a retained immutable dense sample.
+    // These pointers never escape its owning assembly call.
+    const GfVec3f *borrowedPoints = nullptr;
+    size_t borrowedCount = 0;
+    bool borrowsPoints = false;
+    const GfVec3f *PointData() const {
+        return borrowsPoints ? borrowedPoints : points.data();
+    }
+    size_t PointCount() const {
+        return borrowsPoints ? borrowedCount : points.size();
+    }
     std::shared_ptr<const RigExecBlendSampleLayout> layout;
 
     bool operator==(const RigExecBlendSampleData &o) const {
-        return activation == o.activation && points == o.points &&
-               layout == o.layout;
+        if (activation != o.activation || layout != o.layout ||
+            PointCount() != o.PointCount()) return false;
+        for (size_t i=0;i<PointCount();++i)
+            if (PointData()[i] != o.PointData()[i]) return false;
+        return true;
     }
     bool operator!=(const RigExecBlendSampleData &o) const {
         return !(*this == o);
@@ -344,7 +378,21 @@ struct RigExecMoverParameters {
     /// them once per frame.
     std::shared_ptr<const RigExecSkinTopology> skinTopology;
 
+    /// The epoch-fixed rest state, when the evaluator resolved one: the
+    /// smoothing table, the smoothed rest surface and the transport
+    /// frames, derived once instead of on every frame. The packet arrays
+    /// stay filled -- the entry feeds the kernel only, and deliberately
+    /// takes no part in operator== below: it is a pure function of the
+    /// arrays, so two packets naming the same arrays name the same
+    /// deformation whether the entry is shared, rebuilt, or refused.
+    /// Comparing it would report a packet change on every hit/refusal
+    /// transition -- a notice that newly varies an input, with the
+    /// current frame's value unchanged, would re-execute a revision
+    /// whose numbers cannot move.
+    std::shared_ptr<const RigExecDeltaMushRest> mushRest;
+
     /// Plugin-owned payload. The registered schema identifies its callbacks.
+    const RigExecMoverHandler *externalHandler = nullptr;
     TfToken externalSchema;
     VtValue externalData;
 
@@ -378,6 +426,7 @@ struct RigExecMoverParameters {
                skinIndices == o.skinIndices &&
                skinWeights == o.skinWeights &&
                skinTopology == o.skinTopology &&
+               // mushRest deliberately excluded: see the member comment.
                skinElementSize == o.skinElementSize &&
                skinningMethod == o.skinningMethod &&
                externalSchema == o.externalSchema &&

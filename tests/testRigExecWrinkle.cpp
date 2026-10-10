@@ -25,6 +25,8 @@ PXR_NAMESPACE_USING_DIRECTIVE
 #define CHECK(x) do { if (!(x)) throw std::runtime_error( \
     std::string(__FILE__) + ":" + std::to_string(__LINE__) + ": " #x); } while (false)
 
+#include "rigExecRuntimeDrive.h"
+
 namespace {
 
 using Points = std::vector<GfVec3f>;
@@ -92,8 +94,8 @@ std::string LayerText(const SdfLayerHandle &layer) {
 
 Points Published(const RigExecRigPose &pose) {
     CHECK(pose.valid);
-    CHECK(pose.bakedParityMismatches == 0);
-    CHECK(pose.moverGraphParityMismatches == 0);
+    CHECK(pose.comparisonMismatches == 0);
+    CHECK(pose.referenceMismatches == 0);
     CHECK(pose.movedProperties.count(kTarget) == 1);
     const auto &value = pose.movedProperties.at(kTarget).Get<VtVec3fArray>();
     return {value.begin(), value.end()};
@@ -131,28 +133,32 @@ void CheckRuntime(const RigExecRuntimeReader &reader, const Points &expected) {
     CHECK(found);
 }
 
+// Bakes \p frames' first and plays the file through its inputs in
+// PlaybackOrder (forward, backward, shuffled; a time played twice in a row
+// samples nothing the second time), each run bit for bit with the
+// evaluator's points at that time.
 std::vector<uint8_t> CheckBinaryParity(RigExecRigEvaluator &evaluator,
+                                      const UsdStageRefPtr &stage,
                                       const std::vector<double> &frames) {
     std::vector<Points> expected;
     for (double frame : frames)
         expected.push_back(Published(evaluator.Evaluate(UsdTimeCode(frame))));
     RigExecBakeOpts options;
-    options.frames = frames;
+    options.time = frames.front();
     RigExecBakeResult result;
     std::string error;
     if (!RigExecBakeToBinary(evaluator, options, &result, &error))
         throw std::runtime_error(error);
     CHECK(!result.bytes.empty());
-    auto reader = RigExecRuntimeReader::Open(
-        result.bytes.data(), result.bytes.size(), &error);
-    if (!reader) throw std::runtime_error(error);
-    CHECK(reader->GetFrameTimes() == frames);
+    RigExecTestPlayer player;
+    if (!player.Open(result.bytes, stage, &error))
+        throw std::runtime_error(error);
+    CHECK(player->GetBakeTime() == frames.front());
     for (size_t index : PlaybackOrder(frames.size())) {
         CHECK(SameBits(Published(evaluator.Evaluate(UsdTimeCode(frames[index]))),
                        expected[index]));
-        CHECK(reader->SetFrame(frames[index], &error));
-        if (!reader->Execute(&error)) throw std::runtime_error(error);
-        CheckRuntime(*reader, expected[index]);
+        if (!player.Play(frames[index], &error)) throw std::runtime_error(error);
+        CheckRuntime(player.Reader(), expected[index]);
     }
     return result.bytes;
 }
@@ -197,26 +203,23 @@ void TestEvaluationAndInvalidation(const Grid &grid) {
     const auto rootBefore = LayerText(stage->GetRootLayer());
     const auto sessionBefore = LayerText(stage->GetSessionLayer());
     RigExecRigEvaluator evaluator(stage, kRig);
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::BakedWithParityCheck);
     Compile(evaluator);
     std::vector<std::string> diagnostics;
     CHECK(evaluator.IsBakeable(&diagnostics));
     auto evaluate = [&]() { return Published(evaluator.Evaluate(UsdTimeCode::Default())); };
     CHECK(Near(evaluate(), full));
-    CHECK(evaluator.GetBakedGenerationCount() > 0);
+    CHECK(evaluator.GetBakedProgram() != nullptr);
     CHECK(Near(evaluate(), full));
     CHECK(LayerText(stage->GetRootLayer()) == rootBefore);
     CHECK(LayerText(stage->GetSessionLayer()) == sessionBefore);
 
-    for (const auto mode : {RigExecEvaluationMode::Dynamic,
-                            RigExecEvaluationMode::ExecReference}) {
+    {
         RigExecRigEvaluator reference(stage, kRig);
-        reference.SetEvaluationMode(mode);
-        reference.cpuParityMode = true;
+        reference.cpuReference = true;
         Compile(reference);
         const auto pose = reference.Evaluate(UsdTimeCode::Default());
         CHECK(Near(Published(pose), full));
-        CHECK(pose.moverGraphParityAgreements > 0);
+        CHECK(pose.referenceAgreements > 0);
     }
 
     wrinkle.SetDefaultWeight(0.5f);
@@ -309,7 +312,6 @@ void TestEvaluationAndInvalidation(const Grid &grid) {
     CHECK(layer->ImportFromString(text));
     const auto reopened = UsdStage::Open(layer);
     RigExecRigEvaluator reloaded(reopened, kRig);
-    reloaded.SetEvaluationMode(RigExecEvaluationMode::BakedWithParityCheck);
     Compile(reloaded);
     CHECK(Near(Published(reloaded.Evaluate(UsdTimeCode::Default())), revised));
 
@@ -417,9 +419,8 @@ void TestAnimatedBinary(const Grid &grid) {
     sample("inputs:enabled", true, 1); sample("inputs:enabled", false, 4);
     sample("inputs:enabled", true, 5);
     RigExecRigEvaluator evaluator(stage, kRig);
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::BakedWithParityCheck);
     Compile(evaluator);
-    CheckBinaryParity(evaluator, {1, 2, 3, 4, 5});
+    CheckBinaryParity(evaluator, stage, {1, 2, 3, 4, 5});
 
     auto driver = stage->GetPrimAtPath(kRig).CreateAttribute(
         TfToken("wrinkleScale"), SdfValueTypeNames->Float);
@@ -430,7 +431,7 @@ void TestAnimatedBinary(const Grid &grid) {
     for (size_t i = 0; i < mask.size(); ++i) mask[i] = float(i % 3) * 0.5f;
     const auto weights = builder.AddStaticWeight("Mask", kTarget, mask);
     wrinkle.SetWeightObject(weights.GetPath());
-    CheckBinaryParity(evaluator, {1, 2, 3, 4, 5});
+    CheckBinaryParity(evaluator, stage, {1, 2, 3, 4, 5});
     const auto beforeMovedScale = Published(evaluator.Evaluate(UsdTimeCode(1)));
     auto scaleMover = builder.NewMoverChain("Scale", driver.GetPath())
         .AddFloatMathMover("Blend", TfToken("blend"), 0.2f);
@@ -440,7 +441,7 @@ void TestAnimatedBinary(const Grid &grid) {
         .Set(0.8f, UsdTimeCode(3)));
     wrinkle.SetReadPhase(TfToken("inputs:wrinkleScale"), "final");
     CHECK(!Near(Published(evaluator.Evaluate(UsdTimeCode(1))), beforeMovedScale));
-    CheckBinaryParity(evaluator, {1, 2, 3, 4, 5});
+    CheckBinaryParity(evaluator, stage, {1, 2, 3, 4, 5});
 
     // A directly moved setting is read from property results rather than captured paths.
     const auto scaleAttr = prim.GetAttribute(TfToken("inputs:wrinkleScale"));
@@ -451,13 +452,13 @@ void TestAnimatedBinary(const Grid &grid) {
         .Set(0.3f, UsdTimeCode(1)));
     CHECK(directScale.GetPrim().GetAttribute(TfToken("inputs:value"))
         .Set(0.75f, UsdTimeCode(3)));
-    CheckBinaryParity(evaluator, {1, 3});
+    CheckBinaryParity(evaluator, stage, {1, 3});
     wrinkle.SetTopology(TfToken("surfaceStruts"));
-    CheckBinaryParity(evaluator, {1, 3});
+    CheckBinaryParity(evaluator, stage, {1, 3});
     wrinkle.SetPinPoints({32, 45, 58});
-    CheckBinaryParity(evaluator, {1, 3});
+    CheckBinaryParity(evaluator, stage, {1, 3});
     sample("inputs:iterations", -1, 6);
-    CheckBinaryParity(evaluator, {6});
+    CheckBinaryParity(evaluator, stage, {6});
 }
 
 void TestUpstreamCompression(const Grid &grid, const char *binaryPath) {
@@ -470,20 +471,20 @@ void TestUpstreamCompression(const Grid &grid, const char *binaryPath) {
     // Add order is reverse application order; the empty rest uses authored points.
     chain.AddMatrixMover("Compress", control.GetPath());
     RigExecRigEvaluator evaluator(stage, kRig);
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::BakedWithParityCheck);
     Compile(evaluator);
     RigExecBakeOpts options;
-    options.frames = {1};
+    options.time = 1;
     RigExecBakeResult result;
     std::string error;
     if (!RigExecBakeToBinary(evaluator, options, &result, &error))
         throw std::runtime_error(error);
     auto reader = RigExecRuntimeReader::Open(result.bytes.data(), result.bytes.size(), &error);
     if (!reader) throw std::runtime_error(error);
-    CHECK(reader->SetFrame(1, &error));
+    // The control's scale authored on the stage and set as the binary's
+    // input: both rerun the matrix mover and the wrinkle after it.
     for (const double scale : {1.0, 0.65, 0.8, 1.1, 1.0}) {
         control.SetAvarScale(scale, 1, 1);
-        CHECK(reader->SetAvar(control.GetPath().AppendProperty(TfToken("avars:sx"))
+        CHECK(reader->SetInput(control.GetPath().AppendProperty(TfToken("avars:sx"))
             .GetString(), scale, &error));
         const auto actual = Published(evaluator.Evaluate(UsdTimeCode(1)));
         auto expected = grid.rest;
@@ -495,7 +496,7 @@ void TestUpstreamCompression(const Grid &grid, const char *binaryPath) {
         if (!reader->Execute(&error)) throw std::runtime_error(error);
         CheckRuntime(*reader, actual);
     }
-    reader->ClearAvars();
+    reader->ResetInputs();
     CHECK(reader->Execute(&error));
     CheckRuntime(*reader, grid.rest);
 
@@ -509,7 +510,7 @@ void TestUpstreamCompression(const Grid &grid, const char *binaryPath) {
     for (auto &point : revisedPose) point[0] = float(double(point[0]) * 0.7);
     CHECK(Near(Published(evaluator.Evaluate(UsdTimeCode(1))),
         Solve(revisedGrid, revisedPose)));
-    CheckBinaryParity(evaluator, {1});
+    CheckBinaryParity(evaluator, stage, {1});
     CHECK(mesh.GetPointsAttr().Set(VtVec3fArray(grid.rest.begin(), grid.rest.end())));
     control.SetAvarScale(1, 1, 1);
 
@@ -547,11 +548,9 @@ void TestUpstreamCompression(const Grid &grid, const char *binaryPath) {
     CHECK(maxOffsetStep < 0.01);
     const auto rootBefore = LayerText(stage->GetRootLayer());
     const auto sessionBefore = LayerText(stage->GetSessionLayer());
-    for (const auto mode : {RigExecEvaluationMode::Dynamic,
-                            RigExecEvaluationMode::ExecReference}) {
+    {
         RigExecRigEvaluator reference(stage, kRig);
-        reference.SetEvaluationMode(mode);
-        reference.cpuParityMode = true;
+        reference.cpuReference = true;
         Compile(reference);
         const auto order = PlaybackOrder(frames.size());
         // Start at a compressed subframe without evaluating preceding poses.
@@ -560,7 +559,7 @@ void TestUpstreamCompression(const Grid &grid, const char *binaryPath) {
             CHECK(SameBits(Published(reference.Evaluate(UsdTimeCode(frames[index]))),
                            expected[index]));
     }
-    const auto bytes = CheckBinaryParity(evaluator, frames);
+    const auto bytes = CheckBinaryParity(evaluator, stage, frames);
     CHECK(LayerText(stage->GetRootLayer()) == rootBefore);
     CHECK(LayerText(stage->GetSessionLayer()) == sessionBefore);
     if (binaryPath) {

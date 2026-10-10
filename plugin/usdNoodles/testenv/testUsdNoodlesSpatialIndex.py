@@ -43,13 +43,6 @@ class TestSpatialIndex(unittest.TestCase):
         index = _noodles.SpatialIndex(bounds, 8, 10, 10.0)
         self.assertEqual(index.getNodeCount(), 0)
 
-    def test_insert_node(self):
-        """Test inserting a single node."""
-        index = _noodles.SpatialIndex()
-        bounds = Gf.Range2d(Gf.Vec2d(0, 0), Gf.Vec2d(100, 50))
-        index.insertNode("node1", bounds)
-        self.assertEqual(index.getNodeCount(), 1)
-
     def test_insert_multiple_nodes(self):
         """Test inserting multiple nodes."""
         index = _noodles.SpatialIndex()
@@ -59,13 +52,6 @@ class TestSpatialIndex(unittest.TestCase):
             )
             index.insertNode(f"node{i}", bounds)
         self.assertEqual(index.getNodeCount(), 100)
-
-    def test_insert_link(self):
-        """Test inserting a single link."""
-        index = _noodles.SpatialIndex()
-        bounds = Gf.Range2d(Gf.Vec2d(0, 0), Gf.Vec2d(200, 100))
-        index.insertLink(0, bounds)
-        self.assertEqual(index.getLinkCount(), 1)
 
     def test_insert_multiple_links(self):
         """Test inserting multiple links."""

@@ -279,8 +279,9 @@ final preview until the commit. Undo, a new drag, time or selection changes,
 and saving drain the pending edit first; a replacement stage invalidates its
 queued callback. A clean preview committed with exactly the same values keeps
 its published generation, including the first opinion in an empty session
-layer. Empty-field ancestor overs are inert; real metadata, structural edits,
-connections and revised property-chain targets still require evaluation.
+layer. A drag on a property that movers revise previews its base, so its
+exact commit settles the same way. Empty-field ancestor overs are inert; real
+metadata, structural edits and connections still require evaluation.
 
 ## usdview plugins
 

@@ -11,6 +11,10 @@
 #
 set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]:-$0}")/_env.sh"
+if [[ -n "${RIGEXEC_VIZ_ROOT:-}" ]]; then
+    export PYTHONPATH="$RIGEXEC_VIZ_ROOT:${PYTHONPATH:-}"
+    export PXR_PLUGINPATH_NAME="$PXR_PLUGINPATH_NAME:$RIGEXEC_VIZ_ROOT/usdview"
+fi
 
 # Register TouchPose for interactive sessions. This launcher
 # is the one an animator opens, and the toolset is not something they

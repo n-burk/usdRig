@@ -421,7 +421,9 @@ Constant colour of the synthesized guide. May be CONNECTED
 to another color3f attribute, in which case the first connection
 source's value at the evaluated time is drawn instead of the local
 one -- the imaging bridge follows the connection because
-UsdAttribute::Get never does.
+UsdAttribute::Get never does. A source that math movers revise is
+read at this attribute's rigExecReadPhase: its authored base unless
+`final` or a checkpoint is declared.
 
 #### `guide:displayOpacity`
 
@@ -431,8 +433,11 @@ Constant opacity of the synthesized guide. May be CONNECTED
 to a float or double attribute -- a limb's IK/FK dial, say -- and
 then the first connection source's value at the evaluated time is
 what is drawn, optionally complemented by guide:displayOpacityInvert
-and never below guide:displayOpacityMin. An unconnected attribute
-draws exactly the value it holds, floor and invert ignored.
+and never below guide:displayOpacityMin. A dial that math movers
+revise is read at this attribute's rigExecReadPhase: its authored
+base unless `final` or a checkpoint is declared. An unconnected
+attribute draws exactly the value it holds, floor and invert
+ignored.
 
 #### `guide:displayOpacityInvert`
 

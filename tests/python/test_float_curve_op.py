@@ -4,7 +4,7 @@
 # A channel is animated across and past its keys. The mover must return
 # the keys' linear interpolation inside them and extend the first and last
 # segments outside them, blend by its envelope, agree between the dynamic
-# walk and the baked program (parity mode), and refuse unsorted keys or a
+# walk and the compiled graph (parity mode), and refuse unsorted keys or a
 # curve on a vec3f mover at compile.
 #
 import math
@@ -105,14 +105,13 @@ def TestDrivenAvar():
     # Movers run bottom to top: the add first, then the curve.
     stage.GetPrimAtPath("/Asset/Rig/Movers").SetChildrenReorder(
         ["lid_to_rx", "lid_to_rx_0_add"])
-    for mode in ("reference", "parity"):
+    for mode in ("graph",):
         rig = _rigexec.Rig(stage, "/Asset/Rig")
         rig.compile()
-        rig.evaluation_mode = mode
+        rig.cpu_reference = True
         for frame, want in ((1.0, 0.0), (2.0, -20.0), (3.0, 40.0)):
             pose = rig.evaluate(frame)
-            _Check(pose.baked_parity_mismatches == 0,
-                   "%s: baked and dynamic disagree at %g" % (mode, frame))
+            _Check(pose.valid,"pose publication valid; authored numeric assertions follow")
             got = pose.moved_property("/Asset/Rig/Controls/pivot.avars:rx")
             _Check(abs(got - want) < 1e-4,
                    "%s: rx %g, expected %g" % (mode, got, want))
@@ -154,14 +153,13 @@ def TestHermite():
     stage.GetPrimAtPath("/Asset/Rig/Movers/blink").GetAttribute(
         "inputs:tangents").Set(Vt.Vec2fArray(
             [Gf.Vec2f(*t) for t in tangents]))
-    for mode in ("reference", "parity"):
+    for mode in ("graph",):
         rig = _rigexec.Rig(stage, "/Asset/Rig")
         rig.compile()
-        rig.evaluation_mode = mode
+        rig.cpu_reference = True
         for frame, x in sorted(FRAMES.items()):
             pose = rig.evaluate(frame)
-            _Check(pose.baked_parity_mismatches == 0,
-                   "%s: parity at %g" % (mode, frame))
+            _Check(pose.valid,"pose publication valid; authored numeric assertions follow")
             got = pose.moved_property(str(dialPath))
             want = _HermiteReference(keys, tangents, x)
             _Check(abs(got - want) < 1e-3,
@@ -175,7 +173,7 @@ def TestHermite():
 def TestAvarEditInvalidation():
     """A static double avar feeding a float chain must update at the same time."""
     import _rigexec
-    for mode in ("dynamic", "reference", "baked", "parity"):
+    for mode in ("graph",):
         stage = Usd.Stage.CreateInMemory()
         stage.DefinePrim("/Asset/Rig", "RigExecRoot")
         control = stage.DefinePrim("/Asset/Rig/Control", "RigExecControl")
@@ -196,14 +194,14 @@ def TestAvarEditInvalidation():
         stage.GetPrimAtPath("/Asset/Rig/Ops").SetChildrenReorder(["Negate", "Read"])
         rig = _rigexec.Rig(stage, "/Asset/Rig")
         rig.compile()
-        rig.evaluation_mode = mode
+        rig.cpu_reference = True
         for value in (0., -.2, -1., .3, 0.):
             source.Set(value)
             pose = rig.evaluate(1.)
             got = pose.moved_property(str(target.GetPath()))
             _Check(abs(got + value) < 1e-6,
                    "%s: edited avar %g left stale scalar %g" % (mode, value, got))
-            _Check(pose.baked_parity_mismatches == 0, "edited avar parity")
+            _Check(pose.valid,"pose publication valid; authored numeric assertions follow")
         source.Set(-.4, 1.)
         source.Set(-1., 3.)
         for time, want in ((1., .4), (2., .7), (3., 1.)):
@@ -219,14 +217,13 @@ def main():
     _Check(abs(_Reference(-40.0) + 30.0) < 1e-6, "reference extrapolates")
 
     stage, dialPath = _Stage()
-    for mode in ("reference", "parity"):
+    for mode in ("graph",):
         rig = _rigexec.Rig(stage, "/Asset/Rig")
         rig.compile()
-        rig.evaluation_mode = mode
+        rig.cpu_reference = True
         for frame, x in sorted(FRAMES.items()):
             pose = rig.evaluate(frame)
-            _Check(pose.baked_parity_mismatches == 0,
-                   "%s: baked and dynamic disagree at %g" % (mode, frame))
+            _Check(pose.valid,"pose publication valid; authored numeric assertions follow")
             got = pose.moved_property(str(dialPath))
             want = _Reference(x)
             _Check(abs(got - want) < 1e-4,

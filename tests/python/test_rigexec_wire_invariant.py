@@ -118,7 +118,7 @@ def _open(mode, carrier):
     a.Set(value)
 
     rig = rigexec.Rig(stage, _RIG)
-    rig.evaluation_mode = mode
+    rig.cpu_reference = True
     return rig, enables
 
 
@@ -127,11 +127,11 @@ def _points(rig):
     assert pose.valid, [d for d in pose.diagnostics
                         if not d.startswith("warning:")]
     out = {}
-    for key in pose.moved_properties():
+    for key, value in pose.moved_properties().items():
         if not key.endswith(".points"):
             continue
         try:
-            out[key] = [tuple(q) for q in pose.moved_property(key)]
+            out[key] = [tuple(q) for q in value]
         except TypeError:
             pass
     return out
@@ -233,7 +233,7 @@ def _check_look_at_drives_the_lids():
     at.Set(60.0)
 
     rig = rigexec.Rig(stage, _RIG)
-    rig.evaluation_mode = "baked"
+    rig.cpu_reference = True
     # THE LOOK-AT IS PUT IN WORLD SPACE, explicitly, because what this
     # measures only exists there.
     #
@@ -279,7 +279,7 @@ def main():
     # numbers identical to the digit in both modes -- measured -- so the
     # second pass doubled a 150-second test to buy nothing. Parity
     # between the two paths is verify_binary's job, not this file's.
-    _check("baked")
+    _check("graph")
     _check_look_at_drives_the_lids()
     print("OK: a deformer at rest adds nothing, however it is carried")
 

@@ -8,7 +8,7 @@
 // tiers' baselines were measured without them.
 // Every scenario runs in a child process of its own (the bench re-runs
 // itself with --child), on a freshly opened stage and a fresh evaluator,
-// compiled in the requested mode, profiled, and warmed with three evaluates
+// compiled with optional scalar reference checks, profiled, and warmed with three evaluates
 // at the held time before anything is timed. A process is the unit because
 // compile and settle costs drift upward with the number of epochs a process
 // has compiled -- measured on the biped, thirty compiled-and-dropped
@@ -33,7 +33,7 @@
 // median over the rounds on its own, so a row need not add up.
 // Prints numbers and asserts nothing, so it is built but deliberately NOT
 // registered with ctest, like the other benches.
-//   benchEditLatency [examplesDir] [--mode baked|dynamic|parity]
+//   benchEditLatency [examplesDir] [--reference-checks]
 //                    [--rounds N] [--only ID[,ID...]]
 //                    [--stage FILE] [--rig PATH]
 // --child runs the selected scenarios in this process and prints only
@@ -43,7 +43,7 @@
 // first prim of the right kind, and a scenario with no target says so.
 // Environment is read and reported, never set: RIGEXEC_ENABLE_PARALLEL_EVAL,
 // RIGEXEC_BAKED_SCHEDULE, RIGEXEC_FRAME_CACHE and
-// RIGEXEC_DYNAMIC_RUNS_PROGRAM (which makes --mode dynamic run the program).
+// Scalar reference checks use the same production graph.
 #include "rigExec/bakedProgram.h"
 #include "rigExec/bakedProgramImpl.h"
 #include "rigExec/parallel.h"
@@ -391,20 +391,9 @@ CountProgramWork(const RigExecRigEvaluator &evaluator, Round *r)
     }
     r->clusters = double(program->GetClusterCount());
     r->clustersRun = double(program->GetClustersRunLastGeneration());
-    // A step ran when it is a source (sources run every generation) or when
-    // it is in the step closure the run decided on.
     const RigExecBakedProgramImpl &impl = program->GetStepGraph();
-    const size_t closedBits = impl.closedSteps.words.size() * 64;
-    size_t steps = 0, ran = 0;
-    for (const RigExecBakedStep &step : impl.steps) {
-        const size_t index = steps++;
-        if (step.isSource ||
-            (index < closedBits && impl.closedSteps.Test(int(index)))) {
-            ++ran;
-        }
-    }
-    r->steps = double(steps);
-    r->stepsRun = double(ran);
+    r->steps = double(impl.opGraph.ops.size());
+    r->stepsRun = double(impl.opExecution.executed);
 }
 
 /// Applies the edit, evaluates at \p time, and measures both. Returns
@@ -420,12 +409,11 @@ MeasureRound(RigExecRigEvaluator &evaluator,
         return false;
     }
     const double evalStart = NowUs();
-    const size_t generationsBefore = evaluator.GetBakedGenerationCount();
     const RigExecRigPose pose = evaluator.Evaluate(time);
     const double evalEnd = NowUs();
     r->editMs = (evalStart - editStart) / 1000.0;
     r->wallMs = (evalEnd - evalStart) / 1000.0;
-    r->baked = evaluator.GetBakedGenerationCount() > generationsBefore;
+    r->baked = pose.valid && evaluator.GetBakedProgram() != nullptr;
     // The first line that is not a compile warning: a warning rides along
     // on every generation, and the line worth printing is the failure.
     for (const std::string &line : pose.diagnostics) {
@@ -802,37 +790,11 @@ BuildScenarios(const UsdStageRefPtr &stage, const Targets &t, double held)
     return out;
 }
 
-const char *
-ModeName(RigExecEvaluationMode mode)
-{
-    switch (mode) {
-    case RigExecEvaluationMode::Baked: return "baked";
-    case RigExecEvaluationMode::BakedWithParityCheck: return "parity";
-    case RigExecEvaluationMode::Dynamic: return "dynamic";
-    }
-    return "?";
-}
-
-bool
-ParseMode(const std::string &name, RigExecEvaluationMode *mode)
-{
-    if (name == "baked") {
-        *mode = RigExecEvaluationMode::Baked;
-    } else if (name == "dynamic") {
-        *mode = RigExecEvaluationMode::Dynamic;
-    } else if (name == "parity") {
-        *mode = RigExecEvaluationMode::BakedWithParityCheck;
-    } else {
-        return false;
-    }
-    return true;
-}
-
 int
 Usage()
 {
     std::printf("usage: benchEditLatency [examplesDir] "
-                "[--mode baked|dynamic|parity] [--rounds N] "
+                "[--reference-checks] [--rounds N] "
                 "[--only ID[,ID...]] [--stage FILE] [--rig PATH]\n");
     return 2;
 }
@@ -841,7 +803,7 @@ Usage()
 /// failure that makes the rest of the run meaningless (no compile).
 bool
 RunScenario(const Scenario &scenario, const UsdStageRefPtr &stage,
-            const SdfPath &rigPath, RigExecEvaluationMode mode,
+            const SdfPath &rigPath, bool referenceChecks,
             size_t rounds, double held)
 {
     if (!scenario.missing.empty()) {
@@ -850,7 +812,7 @@ RunScenario(const Scenario &scenario, const UsdStageRefPtr &stage,
         return true;
     }
     RigExecRigEvaluator evaluator(stage, rigPath);
-    evaluator.SetEvaluationMode(mode);
+    evaluator.cpuReference = referenceChecks;
     evaluator.SetProfilingEnabled(true);
     std::vector<std::string> errors;
     if (!evaluator.Compile(&errors)) {
@@ -888,8 +850,7 @@ RunScenario(const Scenario &scenario, const UsdStageRefPtr &stage,
         }
         // Why the program did not answer, when it was asked to and did not;
         // a round it answered carries only its routine report lines.
-        if (diagnostic.empty() && !r.baked &&
-            mode != RigExecEvaluationMode::Dynamic) {
+        if (diagnostic.empty() && !r.baked) {
             diagnostic = r.firstDiagnostic;
         }
         all.push_back(r);
@@ -964,7 +925,7 @@ main(int argc, char **argv)
     std::string examplesDir = "examples";
     std::string stagePath;
     SdfPath rigPath;
-    RigExecEvaluationMode mode = RigExecEvaluationMode::Baked;
+    bool referenceChecks = false;
     size_t rounds = 8;
     std::set<std::string> only;
     bool child = false;
@@ -975,11 +936,9 @@ main(int argc, char **argv)
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
         const bool hasValue = i + 1 < argc;
-        if (arg == "--mode" && hasValue) {
-            if (!ParseMode(argv[++i], &mode)) {
-                return Usage();
-            }
-            forwarded += " --mode " + std::string(argv[i]);
+        if (arg == "--reference-checks") {
+            referenceChecks = true;
+            forwarded += " --reference-checks";
         } else if (arg == "--rounds" && hasValue) {
             rounds = size_t(std::max(1, std::atoi(argv[++i])));
             forwarded += " --rounds " + std::to_string(rounds);
@@ -1017,8 +976,7 @@ main(int argc, char **argv)
     if (!child) {
         for (const char *name : {"RIGEXEC_ENABLE_PARALLEL_EVAL",
                                  "RIGEXEC_BAKED_SCHEDULE",
-                                 "RIGEXEC_FRAME_CACHE",
-                                 "RIGEXEC_DYNAMIC_RUNS_PROGRAM"}) {
+                                 "RIGEXEC_FRAME_CACHE"}) {
             const char *value = GetEnv(name);
             std::printf("%s=%s\n", name, value ? value : "(unset)");
         }
@@ -1049,15 +1007,15 @@ main(int argc, char **argv)
     if (child) {
         for (const Scenario &scenario : scenarios) {
             if ((only.empty() || only.count(scenario.id)) &&
-                !RunScenario(scenario, stage, rigPath, mode, rounds, held)) {
+                !RunScenario(scenario, stage, rigPath, referenceChecks, rounds, held)) {
                 return 1;
             }
         }
         return 0;
     }
 
-    std::printf("[stage] %s rig=%s mode=%s held=%g rounds=%zu\n",
-                stagePath.c_str(), rigPath.GetText(), ModeName(mode), held,
+    std::printf("[stage] %s rig=%s reference=%s held=%g rounds=%zu\n",
+                stagePath.c_str(), rigPath.GetText(), referenceChecks ? "on" : "off", held,
                 rounds);
     std::printf("columns: medians over the rounds, ms; settle nests "
                 "compile, and compile nests bake on a recompile\n");

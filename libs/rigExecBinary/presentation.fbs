@@ -1,0 +1,65 @@
+// A .rigexec presentation: render meshes, materials and public controls an
+// engine shows for a baked rig. It travels as a nested buffer in the
+// File.presentation field of rigexec.fbs (file identifier REXP) and is read
+// by consumers such as the Godot add-on; the runtime never interprets it.
+// Its floats are presentation-only, so this schema is exempt from
+// rigexec.fbs's rule against float scalars in tables. Regenerate with
+// bin/gen_flatbuffers.sh or bin/gen_flatbuffers.bat after any edit.
+namespace rigExec.fb;
+
+enum PresentationUnit : ubyte { AssetUnits = 0, Degrees, Ratio }
+enum PresentationWrap : ubyte { Repeat = 0, Clamp }
+
+struct PresentationColor { r: float; g: float; b: float; }
+
+/// One public control. The input list of the file that carries this
+/// presentation is the only source of its default.
+table PresentationControl {
+  name: string (required);
+  /// The name of a listed input of the carrying file.
+  input: string (required);
+  unit: PresentationUnit;
+}
+
+table PresentationMaterial {
+  /// "UsdPreviewSurface".
+  model: string;
+  /// Raw PNG bytes.
+  texture_png: [ubyte];
+  diffuse_scale: PresentationColor;
+  emission_scale: PresentationColor;
+  roughness: float;
+  metallic: float;
+  specular: float;
+  wrap_s: PresentationWrap;
+  wrap_t: PresentationWrap;
+}
+
+table PresentationMesh {
+  path: string;
+  /// The points output the stencils read.
+  points_path: string (required);
+  source_point_count: uint;
+  /// CSR offsets, three groups (p, u, v) per render vertex.
+  stencil_offsets: [uint];
+  /// Stencil source indices: 16-bit while source_point_count <= 65535,
+  /// else stencil_indices32.
+  stencil_indices16: [ushort];
+  stencil_indices32: [uint];
+  stencil_weights: [float];
+  vertex_indices: [uint];
+  /// Two per vertex_indices entry.
+  uvs: [float];
+  material: PresentationMaterial;
+}
+
+table Presentation {
+  version: uint = 1;
+  controls: [PresentationControl];
+  meshes: [PresentationMesh];
+  /// The exporter's source description, as JSON text.
+  source_json: string;
+}
+
+root_type Presentation;
+file_identifier "REXP";

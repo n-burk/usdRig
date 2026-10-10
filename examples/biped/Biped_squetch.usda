@@ -78,6 +78,9 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI"]
                 )
                 {
+                    float inputs:value (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/headwire_low_follow/M_HeadwireLow.face:head_lowRatio>
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/head_low_squetch.avars:sx>
                     uniform token rigExec:operation = "blend"
@@ -97,6 +100,9 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI"]
                 )
                 {
+                    float inputs:value (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/headwire_low_follow/M_HeadwireLow.face:head_lowRatio>
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/head_low_squetch.avars:sz>
                     uniform token rigExec:operation = "blend"
@@ -116,6 +122,9 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI"]
                 )
                 {
+                    float inputs:value (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/headwire_top_follow/M_HeadwireTop.face:head_topRatio>
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/head_top_squetch.avars:sx>
                     uniform token rigExec:operation = "blend"
@@ -135,6 +144,9 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI"]
                 )
                 {
+                    float inputs:value (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/headwire_top_follow/M_HeadwireTop.face:head_topRatio>
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/head_top_squetch.avars:sz>
                     uniform token rigExec:operation = "blend"
@@ -187,6 +199,9 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI"]
                 )
                 {
+                    float inputs:value (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/headwire_top_follow/M_HeadwireTop.face:head_topRatio_z>
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/headwire_top_follow/M_HeadwireTop.face:head_topRatio>
                     uniform token rigExec:operation = "add"
@@ -196,6 +211,9 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI"]
                 )
                 {
+                    float inputs:value (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/headwire_top_follow/M_HeadwireTop.face:head_topRatio_y>
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/headwire_top_follow/M_HeadwireTop.face:head_topRatio>
                     uniform token rigExec:operation = "add"
@@ -205,6 +223,9 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI"]
                 )
                 {
+                    float inputs:value (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/headwire_top_follow/M_HeadwireTop.face:head_topRatio_x>
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/headwire_top_follow/M_HeadwireTop.face:head_topRatio>
                     uniform token rigExec:operation = "add"
@@ -286,6 +307,9 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI"]
                 )
                 {
+                    float inputs:value (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/headwire_low_follow/M_HeadwireLow.face:head_lowRatio_z>
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/headwire_low_follow/M_HeadwireLow.face:head_lowRatio>
                     uniform token rigExec:operation = "add"
@@ -295,6 +319,9 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI"]
                 )
                 {
+                    float inputs:value (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/headwire_low_follow/M_HeadwireLow.face:head_lowRatio_y>
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/headwire_low_follow/M_HeadwireLow.face:head_lowRatio>
                     uniform token rigExec:operation = "add"
@@ -304,6 +331,9 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI"]
                 )
                 {
+                    float inputs:value (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/headwire_low_follow/M_HeadwireLow.face:head_lowRatio_x>
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/headwire_low_follow/M_HeadwireLow.face:head_lowRatio>
                     uniform token rigExec:operation = "add"

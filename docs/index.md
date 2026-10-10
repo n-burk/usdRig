@@ -12,10 +12,13 @@ Storm viewport with the rig guides on.
 | | Page | About |
 |---|---|---|
 | ![How operators fire](../icons/concept.png) | [How operators fire](concepts/how-operators-fire.md) | The mental model and the evaluation order behind every UsdRig rig — who reads what, who writes what, and when. |
-| ![Baked and dynamic evaluation](../icons/concept.png) | [Baked and dynamic evaluation](concepts/baked-vs-dynamic.md) | The two ways UsdRig computes a frame, how to switch between them, and what each one is for. |
+| ![Evaluation and independent checks](../icons/concept.png) | [Evaluation and independent checks](concepts/baked-vs-dynamic.md) | One production operation graph for native, frozen and runtime evaluation, with optional independent judges. |
 | ![What warming does](../icons/concept.png) | [What warming does](concepts/frame-cache-warming.md) | The per-frame cache in one page: what warms, what you see, what it costs, and the switches. |
+| ![Tutorial: a rolling ball rig](../icons/concept.png) | [Tutorial: a rolling ball rig](concepts/tutorial-rolling-ball.md) | Build the classic bouncing-ball rig in usdview, node by node, and make the roll a consequence of the travel instead of a channel to key. |
 | ![Compression-driven wrinkles](../icons/concept.png) | [Compression-driven wrinkles](concepts/wrinkle-deformation.md) | How compression and a stable fold guide produce quasistatic wrinkles, with pins, attachment bounds, and local collision planes. |
-| ![External mover plugins](../icons/concept.png) | [External mover plugins](concepts/external-movers.md) | Build and register point movers from a separate repository for dynamic, baked and .rigexec playback. |
+| ![Tutorial: Godot and baked rigs](../icons/concept.png) | [Tutorial: Godot and baked rigs](concepts/tutorial-godot-baked-rig.md) | Build the ball in usdview, bake one self-contained rig asset, and drive its exposed controllers in Godot, with GIF checkpoints. |
+| ![External mover plugins](../icons/concept.png) | [External mover plugins](concepts/external-movers.md) | Build and register point movers from a separate repository for native, frozen and .rigexec playback. |
+| ![Live evaluator inspection](../icons/concept.png) | [Live evaluator inspection](concepts/live-evaluator-inspection.md) | Attach the optional rigExec_viz tool to usdview and read a session's operation graph and per-operation thread timings. |
 
 ## Rig
 
@@ -30,6 +33,7 @@ Storm viewport with the rig guides on.
 | ![Control](../icons/control.png) | [Control](nodes/control.md) | The animator's handle: animation is authored on its avars. |
 | ![Joint](../icons/joint.png) | [Joint](nodes/joint.md) | A posed output of the rig: solvers write it, movers read it. |
 | ![Space Switch](../icons/concept.png) | [Space Switch](nodes/space_switch.md) | Gives a control a labelled list of parent spaces, selected or blended by an index. |
+| ![Auto Clavicle](../icons/concept.png) | [Auto Clavicle](nodes/auto_clavicle.md) | Carries the shoulder with the arm's swing in FK or IK. |
 | ![Bone Frame](../icons/concept.png) | [Bone Frame](nodes/bone_frame.md) | Evaluates joint channels with explicit scale and location inheritance. |
 | ![Copy Frame](../icons/concept.png) | [Copy Frame](nodes/copy_frame.md) | Copies a live frame, optionally retaining incoming translation. |
 | ![Mapped Frame](../icons/concept.png) | [Mapped Frame](nodes/mapped_frame.md) | Transfers source rest-to-pose motion onto a target rest frame. |

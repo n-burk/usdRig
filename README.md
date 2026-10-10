@@ -25,15 +25,16 @@ and [Matt Schiller](https://github.com/matthewschiller).
 - External mover plugins built from separate repositories through a public
   registration API and CMake helper.
 - Scalar, vector, and matrix operations; painted and procedural weight fields.
-- Dynamic evaluation, a baked program, and experimental `.rigexec` export
-  with a standalone binary runtime.
+- Native and frozen evaluation through a shared operation graph, plus
+  experimental `.rigexec` export with a standalone binary runtime.
 - `usdview` tools for controls, curves, layers, picking, and node graphs.
 
 RigExec builds against OpenUSD installation with OpenExec.
 The [architecture guide](docs/specs/spec.md) explains the evaluation layers;
 the [node reference](docs/index.md) describes authoring and parameters.
 
-![Baked and dynamic execution share math kernels, diverge in scheduling and data storage, and produce the same rig pose.](docs/images/baked-vs-dynamic-execution.png)
+The [evaluation guide](docs/concepts/baked-vs-dynamic.md) describes the shared
+operation graph, frozen execution, binary playback, and independent checks.
 
 ## Build and run
 
@@ -67,7 +68,12 @@ bin/usdview.sh examples/ArmShotAnim.usda
 ```
 
 The build helper configures the project, builds it, and runs enabled CTest
-tests. Platform support depends on a compatible OpenUSD build; these commands
+tests with four concurrent test processes. Set `CTEST_PARALLEL_LEVEL` to adjust
+test concurrency (`1` runs serially); `JOBS` separately controls compilation.
+CTest schedules tests as workers become available and respects fixture
+dependencies, including bake-before-playback tests.
+
+Platform support depends on a compatible OpenUSD build; these commands
 do not imply that every platform has been qualified for this checkout.
 
 For manual configuration in an initialized compiler environment:
@@ -76,7 +82,7 @@ For manual configuration in an initialized compiler environment:
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DUSD_INSTALL_DIR=/path/to/usd-install -DCMAKE_PREFIX_PATH=/path/to/usd-install
 cmake --build build
-ctest --test-dir build --output-on-failure
+ctest --test-dir build --parallel 4 --output-on-failure
 cmake --install build --prefix /path/to/rigexec-install
 ```
 
@@ -98,6 +104,7 @@ The [biped](examples/biped/README.md) is the full character example.
 - [Viewport tools](docs/specs/viewport-gizmos.md) and [graph editor](docs/specs/graph-editor.md)
 - [Bake and inverse APIs](docs/specs/python-bake-inverse.md)
 - [Build and register external movers](docs/concepts/external-movers.md)
+- [Inspect the live evaluator graph and thread trace](docs/concepts/live-evaluator-inspection.md)
 - [Standalone runtime](docs/specs/standalone-runtime.md)
 - [Public method references](docs/references.md)
 - [Agent and contributor guide](AGENTS.md)
@@ -108,7 +115,8 @@ The [biped](examples/biped/README.md) is the full character example.
 |---|---|
 | `libs/rigExecMath` | Solver, deformation, interpolation, and weight math |
 | `libs/rigExecSchema` | Authored USD schema definitions |
-| `libs/rigExec` | OpenExec integration, evaluation, baked programs, and caches |
+| `libs/rigExec` | Scene binding, compiled evaluation, independent checks, and caches |
+| `libs/rigExecGraph` | Shared operation compiler, typed values, and executor |
 | `libs/rigExecRigging` | C++ authoring API |
 | `libs/rigExecImaging` | Hydra scene indices and viewport publication |
 | `libs/rigExecBake`, `libs/rigExecBinary`, `libs/rigExecRuntime` | Binary export, format, and playback |
@@ -145,15 +153,12 @@ describes the parts named here.
   schemas with `EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA`: provider frames and
   matrices (`computePointFrame`, `computeRestFrame`, `computeMatrix`), solver
   outputs (`computePointFrameArray`), weight packets, and mover parameters.
-- **Requests and overrides.** The dynamic evaluator reads those values through
-  `ExecUsdSystem` requests keyed by `ExecUsdValueKey`, and applies interactive
-  edits as `ExecUsdValueOverride` values.
-- **Mover graph.** Mover revision chains are built as an in-memory
-  `VdfNetwork` from the authored relationships, scheduled and run by the Vdf
-  pull-based executor (`libs/rigExec/moverGraph.cpp`).
+- **Independent checks.** Optional operation checks read reference values
+  through `ExecUsdSystem` requests keyed by `ExecUsdValueKey`, with captured
+  inputs supplied as `ExecUsdValueOverride` values.
 - **Standalone adapter.** The experimental `libs/rigExecStandalone` implements
   the Esf scene interfaces over its own scene database.
 
-The baked program and the `.rigexec` runtime evaluate frames without calling
-OpenExec, and the runtime links no USD library. Other upstream and published
+Native, frozen, and `.rigexec` production execution use the shared operation
+graph. The binary runtime links no USD library. Other upstream and published
 sources are listed in the [method references](docs/references.md).

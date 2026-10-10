@@ -60,7 +60,8 @@ struct RigExecPropertyChainBindings
         // it moved republishes the last answer instead of recomputing it.
         //  * `watch`: every input attribute, and every attribute along an
         //    input's connection chain -- where an interactive override can
-        //    stand;
+        //    stand (the phased readers' hops and the target are watched for
+        //    overrides too, below);
         //  * `upstream`: the chains whose targets are among those
         //    attributes;
         //  * `varying`: whether any of them, or the target's own authored
@@ -82,19 +83,23 @@ struct RigExecPropertyChainBindings
         std::vector<SdfPath> missingSources;
         bool stale = false;
 
-        // Mover inputs that read this chain at a declared phase rather than
-        // its final value: each is published on the consumer with the value
-        // after `applied` revisions, cast to the consumer's own type.
+        // Operator inputs that read this chain at a phase
+        // (RigExecPhasedConnection): each is published on the consumer with
+        // the value after `applied` revisions, cast to the consumer's own
+        // type -- unless an interactive override stands on one of its
+        // `hops`, which the overlay walk then meets instead. An override on
+        // the target is the chain's base, so it is the value after none.
         struct Phased {
             SdfPath consumer;
             SdfValueTypeName consumerType;
             size_t applied = 0;
+            SdfPathVector hops;
         };
         std::vector<Phased> phased;
 
         // The last run: whether it published, what, and the diagnostics it
         // pushed, all replayed verbatim when the chain is clean. lastPhased
-        // parallels `phased`.
+        // parallels `phased`, empty where nothing was published.
         bool cached = false;
         bool published = false;
         VtValue lastValue;

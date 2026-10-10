@@ -64,6 +64,9 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI"]
                 )
                 {
+                    float inputs:value (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/jaw_compression_auto.avars:compression>
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.face:jawCompression>
                     uniform token rigExec:operation = "add"

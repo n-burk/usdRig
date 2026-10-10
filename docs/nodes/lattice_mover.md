@@ -46,6 +46,9 @@ envelope. `cageMatrix` and `targetMatrix`, optionally followed by the two
 points already in a shared asset space; `local` is for object-local points.
 The cage relationship reads its selected base or final revision.
 
+`.rigexec` exports carry these settings from format revision 21. A revision
+20 file has none of them and plays the legacy cage evaluator.
+
 ## Wiring
 
 | Relationship | Points to | Required |

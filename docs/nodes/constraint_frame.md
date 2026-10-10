@@ -46,10 +46,10 @@ The relationship supplies pose dependency ordering and invalidation; the
 specific source/parent relationships supply numerical inputs. Keep the
 provider's rest frame separate from its evaluated pose.
 
-These computations live in the shared runtime. A connected pose
-expression can make an epoch ineligible for the baked program; ordinary
-runtime evaluation then follows the existing dynamic fallback. This does not
-provide USD-free binary serialization of the expression graph.
+These computations are operations in the shared evaluation graph: native
+evaluation and frame-cache workers run the same stage-free kernels from the
+provider's declared inputs, so editing an input re-runs the providers that
+read it and their dependents.
 
 ## Wiring
 

@@ -75,7 +75,7 @@ points, and `rigExec:projectionMode` chooses whether the posed frame
 follows that material point or re-casts at the posed surface. The
 published matrix is `rigExec:shaderOffset * look * delta`. Up to sixteen
 scalar `rigExec:shaderDialSources` are packed into a second matrix primvar
-for the same material. The dynamic path, the baked program, the frame
+for the same material. The native program, frozen jobs, the frame
 cache and the `.rigexec` runtime all run one header-only kernel.
 
 ## Wiring

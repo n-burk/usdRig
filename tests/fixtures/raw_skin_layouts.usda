@@ -1,0 +1,273 @@
+#usda 1.0
+(
+    """
+    Test fixture: skin layouts a .rigexec holds raw because its sparse form
+    cannot, beside two it holds sparse. Compile accepts each layout because
+    the keyed meshes author no default points, so there is no point count
+    to hold a layout to:
+
+      OddSkin        elementSize 2 over 5 entries: not rows of elementSize,
+                     with a (0, 0) and a (0, -0) entry the sparse form would
+                     drop; unvalidated, so the skin fails and OddSmooth,
+                     which it is nested in, smooths the points it passed
+                     through
+      WideOddSkin    elementSize 70000 over 5 entries: not rows either, and
+                     an element size past the sparse form's counts
+      WideEmptySkin  elementSize 70000 over no entries: rows (zero of them)
+                     and validated, but past the sparse form's counts; the
+                     packet is valid and the kernel refuses the layout for
+                     the ten points it receives
+      ShortSkin      three rows of two over ten keyed points: sparse and
+                     validated, so the packet is valid and the kernel
+                     refuses the layout for the points it receives
+      RowSkin        a two-slot layout over its ten authored points, which
+                     the sparse form holds and which skins
+
+    Every skin but RowSkin fails at every frame with the evaluators'
+    MoverFailed line; the binary must say the same, also with its skins
+    cut into chunks, and must store each raw layout's authored arrays.
+    """
+    defaultPrim = "RawSkinAsset"
+    endTimeCode = 10
+    metersPerUnit = 0.01
+    startTimeCode = 1
+    timeCodesPerSecond = 24
+    upAxis = "Y"
+)
+
+def Xform "RawSkinAsset"
+{
+    def RigExecRoot "Rig"
+    {
+        uniform token rigExec:partition = "RawSkinAsset"
+
+        def Scope "Controls"
+        {
+            def RigExecControl "C0" (
+                prepend apiSchemas = ["RigExecControlAPI"]
+            )
+            {
+                double avars:rz = 0
+                double avars:rz.spline = {
+                    1: 0; pre (0, 0); post linear,
+                    10: 30; post linear,
+                }
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+
+                def RigExecControl "C1" (
+                    prepend apiSchemas = ["RigExecControlAPI"]
+                )
+                {
+                    double avars:rz = 0
+                    double avars:rz.spline = {
+                        1: 0; pre (0, 0); post linear,
+                        10: 45; post linear,
+                    }
+                    matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (2, 0, 0, 1) )
+                }
+            }
+        }
+
+        def Scope "Solvers"
+        {
+            def RigExecFkChain "FK"
+            {
+                rel rigExec:controls = [
+                    </RawSkinAsset/Rig/Controls/C0>,
+                    </RawSkinAsset/Rig/Controls/C0/C1>,
+                ]
+                uniform token rigExec:controlSpace = "parentRelative"
+                rel rigExec:joints = [
+                    </RawSkinAsset/Rig/Joints/J0>,
+                    </RawSkinAsset/Rig/Joints/J0/J1>,
+                ]
+            }
+        }
+
+        def Scope "Joints"
+        {
+            def RigExecJoint "J0"
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+
+                def RigExecJoint "J1"
+                {
+                    matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (2, 0, 0, 1) )
+                }
+            }
+        }
+
+        def Scope "Movers"
+        {
+            # Composed post-order: OddSkin (nested) applies first, then
+            # OddSmooth over whatever it left.
+            def RigExecSmoothMover "OddSmooth" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                float inputs:defaultWeight = 0.5
+                rel rigExec:moves = </RawSkinAsset/Geom/OddMesh.points>
+
+                def RigExecSkinMover "OddSkin" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    uniform int rigExec:elementSize = 2
+                    rel rigExec:influences = [
+                        </RawSkinAsset/Rig/Joints/J0>,
+                        </RawSkinAsset/Rig/Joints/J0/J1>,
+                    ] (
+                        rigExecReadPhase = "final"
+                    )
+                    int[] rigExec:jointIndices = [1, 0, 0, 1, 0]
+                    float[] rigExec:jointWeights = [0.5, 0, 1, 0.25, -0]
+                    rel rigExec:moves = </RawSkinAsset/Geom/OddMesh.points>
+                    uniform token rigExec:skinningMethod = "classicLinear"
+                }
+            }
+
+            def RigExecSkinMover "WideOddSkin" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                uniform int rigExec:elementSize = 70000
+                rel rigExec:influences = [
+                    </RawSkinAsset/Rig/Joints/J0>,
+                    </RawSkinAsset/Rig/Joints/J0/J1>,
+                ]
+                int[] rigExec:jointIndices = [0, 1, 1, 0, 1]
+                float[] rigExec:jointWeights = [1, 0.5, 0.25, 0, 1]
+                rel rigExec:moves = </RawSkinAsset/Geom/WideOddMesh.points>
+                uniform token rigExec:skinningMethod = "classicLinear"
+            }
+
+            def RigExecSkinMover "WideEmptySkin" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                uniform int rigExec:elementSize = 70000
+                rel rigExec:influences = [
+                    </RawSkinAsset/Rig/Joints/J0>,
+                    </RawSkinAsset/Rig/Joints/J0/J1>,
+                ]
+                int[] rigExec:jointIndices = []
+                float[] rigExec:jointWeights = []
+                rel rigExec:moves = </RawSkinAsset/Geom/WideEmptyMesh.points>
+                uniform token rigExec:skinningMethod = "classicLinear"
+            }
+
+            def RigExecSkinMover "ShortSkin" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                uniform int rigExec:elementSize = 2
+                rel rigExec:influences = [
+                    </RawSkinAsset/Rig/Joints/J0>,
+                    </RawSkinAsset/Rig/Joints/J0/J1>,
+                ] (
+                    rigExecReadPhase = "final"
+                )
+                int[] rigExec:jointIndices = [0, 1, 1, 0, 0, 1]
+                float[] rigExec:jointWeights = [0.75, 0.25, 1, 0, 0.5, 0.5]
+                rel rigExec:moves = </RawSkinAsset/Geom/ShortMesh.points>
+                uniform token rigExec:skinningMethod = "classicLinear"
+            }
+
+            def RigExecSkinMover "RowSkin" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                uniform int rigExec:elementSize = 2
+                rel rigExec:influences = [
+                    </RawSkinAsset/Rig/Joints/J0>,
+                    </RawSkinAsset/Rig/Joints/J0/J1>,
+                ] (
+                    rigExecReadPhase = "final"
+                )
+                int[] rigExec:jointIndices = [
+                    0, 1, 0, 1, 0, 1, 1, 0, 1, 0,
+                    0, 1, 0, 1, 0, 1, 1, 0, 1, 0,
+                ]
+                float[] rigExec:jointWeights = [
+                    1, 0, 0.75, 0.25, 0.5, 0.5, 1, 0, 1, 0,
+                    1, 0, 0.75, 0.25, 0.5, 0.5, 1, 0, 1, 0,
+                ]
+                rel rigExec:moves = </RawSkinAsset/Geom/RowMesh.points>
+                uniform token rigExec:skinningMethod = "classicLinear"
+            }
+        }
+    }
+
+    def Scope "Geom"
+    {
+        # Keyed and not authored at Default, so compile has no point count
+        # to hold the skins' layouts to.
+        def Mesh "OddMesh"
+        {
+            float3[] extent = [(0, -0.5, 0), (4, 0.5, 0)]
+            int[] faceVertexCounts = [4, 4, 4, 4]
+            int[] faceVertexIndices = [0, 1, 6, 5, 1, 2, 7, 6, 2, 3, 8, 7, 3, 4, 9, 8]
+            point3f[] points.timeSamples = {
+                1: [
+                    (0, -0.5, 0), (1, -0.4, 0), (2, -0.6, 0), (3, -0.5, 0), (4, -0.3, 0),
+                    (0, 0.5, 0), (1, 0.6, 0), (2, 0.4, 0), (3, 0.5, 0), (4, 0.7, 0),
+                ],
+            }
+            uniform token subdivisionScheme = "none"
+        }
+
+        def Mesh "WideOddMesh"
+        {
+            float3[] extent = [(0, -0.5, 2), (4, 0.5, 2)]
+            int[] faceVertexCounts = [4, 4, 4, 4]
+            int[] faceVertexIndices = [0, 1, 6, 5, 1, 2, 7, 6, 2, 3, 8, 7, 3, 4, 9, 8]
+            point3f[] points.timeSamples = {
+                1: [
+                    (0, -0.5, 2), (1, -0.5, 2), (2, -0.5, 2), (3, -0.5, 2), (4, -0.5, 2),
+                    (0, 0.5, 2), (1, 0.5, 2), (2, 0.5, 2), (3, 0.5, 2), (4, 0.5, 2),
+                ],
+            }
+            uniform token subdivisionScheme = "none"
+        }
+
+        def Mesh "WideEmptyMesh"
+        {
+            float3[] extent = [(0, -0.5, 4), (4, 0.5, 4)]
+            int[] faceVertexCounts = [4, 4, 4, 4]
+            int[] faceVertexIndices = [0, 1, 6, 5, 1, 2, 7, 6, 2, 3, 8, 7, 3, 4, 9, 8]
+            point3f[] points.timeSamples = {
+                1: [
+                    (0, -0.5, 4), (1, -0.5, 4), (2, -0.5, 4), (3, -0.5, 4), (4, -0.5, 4),
+                    (0, 0.5, 4), (1, 0.5, 4), (2, 0.5, 4), (3, 0.5, 4), (4, 0.5, 4),
+                ],
+            }
+            uniform token subdivisionScheme = "none"
+        }
+
+        def Mesh "ShortMesh"
+        {
+            float3[] extent = [(0, -0.5, 8), (4, 0.5, 8)]
+            int[] faceVertexCounts = [4, 4, 4, 4]
+            int[] faceVertexIndices = [0, 1, 6, 5, 1, 2, 7, 6, 2, 3, 8, 7, 3, 4, 9, 8]
+            point3f[] points.timeSamples = {
+                1: [
+                    (0, -0.5, 8), (1, -0.5, 8), (2, -0.5, 8), (3, -0.5, 8), (4, -0.5, 8),
+                    (0, 0.5, 8), (1, 0.5, 8), (2, 0.5, 8), (3, 0.5, 8), (4, 0.5, 8),
+                ],
+            }
+            uniform token subdivisionScheme = "none"
+        }
+
+        def Mesh "RowMesh"
+        {
+            float3[] extent = [(0, -0.5, 6), (4, 0.5, 6)]
+            int[] faceVertexCounts = [4, 4, 4, 4]
+            int[] faceVertexIndices = [0, 1, 6, 5, 1, 2, 7, 6, 2, 3, 8, 7, 3, 4, 9, 8]
+            point3f[] points = [
+                (0, -0.5, 6), (1, -0.5, 6), (2, -0.5, 6), (3, -0.5, 6), (4, -0.5, 6),
+                (0, 0.5, 6), (1, 0.5, 6), (2, 0.5, 6), (3, 0.5, 6), (4, 0.5, 6),
+            ]
+            uniform token subdivisionScheme = "none"
+        }
+    }
+}

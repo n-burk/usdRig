@@ -1,30 +1,35 @@
 // rigExecRuntime shared value types (M2 framework).
 // Zero-USD mirrors of the pose values the step bodies pass around:
-// point frames, input values, weight packets, the phased-read snapshot
-// store, and per-step outputs. Family .cpps build their private state
-// from these; the store owns the framework-visible instances.
+// point frames, input values, weight packets and per-step outputs.
+// Family .cpps build their private state from these; the store owns the
+// framework-visible instances.
 #ifndef RIGEXEC_RUNTIME_VALUES_H
 #define RIGEXEC_RUNTIME_VALUES_H
 
-#include "rigExecBinary/program.h"
+#include "rigExecBinary/wireTypes.h"
 #include "rigExecRuntime/runtimeMath.h"
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <map>
 #include <string>
 #include <vector>
 
 namespace rigExec {
 
-// The four identity landmarks a frame is measured against.
+// The four identity landmarks a frame is measured against. Initialised at
+// load rather than as a function-local static, whose first-use guard every
+// call would test.
+inline const std::array<RrVec3d, 4> kRrIdentityLandmarks = {
+    RrVec3d(0.0), RrVec3d(1.0, 0.0, 0.0), RrVec3d(0.0, 1.0, 0.0),
+    RrVec3d(0.0, 0.0, 1.0)};
+
 inline const std::array<RrVec3d, 4> &
 RrIdentityLandmarks()
 {
-    static const std::array<RrVec3d, 4> identity = {
-        RrVec3d(0.0), RrVec3d(1.0, 0.0, 0.0), RrVec3d(0.0, 1.0, 0.0),
-        RrVec3d(0.0, 0.0, 1.0)};
-    return identity;
+    return kRrIdentityLandmarks;
 }
 
 // Mirrors RigExecPointFrameFlags bit for bit.
@@ -100,10 +105,47 @@ struct RrPointFrameArray {
     }
 };
 
-// A resolved input value: holder contents or a wire constant, tagged
-// like RigExecWireInput.
+// The value type of an input, a read or a constant, numbered as the
+// file's InputTag. The array tags hold int32_t, float, double, float[2]
+// and float[3] elements.
+enum class RrInputTag : uint8_t {
+    Double = 0,
+    Float = 1,
+    Bool = 2,
+    Int = 3,
+    Matrix4d = 4,
+    Token = 5,
+    Vec3d = 6,
+    Vec3f = 7,
+    IntArray = 8,
+    FloatArray = 9,
+    DoubleArray = 10,
+    Vec2fArray = 11,
+    Vec3fArray = 12,
+    Vec3dArray = 13, Matrix4dArray = 14, TokenArray = 15, BoolArray = 16, Vec3i = 17,
+};
+
+inline bool
+RrInputTagIsArray(RrInputTag tag)
+{
+    return uint8_t(tag) >= uint8_t(RrInputTag::IntArray) &&
+           uint8_t(tag) <= uint8_t(RrInputTag::BoolArray);
+}
+
+// A view of an array input's elements: `count` elements of the type `tag`
+// names (int32_t, float, double, float[2] or float[3]) at `data`. A set
+// copies them; the reader never keeps the caller's pointer.
+struct RigExecRuntimeArray {
+    RrInputTag tag = RrInputTag::FloatArray;
+    const void *data = nullptr;
+    size_t count = 0;
+};
+
+// A resolved input value: a read the slots answered, a wire constant, or
+// an input's value. The member `tag` names holds the value; Token is a
+// path id of the file (or an id the reader interned for unknown text).
 struct RrInputValue {
-    RigExecWireInput::Tag tag = RigExecWireInput::Tag::Double;
+    RrInputTag tag = RrInputTag::Double;
     double f64 = 0;
     float f32 = 0;
     bool boolean = false;
@@ -111,57 +153,34 @@ struct RrInputValue {
     RrMat4d matrix;
     uint32_t token = 0;
     RrVec3d vec = RrVec3d(0.0);
+    RrVec3f vec3f = RrVec3f(0.0f);
+    RrVec3i vec3i = RrVec3i(0);
 
     bool operator==(const RrInputValue &o) const
     {
         return tag == o.tag && f64 == o.f64 && f32 == o.f32 &&
                boolean == o.boolean && i32 == o.i32 && matrix == o.matrix &&
-               token == o.token && vec == o.vec;
+               token == o.token && vec == o.vec && vec3f == o.vec3f && vec3i == o.vec3i;
     }
     bool operator!=(const RrInputValue &o) const { return !(*this == o); }
 };
 
-inline RrInputValue
-RrWireInputConstant(const RigExecWireInput &input)
-{
-    RrInputValue out;
-    out.tag = input.tag;
-    out.f64 = input.f64;
-    out.f32 = input.f32;
-    out.boolean = input.boolean;
-    out.i32 = input.i32;
-    for (size_t r = 0; r < 4; ++r) {
-        for (size_t c = 0; c < 4; ++c) {
-            out.matrix[r][c] = input.matrix[r * 4 + c];
-        }
-    }
-    out.token = input.token;
-    out.vec =
-        RrVec3d(input.vec[0], input.vec[1], input.vec[2]);
-    return out;
-}
+// One input of a .rigexec: an attribute whose authored value the rig reads.
+struct RigExecRuntimeInputInfo {
+    /// The attribute path, e.g. "/Rig/Controls/Hips.avars:tx".
+    std::string name;
+    /// The attribute's value type.
+    RrInputTag type = RrInputTag::Double;
+    /// Whether the attribute is time-varying in the baked stage.
+    bool animated = false;
+    /// Its value at the bake time; the type's zero when that read failed.
+    /// An array input's carries the tag alone.
+    RrInputValue defaultValue;
+    /// An array input's default element count; 0 for a scalar.
+    size_t defaultCount = 0;
+};
 
-inline RrInputValue
-RrWireFrameValue(const RigExecWireValue &value)
-{
-    RrInputValue out;
-    out.tag = value.tag;
-    out.f64 = value.f64;
-    out.f32 = value.f32;
-    out.boolean = value.boolean;
-    out.i32 = value.i32;
-    for (size_t r = 0; r < 4; ++r) {
-        for (size_t c = 0; c < 4; ++c) {
-            out.matrix[r][c] = value.matrix[r * 4 + c];
-        }
-    }
-    out.token = value.token;
-    out.vec =
-        RrVec3d(value.vec[0], value.vec[1], value.vec[2]);
-    return out;
-}
-
-// Mirrors RigExecWeightPacket with string-table token ids.
+// Mirrors RigExecWeightPacket with token path ids.
 struct RrWeightPacket {
     uint32_t representation = 0;
     uint32_t rangePolicy = 0;
@@ -184,7 +203,7 @@ struct RrWeightPacket {
 };
 
 // One property-chain result: the four types _EvaluatePropertyChains
-// instantiates, keyed by string-table path id.
+// instantiates, keyed by path id.
 struct RrPropertyValue {
     enum class Tag : uint8_t {
         Float = 0,
@@ -209,124 +228,6 @@ struct RrPropertyValue {
     }
 };
 
-// A phased-read record: a provider's rest -> final matrix or a chain's
-// points, mirroring the VtValue shapes the store carries.
-struct RrSnapshotValue {
-    enum class Tag : uint8_t {
-        Matrix = 0,
-        Points = 1,
-    };
-    Tag tag = Tag::Matrix;
-    RrMat4d matrix;
-    std::vector<RrVec3f> points;
-};
-
-// Mirrors RigExecChainSnapshots over string-table ids: target id -> the
-// (mover id, value) revisions in walk order plus the final.
-class RrSnapshots
-{
-public:
-    void Record(uint32_t target, uint32_t afterMover,
-                const RrSnapshotValue &value)
-    {
-        _chains[target].revisions.emplace_back(afterMover, value);
-    }
-
-    void RecordFinal(uint32_t target, const RrSnapshotValue &value)
-    {
-        _Chain &chain = _chains[target];
-        chain.final = value;
-        chain.hasFinal = true;
-    }
-
-    // Mirrors Lookup, with the string table resolving the AtPrim prefix
-    // rule. `text` maps an id to its path string; null when unresolvable.
-    const RrSnapshotValue *Lookup(
-        uint32_t target, uint8_t phaseKind, uint32_t phasePrim,
-        uint32_t readerMover,
-        const std::string *(*text)(uint32_t, void *), void *context) const
-    {
-        const auto it = _chains.find(target);
-        if (it == _chains.end()) {
-            return nullptr;
-        }
-        const _Chain &chain = it->second;
-        // Base/Preceding/Final/AtPrim, in RigExecReadPhaseKind order.
-        switch (phaseKind) {
-        case 0:
-            return nullptr;
-        case 2:
-            return chain.hasFinal ? &chain.final : nullptr;
-        case 1: {
-            for (size_t i = 0; i < chain.revisions.size(); ++i) {
-                if (chain.revisions[i].first == readerMover) {
-                    return i == 0 ? nullptr
-                                  : &chain.revisions[i - 1].second;
-                }
-            }
-            return nullptr;
-        }
-        case 3: {
-            const RrSnapshotValue *found = nullptr;
-            const std::string *primText = text(phasePrim, context);
-            if (!primText) {
-                return nullptr;
-            }
-            for (const auto &entry : chain.revisions) {
-                const std::string *moverText = text(entry.first, context);
-                if (moverText && RrHasPrefix(*moverText, *primText)) {
-                    found = &entry.second;
-                }
-            }
-            return found;
-        }
-        default:
-            return nullptr;
-        }
-    }
-
-    void Merge(RrSnapshots &&other)
-    {
-        for (auto &entry : other._chains) {
-            _Chain &destination = _chains[entry.first];
-            destination.revisions.insert(
-                destination.revisions.end(),
-                std::make_move_iterator(entry.second.revisions.begin()),
-                std::make_move_iterator(entry.second.revisions.end()));
-            if (entry.second.hasFinal) {
-                destination.final = std::move(entry.second.final);
-                destination.hasFinal = true;
-            }
-        }
-        other._chains.clear();
-    }
-
-    void Clear() { _chains.clear(); }
-    bool IsEmpty() const { return _chains.empty(); }
-
-private:
-    // SdfPath::HasPrefix over path strings: equal, or a '/'-bounded
-    // extension of the prefix.
-    static bool RrHasPrefix(const std::string &path,
-                            const std::string &prefix)
-    {
-        if (path.size() < prefix.size()) {
-            return false;
-        }
-        if (path.compare(0, prefix.size(), prefix) != 0) {
-            return false;
-        }
-        return path.size() == prefix.size() || path[prefix.size()] == '/';
-    }
-
-    struct _Chain {
-        std::vector<std::pair<uint32_t, RrSnapshotValue>> revisions;
-        RrSnapshotValue final;
-        bool hasFinal = false;
-    };
-    std::map<uint32_t, _Chain> _chains;
-};
-
 // Mirrors RigExecBakedStepCounters.
 struct RrStepCounters {
     uint32_t revisionsExecuted = 0;
@@ -338,19 +239,15 @@ struct RrStepCounters {
     void Clear() { *this = RrStepCounters(); }
 };
 
-// One step's run output: diagnostics, counters, phased records, bail.
+// One step's run output: diagnostics, counters, bail.
 struct RrStepOutput {
     std::vector<std::string> diagnostics;
     RrStepCounters counters;
-    RrSnapshots snapshots;
-    bool bail = false;
 
     void BeginRun()
     {
         diagnostics.clear();
         counters.Clear();
-        snapshots.Clear();
-        bail = false;
     }
 
     void MarkSkipped()
@@ -358,24 +255,19 @@ struct RrStepOutput {
         counters.revisionsExecuted = 0;
         counters.revisionsCreated = 0;
         counters.schedulesBuilt = 0;
-        bail = false;
     }
 };
 
-// A constraint's per-frame arrays, current and last runs.
+// A constraint's authored arrays, as the bake read them.
 struct RrConstraintArraysLive {
     std::vector<double> weights;
     std::vector<RrVec3d> translationOffsets, rotationOffsets;
     std::vector<std::string> diagnostics;
     bool ok = true;
-    std::vector<double> lastWeights;
-    std::vector<RrVec3d> lastTranslationOffsets, lastRotationOffsets;
-    std::vector<std::string> lastDiagnostics;
-    bool lastOk = true;
     bool readPole = false;
-    std::vector<double> poleWeights, lastPoleWeights;
-    std::vector<std::string> poleDiagnostics, lastPoleDiagnostics;
-    bool poleOk = true, lastPoleOk = true;
+    std::vector<double> poleWeights;
+    std::vector<std::string> poleDiagnostics;
+    bool poleOk = true;
 };
 
 // Mirrors RigExecConstraintSource: one resolved constraint source.
@@ -398,12 +290,6 @@ struct RrCommitScratch {
     std::vector<RrConstraintSource> sources;
     std::vector<RrPointFrame> ikChain, ikPrepared, ikRest, ikSolved;
 };
-
-// The 11 avar channels, in RigExecBakedAvarNames order.
-inline const char *const RrAvarNames[11] = {
-    "avars:tx", "avars:ty", "avars:tz", "avars:sx", "avars:sy", "avars:sz",
-    "avars:rx", "avars:ry", "avars:rz", "avars:rspin",
-    "avars:unitScaleFactor"};
 
 }  // namespace rigExec
 

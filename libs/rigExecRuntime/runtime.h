@@ -1,43 +1,59 @@
 // rigExecRuntime: zero-USD .rigexec playback (M2).
-// Opens a baked .rigexec file, replays its cluster DAG per frame, and
-// publishes joint matrices and deformed points -- no USD headers, no USD
-// library. The wire structs and decoders come from rigExecBinary (already
-// USD-free); the math is runtimeMath.h (a bit-identical Gf mirror); the
-// step bodies are ports of the baked program's, one family per .cpp.
-// Fidelity rule (plan section 5): for the same frame, floating-point
-// results must be bit-identical to the baked path. rigExecPose
+// Opens a baked .rigexec file (one FlatBuffer, rigExecBinary/format.h),
+// replays its cluster DAG over the inputs the caller sets, and publishes
+// joint matrices and deformed points -- no USD headers, no USD library. The
+// opened program is private to the library (store.h); the math is
+// runtimeMath.h (a bit-identical Gf mirror); the step bodies are ports of
+// the baked program's, one family per .cpp.
+// Fidelity rule: for the same input values, floating-point results must be
+// bit-identical to the baked path with those values authored. rigExecPose
 // --verify-binary gates every family on dynamic==baked==binary over the
 // shipped examples.
-// Threading (D2): Execute is serial over clusters; the consumer may run
-// clusters in parallel when the cluster DAG allows (the OpenUSD side
-// keeps its dispatcher, Godot uses WorkerThreadPool). The reader holds
-// no locks: one reader per thread, or external synchronization.
+// Threading: Execute is serial over clusters unless the consumer
+// hands it a dispatcher (SetTaskDispatch), which then runs the clusters the
+// DAG allows in parallel (the OpenUSD side passes a WorkDispatcher, Godot
+// its WorkerThreadPool). The reader holds no locks: one reader per thread,
+// or external synchronization.
 #ifndef RIGEXEC_RUNTIME_H
 #define RIGEXEC_RUNTIME_H
 
-#include "rigExecBinary/container.h"
 #include "rigExecBinary/external.h"
-#include "rigExecBinary/geometry.h"
-#include "rigExecBinary/inputTable.h"
-#include "rigExecBinary/pose.h"
-#include "rigExecBinary/program.h"
-#include "rigExecBinary/propertyChains.h"
 #include "rigExecRuntime/runtimeMath.h"
-#include "rigExecRuntime/store.h"
+#include "rigExecRuntime/values.h"
 
+#include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
-#include <map>
 #include <string>
 #include <vector>
 
 namespace rigExec {
+
+// The opened program and its working state (store.h).
+struct RrProgram;
 
 // A joint-matrix output: the joint's path (as baked) plus its final
 // asset-space matrix, row-major.
 struct RigExecRuntimeJointMatrix {
     std::string path;
     RrMat4d matrix;
+};
+
+// One provider's current Base/Final SSA frames and stable path metadata.
+struct RigExecRuntimeProviderFrames {
+    std::string path;
+    uint8_t kind=0;
+    // Exact publication membership: Other=0, Joint=1, Control=2, Both=3.
+    uint8_t publicationRole=0;
+    uint32_t baseVersion=0,finalVersion=0;
+    RrPointFrame base,final;
+};
+
+struct RigExecRuntimeSolverFrames {
+    std::string path;
+    uint32_t aggregate=0;
+    std::vector<RrPointFrame> frames;
 };
 
 // A deformed-points output: the moved property's path plus its points.
@@ -77,53 +93,141 @@ struct RigExecRuntimeProviderXform {
     RrMat4d base;
 };
 
-// The generation's work counters, summed over steps like the epilogue.
-struct RigExecRuntimeCounters {
-    uint32_t revisionsExecuted = 0;
-    uint32_t revisionsCreated = 0;
-    uint32_t schedulesBuilt = 0;
-    uint32_t chainsBuilt = 0;
-    uint32_t revisionsBuilt = 0;
+// A property chain's published value: the target's or a phased consumer's
+// attribute path plus the value.
+struct RigExecRuntimePropertyValue {
+    std::string path;
+    RrPropertyValue value;
 };
 
-// Plays a .rigexec file. Open decodes every section; SetFrame selects a
-// baked frame's inputs; Execute replays the cluster DAG; the getters
-// publish the frame's outputs. Any failure returns false with a reason;
-// the reader keeps its last good state.
+// The generation's actual kernel invocations in the shared executor.
+struct RigExecRuntimeCounters {
+    uint64_t executedOpCount = 0;
+};
+
+// Plays a .rigexec file: a static graph whose inputs are the attributes the
+// rig reads. Open decodes the file, and the inputs start at their
+// bake-time defaults; each input set takes effect as an authored value at
+// the next Execute; Execute runs the serialized common producer graph over the inputs; the
+// getters publish its outputs. A fresh reader executes its defaults, which
+// reproduce the rig at the bake time. Any failure returns false with a
+// reason; the reader keeps its last good state.
 class RigExecRuntimeReader
 {
 public:
-    ~RigExecRuntimeReader() = default;
+    ~RigExecRuntimeReader();
 
     RigExecRuntimeReader(const RigExecRuntimeReader &) = delete;
     RigExecRuntimeReader &operator=(const RigExecRuntimeReader &) = delete;
 
-    // Opens a .rigexec image. False with the reason on a malformed file,
-    // an undecodable section, or tables whose cross-references do not
-    // close (versions, uid routing, cone sizes).
+    // Opens a .rigexec image. False with the reason on a file
+    // RigExecFormatOpen refuses (another format, a malformed buffer, or a
+    // rule of the format broken, the step graph's among them), or on
+    // tables whose cross-references do not close (versions, input reads,
+    // cone sizes).
     static std::unique_ptr<RigExecRuntimeReader> Open(
         const uint8_t *bytes, size_t size, std::string *error);
 
-    // Baked frame times, in file order.
-    std::vector<double> GetFrameTimes() const;
+    // The inputs: every attribute a read of the rig walks, sorted by path.
+    size_t GetInputCount() const;
+    // Input \p index's name, type, animation flag and bake-time default
+    // (an array input's element count); an empty info past the count.
+    const RigExecRuntimeInputInfo &GetInputInfo(size_t index) const;
+    // The index of the input at attribute path \p name.
+    bool FindInput(const std::string &name, size_t *index) const;
+    // Input \p index's value: its default, or the value last set; a
+    // Double zero past the count.
+    const RrInputValue &GetInputValue(size_t index) const;
+    // The authored value of attribute \p name becomes \p value: Execute
+    // then evaluates as the rig would with that value authored. On a
+    // property chain's target it is the chain's base, which the chain's
+    // movers revise; on an attribute connected upstream it takes effect
+    // only where the connection walk falls back to it. False with the
+    // reason, and nothing changes, for an unknown name, a value of another
+    // type (a Double sets a Float input through static_cast<float>), a
+    // non-finite component, or a Token id that names no text.
+    // One gap against the USD evaluators remains: a plugin mover applies
+    // the payload its bake assembled, so an input it reads does not reach
+    // that mover's output.
+    bool SetInput(const std::string &name, const RrInputValue &value,
+                  std::string *error);
+    // A Double input, or a Float input through static_cast<float>.
+    bool SetInput(const std::string &name, double value, std::string *error);
+    // A Token input: text the file holds sets its id; other text is
+    // interned on the reader (GetTokenText resolves it).
+    bool SetInputToken(const std::string &name, const std::string &text,
+                       std::string *error);
+    // SetInput by index.
+    bool SetInputAt(size_t index, const RrInputValue &value,
+                    std::string *error);
+    // The stage's own value of input \p index at a sampled time, for a
+    // stage sampler: SetInputAt, except that a non-finite component is
+    // taken as the stage holds it (a bake-time default can hold one too);
+    // the steps that read it report it as the evaluators do.
+    bool SetSampledInputAt(size_t index, const RrInputValue &value,
+                           std::string *error);
+    // Array inputs (an int[], float[], double[], float2[] or float3[]
+    // attribute). The authored value of array attribute \p name becomes a
+    // copy of \p value's elements, which every read of it then takes, the
+    // Default-time ones included. It keeps the default's element count
+    // (GetInputInfo's defaultCount). False with the reason, and nothing
+    // changes, for an unknown name, a scalar input, another element type,
+    // elements without data, or another count. A scalar's SetInput refuses
+    // an array input.
+    bool SetInputArray(const std::string &name,
+                       const RigExecRuntimeArray &value, std::string *error);
+    // SetInputArray by index.
+    bool SetInputArrayAt(size_t index, const RigExecRuntimeArray &value,
+                         std::string *error);
+    // The stage's own value of array input \p index at a sampled time, of
+    // any count: the reads at the evaluation time take it, the Default-time
+    // ones keep theirs, and each reader judges the count as the evaluators
+    // judge the stage's. Topology (a skin's joint indices, a mesh's face
+    // counts and indices, a curve's order and knots, a sparse blend shape's
+    // offsets and point indices) is fixed for the reader: a set of another
+    // count than the default's is refused with the reason.
+    bool SetSampledInputArrayAt(size_t index, const RigExecRuntimeArray &value,
+                                std::string *error);
+    // Array input \p index's elements: its default, or the value last set.
+    // The view stays valid until the next set or reset of that input; a
+    // default view points into the reader's own storage. False past the
+    // count or for a scalar input.
+    bool GetInputArrayAt(size_t index, RigExecRuntimeArray *out) const;
+    // Input \p name holds no value, as an attribute whose typed read fails
+    // (a blocked sample, or Default on an attribute keyed alone): every
+    // read falls back as it does over such an attribute. False with the
+    // reason for an unknown name or an array input, which ResetInput
+    // restores.
+    bool ClearInput(const std::string &name, std::string *error);
+    // ClearInput by index.
+    bool ClearInputAt(size_t index, std::string *error);
+    // Input \p name returns to its bake-time default (an array input's
+    // set, authored or sampled, ends).
+    bool ResetInput(const std::string &name, std::string *error);
+    void ResetInputs();
+    // Says time moved: the next Execute recomputes what a time change
+    // recomputes even where no Animated input took a new value. A stage
+    // sampler calls it on every change of time.
+    void TouchAnimatedInputs();
+    // The time the inputs' defaults were read at.
+    double GetBakeTime() const;
+    // The text of Token value \p token: a token the file holds, or text
+    // SetInputToken interned; empty for an unknown id.
+    std::string GetTokenText(uint32_t token) const;
 
-    // Selects a baked frame's inputs by exact time. False naming the
-    // miss when the file carries no such frame.
-    bool SetFrame(double frame, std::string *error);
-
-    // Persistent avar overrides, applied after the selected frame and
-    // before FK/geometry evaluation. Angles are degrees. Accepted: a TRS
-    // avar on a compiled control slot, and -- when the file carries its
-    // property chains -- any input those chains read (a face slider such as
-    // `avars:autoSquash`), which the chains then recompute from. Refused: a
-    // property chain's own output, which the chain writes.
-    bool SetAvar(const std::string &propertyPath, double value,
-                 std::string *error);
-    void ClearAvars();
-
-    // Replays the cluster DAG for the selected frame. False naming the
-    // first failing step; outputs keep their previous frame.
+    // Replays the cluster DAG over the inputs. False naming the first
+    // failing step; outputs keep their previous values.
     bool Execute(std::string *error);
+    /// Runs Execute's ready clusters through \p dispatch and joins with
+    /// \p wait -- RigExecOpCallbacks' shape; both or neither, empty restores
+    /// serial. A successful run's results, diagnostics and counts are
+    /// bit-identical to serial; the run trace lists the same steps in
+    /// completion order. A failing run reports the failure of the op first
+    /// in canonical order. Execute returns only after \p wait does. The
+    /// reader still takes no lock; the caller owns the pool. Ignored for a
+    /// program whose Open found state that is not per op (serial then).
+    void SetTaskDispatch(std::function<void(std::function<void()>)> dispatch,
+                         std::function<void()> wait);
 
     // Plugin movers: a file may hold movers an external library registered.
     // Playback runs each through the kernel the host installs for its type
@@ -145,7 +249,81 @@ public:
     // Test-only family mask (bit 0 pose, 1 weights, 2 geometry, all set
     // by default). A masked family's steps are skipped, which is how
     // one family's outputs are compared while another is still landing.
-    void SetRunMaskForTesting(unsigned mask);
+
+    // Test-only: the label error text names step \p step by, as the baked
+    // program spells it; the step's number past the steps.
+    std::string GetStepLabelForTesting(size_t step) const;
+
+    // Test-only: how many clusters the last Execute's closure ran; the
+    // source steps run outside it.
+    size_t GetClosedClusterCountForTesting() const;
+    // Test-only: whether Open let Execute use a dispatcher
+    // (RrProgram::parallelSafe).
+    bool GetParallelSafeForTesting() const;
+
+    // Test-only: how many leaves keyed from input slots alone (provider
+    // leaves, constraint input arrays) the last Execute re-keyed; a run
+    // after no input write re-keys none.
+    size_t GetSlotLeafKeysForTesting() const;
+    // Test-only: how many slot-keyed leaves read input \p slot.
+    size_t GetSlotLeafCountForTesting(size_t slot) const;
+
+    // Test-only: how many source memos of steps that read inputs the last
+    // Execute built; a run after no input write builds none.
+    size_t GetSourceKeysBuiltForTesting() const;
+
+    // Test-only: whether the skin and matrix kernels take the SIMD path,
+    // as RIGEXEC_ENABLE_SIMD said when this reader opened.
+    bool GetSimdEnabledForTesting() const;
+
+    // Test-only: whether the last Execute found the partition of mover
+    // \p moverPath's chain revision stale, so that revision ran whole.
+    bool GetPartitionStaleForTesting(const std::string &moverPath) const;
+
+    // Test-only: mover \p moverPath's chain revision's apply-or-fail
+    // decision as the last Execute's RevisionStatic made it (0 refuses,
+    // 1 applies, 2 deferred), and whether every chunk of it reported ok.
+    // False when no chain revision moves for it.
+    bool GetRevisionDecisionForTesting(const std::string &moverPath,
+                                       int *acceptance, bool *chunksOk) const;
+
+    // Test-only: whether mover \p moverPath's chain revision is
+    // range-pipelined, as Open read it from the file, and whether it is its
+    // own point source. False when no chain revision moves for it.
+    bool GetRangeRoleForTesting(const std::string &moverPath, bool *rangeRole,
+                                bool *ownSource) const;
+
+    // Test-only: whether the last Execute's layout of mover \p moverPath's
+    // chain revision is the one Open expanded from the file, the same
+    // object.
+    bool GetSkinLayoutIsOpenForTesting(const std::string &moverPath) const;
+
+    // Test-only: whether the last Execute ran step \p step: a source step
+    // always; ordinary steps report exact closure selection. Heads report
+    // actual current trace membership. False past the steps and before the
+    // first Execute; ordinary selection remains independent of test masks.
+    bool GetStepRanForTesting(size_t step) const;
+
+    // Test-only: the steps the last Execute ran, by index, in completion
+    // order (a serial run's body order): the source steps, then the
+    // closure's. A step a test mask skips is not listed; empty before the
+    // first Execute.
+    std::vector<int32_t> GetLastRunTraceForTesting() const;
+
+    // Test-only: the geometry prologue alone, which samples the inputs as
+    // set now and publishes nothing, as a run stopped between its prologue
+    // and its leaf publication would. False naming the failure.
+    bool SampleGeometryForTesting(std::string *error);
+
+    // Test-only: the providers whose rest (\p ladder false) or default-space
+    // ladder (\p ladder true) the last Execute's compose steps found moved,
+    // by path, in slot order. A solver refreshes its rest description from
+    // the moved rests it measures.
+    std::vector<std::string> GetComposeMovesForTesting(bool ladder) const;
+
+    // The property chains' published values (chain targets and phased
+    // consumers) as the last Execute computed them, in path order.
+    std::vector<RigExecRuntimePropertyValue> GetPropertyValues() const;
 
     // Final asset-space skinning deltas (rest -> posed), in path order.
     const std::vector<RigExecRuntimeJointMatrix> &GetJointMatrices() const
@@ -154,7 +332,9 @@ public:
     }
 
     // GetJointMatrices preserves the skinning delta (rest -> posed) API.
-    // Skeleton consumers need the asset-space rest and posed frames.
+    // Skeleton consumers need the asset-space rest and posed frames. The
+    // rest frames are the live ones: an input that recomposes the ladder
+    // moves them.
     std::vector<RigExecRuntimeJointMatrix> GetJointRestMatrices() const;
     std::vector<RigExecRuntimeJointMatrix> GetJointPoseMatrices() const;
 
@@ -201,85 +381,23 @@ public:
     // rest -> pose matrices, and the weight packets.
     const std::vector<RrPointFrame> &GetFinFrames() const;
     const std::vector<RrPointFrame> &GetBaseFrames() const;
+    std::vector<RigExecRuntimeProviderFrames> GetProviderFramePublications() const;
+    // Empty when solver guides were disabled in the captured export context.
+    std::vector<RigExecRuntimeSolverFrames> GetSolverFramePublications() const;
     const std::vector<RrMat4d> &GetFinalMatrices() const;
     const std::vector<RrMat4d> &GetBaseMatrices() const;
     const std::vector<RrWeightPacket> &GetWeightPackets() const;
 
-    // Section presence, for loader tests and --verify-binary diagnostics.
-    bool HasSteps() const { return _hasSteps; }
-    bool HasPoses() const { return _hasPoses; }
-    bool HasGeometry() const { return _hasGeometry; }
-    bool HasInputTable() const { return _hasInputTable; }
-    bool HasCones() const { return _hasCones; }
-    bool HasClusters() const { return _hasClusters; }
-    bool HasSlotMeta() const { return _hasSlotMeta; }
-    bool HasConstants() const { return _hasConstants; }
-    // Whether the file carries its property chains as programs, so they
-    // follow SetAvar instead of replaying their recorded values.
-    bool HasPropertyChains() const { return _hasPropertyChains; }
-
-    /// The posed frame of the control or joint at `primPath` (its last
-    /// version),
-    /// asset space, as a row-vector matrix: the three handle vectors, then
-    /// the origin, 16 numbers row-major. The frame the evaluator publishes
-    /// as the control's. False when the path names no slot.
-    bool GetControlFrame(const std::string &primPath, double out[16]) const;
-
-    // The last Execute's property-chain results, scalar ones only, by
-    // target path: what the chains published, computed or replayed.
-    std::map<std::string, double> GetPropertyResults() const;
-
 private:
-    RigExecRuntimeReader() = default;
+    friend class RigExecRuntimeStageArrayInputs;
+    RigExecRuntimeReader();
 
-    std::unique_ptr<RigExecBinaryReader> _reader;
-    std::vector<RigExecWireStep> _steps;
-    RigExecWireClustering _clustering;
-    RigExecWireCones _cones;
-    RigExecWireSlotMeta _slotMeta;
-    RigExecWireConstants _constants;
-    RigExecWireDomainPose _poses;
-    RigExecWireDomainGeometry _geometry;
-    RigExecWireInputTable _inputs;
-    RigExecWireExternalMovers _external;
-    bool _hasSteps = false;
-    bool _hasPoses = false;
-    bool _hasGeometry = false;
-    bool _hasInputTable = false;
-    bool _hasCones = false;
-    bool _hasClusters = false;
-    bool _hasSlotMeta = false;
-    bool _hasConstants = false;
-    bool _hasPropertyChains = false;
-    RigExecWirePropertyChains _chains;
-    // Each chain's target path id, and every path a chain input's walk
-    // visits that no chain writes (what SetAvar may set for the chains).
-    std::map<uint32_t, size_t> _chainOfTarget;
-    std::map<std::string, uint32_t> _chainInputPaths;
+    std::unique_ptr<RrProgram> _program;
 
-    RrProgram _program;
-
-    size_t _frameIndex = 0;
-    bool _frameSelected = false;
-    std::map<size_t, double> _avarOverrides;
-    // Every value SetAvar accepted, by path id: what a chain input's walk
-    // reads as a live value.
-    std::map<uint32_t, double> _pathOverrides;
-
-    // Inputs a poseable bake routed to holders, by every path their walks
-    // visit: (uid, override index) pairs. A mode switch read straight off
-    // an avar (a blend weight, a space switch's active index) is set here.
-    std::map<std::string, std::vector<std::pair<uint32_t, int32_t>>>
-        _overridableInputs;
-    // Values SetAvar accepted for those inputs, and the holder values they
-    // displaced, restored when the overrides go or the frame changes.
-    std::map<std::string, double> _inputOverrides;
-    std::map<uint32_t, RrInputValue> _inputBase;
-    void _RestoreInputs();
-
-    // Computes the property chains for the selected frame into the store,
-    // and hands each result to the input holders it feeds.
-    void _RunPropertyChains();
+    // What the input getters answer past the count: a Double +0.0, every
+    // other member zero.
+    RigExecRuntimeInputInfo _noInput;
+    RrInputValue _noValue;
 
     std::vector<RigExecRuntimeJointMatrix> _jointMatrices;
     std::vector<RigExecRuntimePoints> _points;

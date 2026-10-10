@@ -68,9 +68,13 @@ is why a rig whose constraints all sit above its solvers is unchanged by any of
 this. Put `Solvers` near the bottom of the rig root to get the classic
 "solve, then revise" shape — that is what every shipped example authors.
 
-Steps that share no joint and no data are independent: overlapping writes
-serialise, disjoint chains stay parallel. Nothing about that changes the
-answer, only how fast it arrives.
+The stack is an order of *versions*, not a queue. Steps run in that order only
+where they touch the same data: two writers of one joint, or a step and the
+writer of a frame it reads. Constraints are ordered only by the frames they read
+and write — stack order decides which version a positional read sees — so
+constraints, like solvers, that share no joint and no data are independent and
+may run in parallel. Nothing about that changes the answer, only how fast it
+arrives.
 
 ## Read phases: which version a mover sees
 
@@ -80,12 +84,27 @@ metadata on the relationship that names the input — `rigExec:transform`,
 and so on. Metadata is the only way to declare a phase; there is no schema
 attribute for it. With none authored the input reads `base`.
 
+Property matrix connections, selected geometry points, Ribbon driver curves,
+and phased weight sample targets also use this contract. A `float3` input
+selects one array element only when it authors the integer
+`rigExecInputElement`; a shorter current array uses the input's typed fallback
+and reports a diagnostic. See [Cross-domain inputs](../specs/cross-domain-inputs.md)
+for the S9 authoring rules and count recovery behavior.
+
 - `base` — the joint **after its last solver**. Note that this is not "before
   every constraint": a constraint that fell *below* the last solver is already
   folded in, through that solver's rest reference.
 - `preceding` — the value standing immediately before this one mover's own
   application in the point stack. It is only meaningful to a mover that has a
-  place in that stack.
+  place in that stack. On the points of the chain this revision moves, such
+  as a lattice whose `rigExec:cage` is its own target, that is the points as
+  the movers before it left them; on the stack's first mover it is the
+  authored points. A mover with several targets is a known limitation: its
+  revision on one target reading another chain it also moves at `preceding`
+  gets that chain's points from just before its own revision there only when
+  another reader's phase on that chain makes the evaluator keep that record,
+  and otherwise the authored points. One relationship can therefore resolve
+  to different points for the mover's different targets.
 - `final` — the top of the chain, after every writer of that target.
 - **a checkpoint** — an absolute prim path in place of a token, meaning "the
   provider as it stood right after that named step". Naming the `Solvers` scope
@@ -138,36 +157,62 @@ solver, the joint and the constraint.
 ### Connected inputs
 
 An attribute connection reads a property. When math movers revise that
-property, an undeclared connection reads it after all of them: the final
-value. The same metadata on the connected input chooses another point in
-that property's chain:
+property, an undeclared connection reads its **base**: the authored value,
+before any of them, as an unannotated relationship does. The same metadata
+on the connected input chooses another point in that property's chain:
 
 ```usda
 float inputs:defaultWeight (
-    rigExecReadPhase = "base"
+    rigExecReadPhase = "final"
 )
 float inputs:defaultWeight.connect = </Asset/Rig/Channels/Dial.rigExec:amount>
 ```
 
-- **`final`** — after every math mover on the property. What an undeclared
-  connection reads.
-- **`base`** — the property's authored value, before any math mover.
+- **`base`** — the property's authored value, before any math mover. What an
+  undeclared connection reads.
+- **`final`** — after every math mover on the property. A reader that should
+  follow what the movers computed declares it.
 - **a checkpoint** — an absolute prim path: the value as the last math mover
   at or beneath that prim left it.
 
 `preceding` names a position in the reader's own chain, and a connection
-reads another property's, so compiling it fails. The phase applies to the
-first revised property along the connection's single-source hops, and needs
-that property's type, or float and double either way round.
+reads another property's, so it is refused. The phase applies to the first
+revised property along the connection's single-source hops, and the reading
+input's own phase decides, whatever a hop along the way declares. A declared
+phase needs that property's value type, or float and double either way
+round. A refused declaration sets aside the operation that reads the input
+— a mover, a solver or a pose interpolator — with a warning that says why.
+On an input no such operation reads, such as a control's, a joint's, a
+channel's, a space switch's or an expression's, it fails the compile. An
+input that only a mover already set aside, or one with no `rigExec:moves`
+targets, reads is not compiled, and its declaration is ignored.
 
-A connection phase is read on `inputs:enabled` and `inputs:defaultWeight` of
-every mover; `inputs:value`, `inputs:min`, `inputs:max`, `inputs:keys` and
-`inputs:tangents` of the math movers; the inputs of a weight object a mover
-binds; `inputs:weight` of a blend input a mover names; and every connected
-attribute of a solver. An unconnected input reads its own value, so a phase
-there has nothing to choose and is ignored. A drag on the revised property
-itself replaces its final value only: `base` and checkpoint readers keep
-reading the chain computed from the authored value.
+The phase is read on every connected attribute of a prim under the rig root
+— a mover's inputs, whatever its type, a solver's, a constraint's, a space
+switch's, a pose interpolator's and its poses', a control's or a joint's
+avars — on the weight objects and blend inputs an operator names, and on
+the attributes an operator names as ones it reads
+(`rigExec:driverAttributes`, `rigExec:shaderDialSources`,
+`rigExec:activeSpaceAttribute`). The native program, frozen jobs,
+the frame cache and the `.rigexec` runtime all read it the same way. An
+unconnected input reads its own value, so a phase there has nothing to
+choose and is ignored. An input that math movers revise itself reads its
+own chain's result, and a phase declared on it is refused as ambiguous.
+
+A drag on the reading input, or on a property along its connection, is what
+that reader gets. A drag on the revised property itself edits its base: the
+math movers revise the dragged value as they would the value authored, so
+every reader sees during the drag what it sees once the drag is authored.
+`base` readers read the dragged value, checkpoint readers the chain as of
+their step, and `final` readers, like every other reader of the property,
+the chain's result. A clamped `blink` authored at 0.2 and dragged to 1.4
+reads 1.4 at its base and 1.0 at `final`, during the drag and after it is
+released. A drag that is not finite skips the chain, as an authored one
+does, and readers see the dragged value. The `.rigexec` runtime's `SetInput`
+sets an avar the same way, as its authored value, an avar math movers revise
+included, and takes finite values only. One gap remains for now: a plugin mover applies the
+payload its bake assembled for the frame, so a drag that reaches an input
+the plugin reads does not move that mover's output.
 [Example 16](../../examples/16_ConnectionReadPhases.usda) reads one dial
 three ways, with math movers and with mover envelopes.
 

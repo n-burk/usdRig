@@ -459,6 +459,16 @@ _RrSwingTwist(const RrQuatd &q, const RrVec3d &axis,
     *swing = q * twist->GetInverse();
 }
 
+RrPointFrame
+_RrTransformFrame(const RrPointFrame &frame, const RrMat4d &space)
+{
+    RrPointFrame out = frame;
+    for (RrVec3d &p : out.points) {
+        p = space.Transform(p);
+    }
+    return out;
+}
+
 } // namespace runtimePoseDetail
 
 } // namespace rigExec

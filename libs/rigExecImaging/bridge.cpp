@@ -4,6 +4,7 @@
 #include "warmIndex.h"
 
 #include "rigExecMath/pointFrame.h"
+#include "rigExec/bakedProgramImpl.h"
 #include "rigExec/frameCacheSparsity.h"
 
 #include "pxr/base/gf/quatd.h"
@@ -29,6 +30,30 @@
 namespace rigExec {
 
 namespace {
+// Guide names are interned before frame publication.
+const TfToken _tY("Y");
+const TfToken _tRigExecGenerated("__RigExecGenerated");
+const TfToken _tCircle("circle");
+const TfToken _tFaceVarying("faceVarying");
+const TfToken _tGuideDisplayColor("guide:displayColor");
+const TfToken _tGuideDisplayOpacity("guide:displayOpacity");
+const TfToken _tGuideDisplayOpacityInvert("guide:displayOpacityInvert");
+const TfToken _tGuideDisplayOpacityMin("guide:displayOpacityMin");
+const TfToken _tGuideDrawMode("guide:drawMode");
+const TfToken _tGuideOffset("guide:offset");
+const TfToken _tGuidePlaneNormal("guide:planeNormal");
+const TfToken _tGuideRadius("guide:radius");
+const TfToken _tGuideScaleX("guide:scaleX");
+const TfToken _tGuideScaleY("guide:scaleY");
+const TfToken _tGuideScaleZ("guide:scaleZ");
+const TfToken _tGuideShape("guide:shape");
+const TfToken _tGuideWireWidth("guide:wireWidth");
+const TfToken _tPoints("points");
+const TfToken _tRigExecCurve("rigExec:curve");
+const TfToken _tRigExecPlaneAxis("rigExec:planeAxis");
+const TfToken _tRigExecPlaneBounds("rigExec:planeBounds");
+const TfToken _tVertex("vertex");
+const TfToken _tWire("wire");
 
 // The rigid ASSET-space placement matrix of one posed frame, or nothing
 // when the frame cannot supply one.
@@ -191,7 +216,10 @@ _ReadGuidePurpose(const UsdPrim &prim)
 // drew nothing different, and gave no hint why. This is the read-through.
 // A property-mover result for the source wins over its authored value,
 // exactly as the volume guides read their driven dimensions: a dial that
-// is itself computed must fade the guide by what it computed.
+// is itself computed must fade the guide by what it computed. A value the
+// rig published on the attribute itself wins over both: it is the
+// connection read at its phase (RigExecPhasedConnection), the base of a
+// computed dial unless the attribute declares another.
 bool
 _ReadConnectedValue(
     const UsdAttribute &attr, const RigExecRigPose &pose, VtValue *held)
@@ -199,6 +227,11 @@ _ReadConnectedValue(
     SdfPathVector connections;
     if (!attr.GetConnections(&connections) || connections.empty()) {
         return false;
+    }
+    const auto phased = pose.movedProperties.find(attr.GetPath());
+    if (phased != pose.movedProperties.end() && !phased->second.IsEmpty()) {
+        *held = phased->second;
+        return true;
     }
     const SdfPath &sourcePath = connections.front();
     if (!sourcePath.IsPropertyPath()) {
@@ -248,7 +281,7 @@ _ReadGuideStyle(
     }
     const UsdTimeCode time = pose.time;
     published->guidePurpose = _ReadGuidePurpose(prim);
-    if (UsdAttribute a = prim.GetAttribute(TfToken("guide:displayColor"))) {
+    if (UsdAttribute a = prim.GetAttribute(_tGuideDisplayColor)) {
         VtValue held;
         if (_ReadConnectedValue(a, pose, &held) &&
             held.IsHolding<GfVec3f>()) {
@@ -258,7 +291,7 @@ _ReadGuideStyle(
         }
     }
     if (UsdAttribute a =
-            prim.GetAttribute(TfToken("guide:displayOpacity"))) {
+            prim.GetAttribute(_tGuideDisplayOpacity)) {
         VtValue held;
         double driven = 0.0;
         if (_ReadConnectedValue(a, pose, &held) &&
@@ -271,12 +304,12 @@ _ReadGuideStyle(
             // unconnected attribute draws exactly what it says.
             bool invert = false;
             if (UsdAttribute i = prim.GetAttribute(
-                    TfToken("guide:displayOpacityInvert"))) {
+                    _tGuideDisplayOpacityInvert)) {
                 i.Get(&invert, time);
             }
             double floor = _kDefaultGuideOpacityMin;
             if (UsdAttribute m = prim.GetAttribute(
-                    TfToken("guide:displayOpacityMin"))) {
+                    _tGuideDisplayOpacityMin)) {
                 VtValue heldMin;
                 double authoredMin = 0.0;
                 if (m.Get(&heldMin, time) &&
@@ -424,7 +457,7 @@ bool
 _ReadCurveGuidePoints(
     const UsdPrim &prim, UsdTimeCode time, VtVec3fArray *points)
 {
-    const UsdRelationship rel = prim.GetRelationship(TfToken("rigExec:curve"));
+    const UsdRelationship rel = prim.GetRelationship(_tRigExecCurve);
     if (!rel) {
         return false;
     }
@@ -440,10 +473,75 @@ _ReadCurveGuidePoints(
         return false;
     }
     const TfToken name = target.IsPropertyPath() ? target.GetNameToken()
-                                                 : TfToken("points");
+                                                 : _tPoints;
     const UsdAttribute attr = curvePrim.GetAttribute(name);
     return attr && attr.Get(points, time) && points->size() >= 2;
 }
+
+// Immutable unit geometry is prepared before frame publication.
+// Each guide shapes these samples into its owned output arrays.
+struct _UnitSphereMesh {
+    std::vector<GfVec3f> units;
+    std::vector<int> counts;
+    std::vector<int> indices;
+};
+
+const _UnitSphereMesh _unitSphereMesh = []() {
+    _UnitSphereMesh mesh;
+    constexpr int longitude = 64, latitude = 32;
+    constexpr double pi = 3.14159265358979323846;
+    mesh.units.reserve(
+        size_t((latitude - 1) * longitude) + 2);
+    mesh.units.push_back(GfVec3f(0, 1, 0));
+    for (int j = 1; j < latitude; ++j) {
+        const double theta = pi * j / latitude;
+        for (int i = 0; i < longitude; ++i) {
+            const double phi = 2 * pi * i / longitude;
+            mesh.units.push_back(GfVec3f(
+                float(std::sin(theta) * std::cos(phi)),
+                float(std::cos(theta)),
+                float(std::sin(theta) * std::sin(phi))));
+        }
+    }
+    mesh.units.push_back(GfVec3f(0, -1, 0));
+    mesh.counts.reserve(size_t(longitude) * size_t(latitude - 1));
+    mesh.indices.reserve(mesh.counts.capacity() * 4);
+    const int bottom = int(mesh.units.size()) - 1;
+    auto face = [&](std::initializer_list<int> ids) {
+        mesh.counts.push_back(int(ids.size()));
+        for (int id : ids) mesh.indices.push_back(id);
+    };
+    for (int i = 0; i < longitude; ++i) {
+        const int next = (i + 1) % longitude;
+        face({0, 1 + next, 1 + i});
+        for (int j = 0; j < latitude - 2; ++j) {
+            const int row = 1 + j * longitude;
+            face({row + i, row + next, row + longitude + next,
+                  row + longitude + i});
+        }
+        const int row = 1 + (latitude - 2) * longitude;
+        face({row + i, row + next, bottom});
+    }
+    return mesh;
+}();
+
+struct _UnitSphereRings {
+    VtVec3fArray points;
+    VtIntArray counts;
+};
+
+const _UnitSphereRings _unitSphereRings = []() {
+    const GfVec3f kX(1, 0, 0), kY(0, 1, 0), kZ(0, 0, 1);
+    const GfVec3f kOrigin(0, 0, 0);
+    _UnitSphereRings built;
+    _AppendDottedVolumeRing(
+        kOrigin, kX, kZ, &built.points, &built.counts);
+    _AppendDottedVolumeRing(
+        kOrigin, kX, kY, &built.points, &built.counts);
+    _AppendDottedVolumeRing(
+        kOrigin, kY, kZ, &built.points, &built.counts);
+    return built;
+}();
 
 // One sphere iso-surface at local radius \p radius.
 // The radius and shared axis scales ride in the transform. Directional
@@ -491,43 +589,21 @@ _AppendSphereVolumeGuide(
     };
     if (!wire) {
         element.primType = HdPrimTypeTokens->mesh;
-        element.normalsInterpolation = TfToken("vertex");
-        constexpr int longitude = 64, latitude = 32;
-        constexpr double pi = 3.14159265358979323846;
-        auto vertex = [&](const GfVec3f &unit) {
-            element.points.push_back(shapePoint(unit));
-            GfVec3f normal = unit;
+        element.normalsInterpolation = _tVertex;
+        const _UnitSphereMesh &unit = _unitSphereMesh;
+        element.points.resize(unit.units.size());
+        element.normals.resize(unit.units.size());
+        for (size_t v = 0; v < unit.units.size(); ++v) {
+            const GfVec3f &sample = unit.units[v];
+            element.points[v] = shapePoint(sample);
+            GfVec3f normal = sample;
             for (int a = 0; a < 3; ++a)
-                normal[a] /= float(unit[a] < 0 ? negativeScales[a] : positiveScales[a]);
+                normal[a] /= float(sample[a] < 0 ? negativeScales[a] : positiveScales[a]);
             normal.Normalize();
-            element.normals.push_back(normal);
-        };
-        vertex(GfVec3f(0, 1, 0));
-        for (int j = 1; j < latitude; ++j) {
-            const double theta = pi * j / latitude;
-            for (int i = 0; i < longitude; ++i) {
-                const double phi = 2 * pi * i / longitude;
-                vertex(GfVec3f(float(std::sin(theta) * std::cos(phi)),
-                              float(std::cos(theta)),
-                              float(std::sin(theta) * std::sin(phi))));
-            }
+            element.normals[v] = normal;
         }
-        const int bottom = int(element.points.size());
-        vertex(GfVec3f(0, -1, 0));
-        auto face = [&](std::initializer_list<int> ids) {
-            element.counts.push_back(int(ids.size()));
-            for (int id : ids) element.indices.push_back(id);
-        };
-        for (int i = 0; i < longitude; ++i) {
-            const int next = (i + 1) % longitude;
-            face({0, 1 + next, 1 + i});
-            for (int j = 0; j < latitude - 2; ++j) {
-                const int row = 1 + j * longitude;
-                face({row + i, row + next, row + longitude + next, row + longitude + i});
-            }
-            const int row = 1 + (latitude - 2) * longitude;
-            face({row + i, row + next, bottom});
-        }
+        element.counts.assign(unit.counts.begin(), unit.counts.end());
+        element.indices.assign(unit.indices.begin(), unit.indices.end());
         elements->push_back(std::move(element));
         return;
     }
@@ -535,12 +611,12 @@ _AppendSphereVolumeGuide(
     element.wireWidth = wireWidth;
     // Three orthogonal great circles, dotted. Wire mode draws this both
     // on the exterior falloff and over the translucent interior fill.
-    static const GfVec3f kX(1, 0, 0), kY(0, 1, 0), kZ(0, 0, 1);
-    static const GfVec3f kOrigin(0, 0, 0);
-    _AppendDottedVolumeRing(kOrigin, kX, kZ, &element.points, &element.counts);
-    _AppendDottedVolumeRing(kOrigin, kX, kY, &element.points, &element.counts);
-    _AppendDottedVolumeRing(kOrigin, kY, kZ, &element.points, &element.counts);
-    for (GfVec3f &point : element.points) point = shapePoint(point);
+    const _UnitSphereRings &rings = _unitSphereRings;
+    element.points.resize(rings.points.size());
+    for (size_t v = 0; v < rings.points.size(); ++v) {
+        element.points[v] = shapePoint(rings.points[v]);
+    }
+    element.counts.assign(rings.counts.begin(), rings.counts.end());
     elements->push_back(std::move(element));
 }
 
@@ -748,7 +824,7 @@ _AppendCurveVolumeGuide(
     }
 
     element.primType = HdPrimTypeTokens->mesh;
-    element.normalsInterpolation = TfToken("faceVarying");
+    element.normalsInterpolation = _tFaceVarying;
     element.points.reserve(vertices * _kVolumeTubeSegments);
     for (size_t k = 0; k < vertices; ++k) {
         for (int j = 0; j < _kVolumeTubeSegments; ++j) {
@@ -764,20 +840,20 @@ _AppendCurveVolumeGuide(
     // Append one polygon plus a flat, outward normal at every face corner.
     // Face-varying normals keep the octagonal side facets honest and leave
     // a hard edge where each cap meets the tube.
-    auto appendFace = [&element](const std::vector<int> &face) {
-        element.counts.push_back(static_cast<int>(face.size()));
+    auto appendFace = [&element](const int *face, size_t count) {
+        element.counts.push_back(static_cast<int>(count));
         element.indices.insert(
-            element.indices.end(), face.begin(), face.end());
+            element.indices.end(), face, face + count);
         GfVec3f normal(0.0f);
-        const GfVec3f origin = element.points[face.front()];
-        for (size_t i = 1; i + 1 < face.size(); ++i) {
+        const GfVec3f origin = element.points[face[0]];
+        for (size_t i = 1; i + 1 < count; ++i) {
             normal += GfCross(element.points[face[i]] - origin,
                               element.points[face[i + 1]] - origin);
         }
         if (normal.GetLength() > 1e-9f) {
             normal.Normalize();
         }
-        for (size_t i = 0; i < face.size(); ++i) {
+        for (size_t i = 0; i < count; ++i) {
             element.normals.push_back(normal);
         }
     };
@@ -791,7 +867,8 @@ _AppendCurveVolumeGuide(
             const int b = int(k * _kVolumeTubeSegments) + next;
             const int c = int((k + 1) * _kVolumeTubeSegments) + next;
             const int d = int((k + 1) * _kVolumeTubeSegments) + j;
-            appendFace({a, b, c, d});
+            const int quad[] = {a, b, c, d};
+            appendFace(quad, 4);
         }
     }
 
@@ -805,8 +882,8 @@ _AppendCurveVolumeGuide(
         startCap.push_back(_kVolumeTubeSegments - 1 - j);
         endCap.push_back(int((vertices - 1) * _kVolumeTubeSegments) + j);
     }
-    appendFace(startCap);
-    appendFace(endCap);
+    appendFace(startCap.data(), startCap.size());
+    appendFace(endCap.data(), endCap.size());
     elements->push_back(std::move(element));
 }
 
@@ -825,7 +902,7 @@ RigExecImagingBridge::RigExecImagingBridge(
     : _stage(stage)
     , _rigPath(rigPath)
     , _evaluator(std::make_unique<RigExecRigEvaluator>(
-          stage, rigPath, TfGetenvBool("RIGEXEC_DYNAMIC_RUNS_PROGRAM", true)))
+          stage, rigPath))
     , _store(std::move(store))
     , _frameCache(std::make_shared<RigExecFrameCache>())
 {
@@ -851,7 +928,7 @@ RigExecImagingBridge::Compile(std::vector<std::string> *errors)
 SdfPath
 RigExecImagingBridge::GetGeneratedScope() const
 {
-    return _rigPath.AppendChild(TfToken("__RigExecGenerated"));
+    return _rigPath.AppendChild(_tRigExecGenerated);
 }
 
 // Constraint-driven transforms, published onto the prim itself so parented
@@ -1068,7 +1145,7 @@ RigExecImagingBridge::_GuideRadius(_GuideInputs &inputs,
     if (!inputs.radiusReady || inputs.radiusLive) {
         double radius = 1.0;
         const UsdAttribute a =
-            inputs.prim.GetAttribute(TfToken("guide:radius"));
+            inputs.prim.GetAttribute(_tGuideRadius);
         if (a) {
             a.Get(&radius, time);
         }
@@ -1092,13 +1169,13 @@ RigExecImagingBridge::_ReadGuideStyleCached(
     if (!inputs.styleReady) {
         inputs.styleReady = true;
         inputs.purpose = _ReadGuidePurpose(prim);
-        inputs.colorAttr = prim.GetAttribute(TfToken("guide:displayColor"));
+        inputs.colorAttr = prim.GetAttribute(_tGuideDisplayColor);
         inputs.colorLive = _GuideAttrIsLive(inputs.colorAttr);
         if (inputs.colorAttr && !inputs.colorLive) {
             inputs.hasColor = inputs.colorAttr.Get(&inputs.color, time);
         }
         inputs.opacityAttr =
-            prim.GetAttribute(TfToken("guide:displayOpacity"));
+            prim.GetAttribute(_tGuideDisplayOpacity);
         inputs.opacityLive = _GuideAttrIsLive(inputs.opacityAttr);
         if (inputs.opacityAttr && !inputs.opacityLive) {
             inputs.hasOpacity =
@@ -1286,9 +1363,9 @@ RigExecImagingBridge::_FillControlGuides(
             // plugin registered has no fallback to find, and an empty shape
             // token names no shape at all -- so a rig would silently stop
             // drawing control guides rather than draw the documented default.
-            inputs.shape = TfToken("circle");
-            inputs.drawMode = TfToken("wire");
-            inputs.planeNormal = TfToken("Y");
+            inputs.shape = _tCircle;
+            inputs.drawMode = _tWire;
+            inputs.planeNormal = _tY;
             inputs.scale = GfVec3d(1.0, 1.0, 1.0);
             inputs.wireWidth = 0.05;
             inputs.offset = GfVec3d(0.0);
@@ -1299,23 +1376,23 @@ RigExecImagingBridge::_FillControlGuides(
             bool live = false;
             if (prim) {
                 if (UsdAttribute a =
-                        prim.GetAttribute(TfToken("guide:shape"))) {
+                        prim.GetAttribute(_tGuideShape)) {
                     a.Get(&inputs.shape, pose.time);
                     live = live || _GuideAttrIsLive(a);
                 }
                 if (UsdAttribute a =
-                        prim.GetAttribute(TfToken("guide:drawMode"))) {
+                        prim.GetAttribute(_tGuideDrawMode)) {
                     a.Get(&inputs.drawMode, pose.time);
                     live = live || _GuideAttrIsLive(a);
                 }
                 if (UsdAttribute a =
-                        prim.GetAttribute(TfToken("guide:planeNormal"))) {
+                        prim.GetAttribute(_tGuidePlaneNormal)) {
                     a.Get(&inputs.planeNormal, pose.time);
                     live = live || _GuideAttrIsLive(a);
                 }
-                static const TfToken scaleAttrs[3] = {
-                    TfToken("guide:scaleX"), TfToken("guide:scaleY"),
-                    TfToken("guide:scaleZ")};
+                const TfToken scaleAttrs[3] = {
+                    _tGuideScaleX, _tGuideScaleY,
+                    _tGuideScaleZ};
                 for (int axis = 0; axis < 3; ++axis) {
                     if (UsdAttribute a =
                             prim.GetAttribute(scaleAttrs[axis])) {
@@ -1324,12 +1401,12 @@ RigExecImagingBridge::_FillControlGuides(
                     }
                 }
                 if (UsdAttribute a =
-                        prim.GetAttribute(TfToken("guide:wireWidth"))) {
+                        prim.GetAttribute(_tGuideWireWidth)) {
                     a.Get(&inputs.wireWidth, pose.time);
                     live = live || _GuideAttrIsLive(a);
                 }
                 if (UsdAttribute a =
-                        prim.GetAttribute(TfToken("guide:offset"))) {
+                        prim.GetAttribute(_tGuideOffset)) {
                     a.Get(&inputs.offset, pose.time);
                     live = live || _GuideAttrIsLive(a);
                 }
@@ -1517,7 +1594,7 @@ RigExecImagingBridge::_FillVolumeGuides(
         // resolve, and a volume would silently stop drawing rather than
         // draw the documented default.
         TfToken drawMode(kWire);
-        if (UsdAttribute a = prim.GetAttribute(TfToken("guide:drawMode"))) {
+        if (UsdAttribute a = prim.GetAttribute(_tGuideDrawMode)) {
             a.Get(&drawMode, pose.time);
         }
         if (drawMode != kWire && drawMode != kGeometry) {
@@ -1554,7 +1631,7 @@ RigExecImagingBridge::_FillVolumeGuides(
             continue;
         }
         double wireWidth = 0.05;
-        if (UsdAttribute a = prim.GetAttribute(TfToken("guide:wireWidth"))) {
+        if (UsdAttribute a = prim.GetAttribute(_tGuideWireWidth)) {
             a.Get(&wireWidth, pose.time);
         }
         // A non-positive width is not a reason to draw nothing: it
@@ -1569,7 +1646,7 @@ RigExecImagingBridge::_FillVolumeGuides(
         if (typeName == "RigExecPlaneWeight") {
             TfToken axisToken("y");
             if (UsdAttribute a =
-                    prim.GetAttribute(TfToken("rigExec:planeAxis"))) {
+                    prim.GetAttribute(_tRigExecPlaneAxis)) {
                 a.Get(&axisToken, pose.time);
             }
             const int axis = axisToken == "x" ? 0
@@ -1585,7 +1662,7 @@ RigExecImagingBridge::_FillVolumeGuides(
             const double extentV = readFloat("inputs:extentV", 1.0f);
             TfToken boundsToken("unbounded");
             if (UsdAttribute a =
-                    prim.GetAttribute(TfToken("rigExec:planeBounds"))) {
+                    prim.GetAttribute(_tRigExecPlaneBounds)) {
                 a.Get(&boundsToken, pose.time);
             }
             if (boundsToken != "unbounded" && boundsToken != "bounded") {
@@ -1723,8 +1800,7 @@ RigExecImagingBridge::_FillWeightOverlay(
     }
     RigExecPublishedPrim &published = snapshot->prims[geomPath];
     published.hasWeightOverlay = true;
-    published.weightOverlay =
-        VtFloatArray(it->second.weights.begin(), it->second.weights.end());
+    published.weightOverlay = it->second.weights;
 }
 
 // Stamps WHICH STAGE and WHICH TIME a generation describes onto it.
@@ -1820,7 +1896,7 @@ RigExecImagingBridge::ClearFrameCache()
     _lastPublishedEpoch.store(0, std::memory_order_relaxed);
     _freshDigests.clear();
     _freshEpochValid = false;
-    _cacheModeValid = false;
+
     _sampleSupportValid = false;
 }
 
@@ -1859,8 +1935,15 @@ RigExecFreshProof::RigExecFreshProof(
     // Stage seeds fold no path string, so they contribute none: a notice
     // that moves only seeds leaves the proof standing, and the digest
     // compare -- which does fold them -- misses honestly on the visit.
+    // A matching recorded order is immutable and shared, and its first-win
+    // paths are exactly the vector's sample paths, so it stands in for
+    // their text.
+    if (inputs && RigExecFrameDigestOrderMatches(inputs->digestOrder.get(),
+                                                 inputs->values)) {
+        order = inputs->digestOrder;
+    }
     std::set<std::string> ids;
-    if (inputs) {
+    if (inputs && !order) {
         for (const RigExecSampledInput &sample : inputs->values) {
             if (!sample.path.IsEmpty()) {
                 ids.insert(sample.path.GetString());
@@ -1875,6 +1958,16 @@ RigExecFreshProof::RigExecFreshProof(
     paths.assign(ids.begin(), ids.end());
 }
 
+bool
+RigExecFreshProof::Covers(const std::string &id, const SdfPath &asPath) const
+{
+    // Empty paths are no dependency on either side: `paths` never holds
+    // one, and an empty \p asPath is not looked up.
+    return std::binary_search(paths.begin(), paths.end(), id) ||
+           (order && !asPath.IsEmpty() &&
+            RigExecFrameDigestOrderHasPath(order.get(), asPath));
+}
+
 void
 RigExecImagingBridge::NoteWarmingEnqueued(
     UsdTimeCode time, uint64_t controlDigest, uint64_t unfoldedDigest,
@@ -1886,16 +1979,12 @@ RigExecImagingBridge::NoteWarmingEnqueued(
         return;
     }
     // Scope check, as on the lookup and memoization paths: the evaluation
-    // mode or the epoch may have moved since the last proof was recorded.
+    // epoch may have moved since the last proof was recorded.
     const uint64_t epoch = RigExecFrameCacheEpochDigest(*_evaluator);
-    const RigExecEvaluationMode mode = _evaluator->GetEvaluationMode();
-    if (!_freshEpochValid || _freshEpoch != epoch ||
-        !_cacheModeValid || _cacheMode != mode) {
+    if (!_freshEpochValid || _freshEpoch != epoch) {
         _freshDigests.clear();
         _freshEpoch = epoch;
         _freshEpochValid = true;
-        _cacheMode = mode;
-        _cacheModeValid = true;
     }
     if (_freshDigests.size() >= _kFreshDigestCap) {
         _freshDigests.clear();
@@ -1985,12 +2074,28 @@ RigExecImagingBridge::RetireProofsForControls(
     if (_freshDigests.empty() || controls.empty()) {
         return 0;
     }
-    const std::set<std::string> doomed(controls.begin(), controls.end());
+    // Each doomed id once, beside its path when the id spells one
+    // canonically: then the id equals a sample path's text exactly when
+    // the paths are equal, and an id that spells none equals no sample
+    // path's text, so it can only name an override.
+    std::vector<std::pair<std::string, SdfPath>> doomed;
+    {
+        const std::set<std::string> unique(controls.begin(), controls.end());
+        doomed.reserve(unique.size());
+        for (const std::string &id : unique) {
+            SdfPath path = SdfPath::IsValidPathString(id) ? SdfPath(id)
+                                                          : SdfPath();
+            if (!path.IsEmpty() && path.GetString() != id) {
+                path = SdfPath();
+            }
+            doomed.emplace_back(id, std::move(path));
+        }
+    }
     size_t retired = 0;
     for (auto it = _freshDigests.begin(); it != _freshDigests.end();) {
         bool hit = false;
-        for (const std::string &path : it->second.paths) {
-            if (doomed.find(path) != doomed.end()) {
+        for (const auto &[id, path] : doomed) {
+            if (it->second.Covers(id, path)) {
                 hit = true;
                 break;
             }
@@ -2178,24 +2283,42 @@ bool
 RigExecImagingBridge::_SampleLive(
     UsdTimeCode time, RigExecFrameInputs *out) const
 {
+    // The upstream values ride the vector (RigExecFrameInputs::upstream),
+    // admitted as live admits them, so every digest of it folds them.
     if (_EnsureChainBindings() &&
         RigExecSampleFrameInputsWithTrustedChainBindings(
-            *_evaluator, time, _interactiveOverrides, _liveChainBindings,
-            out)) {
+            *_evaluator, time, _interactiveOverrides, _upstreamInputs,
+            _liveChainBindings, out)) {
         return true;
     }
     // The pinned route declined (a bind that failed, an override it cannot
     // place, a hook that refused): the self-binding sampler answers exactly
     // as it always has, at its own cost.
     return RigExecSampleFrameInputs(*_evaluator, time, _interactiveOverrides,
-                                    out);
+                                    _upstreamInputs, out);
+}
+
+void
+RigExecImagingBridge::SetUpstreamInputs(
+    std::vector<RigExecUpstreamValue> values)
+{
+    std::vector<RigExecValueOverride> inputs;
+    inputs.reserve(values.size());
+    for (const RigExecUpstreamValue &value : values) {
+        inputs.push_back(RigExecValueOverride{value.path.GetPrimPath(),
+                                              TfToken(),
+                                              value.path.GetNameToken(),
+                                              value.value});
+    }
+    _upstreamInputs = std::move(values);
+    _evaluator->SetUpstreamInputs(std::move(inputs));
 }
 
 bool
 RigExecImagingBridge::_CanSampleCacheInputs()
 {
     const RigExecBakedProgram *program = _evaluator->GetBakedProgram();
-    if (!program || _evaluator->cpuParityMode) {
+    if (!program || _evaluator->cpuReference) {
         return false;
     }
     const uint64_t epoch = RigExecFrameCacheEpochDigest(*_evaluator);
@@ -2216,7 +2339,8 @@ RigExecImagingBridge::_ComputePoseOnlyCacheKey(
     UsdTimeCode time, RigExecFrameCacheKey *key) const
 {
     if (!key || !_frameCache ||
-        !RigExecRefusalControlDigestible(_interactiveOverrides)) {
+        !RigExecRefusalControlDigestible(_interactiveOverrides,
+                                         _upstreamInputs)) {
         return false;
     }
     // Complete live results remain cacheable when an operation has no
@@ -2224,7 +2348,8 @@ RigExecImagingBridge::_ComputePoseOnlyCacheKey(
     // per-operation input list or partial retained-state proof is needed.
     key->epochDigest = RigExecFrameCacheEpochDigest(*_evaluator);
     key->controlDigest = RigExecRefusalControlDigest(
-        time, _evaluator->GetStageEditSerial(), _interactiveOverrides);
+        time, _evaluator->GetStageEditSerial(), _interactiveOverrides,
+        _upstreamInputs);
     return true;
 }
 
@@ -2237,9 +2362,8 @@ RigExecImagingBridge::_ServeCachedPose(
     RigExecRigPose cached = pose;
     const bool verify = RigExecFrameCacheVerifyRequested();
     if (verify) {
-        // Shadow mode: prove the hit against a live evaluation, the same
-        // judge as BakedWithParityCheck. The shadow IS an evaluator pull,
-        // so whatever it says, this publication counts as a live one.
+        // Verify the cached pose against a live evaluation. This evaluator
+        // pull counts as a live publication regardless of its verdict.
         RigExecRigPose live;
         {
             RigExecProfileScope scope(MutableProfiler(), "Imaging.Evaluate",
@@ -2402,14 +2526,8 @@ RigExecImagingBridge::_TrySparseServe(
         MutableProfiler()->RecordCacheLookup(false, stamped);
         return false;
     }
-    const RigExecSparsePlan plan = RigExecPlanSparseReuse(
-        *index, &_taskListMemo, *retained, key.epochDigest, inputs,
-        _interactiveOverrides, nullptr);
-    if (plan.verdict != RigExecSparseVerdict::Hit) {
-        // The UI thread serves Hit only: a Partial re-runs on a worker
-        // through the lane-c partial job (plan 2.2), against the retained
-        // slots both publish paths now capture, and a Miss has no base.
-        // Both live-eval here.
+    if (!RigExecCanReuseRetainedPose(*index, *retained, key.epochDigest,
+                                    inputs, _interactiveOverrides)) {
         MutableProfiler()->RecordCacheLookup(false, stamped);
         return false;
     }
@@ -2442,22 +2560,18 @@ bool
 RigExecImagingBridge::_TryPublishCachedResult(
     UsdTimeCode time, PublishResult *result)
 {
-    if (!result || !_frameCache) {
+    if (!result || !_frameCache || _evaluator->cpuReference) {
         return false;
     }
-    // Scope check: a new epoch or a new evaluation mode retires every
+    // Scope check: a new epoch retires every
     // freshness proof. Cached entries stay for LRU (their digests decide
     // reachability); proofs name the old scope's inputs and must not be
     // consulted. No proof can exist yet, so this is a miss either way.
     const uint64_t epoch = RigExecFrameCacheEpochDigest(*_evaluator);
-    const RigExecEvaluationMode mode = _evaluator->GetEvaluationMode();
-    if (!_freshEpochValid || _freshEpoch != epoch ||
-        !_cacheModeValid || _cacheMode != mode) {
+    if (!_freshEpochValid || _freshEpoch != epoch) {
         _freshDigests.clear();
         _freshEpoch = epoch;
         _freshEpochValid = true;
-        _cacheMode = mode;
-        _cacheModeValid = true;
         return false;
     }
     // Servable completions skip sampling entirely: the index row names the
@@ -2599,14 +2713,10 @@ RigExecImagingBridge::_MemoizeLiveResult(
     // Scope check, as on the lookup path: the evaluation above may have
     // settled a new epoch.
     const uint64_t epoch = RigExecFrameCacheEpochDigest(*_evaluator);
-    const RigExecEvaluationMode mode = _evaluator->GetEvaluationMode();
-    if (!_freshEpochValid || _freshEpoch != epoch ||
-        !_cacheModeValid || _cacheMode != mode) {
+    if (!_freshEpochValid || _freshEpoch != epoch) {
         _freshDigests.clear();
         _freshEpoch = epoch;
         _freshEpochValid = true;
-        _cacheMode = mode;
-        _cacheModeValid = true;
     }
     // Sampled AFTER the evaluation, so the resolved state is fresh at exactly
     // this time: the digest below is the TRUE digest, and recording it as
@@ -2645,10 +2755,7 @@ RigExecImagingBridge::_MemoizeLiveResult(
         if (haveInputs) {
             // Retained-state publish (plan 2.0): the source snapshot and
             // the dependency record ride with the pose, so a later edit
-            // retires and re-runs only what touched it. The wider half --
-            // the just-evaluated live program's pose-domain slots, which a
-            // partial cone re-runs against -- is captured beside the source
-            // snapshot.
+            // retains the source snapshot used to validate cache reuse.
             const RigExecBakedProgramImpl &impl =
                 _evaluator->GetBakedProgram()->GetStepGraph();
             RigExecRetainedFrameState retainedState =
@@ -2660,13 +2767,6 @@ RigExecImagingBridge::_MemoizeLiveResult(
             auto retained =
                 std::make_shared<RigExecRetainedFrameState>(
                     std::move(retainedState));
-            std::shared_ptr<const void> slots;
-            size_t slotBytes = 0;
-            if (RigExecCapturePartialSlots(impl, &slots, &slotBytes) &&
-                slots && slotBytes > 0) {
-                retained->slots = std::move(slots);
-                retained->slotBytes = slotBytes;
-            }
             const size_t retainedBytes = retained->RetainedBytes();
             RigExecEntryProvenance provenance =
                 RigExecFullEvalProvenance(impl, time);

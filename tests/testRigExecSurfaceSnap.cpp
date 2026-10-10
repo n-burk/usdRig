@@ -1,5 +1,6 @@
 #include "rigExec/rigEvaluator.h"
 #include "rigExecMath/geometryKernels.h"
+#include "rigExecMath/surfaceSnapKernel.h"
 #include "rigExecBake/bake.h"
 #include "rigExecRuntime/runtime.h"
 #include "pxr/base/plug/registry.h"
@@ -9,6 +10,8 @@
 using namespace rigExec;
 PXR_NAMESPACE_USING_DIRECTIVE
 #define CHECK(x) do {if(!(x))throw std::runtime_error(std::string("line ")+std::to_string(__LINE__)+": " #x);}while(0)
+#include "rigExecFrozenParity.h"
+#include "rigExecRuntimeDrive.h"
 #include "fixtures/surfaceSnap/nearestReferenceCases.h"
 static const SdfPath rigPath("/Rig"),targetPath("/Rig/Target.points");
 static void Near(const std::vector<GfVec3f> &a,const std::vector<GfVec3f> &b) {
@@ -27,14 +30,20 @@ static UsdStageRefPtr Stage(const char *text) {
 static void Compile(RigExecRigEvaluator &e) {
  std::vector<std::string> errors;CHECK(e.Compile(&errors));for(auto &x:errors)std::printf("%s\n",x.c_str());CHECK(errors.empty());
 }
-static void Binary(RigExecRigEvaluator &e) {
- e.SetEvaluationMode(RigExecEvaluationMode::Baked);
- RigExecBakeOpts opts;opts.frames={1.,2.};RigExecBakeResult result;std::string error;
+// The frame-cache worker reproduces live evaluation bit for bit.
+static void Frozen(RigExecRigEvaluator &e,double frame) {
+ std::string why;if(!RigExecFrozenMatchesLive(&e,rigPath,UsdTimeCode(frame),&why))throw std::runtime_error("frozen: "+why);
+}
+// Baked at the first frame and played through the file's inputs, each
+// played frame publishes live evaluation's points.
+static void Binary(RigExecRigEvaluator &e,const UsdStageRefPtr &stage) {
+ RigExecBakeOpts opts;opts.time=1.;RigExecBakeResult result;std::string error;
  if(!RigExecBakeToBinary(e,opts,&result,&error))throw std::runtime_error(error);
- auto reader=RigExecRuntimeReader::Open(result.bytes.data(),result.bytes.size(),&error);CHECK(reader);
+ RigExecTestPlayer reader;
+ if(!reader.Open(result.bytes,stage,&error))throw std::runtime_error(error);
  CHECK(reader->GetMissingExternalKernels().empty());
  for(double frame:{2.,1.,2.}) {
-  CHECK(reader->SetFrame(frame,&error));if(!reader->Execute(&error))throw std::runtime_error(error);
+  if(!reader.Play(frame,&error))throw std::runtime_error(error);
   const auto expected=Points(e.Evaluate(UsdTimeCode(frame)));bool found=false;
   for(const auto &p:reader->GetPoints())if(p.path==targetPath.GetString()) {
    found=true;std::vector<GfVec3f> actual;for(const auto &v:p.points)actual.emplace_back(v[0],v[1],v[2]);Near(actual,expected);
@@ -80,14 +89,17 @@ static void Numeric() {
 int main() {
  try {
   PlugRegistry::GetInstance().RegisterPlugins(RIGEXEC_SCHEMA_RESOURCE_DIR);Numeric();
-  for(const auto &c:surfaceReferenceCases)for(auto mode:{RigExecEvaluationMode::Dynamic,RigExecEvaluationMode::Baked}) {
-   auto stage=Stage(c.stage);RigExecRigEvaluator e(stage,rigPath);e.SetEvaluationMode(mode);Compile(e);
+  for(const auto &c:surfaceReferenceCases) {
+   auto stage=Stage(c.stage);RigExecRigEvaluator e(stage,rigPath);Compile(e);
    std::string before,after;stage->GetRootLayer()->ExportToString(&before);
    Near(Points(e.Evaluate(UsdTimeCode(1))),c.expected);stage->GetRootLayer()->ExportToString(&after);CHECK(before==after);
-   // Animated clearance reaches both captured binary frames and repeated playback.
+   Frozen(e,1);
+   // Animated clearance reaches both played binary frames, repeated
+   // playback and the frame-cache worker.
    const auto mover=stage->GetPrimAtPath(SdfPath("/Rig/Snap"));
    mover.GetAttribute(TfToken("rigExec:offset")).Set(.08f,UsdTimeCode(1));
-   mover.GetAttribute(TfToken("rigExec:offset")).Set(.04f,UsdTimeCode(2));Binary(e);
+   mover.GetAttribute(TfToken("rigExec:offset")).Set(.04f,UsdTimeCode(2));
+   Frozen(e,1);Frozen(e,2);Binary(e,stage);
   }
   for(int invalid=0;invalid<3;++invalid) {
    auto stage=Stage(surfaceReferenceCases[0].stage);auto mover=stage->GetPrimAtPath(SdfPath("/Rig/Snap"));
@@ -97,25 +109,27 @@ int main() {
    const bool compiled=e.Compile(&errors);CHECK(!errors.empty());
    if(compiled)CHECK(e.Evaluate(UsdTimeCode::Default()).movedProperties.count(targetPath)==0);
   }
-  for(bool degenerateDefault:{false,true})for(auto mode:{RigExecEvaluationMode::Dynamic,RigExecEvaluationMode::Baked}) {
+  for(bool degenerateDefault:{false,true}) {
    auto stage=Stage(surfaceReferenceCases[0].stage);
    for(const SdfPath &path:{SdfPath("/Rig/Surface.points"),targetPath}) {
     auto a=stage->GetAttributeAtPath(path);VtVec3fArray p;CHECK(a.Get(&p));CHECK(a.Clear());
     CHECK(a.Set(p,UsdTimeCode(1)));
     if(degenerateDefault)CHECK(a.Set(path==targetPath?p:VtVec3fArray(p.size(),GfVec3f(0))));
    }
-   RigExecRigEvaluator e(stage,rigPath);e.SetEvaluationMode(mode);Compile(e);
+   RigExecRigEvaluator e(stage,rigPath);Compile(e);
    Near(Points(e.Evaluate(UsdTimeCode(1))),surfaceReferenceCases[0].expected);
+   Frozen(e,1);
   }
   // Explicit triangles are sufficient without a duplicate polygon topology.
-  for(auto mode:{RigExecEvaluationMode::Dynamic,RigExecEvaluationMode::Baked}) {
+  {
    auto stage=Stage(surfaceReferenceCases[0].stage);auto surface=stage->GetPrimAtPath(SdfPath("/Rig/Surface"));
    VtIntArray counts,indices,triangles;surface.GetAttribute(TfToken("faceVertexCounts")).Get(&counts);
    surface.GetAttribute(TfToken("faceVertexIndices")).Get(&indices);size_t cursor=0;
    for(int n:counts) {for(int j=1;j+1<n;++j) {triangles.push_back(indices[cursor]);triangles.push_back(indices[cursor+j]);triangles.push_back(indices[cursor+j+1]);}cursor+=n;}
    CHECK(surface.GetAttribute(TfToken("faceVertexCounts")).Clear());CHECK(surface.GetAttribute(TfToken("faceVertexIndices")).Clear());
    CHECK(stage->GetPrimAtPath(SdfPath("/Rig/Snap")).GetAttribute(TfToken("rigExec:triangles")).Set(triangles));
-   RigExecRigEvaluator e(stage,rigPath);e.SetEvaluationMode(mode);Compile(e);Near(Points(e.Evaluate(UsdTimeCode(1))),surfaceReferenceCases[0].expected);Binary(e);
+   RigExecRigEvaluator e(stage,rigPath);Compile(e);Near(Points(e.Evaluate(UsdTimeCode(1))),surfaceReferenceCases[0].expected);
+   Frozen(e,1);Binary(e,stage);
   }
  } catch(const std::exception &e) {std::printf("FAIL %s\n",e.what());return 1;}
  return 0;

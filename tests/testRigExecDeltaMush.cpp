@@ -14,6 +14,7 @@
 using namespace rigExec;
 PXR_NAMESPACE_USING_DIRECTIVE
 #define CHECK(x) do {if(!(x))throw std::runtime_error(#x);}while(false)
+#include "rigExecRuntimeDrive.h"
 #include "deltaMushReferenceFixtures.h"
 static bool Near(const std::vector<GfVec3f> &a,const std::vector<GfVec3f> &b,double e=1e-5) {
     if(a.size()!=b.size())return false;
@@ -63,19 +64,20 @@ static void CheckReferenceFixtures() {
         CHECK(prim.GetAttribute(TfToken("inputs:onlySmooth")).Set(fixture.onlySmooth));
         CHECK(prim.GetAttribute(TfToken("inputs:computationToTarget")).Set(computationToTarget));
         RigExecRigEvaluator evaluator(stage, SdfPath("/Rig"));
-        evaluator.SetEvaluationMode(RigExecEvaluationMode::BakedWithParityCheck);
+        // The independent scalar reference judges every evaluation.
+        evaluator.cpuReference = true;
         std::vector<std::string> diagnostics;
         CHECK(evaluator.Compile(&diagnostics));
         std::string before; stage->GetRootLayer()->ExportToString(&before);
         auto pose = evaluator.Evaluate(UsdTimeCode(1));
-        CHECK(pose.valid); CHECK(pose.bakedParityMismatches == 0); CHECK(pose.moverGraphParityMismatches == 0);
+        CHECK(pose.valid); CHECK(pose.referenceMismatches == 0); CHECK(pose.referenceAgreements > 0);
         auto value = pose.movedProperties.at(mesh.GetPointsAttr().GetPath()).Get<VtVec3fArray>();
         CHECK(Near({value.begin(), value.end()}, transformedExpected, 3e-6));
-        RigExecBakeOpts options; options.frames = {1};
+        RigExecBakeOpts options; options.time = 1;
         RigExecBakeResult result; std::string error;
         CHECK(RigExecBakeToBinary(evaluator, options, &result, &error));
         auto reader = RigExecRuntimeReader::Open(result.bytes.data(), result.bytes.size(), &error);
-        CHECK(reader); CHECK(reader->SetFrame(1, &error)); CHECK(reader->Execute(&error));
+        CHECK(reader); CHECK(reader->Execute(&error));
         bool found = false;
         for (const auto &points : reader->GetPoints()) {
             if (points.path != mesh.GetPointsAttr().GetPath().GetString()) continue;
@@ -92,12 +94,12 @@ static void CheckReferenceFixtures() {
         mush.SetReadPhase(TfToken("rigExec:frame"), "final");
         CHECK(RigExecBakeToBinary(evaluator, options, &result, &error));
         reader = RigExecRuntimeReader::Open(result.bytes.data(), result.bytes.size(), &error);
-        CHECK(reader); CHECK(reader->SetFrame(1, &error));
+        CHECK(reader);
         for (double scale : {1.0, 0.74, 1.31, 1.0}) {
             owner.SetAvarScale(1, scale, 1);
-            CHECK(reader->SetAvar(owner.GetPath().AppendProperty(TfToken("avars:sy")).GetString(), scale, &error));
+            CHECK(reader->SetInput(owner.GetPath().AppendProperty(TfToken("avars:sy")).GetString(), scale, &error));
             pose = evaluator.Evaluate(UsdTimeCode(1));
-            CHECK(pose.valid); CHECK(pose.bakedParityMismatches == 0); CHECK(pose.moverGraphParityMismatches == 0);
+            CHECK(pose.valid); CHECK(pose.referenceMismatches == 0); CHECK(pose.referenceAgreements > 0);
             CHECK(reader->Execute(&error));
             value = pose.movedProperties.at(mesh.GetPointsAttr().GetPath()).Get<VtVec3fArray>();
             GfMatrix4d scaling(1); scaling.SetScale(GfVec3d(1, scale, 1));
@@ -152,15 +154,14 @@ int main(int argc,char **argv) {
     auto mush=rig.NewMoverChain("deform",mesh.GetPointsAttr().GetPath()).AddDeltaMushMover("mush");
     mush.SetRestPoints(rest);mush.SetIterations(3);
     RigExecRigEvaluator evaluator(stage,SdfPath("/Rig"));std::vector<std::string> diagnostics;
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::BakedWithParityCheck);
     CHECK(evaluator.Compile(&diagnostics));
     if(!evaluator.IsBakeable(&diagnostics)) {
         for(const auto &d:diagnostics)std::cerr<<d<<'\n';
         CHECK(false);
     }
-    auto evaluate=[&](){auto count=evaluator.GetBakedGenerationCount();auto p=evaluator.Evaluate(UsdTimeCode::Default());CHECK(p.valid);
-        CHECK(p.bakedParityMismatches==0);CHECK(p.moverGraphParityMismatches==0);
-        CHECK(evaluator.GetBakedGenerationCount()==count+1);
+    auto evaluate=[&](){auto p=evaluator.Evaluate(UsdTimeCode::Default());CHECK(p.valid);
+        CHECK(p.comparisonMismatches==0);CHECK(p.referenceMismatches==0);
+        CHECK(evaluator.GetBakedProgram()!=nullptr);
         auto v=p.movedProperties.at(mesh.GetPointsAttr().GetPath()).Get<VtVec3fArray>();
         return std::vector<GfVec3f>(v.begin(),v.end());};
     CHECK(Near(evaluate(),full));
@@ -185,25 +186,25 @@ int main(int argc,char **argv) {
     std::string text;stage->GetRootLayer()->ExportToString(&text);
     auto layer=SdfLayer::CreateAnonymous("roundtrip.usda");CHECK(layer->ImportFromString(text));
     auto reopened=UsdStage::Open(layer);RigExecRigEvaluator e2(reopened,SdfPath("/Rig"));
-    e2.cpuParityMode=true;CHECK(e2.Compile(&diagnostics));
+    e2.cpuReference=true;CHECK(e2.Compile(&diagnostics));
     auto p=e2.Evaluate(UsdTimeCode::Default());CHECK(p.valid);
-    CHECK(p.moverGraphParityMismatches==0);CHECK(p.moverGraphParityAgreements==1);
+    CHECK(p.referenceMismatches==0);CHECK(p.referenceAgreements==1);
     auto value=p.movedProperties.at(mesh.GetPointsAttr().GetPath()).Get<VtVec3fArray>();CHECK(Near({value.begin(),value.end()},smooth));
-    // Binary playback must run the shared kernel, replay every parameter and
-    // publish bitwise-identical points, including revisiting earlier frames.
+    // Binary playback must run the shared kernel, take every parameter from
+    // its inputs and publish bitwise-identical points, including revisiting
+    // earlier frames: baked at the first frame, played through its inputs.
     auto binaryParity = [&](const std::vector<double> &frames) {
-        RigExecBakeOpts options; options.frames=frames;
+        RigExecBakeOpts options; options.time=frames.front();
         RigExecBakeResult result; std::string error;
         CHECK(RigExecBakeToBinary(evaluator,options,&result,&error));
         CHECK(!result.bytes.empty());
-        auto reader=RigExecRuntimeReader::Open(result.bytes.data(),result.bytes.size(),&error);
-        if(!reader)throw std::runtime_error(error);
+        RigExecTestPlayer reader;
+        if(!reader.Open(result.bytes,stage,&error))throw std::runtime_error(error);
         auto playback=frames;playback.insert(playback.end(),frames.rbegin(),frames.rend());
         for(double frame:playback) {
             auto expectedPose=evaluator.Evaluate(UsdTimeCode(frame));
-            CHECK(expectedPose.valid);CHECK(expectedPose.bakedParityMismatches==0);
-            CHECK(reader->SetFrame(frame,&error));
-            if(!reader->Execute(&error))throw std::runtime_error(error);
+            CHECK(expectedPose.valid);CHECK(expectedPose.comparisonMismatches==0);
+            if(!reader.Play(frame,&error))throw std::runtime_error(error);
             bool found=false;
             for(const auto &actual:reader->GetPoints()) {
                 if(actual.path!=mesh.GetPointsAttr().GetPath().GetString())continue;
@@ -246,8 +247,9 @@ int main(int argc,char **argv) {
     // Invalid parameter is an atomic pass-through in both hosts.
     sample("inputs:iterations",-1,6);binaryParity({6});
     {
-        // A baked input frame contains only the rest pose. Binary avar edits
-        // must rerun skin -> deltaMush, not replay captured deformed points.
+        // A baked input frame contains only the rest pose. Avar inputs set
+        // on the binary must rerun skin -> deltaMush, not replay captured
+        // deformed points.
         auto liveStage=UsdStage::CreateInMemory();
         auto builder=RigExecRigBuilder::Create(liveStage,SdfPath("/Rig"));
         auto body=UsdGeomMesh::Define(liveStage,SdfPath("/Rig/Body"));
@@ -262,18 +264,16 @@ int main(int argc,char **argv) {
         auto skin=chain.AddSkinMover("Skin",{anchor.GetPath(),tip.GetPath()});
         skin.SetJointInfluences({0,0,0,0,1,0},{1,1,1,1,1,1},1);
         RigExecRigEvaluator live(liveStage,SdfPath("/Rig"));
-        live.SetEvaluationMode(RigExecEvaluationMode::BakedWithParityCheck);
-        RigExecBakeOpts options;options.frames={1};
+        RigExecBakeOpts options;options.time=1;
         RigExecBakeResult result;std::string error;
         CHECK(RigExecBakeToBinary(live,options,&result,&error));
         auto reader=RigExecRuntimeReader::Open(result.bytes.data(),result.bytes.size(),&error);
         if(!reader)throw std::runtime_error(error);
-        CHECK(reader->SetFrame(1,&error));
         for(double translation:{0.0,0.7,-0.4,0.0}) {
             tip.SetAvarTranslation(translation,0,0);
-            CHECK(reader->SetAvar(tip.GetPath().AppendProperty(TfToken("avars:tx")).GetString(),translation,&error));
+            CHECK(reader->SetInput(tip.GetPath().AppendProperty(TfToken("avars:tx")).GetString(),translation,&error));
             auto pose=live.Evaluate(UsdTimeCode(1));CHECK(pose.valid);
-            CHECK(pose.bakedParityMismatches==0);
+            CHECK(pose.comparisonMismatches==0);
             if(!reader->Execute(&error))throw std::runtime_error(error);
             auto points=pose.movedProperties.at(body.GetPointsAttr().GetPath()).Get<VtVec3fArray>();
             auto input=rest;input[4][0]+=float(translation);

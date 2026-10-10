@@ -1,0 +1,1047 @@
+#include "bakedProgramImpl.h"
+#include "rigEvaluator.h"
+#include "rigEvaluatorDependencies.h"
+#include "crossDomainInputs.h"
+#include "rigExecGraph/usdSceneAccess.h"
+#include "rigExecGraph/providerContextBinding.h"
+#include "rigExecGraph/providerRefresh.h"
+#include "parallel.h"
+#include "pxr/base/tf/diagnostic.h"
+#include "pxr/base/tf/getenv.h"
+#include "pxr/usd/sdf/types.h"
+#include "pxr/usd/usd/resolveInfo.h"
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <unordered_map>
+
+namespace rigExec {
+namespace {
+RigExecRevisionLeafType _Type(const SdfValueTypeName &type)
+{
+    using T=RigExecRevisionLeafType;
+    if(type==SdfValueTypeNames->Matrix4d) return T::Matrix4d;
+    if(type==SdfValueTypeNames->Double3) return T::Vec3d;
+    if(type==SdfValueTypeNames->Float3) return T::Vec3f;
+    if(type==SdfValueTypeNames->Token) return T::Token;
+    if(type==SdfValueTypeNames->Float) return T::Float;
+    if(type==SdfValueTypeNames->Int) return T::Int;
+    if(type==SdfValueTypeNames->Bool) return T::Bool;
+    return T::Double;
+}
+
+// Keeps the entries k of \p values with keep[k] != 0, in order; an entry
+// past keep's end is dropped.
+template<class T>
+void _KeepRows(std::vector<T> *values,const std::vector<char> &keep)
+{
+    size_t out=0;
+    for(size_t k=0;k<values->size();++k) {
+        if(k>=keep.size() || !keep[k]) continue;
+        if(out!=k) (*values)[out]=std::move((*values)[k]);
+        ++out;
+    }
+    values->erase(values->begin()+std::ptrdiff_t(out),values->end());
+}
+
+// What the provider prune keeps. Producers are numbered ops, sampled rows,
+// external inputs, routed inputs, frame inputs, in that order.
+struct _ProviderLiveness {
+    size_t ops=0,rows=0,externals=0,routed=0,frames=0;
+    std::vector<char> value,producer;
+    /// Ops kept only as diagnostic roots: structurally invalid ops and
+    /// provider cycle members.
+    size_t roots=0;
+    size_t Rows() const {return ops;}
+    size_t Externals() const {return ops+rows;}
+    size_t Routed() const {return ops+rows+externals;}
+    size_t Frames() const {return ops+rows+externals+routed;}
+    size_t Count() const {return Frames()+frames;}
+};
+
+// Backward reachability over the provider producer graph. Roots: every
+// SpaceValue and SpaceLeaf an existing (non-provider) step declares, every
+// ladder channel, cross-domain read and refresh value, every routed input,
+// every op that fails RigExecProviderOpStructurallyValid and every member of
+// a provider cycle, so no pruned producer could have published a value a
+// reader sees, a step diagnostic or a cycle skip reason. Owning thread,
+// vectors only, O(values + edges).
+bool _ProviderLive(const RigExecBakedProgramImpl &B,_ProviderLiveness *out,std::string *error)
+{
+    const auto &p=B.providerProgram;
+    auto &L=*out;
+    L=_ProviderLiveness();
+    L.ops=p.ops.size(); L.rows=p.sampled.size(); L.externals=p.externalInputs.size();
+    L.routed=p.routedInputs.size(); L.frames=B.providerFrameInputs.size();
+    if(p.descriptors.size()!=L.ops || B.providerRoutedReads.size()!=L.routed) {
+        if(error) *error="provider operations, descriptors and routed reads are not parallel";
+        return false;
+    }
+    const size_t values=p.valueKeys.size(),count=L.Count();
+    L.value.assign(values,0); L.producer.assign(count,0);
+    const auto writes=[&](size_t u,const auto &fn) {
+        if(u<L.ops) {
+            fn(p.ops[u].output);
+            for(const auto id:p.descriptors[u].writes) fn(id);
+        } else if(u<L.Externals()) fn(p.sampled[u-L.Rows()].value);
+        else if(u<L.Routed()) fn(p.externalInputs[u-L.Externals()].value);
+        else if(u<L.Frames()) fn(p.routedInputs[u-L.Routed()].value);
+        else fn(B.providerFrameInputs[u-L.Frames()].value);
+    };
+    const auto reads=[&](size_t u,const auto &fn) {
+        if(u<L.ops) {
+            const auto &op=p.ops[u];
+            for(const auto id:op.inputs) fn(id);
+            for(const auto &xform:op.xforms) fn(xform.raw);
+            for(const auto id:p.descriptors[u].reads) fn(id);
+        } else if(u>=L.Routed() && u<L.Frames()) {
+            const int read=B.providerRoutedReads[u-L.Routed()];
+            if(read>=0 && size_t(read)<B.crossDomainReads.size() &&
+               B.crossDomainReads[size_t(read)].spaceValue>=0)
+                fn(RigExecValueId(B.crossDomainReads[size_t(read)].spaceValue));
+        }
+    };
+    // The producers of each value, compressed.
+    std::vector<uint32_t> begin(values+1,0),list;
+    for(size_t u=0;u<count;++u) writes(u,[&](RigExecValueId v){if(v<values) ++begin[size_t(v)+1];});
+    for(size_t v=0;v<values;++v) begin[v+1]+=begin[v];
+    list.resize(begin[values]);
+    {
+        std::vector<uint32_t> at(begin.begin(),begin.end()-1);
+        for(size_t u=0;u<count;++u)
+            writes(u,[&](RigExecValueId v){if(v<values) list[at[size_t(v)]++]=uint32_t(u);});
+    }
+    std::vector<RigExecValueId> pendingValues;
+    std::vector<uint32_t> pendingProducers;
+    const auto markValue=[&](RigExecValueId v) {
+        if(v<values && !L.value[size_t(v)]) {L.value[size_t(v)]=1; pendingValues.push_back(v);}
+    };
+    const auto markProducer=[&](size_t u) {
+        if(u<count && !L.producer[u]) {L.producer[u]=1; pendingProducers.push_back(uint32_t(u));}
+    };
+    for(const auto &step:B.steps)
+        for(const auto *ranges:{&step.reads,&step.writes})
+            for(const auto &range:*ranges) {
+                if(range.domain==RigExecBakedSlotDomain::SpaceValue)
+                    for(uint32_t id=range.begin;id<range.end;++id) markValue(id);
+                else if(range.domain==RigExecBakedSlotDomain::SpaceLeaf)
+                    for(uint32_t k=range.begin;k<range.end && k<L.rows;++k) markProducer(L.Rows()+k);
+            }
+    for(const auto &ladder:B.ladders)
+        for(const int id:ladder.spaceValues) if(id>=0) markValue(RigExecValueId(id));
+    for(const auto &read:B.crossDomainReads)
+        if(read.spaceValue>=0) markValue(RigExecValueId(read.spaceValue));
+    for(const auto &refresh:B.providerRefreshes) {markValue(refresh.baseValue); markValue(refresh.currentValue);}
+    for(size_t k=0;k<L.routed;++k) markProducer(L.Routed()+k);
+    std::vector<char> root(L.ops,0);
+    for(size_t i=0;i<L.ops;++i)
+        if(!RigExecProviderOpStructurallyValid(p,uint32_t(i),nullptr)) root[i]=1;
+    // Provider cycles (Tarjan, iterative) over the ops and routed inputs,
+    // the only producers that read provider values.
+    const size_t nodes=L.ops+L.routed;
+    const auto producerOf=[&](size_t node){return node<L.ops?node:L.Routed()+(node-L.ops);};
+    const auto nodeOf=[&](size_t u)->size_t {
+        if(u<L.ops) return u;
+        return u>=L.Routed() && u<L.Frames()?L.ops+(u-L.Routed()):nodes;
+    };
+    std::vector<uint32_t> edgeBegin(nodes+1,0),edges;
+    std::vector<char> selfLoop(nodes,0);
+    for(size_t n=0;n<nodes;++n) {
+        edgeBegin[n]=uint32_t(edges.size());
+        reads(producerOf(n),[&](RigExecValueId v) {
+            if(v>=values) return;
+            for(uint32_t at=begin[size_t(v)];at<begin[size_t(v)+1];++at) {
+                const size_t m=nodeOf(list[at]);
+                if(m>=nodes) continue;
+                if(m==n) selfLoop[n]=1;
+                edges.push_back(uint32_t(m));
+            }
+        });
+    }
+    edgeBegin[nodes]=uint32_t(edges.size());
+    std::vector<int32_t> index(nodes,-1),low(nodes,0);
+    std::vector<char> onStack(nodes,0);
+    std::vector<uint32_t> stack;
+    std::vector<std::pair<uint32_t,uint32_t>> call;
+    int32_t counter=0;
+    const auto enter=[&](uint32_t n) {
+        index[n]=low[n]=counter++;
+        stack.push_back(n); onStack[n]=1;
+        call.emplace_back(n,edgeBegin[n]);
+    };
+    for(size_t start=0;start<nodes;++start) {
+        if(index[start]>=0) continue;
+        enter(uint32_t(start));
+        while(!call.empty()) {
+            const uint32_t n=call.back().first;
+            if(call.back().second<edgeBegin[n+1]) {
+                const uint32_t m=edges[call.back().second++];
+                if(index[m]<0) enter(m);
+                else if(onStack[m]) low[n]=std::min(low[n],index[m]);
+                continue;
+            }
+            call.pop_back();
+            if(!call.empty()) low[call.back().first]=std::min(low[call.back().first],low[n]);
+            if(low[n]!=index[n]) continue;
+            size_t first=stack.size();
+            do {--first;} while(stack[first]!=n);
+            const bool cyclic=stack.size()-first>1 || selfLoop[n];
+            for(size_t at=first;at<stack.size();++at) {
+                onStack[stack[at]]=0;
+                if(cyclic && stack[at]<L.ops) root[stack[at]]=1;
+            }
+            stack.resize(first);
+        }
+    }
+    for(size_t i=0;i<L.ops;++i) if(root[i]) {++L.roots; markProducer(i);}
+    while(!pendingValues.empty() || !pendingProducers.empty()) {
+        while(!pendingValues.empty()) {
+            const RigExecValueId v=pendingValues.back(); pendingValues.pop_back();
+            for(uint32_t at=begin[size_t(v)];at<begin[size_t(v)+1];++at) markProducer(list[at]);
+        }
+        while(!pendingProducers.empty()) {
+            const size_t u=pendingProducers.back(); pendingProducers.pop_back();
+            writes(u,markValue); reads(u,markValue);
+        }
+    }
+    return true;
+}
+
+// The one function that rewrites provider ids. Drops the producers and the
+// values the prune left out and renumbers the surviving values and sampled
+// rows densely in their old order, in every holder Build has filled by the
+// prune point: the provider program (keys, maps, leaves, ops, descriptors,
+// sampled, external and routed inputs), the provider leaves and their side
+// tables, frame inputs, refreshes and their templates, ladders,
+// cross-domain reads, the value store and the SpaceValue / SpaceLeaf ranges
+// of the steps built so far. An id past the old layout stays past the new
+// one, so a structurally invalid op keeps its failure.
+bool _RemapProviderHolders(RigExecBakedProgramImpl *program,
+    const std::vector<RigExecValueId> &oldToNew,const std::vector<char> &keepRow,
+    const std::vector<char> &keepOp,const std::vector<char> &keepExternal,
+    const std::vector<char> &keepFrame,size_t liveValues,std::string *error)
+{
+    auto &B=*program;
+    auto &p=B.providerProgram;
+    const size_t oldValues=oldToNew.size(),oldRows=keepRow.size();
+    const auto value=[&](RigExecValueId v)->RigExecValueId {
+        if(v==RigExecNoProviderValue) return v;
+        return v<oldValues?oldToNew[size_t(v)]:v-oldValues+liveValues;
+    };
+    const auto valueSlot=[&](int v)->int {
+        if(v<0) return v;
+        const RigExecValueId mapped=value(RigExecValueId(v));
+        return mapped==RigExecNoProviderValue?-1:int(mapped);
+    };
+    std::vector<int> rowOf(oldRows,-1);
+    int liveRows=0;
+    for(size_t k=0;k<oldRows;++k) if(keepRow[k]) rowOf[k]=liveRows++;
+    const auto row=[&](int k)->int {
+        if(k<0) return k;
+        return size_t(k)<oldRows?rowOf[size_t(k)]:k-int(oldRows)+liveRows;
+    };
+    if(!B.providerLeaves.Select(keepRow)) {
+        if(error) *error="the provider leaves declare a key range";
+        return false;
+    }
+    _KeepRows(&p.sampled,keepRow);
+    for(auto &leaf:p.sampled) leaf.value=value(leaf.value);
+    _KeepRows(&B.providerLeafValues,keepRow);
+    for(auto &id:B.providerLeafValues) id=value(id);
+    _KeepRows(&B.providerLeafBlocked,keepRow);
+    _KeepRows(&B.providerFrozenKeys,keepRow);
+    if(B.providerLeafChains.size()==oldRows) _KeepRows(&B.providerLeafChains,keepRow);
+    for(int &k:B.providerParentRawLeaves) k=row(k);
+    _KeepRows(&p.ops,keepOp);
+    _KeepRows(&p.descriptors,keepOp);
+    for(auto &op:p.ops) {
+        op.output=value(op.output);
+        for(auto &id:op.inputs) id=value(id);
+        for(auto &xform:op.xforms) xform.raw=value(xform.raw);
+    }
+    for(auto &descriptor:p.descriptors) {
+        for(auto &id:descriptor.reads) id=value(id);
+        for(auto &id:descriptor.writes) id=value(id);
+    }
+    _KeepRows(&p.externalInputs,keepExternal);
+    _KeepRows(&B.providerExternalSlots,keepExternal);
+    for(auto &input:p.externalInputs) input.value=value(input.value);
+    for(auto &input:p.routedInputs) input.value=value(input.value);
+    _KeepRows(&B.providerFrameInputs,keepFrame);
+    for(auto &input:B.providerFrameInputs) input.value=value(input.value);
+    for(auto &refresh:B.providerRefreshes) {
+        refresh.baseValue=value(refresh.baseValue);
+        refresh.currentValue=value(refresh.currentValue);
+    }
+    for(auto &id:B.providerRefreshTemplates) id=value(id);
+    for(auto &ladder:B.ladders) for(int &id:ladder.spaceValues) id=valueSlot(id);
+    for(auto &read:B.crossDomainReads) read.spaceValue=valueSlot(read.spaceValue);
+    std::vector<std::string> keys;
+    keys.reserve(liveValues);
+    for(size_t v=0;v<oldValues && v<p.valueKeys.size();++v)
+        if(oldToNew[v]!=RigExecNoProviderValue) keys.push_back(std::move(p.valueKeys[v]));
+    p.valueKeys=std::move(keys);
+    const auto remapMap=[&](auto *map) {
+        for(auto it=map->begin();it!=map->end();) {
+            const RigExecValueId mapped=value(it->second);
+            if(mapped==RigExecNoProviderValue && it->second!=RigExecNoProviderValue) it=map->erase(it);
+            else {it->second=mapped; ++it;}
+        }
+    };
+    remapMap(&p.valueIds);
+    remapMap(&p.rawInputs);
+    remapMap(&p.attributeValues);
+    std::vector<RigExecValueId> leaves;
+    leaves.reserve(p.leaves.size());
+    for(const auto id:p.leaves) {
+        const RigExecValueId mapped=value(id);
+        if(mapped!=RigExecNoProviderValue || id==RigExecNoProviderValue) leaves.push_back(mapped);
+    }
+    p.leaves=std::move(leaves);
+    std::vector<RigExecTypedValueState> states(liveValues);
+    for(size_t v=0;v<oldValues && v<B.providerValues.values.size();++v)
+        if(oldToNew[v]!=RigExecNoProviderValue) states[size_t(oldToNew[v])]=std::move(B.providerValues.values[v]);
+    B.providerValues.values=std::move(states);
+    // A range of ids that all survive stays one range; one that lost an id
+    // is split around it.
+    std::vector<RigExecBakedSlotRange> rewritten;
+    const auto rewrite=[&](std::vector<RigExecBakedSlotRange> *ranges) {
+        const bool provider=std::any_of(ranges->begin(),ranges->end(),[](const RigExecBakedSlotRange &range) {
+            return range.domain==RigExecBakedSlotDomain::SpaceValue || range.domain==RigExecBakedSlotDomain::SpaceLeaf;
+        });
+        if(!provider) return;
+        rewritten.clear();
+        for(const auto &range:*ranges) {
+            const bool space=range.domain==RigExecBakedSlotDomain::SpaceValue;
+            if(!space && range.domain!=RigExecBakedSlotDomain::SpaceLeaf) {rewritten.push_back(range); continue;}
+            const size_t first=rewritten.size();
+            for(uint32_t id=range.begin;id<range.end;++id) {
+                const int mapped=space?valueSlot(int(id)):row(int(id));
+                if(mapped<0) continue;
+                if(rewritten.size()>first && rewritten.back().end==uint32_t(mapped)) ++rewritten.back().end;
+                else rewritten.push_back(RigExecBakedOne(range.domain,mapped));
+            }
+        }
+        *ranges=rewritten;
+    };
+    for(auto &step:B.steps) {rewrite(&step.reads); rewrite(&step.writes);}
+    return true;
+}
+
+// RIGEXEC_VERIFY_PROVIDER_PRUNE: the compacted program, reached again from
+// the same roots, keeps no producer nothing reaches, and every holder id is
+// inside the compacted layout.
+size_t _ProviderPruneViolations(const RigExecBakedProgramImpl &B)
+{
+    _ProviderLiveness L;
+    std::string ignored;
+    if(!_ProviderLive(B,&L,&ignored)) return 1;
+    size_t violations=0;
+    for(const char live:L.producer) if(!live) ++violations;
+    const auto &p=B.providerProgram;
+    const size_t values=p.valueKeys.size(),rows=p.sampled.size();
+    const auto outside=[&](RigExecValueId v) {return v!=RigExecNoProviderValue && v>=values;};
+    const auto count=[&](bool bad) {if(bad) ++violations;};
+    for(const auto &leaf:p.sampled) count(outside(leaf.value));
+    for(const auto &input:p.externalInputs) count(outside(input.value));
+    for(const auto &input:p.routedInputs) count(outside(input.value));
+    for(const auto &input:B.providerFrameInputs) count(outside(input.value));
+    for(size_t i=0;i<p.ops.size();++i) {
+        if(!RigExecProviderOpStructurallyValid(p,uint32_t(i),nullptr)) continue;
+        for(const auto id:p.ops[i].inputs) count(outside(id));
+        for(const auto &xform:p.ops[i].xforms) count(outside(xform.raw));
+        for(const auto id:p.descriptors[i].reads) count(outside(id));
+        for(const auto id:p.descriptors[i].writes) count(outside(id));
+    }
+    for(const auto id:p.leaves) count(outside(id));
+    for(const auto &entry:p.valueIds) count(outside(entry.second));
+    for(const auto &entry:p.rawInputs) count(outside(entry.second));
+    for(const auto &entry:p.attributeValues) count(outside(entry.second));
+    for(const auto &ladder:B.ladders)
+        for(const int id:ladder.spaceValues) count(id>=0 && size_t(id)>=values);
+    for(const auto &read:B.crossDomainReads) count(read.spaceValue>=0 && size_t(read.spaceValue)>=values);
+    for(const auto &refresh:B.providerRefreshes) {
+        count(outside(refresh.baseValue));
+        count(outside(refresh.currentValue));
+    }
+    for(const int k:B.providerParentRawLeaves) count(k>=0 && size_t(k)>=rows);
+    for(const auto &step:B.steps)
+        for(const auto *ranges:{&step.reads,&step.writes})
+            for(const auto &range:*ranges) {
+                count(range.domain==RigExecBakedSlotDomain::SpaceValue && range.end>values);
+                count(range.domain==RigExecBakedSlotDomain::SpaceLeaf && range.end>rows);
+            }
+    count(B.providerValues.values.size()!=values);
+    count(B.providerLeaves.decl.keys.size()!=rows || B.providerLeaves.values.size()!=rows ||
+          B.providerLeaves.attributes.size()!=rows);
+    count(B.providerLeafValues.size()!=rows || B.providerLeafBlocked.size()!=rows ||
+          B.providerFrozenKeys.size()!=rows);
+    count(B.providerExternalSlots.size()!=p.externalInputs.size());
+    return violations;
+}
+}
+bool RigExecBakedBuildSpaces(RigExecBakedProgramImpl *program,UsdTimeCode capture,
+    std::string *error,const RigExecSceneDescriptors *captured,
+    const UsdStageWeakPtr &capturedStage,uint64_t capturedSerial)
+{
+    auto &B=*program;
+    auto sceneOwner=std::make_shared<RigExecSceneDescriptors>();
+    auto &scene=*sceneOwner;
+    const RigExecUsdSceneAccess source(B.stage);
+    std::set<SdfPath> selected;
+    for(const auto &entry:B.index) selected.insert(entry.first);
+    const std::vector<UsdTimeCode> identities={capture,UsdTimeCode::Default()};
+    bool reused=false;
+    if(captured && capturedStage==UsdStageWeakPtr(B.stage) &&
+       captured->rigRoot==B.evaluator->GetRigPath() &&
+       capturedSerial==B.evaluator->GetStageEditSerial()) {
+        // Duplicate Default identities select duplicate exact input rows.
+        // A future capture time absent from this snapshot takes the raw
+        // source path; it never substitutes a Default value for AtTime.
+        std::string ignored;
+        reused=RigExecSelectSceneDescriptorIdentities(*captured,identities,&scene,&ignored) &&
+               capturedSerial==B.evaluator->GetStageEditSerial();
+    }
+    if(!reused && !RigExecCaptureSceneDescriptors(source,B.evaluator->GetRigPath(),identities,&scene,error)) return false;
+    if(!RigExecBuildProviderProgram(scene,false,&B.providerProgram,error,&selected)) return false;
+    B.sceneDescriptors=std::move(sceneOwner);
+    B.providerActive.assign(B.paths.size(),0);
+    for(size_t slot=0;slot<B.paths.size();++slot) {
+        const auto node=scene.nodes.find(B.paths[slot]);
+        B.providerActive[slot]=node!=scene.nodes.end() && node->second.fact.active;
+    }
+    B.providerValues=RigExecTypedValueStore(B.providerProgram.valueKeys.size());
+    std::vector<RigExecValueId> changed;
+    if(!RigExecSampleProviderProgram(B.providerProgram,scene,0,{},&B.providerValues,&changed,error)) return false;
+    B.providerLeaves=RigExecBakedPathLeaves();
+    B.providerLeafValues.clear();
+    B.providerLeafBlocked.clear();
+    B.providerFrozenKeys.clear();
+    for(const auto &input:B.providerProgram.sampled) {
+        const auto attribute=scene.attributes.find(input.attribute);
+        if(attribute==scene.attributes.end()) continue;
+        const auto &fact=attribute->second;
+        const VtValue fallback=fact.inputs.empty()?VtValue():fact.inputs[0].raw;
+        B.providerLeaves.decl.Add({input.attribute,_Type(fact.fact.type),
+            RigExecRevisionLeafTime::AtTime,RigExecRevisionLeafFlavour::Raw,fallback});
+        B.providerLeafValues.push_back(input.value);
+        B.providerLeafBlocked.push_back(!fact.inputs.empty() && fact.inputs[0].rawBlocked);
+        B.providerFrozenKeys.push_back(input.attribute.GetPrimPath().AppendProperty(
+            TfToken("rigExec:providerRaw:"+input.attribute.GetName())));
+        B.named.insert(input.attribute); B.prims.insert(input.attribute.GetPrimPath());
+    }
+    RigExecBakedBindPathLeaves(B.stage,&B.providerLeaves);
+    const char *names[]={"rest:space","default:space","posed:space","parent:space",
+        "parent:defaultSpace","avars:defaultSpace","posed:defaultSpace"};
+    // Connected consumers refresh an expression closure against native base
+    // versions. Unconnected namespace expressions keep their initial context.
+    // These binding calls append ops without changing existing output IDs.
+    // Preserve the first producer, including duplicates, and extend through
+    // every context/delivery suffix before the next indexed delivery lookup.
+    std::map<RigExecValueId,size_t> firstProducers;
+    size_t indexedOps=0;
+    const auto indexAppendedProducers=[&] {
+        for(;indexedOps<B.providerProgram.ops.size();++indexedOps)
+            firstProducers.emplace(B.providerProgram.ops[indexedOps].output,indexedOps);
+    };
+    for(size_t slot=0;slot<B.paths.size();++slot) {
+        if(B.slotKind[slot]!=RigExecBakedSlotKind::FirstFramePose) continue;
+        for(size_t channel=0;channel<7;++channel) {
+            const SdfPath consumer=B.paths[slot].AppendProperty(TfToken(names[channel]));
+            const auto found=B.providerProgram.attributeValues.find(consumer);
+            if(found==B.providerProgram.attributeValues.end()) continue;
+            RigExecValueId value=found->second;
+            const auto attribute=scene.attributes.find(consumer);
+            if(attribute!=scene.attributes.end() && attribute->second.fact.connections.size()==1 &&
+               (attribute->second.readPhase.IsEmpty() || attribute->second.readPhase=="base"))
+            {
+                size_t beginOp=0;
+                if(!RigExecBindProviderContext(&B.providerProgram,B.providerProgram.valueKeys,
+                    value,consumer,"base",{},&value,&beginOp,error,
+                    {{"computePointFrame","computeBasePointFrame"}}))return false;
+            }
+            if(channel==3 && attribute!=scene.attributes.end() &&
+               attribute->second.fact.connections.empty()) {
+                // The ladder uses this matrix only for authored/override
+                // selection. Compose and checkpoint operations supply the
+                // actual namespace fallback through their parent reads.
+                indexAppendedProducers();
+                if(!RigExecBindProviderParentDelivery(&B.providerProgram,consumer,value,&value,error,&firstProducers))return false;
+            }
+            B.ladders[slot].spaceValues[channel]=int(value);
+        }
+    }
+    B.providerExternalSlots.clear();
+    for(const auto &input:B.providerProgram.externalInputs) {
+        const auto found=B.index.find(input.owner);
+        if(found==B.index.end()) {
+            if(error) *error="provider expression frame is outside native storage: "+input.owner.GetString();
+            return false;
+        }
+        B.providerExternalSlots.push_back(found==B.index.end()?-1:found->second);
+    }
+    B.providerValues.values.resize(B.providerProgram.valueKeys.size());
+    B.poseProviderInputs.resize(B.paths.size());
+    B.providerParentRawLeaves.assign(B.paths.size(),-1);
+    for(size_t k=0;k<B.providerProgram.sampled.size();++k) {
+        const auto &path=B.providerProgram.sampled[k].attribute;
+        if(path.GetName()!="parent:space")continue;
+        const auto found=B.index.find(path.GetPrimPath());
+        if(found!=B.index.end())B.providerParentRawLeaves[size_t(found->second)]=int(k);
+    }
+    B.connectedPoseProviders.assign(B.paths.size(),0);
+    B.providerRefreshTemplates.assign(B.paths.size(),RigExecNoProviderValue);
+    const char *poseInputs[]={"posed:space","posed:defaultSpace","parent:defaultSpace","parent:space",
+        "avars:unitScaleFactor","avars:tx","avars:ty","avars:tz","avars:sx","avars:sy","avars:sz",
+        "avars:rx","avars:ry","avars:rz","avars:rspin","avars:rotationOrder","avars:rotationSign"};
+    // Every slot's pose-input closure from one _PoseInputGraph batch, as the
+    // compile computes its own: an attribute many closures reach is read
+    // once. Providers and connectedPose equal _CollectPoseInputInfo's for
+    // each prim; RIGEXEC_VERIFY_POSEINFO re-walks every closure to check.
+    // Nothing is skipped, so a joint-bound slot still lists its providers;
+    // only an empty path gets no entry, and the walker's answer for it is
+    // empty too. Owning thread; the graph spreads its stage reads as the
+    // other Build-time regions do.
+    std::unordered_map<SdfPath,evaluatorDetail::_PoseInputInfo,SdfPath::Hash> poseInfos;
+    {
+        evaluatorDetail::_PoseInputGraph graph;
+        graph.Extend(B.stage,B.paths,[](const SdfPath &){return false;},
+            RigExecParallelEvaluationEnabled() && !RigExecFrozenSerialActive(),*B.profiler,&poseInfos);
+    }
+    const evaluatorDetail::_PoseInputInfo noPoseInputs;
+    for(size_t slot=0;slot<B.paths.size();++slot) {
+        const auto computed=poseInfos.find(B.paths[slot]);
+        const auto &info=computed!=poseInfos.end()?computed->second:noPoseInputs;
+        for(const auto &path:info.providers) {
+            const auto found=B.index.find(path);
+            if(found!=B.index.end()) B.poseProviderInputs[slot].push_back(found->second);
+        }
+        if(!info.connectedPose || B.slotKind[slot]!=RigExecBakedSlotKind::FirstFramePose ||
+           B.jointSolverBinding->count(B.paths[slot])) continue;
+        B.connectedPoseProviders[slot]=1;
+        auto &p=B.providerProgram;
+        const auto output=RigExecValueId(p.valueKeys.size());
+        const std::string key="refreshTemplate:"+B.paths[slot].GetString();
+        p.valueKeys.push_back(key);p.valueIds.emplace(key,output);
+        RigExecProviderOp op{RigExecProviderOpKind::PosedFrame,B.paths[slot],output,{}};
+        for(const auto *name:poseInputs)
+            op.inputs.push_back(p.FindValue(RigExecProviderAttributeKey(B.paths[slot].AppendProperty(TfToken(name)))));
+        const auto type=scene.nodes.at(B.paths[slot]).fact.type;
+        op.scaleAvars=type=="RigExecControl" || type=="RigExecJoint";
+        RigExecOpDescriptor descriptor;descriptor.key=key;descriptor.writes={output};
+        for(auto input:op.inputs)if(input!=RigExecNoProviderValue)descriptor.reads.push_back(input);
+        std::sort(descriptor.reads.begin(),descriptor.reads.end());
+        descriptor.reads.erase(std::unique(descriptor.reads.begin(),descriptor.reads.end()),descriptor.reads.end());
+        B.providerRefreshTemplates[slot]=output;
+        B.providerRefreshTemplateOps.push_back(p.ops.size());
+        p.ops.push_back(std::move(op));p.descriptors.push_back(std::move(descriptor));
+    }
+    RigExecSpellProviderOwners(&B.providerProgram);
+    B.providerValues.values.resize(B.providerProgram.valueKeys.size());
+    RigExecBakedSampleSpaces(&B,capture,true);
+    return true;
+}
+const VtValue *RigExecBakedSpaceLeafOverlay(const RigExecBakedProgramImpl &B,size_t k)
+{
+    const auto &path=B.providerProgram.sampled[k].attribute;
+    if(!B.routedOverrides.empty()) {
+        const auto drag=B.routedOverrides.find(path);
+        if(drag!=B.routedOverrides.end()) return &drag->second;
+    }
+    if(!B.upstream.empty()) {
+        const auto upstream=B.upstream.find(path);
+        if(upstream!=B.upstream.end()) return &upstream->second;
+    }
+    // The index holds the two Build-only lookups below, per leaf.
+    if(const auto *index=B.spaceLeafIndex.get(); index && k<index->headSlot.size()) {
+        const int slot=index->headSlot[k];
+        if(slot>=0 && size_t(slot)<B.headOverrides.size() && !B.headOverrides[size_t(slot)].IsEmpty())
+            return &B.headOverrides[size_t(slot)];
+        for(uint32_t i=index->numberBegin[k];i<index->numberBegin[k+1];++i) {
+            const int number=index->numbers[i];
+            if(number>=0 && size_t(number)<B.overridden.size() && B.overridden[size_t(number)])
+                return B.resolvedInputs?B.resolvedInputs->Find(path):nullptr;
+        }
+        return nullptr;
+    }
+    const auto head=B.headOverrideSlots.find(path);
+    if(head!=B.headOverrideSlots.end() && head->second<B.headOverrides.size() &&
+       !B.headOverrides[head->second].IsEmpty()) return &B.headOverrides[head->second];
+    const auto indices=B.overridableInputs.find(path);
+    if(indices!=B.overridableInputs.end()) for(const int index:indices->second)
+        if(index>=0 && size_t(index)<B.overridden.size() && B.overridden[size_t(index)])
+            return B.resolvedInputs?B.resolvedInputs->Find(path):nullptr;
+    return nullptr;
+}
+GfMatrix4d RigExecBakedProviderParentRaw(const RigExecBakedProgramImpl &B,int slot)
+{
+    const int index=B.providerParentRawLeaves[size_t(slot)];
+    if(index<0 || B.providerLeafBlocked[size_t(index)])return GfMatrix4d(1.0);
+    const auto &value=B.providerLeaves.values[size_t(index)];
+    return value.IsHolding<GfMatrix4d>()?value.UncheckedGet<GfMatrix4d>():GfMatrix4d(1.0);
+}
+void RigExecBakedSampleSpaces(RigExecBakedProgramImpl *program,UsdTimeCode time,bool all)
+{
+    auto &B=*program;
+    auto &leaves=B.providerLeaves;
+    const bool full=all || !leaves.sampled || leaves.stamp!=B.programStamp;
+    const bool timeMoved=!leaves.sampled || time!=leaves.time;
+    const bool defaultMoved=timeMoved && (time.IsDefault() || leaves.time.IsDefault());
+    for(size_t k=0;k<leaves.attributes.size();++k) {
+        leaves.changed[k]=0;
+        if(!full && !leaves.mustSample[k] &&
+           !(timeMoved && (leaves.varying[k] || defaultMoved))) continue;
+        leaves.mustSample[k]=0;
+        ++B.pathLeafSamples;
+        const auto &attribute=leaves.attributes[k];
+        VtValue value;
+        const bool blocked=attribute && attribute.GetResolveInfo(time).ValueIsBlocked();
+        if(attribute) attribute.Get(&value,time);
+        leaves.changed[k]=!RigExecBakedHeadValueSame(value,leaves.values[k]) ||
+            bool(B.providerLeafBlocked[k])!=blocked;
+        if(leaves.changed[k]) RigExecBakedNoteSpaceLeafSampled(&B,k);
+        leaves.values[k]=std::move(value);
+        B.providerLeafBlocked[k]=blocked;
+    }
+    leaves.sampled=true;
+    leaves.time=time;
+    leaves.stamp=B.programStamp;
+
+}
+void RigExecBakedPlanProviderRefreshes(RigExecBakedProgramImpl *program)
+{
+    auto &B=*program;
+    B.providerRefreshes.clear();B.providerFrameInputs.clear();
+    B.providerRefreshBefore.assign(B.walkSteps.size()+1,{});
+    if(std::find(B.connectedPoseProviders.begin(),B.connectedPoseProviders.end(),char(1))==B.connectedPoseProviders.end())return;
+    std::vector<std::vector<std::pair<uint32_t,uint32_t>>> constrained(B.paths.size());
+    for(size_t checkpoint=0;checkpoint<=B.walkSteps.size();++checkpoint) {
+        std::vector<int> requested;
+        SdfPath reader=B.evaluator->GetRigPath();
+        const auto add=[&](int slot){if(slot>=0 && size_t(slot)<B.paths.size())requested.push_back(slot);};
+        const auto native=[&](int index) {
+            if(index>=0)for(int slot:B.nativeSources[size_t(index)].ancestorSlots)add(slot);
+        };
+        if(checkpoint==B.walkSteps.size()) {
+            for(size_t slot=0;slot<B.paths.size();++slot)add(int(slot));
+        } else {
+            const auto &walk=B.walkSteps[checkpoint];
+            if(walk.solverBatch) {
+                for(int index:walk.batchSolvers) {
+                    const auto &solver=B.solvers[size_t(index)];reader=solver.path;
+                    for(int slot:solver.controls)add(slot);
+                    add(solver.start);add(solver.root);add(solver.mid);add(solver.end);add(solver.pole);add(solver.spaceSlot);
+                    for(const auto &rest:solver.restRefs)add(rest.first);
+                }
+            } else {
+                const auto &c=B.constraints[size_t(walk.index)];reader=c.path;
+                add(c.target);for(int slot:c.targetSlots)add(slot);
+                for(int slot:c.sources)add(slot);
+                for(int index:c.sourceNatives)native(index);
+                add(c.worldUpObject);native(c.worldUpNative);add(c.effector);native(c.effectorNative);
+                for(int slot:c.poleObjects)add(slot);
+                for(int index:c.poleObjectNatives)native(index);
+                const auto weight=B.index.find(c.weightObject);if(weight!=B.index.end())add(weight->second);
+            }
+        }
+        std::vector<uint8_t> state(B.paths.size(),0);
+        const std::function<void(int)> visit=[&](int slot) {
+            if(state[size_t(slot)] || B.jointSolverBinding->count(B.paths[size_t(slot)]))return;
+            state[size_t(slot)]=1;
+            const auto &dependencies=B.poseProviderInputs[size_t(slot)];
+            for(auto it=dependencies.rbegin();it!=dependencies.rend();++it)visit(*it);
+            state[size_t(slot)]=2;
+            if(!B.connectedPoseProviders[size_t(slot)])return;
+            RigExecBakedProgramImpl::ProviderRefresh refresh;
+            refresh.slot=slot;refresh.checkpoint=checkpoint;refresh.reader=reader;
+            refresh.key="providerRefresh:"+reader.GetString()+":"+std::to_string(checkpoint)+":"+B.paths[size_t(slot)].GetString();
+            refresh.priorConstraints=constrained[size_t(slot)];
+            for(size_t descendant=size_t(slot)+1;descendant<B.paths.size() &&
+                B.paths[descendant].HasPrefix(B.paths[size_t(slot)]);++descendant) {
+                if(B.slotKind[descendant]!=RigExecBakedSlotKind::FirstFramePose)continue;
+                RigExecBakedProgramImpl::ProviderRefresh::Carry carry;carry.slot=int(descendant);
+                bool blocked=false;
+                for(int at=int(descendant);at>=0 && at!=slot;at=B.propParent[size_t(at)]) {
+                    if(B.jointSolverBinding->count(B.paths[size_t(at)]) || B.ladders[size_t(at)].parentSpaceConnected) {
+                        blocked=true;break;
+                    }
+                    if(B.slotKind[size_t(at)]==RigExecBakedSlotKind::FirstFramePose)carry.blockingSlots.push_back(at);
+                }
+                if(!blocked)refresh.carries.push_back(std::move(carry));
+            }
+            const size_t count=refresh.carries.size();
+            refresh.baseInputs.resize(count);refresh.finInputs.resize(count);
+            refresh.baseOutputs.resize(count);refresh.finOutputs.resize(count);refresh.blocked.resize(count);
+            B.providerRefreshBefore[checkpoint].push_back(uint32_t(B.providerRefreshes.size()));
+            B.providerRefreshes.push_back(std::move(refresh));
+        };
+        for(int slot:requested)visit(slot);
+        if(checkpoint<B.walkSteps.size() && !B.walkSteps[checkpoint].solverBatch) {
+            const auto &commit=B.commits[checkpoint];
+            for(size_t k=0;k<commit.slots.size();++k)
+                constrained[size_t(commit.slots[k])].emplace_back(uint32_t(checkpoint),uint32_t(k));
+        }
+    }
+}
+bool RigExecBakedBindProviderRefresh(RigExecBakedProgramImpl *program,uint32_t index,
+    std::vector<uint32_t> *base,std::vector<uint32_t> *fin,
+    const std::function<uint32_t(bool,int)> &allocate)
+{
+    auto &B=*program;auto &refresh=B.providerRefreshes[index];auto &p=B.providerProgram;
+    const auto context=[&](bool basePhase,RigExecValueId *result) {
+        std::map<RigExecValueId,RigExecValueId> replacements;
+        const auto externalCount=p.externalInputs.size();
+        for(size_t k=0;k<externalCount;++k) {
+            const auto input=p.externalInputs[k];
+            if(input.computation!="computePointFrame")continue;
+            const auto found=B.index.find(input.owner);
+            if(found==B.index.end() ||
+               std::find(B.poseProviderInputs[size_t(refresh.slot)].begin(),B.poseProviderInputs[size_t(refresh.slot)].end(),found->second)==
+                   B.poseProviderInputs[size_t(refresh.slot)].end())continue;
+            const auto value=RigExecValueId(p.valueKeys.size());
+            const std::string key=refresh.key+(basePhase?":base:":":current:")+input.owner.GetString();
+            p.valueKeys.push_back(key);p.valueIds.emplace(key,value);
+            B.providerFrameInputs.push_back({value,found->second,basePhase,
+                basePhase?(*base)[size_t(found->second)]:(*fin)[size_t(found->second)],refresh.reader});
+            replacements.emplace(input.value,value);
+        }
+        size_t begin=0;
+        return RigExecBindProviderContext(&p,p.valueKeys,B.providerRefreshTemplates[size_t(refresh.slot)],
+            B.paths[size_t(refresh.slot)],refresh.key+(basePhase?":base":":current"),replacements,result,&begin,&B.providerRefreshError);
+    };
+    if(!context(true,&refresh.baseValue) || !context(false,&refresh.currentValue))return false;
+    refresh.baseRead=(*base)[size_t(refresh.slot)];refresh.finRead=(*fin)[size_t(refresh.slot)];
+    refresh.baseWrite=allocate(true,refresh.slot);refresh.finWrite=allocate(false,refresh.slot);
+    (*base)[size_t(refresh.slot)]=refresh.baseWrite;(*fin)[size_t(refresh.slot)]=refresh.finWrite;
+    for(auto &carry:refresh.carries) {
+        const size_t slot=size_t(carry.slot);carry.baseRead=(*base)[slot];carry.finRead=(*fin)[slot];
+        carry.baseWrite=allocate(true,carry.slot);carry.finWrite=allocate(false,carry.slot);
+        (*base)[slot]=carry.baseWrite;(*fin)[slot]=carry.finWrite;
+    }
+    B.providerValues.values.resize(p.valueKeys.size());
+    return true;
+}
+namespace {
+struct RefreshMath {
+    using Frame=RigExecPointFrame;using Matrix=GfMatrix4d;
+    static bool Usable(const Frame &frame) {
+        if(!frame.IsValid() || frame.IsDegenerate())return false;
+        for(const auto &point:frame.points)for(int axis=0;axis<3;++axis)if(!std::isfinite(point[axis]))return false;
+        return true;
+    }
+    static bool PointsToMatrix(const Frame &before,const Frame &after,Matrix *delta) {
+        return RigExecPointsToMatrix(before.points,after.points,delta);
+    }
+    static Frame Transform(const Frame &frame,const Matrix &delta) {return RigExecMatrixToPoints(frame.points,delta);}
+};
+}
+void RigExecBakedRunProviderRefresh(RigExecBakedProgramImpl *program,RigExecBakedStep *step)
+{
+    auto &B=*program;auto &r=B.providerRefreshes[size_t(step->object)];
+    bool constrained=false;
+    for(const auto &[index,pos]:r.priorConstraints) {
+        const auto &commit=B.commits[index];
+        constrained=constrained || (!commit.abandoned && commit.present[pos]);
+    }
+    for(size_t k=0;k<r.carries.size();++k) {
+        const auto &carry=r.carries[k];r.baseInputs[k]=B.base[carry.baseRead];r.finInputs[k]=B.fin[carry.finRead];
+        r.blocked[k]=0;
+        for(int slot:carry.blockingSlots)if(RigExecBakedProviderParentRaw(B,slot)!=GfMatrix4d(1.0))r.blocked[k]=1;
+    }
+    size_t failed=0;
+    const auto outcome=RigExecRefreshProviderFrames<RefreshMath>(B.base[r.baseRead],B.fin[r.finRead],
+        B.providerValues.Read<RigExecPointFrame>(r.baseValue),B.providerValues.Read<RigExecPointFrame>(r.currentValue),constrained,
+        r.baseInputs.data(),r.finInputs.data(),r.blocked.data(),r.carries.size(),&B.base[r.baseWrite],&B.fin[r.finWrite],
+        r.baseOutputs.data(),r.finOutputs.data(),&failed);
+    for(size_t k=0;k<r.carries.size();++k) {
+        B.base[r.carries[k].baseWrite]=r.baseOutputs[k];B.fin[r.carries[k].finWrite]=r.finOutputs[k];
+    }
+    // Build spelled the paths. `failed` names a carry only on the two
+    // descendant outcomes, so that text is looked up there alone.
+    const auto &texts=*B.pathTexts;
+    const std::string &path=texts[size_t(r.slot)];
+    const auto carry=[&]() -> const std::string & {return texts[size_t(r.carries[failed].slot)];};
+    if(outcome==RigExecProviderRefreshOutcome::MissingBase)
+        step->diagnostics.push_back("connected base pose input incomplete: "+path);
+    else if(outcome==RigExecProviderRefreshOutcome::MissingCurrent)
+        step->diagnostics.push_back("connected final pose input incomplete: "+path);
+    else if(outcome==RigExecProviderRefreshOutcome::InvalidCurrent)
+        step->diagnostics.push_back(path+" produced an invalid or degenerate frame for "+path+"; constraint passed through");
+    else if(outcome==RigExecProviderRefreshOutcome::SingularCurrent)
+        step->diagnostics.push_back(path+" produced a singular hierarchy delta; constraint passed through");
+    else if(outcome==RigExecProviderRefreshOutcome::InvalidDescendant)
+        step->diagnostics.push_back(path+" could not propagate its pose revision through "+carry()+"; constraint passed through");
+    else if(outcome==RigExecProviderRefreshOutcome::InvalidTransformedDescendant)
+        step->diagnostics.push_back(path+" produced an invalid descendant frame for "+carry()+"; constraint passed through");
+}
+// A ladder reads its own property revision before following connections,
+// while other consumers keep
+// the shared expression and their independently selected connection phase.
+bool RigExecBakedBindOwnPropertySpaces(RigExecBakedProgramImpl *program,
+    std::string *error)
+{
+    auto &B=*program;
+    const char *names[]={"rest:space","default:space","posed:space","parent:space",
+        "parent:defaultSpace","avars:defaultSpace","posed:defaultSpace"};
+    for(size_t slot=0;slot<B.ladders.size();++slot) {
+        if(B.slotKind[slot]!=RigExecBakedSlotKind::FirstFramePose) continue;
+        for(size_t channel=0;channel<7;++channel) {
+            const SdfPath consumer=B.paths[slot].AppendProperty(TfToken(names[channel]));
+            const auto chain=std::find_if(B.propertyChains.begin(),B.propertyChains.end(),
+                [&](const auto &item){return item.target==consumer &&
+                    item.arm==RigExecBakedPropertyChain::Arm::Matrix4d && !item.revisions.empty();});
+            if(chain==B.propertyChains.end()) continue;
+            const int prior=B.ladders[slot].spaceValues[channel];
+            if(prior<0 || size_t(prior)>=B.providerValues.values.size()) {
+                if(error) *error="own property space has no captured expression: "+consumer.GetString();
+                return false;
+            }
+            const std::string key="provider:ownPropertyFinal:"+consumer.GetString();
+            if(B.providerProgram.valueIds.count(key)) {
+                if(error) *error="duplicate own property space delivery: "+consumer.GetString();
+                return false;
+            }
+            const RigExecValueId value=RigExecValueId(B.providerProgram.valueKeys.size());
+            B.providerProgram.valueKeys.push_back(key);
+            B.providerProgram.valueIds.emplace(key,value);
+            const auto seed=B.providerValues.values[size_t(prior)];
+            B.providerValues.values.push_back(seed);
+            B.providerProgram.routedInputs.push_back({value,consumer,consumer,TfToken("final")});
+            B.ladders[slot].spaceValues[channel]=int(value);
+        }
+    }
+    // A provider consumes the final revisions of its own default channels.
+    // Keep each property's raw value available to the mover that produces it.
+    const char *defaults[]={"default:tx","default:ty","default:tz",
+        "default:rx","default:ry","default:rz"};
+    for (size_t index=0; index<B.providerProgram.ops.size(); ++index) {
+        auto &op=B.providerProgram.ops[index];
+        if (op.kind != RigExecProviderOpKind::DefaultSpace) continue;
+        for (size_t channel=0; channel<6; ++channel) {
+            const SdfPath consumer=op.owner.AppendProperty(TfToken(defaults[channel]));
+            const auto chain=std::find_if(B.propertyChains.begin(),B.propertyChains.end(),
+                [&](const auto &item){return item.target==consumer && !item.revisions.empty();});
+            if (chain==B.propertyChains.end()) continue;
+            const auto prior=op.inputs[3+channel];
+            const std::string key="provider:ownDefaultFinal:"+consumer.GetString();
+            const auto existing=B.providerProgram.valueIds.find(key);
+            if (existing!=B.providerProgram.valueIds.end()) {
+                op.inputs[3+channel]=existing->second;
+                continue;
+            }
+            const auto value=RigExecValueId(B.providerProgram.valueKeys.size());
+            B.providerProgram.valueKeys.push_back(key);
+            B.providerProgram.valueIds.emplace(key,value);
+            const auto seed=B.providerValues.values[size_t(prior)];
+            B.providerValues.values.push_back(seed);
+            B.providerProgram.routedInputs.push_back({value,consumer,consumer,TfToken("final")});
+            op.inputs[3+channel]=value;
+        }
+        auto &reads=B.providerProgram.descriptors[index].reads;
+        reads.clear();
+        for (auto value : op.inputs) if (value!=UINT64_MAX) reads.push_back(value);
+        std::sort(reads.begin(),reads.end());
+        reads.erase(std::unique(reads.begin(),reads.end()),reads.end());
+    }
+    return true;
+}
+
+bool RigExecBakedPathLeaves::Select(const std::vector<char> &keep)
+{
+    if(decl.scalarBegin>=0 || decl.externalBegin>=0 || decl.dialBegin>=0) return false;
+    std::vector<int> keyOf(decl.keys.size(),-1);
+    int next=0;
+    for(size_t k=0;k<decl.keys.size();++k) if(k<keep.size() && keep[k]) keyOf[k]=next++;
+    for(int &role:decl.roles) role=role>=0 && size_t(role)<keyOf.size()?keyOf[size_t(role)]:-1;
+    _KeepRows(&decl.keys,keep);
+    _KeepRows(&attributes,keep);
+    _KeepRows(&hops,keep);
+    _KeepRows(&varying,keep);
+    _KeepRows(&epoch,keep);
+    _KeepRows(&overrideReached,keep);
+    _KeepRows(&walks,keep);
+    _KeepRows(&exactVersions,keep);
+    _KeepRows(&exactRecordIndices,keep);
+    _KeepRows(&exactValueTypes,keep);
+    _KeepRows(&values,keep);
+    _KeepRows(&consumedValues,keep);
+    _KeepRows(&changed,keep);
+    _KeepRows(&versions,keep);
+    _KeepRows(&observed,keep);
+    _KeepRows(&observedVersions,keep);
+    _KeepRows(&observedRuns,keep);
+    _KeepRows(&mustSample,keep);
+    return true;
+}
+bool RigExecBakedPruneProviderProgram(RigExecBakedProgramImpl *program,std::string *error)
+{
+    auto &B=*program;
+    auto &p=B.providerProgram;
+    B.providerStepsPruned=0; B.providerPruneRoots=0; B.providerPruneViolations=0;
+    // The refresh templates were clone sources for the contexts the pose
+    // steps bound; no step runs them.
+    for(auto it=B.providerRefreshTemplateOps.rbegin();it!=B.providerRefreshTemplateOps.rend();++it) {
+        p.ops.erase(p.ops.begin()+*it);
+        p.descriptors.erase(p.descriptors.begin()+*it);
+    }
+    B.providerRefreshTemplateOps.clear();
+    // Bound before reachability, so a routed value's source is an edge.
+    B.providerRoutedReads.clear();
+    for(size_t k=0;k<p.routedInputs.size();++k) {
+        const auto &input=p.routedInputs[k];
+        RigExecReadPhase phase; std::string why;
+        RigExecCrossDomainRead read;
+        if(!RigExecParseReadPhase(input.readPhase.GetString(),&phase,&why) ||
+           !RigExecBakedBindConnectionValue(B,input.consumer,input.source,phase,&read)) {
+            read.unavailable=why.empty()?"connected provider phase has no native value":why;
+        }
+        B.providerRoutedReads.push_back(int(B.crossDomainReads.size()));
+        B.crossDomainReads.push_back(std::move(read));
+    }
+    // Read at every Build, so one process can compare the two programs.
+    if(!TfGetenvBool("RIGEXEC_PROVIDER_PRUNE",true)) return true;
+    const bool verify=TfGetenvBool("RIGEXEC_VERIFY_PROVIDER_PRUNE",false);
+    const size_t rows=p.sampled.size();
+    if(B.providerLeaves.decl.keys.size()!=rows || B.providerLeafValues.size()!=rows ||
+       B.providerLeafBlocked.size()!=rows || B.providerFrozenKeys.size()!=rows ||
+       B.providerExternalSlots.size()!=p.externalInputs.size() ||
+       B.providerValues.values.size()!=p.valueKeys.size()) {
+        if(error) *error="the provider tables are not parallel to the provider program";
+        return false;
+    }
+    _ProviderLiveness live;
+    if(!_ProviderLive(B,&live,error)) return false;
+    const size_t values=p.valueKeys.size();
+    std::vector<RigExecValueId> oldToNew(values,RigExecNoProviderValue);
+    size_t kept=0;
+    for(size_t v=0;v<values;++v) if(live.value[v]) oldToNew[v]=RigExecValueId(kept++);
+    const auto slice=[&](size_t begin,size_t count) {
+        return std::vector<char>(live.producer.begin()+std::ptrdiff_t(begin),
+                                 live.producer.begin()+std::ptrdiff_t(begin+count));
+    };
+    const std::vector<char> keepOp=slice(0,live.ops),keepRow=slice(live.Rows(),live.rows),
+        keepExternal=slice(live.Externals(),live.externals),keepFrame=slice(live.Frames(),live.frames);
+    const auto dropped=[](const std::vector<char> &keep) {
+        return size_t(std::count(keep.begin(),keep.end(),char(0)));
+    };
+    const size_t pruned=dropped(keepOp)+dropped(keepRow)+dropped(keepExternal)+dropped(keepFrame);
+    if((pruned || kept!=values) &&
+       !_RemapProviderHolders(&B,oldToNew,keepRow,keepOp,keepExternal,keepFrame,kept,error)) return false;
+    B.providerStepsPruned=pruned;
+    B.providerPruneRoots=live.roots;
+    if(verify) {
+        B.providerPruneViolations=_ProviderPruneViolations(B);
+        if(B.providerPruneViolations)
+            TF_WARN("RIGEXEC_VERIFY_PROVIDER_PRUNE: %zu provider holder(s) fail after pruning",
+                    B.providerPruneViolations);
+    }
+    return true;
+}
+void RigExecBakedBuildSpaceSteps(RigExecBakedProgramImpl *program)
+{
+    auto &B=*program;
+    B.providerLeafChains.assign(B.providerProgram.sampled.size(),-1);
+    for(size_t k=0;k<B.providerProgram.sampled.size();++k) {
+        const auto &input=B.providerProgram.sampled[k];
+        RigExecBakedStep step; step.kind=RigExecBakedStepKind::SpaceExpression;
+        step.object=int(k); step.part=2;
+        step.label="SpaceRaw "+input.attribute.GetString();
+        step.reads.push_back(RigExecBakedOne(RigExecBakedSlotDomain::SpaceLeaf,int(k)));
+        step.writes.push_back(RigExecBakedOne(RigExecBakedSlotDomain::SpaceValue,int(input.value)));
+        B.steps.push_back(std::move(step));
+    }
+    // RigExecBakedPruneProviderProgram bound each routed input's read.
+    for(size_t k=0;k<B.providerProgram.routedInputs.size();++k) {
+        const auto &input=B.providerProgram.routedInputs[k];
+        RigExecBakedStep step; step.kind=RigExecBakedStepKind::SpaceExpression;
+        step.object=int(k); step.part=3;
+        step.label="SpaceConnection "+B.providerProgram.valueKeys[size_t(input.value)];
+        step.writes.push_back(RigExecBakedOne(RigExecBakedSlotDomain::SpaceValue,int(input.value)));
+        B.steps.push_back(std::move(step));
+    }
+    for(size_t k=0;k<B.providerProgram.externalInputs.size();++k) {
+        const auto &input=B.providerProgram.externalInputs[k];
+        RigExecBakedStep step; step.kind=RigExecBakedStepKind::SpaceExpression;
+        step.object=int(k); step.part=1;
+        step.label="SpaceInput "+B.providerProgram.valueKeys[size_t(input.value)];
+        const int slot=B.providerExternalSlots[k];
+        if(slot>=0 && input.computation=="computeRestFrame")
+            step.reads.push_back(RigExecBakedOne(RigExecBakedSlotDomain::Rest,slot));
+        else if(slot>=0 && (input.computation=="computePointFrame" || input.computation=="computeBasePointFrame"))
+            step.reads.push_back(RigExecBakedOne(RigExecBakedSlotDomain::PoseBase,
+                uint32_t(slot)));
+        else if(slot>=0) {
+            const auto &leaf=B.ladders[size_t(slot)].interveningSpace;
+            if(leaf.leaf>=0) step.bindingLeaves.push_back(B.leaves.Of<GfMatrix4d>().id[size_t(leaf.leaf)]);
+            step.varyingLeaves=leaf.varying;
+        }
+        step.writes.push_back(RigExecBakedOne(RigExecBakedSlotDomain::SpaceValue,int(input.value)));
+        B.steps.push_back(std::move(step));
+    }
+    for(size_t k=0;k<B.providerProgram.ops.size();++k) {
+        const auto &descriptor=B.providerProgram.descriptors[k];
+        RigExecBakedStep step; step.kind=RigExecBakedStepKind::SpaceExpression;
+        step.object=int(k); step.part=0; step.label=descriptor.key;
+        for(auto value:descriptor.reads) step.reads.push_back(RigExecBakedOne(RigExecBakedSlotDomain::SpaceValue,int(value)));
+        for(auto value:descriptor.writes) step.writes.push_back(RigExecBakedOne(RigExecBakedSlotDomain::SpaceValue,int(value)));
+        B.steps.push_back(std::move(step));
+    }
+    for(size_t k=0;k<B.providerFrameInputs.size();++k) {
+        const auto &input=B.providerFrameInputs[k];
+        RigExecBakedStep step;step.kind=RigExecBakedStepKind::SpaceExpression;step.object=int(k);step.part=4;
+        step.reads.push_back(RigExecBakedOne(input.base?RigExecBakedSlotDomain::PoseBase:RigExecBakedSlotDomain::PoseFin,input.version));
+        step.writes.push_back(RigExecBakedOne(RigExecBakedSlotDomain::SpaceValue,input.value));
+        B.steps.push_back(std::move(step));
+    }
+}
+// Build prunes every provider step no root reaches: a consumer of a provider
+// value must be a declared step read, a ladder channel or a cross-domain read,
+// and an op that can fail here must fail RigExecProviderOpStructurallyValid.
+void RigExecBakedRunSpaceOp(RigExecBakedProgramImpl *program,RigExecBakedStep *step)
+{
+    auto &B=*program;
+    if(step->part==4) {
+        const auto &input=B.providerFrameInputs[size_t(step->object)];
+        B.providerValues.Publish(input.value,input.base?B.base[input.version]:B.fin[input.version]);
+        return;
+    }
+    if(step->part==2) {
+        const size_t k=size_t(step->object);
+        const auto &input=B.providerProgram.sampled[k];
+        const auto *overlay=RigExecBakedSpaceLeafOverlay(B,k);
+        const VtValue &value=overlay?*overlay:B.providerLeaves.values[k];
+        const bool authoritative=overlay!=nullptr;
+        B.providerValues.PublishSource(input.value,value,
+            !authoritative && B.providerLeafBlocked[k],authoritative);
+        return;
+    }
+    if(step->part==3) {
+        const size_t k=size_t(step->object);
+        VtValue value; std::string diagnostic;
+        const bool available=RigExecBakedReadCrossDomain(B,B.providerRoutedReads[k],&value,&diagnostic);
+        B.providerValues.PublishSource(B.providerProgram.routedInputs[k].value,value,!available,true);
+        if(!diagnostic.empty()) step->diagnostics.push_back(diagnostic);
+        return;
+    }
+    if(step->part==1) {
+        const size_t k=size_t(step->object);
+        const auto &input=B.providerProgram.externalInputs[k];
+        const int slot=B.providerExternalSlots[k];
+        if(input.computation=="computeRestFrame")
+            B.providerValues.Publish(input.value,slot>=0?B.restFrames[size_t(slot)]:RigExecFrameFromMatrix(GfMatrix4d(1.0)));
+        else if(input.computation=="computePointFrame" || input.computation=="computeBasePointFrame")
+            B.providerValues.Publish(input.value,slot>=0?B.base[
+                size_t(slot)] :
+                RigExecFrameFromMatrix(GfMatrix4d(1.0)));
+        else B.providerValues.Publish(input.value,slot>=0?RigExecBakedLeafRead(B,B.ladders[size_t(slot)].interveningSpace):GfMatrix4d(1.0));
+        return;
+    }
+    std::string error;
+    if(!RigExecRunProviderOp(B.providerProgram,uint32_t(step->object),&B.providerValues,&error)) {
+        const auto output=B.providerProgram.ops[size_t(step->object)].output;
+        B.providerValues.Publish(output,std::monostate(),true,false,0,error);
+        B.providerValues.values[size_t(output)].raw=VtValue();
+        if(!error.empty()) step->diagnostics.push_back(error);
+    }
+}
+}

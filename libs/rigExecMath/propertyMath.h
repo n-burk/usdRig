@@ -9,54 +9,27 @@
 #ifndef RIGEXEC_MATH_PROPERTY_MATH_H
 #define RIGEXEC_MATH_PROPERTY_MATH_H
 
+#include "rigExecMath/propertyMathKernel.h"
+
 #include "pxr/pxr.h"
 #include "pxr/base/gf/matrix4d.h"
 #include "pxr/base/gf/vec2f.h"
 #include "pxr/base/gf/vec3f.h"
 #include "pxr/base/tf/token.h"
 
-#include "rigExecMath/propertyMathKernel.h"
-
 PXR_NAMESPACE_USING_DIRECTIVE
 
 namespace rigExec {
 
+/// The Gf instantiation of RigExecPropertyMathKernelParams, which documents
+/// the fields (propertyMathKernel.h).
+template <class T>
+using RigExecPropertyMathParams = RigExecPropertyMathKernelParams<T, GfVec2f>;
 
 /// Parses a `rigExec:operation` token. Returns false for an unknown token
 /// rather than substituting a default: the operation selects the compiled
 /// kernel, and silently computing the wrong one is worse than refusing.
 bool RigExecParsePropertyOp(const TfToken &token, RigExecPropertyOp *op);
-
-/// The authored inputs a float or vec3f property mover carries.
-///
-/// `min`/`max` are only read by clamp and remap, `value` only by add,
-/// multiply, and blend; a mover authors all of them and the operation
-/// chooses. Per-component for the vec3f variant, which is why the schema
-/// declares float3 rather than float bounds.
-template <class T>
-struct RigExecPropertyMathParams {
-    RigExecPropertyOp op = RigExecPropertyOp::Add;
-    T value{};
-    T min{};
-    T max{};
-    /// Resolved common MoverAPI envelope (spec §5): either the bound
-    /// rigExec:weightObject's one-element field or inputs:defaultWeight. The
-    /// operation's result is mixed back toward the incoming value, so weight
-    /// 0 is a no-op and weight 1 applies the operation outright. Same rule the
-    /// point-domain matrix mover follows (p' = q + w*(T q - q)).
-    float weight = 1.0f;
-    /// The curve operation's keys as (input, output) pairs sorted by input,
-    /// borrowed from the caller for the duration of one apply. Only curve
-    /// reads them, and only the float mover defines curve.
-    const GfVec2f *keys = nullptr;
-    size_t keyCount = 0;
-    /// Optional (in slope, out slope) per key, parallel to keys. With them
-    /// the curve is a cubic Hermite through the keys and extrapolates along
-    /// the first key's in slope and the last key's out slope, which is how a
-    /// driven key with fixed tangents and linear infinity evaluates.
-    const GfVec2f *tangents = nullptr;
-    size_t tangentCount = 0;
-};
 
 /// Piecewise-linear evaluation of sorted (input, output) keys with linear
 /// extrapolation past both ends along the first and last segments, the way

@@ -30,7 +30,7 @@ def main():
     stage = Usd.Stage.Open(_STACK)
     stage.SetEditTarget(Usd.EditTarget(stage.GetSessionLayer()))
     rig = rigexec.Rig(stage, _RIG)
-    rig.evaluation_mode = "baked"
+    rig.cpu_reference = True
 
     # The mesh with the most deformers, so the test exercises a real one.
     groups = {}

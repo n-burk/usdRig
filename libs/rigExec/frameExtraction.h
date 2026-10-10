@@ -24,13 +24,14 @@ PXR_NAMESPACE_USING_DIRECTIVE
 
 namespace rigExec {
 
+inline const std::array<GfVec3d, 4> RigExecIdentityLandmarkPoints = {
+    GfVec3d(0), GfVec3d(1, 0, 0), GfVec3d(0, 1, 0), GfVec3d(0, 0, 1)};
+
 /// The four identity landmarks a frame is measured against.
 inline const std::array<GfVec3d, 4> &
 RigExecIdentityLandmarks()
 {
-    static const std::array<GfVec3d, 4> identity = {
-        GfVec3d(0), GfVec3d(1, 0, 0), GfVec3d(0, 1, 0), GfVec3d(0, 0, 1)};
-    return identity;
+    return RigExecIdentityLandmarkPoints;
 }
 
 /// Samples an affine map at the identity landmarks.

@@ -10,15 +10,17 @@ Hydra.
 
 | file | what |
 |---|---|
-| `build_rubberhose.py` | the generator: writes both layers below, deterministically |
+| `build_rubberhose.py` | the generator: writes the three layers below, deterministically |
 | `rubberhose_rig.usda` | the character at rest: geometry + rig under one `RigExecRoot` (`/Pip/Rig`) |
 | `rubberhose_anim.usda` | a 120-frame, 24 fps **loop** (frame 121 == frame 1) that sublayers the rig and keys only controls, face dials, two IK length offsets and the hat hand-off |
+| `rubberhose_picker.usda` | the control picker: `Body` and `Face` pages (`/Pip/Rig/Pip`) selecting the 29 animator controls, sublayered by the rig |
+| `rubberhose.usdz` | the packaged character: anim, rig and picker in one file, built with `usdzip -c rubberhose.usdz -a rubberhose_anim.usda` |
 | `render_preview.py` | offscreen Storm stills/sequences: flat unlit pass + optional lit guide pass |
 | `check_limbs.py` | the **limb flip + staging detector**: evaluates the loop with `rigExecPose` and reports every change of bend side of every arm/leg, and every arm crossing the face, hugging the head outline, touching a shoe or merging with a leg (see below) |
 
 ```sh
 source bin/_env.sh
-"$PY" examples/2d/rubberhose/build_rubberhose.py          # regenerate both layers
+"$PY" examples/2d/rubberhose/build_rubberhose.py          # regenerate all three layers
 bin/usdview.sh examples/2d/rubberhose/rubberhose_anim.usda # watch it live (camera /Pip/MainCam)
 build/rigExecPose examples/2d/rubberhose/rubberhose_anim.usda --frames 1,57,63,70,87 --joints --targets
 "$PY" examples/2d/rubberhose/check_limbs.py --plot limbs.png   # flip check, exit 1 on a problem
@@ -29,6 +31,14 @@ RIG=$(pwd) "$PY" examples/2d/rubberhose/render_preview.py \
 The controls are authored with `purpose = "guide"` so the clean picture
 never shows them: turn on *Display -> Display Purposes -> Guide* in usdview
 to see and pick them (and the joints, and the head's lattice cage).
+
+The picker panel reads `RigExecPicker` scene data from the rig layer
+itself: a `Body` page laying the character out head to toe and a `Face`
+page with the head big and the dial carrier below. Every animator
+control has a button in its guide colour (character left on the right,
+as the default camera sees it); the hidden solver helpers -- hip roots,
+hose ends, eye aims -- are deliberately left out, and the face dials are
+reached by selecting `Face_ctl`.
 
 
 

@@ -90,22 +90,32 @@ void RigExecSetPublishFenceProbeForTesting(
 
 /// One frame's freshness proof (plan 2.3): the folded control digest a
 /// lookup must reproduce, the unfolded digest it folds from, and the
-/// sampled-path dependency set the digest covers -- first-win sample paths
-/// plus standing override identities, sorted and unique. An edit retires
-/// the proofs whose sets intersect its affected inputs instead of clearing
-/// the map wholesale; a constant-namespace carry re-points a surviving
-/// proof by re-folding its unfolded half. The digest compare stays the
-/// correctness backstop: an over-retained proof only costs a sample and a
-/// miss, never a wrong pose.
+/// dependency set the digest covers -- first-win sample paths plus
+/// standing override identities. The sample paths are the vector's shared
+/// digest order when it matched, so recording a proof builds no per-sample
+/// text. An edit retires the proofs whose sets intersect its affected
+/// inputs instead of clearing the map wholesale; a constant-namespace carry
+/// re-points a surviving proof by re-folding its unfolded half. The digest
+/// compare stays the correctness backstop: an over-retained proof only
+/// costs a sample and a miss, never a wrong pose.
 struct RigExecFreshProof {
     uint64_t digest = 0;
     uint64_t unfolded = 0;
     bool sampledInputs = false;
+    /// The sampled vector's recorded digest order when it matched the
+    /// vector: its first-win sample paths are the proof's sample
+    /// dependencies. Null otherwise.
+    std::shared_ptr<const RigExecFrameDigestOrder> order;
+    /// Sorted, unique: the standing overrides' control ids, plus, only when
+    /// `order` is null, every first-win non-empty sample path's text.
     std::vector<std::string> paths;
     RigExecFreshProof() = default;
     RigExecFreshProof(uint64_t digestIn, uint64_t unfoldedIn,
                       const RigExecFrameInputs *inputs,
                       const std::vector<RigExecValueOverride> *overrides);
+    /// Whether control \p id (canonical path \p asPath, empty when \p id is
+    /// not one) is in the proof's dependency set.
+    bool Covers(const std::string &id, const SdfPath &asPath) const;
 };
 
 /// Drives one rig's evaluation into the imaging chain.
@@ -247,11 +257,6 @@ public:
     const std::shared_ptr<RigExecFrameCache> &GetFrameCache() const {
         return _frameCache;
     }
-    /// Capture the live namespace for a privately owned fallback worker.
-    /// The worker publishes with this key, never its mirror's serial.
-    bool CapturePoseOnlyCacheKey(UsdTimeCode time, RigExecFrameCacheKey *key) const {
-        return _ComputePoseOnlyCacheKey(time, key);
-    }
 
     /// Drops every cached frame and every freshness proof. The next
     /// publication evaluates live. Called when the overlay selection moves
@@ -287,7 +292,7 @@ public:
     /// at no entry, which reads as a miss, never as a wrong pose.
     ///
     /// No-op when the frame cache is off (nothing is served, so nothing is
-    /// proven). Applies the same epoch/mode scope discipline as the live
+    /// proven). Applies the same epoch scope discipline as the live
     /// memoization: a moved scope clears every proof, this one included.
     /// \p unfoldedDigest is the pre-constant-fold digest and \p inputs the
     /// sampled vector, recorded into the proof's dependency set (plan 2.3).
@@ -395,6 +400,17 @@ public:
         _evaluator->ClearInteractiveOverrides();
     }
 
+    /// This frame's upstream values (authored-level; RigExecRigEvaluator::
+    /// SetUpstreamInputs admits them), sorted by path. Records only, like
+    /// SetInteractiveOverrides. Unlike a drag they keep the frame cache on:
+    /// the live sampler carries them (RigExecFrameInputs::upstream), so
+    /// every sampled key folds them, and the pose-only key folds them too.
+    void SetUpstreamInputs(std::vector<RigExecUpstreamValue> values);
+
+    const std::vector<RigExecUpstreamValue> &GetUpstreamInputs() const {
+        return _upstreamInputs;
+    }
+
     /// The stage the rig evaluates against, for a caller that has to read the
     /// authored value an override is standing in for.
     const UsdStageRefPtr &GetEvaluationStage() const {
@@ -416,7 +432,8 @@ private:
     /// its posed frame (spec §10.3 extension).
     /// Records the stage identity and sample time on a generation.
     /// A complete conservative key for operations without a sampled input
-    /// contract: time, stage-edit serial, epoch and standing overrides.
+    /// contract: time, stage-edit serial, epoch, standing overrides and
+    /// upstream values.
     bool _ComputePoseOnlyCacheKey(
         UsdTimeCode time, RigExecFrameCacheKey *key) const;
 
@@ -522,9 +539,9 @@ public:
     {
         return const_cast<RigExecProfiler *>(&_evaluator->GetProfiler());
     }
-    /// The evaluation mode actually answering this rig (baked, dynamic...),
-    /// for diagnostics a viewer shows. See RigExecRigEvaluator.
+    /// The evaluator owning the compiled operation graph.
     const RigExecRigEvaluator &GetEvaluator() const { return *_evaluator; }
+    void SetOpTimingEnabled(bool enabled) { _evaluator->SetOpTimingEnabled(enabled); }
 
     /// Forgets every cached guide input. Called for any stage notice that
     /// touches the rig and on every recompile: the caches hold AUTHORED
@@ -634,6 +651,9 @@ private:
     /// digest folds them explicitly (a drag must never hit a pre-drag pose)
     /// and warming jobs sample them at enqueue time.
     std::vector<RigExecValueOverride> _interactiveOverrides;
+    /// The upstream values as handed to SetUpstreamInputs: the live sampler
+    /// carries them and the pose-only key folds them.
+    std::vector<RigExecUpstreamValue> _upstreamInputs;
     /// Freshness proofs: (isDefault, timeValue) -> the proof recorded for
     /// a sample taken right after a live evaluation AT that time, when
     /// every chain-resolved input was fresh. A lookup serves a cached pose
@@ -642,7 +662,7 @@ private:
     /// chain inputs sampled for a time the evaluator has not run come from
     /// the standing (stale) resolved state, and without the proof a scrub
     /// forth and back over animated chains could alias one frame's pose
-    /// onto another's. Scoped by _freshEpoch and by the evaluation mode:
+    /// onto another's. Scoped by _freshEpoch:
     /// either moving clears the map (entries stay in the cache,
     /// unreachable, for LRU). Bounded: past _kFreshDigestCap entries the
     /// map clears wholesale, which only costs misses, never correctness.
@@ -662,8 +682,6 @@ private:
     uint64_t _freshEpoch = 0;
     bool _freshEpochValid = false;
     uint64_t _cacheEditSerial = 0;
-    RigExecEvaluationMode _cacheMode = RigExecEvaluationMode::Baked;
-    bool _cacheModeValid = false;
     const RigExecBakedProgram *_sampleSupportProgram = nullptr;
     uint64_t _sampleSupportEpoch = 0;
     uint64_t _sampleSupportSerial = 0;

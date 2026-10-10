@@ -10,7 +10,7 @@ Headless test for RigExecAutoClavicle on examples/biped/Biped_autoclav.usda:
      joint with it; twisting the arm about its own axis moves nothing.
   3. avars:autoClav scales the effect: 0 moves nothing, 0.5 moves less.
   4. Raising the IK hand lifts the shoulder too.
-  5. The dynamic evaluator and the baked program agree bit for bit over FK,
+  5. An incremental evaluator and a freshly compiled graph agree bit for bit over FK,
      IK, a half blend, the dial and a swing held in its local space.
 
 The poses are applied as interactive overrides, never authored.
@@ -48,14 +48,12 @@ def _Check(condition, message):
 
 
 class _Session(object):
-    def __init__(self, mode=None):
+    def __init__(self):
         import _rigexec
         self.stage = Usd.Stage.Open(os.path.join(
             _ROOT, "examples", "biped", "Biped_stack.usda"))
         self.rig = _rigexec.Rig(self.stage, "/Biped/Rig")
         self.rig.compile()
-        if mode is not None:
-            self.rig.evaluation_mode = mode
         self.rig.publish_weight_fields = False
 
     def Pose(self, overrides):
@@ -111,7 +109,7 @@ def TestBehaviour(session):
            % ikLift[1])
 
 
-def TestParity(baked, dynamic):
+def TestFreshProgramParity(incremental):
     poses = [
         {(UPARM, "avars:ry"): -80.0},
         {(UPARM, "avars:rz"): 60.0, (UPARM, "avars:ry"): -30.0},
@@ -124,23 +122,21 @@ def TestParity(baked, dynamic):
          (C + "/M_Body/M_Torso/M_Chest", "avars:rz"): 25.0},
     ]
     for k, pose in enumerate(poses):
-        a, b = baked.Pose(pose), dynamic.Pose(pose)
+        a, b = incremental.Pose(pose), _Session().Pose(pose)
         worst = 0.0
         for path, joint in ((SWING, False), (SHOULDER, True)):
             frame = ikfkMatch.JointFrame if joint else ikfkMatch.ControlFrame
             fa, fb = frame(a, path), frame(b, path)
             worst = max(worst, max(abs(fa[r][c] - fb[r][c])
                                    for r in range(4) for c in range(4)))
-        _Check(worst == 0.0, "pose %d: baked and dynamic agree (%.3g)"
+        _Check(worst == 0.0, "pose %d: incremental and fresh graphs agree (%.3g)"
                % (k, worst))
 
 
 def main():
     baked = _Session()
     TestBehaviour(baked)
-    dynamic = _Session("dynamic")
-    TestBehaviour(dynamic)
-    TestParity(baked, dynamic)
+    TestFreshProgramParity(baked)
     if _failures:
         print("%d failure(s)" % len(_failures))
         return 1

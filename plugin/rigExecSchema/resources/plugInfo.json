@@ -6,6 +6,11 @@
         {
             "Info": {
                 "SdfMetadata": {
+                    "rigExecInputElement": {
+                        "appliesTo": "properties",
+                        "displayGroup": "RigExec",
+                        "type": "int"
+                    },
                     "rigExecReadPhase": {
                         "appliesTo": "properties",
                         "displayGroup": "RigExec",

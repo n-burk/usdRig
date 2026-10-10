@@ -328,22 +328,10 @@ RrBlendTransforms(const RrMat4d &a, const RrMat4d &b, double weight)
 }
 
 RrMat4d
-RrOrientSpaceDelta(const RrMat4d &delta, const RrMat4d &local,
-                   const RrMat4d &localInverse, const RrMat4d &unswitched)
-{
-    RrMat4d frame = delta * local;
-    frame[3][0] = unswitched[3][0];
-    frame[3][1] = unswitched[3][1];
-    frame[3][2] = unswitched[3][2];
-    return frame * localInverse;
-}
-
-RrMat4d
 RrFilterSpaceRotation(const RrMat4d &m, const RrVec3d &axis,
                       RrRotationFilter filter)
 {
-    if (filter == RrRotationFilter::All ||
-        filter == RrRotationFilter::Orient) {
+    if (filter == RrRotationFilter::All) {
         return m;
     }
     const double length = axis.GetLength();
@@ -399,8 +387,8 @@ RrMaskTransform(const RrMat4d &m, const bool translation[3],
             x = std::atan2(-r._mtx[2][1], r._mtx[1][1]);
             z = 0.0;
         }
-        static const RrVec3d axes[3] = {RrVec3d(1, 0, 0), RrVec3d(0, 1, 0),
-                                        RrVec3d(0, 0, 1)};
+        const RrVec3d axes[3] = {RrVec3d(1, 0, 0), RrVec3d(0, 1, 0),
+                                 RrVec3d(0, 0, 1)};
         const double angles[3] = {RrRadiansToDegrees(x),
                                   RrRadiansToDegrees(y),
                                   RrRadiansToDegrees(z)};
@@ -413,164 +401,6 @@ RrMaskTransform(const RrMat4d &m, const bool translation[3],
         d.rotation = composed.ExtractRotationQuat();
     }
     return _RrRecompose(d);
-}
-
-const RigExecWireInput &
-RrProgram::LadderInput(size_t slot, int field) const
-{
-    const RigExecWireLadder &ladder = poses->ladders[slot];
-    switch (field) {
-    case RrLadderRestSpace:
-        return ladder.restSpace;
-    case RrLadderDefaultSpace:
-        return ladder.defaultSpace;
-    case RrLadderPosedSpace:
-        return ladder.posedSpace;
-    default:
-        break;
-    }
-    if (field >= RrLadderRestAvar0 && field < RrLadderRestAvar0 + 6) {
-        return ladder.restAvars[field - RrLadderRestAvar0];
-    }
-    if (field >= RrLadderDefaultAvar0 && field < RrLadderDefaultAvar0 + 6) {
-        return ladder.defaultAvars[field - RrLadderDefaultAvar0];
-    }
-    return ladder.rotationOrder;
-}
-
-const RigExecWireInput &
-RrProgram::SolverInput(size_t solver, int field) const
-{
-    const RigExecWireSolver &s = poses->solvers[solver];
-    switch (field) {
-    case RrSolverBend:
-        return s.bend;
-    case RrSolverUpperOffset:
-        return s.upperOffset;
-    case RrSolverLowerOffset:
-        return s.lowerOffset;
-    case RrSolverStretch:
-        return s.stretch;
-    case RrSolverSoftness:
-        return s.softness;
-    case RrSolverBlendWeight:
-        return s.blendWeight;
-    case RrSolverPreserveVolume:
-        return s.preserveVolume;
-    case RrSolverMidFollowWeight:
-        return s.midFollowWeight;
-    case RrSolverRoll:
-        return s.roll;
-    case RrSolverTwist:
-        return s.twist;
-    case RrSolverMinLengthRatio:
-        return s.minLengthRatio;
-    case RrSolverTwistTurns:
-        return s.twistTurns;
-    default:
-        break;
-    }
-    return s.ribbonSampleCount;
-}
-
-const RigExecWireInput &
-RrProgram::ConstraintInput(size_t constraint, int field) const
-{
-    const RigExecWireConstraint &c = poses->constraints[constraint];
-    switch (field) {
-    case RrConstraintEnabled:
-        return c.enabled;
-    case RrConstraintDefaultWeight:
-        return c.defaultWeight;
-    case RrConstraintOffset:
-        return c.offset;
-    case RrConstraintAffectX:
-        return c.affectX;
-    case RrConstraintAffectY:
-        return c.affectY;
-    case RrConstraintAffectZ:
-        return c.affectZ;
-    case RrConstraintTX:
-        return c.tX;
-    case RrConstraintTY:
-        return c.tY;
-    case RrConstraintTZ:
-        return c.tZ;
-    case RrConstraintRX:
-        return c.rX;
-    case RrConstraintRY:
-        return c.rY;
-    case RrConstraintRZ:
-        return c.rZ;
-    case RrConstraintSX:
-        return c.sX;
-    case RrConstraintSY:
-        return c.sY;
-    case RrConstraintSZ:
-        return c.sZ;
-    case RrConstraintAimVector:
-        return c.aimVector;
-    case RrConstraintUpVector:
-        return c.upVector;
-    case RrConstraintRotationOffset:
-        return c.rotationOffset;
-    case RrConstraintWorldUpVector:
-        return c.worldUpVector;
-    case RrConstraintPoleVector:
-        return c.poleVector;
-    default:
-        break;
-    }
-    return c.twistDegrees;
-}
-
-const RigExecWireInput &
-RrProgram::WeightInput(size_t object, int field) const
-{
-    const RigExecWireWeightObject &w = geometry->weightObjects[object];
-    switch (field) {
-    case RrWeightDefaultWeight:
-        return w.defaultWeight;
-    case RrWeightDriver:
-        return w.driver;
-    case RrWeightScale:
-        return w.scale;
-    case RrWeightBias:
-        return w.bias;
-    case RrWeightStrength:
-        return w.strength;
-    case RrWeightInvert:
-        return w.invert;
-    case RrWeightFalloffMin:
-        return w.falloffMin;
-    case RrWeightFalloffMax:
-        return w.falloffMax;
-    case RrWeightScaleXPos:
-        return w.scaleXPos;
-    case RrWeightScaleYPos:
-        return w.scaleYPos;
-    case RrWeightScaleZPos:
-        return w.scaleZPos;
-    case RrWeightScaleXNeg:
-        return w.scaleXNeg;
-    case RrWeightScaleYNeg:
-        return w.scaleYNeg;
-    case RrWeightScaleZNeg:
-        return w.scaleZNeg;
-    case RrWeightScaleX:
-        return w.scaleX;
-    case RrWeightScaleY:
-        return w.scaleY;
-    case RrWeightScaleZ:
-        return w.scaleZ;
-    case RrWeightExtentU:
-        return w.extentU;
-    case RrWeightExtentV:
-        return w.extentV;
-    default:
-        break;
-    }
-    return w.defaultWeight;
 }
 
 }  // namespace rigExec

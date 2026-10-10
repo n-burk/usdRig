@@ -1,0 +1,217 @@
+#usda 1.0
+(
+    doc = """The upstream-inputs fixture (testRigExecUpstreamInputs), from
+    oneloop_two_limbs.usda. A0's avars:rz is authored unkeyed, so only an
+    upstream value moves it. BRoot's rest:space is connected to
+    /LimbsAsset/Upstream.inputs:space, a plain matrix outside the rig whose
+    value equals the rest it replaces. The meshes author no extent, so no
+    Derived extent step is always dirty. BEffector stays keyed."""
+    defaultPrim = "LimbsAsset"
+    endTimeCode = 12
+    metersPerUnit = 0.01
+    startTimeCode = 1
+    timeCodesPerSecond = 24
+    upAxis = "Y"
+)
+
+def Xform "LimbsAsset"
+{
+    def RigExecRoot "Rig"
+    {
+        uniform token rigExec:partition = "LimbsAsset"
+
+        def Scope "Controls"
+        {
+            def RigExecControl "A0" (
+                prepend apiSchemas = ["RigExecControlAPI"]
+            )
+            {
+                double avars:rz = 0
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+
+                def RigExecControl "A1" (
+                    prepend apiSchemas = ["RigExecControlAPI"]
+                )
+                {
+                    double avars:rz = 0
+                    double avars:rz.spline = {
+                        1: 0; pre (0, 0); post linear,
+                        12: 50; post linear,
+                    }
+                    matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (2, 0, 0, 1) )
+                }
+            }
+
+            def RigExecControl "BRoot" (
+                prepend apiSchemas = ["RigExecControlAPI"]
+            )
+            {
+                matrix4d rest:space.connect = </LimbsAsset/Upstream.inputs:space>
+            }
+
+            def RigExecControl "BEffector" (
+                prepend apiSchemas = ["RigExecControlAPI"]
+            )
+            {
+                double avars:tx = 0
+                double avars:tx.spline = {
+                    1: 0; pre (0, 0); post linear,
+                    12: -1.5; post linear,
+                }
+                double avars:ty = 0
+                double avars:ty.spline = {
+                    1: 0; pre (0, 0); post linear,
+                    12: 2; post linear,
+                }
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (4, 0, 10, 1) )
+            }
+
+            def RigExecControl "BPole" (
+                prepend apiSchemas = ["RigExecControlAPI"]
+            )
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (2, 3, 10, 1) )
+            }
+        }
+
+        def Scope "Solvers"
+        {
+            def RigExecFkChain "LimbAFK"
+            {
+                rel rigExec:controls = [
+                    </LimbsAsset/Rig/Controls/A0>,
+                    </LimbsAsset/Rig/Controls/A0/A1>,
+                ]
+                uniform token rigExec:controlSpace = "parentRelative"
+                rel rigExec:joints = [
+                    </LimbsAsset/Rig/Joints/LimbA0>,
+                    </LimbsAsset/Rig/Joints/LimbA0/LimbA1>,
+                ]
+            }
+
+            def RigExecTwoBoneIk "LimbBIK"
+            {
+                float inputs:softness = 0
+                float inputs:stretch = 0
+                rel rigExec:effectorControl = </LimbsAsset/Rig/Controls/BEffector>
+                rel rigExec:joints = [
+                    </LimbsAsset/Rig/Joints/LimbB0>,
+                    </LimbsAsset/Rig/Joints/LimbB0/LimbB1>,
+                    </LimbsAsset/Rig/Joints/LimbB0/LimbB1/LimbB2>,
+                ]
+                rel rigExec:poleControl = </LimbsAsset/Rig/Controls/BPole>
+                rel rigExec:rootControl = </LimbsAsset/Rig/Controls/BRoot>
+            }
+        }
+
+        def Scope "Joints"
+        {
+            def RigExecJoint "LimbA0"
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+
+                def RigExecJoint "LimbA1"
+                {
+                    matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (2, 0, 0, 1) )
+                }
+            }
+
+            def RigExecJoint "LimbB0"
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 10, 1) )
+
+                def RigExecJoint "LimbB1"
+                {
+                    matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (2, 0.2, 0, 1) )
+
+                    def RigExecJoint "LimbB2"
+                    {
+                        matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (2, -0.2, 0, 1) )
+                    }
+                }
+            }
+        }
+
+        def Scope "Movers"
+        {
+            def RigExecSkinMover "MeshASkin" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                uniform int rigExec:elementSize = 2
+                rel rigExec:influences = [
+                    </LimbsAsset/Rig/Joints/LimbA0>,
+                    </LimbsAsset/Rig/Joints/LimbA0/LimbA1>,
+                ] (
+                    rigExecReadPhase = "final"
+                )
+                int[] rigExec:jointIndices = [
+                    0, 1, 0, 1, 0, 1, 1, 0, 1, 0,
+                    0, 1, 0, 1, 0, 1, 1, 0, 1, 0,
+                ]
+                float[] rigExec:jointWeights = [
+                    1, 0, 0.75, 0.25, 0.5, 0.5, 1, 0, 1, 0,
+                    1, 0, 0.75, 0.25, 0.5, 0.5, 1, 0, 1, 0,
+                ]
+                rel rigExec:moves = </LimbsAsset/Geom/MeshA.points>
+                uniform token rigExec:skinningMethod = "classicLinear"
+            }
+
+            def RigExecSkinMover "MeshBSkin" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                uniform int rigExec:elementSize = 2
+                rel rigExec:influences = [
+                    </LimbsAsset/Rig/Joints/LimbB0>,
+                    </LimbsAsset/Rig/Joints/LimbB0/LimbB1>,
+                    </LimbsAsset/Rig/Joints/LimbB0/LimbB1/LimbB2>,
+                ] (
+                    rigExecReadPhase = "final"
+                )
+                int[] rigExec:jointIndices = [
+                    0, 1, 0, 1, 1, 2, 1, 2, 2, 1,
+                    0, 1, 0, 1, 1, 2, 1, 2, 2, 1,
+                ]
+                float[] rigExec:jointWeights = [
+                    1, 0, 0.5, 0.5, 1, 0, 0.5, 0.5, 1, 0,
+                    1, 0, 0.5, 0.5, 1, 0, 0.5, 0.5, 1, 0,
+                ]
+                rel rigExec:moves = </LimbsAsset/Geom/MeshB.points>
+                uniform token rigExec:skinningMethod = "classicLinear"
+            }
+        }
+    }
+
+    def Scope "Upstream"
+    {
+        custom matrix4d inputs:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 10, 1) )
+    }
+
+    def Scope "Geom"
+    {
+        # Limb A along +x at z = 0.
+        def Mesh "MeshA"
+        {
+            int[] faceVertexCounts = [4, 4, 4, 4]
+            int[] faceVertexIndices = [0, 1, 6, 5, 1, 2, 7, 6, 2, 3, 8, 7, 3, 4, 9, 8]
+            point3f[] points = [
+                (0, -0.5, 0), (1, -0.5, 0), (2, -0.5, 0), (3, -0.5, 0), (4, -0.5, 0),
+                (0, 0.5, 0), (1, 0.5, 0), (2, 0.5, 0), (3, 0.5, 0), (4, 0.5, 0),
+            ]
+            uniform token subdivisionScheme = "none"
+        }
+
+        # Limb B along +x at z = 10.
+        def Mesh "MeshB"
+        {
+            int[] faceVertexCounts = [4, 4, 4, 4]
+            int[] faceVertexIndices = [0, 1, 6, 5, 1, 2, 7, 6, 2, 3, 8, 7, 3, 4, 9, 8]
+            point3f[] points = [
+                (0, -0.5, 10), (1, -0.5, 10), (2, -0.5, 10), (3, -0.5, 10), (4, -0.5, 10),
+                (0, 0.5, 10), (1, 0.5, 10), (2, 0.5, 10), (3, 0.5, 10), (4, 0.5, 10),
+            ]
+            uniform token subdivisionScheme = "none"
+        }
+    }
+}

@@ -119,13 +119,14 @@ _HashVtValue(uint64_t *hash, const VtValue &value)
 
 void
 RigExecFrameInputs::Add(const SdfPath &path, const VtValue &value,
-                        bool hasValue, bool viaChain)
+                        bool hasValue, bool viaChain, bool valueBlocked)
 {
     RigExecSampledInput sampled;
     sampled.path = path;
     sampled.value = value;
     sampled.hasValue = hasValue;
     sampled.viaChain = viaChain;
+    sampled.valueBlocked = valueBlocked;
     values.push_back(sampled);
 }
 
@@ -143,46 +144,93 @@ RigExecFrozenPurityAudit()
          RigExecFrozenPurity::Pure,
          "free functions over their arguments; no static, thread-local, or "
          "member state anywhere in the directory"},
+        {"rigExecMath extended deformer and frame kernels (deltaMushKernel "
+         "settings, latticeKernel regular grid, surfaceSnapKernel, "
+         "affineFrameKernels)",
+         RigExecFrozenPurity::Pure,
+         "free functions over their arguments; settings arrive in the "
+         "packet or the op inputs, and text settings parse from views"},
+        {"provider affine frame expressions (rigExecGraph/providerProgram.cpp "
+         "AffineFrame ops)",
+         RigExecFrozenPurity::Pure,
+         "ordinary provider ops over declared attribute values and provider "
+         "point frames; the expression table is namespace-scope, built at "
+         "load; token values are read as text, never interned"},
+        {"built-in external movers (movers/armatureMover.cpp, "
+         "movers/surfaceBindingMover.cpp)",
+         RigExecFrozenPurity::Pure,
+         "assembly and application read only the declared inputs and the "
+         "provider values; payload keys are plain strings; no token built "
+         "from text, no lock"},
         {"libs/rigExec/solverKernels.{h,cpp}",
          RigExecFrozenPurity::Pure,
          "ribbon/twist/rotation glue over caller buffers; no statics, no "
          "locks, no USD"},
         {"libs/rigExec/moverKernels.cpp exec callbacks and helpers",
          RigExecFrozenPurity::Pure,
-         "only static const tokens and the SIMD env flag; per-evaluation "
-         "state lives in the VdfContext, never in the kernel"},
+         "only static const tokens and the SIMD switch, read once at "
+         "library load (RigExecSimdEnabled); per-evaluation state lives in "
+         "the VdfContext, never in the kernel"},
         {"libs/rigExec/computations.cpp frame helpers",
          RigExecFrozenPurity::Pure,
          "static free functions over frames and params; guards and packing "
          "only, no retained state"},
         {"libs/rigExec/weightPackets.cpp packet math",
          RigExecFrozenPurity::Pure,
-         "only static const tokens; assembly over caller buffers"},
+         "one token table, touched at Build; assembly over caller "
+         "buffers"},
         {"baked step bodies (bakedPose/bakedGeometry/bakedWeights/"
          "bakedVerify.cpp)",
          RigExecFrozenPurity::Pure,
          "a step reads declared slots and writes declared slots; per-step "
-         "diagnostics and counters merge in step order, and BeginRun resets "
-         "them, so no result survives into the next run; steps never touch "
-         "USD (bakedProgram.cpp Run prologue comment)"},
-        {"baked schedule serial executor",
+         "diagnostics merge in canonical order; outputs persist between "
+         "jobs and exact value keys control propagation. Bodies consume "
+         "copied source facts and typed values without USD queries; API4 "
+         "plugins receive immutable compile data and declared typed inputs"},
+        {"property operations (bakedProperties.cpp)",
          RigExecFrozenPurity::Pure,
-         "program order on one thread; the reference every frozen run uses"},
-        {"baked schedule parallel executor",
-         RigExecFrozenPurity::LiveOnly,
-         "WorkDispatcher + per-run atomics on the shared arena at normal "
-         "priority; the frozen serial scope exists to keep workers out of "
-         "it (proposed hook in RigExecBakedRunSteps)"},
+         "ordinary shared-graph operations over sampled leaves, explicit "
+         "overrides, and bound property versions; no separate head executor"},
+        {"reader walks (bakedProperties.cpp RigExecBakedResolveReaderWalk)",
+         RigExecFrozenPurity::Pure,
+         "every declared read that a chain result or a record "
+         "can answer -- a chain-routed binding, a path leaf read through "
+         "the resolved inputs -- resolves from head leaves, override slots, "
+         "chain finals and records: no USD, no path built, no lock; live "
+         "and a frozen job call the same function"},
+        {"shared operation graph executor",
+         RigExecFrozenPurity::Pure,
+         "one readiness and value-cutoff loop for native, frozen, and runtime; "
+         "caller-owned workspaces retain exact semantic state. Dispatch "
+         "callbacks choose serial or parallel execution without changing dependencies"},
         {"per-point geometry kernels (moverGraph.cpp parallel regions)",
          RigExecFrozenPurity::Pure,
          "range-independent per-point math; the per-context serial hook "
          "(D4) keeps frozen runs on the serial variants, which compute "
          "byte-identical numbers"},
         {"RigExecBakedProgramImpl structure (steps, edges, clusters, "
-         "cones, walk, ladder tables)",
+         "cones, walk, rest and ladder op declarations)",
          RigExecFrozenPurity::EpochPinned,
          "immutable after Build; safe as the programDigest check names it, "
          "never as a live read of per-frame working state"},
+        {"skin layout handles (bakedGeometry.cpp SkinTopology ops)",
+         RigExecFrozenPurity::Pure,
+         "each layout operation consumes current sampled leaves and declared "
+         "property versions; unchanged semantic layouts retain their handle. "
+         "Geometry adopts the handle inside its owning operation"},
+        {"ladder tables (restM through rotOrder)",
+         RigExecFrozenPurity::Pure,
+         "RestCompose and LadderCompose are graph operations over copied "
+         "source facts and declared provider values; each owns its output slot"},
+        {"upstream layer (upstream, lastUpstream, upstreamOn, "
+         "upstreamChanged)",
+         RigExecFrozenPurity::Pure,
+         "per program: a frozen job sets its clone's from the vector's "
+         "admitted values and diffs them against the snapshot's by "
+         "RigExecBakedPlaceUpstream with the oracle placement off -- map "
+         "compares and leaf marks, no stage, no admission-set build; every "
+         "read they reach was sampled through the same values on the UI "
+         "thread"},
         {"skin/blend bindings (shared_ptr<const> topologies and layouts)",
          RigExecFrozenPurity::EpochPinned,
          "immutable snapshots resolved at Build/prologue; the worker runs "
@@ -202,32 +250,43 @@ RigExecFrozenPurityAudit()
          "live state by definition; the program's captured pointers to it "
          "are why workers run a private arena, never the live program"},
         {"RigExecBakedProgramImpl live pointers (evaluator, stage, "
-         "resolvedInputs, chainSnapshots, skinTopologies, "
-         "blendSampleShapes, profiler, guideTaps)",
+         "resolvedInputs, profiler, "
+         "guideTaps)",
          RigExecFrozenPurity::LiveOnly,
-         "read-what-the-evaluator-holds-now by design; a worker-owned "
-         "program copy would still point at the live evaluator, so the "
-         "region-only frozen entry is a program-side hook, not a copy"},
+         "snapshot construction clears live pointers; each frozen lane "
+         "rebinds only its private resolver, profiler, and copied epoch tables"},
         {"ExecUsdSystem / TapSet / Snapshot (dynamic path)",
          RigExecFrozenPurity::LiveOnly,
-         "OpenExec against the live stage; cannot run concurrently with "
-         "stage edits, which is why refusal rigs take the D7 memo path"},
-        {"wire-basis memo (moverGraph.cpp _CachedWireBasis, process-wide, "
-         "mutex-guarded)",
-         RigExecFrozenPurity::LiveOnly,
-         "thread-safe and answer-preserving (full-input compare on hit), "
-         "but a lock held across map insert; no baked step calls it, so "
-         "frozen runs bypass it; a wire deformer that ever reaches a step "
-         "makes its rig cache-ineligible until the program resolves bases "
-         "in its UI-thread prologue"},
-        {"RigExecStaticInputCache / RigExecSkinTopologyCache / "
-         "RigExecBlendSampleCache OBJECTS",
+         "owning-thread source capture and optional reference checks only; "
+         "workers consume fresh detached facts and compiled operations"},
+        {"wire-basis memo (moverGraph.h RigExecWireBasisCache, per owner)",
+         RigExecFrozenPurity::Pure,
+         "one per revision (GeomRevision::wireBasis) and one per dynamic "
+         "chain graph, each touched only by the step or task that runs it, "
+         "so no lock; answer-preserving (full-input compare on hit, a pure "
+         "rebuild on a miss); a frozen clone copies the revision's map, "
+         "whose entries are immutable and shared, and memoizes into its "
+         "own copy"},
+        {"revision kernel memo (rigExecMath/surfaceKernelCache.h: "
+         "adjacency, delta-mush rest, wrinkle topology, lattice basis)",
+         RigExecFrozenPurity::Pure,
+         "one per revision (GeomRevision::surfaceCache; the runtime's "
+         "revision scratch), touched only by the step that runs the "
+         "revision, so no lock; answer-preserving (raw-bit compare of every "
+         "input an entry reads, a pure rebuild on a miss); a frozen clone "
+         "shares the immutable entries and replaces only its own slots; "
+         "before a run dispatches, the thread running the program points "
+         "revisions' equal lattice binds at one immutable instance "
+         "(RigExecBakedShareLatticeBinds), and a bind over the budget is "
+         "streamed rather than retained"},
+        {"RigExecStaticInputCache / RigExecBlendSampleCache OBJECTS",
          RigExecFrozenPurity::LiveOnly,
          "single-threaded or notice-invalidated live state (THREAD rule); "
          "workers use sampled values and held bindings, never the caches"},
-        {"RigExecBakeReadRecorder",
+        {"RigExecSkinTopologyCache",
          RigExecFrozenPurity::LiveOnly,
-         "mutex plus per-run maps; a capture tool, never a worker input"},
+         "dynamic only; baked and frozen build layouts in the SkinTopology "
+         "op"},
         {"calibration/timing statics (bakedSchedule.cpp framesSeen)",
          RigExecFrozenPurity::LiveOnly,
          "unsynchronized diagnostic counters; frozen runs never enable "
@@ -320,6 +379,13 @@ RigExecPatchFrozenAvarConstants(const RigExecFrozenProgram &base,
     }
     const RigExecBakedProgramImpl &L = live.GetStepGraph();
     const RigExecBakedProgramImpl &S = base.program;
+    // Live's avar slots, carried below, hold the upstream values its last
+    // run placed; the copy keeps the snapshot's table as its history, so
+    // the two must name the same table.
+    if (L.lastUpstream != S.lastUpstream) {
+        return fail("upstream inputs moved since the snapshot: re-freeze, "
+                    "do not patch");
+    }
     // The same program object, or at least the same shape: a rebuild is
     // re-frozen, never patched.
     if (S.avarConstantBindings.size() != L.avarConstantBindings.size() ||
@@ -327,7 +393,8 @@ RigExecPatchFrozenAvarConstants(const RigExecFrozenProgram &base,
         return fail("avar region changed shape: re-freeze, do not patch");
     }
     auto snapshot = std::make_shared<RigExecFrozenProgram>();
-    _CloneImpl(S, &snapshot->program);
+    // Settled after the patch below; the copy's lanes inherit that verdict.
+    _CloneImpl(S, &snapshot->program, _CloneVerdict::Defer);
     RigExecBakedProgramImpl &P = snapshot->program;
     // Every field the live patch writes, carried onto the copy. The
     // consumed table for constant slots comes along too: no run recomputes
@@ -358,6 +425,7 @@ RigExecPatchFrozenAvarConstants(const RigExecFrozenProgram &base,
     P.promotedAvars = L.promotedAvars;
     P.varyingInputs = L.varyingInputs;
     P.avarConstants = L.avarConstants;
+    ++P.avarConstantSerial;
     // And every value edit routed since the snapshot was taken or last
     // patched, added to the copy's own pending ones: the copy's first run
     // owes them all. Asked of the per-index edit counts, not of the live
@@ -383,8 +451,12 @@ RigExecPatchFrozenAvarConstants(const RigExecFrozenProgram &base,
     }
     // The epoch's side-tables, unchanged by a constant patch.
     snapshot->jointSolverBinding = base.jointSolverBinding;
-    snapshot->guideTapsPresent = base.guideTapsPresent;
+    snapshot->solverGuidesPresent = base.solverGuidesPresent;
     snapshot->inputHeadPaths = base.inputHeadPaths;
+    _ForEachPatchableInput(P,[&](const auto &input) {
+        snapshot->inputConstants.push_back(VtValue(
+            input.sourceBacked ? input.sourceFallback : input.constant));
+    }, /*includeIntervening=*/false);
     snapshot->arrayKeys = base.arrayKeys;
     snapshot->chainBaseQueryValid = base.chainBaseQueryValid;
     snapshot->derivedBaseQueryValid = base.derivedBaseQueryValid;
@@ -392,6 +464,9 @@ RigExecPatchFrozenAvarConstants(const RigExecFrozenProgram &base,
     snapshot->moverHasEnabled = base.moverHasEnabled;
     snapshot->moverHasDefaultWeight = base.moverHasDefaultWeight;
     snapshot->moverHasMethod = base.moverHasMethod;
+    snapshot->moverDefaultWeightKeys = base.moverDefaultWeightKeys;
+    snapshot->weightArrayKeys = base.weightArrayKeys;
+    _SettleCloneVerdict(&P);
     *out = std::move(snapshot);
     return true;
 }

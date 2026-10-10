@@ -14,6 +14,7 @@
 #include "pxr/exec/exec/registerSchema.h"
 #include "pxr/exec/vdf/context.h"
 #include "pxr/exec/vdf/readIterator.h"
+#include "pxr/usd/usd/attribute.h"
 #include <type_traits>
 
 using rigExec::RigExecMoverParameters;
@@ -22,16 +23,25 @@ using rigExec::RigExecMoverExecTokens;
 PXR_NAMESPACE_USING_DIRECTIVE
 
 namespace {
+const TfToken _oracleToken0("rigExec:cage");
+const TfToken _oracleToken1("points");
+const TfToken _oracleToken2("rigExec:divisions");
+// The settings' fallbacks, built once: an oracle builds no token from text.
+const TfToken _legacyToken("legacy");
+const TfToken _regularGridToken("regularGrid");
+const TfToken _bsplineToken("bspline");
+const TfToken _localToken("local");
+
 
 template<class Read>
 bool Configure(RigExecMoverParameters *p,Read read,const std::vector<GfMatrix4d> &frames) {
     using namespace rigExec;
-    const auto evaluation=read("rigExec:evaluation",TfToken("legacy"));
-    if(evaluation!=TfToken("legacy") && evaluation!=TfToken("regularGrid"))return false;
-    p->latticeSettings.regularGrid=evaluation==TfToken("regularGrid");
+    const TfToken evaluation=read("rigExec:evaluation",_legacyToken);
+    if(evaluation!=_legacyToken && evaluation!=_regularGridToken)return false;
+    p->latticeSettings.regularGrid=evaluation==_regularGridToken;
     if(!p->latticeSettings.regularGrid)return true;
     const char *names[]={"rigExec:interpolationU","rigExec:interpolationV","rigExec:interpolationW"};
-    for(int a=0;a<3;++a)if(!RigExecLatticeInterpolationFromString(read(names[a],TfToken("bspline")).GetString(),&p->latticeSettings.interpolation[a]))return false;
+    for(int a=0;a<3;++a)if(!RigExecLatticeInterpolationFromString(read(names[a],_bsplineToken).GetText(),&p->latticeSettings.interpolation[a]))return false;
     const auto origin=read("rigExec:origin",GfVec3f(-.5f)),spacing=read("rigExec:spacing",GfVec3f(1));
     for(int a=0;a<3;++a) {p->latticeSettings.origin[a]=origin[a];p->latticeSettings.spacing[a]=spacing[a];}
     const auto mask=read("rigExec:mask",VtFloatArray());p->latticeSettings.mask.assign(mask.begin(),mask.end());
@@ -42,7 +52,7 @@ bool Configure(RigExecMoverParameters *p,Read read,const std::vector<GfMatrix4d>
         if(frames.size()!=2)return false;cage*=frames[0];target*=frames[1];
         if(!RigExecSurfaceSnapCanonicalComputedMatrix(&cage) || !RigExecSurfaceSnapCanonicalComputedMatrix(&target))return false;
     }
-    return RigExecLatticeCoordinateMaps(read("rigExec:pointSpace",TfToken("local")).GetString(),cage,target,
+    return RigExecLatticeCoordinateMaps(read("rigExec:pointSpace",_localToken).GetText(),cage,target,
         &p->targetToLattice,&p->latticeToTarget,&p->cageToLattice);
 }
 
@@ -121,8 +131,8 @@ rigExec::RigExecOracleResult
 _OracleLatticeMover(const rigExec::RigExecMoverOracleContext &ctx)
 {
     using rigExec::RigExecOracleResult;
-    const UsdStageRefPtr &stage = ctx.stage;
-    const UsdPrim &prim = ctx.prim;
+    const rigExec::RigExecOracleScene &stage = ctx.stage;
+    const rigExec::RigExecOraclePrim &prim = ctx.prim;
     const SdfPath &moverPath = ctx.moverPath;
     const SdfPath &target = ctx.target;
     const UsdTimeCode time = ctx.time;
@@ -137,8 +147,8 @@ _OracleLatticeMover(const rigExec::RigExecMoverOracleContext &ctx)
     // rigExec:restCagePoints -- a Default-time read and nothing
     // more, which is why the authored capture was removable.
     SdfPathVector cages;
-    if (UsdRelationship rel =
-            prim.GetRelationship(TfToken("rigExec:cage"))) {
+    if (rigExec::RigExecOracleRelationship rel =
+            prim.GetRelationship(_oracleToken0)) {
         rel.GetTargets(&cages);
     }
     if (cages.empty()) {
@@ -146,27 +156,26 @@ _OracleLatticeMover(const rigExec::RigExecMoverOracleContext &ctx)
     }
     SdfPath cagePoints = cages[0];
     if (cagePoints.IsPrimPath()) {
-        cagePoints = cagePoints.AppendProperty(TfToken("points"));
+        cagePoints = cagePoints.AppendProperty(_oracleToken1);
     }
     VtVec3fArray restCage, posedCage, base;
     // Rest is the BIND pose and always the authored value; only the
     // live cage carries a phase.
-    if (UsdAttribute a = stage->GetAttributeAtPath(cagePoints)) {
+    if (rigExec::RigExecOracleAttribute a = stage->GetAttributeAtPath(cagePoints)) {
         a.Get(&restCage, UsdTimeCode::Default());
     }
     rigExec::RigExecReadPhasedPoints(
-        stage, ctx.snapshots, time, prim, "rigExec:cage", cagePoints,
-        moverPath, &posedCage);
-    if (UsdAttribute a = stage->GetAttributeAtPath(target)) {
+        ctx, "rigExec:cage", cagePoints, &posedCage);
+    if (rigExec::RigExecOracleAttribute a = stage->GetAttributeAtPath(target)) {
         a.Get(&base, time);
     }
     GfVec3i divisions(0);
-    if (UsdAttribute a =
-            prim.GetAttribute(TfToken("rigExec:divisions"))) {
+    if (rigExec::RigExecOracleAttribute a =
+            prim.GetAttribute(_oracleToken2)) {
         a.Get(&divisions, time);
     }
     const auto read=[&](const char *name,auto fallback) {
-        const auto a=prim.GetAttribute(TfToken(name));if(a)ctx.resolved.GetAttribute(a,time,&fallback);return fallback;
+        const auto a=prim.GetAttribute(name);if(a)ctx.resolved.GetAttribute(a,time,&fallback);return fallback;
     };
     std::vector<GfMatrix4d> matrices;
     const auto frames=rigExec::RigExecRelationshipTargets(prim,"rigExec:frames");

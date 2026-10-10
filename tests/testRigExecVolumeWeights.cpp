@@ -2,21 +2,33 @@
 // volumetric extension): sphere, plane, and curve fields driving real
 // matrix movers, weight-object composition, the authored falloff spline,
 // and the base/preceding read phases of the sampled points.
-// Every case also asserts pose.moverGraphParityMismatches == 0, which is
+// Every case also asserts pose.referenceMismatches == 0, which is
 // the assertion that actually matters: it means the OpenExec
 // computeWeightPacket kernels and the CPU oracle independently computed
 // the same field. A volumetric weight that only worked on one of those
 // paths would still move points, just not the same points.
 // argv[1] = path to the examples directory; the codeless schema plugin is
 // expected at <examples>/../plugin/rigExecSchema/resources.
+#include "rigExec/inputReplay.h"
+#include "rigExec/bakedProgramImpl.h"
+#include "rigExec/bakedTrace.h"
 #include "rigExec/rigEvaluator.h"
 #include "rigExec/types.h"
 #include "rigExec/weightPackets.h"
+#include "rigExec/frameExtraction.h"
+#include "rigExec/frozenContext.h"
+#include "rigExecMath/pointFrame.h"
+#include "rigExecPoseCompare.h"
 #include <limits>
+#include <algorithm>
 
+#include "pxr/base/gf/matrix4d.h"
+#include "pxr/base/gf/rotation.h"
 #include "pxr/base/plug/registry.h"
+#include "pxr/base/tf/errorMark.h"
 #include "pxr/base/tf/getenv.h"
 #include "pxr/base/tf/pathUtils.h"
+#include "pxr/base/tf/stringUtils.h"
 #include "pxr/base/ts/knot.h"
 #include "pxr/base/ts/spline.h"
 #include "pxr/usd/sdf/types.h"
@@ -26,7 +38,10 @@
 #include "pxr/usd/usd/stage.h"
 #include "pxr/usd/usdGeom/xform.h"
 
+#include <cstdint>
 #include <cstdio>
+#include <memory>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -36,7 +51,7 @@ using namespace rigExec;
 static int failures = 0;
 
 // Whether this run asks for the BAKED program instead of the CPU oracle.
-// The suite's default is cpuParityMode, which is what it was written for:
+// The suite's default is cpuReference, which is what it was written for:
 // every expectation below is checked against an independently written CPU
 // resolver as well as against exec. That mode deliberately turns the baked
 // program OFF -- the oracle and the program are alternatives, not peers, and
@@ -64,17 +79,12 @@ BakedPathRequested()
 static void
 CheckTheHarnessRan(const char *label, const RigExecRigPose &pose)
 {
-    if (pose.moverGraphParityMismatches != 0) {
-        std::printf("%s: %zu graph/CPU parity MISMATCHES\n", label,
-                    size_t(pose.moverGraphParityMismatches));
+    if (pose.referenceMismatches != 0) {
+        std::printf("%s: %zu independent scalar reference MISMATCHES\n", label,
+                    size_t(pose.referenceMismatches));
         ++failures;
     }
-    if (pose.bakedParityMismatches != 0) {
-        std::printf("%s: %zu baked parity mismatch(es)\n", label,
-                    size_t(pose.bakedParityMismatches));
-        ++failures;
-    }
-    if (!BakedPathRequested() && pose.moverGraphParityAgreements == 0) {
+    if (!BakedPathRequested() && pose.referenceAgreements == 0) {
         std::printf("%s: parity harness never ran\n", label);
         ++failures;
     }
@@ -203,7 +213,7 @@ struct Fixture {
     VtVec3fArray Resolve(const char *label)
     {
         RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
-        evaluator.cpuParityMode = !BakedPathRequested();
+        evaluator.cpuReference = !BakedPathRequested();
         std::vector<std::string> errors;
         if (!evaluator.Compile(&errors)) {
             for (const std::string &e : errors) {
@@ -376,7 +386,7 @@ TestSphereDirectionalEdits()
     CHECK(neg.Set(1.0f));
     f.MakeMover(SdfPath("/Asset/Rig/Movers/M"), v.GetPath());
     RigExecRigEvaluator evaluator(f.stage, SdfPath("/Asset/Rig"));
-    evaluator.cpuParityMode = !BakedPathRequested();
+    evaluator.cpuReference = !BakedPathRequested();
     CHECK(evaluator.Compile());
     auto check = [&](UsdTimeCode time, float wp, float wn) {
         const auto pose = evaluator.Evaluate(time);
@@ -502,7 +512,7 @@ TestPlaneWeight()
 // The bound lives in TWO independent implementations -- the exec kernel in
 // moverKernels.cpp and the CPU oracle in rigEvaluator.cpp -- and a bound
 // applied on only one of them would still move points, just not the same
-// ones, which is exactly the failure moverGraphParityMismatches exists to
+// ones, which is exactly the failure referenceMismatches exists to
 // catch.
 static void
 TestPlaneBounded()
@@ -604,7 +614,7 @@ TestPlaneBoundsEpochSplit()
 
     RigExecRigEvaluator evaluator(f.stage, SdfPath("/Asset/Rig"));
 
-    evaluator.cpuParityMode = !BakedPathRequested();
+    evaluator.cpuReference = !BakedPathRequested();
     std::vector<std::string> errors;
     if (!evaluator.Compile(&errors)) {
         for (const std::string &e : errors) {
@@ -703,7 +713,7 @@ TestPlaneBoundedInvalidExtents()
 
     RigExecRigEvaluator evaluator(f.stage, SdfPath("/Asset/Rig"));
 
-    evaluator.cpuParityMode = !BakedPathRequested();
+    evaluator.cpuReference = !BakedPathRequested();
     std::vector<std::string> errors;
     if (!evaluator.Compile(&errors)) {
         for (const std::string &e : errors) {
@@ -734,7 +744,7 @@ TestPlaneBoundedInvalidExtents()
     extentU.Set(2.0f);
     const RigExecRigPose fixed = evaluator.Evaluate(UsdTimeCode::Default());
     CHECK(fixed.valid);
-    CHECK(fixed.moverGraphParityMismatches == 0);
+    CHECK(fixed.referenceMismatches == 0);
     const auto fixedIt = fixed.movedProperties.find(Fixture::Target());
     CHECK(fixedIt != fixed.movedProperties.end());
     if (fixedIt != fixed.movedProperties.end()) {
@@ -1117,7 +1127,7 @@ TestVolumeWeightTargetMismatchSkipsMover()
 
     RigExecRigEvaluator evaluator(f.stage, SdfPath("/Asset/Rig"));
 
-    evaluator.cpuParityMode = !BakedPathRequested();
+    evaluator.cpuReference = !BakedPathRequested();
     std::vector<std::string> errors;
     CHECK(evaluator.Compile(&errors));
     CHECK(evaluator.GetSkippedOperations().count(SdfPath("/Asset/Rig/Movers/M")) == 1);
@@ -1152,7 +1162,7 @@ TestCurveWeightRejectsTwoCurves()
 
     RigExecRigEvaluator evaluator(f.stage, SdfPath("/Asset/Rig"));
 
-    evaluator.cpuParityMode = !BakedPathRequested();
+    evaluator.cpuReference = !BakedPathRequested();
     std::vector<std::string> errors;
     CHECK(!evaluator.Compile(&errors));
     CHECK(!errors.empty());
@@ -1242,40 +1252,74 @@ TestCurrentPhaseThroughCombine()
     }
 }
 
-// A composition cycle is an authoring error and must be DIAGNOSED. The
-// CPU resolver recurses through the same edges with no guard of its own,
-// so an undetected cycle exhausts the stack rather than answering wrong.
+// Only the composition SCC is excluded. Its geometry consumer receives an
+// invalid packet and keeps the authored base; an unrelated property still runs.
 static void
-TestCombineCycleSkipsMover()
+TestCombineCycleSetsAsideMembers()
 {
-    Fixture f(VtVec3fArray{GfVec3f(0, 0, 0), GfVec3f(1, 0, 0)},
-              GfVec3d(0, 2, 0));
+    const VtVec3fArray base{GfVec3f(0,0,0),GfVec3f(1,0,0)};
+    Fixture f(base,GfVec3d(0,2,0));
     auto makeCombine = [&](const char *name) {
-        UsdPrim c = f.stage->DefinePrim(
-            SdfPath(std::string("/Asset/Rig/Weights/") + name),
+        UsdPrim c=f.stage->DefinePrim(
+            SdfPath(std::string("/Asset/Rig/Weights/")+name),
             TfToken("RigExecCombineWeight"));
-        c.CreateRelationship(TfToken("rigExec:weightTarget"))
-            .SetTargets({Fixture::Target()});
+        c.CreateRelationship(TfToken("rigExec:weightTarget")).SetTargets({Fixture::Target()});
         return c;
     };
-    UsdPrim a = makeCombine("CycleA");
-    UsdPrim b = makeCombine("CycleB");
-    a.GetRelationship(TfToken("rigExec:inputWeights"))
-        .SetTargets({b.GetPath()});
-    b.CreateRelationship(TfToken("rigExec:inputWeights"))
-        .SetTargets({a.GetPath()});
-    f.MakeMover(SdfPath("/Asset/Rig/Movers/M"), a.GetPath());
+    const UsdPrim a=makeCombine("CycleA"),b=makeCombine("CycleB");
+    a.CreateRelationship(TfToken("rigExec:inputWeights")).SetTargets({b.GetPath()});
+    b.CreateRelationship(TfToken("rigExec:inputWeights")).SetTargets({a.GetPath()});
+    const SdfPath moverPath("/Asset/Rig/Movers/M");
+    f.MakeMover(moverPath,a.GetPath());
+    const auto channel=f.stage->DefinePrim(SdfPath("/Asset/Rig/Channels/Independent"));
+    const auto scalar=channel.CreateAttribute(TfToken("value"),SdfValueTypeNames->Float);
+    scalar.Set(0.0f);
+    const auto sibling=f.stage->DefinePrim(SdfPath("/Asset/Rig/Movers/Independent"),TfToken("RigExecFloatMathMover"));
+    sibling.ApplyAPI(TfToken("RigExecMoverAPI"));
+    sibling.CreateRelationship(TfToken("rigExec:moves")).SetTargets({scalar.GetPath()});
+    sibling.CreateAttribute(TfToken("rigExec:operation"),SdfValueTypeNames->Token).Set(TfToken("add"));
+    sibling.CreateAttribute(TfToken("inputs:value"),SdfValueTypeNames->Float).Set(7.0f);
 
-    RigExecRigEvaluator evaluator(f.stage, SdfPath("/Asset/Rig"));
-
-    evaluator.cpuParityMode = !BakedPathRequested();
-    std::vector<std::string> errors;
-    CHECK(evaluator.Compile(&errors));
-    CHECK(evaluator.GetSkippedOperations().count(SdfPath("/Asset/Rig/Movers/M")) == 1);
-    CHECK(evaluator.Evaluate(UsdTimeCode::Default()).valid);
-    CHECK(!errors.empty());
+    RigExecRigEvaluator evaluator(f.stage,SdfPath("/Asset/Rig"));
+    std::vector<std::string> errors;CHECK(evaluator.Compile(&errors));
+    CHECK(evaluator.GetSkippedOperations().count(moverPath)==0);
+    CHECK(evaluator.GetBakedProgram());if(!evaluator.GetBakedProgram())return;
+    const auto &B=evaluator.GetBakedProgram()->GetStepGraph();
+    CHECK(B.opGraph.cycles.size()==1);
+    bool namedA=false,namedB=false;
+    for(const auto &loop:B.opGraph.cycles)for(const auto &key:loop) {
+        namedA|=key.find(a.GetPath().GetString())!=std::string::npos;
+        namedB|=key.find(b.GetPath().GetString())!=std::string::npos;
+    }
+    CHECK(namedA && namedB);CHECK(B.excludedSteps.size()==2);
+    for(const auto &step:B.excludedSteps) {
+        CHECK(step.kind==RigExecBakedStepKind::WeightPacket);
+        if(step.kind==RigExecBakedStepKind::WeightPacket) {
+            const auto &path=B.weightObjects[size_t(step.object)].path;
+            CHECK(path==a.GetPath() || path==b.GetPath());
+        }
+    }
+    const auto builds=evaluator.GetBakedProgramBuildCount();
+    const auto check=[&](const RigExecRigPose &pose) {
+        CHECK(pose.valid);
+        const auto points=pose.movedProperties.find(Fixture::Target());
+        CHECK(points!=pose.movedProperties.end());
+        if(points!=pose.movedProperties.end())CHECK(points->second.IsHolding<VtVec3fArray>() && points->second.UncheckedGet<VtVec3fArray>()==base);
+        const auto value=pose.movedProperties.find(scalar.GetPath());
+        CHECK(value!=pose.movedProperties.end());
+        if(value!=pose.movedProperties.end())CHECK(value->second.IsHolding<float>() && value->second.UncheckedGet<float>()==7.0f);
+        for(const auto &step:B.excludedSteps)if(step.kind==RigExecBakedStepKind::WeightPacket)
+            CHECK(!B.weightPackets[size_t(step.object)].valid);
+    };
+    check(evaluator.Evaluate(UsdTimeCode::Default()));
+    const auto held=evaluator.Evaluate(UsdTimeCode::Default());check(held);CHECK(held.executedOpCount==0);
+    f.joint.GetAttribute(TfToken("avars:ty")).Set(4.0);
+    check(evaluator.Evaluate(UsdTimeCode::Default()));
+    CHECK(evaluator.GetBakedProgramBuildCount()==builds);
+    bool diagnosed=false;
+    for(const auto &error:errors)diagnosed|=error.find("operation cycle")!=std::string::npos;
+    CHECK(diagnosed);
 }
-
 
 // A volume weight object bound to a CONSTRAINT.
 // The reachable shape of it is a GEOMETRY-DOMAIN constraint: a volumetric
@@ -1358,7 +1402,7 @@ struct ConstraintEnvelopeFixture {
     VtVec3fArray Resolve(const std::string &label)
     {
         RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
-        evaluator.cpuParityMode = !BakedPathRequested();
+        evaluator.cpuReference = !BakedPathRequested();
         std::vector<std::string> errors;
         if (!evaluator.Compile(&errors)) {
             for (const std::string &e : errors) {
@@ -1431,6 +1475,537 @@ TestVolumeWeightOnAConstraint(const char *readPhase)
     CHECK(differs);
 }
 
+// RigExecVolumePlacement: the decomposition of a usable final frame, and the
+// identity for every frame that is not one.
+static void
+TestVolumePlacementGate()
+{
+    GfMatrix4d placed(1.0);
+    placed.SetRotate(GfRotation(GfVec3d(0, 0, 1), 30.0));
+    placed.SetTranslateOnly(GfVec3d(1, 2, 3));
+    const RigExecPointFrame usable =
+        RigExecMatrixToPoints(RigExecIdentityLandmarks(), placed);
+    GfMatrix4d expected(1.0);
+    CHECK(RigExecPointsToMatrix(RigExecIdentityLandmarks(), usable.points,
+                                &expected));
+    CHECK(RigExecVolumePlacement(usable) == expected);
+    CHECK(GfIsClose(RigExecVolumePlacement(usable), placed, 1e-9));
+
+    const GfMatrix4d identity(1.0);
+    RigExecPointFrame degenerate = usable;
+    degenerate.flags |= RigExecPointFrameDegenerate;
+    CHECK(RigExecVolumePlacement(degenerate) == identity);
+
+    RigExecPointFrame invalid = usable;
+    invalid.flags = 0;
+    CHECK(RigExecVolumePlacement(invalid) == identity);
+
+    RigExecPointFrame notFinite = usable;
+    notFinite.points[2][1] = std::numeric_limits<double>::quiet_NaN();
+    CHECK(RigExecVolumePlacement(notFinite) == identity);
+    notFinite = usable;
+    notFinite.points[0][0] = std::numeric_limits<double>::infinity();
+    CHECK(RigExecVolumePlacement(notFinite) == identity);
+}
+
+// Animated incoming geometry reruns the field while retaining placement.
+// The independent scalar reference checks the result; a held repeat does no work.
+static void
+TestTheOracleReadsTheProgramsPlacements()
+{
+    const char *label = "oracle reads the program's placements";
+    const VtVec3fArray base{GfVec3f(0, 0, 0), GfVec3f(0.5f, 0, 0),
+                            GfVec3f(1, 0, 0), GfVec3f(2, 0, 0)};
+    Fixture f(base, GfVec3d(0, 2, 0));
+    VtVec3fArray later = base;
+    for (GfVec3f &p : later) {
+        p += GfVec3f(0.25f, 0, 0);
+    }
+    const UsdAttribute points = f.stage->GetAttributeAtPath(Fixture::Target());
+    points.Set(base, UsdTimeCode(1));
+    points.Set(later, UsdTimeCode(2));
+
+    UsdPrim v = f.MakeVolume("Sphere", TfToken("RigExecSphereWeight"),
+                             GfVec3d(0, 0, 0), 0.0f, 3.0f);
+    v.GetRelationship(TfToken("rigExec:weightTarget"))
+        .SetMetadata(TfToken("rigExecReadPhase"), std::string("preceding"));
+    f.MakeMover(SdfPath("/Asset/Rig/Movers/Lift"), v.GetPath());
+
+    RigExecRigEvaluator E(f.stage, SdfPath("/Asset/Rig"));
+    E.SetProfilingEnabled(true);
+    std::vector<std::string> errors;
+    if (!E.Compile(&errors)) {
+        for (const std::string &e : errors) {
+            std::printf("%s: compile error: %s\n", label, e.c_str());
+        }
+        ++failures;
+        return;
+    }
+    const RigExecRigPose first = E.Evaluate(UsdTimeCode(1));
+    if (!first.valid || E.GetBakedGenerationCount() != 1) {
+        std::printf("FAIL %s: the first generation is not baked\n", label);
+        ++failures;
+        return;
+    }
+    GfMatrix4d poison(1.0);
+    poison.SetTranslate(GfVec3d(100, 0, 0));
+    E.cpuReference = true;
+
+    E.ClearProfile();
+    const RigExecRigPose second = E.Evaluate(UsdTimeCode(2));
+    CHECK(second.valid);
+    CHECK(E.GetBakedGenerationCount() == 2);
+    CHECK(second.comparisonMismatches == 0);
+    size_t placements = 0, assembles = 0, fields = 0;
+    for (const RigExecOpTraceEntry &entry : E.GetLastOpTrace()) {
+        placements += entry.kind == "VolumePlacements";
+        assembles += entry.kind == "RevisionStatic";
+        fields += entry.kind == "WeightField";
+    }
+    // Animated incoming points rerun the field and consumer without replacing placement.
+    CHECK(placements == 0);
+    CHECK(assembles > 0);
+    CHECK(fields > 0);
+    CHECK(second.referenceMismatches == 0);
+    CHECK(second.referenceAgreements > 0);
+    const auto held = E.Evaluate(UsdTimeCode(2));
+    CHECK(held.valid && held.movedProperties == second.movedProperties);
+    for (const auto &entry : E.GetLastOpTrace()) {
+        CHECK(entry.kind != "WeightField");
+        CHECK(entry.kind != "RevisionStatic");
+    }
+
+    RigExecRigEvaluator fresh(f.stage, SdfPath("/Asset/Rig"));
+    fresh.cpuReference = true;
+    CHECK(fresh.Compile(&errors));
+    const RigExecRigPose reference = fresh.Evaluate(UsdTimeCode(2));
+    CHECK(reference.valid);
+
+    const auto got = second.movedProperties.find(Fixture::Target());
+    const auto want = reference.movedProperties.find(Fixture::Target());
+    CHECK(got != second.movedProperties.end());
+    CHECK(want != reference.movedProperties.end());
+    if (got == second.movedProperties.end() ||
+        want == reference.movedProperties.end()) {
+        return;
+    }
+    const VtVec3fArray gotPoints = got->second.Get<VtVec3fArray>();
+    CHECK(gotPoints == want->second.Get<VtVec3fArray>());
+    // Not vacuous: the field reaches the points, so a far-away placement
+    // would have moved none of them.
+    bool lifted = false;
+    for (size_t i = 0; i < gotPoints.size() && i < later.size(); ++i) {
+        lifted = lifted || !Near(gotPoints[i], later[i]);
+    }
+    CHECK(lifted);
+    CHECK(second.weightFrames == reference.weightFrames);
+    const auto frame = second.weightFrames.find(v.GetPath());
+    CHECK(frame != second.weightFrames.end() && frame->second != poison);
+}
+
+// A supported volume avar edit and lift both use the common graph.
+// Published placement must move to the standing value and return to authored space.
+static void
+TestReleasedOverridePublishesTheProgramsPlacements()
+{
+    const char *label = "released override publishes program placements";
+    const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    const bool imported = rigExec::RigExecInputReplayImportFromString(stage->GetRootLayer(), R"(#usda 1.0
+(
+    startTimeCode = 1
+    endTimeCode = 10
+)
+def Xform "Asset"
+{
+    def RigExecRoot "Rig"
+    {
+        def RigExecControl "Root"
+        {
+            double avars:rz = 0
+            double avars:rz.timeSamples = {1: 0, 2: 45}
+        }
+        def RigExecJoint "Joint"
+        {
+            matrix4d rest:space = ((1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 1, 0, 1))
+            double avars:rz.connect = </Asset/Rig/Root.avars:rz>
+        }
+        def RigExecSphereWeight "Guide"
+        {
+            double avars:ty = 3
+            float inputs:falloffMin = 0
+            float inputs:falloffMax = 1
+        }
+    }
+}
+)");
+    CHECK(imported);
+    const SdfPath rig("/Asset/Rig"), guide("/Asset/Rig/Guide");
+    RigExecRigEvaluator E(stage, rig);
+    E.SetProfilingEnabled(true);
+    std::vector<std::string> errors;
+    if (!E.Compile(&errors)) {
+        for (const std::string &e : errors) {
+            std::printf("FAIL %s: compile error: %s\n", label, e.c_str());
+        }
+        ++failures;
+        return;
+    }
+    CHECK(E.Evaluate(UsdTimeCode(1)).valid);
+    const RigExecRigPose answer = E.Evaluate(UsdTimeCode(2));
+    CHECK(answer.valid);
+    if (E.GetBakedGenerationCount() != 2) {
+        std::printf("FAIL %s: the first generations are not baked\n", label);
+        ++failures;
+        return;
+    }
+    const auto authored = answer.weightFrames.find(guide);
+    CHECK(authored != answer.weightFrames.end() &&
+          authored->second.ExtractTranslation()[1] == 3.0);
+    for (const RigExecBakedStep &step :
+         E.GetBakedProgram()->GetStepGraph().steps) {
+        CHECK(!step.externalReads);
+    }
+
+    RigExecValueOverride drag;
+    drag.prim = guide;
+    drag.attribute = TfToken("avars:ty");
+    drag.value = VtValue(50.0);
+    E.SetInteractiveOverrides({drag});
+    const RigExecRigPose held = E.Evaluate(UsdTimeCode(2));
+    CHECK(held.valid);
+    CHECK(E.GetBakedGenerationCount() == 3);
+    CHECK(E.GetBakedProgram() != nullptr);
+    // Not vacuous: the walk's map now holds a placement the program's table
+    // does not.
+    const auto dragged = held.weightFrames.find(guide);
+    CHECK(dragged != held.weightFrames.end() &&
+          dragged->second.ExtractTranslation()[1] == 50.0);
+
+    E.ClearInteractiveOverrides();
+    E.ClearProfile();
+    const RigExecRigPose released = E.Evaluate(UsdTimeCode(2));
+    CHECK(released.valid);
+    CHECK(E.GetBakedGenerationCount() == 4);
+    bool placementRan = false;
+    for (const RigExecOpTraceEntry &entry : E.GetLastOpTrace()) {
+        placementRan = placementRan || entry.kind == "VolumePlacements";
+    }
+    CHECK(placementRan);
+    if (released.weightFrames != answer.weightFrames) {
+        std::printf("FAIL %s: weightFrames differ from the earlier baked "
+                    "answer\n", label);
+        ++failures;
+    }
+}
+
+// The step of \p kind labelled exactly "<kind> <path>", or SIZE_MAX with a
+// failure when there is not exactly one.
+static size_t
+OneOpGraphStep(const std::vector<RigExecOpGraphNode> &graph,
+               const std::string &kind, const SdfPath &path, const std::string &suffix = "")
+{
+    const std::string label = path.GetString();
+    size_t found = SIZE_MAX, count = 0;
+    for (const RigExecOpGraphNode &node : graph) {
+        if (node.kind == kind && node.label == label &&
+            (suffix.empty() || (suffix==" base" && std::any_of(node.writes.begin(),node.writes.end(),[](const auto &range){return range.domain=="WeightFramesBase";})))) {
+            found = node.step;
+            ++count;
+        }
+    }
+    if (count != 1) {
+        std::printf("FAIL: expected one step labelled %s, found %zu\n",
+                    label.c_str(), count);
+        ++failures;
+        return SIZE_MAX;
+    }
+    return found;
+}
+
+// The per-consumer WeightField reads exactly the declared volume closure's
+// Base placements and precedes StripSmooth's packet assembly.
+static void
+CheckPlacementReads(const UsdStageRefPtr &stage, const std::string &label,
+                    const std::vector<SdfPath> &outside)
+{
+    const SdfPath rig("/PlacementAsset/Rig");
+    const SdfPath smooth("/PlacementAsset/Rig/GeometryMovers/StripSmooth");
+    RigExecRigEvaluator E(stage, rig);
+    std::vector<std::string> errors;
+    TfErrorMark mark;
+    const bool compiled = E.Compile(&errors);
+    const bool valid = compiled && E.Evaluate(UsdTimeCode(1.0)).valid;
+    if (!compiled || !valid || E.GetBakedGenerationCount() != 1) {
+        std::printf("FAIL %s: no baked generation (compiled %d, valid %d)\n",
+                    label.c_str(), int(compiled), int(valid));
+        for (const std::string &e : errors) {
+            std::printf("  compile error: %s\n", e.c_str());
+        }
+        ++failures;
+        return;
+    }
+    if (!mark.IsClean()) {
+        for (const TfError &error : mark) {
+            std::printf("FAIL %s: build posted: %s\n", label.c_str(),
+                        error.GetCommentary().c_str());
+        }
+        ++failures;
+        mark.Clear();
+    }
+    const std::vector<RigExecOpGraphNode> graph = E.GetOpGraph();
+    const size_t smoothStatic = OneOpGraphStep(graph, "RevisionStatic", smooth);
+    const size_t placeA = OneOpGraphStep(
+        graph, "VolumePlacements",
+        SdfPath("/PlacementAsset/Rig/Joints/A/SphereA"), " base");
+    const size_t placeB = OneOpGraphStep(
+        graph, "VolumePlacements",
+        SdfPath("/PlacementAsset/Rig/Joints/B/SphereB"), " base");
+    std::vector<size_t> placeOutside;
+    for (const SdfPath &volume : outside) {
+        placeOutside.push_back(
+            OneOpGraphStep(graph, "VolumePlacements", volume, " base"));
+    }
+    if (smoothStatic == SIZE_MAX || placeA == SIZE_MAX ||
+        placeB == SIZE_MAX) {
+        return;
+    }
+    using Range = std::pair<uint32_t, uint32_t>;
+    const auto placementsOf = [](const std::vector<RigExecOpSlotRange> &rs) {
+        std::set<Range> out;
+        for (const RigExecOpSlotRange &r : rs) {
+            if (r.domain == "WeightFramesBase") {
+                out.insert({r.first, r.last});
+            }
+        }
+        return out;
+    };
+    std::set<Range> expected = placementsOf(graph[placeA].writes);
+    const std::set<Range> writesB = placementsOf(graph[placeB].writes);
+    CHECK(expected.size() == 1 && writesB.size() == 1);
+    expected.insert(writesB.begin(), writesB.end());
+    CHECK(expected.size() == 2);
+    size_t fieldStep = SIZE_MAX;
+    for (size_t pred : graph[smoothStatic].preds) {
+        if (graph[pred].kind != "WeightField") continue;
+        CHECK(fieldStep == SIZE_MAX);
+        fieldStep = pred;
+    }
+    CHECK(fieldStep != SIZE_MAX);
+    if (fieldStep == SIZE_MAX) return;
+    const RigExecOpGraphNode &reader = graph[fieldStep];
+    const std::set<Range> read = placementsOf(reader.reads);
+    if (read != expected) {
+        std::printf("FAIL %s: StripSmooth's WeightField reads %zu "
+                    "WeightFramesBase range(s), not exactly SphereA's and "
+                    "SphereB's\n", label.c_str(), read.size());
+        ++failures;
+    }
+    const std::set<size_t> preds(reader.preds.begin(), reader.preds.end());
+    CHECK(preds.count(placeA) == 1);
+    CHECK(preds.count(placeB) == 1);
+    for (const size_t place : placeOutside) {
+        if (place == SIZE_MAX) {
+            continue;
+        }
+        const std::set<Range> writes = placementsOf(graph[place].writes);
+        CHECK(writes.size() == 1);
+        for (const Range &w : writes) {
+            CHECK(!read.count(w));
+        }
+        CHECK(!preds.count(place));
+    }
+}
+
+// tests/fixtures/volume_placements.usda: two volumes with one placement step
+// each. SphereB rides B, which BAim revises after BFK, so its final
+// placement (pose.weightFrames, the oracle) differs from its base placement
+// (BSkin's packet). A and B are driven by separate solvers in separate
+// hierarchies, so a drag on one control re-runs its own volume's placement
+// step and not the other's.
+static void
+TestVolumePlacementsAreIndependent(const std::string &examplesDir)
+{
+    const char *label = "volume placements";
+    const std::string stagePath =
+        examplesDir + "/../tests/fixtures/volume_placements.usda";
+    const SdfPath rig("/PlacementAsset/Rig");
+    const SdfPath sphereA("/PlacementAsset/Rig/Joints/A/SphereA");
+    const SdfPath sphereB("/PlacementAsset/Rig/Joints/B/SphereB");
+    const SdfPath aCtl("/PlacementAsset/Rig/Controls/ACtl");
+    const SdfPath bCtl("/PlacementAsset/Rig/Controls/BCtl");
+    const SdfPath smooth("/PlacementAsset/Rig/GeometryMovers/StripSmooth");
+    const SdfPath skin = smooth.AppendChild(TfToken("BSkin"));
+    const UsdStageRefPtr stage = UsdStage::Open(stagePath);
+    // The same rig with BAim disabled: B's final frame equals its base.
+    const UsdStageRefPtr unaimedStage = UsdStage::Open(stagePath);
+    CHECK(stage && unaimedStage);
+    if (!stage || !unaimedStage) {
+        return;
+    }
+    unaimedStage->SetEditTarget(unaimedStage->GetSessionLayer());
+    const UsdPrim aim = unaimedStage->GetPrimAtPath(
+        SdfPath("/PlacementAsset/Rig/BFollow/BAim"));
+    CHECK(aim && aim.GetAttribute(TfToken("inputs:enabled")).Set(false));
+
+    std::vector<std::string> errors;
+    const auto open = [&](const UsdStageRefPtr &s,
+                          bool referenceChecks) {
+        auto E = std::make_unique<RigExecRigEvaluator>(s, rig);
+        if (!E->Compile(&errors)) {
+            for (const std::string &e : errors) {
+                std::printf("FAIL %s: compile error: %s\n", label, e.c_str());
+            }
+            ++failures;
+            return std::unique_ptr<RigExecRigEvaluator>();
+        }
+        E->cpuReference = referenceChecks;
+        E->SetPublishWeightFields(true);
+        return E;
+    };
+    const auto baked = open(stage, false);
+    const auto walk = open(stage, true);
+    const auto unaimed = open(unaimedStage, true);
+    if (!baked || !walk || !unaimed) {
+        return;
+    }
+    CHECK(baked->IsBakeable());
+    baked->SetProfilingEnabled(true);
+
+    const auto frameOf = [](const RigExecRigPose &pose, const SdfPath &path) {
+        const auto found = pose.weightFrames.find(path);
+        return found == pose.weightFrames.end() ? GfMatrix4d(0.0)
+                                                : found->second;
+    };
+    for (const double frame : {1.0, 5.0, 10.0}) {
+        const std::string where = TfStringPrintf("%s frame %g", label, frame);
+        const size_t before = baked->GetBakedGenerationCount();
+        const RigExecRigPose live = baked->Evaluate(UsdTimeCode(frame));
+        const RigExecRigPose dynamic = walk->Evaluate(UsdTimeCode(frame));
+        const RigExecRigPose base = unaimed->Evaluate(UsdTimeCode(frame));
+        CHECK(live.valid && dynamic.valid && base.valid);
+        CHECK(baked->GetBakedGenerationCount() == before + 1);
+        rigExecTest::CompareEveryMap(&failures, where, dynamic, live);
+        CHECK(live.weightFrames.size() == 2);
+        // weightFrames is the FINAL placement: the aim moves SphereB's and
+        // leaves SphereA's alone.
+        CHECK(frameOf(live, sphereB) != frameOf(base, sphereB));
+        CHECK(frameOf(live, sphereA) == frameOf(base, sphereA));
+        // BSkin's packet is placed at SphereB's BASE frame, which the aim
+        // does not revise: the same field with and without it.
+        const auto field = live.weightFields.find(sphereB);
+        const auto baseField = base.weightFields.find(sphereB);
+        CHECK(field != live.weightFields.end() &&
+              baseField != base.weightFields.end());
+        if (field != live.weightFields.end() &&
+            baseField != base.weightFields.end()) {
+            CHECK(field->second.weights == baseField->second.weights);
+            bool reaches = false;
+            for (const float w : field->second.weights) {
+                reaches = reaches || w > 0.0f;
+            }
+            CHECK(reaches);
+        }
+    }
+
+    // Drags at frame 5, after a repeat of it. Each control reaches its own
+    // volume's placement step and not the other's; the current-phase field
+    // (StripSmooth) reads both placements and re-runs either way.
+    CHECK(baked->Evaluate(UsdTimeCode(5.0)).valid);
+    const RigExecRigPose still = walk->Evaluate(UsdTimeCode(5.0));
+    struct Drag {
+        SdfPath control, placed, kept;
+        double rz;
+    };
+    for (const Drag &drag : {Drag{aCtl, sphereA, sphereB, 50.0},
+                             Drag{bCtl, sphereB, sphereA, -40.0}}) {
+        const std::string where =
+            std::string(label) + " drag " + drag.control.GetName();
+        const std::vector<RigExecValueOverride> overrides{
+            RigExecValueOverride{drag.control, TfToken(),
+                                 TfToken("avars:rz"), VtValue(drag.rz)}};
+        baked->SetInteractiveOverrides(overrides);
+        walk->SetInteractiveOverrides(overrides);
+        baked->ClearProfile();
+        const size_t before = baked->GetBakedGenerationCount();
+        const RigExecRigPose live = baked->Evaluate(UsdTimeCode(5.0));
+        const RigExecRigPose dynamic = walk->Evaluate(UsdTimeCode(5.0));
+        CHECK(live.valid && dynamic.valid);
+        CHECK(baked->GetBakedGenerationCount() == before + 1);
+        rigExecTest::CompareEveryMap(&failures, where, dynamic, live);
+        // The drag moved its own volume and nothing of the other.
+        CHECK(frameOf(live, drag.placed) != frameOf(still, drag.placed));
+        CHECK(frameOf(live, drag.kept) == frameOf(still, drag.kept));
+        const std::vector<RigExecOpTraceEntry> trace = baked->GetLastOpTrace();
+        // Exact labels: StripSmooth's is a prefix of BSkin's.
+        const auto graphForTrace = baked->GetOpGraph();
+        const auto ran = [&trace,&graphForTrace](const std::string &kind,
+                                  const SdfPath &path) {
+            size_t count = 0;
+            for (const RigExecOpTraceEntry &entry : trace) {
+                if(entry.kind!=kind || entry.label!=path.GetString())continue;
+                if(kind=="VolumePlacements") {
+                    const auto node=std::find_if(graphForTrace.begin(),graphForTrace.end(),[&](const auto &n){return n.step==entry.step;});
+                    if(node==graphForTrace.end() || !std::any_of(node->writes.begin(),node->writes.end(),[](const auto &range){return range.domain=="WeightFramesBase";}))continue;
+                }
+                ++count;
+            }
+            return count;
+        };
+        CHECK(ran("VolumePlacements", drag.placed) == 1);
+        CHECK(ran("VolumePlacements", drag.kept) == 0);
+        CHECK(ran("RevisionStatic", smooth) == 1);
+        // BSkin's steps run on every frame: its packet's step reads a pose
+        // frame and so is always dirty (externalReads), and the cone is
+        // structural. Whether the skin re-deformed is the value decision of
+        // its assemble, and only a drag that reaches SphereB's base or B
+        // makes it.
+        bool skinExecuted = true, smoothExecuted = false;
+        const RigExecBakedProgramImpl &B =
+            baked->GetBakedProgram()->GetStepGraph();
+        for (const auto &chain : B.chains) {
+            for (const auto &revision : chain.revisions) {
+                if (revision.moverPath == skin) {
+                    skinExecuted = revision.executed;
+                } else if (revision.moverPath == smooth) {
+                    smoothExecuted = revision.executed;
+                }
+            }
+        }
+        CHECK(skinExecuted == (drag.control == bCtl));
+        CHECK(smoothExecuted);
+        std::printf("  %s: %zu step(s) ran, %zu revision(s) executed, "
+                    "BSkin %s\n",
+                    where.c_str(), trace.size(),
+                    size_t(live.executedOpCount),
+                    skinExecuted ? "re-deformed" : "kept");
+        baked->ClearInteractiveOverrides();
+        walk->ClearInteractiveOverrides();
+        CHECK(baked->Evaluate(UsdTimeCode(5.0)).valid);
+    }
+
+    // The closure: on the shipped rig, and with SphereC, a volume outside
+    // Both's closure, added in the session layer.
+    CheckPlacementReads(stage, label, {});
+    const UsdStageRefPtr thirdStage = UsdStage::Open(stagePath);
+    CHECK(thirdStage);
+    if (!thirdStage) {
+        return;
+    }
+    thirdStage->SetEditTarget(thirdStage->GetSessionLayer());
+    const SdfPath sphereC("/PlacementAsset/Rig/Weights/SphereC");
+    const UsdPrim third =
+        thirdStage->DefinePrim(sphereC, TfToken("RigExecSphereWeight"));
+    CHECK(third);
+    third.CreateAttribute(TfToken("avars:ty"), SdfValueTypeNames->Double)
+        .Set(2.0);
+    third.CreateAttribute(TfToken("inputs:falloffMin"),
+                          SdfValueTypeNames->Float).Set(0.5f);
+    third.CreateAttribute(TfToken("inputs:falloffMax"),
+                          SdfValueTypeNames->Float).Set(2.0f);
+    CheckPlacementReads(thirdStage, std::string(label) + " with SphereC",
+                        {sphereC});
+}
+
 static std::string
 DefaultResourceDir()
 {
@@ -1441,9 +2016,447 @@ DefaultResourceDir()
 #endif
 }
 
+
+static void
+TestResolveAllSparseSelfResolve()
+{
+    RigExecWeightPacket packet;
+    packet.representation = TfToken("sparse");
+    packet.rangePolicy = TfToken("strict");
+    packet.indices = {1, 3};
+    packet.values = {0.25f, 0.75f};
+    packet.defaultWeight = 0.5f;
+    packet.valid = true;
+    CHECK(packet.ResolveAll(4, &packet.values));
+    const std::vector<float> expected = {0.5f, 0.25f, 0.5f, 0.75f};
+    CHECK(packet.values == expected);
+    // Failure still leaves the destination untouched, on both paths.
+    packet.values = {2.0f, 0.75f};
+    std::vector<float> before = packet.values;
+    CHECK(!packet.ResolveAll(4, &packet.values));
+    CHECK(packet.values == before);
+    std::vector<float> out = {9.0f, 9.0f, 9.0f, 9.0f};
+    CHECK(!packet.ResolveAll(4, &out));
+    CHECK(out == std::vector<float>({9.0f, 9.0f, 9.0f, 9.0f}));
+}
+
+static void
+TestCombineUnsortedSparseMatchesResolve()
+{
+    RigExecWeightPacket sparse;
+    sparse.representation = TfToken("sparse");
+    sparse.rangePolicy = TfToken("strict");
+    sparse.indices = {2, 0};  // unsorted, in range
+    sparse.values = {0.25f, 0.75f};
+    sparse.defaultWeight = 0.5f;
+    sparse.valid = true;
+    RigExecWeightPacket dense;
+    dense.representation = TfToken("dense");
+    dense.rangePolicy = TfToken("strict");
+    dense.values = {1.0f, 1.0f, 1.0f};
+    dense.defaultWeight = 0.0f;
+    dense.valid = true;
+    std::vector<const RigExecWeightPacket *> borrowed;
+    borrowed.push_back(&sparse);
+    borrowed.push_back(&dense);
+    const RigExecWeightPacket combined = RigExecBuildCombineWeightPacket(
+        TfToken("dense"), TfToken("strict"), TfToken("multiply"),
+        borrowed, 0, 1.0f, 0.0f);
+    CHECK(combined.valid);
+    CHECK(combined.values.size() == 3);
+    // Reference: the per-point Resolve answers folded by hand.
+    for (size_t i = 0; i < 3; ++i) {
+        const float expected =
+            sparse.Resolve(i, 3) * dense.Resolve(i, 3);
+        CHECK(combined.values[i] == expected);
+    }
+}
+
+static void
+TestCombineRejectsNegativeResolved()
+{
+    auto dense = [](std::vector<float> values) {
+        RigExecWeightPacket p;
+        p.representation = TfToken("dense");
+        p.rangePolicy = TfToken("strict");
+        p.values = std::move(values);
+        p.defaultWeight = 0.0f;
+        p.valid = true;
+        return p;
+    };
+    auto sparse = [](std::vector<int> indices,
+                     std::vector<float> values, float def) {
+        RigExecWeightPacket p;
+        p.representation = TfToken("sparse");
+        p.rangePolicy = TfToken("strict");
+        p.indices = std::move(indices);
+        p.values = std::move(values);
+        p.defaultWeight = def;
+        p.valid = true;
+        return p;
+    };
+    auto combine =
+        [](const std::vector<const RigExecWeightPacket *> &ins,
+           size_t target) {
+            return RigExecBuildCombineWeightPacket(
+                TfToken("dense"), TfToken("strict"), TfToken("add"),
+                ins, target, 1.0f, 0.0f);
+        };
+    // A negative masked by its operand still fails: -0.25 + 0.75 would
+    // fold to a valid 0.5 without the rejection.
+    {
+        const RigExecWeightPacket neg = dense({-0.25f, 0.5f});
+        const RigExecWeightPacket pos = dense({0.75f, 0.5f});
+        const std::vector<const RigExecWeightPacket *> ins = {&neg, &pos};
+        CHECK(!combine(ins, 0).valid);
+    }
+    // Sorted and unsorted sparse values.
+    {
+        const RigExecWeightPacket neg =
+            sparse({0, 1}, {0.5f, -0.25f}, 0.5f);
+        const RigExecWeightPacket pos = dense({0.75f, 0.75f});
+        const std::vector<const RigExecWeightPacket *> ins = {&neg, &pos};
+        CHECK(!combine(ins, 0).valid);
+        const RigExecWeightPacket un =
+            sparse({1, 0}, {-0.25f, 0.5f}, 0.5f);
+        const std::vector<const RigExecWeightPacket *> ins2 = {&un, &pos};
+        CHECK(!combine(ins2, 0).valid);
+    }
+    // Negative defaults: constant and partial-coverage sparse fail.
+    {
+        RigExecWeightPacket neg;
+        neg.representation = TfToken("constant");
+        neg.rangePolicy = TfToken("strict");
+        neg.defaultWeight = -0.25f;
+        neg.valid = true;
+        const RigExecWeightPacket pos = dense({0.75f, 0.75f});
+        const std::vector<const RigExecWeightPacket *> ins = {&neg, &pos};
+        CHECK(!combine(ins, 0).valid);
+        const RigExecWeightPacket part = sparse({0}, {0.5f}, -0.25f);
+        const std::vector<const RigExecWeightPacket *> ins2 = {&part, &pos};
+        CHECK(!combine(ins2, 0).valid);
+    }
+    // Full coverage never reads the default: passes, default ignored.
+    {
+        const RigExecWeightPacket full =
+            sparse({0, 1}, {0.25f, 0.5f}, -1.0f);
+        const RigExecWeightPacket pos = dense({0.75f, 0.5f});
+        const std::vector<const RigExecWeightPacket *> ins = {&full, &pos};
+        const RigExecWeightPacket out = combine(ins, 0);
+        CHECK(out.valid);
+        CHECK(out.values.size() == 2);
+        if (out.values.size() == 2) {
+            CHECK(out.values[0] == 1.0f);
+            CHECK(out.values[1] == 1.0f);
+        }
+    }
+}
+
+static void
+TestVolumeTargetCountWithoutCoords()
+{
+    RigExecVolumeWeightInputs inputs;
+    inputs.representation = TfToken("dense");
+    inputs.rangePolicy = TfToken("clamp");
+    inputs.hasPlacement = true;
+    inputs.params.falloffMin = 0.0f;
+    inputs.params.falloffMax = 2.0f;
+    inputs.targetPoints = {
+        GfVec3f(0), GfVec3f(1, 0, 0), GfVec3f(0, 2, 0)};
+    inputs.samplePoints = {
+        GfVec3f(0, 0, 1), GfVec3f(1, 0, 1), GfVec3f(0, 2, 1)};
+    const TfToken type("RigExecSphereWeight");
+    const RigExecWeightPacket legacy =
+        RigExecBuildVolumeWeightPacket(type, inputs);
+    CHECK(legacy.valid);
+    RigExecVolumeWeightInputs noSamples = inputs;
+    noSamples.samplePoints.clear();
+    const RigExecWeightPacket legacyTarget =
+        RigExecBuildVolumeWeightPacket(type, noSamples);
+    CHECK(legacyTarget.valid);
+    // Sized: same cardinality, no coordinates.
+    RigExecVolumeWeightInputs sized = inputs;
+    sized.targetPoints.clear();
+    sized.targetPointCount = 3;
+    const RigExecWeightPacket out =
+        RigExecBuildVolumeWeightPacket(type, sized);
+    CHECK(out.valid);
+    if (legacy.valid && out.valid) {
+        CHECK(out.values == legacy.values);
+    }
+    // A lying count is rejected, as a mismatched array is.
+    sized.targetPointCount = 2;
+    CHECK(!RigExecBuildVolumeWeightPacket(type, sized).valid);
+    // The count without coordinates serves only the sampled case:
+    // with no samples the target IS the measured set.
+    sized.samplePoints.clear();
+    sized.targetPointCount = 3;
+    CHECK(!RigExecBuildVolumeWeightPacket(type, sized).valid);
+    // ... unless the coordinates are there too.
+    sized.targetPoints = inputs.targetPoints;
+    const RigExecWeightPacket both =
+        RigExecBuildVolumeWeightPacket(type, sized);
+    CHECK(both.valid);
+    if (legacyTarget.valid && both.valid) {
+        CHECK(both.values == legacyTarget.values);
+    }
+}
+
+static void
+TestResolveAllVtFloatArrayParity()
+{
+    auto check = [](const RigExecWeightPacket &packet, size_t count) {
+        std::vector<float> vec;
+        VtFloatArray arr;
+        const bool okVec = packet.ResolveAll(count, &vec);
+        const bool okArr = packet.ResolveAll(count, &arr);
+        CHECK(okVec == okArr);
+        if (okVec && okArr) {
+            CHECK(vec.size() == arr.size());
+            if (vec.size() == arr.size()) {
+                for (size_t i = 0; i < vec.size(); ++i) {
+                    CHECK(vec[i] == arr[i]);
+                }
+            }
+        }
+    };
+    RigExecWeightPacket constant;
+    constant.representation = TfToken("constant");
+    constant.rangePolicy = TfToken("strict");
+    constant.defaultWeight = 0.5f;
+    constant.valid = true;
+    check(constant, 4);
+    RigExecWeightPacket dense;
+    dense.representation = TfToken("dense");
+    dense.rangePolicy = TfToken("clamp");
+    dense.values = {0.0f, 0.25f, 0.5f, 1.0f};
+    dense.valid = true;
+    check(dense, 4);
+    RigExecWeightPacket sparse;
+    sparse.representation = TfToken("sparse");
+    sparse.rangePolicy = TfToken("strict");
+    sparse.indices = {1, 3};
+    sparse.values = {0.25f, 0.75f};
+    sparse.defaultWeight = 0.5f;
+    sparse.valid = true;
+    check(sparse, 4);
+    // Failure arms agree too.
+    RigExecWeightPacket badPolicy = dense;
+    badPolicy.rangePolicy = TfToken("wrap");
+    check(badPolicy, 4);
+    RigExecWeightPacket badValues = dense;
+    badValues.values[2] = 2.0f;
+    check(badValues, 4);
+    RigExecWeightPacket unsorted = sparse;
+    unsorted.indices = {3, 1};
+    unsorted.values = {0.75f, 0.25f};
+    check(unsorted, 4);
+    // A shared destination: the resolve drops the old buffer without
+    // detaching a copy of it, and the other handle keeps its values.
+    VtFloatArray shared(4, 0.125f);
+    VtFloatArray alias = shared;
+    CHECK(sparse.ResolveAll(4, &shared));
+    CHECK(shared.size() == 4);
+    if (shared.size() == 4) {
+        CHECK(shared[0] == 0.5f);
+        CHECK(shared[1] == 0.25f);
+        CHECK(shared[2] == 0.5f);
+        CHECK(shared[3] == 0.75f);
+    }
+    CHECK(alias.size() == 4);
+    for (size_t i = 0; i < alias.size(); ++i) {
+        CHECK(alias[i] == 0.125f);
+    }
+}
+
+// A real current-phase producer samples an animated private Token leaf.
+// Unknown authored tokens invalidate the field; recovery must not reuse it.
+static void TestWeightFieldTokenProducer()
+{
+    const VtVec3fArray base{GfVec3f(0,0,0),GfVec3f(.5f,0,0),GfVec3f(1,0,0),GfVec3f(2,0,0)};
+    Fixture fixture(base,GfVec3d(0,2,0));
+    const auto plane = fixture.MakeVolume("FieldPlane",TfToken("RigExecPlaneWeight"),GfVec3d(0),0,3);
+    plane.GetRelationship(TfToken("rigExec:weightTarget")).SetMetadata(
+        TfToken("rigExecReadPhase"),std::string("preceding"));
+    auto axis = plane.CreateAttribute(TfToken("rigExec:planeAxis"),SdfValueTypeNames->Token);
+    axis.Set(TfToken("x"),UsdTimeCode(1));
+    axis.Set(TfToken("y"),UsdTimeCode(2));
+    axis.Set(TfToken("invalidAxis"),UsdTimeCode(3));
+    axis.Set(TfToken("z"),UsdTimeCode(4));
+    const auto mover = fixture.MakeMover(SdfPath("/Asset/Rig/Movers/FieldMover"),plane.GetPath());
+    RigExecRigEvaluator baked(fixture.stage,SdfPath("/Asset/Rig"));
+    RigExecRigEvaluator reference(fixture.stage,SdfPath("/Asset/Rig"));
+    reference.cpuReference = true;
+    std::vector<std::string> errors;
+    CHECK(baked.Compile(&errors)); CHECK(reference.Compile(&errors));
+    for(const auto &object:baked.GetBakedProgram()->GetStepGraph().weightObjects) {
+        CHECK(object.oracleFrozenKeys.size()==object.oracleLeaves.decl.keys.size());
+        std::set<SdfPath> keys;for(const auto &key:object.oracleFrozenKeys){CHECK(!key.IsEmpty());CHECK(keys.insert(key).second);}
+    }
+    VtVec3fArray first;
+    bool visitedTwo = false;
+    for (int frame : {1,2,2,3,4}) {
+        const bool held = frame == 2 && visitedTwo;
+        visitedTwo = visitedTwo || frame == 2;
+        const auto got = baked.Evaluate(UsdTimeCode(frame));
+        const auto want = reference.Evaluate(UsdTimeCode(frame));
+        CHECK(got.valid == want.valid);
+        CHECK(got.diagnostics == want.diagnostics);
+        const auto a = got.movedProperties.find(Fixture::Target());
+        const auto b = want.movedProperties.find(Fixture::Target());
+        CHECK(a != got.movedProperties.end()); CHECK(b != want.movedProperties.end());
+        if (a == got.movedProperties.end() || b == want.movedProperties.end()) continue;
+        const auto points = a->second.Get<VtVec3fArray>();
+        CHECK(points == b->second.Get<VtVec3fArray>());
+        if (frame == 1) first = points;
+        if (frame == 2) CHECK(points != first);
+        if (frame == 3) CHECK(points == base);
+        std::shared_ptr<const RigExecFrozenProgram> snapshot;
+        std::string frozenError;
+        CHECK(RigExecFreezeProgram(baked,&snapshot,&frozenError));
+        RigExecFrameInputs inputs;
+        CHECK(RigExecSampleFrameInputs(baked,UsdTimeCode(frame),{},{},&inputs,&frozenError));
+        if (snapshot) {
+            RigExecFrozenEvalContext context;
+            context.epochDigest = baked.GetBindingEpochDigest();
+            context.slotCount = baked.GetBakedProgram()->GetProviderCount();
+            context.varyingInputCount = inputs.values.size();
+            context.flags = (baked.GetPublishWeightFields()?kRigExecFrozenPublishWeightFields:0) |
+                (baked.GetSolverGuidesEnabled()?kRigExecFrozenSolverGuidesEnabled:0);
+            context.frozen = snapshot.get();
+            auto workspace = RigExecCreateFrozenWorkspace(snapshot);
+            context.workspace = workspace.get();
+            RigExecFrozenRunReport report;
+            const auto frozen = RigExecEvaluateFrozen(context,inputs,
+                RigExecMakeProductionStepRunner(),nullptr,SdfPath(),&report);
+            CHECK(report.ran);
+            CHECK(frozen.valid == got.valid);
+            CHECK(frozen.diagnostics == got.diagnostics);
+            CHECK(frozen.movedProperties == got.movedProperties);
+            for (const auto &entry : report.region)
+                CHECK(entry.kind != "WeightField");
+        }        const auto *program = baked.GetBakedProgram();
+        CHECK(program != nullptr);
+        if (!program) continue;
+        const auto &B = program->GetStepGraph();
+        CHECK(B.weightFields.size() == 1);
+        if (B.weightFields.size() != 1) continue;
+        const auto &field = B.weightFields[0];
+        CHECK(field.form == RigExecBakedProgramImpl::WeightField::Form::Revision);
+        CHECK(field.placementPhase == RigExecBakedProgramImpl::WeightField::PlacementPhase::Base);
+        CHECK(field.ok == (frame != 3));
+        if (frame == 3) {
+            CHECK(field.values.empty());
+            CHECK(field.error.find("unknown rigExec:planeAxis invalidAxis") != std::string::npos);
+        }
+        size_t producers = 0;
+        for (const auto &step : B.steps) {
+            if (step.kind != RigExecBakedStepKind::WeightField) continue;
+            ++producers; CHECK(!step.externalReads);
+            if (held) CHECK((size_t(&step - B.steps.data()) >= B.opExecution.ran.size() || !B.opExecution.ran[size_t(&step - B.steps.data())]));
+            CHECK(!step.bindingLeaves.empty());
+            CHECK(!field.volumes.empty());
+            if (field.volumes.empty()) continue;
+            CHECK(std::find(step.reads.begin(),step.reads.end(),
+                RigExecBakedOne(RigExecBakedSlotDomain::WeightFramesBase,field.volumes[0])) != step.reads.end());
+        }
+        CHECK(producers == 1);
+    }
+    (void)mover;
+}
+
+static void TestConstantEnvelopeBorrowedDerived()
+{
+    const std::vector<GfVec3f> authored{GfVec3f(-9),GfVec3f(9)};
+    RigExecMoverParameters p;
+    p.weights=RigExecWeightPacket::Constant(1.0f);
+    p.auxPoints={GfVec3f(1,2,3),GfVec3f(-2,4,0)};
+    std::vector<GfVec3f> result{GfVec3f(77)};
+    CHECK(RigExecApplyDerivedKernel(RigExecRevisionOp::RecomputeExtent,p,
+        authored.data(),authored.size(),&result));
+    CHECK(result==std::vector<GfVec3f>({GfVec3f(-2,2,0),GfVec3f(1,4,3)}));
+    CHECK(authored==std::vector<GfVec3f>({GfVec3f(-9),GfVec3f(9)}));
+    const auto retained=result;
+    CHECK(!RigExecApplyDerivedKernel(RigExecRevisionOp::RecomputeExtent,p,
+        authored.data(),1,&result));
+    CHECK(result==retained);
+    CHECK(!RigExecApplyDerivedKernel(RigExecRevisionOp::RecomputeExtent,p,
+        nullptr,authored.size(),&result));
+    CHECK(result==retained);
+    p.auxPoints.clear();
+    CHECK(!RigExecApplyDerivedKernel(RigExecRevisionOp::RecomputeExtent,p,
+        authored.data(),authored.size(),&result));
+    CHECK(result==retained);
+    p.auxPoints={GfVec3f(1,2,3),GfVec3f(-2,4,0)};
+    p.weights=RigExecWeightPacket::Constant(0.5f);
+    CHECK(RigExecApplyDerivedKernel(RigExecRevisionOp::RecomputeExtent,p,
+        authored.data(),authored.size(),&result));
+    CHECK(result==std::vector<GfVec3f>({GfVec3f(-5.5f,-3.5f,-4.5f),GfVec3f(5,6.5f,6)}));
+    auto inPlace=authored;
+    CHECK(RigExecApplyDerivedKernel(RigExecRevisionOp::RecomputeExtent,p,&inPlace));
+    CHECK(result==inPlace);
+
+    p.weights=RigExecWeightPacket::Constant(1.0f);
+    p.transform=GfMatrix4d(1.0);
+    p.transform.SetTranslate(GfVec3d(2,-3,4));
+    const std::vector<GfVec3f> input{GfVec3f(1,2,3),GfVec3f(-2,4,0)};
+    const std::vector<float> ones(input.size(),1.0f);
+    for(bool simd : {false,true}) for(bool radial : {false,true}) {
+        p.radialWeight=radial;
+        auto fast=input,range=input;
+        CHECK(RigExecApplyMatrixKernel(p,&fast,simd));
+        RigExecApplyMatrixKernelRange(p,ones.data(),0,range.size(),range.data(),simd);
+        CHECK(fast==range);
+        CHECK(fast==std::vector<GfVec3f>({GfVec3f(3,-1,7),GfVec3f(0,1,4)}));
+    }
+    p.blendDeltas={GfVec3f(2,1,-1),GfVec3f(-1,2,3)};
+    auto blended=input;
+    CHECK(RigExecApplyBlendShapeKernel(p,&blended));
+    CHECK(blended==std::vector<GfVec3f>({GfVec3f(3,3,2),GfVec3f(-3,6,3)}));
+    const auto held=blended;
+    p.blendDeltas.resize(1);
+    CHECK(!RigExecApplyBlendShapeKernel(p,&blended));
+    CHECK(blended==held);
+}
+
+static void TestBorrowedDenseBlendInputs()
+{
+    const std::vector<GfVec3f> base{GfVec3f(1,2,3),GfVec3f(-2,4,1)};
+    const std::vector<GfVec3f> moved{GfVec3f(5,6,7),GfVec3f(2,0,5)};
+    RigExecBlendSampleData sample;
+    sample.activation=1.0f;
+    sample.points=moved;
+    RigExecBlendChannel channel;
+    channel.weight=0.5f;
+    channel.samples.push_back(sample);
+    std::vector<RigExecBlendChannel> channels{channel};
+    std::vector<GfVec3f> owned,borrowed;
+    CHECK(RigExecSumBlendChannels(channels,base,&owned));
+    auto &view=channels[0].samples[0];
+    view.points.clear();
+    view.borrowsPoints=true;
+    view.borrowedPoints=moved.data();
+    view.borrowedCount=moved.size();
+    CHECK(RigExecSumBlendChannels(channels,base.data(),base.size(),&borrowed));
+    CHECK(owned==borrowed);
+    CHECK(borrowed==std::vector<GfVec3f>({GfVec3f(2,2,2),GfVec3f(2,-2,2)}));
+    CHECK(base[0]==GfVec3f(1,2,3));
+    view.borrowedPoints=nullptr;
+    CHECK(!RigExecSumBlendChannels(channels,base.data(),base.size(),&borrowed));
+    CHECK(!RigExecSumBlendChannels(channels,nullptr,base.size(),&borrowed));
+}
+
 int
 main(int argc, char **argv)
 {
+    TestBorrowedDenseBlendInputs();
+    TestConstantEnvelopeBorrowedDerived();
+    TestResolveAllSparseSelfResolve();
+    TestCombineUnsortedSparseMatchesResolve();
+    TestCombineRejectsNegativeResolved();
+    TestVolumeTargetCountWithoutCoords();
+    TestResolveAllVtFloatArrayParity();
+
     std::string resources = DefaultResourceDir();
     if (argc > 1 && resources.empty()) {
         resources = TfAbsPath(std::string(argv[1]) +
@@ -1459,6 +2472,7 @@ main(int argc, char **argv)
     TestSphereDirectionalScales();
     TestSphereDirectionalEdits();
     TestSphereDirectionalScaleValidation();
+    TestWeightFieldTokenProducer();
     TestVolumeIgnoresTransformScaleAvars();
     TestPlaneWeight();
     TestPlaneBounded();
@@ -1471,7 +2485,7 @@ main(int argc, char **argv)
     TestCombineOfConstantInputs();
     TestDefaultCombineNeedsNoRepresentation();
     TestCurrentPhaseThroughCombine();
-    TestCombineCycleSkipsMover();
+    TestCombineCycleSetsAsideMembers();
     TestInvert();
     TestAuthoredFalloffCurve();
     TestSamplePhase(/* current */ false);
@@ -1480,6 +2494,12 @@ main(int argc, char **argv)
     TestCurveWeightRejectsTwoCurves();
     TestVolumeWeightOnAConstraint("base");
     TestVolumeWeightOnAConstraint("preceding");
+    TestVolumePlacementGate();
+    TestTheOracleReadsTheProgramsPlacements();
+    TestReleasedOverridePublishesTheProgramsPlacements();
+    if (argc > 1) {
+        TestVolumePlacementsAreIndependent(argv[1]);
+    }
 
     if (failures) {
         std::printf("%d FAILURE(S)\n", failures);

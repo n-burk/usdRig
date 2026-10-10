@@ -29,8 +29,8 @@ Native detail-preserving smoothing. Smooth reference and incoming points, then t
 
 The shared kernel builds edge adjacency from mesh topology and applies
 the same smoothing settings to rest and incoming points. It transports the
-rest-to-smoothed offset into the deformed local surface frame. Dynamic,
-baked, frozen, and binary evaluation share `libs/rigExecMath/deltaMushKernel.h`.
+rest-to-smoothed offset into the deformed local surface frame. Native,
+frozen and binary evaluation share `libs/rigExecMath/deltaMushKernel.h`.
 
 Defaults preserve the existing rest-weighted smoothing and vertex-frame
 transport. Choose `smoothing = simple` or `lengthWeighted` with
@@ -44,6 +44,9 @@ disables detail restoration, and `displacement` scales restored detail.
 `computationToTarget`, optionally followed by the `rigExec:frame` provider,
 keeps smoothing in the original object's coordinate space under nonuniform
 scale. Saved rest points stay in that computation space.
+
+`.rigexec` exports carry these settings from format revision 21. A revision
+20 file has none of them and plays the default smoothing and transport.
 
 ## Wiring
 

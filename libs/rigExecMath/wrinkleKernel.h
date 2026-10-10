@@ -5,6 +5,7 @@
 #define RIGEXEC_MATH_WRINKLE_KERNEL_H
 
 #include "wrinkleSettings.h"
+#include "meshConnectivity.h"
 
 #include <algorithm>
 #include <array>
@@ -82,12 +83,20 @@ struct Constraint {
 /// Full 3D affine edge projections, bounded by incoming attachment balls and
 /// optional outward tangent halfspaces. Point/Wide provide storage
 /// and arithmetic only; this shared implementation has no USD dependency.
+///
+/// The apply half of the split: \p topology carries the cached
+/// triangulation, sorted edges, neighbor rings, border vertices, and
+/// bending pairs RigExecBuildWrinkleMesh derived from (counts, indices),
+/// and the same arithmetic the single-call kernel performs runs over it.
+/// A topology built from anything else fails closed, exactly as its own
+/// build would have verdict-ed.
 template<class Point, class Wide>
 bool
-RigExecApplyWrinkleKernel(
+RigExecApplyWrinkleWithTopology(
     std::vector<Point> *points, const std::vector<Point> &rest,
     const std::vector<int> &counts, const std::vector<int> &indices,
-    const RigExecWrinkleSettings &settings)
+    const RigExecWrinkleSettings &settings,
+    const RigExecWrinkleMesh &topology)
 {
     using namespace wrinkleDetail;
     if (!points || points->size() != rest.size() || !ValidSettings(settings)) return false;
@@ -105,21 +114,18 @@ RigExecApplyWrinkleKernel(
         if (index < 0 || size_t(index) >= pointCount || pinned[index]) return false;
         pinned[index] = true;
     }
+    if (!topology.Covers(pointCount, counts, indices,
+                         settings.topology, settings.neighborDistance)) {
+        return false;
+    }
 
-    std::map<std::pair<int, int>, size_t> polygonEdges;
-    std::vector<std::array<int, 3>> triangles;
+    // Posed face normals: the one face walk the apply half still makes, in
+    // the single-call kernel's order. The shape verdicts (short faces,
+    // overruns, range, duplicates) are the cached build's, covered above;
+    // the area finiteness verdict is posed, so it stays here.
     std::vector<Wide> normals(pointCount, Wide(0));
-    size_t offset = 0, faceIndex = 0;
+    size_t offset = 0;
     for (int count : counts) {
-        if (count < 3 || size_t(count) > indices.size() - offset) return false;
-        std::set<int> corners;
-        for (int corner = 0; corner < count; ++corner) {
-            const int a = indices[offset + corner];
-            const int b = indices[offset + (corner + 1) % count];
-            if (a < 0 || b < 0 || size_t(a) >= pointCount || size_t(b) >= pointCount ||
-                !corners.insert(a).second) return false;
-            ++polygonEdges[std::minmax(a, b)];
-        }
         const int origin = indices[offset];
         Wide area(0);
         for (int corner = 1; corner + 1 < count; ++corner) {
@@ -128,21 +134,10 @@ RigExecApplyWrinkleKernel(
         }
         if (!IsFinite(area)) return false;
         for (int corner = 0; corner < count; ++corner) normals[indices[offset + corner]] += area;
-        if (count == 4 && faceIndex % 2) {
-            triangles.push_back({indices[offset], indices[offset + 1], indices[offset + 3]});
-            triangles.push_back({indices[offset + 1], indices[offset + 2], indices[offset + 3]});
-        } else {
-            for (int corner = 1; corner + 1 < count; ++corner)
-                triangles.push_back({origin, indices[offset + corner], indices[offset + corner + 1]});
-        }
         offset += size_t(count);
-        ++faceIndex;
     }
-    if (offset != indices.size()) return false;
     if (settings.pinBorders) {
-        for (const auto &edge : polygonEdges) {
-            if (edge.second == 1) pinned[edge.first.first] = pinned[edge.first.second] = true;
-        }
+        for (int index : topology.borderVertices) pinned[index] = true;
     }
     for (size_t i = 0; i < pointCount; ++i) {
         const double length = Length(normals[i]);
@@ -153,16 +148,10 @@ RigExecApplyWrinkleKernel(
     if (pointCount == 0 || settings.iterations == 0 || settings.maxDisplacement == 0 ||
         settings.wrinkleScale == 0) return true;
 
-    // One sorted edge map supplies stable solve order and opposite vertices
-    // for the inexpensive distance-based bending model.
-    std::map<std::pair<int, int>, std::vector<int>> triangleEdges;
-    for (const auto &triangle : triangles) {
-        for (int corner = 0; corner < 3; ++corner) {
-            triangleEdges[std::minmax(triangle[corner], triangle[(corner + 1) % 3])]
-                .push_back(triangle[(corner + 2) % 3]);
-        }
-    }
-    std::vector<std::vector<int>> neighbors(pointCount);
+    // The cached triangle edges supply stable solve order and the cached
+    // bending pairs the distance-based bending model; rest lengths stay
+    // per-frame, exactly as the single-call kernel derived them.
+    const std::vector<std::vector<int>> &neighbors = topology.neighbors;
     std::vector<Constraint> constraints;
     const auto addConstraint = [&](int a, int b, bool bending) {
         const double length = Length(restWide[a] - restWide[b]);
@@ -174,45 +163,10 @@ RigExecApplyWrinkleKernel(
         }
         return true;
     };
-    for (const auto &edge : triangleEdges) {
-        const int a = edge.first.first, b = edge.first.second;
-        neighbors[a].push_back(b);
-        neighbors[b].push_back(a);
-        if (!addConstraint(a, b, false)) return false;
+    for (const RigExecWrinkleEdge &edge : topology.edges) {
+        if (!addConstraint(edge.a, edge.b, false)) return false;
     }
-    for (auto &ring : neighbors) std::sort(ring.begin(), ring.end());
-    std::set<std::pair<int, int>> bendingPairs;
-    if (settings.topology == RigExecWrinkleTopology::Cloth) {
-        for (const auto &edge : triangleEdges) {
-            const auto &opposite = edge.second;
-            if (opposite.size() == 2 && opposite[0] != opposite[1]) {
-                const std::pair<int, int> pair = std::minmax(opposite[0], opposite[1]);
-                if (!triangleEdges.count(pair)) bendingPairs.insert(pair);
-            }
-        }
-    } else if (settings.neighborDistance > 1) {
-        // Exact graph-hop rings on the implicit triangle topology. The base
-        // edges remain structural constraints even when the ring is wider.
-        std::vector<int> distance(pointCount, -1), visited;
-        for (size_t start = 0; start < pointCount; ++start) {
-            visited.clear();
-            visited.push_back(int(start));
-            distance[start] = 0;
-            for (size_t cursor = 0; cursor < visited.size(); ++cursor) {
-                const int a = visited[cursor];
-                if (distance[a] == settings.neighborDistance) continue;
-                for (int b : neighbors[a]) {
-                    if (distance[b] >= 0) continue;
-                    distance[b] = distance[a] + 1;
-                    visited.push_back(b);
-                    if (distance[b] == settings.neighborDistance && size_t(b) > start)
-                        bendingPairs.emplace(int(start), b);
-                }
-            }
-            for (int index : visited) distance[index] = -1;
-        }
-    }
-    for (const auto &pair : bendingPairs) {
+    for (const auto &pair : topology.bendingPairs) {
         if (!addConstraint(pair.first, pair.second, true)) return false;
     }
 
@@ -265,6 +219,7 @@ RigExecApplyWrinkleKernel(
     std::vector<std::vector<double>> phaseWeights(pointCount);
     for (size_t i = 0; i < pointCount; ++i) {
         phase[i] = Seed(i);
+        phaseWeights[i].reserve(neighbors[i].size());
         for (int neighbor : neighbors[i]) {
             const double reference = Length(restWide[neighbor] - restWide[i]) *
                 double(settings.restLengthScale);
@@ -275,17 +230,21 @@ RigExecApplyWrinkleKernel(
                 1.0 - strain / (localCompression + .002)), 8));
         }
     }
+    // One alternate buffer for all passes, swapped between them: each
+    // pass writes every element (the else keeps the per-pass copy's
+    // behavior for zero-weight vertices), so no pass reads stale data.
+    std::vector<double> nextPhase = phase;
     for (int pass = 0; pass < 10; ++pass) {
-        auto next = phase;
         for (size_t i = 0; i < pointCount; ++i) {
             double sum = 0, weight = 0;
             for (size_t j = 0; j < neighbors[i].size(); ++j) {
                 sum += phase[neighbors[i][j]] * phaseWeights[i][j];
                 weight += phaseWeights[i][j];
             }
-            if (weight > 0) next[i] = .5 * (phase[i] + sum / weight);
+            nextPhase[i] = weight > 0 ? .5 * (phase[i] + sum / weight)
+                                      : phase[i];
         }
-        phase.swap(next);
+        phase.swap(nextPhase);
     }
     const auto phaseRange = std::minmax_element(phase.begin(), phase.end());
     const double phaseWidth = .1 * (*phaseRange.second - *phaseRange.first) + 1e-6;
@@ -345,16 +304,21 @@ RigExecApplyWrinkleKernel(
 
     std::vector<Wide> deltas(pointCount);
     for (size_t i = 0; i < pointCount; ++i) deltas[i] = current[i] - incoming[i];
+    // As above: pinned and isolated vertices keep their values
+    // through the else, exactly as the per-iteration copy did.
+    std::vector<Wide> nextDeltas = deltas;
     for (int iteration = 0; iteration < settings.smoothingIterations; ++iteration) {
-        auto next = deltas;
         for (size_t i = 0; i < pointCount; ++i) {
-            if (pinned[i] || neighbors[i].empty()) continue;
+            if (pinned[i] || neighbors[i].empty()) {
+                nextDeltas[i] = deltas[i];
+                continue;
+            }
             Wide average(0);
             for (int neighbor : neighbors[i]) average += deltas[neighbor];
             average /= double(neighbors[i].size());
-            next[i] = .5 * (deltas[i] + average);
+            nextDeltas[i] = .5 * (deltas[i] + average);
         }
-        deltas.swap(next);
+        deltas.swap(nextDeltas);
     }
     std::vector<Point> result = *points;
     for (size_t i = 0; i < pointCount; ++i) {
@@ -366,6 +330,26 @@ RigExecApplyWrinkleKernel(
     }
     *points = std::move(result);
     return true;
+}
+
+/// Single-call form: builds the topology half, then applies it. Behavior
+/// is bit-exact against the split by construction; revisions that deform
+/// the same mesh every frame retain the topology and call the apply half.
+template<class Point, class Wide>
+bool
+RigExecApplyWrinkleKernel(
+    std::vector<Point> *points, const std::vector<Point> &rest,
+    const std::vector<int> &counts, const std::vector<int> &indices,
+    const RigExecWrinkleSettings &settings)
+{
+    RigExecWrinkleMesh topology;
+    if (!RigExecBuildWrinkleMesh(rest.size(), counts, indices,
+                                 settings.topology,
+                                 settings.neighborDistance, &topology)) {
+        return false;
+    }
+    return RigExecApplyWrinkleWithTopology<Point, Wide>(
+        points, rest, counts, indices, settings, topology);
 }
 
 } // namespace rigExec

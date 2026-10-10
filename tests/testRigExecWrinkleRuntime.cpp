@@ -1,4 +1,8 @@
 // This quasistatic wrinkle fixture links rigExecRuntime only; no USD is loaded.
+// The binary is testRigExecWrinkle's upstream-compression rig baked at frame
+// 1. Playback drives its Compression control's avars:sx input along the
+// compression that rig keys (1 at frame 1, 0.65 at 24, 1 at 48), every tenth
+// of a frame, computed here.
 #include "rigExecRuntime/runtime.h"
 #include <algorithm>
 #include <cmath>
@@ -18,8 +22,15 @@ int main(int argc, char **argv) {
         std::string error;
         auto reader = rigExec::RigExecRuntimeReader::Open(bytes.data(), bytes.size(), &error);
         if (!reader) throw std::runtime_error(error);
+        const std::string sx = "/Rig/Controls/Compression.avars:sx";
+        if (reader->GetBakeTime() != 1 || !reader->FindInput(sx, nullptr))
+            throw std::runtime_error("expected a bake at frame 1 with " + sx + " as an input");
+        const auto compressionAt = [](double frame) {
+            return frame <= 24 ? 1 - 0.35 * (frame - 1) / 23 :
+                                 0.65 + 0.35 * (frame - 24) / 24;
+        };
         auto evaluate = [&](double frame) {
-            if (!reader->SetFrame(frame, &error) || !reader->Execute(&error))
+            if (!reader->SetInput(sx, compressionAt(frame), &error) || !reader->Execute(&error))
                 throw std::runtime_error(error);
             for (const auto &value : reader->GetPoints())
                 if (value.path == "/Rig/Body.points" && value.points.size() == 91)
@@ -37,19 +48,10 @@ int main(int argc, char **argv) {
             evaluate(1) != rest)
             throw std::runtime_error("wrinkle playback/seek/reset failed");
 
-        const auto &frames = reader->GetFrameTimes();
-        if (frames.size() != 471 || frames.front() != 1 || frames.back() != 48)
-            throw std::runtime_error("missing tenth-frame wrinkle animation");
+        std::vector<double> frames;
+        for (int step = 0; step <= 470; ++step) frames.push_back(1 + step / 10.0);
         std::vector<decltype(evaluate(1))> expected;
-        for (size_t index = 0; index < frames.size(); ++index) {
-            if (frames[index] != 1 + index / 10.0)
-                throw std::runtime_error("incorrect wrinkle sample time");
-            expected.push_back(evaluate(frames[index]));
-        }
-        const auto compressionAt = [](double frame) {
-            return frame <= 24 ? 1 - 0.35 * (frame - 1) / 23 :
-                                 0.65 + 0.35 * (frame - 24) / 24;
-        };
+        for (double frame : frames) expected.push_back(evaluate(frame));
         double maxOffsetStep = 0;
         for (size_t index = 1; index < frames.size(); ++index) {
             const double scaleStep = compressionAt(frames[index]) - compressionAt(frames[index - 1]);
@@ -81,7 +83,8 @@ int main(int argc, char **argv) {
 
         // A new reader must not need earlier frames to reproduce a subframe.
         const auto fresh = rigExec::RigExecRuntimeReader::Open(bytes.data(), bytes.size(), &error);
-        if (!fresh || !fresh->SetFrame(frames[163], &error) || !fresh->Execute(&error))
+        if (!fresh || !fresh->SetInput(sx, compressionAt(frames[163]), &error) ||
+            !fresh->Execute(&error))
             throw std::runtime_error(error);
         bool found = false;
         for (const auto &value : fresh->GetPoints()) {

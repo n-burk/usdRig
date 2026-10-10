@@ -171,18 +171,6 @@ _RrAffects(const _RrConstraintAxisMask &mask, int axis)
     return axis == 0 ? mask.x : axis == 1 ? mask.y : mask.z;
 }
 
-/// Every landmark carried by the space, nothing else: the twin of
-/// RigExecTransformFrame.
-RrPointFrame
-_RrTransformFrame(const RrPointFrame &frame, const RrMat4d &space)
-{
-    RrPointFrame out = frame;
-    for (RrVec3d &p : out.points) {
-        p = space.Transform(p);
-    }
-    return out;
-}
-
 // Shear belongs to the same linear block as scale; a constraint governing
 // all three scale axes governs it too. The twin of _BlendGovernedShear in
 // libs/rigExecMath/solvers.cpp -- see the reasoning there. Without it an
@@ -233,7 +221,7 @@ _RrOrderIndices(_RrEulerOrder order)
 RrQuatd
 _RrQuatFromEulerDegrees(const RrVec3d &degrees, _RrEulerOrder order)
 {
-    static const RrVec3d axes[3] = {
+    const RrVec3d axes[3] = {
         RrVec3d(1, 0, 0), RrVec3d(0, 1, 0), RrVec3d(0, 0, 1)};
     RrMat4d matrix = _RrIdentity();
     const std::array<int, 3> indices = _RrOrderIndices(order);
@@ -248,7 +236,7 @@ _RrQuatFromEulerDegrees(const RrVec3d &degrees, _RrEulerOrder order)
 RrVec3d
 _RrEulerDegreesFromQuat(const RrQuatd &rotation, _RrEulerOrder order)
 {
-    static const RrVec3d axes[3] = {
+    const RrVec3d axes[3] = {
         RrVec3d(1, 0, 0), RrVec3d(0, 1, 0), RrVec3d(0, 0, 1)};
     const std::array<int, 3> indices = _RrOrderIndices(order);
     // GfRotation::Decompose(a,b,c) describes row-matrix factors in the
@@ -918,6 +906,7 @@ struct _RrSingleChainIkParams {
     _RrSingleChainIkMode mode = _RrSingleChainIkMode::RotatePlane;
     RrVec3d pole{0.0, 1.0, 0.0};
     double twistDegrees = 0.0;
+    double stretch=0;
     double weight = 1.0;
 };
 
@@ -1425,8 +1414,12 @@ _RrSolveSingleChainIk(const std::vector<RrPointFrame> &currentFrames,
         }
     }
 
+    if(!std::isfinite(params.stretch) || params.stretch<0 || params.stretch>1)return _RrIkDegenerate(currentFrames);
+    double totalLength=0;for(double length:lengths)totalLength+=length;
+    const double growth=1+params.stretch*std::max(0.0,(effectorFrame.points[0]-original.front()).GetLength()/totalLength-1);
+    auto solveLengths=lengths;for(double &length:solveLengths)length*=growth;
     const std::vector<RrVec3d> solved = _RrIkSolvePositions(
-        original, lengths, bases, effectorBasis,
+        original, solveLengths, bases, effectorBasis,
         effectorFrame.points[0], params, positionEpsilon,
         angularEpsilon);
     if (solved.size() != currentFrames.size()) {
@@ -1473,7 +1466,7 @@ _RrSolveSingleChainIk(const std::vector<RrPointFrame> &currentFrames,
             const RrVec3d direction = _RrIkBlendDirection(
                 currentDirection, solvedDirection, weight, bases[i].up,
                 angularEpsilon);
-            blended[i + 1] = blended[i] + direction * lengths[i];
+            blended[i + 1] = blended[i] + direction * lengths[i] * (1+weight*(growth-1));
         }
         for (size_t i = 0; i < result.size(); ++i) {
             result[i] = _RrIkBlendEndFrame(
@@ -1482,6 +1475,10 @@ _RrSolveSingleChainIk(const std::vector<RrPointFrame> &currentFrames,
         }
     }
 
+    if(growth!=1)for(size_t i=0;i+1<result.size();++i) {
+        const auto bone=result[i+1].points[0]-result[i].points[0];
+        RigExecScaleFrameAlong(result[i].points.data(),bone.GetNormalized(),bone.GetLength()/lengths[i]);
+    }
     for (const RrPointFrame &frame : result) {
         if (!_RrIkFrameFinite(frame)) {
             return _RrIkDegenerate(currentFrames);
@@ -1562,103 +1559,6 @@ _RrPrepareRestDerivedIkChain(
 }
 
 // The Constraint step (bakedPose.cpp).
-
-// RigExecWeightPacket::ResolveAll (types.cpp), over an RrWeightPacket.
-bool
-_RrResolveWeightPacketAll(const RrProgram *program,
-                          const RrWeightPacket &packet, size_t count,
-                          std::vector<float> *resolved)
-{
-    if (!resolved || !packet.valid) {
-        return false;
-    }
-    if (packet.rangePolicy != 0 &&
-        !program->TokenEquals(packet.rangePolicy, "strict") &&
-        !program->TokenEquals(packet.rangePolicy, "clamp")) {
-        return false;
-    }
-    const bool isConstant =
-        program->TokenEquals(packet.representation, "constant");
-    const bool isDense =
-        program->TokenEquals(packet.representation, "dense");
-    const bool isSparse =
-        program->TokenEquals(packet.representation, "sparse");
-    if (isConstant) {
-        if (!packet.values.empty() || !packet.indices.empty()) {
-            return false;
-        }
-    } else if (isDense) {
-        if (!packet.indices.empty() || packet.values.size() != count) {
-            return false;
-        }
-    } else if (isSparse) {
-        if (packet.indices.size() != packet.values.size()) {
-            return false;
-        }
-        for (size_t i = 0; i < packet.indices.size(); ++i) {
-            if (packet.indices[i] < 0 ||
-                size_t(packet.indices[i]) >= count ||
-                (i > 0 &&
-                 packet.indices[i] <= packet.indices[i - 1])) {
-                return false;
-            }
-        }
-    } else {
-        return false;
-    }
-
-    const auto usable = [](float v) {
-        return std::isfinite(v) && v >= 0.0f && v <= 1.0f;
-    };
-
-    if (isConstant) {
-        if (!usable(packet.defaultWeight)) {
-            return false;
-        }
-        resolved->assign(count, packet.defaultWeight);
-        return true;
-    }
-
-    if (isDense) {
-        for (size_t i = 0; i < count; ++i) {
-            if (!usable(packet.values[i])) {
-                return false;
-            }
-        }
-        resolved->assign(packet.values.begin(),
-                         packet.values.begin() + count);
-        return true;
-    }
-
-    if (packet.indices.size() < count && !usable(packet.defaultWeight)) {
-        return false;
-    }
-    for (const float value : packet.values) {
-        if (!usable(value)) {
-            return false;
-        }
-    }
-    std::vector<float> valuesOut(count, packet.defaultWeight);
-    for (size_t i = 0; i < packet.indices.size(); ++i) {
-        valuesOut[size_t(packet.indices[i])] = packet.values[i];
-    }
-    resolved->swap(valuesOut);
-    return true;
-}
-
-// Whether the wire weight object names a type the oracle understands
-// (_IsWeightObjectType: static, dynamic, combine, and the
-// three volumetric kinds).
-bool
-_RrIsWeightObjectType(const RrProgram *program, uint32_t type)
-{
-    return program->TokenEquals(type, "RigExecStaticWeight") ||
-           program->TokenEquals(type, "RigExecDynamicWeight") ||
-           program->TokenEquals(type, "RigExecCombineWeight") ||
-           program->TokenEquals(type, "RigExecSphereWeight") ||
-           program->TokenEquals(type, "RigExecPlaneWeight") ||
-           program->TokenEquals(type, "RigExecCurveWeight");
-}
 
 // RigExecApplyRevisedAncestorDelta (rigEvaluator.cpp): the native
 // source rides the delta of the deepest revised ancestor above it.
@@ -1743,9 +1643,7 @@ _RrRunConstraintStep(RrProgram *program, size_t step,
     if (walkIndex < 0 ||
         size_t(walkIndex) >= program->poses->constraints.size() ||
         size_t(walkIndex) >= scratch->weightScratch.size() ||
-        size_t(walkIndex) >= scratch->weightError.size() ||
-        size_t(walkIndex) >= scratch->constraintWeights.size() ||
-        size_t(walkIndex) >= scratch->constraintHaveWeight.size()) {
+        size_t(walkIndex) >= scratch->weightError.size()) {
         if (error) {
             *error = _RrStepHead(program, step) +
                      " names no constraint";
@@ -1807,51 +1705,28 @@ _RrRunConstraintStep(RrProgram *program, size_t step,
         return finish();
     }
     // The envelope, in the dynamic path's THREE exclusive arms. The
-    // oracle call resolves into this constraint's own scratch; the
-    // runtime answers it from the weight packets the weights family
-    // resolved, falling back to the captured envelope when the
-    // weights family is masked out of the run.
+    // first resolves the weight object through the oracle into this
+    // constraint's own scratch, with the oracle's error on failure
+    // (bakedPose.cpp, the Constraint step). A geometry-domain constraint
+    // (points target) resolves none and keeps 1.0: its weight applies
+    // per point on the revision its delta feeds.
     double weight = 1.0;
     if (c.weightObject != 0 && c.pointsTarget == 0) {
         std::vector<float> &envelope = scratch->weightScratch[ci];
         std::string &envelopeError = scratch->weightError[ci];
         envelope.clear();
         envelopeError.clear();
-        envelope.assign(1, 1.0f);
-        bool resolved = false;
-        const auto found = scratch->weightIndex.find(c.weightObject);
-        if (found != scratch->weightIndex.end() &&
-            found->second < store.weightPackets.size() &&
-            !store.weightPackets.empty()) {
-            envelope.clear();
-            resolved = _RrResolveWeightPacketAll(
-                program, store.weightPackets[found->second], 1,
-                &envelope);
-        }
-        if (!resolved && scratch->constraintHaveWeight[ci]) {
-            envelope.assign(
-                1, scratch->constraintWeights[ci]);
-            resolved = true;
-        }
-        if (!resolved || envelope.size() != 1) {
-            const std::string wpath =
-                program->TextOrEmpty(c.weightObject);
-            if (found == scratch->weightIndex.end()) {
-                envelopeError = "missing weight object " + wpath;
-            } else {
-                const uint32_t type =
-                    program->geometry
-                        ->weightObjects[found->second]
-                        .type;
-                if (!_RrIsWeightObjectType(program, type)) {
-                    envelopeError = "unknown weight object type " +
-                                    program->TextOrEmpty(type) + " on " +
-                                    wpath;
-                } else {
-                    envelopeError =
-                        "could not resolve weights on " + wpath;
-                }
+        if (c.weightObjectIndex < 0) {
+            if (error) {
+                *error = _RrStepHead(program, step) +
+                         " resolves an envelope with no weight object";
             }
+            return false;
+        }
+        const auto &field = store.weightFieldResults[size_t(c.weightField)];
+        envelope = field.values;
+        envelopeError = field.error;
+        if (!field.ok || envelope.size() != 1) {
             output.diagnostics.push_back(
                 cpath + ": " + envelopeError +
                 "; constraint passed through");
@@ -1929,7 +1804,48 @@ _RrRunConstraintStep(RrProgram *program, size_t step,
         }
         return false;
     }
-    const RrConstraintArraysLive &arrays = store.arrays[size_t(c.arrays)];
+    RrConstraintArraysLive &arrays = store.arrays[size_t(c.arrays)];
+    const auto &arrayWire=program->poses->constraintArrays[size_t(c.arrays)];
+    const auto arrayPath=program->TextOrEmpty(arrayWire.prim);
+    arrays.diagnostics.clear(); arrays.poleDiagnostics.clear();
+    const auto weights=[&](size_t channel,size_t count,const char *name,
+                          std::vector<std::string> *lines,std::vector<double> *values) {
+        const int slot=arrayWire.rawSlots[channel];
+        const auto *raw=slot>=0 && RrInputHasValue(program,uint32_t(slot))
+            ? RrInputArray<float>(program,uint32_t(slot)) : nullptr;
+        if(raw && !raw->empty() && raw->size()!=count) {
+            lines->push_back(arrayPath+" "+name+" has "+std::to_string(raw->size())+
+                             " entries for "+std::to_string(count)+" sources");
+            return false;
+        }
+        values->assign(count,1.0);
+        if(raw) for(size_t k=0;k<raw->size();++k) (*values)[k]=(*raw)[k];
+        return true;
+    };
+    const auto offsets=[&](size_t channel,const char *name,std::vector<RrVec3d> *values) {
+        const int slot=arrayWire.rawSlots[channel];
+        const auto *raw=slot>=0 && RrInputHasValue(program,uint32_t(slot))
+            ? RrInputArray<RigExecWireVec3d>(program,uint32_t(slot)) : nullptr;
+        if(raw && !raw->empty() && raw->size()!=arrayWire.sourceCount) {
+            arrays.diagnostics.push_back(arrayPath+" "+name+" has "+std::to_string(raw->size())+
+                             " entries for "+std::to_string(arrayWire.sourceCount)+" sources");
+            return false;
+        }
+        values->assign(size_t(arrayWire.sourceCount),RrVec3d(0));
+        if(raw) for(size_t k=0;k<raw->size();++k)
+            (*values)[k]=RrVec3d((*raw)[k][0],(*raw)[k][1],(*raw)[k][2]);
+        return true;
+    };
+    arrays.ok=weights(0,size_t(arrayWire.sourceCount),"inputs:sourceWeights",&arrays.diagnostics,&arrays.weights);
+    if(arrayWire.parentOffsets)
+        arrays.ok=arrays.ok && offsets(1,"inputs:translationOffsets",&arrays.translationOffsets) &&
+                              offsets(2,"inputs:rotationOffsets",&arrays.rotationOffsets);
+    else {
+        arrays.translationOffsets.assign(size_t(arrayWire.sourceCount),RrVec3d(0));
+        arrays.rotationOffsets.assign(size_t(arrayWire.sourceCount),RrVec3d(0));
+    }
+    if(arrayWire.readPole)
+        arrays.poleOk=weights(3,size_t(arrayWire.poleCount),"inputs:poleVectorWeights",&arrays.poleDiagnostics,&arrays.poleWeights);
 
     if (c.singleChainIk) {
         if (wireCommit.targetReads.size() != c.targetSlots.size() ||
@@ -1963,6 +1879,7 @@ _RrRunConstraintStep(RrProgram *program, size_t step,
             inputsValid = false;
         }
         _RrSingleChainIkParams params;
+        params.stretch=c.stretch?program->ReadConstraint(ci,RrConstraintStretch).f32:0;
         params.mode = _RrSingleChainIkMode(c.ikMode);
         params.weight = weight;
         if (c.ikMode == 0) {
@@ -1982,6 +1899,9 @@ _RrRunConstraintStep(RrProgram *program, size_t step,
                 inputsValid = false;
             }
             if (inputsValid && !arrays.poleOk) {
+                for (const std::string &line : arrays.poleDiagnostics) {
+                    output.diagnostics.push_back(line);
+                }
                 inputsValid = false;
             }
             RrVec3d polePoint(0.0);
@@ -2002,7 +1922,7 @@ _RrRunConstraintStep(RrProgram *program, size_t step,
                 if (!resolveSource(
                         c.poleObjects[k], wireCommit.poleReads[k],
                         c.poleObjectNatives[k],
-                        wireCommit.poleAncestors[k], &poleFrame) ||
+                        wireCommit.poleAncestors[k].v, &poleFrame) ||
                     !std::isfinite(arrays.poleWeights[k]) ||
                     arrays.poleWeights[k] < 0) {
                     output.diagnostics.push_back(
@@ -2098,7 +2018,12 @@ _RrRunConstraintStep(RrProgram *program, size_t step,
 
     scratch->recordEveryTarget[size_t(wire.object)] = 0;
 
+    // The authored tables first, then the source frames: the arrays' own
+    // lines ahead of any source's, as the baked step orders them.
     bool sourcesReady = arrays.ok;
+    for (const std::string &line : arrays.diagnostics) {
+        output.diagnostics.push_back(line);
+    }
     for (size_t k = 0; sourcesReady && k < c.sources.size(); ++k) {
         if (k >= wireCommit.sourceReads.size() ||
             k >= wireCommit.sourceAncestors.size() ||
@@ -2117,7 +2042,7 @@ _RrRunConstraintStep(RrProgram *program, size_t step,
         RrPointFrame frame;
         if (!resolveSource(c.sources[k], wireCommit.sourceReads[k],
                            c.sourceNatives[k],
-                           wireCommit.sourceAncestors[k], &frame)) {
+                           wireCommit.sourceAncestors[k].v, &frame)) {
             output.diagnostics.push_back(
                 cpath + " could not resolve source " +
                 program->TextOrEmpty(c.sourcePaths[k]));

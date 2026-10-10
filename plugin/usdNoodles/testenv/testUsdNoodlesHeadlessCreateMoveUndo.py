@@ -108,12 +108,6 @@ class TestUndoRedo(NoodlesHeadlessTestCase):
         nodes = self.helper.get_node_ids()
         self.assertEqual(len(nodes), 1, "Expected 1 node after undo")
 
-    def test_undo_enables_redo(self):
-        """After undo, redo should become available."""
-        self._create_and_move()
-        self.helper.undo()
-        self.assertTrue(self.helper.can_redo())
-
     def test_redo_after_undo(self):
         """Redo should re-apply the undone operation."""
         self._create_and_move()

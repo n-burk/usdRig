@@ -16,6 +16,12 @@ TF_DEFINE_PRIVATE_TOKENS(_mush,
     ((onlySmooth,"inputs:onlySmooth")) ((computationToTarget,"inputs:computationToTarget"))
     ((frame,"rigExec:frame")) (frameTransforms));
 namespace {
+const TfToken _oracleToken0("faceVertexCounts");
+const TfToken _oracleToken1("faceVertexIndices");
+// The modes' fallbacks, built once: an oracle builds no token from text.
+const TfToken _restToken("rest");
+const TfToken _vertexToken("vertex");
+
 template<class T> T Input(const VdfContext &ctx,const TfToken &name,T fallback) {
     const auto *value=ctx.GetInputValuePtr<T>(name);return value ? *value : fallback;
 }
@@ -35,8 +41,8 @@ RigExecMoverParameters Parameters(const VdfContext &ctx) {
         if(needsRest&&!p.mushSettings.onlySmooth)return p;
         p.restPoints=RigExecMoverCollect<GfVec3f>(ctx,RigExecMoverExecTokens->basePoints);
     }
-    if(!RigExecParseDeltaMushSmoothing(Input(ctx,_mush->smoothing,TfToken("rest")).GetString(),&p.mushSettings.smoothing)||
-       !RigExecParseDeltaMushFrameTransport(Input(ctx,_mush->transport,TfToken("vertex")).GetString(),&p.mushSettings.frameTransport))return p;
+    if(!RigExecParseDeltaMushSmoothing(Input(ctx,_mush->smoothing,_restToken).GetString(),&p.mushSettings.smoothing)||
+       !RigExecParseDeltaMushFrameTransport(Input(ctx,_mush->transport,_vertexToken).GetString(),&p.mushSettings.frameTransport))return p;
     p.mushSettings.smoothWeights=RigExecMoverCollect<float>(ctx,_mush->smoothWeights);
     p.mushSettings.edges=RigExecMoverCollect<int>(ctx,_mush->edges);
     p.topologyCounts=RigExecMoverCollect<int>(ctx,RigExecMoverExecTokens->topologyCounts);
@@ -85,19 +91,19 @@ RigExecOracleResult Oracle(const RigExecMoverOracleContext &ctx) {
     VtVec3fArray rest;ctx.prim.GetAttribute(_mush->rest).Get(&rest);
 
     VtIntArray counts,indices;auto owner=ctx.stage->GetPrimAtPath(ctx.target.GetPrimPath());
-    owner.GetAttribute(TfToken("faceVertexCounts")).Get(&counts,ctx.time);
-    owner.GetAttribute(TfToken("faceVertexIndices")).Get(&indices,ctx.time);
+    owner.GetAttribute(_oracleToken0).Get(&counts,ctx.time);
+    owner.GetAttribute(_oracleToken1).Get(&indices,ctx.time);
     int iterations=10;float step=0.5f,distance=0,detail=1;bool pin=true;
     ctx.resolved.GetAttribute(ctx.prim.GetAttribute(_mush->iterations),ctx.time,&iterations);
     ctx.resolved.GetAttribute(ctx.prim.GetAttribute(_mush->step),ctx.time,&step);
     ctx.resolved.GetAttribute(ctx.prim.GetAttribute(_mush->pin),ctx.time,&pin);
     ctx.resolved.GetAttribute(ctx.prim.GetAttribute(_mush->distance),ctx.time,&distance);
     ctx.resolved.GetAttribute(ctx.prim.GetAttribute(_mush->detail),ctx.time,&detail);
-    RigExecDeltaMushSettings settings;TfToken smoothing("rest"),transport("vertex");
+    RigExecDeltaMushSettings settings;TfToken smoothing=_restToken,transport=_vertexToken;
     ctx.resolved.GetAttribute(ctx.prim.GetAttribute(_mush->smoothing),UsdTimeCode::Default(),&smoothing);
     ctx.resolved.GetAttribute(ctx.prim.GetAttribute(_mush->transport),UsdTimeCode::Default(),&transport);
-    if(!RigExecParseDeltaMushSmoothing(smoothing.GetString(),&settings.smoothing)||
-       !RigExecParseDeltaMushFrameTransport(transport.GetString(),&settings.frameTransport))return RigExecOracleResult::PassThrough;
+    if(!RigExecParseDeltaMushSmoothing(smoothing.GetText(),&settings.smoothing)||
+       !RigExecParseDeltaMushFrameTransport(transport.GetText(),&settings.frameTransport))return RigExecOracleResult::PassThrough;
     ctx.resolved.GetAttribute(ctx.prim.GetAttribute(_mush->onlySmooth),ctx.time,&settings.onlySmooth);
     VtFloatArray weights;VtIntArray edges;
     ctx.resolved.GetAttribute(ctx.prim.GetAttribute(_mush->smoothWeights),ctx.time,&weights);

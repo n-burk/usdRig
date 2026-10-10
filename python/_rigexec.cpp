@@ -521,51 +521,6 @@ _PythonToDependencyPaths(
 
 // Rig: the evaluator wrapper.
 
-const char *
-_ModeName(rigExec::RigExecEvaluationMode mode)
-{
-    switch (mode) {
-    case rigExec::RigExecEvaluationMode::Baked: return "baked";
-    case rigExec::RigExecEvaluationMode::BakedWithParityCheck: return "parity";
-    case rigExec::RigExecEvaluationMode::ExecReference: return "reference";
-    case rigExec::RigExecEvaluationMode::Dynamic: break;
-    }
-    return "dynamic";
-}
-
-// Who chose the mode. Spelled as the thing a reader would go and look at:
-// the attribute by its property name, the variable by its own name.
-const char *
-_ModeSourceName(rigExec::RigExecEvaluationModeSource source)
-{
-    switch (source) {
-    case rigExec::RigExecEvaluationModeSource::Explicit: return "explicit";
-    case rigExec::RigExecEvaluationModeSource::Environment:
-        return "environment";
-    case rigExec::RigExecEvaluationModeSource::Attribute: return "attribute";
-    case rigExec::RigExecEvaluationModeSource::Default: break;
-    }
-    return "default";
-}
-
-rigExec::RigExecEvaluationMode
-_ParseMode(const std::string &name)
-{
-    if (name == "baked") return rigExec::RigExecEvaluationMode::Baked;
-    if (name == "parity") {
-        return rigExec::RigExecEvaluationMode::BakedWithParityCheck;
-    }
-    if (name == "reference") {
-        return rigExec::RigExecEvaluationMode::ExecReference;
-    }
-    if (name != "dynamic") {
-        throw py::value_error(
-            "evaluation_mode must be 'dynamic', 'baked', 'parity' or "
-            "'reference' (got '" + name + "')");
-    }
-    return rigExec::RigExecEvaluationMode::Dynamic;
-}
-
 struct _Rig {
     UsdStageRefPtr stage;  ///< keeps the stage alive for the rig's lifetime
     SdfPath rigPath;
@@ -851,60 +806,84 @@ PYBIND11_MODULE(_rigexec, m) {
                      time < 0 ? UsdTimeCode::Default() : UsdTimeCode(time));
              },
              py::arg("time") = -1.0)
-        .def_property("cpu_parity_mode",
-            [](_Rig &r) { return r.evaluator->cpuParityMode; },
-            [](_Rig &r, bool v) { r.evaluator->cpuParityMode = v; })
-        .def_property("evaluation_mode",
-            [](_Rig &r) { return _ModeName(r.evaluator->GetEvaluationMode()); },
-            [](_Rig &r, std::string v) {
-                r.evaluator->SetEvaluationMode(_ParseMode(v));
-            },
-            "'dynamic' (OpenExec plus the pose walk), 'baked' (the flattened\n"
-            "epoch when the rig allows it, dynamic otherwise), 'parity'\n"
-            "(both, compared with exact equality; see\n"
-            "Pose.baked_parity_mismatches), or 'reference' (the exec-\n"
-            "authoritative walk alone, the oracle the other three are\n"
-            "judged against). Baked is a request: setting it\n"
-            "can never change an answer, only how fast it arrives.\n"
-            "Setting it also takes the decision away from the rig's own\n"
-            "rigExec:baked for good; see evaluation_mode_source.")
+        .def_property("cpu_reference",
+            [](_Rig &r) { return r.evaluator->cpuReference; },
+            [](_Rig &r, bool v) { r.evaluator->cpuReference = v; },
+            "Compare graph results with the independent scalar reference.")
         .def_property("publish_weight_fields",
             [](_Rig &r) { return r.evaluator->GetPublishWeightFields(); },
             [](_Rig &r, bool v) { r.evaluator->SetPublishWeightFields(v); },
             "Whether each evaluation resolves the per-point weight fields\n"
             "Pose.weight_field reads. On by default; the viewer turns it off\n"
             "until a weight overlay is shown.")
-        .def_property_readonly("evaluation_mode_source",
-            [](_Rig &r) {
-                return _ModeSourceName(r.evaluator->GetEvaluationModeSource());
-            },
-            "Who chose evaluation_mode: 'explicit' (this property was set),\n"
-            "'environment' (a non-empty RIGEXEC_EVALUATION_MODE),\n"
-            "'attribute' (the rig's own uniform bool rigExec:baked) or\n"
-            "'default' (nobody asked). That is also the precedence, highest\n"
-            "first -- an interactive host leaves the mode alone so a rig\n"
-            "authored rigExec:baked = true opens through the program.")
-        .def_property_readonly("baked_cluster_count", [](const _Rig &r) {
-                return r.evaluator->GetBakedClusterCount();
-            },
-            "How many clusters the standing baked program holds; zero with\n"
-            "no program.")
-        .def_property_readonly("baked_clusters_run_last_generation",
-            [](const _Rig &r) {
-                return r.evaluator->GetBakedClustersRunLastGeneration();
-            },
-            "How many of those clusters the last generation ran. Cone\n"
-            "re-execution is invisible on a published pose -- a frame that\n"
-            "re-ran everything publishes the same numbers as one that\n"
-            "skipped the right half -- so this is what makes a skipped\n"
-            "cone observable, with baked_cluster_count beside it.")
+        .def("last_op_trace", [](const _Rig &r) {
+                 std::vector<py::dict> out;
+                 for (const rigExec::RigExecOpTraceEntry &entry :
+                      r.evaluator->GetLastOpTrace()) {
+                     py::dict d;
+                     d["step"] = entry.step;
+                     d["kind"] = entry.kind;
+                     d["domain"] = entry.domain;
+                     d["label"] = entry.label;
+                     d["seq"] = entry.seq;
+                     d["cluster"] = entry.cluster;
+                     d["start_us"] = entry.startUs;
+                     d["duration_us"] = entry.durationUs;
+                     d["thread"] = entry.thread;
+                     d["memo_us"] = entry.memoUs;
+                     d["publish_us"] = entry.publishUs;
+                     out.push_back(d);
+                 }
+                 return out;
+             },
+             "The graph operations the last generation executed, in completion\n"
+             "order: dicts of step, kind, domain ('pose', 'weight' or\n"
+             "'geometry'), label, seq (1-based) and cluster. Empty when the\n"
+             "graph has not been compiled. With op timing on, start_us and\n"
+             "duration_us give the body, memo_us and publish_us the memo before\n"
+             "it and the value publication after it, and thread the runner.")
+        .def_property("op_timing_enabled",
+            [] (const _Rig &r) { return r.evaluator->GetOpTimingEnabled(); },
+            [] (_Rig &r, bool enabled) { r.evaluator->SetOpTimingEnabled(enabled); })
+        .def("op_graph", [](const _Rig &r) {
+                 const auto ranges =
+                     [](const std::vector<rigExec::RigExecOpSlotRange> &in) {
+                         std::vector<py::tuple> out;
+                         for (const rigExec::RigExecOpSlotRange &range : in) {
+                             out.push_back(py::make_tuple(
+                                 range.domain, range.first, range.last));
+                         }
+                         return out;
+                     };
+                 std::vector<py::dict> out;
+                 for (const rigExec::RigExecOpGraphNode &node :
+                      r.evaluator->GetOpGraph()) {
+                     py::dict d;
+                     d["step"] = node.step;
+                     d["kind"] = node.kind;
+                     d["domain"] = node.domain;
+                     d["label"] = node.label;
+                     d["preds"] = node.preds;
+                     d["succs"] = node.succs;
+                     d["cluster"] = node.cluster;
+                     d["reads"] = ranges(node.reads);
+                     d["writes"] = ranges(node.writes);
+                     out.push_back(d);
+                 }
+                 return out;
+             },
+             "The compiled operation graph: dicts of step, kind,\n"
+             "domain, label, preds, succs, cluster, and reads/writes\n"
+             "as (slot domain, first, last) tuples, last inclusive. Empty\n"
+             "when the graph has not been compiled.")
         .def_property_readonly("skin_topology_cache_size", [](const _Rig &r) {
                 return r.evaluator->GetSkinTopologyCacheSize();
             },
             "How many skin layouts the epoch's topology cache holds answers\n"
             "for. Dropping and re-reading a layout publishes the same\n"
             "deformation as keeping it, so only the cache's occupancy says\n"
-            "whether an interactive override paid for the re-read.")
+            "whether an interactive override paid for the re-read. The\n"
+            "cache retains immutable layout state for graph execution.")
         .def("set_interactive_overrides",
              [](_Rig &r, const std::vector<std::tuple<std::string, std::string,
                                                      py::object>> &entries) {
@@ -952,39 +931,6 @@ PYBIND11_MODULE(_rigexec, m) {
         .def_property_readonly("has_interactive_overrides", [](const _Rig &r) {
                  return r.evaluator->HasInteractiveOverrides();
              })
-        .def("solver_batch_levels", [](const _Rig &r) {
-                 std::map<std::string, size_t> out;
-                 for (const auto &entry : r.evaluator->GetSolverBatchLevels()) {
-                     out[_PathStr(entry.first)] = entry.second;
-                 }
-                 return out;
-             },
-             "Aggregate solver path -> its dependency level in the compiled\npose schedule. Diagnostic: evaluation order comes from the\ninterleaved pose steps, not from this map.")
-        .def("chain_levels", [](const _Rig &r) {
-                 std::vector<py::dict> out;
-                 for (size_t i = 0; i < r.evaluator->GetChainLevelCount(); ++i) {
-                     py::dict d;
-                     std::vector<std::string> targets;
-                     for (const SdfPath &t :
-                          r.evaluator->GetChainLevelTargets(i)) {
-                         targets.push_back(_PathStr(t));
-                     }
-                     d["targets"] = targets;
-                     d["parallel"] = r.evaluator->IsChainLevelParallel(i);
-                     out.push_back(d);
-                 }
-                 return out;
-             },
-             "The compiled geometry-chain levels, in walk order.")
-        .def("is_bakeable", [](const _Rig &r) {
-            return r.evaluator->IsBakeable(nullptr);
-        }, "Whether the compiled epoch can be expressed as a baked program.")
-        .def("bakeability_reasons", [](const _Rig &r) {
-            std::vector<std::string> reasons;
-            r.evaluator->IsBakeable(&reasons);
-            return reasons;
-        }, "One reason per feature that stops the rig from baking; empty\n"
-           "when is_bakeable() is true.")
         .def("binding_epoch_digest", [](const _Rig &r) {
             return r.evaluator->GetBindingEpochDigest();
         })
@@ -1066,7 +1012,8 @@ PYBIND11_MODULE(_rigexec, m) {
             }
             return out;
         }, "Every recorded scope in completion order, with the index of the\n"
-           "thread that ran it. Use profile_summary for totals.");
+           "thread that ran it. Use profile_summary for totals.")
+        ;
 
 
     py::class_<rigExec::RigExecRigPose>(m, "Pose",
@@ -1078,21 +1025,9 @@ PYBIND11_MODULE(_rigexec, m) {
         .def_property_readonly("diagnostics", [](const rigExec::RigExecRigPose &p) {
             return py::cast(p.diagnostics);
         })
-        .def_property_readonly("mover_graph_parity_mismatches",
-            [](const rigExec::RigExecRigPose &p) { return p.moverGraphParityMismatches; })
-        .def_property_readonly("baked_parity_mismatches",
-            [](const rigExec::RigExecRigPose &p) { return p.bakedParityMismatches; })
-        .def_readonly("mover_graph_revisions_created",
-            &rigExec::RigExecRigPose::moverGraphRevisionsCreated)
-        .def_readonly("mover_graph_revisions_executed",
-            &rigExec::RigExecRigPose::moverGraphRevisionsExecuted)
-        .def_readonly("mover_graph_schedules_built",
-            &rigExec::RigExecRigPose::moverGraphSchedulesBuilt)
-        .def_property_readonly("solver_override_rounds",
-            [](const rigExec::RigExecRigPose &p) { return p.solverOverrideRounds; })
-        .def_readonly("solver_evaluations", &rigExec::RigExecRigPose::solverEvaluations)
-        .def_property_readonly("solver_overrides_converged",
-            [](const rigExec::RigExecRigPose &p) { return p.solverOverridesConverged; })
+        .def_readonly("reference_agreements", &rigExec::RigExecRigPose::referenceAgreements)
+        .def_readonly("reference_mismatches", &rigExec::RigExecRigPose::referenceMismatches)
+        .def_readonly("comparison_mismatches", &rigExec::RigExecRigPose::comparisonMismatches)
 
         // Joint frames.
         .def("joint_frame", [](const rigExec::RigExecRigPose &p, std::string path, bool final) {
@@ -1240,7 +1175,8 @@ PYBIND11_MODULE(_rigexec, m) {
                 if (it == p.weightFields.end()) {
                     throw py::key_error("no weight field for " + path);
                 }
-                return py::cast(it->second.weights);
+                const VtFloatArray &held = it->second.weights;
+                return py::cast(std::vector<float>(held.cbegin(), held.cend()));
             }, py::arg("path"),
            "The resolved dense weights of one consumed weight object.")
         .def("weight_frame", [](const rigExec::RigExecRigPose &p, std::string path) {

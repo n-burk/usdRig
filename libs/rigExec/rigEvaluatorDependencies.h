@@ -33,14 +33,6 @@ _DiscoverAggregateSolvers(
 
 using _PathDependencies = std::map<SdfPath, std::set<SdfPath>>;
 
-struct _DependencyOrder {
-    SdfPathVector ordered;
-    SdfPathVector blocked;  // Cycles and anything waiting on them.
-};
-
-_DependencyOrder
-_OrderDependencies(const _PathDependencies &dependencies);
-
 // Matrix expressions can expose a posed ancestor through a connection to
 // another provider's parent:space, including through default-space fallbacks.
 // Trace the registered inputs conservatively: value-only identity toggles do
@@ -185,14 +177,6 @@ _BuildSolverInputIndex(
     const std::map<SdfPath, _PoseInputInfo> &poseInputInfo);
 
 } // namespace evaluatorDetail
-
-// Deferred inputs retained until dynamic request preparation needs the index.
-struct RigExecRigEvaluator::_SolverInputIndexInputs {
-    std::map<SdfPath, std::set<SdfPath>> solverPoseReads;
-    // Attribute sets not yet materialized: the graph below fills them.
-    std::map<SdfPath, evaluatorDetail::_PoseInputInfo> poseInputInfo;
-    std::shared_ptr<evaluatorDetail::_PoseInputGraph> poseInputGraph;
-};
 
 } // namespace rigExec
 

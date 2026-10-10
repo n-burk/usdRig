@@ -5,6 +5,10 @@
 #include <memory>
 
 namespace rigExec {
+struct RigExecStandaloneResolvedState {
+    VtValue value;
+    bool blocked=false;
+};
 struct RigExecStandaloneResult {
     /// True means every requested value was extracted without execution errors.
     /// Typed packet validity/degeneracy flags retain their own semantic meaning.
@@ -23,10 +27,10 @@ struct RigExecStandaloneResult {
     }
 };
 
-/// Portable provider-computation execution over an owned compact database.
+/// Shared production scene-graph execution over an owned compact database.
 /// The host serializes calls; no USD stage is created or retained here.
-/// CPU mover/pose revisions and reverse solver-joint bindings must be lowered
-/// before use and are rejected by this provider-level vertical slice.
+/// Solver, pose, property, weight and geometry producers share typed IDs and
+/// the same compiler/executor as detached scene playback.
 class RigExecStandaloneSystem {
 public:
     explicit RigExecStandaloneSystem(const RigExecSceneDb &database);
@@ -39,8 +43,15 @@ public:
     RigExecStandaloneResult Evaluate(UsdTimeCode time);
     /// Supply every attribute's already-resolved value/block for an arbitrary
     /// identity. Missing slots fail; no row is borrowed from an exported time.
+    /// Empty boxes preserve an existing identity's block bit; new identities
+    /// need the typed overload below to distinguish blocks from no value.
     RigExecStandaloneResult EvaluateResolved(
         UsdTimeCode time, const std::map<SdfPath, VtValue> &resolvedStates);
+
+    /// Explicit block/no-value provenance for an arbitrary identity. A block
+    /// requires an empty value; captured structural Default facts must match.
+    RigExecStandaloneResult EvaluateResolved(UsdTimeCode time,
+        const std::map<SdfPath,RigExecStandaloneResolvedState> &resolvedStates);
 
     bool SetValue(const SdfPath &attribute, UsdTimeCode time,
                   const VtValue &value, std::string *error = nullptr);
@@ -49,7 +60,10 @@ public:
     bool SetTargets(const SdfPath &relationship, const SdfPathVector &targets,
                     std::string *error = nullptr);
     bool SetPrimActive(const SdfPath &prim, bool active, std::string *error = nullptr);
+    /// Actual compiled scene artifact identity: retained for numeric row edits,
+    /// replaced after structural declarations change.
     const void *GetCompilerIdentity() const;
+    /// Requested outputs reached by changed sampled IDs in the compiled graph.
     size_t GetValueInvalidationCount() const;
 private:
     struct _Impl;

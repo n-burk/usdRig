@@ -326,15 +326,10 @@ class ShapeEditorPanel(QtWidgets.QDialog):
                     # This evaluator exists to read published floats, and
                     # nothing looks at its guides -- so stop computing
                     # them. MEASURED elsewhere at ~1.4 ms/frame of pure
-                    # viewport data. Sparse for the same reason: the panel
-                    # re-evaluates on a drag, which is exactly the case
-                    # sparse is for (fingertip 24.2 -> 15.9 ms).
+                    # viewport data. The graph handles changed input cones
+                    # while the panel re-evaluates an interactive drag.
                     try:
                         rig.solver_guides_enabled = False
-                    except Exception:
-                        pass
-                    try:
-                        rig.evaluation_mode = "sparse"
                     except Exception:
                         pass
                     self._rig = rig

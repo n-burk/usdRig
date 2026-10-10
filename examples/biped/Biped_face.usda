@@ -265,7 +265,9 @@ over "Biped"
                 )
                 {
                     float inputs:defaultWeight = 1
-                    float inputs:value = 0
+                    float inputs:value = 0 (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.face:jawCompression>
                     rel rigExec:moves = </Biped/Rig/Movers/face_inner_joints/nose_bridge_compress_scale.inputs:defaultWeight>
                     uniform token rigExec:operation = "add"
@@ -375,7 +377,9 @@ over "Biped"
                 )
                 {
                     float inputs:defaultWeight = 1
-                    float inputs:value = 0
+                    float inputs:value = 0 (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.face:jawCompression>
                     rel rigExec:moves = </Biped/Rig/Movers/face_pivots/nose_compress_pose.inputs:defaultWeight>
                     uniform token rigExec:operation = "add"
@@ -421,7 +425,9 @@ over "Biped"
                 )
                 {
                     float inputs:defaultWeight = 1
-                    float inputs:value = 0
+                    float inputs:value = 0 (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.face:jawCompression>
                     rel rigExec:moves = </Biped/Rig/Movers/face_pivots/nose_bridge_compress_pose.inputs:defaultWeight>
                     uniform token rigExec:operation = "add"
@@ -493,7 +499,9 @@ over "Biped"
                 )
                 {
                     float inputs:defaultWeight = 1
-                    float inputs:value = 0
+                    float inputs:value = 0 (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.face:jawCompression>
                     rel rigExec:moves = </Biped/Rig/Movers/face_pivots/face_mid_compress_pose.inputs:defaultWeight>
                     uniform token rigExec:operation = "add"

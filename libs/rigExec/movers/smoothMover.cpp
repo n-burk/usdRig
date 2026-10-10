@@ -21,6 +21,9 @@ using rigExec::RigExecMoverExecTokens;
 PXR_NAMESPACE_USING_DIRECTIVE
 
 namespace {
+const TfToken _oracleToken0("faceVertexCounts");
+const TfToken _oracleToken1("faceVertexIndices");
+
 
 // RigExecSmoothMover parameters: fixed-adjacency Laplacian smoothing of
 // the destination's standard topology (spec §7.6 revised).
@@ -63,18 +66,18 @@ rigExec::RigExecOracleResult
 _OracleSmoothMover(const rigExec::RigExecMoverOracleContext &ctx)
 {
     using rigExec::RigExecOracleResult;
-    const UsdStageRefPtr &stage = ctx.stage;
+    const rigExec::RigExecOracleScene &stage = ctx.stage;
     const SdfPath &target = ctx.target;
     const UsdTimeCode time = ctx.time;
     VtVec3fArray &points = *ctx.points;
     std::vector<GfVec3f> scratch(points.begin(), points.end());
-    const UsdPrim owner =
+    const rigExec::RigExecOraclePrim owner =
         stage->GetPrimAtPath(target.GetPrimPath());
     VtIntArray counts, indices;
     if (owner) {
-        owner.GetAttribute(TfToken("faceVertexCounts"))
+        owner.GetAttribute(_oracleToken0)
             .Get(&counts, time);
-        owner.GetAttribute(TfToken("faceVertexIndices"))
+        owner.GetAttribute(_oracleToken1)
             .Get(&indices, time);
     }
     rigExec::RigExecApplyLaplacianSmooth(

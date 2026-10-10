@@ -109,7 +109,7 @@ def _check_look_drives_the_iris(failures):
             break
 
     rig = rigexec.Rig(stage, _RIG)
-    rig.evaluation_mode = "baked"
+    rig.cpu_reference = True
 
     def read():
         pose = rig.evaluate(0)
@@ -160,7 +160,7 @@ def main():
         prim = stage.GetPrimAtPath(control)
         assert prim, control
         rig = rigexec.Rig(stage, _RIG)
-        rig.evaluation_mode = "baked"
+        rig.cpu_reference = True
         rest = _points(rig, mesh)
         attr = prim.GetAttribute("avars:" + avar)
         if not attr or not attr.IsValid():

@@ -1781,8 +1781,9 @@ class RigExecUsdviewContainer(PluginContainer):
                             "playing", False))
 
     def _IsNavigating(self):
-        # Warming samples and captures inputs on the owner thread before
-        # worker evaluation. A timer tick must yield to viewport navigation.
+        # Warming samples inputs on the owner thread before worker
+        # evaluation, and the idle fill may evaluate one whole pose there.
+        # A timer tick must yield to viewport navigation.
         api = getattr(self, "_api", None)
         controller = getattr(api, "_UsdviewApi__appController", None)
         view = getattr(controller, "_stageView", None)

@@ -1,5 +1,6 @@
 // RigExec volumetric weight-field kernels implementation.
 #include "weightFields.h"
+#include "spatialAccel.h"
 
 #include <algorithm>
 #include <cmath>
@@ -50,14 +51,20 @@ RigExecBuildFalloffLut(RigExecFalloffProfile profile, size_t count)
 float
 RigExecSampleFalloffLut(const std::vector<float> &curve, float r)
 {
-    if (curve.size() < 2) {
+    return RigExecSampleFalloffLut(curve.data(), curve.size(), r);
+}
+
+float
+RigExecSampleFalloffLut(const float *curve, size_t count, float r)
+{
+    if (count < 2) {
         return r;  // empty or degenerate table is the identity
     }
-    const float x = _Clamp01(r) * float(curve.size() - 1);
+    const float x = _Clamp01(r) * float(count - 1);
     // floor, not truncation: x is already non-negative here, but keeping
     // the two spellings distinct is what stops a later signed input from
     // silently indexing backwards.
-    const size_t i = std::min(curve.size() - 2,
+    const size_t i = std::min(count - 2,
                               size_t(std::floor(x)));
     const float t = x - float(i);
     return curve[i] + (curve[i + 1] - curve[i]) * t;
@@ -78,7 +85,8 @@ RigExecEvaluateFalloff(float distance, const RigExecFalloffParams &p)
     // invert exchanges the ends continuously rather than by a branch, so
     // an animated invert sweeps rather than popping.
     u = u + (1.0f - 2.0f * u) * p.invert;
-    const float w = RigExecSampleFalloffLut(p.curve, 1.0f - u);
+    const float w = (p.curveData ? RigExecSampleFalloffLut(p.curveData, p.curveCount, 1.0f - u)
+                                    : RigExecSampleFalloffLut(p.curve, 1.0f - u));
     // Deliberately unclamped after the strength multiply: rangePolicy is
     // the authority on out-of-range weights (see the header).
     return w * p.strength;
@@ -158,16 +166,40 @@ _ToLocal(const GfMatrix4d &worldToLocal, const GfVec3f &p)
 }  // namespace
 
 void
+RigExecSphereWeightField(const std::vector<GfVec3f> &points,
+    const GfMatrix4d &matrix, const RigExecFalloffParams &params,
+    std::vector<float> *weights, const GfVec3f &positive, const GfVec3f &negative)
+{
+    RigExecSphereWeightField({points.data(),points.size()},matrix,params,weights,positive,negative);
+}
+void
+RigExecPlaneWeightField(const std::vector<GfVec3f> &points,
+    const GfMatrix4d &matrix, int axis, const RigExecFalloffParams &params,
+    std::vector<float> *weights, const RigExecPlaneBounds *bounds)
+{
+    RigExecPlaneWeightField({points.data(),points.size()},matrix,axis,params,weights,bounds);
+}
+void
+RigExecCurveWeightField(const std::vector<GfVec3f> &points,
+    const std::vector<GfVec3f> &curve, const GfMatrix4d &matrix,
+    const RigExecFalloffParams &params, std::vector<float> *weights)
+{
+    std::vector<GfVec3f> localCurve;
+    RigExecCurveWeightField({points.data(),points.size()},{curve.data(),curve.size()},
+        matrix,params,weights,&localCurve);
+}
+
+void
 RigExecSphereWeightField(
-    const std::vector<GfVec3f> &points,
+    RigExecWeightPointView points,
     const GfMatrix4d &worldToLocal,
     const RigExecFalloffParams &params,
     std::vector<float> *weights,
     const GfVec3f &positiveScales, const GfVec3f &negativeScales)
 {
-    weights->resize(points.size());
-    for (size_t i = 0; i < points.size(); ++i) {
-        GfVec3f local = _ToLocal(worldToLocal, points[i]);
+    weights->resize(points.count);
+    for (size_t i = 0; i < points.count; ++i) {
+        GfVec3f local = _ToLocal(worldToLocal, points.data[i]);
         for (int axis = 0; axis < 3; ++axis) {
             local[axis] /= local[axis] < 0.0f
                 ? negativeScales[axis] : positiveScales[axis];
@@ -179,16 +211,16 @@ RigExecSphereWeightField(
 
 void
 RigExecPlaneWeightField(
-    const std::vector<GfVec3f> &points,
+    RigExecWeightPointView points,
     const GfMatrix4d &worldToLocal,
     int axis,
     const RigExecFalloffParams &params,
     std::vector<float> *weights,
     const RigExecPlaneBounds *bounds)
 {
-    weights->resize(points.size());
-    for (size_t i = 0; i < points.size(); ++i) {
-        const GfVec3f local = _ToLocal(worldToLocal, points[i]);
+    weights->resize(points.count);
+    for (size_t i = 0; i < points.count; ++i) {
+        const GfVec3f local = _ToLocal(worldToLocal, points.data[i]);
         if (bounds && !RigExecPlaneWithinBounds(local, axis, *bounds)) {
             // Outside the rectangle the field is ZERO, not the ramp's
             // value at that distance: a bounded plane is a patch, and a
@@ -208,14 +240,14 @@ RigExecPlaneWeightField(
 
 void
 RigExecCurveWeightField(
-    const std::vector<GfVec3f> &points,
-    const std::vector<GfVec3f> &curvePoints,
+    RigExecWeightPointView points,
+    RigExecWeightPointView curvePoints,
     const GfMatrix4d &worldToLocal,
     const RigExecFalloffParams &params,
-    std::vector<float> *weights)
+    std::vector<float> *weights, std::vector<GfVec3f> *curveScratch)
 {
-    weights->resize(points.size());
-    if (curvePoints.empty()) {
+    weights->resize(points.count);
+    if (curvePoints.count == 0) {
         // No curve is an empty field, not an identity one: an author who
         // loses the curve target should see the influence vanish rather
         // than silently get full weight everywhere.
@@ -223,13 +255,29 @@ RigExecCurveWeightField(
         return;
     }
     // The curve is transformed once, not per point.
-    std::vector<GfVec3f> localCurve(curvePoints.size());
-    for (size_t k = 0; k < curvePoints.size(); ++k) {
-        localCurve[k] = _ToLocal(worldToLocal, curvePoints[k]);
+    auto &localCurve = *curveScratch;
+    localCurve.resize(curvePoints.count);
+    for (size_t k = 0; k < curvePoints.count; ++k) {
+        localCurve[k] = _ToLocal(worldToLocal, curvePoints.data[k]);
     }
-    for (size_t i = 0; i < points.size(); ++i) {
+    if (localCurve.size() - 1 >= kRigExecBvhMinSegments &&
+        points.count >= kRigExecBvhMinQueries) {
+        RigExecSegmentBvh<GfVec3f> bvh;
+        if (bvh.Build(localCurve.data(), localCurve.size())) {
+            for (size_t i = 0; i < points.count; ++i) {
+                const float d = bvh.QueryNearest(
+                    _ToLocal(worldToLocal, points.data[i]), localCurve.data(),
+                    RigExecSegmentDistance);
+                (*weights)[i] = RigExecEvaluateFalloff(d, params);
+            }
+            return;
+        }
+        // Build failed (non-finite curve points): fall through to the
+        // verbatim loop below.
+    }
+    for (size_t i = 0; i < points.count; ++i) {
         const float d = RigExecCurveDistance(
-            _ToLocal(worldToLocal, points[i]), localCurve.data(),
+            _ToLocal(worldToLocal, points.data[i]), localCurve.data(),
             localCurve.size());
         (*weights)[i] = RigExecEvaluateFalloff(d, params);
     }
@@ -282,42 +330,18 @@ RigExecCombineWeightFields(
     size_t elementCount,
     std::vector<float> *out)
 {
-    for (const std::vector<float> &field : inputs) {
-        if (field.size() != elementCount) {
-            out->clear();
-            return false;
-        }
-    }
-    if (inputs.empty()) {
-        out->assign(elementCount, RigExecWeightCombineIdentity(mode));
-        return true;
-    }
-
-    // Subtract and Overlay are seeded from the FIRST input rather than
-    // from an identity: "a minus the rest" is what an author means by a
-    // subtract list, and overlaying onto a zero base would erase
-    // everything. Both then consume the authored order, as documented.
-    const bool seedFromFirst = mode == RigExecWeightCombine::Subtract ||
-                               mode == RigExecWeightCombine::Overlay;
-    size_t first = 0;
-    if (seedFromFirst) {
-        *out = inputs[0];
-        first = 1;
-    } else {
-        out->assign(elementCount, RigExecWeightCombineIdentity(mode));
-    }
-    for (size_t k = first; k < inputs.size(); ++k) {
-        for (size_t i = 0; i < elementCount; ++i) {
-            (*out)[i] = RigExecFoldWeight(mode, (*out)[i], inputs[k][i]);
-        }
-    }
-    if (mode == RigExecWeightCombine::Average) {
-        const float inv = 1.0f / float(inputs.size());
-        for (float &w : *out) {
-            w *= inv;
-        }
-    }
-    return true;
+    // Single definition: the streaming core owns the seeding, order, and
+    // average rules, so this entry point cannot drift from it. The
+    // inputs are already dense, so the core folds straight from them
+    // with no per-input copy.
+    return RigExecCombineWeightFieldsStreamed(
+        mode, inputs.size(), elementCount,
+        [&](size_t k, const float **data, size_t *size) {
+            *data = inputs[k].data();
+            *size = inputs[k].size();
+            return true;
+        },
+        out);
 }
 
 }  // namespace rigExec

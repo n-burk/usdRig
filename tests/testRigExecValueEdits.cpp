@@ -28,6 +28,7 @@
 #include "pxr/base/vt/array.h"
 #include "pxr/usd/sdf/types.h"
 #include "pxr/usd/usd/attribute.h"
+#include "pxr/usd/usd/editContext.h"
 #include "pxr/usd/usd/notice.h"
 #include "pxr/usd/usd/prim.h"
 #include "pxr/usd/usd/stage.h"
@@ -35,6 +36,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <functional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -53,6 +55,24 @@ static int failures = 0;
     } while (0)
 
 namespace {
+// A conservative untracked edit runs every active operation once, including
+// source operations. The census reports actual bodies and occupied clusters.
+void CheckWholeExecution(const RigExecRigEvaluator &evaluator)
+{
+    const auto &B = evaluator.GetBakedProgram()->GetStepGraph();
+    std::set<uint32_t> clusters;
+    CHECK(!B.opGraph.ops.empty());
+    CHECK(B.opExecution.ran.size() == B.opGraph.ops.size());
+    for (size_t i = 0; i < B.opGraph.ops.size(); ++i) {
+        CHECK(B.closedSteps.Test(int(i)));
+        CHECK(i < B.opExecution.ran.size() && B.opExecution.ran[i]);
+        CHECK(i < B.opGraph.opClusters.size());
+        if (i < B.opGraph.opClusters.size()) clusters.insert(B.opGraph.opClusters[i]);
+    }
+    CHECK(B.closedSteps.Count() == B.opGraph.ops.size());
+    CHECK(B.lastClosedSteps == B.opGraph.ops.size());
+    CHECK(evaluator.GetBakedClustersRunLastGeneration() == clusters.size());
+}
 
 std::string
 SchemaResourceDir(const std::string &examplesDir)
@@ -65,20 +85,10 @@ SchemaResourceDir(const std::string &examplesDir)
 #endif
 }
 
-// Baked, unless the parity entries asked for the checked mode: under it every
-// generation is compared with the dynamic walk as well.
-RigExecEvaluationMode
-Mode()
-{
-    return TfGetenv("RIGEXEC_EVALUATION_MODE") == "parity"
-               ? RigExecEvaluationMode::BakedWithParityCheck
-               : RigExecEvaluationMode::Baked;
-}
-
 bool
 Parity()
 {
-    return Mode() == RigExecEvaluationMode::BakedWithParityCheck;
+    return TfGetenvBool("RIGEXEC_BAKED_VERIFY_CONES", false);
 }
 
 const char *
@@ -103,9 +113,7 @@ FreshPose(const UsdStageRefPtr &stage, const SdfPath &rig, UsdTimeCode time)
     RigExecRigEvaluator fresh(stage, rig);
     std::vector<std::string> errors;
     CHECK(fresh.Compile(&errors));
-    fresh.SetEvaluationMode(Mode());
     const RigExecRigPose pose = fresh.Evaluate(time);
-    CHECK(fresh.GetBakedGenerationCount() == 1);
     return pose;
 }
 
@@ -119,9 +127,6 @@ CheckSamePose(const std::string &what, const RigExecRigPose &reference,
     CHECK(pose.valid);
     CHECK(reference.valid);
     RigExecRigPose fresh = reference;
-    pose.moverGraphRevisionsCreated = fresh.moverGraphRevisionsCreated;
-    pose.moverGraphRevisionsExecuted = fresh.moverGraphRevisionsExecuted;
-    pose.moverGraphSchedulesBuilt = fresh.moverGraphSchedulesBuilt;
     // And the lines that report them, with the one a recompile adds: what a
     // generation built, not what it posed.
     const auto keepPosed = [](std::vector<std::string> *lines) {
@@ -138,9 +143,9 @@ CheckSamePose(const std::string &what, const RigExecRigPose &reference,
     keepPosed(&pose.diagnostics);
     RigExecRigPose diff;
     RigExecComparePoses(fresh, pose, &diff);
-    if (diff.bakedParityMismatches != 0) {
+    if (diff.comparisonMismatches != 0) {
         std::printf("FAIL %s: %zu mismatch(es) against a fresh program:\n",
-                    what.c_str(), diff.bakedParityMismatches);
+                    what.c_str(), diff.comparisonMismatches);
         for (size_t i = 0; i < diff.diagnostics.size() && i < 12; ++i) {
             std::printf("    %s\n", diff.diagnostics[i].c_str());
         }
@@ -151,7 +156,7 @@ CheckSamePose(const std::string &what, const RigExecRigPose &reference,
             std::printf("    edited: %s\n", line.c_str());
         }
     }
-    CHECK(diff.bakedParityMismatches == 0);
+    CHECK(diff.comparisonMismatches == 0);
 }
 
 struct Case {
@@ -180,24 +185,26 @@ struct Case {
 void
 RunCase(const Case &c)
 {
+    // This helper owns its source stage exclusively. Observers must not
+    // prolong a previous case beyond its actual caller lifetime.
+    static UsdStageWeakPtr previousStage;
+    CHECK(!previousStage);
     UsdStageRefPtr stage = UsdStage::Open(c.stagePath);
     CHECK(stage);
     if (!stage) {
         return;
     }
+    previousStage = stage;
     if (c.setup) {
         c.setup(stage);
     }
     RigExecRigEvaluator evaluator(stage, c.rig);
     std::vector<std::string> errors;
     CHECK(evaluator.Compile(&errors));
-    evaluator.SetEvaluationMode(Mode());
     const UsdTimeCode time(c.time);
     CHECK(evaluator.Evaluate(time).valid);
     CHECK(evaluator.Evaluate(time).valid);
-    const size_t generations = evaluator.GetBakedGenerationCount();
     const size_t builds = evaluator.GetBakedProgramBuildCount();
-    CHECK(generations == 2);
 
     c.edit(stage);
     const RigExecNoticeDisposition got = evaluator.GetLastNoticeDisposition();
@@ -223,8 +230,7 @@ RunCase(const Case &c)
     }
 
     const RigExecRigPose edited = evaluator.Evaluate(time);
-    CHECK(edited.bakedParityMismatches == 0);
-    CHECK(evaluator.GetBakedGenerationCount() == generations + 1);
+    CHECK(edited.comparisonMismatches == 0);
     if (c.expect != RigExecNoticeDisposition::Stale) {
         CHECK(evaluator.GetBakedProgramBuildCount() == builds);
     }
@@ -240,8 +246,7 @@ RunCase(const Case &c)
         CHECK(ran < total);
     }
     if (c.expectWhole) {
-        CHECK(evaluator.GetBakedClustersRunLastGeneration() ==
-              evaluator.GetBakedClusterCount());
+        CheckWholeExecution(evaluator);
     }
     CheckSamePose(c.name + " (edited frame)", FreshPose(stage, c.rig, time),
                   edited);
@@ -249,12 +254,13 @@ RunCase(const Case &c)
     // And the frames after it: the edit was consumed once, and the program
     // goes on agreeing with a fresh one at the held time and at a new one.
     const RigExecRigPose held = evaluator.Evaluate(time);
-    CHECK(held.bakedParityMismatches == 0);
+    if (c.expectWhole) CHECK(!B.closureFull);
+    CHECK(held.comparisonMismatches == 0);
     CheckSamePose(c.name + " (held frame)", FreshPose(stage, c.rig, time),
                   held);
     const UsdTimeCode next(c.time + 1.0);
     const RigExecRigPose moved = evaluator.Evaluate(next);
-    CHECK(moved.bakedParityMismatches == 0);
+    CHECK(moved.comparisonMismatches == 0);
     CheckSamePose(c.name + " (next frame)", FreshPose(stage, c.rig, next),
                   moved);
 }
@@ -354,6 +360,40 @@ TestAChainMoverInputReachesThroughTheChain(const std::string &examplesDir)
     RunCase(c);
 }
 
+// A keyed rest a solver measures its bone lengths from, edited at the held
+// time: the rest tier recomposes it, and the solver, holding no live rest
+// on a run that is not full, re-measures only because one of its own rests
+// moved. (An edit on a static rest rebuilds the program instead.) Authored
+// in the session layer, which no other case opens.
+const SdfPath kIkSpaceRig("/IkSpaceAsset/Rig");
+const SdfPath kIkSpaceKnee("/IkSpaceAsset/Rig/Joints/Hip/Knee");
+
+void
+TestAKeyedRestSampleReachesItsSolver(const std::string &examplesDir)
+{
+    Case c;
+    c.name = "keyed rest under a solver";
+    c.stagePath = examplesDir + "/../tests/fixtures/computed_ik_space.usda";
+    c.rig = kIkSpaceRig;
+    c.time = 5.0;
+    c.setup = [](const UsdStageRefPtr &stage) {
+        UsdEditContext session(stage, stage->GetSessionLayer());
+        const UsdAttribute a =
+            stage->GetPrimAtPath(kIkSpaceKnee)
+                .CreateAttribute(TfToken("rest:ty"),
+                                 SdfValueTypeNames->Double);
+        CHECK(a.Set(0.0, UsdTimeCode(1.0)));
+        CHECK(a.Set(0.25, UsdTimeCode(5.0)));
+        CHECK(a.Set(0.5, UsdTimeCode(10.0)));
+    };
+    c.edit = [](const UsdStageRefPtr &stage) {
+        UsdEditContext session(stage, stage->GetSessionLayer());
+        CHECK(Attr(stage, kIkSpaceKnee, "rest:ty")
+                  .Set(0.75, UsdTimeCode(5.0)));
+    };
+    RunCase(c);
+}
+
 // A value on a prim outside the rig that nothing reads: routed to nothing,
 // and naming no path a frame cache would have to retire for.
 void
@@ -419,7 +459,6 @@ TestAConstraintInputSampleRunsItsCone(const std::string &examplesDir)
     KeyAimWeight(stage);
     RigExecRigEvaluator evaluator(stage, kAimRig);
     CHECK(evaluator.Compile());
-    evaluator.SetEvaluationMode(Mode());
     CHECK(evaluator.Evaluate(UsdTimeCode(50.0)).valid);
     CHECK(evaluator.Evaluate(UsdTimeCode(50.0)).valid);
     Attr(stage, kAim, "inputs:defaultWeight").Set(0.75f, UsdTimeCode(100.0));
@@ -450,6 +489,8 @@ struct _InvalidationProbe : public TfWeakBase {
 // is routed through -- is not the walk the frame takes any more. The value
 // edit on the new upstream hop that follows then reaches the constraint,
 // where a program that had kept the old index would have routed it nowhere.
+// The weight declares no read phase, so it reads the clamp chain's BASE:
+// the driver as authored, published on the weight by the chain's run.
 void
 TestARetargetedWalkRebuildsBeforeItsUpstreamEdit(
     const std::string &examplesDir)
@@ -470,7 +511,9 @@ TestARetargetedWalkRebuildsBeforeItsUpstreamEdit(
         CHECK(b.Set(0.2f, UsdTimeCode(100.0)));
         // A clamp on each: both are property-chain targets, so a walk that
         // reaches either resolves through the chain every frame (a
-        // `resolvedAttr` walk) and its hops are the input's override paths.
+        // `resolvedAttr` walk, answered at its head by the base the chain
+        // publishes on the weight) and its hops are the input's override
+        // paths.
         const SdfPath movers = kAimRig.AppendChild(TfToken("Movers"));
         for (const char *name : {"drv:a", "drv:b"}) {
             const UsdPrim clamp = stage->DefinePrim(
@@ -483,8 +526,10 @@ TestARetargetedWalkRebuildsBeforeItsUpstreamEdit(
                 .Set(TfToken("clamp"));
             clamp.CreateAttribute(TfToken("inputs:min"),
                                   SdfValueTypeNames->Float).Set(0.0f);
+            // Below the drivers' values at the held time, so the chain's
+            // base and final differ there.
             clamp.CreateAttribute(TfToken("inputs:max"),
-                                  SdfValueTypeNames->Float).Set(1.0f);
+                                  SdfValueTypeNames->Float).Set(0.5f);
             clamp.CreateRelationship(TfToken("rigExec:moves"))
                 .SetTargets({drivers.AppendProperty(TfToken(name))});
         }
@@ -497,7 +542,6 @@ TestARetargetedWalkRebuildsBeforeItsUpstreamEdit(
     setup(stage);
     RigExecRigEvaluator evaluator(stage, kAimRig);
     CHECK(evaluator.Compile());
-    evaluator.SetEvaluationMode(Mode());
     const UsdTimeCode time(50.0);
     CHECK(evaluator.Evaluate(time).valid);
     CHECK(evaluator.Evaluate(time).valid);
@@ -512,31 +556,42 @@ TestARetargetedWalkRebuildsBeforeItsUpstreamEdit(
     TfNotice::Revoke(key);
     // The walk resolved through a chain every frame, so nothing about its
     // value was captured -- and still the retarget is the program's own
-    // reason to rebuild.
+    // reason to rebuild (and a new epoch: the connection walk is in the
+    // structure digest).
     CHECK(probe.invalidated);
     CHECK(evaluator.GetLastNoticeDisposition() ==
           RigExecNoticeDisposition::Stale);
     const RigExecRigPose retargeted = evaluator.Evaluate(time);
-    CHECK(retargeted.bakedParityMismatches == 0);
+    CHECK(retargeted.comparisonMismatches == 0);
     CHECK(evaluator.GetBakedProgramBuildCount() == builds + 1);
     CheckSamePose("retargeted walk", FreshPose(stage, kAimRig, time),
                   retargeted);
+    // What the weight read: drv:b as authored, not the clamp's 0.5.
+    const auto weightRead = retargeted.movedProperties.find(
+        kAim.AppendProperty(TfToken("inputs:defaultWeight")));
+    float authoredB = 0.0f;
+    CHECK(stage->GetAttributeAtPath(driverB).Get(&authoredB, time));
+    CHECK(authoredB > 0.5f);
+    CHECK(weightRead != retargeted.movedProperties.end() &&
+          weightRead->second.IsHolding<float>() &&
+          weightRead->second.UncheckedGet<float>() == authoredB);
     CHECK(evaluator.Evaluate(time).valid);
 
-    // The new upstream hop's value, at the held time.
+    // The new upstream hop's value, at the held time: the base the weight
+    // reads, so the chain's next run publishes it there.
     CHECK(stage->GetAttributeAtPath(driverB).Set(0.05f, UsdTimeCode(100.0)));
     const RigExecNoticeDisposition got = evaluator.GetLastNoticeDisposition();
     std::printf("  upstream edit after the retarget: %s\n",
                 DispositionName(got));
     CHECK(got == RigExecNoticeDisposition::Edited);
     const RigExecRigPose edited = evaluator.Evaluate(time);
-    CHECK(edited.bakedParityMismatches == 0);
+    CHECK(edited.comparisonMismatches == 0);
     CheckSamePose("upstream edit after the retarget",
                   FreshPose(stage, kAimRig, time), edited);
     // And the old hop is read by nothing now: its edit moves no pose.
     CHECK(stage->GetAttributeAtPath(driverA).Set(0.6f, UsdTimeCode(100.0)));
     const RigExecRigPose stale = evaluator.Evaluate(time);
-    CHECK(stale.bakedParityMismatches == 0);
+    CHECK(stale.comparisonMismatches == 0);
     CheckSamePose("old hop after the retarget",
                   FreshPose(stage, kAimRig, time), stale);
 }
@@ -551,7 +606,6 @@ TestLayerMetadataRebuilds(const std::string &examplesDir)
     UsdStageRefPtr stage = UsdStage::Open(AimStage(examplesDir));
     RigExecRigEvaluator evaluator(stage, kAimRig);
     CHECK(evaluator.Compile());
-    evaluator.SetEvaluationMode(Mode());
     CHECK(evaluator.Evaluate(UsdTimeCode(50.0)).valid);
     stage->SetStartTimeCode(stage->GetStartTimeCode() - 1.0);
     std::printf("  layer metadata: %s\n",
@@ -560,11 +614,9 @@ TestLayerMetadataRebuilds(const std::string &examplesDir)
           RigExecNoticeDisposition::Stale);
     const RigExecRigPose pose = evaluator.Evaluate(UsdTimeCode(50.0));
     CHECK(pose.valid);
-    CHECK(pose.bakedParityMismatches == 0);
-    CHECK(evaluator.GetBakedClustersRunLastGeneration() ==
-          evaluator.GetBakedClusterCount());
+    CHECK(pose.comparisonMismatches == 0);
+    CheckWholeExecution(evaluator);
 }
-
 
 // A property the bake asked about by name that no step declares as an input
 // -- a blend shape's target points, read whole by the geometry prologue's
@@ -643,7 +695,6 @@ TestAConnectedChainSourceIsReported(const std::string &examplesDir)
     ConnectClampToSettings(stage);
     RigExecRigEvaluator evaluator(stage, kPropMathRig);
     CHECK(evaluator.Compile());
-    evaluator.SetEvaluationMode(Mode());
     const UsdTimeCode time(c.time);
     const RigExecRigPose before = evaluator.Evaluate(time);
     CHECK(before.valid);
@@ -666,7 +717,7 @@ TestAConnectedChainSourceIsReported(const std::string &examplesDir)
                   FreshPose(stage, kPropMathRig, time), edited);
     RigExecRigPose moved;
     RigExecComparePoses(before, edited, &moved);
-    CHECK(moved.bakedParityMismatches != 0);
+    CHECK(moved.comparisonMismatches != 0);
 
     // The retarget onto the sibling: a connection field, never routed.
     CHECK(Attr(stage, kClampGain, "inputs:max").SetConnections({otherGain}));
@@ -712,7 +763,7 @@ main(int argc, char **argv)
                     resources.c_str());
         return 2;
     }
-    std::printf("mode: %s\n", Parity() ? "parity" : "baked");
+    std::printf("graph execution; scoped verifier: %s\n", Parity() ? "on" : "off");
     // Unbuffered, and with the whole run inside a catch: an exception out of
     // the evaluator reaches ucrtbase's abort, which discards the buffer and
     // leaves ctest reporting 0xc0000409 with no output at all. A test that
@@ -729,6 +780,7 @@ main(int argc, char **argv)
     TestLayerMetadataRebuilds(examplesDir);
     TestANamedInputNoStepDeclaresBumpsTheStamp(examplesDir);
     TestAConnectedChainSourceIsReported(examplesDir);
+    TestAKeyedRestSampleReachesItsSolver(examplesDir);
 
     } catch (const std::exception &error) {
         std::printf("FAIL: threw: %s\n", error.what());

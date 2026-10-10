@@ -128,7 +128,7 @@ _DecomposeMatrix(
     // Scale / shear / reflection: the proper polar rotation from the
     // library's standard decomposition. A singular linear part has no
     // rotation to keep; identity it is.
-    static const std::array<GfVec3d, 4> unitRest = {
+    const std::array<GfVec3d, 4> unitRest = {
         GfVec3d(0, 0, 0), GfVec3d(1, 0, 0),
         GfVec3d(0, 1, 0), GfVec3d(0, 0, 1)};
     RigExecTransformParams params;

@@ -3,7 +3,10 @@
 // this bench measures what warming DOES with them: cold-vs-warm scrub
 // throughput, edit-to-affected-frames recompute cost, UI-eval latency with
 // warming on/off (median and p95), memory under the cap, an N-second
-// UI-vs-warming stress for TSAN runs, and a Chrome-trace lane demo. Prints
+// UI-vs-warming stress for TSAN runs, and a Chrome-trace lane demo. The
+// scrub ends with the routes production samples through (the pinned
+// samplers, the digest and the lookup apart, and a sample after a stage
+// edit); its self-binding rows time the fallback route. Prints
 // human-readable numbers; asserts nothing, so it is built but deliberately
 // NOT registered with ctest (like benchFrameCache): wall-clock comparisons
 // flake on shared CI runners, so the benches report and the gate stays
@@ -34,7 +37,6 @@
 // so the on-vs-off p95 answers the contention question on any rig.
 #include "rigExec/backgroundScheduler.h"
 #include "rigExec/bakedProgram.h"
-#include "rigExec/bakedProgramImpl.h"
 #include "rigExec/frameCache.h"
 #include "rigExec/frameCacheSparsity.h"
 #include "rigExec/frozenContext.h"
@@ -52,6 +54,7 @@
 #include "pxr/usd/sdf/path.h"
 #include "pxr/usd/sdf/types.h"
 #include "pxr/usd/usd/attribute.h"
+#include "pxr/usd/usd/editContext.h"
 #include "pxr/usd/usd/prim.h"
 #include "pxr/usd/usd/primRange.h"
 #include "pxr/usd/usd/relationship.h"
@@ -247,15 +250,6 @@ PrepareRig(const char *name, const UsdStageRefPtr &stage, BenchRig *out)
         }
         return false;
     }
-    std::vector<std::string> reasons;
-    if (!RigExecBakedProgram::IsBakeable(*out->evaluator, &reasons)) {
-        std::printf("FATAL: %s does not bake\n", name);
-        for (const std::string &reason : reasons) {
-            std::printf("  %s\n", reason.c_str());
-        }
-        return false;
-    }
-    out->evaluator->SetEvaluationMode(RigExecEvaluationMode::Baked);
     const RigExecBakedProgram *program = out->evaluator->GetBakedProgram();
     if (!program) {
         std::printf("FATAL: %s built no program\n", name);
@@ -288,6 +282,195 @@ KeyFor(uint64_t epoch, const RigExecFrameInputs &inputs,
     key.epochDigest = epoch;
     key.controlDigest = RigExecControlStateDigest(inputs, overrides);
     return key;
+}
+
+// The warm anatomy production pays, 40 repetitions each: the pinned
+// samplers with the chains bound once (as the bridge and the registry bind
+// them), the digest and the lookup apart, and the trusted sample after a
+// stage edit no rig reads (every notice moves the stage edit serial, so the
+// sampler memo rebuilds once per notice). \p cache holds every frame of
+// \p frames under KeyFor; a miss is printed as data, not asserted.
+bool
+BenchPinnedAnatomy(BenchRig *rig, const std::vector<double> &frames,
+                   RigExecFrameCache *cache)
+{
+    const size_t reps = 40;
+    const std::vector<RigExecValueOverride> noOverrides;
+    const RigExecRigEvaluator &evaluator = *rig->evaluator;
+    RigExecChainSampleBindings bindings;
+    std::string bindError;
+    if (!RigExecBindChainSampleInputs(evaluator, &bindings, &bindError)) {
+        std::printf("  pinned anatomy skipped: chain bind declined (%s)\n",
+                    bindError.c_str());
+        return true;
+    }
+    const auto fail = [](const char *row, double t,
+                         const std::string &error) {
+        std::printf("  %s sample failed at %g (%s)\n", row, t,
+                    error.c_str());
+        return false;
+    };
+    size_t misses = 0;
+
+    // The headline: a served revisit's sample, digest and lookup.
+    std::vector<double> keyHit;
+    for (size_t rep = 0; rep < reps; ++rep) {
+        const double t = frames[rep % frames.size()];
+        RigExecFrameInputs inputs;
+        std::string error;
+        RigExecRigPose served;
+        const double start = NowUs();
+        const bool sampled = RigExecSampleFrameInputsWithTrustedChainBindings(
+            evaluator, UsdTimeCode(t), noOverrides, bindings, &inputs,
+            &error);
+        const bool hit =
+            sampled &&
+            cache->Lookup(KeyFor(rig->epoch, inputs, noOverrides), &served);
+        keyHit.push_back(NowUs() - start);
+        if (!sampled) {
+            return fail("key hit", t, error);
+        }
+        misses += hit && served.valid ? 0 : 1;
+    }
+    PrintDistribution("key hit (trusted)", keyHit, "us/frame");
+
+    // The samplers alone. The trusted vectors feed the digest and lookup
+    // rows below.
+    std::vector<RigExecFrameInputs> vectors(frames.size());
+    std::vector<double> trusted;
+    for (size_t rep = 0; rep < reps; ++rep) {
+        const double t = frames[rep % frames.size()];
+        RigExecFrameInputs inputs;
+        std::string error;
+        const double start = NowUs();
+        const bool sampled = RigExecSampleFrameInputsWithTrustedChainBindings(
+            evaluator, UsdTimeCode(t), noOverrides, bindings, &inputs,
+            &error);
+        trusted.push_back(NowUs() - start);
+        if (!sampled) {
+            return fail("trusted", t, error);
+        }
+        vectors[rep % frames.size()] = std::move(inputs);
+    }
+    PrintDistribution("sample trusted", trusted, "us/frame");
+    std::vector<double> verified;
+    for (size_t rep = 0; rep < reps; ++rep) {
+        const double t = frames[rep % frames.size()];
+        RigExecFrameInputs inputs;
+        std::string error;
+        const double start = NowUs();
+        const bool sampled = RigExecSampleFrameInputsWithChainBindings(
+            evaluator, UsdTimeCode(t), noOverrides, bindings, &inputs,
+            &error);
+        verified.push_back(NowUs() - start);
+        if (!sampled) {
+            return fail("verified", t, error);
+        }
+    }
+    PrintDistribution("sample verified", verified, "us/frame");
+    {
+        RigExecBurstSampleCache burst;
+        std::string error;
+        const RigExecBakedProgram *program = evaluator.GetBakedProgram();
+        if (!program ||
+            !RigExecBuildBurstSampleCache(
+                *program, bindings, noOverrides,
+                RigExecFrameCacheEpochDigest(evaluator), &burst, &error)) {
+            std::printf("  sample burst skipped: build declined (%s)\n",
+                        error.c_str());
+        } else {
+            std::vector<double> burstSamples;
+            for (size_t rep = 0; rep < reps; ++rep) {
+                const double t = frames[rep % frames.size()];
+                RigExecFrameInputs inputs;
+                const double start = NowUs();
+                const bool sampled = RigExecSampleFrameInputsWithBurstCache(
+                    evaluator, UsdTimeCode(t), noOverrides, &burst, &inputs,
+                    &error);
+                burstSamples.push_back(NowUs() - start);
+                if (!sampled) {
+                    return fail("burst", t, error);
+                }
+            }
+            PrintDistribution("sample burst", burstSamples, "us/frame");
+        }
+    }
+
+    // The key and the store apart, over the trusted vectors.
+    std::vector<RigExecFrameCacheKey> keys(frames.size());
+    std::vector<double> digestOnly;
+    for (size_t rep = 0; rep < reps; ++rep) {
+        const size_t i = rep % frames.size();
+        const double start = NowUs();
+        keys[i] = KeyFor(rig->epoch, vectors[i], noOverrides);
+        digestOnly.push_back(NowUs() - start);
+    }
+    PrintDistribution("digest only", digestOnly, "us/frame");
+    std::vector<double> lookupOnly;
+    for (size_t rep = 0; rep < reps; ++rep) {
+        const size_t i = rep % frames.size();
+        RigExecRigPose served;
+        const double start = NowUs();
+        const bool hit = cache->Lookup(keys[i], &served);
+        lookupOnly.push_back(NowUs() - start);
+        misses += hit && served.valid ? 0 : 1;
+    }
+    PrintDistribution("lookup only", lookupOnly, "us/frame");
+
+    // One session-layer value per repetition on an attribute outside every
+    // rig, then the trusted sample. The attribute's prim is defined (a
+    // resync) and removed outside the timed loop, and the chains are bound
+    // again after the define: trusted bindings do not outlive a resync.
+    {
+        const UsdStageRefPtr &stage = rig->stage;
+        const SdfPath scratchPath("/BenchFrameCacheWarmScratch");
+        UsdAttribute scratch;
+        {
+            UsdEditContext session(stage, stage->GetSessionLayer());
+            scratch = stage->DefinePrim(scratchPath)
+                          .CreateAttribute(TfToken("benchValue"),
+                                           SdfValueTypeNames->Double);
+        }
+        RigExecChainSampleBindings rebound;
+        std::string error;
+        if (!scratch ||
+            !RigExecBindChainSampleInputs(evaluator, &rebound, &error)) {
+            std::printf("  sample after a stage edit skipped (%s)\n",
+                        error.c_str());
+        } else {
+            std::vector<double> afterEdit;
+            for (size_t rep = 0; rep < reps; ++rep) {
+                const double t = frames[rep % frames.size()];
+                {
+                    UsdEditContext session(stage, stage->GetSessionLayer());
+                    scratch.Set(double(rep));
+                }
+                RigExecFrameInputs inputs;
+                const double start = NowUs();
+                const bool sampled =
+                    RigExecSampleFrameInputsWithTrustedChainBindings(
+                        evaluator, UsdTimeCode(t), noOverrides, rebound,
+                        &inputs, &error);
+                afterEdit.push_back(NowUs() - start);
+                if (!sampled) {
+                    std::printf("  sample after a stage edit failed at %g "
+                                "(%s)\n",
+                                t, error.c_str());
+                    afterEdit.clear();
+                    break;
+                }
+            }
+            if (!afterEdit.empty()) {
+                PrintDistribution("sample trusted after a stage edit",
+                                  afterEdit, "us/frame");
+            }
+        }
+        UsdEditContext session(stage, stage->GetSessionLayer());
+        stage->RemovePrim(scratchPath);
+    }
+    std::printf("  %-22s %10zu (key hit and lookup only rows)\n",
+                "pinned misses", misses);
+    return true;
 }
 
 // Scrub throughput: cold (live eval + publish) vs warm (digest + lookup).
@@ -439,6 +622,10 @@ BenchScrub(BenchRig *rig, const char *name,
         std::printf("  %-22s %10.1f us/frame (median)\n",
                     "warm of which: digest+lookup",
                     Percentile(digestLookup, 0.5));
+        // The same samples under their production name: the route the
+        // bridge takes only when the pinned route declines.
+        PrintDistribution("sample self-binding (fallback)", sampleOnly,
+                          "us/frame");
     }
     const double ratio =
         Percentile(warm, 0.5) > 0.0
@@ -453,25 +640,14 @@ BenchScrub(BenchRig *rig, const char *name,
                 "bytes=%zu (bench misses=%zu invalid=%zu)\n",
                 stats.hits, stats.misses, stats.published,
                 stats.entryCount, stats.bytes, misses, invalid);
-    return true;
-}
-
-const char *
-VerdictName(RigExecSparseVerdict verdict)
-{
-    switch (verdict) {
-    case RigExecSparseVerdict::Hit:
-        return "Hit";
-    case RigExecSparseVerdict::Partial:
-        return "Partial";
-    case RigExecSparseVerdict::Miss:
-        return "Miss";
-    }
-    return "?";
+    // After the statistics above, so their counts stay the scrub's own.
+    std::printf("  pinned anatomy (production routes, 40 repetitions "
+                "each):\n");
+    return BenchPinnedAnatomy(rig, frames, &cache);
 }
 
 // Edit cost: one control-sample edit across an N-frame range, then what the
-// sparse planner does with the affected frames.
+// whole-pose cache proof does with the affected frames.
 
 bool
 BenchEdit(BenchRig *rig, const std::vector<double> &frames)
@@ -546,59 +722,21 @@ BenchEdit(BenchRig *rig, const std::vector<double> &frames)
                 affectedUs / double(frames.size()), affected,
                 frames.size());
 
-    // Sparse planning for the affected frame: the retained pre-edit state
-    // against the edited request. Planning is sub-microsecond scale, so it
-    // is timed over 200 repetitions and reported as a mean.
-    const double indexStart = NowUs();
     RigExecOutputAffectedIndex index;
-    index.Build(rig->evaluator->GetBakedProgram()->GetStepGraph(),
-                rig->epoch);
-    std::printf("  %-22s %10.1f us (one-time per epoch, %zu clusters)\n",
-                "affected-index build", NowUs() - indexStart,
-                index.ClusterCount());
+    index.Build(rig->evaluator->GetBakedProgram()->GetStepGraph(), rig->epoch);
     RigExecRetainedFrameState retained;
     retained.inputs = warmed[affectedIndex];
     retained.epochDigest = rig->epoch;
     retained.clusterCount = rig->clusters;
-    RigExecTaskListCache memo;
-    const size_t walksBefore = index.Walks();
-    RigExecSparsePlan plan;
-    const double planStart = NowUs();
+    bool reusable = false;
+    const double proofStart = NowUs();
     for (int rep = 0; rep < 200; ++rep) {
-        plan = RigExecPlanSparseReuse(index, &memo, retained, rig->epoch,
-                                      edited[affectedIndex], noOverrides);
+        reusable = RigExecCanReuseRetainedPose(index, retained, rig->epoch,
+                                               edited[affectedIndex], noOverrides);
     }
-    const double planUs = (NowUs() - planStart) / 200.0;
-    std::printf("  %-22s %10.1f us/plan (%s: run %zu of %zu clusters, "
-                "memo %s, walks +%zu)\n",
-                "sparse plan", planUs, VerdictName(plan.verdict),
-                plan.ClustersToRun(), rig->clusters,
-                plan.memoUsed ? "used" : "cold",
-                index.Walks() - walksBefore);
-    const RigExecTaskListStats memoStats = memo.Stats();
-    std::printf("  memo stats: hits=%zu misses=%zu stores=%zu entries=%zu\n",
-                memoStats.hits, memoStats.misses, memoStats.stores,
-                memoStats.entries);
-
-    // A second edit of the same control re-runs the memoized selection
-    // without rewalking: the walk count must not move.
-    tx.Set(1001.0, UsdTimeCode(editedFrame));
-    RigExecFrameInputs editedAgain;
+    std::printf("  whole-pose reuse proof: %.1f us/check; reusable=%s\n",
+                (NowUs() - proofStart) / 200.0, reusable ? "yes" : "no");
     std::string error;
-    if (!RigExecSampleFrameInputs(*rig->evaluator,
-                                  UsdTimeCode(editedFrame), noOverrides,
-                                  &editedAgain, &error)) {
-        std::printf("  FATAL: repeat sample failed (%s)\n", error.c_str());
-        return false;
-    }
-    const size_t walksBeforeRepeat = index.Walks();
-    const RigExecSparsePlan repeat =
-        RigExecPlanSparseReuse(index, &memo, retained, rig->epoch,
-                               editedAgain, noOverrides);
-    std::printf("  %-22s %s (memo %s, walks +%zu)\n", "repeat-edit plan",
-                VerdictName(repeat.verdict),
-                repeat.memoUsed ? "used" : "cold",
-                index.Walks() - walksBeforeRepeat);
 
     // An override drag touches every frame's digest: the affected scan
     // below is the all-frames-moved endpoint, and the plan is the
@@ -627,14 +765,10 @@ BenchEdit(BenchRig *rig, const std::vector<double> &frames)
             dragInputs = at;
         }
     }
-    const RigExecSparsePlan dragPlan =
-        RigExecPlanSparseReuse(index, &memo, retained, rig->epoch,
-                               dragInputs, dragged);
-    std::printf("  override drag: %zu of %zu frames affected; plan %s, "
-                "run %zu of %zu clusters (conservative: unmapped control)\n",
-                dragAffected, frames.size(),
-                VerdictName(dragPlan.verdict), dragPlan.ClustersToRun(),
-                rig->clusters);
+    const bool dragReusable = RigExecCanReuseRetainedPose(
+        index, retained, rig->epoch, dragInputs, dragged);
+    std::printf("  override drag: %zu of %zu frames affected; whole pose reusable=%s\n",
+                dragAffected, frames.size(), dragReusable ? "yes" : "no");
     return true;
 }
 

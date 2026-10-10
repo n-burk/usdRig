@@ -1,18 +1,27 @@
 // .rigexec baking.
 #include "rigExecBake/bake.h"
-#include "rigExecBake/propertyChainsBake.h"
+#include "rigExecBake/computedCapture.h"
+#include "rigExecBake/pathTable.h"
+#include "rigExecBake/revisionReads.h"
 #include "rigExecBake/serialize.h"
-#include "rigExecBake/capture.h"
+#include "rigExecBake/staticCapture.h"
 #include "rigExec/bakedProgramImpl.h"
 #include "rigExec/movers/moverRegistry.h"
 #include "rigExec/rigEvaluator.h"
-#include "rigExecBinary/container.h"
-#include "rigExecBinary/external.h"
+#include "rigExecBinary/format.h"
+#include "rigExecBinary/generated/presentation_generated.h"
 
+#include "pxr/base/vt/array.h"
+#include "pxr/usd/sdf/path.h"
+#include "pxr/usd/usd/attribute.h"
+#include "pxr/usd/usd/stage.h"
 #include "pxr/usd/usd/timeCode.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
-#include <map>
+#include <set>
+#include <utility>
 
 PXR_NAMESPACE_USING_DIRECTIVE
 
@@ -20,7 +29,7 @@ namespace rigExec {
 namespace {
 
 // %.17g round-trips a double, the same canonical form rigExecPose --pose-out
-// writes: a manifest compared across builds compares exactly.
+// writes.
 std::string
 _FormatDouble(double value, char *buffer, size_t size)
 {
@@ -28,46 +37,13 @@ _FormatDouble(double value, char *buffer, size_t size)
     return std::string(buffer);
 }
 
-// JSON string escaping for the manifest. Paths carry no quotes or controls,
-// but the manifest also echoes the rig path a caller supplied, so this is
-// complete rather than trusting the input.
-std::string
-_EscapeJson(const std::string &text)
-{
-    std::string out;
-    out.reserve(text.size() + 2);
-    out.push_back('"');
-    for (const char c : text) {
-        switch (c) {
-        case '"': out += "\\\""; break;
-        case '\\': out += "\\\\"; break;
-        case '\n': out += "\\n"; break;
-        case '\r': out += "\\r"; break;
-        case '\t': out += "\\t"; break;
-        default:
-            if (static_cast<unsigned char>(c) < 0x20) {
-                char buffer[8];
-                std::snprintf(buffer, sizeof(buffer), "\\u%04x", c);
-                out += buffer;
-            } else {
-                out.push_back(c);
-            }
-            break;
-        }
-    }
-    out.push_back('"');
-    return out;
-}
-
-// The plugin movers' half of the file: each one's epoch bytes, and the
-// frame bytes it encoded on every baked frame, interned so a payload that
-// does not change is stored once.
+// The plugin movers' half of the file: each plugin revision's epoch bytes
+// and the frame bytes it encoded in the bake's run.
 class _ExternalExport {
 public:
-    // Lists the program's plugin revisions on the first frame, when the
-    // program certainly stands; refuses one whose plugin cannot encode.
-    bool List(const RigExecBakedProgramImpl &program,
-              RigExecBinaryWriter *writer, std::string *error)
+    // Lists the program's plugin revisions after the run, when the program
+    // certainly stands; refuses one whose plugin cannot encode.
+    bool List(const RigExecBakedProgramImpl &program, std::string *error)
     {
         for (size_t c = 0; c < program.chains.size(); ++c) {
             const auto &revisions = program.chains[c].revisions;
@@ -86,87 +62,193 @@ public:
                              " provides no .rigexec encoding";
                     return false;
                 }
-                RigExecWireExternalRevision entry;
+                _Entry entry;
                 entry.chain = uint32_t(c);
                 entry.revision = uint32_t(r);
-                entry.type = writer->AddString(type.GetString());
-                _wire.revisions.push_back(std::move(entry));
-                _handlers.push_back(handler);
+                entry.handler = handler;
+                _entries.push_back(std::move(entry));
             }
         }
-        _haveEpoch.assign(_handlers.size(), false);
         return true;
     }
 
-    // Encodes every plugin revision's payload as the frame just captured
-    // left it. A revision with no payload -- its assembly failed -- records
-    // that, and playback fails it on the same frame.
-    bool Capture(const RigExecBakedProgramImpl &program, double frame,
+    // Encodes every plugin revision's payload as the run just left it. A
+    // revision with no payload -- its assembly failed -- holds no frame,
+    // and playback fails it the same way.
+    bool Capture(const RigExecBakedProgramImpl &program, double time,
                  std::string *error)
     {
-        std::vector<uint32_t> row(_handlers.size(),
-                                  RigExecWireExternalNoFrame);
-        for (size_t k = 0; k < _handlers.size(); ++k) {
-            RigExecWireExternalRevision &entry = _wire.revisions[k];
-            const auto &revision = program.chains[entry.chain]
-                                       .revisions[entry.revision];
+        for (_Entry &entry : _entries) {
+            const auto &revision =
+                program.chains[entry.chain].revisions[entry.revision];
             const RigExecMoverParameters &parameters = revision.parameters;
+            if(entry.handler->encodeExternalEpoch &&
+               !entry.handler->encodeExternalEpoch(revision.binding,&entry.epoch)) {
+                *error="external mover "+revision.moverPath.GetString()+" could not encode its immutable epoch";
+                return false;
+            }
             if (!parameters.valid || parameters.externalData.IsEmpty()) {
                 continue;
             }
-            std::vector<uint8_t> epoch, bytes;
             char number[32];
-            if (!_handlers[k]->encodeExternal(parameters.externalData,
-                                              revision.binding, &epoch,
-                                              &bytes)) {
+            std::vector<uint8_t> sampledEpoch;
+            auto *epoch = entry.handler->encodeExternalEpoch ? &sampledEpoch : &entry.epoch;
+            if (!entry.handler->encodeExternal(parameters.externalData,
+                                               revision.binding,
+                                               epoch, &entry.frame)) {
                 *error = "external mover " + revision.moverPath.GetString() +
-                         " could not encode its payload at frame " +
-                         _FormatDouble(frame, number, sizeof(number));
+                         " could not encode its payload at time " +
+                         _FormatDouble(time, number, sizeof(number));
                 return false;
             }
-            if (!_haveEpoch[k]) {
-                entry.epoch = std::move(epoch);
-                _haveEpoch[k] = true;
-            } else if (epoch != entry.epoch) {
-                *error = "external mover " + revision.moverPath.GetString() +
-                         " encoded different epoch bytes at frame " +
-                         _FormatDouble(frame, number, sizeof(number)) +
-                         "; they must not vary within an epoch";
-                return false;
-            }
-            const auto interned = _blobs.emplace(
-                std::move(bytes), uint32_t(_wire.blobs.size()));
-            if (interned.second) {
-                _wire.blobs.push_back(interned.first->first);
-            }
-            row[k] = interned.first->second;
+            entry.valid = true;
         }
-        _wire.frames.push_back(std::move(row));
         return true;
     }
 
-    // Queues the section; a rig with no plugin mover writes none, so its
-    // file is what an earlier writer produced.
-    bool Write(RigExecBinaryWriter *writer, std::string *error) const
+    // The file's entries, in the same order: each plugin revision's type,
+    // its epoch, the frame bytes of the bake's run (none when its assembly
+    // failed there), and per declared phase the points authored at
+    // \p time, 0 when nothing is read.
+    void Fill(const RigExecBakedProgramImpl &program, double time,
+              const RigExecBakeInputs &inputs,
+              RigExecBakePathTable *paths, RigExecBakePools *pools,
+              std::vector<fb::RigExecWireExternalMover> *out) const
     {
-        if (_handlers.empty()) {
-            return true;
+        out->clear();
+        for (const _Entry &entry : _entries) {
+            const auto &revision =
+                program.chains[entry.chain].revisions[entry.revision];
+            fb::RigExecWireExternalMover mover;
+            mover.chain = entry.chain;
+            mover.revision = entry.revision;
+            mover.type = paths->Token(revision.moverPrim.GetTypeName());
+            const auto declarations=inputs.externalInputs.find({entry.chain,entry.revision});
+            if(declarations!=inputs.externalInputs.end()) {
+                mover.declaredInputs=declarations->second.reads;
+                for(size_t k=0;k<mover.declaredInputs.size();++k) {
+                    auto &row=mover.declaredInputs[k];
+                    const auto &fallback=declarations->second.fallbacks[k];
+                    if(!RigExecFormatIsArrayTag(row.read->tag)) continue;
+                    fb::RigExecWireValue value;
+                    value.tag=row.read->tag;
+                    if(fallback.IsHolding<VtIntArray>()) {
+                        const auto &v=fallback.UncheckedGet<VtIntArray>(); value.array=pools->Ints(v.cdata(),v.size());
+                    } else if(fallback.IsHolding<VtFloatArray>()) {
+                        const auto &v=fallback.UncheckedGet<VtFloatArray>(); value.array=pools->Floats(v.cdata(),v.size());
+                    } else if(fallback.IsHolding<VtDoubleArray>()) {
+                        const auto &v=fallback.UncheckedGet<VtDoubleArray>(); value.array=pools->Doubles(v.cdata(),v.size());
+                    } else if(fallback.IsHolding<VtVec2fArray>()) {
+                        const auto &v=fallback.UncheckedGet<VtVec2fArray>();
+                        value.array=pools->Vec2fs(v.empty()?nullptr:v.cdata()->data(),v.size());
+                    } else if(fallback.IsHolding<VtVec3fArray>()) {
+                        const auto &v=fallback.UncheckedGet<VtVec3fArray>();
+                        value.array=pools->Vec3fs(v.empty()?nullptr:v.cdata()->data(),v.size());
+                    }
+                    row.read->constant=pools->Value(value);
+                }
+            }
+            mover.v2FrameValid = entry.valid;
+            mover.epoch = entry.epoch;
+            if (entry.valid) {
+                mover.v2Frame = entry.frame;
+            }
+            mover.phasedFallback.reserve(revision.binding.phases.size());
+            for (const auto &phase : revision.binding.phases) {
+                const UsdAttribute attribute =
+                    program.stage->GetAttributeAtPath(phase.first);
+                VtVec3fArray points;
+                uint32_t id = 0;
+                if (attribute && attribute.Get(&points, UsdTimeCode(time))) {
+                    std::vector<float> xyz;
+                    xyz.reserve(points.size() * 3);
+                    for (const GfVec3f &p : points) {
+                        xyz.push_back(p[0]);
+                        xyz.push_back(p[1]);
+                        xyz.push_back(p[2]);
+                    }
+                    id = pools->Vec3fs(xyz.data(), points.size());
+                }
+                mover.phasedFallback.push_back(id);
+            }
+            out->push_back(std::move(mover));
         }
-        std::vector<uint8_t> payload;
-        if (!RigExecWireEncodeExternalMovers(_wire, &payload)) {
-            *error = "cannot encode the external movers";
-            return false;
-        }
-        writer->AddSection(RigExecBinarySection::ExternalMovers, payload);
-        return true;
     }
 
 private:
-    std::vector<const RigExecMoverHandler *> _handlers;
-    std::vector<bool> _haveEpoch;
-    std::map<std::vector<uint8_t>, uint32_t> _blobs;
-    RigExecWireExternalMovers _wire;
+    struct _Entry {
+        uint32_t chain = 0;
+        uint32_t revision = 0;
+        const RigExecMoverHandler *handler = nullptr;
+        std::vector<uint8_t> epoch;
+        std::vector<uint8_t> frame;
+        bool valid = false;
+    };
+    std::vector<_Entry> _entries;
 };
+
+// Adds to \p paths the input each control of \p bytes names, when \p bytes
+// is a REXP buffer that verifies; adds nothing otherwise, and
+// _VerifyPresentation reports that buffer after the capture.
+void
+_PresentationInputPaths(const std::vector<uint8_t> &bytes,
+                        std::set<SdfPath> *paths)
+{
+    if (bytes.empty() || bytes.size() >= FLATBUFFERS_MAX_BUFFER_SIZE) {
+        return;
+    }
+    flatbuffers::Verifier verifier(bytes.data(), bytes.size());
+    if (!fb::VerifyPresentationBuffer(verifier)) {
+        return;
+    }
+    const fb::Presentation *presentation = fb::GetPresentation(bytes.data());
+    if (!presentation->controls()) {
+        return;
+    }
+    for (const fb::PresentationControl *control :
+         *presentation->controls()) {
+        // A name that is no path is no listed input either, which
+        // _VerifyPresentation reports.
+        const std::string input = control->input()->str();
+        if (SdfPath::IsValidPathString(input)) {
+            paths->insert(SdfPath(input));
+        }
+    }
+}
+
+// A REXP buffer that verifies, every control naming one of \p listed
+// (ascending). The bytes are embedded unchanged; nothing here reads more of
+// them than the controls' inputs.
+bool
+_VerifyPresentation(const std::vector<uint8_t> &bytes,
+                    const std::vector<std::string> &listed,
+                    std::string *error)
+{
+    if (bytes.size() >= FLATBUFFERS_MAX_BUFFER_SIZE) {
+        *error = "the presentation is past the FlatBuffers size limit";
+        return false;
+    }
+    flatbuffers::Verifier verifier(bytes.data(), bytes.size());
+    if (!fb::VerifyPresentationBuffer(verifier)) {
+        *error = "the presentation is not a valid REXP buffer";
+        return false;
+    }
+    const fb::Presentation *presentation = fb::GetPresentation(bytes.data());
+    if (!presentation->controls()) {
+        return true;
+    }
+    for (const fb::PresentationControl *control :
+         *presentation->controls()) {
+        // Both fields are required, so the verifier saw them present.
+        const std::string input = control->input()->str();
+        if (!std::binary_search(listed.begin(), listed.end(), input)) {
+            *error = "presentation control " + control->name()->str() +
+                     " names " + input + ", which is not a listed input";
+            return false;
+        }
+    }
+    return true;
+}
 
 }  // namespace
 
@@ -184,12 +266,22 @@ RigExecBakeToBinary(RigExecRigEvaluator &evaluator,
     if (!result) {
         return Fail("no result to bake into");
     }
-    if (opts.frames.empty()) {
-        return Fail("no frames to bake");
+    if (std::isinf(opts.time)) {
+        return Fail("the bake time must be finite");
     }
-    if (opts.targetReaderVersion != RigExecBinaryMajor(RigExecBinaryVersion)) {
-        return Fail("unsupported target reader version");
-    }
+    // The file's program is the export build: a Range skin or a group gate
+    // rests only on reads the file holds as constants (private slots), never
+    // on one it must leave listed -- an admitted upstream input or an input
+    // the presentation names. Compile builds the program at its tail, so the
+    // role mode and the upstream suspension stand before it and that one
+    // build is the export build. The guards restore the evaluator on every
+    // return, and its next Evaluate rebuilds in Live mode.
+    const std::vector<SdfPath> upstream = evaluator.GetUpstreamInputPaths();
+    std::set<SdfPath> keep(upstream.begin(), upstream.end());
+    _PresentationInputPaths(opts.presentation, &keep);
+    RigExecScopedBakedRoleMode roles(evaluator, RigExecBakedRoleMode::Export,
+                                     std::move(keep));
+    RigExecScopedUpstreamSuspension suspension(evaluator);
     std::vector<std::string> compileErrors;
     if (!evaluator.Compile(&compileErrors)) {
         std::string joined = "compile failed";
@@ -209,287 +301,120 @@ RigExecBakeToBinary(RigExecRigEvaluator &evaluator,
         }
         return Fail(joined);
     }
+    // A bake is of the authored epoch: a held drag would print its value
+    // into the defaults.
     if (evaluator.HasInteractiveOverrides()) {
         return Fail("cannot bake with interactive overrides standing");
     }
-    RigExecBinaryWriter writer;
-    std::string captureError;
-    RigExecBakeCapture capture(evaluator, &writer, &captureError,
-                               opts.overridableInputs);
-    if (opts.overridableInputs) {
-        // One byte, written only when the rule was widened, so a default
-        // bake is byte-for-byte what it always was.
-        writer.AddSection(RigExecBinarySection::InputPolicy,
-                          std::vector<uint8_t>{1});
+    const RigExecBakedProgram *standing = evaluator.GetBakedProgram();
+    if (!standing) {
+        return Fail("no baked program standing to capture from");
     }
-    if (!capture.Valid()) {
-        return Fail(captureError);
-    }
-    const size_t bakedBefore = evaluator.GetBakedGenerationCount();
-    std::vector<SdfPath> joints;
-    _ExternalExport external;
-    bool first = true;
+    const double bakeTime =
+        std::isnan(opts.time)
+            ? RigExecBakedProbeTime(standing->GetStepGraph().stage)
+                  .GetValue()
+            : opts.time;
     char number[32];
-    for (double frame : opts.frames) {
-        RigExecRigPose pose;
-        if (!capture.CaptureFrame(frame, &pose, error)) {
-            return false;
-        }
-        if (!pose.valid) {
-            return Fail("invalid generation at frame " +
-                        _FormatDouble(frame, number, sizeof(number)));
-        }
-        const RigExecBakedProgram *program = evaluator.GetBakedProgram();
-        if (!program) {
-            return Fail("no baked program at frame " +
-                        _FormatDouble(frame, number, sizeof(number)));
-        }
-        std::string externalError;
-        if ((first && !external.List(program->GetStepGraph(), &writer,
-                                     &externalError)) ||
-            !external.Capture(program->GetStepGraph(), frame,
-                              &externalError)) {
-            return Fail(externalError);
-        }
-        // The joint set is epoch-structural: a generation that changes it
-        // is a different rig mid-bake, and the binary's joint table could
-        // not name both.
-        std::vector<SdfPath> order;
-        order.reserve(pose.jointFramesFinal.size());
-        for (const auto &[path, _] : pose.jointFramesFinal) {
-            order.push_back(path);
-        }
-        if (first) {
-            joints = order;
-            first = false;
-        } else if (joints != order) {
-            return Fail("the joint set changed between frames");
-        }
+    std::string why;
+    const size_t bakedBefore = evaluator.GetBakedGenerationCount();
+    // The one run reads every step's inputs, so the static data it leaves
+    // behind is complete whatever the closure would have skipped.
+    standing->RequestFullRun();
+    const RigExecRigPose pose = evaluator.Evaluate(UsdTimeCode(bakeTime));
+    if (evaluator.GetBakedProgram() != standing) {
+        return Fail("the program rebuilt during the bake run at time " +
+                    _FormatDouble(bakeTime, number, sizeof(number)));
+    }
+    if (!pose.valid) {
+        return Fail("invalid generation at time " +
+                    _FormatDouble(bakeTime, number, sizeof(number)));
+    }
+    _ExternalExport external;
+    if (!external.List(standing->GetStepGraph(), &why) ||
+        !external.Capture(standing->GetStepGraph(), bakeTime, &why)) {
+        return Fail(why);
     }
     // The IsBakeable gate above is necessary but not sufficient: an
     // in-epoch refusal the reasons do not name -- an override the program
     // cannot place, or a Run that handed the generation back -- still
     // answers dynamically. The generation count is what catches those, the
     // same accounting rigExecPose --require-baked performs.
-    if (evaluator.GetBakedGenerationCount() - bakedBefore != opts.frames.size()) {
-        return Fail("not every frame came from the baked program");
+    if (evaluator.GetBakedGenerationCount() - bakedBefore != 1) {
+        return Fail("the bake run did not come from the baked program");
+    }
+    const RigExecBakedProgramImpl &program = standing->GetStepGraph();
+
+    // The input list, from the standing program: the slots every read
+    // takes, with their values at the bake time as the defaults, every read
+    // in its table field, and the facts the oracle needs. Facts of an
+    // animated attribute hold their value at the bake time, which
+    // RigExecBakeStaticReport names. Paths and tokens intern in the order
+    // this visits them, then the tables', so two bakes write the same ids.
+    RigExecBakePathTable paths;
+    RigExecBakeComputedCapture inputs(evaluator, bakeTime, &paths, &why);
+    if (!inputs.Valid()) {
+        return Fail(why);
+    }
+    const auto &listed = inputs.GetListedInputNames();
+    std::vector<std::string> upstreamNames;
+    upstreamNames.reserve(upstream.size());
+    for (const SdfPath &path : upstream) {
+        const std::string name = path.GetString();
+        if (!std::binary_search(listed.begin(), listed.end(), name)) {
+            return Fail("upstream input " + name +
+                        " is admitted but has no input slot");
+        }
+        upstreamNames.push_back(name);
+    }
+    std::sort(upstreamNames.begin(), upstreamNames.end());
+    if (!opts.presentation.empty() &&
+        !_VerifyPresentation(opts.presentation, inputs.GetListedInputNames(),
+                             &why)) {
+        return Fail(why);
     }
 
-    const RigExecBakedProgram *baked = evaluator.GetBakedProgram();
-    if (!baked) {
-        return Fail("no baked program standing after baked generations");
+    // The file of the program and its run: the tables, the static data the
+    // run left, the plugin movers, then the root's fields. The path reads
+    // are every key the assembly's enumeration lists, so an input set on
+    // the file that takes another branch reads the stage's data there. It
+    // is written only if it validates, and kept only if it opens again.
+    std::vector<RigExecBakeRevisionRead> enumerated;
+    RigExecBakeEnumerateProgramReads(program, bakeTime, &enumerated);
+    fb::RigExecWireFile file;
+    RigExecBakePools pools;
+    if (!RigExecBakeFillFile(program, inputs.GetInputs(), &paths, &pools,
+                             &file, &why) ||
+        !RigExecBakeCaptureStatics(program, bakeTime, inputs.GetInputs(),
+                                   enumerated, &paths, &pools, &file, &why)) {
+        return Fail("cannot build the .rigexec file: " + why);
     }
-    const RigExecBakedProgramImpl &program = baked->GetStepGraph();
-    // The writer was created before the frame loop, so the capture could
-    // intern into its string table.
-    writer.AddString(evaluator.GetRigPath().GetString());
-    std::vector<uint32_t> jointStrings;
-    jointStrings.reserve(joints.size());
-    for (const SdfPath &joint : joints) {
-        jointStrings.push_back(writer.AddString(joint.GetString()));
+    external.Fill(program, bakeTime, inputs.GetInputs(), &paths, &pools, &file.externalMovers);
+    file.formatVersion = RigExecFormatVersion;
+    file.rig = paths.Path(evaluator.GetRigPath());
+    file.bakeTime = bakeTime;
+    file.compileDiagnostics = compileErrors;
+    file.presentation = opts.presentation;
+    paths.MoveInto(&file);
+    pools.MoveInto(&file);
+    std::vector<uint8_t> bytes;
+    if (!RigExecFormatWrite(file, &bytes, &why)) {
+        return Fail("cannot write the .rigexec file: " + why);
     }
-    std::vector<uint8_t> payload;
-    if (!RigExecWireEncodeSlotMeta(
-            RigExecBakeConvertSlotMeta(program, &writer), &payload)) {
-        return Fail("cannot encode the slot inventory");
-    }
-    writer.AddSection(RigExecBinarySection::SlotMeta, payload);
-    payload.clear();
-    if (!RigExecWireEncodeConstants(
-            RigExecBakeConvertConstants(program, &writer), &payload)) {
-        return Fail("cannot encode the epoch constants");
-    }
-    writer.AddSection(RigExecBinarySection::Constants, payload);
-    payload.clear();
-    const std::vector<RigExecWireStep> wireSteps =
-        RigExecBakeConvertSteps(program, &writer);
-    if (!RigExecWireEncodeSteps(wireSteps, &payload)) {
-        return Fail("cannot encode the step list");
-    }
-    writer.AddSection(RigExecBinarySection::Steps, payload);
-    payload.clear();
-    const RigExecWireClustering wireClustering =
-        RigExecBakeConvertClustering(program);
-    if (!RigExecWireEncodeClustering(wireClustering, &payload)) {
-        return Fail("cannot encode the clusters");
-    }
-    writer.AddSection(RigExecBinarySection::Clusters, payload);
-    payload.clear();
-    if (!RigExecWireEncodeCones(RigExecBakeConvertCones(program),
-                                &payload)) {
-        return Fail("cannot encode the cones");
-    }
-    writer.AddSection(RigExecBinarySection::Cones, payload);
-    payload.clear();
-    const RigExecWireDomainPose wirePose =
-        RigExecBakeConvertDomainPose(program, &writer);
-    if (!RigExecWireEncodeDomainPose(wirePose, &payload)) {
-        return Fail("cannot encode the pose tables");
-    }
-    writer.AddSection(RigExecBinarySection::DomainPose, payload);
-    payload.clear();
-    // Sparse: only solvers hanging from a start provider. Absent in
-    // binaries baked by major 1 minor 0, which is not an error: those load
-    // with every chain absolute, exactly as before.
-    std::vector<RigExecWireSolverStart> starts;
-    for (size_t i = 0; i < wirePose.solvers.size(); ++i) {
-        const RigExecWireSolver &solver = wirePose.solvers[i];
-        if (solver.start < 0) {
-            continue;
-        }
-        RigExecWireSolverStart entry;
-        entry.solver = uint32_t(i);
-        entry.start = solver.start;
-        entry.rest = solver.startRest;
-        entry.read = solver.startRead;
-        starts.push_back(entry);
-    }
-    if (!RigExecWireEncodeSolverStarts(starts, &payload)) {
-        return Fail("cannot encode the solver starts");
-    }
-    writer.AddSection(RigExecBinarySection::SolverStart, payload);
-    payload.clear();
-    // Sparse: only interpolators that read dials or measure translation.
-    // Absent in binaries baked before minor 1, which load with every
-    // interpolator solving a transform's rotation alone -- which is what
-    // those files were baked from.
-    std::vector<RigExecWirePoseNumeric> numerics;
-    for (size_t i = 0; i < wirePose.poseInterpolators.size(); ++i) {
-        const RigExecWirePoseInterpolator &interp =
-            wirePose.poseInterpolators[i];
-        if (interp.valueInputs.empty() && !interp.enableTranslation) {
-            continue;
-        }
-        RigExecWirePoseNumeric entry;
-        entry.interpolator = uint32_t(i);
-        entry.enableTranslation = interp.enableTranslation;
-        entry.values = interp.valueInputs;
-        numerics.push_back(std::move(entry));
-    }
-    if (!RigExecWireEncodePoseNumerics(numerics, &payload)) {
-        return Fail("cannot encode the pose numerics");
-    }
-    writer.AddSection(RigExecBinarySection::PoseNumeric, payload);
-    payload.clear();
-    // Sparse in the same way: a rig with no space switch writes an empty
-    // section, and a binary baked before minor 1 carries none at all.
-    if (!RigExecWireEncodeSpaceSwitches(wirePose.spaceSwitches, &payload)) {
-        return Fail("cannot encode the space switches");
-    }
-    writer.AddSection(RigExecBinarySection::SpaceSwitch, payload);
-    payload.clear();
-    // Written only when the rig has one, so every other rig's file is
-    // unchanged.
-    if (!wirePose.autoClavicles.empty()) {
-        if (!RigExecWireEncodeAutoClavicles(wirePose.autoClavicles,
-                                            &payload)) {
-            return Fail("cannot encode the auto clavicles");
-        }
-        writer.AddSection(RigExecBinarySection::AutoClavicle, payload);
-        payload.clear();
-    }
-    if (!wirePose.limbSolvers.empty()) {
-        if (!RigExecWireEncodeLimbSolvers(wirePose.limbSolvers, &payload)) {
-            return Fail("cannot encode the limb solvers");
-        }
-        writer.AddSection(RigExecBinarySection::LimbSolvers, payload);
-        payload.clear();
-    }
-    const RigExecWireDomainGeometry wireGeometry =
-        RigExecBakeConvertDomainGeometry(program, &writer);
-    size_t revisionCount = 0;
-    for (const RigExecWireChain &chain : wireGeometry.chains) {
-        revisionCount += chain.revisions.size();
-    }
-    if (!RigExecWireEncodeDomainGeometry(wireGeometry, &payload)) {
-        return Fail("cannot encode the geometry tables");
-    }
-    writer.AddSection(RigExecBinarySection::DomainGeometry, payload);
-    payload.clear();
-    if (!RigExecWireEncodeInputTable(capture.GetTable(), &payload)) {
-        return Fail("cannot encode the input table");
-    }
-    writer.AddSection(RigExecBinarySection::InputTable, payload);
-    payload.clear();
-    // A poseable bake carries the property chains as programs, so the
-    // runtime computes them from the inputs a client sets rather than
-    // replaying their recorded values (rigExecBinary/propertyChains.h).
-    RigExecWirePropertyChains propertyChains;
-    std::vector<std::string> chainsSkipped;
-    if (opts.overridableInputs) {
-        std::string chainError;
-        if (!RigExecBakePropertyChains(evaluator, opts.frames,
-                                       capture.GetTable(), &writer,
-                                       &propertyChains, &chainsSkipped,
-                                       &chainError)) {
-            return Fail("cannot bake the property chains: " + chainError);
-        }
-        if (!propertyChains.chains.empty()) {
-            if (!RigExecWireEncodePropertyChains(propertyChains,
-                                                 &payload)) {
-                return Fail("cannot encode the property chains");
-            }
-            writer.AddSection(RigExecBinarySection::PropertyChains,
-                              payload);
-            payload.clear();
+    {
+        std::unique_ptr<fb::RigExecWireFile> reopened;
+        if (!RigExecFormatOpen(bytes.data(), bytes.size(), &reopened, &why)) {
+            return Fail("the written .rigexec file does not open: " + why);
         }
     }
-    std::string externalError;
-    if (!external.Write(&writer, &externalError)) {
-        return Fail(externalError);
+    std::set<std::pair<SdfPath, bool>> keys;
+    for (const RigExecBakeRevisionRead &read : enumerated) {
+        keys.emplace(read.path, read.rest);
     }
-    std::string manifest = "{\n";
-    manifest += "  \"format\": 1,\n";
-    manifest += "  \"rig\": " + _EscapeJson(evaluator.GetRigPath().GetString()) +
-                ",\n";
-    manifest += "  \"frames\": [";
-    for (size_t i = 0; i < opts.frames.size(); ++i) {
-        manifest += (i ? ", " : "") +
-                    _FormatDouble(opts.frames[i], number, sizeof(number));
-    }
-    manifest += "],\n";
-    manifest += "  \"joints\": [";
-    for (size_t i = 0; i < jointStrings.size(); ++i) {
-        manifest += (i ? ", " : "") + std::to_string(jointStrings[i]);
-    }
-    manifest += "],\n";
-    manifest += "  \"steps\": " + std::to_string(wireSteps.size()) + ",\n";
-    manifest += "  \"clusters\": " +
-                std::to_string(wireClustering.clusters.size()) + ",\n";
-    manifest += "  \"chains\": " +
-                std::to_string(wireGeometry.chains.size()) + ",\n";
-    manifest += "  \"revisions\": " + std::to_string(revisionCount) + ",\n";
-    manifest += "  \"weightObjects\": " +
-                std::to_string(wireGeometry.weightObjects.size()) + ",\n";
-    manifest += "  \"inputs\": " +
-                std::to_string(capture.GetTable().directory.size()) +
-                ",\n";
-    manifest += "  \"movers\": " +
-                std::to_string(evaluator.GetMoverOrder().size()) + ",\n";
-    if (!propertyChains.chains.empty()) {
-        manifest += "  \"propertyChains\": " +
-                    std::to_string(propertyChains.chains.size()) + ",\n";
-        manifest += "  \"propertyChainsSkipped\": [";
-        for (size_t i = 0; i < chainsSkipped.size(); ++i) {
-            manifest += (i ? ", " : "") + _EscapeJson(chainsSkipped[i]);
-        }
-        manifest += "],\n";
-    }
-    // The compile notices a fresh evaluator seeds its first generation
-    // with (inert movers, purpose warnings). The runtime replays them
-    // ahead of the program lines on its first Execute, exactly once.
-    manifest += "  \"compileDiagnostics\": [";
-    for (size_t i = 0; i < compileErrors.size(); ++i) {
-        manifest += (i ? ", " : "") + _EscapeJson(compileErrors[i]);
-    }
-    manifest += "]\n";
-    manifest += "}\n";
-    writer.AddSection(RigExecBinarySection::Manifest,
-                      reinterpret_cast<const uint8_t *>(manifest.data()),
-                      manifest.size());
-
-    result->bytes = writer.Finish();
-    result->manifestJson = manifest;
+    result->bytes = std::move(bytes);
+    result->upstreamInputs = std::move(upstreamNames);
+    result->pathReadsWritten = file.geometry->pathReads.size();
+    result->pathReadsEnumerated = keys.size();
     return true;
 }
 

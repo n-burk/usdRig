@@ -238,7 +238,6 @@ main(int argc, char **argv)
             return 1;
         }
     }
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     const RigExecBakedProgram *program = evaluator.GetBakedProgram();
     if (!program) {
         std::printf("FATAL: the biped built no program\n");
@@ -347,21 +346,6 @@ main(int argc, char **argv)
             std::printf("  %-28s %10.1f us (median of %zu, x3/frame)\n",
                         "chain currency", Median(current),
                         current.size());
-            std::vector<double> hooks;
-            for (int step = 0; step < 8; ++step) {
-                RigExecResolvedInputs hooked;
-                std::map<SdfPath, VtValue> results;
-                std::vector<std::string> diagnostics;
-                std::string error;
-                const double start = NowUs();
-                volatile bool ok = RigExecEvaluateChainsForTime(
-                    pinned, UsdTimeCode(playheadValue + double(step)),
-                    &hooked, &results, &diagnostics, &error);
-                (void)ok;
-                hooks.push_back(NowUs() - start);
-            }
-            std::printf("  %-28s %10.1f us (median of %zu)\n",
-                        "chain hook", Median(hooks), hooks.size());
             std::vector<double> pinnedSamples;
             for (int step = 0; step < 8; ++step) {
                 RigExecFrameInputs inputs;
@@ -427,9 +411,7 @@ main(int argc, char **argv)
                     "%zu bytes; unresolved: %zu values %zu bytes\n",
                     staticCount, staticBytes, varyingCount, varyingBytes,
                     unresolvedCount, unresolvedBytes);
-        std::printf("  chainResults: %zu revisionPackets: %zu\n",
-                    sampled.chainResults.size(),
-                    sampled.revisionPackets.size());
+        std::printf("  layoutLeaves: %zu\n", sampled.layoutLeaves.size());
     }
 
     // The mouse-up simulation: an edit plus the release flush's commit, at

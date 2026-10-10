@@ -1,4 +1,7 @@
+#include "pxr/base/ts/spline.h"
 #include "sceneDb.h"
+#include "sceneRuntime.h"
+#include "rigExec/movers/moverRegistry.h"
 #include "pxr/base/tf/type.h"
 #include "pxr/usd/usd/schemaRegistry.h"
 #include <cmath>
@@ -22,13 +25,19 @@ const void *InternSchemaKey(const std::pair<TfToken, TfTokenVector> &key)
 bool RigExecStandaloneSupportsPrimType(const TfToken &type)
 {
     if (type.GetString().rfind("RigExec", 0) != 0) return true;
+    if(type.GetString().rfind("RigExecPicker",0)==0 || type.GetString().rfind("RigExecTouch",0)==0)return true;
+    if(RigExecFindMoverHandler(type))return true;
+    for(const auto &handler:RigExecMoverHandlers())for(const auto &schema:handler.sceneDataSchemas)if(type.GetString()==schema)return true;
     static const std::set<TfToken> supported{
-        TfToken("RigExecRoot"), TfToken("RigExecControl"), TfToken("RigExecJoint"),
-        TfToken("RigExecFkChain"), TfToken("RigExecTwoBoneIk"),
-        TfToken("RigExecBlendPointFrames"), TfToken("RigExecTwistDistribution"),
-        TfToken("RigExecStaticWeight"), TfToken("RigExecDynamicWeight"),
-        TfToken("RigExecCombineWeight"),
-        TfToken("RigExecBlendInput"), TfToken("RigExecBlendSample")};
+        TfToken("RigExecRoot"),TfToken("RigExecControl"),TfToken("RigExecJoint"),
+        TfToken("RigExecFkChain"),TfToken("RigExecTwoBoneIk"),TfToken("RigExecBlendPointFrames"),
+        TfToken("RigExecTwistDistribution"),TfToken("RigExecRibbon"),TfToken("RigExecSplineIk"),
+        TfToken("RigExecStaticWeight"),TfToken("RigExecDynamicWeight"),TfToken("RigExecCombineWeight"),
+        TfToken("RigExecSphereWeight"),TfToken("RigExecPlaneWeight"),TfToken("RigExecCurveWeight"),
+        TfToken("RigExecSpaceSwitch"),TfToken("RigExecPoseInterpolator"),TfToken("RigExecPose"),
+        TfToken("RigExecBlendInput"),TfToken("RigExecBlendSample"),
+        TfToken("RigExecParentConstraint"),TfToken("RigExecAimConstraint"),TfToken("RigExecPositionConstraint"),
+        TfToken("RigExecRotationConstraint"),TfToken("RigExecScaleConstraint"),TfToken("RigExecSingleChainIkConstraint")};
     return supported.count(type) != 0;
 }
 std::string RigExecStandaloneTimeKey(UsdTimeCode time)
@@ -83,60 +92,23 @@ SdfPathVector RigExecSceneDb::IncomingConnections(const SdfPath &path) const
 }
 bool RigExecSceneDb::ValidateCapabilities(std::string *error) const
 {
-    const auto fail = [&](const std::string &message) {
-        if (error) *error = "standalone provider runtime " + message;
-        return false;
-    };
-    for (const auto &[path, prim] : prims) {
-        if (!RigExecStandaloneSupportsPrimType(prim.type))
-            return fail("does not lower schema " + prim.type.GetString() + ": " + path.GetString());
-        if (std::find(prim.appliedSchemas.begin(), prim.appliedSchemas.end(),
-                      TfToken("RigExecMoverAPI")) != prim.appliedSchemas.end())
-            return fail("does not lower mover revisions: " + path.GetString());
-        // These stock APIs only describe data in the qualified OpenUSD build.
-        // Unknown APIs may register expressions that this provider slice cannot
-        // classify, so do not silently treat their raw attributes as computed.
-        static const std::set<TfToken> dataApis{
-            TfToken("CollectionAPI"), TfToken("GeomModelAPI"), TfToken("MotionAPI"),
-            TfToken("VisibilityAPI"), TfToken("MaterialBindingAPI"), TfToken("SkelBindingAPI")};
-        for (const auto &applied : prim.appliedSchemas) {
-            const auto name = UsdSchemaRegistry::GetTypeNameAndInstance(applied).first;
-            if (!dataApis.count(name))
-                return fail("does not support applied schema " + applied.GetString() + ": " + path.GetString());
-        }
+    SdfPath root=SdfPath::AbsoluteRootPath();size_t roots=0;
+    for(const auto &[path,prim]:prims)if(prim.active && prim.type=="RigExecRoot"){root=path;++roots;}
+    if(roots>1)root=SdfPath::AbsoluteRootPath();
+    std::vector<UsdTimeCode> times;
+    for(const auto &key:identities) {
+        if(key=="default"){times.push_back(UsdTimeCode::Default());continue;}
+        const bool pre=key.rfind("pre:",0)==0;const size_t prefix=pre?4:6;
+        if(key.size()!=prefix+16){if(error)*error="invalid exported time identity";return false;}
+        uint64_t bits=0;std::istringstream input(key.substr(prefix));input>>std::hex>>bits;
+        double time=0;std::memcpy(&time,&bits,sizeof(time));
+        if(!input || !std::isfinite(time)){if(error)*error="invalid exported time identity";return false;}
+        times.push_back(pre?UsdTimeCode::PreTime(time):UsdTimeCode(time));
     }
-    const auto basePhase = [](const VtValue &value) {
-        return value.IsEmpty() || value == VtValue(TfToken("base")) ||
-            value == VtValue(std::string("base"));
-    };
-    const auto baseMetadata = [&](const VtDictionary &metadata) {
-        const auto phase = metadata.find("rigExecReadPhase");
-        return phase == metadata.end() || basePhase(phase->second);
-    };
-    for (const auto &[path, attr] : attributes) {
-        if (!baseMetadata(attr.metadata))
-            return fail("does not lower input read phases: " + path.GetString());
-    }
-    for (const auto &[path, rel] : relationships) {
-        // rigExec:joints is NOT rejected. It carries two meanings and only
-        // one of them needs an evaluator: it declares the chain a solver
-        // POSES (reverse binding, applied as joint value overrides -- a
-        // pack has no evaluator and never does this), and it declares the
-        // chain a solver MEASURES, whose rest frames wire straight into
-        // the solver's computation. A TwoBoneIk has no absolute length
-        // attribute any more, so that second meaning is the only way it
-        // gets bone lengths at all; rejecting the relationship here made
-        // the type unpackable. Lowering must therefore still resolve
-        // posed outputs explicitly -- a packed rig is not posed through
-        // this relationship -- but the rest inputs it names lower like
-        // any other relationship-targeted computation input.
-        if (path.GetNameToken() == "rigExec:moves" && !rel.targets.empty())
-            return fail("does not lower mover revisions: " + path.GetString());
-        if (!baseMetadata(rel.metadata))
-            return fail("does not lower input read phases: " + path.GetString());
-    }
-    return true;
+    RigExecStandaloneSceneRuntime runtime;
+    return runtime.Prepare(*this,root,times,error);
 }
+
 bool RigExecSceneDb::Validate(std::string *error) const
 {
     const auto fail = [&](const std::string &message) {
@@ -145,6 +117,7 @@ bool RigExecSceneDb::Validate(std::string *error) const
     };
     if (!prims.count(SdfPath::AbsoluteRootPath()) || identities.empty())
         return fail("scene database needs a pseudo-root and exported identities");
+    if (upAxis != "Y" && upAxis != "Z")return fail("unknown stage up axis");
     if (interpolation != "linear" && interpolation != "held")
         return fail("unknown stage interpolation policy");
     for (const std::string &identity : identities) {
@@ -176,8 +149,29 @@ bool RigExecSceneDb::Validate(std::string *error) const
     }
     _incomingConnections.clear();
     for (const auto &[path, attribute] : attributes) {
+        if(!attribute.spline.IsEmpty() && !attribute.spline.IsHolding<TsSpline>())
+            return fail("invalid attribute spline fact: "+path.GetString());
+        for (const auto &identity : attribute.blockedIdentities) {
+            const auto state = attribute.resolved.find(identity);
+            if (!identities.count(identity) || state == attribute.resolved.end() || !state->second.IsEmpty())
+                return fail("blocked identity needs an exported empty state: " + path.GetString());
+        }
+        if (attribute.defaultBlocked && !attribute.hasAuthoredDefault)
+            return fail("blocked default needs an authored default: " + path.GetString());
+        if ((attribute.hasAuthoredDefault || !attribute.sampleTimes.empty()) && !attribute.hasAuthoredValue)
+            return fail("authored sample/default needs an authored value opinion: " + path.GetString());
+        for (size_t i = 0; i < attribute.sampleTimes.size(); ++i)
+            if (!std::isfinite(attribute.sampleTimes[i]) ||
+                (i && !(attribute.sampleTimes[i - 1] < attribute.sampleTimes[i])))
+                return fail("invalid authored sample times: " + path.GetString());
         if (!path.IsPropertyPath() || !prims.count(path.GetPrimPath()) || !attribute.type)
             return fail("invalid attribute descriptor " + path.GetString());
+        if(!attribute.authoredDefault.IsEmpty()) {
+            const bool blocked=attribute.authoredDefault.IsHolding<SdfValueBlock>();
+            if(!attribute.hasAuthoredDefault || blocked!=attribute.defaultBlocked ||
+               (!blocked && attribute.authoredDefault.GetType()!=attribute.type.GetType()))
+                return fail("invalid authored Default opinion: "+path.GetString());
+        }
         if (relationships.count(path)) return fail("attribute/relationship path collision " + path.GetString());
         if (prims.at(path.GetPrimPath()).type.GetString().rfind("RigExec", 0) == 0 &&
             !attribute.type.IsArray() && attribute.connections.size() > 1)
@@ -194,8 +188,6 @@ bool RigExecSceneDb::Validate(std::string *error) const
         for (const SdfPath &source : attribute.connections) {
             if (!source.IsPropertyPath() || !attributes.count(source))
                 return fail("connection source is not retained: " + source.GetString());
-            if (attributes.at(source).type != attribute.type)
-                return fail("connection does not match exact native Sdf type: " + path.GetString());
             _incomingConnections[source].push_back(path);
         }
     }

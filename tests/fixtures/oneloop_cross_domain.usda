@@ -1,0 +1,292 @@
+#usda 1.0
+(
+    doc = """One dependency chain that crosses evaluation domains repeatedly,
+    for the one-loop acceptance suite (testRigExecOneLoopAcceptance):
+
+      property  ClampBlendWeight clamps IKFKBlend.inputs:weight into [0, 1]
+      pose      IKFKBlend mixes ArmFK and ArmIK onto Shoulder/Elbow/Wrist
+      pose      FingerToWrist parents the Finger joint to the blended Wrist
+      pose      FingerFK, stacked above that constraint, composes FingerCtl
+                onto the constrained Finger frame
+      geometry  ArmSkin skins Arm.points to all four joints at `final`
+      weight    FingerVolume, a sphere riding Finger, measures its field
+                against the skinned points (`preceding` on weightTarget)
+      geometry  ArmSmooth relaxes Arm.points under that field
+
+    Every operator is an existing schema. The supported acceptance suite
+    traces the actual shared graph and runs live, frozen and runtime kernels."""
+    defaultPrim = "CrossAsset"
+    endTimeCode = 12
+    metersPerUnit = 0.01
+    startTimeCode = 1
+    timeCodesPerSecond = 24
+    upAxis = "Y"
+)
+
+def Xform "CrossAsset"
+{
+    def RigExecRoot "Rig"
+    {
+        uniform token rigExec:partition = "CrossAsset"
+
+        # Composed order decides the pose stack, bottom sibling first:
+        # ArmSolvers, then FingerFollow, then FingerSolvers.
+        def Scope "Controls"
+        {
+            def RigExecControl "ShoulderFK" (
+                prepend apiSchemas = ["RigExecControlAPI"]
+            )
+            {
+                double avars:rz = 0
+                double avars:rz.spline = {
+                    1: 0; pre (0, 0); post linear,
+                    12: -30; post linear,
+                }
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 10, 0, 1) )
+            }
+
+            def RigExecControl "ElbowFK" (
+                prepend apiSchemas = ["RigExecControlAPI"]
+            )
+            {
+                double avars:rz = 0
+                double avars:rz.spline = {
+                    1: 0; pre (0, 0); post linear,
+                    12: -40; post linear,
+                }
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (3, 10, 0, 1) )
+            }
+
+            def RigExecControl "WristFK" (
+                prepend apiSchemas = ["RigExecControlAPI"]
+            )
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (6, 10, 0, 1) )
+            }
+
+            def RigExecControl "HandIK" (
+                prepend apiSchemas = ["RigExecControlAPI"]
+            )
+            {
+                double avars:tx = 0
+                double avars:tx.spline = {
+                    1: 0; pre (0, 0); post linear,
+                    12: -2; post linear,
+                }
+                double avars:ty = 0
+                double avars:ty.spline = {
+                    1: 0; pre (0, 0); post linear,
+                    12: -3; post linear,
+                }
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (6, 10, 0, 1) )
+            }
+
+            def RigExecControl "ElbowPole" (
+                prepend apiSchemas = ["RigExecControlAPI"]
+            )
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (3, 10, -3, 1) )
+            }
+
+            def RigExecControl "FingerCtl" (
+                prepend apiSchemas = ["RigExecControlAPI"]
+            )
+            {
+                double avars:rz = 0
+                double avars:rz.spline = {
+                    1: 0; pre (0, 0); post linear,
+                    12: 45; post linear,
+                }
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (6, 10, 0, 1) )
+            }
+        }
+
+        # Above FingerFollow, so the constraint on Finger precedes the
+        # skin's `final` read of it in stack order.
+        def Scope "GeometryMovers"
+        {
+            # Composed post-order: ArmSkin (nested) applies first, then
+            # ArmSmooth over the skinned points.
+            def RigExecSmoothMover "ArmSmooth" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                rel rigExec:moves = </CrossAsset/Geom/Arm.points>
+                rel rigExec:weightObject = </CrossAsset/Rig/Joints/Finger/FingerVolume>
+
+                def RigExecSkinMover "ArmSkin" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    uniform int rigExec:elementSize = 2
+                    rel rigExec:influences = [
+                        </CrossAsset/Rig/Joints/Shoulder>,
+                        </CrossAsset/Rig/Joints/Shoulder/Elbow>,
+                        </CrossAsset/Rig/Joints/Shoulder/Elbow/Wrist>,
+                        </CrossAsset/Rig/Joints/Finger>,
+                    ] (
+                        rigExecReadPhase = "final"
+                    )
+                    # Points 8 and 18 lie inside FingerVolume and carry a
+                    # quarter of Wrist, so FingerCtl and the blend move them
+                    # relative to the sphere: the `preceding` field changes
+                    # with the skin over time and under a drag.
+                    int[] rigExec:jointIndices = [
+                        0, 1, 0, 1, 0, 1, 1, 2, 1, 2, 1, 2, 2, 3, 3, 2, 3, 2, 3, 2,
+                        0, 1, 0, 1, 0, 1, 1, 2, 1, 2, 1, 2, 2, 3, 3, 2, 3, 2, 3, 2,
+                    ]
+                    float[] rigExec:jointWeights = [
+                        1, 0, 0.75, 0.25, 0.25, 0.75, 1, 0, 0.75, 0.25, 0.25, 0.75, 0.5, 0.5, 1, 0, 0.75, 0.25, 1, 0,
+                        1, 0, 0.75, 0.25, 0.25, 0.75, 1, 0, 0.75, 0.25, 0.25, 0.75, 0.5, 0.5, 1, 0, 0.75, 0.25, 1, 0,
+                    ]
+                    rel rigExec:moves = </CrossAsset/Geom/Arm.points>
+                    uniform token rigExec:skinningMethod = "classicLinear"
+                }
+            }
+        }
+
+        # Runs last in the pose stack: composes FingerCtl onto the frame
+        # the constraint below left on Finger.
+        def Scope "FingerSolvers"
+        {
+            def RigExecFkChain "FingerFK"
+            {
+                rel rigExec:controls = </CrossAsset/Rig/Controls/FingerCtl>
+                rel rigExec:joints = </CrossAsset/Rig/Joints/Finger>
+            }
+        }
+
+        # Reads the blended Wrist and feeds FingerFK.
+        def Scope "FingerFollow"
+        {
+            def RigExecParentConstraint "FingerToWrist" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                rel rigExec:moves = </CrossAsset/Rig/Joints/Finger>
+                rel rigExec:sources = </CrossAsset/Rig/Joints/Shoulder/Elbow/Wrist>
+            }
+        }
+
+        def Scope "ArmSolvers"
+        {
+            def RigExecFkChain "ArmFK"
+            {
+                rel rigExec:controls = [
+                    </CrossAsset/Rig/Controls/ShoulderFK>,
+                    </CrossAsset/Rig/Controls/ElbowFK>,
+                    </CrossAsset/Rig/Controls/WristFK>,
+                ]
+            }
+
+            def RigExecTwoBoneIk "ArmIK"
+            {
+                float inputs:softness = 0.1
+                float inputs:stretch = 1
+                rel rigExec:effectorControl = </CrossAsset/Rig/Controls/HandIK>
+                rel rigExec:joints = [
+                    </CrossAsset/Rig/Joints/Shoulder>,
+                    </CrossAsset/Rig/Joints/Shoulder/Elbow>,
+                    </CrossAsset/Rig/Joints/Shoulder/Elbow/Wrist>,
+                ]
+                rel rigExec:poleControl = </CrossAsset/Rig/Controls/ElbowPole>
+                double rigExec:preferredBendRadians = -0.35
+                rel rigExec:rootControl = </CrossAsset/Rig/Controls/ShoulderFK>
+                uniform token rigExec:stretchPolicy = "uniformSegments"
+                uniform token rigExec:unreachablePolicy = "clampWithSoftness"
+            }
+
+            # Overdriven past both ends of [0, 1]; ClampBlendWeight brings
+            # it back before the blend reads it.
+            def RigExecBlendPointFrames "IKFKBlend"
+            {
+                float inputs:weight = 0
+                float inputs:weight.spline = {
+                    1: -0.25; pre (0, 0); post linear,
+                    12: 1.3; post linear,
+                }
+                rel rigExec:inputA = </CrossAsset/Rig/ArmSolvers/ArmFK>
+                rel rigExec:inputB = </CrossAsset/Rig/ArmSolvers/ArmIK>
+                rel rigExec:joints = [
+                    </CrossAsset/Rig/Joints/Shoulder>,
+                    </CrossAsset/Rig/Joints/Shoulder/Elbow>,
+                    </CrossAsset/Rig/Joints/Shoulder/Elbow/Wrist>,
+                ]
+                uniform token rigExec:rotationBlend = "shortestArc"
+                uniform token rigExec:scaleBlend = "log"
+            }
+        }
+
+        def Scope "Joints"
+        {
+            def RigExecJoint "Shoulder"
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 10, 0, 1) )
+
+                def RigExecJoint "Elbow"
+                {
+                    matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (3, 0, 0, 1) )
+
+                    def RigExecJoint "Wrist"
+                    {
+                        matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (3, 0, 0, 1) )
+                    }
+                }
+            }
+
+            # Not under Wrist: it reaches the blended arm only through
+            # FingerToWrist.
+            def RigExecJoint "Finger"
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (6, 10, 0, 1) )
+
+                # Rides the posed Finger; its field is measured against
+                # the points ArmSkin left, not the authored ones.
+                def RigExecSphereWeight "FingerVolume"
+                {
+                    rel rigExec:weightTarget = </CrossAsset/Geom/Arm.points> (
+                        rigExecReadPhase = "preceding"
+                    )
+                    matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (3, 0, 0, 1) )
+                    uniform token rigExec:falloffProfile = "smooth"
+                    float inputs:falloffMin = 0.5
+                    float inputs:falloffMax = 2.5
+                }
+            }
+        }
+
+        def Scope "PropertyMovers"
+        {
+            def RigExecFloatMathMover "ClampBlendWeight" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                float inputs:max = 1
+                float inputs:min = 0
+                rel rigExec:moves = </CrossAsset/Rig/ArmSolvers/IKFKBlend.inputs:weight>
+                uniform token rigExec:operation = "clamp"
+            }
+        }
+    }
+
+    def Scope "Geom"
+    {
+        # Two rows of ten points along the arm, shoulder to fingertip.
+        def Mesh "Arm"
+        {
+            float3[] extent = [(0, 9.5, 0), (9, 10.5, 0)]
+            int[] faceVertexCounts = [4, 4, 4, 4, 4, 4, 4, 4, 4]
+            int[] faceVertexIndices = [
+                0, 1, 11, 10, 1, 2, 12, 11, 2, 3, 13, 12, 3, 4, 14, 13, 4, 5, 15, 14,
+                5, 6, 16, 15, 6, 7, 17, 16, 7, 8, 18, 17, 8, 9, 19, 18,
+            ]
+            point3f[] points = [
+                (0, 9.5, 0), (1, 9.5, 0), (2, 9.5, 0), (3, 9.5, 0), (4, 9.5, 0),
+                (5, 9.5, 0), (6, 9.5, 0), (7, 9.5, 0), (8, 9.5, 0), (9, 9.5, 0),
+                (0, 10.5, 0), (1, 10.5, 0), (2, 10.5, 0), (3, 10.5, 0), (4, 10.5, 0),
+                (5, 10.5, 0), (6, 10.5, 0), (7, 10.5, 0), (8, 10.5, 0), (9, 10.5, 0),
+            ]
+            uniform token subdivisionScheme = "none"
+        }
+    }
+}

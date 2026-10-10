@@ -56,9 +56,9 @@ rest-to-pose map converts driver points back to surface-local coordinates;
 `surfaceToBinding` maps them into binding space. `targetRestMatrix` times the
 second provider's map returns bound positions to target point space. Without
 frames, the authored matrices alone perform this conversion. Evaluation never
-writes to the stage. Dynamic and baked evaluation use the same immutable
-payload; binary `.rigexec` export currently rejects this mover because it has
-no external payload encoder.
+writes to the stage. Native evaluation and frame-cache workers apply the same
+immutable payload; binary `.rigexec` export currently rejects this mover
+because it has no external payload encoder.
 
 ## Wiring
 

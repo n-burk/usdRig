@@ -24,6 +24,13 @@ void RigExecApplyWeightedMatrixSimd(
     const GfVec3f *in, GfVec3f *out, const float *weights, size_t count,
     const GfMatrix4d &transform);
 
+/// Constant-weight form: the same arithmetic with one weight for every
+/// point, so a constant envelope needs no mesh-sized buffer. Bit-exact
+/// against the array form fed a uniform field.
+void RigExecApplyWeightedMatrixSimd(
+    const GfVec3f *in, GfVec3f *out, float weight, size_t count,
+    const GfMatrix4d &transform);
+
 /// SSE linear blend skinning: out_i = (1 - sum_k w_ik) in_i +
 /// sum_k w_ik (T_ik in_i) in float math, the same rule as the scalar
 /// RigExecApplyLinearBlendSkin and parity-gated against it. The caller has

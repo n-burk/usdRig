@@ -1,25 +1,5 @@
-// RigExec sparse cross-frame reuse: a cached frame as the base of the next.
-// Within one frame the baked step graph already runs only the closure of
-// value-changed sources over clusters (§7). This module extends that closure
-// ACROSS frames: a cached frame retains its source values (plus the slot
-// state a re-run executes against), a lookup compares the request's sources
-// by value, a frame whose cone is empty is a hit, and a partial cone re-runs
-// only affected clusters against otherwise-retained slots.
-// Whether that retention fits the byte cap is Stream 0's go/no-go (plan D2),
-// answered below from the measured numbers: GO on both measured rigs, so
-// this module ships the reuse, not whole-pose memo only. The no-go endpoint
-// stays available -- RigExecDecideSparsity answers it for any rig -- and the
-// output-affected index ships either way, since warming selection needs it.
-// How the pieces compose (Stream E wires this into the imaging chain):
-//   exact key hit          serve the pose, zero work (Stream A path)
-//   retained base + empty cone   serve the retained pose, zero work
-//   retained base + cone         re-run the plan's clusters, publish afresh
-//   no retained base             live eval (the pool never serves)
-// The re-run itself is the caller's: the plan names the clusters, a
-// RigExecClusterRunner executes them, and RigExecRunSparsePlan counts what
-// ran. The slot snapshot the runner executes against is captured by whoever
-// owns the program (Stream E) and carried here as an opaque handle with
-// accounted bytes -- this module never names a program slot.
+// Retained source snapshots support whole-pose cache reuse proofs.
+// A changed output is evaluated by the normal persistent graph workspace.
 #ifndef RIGEXEC_FRAME_CACHE_SPARSITY_H
 #define RIGEXEC_FRAME_CACHE_SPARSITY_H
 
@@ -81,14 +61,7 @@ RigExecSparsityDecision RigExecStream0SparsityDecision();
 
 // Retained cross-frame state.
 
-/// What one cached frame keeps so a later request can reuse it: the source
-/// values the request is compared against by VALUE (§7's rule -- never "the
-/// time changed"), the epoch and cluster count the plan checks for reuse,
-/// and the slot snapshot a partial cone executes against.
-///
-/// The slots are opaque here on purpose: only the program's owner can capture
-/// them, and only it can run a cluster against them. This module accounts
-/// their bytes and carries the handle; Stream E captures and executes.
+/// Sampled sources and epoch metadata used to prove whole-pose cache reuse.
 struct RigExecRetainedFrameState {
     RigExecFrameInputs inputs;
     std::vector<RigExecValueOverride> overrides;
@@ -102,13 +75,7 @@ struct RigExecRetainedFrameState {
     /// live program whose digest is also zero, i.e. never in production.
     uint64_t constantDigest = 0;
     size_t clusterCount = 0;
-    /// Caller-measured bytes of the slot snapshot. Zero means pose-plus-
-    /// sources only: plannable, but a Partial verdict has nothing to
-    /// execute against and the caller must live-eval instead.
-    size_t slotBytes = 0;
-    std::shared_ptr<const void> slots;
-
-    /// slotBytes plus the source snapshot's accounted bytes: the retained
+    /// The source snapshot's accounted bytes: the retained
     /// half of the entry's cap accounting, beside the pose's.
     size_t RetainedBytes() const;
 };
@@ -124,6 +91,12 @@ size_t RigExecRetainedSourcesBytes(const RigExecRetainedFrameState &state);
 bool RigExecSameSourceValue(const VtValue &a, bool aHas, const VtValue &b,
                             bool bHas);
 
+/// Whether two upstream tables (RigExecFrameInputs::upstream, sorted by
+/// path) hold the same values: path by path, the fold hash, then
+/// RigExecSameSourceValue.
+bool RigExecSameUpstream(const std::vector<RigExecUpstreamValue> &a,
+                         const std::vector<RigExecUpstreamValue> &b);
+
 /// The controls whose value moved between the retained frame and the
 /// request: sampled sources by first-wins-per-path (matching what the
 /// worker reads), overrides by (prim, computation, attribute) last-wins
@@ -133,132 +106,34 @@ std::vector<RigExecControlId> RigExecChangedControls(
     const RigExecFrameInputs &requested,
     const std::vector<RigExecValueOverride> &requestedOverrides);
 
-// Planning and execution.
-
-/// What reuse decided.
-enum class RigExecSparseVerdict {
-    /// Nothing moved, or nothing it reaches was requested: serve the
-    /// retained pose with zero cluster work.
-    Hit,
-    /// The caller's choice: re-run `clusters` against retained slots
-    /// (or live-eval when there are no retained slots to run against).
-    Partial,
-    /// No reuse: no retained base, an epoch or topology mismatch, or an
-    /// empty index. Live-eval.
-    Miss,
-};
-
-/// The reuse plan for one request against one retained frame.
-struct RigExecSparsePlan {
-    RigExecSparseVerdict verdict = RigExecSparseVerdict::Miss;
-    /// Clusters to run. Set only on Partial; empty on Hit by construction.
-    RigExecBakedClusterSet clusters;
-    /// What moved, as RigExecChangedControls reported it.
-    std::vector<RigExecControlId> changedControls;
-    /// A memoized selection served at least one changed control.
-    bool memoUsed = false;
-    /// The retained frame's topology is not the request's (cluster count
-    /// moved under a standing epoch). The caller should invalidate the
-    /// epoch; the verdict is already Miss.
-    bool topologyChanged = false;
-
-    size_t ClustersToRun() const { return clusters.Count(); }
-    size_t ClustersSkipped(size_t clusterCount) const
-    {
-        const size_t run = ClustersToRun();
-        return run < clusterCount ? clusterCount - run : 0;
-    }
-};
-
-/// Plans the request against the retained frame.
-///
-/// The checks, in order: the index must be built for \p requestEpoch and
-/// the retained frame must belong to it, with the index's cluster count --
-/// anything else is Miss (a count mismatch under a standing epoch also sets
-/// topologyChanged). The changed controls are diffed by value; none changed
-/// at a standing time is a Hit, none changed at a moved time still re-runs
-/// the always-dirty set plus the varying closure (§7: external reads are
-/// functions of time the source vector does not name, and the executor
-/// dirties varying-step clusters on a moved time). Standing overrides
-/// dirty the override closure on top. Changed controls map to seeds
-/// through the
-/// index -- one memoized selection per control when \p memo is given, so a
-/// repeated edit rewalks nothing -- union to a dirty closure, and intersect
-/// `dirty ∩ affecting(requested)`: empty is a Hit, otherwise Partial.
-///
-/// An unknown control contributes every cluster (the index's conservative
-/// answer), so a Partial plan always covers what moved; re-running it is
-/// bit-identical to live eval, and running FEWER clusters than it names is
-/// never correct.
-RigExecSparsePlan RigExecPlanSparseReuse(
-    const RigExecOutputAffectedIndex &index, RigExecTaskListCache *memo,
+/// Whether the sampled request proves the retained whole pose reusable.
+/// Any affected output falls through to normal graph evaluation, and so
+/// does any difference in the upstream values or in the listed external
+/// inputs (RigExecFrameInputs::varyingRevisionLeaves), which no control id
+/// names.
+bool RigExecCanReuseRetainedPose(
+    const RigExecOutputAffectedIndex &index,
     const RigExecRetainedFrameState &cached, uint64_t requestEpoch,
     const RigExecFrameInputs &requested,
-    const std::vector<RigExecValueOverride> &requestedOverrides,
-    const RigExecBakedClusterSet *affectingRequested = nullptr);
-
-/// Runs one planned cluster, returning false to hand the generation back
-/// (the runner's caller live-evals instead).
-using RigExecClusterRunner = std::function<bool(int cluster)>;
-
-/// What a plan's execution ran, in the order it ran.
-struct RigExecSparseExecution {
-    size_t executed = 0;
-    std::vector<int> executedClusters;
-    /// False when the runner handed the generation back partway.
-    bool completed = true;
-};
-
-/// Executes \p plan's clusters through \p runner, one at a time, in
-/// \p clusterOrder -- the program's `clustering.topologicalOrder`, so that
-/// every planned cluster runs after its planned predecessors. A Miss
-/// executes nothing and reports incomplete: there is no retained base to
-/// run against, so the caller live-evals. A null runner, or an order that
-/// leaves out a planned cluster, also executes nothing and reports
-/// incomplete: running fewer clusters than the plan names is never correct.
-RigExecSparseExecution RigExecRunSparsePlan(
-    const RigExecSparsePlan &plan, const std::vector<int> &clusterOrder,
-    RigExecClusterRunner runner);
+    const std::vector<RigExecValueOverride> &requestedOverrides);
 
 // Entry provenance and retained-state rebind (plan 2.0).
 
 /// The provenance of a full evaluation over \p program: every cluster, every
 /// weight object the program reaches, and every constant region, with \p
-/// time as the first alias. Sorted and unique throughout. A partial cone
-/// re-run records the subset it ran instead (plan 2.2).
+/// time as the first alias. Sorted and unique throughout.
 RigExecEntryProvenance RigExecFullEvalProvenance(
     const RigExecBakedProgramImpl &program, UsdTimeCode time);
 
 /// Captures the retained frame state for a just-evaluated frame: the sampled
 /// inputs and standing overrides by value, plus the epoch, the
 /// epoch-constant digest, and the cluster count the plan checks.
-/// Sources-only (no slot snapshot): plannable, but a Partial verdict has
-/// nothing to execute against and the caller must live-eval instead -- see
-/// RigExecRetainedFrameState::slotBytes.
+/// Retains sampled inputs only; evaluation uses the normal frozen workspace.
 RigExecRetainedFrameState RigExecCaptureRetainedState(
     const RigExecFrameInputs &inputs,
     const std::vector<RigExecValueOverride> &overrides,
     uint64_t epochDigest, size_t clusterCount,
     uint64_t constantDigest = 0);
-
-/// The context a partial cone re-run executes under (plan 2.0): a per-job
-/// clone of the frozen program with the retained handle rebound into it,
-/// plus the production cluster runner the owner supplies. The clone keeps
-/// the frozen program's shape; the retained handle carries the source
-/// snapshot (and, once slot capture lands, the slot arena) the re-run
-/// reads; the runner executes one cluster against the rebound clone.
-struct RigExecClusterRebindContext {
-    std::shared_ptr<RigExecBakedProgramImpl> program;
-    std::shared_ptr<const void> retained;
-    std::function<bool(RigExecBakedProgramImpl &, int)> runCluster;
-};
-
-/// Adapts a rebind context to the cluster runner RigExecRunSparsePlan
-/// executes: a planned cluster runs through the context's production
-/// runner against its rebound program. Answers false (hands the
-/// generation back) when the context holds no program or no runner.
-RigExecClusterRunner RigExecMakeClusterRunner(
-    RigExecClusterRebindContext context);
 
 // Candidate lookup: which retained frame a request reuses.
 
@@ -339,9 +214,8 @@ struct RigExecShadowVerdict {
     std::string report;
 };
 
-/// Compares \p cached against a live evaluation through RigExecComparePoses
-/// -- the same judge as BakedWithParityCheck -- with the live pose as the
-/// reference. A null or invalid live pose is unverified, not a match.
+/// Compares \p cached against a live evaluation through RigExecComparePoses.
+/// A null or invalid live pose is unverified, not a match.
 RigExecShadowVerdict RigExecVerifyHitWithLive(
     const RigExecRigPose &cached, RigExecLiveRunner live);
 

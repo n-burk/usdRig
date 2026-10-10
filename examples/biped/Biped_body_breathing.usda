@@ -289,6 +289,9 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI"]
                 )
                 {
+                    float inputs:value (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/R_Shldr/R_UpArmSwing/arm_r_root_breath_tz.avars:slide>
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/R_Shldr/R_UpArmSwing.avars:tz>
                     uniform token rigExec:operation = "add"
@@ -316,6 +319,9 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI"]
                 )
                 {
+                    float inputs:value (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/R_Shldr/R_UpArmSwing/arm_r_root_breath_tx.avars:slide>
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/R_Shldr/R_UpArmSwing.avars:tx>
                     uniform token rigExec:operation = "add"
@@ -343,6 +349,9 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI"]
                 )
                 {
+                    float inputs:value (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/L_Shldr/L_UpArmSwing/arm_l_root_breath_tz.avars:slide>
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/L_Shldr/L_UpArmSwing.avars:tz>
                     uniform token rigExec:operation = "add"
@@ -370,6 +379,9 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI"]
                 )
                 {
+                    float inputs:value (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/L_Shldr/L_UpArmSwing/arm_l_root_breath_tx.avars:slide>
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/L_Shldr/L_UpArmSwing.avars:tx>
                     uniform token rigExec:operation = "add"

@@ -99,7 +99,7 @@ def _Run(mode, holding, contender):
     """
     stage = Usd.Stage.Open(_STAGE)
     rig = rigexec.Rig(stage, _RIG)
-    rig.evaluation_mode = mode
+    rig.cpu_reference = True
     control = next(p.GetPath().pathString for p in stage.Traverse()
                    if p.GetTypeName() == "RigExecControl"
                    and p.GetName() == _DRAG[0])
@@ -114,10 +114,9 @@ def _Run(mode, holding, contender):
         assert pose.valid, "%s %s t=%g: %s" % (
             mode, "held" if holding else "released", time,
             "; ".join(pose.diagnostics))
-        if mode == "parity":
-            assert not pose.baked_parity_mismatches, (
-                "t=%g: %d baked parity mismatch(es)"
-                % (time, pose.baked_parity_mismatches))
+        assert (pose.reference_agreements > 0 and not pose.reference_mismatches), (
+            "t=%g: %d scalar reference mismatch(es)"
+            % (time, pose.reference_mismatches))
         snaps.append(_Snapshot(pose))
 
     for time in _FRAMES:
@@ -139,7 +138,7 @@ def main():
     contender = _Contender()
     contender.start()
     try:
-        for mode in ("baked", "dynamic", "parity"):
+        for mode in ("graph",):
             # Held first: in the first mode that is the process's first
             # compile, plugin loads included.
             held, ranInside = _Run(mode, True, contender)

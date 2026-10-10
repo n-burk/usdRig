@@ -1,19 +1,17 @@
-// rigExecRuntime frame driver (M2 framework).
-// SetFrame loads a baked frame's sparse values into the holders;
-// Execute runs prologues, the region and the epilogue, then assembles
-// the outputs. Failures name the step and keep the previous outputs.
+// Runtime driver: sample sources, execute the common graph, then publish outputs.
 #include "rigExecRuntime/runtime.h"
+#include "stageArrayInputs.h"
 
-#include "rigExecMath/propertyMathKernel.h"
+#include "rigExecRuntime/labels.h"
+#include "poseInternal.h"
 
 #include <algorithm>
-#include <cmath>
 
 namespace rigExec {
 
 namespace {
 
-// The store's publication maps key by string id (bake insertion order);
+// The store's publication maps key by path id (bake insertion order);
 // every reader getter promises path order, so each assembly sorts by the
 // resolved path text before it ships.
 template <typename T>
@@ -26,152 +24,466 @@ _SortByPath(std::vector<T> *out)
 
 }  // namespace
 
-std::vector<double>
-RigExecRuntimeReader::GetFrameTimes() const
+bool
+RigExecRuntimeStageArrayInputs::CanSample(const RigExecRuntimeReader &reader,
+                                         size_t slot)
 {
-    std::vector<double> out;
-    out.reserve(_inputs.frames.size());
-    for (const auto &frame : _inputs.frames) {
-        out.push_back(frame.frame);
+    const auto &slots = reader._program->inputState.stageArraySlots;
+    return std::binary_search(slots.begin(), slots.end(), slot);
+}
+
+std::vector<RigExecStageArrayInputInfo>
+RigExecRuntimeStageArrayInputs::Enumerate(const RigExecRuntimeReader &reader)
+{
+    std::vector<RigExecStageArrayInputInfo> result;
+    const auto &file = *reader._program->inputState.file;
+    for (size_t slot : RrStageArraySlots(reader._program.get())) {
+        result.push_back({slot, reader._program->TextOrEmpty(file.inputs[slot].name()),
+                          RrInputTag(uint8_t(file.inputs[slot].type()))});
+    }
+    return result;
+}
+
+bool
+RigExecRuntimeStageArrayInputs::SetSample(RigExecRuntimeReader &reader,
+    size_t slot, const RigExecRuntimeArray &value, std::string *error)
+{
+    return RrStageArraySet(reader._program.get(), slot, value, error);
+}
+
+bool
+RigExecRuntimeStageArrayInputs::ClearSample(RigExecRuntimeReader &reader,
+    size_t slot, std::string *error)
+{
+    return RrStageArrayClear(reader._program.get(), slot, error);
+}
+
+bool
+RigExecRuntimeStageArrayInputs::CanSampleProviderValue(
+    const RigExecRuntimeReader &reader, size_t slot)
+{
+    const auto &sources=reader._program->inputState.slotProviderSource;
+    return slot<sources.size() && sources[slot];
+}
+
+bool
+RigExecRuntimeStageArrayInputs::SetSampleBlocked(
+    RigExecRuntimeReader &reader,size_t slot,bool blocked,std::string *error)
+{
+    return RrStageInputBlockedSet(reader._program.get(),slot,blocked,error);
+}
+
+std::vector<RigExecStageArrayInputInfo>
+RigExecRuntimeStageArrayInputs::EnumerateProviderValues(
+    const RigExecRuntimeReader &reader)
+{
+    std::vector<RigExecStageArrayInputInfo> result;
+    const auto &state=reader._program->inputState;
+    for (size_t slot=0;slot<state.slotProviderSource.size();++slot) {
+        if (!state.slotProviderSource[slot]) continue;
+        const auto &input=state.file->inputs[slot];
+        const auto tag=RrInputTag(uint8_t(input.type()));
+        const bool sourceBacked = (state.slotProviderSource[slot] & 2) != 0;
+        if ((!sourceBacked && !(input.flags() & uint8_t(RigExecWireInputSlotFlags::Animated))) ||
+            tag==RrInputTag::Token || RrInputTagIsArray(tag)) continue;
+        result.push_back({slot,reader._program->TextOrEmpty(input.name()),tag,
+                          (input.flags() & uint8_t(RigExecWireInputSlotFlags::Animated)) != 0});
+    }
+    return result;
+}
+
+bool
+RigExecRuntimeStageArrayInputs::SetScalarSample(
+    RigExecRuntimeReader &reader,size_t slot,const RrInputValue &value,std::string *error)
+{
+    return RrStageScalarSet(reader._program.get(),slot,value,error);
+}
+
+bool
+RigExecRuntimeStageArrayInputs::ClearScalarSample(
+    RigExecRuntimeReader &reader,size_t slot,std::string *error)
+{
+    return RrStageScalarClear(reader._program.get(),slot,error);
+}
+
+bool
+RigExecRuntimeStageArrayInputs::CanSampleToken(
+    const RigExecRuntimeReader &reader, size_t slot)
+{
+    const auto &slots = reader._program->inputState.stageTokenSlots;
+    return std::binary_search(slots.begin(), slots.end(), slot);
+}
+
+std::vector<RigExecStageArrayInputInfo>
+RigExecRuntimeStageArrayInputs::EnumerateTokens(const RigExecRuntimeReader &reader)
+{
+    std::vector<RigExecStageArrayInputInfo> result;
+    const auto &state = reader._program->inputState;
+    for (size_t slot : state.stageTokenSlots)
+        result.push_back({slot, reader._program->TextOrEmpty(state.file->inputs[slot].name()),
+                          RrInputTag::Token});
+    return result;
+}
+
+bool
+RigExecRuntimeStageArrayInputs::SetTokenSample(
+    RigExecRuntimeReader &reader, size_t slot, const std::string &text,
+    std::string *error)
+{
+    return RrStageTokenSet(reader._program.get(), slot, text, true, error);
+}
+
+bool
+RigExecRuntimeStageArrayInputs::ClearTokenSample(
+    RigExecRuntimeReader &reader, size_t slot, std::string *error)
+{
+    return RrStageTokenSet(reader._program.get(), slot, {}, false, error);
+}
+
+bool
+RigExecRuntimeStageArrayInputs::SetTokenArraySample(
+    RigExecRuntimeReader &reader, size_t slot,
+    const std::vector<std::string> &texts, std::string *error)
+{
+    return RrStageTokenArraySet(reader._program.get(), slot, texts, error);
+}
+
+size_t
+RigExecRuntimeReader::GetInputCount() const
+{
+    return _program->inputState.inputInfo.size();
+}
+
+const RigExecRuntimeInputInfo &
+RigExecRuntimeReader::GetInputInfo(size_t index) const
+{
+    const auto &info = _program->inputState.inputInfo;
+    return index < info.size() ? info[index] : _noInput;
+}
+
+bool
+RigExecRuntimeReader::FindInput(const std::string &name, size_t *index) const
+{
+    const RrInputState &state = _program->inputState;
+    const auto found = state.nameIndex.find(name);
+    if (found == state.nameIndex.end() ||
+        found->second >= state.inputInfo.size()) {
+        return false;
+    }
+    if (index) {
+        *index = found->second;
+    }
+    return true;
+}
+
+const RrInputValue &
+RigExecRuntimeReader::GetInputValue(size_t index) const
+{
+    const auto &values = _program->inputState.inputValues;
+    return index < values.size() ? values[index] : _noValue;
+}
+
+bool
+RigExecRuntimeReader::SetInput(const std::string &name,
+                               const RrInputValue &value, std::string *error)
+{
+    size_t index = 0;
+    if (!FindInput(name, &index)) {
+        if (error) {
+            *error = "no input named " + name;
+        }
+        return false;
+    }
+    return RrInputsSet(_program.get(), index, value, error);
+}
+
+bool
+RigExecRuntimeReader::SetInput(const std::string &name, double value,
+                               std::string *error)
+{
+    RrInputValue held = _noValue;
+    held.tag = RrInputTag::Double;
+    held.f64 = value;
+    return SetInput(name, held, error);
+}
+
+bool
+RigExecRuntimeReader::SetInputToken(const std::string &name,
+                                    const std::string &text,
+                                    std::string *error)
+{
+    size_t index = 0;
+    if (!FindInput(name, &index)) {
+        if (error) {
+            *error = "no input named " + name;
+        }
+        return false;
+    }
+    return RrInputsSetToken(_program.get(), index, text, error);
+}
+
+bool
+RigExecRuntimeReader::SetInputAt(size_t index, const RrInputValue &value,
+                                 std::string *error)
+{
+    return RrInputsSet(_program.get(), index, value, error);
+}
+
+bool
+RigExecRuntimeReader::SetSampledInputAt(size_t index,
+                                        const RrInputValue &value,
+                                        std::string *error)
+{
+    return RrInputsSet(_program.get(), index, value, error,
+                       /*acceptNonFinite=*/true);
+}
+
+bool
+RigExecRuntimeReader::SetInputArray(const std::string &name,
+                                    const RigExecRuntimeArray &value,
+                                    std::string *error)
+{
+    size_t index = 0;
+    if (!FindInput(name, &index)) {
+        if (error) {
+            *error = "no input named " + name;
+        }
+        return false;
+    }
+    return RrInputsSetArray(_program.get(), index, value, /*authored=*/true,
+                            error);
+}
+
+bool
+RigExecRuntimeReader::SetInputArrayAt(size_t index,
+                                      const RigExecRuntimeArray &value,
+                                      std::string *error)
+{
+    return RrInputsSetArray(_program.get(), index, value, /*authored=*/true,
+                            error);
+}
+
+bool
+RigExecRuntimeReader::SetSampledInputArrayAt(size_t index,
+                                             const RigExecRuntimeArray &value,
+                                             std::string *error)
+{
+    return RrInputsSetArray(_program.get(), index, value, /*authored=*/false,
+                            error);
+}
+
+bool
+RigExecRuntimeReader::GetInputArrayAt(size_t index,
+                                      RigExecRuntimeArray *out) const
+{
+    return RrInputsGetArray(_program.get(), index, out);
+}
+
+bool
+RigExecRuntimeReader::ClearInput(const std::string &name, std::string *error)
+{
+    size_t index = 0;
+    if (!FindInput(name, &index)) {
+        if (error) {
+            *error = "no input named " + name;
+        }
+        return false;
+    }
+    return RrInputsClear(_program.get(), index, error);
+}
+
+bool
+RigExecRuntimeReader::ClearInputAt(size_t index, std::string *error)
+{
+    return RrInputsClear(_program.get(), index, error);
+}
+
+bool
+RigExecRuntimeReader::ResetInput(const std::string &name, std::string *error)
+{
+    size_t index = 0;
+    if (!FindInput(name, &index)) {
+        if (error) {
+            *error = "no input named " + name;
+        }
+        return false;
+    }
+    RrInputsReset(_program.get(), index);
+    return true;
+}
+
+void
+RigExecRuntimeReader::ResetInputs()
+{
+    for (size_t i = 0; i < GetInputCount(); ++i) {
+        RrInputsReset(_program.get(), i);
+    }
+}
+
+void
+RigExecRuntimeReader::TouchAnimatedInputs()
+{
+    _program->store.animatedTouched = true;
+}
+
+double
+RigExecRuntimeReader::GetBakeTime() const
+{
+    return _program->file ? _program->file->bakeTime : 0.0;
+}
+
+std::string
+RigExecRuntimeReader::GetTokenText(uint32_t token) const
+{
+    return _program->TextOrEmpty(token);
+}
+
+std::string
+RigExecRuntimeReader::GetStepLabelForTesting(size_t step) const
+{
+    if (!_program->file || step >= _program->file->steps.size())
+        return std::to_string(step);
+    const auto &key = _program->file->steps[step].descriptorKey;
+    // Compile appends this suffix to the exact native display label.
+    const auto suffix = key.rfind("/category:");
+    return suffix == std::string::npos ? key : key.substr(0, suffix);
+}
+
+size_t
+RigExecRuntimeReader::GetClosedClusterCountForTesting() const
+{
+    return _program->store.lastClosedClusters;
+}
+
+bool
+RigExecRuntimeReader::GetParallelSafeForTesting() const
+{
+    return _program->parallelSafe;
+}
+
+void
+RigExecRuntimeReader::SetTaskDispatch(
+    std::function<void(std::function<void()>)> dispatch,
+    std::function<void()> wait)
+{
+    RrStore &store = _program->store;
+    // Both or neither: a dispatch without its join could return from
+    // Execute before the bodies finished.
+    if (!dispatch || !wait) {
+        store.dispatch = nullptr;
+        store.wait = nullptr;
+        return;
+    }
+    store.dispatch = std::move(dispatch);
+    store.wait = std::move(wait);
+}
+
+size_t
+RigExecRuntimeReader::GetSlotLeafKeysForTesting() const
+{
+    return _program->store.slotLeafKeys;
+}
+
+size_t
+RigExecRuntimeReader::GetSlotLeafCountForTesting(size_t slot) const
+{
+    const std::vector<uint32_t> &begin = _program->slotLeafBegin;
+    return slot + 1 < begin.size() ? begin[slot + 1] - begin[slot] : 0;
+}
+
+size_t
+RigExecRuntimeReader::GetSourceKeysBuiltForTesting() const
+{
+    return _program->store.sourceKeysBuilt;
+}
+
+bool
+RigExecRuntimeReader::GetSimdEnabledForTesting() const
+{
+    return _program->geoSettings.useSimd;
+}
+
+bool
+RigExecRuntimeReader::GetPartitionStaleForTesting(
+    const std::string &moverPath) const
+{
+    return RrGeometryPartitionStaleForTesting(_program.get(), moverPath);
+}
+
+bool
+RigExecRuntimeReader::GetRevisionDecisionForTesting(
+    const std::string &moverPath, int *acceptance, bool *chunksOk) const
+{
+    return acceptance && chunksOk &&
+           RrGeometryRevisionDecisionForTesting(_program.get(), moverPath,
+                                                acceptance, chunksOk);
+}
+
+bool
+RigExecRuntimeReader::GetRangeRoleForTesting(const std::string &moverPath,
+                                             bool *rangeRole,
+                                             bool *ownSource) const
+{
+    return RrGeometryRangeRoleForTesting(_program.get(), moverPath, rangeRole,
+                                         ownSource);
+}
+
+bool
+RigExecRuntimeReader::GetSkinLayoutIsOpenForTesting(
+    const std::string &moverPath) const
+{
+    return RrGeometrySkinLayoutIsOpenForTesting(_program.get(), moverPath);
+}
+
+std::vector<int32_t>
+RigExecRuntimeReader::GetLastRunTraceForTesting() const
+{
+    return _program->store.runTrace;
+}
+
+std::vector<std::string>
+RigExecRuntimeReader::GetComposeMovesForTesting(bool ladder) const
+{
+    const RrStore &store = _program->store;
+    const std::vector<char> &changed =
+        ladder ? store.ladderChanged : store.restChanged;
+    const RigExecWireSlotMeta &meta = *_program->slotMeta;
+    std::vector<std::string> out;
+    for (size_t slot = 0; slot < changed.size() && slot < meta.paths.size();
+         ++slot) {
+        if (changed[slot]) {
+            out.push_back(_program->TextOrEmpty(meta.paths[slot]));
+        }
     }
     return out;
 }
 
 bool
-RigExecRuntimeReader::SetFrame(double frame, std::string *error)
+RigExecRuntimeReader::GetStepRanForTesting(size_t step) const
 {
-    // The record writes only what it carries; a displaced constant comes
-    // back first, and Execute overrides it again.
-    _RestoreInputs();
-    for (size_t i = 0; i < _inputs.frames.size(); ++i) {
-        if (_inputs.frames[i].frame != frame) {
-            continue;
-        }
-        const RigExecWireFrameInputs &record = _inputs.frames[i];
-        if (record.uids.size() != record.values.size()) {
-            if (error) {
-                *error = "frame record pairs no values with its uids";
-            }
-            return false;
-        }
-        for (size_t k = 0; k < record.uids.size(); ++k) {
-            const uint32_t uid = record.uids[k];
-            if (uid >= _program.store.inputHolders.size() ||
-                record.values[k].tag != _inputs.directory[uid].tag) {
-                if (error) {
-                    *error = "frame record names a value no input holds";
-                }
-                return false;
-            }
-            _program.store.inputHolders[uid] =
-                RrWireFrameValue(record.values[k]);
-        }
-        _frameIndex = i;
-        _frameSelected = true;
-        return true;
-    }
-    if (error) {
-        char buffer[64];
-        std::snprintf(buffer, sizeof(buffer), "no baked frame at %.17g",
-                      frame);
-        *error = buffer;
-    }
-    return false;
-}
-
-void
-RigExecRuntimeReader::ClearAvars()
-{
-    _avarOverrides.clear();
-    _pathOverrides.clear();
-    _inputOverrides.clear();
-    _RestoreInputs();
-    std::fill(_program.store.overridden.begin(),
-              _program.store.overridden.end(), 0);
-}
-
-void
-RigExecRuntimeReader::_RestoreInputs()
-{
-    for (const auto &entry : _inputBase) {
-        if (entry.first < _program.store.inputHolders.size()) {
-            _program.store.inputHolders[entry.first] = entry.second;
-        }
-    }
-    _inputBase.clear();
-}
-
-bool
-RigExecRuntimeReader::SetAvar(const std::string &path, double value,
-                            std::string *error)
-{
-    // An input the property chains read: held by path, read by the chains'
-    // walks. A TRS control avar can be both, so this falls through to the
-    // slot override below when it is.
-    bool chainInput = false;
-    if (_hasPropertyChains && std::isfinite(value)) {
-        const auto it = _chainInputPaths.find(path);
-        if (it != _chainInputPaths.end()) {
-            _pathOverrides[it->second] = value;
-            chainInput = true;
-        }
-    }
-    const size_t dot = path.find_last_of('.');
-    const auto slot = _program.pathIndex.find(path.substr(0, dot));
-    int channel = -1;
-    if (dot != std::string::npos) {
-        for (int i = 0; i < 9; ++i) {
-            if (path.substr(dot + 1) == RrAvarNames[i]) channel = i;
-        }
-    }
-    if (!std::isfinite(value) || slot == _program.pathIndex.end() ||
-        channel < 0 ||
-        _slotMeta.slotKind[size_t(slot->second)] !=
-            RigExecWireSlotKind::FirstFramePose ||
-        _constants.posedAuthored[size_t(slot->second)] ||
-        std::find(_slotMeta.controlSlots.begin(), _slotMeta.controlSlots.end(),
-                  slot->second) == _slotMeta.controlSlots.end() ||
-        (channel >= 3 && channel <= 5 &&
-         _constants.noScaleAvars[size_t(slot->second)])) {
-        if (std::isfinite(value) &&
-            _overridableInputs.count(path) != 0) {
-            _inputOverrides[path] = value;
-            return true;
-        }
-        if (chainInput) {
-            return true;
-        }
-        if (error) *error = "expected a finite TRS avar on a compiled pose slot: " + path;
+    const RrStore &store = _program->store;
+    if (step >= _program->steps->size() || !store.everRan) {
         return false;
     }
-    for (const auto &frame : _inputs.frames) {
-        for (uint32_t id : frame.propertyPaths) {
-            if (_program.TextOrEmpty(id) == path) {
-                if (error) *error = "cannot override a captured property-mover output: " + path;
-                return false;
-            }
-        }
-    }
-    _avarOverrides[size_t(slot->second) * 11 + size_t(channel)] = value;
-    return true;
-}
-
-void
-RigExecRuntimeReader::SetRunMaskForTesting(unsigned mask)
-{
-    _program.runMask = mask;
+    return step < store.opExecution.ran.size() && store.opExecution.ran[step];
 }
 
 std::vector<RigExecRuntimeJointMatrix>
 RigExecRuntimeReader::GetJointRestMatrices() const
 {
     std::vector<RigExecRuntimeJointMatrix> out;
-    for (size_t i = 0; i < _slotMeta.jointSlots.size(); ++i) {
-        const size_t slot = size_t(_slotMeta.jointSlots[i]);
+    const std::vector<RrPointFrame> &restFrames =
+        RrPoseRestFrames(_program.get());
+    const RigExecWireSlotMeta &meta = *_program->slotMeta;
+    for (size_t i = 0; i < meta.jointSlots.size(); ++i) {
+        const size_t slot = size_t(meta.jointSlots[i]);
+        if (slot >= restFrames.size()) {
+            continue;
+        }
         RrMat4d rest;
-        const RrPointFrame frame = RrWireToFrame(_constants.restFrames[slot]);
+        const RrPointFrame &frame = restFrames[slot];
         if (RrPointsToMatrix(RrIdentityLandmarks(), frame.points, &rest)) {
-            out.push_back({_program.TextOrEmpty(_slotMeta.jointPaths[i]), rest});
+            out.push_back({_program->TextOrEmpty(meta.jointPaths[i]), rest});
         }
     }
     _SortByPath(&out);
@@ -195,175 +507,127 @@ RigExecRuntimeReader::GetJointPoseMatrices() const
     return out;
 }
 
+std::vector<RigExecRuntimePropertyValue>
+RigExecRuntimeReader::GetPropertyValues() const
+{
+    std::vector<RigExecRuntimePropertyValue> out;
+    out.reserve(_program->store.propertyResults.size());
+    for (const auto &entry : _program->store.propertyResults) {
+        out.push_back({_program->TextOrEmpty(entry.first), entry.second});
+    }
+    _SortByPath(&out);
+    return out;
+}
+
 const std::vector<RrPointFrame> &
 RigExecRuntimeReader::GetFinFrames() const
 {
-    return _program.store.fin;
-}
-
-bool
-RigExecRuntimeReader::GetControlFrame(const std::string &primPath,
-                                      double out[16]) const
-{
-    // The slot's last version: its base frame for an animator input, the
-    // revised one for a control a constraint names (bakedPose.cpp).
-    const RrStore &store = _program.store;
-    const auto slot = _program.pathIndex.find(primPath);
-    if (slot == _program.pathIndex.end() ||
-        size_t(slot->second) >= store.finLast.size() ||
-        size_t(store.finLast[size_t(slot->second)]) >= store.fin.size()) {
-        return false;
-    }
-    const RrPointFrame &frame =
-        store.fin[size_t(store.finLast[size_t(slot->second)])];
-    const RrVec3d &origin = frame.points[0];
-    for (int r = 0; r < 3; ++r) {
-        for (int k = 0; k < 3; ++k) {
-            out[r * 4 + k] = frame.points[size_t(r + 1)][k] - origin[k];
-        }
-        out[r * 4 + 3] = 0.0;
-    }
-    for (int k = 0; k < 3; ++k) {
-        out[12 + k] = origin[k];
-    }
-    out[15] = 1.0;
-    return true;
+    return _program->store.fin;
 }
 
 const std::vector<RrPointFrame> &
 RigExecRuntimeReader::GetBaseFrames() const
 {
-    return _program.store.base;
+    return _program->store.base;
 }
 
 const std::vector<RrMat4d> &
 RigExecRuntimeReader::GetFinalMatrices() const
 {
-    return _program.store.finalMatrix;
+    return _program->store.finalMatrix;
 }
 
 const std::vector<RrMat4d> &
 RigExecRuntimeReader::GetBaseMatrices() const
 {
-    return _program.store.baseMatrix;
+    return _program->store.baseMatrix;
 }
 
 const std::vector<RrWeightPacket> &
 RigExecRuntimeReader::GetWeightPackets() const
 {
-    return _program.store.weightPackets;
+    return _program->store.weightPackets;
+}
+
+bool
+RigExecRuntimeReader::SampleGeometryForTesting(std::string *error)
+{
+    std::vector<std::string> diagnostics;
+    return RrPrologueGeometry(_program.get(), &diagnostics, error);
 }
 
 bool
 RigExecRuntimeReader::Execute(std::string *error)
 {
-    if (!_frameSelected) {
-        if (error) {
-            *error = "no frame selected";
-        }
-        return false;
-    }
-    RrProgram &program = _program;
+    RrProgram &program = *_program;
     RrStore &store = program.store;
-    const RigExecWireFrameInputs &record = _inputs.frames[_frameIndex];
-    const double time = record.frame;
-    program.frameIndex = _frameIndex;
-
-    // The property chains' published values, straight from the record.
-    if (record.propertyPaths.size() != record.propertyValues.size()) {
-        if (error) {
-            *error = "frame record pairs no values with its properties";
-        }
-        return false;
-    }
-    store.propertyResults.clear();
-    for (size_t i = 0; i < record.propertyPaths.size(); ++i) {
-        const RigExecWirePropertyValue &wire = record.propertyValues[i];
-        RrPropertyValue value;
-        value.tag = RrPropertyValue::Tag(wire.tag);
-        value.f32 = wire.f32;
-        value.f64 = wire.f64;
-        for (size_t r = 0; r < 4; ++r) {
-            for (size_t c = 0; c < 4; ++c) {
-                value.matrix[r][c] = wire.matrix[r * 4 + c];
-            }
-        }
-        value.vec = RrVec3f(wire.vec[0], wire.vec[1], wire.vec[2]);
-        store.propertyResults[record.propertyPaths[i]] = value;
-    }
-    // The chains the file carries as programs replace their recorded
-    // values with ones computed from this run's inputs.
-    if (_hasPropertyChains) {
-        _RunPropertyChains();
-    }
-    store.runSnapshots.Clear();
-
-    // Restore constant channels as well as sampled ones, so clearing an
-    // override returns to the baked pose on the very next evaluation.
-    store.avars = _constants.avarConstants;
+    store.runTrace.clear();
+    // The inputs set since the last run. Only an Animated input set, or
+    // TouchAnimatedInputs, dirties what a change of time dirties.
+    RrInputsApplyTouched(&program);
 
     std::vector<std::string> poseDiagnostics;
-    if ((program.runMask & 0x1u) != 0 &&
-        !RrProloguePose(&program, record, &poseDiagnostics, error)) {
+    if (!RrProloguePose(&program, &poseDiagnostics, error)) return false;
+    if (!RrPrologueGeometry(&program, &poseDiagnostics, error)) return false;
+    const bool ran = RrRunSteps(&program, false, error);
+    // Joined: the binds this run built share now, not at the next run.
+    RrShareLatticeBinds(&program);
+    if (!ran) {
         return false;
     }
-    if ((program.runMask & 0x4u) != 0 &&
-        !RrPrologueGeometry(&program, time, record, &poseDiagnostics,
-                            error)) {
-        return false;
-    }
-    for (const auto &entry : _avarOverrides) {
-        store.avars[entry.first] = entry.second;
-    }
-    // Inputs set by path: each holder takes the value in its own type and
-    // its override index marks the steps that read it for this run.
-    for (const auto &entry : _inputOverrides) {
-        for (const auto &target : _overridableInputs[entry.first]) {
-            if (target.first >= store.inputHolders.size()) {
-                continue;
-            }
-            RrInputValue &holder = store.inputHolders[target.first];
-            _inputBase.emplace(target.first, holder);
-            switch (holder.tag) {
-            case RigExecWireInput::Tag::Double: holder.f64 = entry.second; break;
-            case RigExecWireInput::Tag::Float: holder.f32 = float(entry.second); break;
-            case RigExecWireInput::Tag::Int: holder.i32 = int32_t(std::lround(entry.second)); break;
-            case RigExecWireInput::Tag::Bool: holder.boolean = entry.second != 0.0; break;
-            default: continue;
-            }
-            if (size_t(target.second) < store.overridden.size()) {
-                store.overridden[size_t(target.second)] = 1;
-            }
+
+    if(!program.requiredStageFramesAdmission.admitted) {
+        std::vector<size_t> propertySteps;
+        for(size_t i=0;i<program.steps->size();++i)
+            if((*program.steps)[i].kind==RigExecWireStepKind::PropertyRevision)propertySteps.push_back(i);
+        std::sort(propertySteps.begin(),propertySteps.end(),[&](size_t a,size_t b) {
+            const auto &left=(*program.steps)[a]; const auto &right=(*program.steps)[b];
+            return std::make_pair(left.object,left.part)<std::make_pair(right.object,right.part);
+        });
+        for(size_t i:propertySteps) {
+            poseDiagnostics.insert(poseDiagnostics.end(),store.headLines[i].begin(),store.headLines[i].end());
         }
-    }
-    // Chain results computed this run reach holders the closure does not
-    // track by value, so a run whose chains moved runs every step.
-    const bool chainsMoved = _hasPropertyChains &&
-                             store.propertyResults != store.lastPropertyResults;
-    if (!RrRunSteps(&program, time, chainsMoved, error)) {
+        const size_t target=size_t(program.requiredStageFramesAdmission.firstBadTarget);
+        const size_t slot=size_t(program.slotMeta->xformSlots[target]);
+        const std::string refusal="could not resolve constraint target "+
+            program.TextOrEmpty(program.slotMeta->paths[slot])+" relative to the asset root";
+        poseDiagnostics.push_back(refusal);
+        _jointMatrices.clear(); _points.clear(); _matrixPrimvars.clear();
+        _weightFrames.clear(); _weightFields.clear(); _providerXforms.clear();
+        _diagnostics=std::move(poseDiagnostics);
+        _counters=RigExecRuntimeCounters();
+        _counters.executedOpCount=store.opExecution.executed;
+        if(error)*error=refusal;
         return false;
     }
+
+    const size_t epilogueMismatches = program.epilogue.mismatches;
     if (!RrPublishPose(&program, &poseDiagnostics, error)) {
         return false;
     }
-    RrPublishGeometry(&program, record, &poseDiagnostics);
+    RrPublishGeometry(&program, &poseDiagnostics);
+    // RIGEXEC_VERIFY_EPILOGUE_LISTS: lines the held steps published
+    // differently from a sweep of every step fail the run.
+    if (program.epilogue.mismatches != epilogueMismatches) {
+        if (error) {
+            *error = "the epilogue's held steps and a sweep of every "
+                     "step published different lines";
+        }
+        return false;
+    }
+
+    for (const auto &loop : program.opGraph.cycles) {
+        std::string message = "operation cycle: ";
+        for (size_t i = 0; i < loop.size(); ++i) {
+            if (i) message += " -> ";
+            message += loop[i];
+        }
+        if (std::find(poseDiagnostics.begin(), poseDiagnostics.end(), message) == poseDiagnostics.end())
+            poseDiagnostics.push_back(std::move(message));
+    }
 
     RigExecRuntimeCounters counters;
-    for (const RrStepOutput &output : store.stepOutputs) {
-        counters.revisionsExecuted += output.counters.revisionsExecuted;
-        counters.revisionsCreated += output.counters.revisionsCreated;
-        counters.schedulesBuilt += output.counters.schedulesBuilt;
-        counters.chainsBuilt += output.counters.chainsBuilt;
-        counters.revisionsBuilt += output.counters.revisionsBuilt;
-    }
-    poseDiagnostics.push_back(
-        "mover graph: " + std::to_string(counters.chainsBuilt) +
-        " chain(s), " + std::to_string(counters.revisionsBuilt) +
-        " revision(s); " +
-        std::to_string(counters.revisionsCreated) + " created, " +
-        std::to_string(counters.revisionsExecuted) + " executed, " +
-        std::to_string(counters.schedulesBuilt) +
-        " schedule(s) built");
+    counters.executedOpCount=store.opExecution.executed;
 
     // A plugin mover this runtime has no kernel for is a no-op, said on
     // every frame it is one, beside the lines of the step it sat in.
@@ -373,7 +637,7 @@ RigExecRuntimeReader::Execute(std::string *error)
             continue;
         }
         const RigExecWireRevision &wire =
-            _geometry.chains[slot.first].revisions[slot.second];
+            program.geometry->chains[slot.first].revisions[slot.second];
         poseDiagnostics.push_back(
             "warning: " + program.TextOrEmpty(wire.moverPath) + " is a " +
             state.type + ", which this runtime has no kernel for; its "
@@ -381,7 +645,7 @@ RigExecRuntimeReader::Execute(std::string *error)
     }
 
     // The compile notices a fresh evaluator seeds its first generation
-    // with (inert movers, purpose warnings): manifest order, ahead of
+    // with (inert movers, purpose warnings): file order, ahead of
     // every program line, exactly once. Drained here, on the success
     // path only, so a failed Execute keeps both the seed and the
     // previous frame.
@@ -407,7 +671,7 @@ RigExecRuntimeReader::Execute(std::string *error)
     for (const auto &entry : store.movedProperties) {
         RigExecRuntimePoints moved;
         moved.path = program.TextOrEmpty(entry.first);
-        moved.points = entry.second;
+        moved.points = entry.second.Read();
         points.push_back(std::move(moved));
     }
     std::vector<RigExecRuntimeMatrixPrimvar> matrixPrimvars;
@@ -418,12 +682,20 @@ RigExecRuntimeReader::Execute(std::string *error)
         primvar.matrix = entry.second;
         matrixPrimvars.push_back(std::move(primvar));
     }
+    // Every volume slot whose VolumePlacements step has run, under the
+    // slot's path.
     std::vector<RigExecRuntimeWeightFrame> weightFrames;
-    weightFrames.reserve(store.weightFrames.size());
-    for (const auto &entry : store.weightFrames) {
+    const size_t volumeSlots =
+        std::min({program.slotMeta ? program.slotMeta->paths.size()
+                                   : size_t(0),
+                  store.volumePlaced.size(), store.volumePlacement.size()});
+    for (size_t slot = 0; slot < volumeSlots; ++slot) {
+        if (!store.volumePlaced[slot]) {
+            continue;
+        }
         RigExecRuntimeWeightFrame placed;
-        placed.path = program.TextOrEmpty(entry.first);
-        placed.matrix = entry.second;
+        placed.path = program.TextOrEmpty(program.slotMeta->paths[slot]);
+        placed.matrix = store.volumePlacement[slot];
         weightFrames.push_back(std::move(placed));
     }
     std::vector<RigExecRuntimeWeightField> weightFieldsOut;
@@ -432,11 +704,16 @@ RigExecRuntimeReader::Execute(std::string *error)
         RigExecRuntimeWeightField field;
         field.path = program.TextOrEmpty(entry.first);
         field.target = program.TextOrEmpty(entry.second.target);
-        field.weights = entry.second.weights;
+        field.weights = entry.second.weights.Read();
         weightFieldsOut.push_back(std::move(field));
     }
+    // The API holds its copies now: releasing the epilogue's shares leaves
+    // the producers' buffers unique, so the next run's swaps reuse them.
+    store.movedProperties.clear();
+    store.weightFields.clear();
     _SortByPath(&jointMatrices);
     _SortByPath(&points);
+    _SortByPath(&matrixPrimvars);
     _SortByPath(&weightFrames);
     _SortByPath(&weightFieldsOut);
     std::vector<RigExecRuntimeProviderXform> providerXforms;
@@ -462,224 +739,6 @@ RigExecRuntimeReader::Execute(std::string *error)
     _diagnostics = std::move(poseDiagnostics);
     _counters = counters;
     return true;
-}
-
-namespace {
-
-// A value a chain input's walk finds live at `hop`: one SetAvar set, or a
-// chain result published earlier in this run.
-bool
-_LiveHop(const std::map<uint32_t, double> &overrides,
-         const std::map<uint32_t, RrPropertyValue> &results, uint32_t hop,
-         double *out)
-{
-    const auto set = overrides.find(hop);
-    if (set != overrides.end()) {
-        *out = set->second;
-        return true;
-    }
-    const auto result = results.find(hop);
-    if (result != results.end()) {
-        if (result->second.tag == RrPropertyValue::Tag::Float) {
-            *out = double(result->second.f32);
-            return true;
-        }
-        if (result->second.tag == RrPropertyValue::Tag::Double) {
-            *out = result->second.f64;
-            return true;
-        }
-    }
-    return false;
-}
-
-float
-_ReadFloat(const RigExecWirePropertyChainInput &input,
-           const std::map<uint32_t, double> &overrides,
-           const std::map<uint32_t, RrPropertyValue> &results, size_t frame,
-           float fallback)
-{
-    switch (input.kind) {
-    case RigExecWirePropertyChainInput::Kind::Absent:
-        return fallback;
-    case RigExecWirePropertyChainInput::Kind::Constant:
-        return float(input.constant);
-    case RigExecWirePropertyChainInput::Kind::Walk:
-        break;
-    }
-    for (uint32_t hop : input.hops) {
-        double live = 0.0;
-        if (_LiveHop(overrides, results, hop, &live)) {
-            return float(live);
-        }
-    }
-    if (frame < input.frameValues.size() && input.frameHave[frame]) {
-        return float(input.frameValues[frame]);
-    }
-    return fallback;
-}
-
-bool
-_ReadBool(const RigExecWirePropertyChainInput &input, size_t frame, bool fallback)
-{
-    switch (input.kind) {
-    case RigExecWirePropertyChainInput::Kind::Absent:
-        return fallback;
-    case RigExecWirePropertyChainInput::Kind::Constant:
-        return input.constant != 0.0;
-    case RigExecWirePropertyChainInput::Kind::Walk:
-        break;
-    }
-    // No chain publishes a bool and SetAvar holds doubles, so a bool read
-    // never meets a live value of its type: the recorded fallback answers.
-    if (frame < input.frameValues.size() && input.frameHave[frame]) {
-        return input.frameValues[frame] != 0.0;
-    }
-    return fallback;
-}
-
-}  // namespace
-
-std::map<std::string, double>
-RigExecRuntimeReader::GetPropertyResults() const
-{
-    std::map<std::string, double> out;
-    for (const auto &[path, value] : _program.store.propertyResults) {
-        if (value.tag == RrPropertyValue::Tag::Float) {
-            out[_program.TextOrEmpty(path)] = double(value.f32);
-        } else if (value.tag == RrPropertyValue::Tag::Double) {
-            out[_program.TextOrEmpty(path)] = value.f64;
-        }
-    }
-    return out;
-}
-
-void
-RigExecRuntimeReader::_RunPropertyChains()
-{
-    RrStore &store = _program.store;
-    std::map<uint32_t, RrPropertyValue> &results = store.propertyResults;
-    const size_t frame = _frameIndex;
-    // RigExecRigEvaluator::_EvaluatePropertyChains, revision for revision:
-    // the base is the target's authored value, each enabled revision with a
-    // usable envelope and finite inputs applies, and a non-finite result
-    // passes through.
-    // One revision applied to `in`: false when it passes through (disabled,
-    // unusable envelope or inputs), leaving the caller's value untouched.
-    const auto apply = [&](const RigExecWirePropertyChainRevision &revision,
-                           float in, float *out) {
-        if (!_ReadBool(revision.enabled, frame, true)) {
-            return false;
-        }
-        const float envelope = _ReadFloat(revision.defaultWeight,
-                                          _pathOverrides, results, frame,
-                                          1.0f);
-        if (!std::isfinite(envelope) || envelope < 0.0f ||
-            envelope > 1.0f) {
-            return false;
-        }
-        const float amount = _ReadFloat(revision.value, _pathOverrides,
-                                        results, frame, 0.0f);
-        const float low = _ReadFloat(revision.minimum, _pathOverrides,
-                                     results, frame, 0.0f);
-        const float high = _ReadFloat(revision.maximum, _pathOverrides,
-                                      results, frame, 0.0f);
-        if (!std::isfinite(amount) || !std::isfinite(low) ||
-            !std::isfinite(high)) {
-            return false;
-        }
-        const RigExecPropertyOp op = RigExecPropertyOp(revision.op);
-        const RigExecWireVec2f *keys = nullptr;
-        const RigExecWireVec2f *tangents = nullptr;
-        size_t keyCount = 0;
-        size_t tangentCount = 0;
-        if (op == RigExecPropertyOp::Curve) {
-            keyCount = revision.keys.size();
-            if (keyCount == 0 ||
-                !propertyMathKernel::ValidateLinearKeys(revision.keys.data(),
-                                                        keyCount)) {
-                return false;
-            }
-            keys = revision.keys.data();
-            if (!revision.tangents.empty()) {
-                if (revision.tangents.size() != keyCount) {
-                    return false;
-                }
-                tangents = revision.tangents.data();
-                tangentCount = revision.tangents.size();
-            }
-        }
-        *out = propertyMathKernel::ApplyFloatMath(
-            in, op, amount, low, high, envelope, keys, keyCount, tangents,
-            tangentCount);
-        return true;
-    };
-    for (const RigExecWirePropertyChain &chain : _chains.chains) {
-        if (frame >= chain.frameBase.size() || !chain.frameBaseHave[frame]) {
-            results.erase(chain.target);
-            continue;
-        }
-        RrPropertyValue published;
-        if (chain.valueType == RigExecWirePropertyChain::ValueType::Float) {
-            const float base = float(chain.frameBase[frame]);
-            if (!std::isfinite(base)) {
-                results.erase(chain.target);
-                continue;
-            }
-            float value = base;
-            for (const RigExecWirePropertyChainRevision &revision : chain.revisions) {
-                float next = value;
-                if (apply(revision, value, &next) && std::isfinite(next)) {
-                    value = next;
-                }
-            }
-            published.tag = RrPropertyValue::Tag::Float;
-            published.f32 = value;
-        } else {
-            // The double chain runs each revision in float and widens the
-            // result, as the evaluator's double instantiation does.
-            double value = chain.frameBase[frame];
-            if (!std::isfinite(value)) {
-                results.erase(chain.target);
-                continue;
-            }
-            for (const RigExecWirePropertyChainRevision &revision : chain.revisions) {
-                float result = 0.0f;
-                if (apply(revision, float(value), &result)) {
-                    const double next = double(result);
-                    if (std::isfinite(next)) {
-                        value = next;
-                    }
-                }
-            }
-            published.tag = RrPropertyValue::Tag::Double;
-            published.f64 = value;
-        }
-        results[chain.target] = published;
-    }
-    // Each result to the holders it feeds, as the evaluator's read of the
-    // input would see it: a float read of a double result is cast; a
-    // double read of a float result never matches the overlay and keeps
-    // the recorded stage value.
-    for (const RigExecWirePropertyChainConsumer &consumer : _chains.consumers) {
-        if (consumer.uid >= store.inputHolders.size()) {
-            continue;
-        }
-        const auto it = results.find(_chains.chains[consumer.chain].target);
-        if (it == results.end()) {
-            continue;
-        }
-        RrInputValue &holder = store.inputHolders[consumer.uid];
-        if (holder.tag == RigExecWireInput::Tag::Double &&
-            it->second.tag == RrPropertyValue::Tag::Double) {
-            holder.f64 = it->second.f64;
-        } else if (holder.tag == RigExecWireInput::Tag::Float) {
-            if (it->second.tag == RrPropertyValue::Tag::Float) {
-                holder.f32 = it->second.f32;
-            } else if (it->second.tag == RrPropertyValue::Tag::Double) {
-                holder.f32 = float(it->second.f64);
-            }
-        }
-    }
 }
 
 }  // namespace rigExec

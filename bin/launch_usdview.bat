@@ -13,6 +13,10 @@ call "%~dp0_vcvars.bat"
 call "%~dp0_env.bat"
 call "%~dp0_require_python.bat"
 if errorlevel 1 exit /b 1
+if defined RIGEXEC_VIZ_ROOT (
+    set "PYTHONPATH=%RIGEXEC_VIZ_ROOT%;!PYTHONPATH!"
+    set "PXR_PLUGINPATH_NAME=!PXR_PLUGINPATH_NAME!;%RIGEXEC_VIZ_ROOT%\usdview"
+)
 
 rem Register TouchPose for interactive sessions. This launcher
 rem is the one an animator opens, and the toolset is not something they

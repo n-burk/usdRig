@@ -4,7 +4,7 @@
 #define RIGEXEC_FROZEN_CONTEXT_INTERNAL_H
 
 #include "frozenContext.h"
-#include "bakedProgramImpl.h"
+#include "frozenProgram.h"
 #include "tapSet.h"
 
 #include "pxr/base/gf/matrix4d.h"
@@ -26,8 +26,10 @@ namespace frozenDetail {
 // doubles is three orders of magnitude past anything a real job sizes.
 inline constexpr size_t kMaxFrozenArenaSlots = size_t(1) << 27;
 
-// Shared scalar schema for sampling and worker reconstruction. The stage
-// sampler and worker must agree on every iterative deformer input.
+// Shared scalar schema for the iterative deformers' inputs: the frozen
+// stage sampler folds them into the digest, and the .rigexec exporter lists
+// the same inputs as input slots (rigExecBake/computedCapture.cpp), so it
+// stays while the exporter calls it.
 template <class Fn>
 void
 _VisitIterativeMoverScalars(RigExecRevisionOp op,
@@ -61,11 +63,17 @@ _VisitIterativeMoverScalars(RigExecRevisionOp op,
 // snapshot capture, and worker patching all use these visitors.
 template <class Obj, class Fn>
 void
-_VisitLadderInputs(Obj &ladder, Fn &&fn)
+_VisitLadderInputs(Obj &ladder, Fn &&fn, bool includeIntervening = true)
 {
     fn(ladder.restSpace);
+    if (includeIntervening) fn(ladder.interveningSpace);
     fn(ladder.defaultSpace);
     fn(ladder.posedSpace);
+    fn(ladder.parentSpace);
+    fn(ladder.parentDefaultSpace);
+    fn(ladder.avarDefaultSpace);
+    fn(ladder.posedDefaultSpace);
+    fn(ladder.rotationSign);
     for (int i = 0; i < 6; ++i) {
         fn(ladder.restAvars[i]);
         fn(ladder.defaultAvars[i]);
@@ -82,11 +90,7 @@ _VisitSolverInputs(Obj &solver, Fn &&fn)
     fn(solver.lowerOffset);
     fn(solver.stretch);
     fn(solver.softness);
-    fn(solver.pin);
-    fn(solver.upperScale);
-    fn(solver.lowerScale);
-    fn(solver.softDistance);
-    fn(solver.limbTwist);
+    fn(solver.pin);fn(solver.upperScale);fn(solver.lowerScale);fn(solver.softDistance);fn(solver.limbTwist);
     fn(solver.blendWeight);
     fn(solver.preserveVolume);
     fn(solver.midFollowWeight);
@@ -124,7 +128,7 @@ _VisitConstraintInputs(
     fn(constraint.worldUpVector);
     fn(constraint.poleVector);
     fn(constraint.twistDegrees);
-    fn(constraint.ikStretch);
+    fn(constraint.stretch);
 }
 
 template <class Obj, class Fn>
@@ -140,10 +144,18 @@ _VisitInterpolatorInputs(
 }
 
 template <class Obj, class Fn>
+void _VisitAutoClavicleInputs(Obj &operation,Fn &&fn) {
+    for(auto &read:operation.scalars) {
+        if(read.isFloat)fn(read.narrow);else fn(read.wide);
+    }
+}
+
+template <class Obj, class Fn>
 void
 _VisitSpaceSwitchInputs(Obj &spaceSwitch, Fn &&fn)
 {
-    fn(spaceSwitch.activeInput);
+    if (spaceSwitch.tokenIndex) fn(spaceSwitch.activeTokenInput);
+    else fn(spaceSwitch.activeInput);
 }
 
 template <class Obj, class Fn>
@@ -181,10 +193,27 @@ TF_DEFINE_PRIVATE_TOKENS(
     ((sphereWeight, "RigExecSphereWeight"))
     ((planeWeight, "RigExecPlaneWeight"))
     ((curveWeight, "RigExecCurveWeight"))
+    ((targetPointsKey, "frozenWeight:targetPoints"))
+    ((samplePointsKey, "frozenWeight:samplePoints"))
+    ((curvePointsKey, "frozenWeight:curvePoints"))
+    ((combineTargetCountKey, "frozenWeight:combineTargetCount"))
 );
 
+/// \p name is one of the frozenWeight: keys of _frozenWeightTokens. The
+/// sampler and the freeze call it; the worker reads the freeze's keys
+/// (RigExecFrozenProgram::weightArrayKeys) and builds none.
 SdfPath
-_FrozenWeightArrayKey(const SdfPath &objectPath, const char *role);
+_FrozenWeightArrayKey(const SdfPath &objectPath, const TfToken &name);
+
+/// The position of each frozenWeight: key in a weight object's four
+/// RigExecFrozenProgram::weightArrayKeys.
+enum _FrozenWeightArrayRole : size_t {
+    _FrozenWeightTargetPoints = 0,
+    _FrozenWeightSamplePoints,
+    _FrozenWeightCurvePoints,
+    _FrozenWeightCombineTargetCount,
+    _FrozenWeightArrayRoleCount
+};
 
 SdfPath
 _FrozenWireInputKey(const SdfPath &moverPath, const char *role);
@@ -192,9 +221,17 @@ _FrozenWireInputKey(const SdfPath &moverPath, const char *role);
 SdfPath
 _FrozenBlendInputKey(const SdfPath &samplePath, const char *role);
 
+/// Each override's property path (prim.attribute), empty where it names a
+/// computation. UI thread: it builds paths.
+std::vector<SdfPath>
+_FrozenOverridePaths(const std::vector<RigExecValueOverride> &overrides);
+
+/// \p paths is _FrozenOverridePaths(\p overrides), built on the UI thread,
+/// so placement builds no path; a length mismatch is unplaceable.
 bool
 _FrozenPlaceOverrides(const RigExecBakedProgramImpl &B,
                       const std::vector<RigExecValueOverride> &overrides,
+                      const std::vector<SdfPath> &paths,
                       std::vector<char> *flags);
 
 SdfPath
@@ -205,15 +242,6 @@ _FrozenLatticeInputKey(const SdfPath &moverPath, const char *role);
 
 SdfPath
 _FrozenRibbonInputKey(const SdfPath &moverPath, const char *role);
-
-bool
-_ChainIsFinite(float v);
-
-bool
-_ChainIsFinite(const GfVec3f &v);
-
-bool
-_ChainIsFinite(const GfMatrix4d &m);
 
 struct _ChainMoverDesc {
     SdfPath moverPath;
@@ -246,33 +274,29 @@ _HashString(uint64_t hash, const char *text);
 bool
 _HashVtValue(uint64_t *hash, const VtValue &value);
 
-extern thread_local std::shared_ptr<const void> _lastFrozenSlots;
 
-extern thread_local size_t _lastFrozenSlotBytes;
 
-// Visits each auto clavicle's IK/FK blend and dial, which the compose reads
-// beside the avars (space switches have their own visitor above). They are
-// read live (RigExecIsLiveAvarName), so they must key the frame cache and be
-// patched into a frozen run like any other varying input.
-template <class Impl, class Fn>
+// The report RigExecEvaluateFrozen's caller asked for, set for the span of
+// its runner call on the calling thread, else null. _RunFrozen fills it.
+extern thread_local RigExecFrozenRunReport *_frozenRunReport;
+
+// Sets \p program's upstream layer to \p inputs' table and diffs it against
+// the table its last run placed (RigExecBakedPlaceUpstream, rule 8): leaves
+// under a value placed, moved or lifted re-read, their override numbers
+// seed the closure, and the constant-avar pass runs. No stage access.
 void
-_VisitComposeInputs(Impl &B, Fn &&fn)
-{
-    for (auto &ac : B.autoClavicles) {
-        fn(ac.ikBlendInput);
-        fn(ac.ikBlendFloat);
-        fn(ac.amountInput);
-        fn(ac.amountFloat);
-    }
-}
+_FrozenPlaceUpstream(RigExecBakedProgramImpl *program,
+                     const RigExecFrameInputs &inputs);
 
 // Visits every patchable input in one fixed order. The freeze uses it to
 // capture head paths (UI thread, handles valid there) and the worker uses
 // it to patch constants (side-table keys, no handle dereference); sharing
-// the walker is what keeps the two in lockstep.
+// the walker is what keeps the two in lockstep. Native numbering includes
+// synthetic intervening space; frozen attribute bookkeeping excludes it
+// because its source is transported in stageSeeds.
 template <class Impl, class Fn>
 void
-_ForEachPatchableInput(Impl &B, Fn &&fn)
+_ForEachPatchableInput(Impl &B, Fn &&fn, bool includeIntervening = true)
 {
     for (auto &binding : B.avarBindings) {
         fn(binding.input);
@@ -281,8 +305,9 @@ _ForEachPatchableInput(Impl &B, Fn &&fn)
         fn(binding.input);
     }
     for (auto &ladder : B.ladders) {
-        _VisitLadderInputs(ladder, fn);
+        _VisitLadderInputs(ladder, fn, includeIntervening);
     }
+    for(auto &operation:B.autoClavicles)_VisitAutoClavicleInputs(operation,fn);
     for (auto &spaceSwitch : B.spaceSwitches) {
         _VisitSpaceSwitchInputs(spaceSwitch, fn);
     }
@@ -298,11 +323,21 @@ _ForEachPatchableInput(Impl &B, Fn &&fn)
     for (auto &object : B.weightObjects) {
         _VisitWeightInputs(object, fn);
     }
-    _VisitComposeInputs(B, fn);
 }
 
+/// How a clone decides whether its copied op keys stand (retainedComplete):
+/// Compute runs the check now; Defer copies the source's verdict for the
+/// caller to settle after its own edits; Inherit takes the source's
+/// settled verdict (the source is a settled, immutable snapshot).
+enum class _CloneVerdict : uint8_t { Compute, Defer, Inherit };
+
 void
-_CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst);
+_CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst,
+           _CloneVerdict verdict = _CloneVerdict::Compute);
+
+/// The clone check run on \p program as both source and copy; sets
+/// opAdapter.everRan and clears retainedFirst when the keys do not stand.
+void _SettleCloneVerdict(RigExecBakedProgramImpl *program);
 
 // Worker-side state and input patching.
 
@@ -311,17 +346,12 @@ _CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst);
 // snapshot stores, profiler, guide taps, guides flag). Nothing in here is
 // shared between jobs; nothing in here names the stage or the evaluator.
 struct _FrozenWorker {
+    /// The snapshot `B` was cloned from: its freeze-built keys.
+    const RigExecFrozenProgram *snapshot = nullptr;
     RigExecBakedProgramImpl B;
     RigExecResolvedInputs resolved;
-    RigExecChainSnapshots chainSnapshots;
     RigExecProfiler profiler;
     bool guidesEnabled = false;
-    std::unique_ptr<RigExecTapSet> nullTaps;
-    // The worker's own placement map: the snapshot nulls the evaluator's
-    // volumeWeightMatrices pointer, so the frozen VolumePlacements body
-    // writes here, and B.volumeWeightMatrices points at it for the packet
-    // build and pose publish to read.
-    std::map<SdfPath, GfMatrix4d> volumeWeightMatrices;
 };
 
 template <class T>
@@ -352,14 +382,6 @@ _SampleHolds<float>(const VtValue &held, float *out)
     }
     return false;
 }
-
-const TfToken &
-_FrozenKindToken(RigExecRevisionOp op);
-
-bool
-_FrozenStepBody(_FrozenWorker *worker, RigExecBakedStep *step,
-               const std::map<SdfPath, size_t> &index,
-               const RigExecFrameInputs &inputs, UsdTimeCode time);
 
 bool
 _RunFrozen(const RigExecFrozenEvalContext &context,

@@ -122,10 +122,10 @@ def main():
            "a point 4 cm off the curve binds at 4 cm: %g"
            % binds[10 + 21 * 2][1])
 
-    for mode in ("reference", "parity"):
+    for mode in ("graph",):
         rig = _rigexec.Rig(stage, "/Asset/Rig")
         rig.compile()
-        rig.evaluation_mode = mode
+        rig.cpu_reference = True
         rest = rig.evaluate(1.0)
         restPts = rest.moved_property("/Asset/Geom/grid.points")
         worst = max((Gf.Vec3d(*a) - Gf.Vec3d(*b)).GetLength()
@@ -133,8 +133,8 @@ def main():
         _Check(worst < 1e-5, "%s: nothing moves at rest (%g)" % (mode, worst))
 
         posed = rig.evaluate(10.0)
-        _Check(posed.baked_parity_mismatches == 0,
-               "%s: baked and dynamic disagree" % mode)
+        _Check((posed.reference_agreements > 0 and posed.reference_mismatches == 0),
+               "%s: graph and scalar reference disagree" % mode)
         got = posed.moved_property("/Asset/Geom/grid.points")
         worst = 0.0
         for i, (p, b) in enumerate(zip(pts, binds)):
@@ -166,13 +166,13 @@ def main():
     weight.GetAttribute("rigExec:defaultWeight").Set(0.0)
     stage.GetPrimAtPath("/Asset/Rig/Movers/grid_wire").GetRelationship(
         "rigExec:weightObject").SetTargets([weight.GetPath()])
-    for mode in ("reference", "parity"):
+    for mode in ("graph",):
         rig = _rigexec.Rig(stage, "/Asset/Rig")
         rig.compile()
-        rig.evaluation_mode = mode
+        rig.cpu_reference = True
         posed = rig.evaluate(10.0)
-        _Check(posed.baked_parity_mismatches == 0,
-               "%s: sparse baked and dynamic disagree" % mode)
+        _Check((posed.reference_agreements > 0 and posed.reference_mismatches == 0),
+               "%s: sparse graph and scalar reference disagree" % mode)
         got = posed.moved_property("/Asset/Geom/grid.points")
         worst = 0.0
         for i, (p, b) in enumerate(zip(pts, binds)):
@@ -187,13 +187,13 @@ def main():
     bind_prim = stage.GetPrimAtPath("/Asset/Rig/Curves/wire_bind")
     bind_prim.GetAttribute("rigExec:bindCoordinates").Set(Vt.Vec2fArray(
         [Gf.Vec2f(*binds[k]) for k in sorted(sparse)]))
-    for mode in ("reference", "parity"):
+    for mode in ("graph",):
         rig = _rigexec.Rig(stage, "/Asset/Rig")
         rig.compile()
-        rig.evaluation_mode = mode
+        rig.cpu_reference = True
         again = rig.evaluate(10.0)
-        _Check(again.baked_parity_mismatches == 0,
-               "%s: sparse binds, baked and dynamic disagree" % mode)
+        _Check((again.reference_agreements > 0 and again.reference_mismatches == 0),
+               "%s: sparse binds, graph and scalar reference disagree" % mode)
         moved = again.moved_property("/Asset/Geom/grid.points")
         worst = max((Gf.Vec3d(*a) - Gf.Vec3d(*b)).GetLength()
                     for a, b in zip(moved, got))

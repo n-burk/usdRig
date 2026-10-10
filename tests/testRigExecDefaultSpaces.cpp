@@ -1,13 +1,18 @@
 // Public computed spaces and mutable default-pose channels.
+#include "rigExec/bakedProgram.h"
+#include "rigExec/bakedProgramImpl.h"
 #include "rigExec/rigEvaluator.h"
+#include "rigExec/rigEvaluatorDependencies.h"
 #include "rigExec/tapSet.h"
 #include "rigExec/types.h"
 #include "pxr/base/gf/rotation.h"
 #include "pxr/base/plug/registry.h"
 #include "pxr/base/tf/setenv.h"
+#include "pxr/usd/sdf/layer.h"
 #include "pxr/usd/sdf/types.h"
 #include "pxr/usd/usd/attribute.h"
 #include "pxr/usd/usd/relationship.h"
+#include "pxr/usd/usd/stage.h"
 
 #include <algorithm>
 #include <cmath>
@@ -242,43 +247,136 @@ static void TestMutualDefaultSpaceCycleClosure()
     }));
 }
 
-static void TestSuppliedSnapshotResults(size_t partition)
+// The baked program takes every slot's pose-input closure from one batch of
+// the pose-input graph. Each slot's provider slots and connected-pose flag
+// must be exactly what the per-prim walker answers for it: Link's
+// default:space is connected to A/Child's parent:space, so Link's pose reads
+// A through a connection; Bone is a joint the FK chain writes, which the
+// compile's own walk stops at, but whose providers BuildSpaces still lists;
+// Recorded is a plain Xformable a constraint moves. Under
+// RIGEXEC_VERIFY_POSEINFO, which main() turns on, the batch also re-walks
+// every closure itself.
+static void TestBakedPoseInputClosures()
 {
-    const auto stage = UsdStage::CreateInMemory();
-    const SdfPath path("/Control");
-    auto control = stage->DefinePrim(path, TfToken("RigExecControl"));
-    RigExecTapSet taps(stage, partition);
-    const auto frame = taps.Add(RigExecValueAddress::Prim(path, TfToken("computePointFrame")));
-    const auto matrix = taps.Add(RigExecValueAddress::Prim(path, TfToken("computeMatrix")));
-    CHECK(taps.Prepare());
-    std::string authored;
-    stage->GetRootLayer()->ExportToString(&authored);
-    for (int pass = 0; pass < 4; ++pass) {
-        std::vector<RigExecValueOverride> overrides{
-            {path, TfToken(), TfToken("avars:tx"), VtValue(double(pass + 1))}};
-        const auto full = taps.Evaluate(UsdTimeCode(pass), overrides);
-        CHECK(full.IsComplete());
-        std::vector<VtValue> supplied(taps.GetTapCount());
-        supplied[pass % 2 ? matrix : frame] = full.Get(pass % 2 ? matrix : frame);
-        const auto partial = taps.EvaluateWithSuppliedResults(UsdTimeCode(pass), overrides, supplied);
-        CHECK(partial.IsComplete());
-        CHECK(partial.Get(frame) == full.Get(frame));
-        CHECK(partial.Get(matrix) == full.Get(matrix));
+    const char *text = R"(#usda 1.0
+def Xform "Asset"
+{
+    def RigExecRoot "Rig"
+    {
+        def Scope "Controls"
+        {
+            def RigExecControl "A"
+            {
+                double rest:tx = 2
+                def RigExecControl "Child"
+                {
+                    double rest:tx = 1
+                }
+            }
+            def RigExecControl "Link"
+            {
+                matrix4d default:space.connect = </Asset/Rig/Controls/A/Child.parent:space>
+            }
+            def RigExecControl "Fk"
+            {
+                double rest:tx = 1
+                def RigExecControl "Tip"
+                {
+                    double rest:tx = 1
+                }
+            }
+        }
+        def Scope "Joints"
+        {
+            def RigExecJoint "Root"
+            {
+                double rest:tx = 1
+                def RigExecJoint "Bone"
+                {
+                    double rest:tx = 1
+                }
+            }
+        }
+        def Scope "Solvers"
+        {
+            def RigExecFkChain "Chain"
+            {
+                rel rigExec:controls = [</Asset/Rig/Controls/Fk>, </Asset/Rig/Controls/Fk/Tip>]
+                rel rigExec:joints = [</Asset/Rig/Joints/Root>, </Asset/Rig/Joints/Root/Bone>]
+            }
+        }
+        def Scope "Movers"
+        {
+            def RigExecPositionConstraint "ReadLink" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                rel rigExec:moves = </Asset/Recorded>
+                rel rigExec:sources = </Asset/Rig/Controls/Link>
+            }
+        }
     }
-    std::string after;
-    stage->GetRootLayer()->ExportToString(&after);
-    CHECK(after == authored);
-    // Both the full and residual requests must survive structural retirement.
-    CHECK(stage->RemovePrim(path));
-    control = stage->DefinePrim(path, TfToken("RigExecControl"));
-    CHECK(control.GetAttribute(TfToken("rest:tx")).Set(7.0));
-    const auto full = taps.Evaluate(UsdTimeCode::Default());
-    std::vector<VtValue> supplied(taps.GetTapCount());
-    supplied[frame] = full.Get(frame);
-    const auto partial = taps.EvaluateWithSuppliedResults(UsdTimeCode::Default(), {}, supplied);
-    CHECK(partial.IsComplete());
-    CHECK(partial.Get(matrix) == full.Get(matrix));
-    CHECK(!taps.EvaluateWithSuppliedResults(UsdTimeCode::Default(), {}, {}).IsValid());
+    def Xform "Recorded"
+    {
+        matrix4d xformOp:transform = ((1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1))
+        uniform token[] xformOpOrder = ["xformOp:transform"]
+    }
+}
+)";
+    const SdfLayerRefPtr layer = SdfLayer::CreateAnonymous(".usda");
+    CHECK(layer->ImportFromString(text));
+    const UsdStageRefPtr stage = UsdStage::Open(layer);
+    RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+    std::vector<std::string> errors;
+    CHECK(evaluator.Compile(&errors));
+    for (const std::string &error : errors) std::printf("    compile: %s\n", error.c_str());
+    std::vector<std::string> reasons;
+    const auto program = RigExecBakedProgram::Build(&evaluator, &reasons);
+    CHECK(program);
+    if (!program) {
+        for (const std::string &reason : reasons) std::printf("    not bakeable: %s\n", reason.c_str());
+        return;
+    }
+    const RigExecBakedProgramImpl &B = program->GetStepGraph();
+    CHECK(B.poseProviderInputs.size() == B.paths.size());
+    CHECK(B.connectedPoseProviders.size() == B.paths.size());
+    if (B.poseProviderInputs.size() != B.paths.size() ||
+        B.connectedPoseProviders.size() != B.paths.size()) return;
+    for (size_t slot = 0; slot < B.paths.size(); ++slot) {
+        const auto walked = evaluatorDetail::_CollectPoseInputInfo(
+            stage->GetPrimAtPath(B.paths[slot]));
+        std::vector<int> providers;
+        for (const SdfPath &path : walked.providers) {
+            const auto found = B.index.find(path);
+            if (found != B.index.end()) providers.push_back(found->second);
+        }
+        const bool connected = walked.connectedPose &&
+            B.slotKind[slot] == RigExecBakedSlotKind::FirstFramePose &&
+            !B.jointSolverBinding->count(B.paths[slot]);
+        if (B.poseProviderInputs[slot] != providers ||
+            bool(B.connectedPoseProviders[slot]) != connected) {
+            std::printf("    pose inputs of <%s> differ from the walker's\n",
+                        B.paths[slot].GetText());
+            CHECK(false);
+        }
+    }
+    // What the comparison above must have covered.
+    const auto slotOf = [&](const char *path) {
+        const auto found = B.index.find(SdfPath(path));
+        return found == B.index.end() ? -1 : found->second;
+    };
+    const auto lists = [&](int slot, int provider) {
+        if (slot < 0 || provider < 0) return false;
+        const auto &inputs = B.poseProviderInputs[size_t(slot)];
+        return std::find(inputs.begin(), inputs.end(), provider) != inputs.end();
+    };
+    const int link = slotOf("/Asset/Rig/Controls/Link");
+    const int bone = slotOf("/Asset/Rig/Joints/Root/Bone");
+    CHECK(link >= 0 && B.connectedPoseProviders[size_t(link)]);
+    CHECK(lists(link, slotOf("/Asset/Rig/Controls/A")));
+    CHECK(B.jointSolverBinding->count(SdfPath("/Asset/Rig/Joints/Root/Bone")));
+    CHECK(lists(bone, slotOf("/Asset/Rig/Joints/Root")));
+    CHECK(slotOf("/Asset/Recorded") >= 0);
 }
 
 int main()
@@ -287,13 +385,11 @@ int main()
     TfSetenv("RIGEXEC_VERIFY_POSEINFO", "1");
     PlugRegistry::GetInstance().RegisterPlugins(RIGEXEC_SCHEMA_RESOURCE_DIR);
     TestMutualDefaultSpaceCycleClosure();
+    TestBakedPoseInputClosures();
     TestDefaultChannels();
     TestDefaultHierarchyAndOverrides();
     TestInvalidSpacesPropagate();
     TestAnimatedTwistTurns();
-    TestSuppliedSnapshotResults(0);
-    TestSuppliedSnapshotResults(1);
-    TestSuppliedSnapshotResults(2);
     std::printf("testRigExecDefaultSpaces: %d failure(s)\n", failures);
     return failures ? 1 : 0;
 }

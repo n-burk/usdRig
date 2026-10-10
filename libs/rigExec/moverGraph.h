@@ -1,30 +1,22 @@
-// RigExec compiled mover graph (spec §7.2).
-// The per-(mover, target) revision chain is a VdfNetwork built in memory from
-// the relationships already authored on the user's stage. Nothing is authored
-// anywhere to express it: no generated prims, no compiler, no derived stage, and
-// no schema types for the revisions themselves. Compiled nodes live only on the
-// graph side.
-// This is what the write-set authoring model always meant. A mover says "I
-// write this target" and its namespace position says "in this order"; the chain
-// of revisions that implies is dataflow, and dataflow is what a VdfNetwork is
-// for. Materializing it as USD prims required a second stage to hold them, cost
-// a recomposition, and put engine machinery on the authoring surface -- while
-// still not being able to express the optimizations the graph form makes
-// natural (splitting one revision across face sets, cloning legs, per-element
-// masks driving sparse recomputation).
+#include "rigExecGraph/blendLayout.h"
+// Compiled revision bindings, typed leaves and pure revision kernels.
 #ifndef RIGEXEC_MOVER_GRAPH_H
 #define RIGEXEC_MOVER_GRAPH_H
 
+#include "bodyPurity.h"
+#include "moverGraphCaches.h"
+#include "moverGraphTypes.h"
 #include "types.h"
 
 #include "rigExecMath/simdKernels.h"
 #include "rigExecMath/solvers.h"
+#include "rigExecMath/surfaceKernelCache.h"
+#include "rigExecMath/wireKernelCache.h"
 
+#include "pxr/base/tf/span.h"
 #include "pxr/base/vt/array.h"
 #include "pxr/base/vt/value.h"
 #include "pxr/base/gf/vec3f.h"
-#include "pxr/exec/vdf/maskedOutput.h"
-#include "pxr/exec/vdf/network.h"
 #include "pxr/usd/sdf/path.h"
 #include "pxr/usd/usd/object.h"
 #include "pxr/usd/usd/attribute.h"
@@ -32,7 +24,9 @@
 #include "pxr/usd/usd/timeCode.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
+#include <cstdint>
 #include <functional>
 #include <iterator>
 #include <map>
@@ -50,97 +44,6 @@ PXR_NAMESPACE_USING_DIRECTIVE
 
 namespace rigExec {
 
-/// The operation a revision performs. One node type per operation and value
-/// type, mirroring the frozen application signatures (spec §4.1): no runtime
-/// operation dispatch inside a node.
-enum class RigExecRevisionOp {
-    Matrix,
-    Skin,
-    BlendShape,
-    VolumeCorrect,
-    Smooth,
-    Lattice,
-    SurfaceProject,
-    Ribbon,
-    /// RigExecCurveMover "wire": points follow a NURBS driver curve's
-    /// displacement at their bind parameter (RigExecApplyWire).
-    Wire,
-    EmitGuidePoints,
-    // Values 10 and 11 are reserved by the binary wire format.
-    RecomputeNormals = 12,
-    RecomputeExtent,
-    // Append new ops: existing values are pinned by the binary wire format.
-    DeltaMush,
-    Wrinkle,
-    /// A registered plugin supplies parameter assembly and point deformation.
-    External,
-    /// RigExecSurfaceProjector: a derived matrix primvar measured from the
-    /// chain's final points (rigExec:shaderPrimvar).
-    SurfaceProjector,
-    /// RigExecSurfaceProjector: its shader dials packed into a derived
-    /// matrix primvar (rigExec:shaderDialPrimvar).
-    ShaderDials,
-};
-
-/// Whether \p op publishes a derived MATRIX primvar rather than revising
-/// points or a vec3f array.
-inline bool
-RigExecIsDerivedMatrixOp(RigExecRevisionOp op)
-{
-    return op == RigExecRevisionOp::SurfaceProjector ||
-           op == RigExecRevisionOp::ShaderDials;
-}
-
-/// When in the walk a side input takes its value from.
-///
-/// A mover or solver reads things other operators write. Which REVISION of
-/// those things it gets is a separate authored choice from which path it
-/// reads, declared as rigExecReadPhase metadata ON the relationship that
-/// names the input: the phase sits where the binding is, so any input can
-/// carry one and no schema attribute is needed to introduce another.
-enum class RigExecReadPhaseKind {
-    Base,       ///< the authored value: what the stage resolves at this time
-    Preceding,  ///< the value immediately before the reading mover
-    Final,      ///< the value after every mover that writes it has run
-    AtPrim,     ///< the value as of when the walk finished with a named prim
-};
-
-/// A resolved read phase. \p prim is meaningful only for AtPrim.
-///
-/// AtPrim is the general form the other three are shorthands for: the walk is
-/// reverse-sibling post-order over the whole composed rig, so "as of
-/// this prim" means the moment that prim was finished with -- for a mover,
-/// immediately after it applied; for a grouping Scope, after everything
-/// beneath it applied, because post-order visits a parent last. Naming a Scope
-/// is therefore how an author says "after that whole rigging stage", without
-/// listing its contents.
-struct RigExecReadPhase {
-    RigExecReadPhaseKind kind = RigExecReadPhaseKind::Base;
-    SdfPath prim;
-
-    bool IsBase() const { return kind == RigExecReadPhaseKind::Base; }
-    bool operator==(const RigExecReadPhase &o) const {
-        return kind == o.kind && prim == o.prim;
-    }
-    bool operator!=(const RigExecReadPhase &o) const { return !(*this == o); }
-    /// Stable text for digests and diagnostics.
-    std::string GetAsString() const;
-};
-
-/// The metadata field an input's read phase is authored in.
-///
-/// Not namespaced: USD metadata field names are plain identifiers, and
-/// `rigExec:readPhase` does not parse in a metadata position.
-inline constexpr const char *RigExecReadPhaseMetadataName = "rigExecReadPhase";
-
-/// Parses an authored phase string.
-///
-/// Accepts `base`, `preceding`, `final`, or an absolute prim path. Returns
-/// false for anything else -- including a relative path, which has no
-/// unambiguous meaning here -- and fills \p error.
-bool RigExecParseReadPhase(
-    const std::string &authored, RigExecReadPhase *phase, std::string *error);
-
 /// The read phase declared for \p property: its rigExecReadPhase metadata,
 /// or Base when none is authored.
 ///
@@ -152,715 +55,45 @@ bool RigExecResolveReadPhase(
     RigExecReadPhase *phase,
     std::string *error);
 
-/// Authored input values that cannot change between two reads in a generation.
-///
-/// The evaluator and the packet assemblers re-read the same handful of
-/// authored inputs on every frame -- a constraint's inputs:enabled, its
-/// offsets, a weight's defaultWeight -- and each read resolves the attribute
-/// through USD again to be handed the same number back. An attribute that is
-/// neither connected nor time-varying cannot answer differently until the
-/// stage changes, so its first answer is kept and served until it does.
-///
-/// Correctness rests on three rules, all enforced here or by the owner:
-///   * admission: only attributes with no authored connections, no possible
-///     time variation AND no authored time samples at all are held. The
-///     third test is not implied by the second: USD reports
-///     ValueMightBeTimeVarying() == false for an attribute whose strongest
-///     opinion is exactly ONE time sample of a non-composable type, while
-///     Get(Default) does not see time samples at all -- so for such an
-///     attribute a Default read and a numeric read legitimately disagree,
-///     and an entry keyed by path alone would serve whichever came first to
-///     both. A single-keyed inputs:enabled made the pose at a frame depend
-///     on which time codes the same evaluator had evaluated before it;
-///   * invalidation: the owner drops, on every stage notice, every entry the
-///     notice could have moved -- the changed property itself, everything
-///     at or under a resynced or changed prim, and the whole cache for a
-///     change at the root, to a resolved asset or inside a prototype -- so
-///     an edit reaches the very next read. A notice reports a composed
-///     change at every stage path that depends on the edited spec, which is
-///     what makes the entry's own path the right key. It also clears it when
-///     interactive overrides are set AND when they are cleared, which is
-///     defence in depth and not a correctness requirement: an attribute
-///     override is written into the generation's resolved inputs before
-///     anything reads one, and GetAttribute consults this cache only where
-///     the resolved map has no entry, so an overridden attribute is never
-///     answered from here in the first place. Kept because a drag is cheap
-///     to re-fill from and the alternative is an argument;
-///   * precedence: a value this generation already resolved in memory (a
-///     property chain result, an interactive override) is consulted before
-///     the cache is, by RigExecResolvedInputs::GetAttribute.
-class RigExecStaticInputCache
-{
-public:
-    RigExecStaticInputCache() { Clear(); }
-
-    /// Forgets everything. Called on every notice: the cache holds authored
-    /// values, and a notice is the only way an authored value moves.
-    ///
-    /// The counters below are cumulative and deliberately survive this: they
-    /// describe what the cache DID, which a test reads across the notices it
-    /// provokes.
-    void Clear() {
-        _entries.clear();
-        // The cache is single-threaded state. It is stamped with the thread
-        // that owns it here so a read from a worker (a parallel chain walk)
-        // bypasses it instead of racing on it.
-        _owner = std::this_thread::get_id();
-    }
-
-    /// Forgets the entry for \p path alone: a changed-info notice on one
-    /// property. Takes ownership for the calling thread exactly as Clear()
-    /// does, because the thread that handles notices is the one that reads.
-    void Erase(const SdfPath &path) {
-        _entries.erase(path);
-        _owner = std::this_thread::get_id();
-    }
-
-    /// Forgets every entry at or under any of \p prefixes: a resync, or a
-    /// change on a prim, reaches every property beneath it. One pass over
-    /// the entries for all of them. Re-stamps the owner as Clear() does.
-    void ErasePrefixes(const std::vector<SdfPath> &prefixes) {
-        _owner = std::this_thread::get_id();
-        if (prefixes.empty()) {
-            return;
-        }
-        for (auto it = _entries.begin(); it != _entries.end();) {
-            const bool under = std::any_of(
-                prefixes.begin(), prefixes.end(),
-                [&it](const SdfPath &p) { return it->first.HasPrefix(p); });
-            it = under ? _entries.erase(it) : std::next(it);
-        }
-    }
-
-    /// Reads \p attribute at \p time through the cache.
-    ///
-    /// Sets \p handled when the answer is authoritative: false means the
-    /// attribute is not cacheable and the caller must read it the long way.
-    template <class T>
-    bool Read(const UsdAttribute &attribute, const SdfPath &path,
-              UsdTimeCode time, T *out, bool *handled) {
-        *handled = false;
-        if (_owner != std::this_thread::get_id()) {
-            // Not this cache's thread: neither the map nor the counters may
-            // be touched from here. Counted so the bypass is observable --
-            // it is the whole of the cache's thread safety.
-            ++_bypasses;
-            return false;
-        }
-        auto entry = _entries.find(path);
-        if (entry == _entries.end()) {
-            _Entry fresh;
-            fresh.cacheable = !attribute.HasAuthoredConnections() &&
-                              !attribute.ValueMightBeTimeVarying() &&
-                              attribute.GetNumTimeSamples() == 0;
-            entry = _entries.emplace(path, fresh).first;
-        }
-        if (!entry->second.cacheable) {
-            ++_refusals;
-            return false;
-        }
-        *handled = true;
-        if (!entry->second.filled) {
-            T value;
-            entry->second.hasValue = attribute.Get(&value, time);
-            if (entry->second.hasValue) {
-                entry->second.value = VtValue(value);
-            }
-            entry->second.valueType = &typeid(T);
-            entry->second.filled = true;
-            if (entry->second.hasValue) {
-                *out = value;
-            }
-            return entry->second.hasValue;
-        }
-        // The same attribute read as another type: the entry answers only
-        // the type its first read typed it as -- including the "no value"
-        // answer, which a different type may well not share -- so this read
-        // goes to the stage.
-        if (!entry->second.valueType || *entry->second.valueType != typeid(T)) {
-            return attribute.Get(out, time);
-        }
-        ++_hits;
-        if (!entry->second.hasValue) {
-            return false;
-        }
-        *out = entry->second.value.UncheckedGet<T>();
-        return true;
-    }
-
-    /// How many entries are held, cacheable or refused.
-    size_t GetSize() const { return _entries.size(); }
-    /// Reads answered from a held value.
-    size_t GetHitCount() const { return _hits; }
-    /// Reads that arrived from a thread that does not own the cache.
-    size_t GetBypassCount() const { return _bypasses; }
-    /// Reads on an attribute that admission refused, which the caller then
-    /// resolved the long way.
-    size_t GetRefusalCount() const { return _refusals; }
-
-private:
-    struct _Entry {
-        /// The value as the first read of this attribute typed it.
-        VtValue value;
-        /// That type, so a later read of another one is not answered with
-        /// this one's result.
-        const std::type_info *valueType = nullptr;
-        bool cacheable = false;
-        bool filled = false;
-        bool hasValue = false;
-    };
-    std::unordered_map<SdfPath, _Entry, SdfPath::Hash> _entries;
-    std::thread::id _owner;
-    /// Written from the owning thread except for _bypasses, which is
-    /// written from whatever thread bounced off the guard.
-    size_t _hits = 0;
-    size_t _refusals = 0;
-    std::atomic<size_t> _bypasses{0};
-};
-
-/// Values evaluation has already computed that a static read must prefer over
-/// the authored stage value.
-///
-/// Packet assembly reads most of its inputs straight off the stage -- a
-/// strength, a lattice cage, a topology array. Those reads do not go through
-/// exec, so nothing the engine computes reaches them by default, and a
-/// property mover that revised one of them would be silently ignored while
-/// the same revision reached every exec consumer through a value override.
-/// This is the other half of that path: one lookup, consulted first, holding
-/// whatever the current generation has already resolved.
-/// Bake-time record of what the inputs resolved (M1 slice 4).
-///
-/// The runtime replays per-frame input values rather than reading the
-/// stage, so the bake has to capture exactly what the program consumed --
-/// and for the resolved route that is only knowable at resolution time,
-/// while the overlay holds the generation's own values. Armed by the bake
-/// around each Evaluate (null otherwise, when reads cost one predictable
-/// branch), filled from RigExecBakedRead on whatever thread ran the step,
-/// drained per frame by the capture. Keys are input addresses, stable
-/// within the epoch because the bake performs no edit between the
-/// directory walk and the last frame.
-struct RigExecBakeReadRecorder {
-    void Record(const void *input, const VtValue &value) {
-        std::lock_guard<std::mutex> guard(mutex);
-        reads[input] = value;
-    }
-    /// A stage-sourced read from the shared assemblers, keyed by
-    /// (attribute path, was-Default) so a rest/live pair on one attribute
-    /// keeps both values. forceFrame marks connection-following reads,
-    /// whose variance the drain cannot judge from the attribute. An
-    /// invalid value marks a KNOWN-ABSENT attribute (the site read its
-    /// fallback), which the runtime needs told apart from a gap.
-    struct PathRead {
-        VtValue value;
-        bool forceFrame = false;
-    };
-    void RecordPath(const SdfPath &path, bool wasDefault,
-                    const VtValue &value, bool forceFrame) {
-        std::lock_guard<std::mutex> guard(mutex);
-        PathRead &entry = pathReads[std::make_pair(path, wasDefault)];
-        entry.value = value;
-        entry.forceFrame = entry.forceFrame || forceFrame;
-    }
-    void Clear() {
-        std::lock_guard<std::mutex> guard(mutex);
-        reads.clear();
-        pathReads.clear();
-    }
-    std::mutex mutex;
-    std::map<const void *, VtValue> reads;
-    std::map<std::pair<SdfPath, bool>, PathRead> pathReads;
-};
-
-class RigExecResolvedInputs
-{
-public:
-    /// Bake recorder hook, set by the capture around each Evaluate and
-    /// null the rest of the time. Lives here because every input read
-    /// already takes this object, so the funnel needs no new parameter.
-    RigExecBakeReadRecorder *bakeRecorder = nullptr;
-    /// Records a property chain's result for \p path.
-    void SetProperty(const SdfPath &path, const VtValue &value) {
-        _values[path] = value;
-    }
-
-    /// Forgets \p path, so a read of it goes back to the stage.
-    void ClearProperty(const SdfPath &path) { _values.erase(path); }
-
-    /// The resolved value for \p path, or null to read the stage.
-    const VtValue *Find(const SdfPath &path) const {
-        const auto it = _values.find(path);
-        return it == _values.end() ? nullptr : &it->second;
-    }
-
-    /// Typed convenience: true when \p path resolved to a \p T.
-    template <class T>
-    bool Get(const SdfPath &path, T *out) const {
-        const VtValue *v = Find(path);
-        if (!v || !v->IsHolding<T>()) {
-            return false;
-        }
-        *out = v->UncheckedGet<T>();
-        return true;
-    }
-
-    /// Resolves one scalar/static input exactly as Exec's AttributeValue
-    /// accessor does: an in-memory property override wins, otherwise a single
-    /// authored attribute connection is followed, otherwise the
-    /// attribute's own value is read. Compile validates connection
-    /// cardinality/type/cycles for schema inputs that require one scalar.
-    /// The float cast GetAttribute applies to a double source; false for
-    /// every other type, which never reaches it.
-    template <class T>
-    static bool _CoerceFromDouble(double, T *) { return false; }
-    static bool _CoerceFromDouble(double value, float *out) {
-        *out = static_cast<float>(value);
-        return true;
-    }
-
-    template <class T>
-    bool GetAttribute(
-        const UsdAttribute &attribute, UsdTimeCode time, T *out) const {
-        if (!out) {
-            return false;
-        }
-        // A FLOAT read of a DOUBLE attribute is coerced. Every avar is a
-        // double while the math movers compute in float, so a float input
-        // connected to (or standing on) a control's avar reads its value
-        // cast, instead of failing and falling back to a default.
-        // Compile-time gated: a non-float instantiation asks no type
-        // question of the attribute at all.
-        if constexpr (std::is_same<T, float>::value) {
-            if (attribute &&
-                attribute.GetTypeName() == SdfValueTypeNames->Double) {
-                double wide = 0.0;
-                if (!GetAttribute<double>(attribute, time, &wide)) {
-                    return false;
-                }
-                return _CoerceFromDouble(wide, out);
-            }
-        }
-        // An input that cannot change until the stage does answers from the
-        // cache -- but only after the in-memory value for this exact property
-        // has been ruled out, because a property chain result outranks the
-        // authored value the cache holds.
-        // While no overlay is published there is nothing to rule out, so the
-        // read skips the path hash; the path itself is spelled once, because
-        // the cache lookup below used to spell it a second time.
-        if (attribute) {
-            const bool checkOverlay = !_values.empty();
-            const SdfPath attrPath =
-                (checkOverlay || _cache) ? attribute.GetPath() : SdfPath();
-            if (!checkOverlay || !_values.count(attrPath)) {
-                if (_cache) {
-                    bool handled = false;
-                    const bool got = _cache->Read(
-                        attribute, attrPath, time, out, &handled);
-                    if (handled) {
-                        return got;
-                    }
-                }
-                // The cache refused it: a connection to follow, or a value
-                // that varies with time -- which is every avar, so the
-                // refused reads are exactly the ones that recur every frame.
-                // MEASURED 2026-09-13, biped: ~11 600 scalar reads per frame,
-                // and an unconnected one still reaches the walk below, which
-                // allocates a std::set and a std::vector to discover there is
-                // no single connection to follow. Same answer, no allocation.
-                if (!attribute.HasAuthoredConnections()) {
-                    return attribute.Get(out, time);
-                }
-            }
-        }
-        std::set<SdfPath> visiting;
-        std::vector<UsdAttribute> fallback;
-        UsdAttribute a = attribute;
-        while (a && visiting.insert(a.GetPath()).second) {
-            if (Get(a.GetPath(), out)) {
-                return true;
-            }
-            // A float connection chain may end on a double (an avar).
-            if constexpr (std::is_same<T, float>::value) {
-                if (a.GetTypeName() == SdfValueTypeNames->Double) {
-                    double wide = 0.0;
-                    if (!GetAttribute<double>(a, time, &wide)) {
-                        return false;
-                    }
-                    return _CoerceFromDouble(wide, out);
-                }
-            }
-            fallback.push_back(a);
-            SdfPathVector connections;
-            // Connections are derived from authored opinions only, so an
-            // attribute with none can skip building the target index that
-            // GetConnections would build to come back empty.
-            if (a.HasAuthoredConnections()) {
-                a.GetConnections(&connections);
-            }
-            if (connections.size() != 1) {
-                break;
-            }
-            a = a.GetPrim().GetStage()->GetAttributeAtPath(connections[0]);
-        }
-        // The nearest readable upstream authored value is the same fallback
-        // that recursive connection traversal selected, without consuming a
-        // native stack frame for every operation in a long connection chain.
-        for (auto it = fallback.rbegin(); it != fallback.rend(); ++it) {
-            if (it->Get(out, time)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    bool IsEmpty() const { return _values.empty(); }
-    size_t GetSize() const { return _values.size(); }
-    void Clear() { _values.clear(); }
-
-    /// Attaches the owner's static-input cache. Not owned, and not cleared
-    /// by Clear(): this object is emptied every generation, while the cache
-    /// spans generations and is invalidated by stage notices.
-    void SetStaticCache(RigExecStaticInputCache *cache) { _cache = cache; }
-
-private:
-    std::unordered_map<SdfPath, VtValue, SdfPath::Hash> _values;
-    RigExecStaticInputCache *_cache = nullptr;
-};
-
-/// Records one stage-sourced read for the bake. A null recorder or an
-/// empty key records nothing; an invalid attribute records KNOWN-ABSENT
-/// under the caller-built key (the runtime tells absence apart from a
-/// gap; forceFrame is ignored there); an overlay hit records nothing
-/// (the runtime recomputes overlay values by replaying the same steps).
-/// Pass a null resolved for a site that reads the stage directly without
-/// consulting the overlay, so the tier check does not skip a value the
-/// site consumed past the overlay. forceFrame marks the
-/// connection-following reads, whose variance the drain cannot judge
-/// from the attribute.
-inline void
-RigExecRecordStageRead(const RigExecResolvedInputs *resolved,
-                       RigExecBakeReadRecorder *bakeRecorder,
-                       const SdfPath &key, const UsdAttribute &attribute,
-                       UsdTimeCode time, const VtValue &value,
-                       bool forceFrame)
-{
-    if (!bakeRecorder || key.IsEmpty()) {
-        return;
-    }
-    if (!attribute) {
-        bakeRecorder->RecordPath(key, /*wasDefault=*/true, VtValue(),
-                                 /*forceFrame=*/false);
-        return;
-    }
-    if (resolved && resolved->Find(key)) {
-        return;
-    }
-    bakeRecorder->RecordPath(key, time == UsdTimeCode::Default(), value,
-                             forceFrame);
-}
-
-/// What each chain held at each point in the walk.
-///
-/// A chain is a sequence of revisions, and until now only its two ends were
-/// nameable -- the authored base going in and the final value coming out.
-/// Everything between them existed for a moment inside the evaluation loop
-/// and was dropped. A read phase that names a prim needs exactly one of those
-/// intermediate values, so they are kept: one entry per (target, mover) as
-/// the chain is built, plus the final.
-///
-/// Cheap by construction. Chains are short, the values are already
-/// materialized to publish the result anyway, and VtValue's array backing is
-/// copy-on-write -- so recording a revision costs a refcount, not a copy of
-/// the geometry.
-class RigExecChainSnapshots
-{
-public:
-    /// Records \p value as \p target stood immediately after \p afterMover.
-    void Record(const SdfPath &target, const SdfPath &afterMover,
-                const VtValue &value);
-
-    /// Records \p target's value after its whole chain.
-    void RecordFinal(const SdfPath &target, const VtValue &value);
-
-    /// The value of \p target at \p phase, or null when nothing was recorded.
-    ///
-    /// \p readerMover is the mover doing the reading, needed by Preceding.
-    /// An AtPrim phase naming a grouping Scope resolves to the LAST recorded
-    /// revision at or beneath it, which is what post-order makes that Scope
-    /// mean.
-    const VtValue *Lookup(
-        const SdfPath &target, const RigExecReadPhase &phase,
-        const SdfPath &readerMover) const;
-
-    /// Takes over everything recorded in \p other, appending its revisions
-    /// after any this already holds for the same target.
-    ///
-    /// One chain's records are written by whoever walked that chain and are
-    /// folded in here afterwards, in chain order. That is what lets the walk
-    /// hand a task its own store instead of this one: a task records into a
-    /// store nobody else can see, and the walk order -- not the order the
-    /// tasks happened to finish in -- decides what this ends up holding.
-    void Merge(RigExecChainSnapshots &&other);
-
-    void Clear() { _chains.clear(); }
-    bool IsEmpty() const { return _chains.empty(); }
-
-private:
-    struct _Chain {
-        /// (mover, value) in walk order. A vector, not a map: Preceding and
-        /// the Scope rule are both positional questions.
-        std::vector<std::pair<SdfPath, VtValue>> revisions;
-        VtValue final;
-        bool hasFinal = false;
-    };
-    std::map<SdfPath, _Chain> _chains;
-};
-
-/// Where one revision reads its side inputs from.
-///
-/// These are the bindings the compiler used to author onto the mover prim as
-/// rigExec:resolved* relationships so a registered computation could name them.
-/// Every one is a build-time path choice -- which provider supplies the matrix,
-/// which prim carries the topology, which attribute holds the cage -- so in the
-/// graph they are just the paths an edge will be built from, and nothing needs
-/// to be authored anywhere to express them.
-struct RigExecBlendSampleBinding {
-    SdfPath sample;
-    SdfPath points;
-    RigExecReadPhase phase;
-    /// The UsdSkelBlendShape prim named by rigExec:blendShape, when the
-    /// sample carries its shape sparsely instead of as a full points array.
-    /// Empty and `points` set is the dense form; set and `points` empty is
-    /// the sparse one. Never both: the compiler rejects a sample that
-    /// authors both relationships rather than picking a winner.
-    SdfPath blendShape;
-    bool operator==(const RigExecBlendSampleBinding &o) const {
-        return sample == o.sample && points == o.points &&
-               phase == o.phase && blendShape == o.blendShape;
-    }
-};
-
-struct RigExecRevisionBinding {
-    SdfPath moverPath;        ///< the authored mover
-    SdfPath target;           ///< canonical exact write target
-    SdfPath transform;        ///< computeMatrix provider (matrix)
-    /// Optional provider the transform is measured against (matrix):
-    /// T = M(transform) * inverse(M(transformSpace)).
-    SdfPath transformSpace;
-    /// rigExec:space -- the provider whose own rest->pose map carries the
-    /// WHOLE RIG, normally a TRS master, and which is a different thing
-    /// from transformSpace above: that one is what the offset is MEASURED
-    /// against, this one is what the points the offset is applied to have
-    /// already been carried by. Empty when none is named, and then a
-    /// post-skin cluster keeps the scale-only correction it had before.
-    /// See RigExecClusterInPointFrame.
-    SdfPath carrySpace;
-    /// Ordered computeMatrix providers (skin): rigExec:influences, which
-    /// rigExec:jointIndices index. Every entry shares transformPhase.
-    /// Matrix movers use [referenceTransform, referenceTransformSpace]
-    /// here when an explicit neutral solve supplies the deformation bind.
-    std::vector<SdfPath> influences;
-    SdfPath weightObject;     ///< computeWeightPacket provider
-    SdfPath base;             ///< authored-base points (blend/volume/lattice)
-    SdfPath topologyCounts;   ///< faceVertexCounts (smooth/surface)
-    SdfPath topologyIndices;  ///< faceVertexIndices (smooth/surface)
-    SdfPath cagePoints;       ///< lattice cage points
-    SdfPath surfacePoints;    ///< driver surface points
-    SdfPath bindCoords;       ///< ribbon / wire bind coordinates
-    SdfPath driverCurvePoints; ///< wire: driver NURBS curve points
-    SdfPath driverCurveOrder;  ///< wire: that curve's order
-    SdfPath driverCurveKnots;  ///< wire: that curve's knots
-    /// wire: how many of `influences` are rigExec:driverTransforms; the
-    /// rest are rigExec:driverTransformSpaces. Zero when the curve's own
-    /// points drive the wire.
-    int driverTransformCount = 0;
-    /// wire: how many of `influences` after the transforms are their
-    /// spaces, and how many after those are rigExec:driverBaseTransforms;
-    /// the rest are rigExec:driverBaseTransformSpaces.
-    int driverSpaceCount = 0;
-    int driverBaseTransformCount = 0;
-    SdfPath driverFrames;     ///< aggregate frame provider
-    SdfPath widths;           ///< authored widths (extent maintenance)
-    /// Surface projector: rigExec:shaderDialSources, in order, at most
-    /// sixteen, and the static asset-to-mesh map. The historical field name
-    /// is retained on the C++/binary binding; provider frames are asset-space.
-    std::vector<SdfPath> shaderDials;
-    GfMatrix4d meshWorldInverse{1.0};
-    std::vector<SdfPath> blendInputs;  ///< sorted blend channels
-    std::map<SdfPath, std::vector<RigExecBlendSampleBinding>> blendSamples;
-
-    /// Declared read phase per side input, keyed by the exact property path
-    /// the phase governs. Absent means Base, which is what an unannotated
-    /// input has always meant.
-    std::map<SdfPath, RigExecReadPhase> phases;
-
-    /// The phase declared for the transform provider. Kept apart from
-    /// `phases` because it is answered from the FRAME chains rather than the
-    /// point chains -- a different store with a different value type.
-    RigExecReadPhase transformPhase;
-
-    std::vector<std::pair<SdfPath, RigExecReadPhase>> GetPhasedInputs() const {
-        std::vector<std::pair<SdfPath, RigExecReadPhase>> result(
-            phases.begin(), phases.end());
-        for (const auto &[input, samples] : blendSamples)
-            for (const auto &sample : samples)
-                if (!sample.phase.IsBase()) result.emplace_back(sample.points, sample.phase);
-        return result;
-    }
-
-    bool operator==(const RigExecRevisionBinding &o) const;
-};
-
-/// Per-epoch skin layouts, keyed by the mover that owns them.
-///
-/// The expensive half of the operation depends only on the layout, and the
-/// layout is what an epoch IS. Here that half is reading two megabyte-scale
-/// arrays off the stage and range-checking every element of them.
-///
-/// Owned by the evaluator, never a static: a cache that outlives the
-/// evaluator outlives the stage it read, and a weight-paint edit has to be
-/// able to throw it away. Clear() is what a change notice calls.
-///
-/// Resolve() is safe to call from several chain tasks at once, because the
-/// chain walk runs independent chains concurrently and every skinned chain
-/// asks here. The lock decides nothing: a layout is a pure function of the
-/// mover's authored arrays, so whichever task happens to build it builds the
-/// same one, and after the first frame of an epoch every call is a hit.
-class RigExecSkinTopologyCache
-{
-public:
-    /// The layout for \p mover, calling \p build on a miss. \p build fills
-    /// a fresh topology; whatever it produces -- validated or not -- is what
-    /// this epoch uses, so a rejected layout is not re-read every frame
-    /// either.
-    ///
-    /// \p build returns false to REFUSE the cache for this mover: the layout
-    /// can move within the epoch after all, and the caller must read it per
-    /// frame instead. The refusal is remembered exactly as a layout is, so
-    /// the question costs one answer per notice and not one per frame; a
-    /// refused mover answers null until the next Clear().
-    std::shared_ptr<const RigExecSkinTopology> Resolve(
-        const SdfPath &mover,
-        const std::function<bool(RigExecSkinTopology *)> &build);
-
-    void Clear() {
-        std::lock_guard<std::mutex> lock(_mutex);
-        // Dropped as ANSWERS, kept as candidates. Every notice clears this
-        // cache, including the overwhelming majority that touched no
-        // layout; handing back a fresh pointer for arrays that compare equal
-        // would make the mover's packet compare unequal and re-run the
-        // whole per-point kernel for a binding that did not move. Resolve
-        // pays one array compare per notice to avoid that, instead of the
-        // kernel once per notice.
-        for (auto &[mover, topology] : _entries) {
-            if (topology) {
-                _candidates[mover] = std::move(topology);
-            }
-        }
-        _entries.clear();
-    }
-    size_t GetSize() const {
-        std::lock_guard<std::mutex> lock(_mutex);
-        return _entries.size();
-    }
-
-private:
-    mutable std::mutex _mutex;
-    /// A present entry holding null is a remembered refusal.
-    std::map<SdfPath, std::shared_ptr<const RigExecSkinTopology>> _entries;
-    /// The last layout each mover had, from before the most recent Clear(),
-    /// so an unchanged binding can keep its pointer. Never an answer: only
-    /// something a freshly read layout is compared against.
-    std::map<SdfPath, std::shared_ptr<const RigExecSkinTopology>> _candidates;
-};
-
 /// The epoch-fixed skin layout of \p moverPrim, through \p cache.
 ///
-/// The one call a frame makes that takes a lock (RigExecSkinTopologyCache's,
-/// held across the build). Exposed so a caller that must not take a lock
-/// where it assembles -- the baked program, whose step bodies may not
-/// synchronise at all -- can resolve every layout up front and hand the
-/// answer to the assembler through RigExecProviderValues::skinTopology. A
-/// null return is the cache's remembered REFUSAL: the layout can move within
-/// the epoch, so the packet must read the arrays per frame.
+/// The one call a dynamic frame makes that takes a lock
+/// (RigExecSkinTopologyCache's, held across the build). A null return is the
+/// cache's remembered REFUSAL: the layout can move within the epoch, so the
+/// packet must read the arrays per frame. The baked program and its frozen
+/// jobs never call it: their SkinTopology head op builds the same layout
+/// from sampled leaves through RigExecBuildSkinTopology.
 std::shared_ptr<const RigExecSkinTopology> RigExecResolveSkinTopology(
     const UsdPrim &moverPrim,
     size_t influenceCount,
     UsdTimeCode time,
     const RigExecResolvedInputs *resolved,
     RigExecSkinTopologyCache *cache);
-/// Per-epoch blend sample shapes, keyed by the sample prim that owns them.
-///
-/// Peer of RigExecSkinTopologyCache, and there for the same reason, but the
-/// arithmetic is starker here. A dense blend sample's full points array is
-/// read and copied off the stage once per sample per frame whether its
-/// channel sits at 0 or at 1 -- measured at 0.37-0.38 ms per sample per frame
-/// on a 26,276-point body, so 169 correctives cost ~65 ms/frame with the rig
-/// standing at REST. Resolving the shape
-/// once per epoch and sharing it by pointer is what removes that, and the
-/// sparse layout is what makes the resolved shape small: the real correctives
-/// move 1,279 points on average, 4.87% of the mesh.
-///
-/// Owned by the evaluator, never a static: a cache that outlives the
-/// evaluator outlives the stage it read, and a sculpt edit has to be able to
-/// throw it away. Clear() is what a change notice calls.
-///
-/// Resolve() is safe to call from several chain tasks at once. The lock
-/// decides nothing -- a layout is a pure function of the sample's authored
-/// arrays, so whichever task builds it builds the same one.
-class RigExecBlendSampleCache
-{
-public:
-    /// The shape for \p sample, calling \p build on a miss.
-    ///
-    /// \p build returns false to REFUSE the cache for this sample: the shape
-    /// can move within the epoch after all, and the caller must read it per
-    /// frame instead. The refusal is remembered exactly as a shape is, so the
-    /// question costs one answer per notice and not one per frame; a refused
-    /// sample answers null until the next Clear().
-    std::shared_ptr<const RigExecBlendSampleLayout> Resolve(
-        const SdfPath &sample,
-        const std::function<bool(RigExecBlendSampleLayout *)> &build);
 
-    void Clear() {
-        std::lock_guard<std::mutex> lock(_mutex);
-        // Dropped as ANSWERS, kept as candidates -- see
-        // RigExecSkinTopologyCache::Clear for why handing back a fresh
-        // pointer for arrays that compare equal is worse than one array
-        // compare per notice.
-        for (auto &[sample, layout] : _entries) {
-            if (layout) {
-                _candidates[sample] = std::move(layout);
-            }
-        }
-        _entries.clear();
-    }
-    /// Clear() for the one sample \p sample: its shape is dropped as an
-    /// answer and kept as a candidate, so a re-read that finds the same
-    /// arrays hands back the same pointer.
-    void Erase(const SdfPath &sample) {
-        std::lock_guard<std::mutex> lock(_mutex);
-        const auto found = _entries.find(sample);
-        if (found == _entries.end()) {
-            return;
-        }
-        if (found->second) {
-            _candidates[sample] = std::move(found->second);
-        }
-        _entries.erase(found);
-    }
-    size_t GetSize() const {
-        std::lock_guard<std::mutex> lock(_mutex);
-        return _entries.size();
-    }
+/// Whether \p moverPrim's skin layout is epoch state: none of
+/// rigExec:jointIndices, rigExec:jointWeights and rigExec:elementSize might
+/// vary with time or has an authored connection. The question
+/// RigExecResolveSkinTopology asks wherever the cache is refilled. Reads the
+/// stage: owning thread only.
+bool RigExecSkinLayoutIsFixed(const UsdPrim &moverPrim);
 
-private:
-    mutable std::mutex _mutex;
-    /// A present entry holding null is a remembered refusal.
-    std::map<SdfPath, std::shared_ptr<const RigExecBlendSampleLayout>> _entries;
-    /// The last shape each sample had, from before the most recent Clear().
-    std::map<SdfPath, std::shared_ptr<const RigExecBlendSampleLayout>>
-        _candidates;
-};
+/// RigExecSkinLayoutIsFixed's two halves. The topology half asks it of
+/// rigExec:jointIndices and rigExec:elementSize, whose authored edits
+/// rebuild the program, so a program asks it once, at Build; the weights
+/// half asks it of rigExec:jointWeights, a per-frame value whose edits do
+/// not. Their conjunction is RigExecSkinLayoutIsFixed. Owning thread only.
+bool RigExecSkinLayoutTopologyIsFixed(const UsdPrim &moverPrim);
+bool RigExecSkinLayoutWeightsAreFixed(const UsdPrim &moverPrim);
+
+/// Fills \p topology from a skin layout's arrays and element size against an
+/// influence table of \p influenceCount entries: the copies, then the shape,
+/// index range and weight checks of RigExecSkinLayout::Validate, which set
+/// `pointCount` and `validated` only as far as they pass. The influence
+/// matrices are the caller's to check per frame. Pure: no stage, no lock.
+void RigExecBuildSkinTopology(TfSpan<const int> indices,
+                              TfSpan<const float> weights, int elementSize,
+                              size_t influenceCount,
+                              RigExecSkinTopology *topology);
 
 /// Resolves a mover's side-input bindings from the authored stage.
 ///
@@ -925,6 +158,10 @@ RigExecMoverParameters RigExecAssembleSkinParameters(
 /// first bad canonical address.
 RigExecMoverStatus RigExecStatusForParameters(
     const RigExecMoverParameters &parameters, const SdfPath &moverPath);
+/// The same, with the mover's path already spelled: a step body passes the
+/// text Build captured rather than asking SdfPath for it.
+RigExecMoverStatus RigExecStatusForParameters(
+    const RigExecMoverParameters &parameters, const std::string &moverText);
 
 /// Applies the matrix operation of \p p to \p pts in place, returning false
 /// when the packet fails atomically (the envelope does not resolve to the
@@ -1149,7 +386,7 @@ struct RigExecWireDriverFrame {
 /// A wire asking for neither keeps the plain measurement bit for bit. The
 /// runtime twin is the `measured` lambda in RrGeoAssembleWire.
 inline GfMatrix4d
-RigExecMeasureWireDriver(GfMatrix4d transform, GfMatrix4d space,
+RigExecMeasureWireDriver(const GfMatrix4d &transform, const GfMatrix4d &space,
                          const RigExecWireDriverFrame &frame,
                          GfVec3d *spaceScale)
 {
@@ -1161,8 +398,11 @@ RigExecMeasureWireDriver(GfMatrix4d transform, GfMatrix4d space,
         k != GfVec3d(1.0, 1.0, 1.0)) {
         GfMatrix4d unscale(1.0);
         unscale.SetScale(GfVec3d(1.0 / k[0], 1.0 / k[1], 1.0 / k[2]));
-        transform = transform * unscale;
-        space = space * unscale;
+        const GfMatrix4d unscaledTransform = transform * unscale;
+        const GfMatrix4d unscaledSpace = space * unscale;
+        return frame.posedDelta
+            ? RigExecMeasureInPosedSpace(unscaledTransform, unscaledSpace)
+            : RigExecMeasureInSpace(unscaledTransform, unscaledSpace);
     }
     return frame.posedDelta ? RigExecMeasureInPosedSpace(transform, space)
                             : RigExecMeasureInSpace(transform, space);
@@ -1176,8 +416,8 @@ RigExecMeasureWireDriver(GfMatrix4d transform, GfMatrix4d space,
 /// polygon on output; \p auxPoints receives the posed polygon. A posed wire
 /// with no carry has its displacement multiplied by the space's scale; one
 /// with a carry has both polygons carried instead (RigExecCarryWireCurves).
-/// Shared by the live assembler, the frozen replay and nothing else, so the
-/// two USD-side paths cannot drift; the runtime restates it.
+/// Shared by native and frozen parameter assembly; runtime mirrors the same
+/// measurement and per-call selected-pair cache.
 inline void
 RigExecPoseWireDrivers(const std::vector<GfMatrix4d> &table, size_t t,
                        size_t s, size_t bt, const VtFloatArray &weights,
@@ -1190,15 +430,41 @@ RigExecPoseWireDrivers(const std::vector<GfMatrix4d> &table, size_t t,
     const auto pick = [](size_t count, size_t j) {
         return count <= 1 ? size_t(0) : j % count;
     };
+    // One driver/space pair serves most CVs, so each selected pair's
+    // measured matrix and scale compute once per call: the measurement
+    // inverts the space, and a linear scan over the few distinct pairs
+    // is nothing beside that. Shared by the base-motion and driver
+    // arms; spaceless pairs are a table read and skip the cache.
+    struct _MeasuredWirePair {
+        size_t driver;
+        size_t space;
+        GfMatrix4d m;
+        GfVec3d scale;
+    };
+    std::vector<_MeasuredWirePair> measuredCache;
     const auto measured = [&](size_t first, size_t count, size_t spaceFirst,
                               size_t spaceCount, size_t j,
                               GfVec3d *spaceScale) {
-        GfMatrix4d m = table[first + pick(count, j)];
-        if (spaceCount > 0) {
-            m = RigExecMeasureWireDriver(
-                m, table[spaceFirst + pick(spaceCount, j)], frame,
-                spaceScale);
+        const size_t ti = first + pick(count, j);
+        if (spaceCount == 0) {
+            return table[ti];
         }
+        const size_t si = spaceFirst + pick(spaceCount, j);
+        for (const _MeasuredWirePair &hit : measuredCache) {
+            if (hit.driver == ti && hit.space == si) {
+                if (spaceScale) {
+                    *spaceScale = hit.scale;
+                }
+                return hit.m;
+            }
+        }
+        GfVec3d scale(1.0, 1.0, 1.0);
+        GfMatrix4d m = RigExecMeasureWireDriver(
+            table[ti], table[si], frame, &scale);
+        if (spaceScale) {
+            *spaceScale = scale;
+        }
+        measuredCache.push_back({ti, si, m, scale});
         return m;
     };
     const bool carried = frame.posedPoints && frame.carry;
@@ -1244,8 +510,19 @@ RigExecWireTakesSparseEnvelope(const RigExecWeightPacket &w)
             w.rangePolicy == "clamp");
 }
 
+/// RIGEXEC_ENABLE_SIMD (default true), read once when the library loads.
+/// The kernels below take the choice as \p useSimd, so a step body passes
+/// its program's copy and reads neither the environment nor a static; every
+/// caller starts from this answer, so all paths make the same choice.
+bool RigExecSimdEnabled();
+
+/// Constructs this file's token tables on the calling thread. Build calls it
+/// so that their lazy construction, which builds tokens from text, never runs
+/// first on a worker.
+void RigExecRevisionKernelTouchTokens();
+
 bool RigExecApplyMatrixKernel(const RigExecMoverParameters &p,
-                              std::vector<GfVec3f> *pts);
+                              std::vector<GfVec3f> *pts, bool useSimd);
 
 /// Applies the skin operation of \p p to \p pts in place, returning false
 /// when the packet fails atomically (cardinality mismatch, unknown method).
@@ -1256,7 +533,7 @@ bool RigExecApplyMatrixKernel(const RigExecMoverParameters &p,
 /// Shared by the mover-graph revision node and by the baked program, which
 /// runs the same operation with no VdfNetwork around it.
 bool RigExecApplySkinKernel(const RigExecMoverParameters &p,
-                            std::vector<GfVec3f> *pts);
+                            std::vector<GfVec3f> *pts, bool useSimd);
 /// One vertex range of the matrix operation, against an envelope the caller
 /// already resolved at the FULL point count.
 ///
@@ -1267,7 +544,8 @@ bool RigExecApplySkinKernel(const RigExecMoverParameters &p,
 /// array to every range, indexed absolutely.
 void RigExecApplyMatrixKernelRange(const RigExecMoverParameters &p,
                                    const float *envelope,
-                                   size_t begin, size_t end, GfVec3f *pts);
+                                   size_t begin, size_t end, GfVec3f *pts,
+                                   bool useSimd);
 
 /// Blends \p blended over \p preceding for one vertex range, with
 /// \p envelope the FULL resolved envelope and every array indexed
@@ -1364,14 +642,14 @@ bool RigExecSkinTransformsAreUsable(const GfMatrix4d *transforms,
 bool RigExecApplySkinKernelRange(const RigExecMoverParameters &p,
                                  const RigExecSkinTransformsView &transforms,
                                  size_t begin, size_t end,
-                                 std::vector<GfVec3f> *pts);
+                                 std::vector<GfVec3f> *pts, bool useSimd);
 
 /// RigExecApplySkinKernel against an influence table other than the packet's
 /// own, for a caller that folds the matrices outside the packet.
 bool RigExecApplySkinKernelWithTransforms(
     const RigExecMoverParameters &p,
     const RigExecSkinTransformsView &transforms,
-    std::vector<GfVec3f> *pts);
+    std::vector<GfVec3f> *pts, bool useSimd);
 
 
 /// Applies the blend-shape operation of \p p to \p pts in place, returning
@@ -1388,7 +666,8 @@ bool RigExecApplySkinKernelWithTransforms(
 /// folded in, and the rigs that would show a disagreement are the ones no
 /// fixture happened to have.
 bool RigExecApplyBlendShapeKernel(const RigExecMoverParameters &p,
-                                  std::vector<GfVec3f> *pts);
+                                  std::vector<GfVec3f> *pts,
+    RigExecSurfaceKernelCache<GfVec3f,GfVec3d> *cache = nullptr);
 
 /// Recomputes the derived property \p op maintains -- vertex normals or an
 /// extent -- from \p p and blends it over \p pts in place, returning false
@@ -1405,6 +684,11 @@ bool RigExecApplyBlendShapeKernel(const RigExecMoverParameters &p,
 bool RigExecApplyDerivedKernel(RigExecRevisionOp op,
                                const RigExecMoverParameters &p,
                                std::vector<GfVec3f> *pts);
+/// Borrow authored output without first copying it; failed calls leave result intact.
+bool RigExecApplyDerivedKernel(RigExecRevisionOp op,
+    const RigExecMoverParameters &p,const GfVec3f *authored,size_t authoredCount,
+    std::vector<GfVec3f> *result);
+
 
 /// Applies \p op to \p pts in place, returning false when the packet fails
 /// atomically.
@@ -1417,9 +701,14 @@ bool RigExecApplyDerivedKernel(RigExecRevisionOp op,
 /// ONE definition, called by the mover-graph revision node and by the baked
 /// program: a second copy of a deformation agrees on the fixtures that exist
 /// and drifts on the ones that do not.
+///
+/// \p wireBasis is the caller's own memo for a sparse-envelope wire; null
+/// builds the basis for this call only.
 bool RigExecApplyRevisionKernel(RigExecRevisionOp op,
                                 const RigExecMoverParameters &p,
-                                std::vector<GfVec3f> *pts);
+                                std::vector<GfVec3f> *pts, bool useSimd,
+                                RigExecWireBasisCache *wireBasis,
+    RigExecSurfaceKernelCache<GfVec3f,GfVec3d> *cache = nullptr);
 
 /// Runs one revision of \p op over \p pts in place, envelope included: the
 /// packet check, the full-strength fast path, RigExecApplyRevisionKernel and
@@ -1430,9 +719,29 @@ bool RigExecApplyRevisionKernel(RigExecRevisionOp op,
 /// which is then only scratch-collect / call / write-back -- and by the baked
 /// geometry loop. Two hand-written wrappers would have to agree about which
 /// operations blend and which fold the envelope into their own arithmetic.
+/// \p wireBasis as for RigExecApplyRevisionKernel.
 bool RigExecRunRevisionKernel(RigExecRevisionOp op,
                               const RigExecMoverParameters &p,
-                              std::vector<GfVec3f> *pts);
+                              std::vector<GfVec3f> *pts, bool useSimd,
+                              RigExecWireBasisCache *wireBasis,
+    RigExecSurfaceKernelCache<GfVec3f,GfVec3d> *cache = nullptr);
+
+namespace geometryDetail {
+/// Internal owned staging only: failure may modify output; the caller must
+/// discard it and retain the preceding published version. Never borrowed points.
+/// \p envelope, when given, is the separate-blend envelope its caller already
+/// resolved from the packet over the points' count; null resolves it here.
+bool RunDiscardableRevisionKernel(RigExecRevisionOp,const RigExecMoverParameters &,
+    std::vector<GfVec3f> *,bool,RigExecWireBasisCache *,
+    RigExecSurfaceKernelCache<GfVec3f,GfVec3d> *,
+    const std::vector<float> *envelope = nullptr);
+/// The same revision out of place: reads the \p count entering points at
+/// \p in, which must not alias \p out, and writes the result to \p out.
+bool RunDiscardableRevisionKernel(RigExecRevisionOp,const RigExecMoverParameters &,
+    const GfVec3f *in,size_t count,std::vector<GfVec3f> *out,bool,
+    RigExecWireBasisCache *,RigExecSurfaceKernelCache<GfVec3f,GfVec3d> *,
+    const std::vector<float> *envelope = nullptr);
+}
 
 /// Whether \p envelope makes the "apply once" blend the identity, so the
 /// copy of the preceding revision, the resolved envelope array and the blend
@@ -1459,77 +768,157 @@ RigExecEnvelopeIsFullStrength(const RigExecWeightPacket &envelope)
             envelope.rangePolicy == "clamp");
 }
 
-/// Provider results a revision needs that only evaluation can supply.
-///
-/// Everything else an assembler needs is a static read off the authored stage
-/// through the revision binding. These are the dynamic ones: results of
-/// computations on authored prims, pulled through a tap set on that same stage.
-/// A null/empty member means the provider produced nothing and normally fails
-/// the application rather than substituting a default (spec §6.6). The one
-/// deliberate exception is weights: null means no weight object was bound,
-/// so inputs:defaultWeight supplies the common envelope.
-struct RigExecProviderValues {
-    const GfMatrix4d *transform = nullptr;          ///< computeMatrix
-    /// computeMatrix per binding.influences entry, in that order (skin).
-    const std::vector<GfMatrix4d> *influenceTransforms = nullptr;
-    /// computeMatrix of binding.carrySpace (rigExec:space), read at the
-    /// revision's declared phase, or null when the mover named none. A
-    /// POINTER because "named" is the guard, never "identity": a
-    /// transform-driven wire whose points are posed carries both control
-    /// polygons by it (RigExecCarryWireCurves), and a rig naming nothing
-    /// must take the untouched branch.
-    const GfMatrix4d *carry = nullptr;
-    /// Bound computeWeightPacket, or null to use inputs:defaultWeight.
-    const RigExecWeightPacket *weights = nullptr;
-    const RigExecPointFrameArray *driverFrames = nullptr;
-    std::vector<GfVec3f> basePoints;   ///< authored base of the target
-    std::vector<GfVec3f> blendDeltas;  ///< summed channel deltas
-    /// Cache for a skin mover's epoch-fixed per-point layout. Null re-reads
-    /// and re-validates the arrays every call, which is what a layout that
-    /// is animated, connected, or written by a property chain requires.
-    RigExecSkinTopologyCache *skinTopologyCache = nullptr;
-    /// A layout the CALLER already resolved, for a caller that may not take
-    /// the cache's lock where it assembles. Set -- even to a shared_ptr
-    /// holding null, which is a remembered refusal -- it is used and
-    /// `skinTopologyCache` is not consulted at all.
-    const std::shared_ptr<const RigExecSkinTopology> *skinTopology = nullptr;
-    /// Values already resolved this generation, preferred by every static
-    /// read the assembler makes. Null reads the stage throughout, which is
-    /// what a rig with no property chains wants and what a test may pass.
-    const RigExecResolvedInputs *resolved = nullptr;
+/// A revision's apply-or-fail answer, decided from its packet before any
+/// point is written. `Refuses`: the kernel refuses the packet. `Applies`: it
+/// applies it, and nothing after its validation can refuse. `Deferred`: only
+/// running the kernel answers, because its acceptance reads what it computes
+/// (External's finite-output check, a surface-frame transport, a
+/// dual-quaternion blend) or no validation is factored for the operation.
+enum class RigExecRevisionAcceptance : uint8_t {
+    Refuses = 0,
+    Applies = 1,
+    Deferred = 2,
 };
 
-/// The provider frames a surface projector reads, as ASSET frames: each
-/// provider's rest frame times its base or final computeMatrix. Index 0 is
-/// binding.transform (the source), 1 binding.transformSpace (the source's
-/// sibling space), 2 binding.carrySpace (the rig's space). `named` says the
-/// binding names the provider; `resolved` says its frames were read.
-struct RigExecSurfaceProjectorFrames {
-    bool named[3] = {false, false, false};
-    bool resolved[3] = {false, false, false};
-    GfMatrix4d base[3] = {GfMatrix4d(1.0), GfMatrix4d(1.0), GfMatrix4d(1.0)};
-    GfMatrix4d final[3] = {GfMatrix4d(1.0), GfMatrix4d(1.0), GfMatrix4d(1.0)};
+/// The skinning arithmetic \p p names, which RigExecApplySkinKernelRange
+/// dispatches on. Unknown fails the application; a dual-quaternion blend can
+/// still fail at a vertex, a linear blend cannot.
+enum class RigExecSkinMethod : uint8_t {
+    Unknown,
+    ClassicLinear,
+    DualQuaternion,
 };
+RigExecSkinMethod RigExecSkinMethodOf(const RigExecMoverParameters &p);
+
+/// Whether \p op blends its result back over the entering points afterwards
+/// (RigExecRunRevisionKernel's "apply once") rather than folding the
+/// envelope \p w into its own arithmetic.
+bool RigExecRevisionTakesSeparateBlend(RigExecRevisionOp op,
+                                       const RigExecWeightPacket &w);
+
+/// RigExecRunRevisionKernel's answer over \p count entering points, from the
+/// validation the matrix, blend-shape, wire and lattice kernels run first
+/// (one definition each, shared with the kernel) and, for a wire or a
+/// lattice that blends separately, its envelope. A regular-grid lattice and
+/// every other operation is Deferred once its packet passes; a skin's
+/// answer is the baked program's,
+/// from the halves RevisionStatic and the fold hold. \p envelopeResolves,
+/// when given, is a wire's `p.weights.ResolvesAll(count)` already answered
+/// by a resolve of the envelope at \p count, so it is not validated a second
+/// time; a lattice validates its envelope here.
+RigExecRevisionAcceptance RigExecRevisionKernelAcceptance(
+    RigExecRevisionOp op, const RigExecMoverParameters &p, size_t count,
+    const bool *envelopeResolves = nullptr);
+
+struct RigExecLatticeBasis;  // rigExecMath/latticeKernel.h
+
+/// Ops a revision of a range-pipelined chain may run one step per vertex
+/// group: Matrix, Wire, and -- classified further at Build by lattice
+/// evaluation, skinning method and delta space -- Lattice (the Bernstein
+/// evaluation only), Skin and BlendShape. Each is per point
+/// (output point i reads entering point i, the packet and, for a skin, the
+/// influence table only).
+bool RigExecRevisionIsRangeOp(RigExecRevisionOp op);
+
+/// What a range-pipelined revision's range steps read besides the packet,
+/// the separate-blend envelope and the entering points. Filled by its
+/// RevisionStatic (the one writer) and read immutably by its range steps.
+/// The pointers alias the revision's own kernel caches and stay valid until
+/// its next RevisionStatic body; a copied revision copies the caches, which
+/// share the entries.
+struct RigExecRevisionRangeInputs {
+    /// Matrix: the dense envelope at the full count; empty for a
+    /// full-strength envelope or a sparse walk.
+    std::vector<float> matrixWeights;
+    /// Wire with a sparse envelope: RigExecWireBasisCache::Get's basis.
+    std::shared_ptr<const RigExecWireBasis> wireBasis;
+    /// Dense wire: restEvaluations.Get's table, or null to evaluate per point.
+    const std::vector<GfVec3f> *wireRestEvaluations = nullptr;
+    /// Lattice: the cached basis, or null to evaluate per point.
+    const RigExecLatticeBasis *latticeBasis = nullptr;
+    /// The retained bind `latticeBasis` points into, held here because the
+    /// owner may hand the cache an equal bind between runs
+    /// (RigExecLatticeBindSharing), which would otherwise free this one.
+    std::shared_ptr<const RigExecLatticeBind<GfVec3f>> latticeBind;
+    /// BlendShape: the envelope resolved at the full count, the weight its
+    /// kernel blends each point by; empty at full strength.
+    std::vector<float> blendWeights;
+};
+
+/// RigExecRevisionKernelAcceptance(op, p, count), exactly; and when that is
+/// Applies for a range op, \p prepared filled for RigExecRunRevisionGroup
+/// (otherwise cleared). \p wireBasis and \p cache are the revision's own
+/// memos (null builds per call); the caller is their only writer.
+/// The BlendShape arm's answer is RigExecRevisionKernelAcceptance(BlendShape,
+/// p, count) and, when Applies below full strength, `prepared->blendWeights`
+/// holds ResolveAll(count). A Skin's RevisionStatic decides with
+/// SkinAcceptance and does not call it.
+/// \p restVersion (0: unknown) is the content version of p.restPoints; a
+/// lattice bind whose cache recorded the same version skips only the
+/// rest-point comparison.
+RigExecRevisionAcceptance RigExecPrepareRevisionRanges(
+    RigExecRevisionOp op, const RigExecMoverParameters &p, size_t count,
+    RigExecWireBasisCache *wireBasis,
+    RigExecSurfaceKernelCache<GfVec3f, GfVec3d> *cache,
+    RigExecRevisionRangeInputs *prepared, uint64_t restVersion = 0);
+
+/// Whether \p p's packet keeps every point whose resolved envelope weight is
+/// <= 0 at its entering bytes: a valid sparse envelope with a zero default
+/// (RigExecWireTakesSparseEnvelope) on Matrix, Wire, Lattice, a classicLinear
+/// Skin or a target-space BlendShape. The kernel half of a group gate.
+bool RigExecRevisionGateHolds(RigExecRevisionOp op,
+                              const RigExecMoverParameters &p);
+
+/// RigExecRunRevisionRange over one vertex group held in its own buffers:
+/// \p in[k] is entering point begin + k and \p out[k] receives point
+/// begin + k's result, k < end - begin (\p out never aliases \p in). Every
+/// whole-array input (\p p, \p prepared, \p separateEnvelope, sparse indices,
+/// bind tables) is indexed absolutely. Ops: Matrix, Wire, Lattice; Skin
+/// (\p skin is the table the group reads: a chunk's key-filled table or the
+/// fold's; classicLinear or dualQuaternion, then the "apply once" envelope
+/// when \p separateEnvelope is given); BlendShape in target space. Each
+/// point's bits are the whole kernel's; \p out is fully written unless
+/// \p untouched is set true. \p untouched, when non-null, receives whether
+/// the result is \p in itself (then \p out is not written). False where the
+/// whole kernel would refuse and, for a dual-quaternion skin, where a point's
+/// blend is degenerate. RigExecRunRevisionRange becomes a call of this with
+/// in = entering + begin and out = out->data() + begin.
+/// A null \p skin reads the packet's own influence table. The caller decided
+/// the revision applies: a skin's layout and table are validated whole by it
+/// (RigExecSkinLayoutIsUsable, RigExecSkinTransformsAreUsable), as for
+/// RigExecApplySkinKernelRange. Pure: concurrent calls for distinct groups
+/// of one revision are safe.
+bool RigExecRunRevisionGroup(
+    RigExecRevisionOp op, const RigExecMoverParameters &p,
+    const RigExecRevisionRangeInputs &prepared,
+    const RigExecSkinTransformsView *skin, const GfVec3f *in, GfVec3f *out,
+    size_t count, size_t begin, size_t end, const float *separateEnvelope,
+    bool useSimd, bool *untouched = nullptr);
+
+/// Points [begin, end) of a revision that applies: \p out (sized \p count)
+/// receives at those indices exactly what RigExecRunRevisionKernel writes
+/// there for the whole array of \p count entering points; no other index is
+/// touched. \p separateEnvelope is the resolved "apply once" envelope
+/// (\p count floats) for an op that takes a separate blend below full
+/// strength, else null. \p untouched, when set, receives whether the range's
+/// result is the entering points themselves (then \p out is not written).
+/// RigExecRunRevisionGroup over in = entering + begin and
+/// out = out->data() + begin; a skin reads the packet's own table.
+/// Pure: concurrent calls for disjoint ranges of one revision are safe.
+/// False only where the whole kernel would refuse, which an Applies
+/// acceptance rules out.
+bool RigExecRunRevisionRange(
+    RigExecRevisionOp op, const RigExecMoverParameters &p,
+    const RigExecRevisionRangeInputs &prepared, const GfVec3f *entering,
+    size_t count, size_t begin, size_t end, const float *separateEnvelope,
+    std::vector<GfVec3f> *out, bool useSimd, bool *untouched = nullptr);
+
 
 /// A provider's asset frame from its rest landmarks and a rest->pose map:
 /// row-vector frame = rest * M. Identity rest landmarks give M itself.
 GfMatrix4d RigExecWorldFromRest(const std::array<GfVec3d, 4> &restPoints,
                                 const GfMatrix4d &restToPose);
 
-/// What a surface projector target reads besides frames and points: its
-/// settings, its dials and its surface's topology. Gathered from the stage
-/// by RigExecReadProjectorTarget and from samples by the frozen replay, so
-/// both hand RigExecRunProjectorTarget the same values.
-struct RigExecProjectorReads {
-    GfVec3d rayOrigin{0.0, 0.0, 0.0};
-    GfVec3d rayDirection{0.0, 0.0, 1.0};
-    GfVec3d rayUp{0.0, 1.0, 0.0};
-    GfMatrix4d shaderOffset{1.0};
-    bool reproject = false;
-    std::vector<double> dials;
-    std::vector<int> faceVertexCounts;
-    std::vector<int> faceVertexIndices;
-};
 
 /// Reads (and records, for the bake) what \p op needs off the stage,
 /// through the generation's resolved inputs where the live assemblers do.
@@ -1542,13 +931,17 @@ void RigExecReadProjectorTarget(
 /// Runs a surface projector target (SurfaceProjector or ShaderDials) on its
 /// gathered reads: the shared kernel on \p finalPoints against the authored
 /// \p basePoints. False, with diagnostics, when no matrix is published.
+/// \p who is the mover's path text the diagnostics name; a step body passes
+/// the text Build spelled.
 bool RigExecRunProjectorTarget(
     RigExecRevisionOp op, const RigExecRevisionBinding &binding,
     const RigExecSurfaceProjectorFrames &frames,
     const RigExecProjectorReads &reads,
     const std::vector<GfVec3f> &basePoints,
-    const std::vector<GfVec3f> &finalPoints, GfMatrix4d *matrix,
-    std::vector<std::string> *diagnostics);
+    const std::vector<GfVec3f> &finalPoints, const std::string &who,
+    GfMatrix4d *matrix,
+    std::vector<std::string> *diagnostics,
+    RigExecSurfaceKernelCache<GfVec3f,GfVec3d> *cache = nullptr);
 
 /// RigExecReadProjectorTarget then RigExecRunProjectorTarget: what the
 /// dynamic walk and the baked program both call.
@@ -1578,6 +971,9 @@ bool RigExecSumBlendChannels(
     const std::vector<RigExecBlendChannel> &channels,
     const std::vector<GfVec3f> &base,
     std::vector<GfVec3f> *deltas);
+bool RigExecSumBlendChannels(
+    const std::vector<RigExecBlendChannel> &channels,
+    const GfVec3f *base, size_t baseCount, std::vector<GfVec3f> *deltas);
 
 /// Assembles any revision's parameter packet without a derived stage.
 ///
@@ -1595,83 +991,94 @@ RigExecMoverParameters RigExecAssembleParameters(
     const RigExecProviderValues &values,
     UsdTimeCode time = UsdTimeCode::Default());
 
-/// A compiled mover graph.
-///
-/// Build order mirrors the composed mover-stack walk: descendants before their
-/// mover parent, sibling branches bottom-to-top (reverse composed child order).
-/// Seed a target's chain with its authored base points, then append one revision
-/// per mover that writes it. Each append returns the new chain head, which is
-/// the input to the next revision and, at the end, the published result.
-class RigExecMoverGraph
-{
-public:
-    RigExecMoverGraph();
-    ~RigExecMoverGraph();
 
-    RigExecMoverGraph(const RigExecMoverGraph &) = delete;
-    RigExecMoverGraph &operator=(const RigExecMoverGraph &) = delete;
+/// The External arm's plugin call, shared by RigExecAssembleParameters and
+/// the sampled boundary: reads declared leaves and calls the immutable
+/// compiled handler. Reads the stage: owning thread only.
+void RigExecAssembleExternalPayload(const UsdPrim &moverPrim,
+                                    const RigExecRevisionBinding &binding,
+                                    const RigExecProviderValues &values,
+                                    UsdTimeCode time,
+                                    RigExecExternalPayload *payload);
 
-    /// Seeds a chain with the authored base points of \p target.
-    VdfMaskedOutput AddPointSource(
-        const SdfPath &target, const VtVec3fArray &points);
 
-    /// Appends one revision reading \p previous.
-    ///
-    /// \p parameters and \p status are the mover's own resolved packet and
-    /// status. They arrive as values rather than as scene lookups because the
-    /// resolution that used to be authored as rigExec:resolved* relationships
-    /// is just a build-time choice of which output to read.
-    VdfMaskedOutput AddRevision(
-        RigExecRevisionOp op,
-        const VdfMaskedOutput &previous,
-        const RigExecMoverParameters &parameters,
-        const RigExecMoverStatus &status);
+/// Whether \p role reads topology, which is epoch state: a skin's
+/// jointIndices and elementSize, a mesh's face counts and indices, a
+/// lattice's divisions, a wire curve's order and knots, a delta mush's
+/// explicit edges and a surface snap's explicit triangles. An authored edit to
+/// such a path rebuilds the program, so inside one program its read moves
+/// only with the time (an attribute that varies), an interactive override
+/// on one of its hops, or a rebind.
+bool RigExecRevisionLeafRoleIsTopology(RigExecRevisionLeafRole role);
 
-    /// Updates an existing source without changing graph topology. Returns
-    /// false for an unknown source or a changed point count; cardinality
-    /// changes require rebuilding that target's chain. Equal values stay clean.
-    bool UpdatePointSource(
-        const VdfMaskedOutput &source, const VtVec3fArray &points);
+/// Whether RigExecAssembleFromLeaves covers \p op: every operation. A
+/// projector's matrix targets read through
+/// RigExecReadProjectorTargetFromLeaves, and an external mover's payload is
+/// a leaf the caller samples (RigExecRevisionLeafView::external).
+bool RigExecRevisionOpAssemblesFromLeaves(RigExecRevisionOp op);
 
-    /// Updates a revision's packet and status in place. Returns false for an
-    /// unknown revision. Only changed inputs and their dependents are dirtied.
-    bool UpdateRevision(
-        const VdfMaskedOutput &revision,
-        const RigExecMoverParameters &parameters,
-        const RigExecMoverStatus &status);
+/// Declares every read RigExecAssembleParameters can make for \p op on the
+/// mover at \p moverPath -- a superset of what one call reads, whichever
+/// branch its values take -- with the read site's flavour, time policy and
+/// fallback. Declares nothing when \p op is not covered. Stage-free.
+void RigExecDeclareRevisionLeaves(RigExecRevisionOp op,
+                                  const SdfPath &moverPath,
+                                  const RigExecRevisionBinding &binding,
+                                  RigExecRevisionLeafDecl *decl);
 
-    /// Splices a retained revision into a new chain. Its operation and point
-    /// cardinality stay fixed; only that revision and its dependents are dirty.
-    bool ReconnectRevision(const VdfMaskedOutput &revision,
-                           const VdfMaskedOutput &previous);
+/// Declares the three reads of the skin mover at \p moverPath's layout, as
+/// RigExecResolveSkinTopology makes them: rigExec:jointIndices and
+/// rigExec:jointWeights through the overlay at their exact paths then raw,
+/// and rigExec:elementSize resolved then raw, over 1 (roles JointIndices,
+/// JointWeights and ElementSize). `assembles` stays false. Stage-free.
+void RigExecDeclareSkinLayoutLeaves(const SdfPath &moverPath,
+                                    RigExecRevisionLeafDecl *decl);
 
-    /// Removes an obsolete revision after surviving consumers are reconnected.
-    bool RemoveRevision(const VdfMaskedOutput &revision);
+/// The value \p key's read site answers at \p time (Default for an
+/// AtDefault key) through \p resolved, or the key's fallback when it finds
+/// nothing. \p attribute is the attribute at the key's path, invalid when
+/// none stands there. A non-empty \p upstream is the upstream layer: every
+/// stage read a connection-following flavour (and its head fallback) makes
+/// answers from it first (GetAttributeOverStageLayer); Raw and
+/// OverlayThenRaw reads never consult it. Reads the stage: owning thread
+/// only.
+VtValue RigExecSampleRevisionLeaf(
+    const RigExecRevisionLeafKey &key, const UsdAttribute &attribute,
+    const RigExecResolvedInputs *resolved, UsdTimeCode time,
+    const std::map<SdfPath, VtValue> *upstream = nullptr);
 
-    /// Evaluates \p output and returns its points. The schedule and executor
-    /// persist between calls, including intermediate revision values, so an
-    /// edit only executes the affected suffix and an unchanged call is cached.
-    VtVec3fArray Evaluate(const VdfMaskedOutput &output) const;
+/// The attributes \p key's read can reach from \p attribute: the attribute
+/// itself, and for a connection-following flavour every hop of the
+/// single-connection walk RigExecResolvedInputs::GetAttribute takes. Sets
+/// \p varying when the read is at the time and some hop's value might vary
+/// with it. Reads the stage: owning thread only.
+void RigExecRevisionLeafHops(const RigExecRevisionLeafKey &key,
+                             const UsdAttribute &attribute,
+                             std::vector<SdfPath> *hops, bool *varying);
 
-    /// Actual cached execution status, including kernel-time rejection.
-    /// Evaluate the revision or a downstream output before querying it.
-    RigExecMoverStatus GetRevisionStatus(const VdfMaskedOutput &revision) const;
 
-    /// Number of revision nodes currently in the graph (excludes sources).
-    size_t GetRevisionCount() const { return _revisionCount; }
+/// RigExecAssembleParameters for a covered operation, from sampled leaves:
+/// the same arms, gates and order, with every stage read replaced by its
+/// leaf. Reads no stage, takes no lock and builds no token from text.
+/// \p values carries the provider values as for the stage assembler; its
+/// `resolved` and `skinTopologyCache` are not read.
+RigExecMoverParameters RigExecAssembleFromLeaves(
+    RigExecRevisionOp op, const RigExecRevisionBinding &binding,
+    const RigExecRevisionLeafView &leaves,
+    const RigExecProviderValues &values);
 
-    /// Cumulative counters for inspecting incremental execution behavior.
-    size_t GetRevisionExecutionCount() const;
-    size_t GetScheduleBuildCount() const;
+/// Whether RigExecAssembleFromLeaves reaches an External revision's payload
+/// over \p leaves and \p values: the enable and the envelope, which the
+/// stage assembler checks before it calls the plugin.
+bool RigExecExternalPayloadIsRead(const RigExecRevisionLeafView &leaves,
+                                  const RigExecProviderValues &values);
 
-    const VdfNetwork &GetNetwork() const { return _network; }
-
-private:
-    struct _Runtime;
-    VdfNetwork _network;
-    size_t _revisionCount = 0;
-    std::unique_ptr<_Runtime> _runtime;
-};
+/// RigExecReadProjectorTarget over sampled leaves: the same reads, each
+/// answered by its leaf. The caller holds a valid projector prim (the
+/// program refuses a missing one at Build). Reads no stage.
+void RigExecReadProjectorTargetFromLeaves(
+    RigExecRevisionOp op, const RigExecRevisionBinding &binding,
+    const RigExecRevisionLeafView &leaves, RigExecProjectorReads *reads);
 
 }  // namespace rigExec
 

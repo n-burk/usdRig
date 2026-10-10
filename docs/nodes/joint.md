@@ -45,7 +45,9 @@ the evaluated parent and child origins.
 
 The compiler builds one chain per joint out of every step that
 writes it — the solvers that name it and the constraints that move it — in the
-rig's hierarchical order, and the pose phase runs that chain. A solver
+rig's hierarchical order, and the pose phase runs that chain. Steps
+of different chains are ordered only where one reads a frame the other
+writes, so unrelated joints may be posed in parallel. A solver
 extracts the joint's element from its frame array and REPLACES whatever stood
 there, measuring the joint from the frame the preceding steps left; a
 constraint reads that same incoming frame and writes a revised one over it. A

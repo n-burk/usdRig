@@ -84,6 +84,33 @@ _RrFrameFromAxes(const std::array<RrVec3d, 4> &restPoints,
     return f;
 }
 
+// RigExecTwoBoneIkLengths: the chain's bone lengths measured in \p space,
+// each authored offset riding its own bone's factor.
+void
+_RrTwoBoneIkLengths(const std::array<std::array<RrVec3d, 4>, 3> &restPoints,
+                    const RrMat4d &space, double upperOffset,
+                    double lowerOffset, double *upperLength,
+                    double *lowerLength)
+{
+    const double rawUpper =
+        (restPoints[1][0] - restPoints[0][0]).GetLength();
+    const double rawLower =
+        (restPoints[2][0] - restPoints[1][0]).GetLength();
+    const RrVec3d s0 = space.Transform(restPoints[0][0]);
+    const RrVec3d s1 = space.Transform(restPoints[1][0]);
+    const RrVec3d s2 = space.Transform(restPoints[2][0]);
+    const double spacedUpper = (s1 - s0).GetLength();
+    const double spacedLower = (s2 - s1).GetLength();
+    if (upperLength) {
+        const double f = rawUpper > 1e-12 ? spacedUpper / rawUpper : 1.0;
+        *upperLength = spacedUpper + upperOffset * f;
+    }
+    if (lowerLength) {
+        const double f = rawLower > 1e-12 ? spacedLower / rawLower : 1.0;
+        *lowerLength = spacedLower + lowerOffset * f;
+    }
+}
+
 // RigExecSolveTwoBoneIk: analytic two-bone IK with pole vector.
 std::array<RrPointFrame, 3>
 _RrSolveTwoBoneIk(
@@ -200,6 +227,20 @@ _RrSolveTwoBoneIk(
                                         s1 / l1);
         rigExec::RigExecScaleFrameAlong(out[1].points.data(), lowerDir,
                                         (endPos - mid).GetLength() / l2);
+    }
+
+    if (params.space != RrMat4d(1.0)) {
+        for (size_t f = 0; f < 2; ++f) {
+            const RrVec3d origin = out[f].points[0];
+            for (size_t a = 1; a < 4; ++a) {
+                const RrVec3d handle = out[f].points[a] - origin;
+                const double length = handle.GetLength();
+                if (length < 1e-12) continue;
+                const RrVec3d direction = handle / length;
+                const double factor = params.space.TransformDir(direction).GetLength();
+                out[f].points[a] = origin + direction * (length * factor);
+            }
+        }
     }
 
     RrPointFrame end = effectorFrame;
@@ -507,6 +548,21 @@ _RrRefreshSolverRests(RrProgram *program, size_t step, size_t solver,
             return false;
         }
     }
+    // The space target's rest, read where the file's space_rest was read:
+    // the composed rest table, never a live ref.
+    const auto refreshSpaceRest = [&]() {
+        if (wire.spaceSlot < 0) {
+            return true;
+        }
+        if (size_t(wire.spaceSlot) >= scratch->restPts.size()) {
+            if (error) {
+                *error = _RrStepHead(program, step) + " names no rest slot";
+            }
+            return false;
+        }
+        s.spaceRest = scratch->restPts[size_t(wire.spaceSlot)];
+        return true;
+    };
     const std::string type = program->TextOrEmpty(wire.type);
     if (type == "RigExecFkChain") {
         for (size_t k = 0; k < wire.controls.size(); ++k) {
@@ -556,10 +612,20 @@ _RrRefreshSolverRests(RrProgram *program, size_t step, size_t solver,
             (s.ikRests[1][0] - s.ikRests[0][0]).GetLength();
         s.lowerLengthBase =
             (s.ikRests[2][0] - s.ikRests[1][0]).GetLength();
-        s.ikParams.upperLength =
-            s.upperLengthBase + wire.upperOffset.f64;
-        s.ikParams.lowerLength =
-            s.lowerLengthBase + wire.lowerOffset.f64;
+        // The constant arm's lengths, measured in the folded spaceMatrix as
+        // the baked rest refresh measures them.
+        const std::array<int32_t, RrSolverFieldCount> &reads =
+            program->solverRead[solver];
+        const auto constant = [&](int field) {
+            return program->RegisteredConstant(reads[size_t(field)]);
+        };
+        _RrTwoBoneIkLengths(s.ikRests, constant(RrSolverIkSpace).matrix,
+                            constant(RrSolverUpperOffset).f64,
+                            constant(RrSolverLowerOffset).f64,
+                            &s.ikParams.upperLength, &s.ikParams.lowerLength);
+        if (!refreshSpaceRest()) {
+            return false;
+        }
     } else if (type == "RigExecSplineIk") {
         std::vector<RrPointFrame> restJoints(size_t(wire.splineCount));
         for (size_t k = 0; k < wire.restRefs.size(); ++k) {
@@ -602,6 +668,9 @@ _RrRefreshSolverRests(RrProgram *program, size_t step, size_t solver,
             wire.end >= 0 ? scratch->restFrames[size_t(wire.end)]
                           : noFrame,
             wire.splineRestWeights, wire.splineRestMode);
+        if (!refreshSpaceRest()) {
+            return false;
+        }
     } else if (type == "RigExecTwistDistribution") {
         if (wire.root >= 0 && wire.end >= 0 &&
             size_t(wire.root) < scratch->restPts.size() &&
@@ -1387,8 +1456,13 @@ _RrRunSolveStep(RrProgram *program, size_t step, std::string *error)
             liveFlags[k] = ws.restIsLive[k];
         }
     }
-    if ((scratch->ladderRecomputed && !ws.restSlots.empty()) ||
-        ws.hasLiveRest) {
+    bool restMoved = false;
+    for (const int slot : ws.restSlots) {
+        restMoved = restMoved ||
+            (slot >= 0 && size_t(slot) < store.restChanged.size() &&
+             store.restChanged[size_t(slot)]);
+    }
+    if (restMoved || ws.hasLiveRest) {
         if (!_RrRefreshSolverRests(program, step, size_t(wire.object),
                                    error)) {
             return false;
@@ -1468,38 +1542,14 @@ _RrRunSolveStep(RrProgram *program, size_t step, std::string *error)
                 ws.parentRelative ? int(base) - 1 : int(k) + int(base) - 1;
         }
         aggregate.frames = _RrSolveFkChain(s.elements);
-        const int32_t limb =
-            program->limbBySolver.empty()
-                ? -1 : program->limbBySolver[size_t(wire.object)];
-        if (limb >= 0 &&
-            (program->poses->limbSolvers[size_t(limb)].flags & 2) != 0) {
-            // RigExecScaleFkSegments: each element scales along the bone
-            // to the next by posed over rest length.
-            const size_t n = s.elements.size();
-            std::vector<RrVec3d> dirs(n, RrVec3d(0.0));
-            std::vector<double> factors(n, 1.0);
-            for (size_t i = 0; i + 1 < n && i + 1 < aggregate.frames.size();
-                 ++i) {
-                const auto &ri = s.elements[i].hasOutRest
-                                     ? s.elements[i].outRestPoints
-                                     : s.elements[i].restPoints;
-                const auto &rc = s.elements[i + 1].hasOutRest
-                                     ? s.elements[i + 1].outRestPoints
-                                     : s.elements[i + 1].restPoints;
-                const double rest = rigExec::RigExecBoneLengthUnderFrame(
-                    ri.data(), aggregate.frames[i].points.data(),
-                    RrVec3d(rc[0] - ri[0]));
-                const RrVec3d bone = aggregate.frames[i + 1].points[0] -
-                                     aggregate.frames[i].points[0];
-                const double posed = bone.GetLength();
-                if (rest > 1e-12 && posed > 1e-12) {
-                    dirs[i] = bone;
-                    factors[i] = posed / rest;
-                }
-            }
-            for (size_t i = 0; i < n && i < aggregate.frames.size(); ++i) {
-                rigExec::RigExecScaleFrameAlong(
-                    aggregate.frames[i].points.data(), dirs[i], factors[i]);
+        if(ws.scaleSegments) {
+            for(size_t k=0;k+1<s.elements.size() && k+1<aggregate.frames.size();++k) {
+                const auto &a=s.elements[k];const auto &b=s.elements[k+1];
+                const auto &ra=a.hasOutRest?a.outRestPoints:a.restPoints;
+                const auto &rb=b.hasOutRest?b.outRestPoints:b.restPoints;
+                const double rest=RigExecBoneLengthUnderFrame(ra.data(),aggregate.frames[k].points.data(),RrVec3d(rb[0]-ra[0]));
+                const auto bone=aggregate.frames[k+1].points[0]-aggregate.frames[k].points[0];
+                if(rest>1e-12 && bone.GetLength()>1e-12)RigExecScaleFrameAlong(aggregate.frames[k].points.data(),bone,bone.GetLength()/rest);
             }
         }
         if (base && !aggregate.frames.empty()) {
@@ -1507,61 +1557,56 @@ _RrRunSolveStep(RrProgram *program, size_t step, std::string *error)
         }
     } else if (type == "RigExecTwoBoneIk") {
         RrPoseTwoBoneIkParams params = s.ikParams;
-        if (_RrLiveSolver(program, size_t(wire.object),
-                          RrSolverBend) ||
-            _RrLiveSolver(program, size_t(wire.object),
-                          RrSolverStretch) ||
-            _RrLiveSolver(program, size_t(wire.object),
-                          RrSolverSoftness) ||
-            _RrLiveSolver(program, size_t(wire.object),
-                          RrSolverUpperOffset) ||
-            _RrLiveSolver(program, size_t(wire.object),
-                          RrSolverLowerOffset)) {
-            params.preferredBendRadians =
-                program->ReadSolver(size_t(wire.object),
-                                    RrSolverBend).f64;
-            params.stretch = double(
-                program->ReadSolver(size_t(wire.object),
-                                    RrSolverStretch).f32);
-            params.softness = double(
-                program->ReadSolver(size_t(wire.object),
-                                    RrSolverSoftness).f32);
-            params.upperLength =
-                s.upperLengthBase +
-                program->ReadSolver(size_t(wire.object),
-                                    RrSolverUpperOffset).f64;
-            params.lowerLength =
-                s.lowerLengthBase +
-                program->ReadSolver(size_t(wire.object),
-                                    RrSolverLowerOffset).f64;
+        const size_t solver = size_t(wire.object);
+        // rigExec:spaceMatrix, composed after rigExec:space's rest -> pose
+        // map when a space is named (spaceSlot, not spaceRead: an unnamed
+        // space reads no frame).
+        RrMat4d ikSpace = program->ReadSolver(solver, RrSolverIkSpace).matrix;
+        bool spaceMoved = false;
+        if (ws.spaceSlot >= 0) {
+            const RrPointFrame *spaceFrame = nullptr;
+            if (!finAt(ws.spaceRead, &spaceFrame)) {
+                return false;
+            }
+            RrMat4d delta(1.0);
+            if (RrPointsToMatrix(s.spaceRest, *spaceFrame, &delta)) {
+                ikSpace = delta * ikSpace;
+                spaceMoved = true;
+            }
         }
+        {
+            params.preferredBendRadians =
+                program->ReadSolver(solver, RrSolverBend).f64;
+            params.stretch =
+                double(program->ReadSolver(solver, RrSolverStretch).f32);
+            params.softness =
+                double(program->ReadSolver(solver, RrSolverSoftness).f32);
+            params.space = ikSpace;
+            _RrTwoBoneIkLengths(
+                s.ikRests, ikSpace,
+                program->ReadSolver(solver, RrSolverUpperOffset).f64,
+                program->ReadSolver(solver, RrSolverLowerOffset).f64,
+                &params.upperLength, &params.lowerLength);
+        }
+        params.softDistancePolicy=ws.softDistancePolicy;params.scaleSegments=ws.ikScaleSegments;
+        params.limb.stretch=params.stretch;
+        params.limb.pin=ws.pin?program->ReadSolver(solver,RrSolverPin).f32:0;
+        params.limb.upperScale=ws.upperScale?program->ReadSolver(solver,RrSolverUpperScale).f64:1;
+        params.limb.lowerScale=ws.lowerScale?program->ReadSolver(solver,RrSolverLowerScale).f64:1;
+        params.limb.scaleCalibration=ws.scaleCalibration;
+        double rawUpper=0,rawLower=0,upper=0,lower=0;
+        _RrTwoBoneIkLengths(s.ikRests,RrMat4d(1.0),0,0,&rawUpper,&rawLower);
+        _RrTwoBoneIkLengths(s.ikRests,ikSpace,0,0,&upper,&lower);
+        const double rawLength=rawUpper+rawLower;
+        const double spaceFactor=rawLength>1e-12?(upper+lower)/rawLength:1;
+        params.limb.softDistance=ws.softDistance?program->ReadSolver(solver,RrSolverSoftDistance).f32*spaceFactor:0;
+        params.twistRadians=ws.limbTwist?program->ReadSolver(solver,RrSolverLimbTwist).f32*_RrPi/180.0:0;
         const RrPointFrame *root = nullptr;
         const RrPointFrame *end = nullptr;
         const RrPointFrame *pole = nullptr;
         if (!finAt(ws.rootRead, &root) ||
             !finAt(ws.endRead, &end) || !finAt(ws.poleRead, &pole)) {
             return false;
-        }
-        const int32_t limb =
-            program->limbBySolver.empty()
-                ? -1 : program->limbBySolver[size_t(wire.object)];
-        if (limb >= 0) {
-            const RigExecWireLimbSolver &l =
-                program->poses->limbSolvers[size_t(limb)];
-            const auto value = [&](size_t which) {
-                const RrInputValue v = program->ReadLimb(size_t(limb), which);
-                return v.tag == RigExecWireInput::Tag::Double ? v.f64
-                                                              : double(v.f32);
-            };
-            params.softDistancePolicy = (l.flags & 1) != 0;
-            params.scaleSegments = (l.flags & 2) != 0;
-            params.limb.stretch = params.stretch;
-            params.limb.pin = value(0);
-            params.limb.upperScale = value(1);
-            params.limb.lowerScale = value(2);
-            params.limb.softDistance = value(3);
-            params.limb.scaleCalibration = l.scaleCalibration;
-            params.twistRadians = value(4) * _RrPi / 180.0;
         }
         const std::array<RrPointFrame, 3> frames =
             _RrSolveTwoBoneIk(*root, *end, *pole, s.ikRests, params);
@@ -1627,8 +1672,7 @@ _RrRunSolveStep(RrProgram *program, size_t step, std::string *error)
                                 RrSolverTwistTurns).f64,
             liveRests, liveFlags);
     } else if (type == "RigExecRibbon") {
-        if (size_t(wire.object) >= store.ribbonPoints.size() ||
-            size_t(wire.object) >= store.ribbonConstant.size()) {
+        if (size_t(wire.object) >= store.ribbonConstant.size()) {
             if (error) {
                 *error = _RrStepHead(program, step) +
                          " names no solver";
@@ -1636,9 +1680,7 @@ _RrRunSolveStep(RrProgram *program, size_t step, std::string *error)
             return false;
         }
         aggregate = _RrSampleRibbonFrames(
-            ws.ribbonPointsVarying
-                ? store.ribbonPoints[size_t(wire.object)]
-                : store.ribbonConstant[size_t(wire.object)],
+            store.ribbonConstant[size_t(wire.object)],
             s.ribbonRestPoints,
             program->ReadSolver(size_t(wire.object),
                                 RrSolverRibbonSampleCount).i32,
@@ -1677,6 +1719,34 @@ _RrRunSolveStep(RrProgram *program, size_t step, std::string *error)
                 program->ReadSolver(size_t(wire.object),
                                     RrSolverMinLengthRatio).f64;
         }
+        // The rest rebuilt in rigExec:space once the space has moved
+        // (bakedPose.cpp): the bind-time rest is measured at identity and
+        // the placement ratio is arcLength / restArcLength, so a scaled
+        // space would otherwise read as stretch. s.splineRest holds the
+        // rest frames and the root, mid and end rests it was made from.
+        const RrPoseSplineIkRest *restForSolve = &s.splineRest;
+        RrPoseSplineIkRest spacedRest;
+        if (ws.spaceSlot >= 0) {
+            const RrPointFrame *spaceFrame = nullptr;
+            if (!finAt(ws.spaceRead, &spaceFrame)) {
+                return false;
+            }
+            RrMat4d delta(1.0);
+            if (RrPointsToMatrix(s.spaceRest, *spaceFrame, &delta) &&
+                delta != RrMat4d(1.0)) {
+                std::vector<RrPointFrame> spaced;
+                spaced.reserve(s.splineRest.joints.size());
+                for (const RrPointFrame &f : s.splineRest.joints) {
+                    spaced.push_back(_RrTransformFrame(f, delta));
+                }
+                spacedRest = _RrSplineIkMakeRest(
+                    spaced, _RrTransformFrame(s.splineRest.rootControl, delta),
+                    _RrTransformFrame(s.splineRest.midControl, delta),
+                    _RrTransformFrame(s.splineRest.endControl, delta),
+                    ws.splineRestWeights, ws.splineRestMode);
+                restForSolve = &spacedRest;
+            }
+        }
         const RrPointFrame *root = nullptr;
         const RrPointFrame *mid = nullptr;
         const RrPointFrame *end = nullptr;
@@ -1689,7 +1759,7 @@ _RrRunSolveStep(RrProgram *program, size_t step, std::string *error)
         controls.mid = *mid;
         controls.end = *end;
         _RrSplineIkResult solved;
-        _RrSolveSplineIk(s.splineRest, controls, params, &solved);
+        _RrSolveSplineIk(*restForSolve, controls, params, &solved);
         if (solved.joints.size() == size_t(ws.splineCount)) {
             aggregate.frames.reserve(size_t(ws.splineCount));
             for (const auto &joint : solved.joints) {

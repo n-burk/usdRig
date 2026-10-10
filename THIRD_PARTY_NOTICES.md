@@ -5,6 +5,13 @@ It does not replace licenses or grant rights in material owned by others.
 
 ## Bundled code
 
+`third_party/lzma` contains the public-domain LZMA SDK 26.04 by Igor Pavlov.
+The [SDK notice](third_party/lzma/NOTICE.md) records the official source,
+archive hash and local scalar-dispatch patch; its original
+[license text](third_party/lzma/DOC/lzma-sdk.txt) accompanies installed binaries.
+The runtime codec uses the single-threaded scalar implementation without USD.
+
+
 `plugin/usdNoodles` is a locally modified version of the node editor proposed
 in [OpenUSD pull request 4156](https://github.com/PixarAnimationStudios/OpenUSD/pull/4156).
 Its files carry Meta Platforms copyright notices and retain the
@@ -22,6 +29,15 @@ the root license does not relicense a dependency installation.
 The OpenUSD Gf-derived math in `libs/rigExecRuntime/runtimeMath.h` and the
 adapted widgets in `plugin/rigExecUsdview/volumeWeightUI.py` also retain
 OpenUSD license terms and their Pixar notices.
+
+`thirdparty/flatbuffers` holds unmodified C++ runtime headers of
+[Google FlatBuffers](https://github.com/google/flatbuffers) 25.12.19 (tag
+`v25.12.19`, commit `7e163021e59cca4f8e1e35a7c828b5c6b7915953`) under the
+Apache License 2.0 ([license](thirdparty/flatbuffers/LICENSE)). The generated
+headers in `libs/rigExecBinary/generated` are `flatc` output from RigExec
+schemas. FlatBuffers is not relicensed under MIT, and its license accompanies
+source and binary distributions that contain it, including builds that
+compile it in.
 
 The native noodles dependency is pinned at
 `ff5d473f10e8c37ceaf0da11ea7cb80805bc8314`. Its copied GLSL shaders retain

@@ -5,29 +5,35 @@
 // missing -- RigExecBakedCones maps a changed SOURCE to its seed clusters and
 // closes over them, but nothing maps a CONTROL to the clusters it reaches.
 // This index is that list, at cluster granularity.
-// It derives NOTHING. Build copies the forward closures and the seed tables
-// RigExecBakedBuildCones computed; every query is a union over those copies.
+// It derives NOTHING. Build shares the forward closures (the program's
+// immutable cone table) and copies the seed tables RigExecBakedBuildCones
+// computed; every query is a union over those.
 // A control the index never learned (not a provider slot, no explicit
 // mapping) answers conservatively with every cluster: re-running too much is
 // a slower frame, skipping a cluster that moved is a wrong pose.
 #ifndef RIGEXEC_OUTPUT_AFFECTED_INDEX_H
 #define RIGEXEC_OUTPUT_AFFECTED_INDEX_H
 
-#include "bakedProgramImpl.h"
+#include "bakedClusters.h"
+#include "tapSet.h"
 
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <set>
 #include <string>
 #include <vector>
 
+#include "pxr/usd/sdf/path.h"
 #include "pxr/usd/usd/notice.h"
 
 PXR_NAMESPACE_USING_DIRECTIVE
 
 namespace rigExec {
+
+struct RigExecBakedProgramImpl;
 
 /// Names one cached-frame input for the affected-set computation: a sampled
 /// source's path string, or `prim|computation|attribute` for an interactive
@@ -133,7 +139,7 @@ public:
     /// `affecting(requested)` for a whole-pose request.
     RigExecBakedClusterSet AllClusters() const;
 
-    /// The forward closure of \p cluster (itself included), as Build copied
+    /// The forward closure of \p cluster (itself included), as Build shared
     /// it. Out of range answers an empty set.
     const RigExecBakedClusterSet &ConeOf(int cluster) const;
 
@@ -154,10 +160,15 @@ public:
     /// this at zero across repeated edits of one control.
     size_t Walks() const { return _walks.load(std::memory_order_relaxed); }
 
+    /// The cone table Build shares, or null.
+    const void *ConeTableForTesting() const { return _cones.get(); }
+
 private:
     size_t _clusterCount = 0;
     uint64_t _epochDigest = 0;
-    std::vector<RigExecBakedClusterSet> _cones;
+    /// Non-null exactly when _clusterCount is not 0; its size is then
+    /// _clusterCount.
+    std::shared_ptr<const std::vector<RigExecBakedClusterSet>> _cones;
     RigExecBakedClusterSet _always;
     RigExecBakedClusterSet _varying;
     RigExecBakedClusterSet _override;

@@ -745,13 +745,14 @@ RigExecApplyDualQuatSkin(
 
 namespace {
 
+const std::array<GfVec3d, 4> kIdentityLandmarks = {
+    GfVec3d(0, 0, 0), GfVec3d(1, 0, 0),
+    GfVec3d(0, 1, 0), GfVec3d(0, 0, 1)};
+
 const std::array<GfVec3d, 4> &
 _IdentityLandmarks()
 {
-    static const std::array<GfVec3d, 4> points = {
-        GfVec3d(0, 0, 0), GfVec3d(1, 0, 0),
-        GfVec3d(0, 1, 0), GfVec3d(0, 0, 1)};
-    return points;
+    return kIdentityLandmarks;
 }
 
 bool
@@ -840,7 +841,7 @@ _OrderIndices(RigExecEulerOrder order)
 GfQuatd
 _QuatFromEulerDegrees(const GfVec3d &degrees, RigExecEulerOrder order)
 {
-    static const GfVec3d axes[3] = {
+    const GfVec3d axes[3] = {
         GfVec3d(1, 0, 0), GfVec3d(0, 1, 0), GfVec3d(0, 0, 1)};
     GfMatrix4d matrix(1.0);
     const std::array<int, 3> indices = _OrderIndices(order);
@@ -854,7 +855,7 @@ _QuatFromEulerDegrees(const GfVec3d &degrees, RigExecEulerOrder order)
 GfVec3d
 _EulerDegreesFromQuat(const GfQuatd &rotation, RigExecEulerOrder order)
 {
-    static const GfVec3d axes[3] = {
+    const GfVec3d axes[3] = {
         GfVec3d(1, 0, 0), GfVec3d(0, 1, 0), GfVec3d(0, 0, 1)};
     const std::array<int, 3> indices = _OrderIndices(order);
     // GfRotation::Decompose(a,b,c) describes row-matrix factors in the

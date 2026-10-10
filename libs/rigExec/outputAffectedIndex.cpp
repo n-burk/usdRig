@@ -1,6 +1,8 @@
 // RigExec output-affected index. See outputAffectedIndex.h.
 #include "outputAffectedIndex.h"
 
+#include "bakedSchedule.h"
+
 #include <algorithm>
 
 namespace rigExec {
@@ -46,18 +48,18 @@ RigExecOutputAffectedIndex::Build(const RigExecBakedProgramImpl &program,
     if (_clusterCount == 0) {
         return;
     }
-    // The closures, copied -- not re-derived. Build refuses a program whose
-    // cones do not cover its clustering (a BuildCones that never ran) by
-    // treating it as empty: an index that answered empty closures would skip
-    // every cluster and serve stale poses.
-    if (program.cones.cone.size() != _clusterCount) {
+    // The closures, shared -- not re-derived, not copied: BuildCones sizes
+    // every set to the clustering and never writes the table again. Build
+    // refuses a program whose cones do not cover its clustering (a
+    // BuildCones that never ran) by treating it as empty: an index that
+    // answered empty closures would skip every cluster and serve stale
+    // poses.
+    if (program.cones.Cone().size() != _clusterCount) {
         Clear();
         return;
     }
     _cones = program.cones.cone;
-    for (RigExecBakedClusterSet &cone : _cones) {
-        cone.words.resize((_clusterCount + 63) / 64, 0);
-    }
+    const std::vector<RigExecBakedClusterSet> &cones = *_cones;
     _always = program.cones.always;
     _always.words.resize((_clusterCount + 63) / 64, 0);
     _empty.Resize(_clusterCount);
@@ -70,8 +72,8 @@ RigExecOutputAffectedIndex::Build(const RigExecBakedProgramImpl &program,
         if (step >= 0 &&
             size_t(step) < program.clustering.clusterOf.size()) {
             const int cluster = program.clustering.clusterOf[size_t(step)];
-            if (cluster >= 0 && size_t(cluster) < _cones.size()) {
-                _varying.Union(_cones[size_t(cluster)]);
+            if (cluster >= 0 && size_t(cluster) < cones.size()) {
+                _varying.Union(cones[size_t(cluster)]);
             }
         }
     }
@@ -79,8 +81,8 @@ RigExecOutputAffectedIndex::Build(const RigExecBakedProgramImpl &program,
         if (step >= 0 &&
             size_t(step) < program.clustering.clusterOf.size()) {
             const int cluster = program.clustering.clusterOf[size_t(step)];
-            if (cluster >= 0 && size_t(cluster) < _cones.size()) {
-                _override.Union(_cones[size_t(cluster)]);
+            if (cluster >= 0 && size_t(cluster) < cones.size()) {
+                _override.Union(cones[size_t(cluster)]);
             }
         }
     }
@@ -101,24 +103,27 @@ RigExecOutputAffectedIndex::Build(const RigExecBakedProgramImpl &program,
             }
         }
     };
-    const auto admitOne = [&](const RigExecControlId &control, int seed) {
-        if (seed >= 0 && size_t(seed) < _clusterCount) {
-            admit(control, std::vector<int>{seed});
-        } else if (!control.empty()) {
-            _universe.insert(control);
-            _seeds.emplace(control, std::vector<int>());
-        }
-    };
     const std::vector<int> noSeeds;
     const auto tableAt =
         [&](const std::vector<std::vector<int>> &table,
             size_t i) -> const std::vector<int> & {
         return i < table.size() ? table[i] : noSeeds;
     };
-    const auto composeCluster = [&](size_t slot) {
-        return slot < program.cones.avarCluster.size()
-            ? program.cones.avarCluster[slot]
-            : -1;
+    // The compose cluster that reads a provider's avars, and the clusters
+    // of the switched groups that recompose an earlier version of it.
+    const auto composeClusters = [&](size_t slot) {
+        std::vector<int> seeds;
+        if (slot < program.cones.avarCluster.size()) {
+            seeds.push_back(program.cones.avarCluster[slot]);
+        }
+        if (slot < program.cones.avarVersionSteps.size()) {
+            for (const int step : program.cones.avarVersionSteps[slot]) {
+                if (step >= 0 && size_t(step) < program.steps.size()) {
+                    seeds.push_back(program.steps[size_t(step)].cluster);
+                }
+            }
+        }
+        return seeds;
     };
     // Every provider slot the compose pass reads: the path the sampler names
     // a source by, mapped to the cluster whose cone a moved avar dirties
@@ -127,8 +132,8 @@ RigExecOutputAffectedIndex::Build(const RigExecBakedProgramImpl &program,
     const size_t slots =
         std::min(program.paths.size(), program.cones.avarCluster.size());
     for (size_t slot = 0; slot < slots; ++slot) {
-        admitOne(RigExecControlIdForPath(program.paths[slot]),
-                 program.cones.avarCluster[slot]);
+        admit(RigExecControlIdForPath(program.paths[slot]),
+              composeClusters(slot));
     }
     // Patchable avar properties: the exact paths a value patch names, each
     // mapped to its provider's compose cluster. The binding slot is a FLAT
@@ -137,12 +142,11 @@ RigExecOutputAffectedIndex::Build(const RigExecBakedProgramImpl &program,
     // provider-sized compose table mis-maps low channels to the wrong
     // provider and strands the rest seedless.
     for (const auto &kv : program.patchableAvars) {
-        int cluster = -1;
-        if (kv.second < program.avarConstantBindings.size()) {
-            cluster = composeCluster(
-                program.avarConstantBindings[kv.second].slot / 11);
-        }
-        admitOne(RigExecControlIdForPath(kv.first), cluster);
+        admit(RigExecControlIdForPath(kv.first),
+              kv.second < program.avarConstantBindings.size()
+                  ? composeClusters(
+                        program.avarConstantBindings[kv.second].slot / 11)
+                  : noSeeds);
     }
     // Varying avar bindings: the head of each binding's walk -- the avar
     // property the sampler names the sample by -- mapped to its
@@ -151,8 +155,8 @@ RigExecOutputAffectedIndex::Build(const RigExecBakedProgramImpl &program,
         if (!binding.input.head) {
             continue;
         }
-        admitOne(RigExecControlIdForPath(binding.input.head.GetPath()),
-                 composeCluster(binding.slot / 11));
+        admit(RigExecControlIdForPath(binding.input.head.GetPath()),
+              composeClusters(binding.slot / 11));
     }
     // Chains: the target path reaches the clusters reading its base points.
     for (size_t c = 0; c < program.chains.size(); ++c) {
@@ -213,11 +217,10 @@ RigExecOutputAffectedIndex::Build(const RigExecBakedProgramImpl &program,
     // Overridable inputs: every property an input's walk reads, the path a
     // stage value edit on it names (unified-program spec rule S7). An edit
     // there re-runs exactly what an override on it would -- the steps that
-    // declare the input, or the provider compose its avar lands in -- so it
-    // is seeded exactly as the override is. A path one of whose inputs is
-    // re-read by the provider ladder instead stays foreign: what a moved
-    // ladder dirties is decided by the values the prologue recomposes, which
-    // no seed names. So does a path that seeds nothing.
+    // declare the input, the provider compose its avar lands in, or the
+    // readers of what the rest and ladder ops reading it can move -- so it
+    // is seeded exactly as the override is. A path that seeds nothing stays
+    // foreign.
     const std::vector<std::vector<int>> indexSeeds = _IndexSeeds(program);
     for (const auto &[path, indices] : program.overridableInputs) {
         bool seedable = !indices.empty();
@@ -226,8 +229,7 @@ RigExecOutputAffectedIndex::Build(const RigExecBakedProgramImpl &program,
                 index >= 0 && size_t(index) < program.cones.editRoute.size()
                     ? program.cones.editRoute[size_t(index)]
                     : 0;
-            seedable = seedable && route != 0 &&
-                       (route & kEditRouteLadder) == 0;
+            seedable = seedable && route != 0;
         }
         if (!seedable) {
             continue;
@@ -245,7 +247,7 @@ RigExecOutputAffectedIndex::Clear()
 {
     _clusterCount = 0;
     _epochDigest = 0;
-    _cones.clear();
+    _cones.reset();
     _always = RigExecBakedClusterSet();
     _varying = RigExecBakedClusterSet();
     _override = RigExecBakedClusterSet();
@@ -303,8 +305,8 @@ RigExecOutputAffectedIndex::AffectedClusters(
     RigExecBakedClusterSet out;
     out.Resize(_clusterCount);
     for (const int seed : seeds) {
-        if (seed >= 0 && size_t(seed) < _cones.size()) {
-            out.Union(_cones[size_t(seed)]);
+        if (seed >= 0 && size_t(seed) < _clusterCount) {
+            out.Union((*_cones)[size_t(seed)]);
         }
     }
     _walks.fetch_add(1, std::memory_order_relaxed);
@@ -324,7 +326,7 @@ RigExecOutputAffectedIndex::AffectedClusters(
         const bool set = word < seeds.words.size() &&
                          ((seeds.words[word] >> (c & 63)) & 1) != 0;
         if (set) {
-            out.Union(_cones[c]);
+            out.Union((*_cones)[c]);
         }
     }
     _walks.fetch_add(1, std::memory_order_relaxed);
@@ -350,7 +352,7 @@ RigExecOutputAffectedIndex::AffectedByControls(
             continue;
         }
         for (const int seed : found->second) {
-            out.Union(_cones[size_t(seed)]);
+            out.Union((*_cones)[size_t(seed)]);
         }
     }
     _walks.fetch_add(1, std::memory_order_relaxed);
@@ -368,10 +370,10 @@ RigExecOutputAffectedIndex::AllClusters() const
 const RigExecBakedClusterSet &
 RigExecOutputAffectedIndex::ConeOf(int cluster) const
 {
-    if (cluster < 0 || size_t(cluster) >= _cones.size()) {
+    if (cluster < 0 || size_t(cluster) >= _clusterCount) {
         return _empty;
     }
-    return _cones[size_t(cluster)];
+    return (*_cones)[size_t(cluster)];
 }
 
 std::vector<RigExecControlId>
@@ -475,12 +477,15 @@ namespace {
 // Override index -> the clusters a change to that input dirties, for every
 // index at once: the clusters of the steps that declare it (bakedSchedule's
 // override rule -- a step whose overrideInputs carry a flagged index dirties
-// its cluster), and the compose cluster of the avar binding behind it (the
+// its cluster), the compose cluster of the avar binding behind it (the
 // input block writes an overridden avar into the dense table, and the
-// per-provider value comparison dirties its compose cluster). Matched by
-// index, not by head path, so an override standing on a walk hop resolves
-// to the same provider as one on the head. Flat slot / 11, as in Build; a
-// seedless provider contributes nothing.
+// per-provider value comparison dirties its compose cluster), and for a
+// ladder channel the operations reading its leaf. The compiled cluster
+// cones already carry those operations to every downstream reader.
+// Matched by index, not by head path, so an
+// override standing on a walk hop resolves to the same provider as one on
+// the head. Flat slot / 11, as in Build; a seedless provider contributes
+// nothing.
 std::vector<std::vector<int>>
 _IndexSeeds(const RigExecBakedProgramImpl &program)
 {
@@ -516,6 +521,49 @@ _IndexSeeds(const RigExecBakedProgramImpl &program)
             const int cluster = program.cones.avarCluster[provider];
             if (cluster >= 0 && size_t(cluster) < clusters) {
                 add(binding.input.overrideIndex, cluster);
+            }
+            // And every switched group recomposing an earlier version of
+            // the provider from the same avars.
+            if (provider < program.cones.avarVersionSteps.size()) {
+                for (const int step :
+                     program.cones.avarVersionSteps[provider]) {
+                    if (step < 0 || size_t(step) >= program.steps.size()) {
+                        continue;
+                    }
+                    const int reader = program.steps[size_t(step)].cluster;
+                    if (reader >= 0 && size_t(reader) < clusters) {
+                        add(binding.input.overrideIndex, reader);
+                    }
+                }
+            }
+        }
+    }
+    if (!program.ladderOverrides.empty()) {
+        // Seed the shared graph directly. Expanding a transitive set for
+        // every operation here duplicates the cluster cones and makes the
+        // first edit pay an all-operations/all-clusters traversal.
+        std::vector<std::vector<uint32_t>> opsOfLeaf(program.leafRefs.size());
+        for (size_t i = 0; i < program.steps.size(); ++i) {
+            for (const uint32_t leaf : program.steps[i].bindingLeaves) {
+                if (leaf < opsOfLeaf.size()) {
+                    opsOfLeaf[leaf].push_back(uint32_t(i));
+                }
+            }
+        }
+        for (const int index : program.ladderOverrides) {
+            if (index < 0 || size_t(index) >= program.leafOfOverride.size() ||
+                program.leafOfOverride[size_t(index)] < 0) {
+                continue;
+            }
+            const size_t leaf = size_t(program.leafOfOverride[size_t(index)]);
+            if (leaf >= opsOfLeaf.size()) {
+                continue;
+            }
+            for (const uint32_t op : opsOfLeaf[leaf]) {
+                const int cluster = program.steps[op].cluster;
+                if (cluster >= 0 && size_t(cluster) < clusters) {
+                    add(index, cluster);
+                }
             }
         }
     }

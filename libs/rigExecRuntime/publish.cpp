@@ -5,12 +5,194 @@
 // publication, weight fields and moved properties. Guides
 // are skipped: the runtime carries no tap request, which is the
 // guides-disabled shape the baked path mirrors.
+#include "rigExecRuntime/poseInternal.h"
 #include "rigExecRuntime/store.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <utility>
 
 namespace rigExec {
+
+namespace {
+
+using RrEpilogue = RrProgram::EpilogueIndex;
+
+// The step-output blocks, as RigExecBakedStepLines names them.
+enum class RrStepLines { Property, Walk, Interpolator, Geometry };
+
+bool
+_RrHoldsOutput(const RrStore &store, size_t i)
+{
+    return (i < store.stepOutputs.size() &&
+            !store.stepOutputs[i].diagnostics.empty()) ||
+           (i < store.headLines.size() && !store.headLines[i].empty());
+}
+
+// The geometry steps whose diagnostics the geometry epilogue publishes;
+// the pose epilogue's walk skips them.
+bool
+_RrPublishedGeometryKind(RigExecWireStepKind kind)
+{
+    switch (kind) {
+    case RigExecWireStepKind::InfluenceFold:
+    case RigExecWireStepKind::RevisionStatic:
+    case RigExecWireStepKind::RevisionChunk:
+    case RigExecWireStepKind::RevisionFuse:
+    case RigExecWireStepKind::ChainStatus:
+    case RigExecWireStepKind::Derived:
+        return true;
+    default:
+        return false;
+    }
+}
+
+size_t
+_RrSolverCount(const RrProgram &program)
+{
+    return program.poses ? program.poses->solvers.size() : 0;
+}
+
+void
+_RrEpilogueLists(const RrProgram &program, std::vector<char> *aliveSolver,
+                 std::vector<uint32_t> *geometrySteps)
+{
+    const std::vector<RigExecWireStep> &steps = *program.steps;
+    aliveSolver->assign(_RrSolverCount(program), 0);
+    geometrySteps->clear();
+    for (uint32_t i = 0; i < steps.size(); ++i) {
+        const RigExecWireStepKind kind = steps[i].kind;
+        if (kind == RigExecWireStepKind::Solve && steps[i].object >= 0 &&
+            size_t(steps[i].object) < aliveSolver->size())
+            (*aliveSolver)[size_t(steps[i].object)] = 1;
+        if (kind == RigExecWireStepKind::RevisionStatic ||
+            kind == RigExecWireStepKind::ChainStatus ||
+            kind == RigExecWireStepKind::Derived)
+            geometrySteps->push_back(i);
+    }
+}
+
+void
+_RrEnsureEpilogueIndex(RrProgram *program)
+{
+    const RrEpilogue &E = program->epilogue;
+    if (E.held.holding.size() != program->steps->size() ||
+        E.aliveSolver.size() != _RrSolverCount(*program))
+        RrIndexEpilogue(program);
+}
+
+// One block's lines from the step indices \p visit hands over, which must
+// come in step order.
+template <class Visit>
+void
+_RrAppendBlock(const RrProgram &program, RrStepLines block,
+               const Visit &visit, std::vector<std::string> *out)
+{
+    const RrStore &store = program.store;
+    const std::vector<RigExecWireStep> &steps = *program.steps;
+    const auto diagnostics = [&](size_t i) {
+        out->insert(out->end(), store.stepOutputs[i].diagnostics.begin(),
+                    store.stepOutputs[i].diagnostics.end());
+    };
+    switch (block) {
+    case RrStepLines::Property: {
+        // Property reporting follows its immutable chain/part inventory,
+        // independently of the canonical execution graph's interleaving.
+        std::vector<size_t> property;
+        visit([&](size_t i) {
+            if (steps[i].kind == RigExecWireStepKind::PropertyRevision &&
+                _RrHoldsOutput(store, i))
+                property.push_back(i);
+        });
+        std::sort(property.begin(), property.end(), [&](size_t a, size_t b) {
+            return std::make_pair(steps[a].object, steps[a].part) <
+                   std::make_pair(steps[b].object, steps[b].part);
+        });
+        for (size_t i : property) {
+            diagnostics(i);
+            if (i < store.headLines.size())
+                out->insert(out->end(), store.headLines[i].begin(),
+                            store.headLines[i].end());
+        }
+        return;
+    }
+    case RrStepLines::Walk:
+        visit([&](size_t i) {
+            const RigExecWireStepKind kind = steps[i].kind;
+            if (kind != RigExecWireStepKind::PropertyRevision &&
+                kind != RigExecWireStepKind::PoseInterpolator &&
+                !_RrPublishedGeometryKind(kind))
+                diagnostics(i);
+        });
+        return;
+    case RrStepLines::Interpolator:
+        visit([&](size_t i) {
+            if (steps[i].kind == RigExecWireStepKind::PoseInterpolator)
+                diagnostics(i);
+        });
+        return;
+    case RrStepLines::Geometry:
+        visit([&](size_t i) {
+            if (_RrPublishedGeometryKind(steps[i].kind)) diagnostics(i);
+        });
+        return;
+    }
+}
+
+// Appends \p block from the held steps; under `epilogue.verify` also from
+// every step, counting a difference.
+void
+_RrAppendStepLines(RrProgram *program, RrStepLines block,
+                   std::vector<std::string> *out)
+{
+    RrEpilogue &E = program->epilogue;
+    const std::vector<uint32_t> &held = E.held.Ascending();
+    const size_t begin = out->size();
+    _RrAppendBlock(*program, block, [&](const auto &each) {
+        for (const uint32_t i : held) each(size_t(i));
+    }, out);
+    if (!E.verify) {
+        return;
+    }
+    std::vector<std::string> swept;
+    _RrAppendBlock(*program, block, [&](const auto &each) {
+        for (size_t i = 0; i < program->steps->size(); ++i) each(i);
+    }, &swept);
+    if (swept.size() != out->size() - begin ||
+        !std::equal(swept.begin(), swept.end(),
+                    out->begin() + std::ptrdiff_t(begin))) {
+        ++E.mismatches;
+    }
+}
+
+} // namespace
+
+void
+RrIndexEpilogue(RrProgram *program)
+{
+    RrEpilogue &E = program->epilogue;
+    _RrEpilogueLists(*program, &E.aliveSolver, &E.geometrySteps);
+    const size_t count = program->steps->size();
+    E.held.Reset(count);
+    for (uint32_t i = 0; i < count; ++i)
+        E.held.Note(i, _RrHoldsOutput(program->store, i));
+}
+
+void
+RrFoldHeldSteps(RrProgram *program)
+{
+    RrEpilogue &E = program->epilogue;
+    if (E.held.holding.size() != program->steps->size()) {
+        RrIndexEpilogue(program);
+        return;
+    }
+    const std::vector<char> &ran = program->store.opExecution.ran;
+    for (uint32_t c = 0; c < program->opGraph.ops.size() && c < ran.size(); ++c) {
+        if (!ran[c]) continue;
+        const uint32_t i = program->opGraph.ops[c].originalIndex;
+        E.held.Note(i, _RrHoldsOutput(program->store, i));
+    }
+}
 
 bool
 RrPublishPose(RrProgram *program,
@@ -19,8 +201,20 @@ RrPublishPose(RrProgram *program,
 {
     RrStore &store = program->store;
     const RigExecWireSlotMeta &meta = *program->slotMeta;
-    const RigExecWireConstants &constants = *program->constants;
-    const std::vector<RigExecWireStep> &steps = *program->steps;
+
+    _RrEnsureEpilogueIndex(program);
+    if (program->epilogue.verify) {
+        std::vector<char> aliveSolver;
+        std::vector<uint32_t> geometrySteps;
+        _RrEpilogueLists(*program, &aliveSolver, &geometrySteps);
+        bool same = aliveSolver == program->epilogue.aliveSolver &&
+                    geometrySteps == program->epilogue.geometrySteps;
+        for (size_t i = 0; same && i < program->steps->size(); ++i)
+            same = (program->epilogue.held.holding[i] != 0) ==
+                   _RrHoldsOutput(store, i);
+        if (!same) ++program->epilogue.mismatches;
+    }
+    const std::vector<char> &aliveSolver = program->epilogue.aliveSolver;
 
     store.providerXforms.clear();
     store.providerBaseXforms.clear();
@@ -29,27 +223,8 @@ RrPublishPose(RrProgram *program,
     store.jointFramesFinal.clear();
     store.controlFrames.clear();
 
-    for (const RigExecWireStep &step : steps) {
-        if (step.kind == RigExecWireStepKind::PoseInterpolator) {
-            continue;
-        }
-        switch (step.kind) {
-        case RigExecWireStepKind::InfluenceFold:
-        case RigExecWireStepKind::RevisionStatic:
-        case RigExecWireStepKind::RevisionChunk:
-        case RigExecWireStepKind::RevisionFuse:
-        case RigExecWireStepKind::ChainStatus:
-        case RigExecWireStepKind::Derived:
-            continue;
-        default:
-            break;
-        }
-        const RrStepOutput &output =
-            store.stepOutputs[size_t(&step - steps.data())];
-        for (const std::string &diagnostic : output.diagnostics) {
-            poseDiagnostics->push_back(diagnostic);
-        }
-    }
+    _RrAppendStepLines(program, RrStepLines::Property, poseDiagnostics);
+    _RrAppendStepLines(program, RrStepLines::Walk, poseDiagnostics);
 
     // Fallback joints: one line per failing writer, in walk order,
     // stable-sorted by joint path.
@@ -61,6 +236,7 @@ RrPublishPose(RrProgram *program,
             continue;
         }
         for (int si : walk.batchSolvers) {
+            if (!aliveSolver[size_t(si)]) continue;
             const RigExecWireSolver &s =
                 program->poses->solvers[size_t(si)];
             for (size_t k = 0; k < s.outputs.size(); ++k) {
@@ -78,11 +254,11 @@ RrPublishPose(RrProgram *program,
                     const size_t row = binding->second;
                     const std::vector<uint32_t> &writers =
                         program->poses
-                            ->jointBindingSolvers[row];
+                            ->jointBindingSolvers[row].v;
                     for (size_t w = 0; w < writers.size(); ++w) {
                         if (writers[w] == s.path) {
                             element = program->poses
-                                          ->jointBindingElements[row][w];
+                                          ->jointBindingElements[row].v[w];
                             break;
                         }
                     }
@@ -133,22 +309,14 @@ RrPublishPose(RrProgram *program,
     }
 
     // Joint publication, decided first so a frame that cannot publish
-    // returns before a single key is inserted.
+    // returns before a single key is inserted. The rest tested is this
+    // run's composed one, which a recompose can make unusable.
     store.jointMatrixPublished.assign(meta.jointSlots.size(), 0);
     for (size_t k = 0; k < meta.jointSlots.size(); ++k) {
         const size_t slot = size_t(meta.jointSlots[k]);
         const RrPointFrame &finalFrame =
             store.fin[size_t(store.finLast[slot])];
         if (finalFrame.IsValid() && !finalFrame.IsDegenerate()) {
-            if (!RrFrameUsable(RrWireToFrame(constants.restFrames[slot])) ||
-                !RrFrameUsable(finalFrame)) {
-                if (error) {
-                    *error = "joint " +
-                             program->TextOrEmpty(meta.jointPaths[k]) +
-                             " has an unusable rest or final frame";
-                }
-                return false;
-            }
             store.jointMatrixPublished[k] = 1;
         } else {
             store.jointMatrixPublished[k] = 0;
@@ -176,22 +344,20 @@ RrPublishPose(RrProgram *program,
             store.fin[size_t(store.finLast[slot])];
     }
 
-    for (const RigExecWireStep &step : steps) {
-        if (step.kind != RigExecWireStepKind::PoseInterpolator) {
-            continue;
-        }
-        const RrStepOutput &output =
-            store.stepOutputs[size_t(&step - steps.data())];
-        for (const std::string &diagnostic : output.diagnostics) {
-            poseDiagnostics->push_back(diagnostic);
-        }
+    _RrAppendStepLines(program, RrStepLines::Interpolator, poseDiagnostics);
+    // Pose outputs publish after property chains, as the native epilogue does.
+    // The current typed weight also includes disabled or failed solve zeros.
+    for (size_t k = 0; k < program->poses->poseWeightPaths.size(); ++k) {
+        RrPropertyValue value;
+        value.tag = RrPropertyValue::Tag::Float;
+        value.f32 = store.poseWeights[k];
+        store.propertyResults[program->poses->poseWeightPaths[k]] = value;
     }
     return true;
 }
 
 void
 RrPublishGeometry(RrProgram *program,
-                  const RigExecWireFrameInputs &record,
                   std::vector<std::string> *poseDiagnostics)
 {
     RrStore &store = program->store;
@@ -202,13 +368,13 @@ RrPublishGeometry(RrProgram *program,
     store.movedMatrices.clear();
     store.weightFields.clear();
 
-    for (const RigExecWireStep &step : steps) {
-        const RrStepOutput &output =
-            store.stepOutputs[size_t(&step - steps.data())];
+    _RrEnsureEpilogueIndex(program);
+    _RrAppendStepLines(program, RrStepLines::Geometry, poseDiagnostics);
+    // The publications in program order: the maps are keyed, so the order
+    // shows only where two steps name one key, and the later step's stands.
+    for (const uint32_t index : program->epilogue.geometrySteps) {
+        const RigExecWireStep &step = steps[index];
         if (step.kind == RigExecWireStepKind::RevisionStatic) {
-            for (const std::string &diagnostic : output.diagnostics) {
-                poseDiagnostics->push_back(diagnostic);
-            }
             const auto &entry =
                 geo.revisionIndex[size_t(step.object)];
             const size_t chain = size_t(entry.first);
@@ -229,9 +395,6 @@ RrPublishGeometry(RrProgram *program,
             store.weightFields[geo.weightObjects[size_t(wire.weightObject)]
                                    .path] = std::move(field);
         } else if (step.kind == RigExecWireStepKind::ChainStatus) {
-            for (const std::string &diagnostic : output.diagnostics) {
-                poseDiagnostics->push_back(diagnostic);
-            }
             const size_t chain = size_t(step.object);
             if (!store.chainPublish[chain].haveBase) {
                 continue;
@@ -239,9 +402,6 @@ RrPublishGeometry(RrProgram *program,
             store.movedProperties[store.chainPublish[chain].target] =
                 store.chainPublish[chain].result;
         } else if (step.kind == RigExecWireStepKind::Derived) {
-            for (const std::string &diagnostic : output.diagnostics) {
-                poseDiagnostics->push_back(diagnostic);
-            }
             const auto &entry = geo.derivedIndex[size_t(step.object)];
             const size_t chain = size_t(entry.first);
             const RrDerivedPublish &derived =
@@ -252,18 +412,6 @@ RrPublishGeometry(RrProgram *program,
                 } else if (derived.haveMatrix) {
                     store.movedMatrices[derived.target] = derived.matrix;
                 }
-            }
-        } else {
-            switch (step.kind) {
-            case RigExecWireStepKind::InfluenceFold:
-            case RigExecWireStepKind::RevisionChunk:
-            case RigExecWireStepKind::RevisionFuse:
-                for (const std::string &diagnostic : output.diagnostics) {
-                    poseDiagnostics->push_back(diagnostic);
-                }
-                break;
-            default:
-                break;
             }
         }
     }

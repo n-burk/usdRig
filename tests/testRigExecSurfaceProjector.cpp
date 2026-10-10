@@ -1,5 +1,5 @@
 // SurfaceProjector frames remain target-local under static asset placement.
-// Exercise the dynamic and baked paths without authoring during evaluation.
+// Exercise the shared graph without authoring during evaluation.
 #include "rigExec/rigEvaluator.h"
 
 #include "pxr/base/gf/rotation.h"
@@ -168,9 +168,8 @@ bool Near(const GfMatrix4d &a, const GfMatrix4d &b, double tolerance)
     return true;
 }
 
-bool Compile(RigExecRigEvaluator *rig, RigExecEvaluationMode mode)
+bool Compile(RigExecRigEvaluator *rig)
 {
-    rig->SetEvaluationMode(mode);
     std::vector<std::string> errors;
     const bool compiled = rig->Compile(&errors);
     CHECK(compiled);
@@ -180,7 +179,7 @@ bool Compile(RigExecRigEvaluator *rig, RigExecEvaluationMode mode)
     if (!compiled) {
         return false;
     }
-    if (mode != RigExecEvaluationMode::Dynamic) {
+    {
         std::vector<std::string> reasons;
         const bool bakeable = rig->IsBakeable(&reasons);
         CHECK(bakeable);
@@ -211,7 +210,6 @@ bool ReadMatrix(const RigExecRigPose &pose, const SdfPath &path,
 void CheckPose(const RigExecRigPose &pose)
 {
     CHECK(pose.valid);
-    CHECK(pose.bakedParityMismatches == 0);
     for (const std::string &diagnostic : pose.diagnostics) {
         if (diagnostic.find("SurfaceProjector") != std::string::npos) {
             std::printf("    %s\n", diagnostic.c_str());
@@ -230,13 +228,10 @@ void TestAnalyticSurface()
                              {2, 2, 0}, {-2, 2, 0}};
     for (const Placement &placement : Placements()) {
         for (const bool reproject : {false, true}) {
-            for (const RigExecEvaluationMode mode :
-                 {RigExecEvaluationMode::Dynamic,
-                  RigExecEvaluationMode::BakedWithParityCheck}) {
+            {
                 std::printf("  analytic %-10s %s %s\n", placement.name,
                             reproject ? "reproject" : "material",
-                            mode == RigExecEvaluationMode::Dynamic
-                                ? "dynamic" : "baked");
+                            "graph");
                 const SdfLayerRefPtr layer = SdfLayer::CreateAnonymous(".usda");
                 CHECK(layer->ImportFromString(kFixture));
                 const UsdStageRefPtr stage = UsdStage::Open(layer);
@@ -252,7 +247,7 @@ void TestAnalyticSurface()
                           .Set(TfToken(reproject ? "reproject" : "material")));
                 const LayerState before = SnapshotLayers(stage);
                 RigExecRigEvaluator rig(stage, rigPath);
-                if (!Compile(&rig, mode)) {
+                if (!Compile(&rig)) {
                     continue;
                 }
                 CHECK(rig.GetSurfaceProjectorTargets() ==
@@ -287,7 +282,7 @@ void TestAnalyticSurface()
                     }
                 }
                 CHECK(rig.GetBakedGenerationCount() ==
-                      (mode == RigExecEvaluationMode::Dynamic ? 0 : 3));
+                      3);
                 CheckLayersUnchanged(before);
             }
         }
@@ -384,12 +379,9 @@ void TestBiped(const std::string &examples)
     std::vector<GfMatrix4d> reference;
     std::vector<VtValue> referencePoints;
     for (const Placement &placement : Placements()) {
-        for (const RigExecEvaluationMode mode :
-             {RigExecEvaluationMode::Dynamic,
-              RigExecEvaluationMode::BakedWithParityCheck}) {
+        {
             std::printf("  biped    %-10s %s\n", placement.name,
-                        mode == RigExecEvaluationMode::Dynamic
-                            ? "dynamic" : "baked");
+                        "graph");
             const UsdStageRefPtr stage = UsdStage::Open(
                 examples + "/biped/Biped_stack.usda");
             CHECK(stage);
@@ -401,7 +393,7 @@ void TestBiped(const std::string &examples)
             Place(stage, SdfPath("/Biped"), placement.asset * placement.parent);
             const LayerState before = SnapshotLayers(stage);
             RigExecRigEvaluator rig(stage, rigPath);
-            if (!Compile(&rig, mode)) {
+            if (!Compile(&rig)) {
                 continue;
             }
             const std::vector<SdfPath> targets = rig.GetSurfaceProjectorTargets();
@@ -439,7 +431,7 @@ void TestBiped(const std::string &examples)
                 CHECK(points == referencePoints);
             }
             CHECK(rig.GetBakedGenerationCount() ==
-                  (mode == RigExecEvaluationMode::Dynamic ? 0 : 1));
+                  1);
             CheckLayersUnchanged(before);
         }
     }

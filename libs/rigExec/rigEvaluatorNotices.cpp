@@ -1,10 +1,10 @@
 // USD notice classification and epoch invalidation.
 
 #include "rigEvaluatorInternal.h"
+#include "projectorCaptureNotice.h"
 #include "rigEvaluatorPropertyBindings.h"
 #include "rigEvaluatorDependencies.h"
 #include "rigEvaluatorConstraints.h"
-#include "bakedProgramImpl.h"
 
 #include "pxr/base/tf/diagnostic.h"
 #include "pxr/base/tf/getenv.h"
@@ -99,70 +99,6 @@ _NoticeIsAvarValuesOnly(const UsdNotice::ObjectsChanged &notice)
     return sawAvar;
 }
 
-// Whether \p notice is nothing but new values (or a value's own spec
-// appearing or going away) on avar channels: the numeric transform channels
-// _NoticeIsAvarValuesOnly accepts, and the animator channels the bake reads
-// live (RigExecIsLiveAvarName). The epoch digest reads none of their values
-// -- a switch's index, an IK/FK blend, a dial -- so such a notice cannot
-// move it, and recomputing it whole cost ~150 ms per click on the biped.
-bool
-_NoticeIsAvarChannelValuesOnly(const UsdNotice::ObjectsChanged &notice)
-{
-    static const std::string kChannels[] = {
-        "avars:tx", "avars:ty", "avars:tz", "avars:sx", "avars:sy",
-        "avars:sz", "avars:rx", "avars:ry", "avars:rz", "avars:rspin",
-        "avars:unitScaleFactor"};
-    const auto channel = [](const std::string &name) {
-        if (RigExecIsLiveAvarName(name)) {
-            return true;
-        }
-        for (const std::string &avar : kChannels) {
-            if (name == avar) {
-                return true;
-            }
-        }
-        return false;
-    };
-    if (!notice.GetResolvedAssetPathsResyncedPaths().empty()) {
-        return false;
-    }
-    static const TfToken kDefault("default");
-    static const TfToken kTimeSamples("timeSamples");
-    static const TfToken kSpline("spline");
-    static const TfToken kTypeName("typeName");
-    static const TfToken kCustom("custom");
-    bool sawAvar = false;
-    // A new spec restates the type and, for a custom attribute, that it is
-    // custom; neither changes what is read.
-    const auto valueFields = [&](const SdfPath &path, bool resync) {
-        for (const TfToken &field : notice.GetChangedFields(path)) {
-            if (field != kDefault && field != kTimeSamples &&
-                field != kSpline &&
-                !(resync && (field == kTypeName || field == kCustom))) {
-                return false;
-            }
-        }
-        return true;
-    };
-    for (const SdfPath &path : notice.GetResyncedPaths()) {
-        if (!path.IsPropertyPath() || !channel(path.GetName()) ||
-            !valueFields(path, true)) {
-            return false;
-        }
-        sawAvar = true;
-    }
-    for (const SdfPath &path : notice.GetChangedInfoOnlyPaths()) {
-        if (path.IsPrimPath()) {
-            continue;  // ancestor info around the edit
-        }
-        if (!channel(path.GetName()) || !valueFields(path, false)) {
-            return false;
-        }
-        sawAvar = true;
-    }
-    return sawAvar;
-}
-
 // The types whose prims the digest writes the path of for the type alone,
 // wherever under the rig they sit: the discovered joints, controls, volume
 // weights and pose interpolators, and every aggregate solver.
@@ -220,23 +156,12 @@ RigExecRigEvaluator::ClassifyNoticeDisposition(
         return RigExecNoticeDisposition::None;
     }
     std::vector<SdfPath> paths;
-    const bool transformOnly = _NoticeIsAvarValuesOnly(notice);
-    if ((transformOnly || _NoticeIsAvarChannelValuesOnly(notice)) &&
+    if (_NoticeIsAvarValuesOnly(notice) &&
         _bakedProgram->DryRunAvarValueEdits(notice, &paths)) {
-        // Transform channels patched in place; any live channel in the same
-        // edit (an IK/FK blend keyed with what it switches) routes as a
-        // value edit, and its paths join the patched ones so every cached
-        // frame that read either is retired.
-        std::vector<SdfPath> routed;
-        if (transformOnly ||
-            _bakedProgram->DryRunValueEdits(notice, &routed,
-                                            /* skipPatchableAvars = */ true)) {
-            paths.insert(paths.end(), routed.begin(), routed.end());
-            if (patchedPaths) {
-                *patchedPaths = std::move(paths);
-            }
-            return RigExecNoticeDisposition::Patched;
+        if (patchedPaths) {
+            *patchedPaths = std::move(paths);
         }
+        return RigExecNoticeDisposition::Patched;
     }
     if (_bakedProgram->IsInvalidatedBy(notice)) {
         return RigExecNoticeDisposition::Stale;
@@ -580,6 +505,7 @@ void
 RigExecRigEvaluator::_OnObjectsChanged(
     const UsdNotice::ObjectsChanged &notice, const UsdStageWeakPtr &)
 {
+    RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "Notice.Evaluator", "notice");
     ++_stageEditSerial;
     // Never evaluate in a notice callback: ExecUsd must finish invalidating
     // its own caches before the next pull. External inputs can live anywhere
@@ -611,6 +537,14 @@ RigExecRigEvaluator::_OnObjectsChanged(
     // writes because of its type, a relationship whose targets it writes, a
     // connection inside a pose-input closure. When one of them has changed,
     // the digest has moved, and the settle compiles without computing it.
+    // Rebuild the immutable raw Default meshWorldInverse capture, not
+    // unrelated sampled provider xforms. The new compile also rechecks the
+    // static-transform admission when time samples are added or removed.
+    bool projectorCaptureChanged=false;
+    for(const auto &entry:_graphDerivedChains)for(const auto &revision:entry.second)
+        if((revision.op==RigExecRevisionOp::SurfaceProjector || revision.op==RigExecRevisionOp::ShaderDials) &&
+           RigExecProjectorMeshCaptureAffected(notice,revision.binding.base))projectorCaptureChanged=true;
+    if(projectorCaptureChanged) { _compiled=false; _structureDirty=true; }
     const bool avarValuesOnly = _NoticeIsAvarValuesOnly(notice);
     // ... unless the avar the notice names is one a property chain READS.
     //
@@ -638,7 +572,7 @@ RigExecRigEvaluator::_OnObjectsChanged(
         // still skips the skin layouts, the blend samples and the rest.
         _propertyChainBindings.reset();
     }
-    if (!avarValuesOnly && !_NoticeIsAvarChannelValuesOnly(notice)) {
+    if (!avarValuesOnly) {
         if (_NoticeIsDigestSuspect(notice)) {
             _structureDirty = true;
             _NoteCertainStructuralCandidates(notice);
@@ -683,12 +617,6 @@ RigExecRigEvaluator::_OnObjectsChanged(
             // the stamp bump.
             if (!_bakedProgram->ApplyAvarValueEdits(notice)) {
                 _bakedProgram->BumpProgramStamp();
-            } else if (!_NoticeIsAvarValuesOnly(notice) &&
-                       !_bakedProgram->ApplyValueEdits(
-                           notice, /* skipPatchableAvars = */ true)) {
-                // The live channels the classification routed beside the
-                // patch; fail-closed as above.
-                _bakedProgram->BumpProgramStamp();
             }
         } else if (_lastNoticeDisposition ==
                    RigExecNoticeDisposition::Edited) {
@@ -709,7 +637,7 @@ RigExecRigEvaluator::_OnObjectsChanged(
             // otherwise answer for a stage that has since changed.
             _bakeRefused = false;
             _bakeRefusalReasons.clear();
-            _bakeBail = _BakeBailMemo();
+
         } else {
             // The other half of the same index, and the reason the program
             // may skip work at all. A notice that misses the index and that
@@ -726,85 +654,7 @@ RigExecRigEvaluator::_OnObjectsChanged(
         _lastNoticeDisposition = RigExecNoticeDisposition::None;
         _lastNoticePatchedPaths.clear();
     }
-    // rigExec:baked is a VALUE on the rig root, so the epoch digest is blind
-    // to it and _SettleEpoch will not recompile for it: this is the only
-    // place a flip can be seen. Nothing is BUILT here -- never evaluate in a
-    // notice callback -- and nothing needs to be. Dropping the program is
-    // the whole of true -> false, and false -> true is built by the lazy
-    // build in Evaluate, which is the same path SetEvaluationMode leaves
-    // behind when it is asked on an epoch that has not settled.
-    if (_NoticeNamesTheBakedAttribute(notice) &&
-        _RefreshAttributeEvaluationMode() && !_ModeRunsProgram()) {
-        _bakedProgram.reset();
-        _bakedProgramPublished = false;
-        _bakedProgramStale = false;
-    }
-    // The seed, connected, and guide requests read authored values straight
-    // off the stage; an edit that leaves the override tuple unchanged (a
-    // rest attribute, a weight, a goal transform) still changes what they
-    // compute. Any stage edit therefore retires their cached snapshots, the
-    // same way it retires the affected solver batches below.
-    // Retire means CLEAR, not just flagging: the seed and batch caches
-    // are time-keyed LRUs, and the dirty flag only forces the FIRST
-    // post-edit call to recompute. Once it clears, the other times would
-    // hit pre-edit entries whose override tuple still matches -- the edit
-    // changed the stage beneath an identical key.
-    _firstFramePoseDirty = true;
-    _firstFramePoseCache.Clear();
-    _authSnapshotDirty = true;
-    _authSnapTimeKeyed.clear();
-    _guideDirty = true;
-    _connectedPoseCache.clear();
-    for (auto &[target, derived] : _derivedCache) {
-        derived.cached = false;
-    }
-    const auto dirty = [this](const std::set<size_t> &batches) {
-        for (size_t index : batches) {
-            _SolverBatch &batch = _solverBatches[index];
-            batch.dirty = true;
-            // Beside the flag: the per-batch cache is a time-keyed LRU,
-            // and the flag alone only forces the first post-edit call to
-            // recompute -- the other times would hit pre-edit entries.
-            batch.cache.Clear();
-            // And the request it evaluates in, when that is shared: the
-            // merged entries for other times hold this solver's pre-edit
-            // answer too. (The walk vetoes the request's own lookup while
-            // any member is dirty, so the flag needs no copy there.)
-            _solverBatches[batch.leader].requestCache.Clear();
-        }
-    };
-    if (_solverInputIndexAbsent) {
-        // A deferred epoch has no index to route through until its first
-        // dynamic generation builds one, so every batch is taken to have
-        // been reached. Nothing is lost by it: no batch has computed, and so
-        // cached, anything before that same generation.
-        for (_SolverBatch &batch : _solverBatches) {
-            batch.dirty = true;
-            batch.cache.Clear();
-            batch.requestCache.Clear();
-        }
-        return;
-    }
-    for (const SdfPath &property : notice.GetChangedInfoOnlyPaths()) {
-        const auto input = _solverInputBatches.find(property.GetPrimPath());
-        if (input != _solverInputBatches.end()) {
-            dirty(input->second);
-        }
-    }
-    const auto dirtySubtree = [this, &dirty](const SdfPath &path) {
-        const SdfPath primPath = path.GetPrimPath();
-        for (auto input = _solverInputBatches.lower_bound(primPath);
-             input != _solverInputBatches.end() &&
-             input->first.HasPrefix(primPath); ++input) {
-            dirty(input->second);
-        }
-    };
-    for (const SdfPath &path : notice.GetResyncedPaths()) {
-        dirtySubtree(path);
-    }
-    for (const SdfPath &path : notice.GetResolvedAssetPathsResyncedPaths()) {
-        dirtySubtree(path);
-    }
+
 }
 
 } // namespace rigExec

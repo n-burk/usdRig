@@ -27,6 +27,7 @@ PXR_NAMESPACE_USING_DIRECTIVE
 namespace rigExec {
 
 class RigExecTapContext;
+const TfToken &RigExecFinalPhase();
 
 /// Backend-neutral value address (spec §9.1, v0.1 subset).
 ///
@@ -41,16 +42,16 @@ struct RigExecValueAddress {
     SdfPath target;
     TfToken publicComputation;
     /// base, afterMover, or final (informational public identity).
-    TfToken phase = TfToken("final");
+    TfToken phase = RigExecFinalPhase();
 
     static RigExecValueAddress Prim(
         const SdfPath &path, const TfToken &computation,
-        const TfToken &phase = TfToken("final")) {
+        const TfToken &phase = RigExecFinalPhase()) {
         return {path, computation, phase};
     }
     static RigExecValueAddress Property(
         const SdfPath &propertyPath,
-        const TfToken &phase = TfToken("final")) {
+        const TfToken &phase = RigExecFinalPhase()) {
         return {propertyPath, TfToken(), phase};
     }
 };
@@ -99,16 +100,21 @@ struct RigExecValueOverride {
 /// Immutable extracted generation: one value per tap.
 class RigExecSnapshot {
 public:
-    const VtValue &Get(RigExecTapId tap) const {
-        static const VtValue empty;
-        return tap >= 0 && static_cast<size_t>(tap) < _values.size()
-            ? _values[tap] : empty;
-    }
+    const VtValue &Get(RigExecTapId tap) const;
 
     template <class T>
     T Get(RigExecTapId tap) const {
         const VtValue &v = Get(tap);
         return v.IsHolding<T>() ? v.UncheckedGet<T>() : T();
+    }
+
+    /// Borrowed access to the tapped value without copying: null when the
+    /// tap is missing or holds another type. The pointer stays valid while
+    /// this snapshot is alive; callers needing ownership keep Get<T>.
+    template <class T>
+    const T *TryGet(RigExecTapId tap) const {
+        const VtValue &v = Get(tap);
+        return v.IsHolding<T>() ? &v.UncheckedGet<T>() : nullptr;
     }
 
     UsdTimeCode GetTime() const { return _time; }
@@ -123,7 +129,6 @@ public:
 
 private:
     friend class RigExecTapSet;
-    friend class RigExecRigEvaluator;
     std::vector<VtValue> _values;
     UsdTimeCode _time = UsdTimeCode::Default();
     bool _valid = false;
@@ -137,9 +142,6 @@ private:
 class RigExecTapSet {
 public:
     explicit RigExecTapSet(const UsdStageRefPtr &stage);
-    /// Zero shares the stage executor. Nonzero partitions share only with
-    /// requests in that partition, limiting override invalidation fan-out.
-    RigExecTapSet(const UsdStageRefPtr &stage, size_t partition);
     ~RigExecTapSet();
 
     RigExecTapSet(const RigExecTapSet &) = delete;
@@ -156,12 +158,12 @@ public:
         const RigExecValueAddress &publicAddress,
         const SdfPath &privateProvider);
 
+    /// How many taps stand. Tap ids are dense from zero, so the live
+    /// operation graph enumerates every address through this.
+    size_t GetTapCount() const { return _addresses.size(); }
+
     /// The public canonical address of a tap.
-    const RigExecValueAddress &GetAddress(RigExecTapId tap) const {
-        static const RigExecValueAddress empty;
-        return tap >= 0 && static_cast<size_t>(tap) < _addresses.size()
-            ? _addresses[tap] : empty;
-    }
+    const RigExecValueAddress &GetAddress(RigExecTapId tap) const;
 
     /// Builds and front-loads the batched request schedule. Returns
     /// false when the request could not be built valid.
@@ -184,17 +186,11 @@ public:
     ///
     /// Overrides apply to this call only; they do not persist into later
     /// Evaluate calls or affect cached values (ExecUsdSystem contract).
+    /// dropped counts missing prim/attribute addresses during key construction;
+    /// it cannot report whether an existing key lies in the request's cone.
     RigExecSnapshot Evaluate(
-        UsdTimeCode time, const std::vector<RigExecValueOverride> &overrides);
-
-    /// Extract results already computed by the caller's pose walk, evaluating
-    /// only empty slots through Exec. Supplied values must be the exact
-    /// results of these taps under the same overrides, not new input pins.
-    RigExecSnapshot EvaluateWithSuppliedResults(
         UsdTimeCode time, const std::vector<RigExecValueOverride> &overrides,
-        std::vector<VtValue> supplied);
-
-    size_t GetTapCount() const { return _addresses.size(); }
+        size_t *dropped = nullptr);
 
     /// Returns and clears the dirty flag raised by invalidation callbacks.
     bool ConsumeDirty() { return _dirty.exchange(false); }
@@ -215,11 +211,8 @@ private:
     /// Compiler-private resolutions parallel to _addresses; an empty path
     /// means the public address resolves directly.
     std::vector<SdfPath> _resolutions;
-    std::unique_ptr<RigExecTapSet> _residualTaps;
-    std::vector<size_t> _residualIndices;
     std::atomic<bool> _dirty{false};
     bool _prepared = false;
-    size_t _partition = 0;
     /// Diagnostic only (TF_DEBUG=RIGEXEC_TAP_TIMING): how many times this
     /// tap set has rebuilt its request.
     size_t _prepareCount = 0;

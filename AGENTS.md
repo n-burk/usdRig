@@ -28,6 +28,46 @@ The root README is the build entry point; `docs/index.md` is the node catalog.
   shader keeps its own EULA; see `THIRD_PARTY_NOTICES.md`.
 - `tests`: C++ suites, Python model tests, and graphical viewer tests.
 
+## Unified evaluation loop
+
+Native, frozen, and binary runtime evaluation must use the shared operation
+graph, dependency compiler, readiness rules, and kernels. Add behavior through
+declared inputs, outputs, and producers in that graph. Do not introduce a
+second evaluator, fallback walk, private-stage evaluation path, or separate
+pre/post pass that computes rig results outside the unified loop. Independent
+reference checks remain optional judges, never production fallbacks.
+
+Reuse compiled dependency edges and cluster closures for invalidation and
+cache queries; do not rebuild a parallel dependency model or expand all
+transitive dependencies on each edit. Preserve exact producer/version binding,
+cycle handling, and native/frozen/runtime parity. See
+[evaluation and checks](docs/concepts/baked-vs-dynamic.md).
+
+## No-mutex zones and thread ownership
+
+Operation bodies, numerical kernels, and the frozen worker's private arena
+are no-mutex zones. Do not add mutexes, lock-taking helpers, shared mutable
+caches, or blocking synchronization there. This includes indirect locks from
+profiling and logging: collect per-step data locally and publish it at the
+existing boundary. Respect the contracts in
+[bodyPurity.h](libs/rigExec/bodyPurity.h),
+[bakedSchedule.h](libs/rigExec/bakedSchedule.h), and
+[frozenContext.h](libs/rigExec/frozenContext.h).
+
+Sample live USD inputs on the owning thread before dispatch. Computation
+bodies consume captured facts and declared typed values; workers own their
+mutable arenas and must not access the live stage, evaluator, or imaging
+registry. Solve sharing through immutable snapshots and explicit ownership,
+not by wrapping a live evaluator or stage in a new mutex.
+
+Existing scheduler, cache-publication, and registry locks belong to their
+documented coordination boundaries. Preserve their lock order and generation
+fences; do not extend their scope into computation or add locks to hide an
+ownership violation. Keep authoring and UI callbacks on their owner thread.
+A queued UI callback still blocks that thread while it runs: offload only
+detached work through the existing worker path, and measure both dispatch and
+completion latency when fixing interaction stalls.
+
 ## Build and verify
 
 Use an unchanged OpenUSD 26.08 install with OpenExec, CMake 3.26+, Ninja,
@@ -35,16 +75,23 @@ C++17, and a compatible Python interpreter. `USD` and `PY` configure helper
 scripts; their defaults look for a sibling dependency install.
 
 1. Read relevant code and current changes before editing. Preserve user work.
-2. Build with `bin/build_rigexec.sh` or `bin\build_rigexec.bat`; these also run CTest.
-3. Use `bin/test/run_python_tests.sh` or `.bat` for Qt-free interaction changes.
-4. Use the relevant `bin/test/run_testusdview*` helper for viewport changes.
-5. Report checks actually run and any unavailable dependency or graphics test.
+2. Make the whole set of related changes, then build once. Do not alternate
+   one edit, a rebuild and a test run.
+3. Rebuild only the targets you need, e.g.
+   `cmake --build build --target testRigExecOpValues rigExecPose`.
+   `bin/build_rigexec.sh` / `bin\build_rigexec.bat` build everything; use them
+   for a fresh checkout only.
+4. Run the smallest set of tests that covers the change, capped at 4 minutes
+   of wall clock: `ctest --test-dir build -R <tests> --stop-time <now+4min>`.
+5. Use `bin/test/run_python_tests.sh` or `.bat` only for Qt-free interaction
+   changes, and the relevant `bin/test/run_testusdview*` helper only for
+   viewport changes.
+6. Report checks actually run and any unavailable dependency or graphics test.
 
-Use the existing tests to verify dependency invalidation, numerical conventions,
-dynamic/baked parity, and binary round trips. Do not change tolerances just to
-make failures disappear. Evaluation must remain non-authoring; scene edits
-belong in the authoring layer. Keep USD row-vector conventions explicit at
-math boundaries and avoid stage access inside pure computation callbacks.
+Do not change tolerances just to make failures disappear. Evaluation must
+remain non-authoring; scene edits belong in the authoring layer. Keep USD
+row-vector conventions explicit at math boundaries and avoid stage access
+inside pure computation callbacks.
 
 ## Documentation and release hygiene
 

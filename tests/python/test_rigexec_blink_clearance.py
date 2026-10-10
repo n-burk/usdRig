@@ -123,8 +123,8 @@ def _check_runtime_matches(failures, resources):
     if resources:
         env["PXR_PLUGINPATH_NAME"] = resources
     binary = os.path.join(out, "blink_shut.rigexec")
-    for argv in ([bake, overlay, "--frames", "1", "-o", binary],
-                 [pose, overlay, "--verify-binary", binary]):
+    for argv in ([bake, overlay, "--time", "1", "-o", binary],
+                 [pose, overlay, "--verify-binary", binary, "--frames", "1"]):
         done = subprocess.run(argv, env=env, capture_output=True, text=True)
         if done.returncode != 0:
             failures.append("%s failed (%d):\n%s"
@@ -155,7 +155,7 @@ def main():
         assert stage, _STACK
         stage.SetEditTarget(Usd.EditTarget(stage.GetSessionLayer()))
         rig = rigexec.Rig(stage, _RIG)
-        rig.evaluation_mode = "baked"
+        rig.cpu_reference = True
 
         prim = None
         for p in stage.Traverse():
