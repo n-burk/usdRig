@@ -20,6 +20,7 @@
 #include "pxr/base/gf/math.h"
 #include "pxr/base/gf/quatf.h"
 #include "pxr/base/gf/vec2f.h"
+#include "pxr/base/gf/vec3f.h"
 #include "pxr/base/gf/vec3i.h"
 #include "pxr/base/plug/registry.h"
 #include "pxr/base/tf/getenv.h"
@@ -29,6 +30,7 @@
 #include "pxr/usd/sdf/layer.h"
 #include "pxr/usd/sdf/types.h"
 #include "pxr/usd/usd/primRange.h"
+#include "pxr/usd/usd/relationship.h"
 #include "pxr/usd/usd/stage.h"
 #include "pxr/usd/usdGeom/xform.h"
 
@@ -67,6 +69,9 @@ static int comparedFrames = 0;
 
 #include "rigExecFileEdit.h"
 #include "rigExecRuntimeDrive.h"
+// Independent reference rigs of the extended lattice and surface settings.
+#include "fixtures/lattice/latticeReferenceCases.h"
+#include "fixtures/surfaceSnap/nearestReferenceCases.h"
 
 // The C runtime's environment, defined below: the runtime reads its knobs
 // with std::getenv, which TfSetenv does not reach on Windows.
@@ -564,9 +569,15 @@ TestPathReadsFixture()
     // The scalar read rows are exactly those sites, each reading its head
     // when its walk yields nothing; the two that end on the valueless
     // double walk two hops, and their head holds the float the site reads.
-    // (The array read rows read the input slots of the arrays.)
+    // The delta mush's time-read extended settings (format 21) are two of
+    // them. (The array read rows read the input slots of the arrays.)
+    const std::string onlySmooth =
+        "/PathReadAsset/Rig/Movers/Mush.inputs:onlySmooth";
+    const std::string computationToTarget =
+        "/PathReadAsset/Rig/Movers/Mush.inputs:computationToTarget";
     size_t rows = 0;
     size_t twoHops = 0;
+    size_t extended = 0;
     for (const fb::RigExecWirePathRead &row : file->geometry->pathReads) {
         if (!row.read || RigExecFormatIsArrayTag(row.read->tag)) {
             continue;
@@ -574,6 +585,7 @@ TestPathReadsFixture()
         ++rows;
         CHECK(row.headFallback && !row.rest);
         const std::string text = RigExecFormatPathText(*file, row.path);
+        extended += text == onlySmooth || text == computationToTarget;
         if (text != step && text != held) {
             continue;
         }
@@ -596,7 +608,8 @@ TestPathReadsFixture()
         CHECK(value == (text == step ? 0.3f : 0.6f));
         ++twoHops;
     }
-    CHECK(rows == 13);
+    CHECK(rows == 15);
+    CHECK(extended == 2);
     CHECK(twoHops == 2);
 }
 
@@ -4950,6 +4963,194 @@ TestDispatchedExecuteMatchesSerial(const std::string &examplesDir)
     CHECK(safeTargets > 0);
 }
 
+// A Delta Mush with every format-21 setting authored: length-weighted
+// smoothing, corner transport, per-vertex smoothing weights and a
+// nonuniform affine computation space.
+static const char *const _kExtendedMushStage = R"USD(#usda 1.0
+def RigExecRoot "Rig" {
+ def Mesh "Body" {
+  point3f[] points = [(0, 0, 0), (1, 0, 0.3), (2, 0, 0), (0, 1, 0.1), (1, 1, 0.5), (2, 1, 0)]
+  int[] faceVertexCounts = [4, 4]
+  int[] faceVertexIndices = [0, 1, 4, 3, 1, 2, 5, 4]
+ }
+ def RigExecDeltaMushMover "Mush" (prepend apiSchemas = ["RigExecMoverAPI"]) {
+  rel rigExec:moves = </Rig/Body.points>
+  point3f[] inputs:restPoints = [(0, 0, 0), (1, 0, 0.1), (2, 0, 0), (0, 1, 0.05), (1, 1, 0.2), (2, 1, 0)]
+  int inputs:iterations = 4
+  float inputs:step = 0.5
+  bool inputs:pinBorders = 0
+  uniform token inputs:smoothing = "lengthWeighted"
+  uniform token inputs:frameTransport = "corner"
+  float[] inputs:smoothWeights = [1, 0.5, 1, 0.25, 1, 0.75]
+  matrix4d inputs:computationToTarget = ((1.2, 0, 0, 0), (0, 0.9, 0.1, 0), (0, 0, 1.1, 0), (0.2, -0.1, 0.3, 1))
+ }
+}
+)USD";
+
+// The same Delta Mush with no format-21 setting authored: the legacy
+// deformer.
+static const char *const _kLegacyMushStage = R"USD(#usda 1.0
+def RigExecRoot "Rig" {
+ def Mesh "Body" {
+  point3f[] points = [(0, 0, 0), (1, 0, 0.3), (2, 0, 0), (0, 1, 0.1), (1, 1, 0.5), (2, 1, 0)]
+  int[] faceVertexCounts = [4, 4]
+  int[] faceVertexIndices = [0, 1, 4, 3, 1, 2, 5, 4]
+ }
+ def RigExecDeltaMushMover "Mush" (prepend apiSchemas = ["RigExecMoverAPI"]) {
+  rel rigExec:moves = </Rig/Body.points>
+  point3f[] inputs:restPoints = [(0, 0, 0), (1, 0, 0.1), (2, 0, 0), (0, 1, 0.05), (1, 1, 0.2), (2, 1, 0)]
+  int inputs:iterations = 4
+  float inputs:step = 0.5
+  bool inputs:pinBorders = 0
+ }
+}
+)USD";
+
+/// An in-memory stage of \p text; null when it does not parse.
+static UsdStageRefPtr
+_StageFromText(const std::string &text)
+{
+    const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    if (!stage->GetRootLayer()->ImportFromString(text)) {
+        return nullptr;
+    }
+    return stage;
+}
+
+/// \p file with every format-21 setting of its Delta Mush, lattice and
+/// surface revisions taken out (path reads and leaf sites), relabelled
+/// format 20: what a format-20 export of the same legacy rig holds.
+static void
+_AsFormat20(fb::RigExecWireFile *file)
+{
+    auto &reads = file->geometry->pathReads;
+    for (fb::RigExecWireChain &chain : file->geometry->chains) {
+        for (fb::RigExecWireRevision &revision : chain.revisions) {
+            size_t count = 0;
+            const char *const *names =
+                RigExecFormatExtendedSettingNames(revision.op, &count);
+            if (!names || revision.moverPrim == 0) {
+                continue;
+            }
+            const std::string mover =
+                RigExecFormatPathText(*file, revision.moverPrim);
+            const auto extended = [&](uint32_t path) {
+                const std::string text = RigExecFormatPathText(*file, path);
+                for (size_t i = 0; i < count; ++i) {
+                    if (text == mover + "." + names[i]) {
+                        return true;
+                    }
+                }
+                return false;
+            };
+            for (auto *sites :
+                 {&revision.leafSites, &revision.layoutLeafSites}) {
+                sites->erase(std::remove_if(sites->begin(), sites->end(),
+                                            [&](const auto &site) {
+                                                return extended(site.path);
+                                            }),
+                             sites->end());
+            }
+            reads.erase(std::remove_if(reads.begin(), reads.end(),
+                                       [&](const auto &read) {
+                                           return extended(read.path);
+                                       }),
+                        reads.end());
+        }
+    }
+    file->formatVersion = 20;
+}
+
+/// The points \p bytes publishes in one run at its defaults; empty, with a
+/// failed CHECK, when it does not open or run.
+static std::vector<RigExecRuntimePoints>
+_RunDefaults(const std::vector<uint8_t> &bytes, const std::string &name)
+{
+    std::string error;
+    const std::unique_ptr<RigExecRuntimeReader> reader =
+        RigExecRuntimeReader::Open(bytes.data(), bytes.size(), &error);
+    if (!reader || !reader->Execute(&error)) {
+        std::printf("%s: %s\n", name.c_str(), error.c_str());
+        CHECK(false);
+        return {};
+    }
+    return reader->GetPoints();
+}
+
+// The format-21 deformer settings play bit for bit beside the evaluator:
+// every independent reference rig (regular-grid lattices with each
+// interpolation family, surface snaps under each policy), a lattice whose
+// strength is animated and whose cage frame provider moves, and a Delta
+// Mush with every setting. A legacy Delta Mush's format-20 file, its
+// settings taken out, plays the same points as its format-21 file.
+static void
+TestExtendedDeformerSettingsPlay()
+{
+    const auto play = [](const std::string &name, const std::string &text,
+                         const std::vector<double> &frames) {
+        const UsdStageRefPtr stage = _StageFromText(text);
+        CHECK(stage);
+        if (stage) {
+            _TestStage(name, stage, frames);
+        }
+    };
+    for (size_t i = 0; i < latticeReferenceCases.size(); ++i) {
+        play("reference lattice " + std::to_string(i),
+             latticeReferenceCases[i].stage, {1});
+    }
+    for (size_t i = 0; i < surfaceReferenceCases.size(); ++i) {
+        play("reference surface snap " + std::to_string(i),
+             surfaceReferenceCases[i].stage, {1});
+    }
+    play("extended delta mush", _kExtendedMushStage, {1});
+
+    if (const UsdStageRefPtr stage =
+            _StageFromText(latticeReferenceCases[0].stage)) {
+        stage->DefinePrim(SdfPath("/Rig/CageFrame"),
+                          TfToken("RigExecControl"));
+        stage->DefinePrim(SdfPath("/Rig/TargetFrame"),
+                          TfToken("RigExecControl"));
+        const UsdAttribute tx =
+            stage->GetPrimAtPath(SdfPath("/Rig/CageFrame"))
+                .GetAttribute(TfToken("avars:tx"));
+        CHECK(tx && tx.Set(0.15, UsdTimeCode(1)) &&
+              tx.Set(0.3, UsdTimeCode(2)));
+        const UsdPrim lattice = stage->GetPrimAtPath(SdfPath("/Rig/Lattice"));
+        CHECK(lattice.GetRelationship(TfToken("rigExec:frames"))
+                  .SetTargets({SdfPath("/Rig/CageFrame"),
+                               SdfPath("/Rig/TargetFrame")}));
+        const UsdAttribute strength =
+            lattice.GetAttribute(TfToken("rigExec:strength"));
+        CHECK(strength && strength.Set(0.82f, UsdTimeCode(1)) &&
+              strength.Set(0.4f, UsdTimeCode(2)));
+        _TestStage("framed lattice, animated", stage, {1, 2, 1, 2});
+    }
+
+    // A legacy rig's format-20 file plays its format-21 file's points.
+    bool same = false;
+    if (const UsdStageRefPtr stage = _StageFromText(_kLegacyMushStage)) {
+        _TestStage("legacy delta mush", stage, {1});
+        std::vector<uint8_t> current;
+        std::string error;
+        RigExecRigEvaluator baker(stage, SdfPath("/Rig"));
+        CHECK(RigExecTestBakeAt(baker, 1.0, &current, &error));
+        if (!current.empty()) {
+            const std::vector<uint8_t> previous = RigExecTestEdited(
+                current, [](fb::RigExecWireFile *file) { _AsFormat20(file); });
+            const std::vector<RigExecRuntimePoints> a =
+                _RunDefaults(current, "legacy delta mush, format 21");
+            const std::vector<RigExecRuntimePoints> b =
+                _RunDefaults(previous, "legacy delta mush, format 20");
+            same = !a.empty() && _SamePoints({a}, {b});
+            CHECK(same);
+        }
+    }
+    std::printf("extended deformer settings: %zu lattice and %zu surface "
+                "references played; legacy format 20 %s\n",
+                latticeReferenceCases.size(), surfaceReferenceCases.size(),
+                same ? "plays its format-21 points" : "DIFFERS");
+}
+
 int
 main(int argc, char **argv)
 {
@@ -4982,6 +5183,7 @@ main(int argc, char **argv)
     TestPoseDrivenBlendWeights();
     TestBlendActivationDrag();
     TestBlendShapeLayouts();
+    TestExtendedDeformerSettingsPlay();
     TestAcceptanceFailureRecovers();
 
     std::string examplesDir = RIGEXEC_EXAMPLES_DIR;

@@ -2803,6 +2803,14 @@ RrPathValueFromWire(RigExecWireInputTag tag, const RrWireValue &value,
         out->tag = Tag::Vec3d;
         out->vec = value.vec3d;
         return true;
+    case RigExecWireInputTag::Vec3f:
+        // Held widened, as the bake stores a static float3; every
+        // component narrows back exactly.
+        out->tag = Tag::Vec3d;
+        out->vec = RigExecWireVec3d{double(value.vec3f[0]),
+                                    double(value.vec3f[1]),
+                                    double(value.vec3f[2])};
+        return true;
     default:
         return false;
     }

@@ -23,6 +23,11 @@ struct RigExecProviderOp {
     bool scaleAvars=true;
     /// `owner`'s entry in RigExecProviderProgram::ownerTexts.
     uint32_t ownerText=RigExecNoProviderOwnerText;
+    /// AffineFrame: which frame expression it computes, and how many of its
+    /// trailing frame inputs are a constraint frame's targets (the rest are
+    /// their target objects).
+    uint32_t affineKind=0;
+    uint32_t affineTargets=0;
 };
 struct RigExecProviderLeaf {
     RigExecValueId value;

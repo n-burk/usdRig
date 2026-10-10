@@ -1,6 +1,6 @@
 # ![Lattice Mover](../../icons/lattice_mover.png) Lattice Mover
 
-*Deforms points through an animated Bernstein or B-spline cage.*
+*Deforms points through a legacy cage or a regular interpolation grid.*
 
 | | |
 |---|---|
@@ -33,11 +33,21 @@ tensor-product basis evaluation (spec sections 4.1, 7.5).
 
 ## How it works
 
-Each moved point is located in the bind cage's lattice coordinates,
-then re-evaluated in the posed cage under the `bernstein` or `bspline`
-basis. `rigExec:divisions` sets the cage resolution per axis with
-x-fastest point ordering; the cage is read at the `rigExecReadPhase`
-declared on `rigExec:cage` (`base`, the authored animation, when none is).
+The default `rigExec:evaluation = legacy` preserves the existing
+Bernstein cage evaluator. `regularGrid` interpolates cage displacement from
+canonical `origin` and `spacing`, with separate linear, cardinal, B-spline or
+Catmull-Rom interpolation on each axis. `divisions` uses x-fastest ordering;
+single-point axes are supported. Outside coordinates retain their extrapolated
+basis weights while individual cage indices clamp at the boundary.
+
+`strength` and per-point `mask` scale the displacement before the common mover
+envelope. `cageMatrix` and `targetMatrix`, optionally followed by the two
+`frames` providers, define the coordinate spaces. `pointSpace = common` is for
+points already in a shared asset space; `local` is for object-local points.
+The cage relationship reads its selected base or final revision.
+
+`.rigexec` exports carry these settings from format revision 21. A revision
+20 file has none of them and plays the legacy cage evaluator.
 
 ## Wiring
 
@@ -102,6 +112,68 @@ Valid values: `bspline`, `bernstein`.
 #### `rigExec:divisions`
 
 *Type:* `int3`. *Default:* `(2, 2, 2)`.
+
+#### `rigExec:evaluation`
+
+*Type:* `uniform token`. *Default:* `"legacy"`.
+
+Valid values: `legacy`, `regularGrid`.
+
+Legacy retains the bound Bernstein cage. Regular grid interpolates current cage displacement against canonical origin/spacing at each incoming point.
+
+#### `rigExec:interpolationU`
+
+*Type:* `uniform token`. *Default:* `"bspline"`.
+
+Valid values: `bspline`, `linear`, `cardinal`, `catmullRom`.
+
+#### `rigExec:interpolationV`
+
+*Type:* `uniform token`. *Default:* `"bspline"`.
+
+Valid values: `bspline`, `linear`, `cardinal`, `catmullRom`.
+
+#### `rigExec:interpolationW`
+
+*Type:* `uniform token`. *Default:* `"bspline"`.
+
+Valid values: `bspline`, `linear`, `cardinal`, `catmullRom`.
+
+#### `rigExec:origin`
+
+*Type:* `float3`. *Default:* `(-0.5, -0.5, -0.5)`.
+
+#### `rigExec:spacing`
+
+*Type:* `float3`. *Default:* `(1, 1, 1)`.
+
+#### `rigExec:strength`
+
+*Type:* `float`. *Default:* `1`.
+
+#### `rigExec:mask`
+
+*Type:* `float[]`. *Default:* `[]`.
+
+#### `rigExec:pointSpace`
+
+*Type:* `uniform token`. *Default:* `"local"`.
+
+Valid values: `local`, `common`.
+
+#### `rigExec:cageMatrix`
+
+*Type:* `matrix4d`. *Default:* `((1,0,0,0),(0,1,0,0),(0,0,1,0),(0,0,0,1))`.
+
+#### `rigExec:targetMatrix`
+
+*Type:* `matrix4d`. *Default:* `((1,0,0,0),(0,1,0,0),(0,0,1,0),(0,0,0,1))`.
+
+#### `rigExec:frames`
+
+*Relationship.*
+
+Optional cage and target rest-to-pose providers, in that order, applied after their local-to-common matrices.
 
 ## Example
 

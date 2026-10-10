@@ -144,6 +144,24 @@ RigExecFrozenPurityAudit()
          RigExecFrozenPurity::Pure,
          "free functions over their arguments; no static, thread-local, or "
          "member state anywhere in the directory"},
+        {"rigExecMath extended deformer and frame kernels (deltaMushKernel "
+         "settings, latticeKernel regular grid, surfaceSnapKernel, "
+         "affineFrameKernels)",
+         RigExecFrozenPurity::Pure,
+         "free functions over their arguments; settings arrive in the "
+         "packet or the op inputs, and text settings parse from views"},
+        {"provider affine frame expressions (rigExecGraph/providerProgram.cpp "
+         "AffineFrame ops)",
+         RigExecFrozenPurity::Pure,
+         "ordinary provider ops over declared attribute values and provider "
+         "point frames; the expression table is namespace-scope, built at "
+         "load; token values are read as text, never interned"},
+        {"built-in external movers (movers/armatureMover.cpp, "
+         "movers/surfaceBindingMover.cpp)",
+         RigExecFrozenPurity::Pure,
+         "assembly and application read only the declared inputs and the "
+         "provider values; payload keys are plain strings; no token built "
+         "from text, no lock"},
         {"libs/rigExec/solverKernels.{h,cpp}",
          RigExecFrozenPurity::Pure,
          "ribbon/twist/rotation glue over caller buffers; no statics, no "

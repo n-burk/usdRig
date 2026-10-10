@@ -91,6 +91,8 @@ bool RigExecExportProviderRecords(const RigExecProviderProgram &program,
     for(const auto &op:program.ops) {
         if(op.kind==RigExecProviderOpKind::LocalXform || op.kind==RigExecProviderOpKind::InterveningXform)
             return fail("provider wire export requires intervening transforms lowered to external matrix leaves");
+        if(op.kind==RigExecProviderOpKind::AffineFrame)
+            return fail("provider wire export has no affine frame expression record: "+op.owner.GetString());
         records.ops.push_back({op.kind,op.owner.GetString(),op.output,op.inputs,op.scaleAvars});
     }
     for(const auto &leaf:program.sampled)records.sampled.push_back({leaf.value,leaf.attribute.GetString(),{}});

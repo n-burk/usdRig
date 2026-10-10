@@ -513,11 +513,44 @@ inline constexpr uint8_t RigExecWireConstraintWorldUpRotationOnly =
 inline constexpr uint8_t RigExecWireConstraintRadialBlend =
     uint8_t(fb::ConstraintFlags::RadialBlend);
 
-/// The format version this code reads and writes; every change to
-/// rigexec.fbs or to what its records mean bumps it. Open refuses all older
-/// versions with an S3 re-export message; unknown future versions receive a
-/// rebake message.
-inline constexpr uint32_t RigExecFormatVersion = 20;
+/// The format version every writer writes; every change to rigexec.fbs or
+/// to what its records mean bumps it. Open reads it and every version from
+/// RigExecFormatOldestReadable on; it refuses older versions with an S3
+/// re-export message and unknown future versions with a rebake message.
+///
+/// Format 21 adds the extended Delta Mush, lattice and surface settings
+/// (RigExecFormatExtendedSettingNames): mover attributes the revision reads
+/// through its path reads and leaf sites, and frame providers held as its
+/// influences. A format-20 file holds none of them, so its Delta Mush,
+/// lattice and surface revisions play the legacy deformers.
+inline constexpr uint32_t RigExecFormatVersion = 21;
+
+/// The oldest format version Open reads.
+inline constexpr uint32_t RigExecFormatOldestReadable = 20;
+
+/// Whether Open reads format version \p version.
+inline constexpr bool
+RigExecFormatReads(uint32_t version)
+{
+    return version >= RigExecFormatOldestReadable &&
+           version <= RigExecFormatVersion;
+}
+
+/// The first format version whose Delta Mush, lattice and surface
+/// revisions may carry the extended settings.
+inline constexpr uint32_t RigExecFormatExtendedSettingsVersion = 21;
+
+/// The mover attributes format 21 adds to revision op \p op (DeltaMush,
+/// Lattice or SurfaceProject), in the order the assembly reads them, with
+/// their count in \p count; null with 0 for every other op.
+const char *const *RigExecFormatExtendedSettingNames(uint8_t op,
+                                                     size_t *count);
+
+/// The frame providers a revision of op \p op with extended settings may
+/// hold as influences: a Delta Mush at most one (rigExec:frame), a lattice
+/// or a surface none or two (rigExec:frames: cage or surface, then
+/// target). True for every other op.
+bool RigExecFormatExtendedInfluencesValid(uint8_t op, size_t influences);
 
 /// A Range revision (formats 19 and 20): unchunked with two or more chunks,
 /// which are its chain's group partition. Keys are empty except on a Range
@@ -583,11 +616,13 @@ inline constexpr char RigExecFormatIdentifier[] = "REXB";
 /// slot, an array read walks slots of its own tag), constant and override
 /// number, table shapes and indices, step and cone ranges, skin topologies
 /// and the layout, chains with groups (their partitions, group steps'
-/// reads and writes, and the private constants their Range skins and gates
-/// rest on), chain base, painted and oracle slots, path reads, property
-/// chains, external movers and the nested presentation (bounded like Open's
-/// buffer, then verified with its REXP identifier). False with a reason
-/// naming the table, index and field.
+/// reads and writes, and the private constants their Range skins, Range
+/// lattices and gates rest on), chain base, painted and oracle slots, path
+/// reads, property chains, external movers, the extended deformer settings
+/// of its format version (none in format 20; each op's frame provider
+/// count in 21) and the nested presentation (bounded like Open's buffer,
+/// then verified with its REXP identifier). Any readable format version
+/// validates. False with a reason naming the table, index and field.
 bool RigExecFormatValidate(const fb::RigExecWireFile &file,
                            std::string *error);
 
@@ -604,8 +639,9 @@ bool RigExecFormatOpen(const uint8_t *bytes, size_t size,
                        std::unique_ptr<fb::RigExecWireFile> *file,
                        std::string *error);
 
-/// Validates \p file, then packs it with the file identifier. The bytes are
-/// a pure function of \p file.
+/// Validates \p file, refuses any format version but RigExecFormatVersion,
+/// then packs it with the file identifier. The bytes are a pure function of
+/// \p file.
 bool RigExecFormatWrite(const fb::RigExecWireFile &file,
                         std::vector<uint8_t> *bytes, std::string *error);
 

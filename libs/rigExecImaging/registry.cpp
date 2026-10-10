@@ -1931,6 +1931,9 @@ RigExecImagingRegistry::SetTime(UsdTimeCode time)
     // index's time trigger.
     std::unique_lock<std::mutex> lock(_mutex);
     if (_sessions.empty() || !_stage) {
+        // A plain stage has no evaluator, but its xform previews still
+        // compose against the host's displayed frame.
+        _lastTime = time;
         return false;
     }
     // Live hand-off: each session's upstream values at this time. A moved
@@ -2565,7 +2568,8 @@ bool
 RigExecImagingRegistry::_WarmOneFallbackFrame(
     RigSession *session, UsdTimeCode playhead)
 {
-    if (!session || !session->warmRangeActive || !session->bridge ||
+    if (!session || !session->warmRangeActive ||
+        session->warmRange.empty() || !session->bridge ||
         session->playback || !_warmIndex || !_scheduler ||
         !session->bridge->GetInteractiveOverrides().empty()) {
         return false;
@@ -3629,14 +3633,20 @@ RigExecImagingRegistry::_ComposeXformDelta(
     const UsdTimeCode time = cache->GetTime();
     for (const UsdGeomXformOp &op : ops) {
         VtValue value;
-        if (!op.GetAttr().Get(&value, time)) {
-            // An op with no value at this time contributes its identity to
-            // both, which is what USD itself does with it.
+        const bool hasAuthoredValue = op.GetAttr().Get(&value, time);
+        if (hasAuthoredValue) {
+            authored =
+                op.GetOpTransform(op.GetOpType(), value, op.IsInverseOp()) *
+                authored;
+        }
+        // An inverse op shares its attribute with the forward op; the
+        // !invert! marker belongs to the order token, not the value key.
+        const auto found = opValues.find(op.GetAttr().GetName());
+        // A newly created ordered op has no authored value yet. It is an
+        // identity in the authored transform but its preview still applies.
+        if (found == opValues.end() && !hasAuthoredValue) {
             continue;
         }
-        authored = op.GetOpTransform(op.GetOpType(), value, op.IsInverseOp()) *
-                   authored;
-        const auto found = opValues.find(op.GetOpName());
         const VtValue &previewValue =
             found == opValues.end() ? value : found->second;
         previewed =

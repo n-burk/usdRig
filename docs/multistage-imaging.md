@@ -274,6 +274,15 @@ xform-lane slots on its bound stage, so `BeginPreviewForStage` works on a plain
 Xform, and the deltas reach only that stage's chains. The rig lane previews
 through the context's own evaluator.
 
+Viewport release queues authoring on the stage's owner thread, retaining the
+final preview until the commit. Undo, a new drag, time or selection changes,
+and saving drain the pending edit first; a replacement stage invalidates its
+queued callback. A clean preview committed with exactly the same values keeps
+its published generation, including the first opinion in an empty session
+layer. A drag on a property that movers revise previews its base, so its
+exact commit settles the same way. Empty-field ancestor overs are inert; real
+metadata, structural edits and connections still require evaluation.
+
 ## usdview plugins
 
 The Python plugins (`plugin/rigExecUsdview`, `plugin/touchPose`,

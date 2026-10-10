@@ -656,6 +656,130 @@ TestMultiStage(const std::string &examplesDir)
     }
 
     {
+        // The displayed frame is also the preview clock on a stage without
+        // rigs. Default-time composition would double the animated offset.
+        const UsdStageRefPtr stage = _PlainStage();
+        const UsdAttribute translate = stage->GetAttributeAtPath(
+            SdfPath("/Plain.xformOp:translate"));
+        CHECK(translate.Clear());
+        CHECK(translate.Set(GfVec3d(-2, 0, 0), UsdTimeCode(1)));
+        CHECK(translate.Set(GfVec3d(-1.5, 0, 0), UsdTimeCode(3)));
+        std::unique_ptr<_Viewport> viewport = _Open(stage);
+        viewport->indices.stageSceneIndex->SetTime(UsdTimeCode(2));
+        const SdfPath childPath("/Plain/Child");
+        GfMatrix4d baseline(1.0);
+        baseline.SetTranslate(GfVec3d(-1.75, 0, 0));
+        CHECK(_Close(_WorldOf(viewport->Terminal(), childPath), baseline));
+        CHECK(RigExecImaging_BeginPreviewForStage(
+            viewport->id, translate.GetPath().GetText()) == 3);
+        // Retain the inactive return code while remembering frame 2.
+        CHECK(RigExecImaging_SetTimeForStage(viewport->id, 2) == 1);
+        CHECK(RigExecImaging_IsActiveForStage(viewport->id) == 0);
+        const double sample[3] = {-1.25, 0, 0};
+        CHECK(RigExecImaging_UpdatePreviewForStage(viewport->id, sample, 3) == 0);
+        GfMatrix4d expected(1.0);
+        expected.SetTranslate(GfVec3d(-1.25, 0, 0));
+        CHECK(_Close(_WorldOf(viewport->Terminal(), childPath), expected));
+        VtValue defaultValue;
+        CHECK(!translate.Get(&defaultValue, UsdTimeCode::Default()));
+        CHECK(RigExecImaging_EndPreviewWithoutPublishForStage(viewport->id) == 0);
+        CHECK(translate.Set(GfVec3d(-1.25, 0, 0), UsdTimeCode(2)));
+        viewport->indices.stageSceneIndex->ApplyPendingUpdates();
+        CHECK(_Close(_WorldOf(viewport->Terminal(), childPath), expected));
+        _Close(viewport);
+    }
+
+    {
+        // First-use manipulations create an ordered op before authoring its
+        // value. Its authored contribution is identity, but the supplied
+        // preview must already move the real imaging chain and descendants.
+        for (const UsdGeomXformOp::Type type : {
+                 UsdGeomXformOp::TypeTranslate,
+                 UsdGeomXformOp::TypeRotateXYZ,
+                 UsdGeomXformOp::TypeScale}) {
+            const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+            const UsdGeomXform parent =
+                UsdGeomXform::Define(stage, SdfPath("/Parent"));
+            GfMatrix4d parentWorld(1.0);
+            parentWorld.SetScale(GfVec3d(2, 3, 4));
+            parentWorld.SetTranslateOnly(GfVec3d(7, 8, 9));
+            parent.AddTransformOp().Set(parentWorld);
+            const UsdGeomXform target =
+                UsdGeomXform::Define(stage, SdfPath("/Parent/Plain"));
+            const UsdGeomXformOp op = type == UsdGeomXformOp::TypeTranslate
+                ? target.AddTranslateOp()
+                : type == UsdGeomXformOp::TypeRotateXYZ
+                    ? target.AddRotateXYZOp() : target.AddScaleOp();
+            const SdfPath childPath("/Parent/Plain/Child");
+            const UsdGeomMesh child = UsdGeomMesh::Define(stage, childPath);
+            child.CreatePointsAttr(VtValue(VtVec3fArray{
+                GfVec3f(0), GfVec3f(1, 0, 0), GfVec3f(0, 1, 0)}));
+            child.CreateFaceVertexCountsAttr(VtValue(VtIntArray{3}));
+            child.CreateFaceVertexIndicesAttr(VtValue(VtIntArray{0, 1, 2}));
+            VtValue authored;
+            CHECK(!op.GetAttr().Get(&authored));
+            std::unique_ptr<_Viewport> viewport = _Open(stage);
+            CHECK(_Close(_WorldOf(viewport->Terminal(), childPath), parentWorld));
+            std::string before;
+            CHECK(stage->GetRootLayer()->ExportToString(&before));
+            CHECK(RigExecImaging_BeginPreviewForStage(
+                viewport->id, op.GetAttr().GetPath().GetText()) == 3);
+            const double sample[3] = {2, 3, 4};
+            CHECK(RigExecImaging_UpdatePreviewForStage(
+                viewport->id, sample, 3) == 0);
+            const VtValue value = type == UsdGeomXformOp::TypeTranslate
+                ? VtValue(GfVec3d(2, 3, 4)) : VtValue(GfVec3f(2, 3, 4));
+            const GfMatrix4d expected =
+                UsdGeomXformOp::GetOpTransform(type, value, false) * parentWorld;
+            CHECK(_Close(_WorldOf(viewport->Terminal(), childPath), expected));
+            CHECK(!op.GetAttr().Get(&authored));
+            std::string after;
+            CHECK(stage->GetRootLayer()->ExportToString(&after));
+            CHECK(before == after);
+            CHECK(RigExecImaging_EndPreviewForStage(viewport->id) == 0);
+            CHECK(_Close(_WorldOf(viewport->Terminal(), childPath), parentWorld));
+            _Close(viewport);
+        }
+    }
+
+    {
+        // A pivot is one value used by both forward and inverse ordered ops.
+        // Preview both uses before the first value is authored.
+        const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+        const UsdGeomXform target = UsdGeomXform::Define(stage, SdfPath("/Pivot"));
+        const UsdGeomXformOp pivot = target.AddTranslateOp(
+            UsdGeomXformOp::PrecisionDouble, TfToken("pivot"));
+        const UsdGeomXformOp rotation = target.AddRotateXYZOp();
+        CHECK(rotation.Set(GfVec3f(20, 30, 40)));
+        const UsdGeomXformOp inverse = target.AddTranslateOp(
+            UsdGeomXformOp::PrecisionDouble, TfToken("pivot"), true);
+        const SdfPath childPath("/Pivot/Child");
+        UsdGeomMesh::Define(stage, childPath);
+        std::unique_ptr<_Viewport> viewport = _Open(stage);
+        const GfMatrix4d baseline = _WorldOf(viewport->Terminal(), childPath);
+        std::string before;
+        CHECK(stage->GetRootLayer()->ExportToString(&before));
+        CHECK(RigExecImaging_BeginPreviewForStage(
+            viewport->id, pivot.GetAttr().GetPath().GetText()) == 3);
+        const double sample[3] = {0.5, 0.25, -0.75};
+        CHECK(RigExecImaging_UpdatePreviewForStage(viewport->id, sample, 3) == 0);
+        const VtValue value(GfVec3d(sample[0], sample[1], sample[2]));
+        const GfMatrix4d expected = UsdGeomXformOp::GetOpTransform(
+            inverse.GetOpType(), value, true) * rotation.GetOpTransform(UsdTimeCode(1)) *
+            UsdGeomXformOp::GetOpTransform(pivot.GetOpType(), value, false);
+        CHECK(!_Close(baseline, expected));
+        CHECK(_Close(_WorldOf(viewport->Terminal(), childPath), expected));
+        std::string after;
+        CHECK(stage->GetRootLayer()->ExportToString(&after));
+        CHECK(before == after);
+        CHECK(RigExecImaging_EndPreviewWithoutPublishForStage(viewport->id) == 0);
+        CHECK(pivot.Set(value));
+        viewport->indices.stageSceneIndex->ApplyPendingUpdates();
+        CHECK(_Close(_WorldOf(viewport->Terminal(), childPath), expected));
+        _Close(viewport);
+    }
+
+    {
         // The last legacy activation (C) is current.
         CHECK(RigExecImagingRegistry::Current() ==
               RigExecImagingRegistry::ForStage(c->stage, false));

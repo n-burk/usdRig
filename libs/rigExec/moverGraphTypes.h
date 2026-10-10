@@ -420,6 +420,35 @@ enum class RigExecRevisionLeafRole : uint8_t {
     RayUp,
     ShaderOffset,
     ProjectionMode,
+    /// deltaMush's extended settings: inputs:smoothing and
+    /// inputs:frameTransport at Default, inputs:smoothWeights, inputs:edges
+    /// at Default, inputs:onlySmooth and inputs:computationToTarget.
+    MushSmoothing,
+    MushFrameTransport,
+    SmoothWeights,
+    MushEdges,
+    OnlySmooth,
+    ComputationToTarget,
+    /// Lattice: rigExec:evaluation, and the regular grid's interpolations,
+    /// origin, spacing and strength.
+    LatticeEvaluation,
+    InterpolationU,
+    InterpolationV,
+    InterpolationW,
+    GridOrigin,
+    GridSpacing,
+    GridStrength,
+    /// Surface snap: rigExec:snapMode, rigExec:offset, rigExec:triangles.
+    SnapMode,
+    SnapOffset,
+    SnapTriangles,
+    /// Lattice and surface snap: rigExec:mask, rigExec:pointSpace, the
+    /// source frame (rigExec:cageMatrix, rigExec:surfaceMatrix) and
+    /// rigExec:targetMatrix.
+    Mask,
+    PointSpace,
+    SourceMatrix,
+    TargetMatrix,
     Count,
 };
 

@@ -1133,6 +1133,11 @@ table PathValue {
   /// Pool id of the matching pool for the *Array tags.
   array: uint;
 }
+// Format 21 adds the extended Delta Mush, lattice and surface settings
+// (RigExecFormatExtendedSettingNames, rigExecBinary/format.h) as path reads
+// and leaf sites of their revisions' movers; a format-20 file holds none,
+// so it plays the legacy deformers. A float3 value is stored widened in
+// vec3d, which narrows back exactly.
 /// A stage read a revision's assembly makes, keyed by (path, rest): either
 /// a static value or a read through the input slots.
 table PathRead {
@@ -1164,6 +1169,10 @@ table Revision {
   op: ubyte = 1;
   binding: RevisionBinding (required);
   blend_channels: [BlendChannel] (native_inline);
+  // One provider slot per binding influence. Format 21 adds the frame
+  // providers of a Delta Mush (rigExec:frame, at most one) and of a lattice
+  // or a surface (rigExec:frames: none, or cage or surface then target);
+  // format 20 holds none on those ops.
   influence_slots: [int];
   transform_slot: int = -1;
   transform_space_slot: int = -1;

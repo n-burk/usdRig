@@ -23,14 +23,30 @@ Smooths rest and incoming mesh points, then transports rest detail
 into the smoothed deformed surface. Method reference: Mancewicz, Derksen,
 and Wilson (2014), [Delta Mush](https://doi.org/10.1145/2614106.2614144).
 
-Native detail-preserving smoothing. Smooth rest and incoming points using fixed rest-derived weights, then transport rest detail in surface frames. The common mover envelope blends the result once.
+Native detail-preserving smoothing. Smooth reference and incoming points, then transport reference detail in surface frames. Smoothing masks apply within every iteration; the common mover envelope blends the candidate once.
 
 ## How it works
 
 The shared kernel builds edge adjacency from mesh topology and applies
 the same smoothing settings to rest and incoming points. It transports the
-rest-to-smoothed offset into the deformed local surface frame. Dynamic,
-baked, and binary evaluation share `libs/rigExecMath/deltaMushKernel.h`.
+rest-to-smoothed offset into the deformed local surface frame. Native,
+frozen and binary evaluation share `libs/rigExecMath/deltaMushKernel.h`.
+
+Defaults preserve the existing rest-weighted smoothing and vertex-frame
+transport. Choose `smoothing = simple` or `lengthWeighted` with
+`frameTransport = corner` for deformation-dependent smoothing and corner-frame
+detail restoration.
+`smoothWeights` participates inside every smoothing iteration, separate from
+the final envelope. Explicit `edges` preserve loose edges, `onlySmooth`
+disables detail restoration, and `displacement` scales restored detail.
+`restPoints` stores the actual reference or saved bind coordinates.
+
+`computationToTarget`, optionally followed by the `rigExec:frame` provider,
+keeps smoothing in the original object's coordinate space under nonuniform
+scale. Saved rest points stay in that computation space.
+
+`.rigexec` exports carry these settings from format revision 21. A revision
+20 file has none of them and plays the default smoothing and transport.
 
 ## Wiring
 
@@ -102,6 +118,52 @@ every application of the atomic mover.
 #### `inputs:displacement`
 
 *Type:* `float`. *Default:* `1`.
+
+#### `inputs:smoothing`
+
+*Type:* `uniform token`. *Default:* `"rest"`.
+
+Valid values: `rest`, `simple`, `lengthWeighted`.
+
+Rest uses fixed inverse-distance reference weights and step/displacement in [0,1]. Simple averages incident edge displacements. LengthWeighted recomputes current edge lengths per iteration and divides by length sum times edge valence, using twice the step. The latter modes permit any finite step and detail scale.
+
+#### `inputs:frameTransport`
+
+*Type:* `uniform token`. *Default:* `"vertex"`.
+
+Valid values: `vertex`, `corner`.
+
+Vertex uses an averaged surface normal and reference edge. Corner transports detail in each directed face-corner frame and combines posed corner-angle weights. Degenerate corners contribute zero weight.
+
+#### `inputs:smoothWeights`
+
+*Type:* `float[]`. *Default:* `[]`.
+
+Empty means one at every vertex; otherwise one finite value in [0,1] per vertex, multiplying the smoothing step in both reference and incoming iterations. Distinct from the common final envelope.
+
+#### `inputs:edges`
+
+*Type:* `uniform int[]`. *Default:* `[]`.
+
+Optional flattened unique undirected edge pairs, including all polygon edges and any loose edges. Empty derives polygon edges. Border pinning uses polygon incidence.
+
+#### `inputs:onlySmooth`
+
+*Type:* `bool`. *Default:* `false`.
+
+Return the smoothed incoming shape without restoring detail.
+
+#### `inputs:computationToTarget`
+
+*Type:* `matrix4d`. *Default:* `((1,0,0,0),(0,1,0,0),(0,0,1,0),(0,0,0,1))`.
+
+Nonsingular affine row-vector map from the reference/smoothing coordinate space into the target points space. Reference points remain in computation space; incoming points transform back before smoothing. Explicit restPoints are required for a nonidentity map or frame provider, except in onlySmooth mode.
+
+#### `rigExec:frame`
+
+*Relationship.*
+
+Optional single rest-to-pose frame provider composed after computationToTarget, using the declared transform read phase.
 
 ## Example
 

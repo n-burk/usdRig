@@ -5247,7 +5247,8 @@ CheckExampleWarmsBitIdentical(const std::string &stagePath,
 void
 TestIterativeMoversWarmBitIdentical()
 {
-    for (bool wrinkle : {false, true}) {
+    for (int variant : {0, 1, 2, 3}) {
+        const bool wrinkle = variant == 1;
         const UsdStageRefPtr stage = UsdStage::CreateInMemory();
         const SdfPath rig("/Rig"), target("/Rig/Mesh.points");
         auto builder = RigExecRigBuilder::Create(stage, rig);
@@ -5299,6 +5300,21 @@ TestIterativeMoversWarmBitIdentical()
                 .Set(TfToken("surfaceStruts")));
             CHECK(mover.GetAttribute(TfToken("inputs:pinPoints"))
                 .Set(VtIntArray{0, 4}));
+        }
+        if (variant >= 2) {
+            CHECK(mover.GetAttribute(TfToken("inputs:smoothing")).Set(
+                TfToken(variant == 2 ? "simple" : "lengthWeighted")));
+            CHECK(mover.GetAttribute(TfToken("inputs:frameTransport")).Set(TfToken("corner")));
+            CHECK(mover.GetAttribute(TfToken("inputs:smoothWeights")).Set(VtFloatArray(rest.size(), 0.65f)));
+            CHECK(mover.GetAttribute(TfToken("inputs:onlySmooth")).Set(variant == 3));
+            GfMatrix4d computationToTarget(1.0);
+            computationToTarget.SetScale(GfVec3d(1.3, 0.7, 2.0));
+            CHECK(mover.GetAttribute(TfToken("inputs:computationToTarget")).Set(computationToTarget));
+            const UsdPrim frame = stage->DefinePrim(SdfPath("/Rig/ComputationFrame"), TfToken("RigExecControl"));
+            CHECK(frame.GetAttribute(TfToken("avars:rz")).Set(15.0, UsdTimeCode(1)));
+            CHECK(frame.GetAttribute(TfToken("avars:rz")).Set(40.0, UsdTimeCode(3)));
+            CHECK(mover.GetRelationship(TfToken("rigExec:frame")).SetTargets({frame.GetPath()}));
+            CHECK(mover.GetRelationship(TfToken("rigExec:frame")).SetMetadata(TfToken("rigExecReadPhase"), TfToken("final")));
         }
         RigExecRigEvaluator evaluator(stage, rig);
         CHECK(evaluator.Compile());
@@ -5554,6 +5570,149 @@ TestSurfaceDrapeWarmsBitIdentical(const std::string &examplesDir)
         examplesDir + "/07_SurfaceDrape.usda", {1001.0},
         {1012.0, 1024.0, 1036.0, 1048.0},
         SdfPath("/DrapeAsset/Geom/ProjectSticker.points"));
+}
+
+void
+TestSurfaceSnapWarmsBitIdentical()
+{
+    const auto stage = UsdStage::CreateInMemory();
+    CHECK(stage->GetRootLayer()->ImportFromString(R"USD(#usda 1.0
+ def RigExecRoot "Rig" {
+  def RigExecControl "SourceFrame" {
+   double avars:tz.timeSamples = {1: 0.1, 2: 0.3, 3: 0.45}
+  }
+  def RigExecControl "TargetFrame" {}
+  def Mesh "Surface" {
+   point3f[] points = [(0,0,0),(1,0,0),(0,1,0)]
+   int[] faceVertexCounts = [3]
+   int[] faceVertexIndices = [0,1,2]
+  }
+  def Points "Target" {
+   point3f[] points = [(0.2,0.3,0.5)]
+  }
+  def Scope "Movers" {
+   def RigExecMatrixMover "MoveSurface" (prepend apiSchemas = ["RigExecMoverAPI"]) {
+    rel rigExec:moves = </Rig/Surface.points>
+    rel rigExec:transform = </Rig/SourceFrame>
+   }
+   def RigExecSurfaceMover "Shrink" (prepend apiSchemas = ["RigExecMoverAPI"]) {
+    rel rigExec:moves = </Rig/Target.points>
+    rel rigExec:surface = </Rig/Surface> (rigExecReadPhase = "final")
+    rel rigExec:frames = [</Rig/SourceFrame>, </Rig/TargetFrame>] (rigExecReadPhase = "final")
+    token rigExec:pointSpace = "common"
+    token rigExec:snapMode = "inside"
+    float rigExec:offset.timeSamples = {1: 0.05, 2: 0.06, 3: 0.07}
+    float[] rigExec:mask = [0.5]
+    int[] rigExec:triangles = [0,1,2]
+   }
+  }
+ }
+)USD"));
+    const SdfPath root("/Rig"), target("/Rig/Target.points");
+    RigExecRigEvaluator evaluator(stage, root);
+    std::vector<std::string> errors;
+    CHECK(evaluator.Compile(&errors));
+    CHECK(errors.empty());
+    CHECK(evaluator.Evaluate(UsdTimeCode(1)).valid);
+    RigExecBackgroundScheduler scheduler;
+    const std::vector<RigExecValueOverride> noOverrides;
+    for (double time : {2.0, 3.0, 1.0}) {
+        std::shared_ptr<const RigExecFrozenProgram> frozen;
+        std::string error;
+        CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
+        if (!frozen) { std::printf("surface freeze: %s\n", error.c_str()); return; }
+        RigExecChainSampleBindings pinned;
+        CHECK(RigExecBindChainSampleInputs(evaluator, &pinned, &error));
+        RigExecBurstSampleCache cache;
+        CHECK(RigExecBuildBurstSampleCache(*evaluator.GetBakedProgram(), pinned,
+            noOverrides, RigExecFrameCacheEpochDigest(evaluator), &cache, &error));
+        RigExecFrameInputs plain, burst;
+        CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(time), noOverrides, &plain, &error));
+        CHECK(RigExecSampleFrameInputsWithBurstCache(evaluator, UsdTimeCode(time),
+            noOverrides, &cache, &burst, &error));
+        const auto warmed = RunWarmingJob(&evaluator, root, frozen, plain, &scheduler, nullptr);
+        const auto cached = RunWarmingJob(&evaluator, root, frozen, burst, &scheduler, nullptr);
+        const auto live = evaluator.Evaluate(UsdTimeCode(time));
+        CHECK(live.valid);
+        CheckPosesBitIdentical("surface snap frozen", live, warmed);
+        CheckPosesBitIdentical("surface snap burst", live, cached);
+        const auto found = live.movedProperties.find(target);
+        CHECK(found != live.movedProperties.end());
+        if (found != live.movedProperties.end()) {
+            const auto points = found->second.Get<VtVec3fArray>();
+            const float z = time == 1 ? .275f : time == 2 ? .37f : .44f;
+            CHECK(points.size() == 1 && std::abs(points[0][2] - z) < 1e-6f);
+        }
+    }
+}
+
+void
+TestRegularLatticeWarmsBitIdentical()
+{
+    const auto stage = UsdStage::CreateInMemory();
+    CHECK(stage->GetRootLayer()->ImportFromString(R"USD(#usda 1.0
+ def RigExecRoot "Rig" {
+  def RigExecControl "CageFrame" {
+   double avars:tz.timeSamples = {1: 0.1, 2: 0.3, 3: 0.45}
+   double avars:rz.timeSamples = {1: 0, 2: 20, 3: 40}
+  }
+  def RigExecControl "TargetFrame" {}
+  def Points "Cage" {
+   point3f[] points = [(-0.5,-0.5,0),(0.5,-0.5,0),(-0.5,0.5,0),(0.5,0.5,0.2)]
+  }
+  def Points "Target" {
+   point3f[] points = [(0.2,0.3,0.5),(-0.9,0.1,0)]
+  }
+  def Scope "Movers" {
+   def RigExecMatrixMover "MoveCage" (prepend apiSchemas = ["RigExecMoverAPI"]) {
+    rel rigExec:moves = </Rig/Cage.points>
+    rel rigExec:transform = </Rig/CageFrame>
+   }
+   def RigExecLatticeMover "Lattice" (prepend apiSchemas = ["RigExecMoverAPI"]) {
+    rel rigExec:moves = </Rig/Target.points>
+    rel rigExec:cage = </Rig/Cage> (rigExecReadPhase = "final")
+    rel rigExec:frames = [</Rig/CageFrame>, </Rig/TargetFrame>] (rigExecReadPhase = "final")
+    token rigExec:evaluation = "regularGrid"
+    token rigExec:pointSpace = "common"
+    token rigExec:interpolationU = "cardinal"
+    token rigExec:interpolationV = "catmullRom"
+    int3 rigExec:divisions = (2,2,1)
+    float3 rigExec:origin = (-0.5,-0.5,0)
+    float3 rigExec:spacing = (1,1,0)
+    float rigExec:strength.timeSamples = {1: 0.5, 2: 0.8, 3: 1}
+    float[] rigExec:mask = [0.5,1]
+   }
+  }
+ }
+)USD"));
+    const SdfPath root("/Rig");
+    RigExecRigEvaluator evaluator(stage, root);
+    std::vector<std::string> errors;
+    CHECK(evaluator.Compile(&errors));
+    for (const auto &error : errors) std::printf("lattice compile: %s\n", error.c_str());
+    CHECK(evaluator.Evaluate(UsdTimeCode(1)).valid);
+    RigExecBackgroundScheduler scheduler;
+    for (double time : {2.0, 3.0, 1.0}) {
+        std::shared_ptr<const RigExecFrozenProgram> frozen;
+        std::string error;
+        CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
+        if (!frozen) { std::printf("lattice freeze: %s\n", error.c_str()); return; }
+        RigExecChainSampleBindings pinned;
+        CHECK(RigExecBindChainSampleInputs(evaluator, &pinned, &error));
+        RigExecBurstSampleCache cache;
+        CHECK(RigExecBuildBurstSampleCache(*evaluator.GetBakedProgram(), pinned,
+            {}, RigExecFrameCacheEpochDigest(evaluator), &cache, &error));
+        RigExecFrameInputs plain, burst;
+        CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(time), {}, &plain, &error));
+        CHECK(RigExecSampleFrameInputsWithBurstCache(evaluator, UsdTimeCode(time),
+            {}, &cache, &burst, &error));
+        const auto warmed = RunWarmingJob(&evaluator, root, frozen, plain, &scheduler, nullptr);
+        const auto cached = RunWarmingJob(&evaluator, root, frozen, burst, &scheduler, nullptr);
+        const auto live = evaluator.Evaluate(UsdTimeCode(time));
+        CHECK(live.valid);
+        CheckPosesBitIdentical("regular lattice frozen", live, warmed);
+        CheckPosesBitIdentical("regular lattice burst", live, cached);
+    }
 }
 
 // The ribbon spine (examples/05_TwistRibbonSpine.usda) warms
@@ -8382,6 +8541,8 @@ main(int argc, char **argv)
     Test9MeshWarmsBitIdentical();
     TestIterativeMoversWarmBitIdentical();
     TestFrozenWholeRunSkippingVolumePlacementsPublishesLive();
+    TestSurfaceSnapWarmsBitIdentical();
+    TestRegularLatticeWarmsBitIdentical();
     Test9MeshWarmsBitIdenticalAtSweepDistance();
     TestProductionRunnerDeclinesWithoutProof();
     TestFrozenRunIsBitIdentical();

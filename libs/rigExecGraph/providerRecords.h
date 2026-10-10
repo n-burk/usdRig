@@ -9,7 +9,9 @@
 namespace rigExec {
 enum class RigExecProviderOpKind {
     Attribute, SpaceExpression, RestFrame, DefaultSpace, FrameToSpace,
-    MatrixToFrame, PosedFrame, JointMatrix, LocalXform, InterveningXform, AvarMatrix, RelativeXform
+    MatrixToFrame, PosedFrame, JointMatrix, LocalXform, InterveningXform, AvarMatrix, RelativeXform,
+    /// An affine frame expression's outputs:matrix (affineFrameKernels.h).
+    AffineFrame
 };
 struct RigExecProviderPlainOp {
     RigExecProviderOpKind kind;

@@ -229,6 +229,30 @@ void Put(std::string *out, const RigExecSkinTopology &v)
     Put(out,v.validated); Put(out,v.elementSize); Put(out,uint64_t(v.pointCount));
     Put(out,uint64_t(v.influenceCount)); Array(out,v.indices); Array(out,v.weights);
 }
+// The extended deformer settings, field by field.
+void Put(std::string *out, const RigExecDeltaMushSettings &v)
+{
+    Put(out,v.smoothing); Put(out,v.frameTransport); Array(out,v.smoothWeights);
+    Array(out,v.edges); Put(out,v.onlySmooth);
+}
+void Put(std::string *out, const RigExecSurfaceSnapSettings &v)
+{
+    Put(out,v.mode); Put(out,v.offset); Array(out,v.mask); Array(out,v.triangles);
+}
+void Put(std::string *out, const RigExecLatticeSettings &v)
+{
+    Put(out,v.regularGrid);
+    for (int i=0;i<3;++i) { Put(out,v.interpolation[size_t(i)]); Put(out,v.origin[size_t(i)]); Put(out,v.spacing[size_t(i)]); }
+    Put(out,v.strength); Array(out,v.mask);
+}
+// The extended deformer fields of the packet.
+void PutExtendedSettings(std::string *out, const RigExecMoverParameters &v)
+{
+    Put(out,v.mushSettings); Put(out,v.mushComputationToTarget);
+    Put(out,v.surfaceSettings); Put(out,v.targetToSurface); Put(out,v.surfaceToTarget);
+    Put(out,v.surfaceToMetric); Put(out,v.latticeSettings); Put(out,v.targetToLattice);
+    Put(out,v.latticeToTarget); Put(out,v.cageToLattice);
+}
 void Put(std::string *out, const RigExecMoverParameters &v)
 {
     Put(out,v.kind); Put(out,v.enabled); Put(out,v.valid); Put(out,v.transform);
@@ -236,6 +260,7 @@ void Put(std::string *out, const RigExecMoverParameters &v)
     Put(out,v.blendSurfaceFrame); Put(out,v.referenceVolume); Put(out,v.strength);
     Put(out,v.mushIterations); Put(out,v.mushStep); Put(out,v.mushPinBorders);
     Put(out,v.mushDistanceWeight); Put(out,v.mushDisplacement); Put(out,v.wrinkleSettings);
+    PutExtendedSettings(out,v);
     Array(out,v.topologyCounts); Array(out,v.topologyIndices); Array(out,v.auxPoints);
     Array(out,v.auxPointsB); Array(out,v.restPoints); Put(out,v.divisions);
     Array(out,v.bindCoords); Put(out,v.frames); Array(out,v.wireBindCoords);
@@ -362,6 +387,7 @@ void PutPacket(std::string *out, const RigExecBakedProgramImpl::GeomRevision &r)
     Put(out,v.blendSurfaceFrame); Put(out,v.referenceVolume); Put(out,v.strength);
     Put(out,v.mushIterations); Put(out,v.mushStep); Put(out,v.mushPinBorders);
     Put(out,v.mushDistanceWeight); Put(out,v.mushDisplacement); Put(out,v.wrinkleSettings);
+    PutExtendedSettings(out,v);
     Array(out,v.topologyCounts); Array(out,v.topologyIndices); Array(out,v.auxPoints);
     Array(out,v.auxPointsB);
     if(r.restBaseHeld) { Put(out,uint8_t(1)); Put(out,r.restBaseVersion); }

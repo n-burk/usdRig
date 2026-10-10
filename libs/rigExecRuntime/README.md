@@ -28,6 +28,16 @@ playback does not depend on frame history. Wrinkle uses revision opcode 15;
 earlier readers reject files containing that opcode. Existing revision ordinals
 and binary records retain their meaning.
 
+Delta Mush, lattice and surface revisions also read the settings format 21
+adds, through their movers' path reads and leaf sites like every other mover
+input: smoothing and frame transport, smoothing weights, explicit edges,
+smoothing-only output and a computation space; regular-grid lattices with
+their interpolation, origin, spacing, strength, mask and cage and target
+spaces; surface snap modes, offset, mask, explicit triangles and surface and
+target spaces. Their frame providers are the revision's influences. Default
+settings run the legacy kernels; a format-20 file holds none of them and
+plays the legacy deformers.
+
 Plugin movers use revision opcode 16 and the file's `external_movers` table. The
 runtime stores their bytes and calls the kernel a host installs with
 `SetExternalKernel` (see `rigExecBinary/external.h` and

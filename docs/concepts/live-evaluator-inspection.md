@@ -1,4 +1,8 @@
-# Live evaluator inspection
+---
+title: Live evaluator inspection
+summary: Attach the optional rigExec_viz tool to usdview and read a session's operation graph and per-operation thread timings.
+order: 60
+---
 
 The optional sibling `rigExec_viz` tool attaches to usdview's active imaging
 session. Set `RIGEXEC_VIZ_ROOT` to its package root when using the normal

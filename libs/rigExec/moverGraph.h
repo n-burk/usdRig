@@ -799,8 +799,9 @@ bool RigExecRevisionTakesSeparateBlend(RigExecRevisionOp op,
 /// RigExecRunRevisionKernel's answer over \p count entering points, from the
 /// validation the matrix, blend-shape, wire and lattice kernels run first
 /// (one definition each, shared with the kernel) and, for a wire or a
-/// lattice that blends separately, its envelope. Every other operation is
-/// Deferred once its packet passes; a skin's answer is the baked program's,
+/// lattice that blends separately, its envelope. A regular-grid lattice and
+/// every other operation is Deferred once its packet passes; a skin's
+/// answer is the baked program's,
 /// from the halves RevisionStatic and the fold hold. \p envelopeResolves,
 /// when given, is a wire's `p.weights.ResolvesAll(count)` already answered
 /// by a resolve of the envelope at \p count, so it is not validated a second
@@ -812,8 +813,9 @@ RigExecRevisionAcceptance RigExecRevisionKernelAcceptance(
 struct RigExecLatticeBasis;  // rigExecMath/latticeKernel.h
 
 /// Ops a revision of a range-pipelined chain may run one step per vertex
-/// group: Matrix, Wire, Lattice, and -- classified further at Build by
-/// skinning method and delta space -- Skin and BlendShape. Each is per point
+/// group: Matrix, Wire, and -- classified further at Build by lattice
+/// evaluation, skinning method and delta space -- Lattice (the Bernstein
+/// evaluation only), Skin and BlendShape. Each is per point
 /// (output point i reads entering point i, the packet and, for a skin, the
 /// influence table only).
 bool RigExecRevisionIsRangeOp(RigExecRevisionOp op);
@@ -1002,7 +1004,8 @@ void RigExecAssembleExternalPayload(const UsdPrim &moverPrim,
 
 /// Whether \p role reads topology, which is epoch state: a skin's
 /// jointIndices and elementSize, a mesh's face counts and indices, a
-/// lattice's divisions, a wire curve's order and knots. An authored edit to
+/// lattice's divisions, a wire curve's order and knots, a delta mush's
+/// explicit edges and a surface snap's explicit triangles. An authored edit to
 /// such a path rebuilds the program, so inside one program its read moves
 /// only with the time (an attribute that varies), an interactive override
 /// on one of its hops, or a rebind.

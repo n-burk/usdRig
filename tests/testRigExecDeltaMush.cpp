@@ -8,20 +8,126 @@
 #include "pxr/base/gf/rotation.h"
 #include "pxr/usd/usdGeom/mesh.h"
 #include <cmath>
+#include <algorithm>
 #include <iostream>
 #include <stdexcept>
 using namespace rigExec;
 PXR_NAMESPACE_USING_DIRECTIVE
 #define CHECK(x) do {if(!(x))throw std::runtime_error(#x);}while(false)
 #include "rigExecRuntimeDrive.h"
+#include "deltaMushReferenceFixtures.h"
 static bool Near(const std::vector<GfVec3f> &a,const std::vector<GfVec3f> &b,double e=1e-5) {
     if(a.size()!=b.size())return false;
     for(size_t i=0;i<a.size();++i)if((a[i]-b[i]).GetLength()>e)return false;
     return true;
 }
+static void CheckReferenceFixtures() {
+    for (const auto &fixture : DeltaMushReferenceFixtures()) {
+        RigExecDeltaMushSettings settings;
+        settings.smoothing = fixture.lengthWeighted ? RigExecDeltaMushSmoothing::LengthWeighted : RigExecDeltaMushSmoothing::Simple;
+        settings.frameTransport = RigExecDeltaMushFrameTransport::Corner;
+        settings.smoothWeights = fixture.weights;
+        settings.edges = fixture.edges;
+        settings.onlySmooth = fixture.onlySmooth;
+        auto actual = fixture.input;
+        CHECK(RigExecApplyDeltaMush(&actual, fixture.rest, fixture.counts, fixture.indices,
+            4, fixture.step, fixture.pin, 0, fixture.detail, settings));
+        CHECK(Near(actual, fixture.expected, 2e-6));
+        // A nonuniform affine owner map must preserve local smoothing behavior.
+        GfMatrix4d computationToTarget(1);
+        computationToTarget.SetScale(GfVec3d(1.4, 0.73, 1.15));
+        GfMatrix4d rotate(1); rotate.SetRotate(GfRotation(GfVec3d(1, 2, 3), 28));
+        computationToTarget *= rotate;
+        computationToTarget.SetTranslateOnly(GfVec3d(0.3, -0.2, 0.4));
+        auto transformedInput = fixture.input, transformedExpected = fixture.expected;
+        for (auto &p : transformedInput) p = GfVec3f(computationToTarget.Transform(GfVec3d(p)));
+        for (auto &p : transformedExpected) p = GfVec3f(computationToTarget.Transform(GfVec3d(p)));
+        actual = transformedInput;
+        CHECK(RigExecApplyDeltaMush(&actual, fixture.rest, fixture.counts, fixture.indices,
+            4, fixture.step, fixture.pin, 0, fixture.detail, settings, computationToTarget));
+        CHECK(Near(actual, transformedExpected, 3e-6));
+        auto stage = UsdStage::CreateInMemory();
+        auto rig = RigExecRigBuilder::Create(stage, SdfPath("/Rig"));
+        auto mesh = UsdGeomMesh::Define(stage, SdfPath("/Rig/Body"));
+        mesh.CreatePointsAttr().Set(VtVec3fArray(transformedInput.begin(), transformedInput.end()));
+        mesh.CreateFaceVertexCountsAttr().Set(VtIntArray(fixture.counts.begin(), fixture.counts.end()));
+        mesh.CreateFaceVertexIndicesAttr().Set(VtIntArray(fixture.indices.begin(), fixture.indices.end()));
+        auto mush = rig.NewMoverChain("deform", mesh.GetPointsAttr().GetPath()).AddDeltaMushMover("mush");
+        mush.SetRestPoints(fixture.rest); mush.SetIterations(4); mush.SetStep(fixture.step);
+        mush.SetPinBorders(fixture.pin);
+        auto prim = mush.GetPrim();
+        CHECK(prim.GetAttribute(TfToken("inputs:smoothing")).Set(TfToken(fixture.lengthWeighted ? "lengthWeighted" : "simple")));
+        CHECK(prim.GetAttribute(TfToken("inputs:frameTransport")).Set(TfToken("corner")));
+        CHECK(prim.GetAttribute(TfToken("inputs:displacement")).Set(fixture.detail));
+        CHECK(prim.GetAttribute(TfToken("inputs:smoothWeights")).Set(VtFloatArray(fixture.weights.begin(), fixture.weights.end())));
+        CHECK(prim.GetAttribute(TfToken("inputs:edges")).Set(VtIntArray(fixture.edges.begin(), fixture.edges.end())));
+        CHECK(prim.GetAttribute(TfToken("inputs:onlySmooth")).Set(fixture.onlySmooth));
+        CHECK(prim.GetAttribute(TfToken("inputs:computationToTarget")).Set(computationToTarget));
+        RigExecRigEvaluator evaluator(stage, SdfPath("/Rig"));
+        // The independent scalar reference judges every evaluation.
+        evaluator.cpuReference = true;
+        std::vector<std::string> diagnostics;
+        CHECK(evaluator.Compile(&diagnostics));
+        std::string before; stage->GetRootLayer()->ExportToString(&before);
+        auto pose = evaluator.Evaluate(UsdTimeCode(1));
+        CHECK(pose.valid); CHECK(pose.referenceMismatches == 0); CHECK(pose.referenceAgreements > 0);
+        auto value = pose.movedProperties.at(mesh.GetPointsAttr().GetPath()).Get<VtVec3fArray>();
+        CHECK(Near({value.begin(), value.end()}, transformedExpected, 3e-6));
+        RigExecBakeOpts options; options.time = 1;
+        RigExecBakeResult result; std::string error;
+        CHECK(RigExecBakeToBinary(evaluator, options, &result, &error));
+        auto reader = RigExecRuntimeReader::Open(result.bytes.data(), result.bytes.size(), &error);
+        CHECK(reader); CHECK(reader->Execute(&error));
+        bool found = false;
+        for (const auto &points : reader->GetPoints()) {
+            if (points.path != mesh.GetPointsAttr().GetPath().GetString()) continue;
+            found = true; CHECK(points.points.size() == value.size());
+            for (size_t i = 0; i < value.size(); ++i)
+                CHECK(std::memcmp(points.points[i].data(), value[i].data(), 3*sizeof(float)) == 0);
+        }
+        CHECK(found);
+        std::string after; stage->GetRootLayer()->ExportToString(&after); CHECK(before == after);
+        // Live frame folding must use the evaluated provider, including binary
+        // avar edits after an export containing only its identity pose.
+        auto owner = rig.AddControl("Owner", GfMatrix4d(1));
+        CHECK(prim.GetRelationship(TfToken("rigExec:frame")).SetTargets({owner.GetPath()}));
+        mush.SetReadPhase(TfToken("rigExec:frame"), "final");
+        CHECK(RigExecBakeToBinary(evaluator, options, &result, &error));
+        reader = RigExecRuntimeReader::Open(result.bytes.data(), result.bytes.size(), &error);
+        CHECK(reader);
+        for (double scale : {1.0, 0.74, 1.31, 1.0}) {
+            owner.SetAvarScale(1, scale, 1);
+            CHECK(reader->SetInput(owner.GetPath().AppendProperty(TfToken("avars:sy")).GetString(), scale, &error));
+            pose = evaluator.Evaluate(UsdTimeCode(1));
+            CHECK(pose.valid); CHECK(pose.referenceMismatches == 0); CHECK(pose.referenceAgreements > 0);
+            CHECK(reader->Execute(&error));
+            value = pose.movedProperties.at(mesh.GetPointsAttr().GetPath()).Get<VtVec3fArray>();
+            GfMatrix4d scaling(1); scaling.SetScale(GfVec3d(1, scale, 1));
+            actual = transformedInput;
+            CHECK(RigExecApplyDeltaMush(&actual, fixture.rest, fixture.counts, fixture.indices,
+                4, fixture.step, fixture.pin, 0, fixture.detail, settings, computationToTarget * scaling));
+            CHECK(Near({value.begin(), value.end()}, actual, 3e-6));
+            found = false;
+            for (const auto &points : reader->GetPoints()) {
+                if (points.path != mesh.GetPointsAttr().GetPath().GetString()) continue;
+                found = true; CHECK(points.points.size() == value.size());
+                for (size_t i = 0; i < value.size(); ++i)
+                    CHECK(std::memcmp(points.points[i].data(), value[i].data(), 3*sizeof(float)) == 0);
+            }
+            CHECK(found);
+        }
+        mush.SetReadPhase(TfToken("rigExec:frame"), "/Rig/Movers");
+        RigExecRigEvaluator invalidPhase(stage, SdfPath("/Rig"));
+        diagnostics.clear(); CHECK(invalidPhase.Compile(&diagnostics));
+        CHECK(std::any_of(diagnostics.begin(), diagnostics.end(), [](const std::string &d) {
+            return d.find("frame read phase must be base or final") != std::string::npos;
+        }));
+    }
+}
 int main(int argc,char **argv) {
  try {
     CHECK(argc==2);PlugRegistry::GetInstance().RegisterPlugins(argv[1]);
+    CheckReferenceFixtures();
     std::vector<GfVec3f> rest{{1,0,0},{0,1.2f,0},{-1,0,0},{0,-1,0},{0,0,1},{0,0,-1}};
     std::vector<int> counts(8,3),indices{0,1,4,1,2,4,2,3,4,3,0,4,1,0,5,2,1,5,3,2,5,0,3,5};
     auto saved=rest;CHECK(RigExecApplyDeltaMush(&saved,rest,counts,indices));CHECK(Near(saved,rest));

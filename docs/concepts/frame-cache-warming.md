@@ -33,10 +33,14 @@ re-evaluation.
   result is recoverable, a plausible wrong one is not. A new edit cancels
   in-flight warming for that rig, and stale results are dropped, never
   published.
-- **Background workers handle supported frozen programs.** Other operations
-  fill one missing frame per idle tick through the live evaluator. This
-  fallback costs one evaluation on the UI thread, pauses during edits and
-  playback, and does not change the displayed frame.
+- **Background workers run frozen programs.** Every operation, including
+  affine frame providers and external movers, warms from captured inputs on
+  the workers; no worker opens or evaluates a stage. A rig whose inputs
+  cannot all be frozen still caches each frame you visit, and once the
+  workers drain the idle tick fills at most one missing frame of the
+  requested range through the same compiled graph on the owning thread.
+  That fill pauses during edits, drags and playback, and does not change
+  the displayed frame.
 - **Never serves the playhead from the pool.** A miss at the requested frame
   evaluates live on the calling thread and is never slower than with the
   cache off.
@@ -74,8 +78,9 @@ reason. It does not select a different evaluator.
 ## Limits worth knowing
 
 - **Incomplete frozen inputs** prevent worker-thread warming; the host can
-  still evaluate a valid scene program on its owning thread. Compilation
-  failures remain invalid poses with diagnostics.
+  still evaluate a valid scene program on its owning thread. An owning-thread
+  fill that fails is retried only after a stage edit, a new range request or
+  a cache clear. Compilation failures remain invalid poses with diagnostics.
 - **`.rigexec` playback sessions** are unchanged and never consult the
   frame cache.
 - The cache is **in memory only** — there is no on-disk persistence, so
@@ -85,6 +90,11 @@ reason. It does not select a different evaluator.
 
 See [architecture](../specs/spec.md), `libs/rigExec/frameCache.cpp`, and
 `libs/rigExec/backgroundScheduler.cpp` for cache ownership and scheduling.
+The owning thread samples a job's inputs before dispatch; the job runs on a
+worker-owned arena and publishes only while its generation and time fence are
+current. Value edits retire the affected times, structural edits retire every
+time, and stage replacement or deactivation cancels the rig's outstanding
+work.
 
 ## Verification
 

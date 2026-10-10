@@ -39,7 +39,16 @@ template<class Point,class Wide> class RigExecSurfaceKernelCache {
     };
     struct Transport : MeshKey { RigExecTransportRestData<Point,Wide> value; };
     struct Mush : MeshKey { int iterations=0; double step=0,distance=0; bool pin=false;
+        RigExecDeltaMushSettings settings;
         RigExecDeltaMushRestData<Point,Wide> value; };
+    // The smoothing settings by value, the influence weights by their bits.
+    static bool SameSettings(const RigExecDeltaMushSettings &a,const RigExecDeltaMushSettings &b) {
+        return a.smoothing==b.smoothing && a.frameTransport==b.frameTransport &&
+            a.onlySmooth==b.onlySmooth && a.edges==b.edges &&
+            a.smoothWeights.size()==b.smoothWeights.size() &&
+            (a.smoothWeights.empty() || !std::memcmp(a.smoothWeights.data(),b.smoothWeights.data(),
+                a.smoothWeights.size()*sizeof(float)));
+    }
     std::shared_ptr<const Mush> mush;
     struct Wrinkle { size_t points=0; std::vector<int> counts,indices;
         RigExecWrinkleTopology mode; int distance=0; RigExecWrinkleMesh value; };
@@ -87,14 +96,17 @@ public:
     }
     const RigExecDeltaMushRestData<Point,Wide> *MushRest(
         const std::vector<Point> &p,const std::vector<int> &c,const std::vector<int> &i,
-        int iterations,double step,bool pin,double distance) {
+        int iterations,double step,bool pin,double distance,
+        const RigExecDeltaMushSettings &settings=RigExecDeltaMushSettings()) {
         if(mush && mush->Matches(p,c,i) && mush->iterations==iterations && mush->pin==pin &&
             !std::memcmp(&mush->step,&step,sizeof(step)) &&
-            !std::memcmp(&mush->distance,&distance,sizeof(distance))) return &mush->value;
+            !std::memcmp(&mush->distance,&distance,sizeof(distance)) &&
+            SameSettings(mush->settings,settings)) return &mush->value;
         auto entry=std::make_shared<Mush>();
-        if(!RigExecBuildDeltaMushRestData<Point,Wide>(p,c,i,iterations,step,pin,distance,&entry->value)) return nullptr;
+        if(!RigExecBuildDeltaMushRestData<Point,Wide>(p,c,i,iterations,step,pin,distance,settings,&entry->value)) return nullptr;
         entry->points=p; entry->counts=c; entry->indices=i;
         entry->iterations=iterations; entry->step=step; entry->pin=pin; entry->distance=distance;
+        entry->settings=settings;
         mush=entry; return &mush->value;
     }
     const RigExecWrinkleMesh *WrinkleTopology(size_t points,
