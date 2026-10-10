@@ -133,7 +133,7 @@ _Float(float f)
 }
 
 fb::RigExecWireValue
-_Bool(bool b)
+_BoolValue(bool b)
 {
     fb::RigExecWireValue value = _Zero(InputTag::Bool);
     value.bits = b ? 1 : 0;
@@ -487,7 +487,7 @@ struct RigExecBakeComputedCapture::_State {
     /// A registered input's constant, tagged with the input's type.
     fb::RigExecWireValue Value(float v) { return _Float(v); }
     fb::RigExecWireValue Value(double v) { return _Double(v); }
-    fb::RigExecWireValue Value(bool v) { return _Bool(v); }
+    fb::RigExecWireValue Value(bool v) { return _BoolValue(v); }
     fb::RigExecWireValue Value(int v)
     {
         fb::RigExecWireValue value = _Zero(InputTag::Int);
@@ -1114,7 +1114,7 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
             revision.mover = interner->Path(r.mover);
             revision.op = _PropertyOp(r.opValid, r.op);
             const bool matrix = desc.valueType == ValueType::Matrix4d;
-            if (!S.Property(r.enabled, _Bool(true), revision.enabled.get(),
+            if (!S.Property(r.enabled, _BoolValue(true), revision.enabled.get(),
                             &why) ||
                 !S.Property(r.defaultWeight, _Float(1.0f),
                             revision.defaultWeight.get(), &why) ||
@@ -1436,7 +1436,7 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
                 if (op != RigExecRevisionOp::RecomputeNormals &&
                     op != RigExecRevisionOp::RecomputeExtent &&
                     !RigExecIsDerivedMatrixOp(op) &&
-                    !pathRead(attr("inputs:enabled"), _Bool(true), false)) {
+                    !pathRead(attr("inputs:enabled"), _BoolValue(true), false)) {
                     return false;
                 }
                 if (op == RigExecRevisionOp::Skin &&
@@ -1467,7 +1467,7 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
                     return S.Value(TfToken(text));
                 };
                 if (op == RigExecRevisionOp::DeltaMush &&
-                    (!pathRead(attr("inputs:onlySmooth"), _Bool(false),
+                    (!pathRead(attr("inputs:onlySmooth"), _BoolValue(false),
                                false) ||
                      !pathRead(attr("inputs:computationToTarget"),
                                _Identity(), false))) {
