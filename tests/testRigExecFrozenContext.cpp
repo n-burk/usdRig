@@ -3923,7 +3923,7 @@ TestABurstRereadsAConnectedAnimatedWeight(const std::string &examplesDir)
     };
     const float driven[] = {0.0f, 0.5f, 1.0f};
     for (int frame = 1; frame <= 3; ++frame) {
-        const UsdTimeCode time(double(frame));
+        const UsdTimeCode time{double(frame)};
         RigExecFrameInputs plain, burst;
         CHECK(RigExecSampleFrameInputsWithChainBindings(
             evaluator, time, {}, bindings, &plain, &error));
