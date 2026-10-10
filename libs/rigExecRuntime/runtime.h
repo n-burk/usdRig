@@ -9,10 +9,11 @@
 // bit-identical to the baked path with those values authored. rigExecPose
 // --verify-binary gates every family on dynamic==baked==binary over the
 // shipped examples.
-// Threading (D2): Execute is serial over clusters; the consumer may run
-// clusters in parallel when the cluster DAG allows (the OpenUSD side
-// keeps its dispatcher, Godot uses WorkerThreadPool). The reader holds
-// no locks: one reader per thread, or external synchronization.
+// Threading (D2): Execute is serial over clusters unless the consumer
+// hands it a dispatcher (SetTaskDispatch), which then runs the clusters the
+// DAG allows in parallel (the OpenUSD side passes a WorkDispatcher, Godot
+// its WorkerThreadPool). The reader holds no locks: one reader per thread,
+// or external synchronization.
 #ifndef RIGEXEC_RUNTIME_H
 #define RIGEXEC_RUNTIME_H
 
@@ -22,6 +23,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -216,6 +218,16 @@ public:
     // Replays the cluster DAG over the inputs. False naming the first
     // failing step; outputs keep their previous values.
     bool Execute(std::string *error);
+    /// Runs Execute's ready clusters through \p dispatch and joins with
+    /// \p wait -- RigExecOpCallbacks' shape; both or neither, empty restores
+    /// serial. A successful run's results, diagnostics and counts are
+    /// bit-identical to serial; the run trace lists the same steps in
+    /// completion order. A failing run reports the failure of the op first
+    /// in canonical order. Execute returns only after \p wait does. The
+    /// reader still takes no lock; the caller owns the pool. Ignored for a
+    /// program whose Open found state that is not per op (serial then).
+    void SetTaskDispatch(std::function<void(std::function<void()>)> dispatch,
+                         std::function<void()> wait);
 
     // Plugin movers: a file may hold movers an external library registered.
     // Playback runs each through the kernel the host installs for its type
@@ -245,6 +257,9 @@ public:
     // Test-only: how many clusters the last Execute's closure ran; the
     // source steps run outside it.
     size_t GetClosedClusterCountForTesting() const;
+    // Test-only: whether Open let Execute use a dispatcher
+    // (RrProgram::parallelSafe).
+    bool GetParallelSafeForTesting() const;
 
     // Test-only: how many leaves keyed from input slots alone (provider
     // leaves, constraint input arrays) the last Execute re-keyed; a run
@@ -287,9 +302,10 @@ public:
     // first Execute; ordinary selection remains independent of test masks.
     bool GetStepRanForTesting(size_t step) const;
 
-    // Test-only: the steps the last Execute ran, by index, in the order it
-    // ran them: the source steps, then the closure's. A step a test mask
-    // skips is not listed; empty before the first Execute.
+    // Test-only: the steps the last Execute ran, by index, in completion
+    // order (a serial run's body order): the source steps, then the
+    // closure's. A step a test mask skips is not listed; empty before the
+    // first Execute.
     std::vector<int32_t> GetLastRunTraceForTesting() const;
 
     // Test-only: the geometry prologue alone, which samples the inputs as

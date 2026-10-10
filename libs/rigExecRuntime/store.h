@@ -23,6 +23,7 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <string>
@@ -267,7 +268,6 @@ struct RrStore {
     std::vector<RrMat4d> posedM, finalMatrix, baseMatrix;
     std::vector<RrPointFrameArray> aggregates;
     std::vector<RrLadderLive> ladders;
-    std::vector<int> ladderMovedSlots;
     std::vector<std::vector<RrPointFrame>> solverOutFrames;
     std::vector<std::vector<char>> solverOutPresent;
     // Per solver, the ribbon driver points the solve samples: the points
@@ -370,9 +370,19 @@ struct RrStore {
     std::vector<char> jointMatrixPublished;
     std::vector<RrStepOutput> stepOutputs;
     std::vector<uint64_t> closedWords, closedSteps;
-    // The steps the last Execute ran, by index, in the order it ran them.
-    // Reserved at Open to the step count.
+    // The steps the last Execute ran, by index, in completion order (a
+    // serial run's body order). Rebuilt after the join; reserved at Open
+    // to the step count.
     std::vector<int32_t> runTrace;
+    // RigExecRuntimeReader::SetTaskDispatch: both set, Execute hands ready
+    // clusters to dispatch and joins with wait; both empty, it runs serially.
+    std::function<void(std::function<void()>)> dispatch;
+    std::function<void()> wait;
+    // Per op (canonical index), sized at compile: the failure its body
+    // reported this run. Written only by that op's body; read and cleared
+    // on the owner thread after the join.
+    std::vector<std::string> opErrors;
+    std::vector<char> opFailed;
     bool everRan = false;
     // An Animated input was set, or the caller said time moved
     // (RigExecRuntimeReader::TouchAnimatedInputs): the next closure dirties
@@ -597,6 +607,11 @@ struct RrProgram {
     /// RIGEXEC_VERIFY_SOURCE_KEYS, read at Open: every run rebuilds the
     /// source memos it keeps and fails if one moved.
     bool verifySourceKeys = false;
+    /// Whether Execute may hand clusters to RrStore::dispatch. Open clears
+    /// it when a body would write state another op's body can touch at the
+    /// same time (RrGeometrySizeScratch names the case); Execute then runs
+    /// serially whatever the dispatcher.
+    bool parallelSafe = true;
 
     /// One plugin revision's playback state, in external_movers order. No
     /// prepared state means no kernel here: the revision passes through.

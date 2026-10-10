@@ -355,6 +355,29 @@ RigExecRuntimeReader::GetClosedClusterCountForTesting() const
     return _program->store.lastClosedClusters;
 }
 
+bool
+RigExecRuntimeReader::GetParallelSafeForTesting() const
+{
+    return _program->parallelSafe;
+}
+
+void
+RigExecRuntimeReader::SetTaskDispatch(
+    std::function<void(std::function<void()>)> dispatch,
+    std::function<void()> wait)
+{
+    RrStore &store = _program->store;
+    // Both or neither: a dispatch without its join could return from
+    // Execute before the bodies finished.
+    if (!dispatch || !wait) {
+        store.dispatch = nullptr;
+        store.wait = nullptr;
+        return;
+    }
+    store.dispatch = std::move(dispatch);
+    store.wait = std::move(wait);
+}
+
 size_t
 RigExecRuntimeReader::GetSlotLeafKeysForTesting() const
 {

@@ -159,6 +159,9 @@ private:
     RigExecInputSampler _sampler;
     std::string _assetPath;
     uint64_t _epochDigest = 0;
+    // RIGEXEC_RUNTIME_DISPATCH under the parallel schedule, read at Open:
+    // Execute runs the reader's clusters through a WorkDispatcher.
+    bool _dispatchExecute = false;
     SdfPath _weightOverlay;
     uint64_t _generation = 0;
     uint64_t _publishedEpochDigest = 0;

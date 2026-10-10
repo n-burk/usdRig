@@ -24,6 +24,8 @@
 #include "pxr/base/plug/registry.h"
 #include "pxr/base/tf/getenv.h"
 #include "pxr/base/tf/setenv.h"
+#include "pxr/base/work/dispatcher.h"
+#include "pxr/base/work/withScopedParallelism.h"
 #include "pxr/usd/sdf/layer.h"
 #include "pxr/usd/sdf/types.h"
 #include "pxr/usd/usd/primRange.h"
@@ -32,6 +34,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -4713,6 +4716,226 @@ static void TestRetainedResultOwnership()
     CHECK(weights.Read()[0]==0.75f);
 }
 
+// A reader and the input sampler bound to it. Bind's warnings are the
+// same for every reader of one file, so they are not failures here.
+struct _DispatchPlayer {
+    std::unique_ptr<RigExecRuntimeReader> reader;
+    RigExecInputSampler sampler;
+    bool Open(const std::vector<uint8_t> &bytes, const UsdStageRefPtr &stage,
+              std::string *error)
+    {
+        reader = RigExecRuntimeReader::Open(bytes.data(), bytes.size(), error);
+        return reader && sampler.Bind(stage, *reader, error);
+    }
+    bool Play(double time, std::string *error)
+    {
+        return RigExecTestDrive(reader.get(), &sampler, time, error);
+    }
+};
+
+// Plays \p player at \p frame with Execute's clusters on a WorkDispatcher
+// in its own arena, as imaging playback does; the reader forgets the
+// dispatcher after. \p tasks counts the clusters dispatched.
+static bool
+_PlayDispatched(_DispatchPlayer *player, double frame,
+                std::atomic<size_t> *tasks, std::string *error)
+{
+    bool played = false;
+    WorkWithScopedParallelism([&] {
+        WorkDispatcher dispatcher;
+        player->reader->SetTaskDispatch(
+            [&dispatcher, tasks](std::function<void()> task) {
+                tasks->fetch_add(1, std::memory_order_relaxed);
+                dispatcher.Run(std::move(task));
+            },
+            [&dispatcher] { dispatcher.Wait(); });
+        played = player->Play(frame, error);
+        player->reader->SetTaskDispatch(nullptr, nullptr);
+    });
+    return played;
+}
+
+// Whether \p got's last run published \p want's points, joint matrices,
+// diagnostics, executed-op count and closed-cluster count, bit for bit,
+// and ran the same steps (the traces as sets); prints the first
+// difference under \p what.
+static bool
+_SameRun(const std::string &what, const RigExecRuntimeReader &want,
+         const RigExecRuntimeReader &got)
+{
+    const auto &wantPoints = want.GetPoints();
+    const auto &gotPoints = got.GetPoints();
+    bool same = wantPoints.size() == gotPoints.size();
+    for (size_t k = 0; same && k < wantPoints.size(); ++k) {
+        const std::vector<RrVec3f> &a = wantPoints[k].points;
+        const std::vector<RrVec3f> &b = gotPoints[k].points;
+        same = wantPoints[k].path == gotPoints[k].path &&
+               a.size() == b.size() &&
+               (a.empty() ||
+                std::memcmp(a.data(), b.data(), a.size() * sizeof(RrVec3f)) == 0);
+    }
+    if (!same) {
+        std::printf("%s: points differ\n", what.c_str());
+        return false;
+    }
+    const auto &wantJoints = want.GetJointMatrices();
+    const auto &gotJoints = got.GetJointMatrices();
+    same = wantJoints.size() == gotJoints.size();
+    for (size_t k = 0; same && k < wantJoints.size(); ++k) {
+        same = wantJoints[k].path == gotJoints[k].path &&
+               std::memcmp(&wantJoints[k].matrix, &gotJoints[k].matrix,
+                           sizeof(RrMat4d)) == 0;
+    }
+    if (!same) {
+        std::printf("%s: joint matrices differ\n", what.c_str());
+        return false;
+    }
+    if (want.GetDiagnostics() != got.GetDiagnostics()) {
+        std::printf("%s: diagnostics differ (%zu vs %zu)\n", what.c_str(),
+                    want.GetDiagnostics().size(), got.GetDiagnostics().size());
+        return false;
+    }
+    if (want.GetCounters().executedOpCount != got.GetCounters().executedOpCount ||
+        want.GetClosedClusterCountForTesting() !=
+            got.GetClosedClusterCountForTesting()) {
+        std::printf("%s: counts differ (ops %zu vs %zu, clusters %zu vs "
+                    "%zu)\n", what.c_str(),
+                    size_t(want.GetCounters().executedOpCount),
+                    size_t(got.GetCounters().executedOpCount),
+                    want.GetClosedClusterCountForTesting(),
+                    got.GetClosedClusterCountForTesting());
+        return false;
+    }
+    std::vector<int32_t> wantTrace = want.GetLastRunTraceForTesting();
+    std::vector<int32_t> gotTrace = got.GetLastRunTraceForTesting();
+    std::sort(wantTrace.begin(), wantTrace.end());
+    std::sort(gotTrace.begin(), gotTrace.end());
+    if (wantTrace != gotTrace) {
+        std::printf("%s: the run traces list different steps\n",
+                    what.c_str());
+        return false;
+    }
+    return true;
+}
+
+// SetTaskDispatch: a reader whose Execute hands its clusters to a
+// WorkDispatcher publishes what a serial reader of the same file does on
+// every frame, and runs the same steps; a reader given a dispatcher and
+// then none runs serially again, its trace element for element a plain
+// reader's; one repetition runs with the executor's reset judge on at Open.
+static void
+TestDispatchedExecuteMatchesSerial(const std::string &examplesDir)
+{
+    struct Case {
+        const char *stage;
+        std::vector<double> frames;
+        int repetitions;
+    };
+    const std::vector<Case> cases = {
+        // The two small stages' keys start at 1001.
+        {"06_LatticeBulge.usda", {1001, 1012, 1024, 1012, 1001}, 20},
+        {"04_BlendShapeFace.usda", {1001, 1016, 1024, 1016, 1001}, 20},
+        {"2d/bust_dd_b/bust_dd_b_anim.usda", {20, 50, 20}, 10},
+        {"biped/Biped_anim.usda", {1, 2, 1}, 10},
+    };
+    for (const Case &entry : cases) {
+        const std::string name = std::string("dispatch ") + entry.stage;
+        const UsdStageRefPtr stage =
+            UsdStage::Open(examplesDir + "/" + entry.stage);
+        CHECK(stage);
+        if (!stage) {
+            continue;
+        }
+        const SdfPath rigPath = _FindRig(stage);
+        CHECK(!rigPath.IsEmpty());
+        if (rigPath.IsEmpty()) {
+            continue;
+        }
+        std::vector<uint8_t> bytes;
+        std::string error;
+        {
+            RigExecRigEvaluator baker(stage, rigPath);
+            if (!RigExecTestBakeAt(baker, entry.frames.front(), &bytes,
+                                   &error)) {
+                std::printf("%s: FAILED (bake: %s)\n", name.c_str(),
+                            error.c_str());
+                CHECK(false);
+                continue;
+            }
+        }
+        _DispatchPlayer plain, cleared, dispatched, judged;
+        bool opened = plain.Open(bytes, stage, &error) &&
+                      cleared.Open(bytes, stage, &error) &&
+                      dispatched.Open(bytes, stage, &error);
+        {
+            _ScopedEnv judge("RIGEXEC_VERIFY_EXECUTION_RESET", "1");
+            opened = opened && judged.Open(bytes, stage, &error);
+        }
+        if (!opened) {
+            std::printf("%s: FAILED (open: %s)\n", name.c_str(),
+                        error.c_str());
+            CHECK(false);
+            continue;
+        }
+        // Given a dispatcher, then none: serial before its first run.
+        cleared.reader->SetTaskDispatch(
+            [](std::function<void()> task) { task(); }, [] {});
+        cleared.reader->SetTaskDispatch(nullptr, nullptr);
+        const bool parallelSafe =
+            dispatched.reader->GetParallelSafeForTesting();
+        std::printf("%s: parallelSafe %d\n", name.c_str(),
+                    int(parallelSafe));
+        std::atomic<size_t> tasks{0}, judgedTasks{0};
+        bool ok = true;
+        for (int rep = 0; ok && rep < entry.repetitions; ++rep) {
+            for (const double frame : entry.frames) {
+                const bool played =
+                    plain.Play(frame, &error) && cleared.Play(frame, &error) &&
+                    _PlayDispatched(&dispatched, frame, &tasks, &error) &&
+                    (rep > 0 ||
+                     _PlayDispatched(&judged, frame, &judgedTasks, &error));
+                if (!played) {
+                    std::printf("%s frame %.17g repetition %d: FAILED (%s)\n",
+                                name.c_str(), frame, rep, error.c_str());
+                    CHECK(false);
+                    ok = false;
+                    break;
+                }
+                const std::string at = name + " frame " +
+                                       std::to_string(frame) + " repetition " +
+                                       std::to_string(rep);
+                if (!_SameRun(at + " (dispatched)", *plain.reader,
+                              *dispatched.reader) ||
+                    !_SameRun(at + " (cleared)", *plain.reader,
+                              *cleared.reader) ||
+                    (rep == 0 && !_SameRun(at + " (reset judge)",
+                                           *plain.reader, *judged.reader))) {
+                    CHECK(false);
+                    ok = false;
+                    break;
+                }
+                // Serial is serial: the same order, not only the same steps.
+                if (plain.reader->GetLastRunTraceForTesting() !=
+                    cleared.reader->GetLastRunTraceForTesting()) {
+                    std::printf("%s: a serial trace changed order\n",
+                                at.c_str());
+                    CHECK(false);
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        // The hook reached the executor exactly when Open allowed it.
+        CHECK(parallelSafe ? tasks.load() > 0 : tasks.load() == 0);
+        CHECK(parallelSafe ? judgedTasks.load() > 0 : judgedTasks.load() == 0);
+        if (ok) {
+            std::printf("%s: %d repetition(s) of %zu frame(s) matched serial "
+                        "(%zu cluster(s) dispatched)\n", name.c_str(),
+                        entry.repetitions, entry.frames.size(), tasks.load());
+        }
+    }
+}
+
 int
 main(int argc, char **argv)
 {
@@ -4778,6 +5001,7 @@ main(int argc, char **argv)
     TestRetainedResultOwnership();
     TestRepaintedChunkLayoutRunsWhole();
     TestLayoutSetOnChunkedRevision();
+    TestDispatchedExecuteMatchesSerial(examplesDir);
     // Last: it moves RIGEXEC_ENABLE_SIMD, which the evaluator reads once.
     TestSimdSettingPerReader();
 

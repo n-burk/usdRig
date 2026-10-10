@@ -6,6 +6,7 @@
 #include "spaces.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <map>
@@ -30,6 +31,27 @@ _RrIsGeometryKind(RigExecWireStepKind kind)
     default:
         return false;
     }
+}
+
+// A boolean environment knob as Open reads its others (RrGeoGetenvBool):
+// unset, empty or unrecognised text is \p fallback.
+bool
+_RrGetenvBool(const char *name, bool fallback)
+{
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable : 4996)
+#endif
+    const char *value = std::getenv(name);
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
+    if (!value || !*value) return fallback;
+    std::string lower(value);
+    for (char &c : lower) if (c >= 'A' && c <= 'Z') c = char(c - 'A' + 'a');
+    if (lower == "0" || lower == "false" || lower == "no" || lower == "off") return false;
+    if (lower == "1" || lower == "true" || lower == "yes" || lower == "on") return true;
+    return fallback;
 }
 
 bool
@@ -747,6 +769,12 @@ bool RrCompileOpGraph(RrProgram *p,std::string *error)
     _RrIndexSlotLeaves(p);
     RrIndexEpilogue(p);
     _RrIndexSourceSlots(p);
+    // Each op's own failure slot, so a dispatched body never writes the
+    // caller's error.
+    p->store.opErrors.assign(p->opGraph.ops.size(),std::string());
+    p->store.opFailed.assign(p->opGraph.ops.size(),0);
+    // RIGEXEC_VERIFY_EXECUTION_RESET, read at compile (Open for a file).
+    p->store.opWorkspace.verifyReset=_RrGetenvBool("RIGEXEC_VERIFY_EXECUTION_RESET",false);
     return true;
 }
 
@@ -948,15 +976,24 @@ bool RrExecuteOpGraph(RrProgram *p,bool force,std::string *error)
         const bool changed=!exact || input!=scratch; input.swap(scratch);
         return changed;
     };
-    // The runtime executor is serial (no dispatch), so bodies run in
-    // completion order and a cluster's ran ops are consecutive.
-    s.runTrace.clear();
-    size_t closedClusters=0; uint32_t lastCluster=UINT32_MAX;
+    // Bodies may run on workers (SetTaskDispatch): each writes only its own
+    // op's outputs, published values and failure slot. The trace, the
+    // cluster count, the error and the version checks are the owner's,
+    // after the join, on one path for serial and parallel.
+    if(s.opFailed.size()!=p->opGraph.ops.size()) {
+        s.opErrors.assign(p->opGraph.ops.size(),std::string());
+        s.opFailed.assign(p->opGraph.ops.size(),0);
+    }
+    // What the caller's error held: a body starts from it, as it did when
+    // every body wrote the caller's one string.
+    const std::string callerError=error?*error:std::string();
     callbacks.run=[&](uint32_t c){
         const auto i=p->opGraph.ops[c].originalIndex;
-        s.runTrace.push_back(int32_t(i));
-        if(p->opGraph.opClusters[c]!=lastCluster) { lastCluster=p->opGraph.opClusters[c]; ++closedClusters; }
-        if(!RrRunOpBody(p,i,error)) return false;
+        auto &bodyError=s.opErrors[c];
+        bodyError=callerError;
+        const bool ran=RrRunOpBody(p,i,&bodyError);
+        s.opFailed[c]=ran?0:1;
+        if(!ran) return false;
         // ChainDirty's key is its revision's RevisionDone key. Writes run in
         // (domain, slot) order, so the fuse has built that key already.
         const RigExecOpValueState *done=nullptr;
@@ -965,7 +1002,6 @@ bool RrExecuteOpGraph(RrProgram *p,bool force,std::string *error)
             if(done && v.slot==done->slot && v.domain==uint32_t(RigExecWireSlotDomain::ChainDirty))
                 RigExecOpPublishValue(&v,[&](uint32_t,uint32_t,std::string *key){key->append(done->key);});
             else if(!RrPublishSmallValue(p,&v)) RigExecOpPublishValue(&v,sample);
-            verifyChain(id); verifyPacket(id);
             if(v.domain==uint32_t(RigExecWireSlotDomain::RevisionDone)) done=&v;
             if(v.domain==uint32_t(RigExecWireSlotDomain::PropertyResult)) s.propertyVersionChanged[v.slot]=v.changed;
             if(v.domain==uint32_t(RigExecWireSlotDomain::WeightField)) s.weightFieldChanged[v.slot]=v.changed;
@@ -975,16 +1011,57 @@ bool RrExecuteOpGraph(RrProgram *p,bool force,std::string *error)
     callbacks.skip=[&](uint32_t c){const auto i=p->opGraph.ops[c].originalIndex;
         s.stepOutputs[i].MarkSkipped(); if(_RrIsGeometryKind((*p->steps)[i].kind)) RrSkipGeometryStep(p,i);};
     callbacks.skipEffects=&state.skipEffects;
+    if(s.dispatch && s.wait && p->parallelSafe) {
+        callbacks.dispatch=[&](std::function<void()> task){s.dispatch(std::move(task));};
+        callbacks.wait=[&]{s.wait();};
+    }
     std::string graphError;
     const bool ok=RigExecExecuteOpGraph(p->opGraph,state.changedLeaves,state.seeds,force,callbacks,&s.opExecution,&graphError,&s.opWorkspace,&state.candidateOps);
+    // The ops that ran, by op index, in completion order: completion numbers
+    // every candidate (pending) once from 1, a cluster's members
+    // consecutively, and a serial run's bodies in the order they ran.
+    auto &trace=s.runTrace;
+    {
+        const auto &ran=s.opExecution.ran; const auto &completion=s.opExecution.completion;
+        const auto &pending=s.opWorkspace.pending;
+        trace.assign(pending.size(),-1);
+        for(const uint32_t c:pending)
+            if(c<ran.size() && ran[c] && c<completion.size() &&
+               completion[c]>=1 && completion[c]<=pending.size())
+                trace[size_t(completion[c]-1)]=int32_t(c);
+        trace.erase(std::remove(trace.begin(),trace.end(),int32_t(-1)),trace.end());
+    }
+    // A cluster's ran ops are consecutive in that order, so counting changes
+    // of cluster counts the distinct clusters. The version checks follow it
+    // too, so a serial run reports the first mismatch it reported while
+    // running. A failed body published nothing; the failure reported is the
+    // canonically first (a serial run stops at its one).
+    size_t closedClusters=0; uint32_t lastCluster=UINT32_MAX;
+    int64_t failedOp=-1;
+    for(const int32_t entry:trace) {
+        const uint32_t c=uint32_t(entry);
+        if(p->opGraph.opClusters[c]!=lastCluster) { lastCluster=p->opGraph.opClusters[c]; ++closedClusters; }
+        if(s.opFailed[c]) {
+            if(failedOp<0 || int64_t(c)<failedOp) failedOp=int64_t(c);
+            continue;
+        }
+        for(auto id:p->opGraph.ops[c].descriptor.writes) { verifyChain(id); verifyPacket(id); }
+    }
     RigExecOpGatherChanges(&state,p->opGraph,s.opExecution.ran);
     RrFoldHeldSteps(p);
     if(!ok) {
-        s.runTrace.clear();
+        if(error) {
+            if(failedOp>=0) *error=s.opErrors[size_t(failedOp)];
+            if(error->empty()) *error=graphError;
+        }
+        for(const int32_t entry:trace) if(s.opFailed[size_t(entry)]) {
+            s.opFailed[size_t(entry)]=0; s.opErrors[size_t(entry)].clear();
+        }
+        trace.clear();
         state.everRan=false; s.everRan=false;
-        if(error && error->empty()) *error=graphError;
         return false;
     }
+    for(auto &entry:trace) entry=int32_t(p->opGraph.ops[size_t(entry)].originalIndex);
     if(chainMismatch>=0) {
         if(error) *error="value "+std::to_string(chainMismatch)+
             ": its point content version and its points' bytes disagree on a change";

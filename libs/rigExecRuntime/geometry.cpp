@@ -26,6 +26,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <optional>
 #include <tuple>
 #include <cmath>
@@ -3566,8 +3567,9 @@ struct RrGeometryScratch {
         // group of the version this revision leaves.
         std::vector<RigExecGroupSource> groupIds;
         // A whole reader's gather of the version this revision leaves, and
-        // the group ids it was gathered from (the runtime is serial, so a
-        // reader's pointer holds until a writer of that version runs).
+        // the group ids it was gathered from; a reader's pointer holds until
+        // a writer of that version runs. Only the next revision's own ops
+        // gather here, one after another (RrGeoVersionGatherShared).
         mutable std::vector<RrVec3f> versionGather;
         mutable std::vector<RigExecGroupSource> versionGatherIds;
         // Filled by RevisionStatic, read by the group steps; a memo.
@@ -3749,8 +3751,9 @@ struct RrGeometryScratch {
         epochPartitionTopologies;
     // Gated Range revisions whose packet failed the gate while applying, and
     // Range skins that met a stale partition (a pin hole the file's private
-    // constants rule out). Counted by RevisionStatic and the group steps.
-    uint64_t gateViolations = 0;
+    // constants rule out). Counted by RevisionStatic and the group steps,
+    // which may run at once: a relaxed count, read after the join.
+    std::atomic<uint64_t> gateViolations{0};
 
     // The sample point tables point into noPoints and blendPointPool, so
     // the scratch never moves or copies.
@@ -3921,6 +3924,96 @@ RrGeoGatherVersion(const RrGeometryScratch::Chain &chain, size_t version)
         }
     }
     return &owner.versionGather;
+}
+
+// Whether two ops that may run at once could gather one version into the
+// cache RrGeoGatherVersion keeps on the revision leaving it. Revision r's
+// own whole readers of version r -- its weight field, its single chunk,
+// its fuse -- are ordered by the values they declare (field, then
+// RevisionStatic, then chunk, then fuse). Any other whole reader of a
+// version r > 0 of a chain with groups is not: a revision's or derived
+// target's point binding, a blend sample's binding, a weight field's point
+// read, a cross-domain points read, or a second revision-form weight field
+// of revision r. Open, owner thread.
+bool
+RrGeoVersionGatherShared(const RrProgram &program,
+                         const RrGeometryScratch &scratch)
+{
+    const auto gathers = [&](int64_t chain, int64_t version) {
+        return chain >= 0 && size_t(chain) < scratch.chains.size() &&
+               scratch.chains[size_t(chain)].groupBounds.size() >= 2 &&
+               version > 0 &&
+               size_t(version) <= scratch.chains[size_t(chain)].revisions.size();
+    };
+    const auto binding = [&](const RigExecWirePointsBinding &read) {
+        if (read.finalRead) {
+            return false;
+        }
+        for (const RigExecWirePointVersion &candidate : read.candidates) {
+            if (gathers(candidate.chain(), candidate.version())) {
+                return true;
+            }
+        }
+        return false;
+    };
+    const auto revision = [&](const RigExecWireRevision &wire) {
+        for (const RigExecWirePointsBinding &read : wire.pointBindings) {
+            if (binding(read)) {
+                return true;
+            }
+        }
+        for (const RigExecWireBlendChannel &channel : wire.blendChannels) {
+            for (const RigExecWireBlendSample &sample : channel.samples) {
+                if (sample.pointBinding && binding(*sample.pointBinding)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    };
+    const RigExecWireDomainGeometry &geo = *program.geometry;
+    for (const RigExecWireChain &chain : geo.chains) {
+        for (const RigExecWireRevision &wire : chain.revisions) {
+            if (revision(wire)) {
+                return true;
+            }
+        }
+        for (const RigExecWireDerived &derived : chain.derived) {
+            if (derived.revision && revision(*derived.revision)) {
+                return true;
+            }
+        }
+    }
+    std::vector<char> consumed(geo.revisionIndex.size(), 0);
+    for (const RigExecWireWeightField &field : geo.weightFields) {
+        for (const auto &read : field.pointReads) {
+            if (read.binding && binding(*read.binding)) {
+                return true;
+            }
+        }
+        if (field.form != fb::WeightFieldForm::Revision || field.consumer < 0 ||
+            size_t(field.consumer) >= geo.revisionIndex.size()) {
+            continue;
+        }
+        const auto &entry = geo.revisionIndex[size_t(field.consumer)];
+        if (gathers(entry.first, entry.second) &&
+            consumed[size_t(field.consumer)]++) {
+            return true;
+        }
+    }
+    if (program.file) {
+        for (const auto &read : program.file->crossDomainReads) {
+            if (read.finalPoints) {
+                continue;
+            }
+            for (const auto &candidate : read.points) {
+                if (gathers(candidate.first, candidate.second)) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
 }
 
 // The skin over points [begin, end) of \p count held in a group's own
@@ -4999,6 +5092,11 @@ RrGeometrySizeScratch(RrProgram *program, std::string *error)
     }
     scratch->program=program;
     scratch->pathReads = &program->pathReads;
+    // A version gather two ops could make at once (RrGeoVersionGatherShared)
+    // would race on the revision's cache: such a program executes serially.
+    if (RrGeoVersionGatherShared(*program, *scratch)) {
+        program->parallelSafe = false;
+    }
     program->geo = std::move(scratch);
     return true;
 }
@@ -7326,7 +7424,7 @@ RrGeoRunRevisionStaticStep(RrProgram *program, RrGeometryScratch *scratch,
             &rev.surfaceCache, &rev.rangeInputs);
         if (rev.acceptance == RrGeoAcceptance::Applies &&
             !RrGeoGroupGateHolds(chain, rev, count)) {
-            ++scratch->gateViolations;
+            scratch->gateViolations.fetch_add(1, std::memory_order_relaxed);
         }
         return true;
     }
@@ -7352,7 +7450,7 @@ RrGeoRunRevisionStaticStep(RrProgram *program, RrGeometryScratch *scratch,
     }
     if (rev.rangeRole && rev.acceptance == RrGeoAcceptance::Applies &&
         !RrGeoGroupGateHolds(chain, rev, count)) {
-        ++scratch->gateViolations;
+        scratch->gateViolations.fetch_add(1, std::memory_order_relaxed);
     }
     return true;
 }
@@ -7406,7 +7504,7 @@ RrGeoRunGroupStep(RrProgram *program, RrGeometryScratch *scratch,
             if (rev->partitionStale) {
                 // The file holds the layout's indices and element size as
                 // private constants, so this cannot arise: refuse.
-                ++scratch->gateViolations;
+                scratch->gateViolations.fetch_add(1, std::memory_order_relaxed);
                 ok = false;
             } else {
                 if (!RrGeoGatherChunkTransforms(program, wire, *rev, &chunk,

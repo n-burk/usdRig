@@ -64,9 +64,11 @@ _RrSameBits(const RrMat4d &a, const RrMat4d &b)
 }
 
 // RigExecBakedComposeLadder (bakedPose.cpp), over the scratch tables.
-// Reads through ReadLadder, the runtime form of RigExecBakedRead.
+// Reads through ReadLadder, the runtime form of RigExecBakedRead. With
+// \p moved, lists the slots of [begin, end) whose composition moved: the
+// caller's own list, since compose ops of other groups run beside it.
 void
-_RrComposeLadder(RrProgram *program, bool trackMoves,
+_RrComposeLadder(RrProgram *program, std::vector<int> *moved,
                  size_t begin, size_t end, bool restOnly, bool ladderOnly)
 {
     RrStore &store = program->store;
@@ -74,9 +76,7 @@ _RrComposeLadder(RrProgram *program, bool trackMoves,
     const RigExecWireSlotMeta &meta = *program->slotMeta;
     const size_t slots = meta.paths.size();
     const RrMat4d identity = _RrIdentity();
-    if (trackMoves) {
-        store.ladderMovedSlots.clear();
-    }
+    const bool trackMoves = moved != nullptr;
     for (size_t i = begin; i < std::min(end, slots); ++i) {
         if (i >= meta.slotKind.size() ||
             meta.slotKind[i] != RigExecWireSlotKind::FirstFramePose) {
@@ -266,7 +266,7 @@ _RrComposeLadder(RrProgram *program, bool trackMoves,
             !_RrSameBits(scratch->parentSpaceM[i], scratch->lastParentSpaceM[i]) ||
             scratch->parentSpaceAuthored[i] != scratch->lastParentSpaceAuthored[i] ||
             scratch->rotationSign[i] != scratch->lastRotationSign[i]) {
-            store.ladderMovedSlots.push_back(int(i));
+            moved->push_back(int(i));
             scratch->lastRestM[i] = scratch->restM[i];
             scratch->lastSelfD[i] = scratch->selfD[i];
             scratch->lastParentDinv[i] = scratch->parentDinv[i];
@@ -576,11 +576,12 @@ bool
 RrRunRestHead(RrProgram *program, size_t group, bool ladder)
 {
     const auto &range = program->poses->composeGroups[group];
-    _RrComposeLadder(program, true, size_t(range.begin), size_t(range.end),
+    std::vector<int> moved;
+    _RrComposeLadder(program, &moved, size_t(range.begin), size_t(range.end),
                      !ladder, ladder);
     auto &changed = ladder ? program->store.ladderChanged : program->store.restChanged;
-    for (const int slot : program->store.ladderMovedSlots) changed[size_t(slot)] = 1;
-    return !program->store.ladderMovedSlots.empty();
+    for (const int slot : moved) changed[size_t(slot)] = 1;
+    return !moved.empty();
 }
 
 bool

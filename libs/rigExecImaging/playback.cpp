@@ -2,9 +2,14 @@
 #include "playback.h"
 #include "rigExecRuntime/stageArrayInputs.h"
 #include "rigExec/bakedProgram.h"
+#include "rigExec/bakedSchedule.h"
 #include "rigExec/movers/moverRegistry.h"
+#include "rigExec/parallel.h"
 
+#include "pxr/base/tf/getenv.h"
 #include "pxr/base/tf/staticTokens.h"
+#include "pxr/base/work/dispatcher.h"
+#include "pxr/base/work/withScopedParallelism.h"
 #include "pxr/usd/sdf/assetPath.h"
 #include "pxr/usd/usd/attribute.h"
 #include "pxr/usd/usd/primRange.h"
@@ -156,6 +161,14 @@ RigExecBakedPlayback::Open(const std::string &resolvedPath,
     _sampler = std::move(sampler);
     _epochDigest = _PlaybackDigestBytes(bytes);
     _reader = std::move(reader);
+    // In-tree playback runs the reader's clusters in parallel by default
+    // (RIGEXEC_RUNTIME_DISPATCH=0 opts out); the serial schedule knob and
+    // the library's parallel switch keep meaning serial.
+    _dispatchExecute =
+        TfGetenvBool("RIGEXEC_RUNTIME_DISPATCH", true) &&
+        RigExecParallelEvaluationEnabled() &&
+        RigExecBakedScheduleModeFromEnvironment() ==
+            RigExecBakedScheduleMode::Parallel;
     _assetPath = resolvedPath;
     // Admission condition 3 in playback: a listed input, holding its tag's
     // type, including the evaluator's admitted arrays.
@@ -347,7 +360,24 @@ RigExecBakedPlayback::EvaluateAndPublishResult(UsdTimeCode time)
     bool ran = _sampler.Apply(time, _reader.get(), &why, &sampled);
     if (ran) {
         _AdmitUpstream(time);
-        ran = _ApplyUpstream(time, sampled, &why) && _reader->Execute(&why);
+        ran = _ApplyUpstream(time, sampled, &why);
+    }
+    if (ran && _dispatchExecute && !RigExecFrozenSerialActive()) {
+        // The dispatcher lives for this Execute only, in its own arena; the
+        // reader forgets it before it goes. A frozen serial scope keeps
+        // the reader serial, as it keeps the native schedule.
+        pxr::WorkWithScopedParallelism([&] {
+            pxr::WorkDispatcher dispatcher;
+            _reader->SetTaskDispatch(
+                [&dispatcher](std::function<void()> task) {
+                    dispatcher.Run(std::move(task));
+                },
+                [&dispatcher] { dispatcher.Wait(); });
+            ran = _reader->Execute(&why);
+            _reader->SetTaskDispatch(nullptr, nullptr);
+        });
+    } else if (ran) {
+        ran = _reader->Execute(&why);
     }
     if (!ran) {
         // The bridge's rule: a rig that cannot evaluate stops driving the
