@@ -14,6 +14,7 @@
 #include "pxr/exec/exec/registerSchema.h"
 #include "pxr/exec/vdf/context.h"
 #include "pxr/exec/vdf/readIterator.h"
+#include "pxr/usd/usd/attribute.h"
 #include <type_traits>
 
 using rigExec::RigExecMoverParameters;

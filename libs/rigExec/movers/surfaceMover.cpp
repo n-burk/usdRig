@@ -13,6 +13,7 @@
 #include "pxr/exec/exec/registerSchema.h"
 #include "pxr/exec/vdf/context.h"
 #include "pxr/exec/vdf/readIterator.h"
+#include "pxr/usd/usd/attribute.h"
 
 using rigExec::RigExecMoverParameters;
 using rigExec::RigExecMoverExecTokens;
