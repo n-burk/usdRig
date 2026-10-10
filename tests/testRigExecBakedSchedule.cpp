@@ -5987,7 +5987,7 @@ TestARangeChainIsCutIntoRanges(const BuiltProgram &built, const char *name)
     using Role = RigExecBakedRevisionRole;
     const RigExecBakedProgramImpl &B = built.program->GetStepGraph();
     CHECK(B.rangeChains);
-    CHECK(B.groupVertexTarget == 1024 && B.groupCap == 16 && B.groupGates);
+    CHECK(B.groupVertexTarget == 1024 && B.groupCap == 32 && B.groupGates);
     CHECK(B.roleMode == RigExecBakedRoleMode::Live);
     CHECK(B.exportPinnedPaths.empty());
     CHECK(B.chains.size() == 1 && B.chains[0].revisions.size() == 3);

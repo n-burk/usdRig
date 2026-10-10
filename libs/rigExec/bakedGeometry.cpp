@@ -667,7 +667,8 @@ RigExecBakedGroupVertexTargetFromEnvironment()
 size_t
 RigExecBakedGroupCapFromEnvironment()
 {
-    const int authored = TfGetenvInt("RIGEXEC_BAKED_GROUP_CAP", 16);
+    const int authored = TfGetenvInt("RIGEXEC_BAKED_GROUP_CAP",
+                                     int(RigExecBakedDefaultGroupCap));
     return authored < 1 ? size_t(1) : size_t(authored);
 }
 

@@ -1727,6 +1727,10 @@ enum class RigExecBakedRevisionRole : uint8_t {
     Whole,
 };
 
+/// The most vertex groups one range chain is cut into when
+/// RIGEXEC_BAKED_GROUP_CAP is unset; Live and Export alike.
+inline constexpr size_t RigExecBakedDefaultGroupCap = 32;
+
 /// One fact a Range role, a Whole role chosen by value, or a group gate rests
 /// on (Build state); RigExecBakedRolesStand checks them.
 struct RigExecBakedRolePin {
@@ -2711,10 +2715,11 @@ struct RigExecBakedProgramImpl {
     /// RIGEXEC_BAKED_RANGE_CHAINS (default on), read at Build: whether a chain
     /// of more than chunkVertexTarget points is range-pipelined.
     bool rangeChains = true;
-    /// RIGEXEC_BAKED_GROUP_VERTS (1024) and RIGEXEC_BAKED_GROUP_CAP (16), read
-    /// at Build: a range chain's group target and cap (both role modes).
+    /// RIGEXEC_BAKED_GROUP_VERTS (1024) and RIGEXEC_BAKED_GROUP_CAP
+    /// (RigExecBakedDefaultGroupCap), read at Build: a range chain's group
+    /// target and cap (both role modes).
     size_t groupVertexTarget = 1024;
-    size_t groupCap = 16;
+    size_t groupCap = RigExecBakedDefaultGroupCap;
     /// RIGEXEC_BAKED_GROUP_GATES (default on), read at Build.
     bool groupGates = true;
     /// The evaluator's role mode and export keep-set when Build ran.
