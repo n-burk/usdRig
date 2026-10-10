@@ -61,6 +61,23 @@ struct RigExecExternalInputValue {
     const void *data = nullptr;
 };
 
+/// The provider values the mover's binding reads, as playback evaluated
+/// them this frame: the plain form of the assembly's provider values.
+/// Matrices are sixteen row-major doubles. Storage remains valid only for
+/// the apply call.
+struct RigExecExternalProviders {
+    /// The binding's transform provider, or null when it names none.
+    const double *transform = nullptr;
+    /// One matrix per binding influence, in binding order; null with a
+    /// zero count when the binding names none.
+    const double *influences = nullptr;
+    size_t influenceCount = 0;
+    /// The chain's base points (xyz triples) the assembly measures
+    /// against.
+    const float *basePoints = nullptr;
+    size_t basePointCount = 0;
+};
+
 /// A plugin mover's playback kernel.
 struct RigExecExternalKernel {
     /// Decodes one revision's epoch bytes into immutable state, once per
@@ -78,8 +95,19 @@ struct RigExecExternalKernel {
                   size_t phasedCount,
                   const RigExecExternalInputValue *inputs, size_t inputCount,
                   float *xyz, size_t pointCount) = nullptr;
+    /// Optional: apply with the provider values the binding reads as well,
+    /// for a mover whose result follows its influences or transform. When
+    /// set, playback calls it in place of apply, under apply's contract.
+    bool (*applyWithProviders)(const void *state, const uint8_t *frame,
+                               size_t frameSize,
+                               const RigExecExternalPhasedPoints *phased,
+                               size_t phasedCount,
+                               const RigExecExternalInputValue *inputs,
+                               size_t inputCount,
+                               const RigExecExternalProviders &providers,
+                               float *xyz, size_t pointCount) = nullptr;
 
-    bool IsSet() const { return prepare && apply; }
+    bool IsSet() const { return prepare && (apply || applyWithProviders); }
 };
 
 /// The revision op a plugin mover is written with (RigExecRevisionOp::

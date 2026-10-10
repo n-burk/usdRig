@@ -6,6 +6,7 @@
 
 #include "rigExecBinary/stepGraph.h"
 #include "rigExecGraph/providerRecords.h"
+#include "rigExecMath/affineFrameKernel.h"
 
 #include <algorithm>
 #include <cmath>
@@ -2395,8 +2396,18 @@ private:
         std::vector<int> writers(n,-1);
         for (size_t i=0;i<p.ops.size();++i) {
             const auto &op=p.ops[i];
-            if(op.kind>11 || op.kind==8 || op.kind==9 || op.output>=n || op.owner.empty())
+            if(op.kind>12 || op.kind==8 || op.kind==9 || op.output>=n || op.owner.empty())
                 return _Bad("provider op "+_N(i)+": invalid kind/output/owner");
+            // An affine frame expression (format 21) names its expression
+            // and its inputs match that expression's layout; every other
+            // kind names none.
+            const bool affine=op.kind==uint32_t(RigExecProviderOpKind::AffineFrame);
+            if(affine && _f.formatVersion<RigExecFormatAffineFramesVersion)
+                return _Bad("provider op "+_N(i)+": format "+_N(_f.formatVersion)+
+                            " holds no affine frame expressions");
+            if(affine ? !RigExecAffineFrameInputsMatch(op.affineKind,op.inputs.size(),op.affineTargets)
+                      : (op.affineKind!=0 || op.affineTargets!=0))
+                return _Bad("provider op "+_N(i)+": affine frame expression does not match its inputs");
             if(writers[size_t(op.output)]>=0)
                 return _Bad("provider op "+_N(i)+": duplicate output producer");
             writers[size_t(op.output)]=int(i);

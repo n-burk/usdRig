@@ -512,9 +512,11 @@ endfunction()
 rigexec_add_graph_test(testRigExecConstraints CONE_VERIFY)
 
 # Affine frame providers and the layered skin revision: numerical results,
-# then a control edit that must re-run both through their declared inputs.
+# then a control edit that must re-run both through their declared inputs;
+# the runtime's expressions against Gf's, and .rigexec playback.
 add_executable(testRigExecAffineFrames tests/testRigExecAffineFrames.cpp)
-target_link_libraries(testRigExecAffineFrames PRIVATE rigExec)
+target_link_libraries(testRigExecAffineFrames PRIVATE
+    rigExec rigExecBake rigExecRuntime rigExecSampler)
 add_test(NAME testRigExecAffineFrames COMMAND testRigExecAffineFrames
     "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
 set_tests_properties(testRigExecAffineFrames PROPERTIES ENVIRONMENT
@@ -659,8 +661,8 @@ foreach(_schedule serial parallel)
 endforeach()
 
 # Extended nearest-surface snapping, persistent surface bindings and
-# regular-grid lattices against reference values; the snap and lattice
-# cases also replay their .rigexec export.
+# regular-grid lattices against reference values; each also replays its
+# .rigexec export.
 add_executable(testRigExecSurfaceSnap tests/testRigExecSurfaceSnap.cpp)
 target_link_libraries(testRigExecSurfaceSnap PRIVATE
     rigExec rigExecBake rigExecRuntime rigExecSampler)
@@ -669,7 +671,8 @@ add_test(NAME testRigExecSurfaceSnap COMMAND testRigExecSurfaceSnap)
 rigexec_add_graph_test(testRigExecSurfaceSnap CONE_VERIFY)
 
 add_executable(testRigExecSurfaceBinding tests/testRigExecSurfaceBinding.cpp)
-target_link_libraries(testRigExecSurfaceBinding PRIVATE rigExec)
+target_link_libraries(testRigExecSurfaceBinding PRIVATE
+    rigExec rigExecBake rigExecRuntime rigExecSampler)
 target_compile_definitions(testRigExecSurfaceBinding PRIVATE ${_rigexec_schema_resource_define})
 add_test(NAME testRigExecSurfaceBinding COMMAND testRigExecSurfaceBinding)
 rigexec_add_graph_test(testRigExecSurfaceBinding CONE_VERIFY)

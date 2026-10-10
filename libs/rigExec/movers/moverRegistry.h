@@ -255,7 +255,9 @@ struct RigExecMoverHandler {
 /// and explicit phased oracle lookups.
 /// Version 3 passes the oracle context to RigExecReadPhasedPoints and adds
 /// RigExecMoverOracleContext::entering.
-inline constexpr int RigExecMoverPluginApiVersion = 4;
+/// Version 5 adds RigExecExternalKernel::applyWithProviders, which hands a
+/// playback kernel the provider values its binding reads.
+inline constexpr int RigExecMoverPluginApiVersion = 5;
 
 /// Registers one mover, retaining an immutable copy and its schema name.
 /// Duplicate schema names and incomplete external callbacks are rejected.

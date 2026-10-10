@@ -1,4 +1,5 @@
 #include "rigExec/rigEvaluator.h"
+#include "rigExec/movers/moverRegistry.h"
 #include "pxr/base/plug/registry.h"
 #include "pxr/usd/usdGeom/mesh.h"
 #include <cstdio>
@@ -9,6 +10,7 @@ using namespace rigExec;
 static int failures=0;
 #define CHECK(x) do {if(!(x)){std::printf("FAIL %d: %s\n",__LINE__,#x);++failures;}}while(0)
 #include "rigExecFrozenParity.h"
+#include "rigExecRuntimeDrive.h"
 const char *fixture=R"USD(#usda 1.0
 def RigExecRoot "Rig" {
  def RigExecControl "Driver" { }
@@ -53,6 +55,35 @@ void Frozen(RigExecRigEvaluator &rig) {
  if(!same)std::printf("frozen: %s\n",why.c_str());
  CHECK(same);
 }
+// The .rigexec plays the binding through its playback kernel bit for bit as
+// native evaluation, unposed and with \p avar set as an input: the cage's
+// final points and the frames playback evaluates move it.
+void Runtime(const UsdStageRefPtr &s,const char *what,const SdfPath &avar,double posed) {
+ RigExecRigEvaluator rig(s,SdfPath("/Rig"));
+ std::vector<std::string> errors;CHECK(rig.Compile(&errors));
+ std::vector<uint8_t> bytes;std::string error;
+ const bool baked=RigExecTestBakeAt(rig,1,&bytes,&error);CHECK(baked);
+ if(!baked){std::printf("%s bake: %s\n",what,error.c_str());return;}
+ RigExecTestPlayer player;const bool opened=player.Open(bytes,s,&error);CHECK(opened);
+ if(!opened){std::printf("%s open: %s\n",what,error.c_str());return;}
+ const auto *handler=RigExecFindMoverHandler(TfToken("RigExecSurfaceBindingMover"));
+ CHECK(handler && handler->runtimeKernel.IsSet());if(!handler)return;
+ CHECK(player->SetExternalKernel("RigExecSurfaceBindingMover",handler->runtimeKernel,&error));
+ CHECK(player->GetMissingExternalKernels().empty());
+ const auto compare=[&](const RigExecRigPose &pose,const char *phase) {
+  std::vector<std::string> diffs;const bool same=RigExecCompareRuntimeOutputs(pose,player.Reader(),&diffs);
+  if(!same)for(const auto &line:diffs)std::printf("%s %s: %s\n",what,phase,line.c_str());
+  CHECK(same);
+ };
+ const bool played=player.Play(1,&error);CHECK(played);
+ if(!played){std::printf("%s play: %s\n",what,error.c_str());return;}
+ compare(rig.Evaluate(UsdTimeCode(1)),"unposed");
+ const bool held=player.Hold(avar.GetString(),posed,&error) && player.Play(1,&error);CHECK(held);
+ if(!held){std::printf("%s posed play: %s\n",what,error.c_str());return;}
+ std::vector<RigExecRigPose> poses;
+ const bool referenced=RigExecTestEditedPoses(s,SdfPath("/Rig"),{{avar,VtValue(posed)}},{1.0},&poses,&error);
+ CHECK(referenced);if(referenced)compare(poses.front(),"posed");
+}
 void Near(const VtVec3fArray &p,GfVec3f expected) {
  CHECK(p.size()==2);if(p.size()!=2)return;
  if((p[0]-expected).GetLength()>2e-6f)std::printf("actual %g %g %g expected %g %g %g\n",p[0][0],p[0][1],p[0][2],expected[0],expected[1],expected[2]);
@@ -60,6 +91,18 @@ void Near(const VtVec3fArray &p,GfVec3f expected) {
 }
 int main() {
  PlugRegistry::GetInstance().RegisterPlugins(RIGEXEC_SCHEMA_RESOURCE_DIR);
+ Runtime(Stage(),"polygon",SdfPath("/Rig/Driver.avars:rz"),90.0);
+ {
+  // Framed by two controls, surface then target, with smooth normals.
+  auto s=Stage();
+  s->DefinePrim(SdfPath("/Rig/SurfaceFrame"),TfToken("RigExecControl"));
+  s->DefinePrim(SdfPath("/Rig/TargetFrame"),TfToken("RigExecControl"));
+  CHECK(s->GetPrimAtPath(SdfPath("/Rig/TargetFrame")).GetAttribute(TfToken("avars:ty")).Set(.5));
+  auto bind=s->GetPrimAtPath(SdfPath("/Rig/Movers/Bind"));
+  CHECK(bind.GetRelationship(TfToken("rigExec:frames")).SetTargets({SdfPath("/Rig/SurfaceFrame"),SdfPath("/Rig/TargetFrame")}));
+  CHECK(bind.GetAttribute(TfToken("rigExec:normalMode")).Set(TfToken("smooth")));
+  Runtime(s,"framed",SdfPath("/Rig/SurfaceFrame.avars:tx"),.25);
+ }
  {
   auto s=Stage();auto bind=s->GetPrimAtPath(SdfPath("/Rig/Movers/Bind"));
   RigExecRigEvaluator rig(s,SdfPath("/Rig"));

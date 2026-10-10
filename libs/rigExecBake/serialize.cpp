@@ -1679,6 +1679,8 @@ _FileFill::Run(fb::RigExecWireFile *file, std::string *error)
         row.output = op.output;
         row.inputs = op.inputs;
         row.scaleAvars = op.scaleAvars;
+        row.affineKind = op.affineKind;
+        row.affineTargets = op.affineTargets;
         portable.ops.push_back(std::move(row));
     }
     const auto leaves = [](const auto &source, auto *destination) {

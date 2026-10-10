@@ -2,6 +2,7 @@
 // These callbacks have no file-format or application dependency.
 // Numerical/source references: docs/references.md.
 #include "rigExec/movers/moverRegistry.h"
+#include "rigExec/movers/externalPlayback.h"
 #include "rigExecGraph/sceneDescriptors.h"
 #include "rigExecMath/solvers.h"
 #include "pxr/base/vt/dictionary.h"
@@ -43,9 +44,16 @@ template<class T> bool As(const VtValue &value, T *out) {
     return true;
 }
 
-// Text compare without building a token: TfToken(text) takes the registry.
-bool Is(const TfToken &token, const char *text) {
-    return std::strcmp(token.GetText(), text) == 0;
+// A token input's text: a TfToken from the stage-side declared inputs, a
+// std::string from playback, which builds no token (TfToken(text) takes the
+// registry).
+bool Text(const VtValue &value, const char **out) {
+    if (value.IsHolding<TfToken>()) { *out = value.UncheckedGet<TfToken>().GetText(); return true; }
+    if (value.IsHolding<std::string>()) { *out = value.UncheckedGet<std::string>().c_str(); return true; }
+    return false;
+}
+bool Is(const char *token, const char *text) {
+    return std::strcmp(token, text) == 0;
 }
 
 void Bind(const RigExecMoverBindContext &ctx) {
@@ -95,9 +103,9 @@ bool Payload(const std::vector<VtValue> &inputs, const RigExecExternalProviderVa
     if (inputs.size() != kInputCount || !values.influenceTransforms ||
         values.influenceTransforms->empty()) return false;
     VtIntArray indices; VtFloatArray weights, mask; int slots = 0;
-    bool fromBase = false, transformInput = false; TfToken method;
+    bool fromBase = false, transformInput = false; const char *method = nullptr;
     if (!As(inputs[kJointIndices], &indices) || !As(inputs[kJointWeights], &weights) ||
-        !As(inputs[kElementSize], &slots) || !As(inputs[kSkinningMethod], &method) ||
+        !As(inputs[kElementSize], &slots) || !Text(inputs[kSkinningMethod], &method) ||
         !As(inputs[kMask], &mask) || !As(inputs[kUseBaseInput], &fromBase) ||
         !As(inputs[kTransformInput], &transformInput)) return false;
     if (transformInput && !values.transform) return false;
@@ -164,6 +172,41 @@ bool Apply(const VtValue &data, std::vector<GfVec3f> *points) {
     return true;
 }
 
+// .rigexec playback: the epoch is a format tag and the frame bytes are
+// empty. The kernel assembles and deforms through Payload and Apply from
+// the declared inputs and the provider values playback evaluated, so a
+// posed playback follows its influences.
+constexpr char kEpochTag[] = {'R', 'L', 'S', '1'};
+
+bool EncodeEpoch(const RigExecRevisionBinding &, std::vector<uint8_t> *epoch) {
+    epoch->assign(kEpochTag, kEpochTag + sizeof(kEpochTag));
+    return true;
+}
+
+bool Encode(const VtValue &, const RigExecRevisionBinding &binding,
+            std::vector<uint8_t> *epoch, std::vector<uint8_t> *frame) {
+    frame->clear();
+    return EncodeEpoch(binding, epoch);
+}
+
+std::shared_ptr<const void> Prepare(const uint8_t *epoch, size_t size, std::string *error) {
+    if (size != sizeof(kEpochTag) || std::memcmp(epoch, kEpochTag, size) != 0) {
+        if (error) *error = "not a layered skin epoch";
+        return nullptr;
+    }
+    return std::make_shared<int>(1);
+}
+
+bool Play(const void *, const uint8_t *, size_t, const RigExecExternalPhasedPoints *, size_t,
+          const RigExecExternalInputValue *inputs, size_t inputCount,
+          const RigExecExternalProviders &providers, float *xyz, size_t count) {
+    const RigExecExternalPlaybackProviders values(providers);
+    VtValue data;
+    return Payload(RigExecExternalPlaybackInputs(inputs, inputCount),
+                   RigExecExternalProviderValues(values.values), &data) &&
+           RigExecExternalPlaybackApply(data, &Apply, xyz, count);
+}
+
 bool Validate(const RigExecMoverValidateContext &ctx, std::string *error) {
     auto reject = [&](const std::string &message) { *error = ctx.prim.GetPath().GetString()+": "+message; return false; };
     if (ctx.targets.size()!=1 || ctx.targets[0].GetNameToken()!=TfToken("points") ||
@@ -199,6 +242,8 @@ RigExecMoverHandler Handler(const char *type) {
     handler.bind = &Bind; handler.validate = &Validate;
     handler.declareExternalInputs = &DeclareInputs; handler.compileScene = &CompileScene;
     handler.assembleExternal = &Assemble; handler.applyExternal = &Apply;
+    handler.encodeExternalEpoch = &EncodeEpoch; handler.encodeExternal = &Encode;
+    handler.runtimeKernel.prepare = &Prepare; handler.runtimeKernel.applyWithProviders = &Play;
     handler.hasScalarOracle = false;
     handler.layoutAttributes = {TfToken("rigExec:jointIndices"),TfToken("rigExec:jointWeights"),
         TfToken("rigExec:elementSize"),TfToken("inputs:mask"),TfToken("inputs:useBaseInput")};

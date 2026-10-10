@@ -38,11 +38,20 @@ target spaces. Their frame providers are the revision's influences. Default
 settings run the legacy kernels; a format-20 file holds none of them and
 plays the legacy deformers.
 
+Format 21 also adds affine frame expressions (copy, mapped, skin influence,
+armature parent, bone and constraint frames) to the provider program. The
+runtime runs them through `rigExecMath/affineFrameKernel.h`, the definition
+native evaluation instantiates over Gf, over its own math mirror
+(`affineMath.h`).
+
 Plugin movers use revision opcode 16 and the file's `external_movers` table. The
 runtime stores their bytes and calls the kernel a host installs with
 `SetExternalKernel` (see `rigExecBinary/external.h` and
 [External mover plugins](../../docs/concepts/external-movers.md)). A type with
-no kernel passes its points through, with a warning in every `Execute`.
+no kernel passes its points through, with a warning in every `Execute`. A
+kernel that sets `applyWithProviders` also receives the binding's transform
+and influence matrices and the chain's base points as playback evaluated
+them; the layered skin and surface binding movers play this way.
 
 The frozen frame-cache executor and the provider-only `.rigpack` runtime
 remain separate subsets and reject Wrinkle movers. The `.rigexec` binary

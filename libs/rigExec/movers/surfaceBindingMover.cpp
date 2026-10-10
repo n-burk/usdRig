@@ -1,5 +1,6 @@
 // Persistent surface bindings; coordinate/algorithm references: docs/references.md.
 #include "moverRegistry.h"
+#include "externalPlayback.h"
 #include "rigExecGraph/sceneDescriptors.h"
 #include "pxr/base/vt/dictionary.h"
 #include "pxr/usd/usdGeom/pointBased.h"
@@ -82,8 +83,16 @@ template<class T> const T *Get(const VtDictionary &d,const char *key) {
     const auto found = d.find(key);
     return found != d.end() && found->second.IsHolding<T>() ? &found->second.UncheckedGet<T>() : nullptr;
 }
-bool Is(const TfToken &token, const char *text) {
-    return std::strcmp(token.GetText(), text) == 0;
+// A token input's text: a TfToken from the stage-side declared inputs, a
+// std::string from playback, which builds no token (TfToken(text) takes the
+// registry).
+bool Text(const VtValue &value, const char **out) {
+    if (value.IsHolding<TfToken>()) { *out = value.UncheckedGet<TfToken>().GetText(); return true; }
+    if (value.IsHolding<std::string>()) { *out = value.UncheckedGet<std::string>().c_str(); return true; }
+    return false;
+}
+bool Is(const char *token, const char *text) {
+    return std::strcmp(token, text) == 0;
 }
 bool Finite(const GfVec3f &v) {
     return std::isfinite(v[0]) && std::isfinite(v[1]) && std::isfinite(v[2]);
@@ -144,8 +153,8 @@ bool Payload(const std::vector<VtValue> &in, const RigExecExternalProviderValues
         for(float x:a)if(!std::isfinite(x))return false;d[_floatArrays[i]]=VtValue(a);}
     VtVec3fArray offsets;if(!As(in[OffsetVectors],&offsets))return false;
     for(const auto &x:offsets)if(!Finite(x))return false;d["offsets"]=VtValue(offsets);
-    TfToken mode,normal;float strength=0,deltaMultiplier=0;
-    if(!As(in[SurfaceMode],&mode) || !As(in[NormalMode],&normal) ||
+    const char *mode=nullptr,*normal=nullptr;float strength=0,deltaMultiplier=0;
+    if(!Text(in[SurfaceMode],&mode) || !Text(in[NormalMode],&normal) ||
        !As(in[Strength],&strength) || !std::isfinite(strength) ||
        !As(in[DeltaMultiplier],&deltaMultiplier) || !std::isfinite(deltaMultiplier) ||
        (!Is(mode,"polygon") && !Is(mode,"limit")) ||
@@ -271,6 +280,50 @@ bool Apply(const VtValue &data,std::vector<GfVec3f> *output) {
     }
     *output=std::move(candidate);return true;
 }
+// .rigexec playback: the epoch is a format tag and the bound surface's
+// points path, and the frame bytes are empty. The kernel assembles and
+// deforms through Payload and Apply from the declared inputs, the surface
+// points playback evaluated at the binding's phase, and its provider
+// values, so a posed playback follows the surface and the frames.
+constexpr char kEpochTag[]={'R','S','B','1'};
+bool EncodeEpoch(const RigExecRevisionBinding &binding,std::vector<uint8_t> *epoch) {
+    epoch->assign(kEpochTag,kEpochTag+sizeof(kEpochTag));
+    const std::string surface=binding.surfacePoints.IsEmpty()?std::string():binding.surfacePoints.GetString();
+    epoch->insert(epoch->end(),surface.begin(),surface.end());
+    return true;
+}
+bool Encode(const VtValue &,const RigExecRevisionBinding &binding,
+            std::vector<uint8_t> *epoch,std::vector<uint8_t> *frame) {
+    frame->clear();return EncodeEpoch(binding,epoch);
+}
+// The prepared state: the bound surface's points path.
+std::shared_ptr<const void> Prepare(const uint8_t *epoch,size_t size,std::string *error) {
+    if(size<sizeof(kEpochTag) || std::memcmp(epoch,kEpochTag,sizeof(kEpochTag))!=0) {
+        if(error)*error="not a surface binding epoch";
+        return nullptr;
+    }
+    return std::make_shared<const std::string>(reinterpret_cast<const char *>(epoch)+sizeof(kEpochTag),
+                                               size-sizeof(kEpochTag));
+}
+bool Play(const void *state,const uint8_t *,size_t,const RigExecExternalPhasedPoints *phased,size_t phasedCount,
+          const RigExecExternalInputValue *inputs,size_t inputCount,
+          const RigExecExternalProviders &providers,float *xyz,size_t count) {
+    auto values=RigExecExternalPlaybackInputs(inputs,inputCount);
+    // The surface's points at the binding's phase, as playback evaluated
+    // them, in place of the declared read -- the assembly's phase overlay.
+    const auto &surface=*static_cast<const std::string *>(state);
+    for(size_t k=0;k<phasedCount && SurfacePoints<values.size();++k) {
+        if(!phased[k].path || !phased[k].xyz || surface!=phased[k].path)continue;
+        VtVec3fArray points(phased[k].count);
+        for(size_t i=0;i<phased[k].count;++i)
+            points[i]=GfVec3f(phased[k].xyz[i*3],phased[k].xyz[i*3+1],phased[k].xyz[i*3+2]);
+        values[SurfacePoints]=VtValue(points);
+    }
+    const RigExecExternalPlaybackProviders provided(providers);
+    VtValue data;
+    return Payload(values,RigExecExternalProviderValues(provided.values),&data) &&
+           RigExecExternalPlaybackApply(data,&Apply,xyz,count);
+}
 bool Validate(const RigExecMoverValidateContext &ctx,std::string *error) {
     VtVec3fArray p;
     if(ctx.targets.size()!=1 || !ctx.stage->GetAttributeAtPath(ctx.targets[0]).Get(&p))return false;
@@ -294,6 +347,8 @@ RigExecMoverHandler Handler() {
     h.singleTarget=true;h.bind=&Bind;h.validate=&Validate;
     h.declareExternalInputs=&DeclareInputs;h.compileScene=&CompileScene;
     h.assembleExternal=&Assemble;h.applyExternal=&Apply;
+    h.encodeExternalEpoch=&EncodeEpoch;h.encodeExternal=&Encode;
+    h.runtimeKernel.prepare=&Prepare;h.runtimeKernel.applyWithProviders=&Play;
     h.frameRelationships={"rigExec:frames"};h.transformRelationship="rigExec:frames";h.hasScalarOracle=false;
     return h;
 }

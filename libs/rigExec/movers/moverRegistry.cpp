@@ -99,10 +99,12 @@ RigExecRegisterMoverHandler(RigExecMoverHandler handler, std::string *error)
             handler.hasScalarOracle = false;
         }
     }
+    const bool applies = handler.runtimeKernel.apply ||
+                         handler.runtimeKernel.applyWithProviders;
     if ((handler.encodeExternal || handler.runtimeKernel.prepare ||
-         handler.runtimeKernel.apply) &&
-        (!external || (handler.runtimeKernel.prepare != nullptr) !=
-                          (handler.runtimeKernel.apply != nullptr))) {
+         applies) &&
+        (!external ||
+         (handler.runtimeKernel.prepare != nullptr) != applies)) {
         return fail(std::string(handler.schemaType) +
             ": .rigexec export and playback callbacks belong to external "
             "movers, and a playback kernel needs both prepare and apply");

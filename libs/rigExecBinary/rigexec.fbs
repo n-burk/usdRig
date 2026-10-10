@@ -1571,6 +1571,12 @@ table ProviderOp {
   output: ulong;
   inputs: [ulong];
   scale_avars: bool = true;
+  // Format 21: an AffineFrame op (kind 12) names its expression
+  // (RigExecAffineFrameTypes order, rigExecMath/affineFrameKernel.h) and how
+  // many of its trailing frame inputs are a constraint frame's targets; the
+  // rest are their target objects. Zero on every other kind.
+  affine_kind: uint;
+  affine_targets: uint;
 }
 table ProviderLeaf {
   value: ulong; path: string (required); computation: string;

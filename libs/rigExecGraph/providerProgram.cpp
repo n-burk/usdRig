@@ -39,96 +39,15 @@ SdfPath ParentProvider(const RigExecSceneDescriptors &scene,const SdfPath &path)
 }
 // Affine frame expressions: each publishes its outputs:matrix from its own
 // input attributes and the point frames of the providers its relationships
-// name, as an ordinary op whose inputs are those values. The table states
-// every input in op order; the kernels are affineFrameKernels.h's.
+// name, as an ordinary op whose inputs are those values. The layout
+// (RigExecAffineFrameTypes) states every input in op order; the kernels are
+// affineFrameKernel.h's, which the runtime runs too.
 using AffineInputs=RigExecAffineFrameInputs;
-using AffineMember=std::variant<GfMatrix4d AffineInputs::*,bool AffineInputs::*,double AffineInputs::*,
-    int AffineInputs::*,std::string AffineInputs::*,GfVec3d AffineInputs::*,GfVec3i AffineInputs::*,
-    std::vector<int> AffineInputs::*,std::vector<GfMatrix4d> AffineInputs::*,std::vector<double> AffineInputs::*>;
-struct AffineAttribute { const char *name; AffineMember member; };
-struct AffineRelation { const char *name; GfMatrix4d AffineInputs::*member; };
-struct AffineType {
-    const char *type;
-    GfMatrix4d (*compute)(const AffineInputs &);
-    std::vector<AffineAttribute> attributes;
-    std::vector<AffineRelation> relations;
-    /// A constraint frame's frame lists, read after the single relations.
-    const char *targets=nullptr,*targetObjects=nullptr;
-};
-const std::vector<AffineAttribute> affineChannels={
-    {"inputs:tx",&AffineInputs::tx},{"inputs:ty",&AffineInputs::ty},{"inputs:tz",&AffineInputs::tz},
-    {"inputs:rx",&AffineInputs::rx},{"inputs:ry",&AffineInputs::ry},{"inputs:rz",&AffineInputs::rz},
-    {"inputs:sx",&AffineInputs::sx},{"inputs:sy",&AffineInputs::sy},{"inputs:sz",&AffineInputs::sz}};
-std::vector<AffineAttribute> AffineWithChannels(std::vector<AffineAttribute> attributes) {
-    attributes.insert(attributes.end(),affineChannels.begin(),affineChannels.end());
-    return attributes;
-}
-// Namespace-scope and built at load, so a worker reads it with no guard.
-const AffineType affineTypes[]={
-    {"RigExecCopyFrame",&RigExecComputeCopyTransforms,
-     {{"inputs:incoming",&AffineInputs::incoming},{"inputs:preserveLocation",&AffineInputs::preserveLocation}},
-     {{"rigExec:source",&AffineInputs::source}}},
-    {"RigExecMappedFrame",&RigExecComputeMappedFrame,
-     {{"inputs:targetRest",&AffineInputs::targetRest},{"inputs:sourceRest",&AffineInputs::sourceRest}},
-     {{"rigExec:source",&AffineInputs::source}}},
-    {"RigExecSkinInfluence",&RigExecComputeSkinInfluence,
-     {{"inputs:inverseBind",&AffineInputs::inverseBind},{"inputs:inverseMesh",&AffineInputs::inverseMesh},
-      {"inputs:fromBind",&AffineInputs::fromBind},{"inputs:followOnly",&AffineInputs::followOnly}},
-     {{"rigExec:owner",&AffineInputs::owner},{"rigExec:source",&AffineInputs::source},
-      {"rigExec:sourceObject",&AffineInputs::sourceObject}}},
-    {"RigExecArmatureParent",&RigExecComputeArmatureParent,
-     AffineWithChannels({{"inputs:local",&AffineInputs::local},{"inputs:inverseBind",&AffineInputs::inverseBind},
-      {"inputs:incoming",&AffineInputs::incoming},{"inputs:useIncoming",&AffineInputs::useIncoming},
-      {"inputs:preserveLocation",&AffineInputs::preserveLocation}}),
-     {{"rigExec:parent",&AffineInputs::parent},{"rigExec:sourceObject",&AffineInputs::sourceObject},
-      {"rigExec:source",&AffineInputs::source}}},
-    {"RigExecBoneFrame",&RigExecComputeBoneFrame,
-     AffineWithChannels({{"inputs:spaceKind",&AffineInputs::spaceKind},{"inputs:local",&AffineInputs::local},
-      {"inputs:parentRest",&AffineInputs::parentRest},{"inputs:hasParent",&AffineInputs::hasParent},
-      {"inputs:inheritRotation",&AffineInputs::inheritRotation},{"inputs:localLocation",&AffineInputs::localLocation},
-      {"inputs:connected",&AffineInputs::connected},{"inputs:inheritScale",&AffineInputs::inheritScale}}),
-     {{"rigExec:parent",&AffineInputs::parent},{"rigExec:sourceObject",&AffineInputs::object}}},
-    {"RigExecConstraintFrame",&RigExecComputeConstraintFrame,
-     {{"inputs:incoming",&AffineInputs::incoming},{"inputs:origin",&AffineInputs::origin},
-      {"inputs:inverseBind",&AffineInputs::inverseBind},{"inputs:operation",&AffineInputs::operation},
-      {"inputs:influence",&AffineInputs::influence},{"inputs:targetIndices",&AffineInputs::targetIndices},
-      {"inputs:objectIndices",&AffineInputs::objectIndices},{"inputs:targetBinds",&AffineInputs::targetBinds},
-      {"inputs:targetWeights",&AffineInputs::targetWeights},{"inputs:pivot",&AffineInputs::pivot},
-      {"inputs:dualQuaternion",&AffineInputs::dualQuaternion},{"inputs:currentPivot",&AffineInputs::currentPivot},
-      {"inputs:ownerSpace",&AffineInputs::ownerSpace},{"inputs:targetSpace",&AffineInputs::targetSpace},
-      {"inputs:axisMask",&AffineInputs::axisMask},{"inputs:invertMask",&AffineInputs::invertMask},
-      {"inputs:offset",&AffineInputs::offset},{"inputs:uniformScale",&AffineInputs::uniformScale},
-      {"inputs:scaleAdd",&AffineInputs::scaleAdd},{"inputs:power",&AffineInputs::power},
-      {"inputs:rotationMix",&AffineInputs::rotationMix},{"inputs:removeTargetShear",&AffineInputs::removeTargetShear},
-      {"inputs:mapFrom",&AffineInputs::mapFrom},{"inputs:mapFromMin",&AffineInputs::mapFromMin},
-      {"inputs:mapFromMax",&AffineInputs::mapFromMax},{"inputs:mapToMin",&AffineInputs::mapToMin},
-      {"inputs:mapToMax",&AffineInputs::mapToMax},{"inputs:mapAxes",&AffineInputs::mapAxes},
-      {"inputs:mapExtrapolate",&AffineInputs::mapExtrapolate},{"inputs:mapMix",&AffineInputs::mapMix},
-      {"inputs:trackAxis",&AffineInputs::trackAxis},{"inputs:keepAxis",&AffineInputs::keepAxis},
-      {"inputs:volume",&AffineInputs::volume},{"inputs:restLength",&AffineInputs::restLength},
-      {"inputs:bulge",&AffineInputs::bulge},{"inputs:bulgeMin",&AffineInputs::bulgeMin},
-      {"inputs:bulgeMax",&AffineInputs::bulgeMax},{"inputs:bulgeSmooth",&AffineInputs::bulgeSmooth},
-      {"inputs:useBulgeMin",&AffineInputs::useBulgeMin},{"inputs:useBulgeMax",&AffineInputs::useBulgeMax},
-      {"inputs:targetOffset",&AffineInputs::targetOffset},
-      {"inputs:ownerLocal",&AffineInputs::ownerLocal},{"inputs:ownerRest",&AffineInputs::ownerRest},
-      {"inputs:ownerParentRest",&AffineInputs::ownerParentRest},{"inputs:ownerHasParent",&AffineInputs::ownerHasParent},
-      {"inputs:ownerInheritRotation",&AffineInputs::ownerInheritRotation},
-      {"inputs:ownerLocalLocation",&AffineInputs::ownerLocalLocation},
-      {"inputs:ownerInheritScale",&AffineInputs::ownerInheritScale},
-      {"inputs:sourceLocal",&AffineInputs::sourceLocal},{"inputs:sourceRest",&AffineInputs::sourceRest},
-      {"inputs:sourceParentRest",&AffineInputs::sourceParentRest},{"inputs:sourceHasParent",&AffineInputs::sourceHasParent},
-      {"inputs:sourceInheritRotation",&AffineInputs::sourceInheritRotation},
-      {"inputs:sourceLocalLocation",&AffineInputs::sourceLocalLocation},
-      {"inputs:sourceInheritScale",&AffineInputs::sourceInheritScale}},
-     {{"rigExec:source",&AffineInputs::source},{"rigExec:sourceObject",&AffineInputs::sourceObject},
-      {"rigExec:ownerObject",&AffineInputs::ownerObject},{"rigExec:customSpace",&AffineInputs::customSpace},
-      {"rigExec:ownerParent",&AffineInputs::ownerParent},{"rigExec:sourceParent",&AffineInputs::sourceParent}},
-     "rigExec:targets","rigExec:targetObjects"},
-};
-constexpr uint32_t affineTypeCount=uint32_t(sizeof(affineTypes)/sizeof(affineTypes[0]));
+using AffineKernel=RigExecGfAffineFrameKernel;
+constexpr uint32_t affineTypeCount=RigExecAffineFrameTypeCount;
 // The affine type of \p type, or affineTypeCount.
 uint32_t AffineTypeOf(const TfToken &type) {
-    for(uint32_t k=0;k<affineTypeCount;++k)if(type==affineTypes[k].type)return k;
+    for(uint32_t k=0;k<affineTypeCount;++k)if(type==RigExecAffineFrameTypes[k].type)return k;
     return affineTypeCount;
 }
 bool AffineOutput(const RigExecSceneDescriptors &scene,const SdfPath &attribute,uint32_t *kind) {
@@ -145,25 +64,19 @@ SdfPathVector AffineTargets(const RigExecSceneDescriptors &scene,const SdfPath &
 // A provider's point frame from its four landmarks, as a matrix: the axes
 // relative to the origin as rows, then the origin. No frame is identity.
 GfMatrix4d AffineFrameMatrix(const RigExecPointFrame *frame) {
-    GfMatrix4d result(1);
-    if(!frame)return result;
-    const auto origin=frame->Origin();
-    const GfVec3d axes[3]={frame->X()-origin,frame->Y()-origin,frame->Z()-origin};
-    for(int i=0;i<3;++i)for(int j=0;j<3;++j)result[i][j]=axes[i][j];
-    result.SetTranslateOnly(origin);
-    return result;
+    if(!frame)return GfMatrix4d(1);
+    return AffineKernel::FrameMatrix(frame->Origin(),frame->X(),frame->Y(),frame->Z());
 }
 // One input's value into its member: the store's typed value where it holds
 // one, the boxed source value otherwise; an unavailable input keeps the
 // member's default, as an absent exec input does.
-void AffineRead(const RigExecTypedValueStore &store,RigExecValueId id,const AffineMember &member,AffineInputs *in) {
+void AffineRead(const RigExecTypedValueStore &store,RigExecValueId id,RigExecAffineField field,AffineInputs *in) {
     const auto boxed=[&](auto *out) {
         using T=std::decay_t<decltype(*out)>;
         const auto *value=store.Read<VtValue>(id);
         if(value && value->IsHolding<T>())*out=value->UncheckedGet<T>();
     };
-    std::visit([&](auto field) {
-        auto &out=in->*field;
+    RigExecVisitAffineField(*in,field,[&](auto &out) {
         using T=std::decay_t<decltype(out)>;
         if constexpr(std::is_same_v<T,GfMatrix4d> || std::is_same_v<T,GfVec3d>) {
             if(const auto *value=store.Read<T>(id))out=*value;
@@ -182,7 +95,7 @@ void AffineRead(const RigExecTypedValueStore &store,RigExecValueId id,const Affi
         } else {
             boxed(&out);
         }
-    },member);
+    });
 }
 struct GfProviderMath {
     using Matrix=GfMatrix4d;using Vector=GfVec3d;using Rotation=GfRotation;using Frame=RigExecPointFrame;
@@ -251,8 +164,9 @@ bool RigExecBuildProviderProgram(const RigExecSceneDescriptors &scene,bool compo
     // An affine frame expression reads its input attributes and the point
     // frames of the providers its relationships name.
     includeAffine=[&](const SdfPath &prim,uint32_t kind) {
-        const AffineType &type=affineTypes[kind];
-        for(const auto &attribute:type.attributes)includeAttribute(prim.AppendProperty(TfToken(attribute.name)));
+        const RigExecAffineFrameType &type=RigExecAffineFrameTypes[kind];
+        for(uint32_t k=0;k<type.attributeCount;++k)
+            includeAttribute(prim.AppendProperty(TfToken(type.attributes[k].name)));
         const auto frames=[&](const char *name) {
             if(!name)return;
             for(const auto &target:AffineTargets(scene,prim,name)) {
@@ -261,7 +175,7 @@ bool RigExecBuildProviderProgram(const RigExecSceneDescriptors &scene,bool compo
                    Provider(node->second.fact.type))includeProvider(target);
             }
         };
-        for(const auto &relation:type.relations)frames(relation.name);
+        for(uint32_t k=0;k<type.relationCount;++k)frames(type.relations[k].name);
         frames(type.targets);frames(type.targetObjects);
     };
     includeProvider=[&](const SdfPath &path) {
@@ -366,16 +280,16 @@ bool RigExecBuildProviderProgram(const RigExecSceneDescriptors &scene,bool compo
             // Inputs in the table's order: the attributes, one frame per
             // single relation, then a constraint frame's target frames and
             // target-object frames.
-            const AffineType &type=affineTypes[affine];
+            const RigExecAffineFrameType &type=RigExecAffineFrameTypes[affine];
             const SdfPath prim=path.GetPrimPath();
             RigExecProviderOp op{RigExecProviderOpKind::AffineFrame,prim,value,{}};
             op.affineKind=affine;
             const auto frame=[&](const SdfPath &target) {
                 return target.IsPrimPath()?compId(target,"computePointFrame"):RigExecNoProviderValue;
             };
-            for(const auto &attribute:type.attributes)op.inputs.push_back(attrId(prim,attribute.name));
-            for(const auto &relation:type.relations) {
-                const auto targets=AffineTargets(scene,prim,relation.name);
+            for(uint32_t k=0;k<type.attributeCount;++k)op.inputs.push_back(attrId(prim,type.attributes[k].name));
+            for(uint32_t k=0;k<type.relationCount;++k) {
+                const auto targets=AffineTargets(scene,prim,type.relations[k].name);
                 op.inputs.push_back(targets.empty()?RigExecNoProviderValue:frame(targets.front()));
             }
             if(type.targets) {
@@ -572,10 +486,7 @@ bool RigExecProviderOpStructurallyValid(const RigExecProviderProgram &program,
         return ArithmeticHandles(op.kind) || Fail(error,"unsupported provider arithmetic operation kind");
     if(op.kind==RigExecProviderOpKind::AffineFrame) {
         if(op.affineKind>=affineTypeCount)return Fail(error,"unknown affine frame expression");
-        const AffineType &type=affineTypes[op.affineKind];
-        const size_t fixed=type.attributes.size()+type.relations.size();
-        if(op.inputs.size()<fixed || (!type.targets && op.inputs.size()!=fixed) ||
-           op.affineTargets>op.inputs.size()-fixed)
+        if(!RigExecAffineFrameInputsMatch(op.affineKind,op.inputs.size(),op.affineTargets))
             return Fail(error,"affine frame inputs do not match their expression");
         return true;
     }
@@ -662,12 +573,16 @@ bool RigExecRunProviderOp(const RigExecProviderProgram &program,uint32_t index,
     }
     case RigExecProviderOpKind::AffineFrame: {
         // Validated by RigExecProviderOpStructurallyValid above.
-        const AffineType &type=affineTypes[op.affineKind];
+        const RigExecAffineFrameType &type=RigExecAffineFrameTypes[op.affineKind];
         AffineInputs in;
         size_t at=0;
-        for(const auto &attribute:type.attributes)AffineRead(*store,id(at++),attribute.member,&in);
-        for(const auto &relation:type.relations)
-            in.*(relation.member)=AffineFrameMatrix(store->Read<RigExecPointFrame>(id(at++)));
+        for(uint32_t k=0;k<type.attributeCount;++k)AffineRead(*store,id(at++),type.attributes[k].field,&in);
+        for(uint32_t k=0;k<type.relationCount;++k) {
+            const GfMatrix4d frame=AffineFrameMatrix(store->Read<RigExecPointFrame>(id(at++)));
+            RigExecVisitAffineField(in,type.relations[k].field,[&](auto &out) {
+                if constexpr(std::is_same_v<std::decay_t<decltype(out)>,GfMatrix4d>)out=frame;
+            });
+        }
         if(type.targets) {
             for(uint32_t k=0;k<op.affineTargets;++k)
                 in.targets.push_back(AffineFrameMatrix(store->Read<RigExecPointFrame>(id(at++))));
@@ -675,11 +590,9 @@ bool RigExecRunProviderOp(const RigExecProviderProgram &program,uint32_t index,
                 in.targetObjects.push_back(AffineFrameMatrix(store->Read<RigExecPointFrame>(id(at++))));
         }
         GfMatrix4d result(1.0);
-        try {
-            result=type.compute(in);
-        } catch(const std::exception &failure) {
-            return unavailable(RigExecNoProviderValue,std::string("affine frame expression failed: ")+failure.what());
-        }
+        const char *failure=nullptr;
+        if(!AffineKernel::Compute(op.affineKind,in,&result,&failure))
+            return unavailable(RigExecNoProviderValue,std::string("affine frame expression failed: ")+failure);
         store->Publish(op.output,result);
         break;
     }

@@ -11,6 +11,8 @@
 #include "rigExecBinary/transport.h"
 #include "rigExecBinary/generated/presentation_generated.h"
 #include "rigExecExampleFixtures.h"
+#include "rigExecGraph/providerRecords.h"
+#include "rigExecMath/affineFrameKernel.h"
 #include "rigExecMath/pointRanges.h"
 #include "rigExecMath/propertyMath.h"
 #include "rigExecRigging/rigBuilder.h"
@@ -1695,6 +1697,85 @@ TestExtendedDeformerSettingsBake()
                 "frame providers, legacy format 20 %s\n",
                 settings, std::size(rows), framed,
                 legacyOpened ? "opens" : "REFUSED");
+}
+
+// Format 21 holds affine frame expressions as provider ops. A joint whose
+// posed:space reads a copy frame bakes; its op names the expression and
+// its inputs (two attributes and the source frame). It is refused
+// relabelled format 20, with an unknown expression or inputs its
+// expression does not take, and another op naming an expression is too.
+static void
+TestAffineFrameRecords()
+{
+    const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    stage->DefinePrim(SdfPath("/Rig"), TfToken("RigExecRoot"));
+    const UsdPrim source =
+        stage->DefinePrim(SdfPath("/Rig/Source"), TfToken("RigExecControl"));
+    CHECK(source.GetAttribute(TfToken("avars:tx")).Set(2.0));
+    const UsdPrim copy =
+        stage->DefinePrim(SdfPath("/Rig/Copy"), TfToken("RigExecCopyFrame"));
+    CHECK(copy.GetRelationship(TfToken("rigExec:source"))
+              .SetTargets({source.GetPath()}));
+    CHECK(copy.GetRelationship(TfToken("rigExec:poseInputs"))
+              .SetTargets({source.GetPath()}));
+    const UsdPrim joint =
+        stage->DefinePrim(SdfPath("/Rig/Joint"), TfToken("RigExecJoint"));
+    CHECK(joint.GetAttribute(TfToken("posed:space"))
+              .SetConnections({copy.GetPath().AppendProperty(
+                  TfToken("outputs:matrix"))}));
+    std::vector<uint8_t> bytes;
+    const bool baked = _BakeAtOne(stage, &bytes);
+    CHECK(baked);
+    const std::unique_ptr<fb::RigExecWireFile> file =
+        baked ? RigExecTestUnpack(bytes) : nullptr;
+    CHECK(file && file->providerProgram);
+    if (!file || !file->providerProgram) {
+        return;
+    }
+    const auto affineOp = [](fb::RigExecWireFile *f) {
+        fb::RigExecWireProviderOp *found = nullptr;
+        for (auto &op : f->providerProgram->ops) {
+            if (op.kind == uint32_t(RigExecProviderOpKind::AffineFrame)) {
+                found = &op;
+            }
+        }
+        return found;
+    };
+    const auto otherOp = [](fb::RigExecWireFile *f) {
+        for (auto &op : f->providerProgram->ops) {
+            if (op.kind != uint32_t(RigExecProviderOpKind::AffineFrame)) {
+                return &op;
+            }
+        }
+        return static_cast<fb::RigExecWireProviderOp *>(nullptr);
+    };
+    const fb::RigExecWireProviderOp *op = affineOp(file.get());
+    CHECK(op && op->affineKind == 0 && op->affineTargets == 0 &&
+          op->inputs.size() == 3);
+    if (!op) {
+        return;
+    }
+    std::vector<uint8_t> rewritten;
+    std::string why;
+    CHECK(RigExecFormatWrite(*file, &rewritten, &why) && rewritten == bytes);
+    fb::RigExecWireFile previous(*file);
+    previous.formatVersion = 20;
+    CHECK(_Refused(previous, "holds no affine frame expressions"));
+    fb::RigExecWireFile unknown(*file);
+    affineOp(&unknown)->affineKind = RigExecAffineFrameTypeCount;
+    CHECK(_Refused(unknown, "affine frame expression does not match"));
+    fb::RigExecWireFile short_(*file);
+    affineOp(&short_)->inputs.pop_back();
+    CHECK(_Refused(short_, "affine frame expression does not match"));
+    fb::RigExecWireFile named(*file);
+    fb::RigExecWireProviderOp *other = otherOp(&named);
+    CHECK(other);
+    if (other) {
+        other->affineKind = 1;
+        CHECK(_Refused(named, "affine frame expression does not match"));
+    }
+    std::printf("affine frame records: %zu provider ops, format 21 only\n",
+                file->providerProgram->ops.size());
 }
 
 // tests/fixtures/raw_skin_layouts.usda baked at time 1: three skin layouts
@@ -4284,6 +4365,7 @@ main(int argc, char **argv)
     TestPhaseBindingBakes();
     TestRawSkinLayoutBake();
     TestExtendedDeformerSettingsBake();
+    TestAffineFrameRecords();
     TestEnumeratedReadThroughPropertyResult();
     TestStaticReportRevisionReads();
     TestStaticReportAnsweredBlendSamples();

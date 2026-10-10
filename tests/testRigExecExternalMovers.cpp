@@ -940,7 +940,9 @@ void TestIncompatiblePlugin()
     } cleanup{directory};
     {
         std::ofstream metadata(directory / "plugInfo.json");
-        metadata << R"({"Plugins": [{"Type": "library", "Name": "incompatibleExternalMover", "Root": ".", "ResourcePath": ".", "LibraryPath": "never-loaded", "Info": {"RigExecMoverPlugin": 3}}]})";
+        // The previous API version: its handler layout is not this one.
+        metadata << R"({"Plugins": [{"Type": "library", "Name": "incompatibleExternalMover", "Root": ".", "ResourcePath": ".", "LibraryPath": "never-loaded", "Info": {"RigExecMoverPlugin": )"
+                 << RigExecMoverPluginApiVersion - 1 << "}}]}";
         CHECK(metadata.good());
     }
     // The loader must inspect metadata registered after its initial discovery
@@ -954,7 +956,9 @@ void TestIncompatiblePlugin()
     CHECK(diagnostics.size() == 1);
     CHECK(diagnostics.front().find("incompatible") != std::string::npos);
     CHECK(diagnostics.front().find("version") != std::string::npos);
-    CHECK(diagnostics.front().find("expected 4") != std::string::npos);
+    CHECK(diagnostics.front().find(
+              "expected " + std::to_string(RigExecMoverPluginApiVersion)) !=
+          std::string::npos);
     CHECK(!plugin->IsLoaded());
 }
 

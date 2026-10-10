@@ -522,7 +522,8 @@ inline constexpr uint8_t RigExecWireConstraintRadialBlend =
 /// (RigExecFormatExtendedSettingNames): mover attributes the revision reads
 /// through its path reads and leaf sites, and frame providers held as its
 /// influences. A format-20 file holds none of them, so its Delta Mush,
-/// lattice and surface revisions play the legacy deformers.
+/// lattice and surface revisions play the legacy deformers. Format 21 also
+/// adds affine frame expressions to the provider program.
 inline constexpr uint32_t RigExecFormatVersion = 21;
 
 /// The oldest format version Open reads.
@@ -539,6 +540,11 @@ RigExecFormatReads(uint32_t version)
 /// The first format version whose Delta Mush, lattice and surface
 /// revisions may carry the extended settings.
 inline constexpr uint32_t RigExecFormatExtendedSettingsVersion = 21;
+
+/// The first format version whose provider program may hold affine frame
+/// expressions (provider op kind AffineFrame, with its affine_kind and
+/// affine_targets).
+inline constexpr uint32_t RigExecFormatAffineFramesVersion = 21;
 
 /// The mover attributes format 21 adds to revision op \p op (DeltaMush,
 /// Lattice or SurfaceProject), in the order the assembly reads them, with

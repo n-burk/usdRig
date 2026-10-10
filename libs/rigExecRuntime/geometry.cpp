@@ -12,6 +12,7 @@
 // from the wire geometry tables. Bitwise: same ops in the same order, float
 // stays float.
 
+#include "rigExecRuntime/affineMath.h"
 #include "rigExecRuntime/labels.h"
 #include "rigExecRuntime/store.h"
 #include "rigExecMath/deltaMushKernel.h"
@@ -640,6 +641,13 @@ struct RrGeoMoverParameters {
     std::vector<std::string> externalPhasedPaths;
     std::vector<uint8_t> externalPhasedHave;
     std::vector<std::vector<RrVec3f>> externalPhased;
+    // For a kernel that takes them (applyWithProviders): the provider
+    // values the assembly reads -- the folded transform, the folded
+    // influences and the chain's base points.
+    bool externalHaveTransform = false;
+    RrMat4d externalTransform{1.0};
+    std::vector<RrMat4d> externalInfluences;
+    std::vector<RrVec3f> externalBasePoints;
 
     RrGeoMoverParameters()
     {
@@ -691,7 +699,11 @@ struct RrGeoMoverParameters {
                externalInputs == o.externalInputs &&
                externalPhasedPaths == o.externalPhasedPaths &&
                externalPhasedHave == o.externalPhasedHave &&
-               externalPhased == o.externalPhased;
+               externalPhased == o.externalPhased &&
+               externalHaveTransform == o.externalHaveTransform &&
+               externalTransform == o.externalTransform &&
+               externalInfluences == o.externalInfluences &&
+               externalBasePoints == o.externalBasePoints;
     }
     bool operator!=(const RrGeoMoverParameters &o) const
     {
@@ -3074,9 +3086,36 @@ RrGeoApplyExternal(const RrGeoMoverParameters &p, std::vector<RrVec3f> *pts)
     }
     const uint8_t *frameData=p.externalFrame?p.externalFrame->data():nullptr;
     const size_t frameSize=p.externalFrame?p.externalFrame->size():0;
-    if (!p.external->kernel.apply(p.external->state.get(), frameData,
-                                  frameSize, phased.data(), phased.size(),
-                                  inputs.data(),inputs.size(),xyz.data(), pts->size())) {
+    const RigExecExternalKernel &kernel = p.external->kernel;
+    if (kernel.applyWithProviders) {
+        std::vector<double> influences(p.externalInfluences.size() * 16);
+        for (size_t k = 0; k < p.externalInfluences.size(); ++k) {
+            std::memcpy(influences.data() + k * 16, p.externalInfluences[k]._mtx,
+                        sizeof(double) * 16);
+        }
+        std::vector<float> base(p.externalBasePoints.size() * 3);
+        for (size_t i = 0; i < p.externalBasePoints.size(); ++i) {
+            for (size_t a = 0; a < 3; ++a) {
+                base[i * 3 + a] = p.externalBasePoints[i][a];
+            }
+        }
+        RigExecExternalProviders providers;
+        providers.transform = p.externalHaveTransform
+                                  ? &p.externalTransform._mtx[0][0]
+                                  : nullptr;
+        providers.influences = influences.empty() ? nullptr : influences.data();
+        providers.influenceCount = p.externalInfluences.size();
+        providers.basePoints = base.empty() ? nullptr : base.data();
+        providers.basePointCount = p.externalBasePoints.size();
+        if (!kernel.applyWithProviders(p.external->state.get(), frameData,
+                                       frameSize, phased.data(), phased.size(),
+                                       inputs.data(), inputs.size(), providers,
+                                       xyz.data(), pts->size())) {
+            return false;
+        }
+    } else if (!kernel.apply(p.external->state.get(), frameData,
+                             frameSize, phased.data(), phased.size(),
+                             inputs.data(),inputs.size(),xyz.data(), pts->size())) {
         return false;
     }
     // The same atomic check the stage-side host makes: a non-finite
@@ -3573,6 +3612,42 @@ RrGeoStatusForParameters(const RrGeoMoverParameters &parameters,
 }
 
 }  // namespace
+
+// The affine frame expressions' dual quaternions (affineMath.h): the rigid
+// half of the skinning port above, which is dualQuat.cpp's.
+RrAffineDualQuat
+RrAffineDualQuatFromMatrix(const RrMat4d &matrix)
+{
+    RrQuatd rotation(1.0);
+    RrGeoDecomposeMatrix(matrix, &rotation, nullptr);
+    const RrGeoDualQuat dq = RrGeoDualQuatFromRotationTranslation(
+        rotation, matrix.ExtractTranslation());
+    return RrAffineDualQuat{dq.real, dq.dual};
+}
+
+bool
+RrAffineDualQuatNormalize(RrAffineDualQuat *dq)
+{
+    RrGeoDualQuat value;
+    value.real = dq->real;
+    value.dual = dq->dual;
+    const bool normalized = RrGeoDualQuatNormalize(&value);
+    dq->real = value.real;
+    dq->dual = value.dual;
+    return normalized;
+}
+
+RrMat4d
+RrAffineDualQuatToMatrix(const RrAffineDualQuat &dq)
+{
+    RrGeoDualQuat value;
+    value.real = dq.real;
+    value.dual = dq.dual;
+    RrMat4d m(1.0);
+    m.SetRotate(dq.real);
+    m.SetTranslateOnly(RrGeoDualQuatTranslation(value));
+    return m;
+}
 
 // Scratch: revision packets, influence tables, output buffers, chunks, skin
 // topologies, blend layouts and points, base points and the resolved stage
@@ -6126,6 +6201,19 @@ RrGeoAssembleExternal(const RrGeoAssembleInputs &in,
         params->externalInputs.push_back(std::move(value));
     }
     if (!params->externalFrame && params->externalInputs.empty()) return;
+    // A kernel that reads the provider values gets the assembly's: the
+    // fold's transform and influences, and the chain's base points.
+    if (state.kernel.applyWithProviders) {
+        params->externalHaveTransform = in.rev->haveTransform;
+        if (in.rev->haveTransform) {
+            params->externalTransform = in.rev->transform;
+        }
+        params->externalInfluences = in.rev->influences;
+        if (in.basePoints && in.basePointCount > 0) {
+            params->externalBasePoints.assign(in.basePoints,
+                                              in.basePoints + in.basePointCount);
+        }
+    }
     const RigExecWireRevisionBinding &binding = *in.wire->binding;
     for (size_t i = 0;
          i < binding.phaseInputs.size() && i < binding.phases.size(); ++i) {
@@ -8574,6 +8662,10 @@ void RrOpParametersKey(std::string *key, const RrGeoMoverParameters &p)
     RrOpBytes(key, p.externalPhasedPaths);
     RrOpBytes(key, p.externalPhasedHave);
     RrOpBytes(key, p.externalPhased);
+    RrOpBytes(key, p.externalHaveTransform);
+    RrOpBytes(key, p.externalTransform);
+    RrOpBytes(key, p.externalInfluences);
+    RrOpBytes(key, p.externalBasePoints);
     RrOpBytes(key, p.weights.representation); RrOpBytes(key, p.weights.rangePolicy);
     RrOpBytes(key, p.weights.Values()); RrOpBytes(key, p.weights.Indices());
     RrOpBytes(key, p.weights.defaultWeight); RrOpBytes(key, p.weights.valid);
