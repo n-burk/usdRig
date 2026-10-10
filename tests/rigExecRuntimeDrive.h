@@ -391,7 +391,7 @@ RigExecCompareRuntimeOutputs(const rigExec::RigExecRigPose &pose,
     {
         std::map<std::string, const std::vector<rigExec::RrVec3f> *> byPath;
         for (const auto &moved : reader.GetPoints()) {
-            byPath[moved.path] = &moved.points;
+            byPath[moved.path] = &moved.points.Vector();
         }
         size_t arrays = 0;
         for (const auto &[path, value] : pose.movedProperties) {

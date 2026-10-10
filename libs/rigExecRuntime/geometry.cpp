@@ -7652,7 +7652,7 @@ RrGeoRunDerivedStep(RrProgram *program, RrGeometryScratch *scratch,
                 geo.chains[chainIndex].derived[derivedIndex].target) +
             ": derived geometry input/cardinality validation failed");
     }
-    derived.spare.resize(rev.output.size());
+    RrRetainedPrepare(&derived.spare, rev.output.size());
     std::copy(rev.output.begin(), rev.output.end(), derived.spare.data());
     {
         // Before the swap, against what was last published: the array a
@@ -7755,7 +7755,7 @@ RrGeoRunChainStatusStep(RrProgram *program, RrGeometryScratch *scratch,
             RrGeoPointsAfter(chain, chain.revisions.size() - 1, &points,
                              &count);
         }
-        chain.spare.resize(count);
+        RrRetainedPrepare(&chain.spare, count);
         if (count > 0 && points) {
             std::copy(points, points + count, chain.spare.data());
         }
@@ -7927,6 +7927,7 @@ RrGeoRunRevisionStaticStep(RrProgram *program, RrGeometryScratch *scratch,
             if (!shared || packet.arrays != rev.weightFieldArrays ||
                 rev.weightFieldCount != logicalCount) {
                 std::vector<float> &resolved = rev.resolveScratch;
+                RrRetainedPrepare(&resolved, logicalCount);
                 if (!packet.ResolveAll(logicalCount, &resolved)) {
                     resolved.assign(logicalCount, 0.0f);
                     for (size_t i = 0; i < logicalCount; ++i) {
