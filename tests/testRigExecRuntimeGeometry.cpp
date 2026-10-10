@@ -1237,12 +1237,12 @@ _TestFalloffInputMatchesSessionEdit()
     const RigExecRuntimeWeightField *field =
         _FindWeightField(player.Reader(), sphere);
     CHECK(field &&
-          field->weights == (std::vector<float>{0.0f, 0.5f, 1.0f}));
+          field->weights.Vector() == (std::vector<float>{0.0f, 0.5f, 1.0f}));
     CHECK(player->SetInput(falloffMax, 4.0, &error));
     CHECK(player.Play(bakeTime, &error));
     field = _FindWeightField(player.Reader(), sphere);
     CHECK(field &&
-          field->weights == (std::vector<float>{0.0f, 0.0f, 1.0f}));
+          field->weights.Vector() == (std::vector<float>{0.0f, 0.0f, 1.0f}));
     {
         std::vector<RigExecRigPose> poses;
         CHECK(RigExecTestEditedPoses(stage, rigPath,
