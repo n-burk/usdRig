@@ -94,6 +94,29 @@ int main() {
     CHECK(detachedLeaves.size()==lowered.record.leaves.keys.size());
     scene.relationships[relationship.fact.path].readPhase=TfToken("bad relative path");
     CHECK(!RigExecLowerSceneGeometry(scene,mover.fact.path,target.fact.path,&lowered,&error));
+    // The extended settings' frame providers (a Delta Mush's rigExec:frame,
+    // a lattice's or a surface's rigExec:frames) bind as influences at their
+    // relationship's phase, as each mover's Bind binds them.
+    const std::pair<const char *,const char *> framedMovers[]={{"RigExecDeltaMushMover","rigExec:frame"},
+        {"RigExecLatticeMover","rigExec:frames"},{"RigExecSurfaceMover","rigExec:frames"}};
+    for(const auto &[type,name]:framedMovers) {
+        RigExecSceneDescriptors framed;
+        framed.rigRoot=SdfPath("/Rig");framed.identities={UsdTimeCode::Default()};
+        RigExecSceneNodeDescriptor deformer;
+        deformer.fact.path=SdfPath("/Rig/Deform");deformer.fact.type=TfToken(type);deformer.fact.active=true;
+        framed.nodes.emplace(deformer.fact.path,deformer);
+        framed.attributes.emplace(target.fact.path,target);
+        RigExecSceneRelationshipDescriptor frames;
+        frames.fact.path=deformer.fact.path.AppendProperty(TfToken(name));frames.readPhase=TfToken("final");
+        frames.forwardedTargets={SdfPath("/Rig/CageFrame"),SdfPath("/Rig/TargetFrame")};frames.targetExists={1,1};
+        framed.relationships.emplace(frames.fact.path,frames);
+        RigExecSceneGeometryDescriptor detached;
+        CHECK(RigExecLowerSceneGeometry(framed,deformer.fact.path,target.fact.path,&detached,&error));
+        CHECK(detached.record.binding.influences==SdfPathVector({SdfPath("/Rig/CageFrame"),SdfPath("/Rig/TargetFrame")}));
+        CHECK(detached.record.binding.transformPhase.kind==RigExecReadPhaseKind::Final);
+        framed.relationships[frames.fact.path].readPhase=TfToken("bad relative path");
+        CHECK(!RigExecLowerSceneGeometry(framed,deformer.fact.path,target.fact.path,&detached,&error));
+    }
     RigExecSceneGeometryDescriptor graphDescriptor;
     graphDescriptor.mover=SdfPath("/Rig/Move");
     graphDescriptor.record.leaves.keys.push_back({SdfPath("/Mesh.points"),

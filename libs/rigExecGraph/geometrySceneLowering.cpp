@@ -77,19 +77,32 @@ bool RigExecLowerSceneGeometry(const RigExecSceneDescriptors &scene,const SdfPat
                                                        shape.empty()?SdfPath():shape.front()});
             } break;
         case RigExecRevisionOp::VolumeCorrect:binding.base=target;break;
-        case RigExecRevisionOp::Smooth:case RigExecRevisionOp::DeltaMush:case RigExecRevisionOp::Wrinkle:
+        case RigExecRevisionOp::Smooth:case RigExecRevisionOp::Wrinkle:
         case RigExecRevisionOp::RecomputeNormals:
             binding.base=target;meshTopology(owner);break;
+        // The frame providers of the extended settings bind as influences
+        // at their relationship's phase, as each mover's Bind binds them.
+        case RigExecRevisionOp::DeltaMush:
+            binding.base=target;meshTopology(owner);
+            binding.influences=targets(mover,"rigExec:frame");
+            if(!phase(mover,"rigExec:frame",&binding.transformPhase))return false;
+            break;
         case RigExecRevisionOp::Lattice: {
             binding.base=target;binding.cagePoints=points(first("rigExec:cage"));
             RigExecReadPhase p;if(!phase(mover,"rigExec:cage",&p))return false;
-            if(!p.IsBase())binding.phases[binding.cagePoints]=p;break;
+            if(!p.IsBase())binding.phases[binding.cagePoints]=p;
+            binding.influences=targets(mover,"rigExec:frames");
+            if(!phase(mover,"rigExec:frames",&binding.transformPhase))return false;
+            break;
         }
         case RigExecRevisionOp::SurfaceProject: {
             const auto surface=first("rigExec:surface").GetPrimPath();
             if(!surface.IsEmpty()) {binding.surfacePoints=points(surface);meshTopology(surface);}
             RigExecReadPhase p;if(!phase(mover,"rigExec:surface",&p))return false;
-            if(!p.IsBase())binding.phases[binding.surfacePoints]=p;break;
+            if(!p.IsBase())binding.phases[binding.surfacePoints]=p;
+            binding.influences=targets(mover,"rigExec:frames");
+            if(!phase(mover,"rigExec:frames",&binding.transformPhase))return false;
+            break;
         }
         case RigExecRevisionOp::Ribbon:case RigExecRevisionOp::Wire:case RigExecRevisionOp::EmitGuidePoints: {
             binding.bindCoords=first("rigExec:bindCoordinates");binding.driverFrames=first("rigExec:driverFrames");
