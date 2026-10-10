@@ -4260,12 +4260,17 @@ TestTheSparseWatchVisitsWhatMoved(const std::string &examples)
     CHECK(V0->sourceWatch.sparseVisit && V0->verifySourceKeys);
     const SdfPath body = WatchAvar(stage, "M_Body", "avars:ry");
     const SdfPath shoulder = WatchAvar(stage, "L_Shldr", "avars:rz");
-    CHECK(!body.IsEmpty() && !shoulder.IsEmpty());
+    // Read through the foot-roll FloatMath chains' connections: a drag on
+    // it fills a head override slot, so the lift compares an emptied slot.
+    const SdfPath toe = WatchAvar(stage, "L_Leg", "avars:toePlantAngle");
+    CHECK(!body.IsEmpty() && !shoulder.IsEmpty() && !toe.IsEmpty());
     RigExecRigEvaluator *const all[] = {sparse.get(), full.get(),
                                         verify.get()};
     TfErrorMark mark;
     size_t dragSteps = 0;
-    const auto step = [&](double time, const std::string &what, bool drag) {
+    enum class Expect { Any, AvarsCompared, AvarsSkipped };
+    const auto step = [&](double time, const std::string &what, bool drag,
+                          Expect avars = Expect::Any) {
         RigExecRigPose poses[3];
         for (size_t i = 0; i < 3; ++i) {
             poses[i] = all[i]->Evaluate(UsdTimeCode(time));
@@ -4319,11 +4324,30 @@ TestTheSparseWatchVisitsWhatMoved(const std::string &examples)
             CHECK(always <= S->sourceWatchVisits);
             CHECK(S->sourceWatchVisits < entries);
             CHECK(F->sourceWatchVisits == fw.index->entries.size());
+            CHECK(!sw.overrideSlotsHeld.empty());
+        }
+        // A moved avar constant compares every AvarConstant entry; a step
+        // that moved none compares none of them.
+        const size_t always = sw.index->alwaysEntries.size();
+        const size_t avarEntries = sw.index->avarEntries.size();
+        if (avars != Expect::Any) {
+            std::printf("%s: the sparse watch compared %zu entries, %zu "
+                        "always, %zu avar constant(s)
+",
+                        what.c_str(), S->sourceWatchVisits, always,
+                        avarEntries);
+        }
+        if (avars == Expect::AvarsCompared) {
+            CHECK(avarEntries > 0);
+            CHECK(S->sourceWatchVisits >= always + avarEntries);
+        } else if (avars == Expect::AvarsSkipped && avarEntries > 0) {
+            CHECK(S->sourceWatchVisits < always + avarEntries);
         }
     };
     const auto placeDrag = [&](double value) {
         for (RigExecRigEvaluator *e : all) {
-            e->SetInteractiveOverrides({DragOf(body, value)});
+            e->SetInteractiveOverrides(
+                {DragOf(body, value), DragOf(toe, float(value))});
         }
     };
     const auto placeUpstream =
@@ -4361,10 +4385,10 @@ TestTheSparseWatchVisitsWhatMoved(const std::string &examples)
         double value = 0.0;
         attribute.Get(&value, UsdTimeCode::Default());
         CHECK(attribute.Set(value + 0.5));
-        step(2, "avar value edit", false);
+        step(2, "avar value edit", false, Expect::AvarsCompared);
     }
     step(3, "time after the edit", false);
-    step(3, "held after the edit", false);
+    step(3, "held after the edit", false, Expect::AvarsSkipped);
     CHECK(mark.IsClean());
 
     // A frozen clone of the verified program: its lane's jobs keep keys only

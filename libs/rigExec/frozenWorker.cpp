@@ -12,6 +12,7 @@
 #include <cmath>
 #include <cstring>
 #include <set>
+#include <type_traits>
 
 // Source sampling happens before dispatch. Bodies consume copied leaves and
 // typed outputs through the same graph executor as live evaluation; the serial
