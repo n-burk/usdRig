@@ -821,11 +821,9 @@ bool RrRunPropertyChains(RrProgram *program,
                          std::vector<std::string> *poseDiagnostics);
 
 // Prologues, over this run's slots and RrProgram::statics.
-// `poseDiagnostics` carries lines published straight into the generation,
-// after the property chains' own; false names the failure.
-bool RrProloguePose(RrProgram *program,
-                    std::vector<std::string> *poseDiagnostics,
-                    std::string *error);
+// Seeds captured xform, delta-base, and native-source frames. Always
+// completes: a refused stage-frame admission seeds only the admitted prefix.
+void RrProloguePose(RrProgram *program);
 bool RrPrologueGeometry(RrProgram *program,
                         std::vector<std::string> *poseDiagnostics,
                         std::string *error);

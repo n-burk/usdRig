@@ -4411,7 +4411,7 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
     pose->valid = scalarReferenceValid;
     if (measuring) {
         // Counted here, at the one exit that published a pose: a frame that
-        // bailed or fell back did not run the epilogue this is measuring,
+        // bailed before publish did not run the epilogue this is measuring,
         // and its prologue and region are dropped with it so that every
         // term of the table is divided by the frames that produced it. A
         // cold run the per-step sums left out goes to sums of its own.

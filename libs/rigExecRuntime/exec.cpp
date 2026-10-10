@@ -567,7 +567,7 @@ RigExecRuntimeReader::Execute(std::string *error)
     RrInputsApplyTouched(&program);
 
     std::vector<std::string> poseDiagnostics;
-    if (!RrProloguePose(&program, &poseDiagnostics, error)) return false;
+    RrProloguePose(&program);
     if (!RrPrologueGeometry(&program, &poseDiagnostics, error)) return false;
     const bool ran = RrRunSteps(&program, false, error);
     // Joined: the binds this run built share now, not at the next run.

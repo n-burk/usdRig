@@ -584,13 +584,9 @@ RrRunRestHead(RrProgram *program, size_t group, bool ladder)
     return !moved.empty();
 }
 
-bool
-RrProloguePose(RrProgram *program,
-               std::vector<std::string> *poseDiagnostics,
-               std::string *error)
+void
+RrProloguePose(RrProgram *program)
 {
-    (void)poseDiagnostics;
-    (void)error;
     RrStore &store = program->store;
     RrPoseScratch *scratch = _RrScratch(program);
     const RigExecWireSlotMeta &meta = *program->slotMeta;
@@ -610,7 +606,7 @@ RrProloguePose(RrProgram *program,
         store.base[size_t(slot)] = frame;
         store.fin[size_t(slot)] = frame;
     }
-    if(!program->requiredStageFramesAdmission.admitted)return true;
+    if(!program->requiredStageFramesAdmission.admitted)return;
     // The target transform each geometry-domain constraint measures
     // its delta against.
     for (size_t k = 0; k < geometry.deltaBasePaths.size(); ++k) {
@@ -627,7 +623,6 @@ RrProloguePose(RrProgram *program,
     }
     // Constraint array inputs are copied by the input sampler. The owning
     // Constraint operation validates cardinality and expands neutral defaults.
-    return true;
 }
 
 } // namespace rigExec
