@@ -29,5 +29,7 @@ cmake --build "%RIG%\build" -j %JOBS%
 if errorlevel 1 exit /b 1
 
 if "%~1"=="--no-test" exit /b 0
+rem Bound concurrent test processes independently of compile jobs.
+if not defined CTEST_PARALLEL_LEVEL set "CTEST_PARALLEL_LEVEL=4"
 ctest --test-dir "%RIG%\build" --output-on-failure
 exit /b %errorlevel%

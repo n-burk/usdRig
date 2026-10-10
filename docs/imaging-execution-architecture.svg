@@ -1,0 +1,248 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="980" viewBox="0 0 1600 980" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#334155"/>
+    </marker>
+    <marker id="arrowBlue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#2563eb"/>
+    </marker>
+    <marker id="arrowDashed" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#64748b"/>
+    </marker>
+  </defs>
+
+  <!-- background -->
+  <rect x="0" y="0" width="1600" height="980" fill="#f8fafc"/>
+
+  <!-- title -->
+  <text x="40" y="52" font-size="30" font-weight="700" fill="#0f172a">RigExec: Imaging → Execution architecture</text>
+  <text x="40" y="80" font-size="15" fill="#475569">Evaluate-then-publish. Evaluation completes first, then one immutable generation is atomically published, then dirtied notices are sent. Hydra pulls never compute.</text>
+  <line x1="40" y1="100" x2="1560" y2="100" stroke="#cbd5e1" stroke-width="1"/>
+
+  <!-- ===== Column 1: Sources ===== -->
+  <rect x="40" y="120" width="270" height="740" rx="10" fill="#ffffff" stroke="#94a3b8" stroke-width="1.5"/>
+  <rect x="40" y="120" width="270" height="46" rx="10" fill="#0f172a"/>
+  <rect x="40" y="150" width="270" height="16" fill="#0f172a"/>
+  <text x="175" y="149" font-size="17" font-weight="700" fill="#ffffff" text-anchor="middle">1 · Sources</text>
+
+  <rect x="56" y="182" width="238" height="118" rx="8" fill="#f1f5f9" stroke="#64748b"/>
+  <text x="68" y="206" font-size="14" font-weight="700" fill="#0f172a">USD stage (read-only)</text>
+  <text x="68" y="226" font-size="12" fill="#334155">RigExecRoot, controls,</text>
+  <text x="68" y="243" font-size="12" fill="#334155">solvers, movers, weights.</text>
+  <text x="68" y="260" font-size="12" fill="#334155">Evaluator never authors</text>
+  <text x="68" y="277" font-size="12" fill="#334155">the source stage.</text>
+
+  <rect x="56" y="312" width="238" height="118" rx="8" fill="#f1f5f9" stroke="#64748b"/>
+  <text x="68" y="336" font-size="14" font-weight="700" fill="#0f172a">Time trigger</text>
+  <text x="68" y="356" font-size="12" fill="#334155">rigAdapter adds leaf</text>
+  <text x="68" y="373" font-size="12" fill="#334155">rigExec/time on Rig roots.</text>
+  <text x="68" y="390" font-size="12" fill="#334155">UsdImaging SetTime dirties</text>
+  <text x="68" y="407" font-size="12" fill="#334155">it → results index pulls.</text>
+
+  <rect x="56" y="442" width="238" height="118" rx="8" fill="#f1f5f9" stroke="#64748b"/>
+  <text x="68" y="466" font-size="14" font-weight="700" fill="#0f172a">Stage notices</text>
+  <text x="68" y="486" font-size="12" fill="#334155">ObjectsChanged → registry.</text>
+  <text x="68" y="503" font-size="12" fill="#334155">Classified: epoch rebuild,</text>
+  <text x="68" y="520" font-size="12" fill="#334155">cache retire, chain rebind.</text>
+  <text x="68" y="537" font-size="12" fill="#334155">Serial retires pose-only.</text>
+
+  <rect x="56" y="572" width="238" height="118" rx="8" fill="#fefce8" stroke="#a16207"/>
+  <text x="68" y="596" font-size="14" font-weight="700" fill="#0f172a">Upstream inputs</text>
+  <text x="68" y="616" font-size="12" fill="#334155">Authored-level values +</text>
+  <text x="68" y="633" font-size="12" fill="#334155">interactive overrides (drag).</text>
+  <text x="68" y="650" font-size="12" fill="#334155">Folded into cache digest;</text>
+  <text x="68" y="667" font-size="12" fill="#334155">drag bypasses the cache.</text>
+
+  <text x="175" y="730" font-size="12" font-style="italic" fill="#64748b" text-anchor="middle">owning thread</text>
+  <text x="175" y="748" font-size="12" font-style="italic" fill="#64748b" text-anchor="middle">samples here only</text>
+  <text x="175" y="800" font-size="12" font-style="italic" fill="#64748b" text-anchor="middle">registry.h</text>
+  <text x="175" y="818" font-size="12" font-style="italic" fill="#64748b" text-anchor="middle">rigAdapter.cpp</text>
+
+  <!-- ===== Column 2: Registry ===== -->
+  <rect x="330" y="120" width="270" height="740" rx="10" fill="#ffffff" stroke="#2563eb" stroke-width="2"/>
+  <rect x="330" y="120" width="270" height="46" rx="10" fill="#2563eb"/>
+  <rect x="330" y="150" width="270" height="16" fill="#2563eb"/>
+  <text x="465" y="149" font-size="17" font-weight="700" fill="#ffffff" text-anchor="middle">2 · Imaging registry</text>
+
+  <rect x="346" y="182" width="238" height="118" rx="8" fill="#eff6ff" stroke="#2563eb"/>
+  <text x="358" y="206" font-size="14" font-weight="700" fill="#0f172a">Per-stage context</text>
+  <text x="358" y="226" font-size="12" fill="#334155">One context per UsdStage:</text>
+  <text x="358" y="243" font-size="12" fill="#334155">store, sessions, time,</text>
+  <text x="358" y="260" font-size="12" fill="#334155">scheduler, warm index.</text>
+  <text x="358" y="277" font-size="12" fill="#334155">Directory keyed by stage.</text>
+
+  <rect x="346" y="312" width="238" height="118" rx="8" fill="#eff6ff" stroke="#2563eb"/>
+  <text x="358" y="336" font-size="14" font-weight="700" fill="#0f172a">Chain binding</text>
+  <text x="358" y="356" font-size="12" fill="#334155">Chains register UNBOUND.</text>
+  <text x="358" y="373" font-size="12" fill="#334155">rigExec/stageKey leaf binds</text>
+  <text x="358" y="390" font-size="12" fill="#334155">chain → its stage context.</text>
+  <text x="358" y="407" font-size="12" fill="#334155">No side channel.</text>
+
+  <rect x="346" y="442" width="238" height="118" rx="8" fill="#eff6ff" stroke="#2563eb"/>
+  <text x="358" y="466" font-size="14" font-weight="700" fill="#0f172a">Activation + SetTime</text>
+  <text x="358" y="486" font-size="12" fill="#334155">Activate(stage) / auto via</text>
+  <text x="358" y="503" font-size="12" fill="#334155">adapter. SetTime serializes</text>
+  <text x="358" y="520" font-size="12" fill="#334155">one evaluate-and-publish</text>
+  <text x="358" y="537" font-size="12" fill="#334155">per rig. UI thread only.</text>
+
+  <rect x="346" y="572" width="238" height="118" rx="8" fill="#eff6ff" stroke="#2563eb"/>
+  <text x="358" y="596" font-size="14" font-weight="700" fill="#0f172a">Warm scheduler</text>
+  <text x="358" y="616" font-size="12" fill="#334155">Idle frames warm behind</text>
+  <text x="358" y="633" font-size="12" fill="#334155">generation fence. Stale or</text>
+  <text x="358" y="650" font-size="12" fill="#334155">purged jobs retire; never</text>
+  <text x="358" y="667" font-size="12" fill="#334155">repopulate the cache.</text>
+
+  <text x="465" y="730" font-size="12" font-style="italic" fill="#64748b" text-anchor="middle">fence → context → noted</text>
+  <text x="465" y="748" font-size="12" font-style="italic" fill="#64748b" text-anchor="middle">→ cache / directory</text>
+  <text x="465" y="800" font-size="12" font-style="italic" fill="#64748b" text-anchor="middle">registry.h / .cpp</text>
+  <text x="465" y="818" font-size="12" font-style="italic" fill="#64748b" text-anchor="middle">warmIndex.h</text>
+
+  <!-- ===== Column 3: Bridge ===== -->
+  <rect x="620" y="120" width="290" height="740" rx="10" fill="#ffffff" stroke="#7c3aed" stroke-width="2"/>
+  <rect x="620" y="120" width="290" height="46" rx="10" fill="#7c3aed"/>
+  <rect x="620" y="150" width="290" height="16" fill="#7c3aed"/>
+  <text x="765" y="149" font-size="17" font-weight="700" fill="#ffffff" text-anchor="middle">3 · Bridge (fenced)</text>
+
+  <rect x="636" y="182" width="258" height="100" rx="8" fill="#f5f3ff" stroke="#7c3aed"/>
+  <text x="648" y="206" font-size="14" font-weight="700" fill="#0f172a">ⓐ Sample inputs</text>
+  <text x="648" y="226" font-size="12" fill="#334155">Pinned chain bindings +</text>
+  <text x="648" y="243" font-size="12" fill="#334155">frame inputs digest. Live</text>
+  <text x="648" y="260" font-size="12" fill="#334155">USD read happens here.</text>
+
+  <rect x="636" y="294" width="258" height="100" rx="8" fill="#f5f3ff" stroke="#7c3aed"/>
+  <text x="648" y="318" font-size="14" font-weight="700" fill="#0f172a">ⓑ Cache or evaluate</text>
+  <text x="648" y="338" font-size="12" fill="#334155">Proven hit → serve pose.</text>
+  <text x="648" y="355" font-size="12" fill="#334155">Miss → run evaluator →</text>
+  <text x="648" y="372" font-size="12" fill="#334155">memoize + freshness proof.</text>
+
+  <rect x="636" y="406" width="258" height="100" rx="8" fill="#ede9fe" stroke="#7c3aed" stroke-width="2"/>
+  <text x="648" y="430" font-size="14" font-weight="700" fill="#0f172a">ⓒ Atomic publish</text>
+  <text x="648" y="450" font-size="12" fill="#334155">Complete generation →</text>
+  <text x="648" y="467" font-size="12" fill="#334155">snapshot store swap.</text>
+  <text x="648" y="484" font-size="12" fill="#334155">Hit and live paths share it.</text>
+
+  <rect x="636" y="518" width="258" height="100" rx="8" fill="#f5f3ff" stroke="#7c3aed"/>
+  <text x="648" y="542" font-size="14" font-weight="700" fill="#0f172a">ⓓ Dirtied notices</text>
+  <text x="648" y="562" font-size="12" fill="#334155">Precise coalesced notices</text>
+  <text x="648" y="579" font-size="12" fill="#334155">only AFTER the swap.</text>
+  <text x="648" y="596" font-size="12" fill="#334155">+ epoch swap if moved.</text>
+
+  <text x="765" y="656" font-size="12" font-weight="700" fill="#7c3aed" text-anchor="middle">EvaluateAndPublish(time)</text>
+  <text x="765" y="730" font-size="12" font-style="italic" fill="#64748b" text-anchor="middle">motion: preflight, then</text>
+  <text x="765" y="748" font-size="12" font-style="italic" fill="#64748b" text-anchor="middle">N offsets, one fence</text>
+  <text x="765" y="800" font-size="12" font-style="italic" fill="#64748b" text-anchor="middle">bridge.h / bridge.cpp</text>
+  <text x="765" y="818" font-size="12" font-style="italic" fill="#64748b" text-anchor="middle">frameCache, snapshotStore.h</text>
+
+  <!-- ===== Column 4: Execution ===== -->
+  <rect x="930" y="120" width="290" height="740" rx="10" fill="#ffffff" stroke="#059669" stroke-width="2"/>
+  <rect x="930" y="120" width="290" height="46" rx="10" fill="#059669"/>
+  <rect x="930" y="150" width="290" height="16" fill="#059669"/>
+  <text x="1075" y="149" font-size="17" font-weight="700" fill="#ffffff" text-anchor="middle">4 · Execution</text>
+
+  <rect x="946" y="182" width="258" height="118" rx="8" fill="#ecfdf5" stroke="#059669"/>
+  <text x="958" y="206" font-size="14" font-weight="700" fill="#0f172a">Compile epoch</text>
+  <text x="958" y="226" font-size="12" fill="#334155">Discovery, validation,</text>
+  <text x="958" y="243" font-size="12" fill="#334155">typed bindings, read-phase</text>
+  <text x="958" y="260" font-size="12" fill="#334155">→ producer versions.</text>
+  <text x="958" y="277" font-size="12" fill="#334155">Edits rebuild lazily.</text>
+
+  <rect x="946" y="312" width="258" height="130" rx="8" fill="#ecfdf5" stroke="#059669"/>
+  <text x="958" y="336" font-size="14" font-weight="700" fill="#0f172a">One operation graph</text>
+  <text x="958" y="356" font-size="12" fill="#334155">Shared compiler: deps,</text>
+  <text x="958" y="373" font-size="12" fill="#334155">canonical order, SCC cycles,</text>
+  <text x="958" y="390" font-size="12" fill="#334155">clusters, readiness rules.</text>
+  <text x="958" y="407" font-size="12" fill="#334155">Native = frozen = runtime.</text>
+  <text x="958" y="424" font-size="12" fill="#334155">No second evaluator.</text>
+
+  <rect x="946" y="454" width="258" height="118" rx="8" fill="#ecfdf5" stroke="#059669"/>
+  <text x="958" y="478" font-size="14" font-weight="700" fill="#0f172a">Domain bodies (pure)</text>
+  <text x="958" y="498" font-size="12" fill="#334155">Pose, properties, geometry,</text>
+  <text x="958" y="515" font-size="12" fill="#334155">weights. No stage access,</text>
+  <text x="958" y="532" font-size="12" fill="#334155">no mutex, no logging locks.</text>
+  <text x="958" y="549" font-size="12" fill="#334155">Declared values only.</text>
+
+  <rect x="946" y="584" width="258" height="106" rx="8" fill="#d1fae5" stroke="#059669"/>
+  <text x="958" y="608" font-size="14" font-weight="700" fill="#0f172a">Frozen worker</text>
+  <text x="958" y="628" font-size="12" fill="#334155">Detached run on sampled</text>
+  <text x="958" y="645" font-size="12" fill="#334155">values, same graph + bodies.</text>
+  <text x="958" y="662" font-size="12" fill="#334155">Owns its mutable arena.</text>
+
+  <text x="1075" y="730" font-size="12" font-style="italic" fill="#64748b" text-anchor="middle">cycles → cleared outputs</text>
+  <text x="1075" y="748" font-size="12" font-style="italic" fill="#64748b" text-anchor="middle">+ canonical loop keys</text>
+  <text x="1075" y="800" font-size="12" font-style="italic" fill="#64748b" text-anchor="middle">rigEvaluator*.cpp, baked*</text>
+  <text x="1075" y="818" font-size="12" font-style="italic" fill="#64748b" text-anchor="middle">frozenWorker, opGraph</text>
+
+  <!-- ===== Column 5: Hydra ===== -->
+  <rect x="1240" y="120" width="320" height="740" rx="10" fill="#ffffff" stroke="#ea580c" stroke-width="2"/>
+  <rect x="1240" y="120" width="320" height="46" rx="10" fill="#ea580c"/>
+  <rect x="1240" y="150" width="320" height="16" fill="#ea580c"/>
+  <text x="1400" y="149" font-size="17" font-weight="700" fill="#ffffff" text-anchor="middle">5 · Hydra publication</text>
+
+  <rect x="1256" y="182" width="288" height="100" rx="8" fill="#fff7ed" stroke="#ea580c"/>
+  <text x="1268" y="206" font-size="14" font-weight="700" fill="#0f172a">Snapshot store</text>
+  <text x="1268" y="226" font-size="12" fill="#334155">Current immutable</text>
+  <text x="1268" y="243" font-size="12" fill="#334155">generation, atomically read.</text>
+  <text x="1268" y="260" font-size="12" fill="#334155">Warm completions never land here.</text>
+
+  <rect x="1256" y="294" width="288" height="200" rx="8" fill="#fff7ed" stroke="#ea580c"/>
+  <text x="1268" y="318" font-size="14" font-weight="700" fill="#0f172a">Filter chain (in order)</text>
+  <text x="1268" y="340" font-size="12" fill="#334155">↑ UsdImaging upstream</text>
+  <text x="1268" y="360" font-size="12" font-weight="700" fill="#0f172a">① Pruning: owned</text>
+  <text x="1280" y="377" font-size="12" fill="#334155">__RigExecGenerated only</text>
+  <text x="1268" y="397" font-size="12" font-weight="700" fill="#0f172a">② Binding-resolve: epoch</text>
+  <text x="1280" y="414" font-size="12" fill="#334155">immutable per generation</text>
+  <text x="1268" y="434" font-size="12" font-weight="700" fill="#0f172a">③ Results: snapshot overlay</text>
+  <text x="1280" y="451" font-size="12" fill="#334155">GetPrim reads store only</text>
+  <text x="1268" y="471" font-size="12" fill="#334155">↓ merger / renderer</text>
+
+  <rect x="1256" y="506" width="288" height="118" rx="8" fill="#ffedd5" stroke="#ea580c" stroke-width="2"/>
+  <text x="1268" y="530" font-size="14" font-weight="700" fill="#0f172a">Standard Hydra data only</text>
+  <text x="1268" y="550" font-size="12" fill="#334155">HdXform matrices, flat</text>
+  <text x="1268" y="567" font-size="12" fill="#334155">points/normals primvars,</text>
+  <text x="1268" y="584" font-size="12" fill="#334155">extents. Renderers never</text>
+  <text x="1268" y="601" font-size="12" fill="#334155">call RigExec.</text>
+
+  <text x="1400" y="656" font-size="12" font-weight="700" fill="#ea580c" text-anchor="middle">GetPrim never computes,</text>
+  <text x="1400" y="674" font-size="12" font-weight="700" fill="#ea580c" text-anchor="middle">waits, or locks the stage</text>
+  <text x="1400" y="730" font-size="12" font-style="italic" fill="#64748b" text-anchor="middle">guides: joints, solvers,</text>
+  <text x="1400" y="748" font-size="12" font-style="italic" fill="#64748b" text-anchor="middle">controls, weight overlay</text>
+  <text x="1400" y="800" font-size="12" font-style="italic" fill="#64748b" text-anchor="middle">sceneIndices.h/.cpp</text>
+  <text x="1400" y="818" font-size="12" font-style="italic" fill="#64748b" text-anchor="middle">snapshotStore.h</text>
+
+  <!-- ===== Arrows between columns ===== -->
+  <!-- 1 -> 2 -->
+  <line x1="310" y1="380" x2="328" y2="380" stroke="#334155" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="310" y1="500" x2="328" y2="500" stroke="#334155" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- 2 -> 3 -->
+  <line x1="600" y1="440" x2="618" y2="440" stroke="#334155" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <text x="609" y="428" font-size="11" font-weight="700" fill="#334155" text-anchor="middle">publish</text>
+
+  <!-- 3 -> 4 (evaluate) and back -->
+  <line x1="910" y1="343" x2="928" y2="343" stroke="#059669" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <text x="919" y="331" font-size="11" font-weight="700" fill="#059669" text-anchor="middle">run</text>
+  <line x1="928" y1="500" x2="910" y2="500" stroke="#059669" stroke-width="2" stroke-dasharray="5,3" marker-end="url(#arrowDashed)"/>
+  <text x="919" y="488" font-size="11" fill="#059669" text-anchor="middle">pose</text>
+
+  <!-- 3 -> 5 (snapshot) -->
+  <line x1="910" y1="456" x2="928" y2="456" stroke="#334155" stroke-width="2" marker-end="url(#arrow)" opacity="0"/>
+  <!-- bridge publish to store: long arrow along bottom -->
+  <line x1="765" y1="618" x2="765" y2="700" stroke="#7c3aed" stroke-width="2"/>
+  <line x1="765" y1="700" x2="1400" y2="700" stroke="#7c3aed" stroke-width="2" marker-end="url(#arrowBlue)"/>
+  <text x="1080" y="690" font-size="12" font-weight="700" fill="#7c3aed" text-anchor="middle">ⓒ + ⓓ : atomic snapshot swap, then dirtied notices → results index</text>
+
+  <!-- invalidation feedback: notices back to bridge -->
+  <line x1="465" y1="560" x2="620" y2="560" stroke="#64748b" stroke-width="1.5" stroke-dasharray="6,4" marker-end="url(#arrowDashed)"/>
+  <text x="542" y="548" font-size="11" fill="#64748b" text-anchor="middle">retire</text>
+
+  <!-- trigger path from upstream into results -->
+  <line x1="175" y1="430" x2="175" y2="880" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="4,4"/>
+  <line x1="175" y1="880" x2="1400" y2="880" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="4,4" marker-end="url(#arrowDashed)"/>
+  <text x="700" y="872" font-size="12" fill="#64748b" text-anchor="middle">alternate trigger path (no timeline glue, e.g. usdrecord): rigExec/time dirtied → results index pulls frame → registry publishes</text>
+
+  <!-- footer -->
+  <rect x="40" y="900" width="1520" height="60" rx="8" fill="#0f172a"/>
+  <text x="60" y="924" font-size="13" fill="#e2e8f0">Contracts:  operation bodies + kernels + frozen worker are no-mutex zones  ·  workers never touch the live stage, evaluator, or registry  ·  sharing via immutable snapshots + explicit ownership</text>
+  <text x="60" y="945" font-size="13" fill="#94a3b8">Lock order: scheduler fence → context → noted → cache/warm-index → directory (leaf). Cache eviction callbacks run outside shard locks.</text>
+</svg>

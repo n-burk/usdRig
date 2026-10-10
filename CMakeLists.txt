@@ -470,25 +470,25 @@ add_test(NAME testRigExecConstraints COMMAND testRigExecConstraints)
 
 set(RIGEXEC_GOLDEN_SUITE_DIR "" CACHE PATH "Independent original-source suite goldens")
 function(rigexec_add_graph_test name)
-    set(_args "${ARGN}")
-    set(_golden_args "${_args}")
-    list(REMOVE_ITEM _golden_args "CONE_VERIFY")
+    cmake_parse_arguments(A "CONE_VERIFY;SEPARATE_PARALLEL" "" "" ${ARGN})
+    set(_args "${A_UNPARSED_ARGUMENTS}")
     if (RIGEXEC_GOLDEN_SUITE_DIR)
-        add_test(NAME ${name}Golden COMMAND ${name} ${_golden_args})
+        add_test(NAME ${name}Golden COMMAND ${name} ${_args})
         set_tests_properties(${name}Golden PROPERTIES LABELS "golden"
             ENVIRONMENT "RIGEXEC_GOLDEN_SUITE=check:${RIGEXEC_GOLDEN_SUITE_DIR};RIGEXEC_GOLDEN_SUITE_NAME=${name};RIGEXEC_ENABLE_PARALLEL_EVAL=0;RIGEXEC_BAKED_SCHEDULE=serial")
     endif()
-    set(_cone_verify OFF)
-    list(FIND _args "CONE_VERIFY" _cone_verify_at)
-    if (NOT _cone_verify_at EQUAL -1)
-        list(REMOVE_AT _args ${_cone_verify_at})
-        set(_cone_verify ON)
-    endif()
     foreach(_schedule serial parallel)
-        add_test(NAME ${name}Graph_${_schedule} COMMAND ${name} ${_args})
-        set_tests_properties(${name}Graph_${_schedule} PROPERTIES
-            ENVIRONMENT "RIGEXEC_BAKED_SCHEDULE=${_schedule};RIGEXEC_ENABLE_PARALLEL_EVAL=1")
-        if (_cone_verify)
+        # The base entry covers parallel execution unless its arguments or
+        # environment select a different case. Pin it against caller overrides.
+        if (_schedule STREQUAL "parallel" AND NOT A_SEPARATE_PARALLEL)
+            set_property(TEST ${name} APPEND PROPERTY ENVIRONMENT
+                "RIGEXEC_BAKED_SCHEDULE=parallel" "RIGEXEC_ENABLE_PARALLEL_EVAL=1")
+        else()
+            add_test(NAME ${name}Graph_${_schedule} COMMAND ${name} ${_args})
+            set_tests_properties(${name}Graph_${_schedule} PROPERTIES
+                ENVIRONMENT "RIGEXEC_BAKED_SCHEDULE=${_schedule};RIGEXEC_ENABLE_PARALLEL_EVAL=1")
+        endif()
+        if (A_CONE_VERIFY)
             foreach(_grain default 0)
                 set(_cone_test "${name}Cones_${_schedule}")
                 if (_grain STREQUAL "0")
@@ -1307,7 +1307,7 @@ target_compile_definitions(testRigExecVolumeWeights PRIVATE ${_rigexec_schema_re
 add_test(NAME testRigExecVolumeWeights COMMAND testRigExecVolumeWeights
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
 rigexec_add_graph_test(testRigExecVolumeWeights
-    CONE_VERIFY "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+    CONE_VERIFY SEPARATE_PARALLEL "${CMAKE_CURRENT_SOURCE_DIR}/examples")
 foreach(_entry testRigExecVolumeWeightsGraph_serial
                testRigExecVolumeWeightsGraph_parallel
                testRigExecVolumeWeightsCones_serial
@@ -1350,7 +1350,7 @@ set_tests_properties(testRigExecSkinTopology PROPERTIES
     ENVIRONMENT "RIGEXEC_ENABLE_PARALLEL_EVAL=0")
 # The baked program's own layout handles: authored edits, drags, time
 # samples, a bailed generation, and the exported layout fields.
-rigexec_add_graph_test(testRigExecSkinTopology CONE_VERIFY
+rigexec_add_graph_test(testRigExecSkinTopology CONE_VERIFY SEPARATE_PARALLEL
     --baked "${CMAKE_CURRENT_SOURCE_DIR}/examples")
 
 add_executable(testRigExecStaticInputCache
@@ -1373,7 +1373,7 @@ add_test(NAME testRigExecEpochRests COMMAND testRigExecEpochRests
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
 set_tests_properties(testRigExecEpochRests PROPERTIES
     ENVIRONMENT "RIGEXEC_ENABLE_PARALLEL_EVAL=0")
-rigexec_add_graph_test(testRigExecEpochRests CONE_VERIFY
+rigexec_add_graph_test(testRigExecEpochRests CONE_VERIFY SEPARATE_PARALLEL
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
 
 # Bit-identical results from the parallel per-point kernels, both ways round:
@@ -1515,12 +1515,7 @@ target_compile_definitions(testRigExecLeaves PRIVATE
     ${_rigexec_schema_resource_define})
 add_test(NAME testRigExecLeaves COMMAND testRigExecLeaves
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
-# The body-purity case under the parallel executor, without the cone
-# verifier's second pass.
-add_test(NAME testRigExecLeaves_parallel COMMAND testRigExecLeaves
-    "${CMAKE_CURRENT_SOURCE_DIR}/examples")
-set_tests_properties(testRigExecLeaves_parallel PROPERTIES
-    ENVIRONMENT "RIGEXEC_BAKED_SCHEDULE=parallel")
+# The base entry covers parallel body purity without the cone verifier.
 rigexec_add_graph_test(testRigExecLeaves CONE_VERIFY
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
 
@@ -1623,11 +1618,13 @@ target_link_libraries(probeEsfCompatibility PRIVATE exec esfUsd usd)
 
 function(rigexec_add_serial_test name)
     add_test(NAME ${name}Serial COMMAND ${name} ${ARGN})
-    set(_env "RIGEXEC_ENABLE_PARALLEL_EVAL=0")
+    set(_env)
     get_test_property(${name} ENVIRONMENT _plain_env)
     if (_plain_env)
         list(APPEND _env ${_plain_env})
     endif()
+    list(FILTER _env EXCLUDE REGEX "^RIGEXEC_ENABLE_PARALLEL_EVAL=")
+    list(APPEND _env "RIGEXEC_ENABLE_PARALLEL_EVAL=0")
     set_tests_properties(${name}Serial PROPERTIES ENVIRONMENT "${_env}")
     get_test_property(${name} ENVIRONMENT_MODIFICATION _plain_modification)
     if (_plain_modification)

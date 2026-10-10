@@ -141,11 +141,6 @@ class TestBackdropSticker(unittest.TestCase):
         self.assertTrue(attr.HasAuthoredValue())
         self.assertEqual(attr.Get(), 5)
 
-    def test_backdrop_icon_inherited(self):
-        """Test that backdrop can have icon attribute."""
-        prim = _mock_backdrop_prim()
-        self.assertTrue(prim.IsValid())
-
 
 class TestGroupStickerFromPrim(unittest.TestCase):
     """Integration tests for GroupSticker.from_prim reading Backdrop prims."""

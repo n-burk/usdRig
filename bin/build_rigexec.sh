@@ -37,4 +37,6 @@ cmake --build "$RIG/build" -j "$JOBS"
 if [ "${1:-}" = "--no-test" ]; then
     exit 0
 fi
+# Bound concurrent test processes independently of compile jobs.
+export CTEST_PARALLEL_LEVEL="${CTEST_PARALLEL_LEVEL:-4}"
 ctest --test-dir "$RIG/build" --output-on-failure

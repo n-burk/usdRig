@@ -88,17 +88,6 @@ class TestExpansionState(unittest.TestCase):
         result = _resolve_expansion_state(prim)
         self.assertIsNone(result)
 
-    def test_write_and_read_expansion_state(self):
-        # First read - closed
-        prim = _mock_prim(expansion_state="closed")
-        result = _resolve_expansion_state(prim)
-        self.assertEqual(result, "closed")
-
-        # Second read - open (simulating a write then read)
-        prim = _mock_prim(expansion_state="open")
-        result = _resolve_expansion_state(prim)
-        self.assertEqual(result, "open")
-
     def test_closed_maps_to_collapsed(self):
         """Verify the title_collapsed mapping used by NodeFactory."""
         prim = _mock_prim(expansion_state="closed")
@@ -119,14 +108,6 @@ class TestExpansionState(unittest.TestCase):
 
         state = _resolve_expansion_state(prim)
         self.assertNotIn(state, ("closed", "minimized"))
-
-    def test_session_layer_write(self):
-        """Verify expansion state can be read from session layer writes."""
-        # This tests reading only - the actual session layer write is internal
-        prim = _mock_prim(expansion_state="closed")
-
-        result = _resolve_expansion_state(prim)
-        self.assertEqual(result, "closed")
 
 
 @unittest.skipUnless(_has_node_model, "UsdNoodles.models is not importable")

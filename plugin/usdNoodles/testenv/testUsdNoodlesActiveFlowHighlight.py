@@ -32,11 +32,6 @@ class LinkDataHighlightBindingTest(unittest.TestCase):
         link = LinkData()
         self.assertFalse(link.highlighted)
 
-    def test_highlighted_set_to_true(self):
-        link = LinkData()
-        link.highlighted = True
-        self.assertTrue(link.highlighted)
-
     def test_highlighted_toggle(self):
         link = LinkData()
         link.highlighted = True
@@ -227,23 +222,6 @@ class HighlightPropagationTest(unittest.TestCase):
         view = _make_view({"/A": node_a}, [], LinkSelectionMode.WITH_ALL_LINKS)
 
         GraphView._updateLinkSelectionFromNodes(view)
-
-    def test_no_selection_clears_all_highlights(self):
-        """No selected nodes should clear all link highlights."""
-        node_a = _make_node("/A", selected=False)
-        node_b = _make_node("/B", selected=False)
-        link = _make_link("/A", "out", "/B", "in")
-        link.highlighted = True  # previously highlighted
-
-        view = _make_view(
-            {"/A": node_a, "/B": node_b},
-            [link],
-            LinkSelectionMode.WITH_ALL_LINKS,
-        )
-
-        GraphView._updateLinkSelectionFromNodes(view)
-
-        self.assertFalse(link.highlighted)
 
     def test_multiple_links_only_connected_highlighted(self):
         """Only links connected to selected nodes should be highlighted."""

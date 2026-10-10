@@ -68,7 +68,12 @@ bin/usdview.sh examples/ArmShotAnim.usda
 ```
 
 The build helper configures the project, builds it, and runs enabled CTest
-tests. Platform support depends on a compatible OpenUSD build; these commands
+tests with four concurrent test processes. Set `CTEST_PARALLEL_LEVEL` to adjust
+test concurrency (`1` runs serially); `JOBS` separately controls compilation.
+CTest schedules tests as workers become available and respects fixture
+dependencies, including bake-before-playback tests.
+
+Platform support depends on a compatible OpenUSD build; these commands
 do not imply that every platform has been qualified for this checkout.
 
 For manual configuration in an initialized compiler environment:
@@ -77,7 +82,7 @@ For manual configuration in an initialized compiler environment:
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DUSD_INSTALL_DIR=/path/to/usd-install -DCMAKE_PREFIX_PATH=/path/to/usd-install
 cmake --build build
-ctest --test-dir build --output-on-failure
+ctest --test-dir build --parallel 4 --output-on-failure
 cmake --install build --prefix /path/to/rigexec-install
 ```
 
