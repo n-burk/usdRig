@@ -502,7 +502,7 @@ const std::vector<RrVec3f> &Points(const RigExecRuntimeReader &reader,
                                    const SdfPath &path)
 {
     for (const RigExecRuntimePoints &moved : reader.GetPoints()) {
-        if (moved.path == path.GetString()) return moved.points;
+        if (moved.path == path.GetString()) return moved.points.Vector();
     }
     throw std::runtime_error("playback published no " + path.GetString());
 }

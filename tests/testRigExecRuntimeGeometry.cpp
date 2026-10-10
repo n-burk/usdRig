@@ -301,7 +301,7 @@ _TestStage(const std::string &name, const UsdStageRefPtr &stage,
             }
             const VtVec3fArray &want =
                 wantPoints[at].second.UncheckedGet<VtVec3fArray>();
-            const std::vector<RrVec3f> &got = points[at]->points;
+            const std::vector<RrVec3f> &got = points[at]->points.Vector();
             if (got.size() != want.size() ||
                 (want.size() > 0 &&
                  std::memcmp(got.data(), want.cdata(),
@@ -1237,12 +1237,12 @@ _TestFalloffInputMatchesSessionEdit()
     const RigExecRuntimeWeightField *field =
         _FindWeightField(player.Reader(), sphere);
     CHECK(field &&
-          field->weights == (std::vector<float>{0.0f, 0.5f, 1.0f}));
+          field->weights.Vector() == (std::vector<float>{0.0f, 0.5f, 1.0f}));
     CHECK(player->SetInput(falloffMax, 4.0, &error));
     CHECK(player.Play(bakeTime, &error));
     field = _FindWeightField(player.Reader(), sphere);
     CHECK(field &&
-          field->weights == (std::vector<float>{0.0f, 0.0f, 1.0f}));
+          field->weights.Vector() == (std::vector<float>{0.0f, 0.0f, 1.0f}));
     {
         std::vector<RigExecRigPose> poses;
         CHECK(RigExecTestEditedPoses(stage, rigPath,
@@ -4780,8 +4780,8 @@ _SameRun(const std::string &what, const RigExecRuntimeReader &want,
     const auto &gotPoints = got.GetPoints();
     bool same = wantPoints.size() == gotPoints.size();
     for (size_t k = 0; same && k < wantPoints.size(); ++k) {
-        const std::vector<RrVec3f> &a = wantPoints[k].points;
-        const std::vector<RrVec3f> &b = gotPoints[k].points;
+        const std::vector<RrVec3f> &a = wantPoints[k].points.Vector();
+        const std::vector<RrVec3f> &b = gotPoints[k].points.Vector();
         same = wantPoints[k].path == gotPoints[k].path &&
                a.size() == b.size() &&
                (a.empty() ||

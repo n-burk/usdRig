@@ -29,6 +29,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace rigExec {
@@ -59,10 +60,66 @@ struct RigExecRuntimeSolverFrames {
     std::vector<RrPointFrame> frames;
 };
 
+// Immutable view of an array Execute published. Copying the view copies the
+// pointer, not the elements. size, empty, operator[], data, begin and end
+// read the elements. Vector() is the underlying vector, for a memcmp or an
+// address a caller already holds as const vector*. Share() keeps this
+// snapshot alive after the next Execute. operator== is vector equality:
+// a NaN compares unequal and +0 equals -0. Bit-exact checks memcmp data().
+// usdRig_godot reads these from GetPoints and GetWeightFields. Keep the
+// RigExecRuntimePoints or RigExecRuntimeWeightField (or Share()) for the
+// frame being drawn and read Vector() there. Assigning Vector() into a
+// std::vector is the owned copy, when a host still wants one. Do not
+// memcpy this object. See docs/specs/runtime-execute-buffers.md.
+template <class T>
+class RigExecSharedArray {
+public:
+    RigExecSharedArray() : _data(Empty()) {}
+    explicit RigExecSharedArray(std::shared_ptr<const std::vector<T>> data)
+        : _data(data ? std::move(data) : Empty()) {}
+
+    size_t size() const { return _data->size(); }
+    bool empty() const { return _data->empty(); }
+    const T &operator[](size_t index) const { return (*_data)[index]; }
+    const T *data() const { return _data->data(); }
+    const T *begin() const { return data(); }
+    const T *end() const { return data() + size(); }
+    const std::vector<T> &Vector() const { return *_data; }
+    std::shared_ptr<const std::vector<T>> Share() const { return _data; }
+    // Drops this view's retainer and returns it. Execute does this when it
+    // replaces a frame the caller did not keep, so the storage can be reused.
+    std::shared_ptr<const std::vector<T>> Release()
+    {
+        std::shared_ptr<const std::vector<T>> out = std::move(_data);
+        _data = Empty();
+        return out;
+    }
+
+    bool operator==(const RigExecSharedArray &other) const
+    {
+        return *_data == *other._data;
+    }
+    bool operator!=(const RigExecSharedArray &other) const
+    {
+        return !(*this == other);
+    }
+
+private:
+    static std::shared_ptr<const std::vector<T>> Empty()
+    {
+        static const std::shared_ptr<const std::vector<T>> empty =
+            std::make_shared<const std::vector<T>>();
+        return empty;
+    }
+
+    std::shared_ptr<const std::vector<T>> _data;
+};
+
 // A deformed-points output: the moved property's path plus its points.
+// points shares the buffer the chain published.
 struct RigExecRuntimePoints {
     std::string path;
-    std::vector<RrVec3f> points;
+    RigExecSharedArray<RrVec3f> points;
 };
 
 // A matrix-primvar output: the `<prim>.primvars:<name>` property a surface
@@ -79,11 +136,12 @@ struct RigExecRuntimeWeightFrame {
 };
 
 // A resolved weight-field output: the weight object's path, its target
-// path, and the resolved per-element weights.
+// path, and the resolved per-element weights. weights shares the buffer
+// the revision published.
 struct RigExecRuntimeWeightField {
     std::string path;
     std::string target;
-    std::vector<float> weights;
+    RigExecSharedArray<float> weights;
 };
 
 // A constraint-driven transform output: the provider prim's path plus the
@@ -341,7 +399,9 @@ public:
     std::vector<RigExecRuntimeJointMatrix> GetJointRestMatrices() const;
     std::vector<RigExecRuntimeJointMatrix> GetJointPoseMatrices() const;
 
-    // Deformed points per moved property, in path order.
+    // Deformed points per moved property, in path order. The arrays share
+    // the buffers this Execute published. A copy of the returned vector
+    // keeps those bytes after the next Execute.
     const std::vector<RigExecRuntimePoints> &GetPoints() const
     {
         return _points;
@@ -359,7 +419,8 @@ public:
         return _weightFrames;
     }
 
-    // Resolved weight fields, in path order.
+    // Resolved weight fields, in path order. The arrays share the buffers
+    // this Execute published.
     const std::vector<RigExecRuntimeWeightField> &GetWeightFields() const
     {
         return _weightFields;

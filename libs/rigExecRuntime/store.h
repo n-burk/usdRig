@@ -177,6 +177,10 @@ public:
         if (_data && _data.unique()) spare.swap(*_data);
         _data = std::move(next);
     }
+    // Another retainer of the current buffer, not a copy of its elements.
+    // An empty slot shares one immutable empty vector. Write and swap leave
+    // every outstanding share unchanged.
+    std::shared_ptr<const std::vector<T>> Share() const;
 };
 // Namespace-owned empty storage avoids worker-local static initialization.
 inline const std::vector<RrVec3f> RrEmptyRetainedPoints;
@@ -186,6 +190,74 @@ RrRetainedArray<RrVec3f>::Empty() { return RrEmptyRetainedPoints; }
 inline const std::vector<float> RrEmptyRetainedWeights;
 template <> inline const std::vector<float> &
 RrRetainedArray<float>::Empty() { return RrEmptyRetainedWeights; }
+
+inline const std::shared_ptr<const std::vector<RrVec3f>> RrEmptySharedPoints =
+    std::make_shared<const std::vector<RrVec3f>>();
+inline const std::shared_ptr<const std::vector<float>> RrEmptySharedWeights =
+    std::make_shared<const std::vector<float>>();
+
+template <class T>
+std::shared_ptr<const std::vector<T>> RrRetainedEmptyShared();
+
+template <>
+inline std::shared_ptr<const std::vector<RrVec3f>>
+RrRetainedEmptyShared<RrVec3f>() { return RrEmptySharedPoints; }
+
+template <>
+inline std::shared_ptr<const std::vector<float>>
+RrRetainedEmptyShared<float>() { return RrEmptySharedWeights; }
+
+template <class T>
+inline std::shared_ptr<const std::vector<T>> RrRetainedArray<T>::Share() const
+{
+    return _data ? std::shared_ptr<const std::vector<T>>(_data)
+                 : RrRetainedEmptyShared<T>();
+}
+
+// Spare buffers a caller is no longer holding. The next fill of the same
+// size reuses one instead of allocating. Thread-local: two readers on two
+// threads do not share a pool. A share that is still held is not recycled,
+// so its bytes stay immutable.
+template <class T>
+inline std::vector<std::vector<T>> &RrRetainedPool()
+{
+    thread_local std::vector<std::vector<T>> pool;
+    return pool;
+}
+
+// Gives \p spare \p count elements. A pooled buffer of that size is swapped
+// in; otherwise resize allocates.
+template <class T>
+inline void RrRetainedPrepare(std::vector<T> *spare, size_t count)
+{
+    if (spare->size() == count) return;
+    if (spare->capacity() >= count) {
+        spare->resize(count);
+        return;
+    }
+    auto &pool = RrRetainedPool<T>();
+    for (size_t i = 0; i < pool.size(); ++i) {
+        if (pool[i].size() == count) {
+            spare->swap(pool[i]);
+            pool[i].swap(pool.back());
+            pool.pop_back();
+            return;
+        }
+    }
+    spare->resize(count);
+}
+
+// Moves \p share's storage into the pool when \p share is its only owner.
+// The vector was allocated non-const; the const pointer is the public view.
+template <class T>
+inline void RrRetainedRecycle(std::shared_ptr<const std::vector<T>> share)
+{
+    if (!share || share.use_count() != 1 || share->capacity() == 0) return;
+    auto &pool = RrRetainedPool<T>();
+    if (pool.size() >= 32) return;
+    pool.emplace_back();
+    pool.back().swap(*const_cast<std::vector<T> *>(share.get()));
+}
 
 struct RrRevisionPublish {
     bool weightFieldPublished = false;

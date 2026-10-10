@@ -404,3 +404,4 @@ setup and reopen the project. Rebuilding replaces the single asset file.
 * [Source rolling-ball lesson](../concepts/tutorial-rolling-ball.md)
 * [Evaluation and independent checks](../concepts/baked-vs-dynamic.md)
 * [Embedded presentation format](../specs/rigexec-presentation.md)
+* [Execute publication buffers](../specs/runtime-execute-buffers.md)
