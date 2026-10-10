@@ -4945,8 +4945,7 @@ TestDispatchedExecuteMatchesSerial(const std::string &examplesDir)
                         entry.repetitions, entry.frames.size(), tasks.load());
         }
     }
-    std::printf("dispatch: %zu production stage(s) dispatched
-",
+    std::printf("dispatch: %zu production stage(s) dispatched\n",
                 safeTargets);
     CHECK(safeTargets > 0);
 }

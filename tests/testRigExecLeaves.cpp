@@ -4332,8 +4332,7 @@ TestTheSparseWatchVisitsWhatMoved(const std::string &examples)
         const size_t avarEntries = sw.index->avarEntries.size();
         if (avars != Expect::Any) {
             std::printf("%s: the sparse watch compared %zu entries, %zu "
-                        "always, %zu avar constant(s)
-",
+                        "always, %zu avar constant(s)\n",
                         what.c_str(), S->sourceWatchVisits, always,
                         avarEntries);
         }
