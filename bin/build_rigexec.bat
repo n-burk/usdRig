@@ -20,10 +20,12 @@ rem USD_INSTALL_DIR must be passed too, or a USD anywhere but the default
 rem sibling path is not found at all.
 set "_RIGEXEC_MOVER_ARGS="
 if defined RIGEXEC_MOVER_PLUGIN_DIRS set _RIGEXEC_MOVER_ARGS="-DRIGEXEC_MOVER_PLUGIN_DIRS=%RIGEXEC_MOVER_PLUGIN_DIRS%"
+set "_RIGEXEC_CCACHE_ARGS=-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"
+where ccache >nul 2>&1 && set "_RIGEXEC_CCACHE_ARGS=%_RIGEXEC_CCACHE_ARGS% -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache"
 cmake -S "%RIG%" -B "%RIG%\build" -G Ninja ^
       -DCMAKE_BUILD_TYPE=Release ^
       -DUSD_INSTALL_DIR="%USD%" ^
-      -DCMAKE_PREFIX_PATH="%USD%" %_RIGEXEC_MOVER_ARGS%
+      -DCMAKE_PREFIX_PATH="%USD%" %_RIGEXEC_CCACHE_ARGS% %_RIGEXEC_MOVER_ARGS%
 if errorlevel 1 exit /b 1
 cmake --build "%RIG%\build" -j %JOBS%
 if errorlevel 1 exit /b 1
