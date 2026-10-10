@@ -165,7 +165,9 @@ _TestFileRefusals(const std::vector<uint8_t> &bytes)
         });
     got = _OpenError(version);
     CHECK(got == "unsupported .rigexec format version 4 (this reader reads " +
-                     std::to_string(RigExecFormatVersion) + "); re-export: per-group range chains");
+                     std::to_string(RigExecFormatOldestReadable) + " through " +
+                     std::to_string(RigExecFormatVersion) +
+                     "); re-export: per-group range chains");
     if (got.find("format version 4") == std::string::npos) {
         std::printf("version 4: open said '%s'\n", got.c_str());
     }
@@ -821,8 +823,8 @@ static int versionRefusals = 0;
 // step of the SnapshotFinals kind, named as retired even where it stands
 // in for a commit's first step or a VolumePlacements step, whose own rules
 // would otherwise refuse the file first; a whole-map VolumePlacements step
-// and one placing a slot that is no volume; and the previous format
-// version, refused with its re-export message.
+// and one placing a slot that is no volume; and the format version before
+// the oldest readable one, refused with its re-export message.
 static void
 _TestRetiredRefusals(const std::string &name,
                      const std::vector<uint8_t> &bytes)
@@ -884,15 +886,16 @@ _TestRetiredRefusals(const std::string &name,
         ++reservedRefusals;
     }
 
-    // The previous format version.
-    const uint32_t previous = RigExecFormatVersion - 1;
+    // The format version before the oldest readable one.
+    const uint32_t previous = RigExecFormatOldestReadable - 1;
     const std::string got =
         _OpenError(RigExecTestEdited(bytes, [&](fb::RigExecWireFile *edited) {
             edited->formatVersion = previous;
         }));
     const std::string want =
         "unsupported .rigexec format version " + std::to_string(previous) +
-        " (this reader reads " + std::to_string(RigExecFormatVersion) +
+        " (this reader reads " + std::to_string(RigExecFormatOldestReadable) +
+        " through " + std::to_string(RigExecFormatVersion) +
         "); re-export: per-group range chains";
     CHECK(got == want);
     if (got != want) {

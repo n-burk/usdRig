@@ -117,6 +117,8 @@
 #include "pxr/base/tf/notice.h"
 #include "pxr/base/tf/weakBase.h"
 #include "pxr/usd/sdf/types.h"
+#include "pxr/usd/sdf/changeBlock.h"
+#include "pxr/usd/sdf/primSpec.h"
 #include "pxr/usd/usd/notice.h"
 #include "pxr/usd/usd/attribute.h"
 #include "pxr/usd/usd/relationship.h"
@@ -2727,6 +2729,118 @@ TestConnectedSpaceRigWarmsRange()
     }
 }
 
+// A Copy Frame provider poses the joint that a Layered Skin Mover (a core
+// external revision) skins with a per-point mask. The animated source makes
+// every frame distinct.
+UsdStageRefPtr
+MakeAffineLayeredSkinRig()
+{
+    UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    stage->DefinePrim(SdfPath("/Asset"), TfToken("Scope"));
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    const UsdPrim source = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Controls/Source"), TfToken("RigExecControl"));
+    const UsdAttribute tx = source.GetAttribute(TfToken("avars:tx"));
+    for (int t = 1; t <= 4; ++t) {
+        CHECK(tx.Set(2.0 + 0.5 * double(t), UsdTimeCode(double(t))));
+    }
+    const UsdPrim copy = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Computations/Copy"), TfToken("RigExecCopyFrame"));
+    CHECK(copy.GetRelationship(TfToken("rigExec:source"))
+              .SetTargets({source.GetPath()}));
+    CHECK(copy.GetRelationship(TfToken("rigExec:poseInputs"))
+              .SetTargets({source.GetPath()}));
+    const UsdPrim joint = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Joints/Influence"), TfToken("RigExecJoint"));
+    CHECK(joint.CreateAttribute(TfToken("posed:space"),
+                                SdfValueTypeNames->Matrix4d)
+              .SetConnections({copy.GetPath().AppendProperty(
+                  TfToken("outputs:matrix"))}));
+    stage->DefinePrim(SdfPath("/Asset/Geom"), TfToken("Scope"));
+    const SdfPath cloud("/Asset/Geom/Cloud");
+    const UsdPrim points = stage->DefinePrim(cloud, TfToken("Points"));
+    CHECK(points.GetAttribute(TfToken("points"))
+              .Set(VtVec3fArray{GfVec3f(0, 0, 0), GfVec3f(0, 1, 0)}));
+    const UsdPrim skin = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Movers/Skin"),
+        TfToken("RigExecLayeredSkinMover"));
+    CHECK(skin.ApplyAPI(TfToken("RigExecMoverAPI")));
+    CHECK(skin.GetRelationship(TfToken("rigExec:moves"))
+              .SetTargets({cloud.AppendProperty(TfToken("points"))}));
+    CHECK(skin.GetRelationship(TfToken("rigExec:influences"))
+              .SetTargets({joint.GetPath()}));
+    CHECK(skin.GetAttribute(TfToken("rigExec:jointIndices"))
+              .Set(VtIntArray{0, 0}));
+    CHECK(skin.GetAttribute(TfToken("rigExec:jointWeights"))
+              .Set(VtFloatArray{1.0f, 1.0f}));
+    CHECK(skin.GetAttribute(TfToken("inputs:mask"))
+              .Set(VtFloatArray{0.25f, 0.75f}));
+    return stage;
+}
+
+// Affine frame providers and core external movers warm on the frame-cache
+// workers like every other operation: the range fills without an
+// owner-thread pull and serves the reference poses bit for bit.
+void
+TestAffineProvidersAndExternalMoversWarmFrozen()
+{
+    std::printf("progress: TestAffineProvidersAndExternalMoversWarmFrozen\n");
+    std::fflush(stdout);
+    SetEnv("RIGEXEC_FRAME_CACHE", "on");
+    SetEnv("RIGEXEC_FRAME_CACHE_VERIFY", "0");
+    if (!RigExecBackgroundWarmingEnabled()) return;
+    const SdfPath rig("/Asset/Rig");
+    const std::vector<double> range{1.0, 2.0, 3.0, 4.0};
+    auto &registry = RigExecImagingRegistry::GetInstance();
+    const UsdStageRefPtr stage = MakeAffineLayeredSkinRig();
+    std::string sourceBefore;
+    stage->GetRootLayer()->ExportToString(&sourceBefore);
+    RigExecImagingBridge reference(stage, rig);
+    CHECK(reference.Compile());
+    std::map<double, _GenerationGeometry> expected;
+    for (double time : range) {
+        CHECK(reference.EvaluateAndPublishResult(UsdTimeCode(time)).ok);
+        expected[time] = _CaptureGeometry(reference.GetStore()->Get());
+    }
+    CHECK(!expected[1.0].points.empty());
+    CHECK(!_SameGeometry(expected[1.0], expected[2.0]));
+    std::string freezeError;
+    const bool freezes =
+        RigExecCanFreezeProgram(reference.GetEvaluator(), &freezeError);
+    if (!freezes) {
+        std::printf("affine/layered skin rig cannot freeze: %s\n",
+                    freezeError.c_str());
+    }
+    CHECK(freezes);
+    std::vector<std::string> errors;
+    CHECK(registry.Activate(stage, rig, UsdTimeCode(1.0), &errors));
+    CHECK(registry.SetWarmRange(rig, range));
+    const auto snapshot = registry.GetStore()->Get();
+    const size_t pulls = registry.GetSessionEvaluationCount(rig);
+    for (int tick = 0; tick != 8; ++tick) {
+        registry.OnIdle();
+        registry.WaitUntilBackgroundIdle();
+    }
+    CHECK(registry.GetStore()->Get() == snapshot);
+    for (auto state : registry.GetFrameStates(rig, range)) {
+        CHECK(state == RigExecWarmFrameState::Cached);
+    }
+    for (double time : range) {
+        CHECK(registry.SetTime(UsdTimeCode(time)));
+        CHECK(_SameGeometry(expected[time],
+                            _CaptureGeometry(registry.GetStore()->Get())));
+    }
+    // Neither the idle owner-thread fill nor the visits pulled the live
+    // evaluator: the workers produced every frame.
+    if (!RigExecFrameCacheVerifyRequested()) {
+        CHECK(registry.GetSessionEvaluationCount(rig) == pulls);
+    }
+    std::string sourceAfter;
+    stage->GetRootLayer()->ExportToString(&sourceAfter);
+    CHECK(sourceBefore == sourceAfter);
+    registry.Deactivate();
+}
+
 // INDEX. Non-publish streaks: declined-invalid finishes and reasoned skips
 // count toward un-warmable-after-3; publishes, generation pushes, and
 // evictions clear; generation fences never count.
@@ -4994,6 +5108,7 @@ main(int argc, char **argv)
     TestSamplingBudgetShapesTriggers();
     TestWarmRangeCursorSkipsVisited();
     TestConnectedSpaceRigWarmsRange();
+    TestAffineProvidersAndExternalMoversWarmFrozen();
     TestWarmFrameStreaks();
     TestWarmRangeProgress();
     TestCommitDuringPreviewExcludesPlayhead();

@@ -104,6 +104,27 @@ TF_DEFINE_PRIVATE_TOKENS(
     ((rayUp, "rigExec:rayUp"))
     ((shaderOffset, "rigExec:shaderOffset"))
     ((projectionMode, "rigExec:projectionMode"))
+    ((smoothing, "inputs:smoothing"))
+    ((frameTransport, "inputs:frameTransport"))
+    ((smoothWeights, "inputs:smoothWeights"))
+    ((edges, "inputs:edges"))
+    ((onlySmooth, "inputs:onlySmooth"))
+    ((computationToTarget, "inputs:computationToTarget"))
+    ((evaluation, "rigExec:evaluation"))
+    ((interpolationU, "rigExec:interpolationU"))
+    ((interpolationV, "rigExec:interpolationV"))
+    ((interpolationW, "rigExec:interpolationW"))
+    ((origin, "rigExec:origin"))
+    ((spacing, "rigExec:spacing"))
+    ((strength, "rigExec:strength"))
+    ((mask, "rigExec:mask"))
+    ((pointSpace, "rigExec:pointSpace"))
+    ((cageMatrix, "rigExec:cageMatrix"))
+    ((surfaceMatrix, "rigExec:surfaceMatrix"))
+    ((targetMatrix, "rigExec:targetMatrix"))
+    ((snapMode, "rigExec:snapMode"))
+    ((offset, "rigExec:offset"))
+    ((triangles, "rigExec:triangles"))
 );
 
 // The values those reads fall back to, and the three states a revision's
@@ -121,6 +142,15 @@ TF_DEFINE_PRIVATE_TOKENS(
     ((local, "local"))
     ((material, "material"))
     ((radial, "radial"))
+    ((vertex, "vertex"))
+    ((legacy, "legacy"))
+    ((regularGrid, "regularGrid"))
+    ((bspline, "bspline"))
+    ((common, "common"))
+    ((onSurface, "onSurface"))
+    ((inside, "inside"))
+    ((outside, "outside"))
+    ((outsideSurface, "outsideSurface"))
 );
 
 namespace rigExec {
@@ -1053,13 +1083,16 @@ ApplyRevisionKernel(RigExecRevisionOp op,
             pts,p.topologyCounts,p.topologyIndices,p.strength);
         return true;
     case RigExecRevisionOp::DeltaMush: {
+        // The retained rest state is built for the packet's smoothing
+        // settings; the computation-space map is applied around it.
         const auto *rest=cache ? cache->MushRest(p.restPoints,p.topologyCounts,
-            p.topologyIndices,p.mushIterations,p.mushStep,p.mushPinBorders,p.mushDistanceWeight)
-            : nullptr;
+            p.topologyIndices,p.mushIterations,p.mushStep,p.mushPinBorders,p.mushDistanceWeight,
+            p.mushSettings) : nullptr;
         if(cache && !rest) return false;
         return RigExecApplyDeltaMush(pts,p.restPoints,p.topologyCounts,
             p.topologyIndices,p.mushIterations,p.mushStep,p.mushPinBorders,
-            p.mushDistanceWeight,p.mushDisplacement,rest);
+            p.mushDistanceWeight,p.mushDisplacement,p.mushSettings,
+            p.mushComputationToTarget,rest);
     }
     case RigExecRevisionOp::Wrinkle: {
         const auto *topology=cache ? cache->WrinkleTopology(p.restPoints.size(),
@@ -1070,6 +1103,9 @@ ApplyRevisionKernel(RigExecRevisionOp op,
             p.topologyIndices,p.wrinkleSettings,topology);
     }
     case RigExecRevisionOp::Lattice:
+        if(p.latticeSettings.regularGrid)
+            return RigExecApplyLatticeGridKernel<GfVec3f,GfVec3d>(pts,p.auxPointsB,p.divisions,p.latticeSettings,
+                p.targetToLattice,p.latticeToTarget,p.cageToLattice);
         if (p.restPoints.size() != pts->size()) {
             return false;  // cardinality mismatch fails atomically
         }
@@ -1077,10 +1113,12 @@ ApplyRevisionKernel(RigExecRevisionOp op,
             pts, p.restPoints, p.auxPoints, p.auxPointsB, p.divisions, cache);
         return true;
     case RigExecRevisionOp::SurfaceProject:
-        RigExecApplySurfaceProject(
+        if(RigExecSurfaceSnapIsLegacy(p.surfaceSettings,p.targetToSurface,p.surfaceToTarget,p.surfaceToMetric)) {
+            RigExecApplySurfaceProject(pts,p.auxPoints,p.topologyCounts,p.topologyIndices,p.strength);return true;
+        }
+        return RigExecApplySurfaceSnapKernel<GfVec3f,GfVec3d>(
             pts, p.auxPoints, p.topologyCounts, p.topologyIndices,
-            p.strength);
-        return true;
+            p.surfaceSettings,p.targetToSurface,p.surfaceToTarget,p.surfaceToMetric);
     case RigExecRevisionOp::EmitGuidePoints:
         if (p.frames.GetSize() != pts->size()) {
             return false;
@@ -1269,6 +1307,11 @@ RigExecRevisionKernelAcceptance(RigExecRevisionOp op,
         return wire;
     }
     case RigExecRevisionOp::Lattice:
+        // A regular grid can refuse at any point it reads: only running it
+        // answers.
+        if (p.latticeSettings.regularGrid) {
+            return Acceptance::Deferred;
+        }
         // The kernel refuses only a rest-point count other than the entering
         // one; an invalid cage passes every point through. Then the "apply
         // once" envelope resolves at the full count or the revision fails.
@@ -1309,8 +1352,10 @@ RigExecRevisionGateHolds(RigExecRevisionOp op, const RigExecMoverParameters &p)
     switch (op) {
     case RigExecRevisionOp::Matrix:
     case RigExecRevisionOp::Wire:
-    case RigExecRevisionOp::Lattice:
         return true;
+    case RigExecRevisionOp::Lattice:
+        // A regular grid can fail the revision at any point.
+        return !p.latticeSettings.regularGrid;
     case RigExecRevisionOp::Skin:
         // A dual-quaternion blend can fail the revision at any vertex.
         return RigExecSkinMethodOf(p) == RigExecSkinMethod::ClassicLinear;
@@ -1535,7 +1580,9 @@ RigExecRunRevisionGroup(RigExecRevisionOp op, const RigExecMoverParameters &p,
             return false;
         }
     } else if (op == RigExecRevisionOp::Lattice) {
-        if (p.restPoints.size() != count) {
+        // A regular grid runs whole (its revision is never Range), and the
+        // group form is the Bernstein evaluation's.
+        if (p.latticeSettings.regularGrid || p.restPoints.size() != count) {
             return false;  // cardinality mismatch fails atomically
         }
         // Seeds \p out itself, which is all a refused setup leaves there.
@@ -2203,6 +2250,161 @@ _Enabled(const UsdPrim &prim, UsdTimeCode time,
     return enabled;
 }
 
+// The extended deformer settings past their reads, shared by the stage and
+// leaf assemblers so the two cannot disagree. Each answers false where its
+// arm leaves the packet invalid. \p influences is the table of the frame
+// providers binding.influences names, or null. Matrices are row-vector
+// affine maps; the identity defaults reproduce the legacy deformation.
+
+// deltaMush: the smoothing settings and the computation-to-target map,
+// carried by the frame provider when one is bound. A computation space
+// other than the points' own needs authored rest points (the base is in the
+// points' space) unless the mover only smooths.
+bool
+_DeltaMushSettings(const TfToken &smoothing, const TfToken &transport,
+                   std::vector<float> smoothWeights, std::vector<int> edges,
+                   bool onlySmooth, const GfMatrix4d &computationToTarget,
+                   const RigExecRevisionBinding &binding,
+                   const std::vector<GfMatrix4d> *influences,
+                   RigExecMoverParameters *params)
+{
+    RigExecDeltaMushSettings &s = params->mushSettings;
+    if (!RigExecParseDeltaMushSmoothing(smoothing.GetText(), &s.smoothing) ||
+        !RigExecParseDeltaMushFrameTransport(transport.GetText(),
+                                             &s.frameTransport)) {
+        return false;
+    }
+    s.smoothWeights = std::move(smoothWeights);
+    s.edges = std::move(edges);
+    s.onlySmooth = onlySmooth;
+    params->mushComputationToTarget = computationToTarget;
+    const bool needsRest = computationToTarget != GfMatrix4d(1.0) ||
+                           !binding.influences.empty();
+    if (!binding.influences.empty()) {
+        if (!influences || influences->size() != 1) {
+            return false;
+        }
+        params->mushComputationToTarget *= (*influences)[0];
+    }
+    return !(params->restPoints.empty() && needsRest && !s.onlySmooth);
+}
+
+// Lattice, regular grid: the interpolations, the grid placement, the mask
+// and the cage/target frames (each carried by its frame provider when two
+// are bound) as coordinate maps in \p pointSpace.
+bool
+_LatticeGridSettings(const TfToken (&interpolation)[3], const GfVec3f &origin,
+                     const GfVec3f &spacing, float strength,
+                     std::vector<float> mask, GfMatrix4d cage,
+                     GfMatrix4d target, const TfToken &pointSpace,
+                     const RigExecRevisionBinding &binding,
+                     const std::vector<GfMatrix4d> *influences,
+                     RigExecMoverParameters *params)
+{
+    RigExecLatticeSettings &s = params->latticeSettings;
+    for (int axis = 0; axis < 3; ++axis) {
+        if (!RigExecLatticeInterpolationFromString(
+                interpolation[axis].GetText(), &s.interpolation[axis])) {
+            return false;
+        }
+    }
+    for (int axis = 0; axis < 3; ++axis) {
+        s.origin[axis] = origin[axis];
+        s.spacing[axis] = spacing[axis];
+    }
+    s.strength = strength;
+    s.mask = std::move(mask);
+    if (!RigExecSurfaceSnapValidMatrix(cage) ||
+        !RigExecSurfaceSnapValidMatrix(target)) {
+        return false;
+    }
+    if (!binding.influences.empty()) {
+        if (!influences || influences->size() != 2) {
+            return false;
+        }
+        cage *= (*influences)[0];
+        target *= (*influences)[1];
+        if (!RigExecSurfaceSnapCanonicalComputedMatrix(&cage) ||
+            !RigExecSurfaceSnapCanonicalComputedMatrix(&target)) {
+            return false;
+        }
+    }
+    return RigExecLatticeCoordinateMaps(
+        pointSpace.GetText(), cage, target, &params->targetToLattice,
+        &params->latticeToTarget, &params->cageToLattice);
+}
+
+// Surface snap: the mode, the clearance offset, the mask, the explicit
+// triangles and the surface/target frames (each carried by its frame
+// provider when two are bound) as maps in \p pointSpace.
+bool
+_SurfaceSnapSettings(const TfToken &snapMode, float offset,
+                     std::vector<float> mask, std::vector<int> triangles,
+                     GfMatrix4d surface, GfMatrix4d target,
+                     const TfToken &pointSpace,
+                     const RigExecRevisionBinding &binding,
+                     const std::vector<GfMatrix4d> *influences,
+                     RigExecMoverParameters *params)
+{
+    RigExecSurfaceSnapSettings &s = params->surfaceSettings;
+    if (snapMode == _valueTokens->onSurface) {
+        s.mode = RigExecSurfaceSnapMode::OnSurface;
+    } else if (snapMode == _valueTokens->inside) {
+        s.mode = RigExecSurfaceSnapMode::Inside;
+    } else if (snapMode == _valueTokens->outside) {
+        s.mode = RigExecSurfaceSnapMode::Outside;
+    } else if (snapMode == _valueTokens->outsideSurface) {
+        s.mode = RigExecSurfaceSnapMode::OutsideSurface;
+    } else {
+        return false;
+    }
+    s.offset = offset;
+    s.mask = std::move(mask);
+    s.triangles = std::move(triangles);
+    if (!RigExecSurfaceSnapValidMatrix(surface) ||
+        !RigExecSurfaceSnapValidMatrix(target)) {
+        return false;
+    }
+    if (!binding.influences.empty()) {
+        if (!influences || influences->size() != 2) {
+            return false;
+        }
+        surface *= (*influences)[0];
+        target *= (*influences)[1];
+        if (!RigExecSurfaceSnapCanonicalComputedMatrix(&surface) ||
+            !RigExecSurfaceSnapCanonicalComputedMatrix(&target)) {
+            return false;
+        }
+    }
+    if (pointSpace == _valueTokens->local) {
+        params->targetToSurface =
+            target * RigExecSurfaceSnapAffineInverse(surface);
+        params->surfaceToTarget =
+            surface * RigExecSurfaceSnapAffineInverse(target);
+    } else if (pointSpace == _valueTokens->common) {
+        params->targetToSurface = RigExecSurfaceSnapAffineInverse(surface);
+        params->surfaceToMetric = RigExecSurfaceSnapAffineInverse(surface);
+        params->surfaceToTarget = surface;
+    } else {
+        return false;
+    }
+    return true;
+}
+
+// A surface projection packet's validity once its settings are read: a
+// surface, faces or explicit triangles, a finite offset, and a mask (when
+// given) over the \p basePointCount points it moves.
+bool
+_SurfaceProjectValid(const RigExecMoverParameters &params,
+                     size_t basePointCount)
+{
+    const RigExecSurfaceSnapSettings &s = params.surfaceSettings;
+    return !params.auxPoints.empty() &&
+           (!params.topologyCounts.empty() || !s.triangles.empty()) &&
+           std::isfinite(s.offset) &&
+           (s.mask.empty() || s.mask.size() == basePointCount);
+}
+
 }  // namespace
 
 std::shared_ptr<const RigExecSkinTopology>
@@ -2761,9 +2963,22 @@ RigExecAssembleParameters(
         params.valid = !params.topologyCounts.empty();
         break;
 
-    case RigExecRevisionOp::DeltaMush:
+    case RigExecRevisionOp::DeltaMush: {
         params.restPoints = _Array<GfVec3f>(moverPrim, moverPrim.GetPath().AppendProperty(_attrTokens->restPoints), UsdTimeCode::Default(), values.resolved);
-        if (params.restPoints.empty()) params.restPoints = values.basePoints;
+        // The extended settings; their defaults are the legacy deformation.
+        if (!_DeltaMushSettings(
+                _RecordedInput<TfToken>(moverPrim, _attrTokens->smoothing, _valueTokens->rest, UsdTimeCode::Default(), values.resolved),
+                _RecordedInput<TfToken>(moverPrim, _attrTokens->frameTransport, _valueTokens->vertex, UsdTimeCode::Default(), values.resolved),
+                _Array<float>(moverPrim, moverPrim.GetPath().AppendProperty(_attrTokens->smoothWeights), time, values.resolved),
+                _Array<int>(moverPrim, moverPrim.GetPath().AppendProperty(_attrTokens->edges), UsdTimeCode::Default(), values.resolved),
+                _RecordedInput<bool>(moverPrim, _attrTokens->onlySmooth, false, time, values.resolved),
+                _RecordedInput<GfMatrix4d>(moverPrim, _attrTokens->computationToTarget, GfMatrix4d(1.0), time, values.resolved),
+                binding, values.influenceTransforms, &params)) {
+            break;
+        }
+        if (params.restPoints.empty()) {
+            params.restPoints = values.basePoints;
+        }
         params.topologyCounts = _Array<int>(moverPrim, binding.topologyCounts, time, values.resolved);
         params.topologyIndices = _Array<int>(moverPrim, binding.topologyIndices, time, values.resolved);
         params.mushIterations = _RecordedInput<int>(moverPrim, _attrTokens->iterations, 10, time, values.resolved);
@@ -2773,6 +2988,7 @@ RigExecAssembleParameters(
         params.mushDisplacement = _RecordedInput<float>(moverPrim, _attrTokens->displacement, 1.0f, time, values.resolved);
         params.valid = !params.restPoints.empty() && !params.topologyCounts.empty();
         break;
+    }
     case RigExecRevisionOp::Wrinkle: {
         params.restPoints = _Array<GfVec3f>(moverPrim,
             moverPrim.GetPath().AppendProperty(_attrTokens->restPoints),
@@ -2831,6 +3047,32 @@ RigExecAssembleParameters(
     }
 
     case RigExecRevisionOp::Lattice: {
+        // rigExec:evaluation picks the legacy Bernstein cage or the regular
+        // grid; only the grid reads the settings after it.
+        const TfToken evaluation = _RecordedInput<TfToken>(moverPrim, _attrTokens->evaluation, _valueTokens->legacy, time, values.resolved);
+        if (evaluation != _valueTokens->legacy && evaluation != _valueTokens->regularGrid) break;
+        params.latticeSettings.regularGrid = evaluation == _valueTokens->regularGrid;
+        if (params.latticeSettings.regularGrid) {
+            const auto read = [&](const TfToken &name, auto fallback) {
+                return _RecordedInput<decltype(fallback)>(moverPrim, name, fallback, time, values.resolved);
+            };
+            const TfToken interpolation[3] = {
+                read(_attrTokens->interpolationU, _valueTokens->bspline),
+                read(_attrTokens->interpolationV, _valueTokens->bspline),
+                read(_attrTokens->interpolationW, _valueTokens->bspline)};
+            const VtFloatArray mask = read(_attrTokens->mask, VtFloatArray());
+            if (!_LatticeGridSettings(
+                    interpolation, read(_attrTokens->origin, GfVec3f(-0.5f)),
+                    read(_attrTokens->spacing, GfVec3f(1.0f)),
+                    read(_attrTokens->strength, 1.0f),
+                    std::vector<float>(mask.begin(), mask.end()),
+                    read(_attrTokens->cageMatrix, GfMatrix4d(1.0)),
+                    read(_attrTokens->targetMatrix, GfMatrix4d(1.0)),
+                    read(_attrTokens->pointSpace, _valueTokens->local),
+                    binding, values.influenceTransforms, &params)) {
+                break;
+            }
+        }
         if (values.retainedRest && !values.retainedRest->empty()) {
             params.restPoints.swap(*values.retainedRest);
         } else {
@@ -2859,15 +3101,16 @@ RigExecAssembleParameters(
         const size_t cageCount = size_t(params.divisions[0]) *
                                  size_t(params.divisions[1]) *
                                  size_t(params.divisions[2]);
-        params.valid = params.divisions[0] >= 2 && params.divisions[1] >= 2 &&
-                       params.divisions[2] >= 2 &&
-                       params.auxPoints.size() == cageCount &&
+        const int minimum=params.latticeSettings.regularGrid?1:2;
+        params.valid = params.divisions[0] >= minimum && params.divisions[1] >= minimum &&
+                       params.divisions[2] >= minimum &&
+                       (params.latticeSettings.regularGrid || params.auxPoints.size() == cageCount) &&
                        params.auxPointsB.size() == cageCount &&
                        !params.restPoints.empty();
         break;
     }
 
-    case RigExecRevisionOp::SurfaceProject:
+    case RigExecRevisionOp::SurfaceProject: {
         // Fixed at full, matching _BuildSurfaceMoverParameters: v0.1
         // attach/project maps fully. RigExecSurfaceMover declares no
         // inputs:strength, so reading one here silently applied a 0.5
@@ -2877,9 +3120,27 @@ RigExecAssembleParameters(
         params.topologyCounts = _Array<int>(moverPrim, binding.topologyCounts, time, values.resolved);
         params.topologyIndices =
             _Array<int>(moverPrim, binding.topologyIndices, time, values.resolved);
-        params.valid =
-            !params.auxPoints.empty() && !params.topologyCounts.empty();
+        {
+            const auto read = [&](const TfToken &name, auto fallback) {
+                return _RecordedInput<decltype(fallback)>(moverPrim, name, fallback, time, values.resolved);
+            };
+            const VtFloatArray mask = read(_attrTokens->mask, VtFloatArray());
+            const VtIntArray triangles = read(_attrTokens->triangles, VtIntArray());
+            if (!_SurfaceSnapSettings(
+                    read(_attrTokens->snapMode, _valueTokens->onSurface),
+                    read(_attrTokens->offset, 0.0f),
+                    std::vector<float>(mask.begin(), mask.end()),
+                    std::vector<int>(triangles.begin(), triangles.end()),
+                    read(_attrTokens->surfaceMatrix, GfMatrix4d(1.0)),
+                    read(_attrTokens->targetMatrix, GfMatrix4d(1.0)),
+                    read(_attrTokens->pointSpace, _valueTokens->local),
+                    binding, values.influenceTransforms, &params)) {
+                break;
+            }
+        }
+        params.valid = _SurfaceProjectValid(params, values.BasePointCount());
         break;
+    }
 
     case RigExecRevisionOp::Ribbon:
     case RigExecRevisionOp::EmitGuidePoints: {
@@ -3130,6 +3391,8 @@ RigExecRevisionLeafRoleIsTopology(RigExecRevisionLeafRole role)
     case RigExecRevisionLeafRole::Divisions:
     case RigExecRevisionLeafRole::CurveOrder:
     case RigExecRevisionLeafRole::CurveKnots:
+    case RigExecRevisionLeafRole::MushEdges:
+    case RigExecRevisionLeafRole::SnapTriangles:
         return true;
     default:
         return false;
@@ -3226,6 +3489,24 @@ RigExecDeclareRevisionLeaves(RigExecRevisionOp op, const SdfPath &moverPath,
         array(Role::SurfacePoints, binding.surfacePoints, Type::Vec3fArray,
               VtValue(VtVec3fArray()));
         topology();
+        // The snap settings, each read through the resolved inputs.
+        add(Role::SnapMode, mover(_attrTokens->snapMode), Type::Token,
+            Time::AtTime, Flavour::Resolved, VtValue(_valueTokens->onSurface));
+        add(Role::SnapOffset, mover(_attrTokens->offset), Type::Float,
+            Time::AtTime, Flavour::Resolved, VtValue(0.0f));
+        add(Role::Mask, mover(_attrTokens->mask), Type::FloatArray,
+            Time::AtTime, Flavour::Resolved, VtValue(VtFloatArray()));
+        add(Role::SnapTriangles, mover(_attrTokens->triangles),
+            Type::IntArray, Time::AtTime, Flavour::Resolved,
+            VtValue(VtIntArray()));
+        add(Role::SourceMatrix, mover(_attrTokens->surfaceMatrix),
+            Type::Matrix4d, Time::AtTime, Flavour::Resolved,
+            VtValue(GfMatrix4d(1.0)));
+        add(Role::TargetMatrix, mover(_attrTokens->targetMatrix),
+            Type::Matrix4d, Time::AtTime, Flavour::Resolved,
+            VtValue(GfMatrix4d(1.0)));
+        add(Role::PointSpace, mover(_attrTokens->pointSpace), Type::Token,
+            Time::AtTime, Flavour::Resolved, VtValue(_valueTokens->local));
         break;
     case RigExecRevisionOp::Ribbon:
         envelope();
@@ -3255,6 +3536,24 @@ RigExecDeclareRevisionLeaves(RigExecRevisionOp op, const SdfPath &moverPath,
             add(Role::PinPoints, mover(_attrTokens->pinPoints),
                 Type::IntArray, Time::AtDefault, Flavour::OverlayThenRaw,
                 VtValue(VtIntArray()));
+        } else {
+            // deltaMush's extended settings, ahead of its scalars.
+            add(Role::MushSmoothing, mover(_attrTokens->smoothing),
+                Type::Token, Time::AtDefault, Flavour::Resolved,
+                VtValue(_valueTokens->rest));
+            add(Role::MushFrameTransport, mover(_attrTokens->frameTransport),
+                Type::Token, Time::AtDefault, Flavour::Resolved,
+                VtValue(_valueTokens->vertex));
+            array(Role::SmoothWeights, mover(_attrTokens->smoothWeights),
+                  Type::FloatArray, VtValue(VtFloatArray()));
+            add(Role::MushEdges, mover(_attrTokens->edges), Type::IntArray,
+                Time::AtDefault, Flavour::OverlayThenRaw,
+                VtValue(VtIntArray()));
+            add(Role::OnlySmooth, mover(_attrTokens->onlySmooth), Type::Bool,
+                Time::AtTime, Flavour::Resolved, VtValue(false));
+            add(Role::ComputationToTarget,
+                mover(_attrTokens->computationToTarget), Type::Matrix4d,
+                Time::AtTime, Flavour::Resolved, VtValue(GfMatrix4d(1.0)));
         }
         decl->scalarBegin = int(decl->keys.size());
         RigExecMoverParameters fields;
@@ -3278,6 +3577,36 @@ RigExecDeclareRevisionLeaves(RigExecRevisionOp op, const SdfPath &moverPath,
         add(Role::Divisions, mover(_attrTokens->divisions), Type::Vec3i,
             Time::AtTime, Flavour::Raw,
             VtValue(RigExecMoverParameters().divisions));
+        // The evaluation and the regular grid's settings, each read through
+        // the resolved inputs. A legacy lattice reads only the evaluation.
+        add(Role::LatticeEvaluation, mover(_attrTokens->evaluation),
+            Type::Token, Time::AtTime, Flavour::Resolved,
+            VtValue(_valueTokens->legacy));
+        add(Role::InterpolationU, mover(_attrTokens->interpolationU),
+            Type::Token, Time::AtTime, Flavour::Resolved,
+            VtValue(_valueTokens->bspline));
+        add(Role::InterpolationV, mover(_attrTokens->interpolationV),
+            Type::Token, Time::AtTime, Flavour::Resolved,
+            VtValue(_valueTokens->bspline));
+        add(Role::InterpolationW, mover(_attrTokens->interpolationW),
+            Type::Token, Time::AtTime, Flavour::Resolved,
+            VtValue(_valueTokens->bspline));
+        add(Role::GridOrigin, mover(_attrTokens->origin), Type::Vec3f,
+            Time::AtTime, Flavour::Resolved, VtValue(GfVec3f(-0.5f)));
+        add(Role::GridSpacing, mover(_attrTokens->spacing), Type::Vec3f,
+            Time::AtTime, Flavour::Resolved, VtValue(GfVec3f(1.0f)));
+        add(Role::GridStrength, mover(_attrTokens->strength), Type::Float,
+            Time::AtTime, Flavour::Resolved, VtValue(1.0f));
+        add(Role::Mask, mover(_attrTokens->mask), Type::FloatArray,
+            Time::AtTime, Flavour::Resolved, VtValue(VtFloatArray()));
+        add(Role::SourceMatrix, mover(_attrTokens->cageMatrix),
+            Type::Matrix4d, Time::AtTime, Flavour::Resolved,
+            VtValue(GfMatrix4d(1.0)));
+        add(Role::TargetMatrix, mover(_attrTokens->targetMatrix),
+            Type::Matrix4d, Time::AtTime, Flavour::Resolved,
+            VtValue(GfMatrix4d(1.0)));
+        add(Role::PointSpace, mover(_attrTokens->pointSpace), Type::Token,
+            Time::AtTime, Flavour::Resolved, VtValue(_valueTokens->local));
         break;
     case RigExecRevisionOp::Wire:
         envelope();
@@ -3917,8 +4246,21 @@ RigExecAssembleFromLeaves(RigExecRevisionOp op,
         params.auxPoints = L.Array<GfVec3f>(Role::SurfacePoints);
         params.topologyCounts = L.Array<int>(Role::TopologyCounts);
         params.topologyIndices = L.Array<int>(Role::TopologyIndices);
-        params.valid =
-            !params.auxPoints.empty() && !params.topologyCounts.empty();
+        if (!_SurfaceSnapSettings(
+                L.Scalar<TfToken>(Role::SnapMode, _valueTokens->onSurface,
+                                  "rigExec:snapMode"),
+                L.Scalar<float>(Role::SnapOffset, 0.0f, "rigExec:offset"),
+                L.Array<float>(Role::Mask), L.Array<int>(Role::SnapTriangles),
+                L.Scalar<GfMatrix4d>(Role::SourceMatrix, GfMatrix4d(1.0),
+                                     "rigExec:surfaceMatrix"),
+                L.Scalar<GfMatrix4d>(Role::TargetMatrix, GfMatrix4d(1.0),
+                                     "rigExec:targetMatrix"),
+                L.Scalar<TfToken>(Role::PointSpace, _valueTokens->local,
+                                  "rigExec:pointSpace"),
+                binding, values.influenceTransforms, &params)) {
+            break;
+        }
+        params.valid = _SurfaceProjectValid(params, values.BasePointCount());
         break;
     case RigExecRevisionOp::Ribbon:
     case RigExecRevisionOp::EmitGuidePoints: {
@@ -3952,6 +4294,22 @@ RigExecAssembleFromLeaves(RigExecRevisionOp op,
     case RigExecRevisionOp::DeltaMush:
     case RigExecRevisionOp::Wrinkle: {
         params.restPoints = L.Array<GfVec3f>(Role::RestPoints);
+        if (op == RigExecRevisionOp::DeltaMush &&
+            !_DeltaMushSettings(
+                L.Scalar<TfToken>(Role::MushSmoothing, _valueTokens->rest,
+                                  "inputs:smoothing"),
+                L.Scalar<TfToken>(Role::MushFrameTransport,
+                                  _valueTokens->vertex,
+                                  "inputs:frameTransport"),
+                L.Array<float>(Role::SmoothWeights),
+                L.Array<int>(Role::MushEdges),
+                L.Scalar<bool>(Role::OnlySmooth, false, "inputs:onlySmooth"),
+                L.Scalar<GfMatrix4d>(Role::ComputationToTarget,
+                                     GfMatrix4d(1.0),
+                                     "inputs:computationToTarget"),
+                binding, values.influenceTransforms, &params)) {
+            break;
+        }
         if (params.restPoints.empty()) values.CopyBasePoints(&params.restPoints);
         params.topologyCounts = L.Array<int>(Role::TopologyCounts);
         params.topologyIndices = L.Array<int>(Role::TopologyIndices);
@@ -3988,6 +4346,42 @@ RigExecAssembleFromLeaves(RigExecRevisionOp op,
         break;
     }
     case RigExecRevisionOp::Lattice: {
+        const TfToken evaluation = L.Scalar<TfToken>(
+            Role::LatticeEvaluation, _valueTokens->legacy,
+            "rigExec:evaluation");
+        if (evaluation != _valueTokens->legacy &&
+            evaluation != _valueTokens->regularGrid) {
+            break;
+        }
+        params.latticeSettings.regularGrid =
+            evaluation == _valueTokens->regularGrid;
+        if (params.latticeSettings.regularGrid) {
+            const TfToken interpolation[3] = {
+                L.Scalar<TfToken>(Role::InterpolationU, _valueTokens->bspline,
+                                  "rigExec:interpolationU"),
+                L.Scalar<TfToken>(Role::InterpolationV, _valueTokens->bspline,
+                                  "rigExec:interpolationV"),
+                L.Scalar<TfToken>(Role::InterpolationW, _valueTokens->bspline,
+                                  "rigExec:interpolationW")};
+            if (!_LatticeGridSettings(
+                    interpolation,
+                    L.Scalar<GfVec3f>(Role::GridOrigin, GfVec3f(-0.5f),
+                                      "rigExec:origin"),
+                    L.Scalar<GfVec3f>(Role::GridSpacing, GfVec3f(1.0f),
+                                      "rigExec:spacing"),
+                    L.Scalar<float>(Role::GridStrength, 1.0f,
+                                    "rigExec:strength"),
+                    L.Array<float>(Role::Mask),
+                    L.Scalar<GfMatrix4d>(Role::SourceMatrix, GfMatrix4d(1.0),
+                                         "rigExec:cageMatrix"),
+                    L.Scalar<GfMatrix4d>(Role::TargetMatrix, GfMatrix4d(1.0),
+                                         "rigExec:targetMatrix"),
+                    L.Scalar<TfToken>(Role::PointSpace, _valueTokens->local,
+                                      "rigExec:pointSpace"),
+                    binding, values.influenceTransforms, &params)) {
+                break;
+            }
+        }
         // auxPoints is the BIND-TIME cage and auxPointsB the live one, as
         // the stage assembler orders them.
         if (values.retainedRest && !values.retainedRest->empty()) {
@@ -4002,9 +4396,14 @@ RigExecAssembleFromLeaves(RigExecRevisionOp op,
         const size_t cageCount = size_t(params.divisions[0]) *
                                  size_t(params.divisions[1]) *
                                  size_t(params.divisions[2]);
-        params.valid = params.divisions[0] >= 2 && params.divisions[1] >= 2 &&
-                       params.divisions[2] >= 2 &&
-                       params.auxPoints.size() == cageCount &&
+        // A regular grid places its nodes itself: it needs no bind-time
+        // cage and may be one node thick along an axis.
+        const int minimum = params.latticeSettings.regularGrid ? 1 : 2;
+        params.valid = params.divisions[0] >= minimum &&
+                       params.divisions[1] >= minimum &&
+                       params.divisions[2] >= minimum &&
+                       (params.latticeSettings.regularGrid ||
+                        params.auxPoints.size() == cageCount) &&
                        params.auxPointsB.size() == cageCount &&
                        !params.restPoints.empty();
         break;

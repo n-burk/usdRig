@@ -1460,6 +1460,60 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
                         return false;
                     }
                 }
+                // The extended deformer settings (format 21) read at the
+                // time; the Default-time tokens and the arrays are path
+                // reads and leaf sites of their own.
+                const auto token = [&](const char *text) {
+                    return S.Value(TfToken(text));
+                };
+                if (op == RigExecRevisionOp::DeltaMush &&
+                    (!pathRead(attr("inputs:onlySmooth"), _Bool(false),
+                               false) ||
+                     !pathRead(attr("inputs:computationToTarget"),
+                               _Identity(), false))) {
+                    return false;
+                }
+                if (op == RigExecRevisionOp::Lattice) {
+                    const auto vec3f = [](float v) {
+                        fb::RigExecWireValue value = _Zero(InputTag::Vec3f);
+                        *value.vec3f = RigExecWireVec3f{v, v, v};
+                        return value;
+                    };
+                    if (!pathRead(attr("rigExec:evaluation"), token("legacy"),
+                                  false) ||
+                        !pathRead(attr("rigExec:interpolationU"),
+                                  token("bspline"), false) ||
+                        !pathRead(attr("rigExec:interpolationV"),
+                                  token("bspline"), false) ||
+                        !pathRead(attr("rigExec:interpolationW"),
+                                  token("bspline"), false) ||
+                        !pathRead(attr("rigExec:origin"), vec3f(-0.5f),
+                                  false) ||
+                        !pathRead(attr("rigExec:spacing"), vec3f(1.0f),
+                                  false) ||
+                        !pathRead(attr("rigExec:strength"), _Float(1.0f),
+                                  false) ||
+                        !pathRead(attr("rigExec:cageMatrix"), _Identity(),
+                                  false) ||
+                        !pathRead(attr("rigExec:targetMatrix"), _Identity(),
+                                  false) ||
+                        !pathRead(attr("rigExec:pointSpace"), token("local"),
+                                  false)) {
+                        return false;
+                    }
+                }
+                if (op == RigExecRevisionOp::SurfaceProject &&
+                    (!pathRead(attr("rigExec:snapMode"), token("onSurface"),
+                               false) ||
+                     !pathRead(attr("rigExec:offset"), _Float(0.0f), false) ||
+                     !pathRead(attr("rigExec:surfaceMatrix"), _Identity(),
+                               false) ||
+                     !pathRead(attr("rigExec:targetMatrix"), _Identity(),
+                               false) ||
+                     !pathRead(attr("rigExec:pointSpace"), token("local"),
+                               false))) {
+                    return false;
+                }
                 if (op == RigExecRevisionOp::ShaderDials) {
                     for (const SdfPath &dial : revision.binding.shaderDials) {
                         const UsdAttribute a = S.stage->GetAttributeAtPath(dial);

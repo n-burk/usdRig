@@ -138,6 +138,11 @@ _EncodePathValue(const VtValue &held, RigExecBakePathTable *paths,
         out->tag = Tag::Vec3d;
         out->vec3d = std::make_unique<RigExecWireVec3d>(
             _ToVec3d(held.UncheckedGet<GfVec3d>()));
+    } else if (held.IsHolding<GfVec3f>()) {
+        // A float3 is held widened: every component narrows back exactly.
+        out->tag = Tag::Vec3d;
+        out->vec3d = std::make_unique<RigExecWireVec3d>(
+            _ToVec3d(GfVec3d(held.UncheckedGet<GfVec3f>())));
     } else if (held.IsHolding<VtIntArray>()) {
         out->tag = Tag::IntArray;
         const VtIntArray &array = held.UncheckedGet<VtIntArray>();

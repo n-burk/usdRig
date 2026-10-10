@@ -11,10 +11,13 @@
 #include "rigExecBinary/transport.h"
 #include "rigExecBinary/generated/presentation_generated.h"
 #include "rigExecExampleFixtures.h"
+#include "rigExecGraph/providerRecords.h"
+#include "rigExecMath/affineFrameKernel.h"
 #include "rigExecMath/pointRanges.h"
 #include "rigExecMath/propertyMath.h"
 #include "rigExecRigging/rigBuilder.h"
 
+#include "pxr/base/gf/vec3f.h"
 #include "pxr/base/plug/registry.h"
 #include "pxr/base/tf/getenv.h"
 #include "pxr/base/tf/setenv.h"
@@ -22,6 +25,7 @@
 #include "pxr/usd/sdf/types.h"
 #include "pxr/usd/usd/editContext.h"
 #include "pxr/usd/usd/primRange.h"
+#include "pxr/usd/usd/relationship.h"
 #include "pxr/usd/usd/stage.h"
 #include "pxr/usd/usdGeom/mesh.h"
 #include "pxr/usd/usdGeom/xform.h"
@@ -34,6 +38,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <set>
@@ -57,6 +62,9 @@ static int failures = 0;
 // After the macro: the comparison and edit helpers report through CHECK.
 #include "rigExecBinaryCompare.h"
 #include "rigExecFileEdit.h"
+// Independent reference rigs of the extended lattice and surface settings.
+#include "fixtures/lattice/latticeReferenceCases.h"
+#include "fixtures/surfaceSnap/nearestReferenceCases.h"
 
 static std::vector<uint8_t>
 Bytes(const std::string &path)
@@ -1386,6 +1394,388 @@ TestPhaseBindingBakes()
                   stats.answeredSamples == stats.sampleBindings);
         }
     }
+}
+
+// A Delta Mush with every format-21 setting authored: length-weighted
+// smoothing, corner transport, per-vertex smoothing weights and a
+// nonuniform affine computation space.
+static const char *const _kExtendedMushStage = R"USD(#usda 1.0
+def RigExecRoot "Rig" {
+ def Mesh "Body" {
+  point3f[] points = [(0, 0, 0), (1, 0, 0.3), (2, 0, 0), (0, 1, 0.1), (1, 1, 0.5), (2, 1, 0)]
+  int[] faceVertexCounts = [4, 4]
+  int[] faceVertexIndices = [0, 1, 4, 3, 1, 2, 5, 4]
+ }
+ def RigExecDeltaMushMover "Mush" (prepend apiSchemas = ["RigExecMoverAPI"]) {
+  rel rigExec:moves = </Rig/Body.points>
+  point3f[] inputs:restPoints = [(0, 0, 0), (1, 0, 0.1), (2, 0, 0), (0, 1, 0.05), (1, 1, 0.2), (2, 1, 0)]
+  int inputs:iterations = 4
+  float inputs:step = 0.5
+  bool inputs:pinBorders = 0
+  uniform token inputs:smoothing = "lengthWeighted"
+  uniform token inputs:frameTransport = "corner"
+  float[] inputs:smoothWeights = [1, 0.5, 1, 0.25, 1, 0.75]
+  matrix4d inputs:computationToTarget = ((1.2, 0, 0, 0), (0, 0.9, 0.1, 0), (0, 0, 1.1, 0), (0.2, -0.1, 0.3, 1))
+ }
+}
+)USD";
+
+// The same Delta Mush with no format-21 setting authored: the legacy
+// deformer.
+static const char *const _kLegacyMushStage = R"USD(#usda 1.0
+def RigExecRoot "Rig" {
+ def Mesh "Body" {
+  point3f[] points = [(0, 0, 0), (1, 0, 0.3), (2, 0, 0), (0, 1, 0.1), (1, 1, 0.5), (2, 1, 0)]
+  int[] faceVertexCounts = [4, 4]
+  int[] faceVertexIndices = [0, 1, 4, 3, 1, 2, 5, 4]
+ }
+ def RigExecDeltaMushMover "Mush" (prepend apiSchemas = ["RigExecMoverAPI"]) {
+  rel rigExec:moves = </Rig/Body.points>
+  point3f[] inputs:restPoints = [(0, 0, 0), (1, 0, 0.1), (2, 0, 0), (0, 1, 0.05), (1, 1, 0.2), (2, 1, 0)]
+  int inputs:iterations = 4
+  float inputs:step = 0.5
+  bool inputs:pinBorders = 0
+ }
+}
+)USD";
+
+/// An in-memory stage of \p text; null when it does not parse.
+static UsdStageRefPtr
+_StageFromText(const std::string &text)
+{
+    const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    if (!stage->GetRootLayer()->ImportFromString(text)) {
+        return nullptr;
+    }
+    return stage;
+}
+
+/// The revision of mover \p mover in \p file, or null.
+static fb::RigExecWireRevision *
+_RevisionOf(fb::RigExecWireFile *file, const std::string &mover)
+{
+    for (fb::RigExecWireChain &chain : file->geometry->chains) {
+        for (fb::RigExecWireRevision &revision : chain.revisions) {
+            if (RigExecFormatPathText(*file, revision.moverPath) == mover) {
+                return &revision;
+            }
+        }
+    }
+    return nullptr;
+}
+
+/// Whether \p path names one of the format-21 settings of \p revision.
+static bool
+_IsExtendedSetting(const fb::RigExecWireFile &file,
+                   const fb::RigExecWireRevision &revision, uint32_t path)
+{
+    size_t count = 0;
+    const char *const *names =
+        RigExecFormatExtendedSettingNames(revision.op, &count);
+    if (!names || revision.moverPrim == 0) {
+        return false;
+    }
+    const std::string mover = RigExecFormatPathText(file, revision.moverPrim);
+    const std::string text = RigExecFormatPathText(file, path);
+    for (size_t i = 0; i < count; ++i) {
+        if (text == mover + "." + names[i]) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// The format-21 settings \p file holds for mover \p mover, as path reads
+/// or leaf sites, by attribute name.
+static std::set<std::string>
+_HeldSettings(fb::RigExecWireFile *file, const std::string &mover)
+{
+    std::set<std::string> held;
+    const fb::RigExecWireRevision *revision = _RevisionOf(file, mover);
+    if (!revision) {
+        return held;
+    }
+    const auto note = [&](uint32_t path) {
+        if (_IsExtendedSetting(*file, *revision, path)) {
+            held.insert(RigExecFormatPathText(*file, path)
+                            .substr(mover.size() + 1));
+        }
+    };
+    for (const fb::RigExecWirePathRead &read : file->geometry->pathReads) {
+        note(read.path);
+    }
+    for (const auto *sites :
+         {&revision->leafSites, &revision->layoutLeafSites}) {
+        for (const auto &site : *sites) {
+            note(site.path);
+        }
+    }
+    return held;
+}
+
+/// \p file with every format-21 setting of its Delta Mush, lattice and
+/// surface revisions taken out (path reads and leaf sites), relabelled
+/// format 20: what a format-20 export of the same legacy rig holds.
+static void
+_AsFormat20(fb::RigExecWireFile *file)
+{
+    auto &reads = file->geometry->pathReads;
+    for (fb::RigExecWireChain &chain : file->geometry->chains) {
+        for (fb::RigExecWireRevision &revision : chain.revisions) {
+            const auto extended = [&](uint32_t path) {
+                return _IsExtendedSetting(*file, revision, path);
+            };
+            for (auto *sites :
+                 {&revision.leafSites, &revision.layoutLeafSites}) {
+                sites->erase(std::remove_if(sites->begin(), sites->end(),
+                                            [&](const auto &site) {
+                                                return extended(site.path);
+                                            }),
+                             sites->end());
+            }
+            reads.erase(std::remove_if(reads.begin(), reads.end(),
+                                       [&](const auto &read) {
+                                           return extended(read.path);
+                                       }),
+                        reads.end());
+        }
+    }
+    file->formatVersion = 20;
+}
+
+/// \p stage's file baked at time 1 into \p bytes; false with a diagnostic.
+static bool
+_BakeAtOne(const UsdStageRefPtr &stage, std::vector<uint8_t> *bytes)
+{
+    RigExecRigEvaluator evaluator(stage, SdfPath("/Rig"));
+    RigExecBakeOpts opts;
+    opts.time = 1.0;
+    RigExecBakeResult result;
+    std::string error;
+    const bool baked = RigExecBakeToBinary(evaluator, opts, &result, &error);
+    if (!baked) {
+        std::printf("  bake diagnostic: %s\n", error.c_str());
+    }
+    *bytes = std::move(result.bytes);
+    return baked;
+}
+
+// Format 21 on real bakes. Each reference rig -- a regular-grid lattice, a
+// masked surface snap in transformed spaces, a Delta Mush with every new
+// setting -- writes format 21 holding each of its op's settings as a path
+// read or a leaf site, writes back to its bytes, and is refused relabelled
+// format 20, which holds none. A lattice's frame providers are its two
+// influences: one alone is refused, and so is any in format 20. The legacy
+// Delta Mush's file without its settings opens as format 20. A reader of
+// format 20 refuses 21 by its version, as this one refuses 22.
+static void
+TestExtendedDeformerSettingsBake()
+{
+    struct Row {
+        const char *name;
+        std::string stage;
+        const char *mover;
+    };
+    const Row rows[] = {
+        {"regular-grid lattice", latticeReferenceCases[0].stage,
+         "/Rig/Lattice"},
+        {"surface snap", surfaceReferenceCases[0].stage, "/Rig/Snap"},
+        {"delta mush", _kExtendedMushStage, "/Rig/Mush"},
+    };
+    size_t settings = 0;
+    for (const Row &row : rows) {
+        const UsdStageRefPtr stage = _StageFromText(row.stage);
+        CHECK(stage);
+        std::vector<uint8_t> bytes;
+        if (!stage || !_BakeAtOne(stage, &bytes)) {
+            std::printf("extended settings %s: FAILED (bake)\n", row.name);
+            CHECK(false);
+            continue;
+        }
+        const std::unique_ptr<fb::RigExecWireFile> file =
+            RigExecTestUnpack(bytes);
+        if (!file) {
+            continue;
+        }
+        CHECK(file->formatVersion == RigExecFormatVersion);
+        const fb::RigExecWireRevision *revision =
+            _RevisionOf(file.get(), row.mover);
+        CHECK(revision);
+        if (!revision) {
+            continue;
+        }
+        size_t count = 0;
+        const char *const *names =
+            RigExecFormatExtendedSettingNames(revision->op, &count);
+        CHECK(names && count > 0);
+        const std::set<std::string> held =
+            _HeldSettings(file.get(), row.mover);
+        for (size_t i = 0; names && i < count; ++i) {
+            const bool found = held.count(names[i]) != 0;
+            CHECK(found);
+            if (!found) {
+                std::printf("  %s holds no %s\n", row.name, names[i]);
+            }
+        }
+        settings += held.size();
+        std::vector<uint8_t> rewritten;
+        std::string why;
+        CHECK(RigExecFormatWrite(*file, &rewritten, &why) &&
+              rewritten == bytes);
+        fb::RigExecWireFile relabelled(*file);
+        relabelled.formatVersion = 20;
+        CHECK(_Refused(relabelled, "format 20 holds no"));
+        relabelled.formatVersion = RigExecFormatVersion + 1;
+        const std::vector<uint8_t> future =
+            RigExecTestPackUnchecked(relabelled);
+        std::unique_ptr<fb::RigExecWireFile> opened;
+        CHECK(!RigExecFormatOpen(future.data(), future.size(), &opened,
+                                 &why) &&
+              _Contains(why, "rebake"));
+    }
+
+    // A lattice framed by two controls, cage then target.
+    size_t framed = 0;
+    if (const UsdStageRefPtr stage =
+            _StageFromText(latticeReferenceCases[0].stage)) {
+        stage->DefinePrim(SdfPath("/Rig/CageFrame"),
+                          TfToken("RigExecControl"));
+        stage->DefinePrim(SdfPath("/Rig/TargetFrame"),
+                          TfToken("RigExecControl"));
+        const UsdRelationship frames =
+            stage->GetPrimAtPath(SdfPath("/Rig/Lattice"))
+                .GetRelationship(TfToken("rigExec:frames"));
+        CHECK(frames && frames.SetTargets({SdfPath("/Rig/CageFrame"),
+                                           SdfPath("/Rig/TargetFrame")}));
+        std::vector<uint8_t> bytes;
+        CHECK(_BakeAtOne(stage, &bytes));
+        const std::unique_ptr<fb::RigExecWireFile> file =
+            bytes.empty() ? nullptr : RigExecTestUnpack(bytes);
+        fb::RigExecWireRevision *revision =
+            file ? _RevisionOf(file.get(), "/Rig/Lattice") : nullptr;
+        CHECK(revision && revision->influenceSlots.size() == 2);
+        if (revision && revision->influenceSlots.size() == 2) {
+            framed = revision->influenceSlots.size();
+            fb::RigExecWireFile one(*file);
+            fb::RigExecWireRevision *lone = _RevisionOf(&one, "/Rig/Lattice");
+            lone->influenceSlots.pop_back();
+            if (!lone->influenceRecords.empty()) {
+                lone->influenceRecords.pop_back();
+            }
+            CHECK(_Refused(one, "1 frame providers on a Lattice revision"));
+            fb::RigExecWireFile previous(*file);
+            _AsFormat20(&previous);
+            CHECK(_Refused(previous, "holds no frame providers"));
+        }
+    }
+
+    // The legacy Delta Mush, as format 20.
+    bool legacyOpened = false;
+    if (const UsdStageRefPtr stage = _StageFromText(_kLegacyMushStage)) {
+        std::vector<uint8_t> bytes;
+        CHECK(_BakeAtOne(stage, &bytes));
+        const std::unique_ptr<fb::RigExecWireFile> file =
+            bytes.empty() ? nullptr : RigExecTestUnpack(bytes);
+        if (file) {
+            CHECK(!_HeldSettings(file.get(), "/Rig/Mush").empty());
+            _AsFormat20(file.get());
+            CHECK(_HeldSettings(file.get(), "/Rig/Mush").empty());
+            const std::vector<uint8_t> previous =
+                RigExecTestPackUnchecked(*file);
+            std::unique_ptr<fb::RigExecWireFile> opened;
+            std::string why;
+            legacyOpened = RigExecFormatOpen(previous.data(), previous.size(),
+                                             &opened, &why) &&
+                           opened && opened->formatVersion == 20;
+            if (!legacyOpened) {
+                std::printf("  legacy format 20: %s\n", why.c_str());
+            }
+            CHECK(legacyOpened);
+        }
+    }
+    std::printf("extended deformer settings: %zu held over %zu rigs, %zu "
+                "frame providers, legacy format 20 %s\n",
+                settings, std::size(rows), framed,
+                legacyOpened ? "opens" : "REFUSED");
+}
+
+// Format 21 holds affine frame expressions as provider ops. A joint whose
+// posed:space reads a copy frame bakes; its op names the expression and
+// its inputs (two attributes and the source frame). It is refused
+// relabelled format 20, with an unknown expression or inputs its
+// expression does not take, and another op naming an expression is too.
+static void
+TestAffineFrameRecords()
+{
+    const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    stage->DefinePrim(SdfPath("/Rig"), TfToken("RigExecRoot"));
+    const UsdPrim source =
+        stage->DefinePrim(SdfPath("/Rig/Source"), TfToken("RigExecControl"));
+    CHECK(source.GetAttribute(TfToken("avars:tx")).Set(2.0));
+    const UsdPrim copy =
+        stage->DefinePrim(SdfPath("/Rig/Copy"), TfToken("RigExecCopyFrame"));
+    CHECK(copy.GetRelationship(TfToken("rigExec:source"))
+              .SetTargets({source.GetPath()}));
+    CHECK(copy.GetRelationship(TfToken("rigExec:poseInputs"))
+              .SetTargets({source.GetPath()}));
+    const UsdPrim joint =
+        stage->DefinePrim(SdfPath("/Rig/Joint"), TfToken("RigExecJoint"));
+    CHECK(joint.GetAttribute(TfToken("posed:space"))
+              .SetConnections({copy.GetPath().AppendProperty(
+                  TfToken("outputs:matrix"))}));
+    std::vector<uint8_t> bytes;
+    const bool baked = _BakeAtOne(stage, &bytes);
+    CHECK(baked);
+    const std::unique_ptr<fb::RigExecWireFile> file =
+        baked ? RigExecTestUnpack(bytes) : nullptr;
+    CHECK(file && file->providerProgram);
+    if (!file || !file->providerProgram) {
+        return;
+    }
+    const auto affineOp = [](fb::RigExecWireFile *f) {
+        fb::RigExecWireProviderOp *found = nullptr;
+        for (auto &op : f->providerProgram->ops) {
+            if (op.kind == uint32_t(RigExecProviderOpKind::AffineFrame)) {
+                found = &op;
+            }
+        }
+        return found;
+    };
+    const auto otherOp = [](fb::RigExecWireFile *f) {
+        for (auto &op : f->providerProgram->ops) {
+            if (op.kind != uint32_t(RigExecProviderOpKind::AffineFrame)) {
+                return &op;
+            }
+        }
+        return static_cast<fb::RigExecWireProviderOp *>(nullptr);
+    };
+    const fb::RigExecWireProviderOp *op = affineOp(file.get());
+    CHECK(op && op->affineKind == 0 && op->affineTargets == 0 &&
+          op->inputs.size() == 3);
+    if (!op) {
+        return;
+    }
+    std::vector<uint8_t> rewritten;
+    std::string why;
+    CHECK(RigExecFormatWrite(*file, &rewritten, &why) && rewritten == bytes);
+    fb::RigExecWireFile previous(*file);
+    previous.formatVersion = 20;
+    CHECK(_Refused(previous, "holds no affine frame expressions"));
+    fb::RigExecWireFile unknown(*file);
+    affineOp(&unknown)->affineKind = RigExecAffineFrameTypeCount;
+    CHECK(_Refused(unknown, "affine frame expression does not match"));
+    fb::RigExecWireFile short_(*file);
+    affineOp(&short_)->inputs.pop_back();
+    CHECK(_Refused(short_, "affine frame expression does not match"));
+    fb::RigExecWireFile named(*file);
+    fb::RigExecWireProviderOp *other = otherOp(&named);
+    CHECK(other);
+    if (other) {
+        other->affineKind = 1;
+        CHECK(_Refused(named, "affine frame expression does not match"));
+    }
+    std::printf("affine frame records: %zu provider ops, format 21 only\n",
+                file->providerProgram->ops.size());
 }
 
 // tests/fixtures/raw_skin_layouts.usda baked at time 1: three skin layouts
@@ -3974,6 +4364,8 @@ main(int argc, char **argv)
     TestRangeChainBake();
     TestPhaseBindingBakes();
     TestRawSkinLayoutBake();
+    TestExtendedDeformerSettingsBake();
+    TestAffineFrameRecords();
     TestEnumeratedReadThroughPropertyResult();
     TestStaticReportRevisionReads();
     TestStaticReportAnsweredBlendSamples();

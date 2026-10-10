@@ -11,9 +11,11 @@ callback and a points computation; no changes to RigExec's built-in mover list
 are required.
 
 Use the same compiler, architecture, build configuration, OpenUSD installation,
-and RigExec SDK as the host. Plugin API version 4 combines declared external
-input leaves and explicit phased oracle lookup callbacks. Libraries built for
-API 1, 2 or 3 must be rebuilt and migrate their assembly callback.
+and RigExec SDK as the host. Plugin API version 5 combines declared external
+input leaves, explicit phased oracle lookup callbacks and the optional
+provider-aware playback kernel. Libraries built for API 1, 2 or 3 must be
+rebuilt and migrate their assembly callback; libraries built for API 4 must be
+rebuilt.
 
 `declareExternalInputs` runs only at compilation and declares ordered typed
 `RigExecRevisionLeafKey` records. Each record specifies its canonical property
@@ -278,6 +280,17 @@ Default read policy. The runtime applies `inputs:enabled` and the envelope,
 and fails the mover for that frame when `apply` returns false or produces a
 non-finite point.
 
+A mover whose result follows its influences or its transform provider sets
+`runtimeKernel.applyWithProviders` instead of `apply`. Playback then also
+hands it `RigExecExternalProviders`: the binding's transform and influence
+matrices as playback evaluated them at the binding's phase, and the chain's
+base points, the values `assembleExternal` receives as
+`RigExecExternalProviderValues`. The built-in `RigExecLayeredSkinMover` and
+`RigExecSurfaceBindingMover` play this way: their kernels rebuild the payload
+with their own `assembleExternal` logic and deform with `applyExternal`'s, so
+playback matches native evaluation bit for bit and a posed playback follows
+the providers.
+
 Extending the offset mover above:
 
 ```cpp
@@ -350,7 +363,7 @@ Windows and colons on Linux/macOS. Keep the host's existing schema and imaging
 plugin paths as well.
 
 The generated `plugInfo.json` marks the library with
-`"Info": {"RigExecMoverPlugin": 3}`. RigExec loads discoverable mover libraries
+`"Info": {"RigExecMoverPlugin": 5}`. RigExec loads discoverable mover libraries
 on the first unknown handler lookup. Hosts can call
 `RigExecLoadMoverPlugins(&diagnostics)` explicitly to inspect version or load
 errors. After adding search locations with

@@ -9,7 +9,9 @@
 namespace rigExec {
 enum class RigExecProviderOpKind {
     Attribute, SpaceExpression, RestFrame, DefaultSpace, FrameToSpace,
-    MatrixToFrame, PosedFrame, JointMatrix, LocalXform, InterveningXform, AvarMatrix, RelativeXform
+    MatrixToFrame, PosedFrame, JointMatrix, LocalXform, InterveningXform, AvarMatrix, RelativeXform,
+    /// An affine frame expression's outputs:matrix (affineFrameKernels.h).
+    AffineFrame
 };
 struct RigExecProviderPlainOp {
     RigExecProviderOpKind kind;
@@ -17,6 +19,10 @@ struct RigExecProviderPlainOp {
     uint64_t output=UINT64_MAX;
     std::vector<uint64_t> inputs;
     bool scaleAvars=true;
+    /// AffineFrame: the expression (RigExecAffineFrameTypes order) and how
+    /// many trailing frame inputs are a constraint frame's targets.
+    uint32_t affineKind=0;
+    uint32_t affineTargets=0;
 };
 struct RigExecProviderPlainFrame {
     std::array<std::array<double,3>,4> points;

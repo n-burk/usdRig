@@ -1,15 +1,20 @@
 #include "providerProgram.h"
 #include "providerArithmetic.h"
+#include "rigExecMath/affineFrameKernels.h"
 #include "rigExecMath/avarScale.h"
 #include "pxr/base/gf/rotation.h"
+#include "pxr/base/gf/vec3i.h"
 #include "pxr/base/vt/array.h"
+#include "pxr/base/vt/types.h"
 #include "pxr/usd/usdGeom/xformOp.h"
 #include <algorithm>
 #include <cmath>
 #include <limits>
 #include <set>
 #include <string_view>
+#include <type_traits>
 #include <unordered_map>
+#include <variant>
 
 namespace rigExec {
 namespace {
@@ -31,6 +36,66 @@ SdfPath ParentProvider(const RigExecSceneDescriptors &scene,const SdfPath &path)
         if(found!=scene.nodes.end() && found->second.fact.active && Provider(found->second.fact.type))return parent;
     }
     return {};
+}
+// Affine frame expressions: each publishes its outputs:matrix from its own
+// input attributes and the point frames of the providers its relationships
+// name, as an ordinary op whose inputs are those values. The layout
+// (RigExecAffineFrameTypes) states every input in op order; the kernels are
+// affineFrameKernel.h's, which the runtime runs too.
+using AffineInputs=RigExecAffineFrameInputs;
+using AffineKernel=RigExecGfAffineFrameKernel;
+constexpr uint32_t affineTypeCount=RigExecAffineFrameTypeCount;
+// The affine type of \p type, or affineTypeCount.
+uint32_t AffineTypeOf(const TfToken &type) {
+    for(uint32_t k=0;k<affineTypeCount;++k)if(type==RigExecAffineFrameTypes[k].type)return k;
+    return affineTypeCount;
+}
+bool AffineOutput(const RigExecSceneDescriptors &scene,const SdfPath &attribute,uint32_t *kind) {
+    if(attribute.GetName()!="outputs:matrix")return false;
+    const auto node=scene.nodes.find(attribute.GetPrimPath());
+    if(node==scene.nodes.end() || !node->second.fact.active)return false;
+    *kind=AffineTypeOf(node->second.fact.type);
+    return *kind<affineTypeCount;
+}
+SdfPathVector AffineTargets(const RigExecSceneDescriptors &scene,const SdfPath &prim,const char *name) {
+    const auto found=scene.relationships.find(prim.AppendProperty(TfToken(name)));
+    return found==scene.relationships.end()?SdfPathVector():found->second.fact.targets;
+}
+// A provider's point frame from its four landmarks, as a matrix: the axes
+// relative to the origin as rows, then the origin. No frame is identity.
+GfMatrix4d AffineFrameMatrix(const RigExecPointFrame *frame) {
+    if(!frame)return GfMatrix4d(1);
+    return AffineKernel::FrameMatrix(frame->Origin(),frame->X(),frame->Y(),frame->Z());
+}
+// One input's value into its member: the store's typed value where it holds
+// one, the boxed source value otherwise; an unavailable input keeps the
+// member's default, as an absent exec input does.
+void AffineRead(const RigExecTypedValueStore &store,RigExecValueId id,RigExecAffineField field,AffineInputs *in) {
+    const auto boxed=[&](auto *out) {
+        using T=std::decay_t<decltype(*out)>;
+        const auto *value=store.Read<VtValue>(id);
+        if(value && value->IsHolding<T>())*out=value->UncheckedGet<T>();
+    };
+    RigExecVisitAffineField(*in,field,[&](auto &out) {
+        using T=std::decay_t<decltype(out)>;
+        if constexpr(std::is_same_v<T,GfMatrix4d> || std::is_same_v<T,GfVec3d>) {
+            if(const auto *value=store.Read<T>(id))out=*value;
+        } else if constexpr(std::is_same_v<T,double>) {
+            if(const auto *value=store.Read<double>(id))out=*value;
+            else if(const auto *narrow=store.Read<float>(id))out=*narrow;
+        } else if constexpr(std::is_same_v<T,std::string>) {
+            // The token's own text: no registry lookup.
+            if(const auto *value=store.Read<TfToken>(id))out=value->GetText();
+        } else if constexpr(std::is_same_v<T,std::vector<int>>) {
+            VtIntArray array;boxed(&array);if(!array.empty())out.assign(array.begin(),array.end());
+        } else if constexpr(std::is_same_v<T,std::vector<GfMatrix4d>>) {
+            VtMatrix4dArray array;boxed(&array);if(!array.empty())out.assign(array.begin(),array.end());
+        } else if constexpr(std::is_same_v<T,std::vector<double>>) {
+            VtDoubleArray array;boxed(&array);if(!array.empty())out.assign(array.begin(),array.end());
+        } else {
+            boxed(&out);
+        }
+    });
 }
 struct GfProviderMath {
     using Matrix=GfMatrix4d;using Vector=GfVec3d;using Rotation=GfRotation;using Frame=RigExecPointFrame;
@@ -85,13 +150,33 @@ bool RigExecBuildProviderProgram(const RigExecSceneDescriptors &scene,bool compo
     RigExecProviderProgram program;
     std::set<SdfPath> providerPaths,usedAttributes,xformPaths,nativeFrames;
     std::function<void(const SdfPath &)> includeAttribute,includeProvider;
+    std::function<void(const SdfPath &,uint32_t)> includeAffine;
     includeAttribute=[&](const SdfPath &path) {
         const auto attribute=scene.attributes.find(path);
         const auto owner=scene.nodes.find(path.GetPrimPath());
         if(attribute==scene.attributes.end() || owner==scene.nodes.end() || !owner->second.fact.active ||
             !usedAttributes.insert(path).second)return;
         if(Provider(owner->second.fact.type) && Expression(path.GetName()))includeProvider(path.GetPrimPath());
+        uint32_t affine=0;
+        if(AffineOutput(scene,path,&affine))includeAffine(path.GetPrimPath(),affine);
         for(const auto &connection:attribute->second.fact.connections)includeAttribute(connection);
+    };
+    // An affine frame expression reads its input attributes and the point
+    // frames of the providers its relationships name.
+    includeAffine=[&](const SdfPath &prim,uint32_t kind) {
+        const RigExecAffineFrameType &type=RigExecAffineFrameTypes[kind];
+        for(uint32_t k=0;k<type.attributeCount;++k)
+            includeAttribute(prim.AppendProperty(TfToken(type.attributes[k].name)));
+        const auto frames=[&](const char *name) {
+            if(!name)return;
+            for(const auto &target:AffineTargets(scene,prim,name)) {
+                const auto node=scene.nodes.find(target);
+                if(target.IsPrimPath() && node!=scene.nodes.end() && node->second.fact.active &&
+                   Provider(node->second.fact.type))includeProvider(target);
+            }
+        };
+        for(uint32_t k=0;k<type.relationCount;++k)frames(type.relations[k].name);
+        frames(type.targets);frames(type.targetObjects);
     };
     includeProvider=[&](const SdfPath &path) {
         if(path.IsEmpty() || !providerPaths.insert(path).second)return;
@@ -190,6 +275,32 @@ bool RigExecBuildProviderProgram(const RigExecSceneDescriptors &scene,bool compo
         program.rawInputs.emplace(path,raw);program.attributeValues.emplace(path,value);
         program.sampled.push_back({raw,path});program.leaves.push_back(raw);
         if(Provider(node->second.fact.type) && Expression(path.GetName()))continue;
+        uint32_t affine=0;
+        if(AffineOutput(scene,path,&affine)) {
+            // Inputs in the table's order: the attributes, one frame per
+            // single relation, then a constraint frame's target frames and
+            // target-object frames.
+            const RigExecAffineFrameType &type=RigExecAffineFrameTypes[affine];
+            const SdfPath prim=path.GetPrimPath();
+            RigExecProviderOp op{RigExecProviderOpKind::AffineFrame,prim,value,{}};
+            op.affineKind=affine;
+            const auto frame=[&](const SdfPath &target) {
+                return target.IsPrimPath()?compId(target,"computePointFrame"):RigExecNoProviderValue;
+            };
+            for(uint32_t k=0;k<type.attributeCount;++k)op.inputs.push_back(attrId(prim,type.attributes[k].name));
+            for(uint32_t k=0;k<type.relationCount;++k) {
+                const auto targets=AffineTargets(scene,prim,type.relations[k].name);
+                op.inputs.push_back(targets.empty()?RigExecNoProviderValue:frame(targets.front()));
+            }
+            if(type.targets) {
+                const auto targets=AffineTargets(scene,prim,type.targets);
+                for(const auto &target:targets)op.inputs.push_back(frame(target));
+                op.affineTargets=uint32_t(targets.size());
+                for(const auto &target:AffineTargets(scene,prim,type.targetObjects))op.inputs.push_back(frame(target));
+            }
+            add(std::move(op),"affineFrame:"+path.GetString());
+            continue;
+        }
         if(attr.fact.connections.size()>1 && attr.fact.type.IsArray() &&
             node->second.fact.type.GetString().rfind("RigExec",0)==0)
             return Fail(error,"provider lowering needs typed array connection concatenation: "+path.GetString());
@@ -373,6 +484,12 @@ bool RigExecProviderOpStructurallyValid(const RigExecProviderProgram &program,
     if(op.output>=program.valueKeys.size())return Fail(error,"provider output is outside its typed layout");
     if(ArithmeticKind(op.kind))
         return ArithmeticHandles(op.kind) || Fail(error,"unsupported provider arithmetic operation kind");
+    if(op.kind==RigExecProviderOpKind::AffineFrame) {
+        if(op.affineKind>=affineTypeCount)return Fail(error,"unknown affine frame expression");
+        if(!RigExecAffineFrameInputsMatch(op.affineKind,op.inputs.size(),op.affineTargets))
+            return Fail(error,"affine frame inputs do not match their expression");
+        return true;
+    }
     if(op.kind!=RigExecProviderOpKind::LocalXform && op.kind!=RigExecProviderOpKind::InterveningXform)
         return Fail(error,"unknown provider operation kind");
     if(op.ownerText>=program.ownerTexts.size())
@@ -454,10 +571,36 @@ bool RigExecRunProviderOp(const RigExecProviderProgram &program,uint32_t index,
         else store->Publish(op.output,result);
         break;
     }
+    case RigExecProviderOpKind::AffineFrame: {
+        // Validated by RigExecProviderOpStructurallyValid above.
+        const RigExecAffineFrameType &type=RigExecAffineFrameTypes[op.affineKind];
+        AffineInputs in;
+        size_t at=0;
+        for(uint32_t k=0;k<type.attributeCount;++k)AffineRead(*store,id(at++),type.attributes[k].field,&in);
+        for(uint32_t k=0;k<type.relationCount;++k) {
+            const GfMatrix4d frame=AffineFrameMatrix(store->Read<RigExecPointFrame>(id(at++)));
+            RigExecVisitAffineField(in,type.relations[k].field,[&](auto &out) {
+                if constexpr(std::is_same_v<std::decay_t<decltype(out)>,GfMatrix4d>)out=frame;
+            });
+        }
+        if(type.targets) {
+            for(uint32_t k=0;k<op.affineTargets;++k)
+                in.targets.push_back(AffineFrameMatrix(store->Read<RigExecPointFrame>(id(at++))));
+            while(at<op.inputs.size())
+                in.targetObjects.push_back(AffineFrameMatrix(store->Read<RigExecPointFrame>(id(at++))));
+        }
+        GfMatrix4d result(1.0);
+        const char *failure=nullptr;
+        if(!AffineKernel::Compute(op.affineKind,in,&result,&failure))
+            return unavailable(RigExecNoProviderValue,std::string("affine frame expression failed: ")+failure);
+        store->Publish(op.output,result);
+        break;
+    }
     default:return Fail(error,"unknown provider operation kind");
     }
     return true;
 }
+
 bool RigExecSampleProviderProgram(const RigExecProviderProgram &program,
     const RigExecSceneDescriptors &scene,size_t identity,const std::map<SdfPath,VtValue> &overlays,
     RigExecTypedValueStore *store,std::vector<RigExecValueId> *changed,std::string *error) {

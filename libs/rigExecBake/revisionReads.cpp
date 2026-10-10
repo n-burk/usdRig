@@ -65,6 +65,31 @@ TF_DEFINE_PRIVATE_TOKENS(
     ((shaderOffset, "rigExec:shaderOffset"))
     ((projectionMode, "rigExec:projectionMode"))
     ((material, "material"))
+    ((smoothing, "inputs:smoothing"))
+    ((frameTransport, "inputs:frameTransport"))
+    ((smoothWeights, "inputs:smoothWeights"))
+    ((edges, "inputs:edges"))
+    ((onlySmooth, "inputs:onlySmooth"))
+    ((computationToTarget, "inputs:computationToTarget"))
+    ((vertex, "vertex"))
+    ((evaluation, "rigExec:evaluation"))
+    ((interpolationU, "rigExec:interpolationU"))
+    ((interpolationV, "rigExec:interpolationV"))
+    ((interpolationW, "rigExec:interpolationW"))
+    ((origin, "rigExec:origin"))
+    ((spacing, "rigExec:spacing"))
+    ((strength, "rigExec:strength"))
+    ((mask, "rigExec:mask"))
+    ((cageMatrix, "rigExec:cageMatrix"))
+    ((targetMatrix, "rigExec:targetMatrix"))
+    ((pointSpace, "rigExec:pointSpace"))
+    ((legacy, "legacy"))
+    ((bspline, "bspline"))
+    ((snapMode, "rigExec:snapMode"))
+    ((offset, "rigExec:offset"))
+    ((triangles, "rigExec:triangles"))
+    ((surfaceMatrix, "rigExec:surfaceMatrix"))
+    ((onSurface, "onSurface"))
     ((combineWeight, "RigExecCombineWeight"))
     ((sphereWeight, "RigExecSphereWeight"))
     ((planeWeight, "RigExecPlaneWeight"))
@@ -389,11 +414,37 @@ _Revision(const RigExecBakedProgramImpl &program,
     case RigExecRevisionOp::SurfaceProject:
         _Array<GfVec3f>(E, prim, binding.surfacePoints, at);
         _Topology(E, prim, binding);
+        // The snap settings (format 21), every one read at the time.
+        _ResolvedInput(E, prim, _readTokens->snapMode, _readTokens->onSurface,
+                       at);
+        _ResolvedInput(E, prim, _readTokens->offset, 0.0f, at);
+        _ResolvedInput(E, prim, _readTokens->mask, VtFloatArray(), at);
+        _ResolvedInput(E, prim, _readTokens->triangles, VtIntArray(), at);
+        _ResolvedInput(E, prim, _readTokens->surfaceMatrix, GfMatrix4d(1.0),
+                       at);
+        _ResolvedInput(E, prim, _readTokens->targetMatrix, GfMatrix4d(1.0),
+                       at);
+        _ResolvedInput(E, prim, _readTokens->pointSpace, _readTokens->local,
+                       at);
         break;
     case RigExecRevisionOp::DeltaMush:
         _Array<GfVec3f>(
             E, prim, prim.GetPath().AppendProperty(_readTokens->restPoints),
             rest);
+        // The smoothing settings (format 21): the smoothing and transport
+        // tokens and the explicit edges at Default, the rest at the time.
+        _ResolvedInput(E, prim, _readTokens->smoothing, _readTokens->rest,
+                       rest);
+        _ResolvedInput(E, prim, _readTokens->frameTransport,
+                       _readTokens->vertex, rest);
+        _Array<float>(
+            E, prim,
+            prim.GetPath().AppendProperty(_readTokens->smoothWeights), at);
+        _Array<int>(E, prim,
+                    prim.GetPath().AppendProperty(_readTokens->edges), rest);
+        _ResolvedInput(E, prim, _readTokens->onlySmooth, false, at);
+        _ResolvedInput(E, prim, _readTokens->computationToTarget,
+                       GfMatrix4d(1.0), at);
         _Topology(E, prim, binding);
         _ResolvedInput(E, prim, _readTokens->iterations, 10, at);
         _ResolvedInput(E, prim, _readTokens->step, 0.5f, at);
@@ -427,6 +478,25 @@ _Revision(const RigExecBakedProgramImpl &program,
         _ResolvedInput(E, prim, _readTokens->smoothingIterations, 0, at);
         break;
     case RigExecRevisionOp::Lattice:
+        // The regular-grid settings (format 21), every one read at the
+        // time; a legacy lattice reads only the evaluation.
+        _ResolvedInput(E, prim, _readTokens->evaluation, _readTokens->legacy,
+                       at);
+        _ResolvedInput(E, prim, _readTokens->interpolationU,
+                       _readTokens->bspline, at);
+        _ResolvedInput(E, prim, _readTokens->interpolationV,
+                       _readTokens->bspline, at);
+        _ResolvedInput(E, prim, _readTokens->interpolationW,
+                       _readTokens->bspline, at);
+        _ResolvedInput(E, prim, _readTokens->origin, GfVec3f(-0.5f), at);
+        _ResolvedInput(E, prim, _readTokens->spacing, GfVec3f(1.0f), at);
+        _ResolvedInput(E, prim, _readTokens->strength, 1.0f, at);
+        _ResolvedInput(E, prim, _readTokens->mask, VtFloatArray(), at);
+        _ResolvedInput(E, prim, _readTokens->cageMatrix, GfMatrix4d(1.0), at);
+        _ResolvedInput(E, prim, _readTokens->targetMatrix, GfMatrix4d(1.0),
+                       at);
+        _ResolvedInput(E, prim, _readTokens->pointSpace, _readTokens->local,
+                       at);
         // The bind-time cage reads past the overlay; the live one through
         // it. Both are keys.
         _Array<GfVec3f>(E, prim, binding.cagePoints, rest,

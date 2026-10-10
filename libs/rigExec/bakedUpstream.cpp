@@ -529,6 +529,30 @@ _BuildUpstreamSets(RigExecBakedProgramImpl *program)
                         _AddWalk(B, attr(name), &paths);
                     });
             }
+            // The extended deformer settings read at the time (the
+            // exporter's connection-following path reads).
+            if (op == RigExecRevisionOp::DeltaMush) {
+                for (const char *name :
+                     {"inputs:onlySmooth", "inputs:computationToTarget"}) {
+                    _AddWalk(B, attr(name), &paths);
+                }
+            } else if (op == RigExecRevisionOp::Lattice) {
+                for (const char *name :
+                     {"rigExec:evaluation", "rigExec:interpolationU",
+                      "rigExec:interpolationV", "rigExec:interpolationW",
+                      "rigExec:origin", "rigExec:spacing", "rigExec:strength",
+                      "rigExec:cageMatrix", "rigExec:targetMatrix",
+                      "rigExec:pointSpace"}) {
+                    _AddWalk(B, attr(name), &paths);
+                }
+            } else if (op == RigExecRevisionOp::SurfaceProject) {
+                for (const char *name :
+                     {"rigExec:snapMode", "rigExec:offset",
+                      "rigExec:surfaceMatrix", "rigExec:targetMatrix",
+                      "rigExec:pointSpace"}) {
+                    _AddWalk(B, attr(name), &paths);
+                }
+            }
             if (op == RigExecRevisionOp::ShaderDials) {
                 for (const SdfPath &dial : revision.binding.shaderDials) {
                     _AddWalk(B, B.stage->GetAttributeAtPath(dial), &paths);

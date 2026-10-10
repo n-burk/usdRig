@@ -1745,6 +1745,26 @@ _SampleIterativeMoverInputs(
                 revision.moverPrim.GetAttribute(token), fallback,
                 time, refreshed, out, layer);
         });
+    if (revision.op == RigExecRevisionOp::DeltaMush) {
+        // The extended settings, where their leaves read them: the modes
+        // and the edges at Default, the rest at the job's time.
+        const auto scalar = [&](const char *name, auto fallback,
+                                UsdTimeCode at) {
+            const TfToken token(name);
+            _SampleMoverScalar(revision.moverPath.AppendProperty(token),
+                revision.moverPrim.GetAttribute(token), fallback, at,
+                refreshed, out, layer);
+        };
+        scalar("inputs:smoothing", TfToken("rest"), UsdTimeCode::Default());
+        scalar("inputs:frameTransport", TfToken("vertex"),
+               UsdTimeCode::Default());
+        scalar("inputs:onlySmooth", false, time);
+        scalar("inputs:computationToTarget", GfMatrix4d(1.0), time);
+        _SampleTopologyArray<float>(revision.moverPath.AppendProperty(TfToken("inputs:smoothWeights")),
+                                    time, refreshed, stage, out);
+        _SampleTopologyArray<int>(revision.moverPath.AppendProperty(TfToken("inputs:edges")),
+                                  UsdTimeCode::Default(), refreshed, stage, out);
+    }
     if (revision.op == RigExecRevisionOp::Wrinkle) {
         const TfToken topology("inputs:topology");
         _SampleMoverScalar(revision.moverPath.AppendProperty(topology),
@@ -2188,6 +2208,78 @@ _FrozenPlaceOverrides(const RigExecBakedProgramImpl &B,
     }
     return placeable;
 }
+
+namespace {
+// The extended surface-snap and regular-grid lattice settings, sampled where
+// their leaves read them: each through the resolved inputs at the job's
+// time, the arrays included. The worker assembles from the leaves; these
+// samples are the digest's material for the same reads. \p cache, when
+// given, is the burst route's (its upstream layer is its own).
+template <class T>
+void
+_SampleSettingRead(const RigExecBakedProgramImpl::GeomRevision &revision,
+                   const char *name, T fallback, UsdTimeCode time,
+                   const RigExecResolvedInputs *resolved,
+                   RigExecFrameInputs *out,
+                   const std::map<SdfPath, VtValue> *layer,
+                   RigExecBurstSampleCache *cache)
+{
+    const TfToken token(name);
+    const SdfPath path = revision.moverPath.AppendProperty(token);
+    const UsdAttribute attr = revision.moverPrim.GetAttribute(token);
+    if (cache) {
+        _SampleMoverScalarCached(path, attr, fallback, time, resolved, out,
+                                 cache);
+    } else {
+        _SampleMoverScalar(path, attr, fallback, time, resolved, out, layer);
+    }
+}
+
+void
+_SampleSurfaceSettings(const RigExecBakedProgramImpl::GeomRevision &revision,
+                       UsdTimeCode time, const RigExecResolvedInputs *resolved,
+                       RigExecFrameInputs *out,
+                       const std::map<SdfPath, VtValue> *layer,
+                       RigExecBurstSampleCache *cache = nullptr)
+{
+    const auto read = [&](const char *name, auto fallback) {
+        _SampleSettingRead(revision, name, fallback, time, resolved, out,
+                           layer, cache);
+    };
+    read("rigExec:snapMode", TfToken("onSurface"));
+    read("rigExec:pointSpace", TfToken("local"));
+    read("rigExec:offset", 0.0f);
+    read("rigExec:surfaceMatrix", GfMatrix4d(1.0));
+    read("rigExec:targetMatrix", GfMatrix4d(1.0));
+    read("rigExec:mask", VtFloatArray());
+    read("rigExec:triangles", VtIntArray());
+}
+
+void
+_SampleLatticeSettings(const RigExecBakedProgramImpl::GeomRevision &revision,
+                       UsdTimeCode time, const RigExecResolvedInputs *resolved,
+                       RigExecFrameInputs *out,
+                       const std::map<SdfPath, VtValue> *layer,
+                       RigExecBurstSampleCache *cache = nullptr)
+{
+    const auto read = [&](const char *name, auto fallback) {
+        _SampleSettingRead(revision, name, fallback, time, resolved, out,
+                           layer, cache);
+    };
+    read("rigExec:evaluation", TfToken("legacy"));
+    read("rigExec:interpolationU", TfToken("bspline"));
+    read("rigExec:interpolationV", TfToken("bspline"));
+    read("rigExec:interpolationW", TfToken("bspline"));
+    read("rigExec:origin", GfVec3f(-0.5f));
+    read("rigExec:spacing", GfVec3f(1.0f));
+    read("rigExec:strength", 1.0f);
+    read("rigExec:pointSpace", TfToken("local"));
+    read("rigExec:cageMatrix", GfMatrix4d(1.0));
+    read("rigExec:targetMatrix", GfMatrix4d(1.0));
+    read("rigExec:mask", VtFloatArray());
+}
+
+} // namespace
 
 // Synthetic keys for mover side-input arrays whose read route differs from
 // another reader of the same path: the surface driver's points (the base
@@ -2751,12 +2843,14 @@ _SampleWithPinnedChainBindings(
                                       &refreshed, B.stage, &sampled);
         }
         if (revision.op == RigExecRevisionOp::SurfaceProject && moverPrim) {
+            _SampleSurfaceSettings(revision, time, &refreshed, &sampled, layer);
             _SampleMoverPathArray<GfVec3f>(
                 _FrozenSurfaceInputKey(revision.moverPath, "surfacePoints"),
                 revision.binding.surfacePoints, time, &refreshed, B.stage,
                 &sampled);
         }
         if (revision.op == RigExecRevisionOp::Lattice && moverPrim) {
+            _SampleLatticeSettings(revision, time, &refreshed, &sampled, layer);
             // The rest/live cage pair, under distinct synthetic keys: one
             // path, two times (Default raw, evaluated resolved-first).
             _SampleMoverPathArrayAtDefault<GfVec3f>(
@@ -3304,12 +3398,14 @@ RigExecSampleFrameInputsWithBurstCache(
                 &sampled, cache);
         }
         if (revision.op == RigExecRevisionOp::SurfaceProject && moverPrim) {
+            _SampleSurfaceSettings(revision, time, &refreshed, &sampled, nullptr, cache);
             _SampleMoverPathArrayCached<GfVec3f>(
                 _FrozenSurfaceInputKey(revision.moverPath, "surfacePoints"),
                 revision.binding.surfacePoints, time, &refreshed, B.stage,
                 &sampled, cache);
         }
         if (revision.op == RigExecRevisionOp::Lattice && moverPrim) {
+            _SampleLatticeSettings(revision, time, &refreshed, &sampled, nullptr, cache);
             _SampleMoverPathArrayAtDefaultCached<GfVec3f>(
                 _FrozenLatticeInputKey(revision.moverPath, "cageRest"),
                 revision.binding.cagePoints, B.stage, &sampled, cache);

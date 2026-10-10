@@ -1477,33 +1477,43 @@ TestOpenRefusals()
     wildRoot[3] = 0x0f;
     CHECK(!_Open(wildRoot, &why) && _Contains(why, "malformed"));
 
-    static_assert(RigExecFormatVersion == 20,
-                  "per-group range chains pin format20");
-    // Every prior format, 19 among them, requires re-export: a chain with
-    // groups' records (gated parts, Whole revisions' published groups,
+    static_assert(RigExecFormatVersion == 21 &&
+                      RigExecFormatOldestReadable == 20,
+                  "format 21 adds the extended deformer settings; per-group "
+                  "range chains pin the oldest readable format at 20");
+    // Every format before 20, 19 among them, requires re-export: a chain
+    // with groups' records (gated parts, Whole revisions' published groups,
     // Range skins, private constants) mean something else to an older
-    // reader. Future versions require a supported exporter.
+    // reader. Future versions require a supported exporter. Format 20 opens
+    // (it holds no extended deformer settings) but is never written.
     RigExecWireFile versioned = _RichFile();
     size_t reexports = 0, rebakes = 0;
     for (uint32_t version = 0; version <= RigExecFormatVersion + 1; ++version) {
-        if (version == RigExecFormatVersion) continue;
+        if (RigExecFormatReads(version)) continue;
         _context = "open refusals: version " + std::to_string(version);
         versioned.formatVersion = version;
         const std::string expected = "unsupported .rigexec format version " +
-            std::to_string(version) + " (this reader reads 20); " +
+            std::to_string(version) + " (this reader reads 20 through 21); " +
             (version < 20 ? "re-export: per-group range chains" : "rebake");
         CHECK(!_Open(_PackUnchecked(versioned), &why) && why == expected);
         ++(version < 20 ? reexports : rebakes);
     }
     CHECK(reexports == 20 && rebakes == 1);
+    _context = "open refusals: version 20";
+    versioned.formatVersion = 20;
+    const auto previous = _Open(_PackUnchecked(versioned), &why);
+    CHECK(previous && previous->formatVersion == 20);
+    std::vector<uint8_t> unwritten = {1, 2, 3};
+    CHECK(!_Write(versioned, &unwritten, &why) && unwritten.empty() &&
+          _Contains(why, "format_version is 20; a writer writes 21"));
     _context = "open refusals";
     versioned.formatVersion = RigExecFormatVersion;
     std::vector<uint8_t> current;
     CHECK(_Write(versioned, &current) && _Open(current, &why) != nullptr);
     std::printf("format versions: 0 through %u refused with a re-export, "
-                "%u with a rebake; %u writes and opens\n",
-                RigExecFormatVersion - 1, RigExecFormatVersion + 1,
-                RigExecFormatVersion);
+                "%u with a rebake; %u opens; %u writes and opens\n",
+                RigExecFormatOldestReadable - 1, RigExecFormatVersion + 1,
+                RigExecFormatOldestReadable, RigExecFormatVersion);
 
     // A verified buffer that breaks a rule.
     RigExecWireFile broken = _RichFile();
@@ -1566,6 +1576,57 @@ TestWriteRefuses()
     unversioned.formatVersion = 0;
     CHECK(!_Write(unversioned, &bytes, &why) &&
           _Contains(why, "format_version"));
+}
+
+/// The format-21 settings per op: a Delta Mush's six, a lattice's eleven,
+/// a surface's seven, none for any other op; and the frame providers each
+/// takes as influences.
+void
+TestExtendedSettingNames()
+{
+    _context = "extended settings";
+    const auto names = [](fb::RevisionOp op) {
+        size_t count = 0;
+        const char *const *list =
+            RigExecFormatExtendedSettingNames(uint8_t(op), &count);
+        std::vector<std::string> out;
+        for (size_t i = 0; list && i < count; ++i) {
+            out.push_back(list[i]);
+        }
+        CHECK(bool(list) == (count > 0));
+        return out;
+    };
+    const auto mush = names(fb::RevisionOp::DeltaMush);
+    const auto lattice = names(fb::RevisionOp::Lattice);
+    const auto surface = names(fb::RevisionOp::SurfaceProject);
+    CHECK(mush.size() == 6 && mush.front() == "inputs:smoothing" &&
+          mush.back() == "inputs:computationToTarget");
+    CHECK(lattice.size() == 11 && lattice.front() == "rigExec:evaluation" &&
+          lattice.back() == "rigExec:pointSpace");
+    CHECK(surface.size() == 7 && surface.front() == "rigExec:snapMode" &&
+          surface.back() == "rigExec:pointSpace");
+    size_t others = 0;
+    for (unsigned op = 0; op <= unsigned(fb::RevisionOp::MAX); ++op) {
+        const auto r = fb::RevisionOp(op);
+        if (r == fb::RevisionOp::DeltaMush || r == fb::RevisionOp::Lattice ||
+            r == fb::RevisionOp::SurfaceProject) {
+            continue;
+        }
+        CHECK(names(r).empty());
+        CHECK(RigExecFormatExtendedInfluencesValid(uint8_t(op), 3));
+        ++others;
+    }
+    for (size_t n = 0; n < 4; ++n) {
+        CHECK(RigExecFormatExtendedInfluencesValid(
+                  uint8_t(fb::RevisionOp::DeltaMush), n) == (n <= 1));
+        for (const auto op :
+             {fb::RevisionOp::Lattice, fb::RevisionOp::SurfaceProject}) {
+            CHECK(RigExecFormatExtendedInfluencesValid(uint8_t(op), n) ==
+                  (n == 0 || n == 2));
+        }
+    }
+    std::printf("extended settings: 6, 11 and 7 names; %zu other ops hold "
+                "none\n", others);
 }
 
 void
@@ -6348,6 +6409,7 @@ main()
     TestDeterminism();
     TestOpenRefusals();
     TestWriteRefuses();
+    TestExtendedSettingNames();
     TestPathText();
     TestValidationSmoke();
     TestStepGraph();

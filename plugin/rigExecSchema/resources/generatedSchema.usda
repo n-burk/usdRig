@@ -3482,7 +3482,36 @@ class RigExecLatticeMover "RigExecLatticeMover" (
             string userDocBrief = "Native mesh/points prim supplying cage control points."
         }
     )
+    matrix4d rigExec:cageMatrix = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
     int3 rigExec:divisions = (2, 2, 2)
+    uniform token rigExec:evaluation = "legacy" (
+        allowedTokens = ["legacy", "regularGrid"]
+        customData = {
+            string userDocBrief = "Legacy retains the bound Bernstein cage."
+        }
+    )
+    rel rigExec:frames (
+        customData = {
+            string userDocBrief = "Optional cage and target rest-to-pose providers, in that order, applied after their local-to-common matrices."
+        }
+    )
+    uniform token rigExec:interpolationU = "bspline" (
+        allowedTokens = ["bspline", "linear", "cardinal", "catmullRom"]
+    )
+    uniform token rigExec:interpolationV = "bspline" (
+        allowedTokens = ["bspline", "linear", "cardinal", "catmullRom"]
+    )
+    uniform token rigExec:interpolationW = "bspline" (
+        allowedTokens = ["bspline", "linear", "cardinal", "catmullRom"]
+    )
+    float[] rigExec:mask = []
+    float3 rigExec:origin = (-0.5, -0.5, -0.5)
+    uniform token rigExec:pointSpace = "local" (
+        allowedTokens = ["local", "common"]
+    )
+    float3 rigExec:spacing = (1, 1, 1)
+    float rigExec:strength = 1
+    matrix4d rigExec:targetMatrix = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
 }
 
 class RigExecSurfaceMover "RigExecSurfaceMover" (
@@ -3493,14 +3522,130 @@ class RigExecSurfaceMover "RigExecSurfaceMover" (
     }
 )
 {
+    rel rigExec:frames (
+        customData = {
+            string userDocBrief = "Optional surface and target rest-to-pose providers, in that order, applied after their local-to-common matrices."
+        }
+    )
+    float[] rigExec:mask = [] (
+        customData = {
+            string userDocBrief = "Optional target-vertex weights in [0,1]; empty affects every vertex."
+        }
+    )
     uniform token rigExec:mode = "attach" (
         allowedTokens = ["attach", "project"]
+    )
+    float rigExec:offset = 0 (
+        customData = {
+            string userDocBrief = "Side clearance measured in surface metric coordinates, independent of the mover envelope and binding delta multiplier."
+        }
+    )
+    uniform token rigExec:pointSpace = "local" (
+        allowedTokens = ["local", "common"]
+        customData = {
+            string userDocBrief = "Local arrays use their respective matrices."
+        }
+    )
+    uniform token rigExec:snapMode = "onSurface" (
+        allowedTokens = ["onSurface", "inside", "outside", "outsideSurface"]
+        customData = {
+            string userDocBrief = "Nearest-triangle snap policy."
+        }
     )
     rel rigExec:surface (
         customData = {
             string userDocBrief = "Native mesh prim supplying the driver surface."
         }
     )
+    matrix4d rigExec:surfaceMatrix = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+    matrix4d rigExec:targetMatrix = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+    int[] rigExec:triangles = [] (
+        customData = {
+            string userDocBrief = "Optional explicit surface vertex-index triples."
+        }
+    )
+}
+
+class RigExecSurfaceBindingMover "RigExecSurfaceBindingMover" (
+    customData = {
+        string userDocBrief = "Persistent generalized barycentric attachments."
+    }
+)
+{
+    float[] rigExec:barycentricWeights = []
+    float[] rigExec:bindingWeights = []
+    float rigExec:deltaMultiplier = 1 (
+        customData = {
+            string userDocBrief = "Finite signed scale applied only to transported binding offsets; zero attaches to the surface and one preserves the offsets."
+        }
+    )
+    float[] rigExec:deltaMultipliers = [] (
+        customData = {
+            string userDocBrief = "Optional finite signed offset multipliers indexed by target vertex; empty supplies one at every vertex."
+        }
+    )
+    rel rigExec:frames (
+        customData = {
+            string userDocBrief = "Optional surface and target rest-to-pose providers, in that order."
+        }
+    )
+    float[] rigExec:limitDuWeights = []
+    float[] rigExec:limitDvWeights = []
+    int[] rigExec:limitIndices = []
+    int[] rigExec:limitOffsets = [0]
+    float[] rigExec:limitWeights = []
+    float[] rigExec:mask = [] (
+        customData = {
+            string userDocBrief = "Optional target-vertex weights in [0,1]; empty affects every vertex."
+        }
+    )
+    uniform token rigExec:mode = "attach" (
+        allowedTokens = ["attach", "project"]
+    )
+    uniform token rigExec:normalMode = "geometric" (
+        allowedTokens = ["geometric", "smooth"]
+    )
+    float rigExec:offset = 0 (
+        customData = {
+            string userDocBrief = "Side clearance measured in surface metric coordinates, independent of the mover envelope and binding delta multiplier."
+        }
+    )
+    vector3f[] rigExec:offsets = []
+    int[] rigExec:pointIndices = []
+    uniform token rigExec:pointSpace = "local" (
+        allowedTokens = ["local", "common"]
+        customData = {
+            string userDocBrief = "Local arrays use their respective matrices."
+        }
+    )
+    int[] rigExec:polygonOffsets = [0]
+    uniform token rigExec:snapMode = "onSurface" (
+        allowedTokens = ["onSurface", "inside", "outside", "outsideSurface"]
+        customData = {
+            string userDocBrief = "Nearest-triangle snap policy."
+        }
+    )
+    float rigExec:strength = 1
+    rel rigExec:surface (
+        customData = {
+            string userDocBrief = "Native mesh prim supplying the driver surface."
+        }
+    )
+    matrix4d rigExec:surfaceMatrix = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+    uniform token rigExec:surfaceMode = "polygon" (
+        allowedTokens = ["polygon", "limit"]
+    )
+    matrix4d rigExec:surfaceRestMatrix = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+    matrix4d rigExec:surfaceToBinding = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+    matrix4d rigExec:targetMatrix = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+    matrix4d rigExec:targetRestMatrix = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+    int[] rigExec:triangles = [] (
+        customData = {
+            string userDocBrief = "Optional explicit surface vertex-index triples."
+        }
+    )
+    int[] rigExec:vertexOffsets = [0]
+    int[] rigExec:vertices = []
 }
 
 class RigExecSurfaceProjector "RigExecSurfaceProjector" (
@@ -3582,12 +3727,49 @@ class RigExecDeltaMushMover "RigExecDeltaMushMover" (
     }
 )
 {
+    matrix4d inputs:computationToTarget = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
+        customData = {
+            string userDocBrief = "Nonsingular affine row-vector map from the reference/smoothing coordinate space into the target points space."
+        }
+    )
     float inputs:displacement = 1
     float inputs:distanceWeight = 0
+    uniform int[] inputs:edges = [] (
+        customData = {
+            string userDocBrief = "Optional flattened unique undirected edge pairs, including all polygon edges and any loose edges."
+        }
+    )
+    uniform token inputs:frameTransport = "vertex" (
+        allowedTokens = ["vertex", "corner"]
+        customData = {
+            string userDocBrief = "Vertex uses an averaged surface normal and reference edge."
+        }
+    )
     int inputs:iterations = 10
+    bool inputs:onlySmooth = 0 (
+        customData = {
+            string userDocBrief = "Return the smoothed incoming shape without restoring detail."
+        }
+    )
     bool inputs:pinBorders = 1
     point3f[] inputs:restPoints
+    uniform token inputs:smoothing = "rest" (
+        allowedTokens = ["rest", "simple", "lengthWeighted"]
+        customData = {
+            string userDocBrief = "Rest uses fixed inverse-distance reference weights and step/displacement in [0,1]."
+        }
+    )
+    float[] inputs:smoothWeights = [] (
+        customData = {
+            string userDocBrief = "Empty means one at every vertex; otherwise one finite value in [0,1] per vertex, multiplying the smoothing step in both reference and incoming iterations."
+        }
+    )
     float inputs:step = 0.5
+    rel rigExec:frame (
+        customData = {
+            string userDocBrief = "Optional single rest-to-pose frame provider composed after computationToTarget, using the declared transform read phase."
+        }
+    )
 }
 
 class RigExecWrinkleMover "RigExecWrinkleMover" (
@@ -4177,5 +4359,218 @@ class RigExecTouchRegion "RigExecTouchRegion" (
         rigExec:touch:mesh."""
         }
     )
+}
+
+class RigExecLayeredSkinMover "RigExecLayeredSkinMover" (
+    customData = {
+        string userDocBrief = "Masked linear or dual-quaternion skin revision."
+    }
+)
+{
+    float[] inputs:mask = []
+    uniform bool inputs:transformInput = 0
+    uniform bool inputs:useBaseInput = 0
+    uniform int rigExec:elementSize = 1
+    rel rigExec:influences
+    int[] rigExec:jointIndices = []
+    float[] rigExec:jointWeights = []
+    uniform token rigExec:skinningMethod = "classicLinear"
+    rel rigExec:transform
+}
+
+class RigExecConstraintFrame "RigExecConstraintFrame" (
+    customData = {
+        string userDocBrief = "Ordered affine constraint computation."
+    }
+)
+{
+    uniform int inputs:axisMask = 7
+    double inputs:bulge = 1
+    double inputs:bulgeMax = 1
+    double inputs:bulgeMin = 0
+    double inputs:bulgeSmooth = 0
+    uniform bool inputs:currentPivot = 0
+    uniform bool inputs:dualQuaternion = 0
+    matrix4d inputs:incoming = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+    double inputs:influence = 1
+    matrix4d inputs:inverseBind = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+    uniform int inputs:invertMask = 0
+    uniform token inputs:keepAxis = "PLANE_X"
+    uniform int3 inputs:mapAxes = (0, 1, 2)
+    uniform bool inputs:mapExtrapolate = 0
+    uniform token inputs:mapFrom = "LOCATION"
+    double3 inputs:mapFromMax = (1, 1, 1)
+    double3 inputs:mapFromMin = (0, 0, 0)
+    uniform token inputs:mapMix = "ADD"
+    double3 inputs:mapToMax = (1, 1, 1)
+    double3 inputs:mapToMin = (0, 0, 0)
+    int[] inputs:objectIndices = []
+    uniform bool inputs:offset = 0
+    uniform token inputs:operation = "COPY_LOCATION"
+    matrix4d inputs:origin = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+    uniform bool inputs:ownerHasParent = 0
+    uniform bool inputs:ownerInheritRotation = 1
+    uniform token inputs:ownerInheritScale = "FULL"
+    matrix4d inputs:ownerLocal = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+    uniform bool inputs:ownerLocalLocation = 1
+    matrix4d inputs:ownerParentRest = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+    matrix4d inputs:ownerRest = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+    uniform token inputs:ownerSpace = "WORLD"
+    double3 inputs:pivot = (0, 0, 0)
+    double inputs:power = 1
+    uniform bool inputs:removeTargetShear = 0
+    double inputs:restLength = 1
+    uniform token inputs:rotationMix = "REPLACE"
+    uniform bool inputs:scaleAdd = 0
+    uniform bool inputs:sourceHasParent = 0
+    uniform bool inputs:sourceInheritRotation = 1
+    uniform token inputs:sourceInheritScale = "FULL"
+    matrix4d inputs:sourceLocal = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+    uniform bool inputs:sourceLocalLocation = 1
+    matrix4d inputs:sourceParentRest = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+    matrix4d inputs:sourceRest = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+    matrix4d[] inputs:targetBinds = []
+    int[] inputs:targetIndices = []
+    double3 inputs:targetOffset = (0, 0, 0)
+    uniform token inputs:targetSpace = "WORLD"
+    double[] inputs:targetWeights = []
+    uniform token inputs:trackAxis = "TRACK_Y"
+    uniform bool inputs:uniformScale = 0
+    uniform bool inputs:useBulgeMax = 0
+    uniform bool inputs:useBulgeMin = 0
+    uniform token inputs:volume = "NO_VOLUME"
+    matrix4d outputs:matrix = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+    rel rigExec:customSpace
+    rel rigExec:ownerObject
+    rel rigExec:ownerParent
+    rel rigExec:poseInputs (
+        customData = {
+            string userDocBrief = "All frame providers read by this expression, including object, parent, source and multi-target providers."
+        }
+    )
+    rel rigExec:source
+    rel rigExec:sourceObject
+    rel rigExec:sourceParent
+    rel rigExec:targetObjects
+    rel rigExec:targets
+}
+
+class RigExecCopyFrame "RigExecCopyFrame" (
+    customData = {
+        string userDocBrief = "Copies a source provider frame, optionally preserving the incoming translation."
+    }
+)
+{
+    matrix4d inputs:incoming = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+    uniform bool inputs:preserveLocation = 0
+    matrix4d outputs:matrix = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+    rel rigExec:poseInputs (
+        customData = {
+            string userDocBrief = "All frame providers read by this expression, including object, parent, source and multi-target providers."
+        }
+    )
+    rel rigExec:source
+}
+
+class RigExecMappedFrame "RigExecMappedFrame" (
+    customData = {
+        string userDocBrief = "Maps a live source pose onto a target rest frame: targetRest * inverse(sourceRest) * source."
+    }
+)
+{
+    matrix4d inputs:sourceRest = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+    matrix4d inputs:targetRest = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+    matrix4d outputs:matrix = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+    rel rigExec:poseInputs (
+        customData = {
+            string userDocBrief = "All frame providers read by this expression, including object, parent, source and multi-target providers."
+        }
+    )
+    rel rigExec:source
+}
+
+class RigExecSkinInfluence "RigExecSkinInfluence" (
+    customData = {
+        string userDocBrief = "Rest-to-pose influence matrix with optional owner follow: inverseMesh * owner * inverse(sourceObject) * inverseBind * source."
+    }
+)
+{
+    uniform bool inputs:followOnly = 0
+    uniform bool inputs:fromBind = 1
+    matrix4d inputs:inverseBind = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+    matrix4d inputs:inverseMesh = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+    matrix4d outputs:matrix = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+    rel rigExec:owner
+    rel rigExec:poseInputs (
+        customData = {
+            string userDocBrief = "All frame providers read by this expression, including object, parent, source and multi-target providers."
+        }
+    )
+    rel rigExec:source
+    rel rigExec:sourceObject
+}
+
+class RigExecArmatureParent "RigExecArmatureParent" (
+    customData = {
+        string userDocBrief = "Applies a source rest-to-pose map over incoming channels or a supplied incoming frame, optionally retaining its translation."
+    }
+)
+{
+    matrix4d inputs:incoming = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+    matrix4d inputs:inverseBind = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+    matrix4d inputs:local = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+    uniform bool inputs:preserveLocation = 0
+    double inputs:rx = 0
+    double inputs:ry = 0
+    double inputs:rz = 0
+    double inputs:sx = 1
+    double inputs:sy = 1
+    double inputs:sz = 1
+    double inputs:tx = 0
+    double inputs:ty = 0
+    double inputs:tz = 0
+    uniform bool inputs:useIncoming = 0
+    matrix4d outputs:matrix = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+    rel rigExec:parent
+    rel rigExec:poseInputs (
+        customData = {
+            string userDocBrief = "All frame providers read by this expression, including object, parent, source and multi-target providers."
+        }
+    )
+    rel rigExec:source
+    rel rigExec:sourceObject
+}
+
+class RigExecBoneFrame "RigExecBoneFrame" (
+    customData = {
+        string userDocBrief = "Joint channels with separate rotation/scale and location inheritance."
+    }
+)
+{
+    uniform bool inputs:connected = 0
+    uniform bool inputs:hasParent = 0
+    uniform bool inputs:inheritRotation = 1
+    uniform token inputs:inheritScale = "FULL"
+    matrix4d inputs:local = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+    uniform bool inputs:localLocation = 1
+    matrix4d inputs:parentRest = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+    double inputs:rx = 0
+    double inputs:ry = 0
+    double inputs:rz = 0
+    uniform token inputs:spaceKind = "pose"
+    double inputs:sx = 1
+    double inputs:sy = 1
+    double inputs:sz = 1
+    double inputs:tx = 0
+    double inputs:ty = 0
+    double inputs:tz = 0
+    matrix4d outputs:matrix = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+    rel rigExec:parent
+    rel rigExec:poseInputs (
+        customData = {
+            string userDocBrief = "All frame providers read by this expression, including object, parent, source and multi-target providers."
+        }
+    )
+    rel rigExec:sourceObject
 }
 

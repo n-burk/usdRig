@@ -1,6 +1,7 @@
 // Portable provider kernels share the native arithmetic definition.
 #include "spaces.h"
 #include "poseInternal.h"
+#include "rigExecRuntime/affineMath.h"
 #include <algorithm>
 #include "rigExecGraph/providerArithmetic.h"
 #include "rigExecGraph/providerRefresh.h"
@@ -249,6 +250,7 @@ bool RrOpenProviderProgram(RrProgram *program,std::string *error) {
         RigExecProviderPlainOp op;
         op.kind=RigExecProviderOpKind(row.kind); op.owner=row.owner;
         op.output=row.output; op.inputs=row.inputs; op.scaleAvars=row.scaleAvars;
+        op.affineKind=row.affineKind; op.affineTargets=row.affineTargets;
         plain.ops.push_back(std::move(op));
     }
     const auto leaves=[](const auto &wire,auto *out) {
@@ -391,6 +393,105 @@ bool RrProviderEffectiveInputMemo(const RrProgram *program,const RigExecWireStep
     }
     (void)covered;
     return true;
+}
+namespace {
+// One affine input's value into its member, as the native op reads it
+// (providerProgram.cpp AffineRead): a present, unblocked value of the
+// member's type, a float widened for a double; an empty array or any other
+// value keeps the member's default.
+template <class T>
+void RrAffineRead(const RigExecProviderPlainState *state,T *out)
+{
+    if(!state || !state->initialized || state->blocked) return;
+    const auto &value=state->value;
+    if constexpr(std::is_same_v<T,RrMat4d>) {
+        if(const auto *v=std::get_if<std::array<double,16>>(&value))
+            std::memcpy(out->_mtx,v->data(),sizeof(double)*16);
+    } else if constexpr(std::is_same_v<T,RrVec3d>) {
+        if(const auto *v=std::get_if<std::array<double,3>>(&value)) *out=RrVec3d((*v)[0],(*v)[1],(*v)[2]);
+    } else if constexpr(std::is_same_v<T,RrVec3i>) {
+        if(const auto *v=std::get_if<std::array<int32_t,3>>(&value)) *out=RrVec3i((*v)[0],(*v)[1],(*v)[2]);
+    } else if constexpr(std::is_same_v<T,double>) {
+        if(const auto *v=std::get_if<double>(&value)) *out=*v;
+        else if(const auto *narrow=std::get_if<float>(&value)) *out=*narrow;
+    } else if constexpr(std::is_same_v<T,bool>) {
+        if(const auto *v=std::get_if<bool>(&value)) *out=*v;
+    } else if constexpr(std::is_same_v<T,int>) {
+        if(const auto *v=std::get_if<int32_t>(&value)) *out=int(*v);
+    } else if constexpr(std::is_same_v<T,std::string>) {
+        if(const auto *v=std::get_if<std::string>(&value)) *out=*v;
+    } else if constexpr(std::is_same_v<T,std::vector<int>>) {
+        const auto *v=std::get_if<std::vector<int32_t>>(&value);
+        if(v && !v->empty()) out->assign(v->begin(),v->end());
+    } else if constexpr(std::is_same_v<T,std::vector<double>>) {
+        const auto *v=std::get_if<std::vector<double>>(&value);
+        if(v && !v->empty()) *out=*v;
+    } else if constexpr(std::is_same_v<T,std::vector<RrMat4d>>) {
+        const auto *v=std::get_if<std::vector<std::array<double,16>>>(&value);
+        if(v && !v->empty()) {
+            out->resize(v->size());
+            for(size_t k=0;k<v->size();++k)
+                std::memcpy((*out)[k]._mtx,(*v)[k].data(),sizeof(double)*16);
+        }
+    }
+}
+// A provider's point frame as a matrix (identity without one).
+RrMat4d RrAffineFrame(const RigExecProviderPlainState *state)
+{
+    const auto *frame=state && state->initialized && !state->blocked?
+        std::get_if<RigExecProviderPlainFrame>(&state->value):nullptr;
+    if(!frame) return RrMat4d(1.0);
+    const auto point=[&](size_t k){
+        return RrVec3d(frame->points[k][0],frame->points[k][1],frame->points[k][2]);
+    };
+    return RrAffineFrameKernel::FrameMatrix(point(0),point(1),point(2),point(3));
+}
+// An affine frame expression: the native op's inputs in its layout's order,
+// through the same kernel over the runtime mirror (affineMath.h).
+bool RrRunAffineFrame(const RigExecProviderPlainOp &op,
+                      std::vector<RigExecProviderPlainState> *values,std::string *error)
+{
+    if(op.output>=values->size() ||
+       !RigExecAffineFrameInputsMatch(op.affineKind,op.inputs.size(),op.affineTargets)) {
+        if(error)*error="affine frame inputs do not match their expression";
+        return false;
+    }
+    const auto input=[&](size_t at)->const RigExecProviderPlainState * {
+        const uint64_t id=at<op.inputs.size()?op.inputs[at]:UINT64_MAX;
+        return id<values->size()?&(*values)[size_t(id)]:nullptr;
+    };
+    const RigExecAffineFrameType &type=RigExecAffineFrameTypes[op.affineKind];
+    RrAffineFrameInputs in;
+    size_t at=0;
+    for(uint32_t k=0;k<type.attributeCount;++k) {
+        const auto *state=input(at++);
+        RigExecVisitAffineField(in,type.attributes[k].field,[&](auto &out){RrAffineRead(state,&out);});
+    }
+    for(uint32_t k=0;k<type.relationCount;++k) {
+        const RrMat4d frame=RrAffineFrame(input(at++));
+        RigExecVisitAffineField(in,type.relations[k].field,[&](auto &out) {
+            if constexpr(std::is_same_v<std::decay_t<decltype(out)>,RrMat4d>) out=frame;
+        });
+    }
+    if(type.targets) {
+        for(uint32_t k=0;k<op.affineTargets;++k) in.targets.push_back(RrAffineFrame(input(at++)));
+        while(at<op.inputs.size()) in.targetObjects.push_back(RrAffineFrame(input(at++)));
+    }
+    RrMat4d result(1.0);
+    const char *failure=nullptr;
+    auto &out=(*values)[size_t(op.output)];
+    if(!RrAffineFrameKernel::Compute(op.affineKind,in,&result,&failure)) {
+        out.value=std::monostate{}; out.initialized=true; out.blocked=false;
+        out.authoritative=false; out.count=0;
+        out.error=std::string("affine frame expression failed: ")+failure;
+        return true;
+    }
+    std::array<double,16> matrix;
+    std::memcpy(matrix.data(),result._mtx,sizeof(double)*16);
+    out.value=matrix; out.initialized=true; out.blocked=false;
+    out.authoritative=false; out.count=1; out.error.clear();
+    return true;
+}
 }
 bool RrRunSpaceExpression(RrProgram *program,const RigExecWireStep &step,std::string *error) {
     if (step.part == 2) {
@@ -552,6 +653,8 @@ bool RrRunSpaceExpression(RrProgram *program,const RigExecWireStep &step,std::st
         return false;
     }
     const auto &op=program->providerProgram.ops[size_t(step.object)];
+    if(op.kind==RigExecProviderOpKind::AffineFrame)
+        return RrRunAffineFrame(op,&program->store.providerValues,error);
     Store store(program->store.providerValues,op.inputs,
                 program->store.providerConversionScratch[size_t(step.object)]);
     if(!RigExecRunProviderArithmetic<Math>(op,store)) {

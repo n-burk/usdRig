@@ -18683,6 +18683,8 @@ struct RigExecWireProviderOp : public ::flatbuffers::NativeTable {
   uint64_t output = 0;
   std::vector<uint64_t> inputs{};
   bool scaleAvars = true;
+  uint32_t affineKind = 0;
+  uint32_t affineTargets = 0;
 };
 
 struct ProviderOp FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
@@ -18697,7 +18699,9 @@ struct ProviderOp FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
     VT_OWNER = 6,
     VT_OUTPUT = 8,
     VT_INPUTS = 10,
-    VT_SCALEAVARS = 12
+    VT_SCALEAVARS = 12,
+    VT_AFFINEKIND = 14,
+    VT_AFFINETARGETS = 16
   };
   uint32_t kind() const {
     return GetField<uint32_t>(VT_KIND, 0);
@@ -18714,6 +18718,12 @@ struct ProviderOp FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   bool scaleAvars() const {
     return GetField<uint8_t>(VT_SCALEAVARS, 1) != 0;
   }
+  uint32_t affineKind() const {
+    return GetField<uint32_t>(VT_AFFINEKIND, 0);
+  }
+  uint32_t affineTargets() const {
+    return GetField<uint32_t>(VT_AFFINETARGETS, 0);
+  }
   template <bool B = false>
   bool Verify(::flatbuffers::VerifierTemplate<B> &verifier) const {
     return VerifyTableStart(verifier) &&
@@ -18724,6 +18734,8 @@ struct ProviderOp FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyOffset(verifier, VT_INPUTS) &&
            verifier.VerifyVector(inputs()) &&
            VerifyField<uint8_t>(verifier, VT_SCALEAVARS, 1) &&
+           VerifyField<uint32_t>(verifier, VT_AFFINEKIND, 4) &&
+           VerifyField<uint32_t>(verifier, VT_AFFINETARGETS, 4) &&
            verifier.EndTable();
   }
   RigExecWireProviderOp *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
@@ -18750,6 +18762,12 @@ struct ProviderOpBuilder {
   void add_scaleAvars(bool scaleAvars) {
     fbb_.AddElement<uint8_t>(ProviderOp::VT_SCALEAVARS, static_cast<uint8_t>(scaleAvars), 1);
   }
+  void add_affineKind(uint32_t affineKind) {
+    fbb_.AddElement<uint32_t>(ProviderOp::VT_AFFINEKIND, affineKind, 0);
+  }
+  void add_affineTargets(uint32_t affineTargets) {
+    fbb_.AddElement<uint32_t>(ProviderOp::VT_AFFINETARGETS, affineTargets, 0);
+  }
   explicit ProviderOpBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -18768,9 +18786,13 @@ inline ::flatbuffers::Offset<ProviderOp> CreateProviderOp(
     ::flatbuffers::Offset<::flatbuffers::String> owner = 0,
     uint64_t output = 0,
     ::flatbuffers::Offset<::flatbuffers::Vector<uint64_t>> inputs = 0,
-    bool scaleAvars = true) {
+    bool scaleAvars = true,
+    uint32_t affineKind = 0,
+    uint32_t affineTargets = 0) {
   ProviderOpBuilder builder_(_fbb);
   builder_.add_output(output);
+  builder_.add_affineTargets(affineTargets);
+  builder_.add_affineKind(affineKind);
   builder_.add_inputs(inputs);
   builder_.add_owner(owner);
   builder_.add_kind(kind);
@@ -18789,7 +18811,9 @@ inline ::flatbuffers::Offset<ProviderOp> CreateProviderOpDirect(
     const char *owner = nullptr,
     uint64_t output = 0,
     const std::vector<uint64_t> *inputs = nullptr,
-    bool scaleAvars = true) {
+    bool scaleAvars = true,
+    uint32_t affineKind = 0,
+    uint32_t affineTargets = 0) {
   auto owner__ = owner ? _fbb.CreateString(owner) : 0;
   auto inputs__ = inputs ? _fbb.CreateVector<uint64_t>(*inputs) : 0;
   return rigExec::fb::CreateProviderOp(
@@ -18798,7 +18822,9 @@ inline ::flatbuffers::Offset<ProviderOp> CreateProviderOpDirect(
       owner__,
       output,
       inputs__,
-      scaleAvars);
+      scaleAvars,
+      affineKind,
+      affineTargets);
 }
 
 ::flatbuffers::Offset<ProviderOp> CreateProviderOp(::flatbuffers::FlatBufferBuilder &_fbb, const RigExecWireProviderOp *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
@@ -25189,6 +25215,8 @@ inline void ProviderOp::UnPackTo(RigExecWireProviderOp *_o, const ::flatbuffers:
   { auto _e = output(); _o->output = _e; }
   { auto _e = inputs(); if (_e) { _o->inputs.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->inputs[_i] = _e->Get(_i); } } else { _o->inputs.resize(0); } }
   { auto _e = scaleAvars(); _o->scaleAvars = _e; }
+  { auto _e = affineKind(); _o->affineKind = _e; }
+  { auto _e = affineTargets(); _o->affineTargets = _e; }
 }
 
 inline ::flatbuffers::Offset<ProviderOp> CreateProviderOp(::flatbuffers::FlatBufferBuilder &_fbb, const RigExecWireProviderOp *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
@@ -25204,13 +25232,17 @@ inline ::flatbuffers::Offset<ProviderOp> ProviderOp::Pack(::flatbuffers::FlatBuf
   auto _output = _o->output;
   auto _inputs = _o->inputs.size() ? _fbb.CreateVector(_o->inputs) : 0;
   auto _scaleAvars = _o->scaleAvars;
+  auto _affineKind = _o->affineKind;
+  auto _affineTargets = _o->affineTargets;
   return rigExec::fb::CreateProviderOp(
       _fbb,
       _kind,
       _owner,
       _output,
       _inputs,
-      _scaleAvars);
+      _scaleAvars,
+      _affineKind,
+      _affineTargets);
 }
 
 inline RigExecWireProviderLeaf::RigExecWireProviderLeaf(const RigExecWireProviderLeaf &o)
@@ -28289,10 +28321,12 @@ inline const ::flatbuffers::TypeTable *ProviderOpTypeTable() {
     { ::flatbuffers::ET_STRING, 0, -1 },
     { ::flatbuffers::ET_ULONG, 0, -1 },
     { ::flatbuffers::ET_ULONG, 1, -1 },
-    { ::flatbuffers::ET_BOOL, 0, -1 }
+    { ::flatbuffers::ET_BOOL, 0, -1 },
+    { ::flatbuffers::ET_UINT, 0, -1 },
+    { ::flatbuffers::ET_UINT, 0, -1 }
   };
   static const ::flatbuffers::TypeTable tt = {
-    ::flatbuffers::ST_TABLE, 5, type_codes, nullptr, nullptr, nullptr, nullptr
+    ::flatbuffers::ST_TABLE, 7, type_codes, nullptr, nullptr, nullptr, nullptr
   };
   return &tt;
 }

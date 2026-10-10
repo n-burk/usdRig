@@ -69,6 +69,7 @@ TF_DEFINE_PRIVATE_TOKENS(
     ((weightDefault, "rigExec:defaultWeight"))
     ((targetSpace, "target"))
     ((operationCycle, "operation cycle"))
+    ((legacyLattice, "legacy"))
 );
 
 namespace rigExec {
@@ -1334,8 +1335,25 @@ ClassifyRevision(const RoleReads &reads,
     switch (revision->op) {
     case RigExecRevisionOp::Matrix:
     case RigExecRevisionOp::Wire:
-    case RigExecRevisionOp::Lattice:
         return GeomRole::Range;
+    case RigExecRevisionOp::Lattice: {
+        // Only the Bernstein evaluation splits by vertex group; a regular
+        // grid, or an evaluation that can move, runs whole. A file records
+        // a usable evaluation as a constant, as a Range skin's method.
+        const int evaluation = leaves.decl.Role(Role::LatticeEvaluation);
+        if (!reads.Usable(leaves, evaluation)) {
+            return GeomRole::Whole;
+        }
+        const TfToken value = reads.Token(leaves, evaluation);
+        pinToken(evaluation, value);
+        if (value != _tokens->legacyLattice) {
+            return GeomRole::Whole;
+        }
+        if (reads.exportMode) {
+            pinned->push_back(leaves.decl.keys[size_t(evaluation)].path);
+        }
+        return GeomRole::Range;
+    }
     case RigExecRevisionOp::BlendShape: {
         // rigExec:deltaSpace never enters the file, so Export pins it as
         // Live does.
@@ -1580,7 +1598,8 @@ AssignChainRoles(RigExecBakedProgramImpl *program, const RoleReads &reads,
         }
         for (const RigExecRevisionLeafRole role :
                  {RigExecRevisionLeafRole::SkinningMethod,
-                  RigExecRevisionLeafRole::DeltaSpace}) {
+                  RigExecRevisionLeafRole::DeltaSpace,
+                  RigExecRevisionLeafRole::LatticeEvaluation}) {
             const int k = revision.leaves.decl.Role(role);
             if (k >= 0 && revision.leaves.decl.keys[size_t(k)]
                               .path.IsPropertyPath()) {

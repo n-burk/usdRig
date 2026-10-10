@@ -62,6 +62,7 @@ add_library(rigExec::rigExecGraph ALIAS rigExecGraph)
 
 # rigExecMath: pure point-frame and solver kernels (spec §5).
 add_library(rigExecMath STATIC
+    libs/rigExecMath/affineFrameKernels.cpp
     libs/rigExecMath/pointFrame.cpp
     libs/rigExecMath/solvers.cpp
     libs/rigExecMath/singleChainIk.cpp
@@ -92,6 +93,7 @@ add_library(rigExec SHARED
     libs/rigExec/types.cpp
     libs/rigExec/parallel.cpp
     libs/rigExec/computations.cpp
+    libs/rigExec/affineFrameComputations.cpp
     libs/rigExec/moverKernels.cpp
     libs/rigExec/solverKernels.cpp
     libs/rigExec/weightPackets.cpp
@@ -138,12 +140,14 @@ add_library(rigExec SHARED
     libs/rigExec/movers/moverRegistry.cpp
     libs/rigExec/movers/matrixMover.cpp
     libs/rigExec/movers/skinMover.cpp
+    libs/rigExec/movers/armatureMover.cpp
     libs/rigExec/movers/blendShapeMover.cpp
     libs/rigExec/movers/smoothMover.cpp
     libs/rigExec/movers/deltaMushMover.cpp
     libs/rigExec/movers/wrinkleMover.cpp
     libs/rigExec/movers/volumeCorrectMover.cpp
     libs/rigExec/movers/latticeMover.cpp
+    libs/rigExec/movers/surfaceBindingMover.cpp
     libs/rigExec/movers/surfaceMover.cpp
     libs/rigExec/movers/curveMover.cpp
     libs/rigExec/movers/mathMovers.cpp
@@ -507,6 +511,30 @@ function(rigexec_add_graph_test name)
 endfunction()
 rigexec_add_graph_test(testRigExecConstraints CONE_VERIFY)
 
+# Affine frame providers and the layered skin revision: numerical results,
+# then a control edit that must re-run both through their declared inputs;
+# the runtime's expressions against Gf's, and .rigexec playback.
+add_executable(testRigExecAffineFrames tests/testRigExecAffineFrames.cpp)
+target_link_libraries(testRigExecAffineFrames PRIVATE
+    rigExec rigExecBake rigExecRuntime rigExecSampler)
+add_test(NAME testRigExecAffineFrames COMMAND testRigExecAffineFrames
+    "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
+set_tests_properties(testRigExecAffineFrames PROPERTIES ENVIRONMENT
+    "PXR_PLUGINPATH_NAME=${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
+rigexec_add_graph_test(testRigExecAffineFrames CONE_VERIFY
+    "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
+foreach(_entry testRigExecAffineFramesGolden
+               testRigExecAffineFramesGraph_serial
+               testRigExecAffineFramesCones_serial
+               testRigExecAffineFramesCones_parallel
+               testRigExecAffineFramesCones_grain0_serial
+               testRigExecAffineFramesCones_grain0_parallel)
+    if (TEST ${_entry})
+        set_property(TEST ${_entry} APPEND PROPERTY ENVIRONMENT
+            "PXR_PLUGINPATH_NAME=${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
+    endif()
+endforeach()
+
 function(rigexec_add_example_graph_test)
     cmake_parse_arguments(A "GUIDES" "NAME;RIG;STAGE;FRAMES" "" ${ARGN})
     # DEFINED, not truthiness: a frame list that is the single frame 0 is
@@ -630,6 +658,30 @@ foreach(_schedule serial parallel)
         "RIGEXEC_BAKED_SCHEDULE=${_schedule}"
         "RIGEXEC_BAKED_GRAIN_US=0")
 endforeach()
+
+# Extended nearest-surface snapping, persistent surface bindings and
+# regular-grid lattices against reference values; each also replays its
+# .rigexec export.
+add_executable(testRigExecSurfaceSnap tests/testRigExecSurfaceSnap.cpp)
+target_link_libraries(testRigExecSurfaceSnap PRIVATE
+    rigExec rigExecBake rigExecRuntime rigExecSampler)
+target_compile_definitions(testRigExecSurfaceSnap PRIVATE ${_rigexec_schema_resource_define})
+add_test(NAME testRigExecSurfaceSnap COMMAND testRigExecSurfaceSnap)
+rigexec_add_graph_test(testRigExecSurfaceSnap CONE_VERIFY)
+
+add_executable(testRigExecSurfaceBinding tests/testRigExecSurfaceBinding.cpp)
+target_link_libraries(testRigExecSurfaceBinding PRIVATE
+    rigExec rigExecBake rigExecRuntime rigExecSampler)
+target_compile_definitions(testRigExecSurfaceBinding PRIVATE ${_rigexec_schema_resource_define})
+add_test(NAME testRigExecSurfaceBinding COMMAND testRigExecSurfaceBinding)
+rigexec_add_graph_test(testRigExecSurfaceBinding CONE_VERIFY)
+
+add_executable(testRigExecLattice tests/testRigExecLattice.cpp)
+target_link_libraries(testRigExecLattice PRIVATE
+    rigExec rigExecBake rigExecRuntime rigExecSampler)
+target_compile_definitions(testRigExecLattice PRIVATE ${_rigexec_schema_resource_define})
+add_test(NAME testRigExecLattice COMMAND testRigExecLattice)
+rigexec_add_graph_test(testRigExecLattice CONE_VERIFY)
 
 add_executable(testRigExecSurfaceProjector
     tests/testRigExecSurfaceProjector.cpp)
@@ -1966,13 +2018,14 @@ if (RIGEXEC_BUILD_PYTHON AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
     add_test(NAME testGizmoPreview
         COMMAND ${Python3_EXECUTABLE}
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_gizmo_preview.py")
-    foreach(_release_test deferred_release own_commit)
-        add_test(NAME testGizmo_${_release_test}
-            COMMAND ${Python3_EXECUTABLE}
-                "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_gizmo_${_release_test}.py")
-        set_tests_properties(testGizmo_${_release_test} PROPERTIES
-            SKIP_RETURN_CODE 77)
-    endforeach()
+    add_test(NAME testGizmoDeferredRelease
+        COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_gizmo_deferred_release.py")
+    set_tests_properties(testGizmoDeferredRelease PROPERTIES SKIP_RETURN_CODE 77)
+    add_test(NAME testGizmoOwnCommit
+        COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_gizmo_own_commit.py")
+    set_tests_properties(testGizmoOwnCommit PROPERTIES SKIP_RETURN_CODE 77)
     add_test(NAME testGizmoScreen
         COMMAND ${Python3_EXECUTABLE}
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_gizmo_screen.py")
@@ -2046,7 +2099,7 @@ if (RIGEXEC_BUILD_PYTHON AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
                          testMoverChainOrder testIkFkMatch testSpaceMatch
                          testAutoClavicle
                          testAvarEditorModel
-                         testGizmoPreview testGizmo_deferred_release testGizmo_own_commit
+                         testGizmoPreview testGizmoDeferredRelease testGizmoOwnCommit
                          testGizmoSettings testGizmoDrag testGizmoSnap
                          testViewCubeMath testRigExecStageEdits
                          testGraphModel testGraphScreen testCacheStripModel

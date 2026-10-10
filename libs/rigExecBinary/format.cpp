@@ -6,10 +6,12 @@
 
 #include "rigExecBinary/stepGraph.h"
 #include "rigExecGraph/providerRecords.h"
+#include "rigExecMath/affineFrameKernel.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <iterator>
 #include <new>
 #include <map>
 #include <set>
@@ -1015,9 +1017,11 @@ private:
 
     bool _Root()
     {
-        if (_f.formatVersion != RigExecFormatVersion) {
+        if (!RigExecFormatReads(_f.formatVersion)) {
             return _Bad("format_version is " + _N(_f.formatVersion) +
-                        "; this reader reads " + _N(RigExecFormatVersion));
+                        "; this reader reads " +
+                        _N(RigExecFormatOldestReadable) + " through " +
+                        _N(RigExecFormatVersion));
         }
         if (!_f.slotMeta || !_f.constants || !_f.clustering || !_f.cones ||
             !_f.pose || !_f.geometry || !_f.commonGraph) {
@@ -2392,8 +2396,18 @@ private:
         std::vector<int> writers(n,-1);
         for (size_t i=0;i<p.ops.size();++i) {
             const auto &op=p.ops[i];
-            if(op.kind>11 || op.kind==8 || op.kind==9 || op.output>=n || op.owner.empty())
+            if(op.kind>12 || op.kind==8 || op.kind==9 || op.output>=n || op.owner.empty())
                 return _Bad("provider op "+_N(i)+": invalid kind/output/owner");
+            // An affine frame expression (format 21) names its expression
+            // and its inputs match that expression's layout; every other
+            // kind names none.
+            const bool affine=op.kind==uint32_t(RigExecProviderOpKind::AffineFrame);
+            if(affine && _f.formatVersion<RigExecFormatAffineFramesVersion)
+                return _Bad("provider op "+_N(i)+": format "+_N(_f.formatVersion)+
+                            " holds no affine frame expressions");
+            if(affine ? !RigExecAffineFrameInputsMatch(op.affineKind,op.inputs.size(),op.affineTargets)
+                      : (op.affineKind!=0 || op.affineTargets!=0))
+                return _Bad("provider op "+_N(i)+": affine frame expression does not match its inputs");
             if(writers[size_t(op.output)]>=0)
                 return _Bad("provider op "+_N(i)+": duplicate output producer");
             writers[size_t(op.output)]=int(i);
@@ -4594,13 +4608,14 @@ private:
     /// private constants (format 20). A Range Skin's rigExec:skinningMethod
     /// and rigExec:elementSize reads are one hop over a private, unanimated
     /// slot (or a static value), the method classicLinear, and its
-    /// joint_indices_slot is private and unanimated. A Range revision that
-    /// writes fewer parts than the chain has groups is gated: its weight
-    /// object is a static sparse weight, neither current-phase nor
-    /// operation-domain, whose default weight reads one private, unanimated
-    /// slot holding 0 (its Baked constant 0 too) and whose indices are a
-    /// private slot, every index of whose default inside the chain's points
-    /// lies in a written part.
+    /// joint_indices_slot is private and unanimated; a Range lattice's
+    /// rigExec:evaluation (format 21) is likewise one, holding legacy. A
+    /// Range revision that writes fewer parts than the chain has groups is
+    /// gated: its weight object is a static sparse weight, neither
+    /// current-phase nor operation-domain, whose default weight reads one
+    /// private, unanimated slot holding 0 (its Baked constant 0 too) and
+    /// whose indices are a private slot, every index of whose default
+    /// inside the chain's points lies in a written part.
     bool _GroupConstants()
     {
         const fb::RigExecWireDomainGeometry &g = *_f.geometry;
@@ -4619,6 +4634,10 @@ private:
                                         "].revisions[" + _N(r) + "]";
                 if (revision.op == uint8_t(fb::RevisionOp::Skin) &&
                     !_RangeSkinConstants(revision, row)) {
+                    return false;
+                }
+                if (revision.op == uint8_t(fb::RevisionOp::Lattice) &&
+                    !_RangeLatticeConstants(revision, row)) {
                     return false;
                 }
                 const size_t groups = written[r].size();
@@ -4743,6 +4762,43 @@ private:
             return _Bad(_At(row, "joint_indices_slot") +
                         ": a Range Skin's joint indices are listed or "
                         "animated");
+        }
+        return true;
+    }
+
+    /// A Range lattice's rigExec:evaluation reads (format 21): one hop over
+    /// a private, unanimated slot (or a static value) holding legacy, the
+    /// one evaluation with a group form.
+    bool _RangeLatticeConstants(const fb::RigExecWireRevision &revision,
+                                const std::string &row)
+    {
+        const std::string path =
+            RigExecFormatPathText(_f, revision.moverPath) +
+            ".rigExec:evaluation";
+        for (const fb::RigExecWirePathRead &read : _f.geometry->pathReads) {
+            if (read.rest || RigExecFormatPathText(_f, read.path) != path) {
+                continue;
+            }
+            std::string text = "legacy";
+            if (read.read) {
+                const uint32_t head =
+                    read.read->walk.empty() ? 0 : read.read->walk[0];
+                if (read.read->walk.size() != 1 || !_PrivateConstant(head)) {
+                    return _Bad(row + ": a Range lattice's "
+                                      "rigExec:evaluation is not one "
+                                      "private, unanimated slot");
+                }
+                const fb::RigExecWireValue &value = _DefaultOf(int32_t(head));
+                text = value.tag == InputTag::Token
+                           ? RigExecFormatPathText(_f, uint32_t(value.bits))
+                           : std::string();
+            } else if (read.value && read.value->tag == fb::PathTag::Token) {
+                text = RigExecFormatPathText(_f, uint32_t(read.value->bits));
+            }
+            if (text != "legacy") {
+                return _Bad(row + ": a Range lattice's rigExec:evaluation "
+                                  "holds '" + text + "', not legacy");
+            }
         }
         return true;
     }
@@ -4928,10 +4984,91 @@ private:
              !_Topology(*r.partitionTopology, row + ".partition_topology"))) {
             return false;
         }
-        if (!_LayoutSlots(r, derived, row, id)) {
+        if (!_LayoutSlots(r, derived, row, id) ||
+            !_ExtendedSettings(r, row)) {
             return false;
         }
         return derived || _Chunks(r, row);
+    }
+
+    /// Whether path id \p path is one of the \p count properties \p names
+    /// of prim \p prim.
+    bool _IsPropertyOf(uint32_t path, uint32_t prim,
+                       const char *const *names, size_t count) const
+    {
+        if (path == 0 || path >= _f.paths.size()) {
+            return false;
+        }
+        const fb::PathNode &node = _f.paths[path];
+        if (node.kind() != PathKind::Property || node.parent() != prim ||
+            node.name() >= _f.names.size()) {
+            return false;
+        }
+        const std::string &name = _f.names[node.name()];
+        for (size_t k = 0; k < count; ++k) {
+            if (name == names[k]) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// The format-21 settings of a Delta Mush, lattice or surface revision
+    /// \p r. Format 21: its frame providers, as many as the op takes.
+    /// Format 20: none of them -- no influence, no path read and no leaf
+    /// site of a settings attribute of its mover -- so the file plays the
+    /// legacy deformer.
+    bool _ExtendedSettings(const fb::RigExecWireRevision &r,
+                           const std::string &row)
+    {
+        size_t count = 0;
+        const char *const *names =
+            RigExecFormatExtendedSettingNames(r.op, &count);
+        if (!names) {
+            return true;
+        }
+        const char *op = fb::EnumNameRevisionOp(fb::RevisionOp(r.op));
+        if (_f.formatVersion >= RigExecFormatExtendedSettingsVersion) {
+            if (!RigExecFormatExtendedInfluencesValid(
+                    r.op, r.influenceSlots.size())) {
+                return _Bad(_At(row, "influence_slots") + ": " +
+                            _N(r.influenceSlots.size()) +
+                            " frame providers on a " + op + " revision");
+            }
+            return true;
+        }
+        if (!r.influenceSlots.empty()) {
+            return _Bad(_At(row, "influence_slots") + ": format " +
+                        _N(_f.formatVersion) + " holds no frame providers "
+                        "on a " + op + " revision");
+        }
+        if (r.moverPrim == 0) {
+            return true;
+        }
+        const auto refuse = [&](uint32_t path, const std::string &where) {
+            return _Bad(where + ": format " + _N(_f.formatVersion) +
+                        " holds no " + op + " setting " +
+                        RigExecFormatPathText(_f, path));
+        };
+        for (const auto *sites : {&r.leafSites, &r.layoutLeafSites}) {
+            for (size_t k = 0; k < sites->size(); ++k) {
+                const uint32_t path = (*sites)[k].path;
+                if (_IsPropertyOf(path, r.moverPrim, names, count)) {
+                    return refuse(path, row + (sites == &r.leafSites
+                                                   ? ".leaf_sites["
+                                                   : ".layout_leaf_sites[") +
+                                            _N(k) + "]");
+                }
+            }
+        }
+        const auto &reads = _f.geometry->pathReads;
+        for (size_t i = 0; i < reads.size(); ++i) {
+            if (_IsPropertyOf(reads[i].path, r.moverPrim, names, count)) {
+                return refuse(reads[i].path,
+                              "geometry.path_reads[" + _N(i) + "]");
+            }
+        }
+        return true;
     }
 
     /// A revision's layout slots: both or neither, only on a main skin
@@ -6743,17 +6880,71 @@ RigExecFormatGroupWriters(const fb::RigExecWireFile &file, size_t chain,
 
 namespace {
 
-/// Older files require re-export from the stage after the S3 wire cleanup.
-/// Future formats require a matching exporter/reader.
+// The settings attributes format 21 adds, per op, in assembly order.
+constexpr const char *_kDeltaMushSettings[] = {
+    "inputs:smoothing", "inputs:frameTransport", "inputs:smoothWeights",
+    "inputs:edges", "inputs:onlySmooth", "inputs:computationToTarget"};
+constexpr const char *_kLatticeSettings[] = {
+    "rigExec:evaluation", "rigExec:interpolationU", "rigExec:interpolationV",
+    "rigExec:interpolationW", "rigExec:origin", "rigExec:spacing",
+    "rigExec:strength", "rigExec:mask", "rigExec:cageMatrix",
+    "rigExec:targetMatrix", "rigExec:pointSpace"};
+constexpr const char *_kSurfaceSettings[] = {
+    "rigExec:snapMode", "rigExec:offset", "rigExec:mask",
+    "rigExec:triangles", "rigExec:surfaceMatrix", "rigExec:targetMatrix",
+    "rigExec:pointSpace"};
+
+}  // namespace
+
+const char *const *
+RigExecFormatExtendedSettingNames(uint8_t op, size_t *count)
+{
+    const auto list = [count](const auto &names) {
+        *count = std::size(names);
+        return static_cast<const char *const *>(names);
+    };
+    switch (fb::RevisionOp(op)) {
+    case fb::RevisionOp::DeltaMush:
+        return list(_kDeltaMushSettings);
+    case fb::RevisionOp::Lattice:
+        return list(_kLatticeSettings);
+    case fb::RevisionOp::SurfaceProject:
+        return list(_kSurfaceSettings);
+    default:
+        *count = 0;
+        return nullptr;
+    }
+}
+
+bool
+RigExecFormatExtendedInfluencesValid(uint8_t op, size_t influences)
+{
+    switch (fb::RevisionOp(op)) {
+    case fb::RevisionOp::DeltaMush:
+        return influences <= 1;
+    case fb::RevisionOp::Lattice:
+    case fb::RevisionOp::SurfaceProject:
+        return influences == 0 || influences == 2;
+    default:
+        return true;
+    }
+}
+
+namespace {
+
+/// Files older than RigExecFormatOldestReadable require re-export from the
+/// stage; future formats require a matching exporter/reader.
 std::string
 _VersionRefusal(uint32_t version)
 {
-    static_assert(RigExecFormatVersion == 20,
-                  "name what the previous format version lacks");
+    static_assert(RigExecFormatOldestReadable == 20,
+                  "name what the oldest refused format version lacks");
     return "unsupported .rigexec format version " + _N(version) +
-           " (this reader reads " + _N(RigExecFormatVersion) + "); " +
-           (version < RigExecFormatVersion ? "re-export: per-group range chains"
-                                              : "rebake");
+           " (this reader reads " + _N(RigExecFormatOldestReadable) +
+           " through " + _N(RigExecFormatVersion) + "); " +
+           (version < RigExecFormatOldestReadable
+                ? "re-export: per-group range chains"
+                : "rebake");
 }
 
 /// Open after the identifier checks: copy, version probe, bounding walk,
@@ -6779,7 +6970,7 @@ _OpenAligned(const uint8_t *bytes, size_t size,
                                          sizeof(uint32_t))) {
             const uint32_t version =
                 table->GetField<uint32_t>(fb::File::VT_FORMATVERSION, 0);
-            if (version != RigExecFormatVersion) {
+            if (!RigExecFormatReads(version)) {
                 return _Fail(error, _VersionRefusal(version));
             }
         }
@@ -6794,7 +6985,7 @@ _OpenAligned(const uint8_t *bytes, size_t size,
                             "refused it");
     }
     const fb::File *root = fb::GetFile(data);
-    if (root->formatVersion() != RigExecFormatVersion) {
+    if (!RigExecFormatReads(root->formatVersion())) {
         return _Fail(error, _VersionRefusal(root->formatVersion()));
     }
     std::unique_ptr<fb::RigExecWireFile> unpacked(root->UnPack());
@@ -6870,6 +7061,12 @@ RigExecFormatWrite(const fb::RigExecWireFile &file,
     std::string why;
     if (!RigExecFormatValidate(file, &why)) {
         return _Fail(error, "invalid .rigexec: " + why);
+    }
+    // Readable older versions open, but every file written is current.
+    if (file.formatVersion != RigExecFormatVersion) {
+        return _Fail(error, "invalid .rigexec: format_version is " +
+                                _N(file.formatVersion) + "; a writer writes " +
+                                _N(RigExecFormatVersion));
     }
         flatbuffers::FlatBufferBuilder builder(1u << 16);
         fb::FinishFileBuffer(builder, fb::File::Pack(builder, &file));

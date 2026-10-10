@@ -82,6 +82,28 @@ _HoldsTag(const UsdAttribute &a, fb::InputTag tag)
     }
 }
 
+// Whether \p key reads one of the format-21 settings of \p revision's
+// mover (RigExecFormatExtendedSettingNames).
+bool
+_ExtendedSetting(const RigExecBakedProgramImpl::GeomRevision &revision,
+                 const RigExecRevisionLeafKey &key)
+{
+    size_t count = 0;
+    const char *const *names =
+        RigExecFormatExtendedSettingNames(uint8_t(revision.op), &count);
+    if (!names || !key.path.IsPropertyPath() ||
+        key.path.GetPrimPath() != revision.moverPath) {
+        return false;
+    }
+    const std::string &name = key.path.GetNameToken().GetString();
+    for (size_t i = 0; i < count; ++i) {
+        if (name == names[i]) {
+            return true;
+        }
+    }
+    return false;
+}
+
 struct _Lister {
     const RigExecBakedProgramImpl &program;
     UsdStageRefPtr stage;
@@ -186,6 +208,18 @@ struct _Lister {
                     continue;
                 }
                 if (blendPoints.count(int(k))) {
+                    continue;
+                }
+                // An array setting of the format-21 extended deformers
+                // (a Delta Mush's smoothWeights and edges, a lattice's or a
+                // surface's mask and triangles) is a row of its own.
+                if (_ExtendedSetting(revision, key)) {
+                    RigExecBakeArrayRead read;
+                    if (Hops(key, tag, &read)) {
+                        read.consumer = Consumer::Row;
+                        read.chain = chain; read.revision = index; read.derived = derived;
+                        reads->push_back(std::move(read));
+                    }
                     continue;
                 }
                 *error = "the assembly of " +

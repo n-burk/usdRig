@@ -9,7 +9,9 @@
 #include "pointFrame.h"
 #include "wrinkleSettings.h"
 #include "meshConnectivity.h"
+#include "deltaMushSettings.h"
 
+#include "pxr/base/gf/matrix4d.h"
 #include "pxr/base/gf/vec2f.h"
 #include "pxr/base/gf/vec3d.h"
 #include "pxr/base/gf/vec3f.h"
@@ -37,12 +39,19 @@ using RigExecTransportRest = RigExecTransportRestData<GfVec3f, GfVec3d>;
 /// Smooth rest and posed meshes with identical rest-derived weights, then
 /// transport the rest detail onto the smoothed posed surface. No host runtime.
 /// Invalid input fails atomically; isolated vertices and pinned borders stay put.
-/// \p restData supplies prebuilt rest state; null builds it from the inputs.
+/// \p settings select the smoothing, frame transport and edge set (the
+/// defaults are the legacy deformation); \p computationToTarget is the
+/// row-vector affine map from the space the rest points are authored in to
+/// the points' space (identity runs the plain kernel).
+/// \p restData supplies prebuilt rest state built for the same rest inputs
+/// and settings; null builds it from the inputs.
 bool RigExecApplyDeltaMush(
     std::vector<GfVec3f> *points, const std::vector<GfVec3f> &rest,
     const std::vector<int> &counts, const std::vector<int> &indices,
     int iterations = 10, double step = 0.5, bool pinBorders = true,
     double distanceWeight = 0.0, double displacement = 1.0,
+    const RigExecDeltaMushSettings &settings = {},
+    const GfMatrix4d &computationToTarget = GfMatrix4d(1),
     const RigExecDeltaMushRest *restData = nullptr);
 
 /// Resolve phase-guided rest-length constraints inside attachment balls about
