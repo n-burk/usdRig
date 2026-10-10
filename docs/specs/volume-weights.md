@@ -100,25 +100,26 @@ a shape they cannot see. So the rigid placement positions the volume and
 `inputs:scaleX/Y/Z` plus `inputs:falloffMin/falloffMax` are the sole
 authority on its size. Guide and field agree by construction.
 
-Both the exec kernel and the CPU oracle call `RemoveScaleShear()` on the
-placement before inverting it, for exactly this reason.
+Both the weight-packet kernel (`libs/rigExec/weightPackets.cpp`) and the CPU
+reference (`libs/rigExec/weightReference.cpp`) call `RemoveScaleShear()` on
+the placement before inverting it, for exactly this reason.
 
-### 3. The falloff curve cannot be an exec input
+### 3. The falloff curve is epoch-structural
 
-OpenExec 26.08 has no accessor for an attribute's spline — `// XXX:TODO
-Accessors for AnimSpline` is still open in
-`exec/computationBuilders.h:584`. A computation resolves an attribute at
-*one* time; a falloff curve is the whole function.
+An input sampled per frame is a value at *one* time; a falloff curve is the
+whole function. So the curve is **epoch-structural**: resampled to a
+`RigExecFalloffLut` at `Compile` and held as a compiled input of the weight
+packet until the next epoch. The consequence is that the curve's *shape* is
+a rig-authoring parameter rather than an animation channel — which is also
+what keeps the field epoch-shape-stable. The animatable knobs are
+`falloffMin`/`falloffMax`, `invert`, and `strength`, all of which are
+ordinary per-frame inputs.
 
-So the curve is **epoch-structural**: resampled to a
-`RigExecFalloffLut` at `Compile`, and delivered to the kernel as a
-`RigExecValueOverride` on a stub `computeFalloffLut` prim computation.
-That is the same shape the ribbon already uses for its driver-curve
-points, and for the same class of reason. The consequence is that the
-curve's *shape* is a rig-authoring parameter rather than an animation
-channel — which is also what keeps the field epoch-shape-stable. The
-animatable knobs are `falloffMin`/`falloffMax`, `invert`, and `strength`,
-all of which are ordinary per-frame exec inputs.
+OpenExec 26.08 has no accessor for an attribute's spline (`// XXX:TODO
+Accessors for AnimSpline` in `exec/computationBuilders.h:584`), so the
+OpenExec registration's `computeFalloffLut` is a stub, and the
+[reference check](../concepts/baked-vs-dynamic.md#openexec-reference-checks)
+supplies the compiled table as a `RigExecValueOverride`.
 
 Editing the curve changes the structure digest and begins a new epoch;
 the knots are hashed, the animatable floats deliberately are not.
@@ -175,19 +176,12 @@ mode the rectangle is a mesh and cannot carry them, and they are a
 fraction of the extent rather than a fixed length so they survive being
 drawn at any scale.
 
-Both evaluation paths implement the bound — the exec kernel in
-`moverKernels.cpp` and the CPU oracle in `rigEvaluator.cpp` — and the
-parity harness is what holds them together. Removing it from the exec
-side alone gives
-
-```
-plane-bounded: diagnostic: cpu reference parity: value mismatch on
-    /Asset/Geom/M.points at element 3
-plane-bounded: 1 graph/CPU parity MISMATCHES
-```
-
-which is exactly the failure `TestPlaneBounded` exists to catch: a bound
-applied on one path still moves points, just not the same ones.
+Two independent implementations apply the bound — the weight-packet kernel
+in `libs/rigExec/weightPackets.cpp` and the CPU reference in
+`libs/rigExec/weightReference.cpp` — and the CPU reference check holds them
+together. A bound applied by only one of them still moves points, just not
+the same ones, and the reference mismatch that produces is exactly the
+failure `TestPlaneBounded` exists to catch.
 
 ## Sample phase
 
@@ -206,29 +200,17 @@ a compile error.
   right now. Order dependent by construction: the same volume at two
   points in the stack legitimately yields two different fields.
 
-`preceding` cannot come from exec. A revision node's only inputs are its
-parameters, its status, and the read-write point buffer, and the
-parameters are baked as a VDF constant when the graph is built — nothing
-in the packet can depend on a value the graph has not computed yet. What
-*can* be done, and is: `RigExecMoverGraph::Evaluate` is const and takes
-any masked output, so the evaluator evaluates the chain built **so far**,
-measures against that, and bakes the result into the next revision's
-parameters. See the graph build loop in `rigEvaluator.cpp::Evaluate`.
+A `preceding` weight is a per-revision read. Each revision whose weight
+object samples `preceding` gets its own field, measured against the point
+version entering that revision, and uses it in place of the shared packet
+(`currentPhasePacket` in `libs/rigExec/bakedGeometry.cpp`).
 
-**Know the cost before reaching for it.** Each `Evaluate` builds its own
-request, schedule, and executor over the whole prefix, so a chain of *N*
-revisions containing *K* in-flight weights does *O(N·K)* point work —
-quadratic if every mover in a long chain samples `preceding`. `base` is
-the default precisely because it is free: the field is a per-generation
-constant that exec computes once. Reach for `preceding` where the behaviour
-is actually wanted (a volume that should grab whatever has been deformed
-into it), not as a general-purpose "more correct" setting.
-
-The obvious optimisation — reuse one executor across the prefix
-evaluations instead of rebuilding per revision — is available and
-deliberately not taken yet: nothing in the repo needs it, and the naive
-version is the one whose correctness is easy to see against the CPU
-oracle.
+**Know the cost before reaching for it.** A `base` field is one packet per
+generation, shared by every mover that binds the weight object. A
+`preceding` field cannot be shared, so every revision that samples it pays
+for its own field evaluation. Reach for `preceding` where the behaviour is
+actually wanted (a volume that should grab whatever has been deformed into
+it), not as a general-purpose "more correct" setting.
 
 ## Composition
 
@@ -260,10 +242,11 @@ missing tail.
 |---|---|
 | Schema | `libs/rigExecSchema/schema.usda` (volumetric section) |
 | Pure kernels | `libs/rigExecMath/weightFields.{h,cpp}` |
-| Exec computations | `libs/rigExec/moverKernels.cpp` (`_Build*WeightPacket`) |
-| `computeMatrix` etc. | `libs/rigExec/computations.cpp` (`RIGEXEC_REGISTER_XFORMABLE(RigExecVolumeWeight)`) |
+| Weight packets | `libs/rigExec/weightPackets.cpp`, `libs/rigExecGraph/weightProgram.cpp` |
+| OpenExec registrations, used only by the reference check | `libs/rigExec/moverKernels.cpp` (`_Build*WeightPacket`), `libs/rigExec/computations.cpp` (`RIGEXEC_REGISTER_XFORMABLE(RigExecVolumeWeight)`) |
 | LUT packet type | `libs/rigExec/types.h` (`RigExecFalloffLut`) |
-| CPU oracle, epoch, overrides | `libs/rigExec/rigEvaluator.cpp` |
+| CPU reference | `libs/rigExec/weightReference.cpp` |
+| Epoch and falloff tables | `libs/rigExec/rigEvaluatorCompile.cpp` |
 | Resolved field for tools | `RigExecRigPose::weightFields` |
 | Authoring UI | `plugin/rigExecUsdview/volumeWeightUI.py` |
 | Influence overlay + guides | `libs/rigExecImaging/` (`RigExecImaging_SetWeightOverlay`) |
@@ -272,9 +255,11 @@ missing tail.
 
 ## Registering computations on an abstract base
 
-`RIGEXEC_REGISTER_XFORMABLE` is invoked on the **abstract**
-`RigExecVolumeWeight`, unlike `RigExecJoint`/`RigExecControl` which are
-concrete. Exec composes a prim's computation set by walking its full
+This section concerns the OpenExec registrations, which only the
+[reference check](../concepts/baked-vs-dynamic.md#openexec-reference-checks)
+and tests request. `RIGEXEC_REGISTER_XFORMABLE` is invoked on the
+**abstract** `RigExecVolumeWeight`, unlike `RigExecJoint`/`RigExecControl`
+which are concrete. Exec composes a prim's computation set by walking its full
 ancestor type vector strongest-to-weakest
 (`exec/definitionRegistry.cpp::_GetFullyExpandedSchemaTypeVector`), so
 the three concrete volume weights inherit the three xformable
@@ -352,46 +337,27 @@ picture moves and only the final value is wrong.
 `RigExecImagingRegistry::_OnObjectsChanged` re-evaluates from inside
 `UsdNotice::ObjectsChanged` dispatch. `Tf_NoticeRegistry::_Register`
 **prepends** its deliverer, so listeners run most-recently-registered
-*first* — and OpenExec's `ExecUsdSystem::_NoticeListener`, the thing that
-drops every cached computed value when an attribute is authored, is
-constructed by the `ExecUsdSystem` constructor inside `Compile()`.
-Registering our listener after `Compile()` therefore put us **ahead of
-exec**, and every generation an edit published was computed from exec's
-pre-edit cache.
+*first*. A listener that re-evaluates must therefore run after every
+listener that drops cached values for the same edit, or it publishes a
+pre-edit answer. The registry registers its listener before `Compile()`
+(`libs/rigExecImaging/registry.cpp:1422`), which puts it at the back of the
+delivery list.
 
-The measurements that separate this from a missing dirty notice:
-
-| | published field |
-|---|---|
-| stage resolves `falloffMax` = 9 inside our callback | the 4.46 field |
-| a *second* `Evaluate` in the same dispatch | still the 4.46 field |
-| an `Evaluate` after the dispatch ended | the 9 field |
-| the same edit sequence outside any notice | fresh on the first `Evaluate` |
-
-Red-ish pixels while dragging `falloffMax` 4.46 → 9 → 1.5 → 4.46:
-
-| | before | after |
-|---|---|---|
-| 4.46 | 3432 | 3441 |
-| 9 | 3433 | 6076 |
-| 1.5 | 6063 | 2142 |
-| 4.46 | 2157 | 3456 |
-
-The fix is to register the listener **first**, before `Compile()`, which
-puts it at the back of the delivery list and keeps it there: every
-recompile builds a new `ExecUsdSystem` that prepends ahead of it again.
+Production evaluation holds no OpenExec `ExecUsdSystem`, whose
+`_NoticeListener` drops cached computed values when an attribute is
+authored. Only the `RigExecTapSet` requests of the
+[reference check](../concepts/baked-vs-dynamic.md#openexec-reference-checks)
+and of tests create one. `_OnObjectsChanged` first calls
+`RigExecTapSet::PrepareStageChange` (`registry.cpp:3925`), which retires
+those requests when a prim is removed.
 
 Two things are worth carrying forward. First, a direct `SetTime()` call
-cannot see this bug — by then the dispatch has ended and exec is
-invalidated — which is why a suite full of `SetTime` assertions passed
-throughout. `TestAuthoredEditRepublishesFreshField` in
-`testRigExecWeightOverlay.cpp` authors to the stage and lets the notice do
-the republishing, and it is mutation-verified: moving the registration
-back after `Compile()` fails it and nothing else. Second, a plain default
-`Set` and the spline knot the authoring panel writes are **not**
-equivalent through USD's change classification — only the spline knot
-reproduced, so the test covers both and the spline arm is the one that
-catches it.
+cannot see this class of bug, because the dispatch has ended by then.
+`TestAuthoredEditRepublishesFreshField` in `testRigExecWeightOverlay.cpp`
+therefore authors to the stage and lets the notice do the republishing.
+Second, a plain default `Set` and the spline knot the authoring panel
+writes are **not** equivalent through USD's change classification, so the
+test covers both.
 
 ## The third cause of the same symptom: the wrong frame
 
@@ -452,10 +418,10 @@ each with nothing else in the suite noticing.
 
 `TestPlaneBoundedInvalidExtents` covers the remaining arm, where the two
 implementations could disagree quietly: `bounded` with a non-positive
-extent is rejected by the exec kernel (an invalid packet) and by the CPU
-oracle (an error), and both have to mean **pass-through** downstream. A
+extent is rejected by the weight-packet kernel (an invalid packet) and by the
+CPU reference (an error), and both have to mean **pass-through** downstream. A
 kernel that read a negative extent as "unbounded" would move points the
-oracle leaves alone and only parity would see it.
+reference leaves alone and only the reference check would see it.
 
 ## A build trap this change walked into
 

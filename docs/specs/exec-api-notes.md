@@ -1,5 +1,9 @@
 # OpenExec Plugin-Computation Registration — API Notes (OpenUSD v26.08)
 
+> OpenUSD 26.08 study notes, not a description of RigExec. See
+> [OpenExec reference checks](../concepts/baked-vs-dynamic.md#openexec-reference-checks)
+> for what RigExec registers and requests.
+
 Source studied: the OpenUSD v26.08 `pxr/exec/` tree (exec, execUsd, execGeom,
 execIr, vdf) and `extras/exec/examples/definingComputations/`. All signatures
 below are verbatim from source.

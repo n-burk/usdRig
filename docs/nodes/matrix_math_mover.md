@@ -46,10 +46,9 @@ exact at both endpoints, so a `blend` at weight 1 is a straight
 substitution and a partial weight is a crossfade between two frames.
 `inputs:value` may be CONNECTED, which is how a control drives the
 arithmetic: the mover reads the same `posed:space` matrix the control is
-posed and drawn at. The whole property chain resolves BEFORE exec runs —
-that is what lets its result be handed back as the attribute's value —
-so the operand has to be a matrix that already stands on the stage,
-authored or connected.
+posed and drawn at. A property chain reads property values, not evaluated
+provider frames, so the operand has to be a matrix that already stands on
+the stage, authored or connected.
 
 ## Wiring
 

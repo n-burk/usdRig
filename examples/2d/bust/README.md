@@ -69,7 +69,7 @@ colours are authored as display values, per vertex, so soft gradients
 ### Mover stacks (bottom runs first)
 
 ```
-Movers/Channels/*          float math: parameter -> keyform weights (runs before exec)
+Movers/Channels/*          float math: parameter -> keyform weights (ordered before readers)
 Movers/Cages/*Keyforms     blend shapes on the two lattice cages
 Movers/Geometry/<Face|Eyes|Brows|Mouth>   Keyforms -> HeadTilt (matrix) -> HeadWarp (lattice)
 Movers/Geometry/<FrontHair|BackHair>      HairSkin (FK locks + head) -> HeadWarp (lattice)

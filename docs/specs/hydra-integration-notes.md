@@ -1,5 +1,10 @@
 # How usdExecImaging integrates OpenExec into Hydra (OpenUSD v26.08)
 
+> OpenUSD 26.08 study notes, not a description of RigExec. RigExec
+> publishes through filtering scene indices (`libs/rigExecImaging/sceneIndices.h`);
+> see [OpenExec reference checks](../concepts/baked-vs-dynamic.md#openexec-reference-checks)
+> for how RigExec uses OpenExec.
+
 Reference notes for implementing **rigExecImaging**, based on a source study of
 OpenUSD v26.08. All source paths below are relative to the OpenUSD root, and
 line numbers refer to that release.
@@ -624,6 +629,14 @@ resource, `Type: "library"`, and (unlike usdExecImaging) a real
 ---
 
 ## 8. Recommendation: how rigExecImaging should integrate for stock usdview (v26.08)
+
+> **Superseded.** `rigExecImaging` owns no `ExecUsdSystem`, has no
+> `RIGEXECIMAGING_ENABLE` setting and builds no merging overlay of an exec
+> scene index. Its `UsdImagingSceneIndexPlugin`
+> (`libs/rigExecImaging/sceneIndexPlugin.cpp`) appends the filtering scene
+> indices declared in `libs/rigExecImaging/sceneIndices.h`, which publish
+> results evaluated by the shared operation graph. The text below is kept as
+> study material.
 
 **Do not plan on UsdExecImagingAdapterRegistry — it is closed, private, and
 xform-only in v26.08** (adapterRegistry.cpp:31-33 TODO). Also do not plan on

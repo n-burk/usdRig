@@ -21,7 +21,7 @@ Readiness levels used here:
 | Touch Pose | `plugin/touchPose` with [touch regions](docs/nodes/touch_regions.md) | Beta | More mature than the surrounding prototype layers; details may still change. |
 | Picker | `plugin/rigExecUsdview` picker UI with [picker panels](docs/nodes/picker.md) | Beta | More mature than the surrounding prototype layers; details may still change. |
 | Export and runtime | `libs/rigExecBake`, `libs/rigExecBinary`, `libs/rigExecRuntime`: experimental `.rigexec` export and playback | Prototype | Format changes require explicit compatibility testing. |
-| Standalone adapter | `libs/rigExecStandalone`: experimental Esf adapter and rigpack backend | Prototype | Narrow supported surface; check its guide before integration. |
+| Standalone runtime | `libs/rigExecStandalone`: experimental stage-free scene runtime and rigpack backend | Prototype | Narrow supported surface; check its guide before integration. |
 
 The [architecture guide](docs/specs/spec.md) explains how these layers relate.
 Current behavior is defined by source and tests rather than by this page;

@@ -1,9 +1,11 @@
-# Experimental provider execution and rigpack
+# Experimental scene execution and rigpack
 
-This implementation is a provider-level OpenExec/Esf path over a resolved
-`RigExecSceneDb`. It does not replace `RigExecRigEvaluator` and does not claim
-whole-rig, mover-chain, imaging or production-profile parity. The current
-compatibility boundary targets the installed stock OpenUSD 26.08 interfaces.
+A rigpack carries a resolved `RigExecSceneDb` that the
+[standalone scene runtime](standalone-runtime.md) evaluates without a
+`UsdStage`. The runtime lowers the captured scene into the shared operation
+graph and does not run OpenExec; the Esf adapter in `libs/rigExecStandalone`
+has no callers. The runtime does not replace `RigExecRigEvaluator` and does
+not claim imaging or production-profile parity.
 
 `RigExecExportRigPack(stage, times, packPath, sourceAssetId, error)` creates a
 ZIP archive with two generic payloads:
@@ -54,35 +56,19 @@ owns copied values; no cache view crosses the API boundary. `EvaluateResolved`
 accepts a complete exact-typed state set for a transient identity and restores
 the prior database afterward.
 
-The pack exporter rejects mover applications, reverse solver-to-joint output
-bindings, native instances and provider types that require evaluator-only
-packet adapters. In particular, Ribbon's driver packet and volume falloff LUTs
-are not silently replaced by their empty
-callback defaults. The supported RigExec provider classes are Root, Control,
-Joint without solver-output bindings, FkChain, TwoBoneIk, BlendPointFrames,
-TwistDistribution, StaticWeight, DynamicWeight, and CombineWeight.
-BlendInput and BlendSample also support their registered
-descriptor computations. Standard
-USD prims and attributes can be retained, subject to the
-computations actually registered by the installed OpenExec library. Aggregate
-solver requests use explicit dependencies. `rigExec:joints` is permitted and
-supplies solver REST inputs -- a two-bone IK measures its bone lengths through
-it -- but a packed rig is never posed through it, so lowering must still
-resolve posed outputs explicitly. Attribute read-phase metadata and BlendSample
-read phases must select authored base values: preceding/final mover revisions
-are not lowered by this provider runtime. Export, load and runtime preparation
-share the same capability validation.
+Export, load and runtime preparation share one capability validation: each
+prepares the standalone scene program (`RigExecSceneDb::ValidateCapabilities`,
+`libs/rigExecStandalone/sceneDb.cpp:93`). Export rejects native instances and
+instance proxies. Preparation rejects an active prim of an unknown RigExec
+type and any applied API outside the list in the
+[runtime guide](standalone-runtime.md). Movers, solver joint bindings and
+read phases lower into the same graph as the rest of the scene.
 
-Applied APIs are limited to the qualified data-only CollectionAPI, GeomModelAPI,
-MotionAPI, VisibilityAPI, MaterialBindingAPI and SkelBindingAPI. Unknown applied
-APIs are rejected consistently by export, load and runtime preparation; they may
-introduce computation expressions beyond this provider scope.
-
-The version-1 manifest identifies this limited `providers` scope. It is not
-a complete multi-profile deployment format: profile
-composition, normalized sparse-weight semantic hashes, source-closure resource
-packaging, complete evaluation-identity contexts, ABI/plugin hashes, whole-rig
-lowering and production qualification remain outside this slice. Unchanged
+The version-3 manifest identifies the `scene` scope; the loader rejects any
+other version or scope. It is not a complete multi-profile deployment format:
+profile composition, normalized sparse-weight semantic hashes, source-closure resource
+packaging, complete evaluation-identity contexts, ABI/plugin hashes and
+production qualification remain outside this slice. Unchanged
 input produces stable archive bytes; payload timestamps are normalized before
 ZIP creation. Export failures leave an existing archive intact and the
 exporter refuses to overwrite a source layer.
@@ -91,4 +77,4 @@ exporter refuses to overwrite a source layer.
 paired exact/PreTime values, blocks, native geometry and assets, stage-free
 database use, deterministic output, malformed identities/schema values and
 explicit unsupported-scope rejection. `testRigExecStandalone` exercises the
-separate provider runtime and ephemeral edit path.
+standalone scene runtime and ephemeral edit path.

@@ -34,10 +34,10 @@ types, time kinds and consumers come from
 
 Array admission currently defaults off and is available through the test hook
 `RigExecSetUpstreamArrayAdmissionForTesting`. Structural arrays are excluded:
-painted values and indices consumed by vectorized Exec inputs, folded solver
+painted values and indices read per element by weight packets, folded solver
 volume weights, ribbon structural points and Derived bases do not become
-upstream inputs. A geometry chain's base points can be admitted. A path used by
-an Exec per-element weight read is structural even when it is also a chain base.
+upstream inputs. A geometry chain's base points can be admitted. A path that a
+weight packet reads per element is structural even when it is also a chain base.
 
 ## Time and source changes
 

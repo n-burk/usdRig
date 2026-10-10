@@ -1,8 +1,8 @@
 # Default spaces and winding
 
 `RigExecJoint`, `RigExecControl`, and volume weight providers evaluate their
-declared default-space channels through OpenExec. Editing these inputs dirties
-their consumers without replacing the rig's binding epoch.
+declared default-space channels as operations in the shared graph. Editing
+these inputs dirties their consumers without replacing the rig's binding epoch.
 
 The formulas below use USD's row-vector matrix convention: the leftmost
 transform applies first. `R` is the existing orthonormalized rest transform,

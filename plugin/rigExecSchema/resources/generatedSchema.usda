@@ -86,8 +86,7 @@ class RigExecRoot "RigExecRoot" (
 class RigExecControl "RigExecControl" (
     customData = {
         string userDocBrief = """An animator-facing RigExecXformable: animation is authored
-    on the avars (or an authored/connected posed:space), exactly like an
-    Ir xformable."""
+    on the avars (or an authored/connected posed:space)."""
     }
 )
 {
@@ -324,10 +323,9 @@ class RigExecControl "RigExecControl" (
 class "RigExecXformable" (
     customData = {
         string userDocBrief = """An abstract animation interface for an animatable coordinate
-    space, mirroring OpenExec's IrXformable contract exactly
-    (user-directed alignment, 2026-07-25): matrix4d local-to-world
-    rest/default/posed/parent spaces and scalar translation/rotation avars
-    (rotations in degrees)."""
+    space, following the attribute layout of OpenExec's IrXformable:
+    matrix4d local-to-world rest/default/posed/parent spaces and scalar
+    translation/rotation avars (rotations in degrees)."""
     }
 )
 {
@@ -440,8 +438,8 @@ class "RigExecXformable" (
 
 class RigExecJoint "RigExecJoint" (
     customData = {
-        string userDocBrief = """The joint of an armature-based rig, mirroring OpenExec's
-    IrJointScope exactly: a RigExecXformable specialized so guides can be
+        string userDocBrief = """The joint of an armature-based rig, modeled on OpenExec's
+    IrJointScope: a RigExecXformable specialized so guides can be
     drawn (a sphere at the posed origin and one cone to each nested child
     joint, purpose guide)."""
     }

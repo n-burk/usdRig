@@ -161,17 +161,15 @@ avars directly, if you would rather drag than type.
 
 ## Why it is fast
 
-`Biped.usda` authors `uniform bool rigExec:baked = true` on its
-`RigExecRoot` (and so does `Biped_body_center.usda`, which is where the
-body branch defines its own), so opening it -- here, or through
-`rigExecPose` with no `--mode` -- evaluates it through the BAKED PROGRAM: the
-compiled epoch as a graph of steps over dense slots, with no exec round trip
-per frame. It is a request and not an assertion. Every value published is the
-same either way -- that is proven exactly, frame by frame, by the parity
-entries -- so what the attribute changes is how fast the character poses, not
-how it poses, and a generation the program cannot answer falls back to the
-dynamic path and says so on the pose. Delete the line, or pass an explicit
-`--mode dynamic`, to drive it the other way.
+The rig compiles once per binding epoch into the shared operation graph:
+typed steps over dense slots, each bound to the exact producers of its
+inputs. A frame reruns only the steps whose inputs changed. usdview,
+`rigExecPose`, frame-cache workers and the `.rigexec` runtime all evaluate
+that graph; there is no second evaluator to select and no fallback path.
+`Biped.usda` and `Biped_body_center.usda` author
+`uniform bool rigExec:baked = true` on their `RigExecRoot`; evaluation
+ignores that attribute.
+
 ## Touching it
 
 **RigExec → TouchPose** lets you pick controls by touching the character
@@ -244,12 +242,12 @@ one leaves the other in the same step -- and nothing is written until
 from (`Biped_body_touch_regions.usda` or `Biped_face_touch_regions.usda`)
 and never the rig.
 
-That last part is not just tidiness. An authored edit on any prim inside
-the rig's read roots makes OpenExec uncompile and recompile the network,
-which costs about 2.3 s on the next evaluate. The paint buffer lives
-outside the rig for that reason (and the highlight is not on the stage at
-all), and the headless test asserts the rig's generation counter does not
-move across a stroke.
+That last part is not just tidiness. An authored edit inside the rig's
+read roots is a stage edit the evaluator must classify and invalidate, and
+a structural one recompiles the rig. The paint buffer lives outside the rig
+for that reason (and the highlight is not on the stage at all), and the
+headless test asserts the rig's generation counter does not move across a
+stroke.
 
 ### The files
 

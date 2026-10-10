@@ -35,21 +35,20 @@ Publishes computePointFrameArray (spec section 4.1).
 
 ## How it works
 
-All of it is pose phase: the solve is one branch of the
-pose bake (`libs/rigExec/bakedPose.cpp:2552`), and `RigExecRibbon` is one
-of the six baked solver types (`libs/rigExec/bakedProgram.cpp:124`). The
+All of it is pose phase: the solve is one solver operation
+(`libs/rigExecGraph/solverProgram.cpp:92`), and `RigExecRibbon` is one of
+the six compiled solver types (`libs/rigExec/bakedProgram.cpp:156`). The
 compiler resolves `rigExec:driverCurve` to the target's native `points`
-attribute and the solve reads two values of it — the live one and the
-bind-time (default) one — then samples both at equal arc length
-(`libs/rigExecMath/geometryKernels.cpp:549`) and transports a
-rotation-minimizing frame along each, publishing the posed frames paired
-with their rests as one `computePointFrameArray`. Each
+attribute and the solve reads two values of it — the live one, at the read
+phase declared on `rigExec:driverCurve`
+(`libs/rigExec/crossDomainInputs.cpp:244`), and the bind-time (default)
+one — then samples both at equal arc length and transports a
+rotation-minimizing frame along each
+(`libs/rigExecMath/geometryKernels.cpp:741`), publishing the posed frames
+paired with their rests as one `computePointFrameArray`. Each
 `rigExec:joints` entry takes one element of that array as its whole posed
-frame, handed to exec as an override on the joint
-(`libs/rigExec/rigEvaluator.cpp:10512-10515`). Because the driver is scene
-data rather than a control-driven curve, the solve cannot see mover output
-(`libs/rigExec/computations.cpp:1032`); what a wrap measures against is
-the bind-time curve.
+frame through the compiled solver-to-joint binding. What a wrap measures
+against is the bind-time curve.
 
 ## Wiring
 

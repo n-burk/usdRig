@@ -56,11 +56,10 @@ without clamping (a degenerate `min == max` yields 0).
 Inputs may be CONNECTED rather than authored locally: the read follows
 the connection chain and resolves the source at the evaluated time, which
 is what lets an animator channel published on a control drive the mover.
-The whole property chain still owes exec nothing, so it resolves BEFORE
-exec runs and its result is handed back as the attribute's own value; a
-chain whose input is produced by another property chain is ordered after
-its producer. That input reads the producer's base, its authored value,
-unless it declares `rigExecReadPhase = "final"` or a checkpoint (see
+The chain runs before every operation that reads the revised attribute,
+and they read its result as the attribute's value; a chain whose input is
+produced by another property chain is ordered after its producer. That
+input reads the producer's base, its authored value, unless it declares `rigExecReadPhase = "final"` or a checkpoint (see
 [Connected inputs](../concepts/how-operators-fire.md#connected-inputs)).
 
 ## Wiring

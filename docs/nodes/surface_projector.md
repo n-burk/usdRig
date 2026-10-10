@@ -56,8 +56,8 @@ controls into a second matrix primvar for the same shader.
 
 Both primvars are derived targets of the surface's point chain: they
 are recomputed when the chain's final points or a source frame
-change, and the dynamic path, the baked program, the frame cache and
-the .rigexec runtime compute them with one kernel.
+change, and native, frozen and frame-cache evaluation and the
+.rigexec runtime compute them with one kernel.
 
 ## How it works
 

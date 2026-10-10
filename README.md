@@ -29,7 +29,7 @@ and [Matt Schiller](https://github.com/matthewschiller).
   experimental `.rigexec` export with a standalone binary runtime.
 - `usdview` tools for controls, curves, layers, picking, and node graphs.
 
-RigExec builds against OpenUSD installation with OpenExec.
+RigExec builds against an OpenUSD installation with OpenExec.
 The [architecture guide](docs/specs/spec.md) explains the evaluation layers;
 the [node reference](docs/index.md) describes authoring and parameters.
 
@@ -120,7 +120,7 @@ The [biped](examples/biped/README.md) is the full character example.
 | `libs/rigExecRigging` | C++ authoring API |
 | `libs/rigExecImaging` | Hydra scene indices and viewport publication |
 | `libs/rigExecBake`, `libs/rigExecBinary`, `libs/rigExecRuntime` | Binary export, format, and playback |
-| `libs/rigExecStandalone` | Experimental Esf adapter and rigpack backend |
+| `libs/rigExecStandalone` | Experimental stage-free scene runtime and rigpack backend |
 | `python` | Python bindings and authoring helpers |
 | `plugin` | Schema resources and optional viewer tools |
 | `tests`, `examples`, `docs` | Verification, sample stages, and documentation |
@@ -144,21 +144,21 @@ formats require explicit compatibility testing.
 
 ## OpenExec usage
 
-RigExec uses [OpenExec](https://openusd.org/release/intro_to_openexec.html),
-the execution system in OpenUSD 26.08, from an unmodified installation; its
-[system design](https://openusd.org/dev/api/page__execution__system__design.html)
-describes the parts named here.
+RigExec builds against [OpenExec](https://openusd.org/release/intro_to_openexec.html)
+from an unmodified OpenUSD 26.08 installation, but production evaluation does
+not run it.
 
-- **Schema computations.** `libs/rigExec` registers computations for its
-  schemas with `EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA`: provider frames and
-  matrices (`computePointFrame`, `computeRestFrame`, `computeMatrix`), solver
-  outputs (`computePointFrameArray`), weight packets, and mover parameters.
-- **Independent checks.** Optional operation checks read reference values
-  through `ExecUsdSystem` requests keyed by `ExecUsdValueKey`, with captured
-  inputs supplied as `ExecUsdValueOverride` values.
-- **Standalone adapter.** The experimental `libs/rigExecStandalone` implements
-  the Esf scene interfaces over its own scene database.
+- Native, frozen and `.rigexec` evaluation, and the standalone scene runtime,
+  execute the shared operation graph. The binary runtime links no USD or
+  OpenExec library.
+- `libs/rigExec` registers value types and schema computations with OpenExec.
+  Only an optional reference check and tests request them.
+- `rigExecPose --exec-crosscheck` compares eligible native operation results
+  bit for bit with one-key `ExecUsdSystem` requests that receive the
+  operation's captured inputs as overrides. The registrations share the
+  production kernels, so this checks input binding rather than arithmetic.
+- `libs/rigExecStandalone` contains an Esf scene adapter that nothing calls.
 
-Native, frozen, and `.rigexec` production execution use the shared operation
-graph. The binary runtime links no USD library. Other upstream and published
+[OpenExec reference checks](docs/concepts/baked-vs-dynamic.md#openexec-reference-checks)
+lists what is judged and where the code is. Other upstream and published
 sources are listed in the [method references](docs/references.md).

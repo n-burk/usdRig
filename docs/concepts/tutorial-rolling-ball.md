@@ -364,8 +364,9 @@ row's edge all the same. That second drag is an attribute
 connection rather than a relationship — a value travelling, not a
 reference.
 
-Property chains resolve *before* exec runs, so the revised `rz` is what
-the FK chain sees in the same evaluation; nothing is a frame late.
+The compiled graph orders the property chain before the control that reads
+`avars:rz`, so the revised `rz` is what the FK chain sees in the same
+evaluation; nothing is a frame late.
 
 Drag `Move`'s X handle again and the ball rolls, star and band sweeping
 over the top, with no keys on any rotation.
