@@ -18,8 +18,6 @@
 #ifndef RIGEXEC_BAKE_REVISION_READS_H
 #define RIGEXEC_BAKE_REVISION_READS_H
 
-#include "rigExec/bakedProgramImpl.h"
-
 #include <pxr/base/vt/value.h>
 #include <pxr/usd/sdf/path.h>
 
@@ -30,6 +28,8 @@
 #include <vector>
 
 namespace rigExec {
+
+struct RigExecBakedProgramImpl;
 
 /// One key an assembly can read.
 struct RigExecBakeRevisionRead {
@@ -54,14 +54,14 @@ struct RigExecBakeRevisionRead {
 using RigExecBakeRevisionReadSink =
     std::function<void(RigExecBakeRevisionRead &&)>;
 
-/// Every key \p revision's assembly can read at \p time, delivered to
-/// \p sink in the order its assembly reads them. \p revision is a chain
-/// revision or a derived one of \p program (a derived matrix target reads
-/// the projector's keys).
+/// Every key one revision's assembly can read at \p time, delivered to
+/// \p sink in the order its assembly reads them. \p chainIndex and
+/// \p revisionIndex select a chain revision, or a derived revision when
+/// \p derived is set (a derived matrix target reads the projector's keys).
 void RigExecBakeEnumerateRevisionReads(
-    const RigExecBakedProgramImpl &program,
-    const RigExecBakedProgramImpl::GeomRevision &revision,
-    double time, const RigExecBakeRevisionReadSink &sink);
+    const RigExecBakedProgramImpl &program, size_t chainIndex,
+    size_t revisionIndex, bool derived, double time,
+    const RigExecBakeRevisionReadSink &sink);
 
 /// Every key the packet of weight object \p object (an index into
 /// \p program's weight objects) gathers at \p time: the combine target's

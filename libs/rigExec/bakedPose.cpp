@@ -16,9 +16,10 @@
 #include "moverGraph.h"
 #include "rigEvaluator.h"
 #include "solverKernels.h"
-#include "rigExecGraph/sceneCompileInputs.h"
-#include "rigExecGraph/solverSceneLowering.h"
-#include "rigExecGraph/constraintSceneLowering.h"
+#include "rigExecScene/sceneCompileInputs.h"
+#include "rigExecScene/solverSceneLowering.h"
+#include "rigExecScene/constraintSceneLowering.h"
+#include "sceneDispatch.h"
 #include "types.h"
 
 #include "rigExecMath/geometryKernels.h"
@@ -608,7 +609,7 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
         }
         RigExecSceneSolverDescriptor descriptor;
         std::string lowerError;
-        if(!RigExecLowerSceneSolver(*B.sceneDescriptors,solverPath,providerRests,&descriptor,&lowerError))
+        if(!RigExecDispatchLowerSceneSolver(*B.sceneDescriptors,solverPath,providerRests,&descriptor,&lowerError))
             refuse(lowerError,solverPath);
         else {
             // Native input binding selects live/rest SSA versions; the common
@@ -678,7 +679,7 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
         if(fc.schemaType!="RigExecMatrixMover" && constraintNode &&
            constraintNode->fact.type==fc.schemaType) {
             std::string error;
-            loweredConstraint=RigExecLowerSceneConstraint(*B.sceneDescriptors,fc.moverPath,
+            loweredConstraint=RigExecDispatchLowerSceneConstraint(*B.sceneDescriptors,fc.moverPath,
                 fc.targets,&sceneConstraint,&error);
             if(!loweredConstraint) refuse(error,fc.moverPath);
             else c.kernelRecord=sceneConstraint.record;
@@ -4502,7 +4503,7 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
                     else ac.values.Publish(read.value,rd(read.wide),false,true);
                 }
                 std::string invalid;
-                if(!RigExecRunAutoClavicle(ac.operation,&ac.values,&invalid))step->diagnostics.push_back(invalid);
+                if(!RigExecDispatchRunAutoClavicle(ac.operation,&ac.values,&invalid))step->diagnostics.push_back(invalid);
                 if(const auto *frame=ac.values.Read<RigExecPointFrame>(ac.operation.output))B.base[size_t(i)]=*frame;
             }
             B.fin[size_t(i)] = B.base[size_t(i)];

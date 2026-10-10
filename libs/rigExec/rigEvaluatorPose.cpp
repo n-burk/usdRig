@@ -1,8 +1,8 @@
 // Constraint operators, pose interpolators, and rest-frame composition.
 
 #include "rigEvaluatorInternal.h"
-#include "rigExecGraph/poseSceneLowering.h"
-#include "rigExecGraph/usdSceneAccess.h"
+#include "rigExecScene/poseSceneLowering.h"
+#include "sceneDispatch.h"
 #include "rigEvaluatorDependencies.h"
 #include "rigEvaluatorConstraints.h"
 #include "movers/moverRegistry.h"
@@ -275,15 +275,14 @@ RigExecRigEvaluator::_CompilePoseInterpolators(
     phases.Next("Compile.PoseInterpolators.SceneCapture");
     RigExecSceneDescriptors localScene;
     RigExecSceneDescriptors &scene = capturedScene ? *capturedScene : localScene;
-    const RigExecUsdSceneAccess source(_stage);
-    if(!RigExecCaptureSceneDescriptors(source,_rigPath,{UsdTimeCode::Default()},&scene,error))return false;
+    if(!RigExecDispatchCaptureSceneDescriptors(_stage,_rigPath,{UsdTimeCode::Default()},&scene,error))return false;
     phases.Next("Compile.PoseInterpolators.Lowering");
     std::set<SdfPath> providers(joints.begin(),joints.end());
     providers.insert(controls.begin(),controls.end());
     for(const auto &path:paths) {
         *operation=path;
         auto descriptor=std::make_shared<RigExecScenePoseInterpolatorDescriptor>();
-        if(!RigExecLowerScenePoseInterpolator(scene,path,descriptor.get(),error))return false;
+        if(!RigExecDispatchLowerScenePoseInterpolator(scene,path,descriptor.get(),error))return false;
         if(!descriptor->driver.IsEmpty() && !providers.count(descriptor->driver)) {
             *error="pose interpolator "+path.GetString()+" driver is not a provider of this rig";
             return false;

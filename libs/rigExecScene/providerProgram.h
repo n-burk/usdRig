@@ -2,7 +2,7 @@
 #define RIGEXEC_GRAPH_PROVIDER_PROGRAM_H
 #include "sceneDescriptors.h"
 #include "typedValues.h"
-#include "providerRecords.h"
+#include "rigExecGraph/providerRecords.h"
 #include <limits>
 #include <set>
 

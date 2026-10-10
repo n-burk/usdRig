@@ -2,7 +2,7 @@
 #include "rigExec/bakedProgramImpl.h"
 #include "rigExec/pathText.h"
 #include "rigExecGraph/opValues.h"
-#include "rigExecGraph/providerProgram.h"
+#include "rigExecScene/providerProgram.h"
 #include "pxr/base/gf/quatd.h"
 #include "pxr/base/gf/vec2d.h"
 #include "pxr/base/gf/vec4f.h"

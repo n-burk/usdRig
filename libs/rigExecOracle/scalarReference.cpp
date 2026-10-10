@@ -1,6 +1,6 @@
-#include "scalarReference.h"
-#include "rigEvaluatorInternal.h"
-#include "rigEvaluatorConstraints.h"
+#include "rigExec/scalarReference.h"
+#include "rigExec/rigEvaluatorInternal.h"
+#include "rigExec/rigEvaluatorConstraints.h"
 #include "rigExecMath/envelope.h"
 #include <algorithm>
 #include <cmath>

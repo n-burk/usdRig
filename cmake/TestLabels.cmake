@@ -10,8 +10,9 @@ set(_rigexec_pxr_libs
     usdRender usdVol usdMedia usdPhysics cameraUtil pxOsd geomUtil glf garch hf
     usdImagingGL)
 set(_rigexec_project_libs
-    rigExec rigExecRuntime rigExecMath rigExecGraph rigExecBinary rigExecBake
-    rigExecImaging rigExecRigging rigExecStandalone rigExecSampler rigExecLzma)
+    rigExec rigExecScene rigExecOracle rigExecRuntime rigExecMath rigExecGraph
+    rigExecBinary rigExecBake rigExecImaging rigExecRigging rigExecStandalone
+    rigExecSampler rigExecLzma)
 set(_rigexec_fast_direct rigExecMath)
 
 function(_rigexec_normalize_link raw out)

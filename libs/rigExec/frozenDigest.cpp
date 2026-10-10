@@ -150,7 +150,7 @@ RigExecFrozenPurityAudit()
          RigExecFrozenPurity::Pure,
          "free functions over their arguments; settings arrive in the "
          "packet or the op inputs, and text settings parse from views"},
-        {"provider affine frame expressions (rigExecGraph/providerProgram.cpp "
+        {"provider affine frame expressions (rigExecScene/providerProgram.cpp "
          "AffineFrame ops)",
          RigExecFrozenPurity::Pure,
          "ordinary provider ops over declared attribute values and provider "

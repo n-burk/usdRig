@@ -124,7 +124,8 @@ void
 _Revision(const RigExecBakedProgramImpl &program, double time,
           const _SlotDriven &slotDriven,
           const RigExecBakedProgramImpl::GeomRevision &revision,
-          _Entries *entries)
+          _Entries *entries, size_t chainIndex, size_t revisionIndex,
+          bool derived)
 {
     const UsdStageRefPtr &stage = program.stage;
     for (const RigExecBakedProgramImpl::GeomBlendChannel &channel :
@@ -167,7 +168,8 @@ _Revision(const RigExecBakedProgramImpl &program, double time,
     const std::string readField = "revision read " +
                                   revision.moverPath.GetString();
     RigExecBakeEnumerateRevisionReads(
-        program, revision, time, [&](RigExecBakeRevisionRead &&read) {
+        program, chainIndex, revisionIndex, derived, time,
+        [&](RigExecBakeRevisionRead &&read) {
             // A read at Default sees no time sample.
             if (read.rest || bindingPaths.count(read.path) ||
                 !read.path.IsPropertyPath()) {
@@ -323,24 +325,29 @@ RigExecBakeStaticReport(RigExecRigEvaluator &evaluator,
     }
 
     // Point chains: authored bases, blend-sample points, binding arrays.
-    for (const RigExecBakedProgramImpl::GeomChain &chain : B.chains) {
+    for (size_t chainIndex = 0; chainIndex < B.chains.size(); ++chainIndex) {
+        const RigExecBakedProgramImpl::GeomChain &chain = B.chains[chainIndex];
         if (chain.baseQuery.IsValid() &&
             !slotDriven(chain.baseQuery.GetAttribute().GetPath())) {
             _Attribute(chain.baseQuery.GetAttribute(),
                        "chain base " + chain.target.GetString(), &found);
         }
-        for (const RigExecBakedProgramImpl::GeomRevision &revision :
-             chain.revisions) {
-            _Revision(B, probe, slotDriven, revision, &found);
+        for (size_t revisionIndex = 0; revisionIndex < chain.revisions.size();
+             ++revisionIndex) {
+            _Revision(B, probe, slotDriven, chain.revisions[revisionIndex],
+                      &found, chainIndex, revisionIndex, false);
         }
-        for (const RigExecBakedProgramImpl::GeomChain::Derived &derived :
-             chain.derived) {
+        for (size_t revisionIndex = 0; revisionIndex < chain.derived.size();
+             ++revisionIndex) {
+            const RigExecBakedProgramImpl::GeomChain::Derived &derived =
+                chain.derived[revisionIndex];
             if (derived.baseQuery.IsValid()) {
                 _Attribute(derived.baseQuery.GetAttribute(),
                            "derived base " + derived.target.GetString(),
                            &found);
             }
-            _Revision(B, probe, slotDriven, derived.revision, &found);
+            _Revision(B, probe, slotDriven, derived.revision, &found,
+                      chainIndex, revisionIndex, true);
         }
     }
 

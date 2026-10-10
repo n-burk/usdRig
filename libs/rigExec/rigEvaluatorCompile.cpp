@@ -4,8 +4,8 @@
 #include "crossDomainInputs.h"
 #include "inputReplay.h"
 #include "moverGraph.h"
-#include "rigExecGraph/poseSceneLowering.h"
-#include "rigExecGraph/usdSceneAccess.h"
+#include "rigExecScene/poseSceneLowering.h"
+#include "sceneDispatch.h"
 #include "rigEvaluatorDependencies.h"
 #include "rigEvaluatorPropertyBindings.h"
 #include "rigEvaluatorConstraints.h"
@@ -3199,15 +3199,15 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
                 compileSceneSerial != GetStageEditSerial()) {
                 compileScene=std::make_unique<RigExecSceneDescriptors>();
                 const uint64_t before=GetStageEditSerial();
-                const RigExecUsdSceneAccess source(_stage);std::string error;
-                if(!RigExecCaptureSceneDescriptors(source,_rigPath,{UsdTimeCode::Default()},compileScene.get(),&error))return fail(error);
+                std::string error;
+                if(!RigExecDispatchCaptureSceneDescriptors(_stage,_rigPath,{UsdTimeCode::Default()},compileScene.get(),&error))return fail(error);
                 // A notice during capture makes the snapshot ineligible for
                 // later reuse; its original switch lowering still runs here.
                 compileSceneSerial=before;
                 compileSceneReusable=before==GetStageEditSerial();
             }
             auto captured=std::make_shared<RigExecSceneSpaceSwitchDescriptor>();std::string error;
-            if(!RigExecLowerSceneSpaceSwitch(*compileScene,path,captured.get(),&error))return fail(error);
+            if(!RigExecDispatchLowerSceneSpaceSwitch(*compileScene,path,captured.get(),&error))return fail(error);
             if(!targets.insert(captured->target).second)
                 return fail(captured->target.GetString()+" is the target of more than one space switch");
             _SpaceSwitch record;record.descriptor=captured;record.switchPath=path;record.target=captured->target;

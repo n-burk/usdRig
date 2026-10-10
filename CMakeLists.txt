@@ -49,8 +49,8 @@ elseif (UNIX)
 endif()
 set(CMAKE_INSTALL_RPATH_USE_LINK_PATH ON)
 
-# USD-free op scheduler (opGraph.cpp only). The other libs/rigExecGraph
-# sources are compiled into the USD-linked rigExec library.
+# USD-free op scheduler. libs/rigExecGraph is only this archive.
+# USD scene lowering is rigExecScene, linked into the shared library below.
 add_library(rigExecGraph STATIC libs/rigExecGraph/opGraph.cpp)
 target_compile_features(rigExecGraph PUBLIC cxx_std_17)
 target_compile_definitions(rigExecGraph PUBLIC
@@ -89,7 +89,51 @@ target_link_libraries(rigExecInputValues PRIVATE vt sdf ts)
 target_compile_definitions(rigExecInputValues PRIVATE RIGEXEC_INPUT_VALUES_EXPORTS)
 set_target_properties(rigExecInputValues PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
-# rigExec: schema bindings, normalized graph lowering and native evaluation.
+# USD scene lowering. A shared library: librigExec does not absorb it.
+# Frame-path program runners are sources of rigExec, below.
+add_library(rigExecScene SHARED
+    libs/rigExecScene/autoClavicleGraph.cpp
+    libs/rigExecScene/constraintGraphBinding.cpp
+    libs/rigExecScene/constraintSceneLowering.cpp
+    libs/rigExecScene/geometryGraphBinding.cpp
+    libs/rigExecScene/geometrySceneLowering.cpp
+    libs/rigExecScene/poseCommit.cpp
+    libs/rigExecScene/poseGraphBinding.cpp
+    libs/rigExecScene/poseSceneLowering.cpp
+    libs/rigExecScene/propertyGraphBinding.cpp
+    libs/rigExecScene/propertySceneLowering.cpp
+    libs/rigExecScene/providerRecordExport.cpp
+    libs/rigExecScene/registerScene.cpp
+    libs/rigExecScene/sceneLinkAnchor.cpp
+    libs/rigExecScene/sceneDescriptors.cpp
+    libs/rigExecScene/sceneGraphBinding.cpp
+    libs/rigExecScene/sceneGraphTypedRead.cpp
+    libs/rigExecScene/sceneProgram.cpp
+    libs/rigExecScene/sceneProgramLayout.cpp
+    libs/rigExecScene/sceneProgramLowering.cpp
+    libs/rigExecScene/sceneTypedReads.cpp
+    libs/rigExecScene/sceneVersionRoutes.cpp
+    libs/rigExecScene/solverGraphBinding.cpp
+    libs/rigExecScene/solverSceneLowering.cpp
+    libs/rigExecScene/usdSceneAccess.cpp
+    libs/rigExecScene/weightGraphBinding.cpp
+    libs/rigExecScene/weightSceneLowering.cpp
+)
+target_compile_features(rigExecScene PUBLIC cxx_std_17)
+target_include_directories(rigExecScene PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs>
+    $<INSTALL_INTERFACE:${RIGEXEC_INSTALL_INCLUDEDIR}>)
+target_link_libraries(rigExecScene PUBLIC
+    tf gf vt sdf ts usd usdGeom)
+target_link_libraries(rigExecScene PRIVATE rigExecGraph rigExecMath)
+set_target_properties(rigExecScene PROPERTIES POSITION_INDEPENDENT_CODE ON)
+add_library(rigExec::rigExecScene ALIAS rigExecScene)
+target_sources(rigExecScene INTERFACE
+    "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs/rigExecScene/sceneLinkAnchor.cpp>")
+
+# rigExec: schema bindings and native evaluation. It does not link the
+# scene or oracle libraries. Callers that compile a stage link
+# rigExecScene. Cpu-reference and golden runs link rigExecOracle.
 add_library(rigExec SHARED
     libs/rigExec/types.cpp
     libs/rigExec/parallel.cpp
@@ -98,46 +142,21 @@ add_library(rigExec SHARED
     libs/rigExec/moverKernels.cpp
     libs/rigExec/solverKernels.cpp
     libs/rigExec/weightPackets.cpp
-    libs/rigExec/goldenPose.cpp
-    libs/rigExec/goldenSuite.cpp
     libs/rigExec/inputReplay.cpp
-    libs/rigExec/bakedExecCrossCheck.cpp
-    libs/rigExec/weightReference.cpp
-    libs/rigExec/scalarReference.cpp
     libs/rigExec/scalarReferenceAdapter.cpp
-    libs/rigExec/oracleInputs.cpp
-    libs/rigExecGraph/usdSceneAccess.cpp
-    libs/rigExecGraph/poseCommit.cpp
-    libs/rigExecGraph/providerContextBinding.cpp
-    libs/rigExecGraph/constraintGraphBinding.cpp
-    libs/rigExecGraph/geometryGraphBinding.cpp
-    libs/rigExecGraph/autoClavicleGraph.cpp
-    libs/rigExecGraph/poseGraphBinding.cpp
-    libs/rigExecGraph/poseProgram.cpp
-    libs/rigExecGraph/poseSceneLowering.cpp
-    libs/rigExecGraph/propertyGraphBinding.cpp
-    libs/rigExecGraph/sceneGraphBinding.cpp
-    libs/rigExecGraph/sceneGraphTypedRead.cpp
-    libs/rigExecGraph/sceneProgram.cpp
-    libs/rigExecGraph/sceneProgramLayout.cpp
-    libs/rigExecGraph/sceneProgramLowering.cpp
-    libs/rigExecGraph/solverGraphBinding.cpp
-    libs/rigExecGraph/weightGraphBinding.cpp
-    libs/rigExecGraph/sceneDescriptors.cpp
-    libs/rigExecGraph/sceneCompileInputs.cpp
-    libs/rigExecGraph/solverProgram.cpp
-    libs/rigExecGraph/solverSceneLowering.cpp
-    libs/rigExecGraph/constraintProgram.cpp
-    libs/rigExecGraph/constraintSceneLowering.cpp
-    libs/rigExecGraph/propertyProgram.cpp
-    libs/rigExecGraph/propertySceneLowering.cpp
-    libs/rigExecGraph/sceneVersionRoutes.cpp
-    libs/rigExecGraph/geometryProgram.cpp
-    libs/rigExecGraph/geometrySceneLowering.cpp
-    libs/rigExecGraph/weightProgram.cpp
-    libs/rigExecGraph/weightSceneLowering.cpp
-    libs/rigExecGraph/sceneTypedReads.cpp
+    libs/rigExec/oracleDispatch.cpp
+    libs/rigExec/sceneDispatch.cpp
     libs/rigExec/weightField.cpp
+    libs/rigExecScene/constraintProgram.cpp
+    libs/rigExecScene/geometryProgram.cpp
+    libs/rigExecScene/poseProgram.cpp
+    libs/rigExecScene/propertyProgram.cpp
+    libs/rigExecScene/providerContextBinding.cpp
+    libs/rigExecScene/providerProgram.cpp
+    libs/rigExecScene/sceneCompileInputs.cpp
+    libs/rigExecScene/solverProgram.cpp
+    libs/rigExecScene/typedValues.cpp
+    libs/rigExecScene/weightProgram.cpp
     libs/rigExec/movers/moverRegistry.cpp
     libs/rigExec/movers/matrixMover.cpp
     libs/rigExec/movers/skinMover.cpp
@@ -173,10 +192,6 @@ add_library(rigExec SHARED
     libs/rigExec/bakedProperties.cpp
     libs/rigExec/bakedOpValues.cpp
     libs/rigExec/bakedOpGraph.cpp
-    libs/rigExecGraph/providerRecordExport.cpp
-    libs/rigExecGraph/providerProgram.cpp
-    libs/rigExecGraph/typedValues.cpp
-    libs/rigExec/bakedExecCrossCheckRows.cpp
     libs/rigExec/bakedSchedule.cpp
     libs/rigExec/bakedTrace.cpp
     libs/rigExec/bakedUpstream.cpp
@@ -199,14 +214,46 @@ target_include_directories(rigExec PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs>
     $<INSTALL_INTERFACE:${RIGEXEC_INSTALL_INCLUDEDIR}>)
 target_link_libraries(rigExec PUBLIC
-    rigExecGraph
-    rigExecMath
     # usdSkel is here for UsdSkelBlendShape only: a sparse blend sample names
     plug sdf usd usdGeom usdSkel work
     exec execUsd ef vdf
 )
 
-target_link_libraries(rigExec PRIVATE rigExecInputValues)
+target_link_libraries(rigExec PRIVATE
+    rigExecGraph rigExecMath rigExecInputValues ts)
+# Scene lowering calls back into the evaluator. The evaluator does not
+# link the scene library; callers that compile a stage do.
+target_link_libraries(rigExecScene PUBLIC rigExec)
+
+# Test oracles and goldens. A shared library so librigExec does not absorb
+# it and a static math edge does not land on every consumer. Not linked
+# into imaging, playback, or runtime tests. The Python module links it,
+# so the install ships the library beside librigExec. A cpu-reference or
+# golden run aborts when the library is missing.
+add_library(rigExecOracle SHARED
+    libs/rigExecOracle/goldenPose.cpp
+    libs/rigExecOracle/goldenSuite.cpp
+    libs/rigExecOracle/bakedExecCrossCheck.cpp
+    libs/rigExecOracle/bakedExecCrossCheckRows.cpp
+    libs/rigExecOracle/weightReference.cpp
+    libs/rigExecOracle/scalarReference.cpp
+    libs/rigExecOracle/scalarReferenceRun.cpp
+    libs/rigExecOracle/oracleInputs.cpp
+    libs/rigExecOracle/registerOracle.cpp
+    libs/rigExecOracle/oracleLinkAnchor.cpp
+)
+target_compile_features(rigExecOracle PUBLIC cxx_std_17)
+target_include_directories(rigExecOracle PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs>
+    $<INSTALL_INTERFACE:${RIGEXEC_INSTALL_INCLUDEDIR}>)
+target_link_libraries(rigExecOracle PRIVATE rigExecMath rigExec)
+target_link_libraries(rigExecOracle PUBLIC
+    tf gf vt sdf ts usd usdGeom usdSkel)
+set_target_properties(rigExecOracle PROPERTIES POSITION_INDEPENDENT_CODE ON)
+add_library(rigExec::rigExecOracle ALIAS rigExecOracle)
+target_sources(rigExecOracle INTERFACE
+    "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs/rigExecOracle/oracleLinkAnchor.cpp>")
+
 target_sources(rigExec INTERFACE
     "$<BUILD_INTERFACE:$<$<STREQUAL:$<TARGET_PROPERTY:TYPE>,EXECUTABLE>:${CMAKE_CURRENT_SOURCE_DIR}/libs/rigExec/observerHostExit.cpp>>")
 
@@ -226,6 +273,7 @@ target_include_directories(rigExecStandalone PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs>
     $<INSTALL_INTERFACE:${RIGEXEC_INSTALL_INCLUDEDIR}>)
 target_link_libraries(rigExecStandalone PUBLIC rigExec exec esf usd sdf)
+target_link_libraries(rigExecStandalone PRIVATE rigExecScene)
 
 add_library(rigExecRigging SHARED
     libs/rigExecRigging/rigBuilder.cpp
@@ -234,8 +282,8 @@ target_include_directories(rigExecRigging PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs>
     $<INSTALL_INTERFACE:${RIGEXEC_INSTALL_INCLUDEDIR}>)
 target_link_libraries(rigExecRigging PUBLIC
-    rigExecMath
     sdf tf gf vt usd)
+target_link_libraries(rigExecRigging PRIVATE rigExecMath)
 
 # rigExecImaging: Hydra 2.0 scene-index publication (spec §10).
 add_library(rigExecImaging SHARED
@@ -270,7 +318,7 @@ target_link_libraries(rigExecImaging PUBLIC
     sdr
     work
 )
-target_link_libraries(rigExecImaging PRIVATE rigExecRuntime rigExecSampler)
+target_link_libraries(rigExecImaging PRIVATE rigExecRuntime rigExecSampler rigExecScene)
 target_compile_definitions(rigExecImaging PRIVATE RIGEXEC_IMAGING_EXPORTS)
 
 # The vendored FlatBuffers C++ runtime headers (Apache-2.0, unmodified; see
@@ -366,6 +414,7 @@ target_include_directories(rigExecBake PUBLIC
 target_link_libraries(rigExecBake PUBLIC
     rigExec
     rigExecBinary)
+target_link_libraries(rigExecBake PRIVATE rigExecScene)
 add_library(rigExec::rigExecBake ALIAS rigExecBake)
 
 add_executable(rigExecBakeTool tools/rigExecBake.cpp)
@@ -2254,7 +2303,7 @@ if (MSVC AND NOT CMAKE_DISABLE_PRECOMPILE_HEADERS)
 
     # The libraries, and every test, bench or probe executable linking one
     # of the USD-facing libraries.
-    set(_rigexec_pch_users rigExec rigExecImaging rigExecBake)
+    set(_rigexec_pch_users rigExec rigExecScene rigExecOracle rigExecImaging rigExecBake)
     get_property(_rigexec_pch_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
     foreach(_target IN LISTS _rigexec_pch_targets)
         get_target_property(_type ${_target} TYPE)
@@ -2275,17 +2324,63 @@ if (MSVC AND NOT CMAKE_DISABLE_PRECOMPILE_HEADERS)
     endforeach()
 endif()
 
+# Executables that compile a stage through rigExec alone name the scene
+# library, so the hooks are loaded. Imaging, bake, and the standalone
+# adapter link it privately: playback, runtime, and imaging tests load
+# the library and are not scene tests. testRigExecStandalone calls the
+# lowering functions from the test itself.
+foreach(_rigexec_scene_exe IN ITEMS
+    benchEditLatency benchFrameCache benchFrameCacheWarm probeCodingError
+    rigExecPose rigExecBakeTool
+    testRigExecAffineFrames testRigExecArm testRigExecBakedAttribute
+    testRigExecBakedMode testRigExecBakedSchedule testRigExecBinary
+    testRigExecChainLevels testRigExecConstraints testRigExecCrossDomainInputs
+    testRigExecDefaultSpaces testRigExecDeltaMush testRigExecEnvelopeVolumes
+    testRigExecEpochRests testRigExecExampleParity testRigExecExecCrossCheck
+    testRigExecExecCrossCheckRows testRigExecExternalMovers
+    testRigExecFrameCacheCones_Verify testRigExecFrameCacheSparsity
+    testRigExecFrozenContext testRigExecGeometryOpsBakedParity
+    testRigExecGeometryProgram testRigExecGraphBindings testRigExecInputActions
+    testRigExecInteractive testRigExecLattice testRigExecLeaves
+    testRigExecOneLoopAcceptance testRigExecOpTrace
+    testRigExecPhaseBindings testRigExecPoseInterpolator
+    testRigExecPropertyOps testRigExecRestOps testRigExecRuntimeInputs
+    testRigExecScopedClears testRigExecSkinTopology testRigExecSolverBake
+    testRigExecSolverStacking testRigExecSurfaceBinding testRigExecSurfaceProjector
+    testRigExecSurfaceSnap testRigExecValueEdits testRigExecVolumeWeights
+    testRigExecWeightProgram testRigExecWrinkle
+    testRigExecStandalone)
+    target_link_libraries(${_rigexec_scene_exe} PRIVATE rigExecScene)
+endforeach()
+
+# Oracles are linked only where a test runs cpu-reference, golden capture,
+# or an exec cross-check. Imaging, playback, and runtime tests do not.
+foreach(_rigexec_oracle_exe IN ITEMS
+    rigExecPose benchEditLatency
+    testRigExecArm testRigExecBakedAttribute testRigExecBakedMode
+    testRigExecBakedSchedule testRigExecConstraints testRigExecDeltaMush
+    testRigExecEpochRests testRigExecExampleParity
+    testRigExecExecCrossCheck testRigExecExecCrossCheckRows
+    testRigExecExternalMovers testRigExecFrozenContext
+    testRigExecGeometryOpsBakedParity testRigExecGoldenPose
+    testRigExecGoldenSuiteObserver testRigExecInputActions testRigExecInteractive
+    testRigExecOpTrace testRigExecOracleInputs testRigExecPhaseBindings
+    testRigExecPropertyOps testRigExecRestOps testRigExecSkinTopology
+    testRigExecSolverStacking testRigExecVolumeWeights testRigExecWrinkle)
+    target_link_libraries(${_rigexec_oracle_exe} PRIVATE rigExecOracle)
+endforeach()
+
 # Install
 include(CMakePackageConfigHelpers)
 
-install(TARGETS rigExecLzma rigExecGraph rigExecMath rigExec rigExecStandalone rigExecRigging rigExecImaging rigExecFlatBuffers rigExecBinary rigExecBake rigExecRuntime rigExecSampler
+install(TARGETS rigExecLzma rigExecGraph rigExecMath rigExec rigExecScene rigExecOracle rigExecStandalone rigExecRigging rigExecImaging rigExecFlatBuffers rigExecBinary rigExecBake rigExecRuntime rigExecSampler
     EXPORT rigExecTargets
     RUNTIME DESTINATION "${RIGEXEC_INSTALL_LIBDIR}"
     LIBRARY DESTINATION "${RIGEXEC_INSTALL_LIBDIR}"
     ARCHIVE DESTINATION "${RIGEXEC_INSTALL_LIBDIR}")
 
 # FILES_MATCHING still walks -- and recreates -- every subdirectory it passes
-foreach(_lib rigExecGraph rigExecMath rigExec rigExecStandalone rigExecRigging rigExecImaging rigExecBinary rigExecBake rigExecRuntime rigExecSampler)
+foreach(_lib rigExecGraph rigExecScene rigExecMath rigExec rigExecStandalone rigExecRigging rigExecImaging rigExecBinary rigExecBake rigExecRuntime rigExecSampler)
     install(DIRECTORY "libs/${_lib}/"
         DESTINATION "${RIGEXEC_INSTALL_INCLUDEDIR}/${_lib}"
         FILES_MATCHING

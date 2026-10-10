@@ -1,6 +1,8 @@
 // RigExec baked playback for Hydra (M2b). See playback.h for the contract.
 #include "playback.h"
+#include "rigExecRuntime/runtime.h"
 #include "rigExecRuntime/stageArrayInputs.h"
+#include "rigExecSampler/inputSampler.h"
 #include "rigExec/bakedProgram.h"
 #include "rigExec/bakedSchedule.h"
 #include "rigExec/movers/moverRegistry.h"
@@ -95,6 +97,12 @@ RigExecBakedPlayback::RigExecBakedPlayback(
 
 RigExecBakedPlayback::~RigExecBakedPlayback() = default;
 
+void
+RigExecBakedPlayback::NoteStageChanged()
+{
+    if (_sampler) _sampler->NoteStageChanged();
+}
+
 bool
 RigExecBakedPlayback::Open(const std::string &resolvedPath,
                            std::string *error)
@@ -158,10 +166,10 @@ RigExecBakedPlayback::Open(const std::string &resolvedPath,
         TF_WARN("rigExec: %s: %zu input(s) keep their bake-time value: %s",
                 resolvedPath.c_str(), warnings.size(), named.c_str());
     }
-    _sampler = std::move(sampler);
+    _sampler = std::make_unique<RigExecInputSampler>(std::move(sampler));
     // Static inputs are read again only after a stage notice, which the
     // registry forwards (NoteStageChanged).
-    _sampler.SetStaticInputSkip(true);
+    _sampler->SetStaticInputSkip(true);
     _epochDigest = _PlaybackDigestBytes(bytes);
     _reader = std::move(reader);
     // In-tree playback runs the reader's clusters in parallel by default
@@ -277,7 +285,7 @@ RigExecBakedPlayback::_LiftUpstream(const _UpstreamKey &key,
     if (!key.animated || !sampledArray) {
         // A static input the sampler binds is read again at the next
         // sampling Apply, over this reset (see _ApplyUpstream).
-        _sampler.NoteStageChanged();
+        _sampler->NoteStageChanged();
         return _reader->ResetInput(key.name, error);
     }
     return sampled || RigExecSampleInputAt(key.attribute, key.index,
@@ -339,7 +347,7 @@ RigExecBakedPlayback::_ApplyUpstream(UsdTimeCode time, bool sampled,
             // Apply refreshes and reads the stage over it, as every
             // sampling Apply reads an Animated input.
             if (!key.animated) {
-                _sampler.NoteStageChanged();
+                _sampler->NoteStageChanged();
             }
         }
         applied.emplace(path, key);
@@ -367,10 +375,10 @@ RigExecBakedPlayback::EvaluateAndPublishResult(UsdTimeCode time)
     std::string why;
     bool sampled = false;
     // Upstream values go in after Apply, never through
-    // _sampler.Invalidate(): an invalidated Apply touches every Animated
+    // _sampler->Invalidate(): an invalidated Apply touches every Animated
     // input, so every varying step would re-run for a change that reaches
     // only its own readers.
-    bool ran = _sampler.Apply(time, _reader.get(), &why, &sampled);
+    bool ran = _sampler->Apply(time, _reader.get(), &why, &sampled);
     if (ran) {
         _AdmitUpstream(time);
         ran = _ApplyUpstream(time, sampled, &why);
