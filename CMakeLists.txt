@@ -240,6 +240,7 @@ add_library(rigExecOracle SHARED
     libs/rigExecOracle/scalarReferenceRun.cpp
     libs/rigExecOracle/oracleInputs.cpp
     libs/rigExecOracle/registerOracle.cpp
+    libs/rigExecOracle/oracleLinkAnchor.cpp
 )
 target_compile_features(rigExecOracle PUBLIC cxx_std_17)
 target_include_directories(rigExecOracle PUBLIC
@@ -250,6 +251,8 @@ target_link_libraries(rigExecOracle PUBLIC
     tf gf vt sdf ts usd usdGeom usdSkel)
 set_target_properties(rigExecOracle PROPERTIES POSITION_INDEPENDENT_CODE ON)
 add_library(rigExec::rigExecOracle ALIAS rigExecOracle)
+target_sources(rigExecOracle INTERFACE
+    "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs/rigExecOracle/oracleLinkAnchor.cpp>")
 
 target_sources(rigExec INTERFACE
     "$<BUILD_INTERFACE:$<$<STREQUAL:$<TARGET_PROPERTY:TYPE>,EXECUTABLE>:${CMAKE_CURRENT_SOURCE_DIR}/libs/rigExec/observerHostExit.cpp>>")

@@ -44,4 +44,6 @@ const bool registered = [] {
     return true;
 }();
 }
+
+void RigExecOracleLinkAnchor() {}
 }
