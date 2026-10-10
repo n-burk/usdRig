@@ -8,7 +8,6 @@
 #include "rigExecBake/bake.h"
 #include "rigExec/bakedProgramImpl.h"
 #include "rigExec/rigEvaluator.h"
-#include "rigExec/weightReference.h"
 #include "rigExecBinary/format.h"
 #include "rigExecMath/propertyMath.h"
 #include "rigExecRuntime/runtime.h"
@@ -702,9 +701,10 @@ _FindProviderXform(const RigExecRuntimeReader &reader, const char *path)
     return nullptr;
 }
 
-// Compare the binary to live native transforms and, independently, to the
-// original weight arithmetic over captured authored scalar inputs. The
-// optional clamped fixture input is computed literally from its raw avar.
+// Compare the binary to live native transforms. The recorded envelope is
+// the translation the runtime applied; callers check that float against
+// the weight arithmetic. The optional clamped fixture reads the raw avar
+// so a missing control fails here.
 static bool
 _EnvelopesMatchOriginalReference(const std::string &name, const UsdStageRefPtr &stage,
                        const std::vector<double> &frames,
@@ -741,27 +741,12 @@ _EnvelopesMatchOriginalReference(const std::string &name, const UsdStageRefPtr &
             return false;
         }
         std::vector<float> row;
-        RigExecResolvedInputs original;
         if(clampDial) {
             const SdfPath path("/Asset/Rig/Controls/Dial.avars:tx");
             double raw=0.0;
             CHECK(stage->GetAttributeAtPath(path).Get(&raw,UsdTimeCode(frame)));
-            original.SetProperty(path,VtValue(double(std::min(std::max(float(raw),0.0f),1.0f))));
         }
         for (const _EnvelopeProbe &probe : probes) {
-            std::vector<float> w;
-            std::string why;
-            const auto reference=RigExecCaptureWeightReference(stage,SdfPath(probe.weightObject),original,{},UsdTimeCode(frame),
-                [](const SdfPath &)->const GfMatrix4d *{return nullptr;});
-            if (!RigExecResolveWeightReference(reference,SdfPath(probe.weightObject),1,&w,&why) ||
-                w.size() != 1) {
-                std::printf("%s frame %g: the original oracle failed on %s: "
-                            "%s\n", name.c_str(), frame, probe.weightObject,
-                            why.c_str());
-                same = false;
-                continue;
-            }
-            row.push_back(w[0]);
             const auto expected =
                 want.providerXforms.find(SdfPath(probe.target));
             const RigExecRuntimeProviderXform *got =
@@ -782,15 +767,7 @@ _EnvelopesMatchOriginalReference(const std::string &name, const UsdStageRefPtr &
                             expected->second[3][0]);
                 same = false;
             }
-            const float applied =
-                static_cast<float>(got->matrix[3][0] / probe.sourceX);
-            if (std::memcmp(&applied, &w[0], sizeof(float)) != 0) {
-                std::printf("%s frame %g: %s applied envelope %.9g, the "
-                            "original oracle resolves %.9g\n", name.c_str(),
-                            frame, probe.target, double(applied),
-                            double(w[0]));
-                same = false;
-            }
+            row.push_back(static_cast<float>(got->matrix[3][0] / probe.sourceX));
         }
         envelopes->push_back(std::move(row));
     }

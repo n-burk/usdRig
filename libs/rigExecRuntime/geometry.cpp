@@ -26,6 +26,7 @@
 #include "rigExecMath/surfaceProjectorKernel.h"
 #include "rigExecMath/surfaceSnapKernel.h"
 #include "poseInternal.h"
+#include "rigExec/parallel.h"
 
 #include <algorithm>
 #include <array>
@@ -37,7 +38,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <chrono>
+#include <condition_variable>
 #include <functional>
+#include <mutex>
+#include <thread>
 #include <iterator>
 #include <limits>
 #include <map>
@@ -1854,17 +1859,34 @@ RrGeoApplyLaplacianSmooth(std::vector<RrVec3f> *points,
     if (adjacency.empty()) {
         return;  // invalid topology: pass through
     }
-    const std::vector<RrVec3f> source = *points;
-    for (size_t i = 0; i < source.size(); ++i) {
+    // No retained adjacency: the source has to be a copy, because the loop
+    // writes the same buffer it reads. A cached adjacency already paid for
+    // its topology; swap a scratch the cache keeps so the points themselves
+    // are not copied. Isolated vertices are assigned from that scratch.
+    std::vector<RrVec3f> copied;
+    std::vector<RrVec3f> *source = nullptr;
+    if (cache) {
+        std::vector<RrVec3f> &held = cache->SmoothSource();
+        held.swap(*points);
+        points->resize(held.size());
+        source = &held;
+    } else {
+        copied = *points;
+        source = &copied;
+    }
+    for (size_t i = 0; i < source->size(); ++i) {
         if (adjacency[i].empty()) {
+            if (cache) {
+                (*points)[i] = (*source)[i];
+            }
             continue;
         }
         RrVec3f average(0.0f);
         for (int n : adjacency[i]) {
-            average += source[n];
+            average += (*source)[n];
         }
         average /= float(adjacency[i].size());
-        (*points)[i] = source[i] + (average - source[i]) * float(s);
+        (*points)[i] = (*source)[i] + (average - (*source)[i]) * float(s);
     }
 }
 
@@ -2481,10 +2503,16 @@ RrGeoApplySkinKernelRange(const RrGeoMoverParameters &p,
 }
 
 bool
+RrGeoApplySkinRanges(const RrGeoMoverParameters &p,
+                     const RrGeoSkinTransformsView &transforms, size_t begin,
+                     size_t end, std::vector<RrVec3f> *pts, bool useSimd,
+                     bool parallel);
+
+bool
 RrGeoApplySkinKernelWithTransforms(
     const RrGeoMoverParameters &p,
     const RrGeoSkinTransformsView &transforms, std::vector<RrVec3f> *pts,
-    bool useSimd)
+    bool useSimd, bool parallel = false)
 {
     const size_t count = pts->size();
     if (!RrGeoSkinLayoutIsUsable(p, count)) {
@@ -2496,9 +2524,173 @@ RrGeoApplySkinKernelWithTransforms(
         return false;
     }
 
-    // The runtime runs serially; a point range is an independent
-    // sub-problem, so the serial call is the parallel loop's answer.
-    return RrGeoApplySkinKernelRange(p, transforms, 0, count, pts, useSimd);
+    // Same cut as the baked kernel: a point range is independent under either
+    // method, and the per-matrix tables are derived once. \p parallel is set
+    // only when the caller installed RrStore::dispatch and the program is
+    // parallel-safe. The ranges join on their own threads. They do not call
+    // that dispatcher: a cluster body is already running on it, and waiting
+    // for it from inside the body deadlocks.
+    return RrGeoApplySkinRanges(p, transforms, 0, count, pts, useSimd,
+                                parallel);
+}
+
+bool
+RrGeoSkinMaySplit(const RrProgram *program)
+{
+    return program->parallelSafe &&
+           static_cast<bool>(program->store.dispatch) &&
+           static_cast<bool>(program->store.wait);
+}
+
+// Threads stay up for the process. Spawning a std::thread per skin costs
+// more than a linear blend of a few tens of thousands of points. The caller
+// drains ranges too, so the pool is hardware_concurrency()-1 workers.
+struct RrGeoPointPool {
+    std::mutex runMu;
+    std::mutex mu;
+    std::condition_variable workCv;
+    std::condition_variable doneCv;
+    std::vector<std::thread> threads;
+    std::function<void(size_t, size_t)> body;
+    std::atomic<size_t> cursor{0};
+    size_t end = 0;
+    size_t grain = RigExecGeometryGrainSize;
+    unsigned inflight = 0;
+    unsigned generation = 0;
+    bool stop = false;
+
+    RrGeoPointPool()
+    {
+        unsigned workers = std::thread::hardware_concurrency();
+        if (workers > 1) {
+            --workers;
+        } else {
+            workers = 0;
+        }
+        threads.reserve(workers);
+        for (unsigned i = 0; i < workers; ++i) {
+            threads.emplace_back([this] { Loop(); });
+        }
+    }
+
+    ~RrGeoPointPool()
+    {
+        {
+            std::lock_guard<std::mutex> lock(mu);
+            stop = true;
+        }
+        workCv.notify_all();
+        for (std::thread &worker : threads) {
+            worker.join();
+        }
+    }
+
+    void Drain()
+    {
+        for (;;) {
+            const size_t b = cursor.fetch_add(grain, std::memory_order_relaxed);
+            if (b >= end) {
+                return;
+            }
+            body(b, std::min(end, b + grain));
+        }
+    }
+
+    void Loop()
+    {
+        unsigned seen = 0;
+        for (;;) {
+            std::unique_lock<std::mutex> lock(mu);
+            workCv.wait(lock, [&] { return stop || generation != seen; });
+            if (stop) {
+                return;
+            }
+            seen = generation;
+            lock.unlock();
+            Drain();
+            lock.lock();
+            if (--inflight == 0) {
+                doneCv.notify_one();
+            }
+        }
+    }
+
+    void Run(size_t rangeBegin, size_t rangeEnd,
+             const std::function<void(size_t, size_t)> &fn)
+    {
+        std::lock_guard<std::mutex> runLock(runMu);
+        if (threads.empty() || rangeEnd <= rangeBegin) {
+            fn(rangeBegin, rangeEnd);
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> lock(mu);
+            body = fn;
+            cursor.store(rangeBegin, std::memory_order_relaxed);
+            end = rangeEnd;
+            grain = RigExecGeometryGrainSize;
+            inflight = static_cast<unsigned>(threads.size());
+            ++generation;
+        }
+        workCv.notify_all();
+        Drain();
+        std::unique_lock<std::mutex> lock(mu);
+        doneCv.wait(lock, [&] { return inflight == 0; });
+        body = nullptr;
+    }
+};
+
+void
+RrGeoParallelPointRanges(size_t begin, size_t end,
+                         const std::function<void(size_t, size_t)> &body)
+{
+    static RrGeoPointPool pool;
+    pool.Run(begin, end, body);
+}
+
+bool
+RrGeoApplySkinRanges(const RrGeoMoverParameters &p,
+                     const RrGeoSkinTransformsView &transforms, size_t begin,
+                     size_t end, std::vector<RrVec3f> *pts, bool useSimd,
+                     bool parallel)
+{
+    const size_t count = end - begin;
+    const bool splittable =
+        parallel && count >= RigExecGeometryParallelThreshold &&
+        (p.skinningMethod == "classicLinear" ||
+         p.skinningMethod == "dualQuaternion");
+    if (!splittable) {
+        return RrGeoApplySkinKernelRange(p, transforms, begin, end, pts,
+                                         useSimd);
+    }
+
+    RrGeoSkinTransformsView shared = transforms;
+    const RrGeoSkinLayout layout =
+        RrGeoSkinLayoutForPacket(p, transforms, pts->size());
+    std::vector<float> rows;
+    std::vector<RrGeoScaledDualQuat> palette;
+    if (p.skinningMethod == "classicLinear" && useSimd && !shared.rows &&
+        layout.transforms) {
+        rows.resize(layout.transformCount * RrGeoSkinRowStride);
+        for (size_t t = 0; t < layout.transformCount; ++t) {
+            RrGeoNarrowSkinRows(layout.transforms[t],
+                                &rows[t * RrGeoSkinRowStride]);
+        }
+        shared.rows = rows.data();
+    } else if (p.skinningMethod == "dualQuaternion" && !shared.palette) {
+        palette = RrGeoSkinDualQuatPalette(layout);
+        shared.palette = palette.data();
+        shared.paletteSize = palette.size();
+    }
+
+    std::atomic<bool> ok(true);
+    RrGeoParallelPointRanges(begin, end, [&](size_t rangeBegin, size_t rangeEnd) {
+        if (!RrGeoApplySkinKernelRange(p, shared, rangeBegin, rangeEnd, pts,
+                                      useSimd)) {
+            ok.store(false, std::memory_order_relaxed);
+        }
+    });
+    return ok.load(std::memory_order_relaxed);
 }
 
 // One sample as the gather consumes it. `points` (the dense points, empty
@@ -3137,7 +3329,8 @@ RrGeoApplyRevisionKernel(
     std::unordered_map<uint64_t, RrGeoWireBasisEntry> *wireCache,
     bool useSimd, RigExecSurfaceKernelCache<RrVec3f,RrVec3d> *surfaceCache = nullptr,
     RigExecWireRestCache<RrVec3f,RrVec2f> *wireRestCache = nullptr,
-    std::shared_ptr<const RrGeoWireBasisEntry> *lastWireBasis = nullptr)
+    std::shared_ptr<const RrGeoWireBasisEntry> *lastWireBasis = nullptr,
+    bool parallelSkin = false)
 {
     switch (op) {
     case RrGeoOpExternal:
@@ -3146,7 +3339,7 @@ RrGeoApplyRevisionKernel(
         return RrGeoApplyMatrixKernel(p, pts, useSimd);
     case RrGeoOpSkin:
         return RrGeoApplySkinKernelWithTransforms(
-            p, RrGeoSkinTransformsOf(p), pts, useSimd);
+            p, RrGeoSkinTransformsOf(p), pts, useSimd, parallelSkin);
     case RrGeoOpBlendShape:
         return RrGeoApplyBlendShapeKernel(p, pts, surfaceCache);
     case RrGeoOpVolumeCorrect:
@@ -3295,7 +3488,8 @@ RrGeoRunRevisionKernel(
     RigExecWireRestCache<RrVec3f,RrVec2f> *wireRestCache = nullptr,
     std::shared_ptr<const RrGeoWireBasisEntry> *lastWireBasis = nullptr,
     const std::vector<float> *envelope = nullptr,
-    const RrVec3f *source = nullptr, size_t sourceCount = 0)
+    const RrVec3f *source = nullptr, size_t sourceCount = 0,
+    bool parallelSkin = false)
 {
     if (!RrGeoPacketMatches(op, p)) {
         return false;
@@ -3310,7 +3504,7 @@ RrGeoRunRevisionKernel(
         pts->assign(source, source + sourceCount);
     }
     if (!RrGeoRevisionTakesSeparateBlend(op, p.weights)) {
-        return RrGeoApplyRevisionKernel(op, p, pts, wireCache, useSimd, surfaceCache, wireRestCache, lastWireBasis);
+        return RrGeoApplyRevisionKernel(op, p, pts, wireCache, useSimd, surfaceCache, wireRestCache, lastWireBasis, parallelSkin);
     }
 
     const bool fullStrengthEnvelope = RrGeoEnvelopeIsFullStrength(p.weights);
@@ -3319,7 +3513,7 @@ RrGeoRunRevisionKernel(
     if (!fullStrengthEnvelope && !source) {
         preceding = *pts;
     }
-    if (!RrGeoApplyRevisionKernel(op, p, pts, wireCache, useSimd, surfaceCache, wireRestCache, lastWireBasis)) {
+    if (!RrGeoApplyRevisionKernel(op, p, pts, wireCache, useSimd, surfaceCache, wireRestCache, lastWireBasis, parallelSkin)) {
         return false;
     }
     if (pts->size() != precedingSize) {
@@ -6841,7 +7035,7 @@ bool
 RrGeoSkinRange(RrGeometryScratch::Revision *rev, const RrVec3f *preceding,
                const RrGeoSkinTransformsView &view, size_t begin,
                size_t end, bool whole, bool useSimd,
-               std::vector<RrVec3f> *target)
+               std::vector<RrVec3f> *target, bool parallel = false)
 {
     std::vector<RrVec3f> &out = *target;
     if (end > begin && preceding) {
@@ -6850,11 +7044,11 @@ RrGeoSkinRange(RrGeometryScratch::Revision *rev, const RrVec3f *preceding,
     }
     if (whole) {
         if (!RrGeoApplySkinKernelWithTransforms(rev->parameters, view,
-                                                &out, useSimd)) {
+                                                &out, useSimd, parallel)) {
             return false;
         }
-    } else if (!RrGeoApplySkinKernelRange(rev->parameters, view, begin,
-                                           end, &out, useSimd)) {
+    } else if (!RrGeoApplySkinRanges(rev->parameters, view, begin, end, &out,
+                                     useSimd, parallel)) {
         return false;
     }
     if (!rev->fullStrength) {
@@ -6874,7 +7068,8 @@ RrGeoSkinRange(RrGeometryScratch::Revision *rev, const RrVec3f *preceding,
 bool
 RrGeoFuseWholeRevision(const RrGeometryScratch::Chain &chain,
                        RrGeometryScratch::Revision *rev, size_t revisionIndex,
-                       bool useSimd, std::vector<RrVec3f> *fused)
+                       bool useSimd, std::vector<RrVec3f> *fused,
+                       bool parallel = false)
 {
     const RrVec3f *points = nullptr;
     size_t count = 0;
@@ -6885,7 +7080,7 @@ RrGeoFuseWholeRevision(const RrGeometryScratch::Chain &chain,
     }
     fused->resize(count);
     return RrGeoSkinRange(rev, points, RrGeoWholeTransformsView(rev), 0,
-                          count, true, useSimd, fused);
+                          count, true, useSimd, fused, parallel);
 }
 
 // A port of RigExecBakedAdoptPartition. The chunk keys stay Build's,
@@ -7434,7 +7629,8 @@ RrGeoRunDerivedStep(RrProgram *program, RrGeometryScratch *scratch,
                   RrGeoApplyDerivedKernel(int(wire.op),parameters,&values,derived.lastBase.size())
                 : RrGeoRunRevisionKernel(int(wire.op), parameters, &values,
                     &scratch->wireBasis,program->geoSettings.useSimd,
-                    &rev.surfaceCache,&rev.wireRestCache,&rev.lastWireBasis));
+                    &rev.surfaceCache,&rev.wireRestCache,&rev.lastWireBasis,
+                    nullptr, nullptr, 0, RrGeoSkinMaySplit(program)));
         rev.resultStatus = status.state;
         if (!applied) {
             values.assign(derived.lastBase.begin(), derived.lastBase.end());
@@ -7456,7 +7652,7 @@ RrGeoRunDerivedStep(RrProgram *program, RrGeometryScratch *scratch,
                 geo.chains[chainIndex].derived[derivedIndex].target) +
             ": derived geometry input/cardinality validation failed");
     }
-    derived.spare.resize(rev.output.size());
+    RrRetainedPrepare(&derived.spare, rev.output.size());
     std::copy(rev.output.begin(), rev.output.end(), derived.spare.data());
     {
         // Before the swap, against what was last published: the array a
@@ -7559,7 +7755,7 @@ RrGeoRunChainStatusStep(RrProgram *program, RrGeometryScratch *scratch,
             RrGeoPointsAfter(chain, chain.revisions.size() - 1, &points,
                              &count);
         }
-        chain.spare.resize(count);
+        RrRetainedPrepare(&chain.spare, count);
         if (count > 0 && points) {
             std::copy(points, points + count, chain.spare.data());
         }
@@ -7731,6 +7927,7 @@ RrGeoRunRevisionStaticStep(RrProgram *program, RrGeometryScratch *scratch,
             if (!shared || packet.arrays != rev.weightFieldArrays ||
                 rev.weightFieldCount != logicalCount) {
                 std::vector<float> &resolved = rev.resolveScratch;
+                RrRetainedPrepare(&resolved, logicalCount);
                 if (!packet.ResolveAll(logicalCount, &resolved)) {
                     resolved.assign(logicalCount, 0.0f);
                     for (size_t i = 0; i < logicalCount; ++i) {
@@ -7983,7 +8180,8 @@ RrGeoRunWholeSkinChunk(RrProgram *program,
 void
 RrGeoRunWholeFuse(const RrGeometryScratch::Chain &chain,
                   RrGeometryScratch::Revision *rev, size_t revisionIndex,
-                  bool skin, bool packetValid, bool useSimd)
+                  bool skin, bool packetValid, bool useSimd,
+                  bool parallel = false)
 {
     const size_t groups = chain.groupBounds.size() - 1;
     const size_t count = rev->precedingCount;
@@ -7993,7 +8191,7 @@ RrGeoRunWholeFuse(const RrGeometryScratch::Chain &chain,
     std::vector<RrVec3f> fused;
     if (whole) {
         applied = RrGeoFuseWholeRevision(chain, rev, revisionIndex, useSimd,
-                                         &fused);
+                                         &fused, parallel);
     } else if (applied && rev->acceptance != RrGeoAcceptance::Deferred) {
         applied = rev->acceptance == RrGeoAcceptance::Applies;
     } else if (applied) {
@@ -8170,7 +8368,7 @@ RrGeoRunRevisionChunkStep(RrProgram *program, RrGeometryScratch *scratch,
                 int(wire.op), rev.parameters, &rev.stagingOutput,
                 &scratch->wireBasis, useSimd, &rev.surfaceCache, &rev.wireRestCache, &rev.lastWireBasis,
                 !rev.fullStrength && rev.envelopeOk ? &rev.envelope : nullptr,
-                count > 0 ? points : nullptr, count);
+                count > 0 ? points : nullptr, count, RrGeoSkinMaySplit(program));
             return true;
         }
         if (!RrGeoSkinPacketIsUsable(rev) || !rev.influencesValid || !sized) {
@@ -8179,7 +8377,8 @@ RrGeoRunRevisionChunkStep(RrProgram *program, RrGeometryScratch *scratch,
         rev.stagingFresh = true;
         chunk.ok = RrGeoSkinRange(&rev, points,
                                   RrGeoWholeTransformsView(&rev), 0, count,
-                                  true, useSimd, &rev.stagingOutput);
+                                  true, useSimd, &rev.stagingOutput,
+                                  RrGeoSkinMaySplit(program));
         return true;
     }
 
@@ -8206,7 +8405,8 @@ RrGeoRunRevisionChunkStep(RrProgram *program, RrGeometryScratch *scratch,
     chunk.ok = RrGeoSkinRange(&rev, points,
                               RrGeoChunkTransformsView(chunk, useSimd),
                               size_t(chunk.begin), size_t(chunk.end), false,
-                              useSimd, &rev.stagingOutput);
+                              useSimd, &rev.stagingOutput,
+                              RrGeoSkinMaySplit(program));
     return true;
 }
 
@@ -8305,7 +8505,8 @@ RrGeoRunRevisionFuseStep(RrProgram *program, RrGeometryScratch *scratch,
     output.counters.revisionsExecuted = rev.executed ? 1 : 0;
     if (rev.role == RrGeoRole::Whole) {
         RrGeoRunWholeFuse(chain, &rev, revisionIndex, skin, packetValid,
-                          program->geoSettings.useSimd);
+                          program->geoSettings.useSimd,
+                          RrGeoSkinMaySplit(program));
         rev.lastStatus = rev.status;
         rev.ran = true;
     } else if (rev.executed) {
@@ -8323,7 +8524,7 @@ RrGeoRunRevisionFuseStep(RrProgram *program, RrGeometryScratch *scratch,
         if (whole) {
             applied = RrGeoFuseWholeRevision(chain, &rev, revisionIndex,
                                              program->geoSettings.useSimd,
-                                             &fused);
+                                             &fused, RrGeoSkinMaySplit(program));
         } else if (applied && rev.acceptance != RrGeoAcceptance::Deferred) {
             // RevisionStatic's decision, from the validation each chunk's
             // kernel runs first, so every chunk's `ok` is this answer.
@@ -9057,6 +9258,159 @@ const std::vector<RrVec3f> *RrResolveDeclaredPoints(const RrProgram *program,
 {
     const auto *scratch=static_cast<const RrGeometryScratch *>(program->geo.get());
     return scratch?RrGeoResolvePoints(*scratch,binding):nullptr;
+}
+
+bool
+RrGeoCompareSkinSplitForTesting(std::string *error,
+                               double *linearSerialUs,
+                               double *linearParallelUs,
+                               double *dualSerialUs,
+                               double *dualParallelUs)
+{
+    const uint32_t payloadBits = 0x7fc01234u;
+    float payload = 0.0f;
+    std::memcpy(&payload, &payloadBits, sizeof(payload));
+    auto fail = [&](const std::string &text) {
+        if (error) {
+            *error = text;
+        }
+        return false;
+    };
+    auto sameBits = [](const std::vector<RrVec3f> &a,
+                       const std::vector<RrVec3f> &b) {
+        if (a.size() != b.size()) {
+            return false;
+        }
+        return a.empty() ||
+               std::memcmp(a.data(), b.data(), a.size() * sizeof(RrVec3f)) == 0;
+    };
+    auto hasNan = [](const std::vector<RrVec3f> &points) {
+        for (const RrVec3f &point : points) {
+            for (int axis = 0; axis < 3; ++axis) {
+                if (std::isnan(point[axis])) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    };
+    struct Built {
+        RrGeoMoverParameters parameters;
+        std::vector<RrVec3f> points;
+    };
+    auto build = [&](size_t count, const char *method, bool nanWeight) {
+        Built built;
+        built.parameters.skinningMethod = method;
+        built.parameters.skinTransforms.resize(8);
+        for (size_t t = 0; t < built.parameters.skinTransforms.size(); ++t) {
+            built.parameters.skinTransforms[t] = RrMat4d(1.0);
+            built.parameters.skinTransforms[t][3][0] = double(t) * 0.25;
+            built.parameters.skinTransforms[t][3][1] = double(int(t) - 3) * 0.1;
+        }
+        built.parameters.skinTransforms[3].Set(
+            0, -1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0.5, -0.25, 0.125, 1);
+        auto topology = std::make_shared<RrGeoSkinTopology>();
+        topology->validated = true;
+        topology->elementSize = 4;
+        topology->influenceCount = built.parameters.skinTransforms.size();
+        topology->pointCount = count;
+        topology->indices.resize(count * 4);
+        topology->weights.resize(count * 4);
+        for (size_t i = 0; i < count; ++i) {
+            for (int k = 0; k < 4; ++k) {
+                topology->indices[i * 4 + size_t(k)] =
+                    int((i + size_t(k)) % built.parameters.skinTransforms.size());
+                const float weight = k == 0 ? 0.4f : k == 1 ? 0.3f
+                                              : k == 2      ? 0.2f
+                                                            : 0.1f;
+                topology->weights[i * 4 + size_t(k)] = weight;
+            }
+        }
+        if (nanWeight && count > 8) {
+            topology->weights[7] = payload;
+        }
+        built.parameters.skinTopology = topology;
+        built.points.resize(count);
+        for (size_t i = 0; i < count; ++i) {
+            built.points[i] = RrVec3f(
+                float(i) * 0.01f, float(i % 19) * 0.05f, float(i % 7));
+        }
+        built.points[count / 3][1] = payload;
+        return built;
+    };
+    auto check = [&](const char *label, size_t count, const char *method,
+                     bool nanWeight, bool useSimd, double *serialUs,
+                     double *parallelUs) {
+        const Built built = build(count, method, nanWeight);
+        auto run = [&](bool parallel) {
+            std::vector<RrVec3f> out = built.points;
+            const bool ok = RrGeoApplySkinKernelWithTransforms(
+                built.parameters, RrGeoSkinTransformsOf(built.parameters),
+                &out, useSimd, parallel);
+            return std::make_pair(ok, std::move(out));
+        };
+        const auto serial = run(false);
+        const auto parallel = run(true);
+        if (!serial.first || !parallel.first ||
+            !sameBits(serial.second, parallel.second)) {
+            return fail(std::string(label) +
+                        " serial and parallel skin differ");
+        }
+        if (!hasNan(serial.second)) {
+            return fail(std::string(label) + " dropped the NaN payload");
+        }
+        if (serialUs && parallelUs) {
+            auto time = [&](bool parallelRun) {
+                double best = 0;
+                for (int sample = 0; sample < 3; ++sample) {
+                    const auto start = std::chrono::steady_clock::now();
+                    const auto result = run(parallelRun);
+                    const auto stop = std::chrono::steady_clock::now();
+                    if (!result.first ||
+                        !sameBits(result.second, serial.second)) {
+                        return -1.0;
+                    }
+                    const double us = std::chrono::duration<double, std::micro>(
+                                          stop - start)
+                                          .count();
+                    if (sample == 0 || us < best) {
+                        best = us;
+                    }
+                }
+                return best;
+            };
+            *serialUs = time(false);
+            *parallelUs = time(true);
+            if (*serialUs < 0 || *parallelUs < 0) {
+                return fail(std::string(label) + " changed during timing");
+            }
+        }
+        return true;
+    };
+    // Under the 4,096-point cut the parallel flag stays on the serial loop.
+    if (!check("linear-small", 128, "classicLinear", true, false, nullptr,
+               nullptr) ||
+        !check("linear-small-simd", 128, "classicLinear", true, true, nullptr,
+               nullptr) ||
+        !check("dq-small", 128, "dualQuaternion", false, false, nullptr,
+               nullptr) ||
+        !check("dq-small-simd", 128, "dualQuaternion", false, true, nullptr,
+               nullptr)) {
+        return false;
+    }
+    // The measured body is the 26,276-point mesh the baked split was timed on.
+    constexpr size_t kBodyPoints = 26276;
+    if (!check("linear", kBodyPoints, "classicLinear", true, false, nullptr,
+               nullptr) ||
+        !check("dq", kBodyPoints, "dualQuaternion", false, false, nullptr,
+               nullptr) ||
+        !check("linear-simd", kBodyPoints, "classicLinear", true, true,
+               linearSerialUs, linearParallelUs) ||
+        !check("dq-simd", kBodyPoints, "dualQuaternion", false, true,
+               dualSerialUs, dualParallelUs)) {
+        return false;
+    }
+    return true;
 }
 
 }  // namespace rigExec

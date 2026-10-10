@@ -1,5 +1,5 @@
-#include "goldenSuite.h"
-#include "goldenPose.h"
+#include "rigExec/goldenSuite.h"
+#include "rigExec/goldenPose.h"
 
 #include <atomic>
 #include <cstdio>
@@ -174,54 +174,60 @@ const bool registered = [] {
 }();
 }
 
-void RigExecFinalizeGoldenSuite()
+class RigExecGoldenSuiteRecorder : public RigExecGoldenSuiteObserver {
+public:
+    RigExecGoldenSuiteRecorder(const SdfPath &rigPath, unsigned ordinal)
+        : _ordinal(ordinal)
+    {
+        _node = new RigExecGoldenSuiteNode{ordinal, rigPath.GetString()};
+        auto &registry = Index().head;
+        auto *head = registry.load(std::memory_order_relaxed);
+        do { _node->next = head; }
+        while (!registry.compare_exchange_weak(head, _node, std::memory_order_release, std::memory_order_relaxed));
+        _bytes = "rigexec-suite-golden 1\nsuite " + RigExecGoldenEscape(configuration.suite) +
+            " evaluator " + std::to_string(ordinal) + " rig " + RigExecGoldenEscape(rigPath.GetString()) +
+            "\nencoding raw-bits " + (configuration.rawValues ? "full-values" : "domain-digests") +
+            " work-metadata=excluded\n";
+    }
+    void Record(const RigExecRigPose &pose) override
+    {
+        std::vector<RigExecGoldenValue> values;
+        std::string error;
+        if (!RigExecEncodeGoldenPose(pose, &values, &error)) Fail(_ordinal, error);
+        // Generation order and times are recorded in this evaluator's private
+        // buffer. Independent evaluator interleavings do not affect the verdict.
+        _bytes += RigExecGoldenVisit("generation", _generation++, pose, values, !configuration.rawValues);
+    }
+    ~RigExecGoldenSuiteRecorder() override
+    {
+        const auto path = configuration.directory / (std::to_string(_ordinal) + ".golden");
+        if (configuration.capture) Write(path, _bytes, _ordinal);
+        else {
+            std::string error;
+            if (!RigExecCompareGolden(Read(path, _ordinal), _bytes, &error)) Fail(_ordinal, error);
+        }
+        _node->generations = _generation;
+        _node->closed.store(true, std::memory_order_release);
+        Index().active.fetch_sub(1, std::memory_order_release);
+    }
+private:
+    RigExecGoldenSuiteNode *_node = nullptr;
+    unsigned _ordinal = 0;
+    size_t _generation = 0;
+    std::string _bytes;
+};
+
+void RigExecOracleFinalizeGolden()
 {
     if (configuration.enabled) Finalize();
 }
 
 std::unique_ptr<RigExecGoldenSuiteObserver>
-RigExecGoldenSuiteObserver::Create(const SdfPath &rigPath)
+RigExecOracleCreateGolden(const SdfPath &rigPath)
 {
     if (!configuration.enabled) return nullptr;
     Index().active.fetch_add(1, std::memory_order_relaxed);
     const unsigned ordinal = Index().evaluators.fetch_add(1, std::memory_order_relaxed);
-    return std::unique_ptr<RigExecGoldenSuiteObserver>(new RigExecGoldenSuiteObserver(rigPath, ordinal));
-}
-
-RigExecGoldenSuiteObserver::RigExecGoldenSuiteObserver(const SdfPath &rigPath, unsigned ordinal)
-    : _ordinal(ordinal)
-{
-    _node = new RigExecGoldenSuiteNode{ordinal, rigPath.GetString()};
-    auto &registry = Index().head;
-    auto *head = registry.load(std::memory_order_relaxed);
-    do { _node->next = head; }
-    while (!registry.compare_exchange_weak(head, _node, std::memory_order_release, std::memory_order_relaxed));
-    _bytes = "rigexec-suite-golden 1\nsuite " + RigExecGoldenEscape(configuration.suite) +
-        " evaluator " + std::to_string(ordinal) + " rig " + RigExecGoldenEscape(rigPath.GetString()) +
-        "\nencoding raw-bits " + (configuration.rawValues ? "full-values" : "domain-digests") +
-        " work-metadata=excluded\n";
-}
-
-void RigExecGoldenSuiteObserver::Record(const RigExecRigPose &pose)
-{
-    std::vector<RigExecGoldenValue> values;
-    std::string error;
-    if (!RigExecEncodeGoldenPose(pose, &values, &error)) Fail(_ordinal, error);
-    // Generation order and times are recorded in this evaluator's private
-    // buffer. Independent evaluator interleavings do not affect the verdict.
-    _bytes += RigExecGoldenVisit("generation", _generation++, pose, values, !configuration.rawValues);
-}
-
-RigExecGoldenSuiteObserver::~RigExecGoldenSuiteObserver()
-{
-    const auto path = configuration.directory / (std::to_string(_ordinal) + ".golden");
-    if (configuration.capture) Write(path, _bytes, _ordinal);
-    else {
-        std::string error;
-        if (!RigExecCompareGolden(Read(path, _ordinal), _bytes, &error)) Fail(_ordinal, error);
-    }
-    _node->generations = _generation;
-    _node->closed.store(true, std::memory_order_release);
-    Index().active.fetch_sub(1, std::memory_order_release);
+    return std::unique_ptr<RigExecGoldenSuiteObserver>(new RigExecGoldenSuiteRecorder(rigPath, ordinal));
 }
 }

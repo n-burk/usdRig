@@ -1,7 +1,7 @@
 #include "rigExec/weightField.h"
 #include "rigExec/bakedProgramImpl.h"
 #include "rigExec/crossDomainInputs.h"
-#include "rigExecGraph/weightProgram.h"
+#include "rigExecScene/weightProgram.h"
 #include <pxr/usd/usdGeom/pointBased.h>
 #include <pxr/usd/sdf/types.h>
 #include <algorithm>

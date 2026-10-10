@@ -1,7 +1,7 @@
 // Reference arithmetic retains the original scalar statement order.
-#include "weightReference.h"
-#include "rigEvaluatorInternal.h"
-#include "moverGraph.h"
+#include "rigExec/weightReference.h"
+#include "rigExec/rigEvaluatorInternal.h"
+#include "rigExec/moverGraph.h"
 #include "rigExecMath/volumeFieldCheck.h"
 #include "rigExecMath/weightFields.h"
 #include "pxr/usd/usdGeom/pointBased.h"

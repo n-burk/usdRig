@@ -1,6 +1,6 @@
-#include "rigExecGraph/geometryProgram.h"
-#include "rigExecGraph/geometrySceneLowering.h"
-#include "rigExecGraph/geometryGraphBinding.h"
+#include "rigExecScene/geometryProgram.h"
+#include "rigExecScene/geometrySceneLowering.h"
+#include "rigExecScene/geometryGraphBinding.h"
 #include "rigExec/moverGraph.h"
 #include <cstdio>
 using namespace rigExec;

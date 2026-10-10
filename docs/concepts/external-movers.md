@@ -100,7 +100,7 @@ the value comparison needed by `VtValue` and the evaluation cache.
 
 ```cpp
 #include "rigExec/movers/moverRegistry.h"
-#include "rigExecGraph/sceneDescriptors.h"
+#include "rigExecScene/sceneDescriptors.h"
 
 #include <cmath>
 

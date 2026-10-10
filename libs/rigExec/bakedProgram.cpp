@@ -22,7 +22,7 @@
 
 #include "bakedProgramImpl.h"
 #include "projectorCaptureNotice.h"
-#include "rigExecGraph/poseSceneLowering.h"
+#include "sceneDispatch.h"
 #include "bakedSchedule.h"
 #include "bakedOpGraph.h"
 #include "crossDomainInputs.h"
@@ -3604,7 +3604,7 @@ RigExecBakedProgram::_BuildWithSceneCaptureAttempt(RigExecRigEvaluator *evaluato
             ac.scalars.push_back(std::move(read));return true;
         };
         std::string invalid;
-        if(!RigExecBindAutoClavicle(*B.sceneDescriptors,path,link,0,UINT64_MAX,&ac.operation,&invalid)) {
+        if(!RigExecDispatchBindAutoClavicle(*B.sceneDescriptors,path,link,0,UINT64_MAX,&ac.operation,&invalid)) {
             refuse(invalid,path);return nullptr;
         }
         ac.operation.output=next++;ac.values=RigExecTypedValueStore(size_t(next));
@@ -4538,6 +4538,14 @@ UsdTimeCode
 RigExecBakedProbeTime(const UsdStageRefPtr &stage)
 {
     return _ProbeTime(stage);
+}
+
+void
+RigExecBakedProgramTesting::SetOpObservers(const RigExecBakedProgram &program,
+    std::function<void(uint32_t)> before, std::function<void(uint32_t)> after)
+{
+    program._impl->opBeforeBody = std::move(before);
+    program._impl->opAfterBody = std::move(after);
 }
 
 bool

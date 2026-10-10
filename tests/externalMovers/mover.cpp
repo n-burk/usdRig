@@ -1,5 +1,5 @@
 #include "rigExec/movers/moverRegistry.h"
-#include "rigExecGraph/sceneDescriptors.h"
+#include "rigExecScene/sceneDescriptors.h"
 
 #include <cmath>
 #include <cstring>

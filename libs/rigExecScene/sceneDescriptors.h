@@ -1,7 +1,7 @@
 #ifndef RIGEXEC_GRAPH_SCENE_DESCRIPTORS_H
 #define RIGEXEC_GRAPH_SCENE_DESCRIPTORS_H
 #include "sceneAccess.h"
-#include "opGraph.h"
+#include "rigExecGraph/opGraph.h"
 #include <map>
 
 namespace rigExec {

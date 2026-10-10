@@ -1,10 +1,10 @@
-#include "bakedExecCrossCheckRows.h"
-#include "bakedProgramImpl.h"
-#include "bakedProgram.h"
-#include "goldenPose.h"
-#include "solverKernels.h"
-#include "weightPackets.h"
-#include "independentConstraintCheck.h"
+#include "rigExec/bakedExecCrossCheckRows.h"
+#include "rigExec/bakedProgramImpl.h"
+#include "rigExec/bakedProgram.h"
+#include "rigExec/goldenPose.h"
+#include "rigExec/solverKernels.h"
+#include "rigExec/weightPackets.h"
+#include "rigExec/independentConstraintCheck.h"
 #include "pxr/base/vt/array.h"
 #include <algorithm>
 #include <limits>
@@ -430,6 +430,8 @@ bool RigExecBakedExecCheckRows::Add(RigExecExecCheckDescriptor d, Binding bindin
     return true;
 }
 
+RigExecBakedExecCheckRows::~RigExecBakedExecCheckRows() = default;
+
 std::shared_ptr<RigExecBakedExecCheckRows> RigExecBakedExecCheckRows::Build(const B &b, std::string *error)
 {
     auto rows = std::shared_ptr<RigExecBakedExecCheckRows>(new RigExecBakedExecCheckRows(b.stage));
@@ -667,11 +669,5 @@ std::shared_ptr<RigExecBakedExecCheckRows> RigExecBakedProgramTesting::ExecCross
     const RigExecBakedProgram &program)
 {
     return program._impl->execCheckRows;
-}
-void RigExecBakedProgramTesting::SetOpObservers(const RigExecBakedProgram &program,
-    std::function<void(uint32_t)> before,std::function<void(uint32_t)> after)
-{
-    program._impl->opBeforeBody=std::move(before);
-    program._impl->opAfterBody=std::move(after);
 }
 }

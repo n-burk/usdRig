@@ -1,7 +1,7 @@
 #ifndef RIGEXEC_STANDALONE_GRAPH_FRONTEND_H
 #define RIGEXEC_STANDALONE_GRAPH_FRONTEND_H
 #include "sceneDb.h"
-#include "rigExecGraph/sceneDescriptors.h"
+#include "rigExecScene/sceneDescriptors.h"
 namespace rigExec {
 /// Captures directly from compact source rows into the shared compiler input.
 /// Production lowering must bind typed kernels before this graph can execute.
