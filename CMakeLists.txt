@@ -433,6 +433,13 @@ target_link_libraries(testRigExecWrinkleRuntime PRIVATE rigExecRuntime)
 add_test(NAME testRigExecWrinkleRuntime COMMAND testRigExecWrinkleRuntime
     "${CMAKE_CURRENT_BINARY_DIR}/wrinkle_test.rigexec")
 set_tests_properties(testRigExecWrinkleRuntime PROPERTIES FIXTURES_REQUIRED WrinkleBinary)
+add_executable(testRigExecSkinSplit tests/testRigExecSkinSplit.cpp)
+target_link_libraries(testRigExecSkinSplit PRIVATE rigExecRuntime)
+add_test(NAME testRigExecSkinSplit COMMAND testRigExecSkinSplit)
+add_executable(testRigExecRuntimeFixture tests/testRigExecRuntimeFixture.cpp)
+target_link_libraries(testRigExecRuntimeFixture PRIVATE rigExecRuntime)
+add_test(NAME testRigExecRuntimeFixture COMMAND testRigExecRuntimeFixture
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/minimal.rigexec")
 add_executable(testRigExecDeltaMush tests/testRigExecDeltaMush.cpp)
 target_link_libraries(testRigExecDeltaMush PRIVATE rigExec rigExecRigging rigExecBake rigExecRuntime rigExecSampler)
 add_test(NAME testRigExecDeltaMush COMMAND testRigExecDeltaMush "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
@@ -2163,6 +2170,9 @@ foreach(_mover_dir IN LISTS RIGEXEC_MOVER_PLUGIN_DIRS)
     string(SHA256 _mover_id "${_mover_dir}")
     add_subdirectory("${_mover_dir}" "${CMAKE_CURRENT_BINARY_DIR}/mover-plugins/${_mover_id}")
 endforeach()
+
+include(cmake/TestLabels.cmake)
+rigexec_label_tests()
 
 get_property(_rigexec_tests DIRECTORY PROPERTY TESTS)
 foreach(_rigexec_test IN LISTS _rigexec_tests)

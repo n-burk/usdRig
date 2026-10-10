@@ -20,17 +20,25 @@ rigexec_require_python
 # Branched rather than passed through an array: expanding an empty array
 # with set -u is an "unbound variable" error under bash 3.2 (macOS
 # /bin/bash); see bin/usdview.sh.
+# compile_commands.json lands in build/ for clangd. ccache is used when
+# it is on PATH; a machine without it still configures.
+CMAKE_LAUNCHER=(-DCMAKE_EXPORT_COMPILE_COMMANDS=ON)
+if command -v ccache >/dev/null 2>&1; then
+    CMAKE_LAUNCHER+=(-DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache)
+fi
 if [ -n "${RIGEXEC_MOVER_PLUGIN_DIRS:-}" ]; then
     cmake -S "$RIG" -B "$RIG/build" -G Ninja \
           -DCMAKE_BUILD_TYPE=Release \
           -DUSD_INSTALL_DIR="$USD" \
           -DCMAKE_PREFIX_PATH="$USD" \
+          "${CMAKE_LAUNCHER[@]}" \
           "-DRIGEXEC_MOVER_PLUGIN_DIRS=$RIGEXEC_MOVER_PLUGIN_DIRS"
 else
     cmake -S "$RIG" -B "$RIG/build" -G Ninja \
           -DCMAKE_BUILD_TYPE=Release \
           -DUSD_INSTALL_DIR="$USD" \
-          -DCMAKE_PREFIX_PATH="$USD"
+          -DCMAKE_PREFIX_PATH="$USD" \
+          "${CMAKE_LAUNCHER[@]}"
 fi
 cmake --build "$RIG/build" -j "$JOBS"
 

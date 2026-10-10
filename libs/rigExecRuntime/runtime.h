@@ -12,8 +12,11 @@
 // Threading: Execute is serial over clusters unless the consumer
 // hands it a dispatcher (SetTaskDispatch), which then runs the clusters the
 // DAG allows in parallel (the OpenUSD side passes a WorkDispatcher, Godot
-// its WorkerThreadPool). The reader holds no locks: one reader per thread,
-// or external synchronization.
+// its WorkerThreadPool). A classicLinear or dualQuaternion skin of at least
+// 4,096 points then splits at a grain of 512 on a local join. The host
+// dispatcher is not re-entered: the skin is already running on one of its
+// tasks. Successful points match the serial loop, including NaN payloads.
+// The reader holds no locks: one reader per thread, or external synchronization.
 #ifndef RIGEXEC_RUNTIME_H
 #define RIGEXEC_RUNTIME_H
 
@@ -408,6 +411,15 @@ private:
     std::vector<std::string> _diagnostics;
     RigExecRuntimeCounters _counters;
 };
+
+// Serial and parallel skin on one synthetic mesh, including a NaN payload.
+// False when the bytes differ. The microsecond pointers receive the best of
+// three runs of a 26,276-point SIMD skin; null skips the timing write.
+bool RrGeoCompareSkinSplitForTesting(std::string *error,
+                                     double *linearSerialUs,
+                                     double *linearParallelUs,
+                                     double *dualSerialUs,
+                                     double *dualParallelUs);
 
 }  // namespace rigExec
 
