@@ -415,6 +415,14 @@ struct RigExecBakedLeafPool {
     std::vector<char> mustSample;
     /// The leaf id (RigExecBakedProgramImpl::leafRefs) of each entry.
     std::vector<uint32_t> id;
+    /// Pool indices whose `changed` byte went 0 -> 1 since the first sample
+    /// pass last cleared the flags (an index may repeat); the next clear
+    /// zeroes only these. Kept by RigExecBakedNoteLeafWrite.
+    std::vector<uint32_t> changedList;
+    /// Pool indices whose `mustSample` byte went 0 -> 1 and that no sample
+    /// pass has consumed yet. Kept by RigExecBakedMarkPoolLeaf; every pass
+    /// keeps only the entries still marked whose input it samples.
+    std::vector<uint32_t> markedList;
 };
 
 /// Where leaf id k lives: its pool and its index in that pool.
@@ -1728,6 +1736,26 @@ struct RigExecBakedRolePin {
     int leaf = -1;
     TfToken token;
     int weightObject = -1;
+};
+
+/// RigExecBakedSampleLeaves' index of the patchable inputs, built on first
+/// sparse use by the program object it describes and rebuilt whenever
+/// `owner` or `leafCount` differs, so a clone or a rebuild never follows
+/// another program's pointers. Owner thread.
+struct RigExecBakedSparseInputs {
+    const void *owner = nullptr;
+    size_t leafCount = 0;
+    /// Per leaf id: the input, a RigExecBakedInput<T>* with T named by
+    /// leafRefs[id].type.
+    std::vector<void *> input;
+    /// Leaf ids of the inputs whose `varying` was set at the build, walk < 0.
+    std::vector<uint32_t> varying;
+    /// Override number n's leaf ids: numberLeaves[numberBegin[n],
+    /// numberBegin[n + 1]); walk < 0 only.
+    std::vector<uint32_t> numberBegin, numberLeaves;
+    /// Per leaf id, the pass stamp that last visited it.
+    std::vector<uint64_t> visited;
+    uint64_t pass = 0;
 };
 
 struct RigExecBakedProgramImpl {
@@ -3811,6 +3839,28 @@ struct RigExecBakedProgramImpl {
     /// Executes that built operation keys, which read the path leaves'
     /// versions (RigExecBakedSetPathLeaf). Owner of the program only.
     uint64_t pathLeafRun = 0;
+    /// Every standing interactive override's path (prim.attribute, or
+    /// prim.computation), sorted and unique; RigExecBakedPrepareOverridePaths.
+    std::vector<SdfPath> overridePathsSorted;
+    /// RIGEXEC_PATH_LEAF_GATING (default on), RIGEXEC_VERIFY_PATH_LEAF_GATING;
+    /// read at Build. Verify mode counts gated keys whose fresh read differed.
+    bool pathLeafGating = true, verifyPathLeafGating = false;
+    size_t pathLeafGateMismatches = 0;
+    /// Incremented when the first sample pass clears the typed leaves'
+    /// `changed` flags: flags and `changedList`s describe exactly the typed
+    /// writes since then.
+    uint64_t leafFlagEpoch = 0;
+    /// Incremented by every call that may move an avar binding's constant
+    /// or variance: RigExecProgramAvarPatch, RigExecPatchFrozenAvarConstants,
+    /// and a frozen job's input patch when an avar constant's bits moved.
+    uint64_t avarConstantSerial = 0;
+    /// RIGEXEC_SPARSE_SAMPLING (default on), RIGEXEC_VERIFY_SPARSE_SAMPLING;
+    /// read at Build. Verify mode counts inputs the sparse pass missed.
+    bool sparseSampling = true, verifySparseSampling = false;
+    size_t sparseSamplingMismatches = 0;
+    /// Inputs whose resample predicate the binding sampler evaluated.
+    uint64_t leafVisits = 0;
+    RigExecBakedSparseInputs sparseInputs;
     /// Every property a chain writes: RigExecBakedBuildContext::chainTargets
     /// as Build classified the inputs against it, kept so a bake can
     /// recompute each input's walk the same way.
@@ -4069,6 +4119,30 @@ RigExecBakedNoteSpaceLeafSampled(RigExecBakedProgramImpl *program, size_t k)
     }
 }
 
+/// The one way a typed leaf's sampled value is recorded: `changed[k]`
+/// becomes \p moved, which must compare bits (a NaN that stays NaN has not
+/// moved, -0 is not 0), and k is listed in `changedList` when the byte goes
+/// 0 -> 1. Owner thread (or the frozen worker on its own clone).
+template <class Pool>
+inline void
+RigExecBakedNoteLeafWrite(Pool *pool, size_t k, bool moved)
+{
+    if (k >= pool->changed.size()) return;
+    if (moved && !pool->changed[k]) pool->changedList.push_back(uint32_t(k));
+    pool->changed[k] = moved ? 1 : 0;
+}
+
+/// Sets `mustSample[k]` and lists k in `markedList` when the byte goes
+/// 0 -> 1.
+template <class Pool>
+inline void
+RigExecBakedMarkPoolLeaf(Pool *pool, size_t k)
+{
+    if (k >= pool->mustSample.size() || pool->mustSample[k]) return;
+    pool->mustSample[k] = 1;
+    pool->markedList.push_back(uint32_t(k));
+}
+
 /// Sets leaf \p id's `mustSample` byte, so the next sample re-reads it. An
 /// id past the binding leaves names a path leaf.
 inline void
@@ -4093,12 +4167,20 @@ RigExecBakedMarkLeaf(RigExecBakedProgramImpl *program, uint32_t id)
     const RigExecBakedLeafRef &ref = program->leafRefs[id];
     program->leaves.ForEach([&ref](auto &pool) {
         using T = typename std::decay_t<decltype(pool)>::Type;
-        if (RigExecBakedLeafTraits<T>::type == ref.type &&
-            ref.index < pool.mustSample.size()) {
-            pool.mustSample[ref.index] = 1;
+        if (RigExecBakedLeafTraits<T>::type == ref.type) {
+            RigExecBakedMarkPoolLeaf(&pool, ref.index);
         }
     });
 }
+
+/// Whether RigExecRevisionLeafHops lists every path where \p key's read can
+/// meet the resolved-input overlay: false only for a Dial key whose flavour
+/// is neither Resolved nor ResolvedOnly. (bakedGeometry.cpp)
+bool RigExecRevisionLeafHopsComplete(const RigExecRevisionLeafKey &key);
+
+/// Fills `overridePathsSorted` from `*interactiveOverrides`. Owner thread,
+/// first thing in Run's prologue. (bakedGeometry.cpp)
+void RigExecBakedPrepareOverridePaths(RigExecBakedProgramImpl *program);
 
 /// Whether binding leaf \p id (a `leafRefs` id) moved in this run's sample.
 inline bool
@@ -4181,12 +4263,12 @@ RigExecBakedPathLeafVersioned(const RigExecBakedPathLeafRef &ref)
 /// resolved inputs at \p time, every key of \p leaves that one of these says
 /// can have moved since its last sample, and sets its `changed` byte:
 ///  1. the first sample, a moved program stamp, or \p all (a forced run);
-///  2. an interactive override standing now or at the last sample: a drag on
-///     any hop, numbered or routed, reaches the read through the resolved
-///     inputs, so every key re-reads while one stands and once after; a
-///     topology key (`epoch`) re-reads only while one stands on one of its
-///     hops, the only paths its read consults the overlay at, and once
-///     after;
+///  2. an interactive override standing now or at the last sample on one of
+///     the key's hops (`overridePathsSorted`), the only paths its read
+///     consults the overlay at; once after, through `overrideReached`. A
+///     key whose hops are not complete (RigExecRevisionLeafHopsComplete)
+///     re-reads while any override stands and once after, as does every
+///     key but a topology one (`epoch`) under RIGEXEC_PATH_LEAF_GATING=0;
 ///  3. a moved time, for a key read at the time that can vary with it (or
 ///     when the time moves to or from Default);
 ///  4. its `mustSample` byte: a value edit reached one of its paths
@@ -4236,6 +4318,12 @@ bool RigExecBakedLeafVaryingNow(const RigExecBakedProgramImpl &program,
 /// (RigExecBakedReadWalked), any other through RigExecBakedRead, the long
 /// way through the upstream layer while a value stands on its number
 /// (`upstreamOn`). Owning thread, prologue only.
+///
+/// Without rules 1-2 a pass visits only the inputs rules 3-6 and 8 can
+/// select: the pools' `markedList`s, the varying inputs and the promoted
+/// avars when the time moved, and the inputs under an override number set
+/// in `overridden`, `lastOverridden` or `edited` (`sparseInputs`).
+/// RIGEXEC_SPARSE_SAMPLING=0 visits every input; both read the same leaves.
 ///
 /// \p pass splits the live prologue around the head tier: BeforeHead reads
 /// every leaf but the chain-routed ones (a binding with `resolvedAttr` or a

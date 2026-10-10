@@ -337,8 +337,9 @@ _FrozenPrologue(_FrozenWorker *worker, const RigExecFrozenProgram &snapshot,
             size_t(input.leaf) >= pool.changed.size()) return false;
         const size_t leaf = size_t(input.leaf);
         input.constant = inputs.stageSeeds.intervening[k];
-        pool.changed[leaf] = std::memcmp(pool.value[leaf].GetArray(),
-            input.constant.GetArray(), 16 * sizeof(double)) != 0;
+        RigExecBakedNoteLeafWrite(&pool, leaf,
+            std::memcmp(pool.value[leaf].GetArray(),
+                        input.constant.GetArray(), 16 * sizeof(double)) != 0);
         pool.value[leaf] = input.constant;
         ladder.interveningReset = inputs.stageSeeds.interveningReset[k];
     }

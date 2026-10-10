@@ -4707,6 +4707,550 @@ TestATrackedConstraintKeepsItsKey(const std::string &examples)
                          "native constraint source moved") == 0);
 }
 
+namespace {
+
+// A Build knob set for one scope: Build reads it once (TfGetenvBool), so a
+// program built or rebuilt inside the scope keeps the setting.
+struct ScopedKnob {
+    std::string name;
+    ScopedKnob(const char *knob, const char *value) : name(knob)
+    {
+        ArchSetEnv(name, value, /*overwrite=*/true);
+    }
+    ~ScopedKnob() { ArchRemoveEnv(name); }
+};
+
+// The value the path leaf keyed at \p path holds, empty when no key reads it.
+VtValue
+PathLeafValue(const RigExecBakedProgramImpl &B, const SdfPath &path)
+{
+    for (const RigExecBakedPathLeafRef &ref : B.pathLeafRefs) {
+        const RigExecBakedPathLeaves *leaves = RigExecBakedPathLeavesOf(B, ref);
+        if (leaves && ref.key < leaves->decl.keys.size() &&
+            ref.key < leaves->values.size() &&
+            leaves->decl.keys[ref.key].path == path) {
+            return leaves->values[ref.key];
+        }
+    }
+    return VtValue();
+}
+
+// How many path-leaf keys list \p path among their hops.
+size_t
+PathLeafKeysReaching(const RigExecBakedProgramImpl &B, const SdfPath &path)
+{
+    size_t count = 0;
+    for (const RigExecBakedPathLeafRef &ref : B.pathLeafRefs) {
+        const RigExecBakedPathLeaves *leaves = RigExecBakedPathLeavesOf(B, ref);
+        if (!leaves || ref.key >= leaves->hops.size()) {
+            continue;
+        }
+        const std::vector<SdfPath> &hops = leaves->hops[ref.key];
+        if (std::find(hops.begin(), hops.end(), path) != hops.end()) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+// One run of \p evaluator under \p drag at \p time on the program it
+// already holds: the path leaves it re-read, and its pose.
+uint64_t
+PathLeafRun(RigExecRigEvaluator *evaluator,
+            const std::vector<RigExecValueOverride> &drag, UsdTimeCode time,
+            const std::string &what, RigExecRigPose *pose)
+{
+    const RigExecBakedProgramImpl *before = Program(*evaluator);
+    const uint64_t samples = before ? before->pathLeafSamples : 0;
+    const size_t builds = evaluator->GetBakedProgramBuildCount();
+    *pose = RunChecked(evaluator, drag, time, what);
+    const bool rebuilt = evaluator->GetBakedProgramBuildCount() != builds;
+    CHECK(!rebuilt);
+    const RigExecBakedProgramImpl *after = Program(*evaluator);
+    return after && !rebuilt ? after->pathLeafSamples - samples : 0;
+}
+
+}  // namespace
+
+// RIGEXEC_PATH_LEAF_GATING. Under a standing override a path-leaf key is
+// re-read only when an override stands on one of its hops, now or at its
+// last sample. A control drag no hop reaches re-reads no path leaf (with the
+// gate off, every key on every step); a drag on a mover input re-reads the
+// key that reads it, its lift once more, and each pose equals a fresh
+// evaluator's. RIGEXEC_VERIFY_PATH_LEAF_GATING reads every key the gate
+// kept and finds it holding what a read gives.
+void
+TestADragResamplesOnlyReachedPathLeaves(const std::string &examples)
+{
+    TfErrorMark mark;
+    {
+        UsdStageRefPtr stage = UsdStage::Open(examples + "/01_FkChainTail.usda");
+        CHECK(stage);
+        if (!stage) {
+            return;
+        }
+        const SdfPath rig("/TailAsset/Rig");
+        const SdfPath control("/TailAsset/Rig/Controls/Tail2.avars:rz");
+        CHECK(stage->GetAttributeAtPath(control));
+        const UsdTimeCode t(1024.0);
+        std::unique_ptr<RigExecRigEvaluator> gated, ungated;
+        RigExecRigPose gatedPose, ungatedPose;
+        {
+            const ScopedKnob verify("RIGEXEC_VERIFY_PATH_LEAF_GATING", "1");
+            gated = MakeEvaluator(stage, rig);
+            RunChecked(gated.get(), {}, t, "gated, first");
+        }
+        {
+            const ScopedKnob off("RIGEXEC_PATH_LEAF_GATING", "0");
+            ungated = MakeEvaluator(stage, rig);
+            RunChecked(ungated.get(), {}, t, "ungated, first");
+        }
+        const RigExecBakedProgramImpl *G = Program(*gated);
+        const RigExecBakedProgramImpl *U = Program(*ungated);
+        CHECK(G && G->pathLeafGating && G->verifyPathLeafGating);
+        CHECK(U && !U->pathLeafGating);
+        if (!G || !U) {
+            return;
+        }
+        CHECK(!G->pathLeafRefs.empty());
+        CHECK(PathLeafKeysReaching(*G, control) == 0);
+        uint64_t gatedAfterFirst = 0, ungatedAfterFirst = 0;
+        for (int step = 0; step < 4; ++step) {
+            const std::vector<RigExecValueOverride> drag =
+                DragBy(stage, control, t, 5.0 * (step + 1));
+            CHECK(!drag.empty());
+            const std::string what = "control drag " + std::to_string(step);
+            const uint64_t g =
+                PathLeafRun(gated.get(), drag, t, "gated " + what, &gatedPose);
+            const uint64_t u = PathLeafRun(ungated.get(), drag, t,
+                                           "ungated " + what, &ungatedPose);
+            CHECK(PoseMismatches(ungatedPose, gatedPose, what) == 0);
+            std::printf("path-leaf gate, %s: %llu gated, %llu ungated\n",
+                        what.c_str(), static_cast<unsigned long long>(g),
+                        static_cast<unsigned long long>(u));
+            if (step > 0) {
+                gatedAfterFirst += g;
+                ungatedAfterFirst += u;
+            }
+        }
+        CHECK(gatedAfterFirst == 0);
+        CHECK(ungatedAfterFirst > 0);
+        G = Program(*gated);
+        CHECK(G && G->pathLeafGateMismatches == 0);
+    }
+    {
+        UsdStageRefPtr stage =
+            UsdStage::Open(examples + "/06_LatticeBulge.usda");
+        CHECK(stage);
+        if (!stage) {
+            return;
+        }
+        const SdfPath rig = RootOf(stage);
+        const SdfPath input("/LatticeAsset/Rig/Movers/Geometry/VolumeCorrect/Smooth.inputs:defaultWeight");
+        CHECK(stage->GetAttributeAtPath(input));
+        const UsdTimeCode t(stage->GetStartTimeCode() + 12.0);
+        std::unique_ptr<RigExecRigEvaluator> gated, ungated;
+        RigExecRigPose gatedPose, ungatedPose;
+        {
+            const ScopedKnob verify("RIGEXEC_VERIFY_PATH_LEAF_GATING", "1");
+            gated = MakeEvaluator(stage, rig);
+            RunChecked(gated.get(), {}, t, "reached, first");
+        }
+        {
+            const ScopedKnob off("RIGEXEC_PATH_LEAF_GATING", "0");
+            ungated = MakeEvaluator(stage, rig);
+            RunChecked(ungated.get(), {}, t, "reached ungated, first");
+        }
+        const RigExecBakedProgramImpl *G = Program(*gated);
+        CHECK(G && G->verifyPathLeafGating);
+        if (!G) {
+            return;
+        }
+        const size_t reaching = PathLeafKeysReaching(*G, input);
+        const VtValue authored = PathLeafValue(*G, input);
+        CHECK(reaching > 0);
+        CHECK(authored.IsHolding<float>());
+        const std::vector<RigExecValueOverride> drag =
+            DragTo(stage, input, 0.25);
+        CHECK(!drag.empty());
+        const uint64_t dragged =
+            PathLeafRun(gated.get(), drag, t, "reached, dragged", &gatedPose);
+        const uint64_t ungatedDragged = PathLeafRun(
+            ungated.get(), drag, t, "reached ungated, dragged", &ungatedPose);
+        G = Program(*gated);
+        CHECK(dragged > 0 && dragged < ungatedDragged);
+        CHECK(G && PathLeafValue(*G, input) == VtValue(0.25f));
+        CHECK(PoseMismatches(FreshOverridePose(stage, rig, t, drag), gatedPose,
+                             "reached, dragged") == 0);
+        CHECK(PoseMismatches(ungatedPose, gatedPose,
+                             "reached, dragged against ungated") == 0);
+        const uint64_t lifted =
+            PathLeafRun(gated.get(), {}, t, "reached, released", &gatedPose);
+        G = Program(*gated);
+        CHECK(lifted > 0);
+        CHECK(G && PathLeafValue(*G, input) == authored);
+        CHECK(PoseMismatches(FreshPose(stage, rig, t), gatedPose,
+                             "reached, released") == 0);
+        CHECK(PathLeafRun(gated.get(), {}, t, "reached, held", &gatedPose) ==
+              0);
+        G = Program(*gated);
+        CHECK(G && G->pathLeafGateMismatches == 0);
+        std::printf("path-leaf gate, mover input: %zu key(s) reach it, %llu re-read dragged (%llu ungated), %llu lifted\n",
+                    reaching, static_cast<unsigned long long>(dragged),
+                    static_cast<unsigned long long>(ungatedDragged),
+                    static_cast<unsigned long long>(lifted));
+    }
+    CHECK(mark.IsClean());
+}
+
+// RIGEXEC_SPARSE_SAMPLING. The binding sampler visits only the inputs a
+// rule can select; RIGEXEC_SPARSE_SAMPLING=0 sweeps every input. Step for
+// step -- a drag, its release, a moved time, a time-sample edit, an avar
+// patch, its promotion to a keyed read, an upstream value placed and
+// lifted -- both read the same number of leaves and pose alike, every leaf
+// equals a fresh read (RunChecked), and RIGEXEC_VERIFY_SPARSE_SAMPLING finds
+// no input the sparse pass skipped while due. A drag step visits under 1 %
+// of the inputs; the sweep visits each at least once.
+void
+TestASparsePassVisitsOnlyCandidates(const std::string &examples)
+{
+    const Fixture f = FixtureNamed(Fixtures(examples), "biped");
+    const UsdStageRefPtr stage = UsdStage::Open(f.stage);
+    CHECK(stage);
+    if (!stage) {
+        return;
+    }
+    const auto avar = [&](const char *prim, const char *name) {
+        for (const UsdPrim &p : stage->Traverse()) {
+            if (p.GetName() == prim) {
+                return p.GetPath().AppendProperty(TfToken(name));
+            }
+        }
+        return SdfPath();
+    };
+    const SdfPath body = avar("M_Body", "avars:ry");
+    const SdfPath keyed = avar("M_Body", "avars:rz");
+    const SdfPath shoulder = avar("L_Shldr", "avars:rz");
+    CHECK(!body.IsEmpty() && !keyed.IsEmpty() && !shoulder.IsEmpty());
+    const UsdTimeCode t1(stage->GetStartTimeCode());
+    const UsdTimeCode t2(t1.GetValue() + 1.0), t3(t1.GetValue() + 2.0);
+    struct Counts {
+        uint64_t samples = 0, visits = 0;
+        bool rebuilt = false;
+        RigExecRigPose pose;
+    };
+    // Each evaluator runs under its own knob, so a rebuild keeps it.
+    const auto run = [&](RigExecRigEvaluator *evaluator, bool swept,
+                         const std::vector<RigExecValueOverride> &drag,
+                         UsdTimeCode time, bool checked,
+                         const std::string &what) {
+        const ScopedKnob knob(swept ? "RIGEXEC_SPARSE_SAMPLING"
+                                    : "RIGEXEC_VERIFY_SPARSE_SAMPLING",
+                              swept ? "0" : "1");
+        Counts out;
+        const RigExecBakedProgramImpl *before = Program(*evaluator);
+        const uint64_t samples = before ? before->leafSamples : 0;
+        const uint64_t visits = before ? before->leafVisits : 0;
+        const size_t builds = evaluator->GetBakedProgramBuildCount();
+        if (checked) {
+            out.pose = RunChecked(evaluator, drag, time, what);
+        } else {
+            // An upstream value stands: RunChecked's fresh read takes no
+            // upstream layer, so only the pose and the generation count.
+            evaluator->SetInteractiveOverrides(drag);
+            const size_t generations = evaluator->GetBakedGenerationCount();
+            out.pose = evaluator->Evaluate(time);
+            CHECK(out.pose.valid);
+            CHECK(evaluator->GetBakedGenerationCount() == generations + 1);
+        }
+        const RigExecBakedProgramImpl *after = Program(*evaluator);
+        CHECK(after);
+        out.rebuilt = evaluator->GetBakedProgramBuildCount() != builds;
+        if (after && !out.rebuilt) {
+            out.samples = after->leafSamples - samples;
+            out.visits = after->leafVisits - visits;
+        }
+        if (after) {
+            CHECK(after->sparseSampling == !swept);
+            CHECK(after->verifySparseSampling == !swept);
+        }
+        return out;
+    };
+    std::unique_ptr<RigExecRigEvaluator> sparse, swept;
+    {
+        const ScopedKnob verify("RIGEXEC_VERIFY_SPARSE_SAMPLING", "1");
+        sparse = MakeEvaluator(stage, f.rig);
+    }
+    {
+        const ScopedKnob off("RIGEXEC_SPARSE_SAMPLING", "0");
+        swept = MakeEvaluator(stage, f.rig);
+    }
+    TfErrorMark mark;
+    const auto both = [&](const std::vector<RigExecValueOverride> &drag,
+                          UsdTimeCode time, bool checked,
+                          const std::string &what) {
+        const Counts s = run(sparse.get(), false, drag, time, checked,
+                             what + ", sparse");
+        const Counts w = run(swept.get(), true, drag, time, checked,
+                             what + ", swept");
+        CHECK(s.rebuilt == w.rebuilt);
+        if (!s.rebuilt && !w.rebuilt && s.samples != w.samples) {
+            std::printf("FAIL %s: %llu leaf read(s) sparse, %llu swept\n",
+                        what.c_str(),
+                        static_cast<unsigned long long>(s.samples),
+                        static_cast<unsigned long long>(w.samples));
+        }
+        CHECK(s.rebuilt || w.rebuilt || s.samples == w.samples);
+        CHECK(PoseMismatches(w.pose, s.pose, what) == 0);
+        const RigExecBakedProgramImpl *P = Program(*sparse);
+        CHECK(P && P->sparseSamplingMismatches == 0);
+        std::printf("sparse sampling, %s: %llu read, %llu visited (%llu swept)%s\n",
+                    what.c_str(), static_cast<unsigned long long>(s.samples),
+                    static_cast<unsigned long long>(s.visits),
+                    static_cast<unsigned long long>(w.visits),
+                    s.rebuilt ? ", rebuilt" : "");
+        return std::make_pair(s, w);
+    };
+    both({}, t1, true, "first");
+    both({}, t1, true, "held");
+    const auto drag = both({DragOf(body, 20.0)}, t1, true, "drag");
+    const RigExecBakedProgramImpl *P = Program(*sparse);
+    const size_t inputs = P ? P->leafRefs.size() : 0;
+    CHECK(inputs > 0);
+    CHECK(!drag.first.rebuilt && drag.first.visits * 100 < inputs);
+    CHECK(!drag.second.rebuilt && drag.second.visits >= inputs);
+    both({DragOf(body, 25.0)}, t1, true, "drag moved");
+    both({}, t1, true, "drag released");
+    both({}, t2, true, "time moved");
+
+    // A keyed avar's sample at the held frame, edited: routed by its number
+    // (`edited`) and its marked leaf.
+    UsdAttribute keyedAttribute = stage->GetAttributeAtPath(keyed);
+    CHECK(keyedAttribute);
+    double keyedValue = 0.0;
+    keyedAttribute.Get(&keyedValue, t2);
+    CHECK(keyedAttribute.Set(keyedValue + 3.0, t2));
+    std::printf("sparse sampling, keyed edit: disposition %d\n",
+                int(sparse->GetLastNoticeDisposition()));
+    both({}, t2, true, "keyed edit");
+
+    // A constant avar: its own spec, a value patch, then a key that
+    // promotes the binding to a per-frame read (RigExecProgramAvarPatch).
+    P = Program(*sparse);
+    CHECK(P && !P->patchableAvars.empty());
+    if (P && !P->patchableAvars.empty()) {
+        const SdfPath patched = P->patchableAvars.begin()->first;
+        UsdAttribute attribute = stage->GetAttributeAtPath(patched);
+        double value = 0.0;
+        attribute.Get(&value, UsdTimeCode::Default());
+        CHECK(attribute.Set(value));
+        both({}, t2, true, "avar spec");
+        CHECK(attribute.Set(value + 0.5));
+        both({}, t2, true, "avar patch");
+        TsSpline spline = attribute.GetSpline();
+        TsKnot knot;
+        knot.SetTime(t3.GetValue());
+        knot.SetValue(value + 1.5);
+        knot.SetNextInterpolation(TsInterpCurve);
+        spline.SetKnot(knot);
+        CHECK(attribute.SetSpline(spline));
+        std::printf("sparse sampling, avar keyed: disposition %d\n",
+                    int(sparse->GetLastNoticeDisposition()));
+        both({}, t2, true, "avar keyed");
+        both({}, t3, true, "time moved after the key");
+    }
+
+    sparse->SetUpstreamInputs({DragOf(shoulder, 30.0)});
+    swept->SetUpstreamInputs({DragOf(shoulder, 30.0)});
+    both({}, t3, false, "upstream placed");
+    sparse->SetUpstreamInputs({});
+    swept->SetUpstreamInputs({});
+    both({}, t3, false, "upstream lifted");
+    both({}, t3, true, "held after upstream");
+    CHECK(mark.IsClean());
+}
+
+// Every set `changed` byte of a typed pool is listed in its `changedList`,
+// so the first pass of the next sample clears exactly them; a forced run,
+// a sparse run under a moved upstream value and three frozen-lane samples
+// (`all`, frozenWorker.cpp) leave every `markedList` empty.
+void
+TestTheChangedListsClearTheFlags(const std::string &examples)
+{
+    UsdStageRefPtr stage = UsdStage::Open(examples + "/01_FkChainTail.usda");
+    CHECK(stage);
+    if (!stage) {
+        return;
+    }
+    const SdfPath rig("/TailAsset/Rig");
+    const SdfPath control("/TailAsset/Rig/Controls/Tail2.avars:rz");
+    auto evaluator = MakeEvaluator(stage, rig);
+    const auto program = [&] {
+        return const_cast<RigExecBakedProgramImpl *>(Program(*evaluator));
+    };
+    // The set `changed` bytes no list names; \p count counts the set ones.
+    const auto unlisted = [](RigExecBakedProgramImpl *B, size_t *count) {
+        size_t missing = 0;
+        *count = 0;
+        B->leaves.ForEach([&](auto &pool) {
+            const std::set<uint32_t> listed(pool.changedList.begin(),
+                                            pool.changedList.end());
+            for (size_t k = 0; k < pool.changed.size(); ++k) {
+                if (pool.changed[k]) {
+                    ++*count;
+                    missing += listed.count(uint32_t(k)) ? 0 : 1;
+                }
+            }
+        });
+        return missing;
+    };
+    const auto marked = [](RigExecBakedProgramImpl *B) {
+        size_t entries = 0;
+        B->leaves.ForEach(
+            [&entries](auto &pool) { entries += pool.markedList.size(); });
+        return entries;
+    };
+    const auto plainRun = [&](double time, const std::string &what) {
+        const size_t generations = evaluator->GetBakedGenerationCount();
+        CHECK(evaluator->Evaluate(UsdTimeCode(time)).valid);
+        if (evaluator->GetBakedGenerationCount() != generations + 1) {
+            std::printf("FAIL %s: not a baked generation\n", what.c_str());
+        }
+        CHECK(evaluator->GetBakedGenerationCount() == generations + 1);
+    };
+    size_t flagged = 0;
+    RunChecked(evaluator.get(), {}, UsdTimeCode(1001), "changed lists, first");
+    RigExecBakedProgramImpl *B = program();
+    CHECK(B);
+    if (!B) {
+        return;
+    }
+    CHECK(unlisted(B, &flagged) == 0);
+    RunChecked(evaluator.get(), {}, UsdTimeCode(1010), "changed lists, time");
+    B = program();
+    CHECK(unlisted(B, &flagged) == 0);
+    // The keyed avars moved between the two frames.
+    CHECK(flagged > 0);
+    CHECK(marked(B) == 0);
+
+    // The next first pass at the held frame reads nothing and clears every
+    // flag through the lists.
+    const uint64_t epoch = B->leafFlagEpoch;
+    const uint64_t samples = B->leafSamples;
+    RigExecBakedSampleLeaves(B, UsdTimeCode(1010), /*all=*/false,
+                             RigExecBakedLeafPass::BeforeHead);
+    CHECK(B->leafFlagEpoch == epoch + 1);
+    CHECK(B->leafSamples == samples);
+    CHECK(unlisted(B, &flagged) == 0);
+    CHECK(flagged == 0);
+    B->leaves.ForEach(
+        [](auto &pool) { CHECK(pool.changedList.empty()); });
+
+    // A forced run (a failed run's reset) under a placed upstream value,
+    // then a sparse run under a moved one.
+    evaluator->SetUpstreamInputs({DragOf(control, 30.0)});
+    B->everRan = false;
+    B->opAdapter.everRan = false;
+    plainRun(1010, "changed lists, forced");
+    B = program();
+    CHECK(marked(B) == 0);
+    CHECK(unlisted(B, &flagged) == 0);
+    const uint64_t beforeMoved = B->leafSamples;
+    evaluator->SetUpstreamInputs({DragOf(control, 35.0)});
+    plainRun(1010, "changed lists, upstream moved");
+    B = program();
+    CHECK(B->leafSamples > beforeMoved);
+    CHECK(marked(B) == 0);
+    CHECK(unlisted(B, &flagged) == 0);
+
+    // A frozen lane's sample shape on a clone: every job marks the leaves
+    // under the upstream path and samples `all`.
+    const auto filed = B->leafByPath.find(control);
+    CHECK(filed != B->leafByPath.end());
+    auto lane = std::make_unique<RigExecBakedProgramImpl>();
+    frozenDetail::_CloneImpl(*B, lane.get());
+    RigExecResolvedInputs laneResolved;
+    lane->resolvedInputs = &laneResolved;
+    for (int job = 0; job < 3; ++job) {
+        if (filed != B->leafByPath.end()) {
+            for (const uint32_t id : filed->second) {
+                RigExecBakedMarkLeaf(lane.get(), id);
+            }
+        }
+        CHECK(marked(lane.get()) > 0);
+        RigExecBakedSampleLeaves(lane.get(), UsdTimeCode(1010 + job),
+                                 /*all=*/true);
+        CHECK(marked(lane.get()) == 0);
+        CHECK(unlisted(lane.get(), &flagged) == 0);
+    }
+    evaluator->SetUpstreamInputs({});
+    plainRun(1010, "changed lists, upstream lifted");
+    RunChecked(evaluator.get(), {}, UsdTimeCode(1011), "changed lists, after");
+    B = program();
+    CHECK(marked(B) == 0);
+    CHECK(unlisted(B, &flagged) == 0);
+}
+
+// The intervening-space writer compares bits (-0 is not 0), as every typed
+// leaf writer does, so its move is listed for the next clear.
+void
+TestAnInterveningZeroSignIsListed(const std::string &examples)
+{
+    UsdStageRefPtr stage = UsdStage::Open(examples + "/01_FkChainTail.usda");
+    CHECK(stage);
+    if (!stage) {
+        return;
+    }
+    const SdfPath rig("/TailAsset/Rig");
+    const UsdTimeCode t(1010.0);
+    auto evaluator = MakeEvaluator(stage, rig);
+    RunChecked(evaluator.get(), {}, t, "intervening, first");
+    RunChecked(evaluator.get(), {}, t, "intervening, held");
+    RigExecBakedProgramImpl *B =
+        const_cast<RigExecBakedProgramImpl *>(Program(*evaluator));
+    CHECK(B && !B->interveningSlots.empty());
+    if (!B || B->interveningSlots.empty()) {
+        return;
+    }
+    // An intervening leaf entry holding +0, which the held run's compose
+    // writes again.
+    RigExecBakedLeafPool<GfMatrix4d> &pool = B->leaves.Of<GfMatrix4d>();
+    size_t leaf = pool.value.size();
+    int entry = -1;
+    for (const auto slot : B->interveningSlots) {
+        const auto &input = B->ladders[size_t(slot)].interveningSpace;
+        if (input.leaf < 0 || size_t(input.leaf) >= pool.value.size()) {
+            continue;
+        }
+        const double *m = pool.value[size_t(input.leaf)].GetArray();
+        for (int i = 0; i < 16 && entry < 0; ++i) {
+            if (m[i] == 0.0 && !std::signbit(m[i])) {
+                entry = i;
+            }
+        }
+        if (entry >= 0) {
+            leaf = size_t(input.leaf);
+            break;
+        }
+    }
+    CHECK(entry >= 0);
+    if (entry < 0) {
+        return;
+    }
+    pool.value[leaf].GetArray()[entry] = -0.0;
+    RunChecked(evaluator.get(), {}, t, "intervening, signed zero");
+    const RigExecBakedProgramImpl *A = Program(*evaluator);
+    CHECK(A == B);
+    if (A != B) {
+        return;
+    }
+    const RigExecBakedLeafPool<GfMatrix4d> &after = A->leaves.Of<GfMatrix4d>();
+    CHECK(leaf < after.changed.size() && after.changed[leaf] == 1);
+    CHECK(std::find(after.changedList.begin(), after.changedList.end(),
+                    uint32_t(leaf)) != after.changedList.end());
+    CHECK(!std::signbit(after.value[leaf].GetArray()[entry]));
+}
+
 int
 main(int argc, char **argv)
 {
@@ -4741,6 +5285,10 @@ main(int argc, char **argv)
     TestTheSparseWatchVisitsWhatMoved(examples);
     TestALaneWatchFollowsPatchedConstants(examples);
     TestATrackedConstraintKeepsItsKey(examples);
+    TestADragResamplesOnlyReachedPathLeaves(examples);
+    TestASparsePassVisitsOnlyCandidates(examples);
+    TestTheChangedListsClearTheFlags(examples);
+    TestAnInterveningZeroSignIsListed(examples);
     std::printf("testRigExecLeaves: %d failure(s)\n", failures);
     return failures ? 1 : 0;
 }

@@ -5121,6 +5121,34 @@ RigExecBakedResolvePathLeaves(const RigExecBakedProgramImpl &B,
     return leaves.consumedValues;
 }
 
+bool
+RigExecRevisionLeafHopsComplete(const RigExecRevisionLeafKey &key)
+{
+    // A Dial read walks the connections through the overlay whatever its
+    // flavour; RigExecRevisionLeafHops lists that walk for these two only.
+    return key.type != RigExecRevisionLeafType::Dial ||
+           key.flavour == RigExecRevisionLeafFlavour::Resolved ||
+           key.flavour == RigExecRevisionLeafFlavour::ResolvedOnly;
+}
+
+void
+RigExecBakedPrepareOverridePaths(RigExecBakedProgramImpl *program)
+{
+    RigExecBakedProgramImpl &B = *program;
+    std::vector<SdfPath> &paths = B.overridePathsSorted;
+    paths.clear();
+    if (!B.interactiveOverrides) {
+        return;
+    }
+    for (const auto &overrideValue : *B.interactiveOverrides) {
+        paths.push_back(overrideValue.attribute.IsEmpty()
+            ? overrideValue.prim.AppendProperty(overrideValue.computation)
+            : overrideValue.prim.AppendProperty(overrideValue.attribute));
+    }
+    std::sort(paths.begin(), paths.end());
+    paths.erase(std::unique(paths.begin(), paths.end()), paths.end());
+}
+
 void
 RigExecBakedSamplePathLeaves(RigExecBakedProgramImpl *program,
                              RigExecBakedPathLeaves *leaves, UsdTimeCode time,
@@ -5137,74 +5165,41 @@ RigExecBakedSamplePathLeaves(RigExecBakedProgramImpl *program,
     // that holds both, whatever its variance.
     const bool defaultMoved =
         timeMoved && (time.IsDefault() || leaves->time.IsDefault());
+    // The overlay the reads consult, built by the first key that reads.
     RigExecResolvedInputs sourceOnly;
-    std::vector<SdfPath> overridePaths;
-    if (B.interactiveOverrides) {
-        for (const auto &overrideValue : *B.interactiveOverrides) {
-            const SdfPath path = overrideValue.attribute.IsEmpty()
-                ? overrideValue.prim.AppendProperty(overrideValue.computation)
-                : overrideValue.prim.AppendProperty(overrideValue.attribute);
-            sourceOnly.SetProperty(path,overrideValue.value);
-            overridePaths.push_back(path);
+    bool sourceOnlyBuilt = false;
+    const auto overlay = [&]() -> const RigExecResolvedInputs * {
+        if (!sourceOnlyBuilt) {
+            sourceOnlyBuilt = true;
+            if (B.interactiveOverrides) {
+                for (const auto &overrideValue : *B.interactiveOverrides) {
+                    const SdfPath path = overrideValue.attribute.IsEmpty()
+                        ? overrideValue.prim.AppendProperty(overrideValue.computation)
+                        : overrideValue.prim.AppendProperty(overrideValue.attribute);
+                    sourceOnly.SetProperty(path,overrideValue.value);
+                }
+            }
         }
-    }
+        return &sourceOnly;
+    };
     // Whether a standing override is at a path key \p k's read can reach:
     // the overlay the read consults holds nothing anywhere else.
     const auto overrideReaches = [&](size_t k) {
         if (!overrides || k >= leaves->hops.size()) {
             return false;
         }
-        const std::vector<SdfPath> &reach = leaves->hops[k];
-        return std::any_of(overridePaths.begin(), overridePaths.end(),
-                           [&reach](const SdfPath &path) {
-                               return std::find(reach.begin(), reach.end(),
-                                                path) != reach.end();
-                           });
-    };
-    std::vector<SdfPath> hops;
-    for (size_t k = 0; k < leaves->decl.keys.size(); ++k) {
-        leaves->changed[k] = 0;
-        if (std::find(skip.begin(), skip.end(), int(k)) != skip.end()) {
-            leaves->mustSample[k] = 1;
-            continue;
-        }
-        const RigExecRevisionLeafKey &key = leaves->decl.keys[k];
-        const bool rebind = all || leaves->VarianceStale(B.programStamp, k);
-        const bool atTime = key.time == RigExecRevisionLeafTime::AtTime;
-        // A topology key is epoch state: a standing override moves it only
-        // where one stands on its hops, now or at its last sample.
-        const bool epoch = k < leaves->epoch.size() && leaves->epoch[k] != 0;
-        bool reached = epoch && overrideReaches(k);
-        const bool overrideMoves =
-            overridden &&
-            (!epoch || reached ||
-             (k < leaves->overrideReached.size() &&
-              leaves->overrideReached[k] != 0));
-        if (!rebind && !overrideMoves && !chainsMoved &&
-            !(atTime && timeMoved && (leaves->varying[k] || defaultMoved))) {
-            continue;
-        }
-        if (rebind) {
-            // An edit can author time samples where there were none.
-            bool varying = false;
-            RigExecRevisionLeafHops(key, leaves->attributes[k], &hops,
-                                    &varying);
-            leaves->varying[k] = varying ? 1 : 0;
-            if (epoch && k < leaves->hops.size()) {
-                leaves->hops[k] = hops;
-                reached = overrideReaches(k);
+        const std::vector<SdfPath> &paths = B.overridePathsSorted;
+        for (const SdfPath &hop : leaves->hops[k]) {
+            if (std::binary_search(paths.begin(), paths.end(), hop)) {
+                return true;
             }
         }
-        if (epoch && k < leaves->overrideReached.size()) {
-            leaves->overrideReached[k] = reached ? 1 : 0;
-        }
-        leaves->mustSample[k] = 0;
-        ++B.pathLeafSamples;
-        // Sampling publishes source opinions only. Produced values are resolved
-        // by the owning body after its graph dependencies complete.
-        const int walk = k < leaves->walks.size() ? leaves->walks[k] : -1;
+        return false;
+    };
+    // Key \p k's value as a sample reads it now.
+    const auto read = [&](const RigExecRevisionLeafKey &key, size_t k) {
         VtValue value = RigExecSampleRevisionLeaf(key, leaves->attributes[k],
-                                                &sourceOnly, time, &B.upstream);
+                                                overlay(), time, &B.upstream);
         if (key.flavour == RigExecRevisionLeafFlavour::Present) {
             bool present = false;
             if (B.interactiveOverrides) {
@@ -5217,6 +5212,62 @@ RigExecBakedSamplePathLeaves(RigExecBakedProgramImpl *program,
             }
             value = VtValue(present);
         }
+        return value;
+    };
+    std::vector<SdfPath> hops;
+    for (size_t k = 0; k < leaves->decl.keys.size(); ++k) {
+        leaves->changed[k] = 0;
+        if (std::find(skip.begin(), skip.end(), int(k)) != skip.end()) {
+            leaves->mustSample[k] = 1;
+            continue;
+        }
+        const RigExecRevisionLeafKey &key = leaves->decl.keys[k];
+        const bool rebind = all || leaves->VarianceStale(B.programStamp, k);
+        const bool atTime = key.time == RigExecRevisionLeafTime::AtTime;
+        // A standing override moves a gated key only where one stands on its
+        // hops, now or at its last sample: a topology key (epoch state)
+        // always, any key whose hops list every overlay read while
+        // RIGEXEC_PATH_LEAF_GATING is on.
+        const bool epoch = k < leaves->epoch.size() && leaves->epoch[k] != 0;
+        const bool gated =
+            epoch || (B.pathLeafGating && RigExecRevisionLeafHopsComplete(key));
+        bool reached = gated && overrideReaches(k);
+        const bool overrideMoves =
+            overridden &&
+            (!gated || reached ||
+             (k < leaves->overrideReached.size() &&
+              leaves->overrideReached[k] != 0));
+        if (!rebind && !overrideMoves && !chainsMoved &&
+            !(atTime && timeMoved && (leaves->varying[k] || defaultMoved))) {
+            // RIGEXEC_VERIFY_PATH_LEAF_GATING: a key only the gate kept
+            // reads what it holds.
+            if (B.verifyPathLeafGating && overridden && gated && !epoch &&
+                !RigExecBakedHeadValueSame(read(key, k), leaves->values[k])) {
+                ++B.pathLeafGateMismatches;
+                TF_VERIFY(false, "path leaf %s skipped by its override gate reads another value", key.path.GetText());
+            }
+            continue;
+        }
+        if (rebind) {
+            // An edit can author time samples where there were none.
+            bool varying = false;
+            RigExecRevisionLeafHops(key, leaves->attributes[k], &hops,
+                                    &varying);
+            leaves->varying[k] = varying ? 1 : 0;
+            if (gated && k < leaves->hops.size()) {
+                leaves->hops[k] = hops;
+                reached = overrideReaches(k);
+            }
+        }
+        if (gated && k < leaves->overrideReached.size()) {
+            leaves->overrideReached[k] = reached ? 1 : 0;
+        }
+        leaves->mustSample[k] = 0;
+        ++B.pathLeafSamples;
+        // Sampling publishes source opinions only. Produced values are resolved
+        // by the owning body after its graph dependencies complete.
+        const int walk = k < leaves->walks.size() ? leaves->walks[k] : -1;
+        VtValue value = read(key, k);
         leaves->changed[k] =
             RigExecBakedSetPathLeaf(leaves, k, std::move(value), B.pathLeafRun) ? 1 : 0;
         if (walk >= 0 && leaves->changed[k]) {

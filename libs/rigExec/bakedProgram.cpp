@@ -57,6 +57,7 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cstring>
 #include <functional>
 #include <limits>
 #include <map>
@@ -341,7 +342,12 @@ void _SampleIntervening(RigExecBakedProgramImpl *program, UsdTimeCode time)
         if (input.leaf >= 0) {
             auto &pool = B.leaves.Of<GfMatrix4d>();
             const size_t leaf = size_t(input.leaf);
-            pool.changed[leaf] = pool.value[leaf] != input.constant;
+            // Bitwise, as every typed leaf compares: -0 is not 0.
+            RigExecBakedNoteLeafWrite(
+                &pool, leaf,
+                std::memcmp(pool.value[leaf].GetArray(),
+                            input.constant.GetArray(),
+                            16 * sizeof(double)) != 0);
             pool.value[leaf] = input.constant;
         }
     }
@@ -1511,12 +1517,14 @@ void
 RigExecProgramAvarPatch(RigExecBakedProgramImpl *B, size_t bindingIndex,
                         double value, bool animated)
 {
+    ++B->avarConstantSerial;
     RigExecBakedProgramImpl::AvarBinding &binding =
         B->avarConstantBindings[bindingIndex];
     // The binding's leaf is re-read by the next sample, whichever way the
     // patch moves the binding below.
     if (binding.input.leaf >= 0) {
-        B->leaves.Of<double>().mustSample[size_t(binding.input.leaf)] = 1;
+        RigExecBakedMarkPoolLeaf(&B->leaves.Of<double>(),
+                                 size_t(binding.input.leaf));
     }
     const auto promoted = std::find(B->promotedAvars.begin(),
                                     B->promotedAvars.end(), bindingIndex);
@@ -2607,6 +2615,12 @@ RigExecBakedProgram::_BuildWithSceneCaptureAttempt(RigExecRigEvaluator *evaluato
     B.useSimd = RigExecSimdEnabled();
     B.purityAudit = TfGetenvBool("RIGEXEC_PURITY_AUDIT", false);
     B.verifyFrozenStatic = TfGetenvBool("RIGEXEC_VERIFY_FROZEN_STATIC", false);
+    B.pathLeafGating = TfGetenvBool("RIGEXEC_PATH_LEAF_GATING", true);
+    B.verifyPathLeafGating =
+        TfGetenvBool("RIGEXEC_VERIFY_PATH_LEAF_GATING", false);
+    B.sparseSampling = TfGetenvBool("RIGEXEC_SPARSE_SAMPLING", true);
+    B.verifySparseSampling =
+        TfGetenvBool("RIGEXEC_VERIFY_SPARSE_SAMPLING", false);
     RigExecRevisionKernelTouchTokens();
     RigExecWeightPacketsTouchTokens();
     RigExecBakedGeometryTouchTokens();
@@ -4180,6 +4194,8 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
     // here.
     {
         RIGEXEC_PROFILE_SCOPE_CAT(*B.profiler, "BakedPrologue", "baked");
+        // The standing overrides' paths, which gate the path leaves' reads.
+        RigExecBakedPrepareOverridePaths(&B);
         // A math mover's inputs are all authored on itself, so its chain owes
         // exec nothing and resolves first: the head tier runs the chains
         // before anything else reads a result.

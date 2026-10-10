@@ -2957,6 +2957,216 @@ RigExecBakedNumberLeaves(RigExecBakedProgramImpl *program)
     }
 }
 
+namespace {
+
+bool
+_LeafFlagged(const std::vector<char> &flags, int index)
+{
+    return index >= 0 && size_t(index) < flags.size() &&
+           flags[size_t(index)];
+}
+
+// RigExecBakedSampleLeaves' decision for one input: numbered, outside a
+// bound walk, of \p pass's routing, and selected by one of its rules.
+template <class T>
+bool
+_LeafResample(const RigExecBakedProgramImpl &B,
+              const RigExecBakedInput<T> &input, RigExecBakedLeafPass pass,
+              bool all, bool timeMoved, bool edited)
+{
+    if (input.leaf < 0) {
+        return false;
+    }
+    // Bound walks are resolved by their consumer against current graph
+    // values. Their source heads are sampled separately as raw leaves.
+    if(input.walk>=0) return false;
+    const bool routed = bool(input.resolvedAttr);
+    if ((pass == RigExecBakedLeafPass::BeforeHead && routed) ||
+        (pass == RigExecBakedLeafPass::ChainRouted && !routed)) {
+        return false;
+    }
+    const RigExecBakedLeafPool<T> &pool = B.leaves.Of<T>();
+    const size_t k = size_t(input.leaf);
+    const int o = input.overrideIndex;
+    const bool walked = input.walk >= 0;
+    // `all` first: a frozen job's handles are dead.
+    return all || pool.mustSample[k] || (timeMoved && input.varying) ||
+           _LeafFlagged(B.overridden, o) ||
+           _LeafFlagged(B.lastOverridden, o) ||
+           (edited && _LeafFlagged(B.edited, o)) ||
+           (walked && B.readerWalkMoved[size_t(input.walk)]);
+}
+
+// One input's visit, the same from the full sweep and the sparse pass:
+// whether it was read. Each input owns its leaf and the read is pure, so
+// the visiting order cannot change a value or a flag.
+template <class T>
+bool
+_SampleLeafInput(RigExecBakedProgramImpl &B, const RigExecResolvedInputs &R,
+                 RigExecBakedInput<T> &input, RigExecBakedLeafPass pass,
+                 UsdTimeCode time, bool all, bool timeMoved, bool edited)
+{
+    using Stored = typename RigExecBakedLeafTraits<T>::Stored;
+    ++B.leafVisits;
+    if (!_LeafResample(B, input, pass, all, timeMoved, edited)) {
+        return false;
+    }
+    RigExecBakedLeafPool<T> &pool = B.leaves.Of<T>();
+    const size_t k = size_t(input.leaf);
+    const bool walked = input.walk >= 0;
+    pool.mustSample[k] = 0;
+    ++B.leafSamples;
+    // An upstream value on a hop reads the long way through the layer;
+    // rule 8 marked the leaf when it was placed, moved or lifted.
+    const Stored value =
+        walked ? Stored(RigExecBakedReadWalked(B, input, B.overridden,
+                                               &B.upstreamOn))
+               : Stored(RigExecBakedRead(input, R, time, &B.overridden,
+                                         &B.upstream, &B.upstreamOn));
+    RigExecBakedNoteLeafWrite(&pool, k, !_LeafSame(value, pool.value[k]));
+    pool.value[k] = value;
+    if (walked && pool.changed[k]) {
+        B.readerWalkChanged[size_t(input.walk)] = 1;
+    }
+    return true;
+}
+
+// \p fn(n) for every n with flags[n] != 0, ascending, testing eight bytes
+// at a time.
+template <class Fn>
+void
+_ForEachFlagged(const std::vector<char> &flags, Fn &&fn)
+{
+    const size_t n = flags.size();
+    size_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+        uint64_t word = 0;
+        std::memcpy(&word, flags.data() + i, sizeof(word));
+        if (word == 0) {
+            continue;
+        }
+        for (size_t j = i; j < i + 8; ++j) {
+            if (flags[j]) {
+                fn(j);
+            }
+        }
+    }
+    for (; i < n; ++i) {
+        if (flags[i]) {
+            fn(i);
+        }
+    }
+}
+
+// \p fn on leaf \p id's input, cast to the type its pool names.
+template <class Fn>
+void
+_WithLeafInput(RigExecBakedProgramImpl &B, uint32_t id, Fn &&fn)
+{
+    void *input = id < B.sparseInputs.input.size()
+                      ? B.sparseInputs.input[id]
+                      : nullptr;
+    if (!input || id >= B.leafRefs.size()) {
+        return;
+    }
+    switch (B.leafRefs[id].type) {
+    case RigExecBakedLeafType::Double:
+        fn(*static_cast<RigExecBakedInput<double> *>(input));
+        return;
+    case RigExecBakedLeafType::Float:
+        fn(*static_cast<RigExecBakedInput<float> *>(input));
+        return;
+    case RigExecBakedLeafType::Int:
+        fn(*static_cast<RigExecBakedInput<int> *>(input));
+        return;
+    case RigExecBakedLeafType::Bool:
+        fn(*static_cast<RigExecBakedInput<bool> *>(input));
+        return;
+    case RigExecBakedLeafType::Token:
+        fn(*static_cast<RigExecBakedInput<TfToken> *>(input));
+        return;
+    case RigExecBakedLeafType::Matrix4d:
+        fn(*static_cast<RigExecBakedInput<GfMatrix4d> *>(input));
+        return;
+    case RigExecBakedLeafType::Vec3d:
+        fn(*static_cast<RigExecBakedInput<GfVec3d> *>(input));
+        return;
+    case RigExecBakedLeafType::Vec3f:
+        fn(*static_cast<RigExecBakedInput<GfVec3f> *>(input));
+        return;
+    }
+}
+
+// Builds `sparseInputs` for \p program unless it already describes it:
+// one visitor traversal. False, leaving it empty, when some leaf id has no
+// input to point at; the caller then sweeps.
+bool
+_SparseInputsReady(RigExecBakedProgramImpl *program)
+{
+    RigExecBakedProgramImpl &B = *program;
+    RigExecBakedSparseInputs &S = B.sparseInputs;
+    if (S.owner == &B && S.leafCount == B.leafRefs.size()) {
+        return true;
+    }
+    S = RigExecBakedSparseInputs();
+    const size_t n = B.leafRefs.size();
+    S.input.assign(n, nullptr);
+    // (override number, leaf id) of every input outside a walk.
+    std::vector<std::pair<uint32_t, uint32_t>> numbered;
+    size_t numbers = 0;
+    bool complete = true;
+    frozenDetail::_ForEachPatchableInput(B, [&](auto &input) {
+        using T = std::decay_t<decltype(input.constant)>;
+        if (input.leaf < 0) {
+            return;
+        }
+        const RigExecBakedLeafPool<T> &pool = B.leaves.Of<T>();
+        const size_t k = size_t(input.leaf);
+        if (k >= pool.id.size() || pool.id[k] >= n ||
+            B.leafRefs[pool.id[k]].type != RigExecBakedLeafTraits<T>::type) {
+            complete = false;
+            return;
+        }
+        const uint32_t id = pool.id[k];
+        S.input[id] = &input;
+        if (input.walk >= 0) {
+            return;
+        }
+        if (input.varying) {
+            S.varying.push_back(id);
+        }
+        if (input.overrideIndex >= 0) {
+            numbered.emplace_back(uint32_t(input.overrideIndex), id);
+            numbers = std::max(numbers, size_t(input.overrideIndex) + 1);
+        }
+    });
+    for (const void *input : S.input) {
+        complete = complete && input != nullptr;
+    }
+    if (!complete) {
+        S = RigExecBakedSparseInputs();
+        return false;
+    }
+    S.numberBegin.assign(numbers + 1, 0);
+    for (const auto &entry : numbered) {
+        ++S.numberBegin[size_t(entry.first) + 1];
+    }
+    for (size_t i = 0; i < numbers; ++i) {
+        S.numberBegin[i + 1] += S.numberBegin[i];
+    }
+    S.numberLeaves.assign(numbered.size(), 0);
+    std::vector<uint32_t> next(S.numberBegin.begin(), S.numberBegin.end() - 1);
+    for (const auto &entry : numbered) {
+        S.numberLeaves[next[size_t(entry.first)]++] = entry.second;
+    }
+    S.visited.assign(n, 0);
+    S.owner = &B;
+    S.leafCount = n;
+    return true;
+}
+
+}  // namespace
+
 void
 RigExecBakedSampleLeaves(RigExecBakedProgramImpl *program, UsdTimeCode time,
                          bool all, RigExecBakedLeafPass pass)
@@ -2993,56 +3203,136 @@ RigExecBakedSampleLeaves(RigExecBakedProgramImpl *program, UsdTimeCode time,
     all = all || !B.everRan || B.programStamp != B.lastProgramStamp;
     const bool timeMoved = time != B.lastTime;
     const bool edited = B.anyEdited;
-    const auto flagged = [](const std::vector<char> &flags, int index) {
-        return index >= 0 && size_t(index) < flags.size() &&
-               flags[size_t(index)];
-    };
+    // Both passes of a Run decide alike: `all` is recomputed from the same
+    // state, and the index built by the first stands for the second.
+    const bool sparse = !all && B.sparseSampling && _SparseInputsReady(&B);
     if (first) {
-        B.leaves.ForEach([](auto &pool) {
-            std::fill(pool.changed.begin(), pool.changed.end(), char(0));
+        ++B.leafFlagEpoch;
+        B.leaves.ForEach([sparse](auto &pool) {
+            if (sparse) {
+                for (const uint32_t k : pool.changedList) {
+                    if (k < pool.changed.size()) {
+                        pool.changed[k] = 0;
+                    }
+                }
+            } else {
+                std::fill(pool.changed.begin(), pool.changed.end(), char(0));
+            }
+            pool.changedList.clear();
         });
     }
-    frozenDetail::_ForEachPatchableInput(B, [&](auto &input) {
-        using T = std::decay_t<decltype(input.constant)>;
-        using Stored = typename RigExecBakedLeafTraits<T>::Stored;
-        if (input.leaf < 0) {
+    if (!sparse) {
+        // The sweep relists every input it samples that is still marked.
+        B.leaves.ForEach([](auto &pool) { pool.markedList.clear(); });
+        frozenDetail::_ForEachPatchableInput(B, [&](auto &input) {
+            using T = std::decay_t<decltype(input.constant)>;
+            _SampleLeafInput(B, R, input, pass, time, all, timeMoved, edited);
+            if (input.leaf < 0 || input.walk >= 0) {
+                return;
+            }
+            RigExecBakedLeafPool<T> &pool = B.leaves.Of<T>();
+            const size_t k = size_t(input.leaf);
+            if (k < pool.mustSample.size() && pool.mustSample[k]) {
+                pool.markedList.push_back(uint32_t(k));
+            }
+        });
+        return;
+    }
+    // Every input a rule can select, each once per pass: a set `mustSample`
+    // byte (rules 5, 6 and 8) through the marked lists; a moved time (rule
+    // 3) through the varying inputs and the avars a patch promoted (the
+    // only run-time writer of `varying`); an override now or at the last
+    // run (rule 4) and an edit (rule 5) through their numbers.
+    RigExecBakedSparseInputs &S = B.sparseInputs;
+    const uint64_t stamp = ++S.pass;
+    const auto visit = [&](uint32_t id) {
+        if (id >= S.visited.size() || S.visited[id] == stamp) {
             return;
         }
-        // Bound walks are resolved by their consumer against current graph
-        // values. Their source heads are sampled separately as raw leaves.
-        if(input.walk>=0) return;
-        const bool routed = bool(input.resolvedAttr);
-        if ((pass == RigExecBakedLeafPass::BeforeHead && routed) ||
-            (pass == RigExecBakedLeafPass::ChainRouted && !routed)) {
+        S.visited[id] = stamp;
+        _WithLeafInput(B, id, [&](auto &input) {
+            _SampleLeafInput(B, R, input, pass, time, all, timeMoved, edited);
+        });
+    };
+    B.leaves.ForEach([&visit](auto &pool) {
+        for (size_t i = 0; i < pool.markedList.size(); ++i) {
+            const uint32_t k = pool.markedList[i];
+            if (k < pool.id.size()) {
+                visit(pool.id[k]);
+            }
+        }
+    });
+    if (timeMoved) {
+        for (const uint32_t id : S.varying) {
+            visit(id);
+        }
+        const RigExecBakedLeafPool<double> &avars = B.leaves.Of<double>();
+        for (const size_t binding : B.promotedAvars) {
+            if (binding >= B.avarConstantBindings.size()) {
+                continue;
+            }
+            const int leaf = B.avarConstantBindings[binding].input.leaf;
+            if (leaf >= 0 && size_t(leaf) < avars.id.size()) {
+                visit(avars.id[size_t(leaf)]);
+            }
+        }
+    }
+    const auto visitNumber = [&](size_t number) {
+        if (number + 1 >= S.numberBegin.size()) {
             return;
         }
-        RigExecBakedLeafPool<T> &pool = B.leaves.Of<T>();
-        const size_t k = size_t(input.leaf);
-        const int o = input.overrideIndex;
-        const bool walked = input.walk >= 0;
-        // `all` first: a frozen job's handles are dead.
-        const bool resample =
-            all || pool.mustSample[k] || (timeMoved && input.varying) ||
-            flagged(B.overridden, o) || flagged(B.lastOverridden, o) ||
-            (edited && flagged(B.edited, o)) ||
-            (walked && B.readerWalkMoved[size_t(input.walk)]);
-        if (!resample) {
-            return;
+        for (uint32_t i = S.numberBegin[number];
+             i < S.numberBegin[number + 1]; ++i) {
+            visit(S.numberLeaves[i]);
         }
-        pool.mustSample[k] = 0;
-        ++B.leafSamples;
-        // An upstream value on a hop reads the long way through the layer;
-        // rule 8 marked the leaf when it was placed, moved or lifted.
-        const Stored value =
-            walked ? Stored(RigExecBakedReadWalked(B, input, B.overridden,
-                                                   &B.upstreamOn))
-                   : Stored(RigExecBakedRead(input, R, time, &B.overridden,
-                                             &B.upstream, &B.upstreamOn));
-        pool.changed[k] = _LeafSame(value, pool.value[k]) ? 0 : 1;
-        pool.value[k] = value;
-        if (walked && pool.changed[k]) {
-            B.readerWalkChanged[size_t(input.walk)] = 1;
+    };
+    _ForEachFlagged(B.overridden, visitNumber);
+    _ForEachFlagged(B.lastOverridden, visitNumber);
+    if (edited) {
+        _ForEachFlagged(B.edited, visitNumber);
+    }
+    // RIGEXEC_VERIFY_SPARSE_SAMPLING: no input the pass left unvisited was
+    // due for a read.
+    if (B.verifySparseSampling) {
+        size_t missed = 0;
+        frozenDetail::_ForEachPatchableInput(B, [&](auto &input) {
+            using T = std::decay_t<decltype(input.constant)>;
+            if (input.leaf < 0) {
+                return;
+            }
+            const RigExecBakedLeafPool<T> &pool = B.leaves.Of<T>();
+            const size_t k = size_t(input.leaf);
+            if (k < pool.id.size() && pool.id[k] < S.visited.size() &&
+                S.visited[pool.id[k]] == stamp) {
+                return;
+            }
+            if (_LeafResample(B, input, pass, all, timeMoved, edited)) {
+                ++missed;
+            }
+        });
+        if (missed) {
+            B.sparseSamplingMismatches += missed;
+            TF_VERIFY(false, "%zu binding leaf(s) the sparse sample pass did not visit were due for a read", missed);
         }
+    }
+    // Keep the entries still marked whose input this function samples: a
+    // routed one marked before BeforeHead stays for ChainRouted.
+    B.leaves.ForEach([&S](auto &pool) {
+        using T = typename std::decay_t<decltype(pool)>::Type;
+        size_t kept = 0;
+        for (size_t i = 0; i < pool.markedList.size(); ++i) {
+            const uint32_t k = pool.markedList[i];
+            if (k >= pool.mustSample.size() || !pool.mustSample[k] ||
+                k >= pool.id.size() || pool.id[k] >= S.input.size()) {
+                continue;
+            }
+            const auto *input =
+                static_cast<const RigExecBakedInput<T> *>(S.input[pool.id[k]]);
+            if (input && input->walk < 0) {
+                pool.markedList[kept++] = k;
+            }
+        }
+        pool.markedList.resize(kept);
     });
 }
 
