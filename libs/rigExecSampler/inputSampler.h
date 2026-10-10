@@ -4,7 +4,8 @@
 // stage's timeline means handing the reader, at every new time, the values
 // the stage holds there. Only the inputs the file marks Animated can hold
 // another value at another time. Explicit static SourceBacked rows are also
-// sampled after invalidation to transport Default edits. Reads are raw typed Gets of
+// sampled to transport Default edits; under SetStaticInputSkip only by an
+// Apply that refreshes (NoteStageChanged). Reads are raw typed Gets of
 // the attribute itself (the runtime performs the connection walks). A time
 // equal to the last one makes no calls, so the reader's closure sees time
 // move exactly when it did.
@@ -83,12 +84,30 @@ public:
     /// all when \p time is the time of the last Apply, or the bake time
     /// right after Bind. False with the reader's reason when it refuses a
     /// value; the next Apply samples again. \p sampled, when given, says
-    /// whether this call sampled (false for the no-call case).
+    /// whether this call sampled (false for the no-call case). Under
+    /// SetStaticInputSkip, a static input is read only when the Apply
+    /// refreshes.
     bool Apply(PXR_NS::UsdTimeCode time, RigExecRuntimeReader *reader,
                std::string *error, bool *sampled = nullptr);
 
-    /// The next Apply samples whatever its time.
-    void Invalidate() { _sampled = false; }
+    /// The next Apply samples whatever its time, and reads every input.
+    void Invalidate()
+    {
+        _sampled = false;
+        _staticStale = true;
+    }
+
+    /// Off by default. On: a bound input that is not Animated and whose
+    /// attribute cannot vary with time is read only by a sampling Apply that
+    /// refreshes (the first after Bind, Invalidate or NoteStageChanged, or
+    /// one whose time changes Default-ness), which also re-decides which
+    /// inputs are static. Order-free with Bind.
+    void SetStaticInputSkip(bool skip) { _staticSkip = skip; }
+    /// The stage changed: the next Apply that samples reads every input and
+    /// re-decides which are static. Owner thread; sets a flag only.
+    void NoteStageChanged() { _staticStale = true; }
+    /// Inputs the last sampling Apply read (a cost counter for tests).
+    size_t GetLastReadCount() const { return _lastReads; }
 
     /// One line per input Bind could not resolve, naming it and why.
     const std::vector<std::string> &GetWarnings() const { return _warnings; }
@@ -103,6 +122,9 @@ private:
         RrInputTag type = RrInputTag::Double;
         PXR_NS::UsdAttribute attribute;
         bool animated = true;
+        /// Not Animated, and the attribute reads one value at every numeric
+        /// time; decided at Bind and at every refresh.
+        bool isStatic = false;
     };
 
     std::vector<_Bound> _animated;
@@ -110,6 +132,8 @@ private:
     std::vector<std::string> _warnings;
     PXR_NS::UsdTimeCode _last;
     bool _sampled = false;
+    bool _staticSkip = false, _staticStale = true;
+    size_t _lastReads = 0;
 };
 
 }  // namespace rigExec

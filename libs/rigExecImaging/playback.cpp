@@ -159,6 +159,9 @@ RigExecBakedPlayback::Open(const std::string &resolvedPath,
                 resolvedPath.c_str(), warnings.size(), named.c_str());
     }
     _sampler = std::move(sampler);
+    // Static inputs are read again only after a stage notice, which the
+    // registry forwards (NoteStageChanged).
+    _sampler.SetStaticInputSkip(true);
     _epochDigest = _PlaybackDigestBytes(bytes);
     _reader = std::move(reader);
     // In-tree playback runs the reader's clusters in parallel by default
@@ -272,6 +275,9 @@ RigExecBakedPlayback::_LiftUpstream(const _UpstreamKey &key,
     const bool sampledArray = !RrInputTagIsArray(key.tag) ||
         RigExecRuntimeStageArrayInputs::CanSample(*_reader, key.index);
     if (!key.animated || !sampledArray) {
+        // A static input the sampler binds is read again at the next
+        // sampling Apply, over this reset (see _ApplyUpstream).
+        _sampler.NoteStageChanged();
         return _reader->ResetInput(key.name, error);
     }
     return sampled || RigExecSampleInputAt(key.attribute, key.index,
@@ -327,6 +333,13 @@ RigExecBakedPlayback::_ApplyUpstream(UsdTimeCode time, bool sampled,
                     return false;
                 }
                 continue;
+            }
+            // The sampler skips a static input it binds until it refreshes,
+            // and a write here is not the stage's value: the next sampling
+            // Apply refreshes and reads the stage over it, as every
+            // sampling Apply reads an Animated input.
+            if (!key.animated) {
+                _sampler.NoteStageChanged();
             }
         }
         applied.emplace(path, key);

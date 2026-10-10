@@ -25,7 +25,10 @@
 // interactive overrides, against which the work counters agree too, and a
 // lattice whose live cage read is bound where its read phase answers
 // nothing. Last, every input write route re-keys the leaves keyed from
-// the slot it writes, and a run after no write re-keys none.
+// the slot it writes, and a run after no write re-keys none, nor one after
+// a write that moves no keyed field; and a sampler that skips static
+// provider inputs plays what one reading every input plays, and follows a
+// Default edit or new keys after NoteStageChanged.
 #include "rigExec/rigEvaluator.h"
 #include "rigExecBake/bake.h"
 #include "rigExecBake/staticReport.h"
@@ -1894,9 +1897,10 @@ _TestExampleArrays(const std::string &examples)
 // leaf, a constraint's arrays) is re-keyed only after a write to a slot it
 // reads. Under RIGEXEC_VERIFY_SPARSE_LEAVES every Execute also re-keys the
 // leaves it skipped and fails if one moved, so each write route below has
-// to mark its slot: the sampler over time, a sampled set and its repeat, a
-// blocked flag, a sampled clear, an authored set, a clear, a reset. A run
-// after no write re-keys none, and one write re-keys fewer than all.
+// to mark its slot: the sampler over time, a sampled set, a blocked flag, a
+// sampled clear, an authored set, a clear, a reset. A run after no write
+// re-keys none, nor does one after a repeat that moves no keyed field, and
+// one write re-keys fewer than all.
 static void
 _TestSparseSlotLeaves(const std::string &examples)
 {
@@ -1968,7 +1972,7 @@ _TestSparseSlotLeaves(const std::string &examples)
     std::printf("sparse slot leaves: %zu, re-keyed after a time step %zu, "
                 "after one input %zu\n", all, sampled, one);
     CHECK(RigExecRuntimeStageArrayInputs::SetScalarSample(reader, slot, value, &error));
-    CHECK(run("repeated sampled set") == one);
+    CHECK(run("repeated sampled set") == 0);
     CHECK(RigExecRuntimeStageArrayInputs::SetSampleBlocked(reader, slot, true, &error));
     CHECK(run("blocked") == one);
     CHECK(RigExecRuntimeStageArrayInputs::SetSampleBlocked(reader, slot, false, &error));
@@ -1995,8 +1999,8 @@ _TestSparseSlotLeaves(const std::string &examples)
 // tables only, so a run rebuilds just the memos of steps reading a slot
 // some call wrote. Under RIGEXEC_VERIFY_SOURCE_KEYS every Execute also
 // rebuilds the memos it keeps and fails if one moved. A run after no write
-// builds none; an avar written alone builds some but not all, and its
-// repeat, its move and its reset build the same ones.
+// builds none; an avar written alone builds some but not all, its move and
+// its reset build the same ones, and its repeat none.
 static void
 _TestSparseSourceMemos(const std::string &examples)
 {
@@ -2069,7 +2073,7 @@ _TestSparseSourceMemos(const std::string &examples)
     if (slot >= count) return;
     CHECK(one < all);
     CHECK(reader.SetInputAt(slot, value, &error));
-    CHECK(run("repeated set") == one);
+    CHECK(run("repeated set") == 0);
     value.f64 = -1.25;
     CHECK(reader.SetInputAt(slot, value, &error));
     CHECK(run("moved set") == one);
@@ -2080,6 +2084,325 @@ _TestSparseSourceMemos(const std::string &examples)
     std::printf("sparse source memos: %zu keyed, after one avar %zu\n", all, one);
     CHECK(player.Play(3.0, &error));
     CHECK(run("held at the end") == 0);
+}
+
+// A runtime knob for the readers opened while it stands: the runtime reads
+// its knobs at Open through the C runtime's environment. Unset at the end
+// of its scope.
+class _RtInputsKnob
+{
+public:
+    _RtInputsKnob(const char *name, const char *value) : _name(name)
+    {
+        _Put(_name, value);
+    }
+    ~_RtInputsKnob() { _Put(_name, ""); }
+    _RtInputsKnob(const _RtInputsKnob &) = delete;
+    _RtInputsKnob &operator=(const _RtInputsKnob &) = delete;
+
+private:
+    static void _Put(const char *name, const char *value)
+    {
+#if defined(_WIN32)
+        _putenv_s(name, value);
+#else
+        if (*value) setenv(name, value, 1);
+        else unsetenv(name);
+#endif
+    }
+    const char *_name;
+};
+
+// Written slots: a set that leaves a slot's value bits, HasValue, authored
+// mark and blocked flag where its readers were last keyed writes nothing a
+// run consumes, so that run re-keys no leaf and builds no source memo;
+// another value re-keys what the first set did. Under the sparse leaf and
+// source key judges every run passes. A reader opened with
+// RIGEXEC_RUNTIME_WRITTEN_FILTER=0 plays the same outputs and re-keys on
+// every repeat.
+static void
+_TestARepeatedSetWritesNothing(const std::vector<uint8_t> &bytes)
+{
+    std::string error;
+    std::unique_ptr<RigExecRuntimeReader> filtered, recorded;
+    {
+        const _RtInputsKnob leaves("RIGEXEC_VERIFY_SPARSE_LEAVES", "1");
+        const _RtInputsKnob sources("RIGEXEC_VERIFY_SOURCE_KEYS", "1");
+        filtered =
+            RigExecRuntimeReader::Open(bytes.data(), bytes.size(), &error);
+        const _RtInputsKnob off("RIGEXEC_RUNTIME_WRITTEN_FILTER", "0");
+        recorded =
+            RigExecRuntimeReader::Open(bytes.data(), bytes.size(), &error);
+    }
+    CHECK(filtered && recorded);
+    if (!filtered || !recorded) {
+        std::printf("repeated set: open: %s\n", error.c_str());
+        return;
+    }
+    // The leaves a reader's last run re-keyed and the source memos it built.
+    using _Keys = std::pair<size_t, size_t>;
+    const _Keys none(0, 0);
+    const auto run = [&](RigExecRuntimeReader &reader, const char *what) {
+        error.clear();
+        const bool ok = reader.Execute(&error);
+        if (!ok) std::printf("repeated set, %s: %s\n", what, error.c_str());
+        CHECK(ok);
+        return _Keys(reader.GetSlotLeafKeysForTesting(),
+                     reader.GetSourceKeysBuiltForTesting());
+    };
+    // Both readers take \p value at input \p slot and run, and play the
+    // same outputs: the filtered reader's keys, the other's in `unfiltered`.
+    _Keys unfiltered = none;
+    const auto setBoth = [&](size_t slot, double value, const char *what) {
+        RrInputValue typed;
+        typed.tag = RrInputTag::Double;
+        typed.f64 = value;
+        error.clear();
+        CHECK(filtered->SetSampledInputAt(slot, typed, &error));
+        CHECK(recorded->SetSampledInputAt(slot, typed, &error));
+        const _Keys keys = run(*filtered, what);
+        unfiltered = run(*recorded, what);
+        CHECK(_SameOutputs(*filtered, *recorded));
+        return keys;
+    };
+    run(*filtered, "first");
+    run(*recorded, "first");
+    CHECK(run(*filtered, "held") == none);
+    CHECK(run(*recorded, "held") == none);
+
+    // A listed Double provider value that some leaf or memo reads.
+    const size_t count = filtered->GetInputCount();
+    size_t slot = count, tried = 0;
+    _Keys keyed = none;
+    for (const RigExecStageArrayInputInfo &info :
+         RigExecRuntimeStageArrayInputs::EnumerateProviderValues(*filtered)) {
+        if (info.tag != RrInputTag::Double || info.slot >= count ||
+            tried == 16) {
+            continue;
+        }
+        ++tried;
+        keyed = setBoth(info.slot, 0.375, "set");
+        if (keyed != none) {
+            slot = info.slot;
+            break;
+        }
+    }
+    CHECK(slot < count);
+    if (slot >= count) {
+        return;
+    }
+    CHECK(unfiltered == keyed);
+    CHECK(setBoth(slot, 0.375, "repeated set") == none);
+    CHECK(unfiltered == keyed);
+    CHECK(setBoth(slot, -1.25, "moved set") == keyed);
+    CHECK(unfiltered == keyed);
+    CHECK(setBoth(slot, -1.25, "repeated moved set") == none);
+    CHECK(unfiltered == keyed);
+    CHECK(run(*filtered, "held") == none);
+    std::printf("written filter: a set of %s re-keys %zu leaves and builds "
+                "%zu memos, its repeat none (%zu without the filter)\n",
+                filtered->GetInputInfo(slot).name.c_str(), keyed.first,
+                keyed.second, unfiltered.first + unfiltered.second);
+}
+
+// Static provider inputs: a sampler told SetStaticInputSkip after Bind, as
+// playback tells it, reads a bound input the file does not mark Animated,
+// on an attribute that cannot vary with time, only when an Apply refreshes
+// (its first sampling one, one after NoteStageChanged, one that changes
+// Default-ness), and plays bit for bit what a sampler reading every input
+// plays. A Default edit of such an input plays after NoteStageChanged as a
+// sampler bound after the edit plays it; a skip sampler never told keeps
+// what it read. Keys authored after Bind are followed after the next
+// NoteStageChanged.
+static void
+_TestStaticProviderInputsAreReadOnce(const UsdStageRefPtr &stage,
+                                     const std::vector<uint8_t> &bytes)
+{
+    struct _Played {
+        std::unique_ptr<RigExecRuntimeReader> reader;
+        RigExecInputSampler sampler;
+    };
+    std::string error;
+    // A reader of the bake with a sampler bound to the stage as it is now.
+    const auto open = [&](_Played *played) {
+        error.clear();
+        played->reader =
+            RigExecRuntimeReader::Open(bytes.data(), bytes.size(), &error);
+        const bool ok = played->reader &&
+                        played->sampler.Bind(stage, *played->reader, &error) &&
+                        played->sampler.GetWarnings().empty();
+        if (!ok) std::printf("static inputs: open: %s\n", error.c_str());
+        CHECK(ok);
+        return ok;
+    };
+    const auto play = [&](_Played *played, UsdTimeCode time) {
+        error.clear();
+        const bool ok =
+            played->sampler.Apply(time, played->reader.get(), &error) &&
+            played->reader->Execute(&error);
+        if (!ok) std::printf("static inputs: play: %s\n", error.c_str());
+        CHECK(ok);
+    };
+    // A reader played at \p frame over the stage as it is now; null when it
+    // does not open.
+    const auto fresh = [&](double frame) {
+        auto played = std::make_unique<_Played>();
+        if (open(played.get())) {
+            play(played.get(), UsdTimeCode(frame));
+        } else {
+            played.reset();
+        }
+        return played;
+    };
+    _Played skip, plain, unnoted;
+    if (!open(&skip) || !open(&plain) || !open(&unnoted)) {
+        return;
+    }
+    // Set after Bind, as playback sets it.
+    skip.sampler.SetStaticInputSkip(true);
+    unnoted.sampler.SetStaticInputSkip(true);
+    // The bound inputs the file does not mark Animated: provider values
+    // read from their source, static at the bake.
+    std::vector<RigExecStageArrayInputInfo> statics;
+    for (const RigExecStageArrayInputInfo &info :
+         RigExecRuntimeStageArrayInputs::EnumerateProviderValues(
+             *skip.reader)) {
+        if (!info.animated) {
+            statics.push_back(info);
+        }
+    }
+    CHECK(!statics.empty());
+    if (statics.empty()) {
+        return;
+    }
+    const size_t animated = skip.sampler.GetAnimatedCount();
+    const size_t bound = animated + statics.size();
+    // Frame 1 is the bake time, which makes no call; frame 2 refreshes and
+    // reads every bound input; frames 3 and 4 read the Animated ones alone.
+    for (int frame = 1; frame <= 4; ++frame) {
+        for (_Played *played : {&skip, &plain, &unnoted}) {
+            play(played, UsdTimeCode(double(frame)));
+        }
+        CHECK(_SameOutputs(*skip.reader, *plain.reader));
+        CHECK(_SameOutputs(*unnoted.reader, *plain.reader));
+        if (frame >= 2) {
+            CHECK(plain.sampler.GetLastReadCount() == bound);
+            CHECK(skip.sampler.GetLastReadCount() ==
+                  (frame == 2 ? bound : animated));
+        }
+    }
+
+    // A static Double input whose Default edit moves what the rig plays:
+    // the reader that reads every input takes each candidate edit at frame
+    // 4, where the skip reader still holds the unedited values.
+    const std::unique_ptr<_Played> old5 = fresh(5.0);
+    if (!old5) {
+        return;
+    }
+    UsdAttribute edited;
+    double original = 0.0;
+    size_t tried = 0;
+    for (const RigExecStageArrayInputInfo &info : statics) {
+        if (info.tag != RrInputTag::Double || tried == 48) {
+            continue;
+        }
+        const UsdAttribute attribute =
+            stage->GetAttributeAtPath(SdfPath(info.name));
+        double value = 0.0;
+        if (!attribute || !attribute.Get(&value, UsdTimeCode(4.0)) ||
+            !std::isfinite(value)) {
+            continue;
+        }
+        ++tried;
+        {
+            UsdEditContext context(stage, stage->GetSessionLayer());
+            CHECK(attribute.Set(value - 1.0));
+        }
+        plain.sampler.Invalidate();
+        play(&plain, UsdTimeCode(4.0));
+        if (!_SameOutputs(*plain.reader, *skip.reader)) {
+            edited = attribute;
+            original = value;
+            break;
+        }
+        UsdEditContext context(stage, stage->GetSessionLayer());
+        CHECK(attribute.Clear());
+    }
+    std::printf("static inputs: %zu of %zu bound inputs, %zu tried for an "
+                "edit that moves the rig\n",
+                statics.size(), bound, tried);
+    CHECK(edited);
+    if (!edited) {
+        return;
+    }
+
+    // Frame 5: the reader that reads every input and the skip reader told
+    // NoteStageChanged read the edit, as a reader bound after it does; the
+    // skip reader never told keeps what it read (the documented semantics).
+    const std::unique_ptr<_Played> edited5 = fresh(5.0);
+    if (!edited5) {
+        return;
+    }
+    CHECK(!_SameOutputs(*edited5->reader, *old5->reader));
+    skip.sampler.NoteStageChanged();
+    for (_Played *played : {&skip, &plain, &unnoted}) {
+        play(played, UsdTimeCode(5.0));
+    }
+    CHECK(skip.sampler.GetLastReadCount() == bound);
+    CHECK(unnoted.sampler.GetLastReadCount() == animated);
+    CHECK(_SameOutputs(*skip.reader, *edited5->reader));
+    CHECK(_SameOutputs(*plain.reader, *edited5->reader));
+    CHECK(_SameOutputs(*unnoted.reader, *old5->reader));
+    for (_Played *played : {&skip, &plain}) {
+        play(played, UsdTimeCode(6.0));
+    }
+    CHECK(skip.sampler.GetLastReadCount() == animated);
+    CHECK(_SameOutputs(*skip.reader, *plain.reader));
+
+    // Keys authored after Bind: the refresh the next notice asks for finds
+    // the input varying, and every later Apply reads it. Frame 8's key is
+    // the edit's value, which the never-told reader does not hold.
+    {
+        UsdEditContext context(stage, stage->GetSessionLayer());
+        CHECK(edited.Set(original, UsdTimeCode(7.0)));
+        CHECK(edited.Set(original - 1.0, UsdTimeCode(8.0)));
+    }
+    skip.sampler.NoteStageChanged();
+    for (const double frame : {7.0, 8.0}) {
+        for (_Played *played : {&skip, &plain, &unnoted}) {
+            play(played, UsdTimeCode(frame));
+        }
+        const std::unique_ptr<_Played> reference = fresh(frame);
+        CHECK(reference && _SameOutputs(*skip.reader, *reference->reader));
+        CHECK(_SameOutputs(*plain.reader, *skip.reader));
+        CHECK(skip.sampler.GetLastReadCount() ==
+              (frame == 7.0 ? bound : animated + 1));
+    }
+    CHECK(!_SameOutputs(*unnoted.reader, *skip.reader));
+
+    // Default after numeric times refreshes and reads every bound input,
+    // and so does the numeric time after it.
+    for (_Played *played : {&skip, &plain}) {
+        error.clear();
+        CHECK(played->sampler.Apply(UsdTimeCode::Default(),
+                                    played->reader.get(), &error));
+    }
+    CHECK(skip.sampler.GetLastReadCount() == bound);
+    std::string skipWhy, plainWhy;
+    const bool skipRan = skip.reader->Execute(&skipWhy);
+    const bool plainRan = plain.reader->Execute(&plainWhy);
+    CHECK(skipRan == plainRan && skipWhy == plainWhy);
+    if (skipRan && plainRan) {
+        CHECK(_SameOutputs(*skip.reader, *plain.reader));
+    }
+    for (const double frame : {9.0, 10.0}) {
+        for (_Played *played : {&skip, &plain}) {
+            play(played, UsdTimeCode(frame));
+        }
+        CHECK(_SameOutputs(*skip.reader, *plain.reader));
+        CHECK(skip.sampler.GetLastReadCount() ==
+              (frame == 9.0 ? bound : animated + 1));
+    }
 }
 
 int
@@ -2304,6 +2627,16 @@ main(int argc, char **argv)
     _TestRetainedPointFinalAvailability(examples);
     _TestSparseSlotLeaves(examples);
     _TestSparseSourceMemos(examples);
+    // Written slots and static provider inputs, over one bake.
+    if (const UsdStageRefPtr stage =
+            _Open(examples + "/biped/Biped_anim.usda")) {
+        std::vector<uint8_t> bytes;
+        if (_BakeArrays("static inputs", stage, _FindRig(stage), 1.0,
+                        &bytes)) {
+            _TestARepeatedSetWritesNothing(bytes);
+            _TestStaticProviderInputsAreReadOnce(stage, bytes);
+        }
+    }
     if (failures == 0) {
         std::printf("testRigExecRuntimeInputs: all tests passed\n");
         return 0;

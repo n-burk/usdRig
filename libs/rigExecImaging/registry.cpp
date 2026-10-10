@@ -3935,9 +3935,14 @@ RigExecImagingRegistry::_OnObjectsChanged(
         readRoots = _readRoots;
         // Pose-only keys include every stage edit. Retire their display
         // rows even when this notice misses the rig's known input roots.
+        // A playback re-reads its static inputs after every edit too: one
+        // it binds may lie outside them.
         for (RigSession &session : _sessions) {
             if (!session.playback && session.bridge) {
                 session.bridge->RetirePoseOnlyCacheEntries();
+            }
+            if (session.playback) {
+                session.playback->NoteStageChanged();
             }
         }
     }

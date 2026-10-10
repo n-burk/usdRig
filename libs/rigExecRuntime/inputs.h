@@ -338,6 +338,15 @@ struct RrInputState {
     /// consumed them (RrInputsMarkWritten), each listed once.
     std::vector<uint32_t> written;
     std::vector<char> writtenFlag;
+    /// Per slot: the value and the keyed bits (bit 0 HasValue, 1 authored,
+    /// 2 blocked) the slot's readers were last keyed from, which
+    /// RrInputsFilterWritten compares a written scalar slot with. Sized at
+    /// Open with the slots.
+    std::vector<RrWireValue> keyedValue;
+    std::vector<uint8_t> keyedBits;
+    /// RIGEXEC_RUNTIME_WRITTEN_FILTER, read at Open: off, the filter only
+    /// records and drops nothing.
+    bool filterWritten = true;
     /// Per listed input (index = slot id < file->listedInputs): what
     /// GetInputInfo reports, and the value GetInputValue reports.
     std::vector<RigExecRuntimeInputInfo> inputInfo;
@@ -579,6 +588,13 @@ RrInputsMarkWritten(RrInputState &state, size_t slot)
         state.written.push_back(uint32_t(slot));
     }
 }
+
+/// Drops from `written` every scalar slot whose value bits, HasValue,
+/// authored mark and blocked flag equal what its readers were last keyed
+/// from, and records the rest as keyed. Array slots always stay. Called
+/// where a run consumes `written`; \p all records every slot (a full
+/// publication) and drops nothing.
+void RrInputsFilterWritten(RrInputState *state, bool all);
 
 /// Whether the resolved inputs hold a value at attribute \p path this run:
 /// a property-chain result (RigExecResolvedInputs::Find).

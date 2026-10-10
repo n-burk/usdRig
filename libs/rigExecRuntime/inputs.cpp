@@ -15,6 +15,7 @@
 #include <set>
 #include "stageArrayInputs.h"
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <unordered_map>
 #include <utility>
@@ -332,6 +333,61 @@ _RrSameValueBits(const RrWireValue &a, const RrWireValue &b)
     }
 }
 
+// The fields of slot \p slot a slot key appends beside its value
+// (_RrRawSlotMemo, RrSourceReadMemo): bit 0 HasValue, 1 authored, 2 blocked.
+uint8_t
+_RrKeyedBits(const RrInputState &state, size_t slot)
+{
+    return uint8_t((state.slotHasValue[slot] ? 1 : 0) |
+                   (state.slotAuthored[slot] ? 2 : 0) |
+                   (state.slotBlocked[slot] ? 4 : 0));
+}
+
+// Every member of two scalar values a slot key appends (_RrMemoValue), bit
+// for bit: the tag's own member and the others, which a file value may carry.
+bool
+_RrSameKeyedValue(const RrWireValue &a, const RrWireValue &b)
+{
+    return a.tag == b.tag && a.bits == b.bits &&
+           std::memcmp(a.matrix.data(), b.matrix.data(), sizeof(a.matrix)) ==
+               0 &&
+           std::memcmp(a.vec3d.data(), b.vec3d.data(), sizeof(a.vec3d)) == 0 &&
+           std::memcmp(a.vec3f.data(), b.vec3f.data(), sizeof(a.vec3f)) == 0 &&
+           a.vec3i == b.vec3i;
+}
+
+// A runtime knob, read at Open from the C runtime's environment: "0",
+// "false", "no" or "off" (any case) is off, "1", "true", "yes" or "on" on;
+// anything else, or nothing, is \p fallback.
+bool
+_RrKnob(const char *name, bool fallback)
+{
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable : 4996)
+#endif
+    const char *value = std::getenv(name);
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
+    if (!value || !*value) {
+        return fallback;
+    }
+    std::string lower(value);
+    for (char &c : lower) {
+        if (c >= 'A' && c <= 'Z') {
+            c = char(c - 'A' + 'a');
+        }
+    }
+    if (lower == "0" || lower == "false" || lower == "no" || lower == "off") {
+        return false;
+    }
+    if (lower == "1" || lower == "true" || lower == "yes" || lower == "on") {
+        return true;
+    }
+    return fallback;
+}
+
 // Whether slot \p slot holds other than its bake-time default: another
 // HasValue, or other bits.
 bool
@@ -606,6 +662,7 @@ RrInputsOpen(RrProgram *program, const RigExecWireFile *file,
     RrInputState &state = program->inputState;
     state = RrInputState();
     state.file = file;
+    state.filterWritten = _RrKnob("RIGEXEC_RUNTIME_WRITTEN_FILTER", true);
     state.stageArraySlots = RigExecStageArraySlots(*file);
     state.stageTokenSlots = RigExecStageTokenSlots(*file);
     state.values.reserve(file->values.size());
@@ -725,6 +782,12 @@ RrInputsOpen(RrProgram *program, const RigExecWireFile *file,
     state.touchedFlag.assign(slots, 0);
     state.writtenFlag.assign(slots, 0);
     state.written.clear();
+    // The first run publishes in full and records every slot again.
+    state.keyedValue = state.slotCurrent;
+    state.keyedBits.resize(slots);
+    for (size_t s = 0; s < slots; ++s) {
+        state.keyedBits[s] = _RrKeyedBits(state, s);
+    }
     state.slotChangedSinceRun.assign(slots, 0);
     // The float2 and float3 pool entries an array value names, converted
     // once; the other pools are read in place.
@@ -2641,6 +2704,39 @@ RrInputsApplyTouched(RrProgram *program)
     store.anyOverridden =
         std::find(store.overridden.begin(), store.overridden.end(),
                   char(1)) != store.overridden.end();
+}
+
+void
+RrInputsFilterWritten(RrInputState *state, bool all)
+{
+    RrInputState &s = *state;
+    const size_t slots = s.keyedBits.size();
+    if (all) {
+        for (size_t slot = 0; slot < slots; ++slot) {
+            s.keyedValue[slot] = s.slotCurrent[slot];
+            s.keyedBits[slot] = _RrKeyedBits(s, slot);
+        }
+        return;
+    }
+    // A slot-keyed leaf or a source memo keys exactly these fields of the
+    // slots it reads (_RrRawSlotMemo, RrSourceReadMemo), and a slot leaves
+    // `written` only when they equal the record; every slot it keeps is
+    // re-recorded, so the record is what the readers were last keyed from.
+    size_t kept = 0;
+    for (const uint32_t slot : s.written) {
+        if (slot < slots && !_RrIsArraySlot(s, slot)) {
+            const uint8_t bits = _RrKeyedBits(s, slot);
+            if (s.filterWritten && bits == s.keyedBits[slot] &&
+                _RrSameKeyedValue(s.slotCurrent[slot], s.keyedValue[slot])) {
+                s.writtenFlag[slot] = 0;
+                continue;
+            }
+            s.keyedValue[slot] = s.slotCurrent[slot];
+            s.keyedBits[slot] = bits;
+        }
+        s.written[kept++] = slot;
+    }
+    s.written.resize(kept);
 }
 
 bool

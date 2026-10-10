@@ -28,7 +28,9 @@
 // keyed input with no default value holds no value there, as on the stage,
 // and so does one whose sample is blocked. Stage edits never dirty a
 // playback session, so an edit is read only at the next change of time,
-// and only on an Animated input; changing the asset, or the file it names,
+// and only on an input the sampler binds; a static one (not Animated, not
+// keyed) only after the registry forwards a stage notice
+// (NoteStageChanged). Changing the asset, or the file it names,
 // needs a re-activation, the same rule as a rig authored into an
 // already-active stage.
 // Upstream scene-index values (docs/specs/upstream-inputs.md, "Playback")
@@ -88,6 +90,12 @@ public:
     /// ok == false.
     RigExecImagingBridge::PublishResult EvaluateAndPublishResult(
         UsdTimeCode time);
+
+    /// The stage changed: the next evaluation at a new time reads every
+    /// bound input again, the static ones included, and re-decides which
+    /// are static. The registry calls it for every notice of its stage,
+    /// under its lock. Sets a flag only.
+    void NoteStageChanged() { _sampler.NoteStageChanged(); }
 
     /// Stable per file (FNV-1a over the bytes): the published prim set of
     /// a binary never changes, so one epoch is published ever.

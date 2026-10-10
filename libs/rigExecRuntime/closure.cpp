@@ -838,9 +838,12 @@ bool RrExecuteOpGraph(RrProgram *p,bool force,std::string *error)
     };
     RrGeometryPublishChainInputs(p);
     // A slot-keyed leaf keeps the key an equal compare would keep until a
-    // slot it reads is written; the run consumes the written slots.
+    // slot it reads is written; the run consumes the written slots, less
+    // those whose keyed fields are where its readers were last keyed.
     auto &inputs=p->inputState;
-    if(first || force || p->slotLeafBegin.empty()) {
+    const bool full=first || force || p->slotLeafBegin.empty();
+    RrInputsFilterWritten(&inputs,full);
+    if(full) {
         for(const auto id:state.leaves) publish(id);
         s.slotLeafKeys=p->slotKeyedLeaves.size();
     } else {

@@ -19,6 +19,19 @@ PXR_NAMESPACE_USING_DIRECTIVE
 
 namespace rigExec {
 
+namespace {
+
+// An input the file does not mark Animated, on an attribute with at most one
+// time sample and no spline or varying clip: every numeric time reads the
+// same value (Default may read another, which a refresh covers).
+bool
+_StaticInput(bool animated, const UsdAttribute &attribute)
+{
+    return !animated && attribute && !attribute.ValueMightBeTimeVarying();
+}
+
+}  // namespace
+
 TfType
 RigExecInputTagType(RrInputTag tag)
 {
@@ -336,6 +349,8 @@ RigExecInputSampler::Bind(const UsdStagePtr &stage,
     _animatedCount = 0;
     _warnings.clear();
     _sampled = false;
+    _staticStale = true;
+    _lastReads = 0;
     if (!stage) {
         if (error) {
             *error = "the input sampler has no stage to read";
@@ -417,6 +432,9 @@ RigExecInputSampler::Bind(const UsdStagePtr &stage,
         _animatedCount += bound.animated ? 1 : 0;
         _animated.push_back(std::move(bound));
     }
+    for (_Bound &bound : _animated) {
+        bound.isStatic = _StaticInput(bound.animated, bound.attribute);
+    }
     _last = UsdTimeCode(reader.GetBakeTime());
     _sampled = true;
     return true;
@@ -432,7 +450,27 @@ RigExecInputSampler::Apply(UsdTimeCode time, RigExecRuntimeReader *reader,
     if (_sampled && time == _last) {
         return true;
     }
+    // A refresh reads every input and re-decides which are static: keys
+    // authored since the last one make an input varying, removed keys make
+    // it static again. Default and a numeric time can read different values
+    // of an attribute keyed once, so a change of Default-ness refreshes too.
+    const bool refresh =
+        _staticStale || time.IsDefault() != _last.IsDefault();
+    if (refresh) {
+        for (_Bound &bound : _animated) {
+            bound.isStatic = _StaticInput(bound.animated, bound.attribute);
+        }
+    }
+    const bool skipStatic = _staticSkip && !refresh;
+    _lastReads = 0;
     for (const _Bound &bound : _animated) {
+        // A skipped input holds what the last refresh read, the stage's
+        // value at every numeric time; a caller that writes such an input
+        // itself calls NoteStageChanged so the next Apply reads it again.
+        if (skipStatic && bound.isStatic) {
+            continue;
+        }
+        ++_lastReads;
         if (!RigExecSampleInputAt(bound.attribute, bound.index, bound.name,
                                   bound.type, time, reader, error)) {
             return false;
@@ -441,6 +479,7 @@ RigExecInputSampler::Apply(UsdTimeCode time, RigExecRuntimeReader *reader,
     reader->TouchAnimatedInputs();
     _last = time;
     _sampled = true;
+    _staticStale = false;
     if (sampled) {
         *sampled = true;
     }

@@ -11,11 +11,14 @@
 // playback's two documented v1 gaps (see playback.h) and are not compared:
 // the assertion is that every geometry leaf the live path owns, playback
 // owns with the same value, and that playback owns no geometry leaf the
-// live path lacks. Also covered: Open() refusing an unreadable file, and
+// live path lacks. Also covered: Open() refusing an unreadable file;
 // registry selection -- a stage whose rig names rigExec:asset activates
 // into a guideless playback generation, while the same stage without the
-// attribute draws guides.
+// attribute draws guides; and a registry playback that reads its static
+// inputs once, then again after each stage notice, so a Default edit or
+// keys authored after it opened play as a fresh playback plays them.
 #include "rigExecBake/bake.h"
+#include "rigExecBinary/format.h"
 #include "rigExecImaging/bridge.h"
 #include "rigExecImaging/playback.h"
 #include "rigExecImaging/registry.h"
@@ -24,6 +27,7 @@
 #include "pxr/base/plug/registry.h"
 #include "pxr/usd/sdf/assetPath.h"
 #include "pxr/usd/sdf/valueTypeName.h"
+#include "pxr/usd/usd/editContext.h"
 #include "pxr/usd/usd/primRange.h"
 #include "pxr/usd/usd/stage.h"
 
@@ -31,6 +35,8 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -184,6 +190,44 @@ _CompareGenerations(const RigExecImagingSnapshot &live,
             CHECK(false);
         }
     }
+}
+
+// Whether two generations own the same geometry leaves with the same
+// values, as _CompareGenerations holds them, without reporting.
+static bool
+_SameGenerations(const RigExecImagingSnapshot &a,
+                 const RigExecImagingSnapshot &b)
+{
+    const auto geometry = [](const RigExecPublishedPrim &prim) {
+        return prim.hasPoints || prim.hasNormals || prim.hasExtent ||
+               prim.hasXform;
+    };
+    for (const auto &[path, x] : a.prims) {
+        const auto found = b.prims.find(path);
+        if (found == b.prims.end()) {
+            if (geometry(x)) {
+                return false;
+            }
+            continue;
+        }
+        const RigExecPublishedPrim &y = found->second;
+        if (x.hasPoints != y.hasPoints || x.hasNormals != y.hasNormals ||
+            x.hasExtent != y.hasExtent || x.hasXform != y.hasXform ||
+            (x.hasPoints && !_SamePoints(x.points, y.points)) ||
+            (x.hasNormals && !_SamePoints(x.normals, y.normals)) ||
+            (x.hasExtent && (x.extentMin != y.extentMin ||
+                             x.extentMax != y.extentMax)) ||
+            (x.hasXform && (!_SameMatrices(x.xform, y.xform) ||
+                            !_SameMatrices(x.xformBase, y.xformBase)))) {
+            return false;
+        }
+    }
+    for (const auto &[path, y] : b.prims) {
+        if (geometry(y) && a.prims.find(path) == a.prims.end()) {
+            return false;
+        }
+    }
+    return true;
 }
 
 static int comparedRows = 0;
@@ -399,6 +443,217 @@ _TestSelection(const std::string &stagePath, const std::string &frameText,
     registry.Deactivate();
 }
 
+// A registry playback session reads its static inputs (not Animated, not
+// keyed) only after a stage notice, and the registry forwards every notice
+// of its stage. A Default edit of such an input then plays at the next
+// time exactly as a playback opened after the edit plays it, and keys
+// authored on it afterwards are followed at every time. Playbacks outside
+// the registry hear of no edit and keep what they read: the one opened
+// before the edit shows that the edit moves the rig, the one opened after
+// it that the keys do.
+static void
+_TestPlaybackSeesAStaticProviderEdit(const std::string &examples,
+                                     const std::filesystem::path &scratch)
+{
+    const UsdStageRefPtr stage =
+        UsdStage::Open(examples + "/biped/Biped_anim.usda");
+    CHECK(stage);
+    if (!stage) {
+        return;
+    }
+    const SdfPath rigPath = _FindRig(stage);
+    CHECK(!rigPath.IsEmpty());
+    if (rigPath.IsEmpty()) {
+        return;
+    }
+    const double bakeTime = 1.0, t1 = 2.0, t2 = 3.0, t3 = 5.0, t4 = 6.0;
+    RigExecBakeResult baked;
+    std::string error;
+    {
+        RigExecRigEvaluator evaluator(stage, rigPath);
+        RigExecBakeOpts opts;
+        opts.time = bakeTime;
+        CHECK(RigExecBakeToBinary(evaluator, opts, &baked, &error));
+    }
+    if (baked.bytes.empty()) {
+        std::printf("static edit: bake: %s\n", error.c_str());
+        return;
+    }
+    const std::string binary = (scratch / "static_edit.rigexec").string();
+    {
+        std::ofstream stream(binary, std::ios::binary);
+        stream.write(reinterpret_cast<const char *>(baked.bytes.data()),
+                     std::streamsize(baked.bytes.size()));
+    }
+    // The input slots the file holds and does not mark Animated, by path.
+    std::set<std::string> staticSlots;
+    {
+        std::unique_ptr<fb::RigExecWireFile> file;
+        CHECK(RigExecFormatOpen(baked.bytes.data(), baked.bytes.size(), &file,
+                                &error));
+        if (file) {
+            for (const auto &input : file->inputs) {
+                if (!(input.flags() &
+                      uint8_t(fb::InputSlotFlags::Animated))) {
+                    staticSlots.insert(
+                        RigExecFormatPathText(*file, input.name()));
+                }
+            }
+        }
+    }
+    // Rest avars the file holds as static inputs, the provider values a
+    // playback samples from their source, in stage order.
+    const TfToken restAvars[] = {TfToken("rest:tx"), TfToken("rest:ty"),
+                                 TfToken("rest:tz"), TfToken("rest:rx"),
+                                 TfToken("rest:ry"), TfToken("rest:rz")};
+    std::vector<UsdAttribute> candidates;
+    for (const UsdPrim &prim : UsdPrimRange(stage->GetPrimAtPath(rigPath))) {
+        for (const TfToken &name : restAvars) {
+            const UsdAttribute attribute = prim.GetAttribute(name);
+            if (attribute &&
+                attribute.GetTypeName() == SdfValueTypeNames->Double &&
+                attribute.GetNumTimeSamples() == 0 &&
+                !attribute.HasAuthoredConnections() &&
+                staticSlots.count(attribute.GetPath().GetString())) {
+                candidates.push_back(attribute);
+            }
+        }
+    }
+    CHECK(!candidates.empty());
+    {
+        UsdEditContext context(stage, stage->GetSessionLayer());
+        const UsdAttribute asset =
+            stage->GetPrimAtPath(rigPath).CreateAttribute(
+                TfToken("rigExec:asset"), SdfValueTypeNames->Asset);
+        CHECK(asset && asset.Set(SdfAssetPath(binary)));
+    }
+    RigExecImagingRegistry &registry = RigExecImagingRegistry::GetInstance();
+    std::vector<std::string> errors;
+    CHECK(registry.Activate(stage, rigPath, UsdTimeCode(bakeTime), &errors));
+    for (const std::string &line : errors) {
+        std::printf("static edit: activation: %s\n", line.c_str());
+    }
+    CHECK(registry.GetPlayback(rigPath) != nullptr);
+    if (!registry.GetPlayback(rigPath) || candidates.empty()) {
+        registry.Deactivate();
+        return;
+    }
+    // The registry's generation at \p frame.
+    const auto published = [&](double frame) {
+        CHECK(registry.SetTime(UsdTimeCode(frame)));
+        RigExecImagingSnapshotConstPtr snapshot = registry.GetStore()->Get();
+        CHECK(snapshot && snapshot->Describes(UsdStageWeakPtr(stage),
+                                              UsdTimeCode(frame)));
+        return snapshot;
+    };
+    // A playback outside the registry, opened over the stage as it is now,
+    // and its generation at a time.
+    struct _Outside {
+        std::shared_ptr<RigExecSnapshotStore> store;
+        std::unique_ptr<RigExecBakedPlayback> play;
+    };
+    const auto outside = [&]() {
+        _Outside out;
+        out.store = std::make_shared<RigExecSnapshotStore>();
+        out.play = std::make_unique<RigExecBakedPlayback>(stage, rigPath,
+                                                          out.store);
+        std::string why;
+        const bool opened = out.play->Open(binary, &why);
+        if (!opened) {
+            std::printf("static edit: open: %s\n", why.c_str());
+        }
+        CHECK(opened);
+        return out;
+    };
+    const auto at = [&](_Outside &out, double frame) {
+        CHECK(out.play->EvaluateAndPublishResult(UsdTimeCode(frame)).ok);
+        RigExecImagingSnapshotConstPtr snapshot = out.store->Get();
+        CHECK(snapshot && snapshot->Describes(UsdStageWeakPtr(stage),
+                                              UsdTimeCode(frame)));
+        return snapshot;
+    };
+
+    // Unedited, the session and a playback outside it agree.
+    _Outside before = outside();
+    const RigExecImagingSnapshotConstPtr g1 = published(t1);
+    const RigExecImagingSnapshotConstPtr b1 = at(before, t1);
+    const RigExecImagingSnapshotConstPtr b2 = at(before, t2);
+    if (!g1 || !b1 || !b2) {
+        registry.Deactivate();
+        return;
+    }
+    _CompareGenerations(*g1, *b1, "static edit, unedited");
+
+    // A candidate whose Default edit moves the rig at t2: a probe told of
+    // each edit reads it at t1 and holds it at t2.
+    _Outside probe = outside();
+    UsdAttribute edited;
+    double original = 0.0;
+    size_t tried = 0;
+    for (const UsdAttribute &attribute : candidates) {
+        double value = 0.0;
+        if (tried == 48 || !attribute.Get(&value, UsdTimeCode(t2))) {
+            continue;
+        }
+        ++tried;
+        {
+            UsdEditContext context(stage, stage->GetSessionLayer());
+            CHECK(attribute.Set(value - 1.0));
+        }
+        probe.play->NoteStageChanged();
+        at(probe, t1);
+        const RigExecImagingSnapshotConstPtr p2 = at(probe, t2);
+        if (p2 && !_SameGenerations(*p2, *b2)) {
+            edited = attribute;
+            original = value;
+            break;
+        }
+        UsdEditContext context(stage, stage->GetSessionLayer());
+        CHECK(attribute.Clear());
+    }
+    std::printf("static edit: %zu of %zu candidate(s) tried; edited %s\n",
+                tried, candidates.size(),
+                edited ? edited.GetPath().GetText() : "none");
+    CHECK(edited);
+    if (!edited) {
+        registry.Deactivate();
+        return;
+    }
+    // At t2 the session plays the edit as a playback opened after it.
+    _Outside after = outside();
+    const RigExecImagingSnapshotConstPtr a2 = at(after, t2);
+    CHECK(a2 && !_SameGenerations(*a2, *b2));
+    const RigExecImagingSnapshotConstPtr g2 = published(t2);
+    if (g2 && a2) {
+        _CompareGenerations(*g2, *a2, "static edit, Default at t2");
+    }
+
+    // Keys after the session opened: the edit's value at t3, the original
+    // at t4. The playback opened after the Default edit hears of no keys
+    // and still plays the edit at t4, so there the keys move the rig.
+    {
+        UsdEditContext context(stage, stage->GetSessionLayer());
+        CHECK(edited.Set(original - 1.0, UsdTimeCode(t3)));
+        CHECK(edited.Set(original, UsdTimeCode(t4)));
+    }
+    _Outside keyed3 = outside();
+    _Outside keyed4 = outside();
+    const RigExecImagingSnapshotConstPtr k3 = at(keyed3, t3);
+    const RigExecImagingSnapshotConstPtr k4 = at(keyed4, t4);
+    const RigExecImagingSnapshotConstPtr e4 = at(after, t4);
+    CHECK(k4 && e4 && !_SameGenerations(*e4, *k4));
+    for (const double frame : {t3, t4, t3}) {
+        const RigExecImagingSnapshotConstPtr g = published(frame);
+        const RigExecImagingSnapshotConstPtr &want = frame == t3 ? k3 : k4;
+        if (g && want) {
+            _CompareGenerations(*g, *want,
+                                "static edit, keyed, at " +
+                                    std::to_string(frame));
+        }
+    }
+    registry.Deactivate();
+}
+
 int
 main(int argc, char **argv)
 {
@@ -445,6 +700,7 @@ main(int argc, char **argv)
     std::printf("playback: %d of %d baking row(s) compared at %d time(s)\n",
                 comparedRows, bakingRows, comparedTimes);
     CHECK(comparedRows == bakingRows);
+    _TestPlaybackSeesAStaticProviderEdit(argv[1], scratch);
     if (failures == 0) {
         std::printf("testRigExecImagingPlayback: all tests passed\n");
     } else {
