@@ -8328,7 +8328,7 @@ main(int argc, char **argv)
     TestStillCurrentDetectsConstantEdit();
     TestConstantHeadLeavesRideASharedTable();
     TestStaticLeavesFollowEdits();
-    // Wave 7 W7-statickey: held source-backed, base and blend reads.
+    // Held source-backed, base and blend reads.
     TestASourceBackedEditReachesTheNextVector();
     if (argc > 1) {
         TestTheSamplerServesSourceBackedReads(argv[1]);
@@ -8400,7 +8400,7 @@ main(int argc, char **argv)
     TestBindIntoNullDeclines();
     TestStaleChainBindingsDeclineSampling();
     TestBurstBuildIntoNullDeclines();
-    // Wave 7 W7-cow: clone verdicts, shared cones, blend delta buffers and
+    // Clone verdicts, shared cones, blend delta buffers and
     // clone scratch.
     TestAWorkspaceInheritsTheVerdict();
     if (argc > 1) {

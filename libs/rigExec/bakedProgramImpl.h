@@ -1718,7 +1718,7 @@ using RigExecBakedPropagateOutcome=RigExecPosePropagateOutcome;
 class RigExecBakedExecCheckRows;
 /// A revision's place in its chain (Build state).
 enum class RigExecBakedRevisionRole : uint8_t {
-    /// Not in a range-pipelined chain: chunks and fuse as before wave 6.
+    /// Not in a range-pipelined chain: chunks and fuse, with no vertex groups.
     Legacy,
     /// One RevisionChunk step per written group and a join.
     Range,
@@ -5443,7 +5443,7 @@ RigExecGroupSource RigExecBakedGroupSourceAt(
     const RigExecBakedProgramImpl &B, int chain, size_t version, size_t g);
 /// Declares the read of group \p g of version \p version of chain \p chain:
 /// ChainBase for the base (or past a set-aside revision), else the writer's
-/// RevisionOut slot (2.4).
+/// RevisionOut slot.
 void RigExecBakedDeclareGroupRead(const RigExecBakedProgramImpl &B, int chain,
     size_t version, size_t g, std::vector<RigExecBakedSlotRange> *reads);
 /// The RevisionOut slot of group \p g as revision \p id publishes it (Range:
@@ -5464,7 +5464,7 @@ void RigExecBakedVersionPoints(const RigExecBakedProgramImpl::GeomChain &chain,
 size_t RigExecBakedGroupVertexTargetFromEnvironment();
 size_t RigExecBakedGroupCapFromEnvironment();
 bool RigExecBakedGroupGatesFromEnvironment();
-/// VtFloatArray form of RigExecBakedNoteFloats (H4): replaces \p field by
+/// VtFloatArray form of RigExecBakedNoteFloats: replaces \p field by
 /// \p scratch's values (assign, never a detach copy) and bumps \p version
 /// exactly when the bytes differ.
 void RigExecBakedNoteFloats(VtFloatArray *field, std::vector<float> *scratch,

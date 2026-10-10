@@ -2446,8 +2446,7 @@ struct _PruneKnob {
 // own values, so it stays animated) plays frames 1-3 through the stage
 // sampler as the evaluator publishes them, bit for bit: a slot whose
 // provider leaf was pruned still reaches its readers. The provider-source
-// slots only the unpruned bake lists are printed, the static ones marked
-// (decision D7-1).
+// slots only the unpruned bake lists are printed, the static ones marked.
 static void
 _TestAPrunedBakeKeepsABlockedAnimatedAvar(const std::string &examples)
 {
@@ -2536,7 +2535,7 @@ _TestAPrunedBakeKeepsABlockedAnimatedAvar(const std::string &examples)
         }
         CHECK(same);
     }
-    // D7-1 evidence: the provider-source slots pruning took off the list.
+    // The provider-source slots pruning took off the list.
     std::unique_ptr<RigExecRuntimeReader> unpruned = RigExecRuntimeReader::Open(
         unprunedBytes.data(), unprunedBytes.size(), &error);
     CHECK(unpruned);

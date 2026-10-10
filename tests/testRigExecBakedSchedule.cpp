@@ -6904,7 +6904,7 @@ BuildStageInMode(const UsdStageRefPtr &stage, RigExecBakedRoleMode mode)
 }
 
 /// A live program is lowered for this machine's work limit and an export
-/// program for the reference concurrency (user decision U2), each by the
+/// program for the reference concurrency, each by the
 /// grain formula over its own serial cost.
 void
 TestTheLiveGrainFollowsTheMachine(const std::string &stagePath)
@@ -7098,7 +7098,7 @@ TestGroupChainsMatchTheWholeChain()
 ///  * 7 -> 8, the base moves in group 0 alone: every group step reruns (each
 ///    reads the chain base) but only group 0's versions move.
 /// Frames 7 and 9 move nothing and run no group step. After the groups
-/// (F13): ChainStatus reruns exactly when a group of the last version moved,
+/// ChainStatus reruns exactly when a group of the last version moved,
 /// bumps its content version once and keeps every unmoved group's bytes; a
 /// frame that moves nothing reruns neither it nor any reader of the chain's
 /// points, and the published result keeps its identity.
@@ -7966,7 +7966,7 @@ SchemaResourceDir(const std::string &examplesDir)
 }
 
 
-// Wave 6 Build: vertex groups, roles, gates and pins of a range chain.
+// Build: vertex groups, roles, gates and pins of a range chain.
 
 /// What MakeGroupBuildStage authors besides its default movers.
 struct GroupStageOptions {
@@ -9085,7 +9085,7 @@ def Scope "Asset"
 }
 )USDA";
 
-/// Whole readers after Range revisions (F15): a current-phase weight field
+/// Whole readers after Range revisions: a current-phase weight field
 /// gathers the version entering its mover into the field's own scratch, a
 /// phased dense blend sample into its binding's, and a cross-domain points
 /// read into a local binding's. Over {1,2,3,2,1,3} the chain's points,
@@ -9145,7 +9145,7 @@ TestWholeReadersGatherAfterRangeRevisions()
     std::printf("  whole readers gather after Range revisions\n");
 }
 
-/// The Whole keyed skin's speculative buffers (F5). An override repainting
+/// The Whole keyed skin's speculative buffers. An override repainting
 /// Dual's joint indices stales its partition: the fuse publishes the
 /// whole-array skin from a fresh group buffer while the chunks keep their
 /// last computed results, so group 3 (the only group the repaint moves)
@@ -9307,7 +9307,7 @@ struct PruneKnobs {
     std::string prune, verify;
 };
 
-/// Build prunes the provider steps no reader reaches (user decision U1) and
+/// Build prunes the provider steps no reader reaches and
 /// no value moves: Biped_anim built with RIGEXEC_PROVIDER_PRUNE off and on
 /// publishes the same generations, bit for bit, diagnostics included, over
 /// frames 1, 2, 3, 2 and a three-step drag of M_Body's rz. The pruned
@@ -9708,7 +9708,7 @@ main(int argc, char **argv)
         TestAWholeSkinChunkOutlivesAStaleFuse();
     }
     {
-        // Wave 6 Build: vertex groups, roles, gates and pins of a range
+        // Build: vertex groups, roles, gates and pins of a range
         // chain, and the step graph they declare.
         const BuiltProgram grouped = BuildGroupStage(GroupStageOptions());
         TestTheGraphDescribesTheProgram(grouped, "group_chain");
@@ -9801,7 +9801,7 @@ main(int argc, char **argv)
         TestWholeReadersGatherAfterRangeRevisions();
     }
     TestTheLiveGrainFollowsTheMachine(examplesDir + "/biped/Biped.usda");
-    // Wave 7 W7-cow: the shared cone table.
+    // The shared cone table.
     TestTheConeTableIsPublishedOnce();
     {
         // Provider steps no reader reaches are pruned at Build, and no

@@ -1313,7 +1313,7 @@ PartitionSkinGroups(RigExecBakedProgramImpl::GeomRevision *revision,
 }
 
 /// The role \p revision of an eligible chain takes, from what Build reads,
-/// with the pins it rests on (2.2). A role a usable method or space leaf
+/// with the pins it rests on. A role a usable method or space leaf
 /// chose by value is pinned, whichever it chose; a Range skin also pins that
 /// no override or upstream value reaches its layout topology. Export adds
 /// the Range skin's reads to \p pinned.
@@ -1479,7 +1479,7 @@ GateDefault(const RoleReads &reads, int object, float *value, SdfPath *head)
     return true;
 }
 
-/// Gates a Range \p revision (2.3): a static sparse weight object with an
+/// Gates a Range \p revision: a static sparse weight object with an
 /// exactly-zero resolved default the pins can hold, a packet the kernel half
 /// (RigExecRevisionGateHolds) admits, and no current-phase or operation-
 /// domain weighting. Writes the groups the authored indices inside
@@ -1544,7 +1544,7 @@ GateRevision(const RoleReads &reads,
 }
 
 /// Gives every revision of \p chain its role, groups, gates, pins and
-/// chunks (2.1-2.3, 5.2). A chain is range-pipelined when wave 5 would split
+/// chunks. A chain is range-pipelined when chunking would split
 /// it, it holds two or more groups and one of its revisions takes the Range
 /// role; every other chain keeps its Legacy chunks. The skinning methods and
 /// delta spaces of an eligible chain are epoch keys: an authored edit to one
@@ -3473,7 +3473,7 @@ ChunkHoldsAnswer(const RigExecBakedProgramImpl::GeomRevision &revision,
 /// chunk's computed result (a keyed skin), the group's slice of the result
 /// copied into a buffer of the group (one whole chunk, or the whole-array
 /// skin), or the entering group shared where the revision did not apply.
-/// `groupIds` and `doneVersion` follow (2.7): a downstream group reruns only
+/// `groupIds` and `doneVersion` follow: a downstream group reruns only
 /// if its group moved.
 void
 RunWholeFuse(RigExecBakedProgramImpl &B,

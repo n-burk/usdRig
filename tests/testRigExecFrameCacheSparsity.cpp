@@ -1388,7 +1388,7 @@ main()
     TestOverrideSeeds();
     TestRecomposedVersionSeedsSparseReuse();
     TestRetainedBytesUnchangedByTheOrder();
-    // Wave 7 W7-cow: the shared cone table.
+    // The shared cone table.
     TestTheAffectedIndexSharesTheCones();
     if (failures == 0) {
         std::printf("PASS testRigExecFrameCacheSparsity\n");

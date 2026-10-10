@@ -9,7 +9,7 @@
 // bit-identical to the baked path with those values authored. rigExecPose
 // --verify-binary gates every family on dynamic==baked==binary over the
 // shipped examples.
-// Threading (D2): Execute is serial over clusters unless the consumer
+// Threading: Execute is serial over clusters unless the consumer
 // hands it a dispatcher (SetTaskDispatch), which then runs the clusters the
 // DAG allows in parallel (the OpenUSD side passes a WorkDispatcher, Godot
 // its WorkerThreadPool). The reader holds no locks: one reader per thread,

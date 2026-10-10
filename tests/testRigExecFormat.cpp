@@ -4680,7 +4680,7 @@ TestRangeChunkTables()
            text(row + ": partition producer sets on a range-pipelined "
                       "revision"));
 
-    // The counts (F1): a Whole revision owns its chunks and one published
+    // The counts: a Whole revision owns its chunks and one published
     // group per group.
     const auto whole = [](const std::function<void(F &)> &edit) {
         return [edit] {
@@ -4722,7 +4722,7 @@ TestRangeChunkTables()
            text("geometry.chains[0].revisions[1]: no RevisionChunk step for "
                 "part 0 of a Whole revision"));
 
-    // Group steps and joins (G2).
+    // Group steps and joins.
     const auto twoRange = [](const std::function<void(F &)> &edit) {
         return [edit] {
             F f = _GroupFile(fb::RevisionOp::Matrix);
@@ -4821,7 +4821,7 @@ TestRangeChunkTables()
            text("geometry.chains[0].revisions[1]: its point ranges differ "
                 "from revisions[0]'s, the chain's partition"));
 
-    // Gates and constants (G2, G3).
+    // Gates and constants.
     const auto gated = [](const std::function<void(F &)> &edit) {
         return [edit] {
             F f = _GroupFile(fb::RevisionOp::Matrix, {0}, true);
@@ -4874,7 +4874,7 @@ TestRangeChunkTables()
            text(writesOne + ", but weight object 0 is not a static sparse "
                             "weight"));
 
-    // A Range Skin (G1, G3): keys checked against its stored layout, a
+    // A Range Skin: keys checked against its stored layout, a
     // private classicLinear method.
     const auto rangeSkin = [](const std::function<void(F &, R &)> &edit) {
         return [edit] {

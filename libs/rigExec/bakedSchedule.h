@@ -96,7 +96,7 @@ void RigExecBakedAssignStepCosts(RigExecBakedProgramImpl *program,
                                  size_t firstStep = 0);
 
 /// The concurrency an exported program is lowered for. Exports must not
-/// depend on the baking machine (user decision U2); 8 reproduces the
+/// depend on the baking machine; 8 reproduces the
 /// clustering of every bake made with 8 or fewer workers.
 constexpr size_t kRigExecBakedReferenceConcurrency = 8;
 

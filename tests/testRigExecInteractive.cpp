@@ -898,7 +898,7 @@ _SkinMethod(const char *method)
     return o;
 }
 
-// A Range role rests on a value a run samples (R3): an interactive override
+// A Range role rests on a value a run samples: an interactive override
 // flipping the skin's method to dualQuaternion makes the next Evaluate bail
 // before any step and rebuild once, and its pose (points, weight fields,
 // diagnostics, so no line of the bailed run) is a fresh evaluator's built

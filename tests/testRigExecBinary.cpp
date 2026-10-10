@@ -3428,7 +3428,7 @@ TestBakeRestoresLiveRoles()
 }
 
 // An export is lowered for the reference concurrency whatever the baking
-// machine's work limit (user decision U2). The fixture is the first whose
+// machine's work limit. The fixture is the first whose
 // serial cost gives different grains at one and two workers, so a bake that
 // followed the limit would differ under the two.
 static void
