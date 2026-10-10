@@ -11,10 +11,9 @@ line. This script is not wired into CI.
 Limitations are printed with --explain. Schedule/cone variants that
 rigexec_add_graph_test() adds are synthesized. Tests registered from
 example-fixture lists are named but not expanded (those lists live in
-tests/exampleFixtures.cmake). A library no executable links directly
-(the scene compiler absorbed into rigExec, the test oracle linked from
-rigExec) selects the tests that link its parent. A library that already
-has direct executables, such as rigExecMath, does not take that hop.
+tests/exampleFixtures.cmake). Selection follows PUBLIC and INTERFACE
+links. A PRIVATE dependency does not pull in the dependents of the
+library that links it.
 """
 
 from __future__ import annotations
@@ -223,8 +222,8 @@ def extract_link_names(token: str) -> list[str]:
 
 def parse(cmake_text: str) -> dict:
     text = synthesize_graph_tests(expand_foreach(strip_comments(cmake_text)))
-    libraries = {}  # name -> {sources, links, kind}
-    executables = {}  # name -> {sources, links}
+    libraries = {}  # name -> {sources, links, link_vis, kind}
+    executables = {}  # name -> {sources, links, link_vis}
     tests = []  # {name, command, executable}
 
     current_kind = None
@@ -237,20 +236,30 @@ def parse(cmake_text: str) -> dict:
                 kind = rest[0]
                 rest = rest[1:]
             sources = [a for a in rest if not a.startswith("$")]
-            libraries[lib] = {"kind": kind, "sources": sources, "links": []}
+            libraries[lib] = {"kind": kind, "sources": sources, "links": [], "link_vis": {}}
         elif name == "add_executable" and args:
             exe = args[0]
             sources = [a for a in args[1:] if not a.startswith("$")]
-            executables[exe] = {"sources": sources, "links": []}
+            executables[exe] = {"sources": sources, "links": [], "link_vis": {}}
         elif name == "target_link_libraries" and len(args) >= 2:
             target = args[0]
-            libs = []
+            vis = "PUBLIC"
+            named = []
+            visibility = {}
             for arg in args[1:]:
-                libs.extend(extract_link_names(arg))
-            if target in libraries:
-                libraries[target]["links"].extend(libs)
-            elif target in executables:
-                executables[target]["links"].extend(libs)
+                if arg in {"PUBLIC", "PRIVATE", "INTERFACE"}:
+                    vis = arg
+                    continue
+                for libname in extract_link_names(arg):
+                    named.append(libname)
+                    # PUBLIC wins when a later private link repeats the name.
+                    previous = visibility.get(libname)
+                    if previous != "PUBLIC":
+                        visibility[libname] = vis
+            bucket = libraries.get(target) or executables.get(target)
+            if bucket is not None:
+                bucket["links"].extend(named)
+                bucket["link_vis"].update(visibility)
         elif name == "add_test":
             if "NAME" in args and "COMMAND" in args:
                 tname = args[args.index("NAME") + 1]
@@ -280,6 +289,11 @@ def parse(cmake_text: str) -> dict:
     return {"libraries": libraries, "executables": executables, "tests": deduped}
 
 
+def public_names(info: dict) -> list[str]:
+    vis = info.get("link_vis") or {}
+    return [name for name in info["links"] if vis.get(name, "PUBLIC") in {"PUBLIC", "INTERFACE"}]
+
+
 def closure(start: set[str], edges: dict[str, list[str]]) -> set[str]:
     seen = set(start)
     stack = list(start)
@@ -294,10 +308,10 @@ def closure(start: set[str], edges: dict[str, list[str]]) -> set[str]:
 
 def build_index(model: dict) -> dict:
     lib_edges = {n: info["links"] for n, info in model["libraries"].items()}
+    public_edges = {n: public_names(info) for n, info in model["libraries"].items()}
     exe_edges = {}
     for name, info in model["executables"].items():
         exe_edges[name] = info["links"]
-    # Library public/private are not distinguished: both end up on the link line.
     source_to_lib = defaultdict(list)
     for lib, info in model["libraries"].items():
         for src in info["sources"]:
@@ -318,6 +332,7 @@ def build_index(model: dict) -> dict:
         "exe_closure": exe_closure,
         "tests_by_exe": tests_by_exe,
         "lib_edges": lib_edges,
+        "public_edges": public_edges,
     }
 
 
@@ -433,38 +448,21 @@ def select(paths: list[str], model: dict, index: dict, follow_headers: bool) -> 
     else:
         wanted = set()
         direct = set()
-        # A library no executable names (scene lowering absorbed into
-        # rigExec, the oracle linked through rigExec's interface) still
-        # selects the executables that link its parent. Libraries that
-        # already have direct executables, such as rigExecMath, do not
-        # take that hop.
-        for lib in sorted(l for l in libs if not str(l).startswith("exe:")):
-            named = {
-                exe for exe, info in model["executables"].items()
-                if lib in info["links"]
-            }
-            if named:
-                direct |= named
-                continue
-            parents = {
-                other for other, info in model["libraries"].items()
-                if lib in info["links"]
-            }
-            hopped = {
-                exe for exe, info in model["executables"].items()
-                if parents & set(info["links"])
-            }
-            direct |= hopped
-            reasons[lib].append(
-                "no executable links this library; one hop through "
-                + (", ".join(sorted(parents)) if parents else "(none)")
-            )
+        # PRIVATE dependencies stay inside the library that links them.
+        # A consumer is selected when it names the library, or when a
+        # library it names publishes that dependency on its PUBLIC
+        # interface. There is no hop through a private parent.
+        public_edges = index["public_edges"]
+
+        def published(start: set[str]) -> set[str]:
+            return closure(start, public_edges)
+
         for exe, info in model["executables"].items():
-            reached = set(index["exe_closure"][exe])
-            if reached & libs or ("exe:" + exe) in libs:
-                wanted.add(exe)
-            if ("exe:" + exe) in libs:
+            named = set(info["links"])
+            reached = published(named)
+            if named & libs or reached & libs or ("exe:" + exe) in libs:
                 direct.add(exe)
+                wanted.add(exe)
             for src in info["sources"]:
                 if os.path.normpath(src) in pathset:
                     wanted.add(exe)
@@ -501,6 +499,46 @@ def ctest_regex(names: list[str]) -> str:
     return "^(" + "|".join(re.escape(n) for n in names) + ")$"
 
 
+# Labels cmake/TestLabels.cmake writes from an executable's own link line.
+PROJECT_LIBS = {
+    "rigExec", "rigExecScene", "rigExecOracle", "rigExecRuntime", "rigExecMath",
+    "rigExecGraph", "rigExecBinary", "rigExecBake", "rigExecImaging",
+    "rigExecRigging", "rigExecStandalone", "rigExecSampler", "rigExecLzma",
+}
+
+
+def ctest_label(model: dict, index: dict, result: dict) -> str:
+    """Label regex that matches every selected executable, and no broader run.
+
+    -L and -R are AND-ed. The regex is the union of project libraries on
+    the selected executables' own link lines, so a test labeled
+    rigExecImaging still matches when the edit is in a library imaging
+    publishes. An executable with no project-library label cannot be
+    matched that way; callers then use -R alone.
+    """
+    free = set(usd_free_exes(model, index))
+    direct = result["direct_executables"]
+    if direct and all(exe in free for exe in direct):
+        return "^usd-free$"
+    labels = []
+    for exe in direct:
+        info = model["executables"].get(exe)
+        if not info:
+            return ""
+        found = False
+        for lib in info["links"]:
+            if lib in PROJECT_LIBS and lib not in labels:
+                labels.append(lib)
+                found = True
+            elif lib in PROJECT_LIBS:
+                found = True
+        if not found:
+            return ""
+    if not labels:
+        return ""
+    return "^(" + "|".join(re.escape(lib) for lib in labels) + ")$"
+
+
 def snapshot(model: dict, index: dict) -> dict:
     by_lib = defaultdict(list)
     for exe, reached in index["exe_closure"].items():
@@ -532,11 +570,11 @@ def snapshot(model: dict, index: dict) -> dict:
         "tests_for_library": tests_for_lib,
         "usd_free_executables": free,
         "notes": [
-            "Link edges are not split into PUBLIC and PRIVATE.",
+            "Transitive selection follows PUBLIC and INTERFACE links. PRIVATE links do not pull consumers.",
             "rigexec_add_graph_test cone and graph variants are synthesized.",
             "Example-fixture loops (IN LISTS) are not expanded.",
-            "A change inside libs/rigExec selects every test that links the rigExec shared library.",
-            "A library with no direct executable (rigExecScene, rigExecOracle) selects tests that link the library that links it.",
+            "A change inside libs/rigExec selects every test that links the rigExec shared library or a library that PUBLIC-links it.",
+            "rigExecScene and rigExecOracle are selected from the executables and PUBLIC parents that name them.",
         ],
     }
 
@@ -584,7 +622,7 @@ def main(argv: list[str]) -> int:
             print(f"  {lib}")
         print(
             f"direct executables ({len(result['direct_executables'])}) "
-            "(link the changed library themselves):"
+            "(name the library, or link one that publishes it):"
         )
         for exe in result["direct_executables"]:
             print(f"  {exe}")
@@ -595,7 +633,7 @@ def main(argv: list[str]) -> int:
             print(f"  {name}")
         print(
             f"transitive executables ({len(result['executables'])}) "
-            "(link closure, safe rebuild):"
+            "(public link closure):"
         )
         for exe in result["executables"]:
             print(f"  {exe}")
@@ -603,28 +641,7 @@ def main(argv: list[str]) -> int:
         for name in result["tests"]:
             print(f"  {name}")
         regex = ctest_regex(result["direct_tests"])
-        free = set(usd_free_exes(model, index))
-        direct_free = bool(result["direct_executables"]) and all(
-            exe in free for exe in result["direct_executables"]
-        )
-        if direct_free:
-            label = "^usd-free$"
-        else:
-            # ctest labels name libraries an executable links directly.
-            # A lonely library's tests carry its parent's label.
-            label_libs = []
-            for lib in result["libraries"]:
-                if not lib.startswith("rigExec"):
-                    continue
-                named = any(lib in info["links"] for info in model["executables"].values())
-                if named:
-                    label_libs.append(lib)
-                    continue
-                for other, info in model["libraries"].items():
-                    if lib in info["links"] and other.startswith("rigExec"):
-                        label_libs.append(other)
-            label_libs = list(dict.fromkeys(label_libs))
-            label = "^(" + "|".join(re.escape(lib) for lib in label_libs) + ")$" if label_libs else ""
+        label = ctest_label(model, index, result)
         if regex and label:
             print("ctest (direct):")
             print(
@@ -652,8 +669,8 @@ def main(argv: list[str]) -> int:
         print(
             "note: the direct set is the inner loop. bin/test_changed.sh "
             "--run builds those targets and runs the ctest line. The "
-            "transitive set is what to run before pushing. A change inside "
-            "the rigExec shared library still selects every test that links it."
+            "transitive set is what to run before pushing. Private dependencies "
+            "do not select the dependents of the library that links them."
         )
     return 0
 

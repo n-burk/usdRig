@@ -2,7 +2,7 @@
 #include "rigEvaluator.h"
 #include "rigEvaluatorDependencies.h"
 #include "crossDomainInputs.h"
-#include "rigExecScene/usdSceneAccess.h"
+#include "sceneDispatch.h"
 #include "rigExecScene/providerContextBinding.h"
 #include "rigExecGraph/providerRefresh.h"
 #include "parallel.h"
@@ -387,7 +387,6 @@ bool RigExecBakedBuildSpaces(RigExecBakedProgramImpl *program,UsdTimeCode captur
     auto &B=*program;
     auto sceneOwner=std::make_shared<RigExecSceneDescriptors>();
     auto &scene=*sceneOwner;
-    const RigExecUsdSceneAccess source(B.stage);
     std::set<SdfPath> selected;
     for(const auto &entry:B.index) selected.insert(entry.first);
     const std::vector<UsdTimeCode> identities={capture,UsdTimeCode::Default()};
@@ -399,10 +398,10 @@ bool RigExecBakedBuildSpaces(RigExecBakedProgramImpl *program,UsdTimeCode captur
         // A future capture time absent from this snapshot takes the raw
         // source path; it never substitutes a Default value for AtTime.
         std::string ignored;
-        reused=RigExecSelectSceneDescriptorIdentities(*captured,identities,&scene,&ignored) &&
+        reused=RigExecDispatchSelectSceneDescriptorIdentities(*captured,identities,&scene,&ignored) &&
                capturedSerial==B.evaluator->GetStageEditSerial();
     }
-    if(!reused && !RigExecCaptureSceneDescriptors(source,B.evaluator->GetRigPath(),identities,&scene,error)) return false;
+    if(!reused && !RigExecDispatchCaptureSceneDescriptors(B.stage,B.evaluator->GetRigPath(),identities,&scene,error)) return false;
     if(!RigExecBuildProviderProgram(scene,false,&B.providerProgram,error,&selected)) return false;
     B.sceneDescriptors=std::move(sceneOwner);
     B.providerActive.assign(B.paths.size(),0);

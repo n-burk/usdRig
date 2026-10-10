@@ -364,6 +364,8 @@ jobs:
           P="${GITHUB_WORKSPACE}/usdrig-install"
           for f in \
             "$P/lib/librigExec.so" \
+            "$P/lib/librigExecScene.so" \
+            "$P/lib/librigExecOracle.so" \
             "$P/lib/librigExecImaging.so" \
             "$P/lib/librigExecStandalone.so" \
             "$P/lib/librigExecRigging.so" \

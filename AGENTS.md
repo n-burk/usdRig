@@ -12,17 +12,27 @@ The root README is the build entry point; `docs/index.md` is the node catalog.
 
 - `libs/rigExecMath`: numerical kernels. Keep math independent of stage access.
   The archive links `gf`, `vt`, and `tf`; it does not read a stage.
+  `rigExec`, the scene library, rigging, and the oracle library link it
+  privately.
 - `libs/rigExecGraph`: the USD-free op scheduler (`opGraph.cpp` only).
-  Runtime and the binary format include these headers. Do not add a
-  stage or `pxr/` include here.
-- `libs/rigExecScene`: USD scene lowering. It links `tf`, `gf`, `vt`,
-  `sdf`, `ts`, `usd`, and `usdGeom`, plus the graph archive and math.
-  Its objects are absorbed into `librigExec.so`. Installed headers live
-  under `include/rigExecScene/`.
-- `libs/rigExecOracle`: test oracles and golden capture. Executables that
-  link `rigExec`, and the Python module, link this object library. It is
-  not part of `librigExec.so`. A cpu-reference or golden run aborts when
-  the library is missing.
+  Runtime links it publicly. `rigExec` links it privately, so an edit
+  here does not select every evaluator test. Do not add a stage or
+  `pxr/` include here.
+- `libs/rigExecScene`: USD scene lowering, built as `librigExecScene.so`.
+  It links `tf`, `gf`, `vt`, `sdf`, `ts`, `usd`, and `usdGeom`. Graph and
+  math are private. `librigExec.so` does not link it. Imaging, bake, and
+  the standalone adapter link it privately, so playback, runtime, and
+  imaging tests load the library without being selected as scene tests.
+  Tests that compile a stage through `rigExec` alone name `rigExecScene`.
+  The evaluator calls it through the hooks in `sceneDispatch`. Installed
+  headers live under `include/rigExecScene/`.
+- `libs/rigExecOracle`: test oracles and golden capture, built as
+  `librigExecOracle.so`. `librigExec.so` does not link it. The Python
+  module links it, and so does each test that runs a cpu-reference,
+  golden, or exec cross-check. Imaging, playback, and runtime tests do
+  not. A cpu-reference or golden run aborts when the library is missing.
+  The install ships this library because the installed Python module
+  loads it.
 - `libs/rigExecSampler`: copies stage values into runtime inputs. This is
   the USD boundary in front of playback.
 - `libs/rigExecSchema/schema.usda`: source schema. Resources under
@@ -105,9 +115,11 @@ scripts; their defaults look for a sibling dependency install.
    of wall clock. `bin/test_changed.sh <paths>` prints that set.
    `bin/test_changed.sh --run <paths>` builds the direct executables and
    runs them. The direct set is the inner loop; run the transitive set
-   before pushing. The ctest line uses labels: `usd-free` when the direct
-   executables link no OpenUSD library, otherwise the project libraries
-   the change sits in.
+   before pushing. Both follow public and interface links, so a private
+   dependency stays inside the library that links it. The ctest line uses
+   labels: `usd-free` when every selected executable links no OpenUSD
+   library, otherwise the project libraries named on those executables'
+   own link lines. `-R` keeps the run to the selected tests.
    `ctest --test-dir build -L fast` is the short tier. `ctest -L usd-free`
    runs without a stage. `tests/fixtures/minimal.rigexec` is the checked-in
    program `testRigExecRuntimeFixture` opens. The whole `ctest` gate still
