@@ -4830,14 +4830,19 @@ TestDispatchedExecuteMatchesSerial(const std::string &examplesDir)
         const char *stage;
         std::vector<double> frames;
         int repetitions;
+        // The small stages' bindings read base or final versions only, so
+        // Open must find them parallel-safe; the two production rigs are
+        // the dispatch targets, and at least one of them must be.
+        bool mustBeSafe;
     };
     const std::vector<Case> cases = {
         // The two small stages' keys start at 1001.
-        {"06_LatticeBulge.usda", {1001, 1012, 1024, 1012, 1001}, 20},
-        {"04_BlendShapeFace.usda", {1001, 1016, 1024, 1016, 1001}, 20},
-        {"2d/bust_dd_b/bust_dd_b_anim.usda", {20, 50, 20}, 10},
-        {"biped/Biped_anim.usda", {1, 2, 1}, 10},
+        {"06_LatticeBulge.usda", {1001, 1012, 1024, 1012, 1001}, 20, true},
+        {"04_BlendShapeFace.usda", {1001, 1016, 1024, 1016, 1001}, 20, true},
+        {"2d/bust_dd_b/bust_dd_b_anim.usda", {20, 50, 20}, 10, false},
+        {"biped/Biped_anim.usda", {1, 2, 1}, 10, false},
     };
+    size_t safeTargets = 0;
     for (const Case &entry : cases) {
         const std::string name = std::string("dispatch ") + entry.stage;
         const UsdStageRefPtr stage =
@@ -4928,12 +4933,22 @@ TestDispatchedExecuteMatchesSerial(const std::string &examplesDir)
         // The hook reached the executor exactly when Open allowed it.
         CHECK(parallelSafe ? tasks.load() > 0 : tasks.load() == 0);
         CHECK(parallelSafe ? judgedTasks.load() > 0 : judgedTasks.load() == 0);
+        if (entry.mustBeSafe) {
+            CHECK(parallelSafe);
+            CHECK(tasks.load() > 0);
+        } else if (parallelSafe && tasks.load() > 0) {
+            ++safeTargets;
+        }
         if (ok) {
             std::printf("%s: %d repetition(s) of %zu frame(s) matched serial "
                         "(%zu cluster(s) dispatched)\n", name.c_str(),
                         entry.repetitions, entry.frames.size(), tasks.load());
         }
     }
+    std::printf("dispatch: %zu production stage(s) dispatched
+",
+                safeTargets);
+    CHECK(safeTargets > 0);
 }
 
 int
