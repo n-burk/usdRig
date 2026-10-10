@@ -55,6 +55,7 @@
 #include "pxr/base/tf/pathUtils.h"
 #include "pxr/base/vt/array.h"
 #include "pxr/base/vt/value.h"
+#include "pxr/base/work/threadLimits.h"
 #include "pxr/usd/usd/attribute.h"
 #include "pxr/usd/usd/prim.h"
 #include "pxr/usd/usd/primRange.h"
@@ -6902,6 +6903,55 @@ BuildStageInMode(const UsdStageRefPtr &stage, RigExecBakedRoleMode mode)
     return built;
 }
 
+/// A live program is lowered for this machine's work limit and an export
+/// program for the reference concurrency (user decision U2), each by the
+/// grain formula over its own serial cost.
+void
+TestTheLiveGrainFollowsTheMachine(const std::string &stagePath)
+{
+    if (!TfGetenv("RIGEXEC_BAKED_GRAIN_US", "").empty()) {
+        std::printf("live grain: skipped, RIGEXEC_BAKED_GRAIN_US is set\n");
+        return;
+    }
+    const size_t machine = std::max<size_t>(WorkGetConcurrencyLimit(), 1);
+    const LiveRig rig = OpenRig(stagePath);
+    CHECK(rig.evaluator != nullptr);
+    if (!rig.evaluator) {
+        return;
+    }
+    CHECK(rig.evaluator->Evaluate(UsdTimeCode(1)).valid);
+    const RigExecBakedProgram *program = rig.evaluator->GetBakedProgram();
+    CHECK(program != nullptr);
+    if (!program) {
+        return;
+    }
+    const RigExecBakedProgramImpl &live = program->GetStepGraph();
+    CHECK(live.roleMode == RigExecBakedRoleMode::Live);
+    CHECK(RigExecBakedLoweringConcurrency(live) == machine);
+    CHECK(live.clustering.grainUs ==
+          RigExecBakedScheduleGrainUs(live.clustering.serialCost, machine));
+    // Copied out: the rebuild below drops the live program.
+    const double liveGrain = live.clustering.grainUs;
+    // The same evaluator in Export mode rebuilds at its next Evaluate.
+    rig.evaluator->SetBakedRoleMode(RigExecBakedRoleMode::Export);
+    CHECK(rig.evaluator->Evaluate(UsdTimeCode(1)).valid);
+    const RigExecBakedProgram *rebuilt = rig.evaluator->GetBakedProgram();
+    CHECK(rebuilt != nullptr);
+    if (!rebuilt) {
+        return;
+    }
+    const RigExecBakedProgramImpl &exported = rebuilt->GetStepGraph();
+    CHECK(exported.roleMode == RigExecBakedRoleMode::Export);
+    CHECK(RigExecBakedLoweringConcurrency(exported) ==
+          kRigExecBakedReferenceConcurrency);
+    CHECK(exported.clustering.grainUs ==
+          RigExecBakedScheduleGrainUs(exported.clustering.serialCost,
+                                      kRigExecBakedReferenceConcurrency));
+    std::printf("live grain: %zu worker(s) %.2f us, export %.2f us (serial cost %.2f us)\n",
+                machine, liveGrain, exported.clustering.grainUs,
+                exported.clustering.serialCost);
+}
+
 /// Whether the group chain was cut as the fixture intends: the chain order,
 /// ten groups, the gated revision writing group 0 alone when \p gates, the
 /// two skins and the blend Range or Whole by method and space.
@@ -9472,6 +9522,7 @@ main(int argc, char **argv)
         TestASetAsideJoinFollowsTheBase();
         TestWholeReadersGatherAfterRangeRevisions();
     }
+    TestTheLiveGrainFollowsTheMachine(examplesDir + "/biped/Biped.usda");
     if (failures) {
         std::printf("%d FAILURE(S)\n", failures);
         return 1;

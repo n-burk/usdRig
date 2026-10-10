@@ -95,9 +95,19 @@ std::vector<int> RigExecBakedHeadSeedsFrom(
 void RigExecBakedAssignStepCosts(RigExecBakedProgramImpl *program,
                                  size_t firstStep = 0);
 
-/// The grain Build uses: RIGEXEC_BAKED_GRAIN_US when it is set, and
-/// otherwise `clamp(total cost / (4 x concurrency), 5us, 50us)`.
-double RigExecBakedScheduleGrainUs(double totalCost);
+/// The concurrency an exported program is lowered for. Exports must not
+/// depend on the baking machine (user decision U2); 8 reproduces the
+/// clustering of every bake made with 8 or fewer workers.
+constexpr size_t kRigExecBakedReferenceConcurrency = 8;
+
+/// The lowering grain, in microseconds, for a program whose model serial
+/// cost is \p totalCost, scheduled for \p concurrency workers (0 counts as
+/// 1). RIGEXEC_BAKED_GRAIN_US, read once, overrides both.
+double RigExecBakedScheduleGrainUs(double totalCost, size_t concurrency);
+
+/// kRigExecBakedReferenceConcurrency for an Export build, else the
+/// machine's WorkGetConcurrencyLimit() (at least 1). Owner thread, Build.
+size_t RigExecBakedLoweringConcurrency(const RigExecBakedProgramImpl &B);
 
 /// The clusters of \p clustering, each after all of its predecessors.
 ///

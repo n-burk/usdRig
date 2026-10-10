@@ -726,6 +726,11 @@ void TestChangeFlagsClearedFromGatheredList()
             CHECK(!state.values[id].changed ||
                   std::find(state.changedValues.begin(),state.changedValues.end(),id)!=
                       state.changedValues.end());
+        // Visiting only the executor's record gathers the same list.
+        const std::vector<RigExecValueId> swept=state.changedValues;
+        CHECK(execution.touchedValid);
+        RigExecOpGatherChanges(&state,graph,execution.ran,&execution.touched);
+        CHECK(state.changedValues==swept);
     };
     frame(); // First publication: every value is new.
     CHECK(state.changedValues.size()==7);
@@ -735,6 +740,183 @@ void TestChangeFlagsClearedFromGatheredList()
     CHECK(state.changedValues==std::vector<RigExecValueId>({0,1}));
     frame(); // Idle: the last frame's flags are gone.
     CHECK(state.changedValues.empty());
+}
+
+/// Forty ops in four chains, C joining A and B, lowered three clusters a
+/// chain. One execution and workspace, reset through their own records,
+/// give a fresh pair's answer after every run, across whole-struct
+/// restores; an execution without a valid record is reset whole; a
+/// list-driven reset leaves a byte no record names, and the reset judge
+/// fails the run on it.
+void TestSparseResetMatchesFreshWorkspace()
+{
+    std::vector<RigExecOpDescriptor> descriptors;
+    const char chains[] = "ABCD";
+    for (int k = 0; k < 4; ++k)
+        for (int i = 0; i < 10; ++i) {
+            const RigExecValueId base = RigExecValueId(100 * (k + 1));
+            std::vector<RigExecValueId> reads{base + RigExecValueId(i)};
+            if (k == 2 && i == 0) reads = {RigExecValueId(110), RigExecValueId(210)};
+            const std::string key = std::string(1, chains[k]) + char('0' + i);
+            descriptors.push_back(Op(key.c_str(), reads, {base + RigExecValueId(i + 1)}));
+        }
+    RigExecCompiledGraph graph;
+    CHECK(RigExecCompileOpGraph(descriptors, {100, 200, 400},
+        RigExecCyclePolicy::Reject, &graph));
+    CHECK(RigExecLowerOpClusters(&graph, {}, 4.0));
+    // Canonical order A0..A9, B0..B9, C0..C9, D0..D9; clusters of 4, 4, 2.
+    CHECK(graph.ops.size() == 40 && graph.clusters.size() == 12);
+    if (graph.ops.size() != 40 || graph.clusters.size() != 12) return;
+    CHECK(graph.ops[20].descriptor.key == "C0" && graph.opClusters[17] == 4 &&
+          graph.opClusters[30] == 9 && graph.opClusters[39] == 11);
+    for (bool parallel : {false, true}) {
+        std::vector<std::atomic<bool>> changed(512);
+        RigExecOpCallbacks callbacks;
+        // Every seventh op from the fourth keeps a clean output, which
+        // stops the wave there.
+        callbacks.run = [&](uint32_t i) {
+            if (i % 7 != 3)
+                for (auto write : graph.ops[i].descriptor.writes)
+                    changed[size_t(write)].store(true, std::memory_order_release);
+            return true;
+        };
+        callbacks.skip = [](uint32_t) {};
+        callbacks.changed = [&](RigExecValueId id) {
+            return changed[size_t(id)].load(std::memory_order_acquire);
+        };
+        WorkDispatcher dispatcher;
+        if (parallel) {
+            callbacks.dispatch = [&](std::function<void()> task) { dispatcher.Run(std::move(task)); };
+            callbacks.wait = [&] { dispatcher.Wait(); };
+        }
+        std::string error;
+        const auto execute = [&](RigExecOpExecution *execution,
+                                 RigExecOpWorkspace *workspace,
+                                 const std::vector<uint32_t> &seeds, bool force) {
+            for (auto &value : changed) value.store(false);
+            error.clear();
+            return RigExecExecuteOpGraph(graph, {}, seeds, force, callbacks,
+                                         execution, &error, workspace);
+        };
+        // \p kept against a fresh execution and workspace given the same run.
+        const auto same = [&](const RigExecOpExecution &kept,
+                              const std::vector<uint32_t> &seeds, bool force,
+                              const char *what) {
+            RigExecOpExecution fresh;
+            RigExecOpWorkspace freshWorkspace;
+            CHECK(execute(&fresh, &freshWorkspace, seeds, force));
+            std::vector<uint32_t> ascending;
+            for (uint32_t i = 0; i < fresh.candidates.size(); ++i)
+                if (fresh.candidates[i]) ascending.push_back(i);
+            bool equal = kept.candidates == fresh.candidates &&
+                kept.ran == fresh.ran && kept.executed == fresh.executed &&
+                kept.skipped == fresh.skipped && kept.touchedValid &&
+                kept.touched == ascending && fresh.touched == ascending &&
+                kept.completion.size() == fresh.completion.size();
+            // A parallel run numbers in finish order; only its support is fixed.
+            for (size_t i = 0; equal && i < kept.completion.size(); ++i)
+                equal = (kept.completion[i] != 0) == (kept.candidates[i] != 0);
+            if (!parallel) equal = equal && kept.completion == fresh.completion;
+            if (!equal)
+                std::printf("    %s run %s: the reused pair differs from a fresh one\n",
+                            parallel ? "parallel" : "serial", what);
+            CHECK(equal);
+        };
+        const std::vector<uint32_t> seedsA{0}, seedsB{17, 30}, seedsD{5}, none;
+        RigExecOpExecution execution, afterB;
+        RigExecOpWorkspace workspace;
+        CHECK(execute(&execution, &workspace, seedsA, false));
+        CHECK(execution.executed == 4 && execution.touched.size() == 20);
+        same(execution, seedsA, false, "A");
+        CHECK(execute(&execution, &workspace, seedsB, false));
+        same(execution, seedsB, false, "B");
+        afterB = execution;
+        CHECK(execute(&execution, &workspace, none, true));
+        CHECK(execution.executed == 40);
+        same(execution, none, true, "C");
+        // Put back as the verify restores do: the record comes with the bytes.
+        execution = afterB;
+        CHECK(execute(&execution, &workspace, seedsD, false));
+        CHECK(execution.executed == 10 && execution.touched.size() == 15);
+        same(execution, seedsD, false, "D");
+        // A copy taken after A, put back after B: only the copy's own record
+        // names A0..A4, which D does not reach.
+        RigExecOpExecution second, afterA;
+        RigExecOpWorkspace secondWorkspace;
+        CHECK(execute(&second, &secondWorkspace, seedsA, false));
+        afterA = second;
+        CHECK(execute(&second, &secondWorkspace, seedsB, false));
+        second = afterA;
+        CHECK(execute(&second, &secondWorkspace, seedsD, false));
+        same(second, seedsD, false, "D after A put back");
+        // Another execution on the same workspace, every byte set and no
+        // valid record: reset whole.
+        RigExecOpExecution poisoned;
+        poisoned.candidates.assign(40, 1);
+        poisoned.ran.assign(40, 1);
+        poisoned.completion.assign(40, 9);
+        poisoned.touched = {0};
+        poisoned.touchedValid = false;
+        CHECK(execute(&poisoned, &workspace, seedsD, false));
+        same(poisoned, seedsD, false, "D on a poisoned execution");
+        // The reset follows the record: a byte it does not name stays.
+        CHECK(execute(&execution, &workspace, seedsD, false));
+        execution.ran[0] = 1;
+        CHECK(execute(&execution, &workspace, seedsD, false));
+        CHECK(execution.ran[0] == 1 && execution.executed == 10);
+        // The judge finds such a byte in the execution or the workspace,
+        // zeroes it and fails the run.
+        workspace.verifyReset = true;
+        CHECK(!execute(&execution, &workspace, seedsD, false));
+        CHECK(error == "operation execution reset missed an entry");
+        CHECK(execution.ran[0] == 0);
+        CHECK(execute(&execution, &workspace, seedsD, false));
+        same(execution, seedsD, false, "D after the judge");
+        workspace.clusterCandidates[11] = 1;
+        CHECK(!execute(&execution, &workspace, seedsD, false));
+        CHECK(error == "operation execution reset missed an entry");
+        workspace.seeded[35] = 1;
+        CHECK(!execute(&execution, &workspace, seedsD, false));
+        CHECK(error == "operation execution reset missed an entry");
+        CHECK(execute(&execution, &workspace, seedsD, false));
+        same(execution, seedsD, false, "D after the judged workspace");
+    }
+}
+
+/// The sorted and the scanned forms give one ascending, unique sequence.
+void TestAscendingListsAgree()
+{
+    const size_t n = 1000;
+    std::vector<char> flags(n, 0);
+    const auto scan = [&](size_t size) {
+        std::vector<uint32_t> result;
+        for (uint32_t i = 0; i < size && i < flags.size(); ++i)
+            if (flags[i]) result.push_back(i);
+        return result;
+    };
+    // Ten entries, two repeated: 10 * 16 < 1000 sorts.
+    const std::vector<uint32_t> sparse{913, 4, 77, 4, 500, 999, 0, 77, 250, 13};
+    for (uint32_t i : sparse) flags[i] = 1;
+    std::vector<uint32_t> out{42, 7};
+    RigExecOpAscending(sparse, flags, n, &out);
+    CHECK(out == scan(n));
+    CHECK(out == std::vector<uint32_t>({0, 4, 13, 77, 250, 500, 913, 999}));
+    // 450 entries, each twice and scrambled: 900 * 16 >= 1000 scans.
+    std::fill(flags.begin(), flags.end(), char(0));
+    std::vector<uint32_t> dense;
+    for (uint32_t k = 0; k < 450; ++k) {
+        const uint32_t i = (k * 919u) % 1000u;
+        dense.push_back(i); dense.push_back(i);
+        flags[i] = 1;
+    }
+    const std::vector<uint32_t> expected = scan(n);
+    CHECK(dense.size() == 900 && expected.size() == 450);
+    RigExecOpAscending(dense, flags, n, &out);
+    CHECK(out == expected);
+    // The same list against a larger n sorts: 900 * 16 < 20000.
+    flags.resize(20000, char(0));
+    RigExecOpAscending(dense, flags, flags.size(), &out);
+    CHECK(out == expected);
 }
 
 } // namespace
@@ -748,6 +930,7 @@ int main()
     TestUnrelatedBranchFinishesBeforeGate(); TestFatalCancellationJoinsActiveCallbacks();
     TestClusterCompletionAndCounts(); TestSkipEffectsAndVolatileSeeds();
     TestChangeFlagsClearedFromGatheredList();
+    TestSparseResetMatchesFreshWorkspace(); TestAscendingListsAgree();
     std::printf("OpGraph: %d failures\n", failures);
     return failures ? 1 : 0;
 }

@@ -334,14 +334,21 @@ inline void RigExecOpClearChanges(RigExecOpAdapterState *state)
 }
 
 /// Owner, after the join and on failure too: gathers the flags this run set,
-/// from its changed leaves and the writes of the ops that ran.
+/// from its changed leaves and the writes of the ops that ran. With
+/// \p candidates (ascending; every op that ran is one), only those ops are
+/// visited; the output order is the same.
 inline void RigExecOpGatherChanges(RigExecOpAdapterState *state,
-    const RigExecCompiledGraph &graph, const std::vector<char> &ran)
+    const RigExecCompiledGraph &graph, const std::vector<char> &ran,
+    const std::vector<uint32_t> *candidates = nullptr)
 {
     state->changedValues.assign(state->changedLeaves.begin(), state->changedLeaves.end());
-    for (size_t c = 0; c < graph.ops.size() && c < ran.size(); ++c) if (ran[c])
+    const auto gather = [&](size_t c) {
+        if (c >= graph.ops.size() || c >= ran.size() || !ran[c]) return;
         for (RigExecValueId id : graph.ops[c].descriptor.writes)
             if (state->values[size_t(id)].changed) state->changedValues.push_back(id);
+    };
+    if (candidates) for (uint32_t c : *candidates) gather(c);
+    else for (size_t c = 0; c < graph.ops.size() && c < ran.size(); ++c) gather(c);
 }
 
 } // namespace rigExec

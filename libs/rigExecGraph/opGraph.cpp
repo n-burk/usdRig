@@ -350,6 +350,62 @@ bool RigExecValidateOpClusters(const RigExecCompiledGraph &graph, std::string *e
     return true;
 }
 
+void RigExecOpAscending(const std::vector<uint32_t> &listed,
+    const std::vector<char> &flags, size_t n, std::vector<uint32_t> *out)
+{
+    if (!out) return;
+    const size_t limit = std::min(n, flags.size());
+    // A dense list costs a sort more than a scan of the flags does.
+    if (listed.size() * 16 >= n) {
+        out->clear();
+        for (size_t i = 0; i < limit; ++i) if (flags[i]) out->push_back(uint32_t(i));
+        return;
+    }
+    if (out != &listed) out->assign(listed.begin(), listed.end());
+    out->erase(std::remove_if(out->begin(), out->end(),
+        [&](uint32_t i) { return i >= limit || !flags[i]; }), out->end());
+    Unique(out);
+}
+
+bool RigExecOpResetExecution(RigExecOpExecution *out,
+    RigExecOpWorkspace *workspace, size_t ops, size_t clusters)
+{
+    bool listed = false;
+    if (out) {
+        if (out->touchedValid && out->candidates.size() == ops &&
+            out->ran.size() == ops && out->completion.size() == ops) {
+            for (uint32_t i : out->touched) if (i < ops) {
+                out->candidates[i] = 0; out->ran[i] = 0; out->completion[i] = 0;
+            }
+            listed = true;
+        } else {
+            out->candidates.assign(ops, 0); out->ran.assign(ops, 0); out->completion.assign(ops, 0);
+        }
+        out->touched.clear(); out->touchedValid = true;
+        out->executed = out->skipped = 0;
+    }
+    if (!workspace) return true;
+    if (workspace->listsValid && workspace->seeded.size() == ops &&
+        workspace->clusterCandidates.size() == clusters) {
+        for (uint32_t i : workspace->pending) if (i < ops) workspace->seeded[i] = 0;
+        for (uint32_t c : workspace->candidateClusters)
+            if (c < clusters) workspace->clusterCandidates[c] = 0;
+        listed = true;
+    } else {
+        workspace->seeded.assign(ops, 0); workspace->clusterCandidates.assign(clusters, 0);
+    }
+    workspace->candidateClusters.clear();
+    if (!listed || !workspace->verifyReset) return true;
+    // The judge: every byte the records describe is now zero, or one was missed.
+    bool complete = true;
+    const auto zero = [&](auto *values) {
+        for (auto &value : *values) if (value) { value = 0; complete = false; }
+    };
+    if (out) { zero(&out->candidates); zero(&out->ran); zero(&out->completion); }
+    zero(&workspace->seeded); zero(&workspace->clusterCandidates);
+    return complete;
+}
+
 bool RigExecExecuteOpGraph(const RigExecCompiledGraph &graph,
     const std::vector<RigExecValueId> &changedLeaves,
     const std::vector<uint32_t> &seedOps, bool force,
@@ -374,9 +430,14 @@ bool RigExecExecuteOpGraph(const RigExecCompiledGraph &graph,
     RigExecOpExecution &result = *out;
     RigExecOpWorkspace localWorkspace;
     RigExecOpWorkspace &workspace = suppliedWorkspace ? *suppliedWorkspace : localWorkspace;
-    result.candidates.assign(count, 0); result.ran.assign(count, 0); result.completion.assign(count, 0);
+    // Only what the last execution set is cleared; a reused execution or
+    // workspace without a valid record is cleared whole.
+    if (!RigExecOpResetExecution(out, &workspace, count, clusterCount))
+        return fail("operation execution reset missed an entry");
+    // Invalid until the join records what this execution sets.
+    result.touchedValid = false; workspace.listsValid = false;
     auto &seeded = workspace.seeded;
-    seeded.assign(count, force ? 1 : 0);
+    if (force) seeded.assign(count, 1);
     auto &pending = workspace.pending;
     pending.clear(); pending.reserve(count);
     const auto seed = [&](uint32_t i, bool mandatory) {
@@ -395,22 +456,27 @@ bool RigExecExecuteOpGraph(const RigExecCompiledGraph &graph,
         for (uint32_t next : graph.ops[pending[at]].successors)
             if (!result.candidates[next]) { result.candidates[next] = 1; pending.push_back(next); }
     auto &clusterCandidates = workspace.clusterCandidates;
-    clusterCandidates.assign(clusterCount, 0);
-    for (uint32_t op : pending) clusterCandidates[graph.opClusters[op]] = 1;
+    auto &ready = workspace.ready;
+    // Each candidate cluster once, gathered in `ready`, then ascending.
+    ready.clear();
+    for (uint32_t op : pending) {
+        const uint32_t cluster = graph.opClusters[op];
+        if (!clusterCandidates[cluster]) { clusterCandidates[cluster] = 1; ready.push_back(cluster); }
+    }
+    auto &candidateClusters = workspace.candidateClusters;
+    RigExecOpAscending(ready, clusterCandidates, clusterCount, &candidateClusters);
     auto &unresolved = workspace.unresolved;
     unresolved.resize(clusterCount);
-    auto &ready = workspace.ready;
     ready.clear(); ready.reserve(clusterCount);
     if (callbacks.skipEffects) {
         for (uint32_t i : *callbacks.skipEffects) if (!result.candidates[i]) callbacks.skip(i);
     } else for (uint32_t i = 0; i < count; ++i) if (!result.candidates[i]) callbacks.skip(i);
-    for (uint32_t i = 0; i < clusterCount; ++i) {
+    // A non-candidate cluster's count is never read: release skips it.
+    for (uint32_t i : candidateClusters) {
         uint32_t dependencies = 0;
-        if (clusterCandidates[i]) {
-            for (uint32_t predecessor : graph.clusters[i].predecessors)
-                if (clusterCandidates[predecessor]) ++dependencies;
-            if (!dependencies) ready.push_back(i);
-        }
+        for (uint32_t predecessor : graph.clusters[i].predecessors)
+            if (clusterCandidates[predecessor]) ++dependencies;
+        if (!dependencies) ready.push_back(i);
         unresolved[i].value.store(dependencies, std::memory_order_relaxed);
     }
     std::atomic<bool> succeeded{true};
@@ -472,8 +538,14 @@ bool RigExecExecuteOpGraph(const RigExecCompiledGraph &graph,
         callbacks.wait();
     }
     // Every candidate cluster ran once, so each op either ran or skipped.
-    result.executed = size_t(std::count(result.ran.begin(), result.ran.end(), char(1)));
+    // Only a candidate's bytes were set: the records name exactly those.
+    RigExecOpAscending(pending, result.candidates, count, &result.touched);
+    result.touchedValid = true;
+    size_t executed = 0;
+    for (uint32_t i : result.touched) executed += result.ran[i] == 1;
+    result.executed = executed;
     result.skipped = count - result.executed;
+    workspace.listsValid = true;
     const bool valid = succeeded.load(std::memory_order_acquire);
     if (!valid && error) *error = "an operation failed";
     return valid;

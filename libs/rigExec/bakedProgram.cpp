@@ -686,21 +686,26 @@ void RigExecBakedProgram::ReleaseStageReferences() {
 void RigExecBakedProgram::AdoptBlendSampleLayouts(RigExecBlendSampleCache *cache) {
     if (!cache) return;
     auto &B = *_impl;
+    const auto &execution = B.opExecution;
     // Only bodies which normalized current leaves may publish after the join.
-    for (size_t i=0;i<B.opGraph.ops.size() && i<B.opExecution.ran.size();++i) {
-        if (!B.opExecution.ran[i]) continue;
+    const auto adopt = [&](size_t i) {
+        if (i>=B.opGraph.ops.size() || i>=execution.ran.size() || !execution.ran[i]) return;
         const auto &step=B.steps[B.opGraph.ops[i].originalIndex];
         if (step.kind!=RigExecBakedStepKind::RevisionStatic || step.object<0 ||
-            size_t(step.object)>=B.revisionIndex.size()) continue;
+            size_t(step.object)>=B.revisionIndex.size()) return;
         const auto &entry=B.revisionIndex[size_t(step.object)];
         auto &revision=B.chains[size_t(entry.first)].revisions[size_t(entry.second)];
-        if (!revision.parameters.enabled) continue;
+        if (!revision.parameters.enabled) return;
         for (auto &channel:revision.blendChannels) for (auto &sample:channel.samples) {
             if (sample.blendShape.IsEmpty() || !sample.layout) continue;
             auto retained=cache->AdoptExclusive(sample.samplePath,sample.layout,sample.layoutRefused);
             if (retained) sample.layout=std::move(retained);
         }
-    }
+    };
+    // The executor's record, ascending: AdoptExclusive is first-wins, so
+    // the visit order is that of a sweep over every op.
+    if (execution.touchedValid) for (const uint32_t i:execution.touched) adopt(i);
+    else for (size_t i=0;i<B.opGraph.ops.size() && i<execution.ran.size();++i) adopt(i);
 }
 
 void RigExecBakedProgram::AdoptGeometryStateFrom(

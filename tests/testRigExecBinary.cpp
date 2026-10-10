@@ -3,6 +3,7 @@
 #include "rigExecBake/bake.h"
 #include "rigExecBake/revisionReads.h"
 #include "rigExecBake/staticReport.h"
+#include "rigExec/bakedSchedule.h"
 #include "rigExec/frozenContextInternal.h"
 #include "rigExec/rigEvaluator.h"
 #include "rigExecBinary/external.h"
@@ -15,6 +16,8 @@
 #include "rigExecRigging/rigBuilder.h"
 
 #include "pxr/base/plug/registry.h"
+#include "pxr/base/tf/getenv.h"
+#include "pxr/base/work/threadLimits.h"
 #include "pxr/usd/sdf/types.h"
 #include "pxr/usd/usd/editContext.h"
 #include "pxr/usd/usd/primRange.h"
@@ -3423,6 +3426,67 @@ TestBakeRestoresLiveRoles()
     restored("after a failed bake");
 }
 
+// An export is lowered for the reference concurrency whatever the baking
+// machine's work limit (user decision U2). The fixture is the first whose
+// serial cost gives different grains at one and two workers, so a bake that
+// followed the limit would differ under the two.
+static void
+TestTheExportIgnoresTheWorkLimit()
+{
+    if (!TfGetenv("RIGEXEC_BAKED_GRAIN_US", "").empty()) {
+        std::printf("export work limit: skipped, RIGEXEC_BAKED_GRAIN_US is set\n");
+        return;
+    }
+    struct RestoreLimit {
+        unsigned limit;
+        ~RestoreLimit() { WorkSetConcurrencyLimit(limit); }
+    } restore{WorkGetConcurrencyLimit()};
+    std::string chosen;
+    double cost = 0;
+    for (const char *name : {"02_TwoBoneIkLeg.usda", "09_PropertyMathMovers.usda",
+                             "06_LatticeBulge.usda"}) {
+        const std::string path =
+            (std::filesystem::path(RIGEXEC_EXAMPLES_DIR) / name).string();
+        const std::vector<uint8_t> bytes = _BakeFixture(path, 1001.0);
+        std::unique_ptr<fb::RigExecWireFile> file;
+        std::string why;
+        if (bytes.empty() ||
+            !RigExecFormatOpen(bytes.data(), bytes.size(), &file, &why) ||
+            !file->clustering) {
+            std::printf("  export work limit: %s does not open (%s)\n", name,
+                        why.c_str());
+            continue;
+        }
+        const double serial = file->clustering->serialCost;
+        std::printf("  export work limit: %s serial cost %.2f us\n", name,
+                    serial);
+        if (RigExecBakedScheduleGrainUs(serial, 1) !=
+            RigExecBakedScheduleGrainUs(serial, 2)) {
+            chosen = path;
+            cost = serial;
+            break;
+        }
+    }
+    CHECK(!chosen.empty());
+    if (chosen.empty()) {
+        return;
+    }
+    std::printf("export work limit: %s (serial cost %.2f us)\n", chosen.c_str(),
+                cost);
+    WorkSetConcurrencyLimit(1);
+    const std::vector<uint8_t> one = _BakeFixture(chosen, 1001.0);
+    WorkSetConcurrencyLimit(2);
+    const std::vector<uint8_t> two = _BakeFixture(chosen, 1001.0);
+    CHECK(!one.empty() && one == two);
+    std::unique_ptr<fb::RigExecWireFile> file;
+    std::string why;
+    CHECK(RigExecFormatOpen(one.data(), one.size(), &file, &why));
+    CHECK(file && file->clustering &&
+          file->clustering->grainUs ==
+              RigExecBakedScheduleGrainUs(cost,
+                                          kRigExecBakedReferenceConcurrency));
+}
+
 // Format 9, examples/biped/Biped.usda at fixture time 1: 3,467,672 bytes,
 // measured 2026-10-06 with head steps and memo bindings. Budget: plus 5%.
 constexpr size_t kBipedBytes = 3467672;
@@ -3788,6 +3852,7 @@ main(int argc, char **argv)
     TestGroupRolesBake();
     TestExportKeepSetBake();
     TestBakeRestoresLiveRoles();
+    TestTheExportIgnoresTheWorkLimit();
     // Each example's positive capture/default/source conformance and two
     // fresh bakes run in its existing verify_binary registration before
     // the unchanged runtime defaults, frame sampling and drag ledger.

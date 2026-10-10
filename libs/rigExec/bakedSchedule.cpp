@@ -607,7 +607,7 @@ RigExecBakedAssignStepCosts(RigExecBakedProgramImpl *program,
 // Clustering.
 
 double
-RigExecBakedScheduleGrainUs(double totalCost)
+RigExecBakedScheduleGrainUs(double totalCost, size_t concurrency)
 {
     // Read once: a grain that could move between two frames of one session
     // would make "the program produced two schedules" a question about when
@@ -623,13 +623,23 @@ RigExecBakedScheduleGrainUs(double totalCost)
     if (override >= 0) {
         return override;
     }
-    const double concurrency =
-        double(std::max<size_t>(WorkGetConcurrencyLimit(), 1));
+    const double workers = double(std::max<size_t>(concurrency, 1));
     // Enough work per task that the dispatch is noise, few enough tasks that
     // no thread is left holding the only remaining one: four bins per thread
     // is the usual compromise, and the clamp keeps a tiny rig from packing
     // everything into one cluster and a huge one from making ten thousand.
-    return std::min(50.0, std::max(5.0, totalCost / (4.0 * concurrency)));
+    return std::min(50.0, std::max(5.0, totalCost / (4.0 * workers)));
+}
+
+size_t
+RigExecBakedLoweringConcurrency(const RigExecBakedProgramImpl &B)
+{
+    // A file's clusters are part of its bytes, so they cannot follow the
+    // machine that baked it; a live program schedules for this machine.
+    if (B.roleMode == RigExecBakedRoleMode::Export) {
+        return kRigExecBakedReferenceConcurrency;
+    }
+    return std::max<size_t>(WorkGetConcurrencyLimit(), 1);
 }
 
 // Validation.
@@ -2370,11 +2380,11 @@ RigExecBakedClearRunStamps(RigExecBakedProgramImpl *program)
         step.memoStartNs = step.memoEndNs = step.bodyEndNs = step.publishEndNs = 0;
     }
     program->stampedSteps.clear();
-    auto &execution = program->opExecution;
-    std::fill(execution.ran.begin(), execution.ran.end(), char(0));
-    std::fill(execution.candidates.begin(), execution.candidates.end(), char(0));
-    std::fill(execution.completion.begin(), execution.completion.end(), uint64_t(0));
-    execution.executed = execution.skipped = 0;
+    // Through the execution's own record. The workspace is the executor's
+    // to reset, so its judge reports a missed byte by failing that run.
+    RigExecOpResetExecution(&program->opExecution, nullptr,
+                            program->opGraph.ops.size(),
+                            program->opGraph.clusters.size());
 }
 
 bool
@@ -2790,7 +2800,8 @@ RigExecBakedScheduleReport(const RigExecBakedProgramImpl &B)
                ? "parallel"
                : "serial";
     out += " grain=" + Fixed(schedule.grainUs) + "us concurrency=" +
-           std::to_string(WorkGetConcurrencyLimit()) + "\n";
+           std::to_string(WorkGetConcurrencyLimit()) + " reference=" +
+           std::to_string(RigExecBakedLoweringConcurrency(B)) + "\n";
     out += "  clusters=" + std::to_string(schedule.clusters.size()) + " (" +
            std::to_string(clusterEdges) + " edge(s)) serial=" +
            Fixed(schedule.serialCost) + "us criticalPath=" +
@@ -2907,14 +2918,24 @@ RigExecBakedReplayStepTimings(const RigExecBakedProgramImpl &B)
     }
     const std::vector<RigExecBakedCluster> &clusters = B.clustering.clusters;
     const bool traceAll = TraceAllStepsRequested();
-    for (const RigExecBakedStep &step : B.steps) {
+    // Only a listed step or cluster holds an interval, so the lists, sorted
+    // and each entry once, give the records and order of an ascending sweep.
+    std::vector<uint32_t> stamped(B.stampedSteps);
+    std::sort(stamped.begin(), stamped.end());
+    stamped.erase(std::unique(stamped.begin(), stamped.end()), stamped.end());
+    for (const uint32_t index : stamped) {
+        if (index >= B.steps.size() || index >= B.opExecution.ran.size() ||
+            index >= B.opExecution.completion.size()) {
+            continue;
+        }
+        const RigExecBakedStep &step = B.steps[index];
         // A step that did not take a whole microsecond is on nobody's
         // critical path, and a biped's graph holds several hundred of them
         // -- so recording each would cost more than the steps did and would
         // bury the events that matter under zero-length ones. The interval
         // is still measured; what is dropped is the report of it, unless
         // RIGEXEC_TRACE_ALL_STEPS asks for every timed step that ran.
-        const bool timedRun = B.opExecution.ran[size_t(&step-B.steps.data())] && step.startUs != 0;
+        const bool timedRun = B.opExecution.ran[index] && step.startUs != 0;
         if (step.endUs <= step.startUs && !(traceAll && timedRun)) {
             continue;
         }
@@ -2922,13 +2943,19 @@ RigExecBakedReplayStepTimings(const RigExecBakedProgramImpl &B)
             step.runner, step.label, "op", step.startUs, step.endUs,
             {{"kind", RigExecBakedStepKindName(step.kind)},
              {"domain", RigExecBakedStepDomainName(step.kind)},
-             {"seq", std::to_string(B.opExecution.completion[size_t(&step-B.steps.data())])}});
+             {"seq", std::to_string(B.opExecution.completion[index])}});
     }
 
     // The clusters themselves, one span each, on the row that ran them.
     // Each span covers the actual bodies run by one common cluster task.
     // Skipped clusters carry no interval.
-    for (size_t c = 0; c < clusters.size(); ++c) {
+    std::vector<uint32_t> timed(B.timedClusters);
+    std::sort(timed.begin(), timed.end());
+    timed.erase(std::unique(timed.begin(), timed.end()), timed.end());
+    for (const uint32_t c : timed) {
+        if (c >= clusters.size()) {
+            continue;
+        }
         const RigExecBakedCluster &cluster = clusters[c];
         if (cluster.endUs <= cluster.startUs) {
             continue;

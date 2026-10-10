@@ -948,6 +948,7 @@ bool RigExecBakedCompileOpGraph(RigExecBakedProgramImpl *B,std::string *error)
             B->skinTopologyLayouts.push_back(B->steps[i].object);
     }
     B->epilogue.verify=TfGetenvBool("RIGEXEC_VERIFY_EPILOGUE_LISTS",false);
+    B->opWorkspace.verifyReset=TfGetenvBool("RIGEXEC_VERIFY_EXECUTION_RESET",false);
     RigExecBakedIndexEpilogue(B);
     return true;
 }
@@ -975,10 +976,15 @@ bool RigExecBakedExecuteOpGraph(RigExecBakedProgramImpl *program,UsdTimeCode tim
     const bool timing=B.recordOpTimings || profiling;
     const bool stamping=measuring || timing;
     // Only a profiled run folds cluster times (below), so only one leaves
-    // any to clear.
-    if(B.clustering.lastRunTimed) for(auto &cluster:B.clustering.clusters) {
-        cluster.readyUs=cluster.startUs=cluster.endUs=0;
-        cluster.runner=std::thread::id();
+    // any to clear, and it listed every cluster it wrote.
+    if(B.clustering.lastRunTimed) {
+        for(const uint32_t c:B.timedClusters) {
+            if(c>=B.clustering.clusters.size()) continue;
+            auto &cluster=B.clustering.clusters[c];
+            cluster.readyUs=cluster.startUs=cluster.endUs=0;
+            cluster.runner=std::thread::id();
+        }
+        B.timedClusters.clear();
     }
     B.clustering.lastRunTimed=profiling;
     B.closureFull=force || B.programStamp!=B.lastProgramStamp;
@@ -1168,7 +1174,18 @@ bool RigExecBakedExecuteOpGraph(RigExecBakedProgramImpl *program,UsdTimeCode tim
     if(stamping)
         for(const uint32_t c:B.opWorkspace.pending)
             if(c<B.opGraph.ops.size()) B.stampedSteps.push_back(B.opGraph.ops[c].originalIndex);
-    RigExecOpGatherChanges(&state,B.opGraph,B.opExecution.ran);
+    // The sweeps below visit the ops the executor's record names, ascending,
+    // so each keeps the order of a sweep over every op; without a valid
+    // record they sweep every op.
+    const auto &execution=B.opExecution;
+    const auto forTouched=[&](auto &&visit) {
+        if(execution.touchedValid) {
+            for(const uint32_t c:execution.touched)
+                if(c<B.opGraph.ops.size() && c<execution.ran.size()) visit(c);
+        } else for(uint32_t c=0;c<B.opGraph.ops.size() && c<execution.ran.size();++c) visit(c);
+    };
+    RigExecOpGatherChanges(&state,B.opGraph,execution.ran,
+        execution.touchedValid ? &execution.touched : nullptr);
     RigExecBakedFoldHeldSteps(&B);
     // Joined: the binds this run built share now, before anything copies
     // the program (a freeze, a patched snapshot), not at its next run.
@@ -1180,12 +1197,13 @@ bool RigExecBakedExecuteOpGraph(RigExecBakedProgramImpl *program,UsdTimeCode tim
     // After the join, so the workers do no verification: nothing a run
     // writes later moves the points a published value describes.
     if(B.verifyChainVersions || B.verifyPacketVersions)
-        for(uint32_t c=0;c<B.opGraph.ops.size() && c<B.opExecution.ran.size();++c)
-            if(B.opExecution.ran[c])
+        forTouched([&](uint32_t c) {
+            if(execution.ran[c])
                 for(const auto id:B.opGraph.ops[c].descriptor.writes) {
                     if(B.verifyChainVersions) VerifyChainVersion(&B,id);
                     if(B.verifyPacketVersions) VerifyPacketVersion(&B,id);
                 }
+        });
     if(!ok) {
         state.retainedFirst.clear();
         B.everRan=false;
@@ -1197,37 +1215,42 @@ bool RigExecBakedExecuteOpGraph(RigExecBakedProgramImpl *program,UsdTimeCode tim
     if(B.verifyRangeChains) RigExecBakedVerifyRangeChains(&B);
     // Worker writes are confined to each operation. Reduce coarse timing
     // after join so profiling never adds synchronization to readiness.
-    if(profiling) for(uint32_t c=0;c<B.opGraph.ops.size() && c<B.opExecution.ran.size();++c) {
-        if(!B.opExecution.ran[c]) continue;
+    // A cluster first written here is listed, so the next run's reset and
+    // the replay visit exactly the clusters holding times.
+    if(profiling) forTouched([&](uint32_t c) {
+        if(!execution.ran[c]) return;
         const auto &step=B.steps[B.opGraph.ops[c].originalIndex];
-        auto &cluster=B.clustering.clusters[B.opGraph.opClusters[c]];
+        const uint32_t clusterIndex=B.opGraph.opClusters[c];
+        auto &cluster=B.clustering.clusters[clusterIndex];
+        if(!cluster.startUs && !cluster.endUs) B.timedClusters.push_back(clusterIndex);
         if(!cluster.startUs || step.startUs<cluster.startUs) {
             cluster.startUs=step.startUs; cluster.runner=step.runner;
         }
         cluster.endUs=std::max(cluster.endUs,step.endUs);
-    }
+    });
     // Every candidate evaluated its memo this run (a failed run returned
     // above) and only an op that ran published, so no stamp of another run
     // is folded.
-    if(measuring) for(uint32_t c=0;c<B.opGraph.ops.size() && c<B.opExecution.candidates.size();++c) {
-        if(!B.opExecution.candidates[c]) continue;
+    if(measuring) forTouched([&](uint32_t c) {
+        if(c>=execution.candidates.size() || !execution.candidates[c]) return;
         auto &step=B.steps[B.opGraph.ops[c].originalIndex];
         if(step.memoStartNs && step.memoEndNs>=step.memoStartNs) {
             step.measuredMemoUs+=double(step.memoEndNs-step.memoStartNs)/1000.0;
             ++step.measuredMemoRuns;
         }
-        if(B.opExecution.ran[c] && step.bodyEndNs && step.publishEndNs>=step.bodyEndNs)
+        if(execution.ran[c] && step.bodyEndNs && step.publishEndNs>=step.bodyEndNs)
             step.measuredPublishUs+=double(step.publishEndNs-step.bodyEndNs)/1000.0;
-    }
+    });
     RigExecBakedPublishPropertyChains(&B);
     RigExecBakedNoteReaderWalks(&B);
     B.closed.Clear();
     B.closedSteps.Clear();
-    for(uint32_t c=0;c<B.opGraph.ops.size();++c)
-        if(B.opExecution.ran[c]) {
+    forTouched([&](uint32_t c) {
+        if(execution.ran[c]) {
             B.closed.Set(int(B.opGraph.opClusters[c]));
             B.closedSteps.Set(int(c));
         }
+    });
     B.lastClosedClusters=B.closed.Count();
     B.lastClosedSteps=B.opExecution.executed;
     B.restMoved.clear(); B.ladderMoved.clear();
@@ -1236,8 +1259,9 @@ bool RigExecBakedExecuteOpGraph(RigExecBakedProgramImpl *program,UsdTimeCode tim
     for(size_t slot=0;slot<B.ladderChanged.size();++slot)
         if(B.ladderChanged[slot]) B.ladderMoved.push_back(int(slot));
     B.headOpsRun=0;
-    for(uint32_t c=0;c<B.opGraph.ops.size();++c)
-        if(B.opExecution.ran[c] && B.steps[B.opGraph.ops[c].originalIndex].isHead) ++B.headOpsRun;
+    forTouched([&](uint32_t c) {
+        if(execution.ran[c] && B.steps[B.opGraph.ops[c].originalIndex].isHead) ++B.headOpsRun;
+    });
     state.retainedFirst.clear();
     // Pure preparation and admission outcomes completed, but a refused
     // public generation does not accept the pending epoch/edit debt.
@@ -1261,11 +1285,13 @@ bool RigExecBakedLowerOpGraph(RigExecBakedProgramImpl *B,std::string *error)
         const double cost=B->steps[op.originalIndex].cost;
         costs.push_back(cost); total+=cost;
     }
-    const double grain=RigExecBakedScheduleGrainUs(total);
+    const double grain=RigExecBakedScheduleGrainUs(total,RigExecBakedLoweringConcurrency(*B));
     if(!RigExecLowerOpClusters(&B->opGraph,costs,grain,error)) return false;
     // Compatibility reports and cone views reflect the common artifact.
     auto &view=B->clustering;
     view={}; view.grainUs=grain; view.serialCost=total;
+    // The view starts with no cluster times, so none is listed.
+    B->timedClusters.clear();
     view.clusterOf.assign(B->opGraph.opClusters.begin(),B->opGraph.opClusters.end());
     view.clusters.resize(B->opGraph.clusters.size());
     std::vector<double> path(view.clusters.size(),0);
@@ -1372,11 +1398,15 @@ void RigExecBakedFoldHeldSteps(RigExecBakedProgramImpl *program)
 {
     auto &B=*program;
     if(B.epilogue.held.holding.size()!=B.steps.size()) { RigExecBakedIndexEpilogue(&B); return; }
-    for(uint32_t c=0;c<B.opGraph.ops.size() && c<B.opExecution.ran.size();++c) {
-        if(!B.opExecution.ran[c]) continue;
+    const auto &execution=B.opExecution;
+    const auto fold=[&](uint32_t c) {
+        if(c>=B.opGraph.ops.size() || c>=execution.ran.size() || !execution.ran[c]) return;
         const uint32_t i=B.opGraph.ops[c].originalIndex;
         B.epilogue.held.Note(i,HoldsOutput(B.steps[i]));
-    }
+    };
+    // The executor's record, ascending, is every op that may have run.
+    if(execution.touchedValid) for(const uint32_t c:execution.touched) fold(c);
+    else for(uint32_t c=0;c<B.opGraph.ops.size() && c<execution.ran.size();++c) fold(c);
 }
 
 void RigExecBakedVerifyEpilogueIndex(RigExecBakedProgramImpl *program)

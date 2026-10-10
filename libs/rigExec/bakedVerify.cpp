@@ -1454,6 +1454,7 @@ RigExecBakedRunStatistics::RigExecBakedRunStatistics(
     spaceLeafKeys = program.spaceLeafKeys;
     sourceKeysBuilt = program.sourceKeysBuilt;
     timed = program.clustering.lastRunTimed;
+    timedClusters = program.timedClusters;
     clusters.resize(program.clustering.clusters.size());
     for (size_t c = 0; c < clusters.size(); ++c) {
         const RigExecBakedCluster &cluster = program.clustering.clusters[c];
@@ -1485,6 +1486,7 @@ RigExecBakedRunStatistics::Restore(RigExecBakedProgramImpl *program) const
     B.spaceLeafKeys = spaceLeafKeys;
     B.sourceKeysBuilt = sourceKeysBuilt;
     B.clustering.lastRunTimed = timed;
+    B.timedClusters = timedClusters;
     for (size_t c = 0;
          c < B.clustering.clusters.size() && c < clusters.size(); ++c) {
         B.clustering.clusters[c].readyUs = clusters[c].readyUs;

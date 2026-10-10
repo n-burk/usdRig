@@ -2829,6 +2829,10 @@ struct RigExecBakedProgramImpl {
     /// wrote since the last clear. RigExecBakedClearRunStamps zeroes these
     /// steps' stamps and empties the list.
     std::vector<uint32_t> stampedSteps;
+    /// Clusters whose timing fields the last profiled run set (an index may
+    /// repeat); the next run resets only these, and the replay records only
+    /// these. Cleared by the lowering.
+    std::vector<uint32_t> timedClusters;
 
     /// What the epilogue visits instead of every step: the step lists Build
     /// fixes and the steps holding diagnostics or lines now. Indexed by
@@ -5821,6 +5825,8 @@ struct RigExecBakedRunStatistics {
     size_t spaceLeafKeys = 0;
     size_t sourceKeysBuilt = 0;
     bool timed = false;
+    /// The program's timedClusters, restored with the cluster times.
+    std::vector<uint32_t> timedClusters;
 };
 
 /// Whether RIGEXEC_BAKED_VERIFY_CONES asks a run to prove its cone.

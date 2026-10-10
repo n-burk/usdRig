@@ -24,10 +24,13 @@
 #include "rigExec/bakedTrace.h"
 #include "rigExec/parallel.h"
 #include "rigExec/rigEvaluator.h"
+#include "rigExec/tapSet.h"
 
 #include "pxr/base/plug/registry.h"
+#include "pxr/base/tf/getenv.h"
 #include "pxr/base/tf/pathUtils.h"
 #include "pxr/base/tf/setenv.h"
+#include "pxr/base/vt/value.h"
 #include "pxr/usd/sdf/types.h"
 #include "pxr/usd/usd/attribute.h"
 #include "pxr/usd/usd/prim.h"
@@ -697,6 +700,99 @@ TestInvalidTargetStillExecutesUnrelatedOperations(const std::string &examplesDir
     CHECK(!program->GetOpGraph().empty());
 }
 
+/// A profiled drag step replayed from lists that hold every entry twice and
+/// out of order: one event per timed step and cluster, ascending -- exactly
+/// the events a sweep over every step and every cluster records.
+void
+TestTheReplayRecordsEachStepOnce(const std::string &examplesDir)
+{
+    LiveRig rig = OpenRig(examplesDir + "/biped/Biped.usda");
+    CHECK(rig.evaluator != nullptr);
+    if (!rig.evaluator) return;
+    RigExecRigEvaluator &E = *rig.evaluator;
+    const SdfPath control("/Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/L_Shldr/L_UpArmSwing/L_UpArm/L_LoArm/L_Hand");
+    const TfToken avar("avars:rz");
+    const UsdAttribute attribute =
+        rig.stage->GetPrimAtPath(control).GetAttribute(avar);
+    VtValue authored, dragged;
+    CHECK(attribute && attribute.Get(&authored, UsdTimeCode(1)));
+    if (authored.IsHolding<double>()) {
+        dragged = VtValue(authored.UncheckedGet<double>() + 3.0);
+    } else if (authored.IsHolding<float>()) {
+        dragged = VtValue(authored.UncheckedGet<float>() + 3.0f);
+    }
+    CHECK(!dragged.IsEmpty());
+    if (dragged.IsEmpty()) return;
+
+    E.SetProfilingEnabled(true);
+    CHECK(E.Evaluate(UsdTimeCode(1)).valid);
+    E.SetInteractiveOverrides(
+        {RigExecValueOverride{control, TfToken(), avar, dragged}});
+    const size_t generations = E.GetBakedGenerationCount();
+    CHECK(E.Evaluate(UsdTimeCode(1)).valid);
+    CHECK(E.GetBakedGenerationCount() == generations + 1);
+    const RigExecBakedProgram *program = E.GetBakedProgram();
+    CHECK(program != nullptr);
+    if (!program) return;
+    RigExecBakedProgramImpl &B =
+        const_cast<RigExecBakedProgramImpl &>(program->GetStepGraph());
+    CHECK(!B.stampedSteps.empty() && !B.timedClusters.empty());
+
+    // What a sweep over every step and cluster records, by the replay's
+    // own predicates.
+    const bool traceAll = TfGetenvBool("RIGEXEC_TRACE_ALL_STEPS", false);
+    std::vector<std::pair<std::string, std::string>> expectedSteps;
+    for (size_t k = 0; k < B.steps.size(); ++k) {
+        const RigExecBakedStep &step = B.steps[k];
+        const bool ran = k < B.opExecution.ran.size() && B.opExecution.ran[k];
+        if (step.endUs <= step.startUs &&
+            !(traceAll && ran && step.startUs != 0)) {
+            continue;
+        }
+        expectedSteps.emplace_back(
+            step.label, k < B.opExecution.completion.size()
+                            ? std::to_string(B.opExecution.completion[k])
+                            : std::string());
+    }
+    std::vector<std::string> expectedClusters;
+    for (size_t c = 0; c < B.clustering.clusters.size(); ++c) {
+        const RigExecBakedCluster &cluster = B.clustering.clusters[c];
+        if (cluster.endUs > cluster.startUs) {
+            expectedClusters.push_back("cluster " + std::to_string(c));
+        }
+    }
+    CHECK(!expectedSteps.empty() && !expectedClusters.empty());
+
+    // Each list again, reversed: a replay that walked the lists as they
+    // stand would record duplicates out of order.
+    const std::vector<uint32_t> stamped = B.stampedSteps;
+    const std::vector<uint32_t> timed = B.timedClusters;
+    B.stampedSteps.insert(B.stampedSteps.end(), stamped.rbegin(),
+                          stamped.rend());
+    B.timedClusters.insert(B.timedClusters.end(), timed.rbegin(),
+                           timed.rend());
+    E.ClearProfile();
+    RigExecBakedReplayStepTimings(B);
+    std::vector<std::pair<std::string, std::string>> recordedSteps;
+    std::vector<std::string> recordedClusters;
+    for (const RigExecProfileEvent &event : E.GetProfiler().GetEvents()) {
+        if (event.category == "op") {
+            const auto seq = event.args.find("seq");
+            recordedSteps.emplace_back(event.name,
+                                       seq == event.args.end()
+                                           ? std::string("-")
+                                           : seq->second);
+        } else if (event.category == "cluster") {
+            recordedClusters.push_back(event.name);
+        }
+    }
+    CHECK(recordedSteps == expectedSteps);
+    CHECK(recordedClusters == expectedClusters);
+    std::printf("  replay: %zu step event(s) from %zu listed, %zu cluster event(s) from %zu listed\n",
+                recordedSteps.size(), B.stampedSteps.size(),
+                recordedClusters.size(), B.timedClusters.size());
+}
+
 /// Precedes and the finders agree with the seq numbers they read.
 void
 TestTheHelpersReadTheTrace()
@@ -793,6 +889,7 @@ main(int argc, char **argv)
     TestMeasurementFoldsOperationPhases(examplesDir);
     TestStepTimingLeavesOutColdRuns(examplesDir);
     TestInvalidTargetStillExecutesUnrelatedOperations(examplesDir);
+    TestTheReplayRecordsEachStepOnce(examplesDir);
     if (failures) {
         std::printf("%d FAILURE(S)\n", failures);
         return 1;

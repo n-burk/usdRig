@@ -114,6 +114,13 @@ struct RigExecOpExecution {
     std::vector<uint64_t> completion;
     /// Derived from ran after the join: skipped is every op that did not run.
     size_t executed = 0, skipped = 0;
+    /// Every op whose candidates, ran or completion entry the execution
+    /// that wrote these bytes may have set, ascending, each once; valid
+    /// only while `touchedValid`. Copying the struct copies the record with
+    /// the bytes it describes. Code that writes the bytes any other way
+    /// clears `touchedValid` (the next reset then clears everything).
+    std::vector<uint32_t> touched;
+    bool touchedValid = false;
 };
 
 struct RigExecOpPendingCount {
@@ -132,7 +139,32 @@ struct RigExecOpWorkspace {
     std::vector<char> seeded, clusterCandidates;
     std::vector<uint32_t> pending, ready;
     std::vector<RigExecOpPendingCount> unresolved;
+    /// The clusters whose clusterCandidates byte the last execution set,
+    /// ascending, each once. With `pending` (every op whose seeded byte it
+    /// may have set) it is the reset record of this workspace's bytes,
+    /// valid while `listsValid`.
+    std::vector<uint32_t> candidateClusters;
+    bool listsValid = false;
+    /// RIGEXEC_VERIFY_EXECUTION_RESET, set by the backend at compile or
+    /// Open: after a list-driven reset every byte is checked to be zero.
+    bool verifyReset = false;
 };
+
+/// Zeroes \p out's candidates, ran, completion and counts (sized \p ops)
+/// and \p workspace's seeded and cluster marks (sized \p ops and
+/// \p clusters): through the records when they are valid for these sizes,
+/// else whole. Leaves `pending` as it is (the executor rebuilds it). False
+/// only when `verifyReset` found a byte the records missed (the byte is
+/// zeroed; the caller fails the run). Owner thread, between executions.
+bool RigExecOpResetExecution(RigExecOpExecution *out,
+    RigExecOpWorkspace *workspace, size_t ops, size_t clusters);
+
+/// Writes to \p out, ascending and unique, every i < \p n with
+/// flags[i] != 0, given \p listed holding each such i at least once and
+/// nothing else: by a scan of \p flags when listed.size() * 16 >= n, else
+/// by sorting a copy of \p listed. Both give the same sequence.
+void RigExecOpAscending(const std::vector<uint32_t> &listed,
+    const std::vector<char> &flags, size_t n, std::vector<uint32_t> *out);
 
 /// The same readiness/change-propagation loop for serial and parallel backends.
 /// Callers reset current-generation change flags before publishing sampled leaves.
