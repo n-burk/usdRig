@@ -1,0 +1,107 @@
+# Dry run of tools/select_affected_tests.py
+# Generated on this branch. Not a test result.
+
+========== libs/rigExecMath/solvers.cpp ==========
+paths:
+libraries:
+direct executables (9) (link the changed library themselves):
+direct tests (9):
+transitive executables (95) (link closure, safe rebuild):
+transitive tests (118):
+ctest (direct):
+  ctest --test-dir build -R '^(testRigExecDualQuat|testRigExecMath|testRigExecPoseInterpolator|testRigExecRbf|testRigExecSingleChainIk|testRigExecSplineIk|testRigExecSurfaceKernelCache|testRigExecWeightFields|testRigExecWrinkleMath)$' --output-on-failure
+build (direct):
+  cmake --build build --target testRigExecDualQuat testRigExecMath testRigExecPoseInterpolator testRigExecRbf testRigExecSingleChainIk testRigExecSplineIk testRigExecSurfaceKernelCache testRigExecWeightFields testRigExecWrinkleMath
+note: this is a dry run. It over-selects inside the rigExec shared library and does not run anything.
+
+========== libs/rigExecRuntime/geometry.cpp ==========
+paths:
+libraries:
+direct executables (20) (link the changed library themselves):
+direct tests (27):
+transitive executables (32) (link closure, safe rebuild):
+transitive tests (37):
+ctest (direct):
+  ctest --test-dir build -R '^(testRigExecAffineFrames|testRigExecConstraints|testRigExecDeltaMush|testRigExecDeltaMushRuntime|testRigExecExternalMovers|testRigExecImaging|testRigExecImagingFineClusters|testRigExecImagingFineClustersReference|testRigExecLattice|testRigExecOneLoopAcceptance_serial|testRigExecOneLoopAcceptance_parallel|testRigExecOneLoopAcceptance_production|testRigExecRuntimeGeometry|testRigExecRuntimeGeometryFineClusters|testRigExecRuntimeInputs|testRigExecRuntimeLoader|testRigExecRuntimeMath|testRigExecRuntimePose|testRigExecRuntimeAutoClavicle|testRigExecRuntimePoseFineClusters|testRigExecRuntimeWeights|testRigExecRuntimeWeightsFineClusters|testRigExecSurfaceBinding|testRigExecSurfaceSnap|testRigExecUpstreamInputs|testRigExecWrinkle|testRigExecWrinkleRuntime)$' --output-on-failure
+build (direct):
+  cmake --build build --target rigExecPose testRigExecAffineFrames testRigExecConstraints testRigExecDeltaMush testRigExecDeltaMushRuntime testRigExecExternalMovers testRigExecImaging testRigExecLattice testRigExecOneLoopAcceptance testRigExecRuntimeGeometry testRigExecRuntimeInputs testRigExecRuntimeLoader testRigExecRuntimeMath testRigExecRuntimePose testRigExecRuntimeWeights testRigExecSurfaceBinding testRigExecSurfaceSnap testRigExecUpstreamInputs testRigExecWrinkle testRigExecWrinkleRuntime
+note: this is a dry run. It over-selects inside the rigExec shared library and does not run anything.
+
+========== libs/rigExecGraph/constraintSceneLowering.cpp ==========
+paths:
+libraries:
+direct executables (62) (link the changed library themselves):
+direct tests (80):
+transitive executables (85) (link closure, safe rebuild):
+transitive tests (107):
+ctest (direct):
+  ctest --test-dir build -R '^(testRigExecAffineFrames|testRigExecArm|testRigExecBackgroundScheduler|testRigExecBakedAttribute|testRigExecBakedAttributeEnvironment|testRigExecBakedMode|testRigExecBakedSchedule|testRigExecBakedScheduleCones_serial|testRigExecBakedScheduleCones_grain0_serial|testRigExecBakedScheduleCones_parallel|testRigExecBakedScheduleCones_grain0_parallel|testRigExecChainLevels|testRigExecChainLevelsRepeat|testRigExecConstraints|testRigExecCrossDomainInputs_serial|testRigExecCrossDomainInputs_parallel|testRigExecDefaultSpaces|testRigExecDeltaMush|testRigExecEnvelopeVolumes_serial|testRigExecEnvelopeVolumes_parallel|testRigExecEpochRests|testRigExecExampleParity|testRigExecExampleParityCones_serial|testRigExecExampleParityCones_grain0_serial|testRigExecExampleParityCones_parallel|testRigExecExampleParityCones_grain0_parallel|testRigExecExecCrossCheck|exec_crosscheck_01_FkChainTail|exec_crosscheck_03_IkFkBlendClamp|exec_crosscheck_05_TwistRibbonSpine|exec_crosscheck_11_VolumeWeights|exec_crosscheck_13_ReadPhases|exec_crosscheck_ArmRig|exec_crosscheck_computed_ik_space|testRigExecExternalMovers|testRigExecFrameCache|testRigExecFrameCacheCones_Verify|testRigExecFrameCacheSparsity|testRigExecFrozenContext|testRigExecGeometryOpsBakedParity|testRigExecGeometryOpsBakedParityCones_serial|testRigExecGeometryOpsBakedParityCones_grain0_serial|testRigExecGeometryOpsBakedParityCones_parallel|testRigExecGeometryOpsBakedParityCones_grain0_parallel|testRigExecGeometryProgram|testRigExecGoldenPose|testRigExecGraphBindings|testRigExecInputReplayValues|testRigExecInteractive|testRigExecLattice|testRigExecMoverGraph|testRigExecOneLoopAcceptance_serial|testRigExecOneLoopAcceptance_parallel|testRigExecOneLoopAcceptance_production|testRigExecOpTrace_serial|testRigExecOpTrace_parallel|testRigExecOpTrace_calibrate|testRigExecOpValues|testRigExecOracleInputs|testRigExecParallelKernels|testRigExecParallelKernelsSerial|testRigExecPhaseBindings|testRigExecPoseInterpolator|testRigExecProfiler|testRigExecRestOps|testRigExecRuntimeInputs|testRigExecScopedClears|testRigExecSkinTopology|testRigExecSolverBake|testRigExecSolverBakeSpaceRestCandidates|testRigExecSolverStacking|testRigExecStaticInputCache|testRigExecSurfaceBinding|testRigExecSurfaceProjector|testRigExecSurfaceSnap|testRigExecTypedValues|testRigExecValueEdits|testRigExecVolumeWeights|testRigExecWeightProgram|testRigExecWrinkle)$' --output-on-failure
+build (direct):
+  cmake --build build --target benchEditLatency benchFrameCache benchFrameCacheWarm benchPathLookup benchStageReads probeCodingError rigExecPose rigExecReplayInputs testRigExecAffineFrames testRigExecArm testRigExecBackgroundScheduler testRigExecBakedAttribute testRigExecBakedMode testRigExecBakedSchedule testRigExecChainLevels testRigExecConstraints testRigExecCrossDomainInputs testRigExecDefaultSpaces testRigExecDeltaMush testRigExecEnvelopeVolumes testRigExecEpochRests testRigExecExampleParity testRigExecExecCrossCheck testRigExecExecCrossCheckRows testRigExecExternalMovers testRigExecFrameCache testRigExecFrameCacheCones_Verify testRigExecFrameCacheSparsity testRigExecFrozenContext testRigExecGeometryOpsBakedParity testRigExecGeometryProgram testRigExecGoldenPose testRigExecGoldenSuiteObserver testRigExecGraphBindings testRigExecInputActions testRigExecInputReplayValues testRigExecInteractive testRigExecLattice testRigExecMoverGraph testRigExecOneLoopAcceptance testRigExecOpTrace testRigExecOpValues testRigExecOracleInputs testRigExecParallelKernels testRigExecPhaseBindings testRigExecPoseInterpolator testRigExecProfiler testRigExecRestOps testRigExecRuntimeInputs testRigExecScopedClears testRigExecSkinTopology testRigExecSolverBake testRigExecSolverStacking testRigExecStaticInputCache testRigExecSurfaceBinding testRigExecSurfaceProjector testRigExecSurfaceSnap testRigExecTypedValues testRigExecValueEdits testRigExecVolumeWeights testRigExecWeightProgram testRigExecWrinkle
+note: this is a dry run. It over-selects inside the rigExec shared library and does not run anything.
+
+========== libs/rigExecGraph/opGraph.cpp ==========
+paths:
+libraries:
+direct executables (1) (link the changed library themselves):
+direct tests (1):
+transitive executables (89) (link closure, safe rebuild):
+transitive tests (111):
+ctest (direct):
+  ctest --test-dir build -R '^(testRigExecOpGraph)$' --output-on-failure
+build (direct):
+  cmake --build build --target testRigExecOpGraph
+note: this is a dry run. It over-selects inside the rigExec shared library and does not run anything.
+
+========== libs/rigExecBinary/format.cpp ==========
+paths:
+libraries:
+direct executables (1) (link the changed library themselves):
+direct tests (1):
+transitive executables (37) (link closure, safe rebuild):
+transitive tests (42):
+ctest (direct):
+  ctest --test-dir build -R '^(testRigExecFormat)$' --output-on-failure
+build (direct):
+  cmake --build build --target testRigExecFormat
+note: this is a dry run. It over-selects inside the rigExec shared library and does not run anything.
+
+========== libs/rigExecImaging/sceneIndices.cpp ==========
+paths:
+libraries:
+direct executables (13) (link the changed library themselves):
+direct tests (13):
+transitive executables (13) (link closure, safe rebuild):
+transitive tests (13):
+ctest (direct):
+  ctest --test-dir build -R '^(testRigExecImaging|testRigExecImagingFineClusters|testRigExecImagingFineClustersReference|testRigExecImagingFrameCache|testRigExecImagingMultiStage|testRigExecImagingPlayback|testRigExecLiveDebug_serial|testRigExecLiveDebug_parallel|testRigExecNoAuthoring|testRigExecProfilerApi|testRigExecTouchPose|testRigExecUpstreamInputs|testRigExecWeightOverlay)$' --output-on-failure
+build (direct):
+  cmake --build build --target benchCommitLag benchPlayback probeImagingPipeline testRigExecImaging testRigExecImagingFrameCache testRigExecImagingMultiStage testRigExecImagingPlayback testRigExecLiveDebug testRigExecNoAuthoring testRigExecProfilerApi testRigExecTouchPose testRigExecUpstreamInputs testRigExecWeightOverlay
+note: this is a dry run. It over-selects inside the rigExec shared library and does not run anything.
+
+========== libs/rigExecBake/bake.cpp ==========
+paths:
+libraries:
+direct executables (25) (link the changed library themselves):
+direct tests (31):
+transitive executables (25) (link closure, safe rebuild):
+transitive tests (31):
+ctest (direct):
+  ctest --test-dir build -R '^(testRigExecDeltaMushBakeFile|testRigExecAffineFrames|testRigExecBinary|testRigExecConstraints|testRigExecDeltaMush|testRigExecExternalMovers|testRigExecFrozenContext|testRigExecImaging|testRigExecImagingFineClusters|testRigExecImagingFineClustersReference|testRigExecImagingFrameCache|testRigExecImagingPlayback|testRigExecLattice|testRigExecLeaves|testRigExecOneLoopAcceptance_serial|testRigExecOneLoopAcceptance_parallel|testRigExecOneLoopAcceptance_production|testRigExecPropertyOps|testRigExecRuntimeGeometry|testRigExecRuntimeGeometryFineClusters|testRigExecRuntimeInputs|testRigExecRuntimeLoader|testRigExecRuntimePose|testRigExecRuntimeAutoClavicle|testRigExecRuntimePoseFineClusters|testRigExecRuntimeWeights|testRigExecRuntimeWeightsFineClusters|testRigExecSurfaceBinding|testRigExecSurfaceSnap|testRigExecUpstreamInputs|testRigExecWrinkle)$' --output-on-failure
+build (direct):
+  cmake --build build --target benchCommitLag benchPlayback rigExecBakeTool testRigExecAffineFrames testRigExecBinary testRigExecConstraints testRigExecDeltaMush testRigExecExternalMovers testRigExecFrozenContext testRigExecImaging testRigExecImagingFrameCache testRigExecImagingPlayback testRigExecLattice testRigExecLeaves testRigExecOneLoopAcceptance testRigExecPropertyOps testRigExecRuntimeGeometry testRigExecRuntimeInputs testRigExecRuntimeLoader testRigExecRuntimePose testRigExecRuntimeWeights testRigExecSurfaceBinding testRigExecSurfaceSnap testRigExecUpstreamInputs testRigExecWrinkle
+note: this is a dry run. It over-selects inside the rigExec shared library and does not run anything.
+
+========== libs/rigExecRigging/rigBuilder.cpp ==========
+paths:
+libraries:
+direct executables (10) (link the changed library themselves):
+direct tests (11):
+transitive executables (10) (link closure, safe rebuild):
+transitive tests (11):
+ctest (direct):
+  ctest --test-dir build -R '^(testRigExecBinary|testRigExecDeltaMush|testRigExecExternalMovers|testRigExecFrozenContext|testRigExecLeaves|testRigExecPack|testRigExecRigBuilder|testRigExecSchemaAuthoring|testRigExecSchemaAuthoringMissing|testRigExecStandalone|testRigExecWrinkle)$' --output-on-failure
+build (direct):
+  cmake --build build --target testRigExecBinary testRigExecDeltaMush testRigExecExternalMovers testRigExecFrozenContext testRigExecLeaves testRigExecPack testRigExecRigBuilder testRigExecSchemaAuthoring testRigExecStandalone testRigExecWrinkle
+note: this is a dry run. It over-selects inside the rigExec shared library and does not run anything.
+

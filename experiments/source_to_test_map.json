@@ -1,0 +1,5931 @@
+{
+  "libraries": {
+    "rigExec": {
+      "kind": "SHARED",
+      "sources": [
+        "libs/rigExec/types.cpp",
+        "libs/rigExec/parallel.cpp",
+        "libs/rigExec/computations.cpp",
+        "libs/rigExec/affineFrameComputations.cpp",
+        "libs/rigExec/moverKernels.cpp",
+        "libs/rigExec/solverKernels.cpp",
+        "libs/rigExec/weightPackets.cpp",
+        "libs/rigExec/goldenPose.cpp",
+        "libs/rigExec/goldenSuite.cpp",
+        "libs/rigExec/inputReplay.cpp",
+        "libs/rigExec/bakedExecCrossCheck.cpp",
+        "libs/rigExec/weightReference.cpp",
+        "libs/rigExec/scalarReference.cpp",
+        "libs/rigExec/scalarReferenceAdapter.cpp",
+        "libs/rigExec/oracleInputs.cpp",
+        "libs/rigExecGraph/usdSceneAccess.cpp",
+        "libs/rigExecGraph/poseCommit.cpp",
+        "libs/rigExecGraph/providerContextBinding.cpp",
+        "libs/rigExecGraph/constraintGraphBinding.cpp",
+        "libs/rigExecGraph/geometryGraphBinding.cpp",
+        "libs/rigExecGraph/autoClavicleGraph.cpp",
+        "libs/rigExecGraph/poseGraphBinding.cpp",
+        "libs/rigExecGraph/poseProgram.cpp",
+        "libs/rigExecGraph/poseSceneLowering.cpp",
+        "libs/rigExecGraph/propertyGraphBinding.cpp",
+        "libs/rigExecGraph/sceneGraphBinding.cpp",
+        "libs/rigExecGraph/sceneGraphTypedRead.cpp",
+        "libs/rigExecGraph/sceneProgram.cpp",
+        "libs/rigExecGraph/sceneProgramLayout.cpp",
+        "libs/rigExecGraph/sceneProgramLowering.cpp",
+        "libs/rigExecGraph/solverGraphBinding.cpp",
+        "libs/rigExecGraph/weightGraphBinding.cpp",
+        "libs/rigExecGraph/sceneDescriptors.cpp",
+        "libs/rigExecGraph/sceneCompileInputs.cpp",
+        "libs/rigExecGraph/solverProgram.cpp",
+        "libs/rigExecGraph/solverSceneLowering.cpp",
+        "libs/rigExecGraph/constraintProgram.cpp",
+        "libs/rigExecGraph/constraintSceneLowering.cpp",
+        "libs/rigExecGraph/propertyProgram.cpp",
+        "libs/rigExecGraph/propertySceneLowering.cpp",
+        "libs/rigExecGraph/sceneVersionRoutes.cpp",
+        "libs/rigExecGraph/geometryProgram.cpp",
+        "libs/rigExecGraph/geometrySceneLowering.cpp",
+        "libs/rigExecGraph/weightProgram.cpp",
+        "libs/rigExecGraph/weightSceneLowering.cpp",
+        "libs/rigExecGraph/sceneTypedReads.cpp",
+        "libs/rigExec/weightField.cpp",
+        "libs/rigExec/movers/moverRegistry.cpp",
+        "libs/rigExec/movers/matrixMover.cpp",
+        "libs/rigExec/movers/skinMover.cpp",
+        "libs/rigExec/movers/armatureMover.cpp",
+        "libs/rigExec/movers/blendShapeMover.cpp",
+        "libs/rigExec/movers/smoothMover.cpp",
+        "libs/rigExec/movers/deltaMushMover.cpp",
+        "libs/rigExec/movers/wrinkleMover.cpp",
+        "libs/rigExec/movers/volumeCorrectMover.cpp",
+        "libs/rigExec/movers/latticeMover.cpp",
+        "libs/rigExec/movers/surfaceBindingMover.cpp",
+        "libs/rigExec/movers/surfaceMover.cpp",
+        "libs/rigExec/movers/curveMover.cpp",
+        "libs/rigExec/movers/mathMovers.cpp",
+        "libs/rigExec/moverGraph.cpp",
+        "libs/rigExec/tapSet.cpp",
+        "libs/rigExec/rigEvaluator.cpp",
+        "libs/rigExec/rigEvaluatorChainPlan.cpp",
+        "libs/rigExec/rigEvaluatorCompile.cpp",
+        "libs/rigExec/rigEvaluatorDependencies.cpp",
+        "libs/rigExec/rigEvaluatorDigest.cpp",
+        "libs/rigExec/rigEvaluatorGeometry.cpp",
+        "libs/rigExec/rigEvaluatorInputs.cpp",
+        "libs/rigExec/rigEvaluatorLiveGraph.cpp",
+        "libs/rigExec/rigEvaluatorNotices.cpp",
+        "libs/rigExec/rigEvaluatorPose.cpp",
+        "libs/rigExec/rigEvaluatorProperties.cpp",
+        "libs/rigExec/rigEvaluatorValidation.cpp",
+        "libs/rigExec/bakedProgram.cpp",
+        "libs/rigExec/crossDomainInputs.cpp",
+        "libs/rigExec/bakedSpaces.cpp",
+        "libs/rigExec/bakedPose.cpp",
+        "libs/rigExec/bakedProperties.cpp",
+        "libs/rigExec/bakedOpValues.cpp",
+        "libs/rigExec/bakedOpGraph.cpp",
+        "libs/rigExecGraph/providerRecordExport.cpp",
+        "libs/rigExecGraph/providerProgram.cpp",
+        "libs/rigExecGraph/typedValues.cpp",
+        "libs/rigExec/bakedExecCrossCheckRows.cpp",
+        "libs/rigExec/bakedSchedule.cpp",
+        "libs/rigExec/bakedTrace.cpp",
+        "libs/rigExec/bakedUpstream.cpp",
+        "libs/rigExec/bakedGeometry.cpp",
+        "libs/rigExec/bakedWeights.cpp",
+        "libs/rigExec/bakedVerify.cpp",
+        "libs/rigExec/frameCache.cpp",
+        "libs/rigExec/frozenContext.cpp",
+        "libs/rigExec/frozenDigest.cpp",
+        "libs/rigExec/frozenPropertySampling.cpp",
+        "libs/rigExec/frozenSampling.cpp",
+        "libs/rigExec/frozenSnapshot.cpp",
+        "libs/rigExec/frozenWorker.cpp",
+        "libs/rigExec/backgroundScheduler.cpp",
+        "libs/rigExec/outputAffectedIndex.cpp",
+        "libs/rigExec/taskListCache.cpp",
+        "libs/rigExec/frameCacheSparsity.cpp"
+      ],
+      "links": [
+        "rigExecGraph",
+        "rigExecMath",
+        "plug",
+        "sdf",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "work",
+        "exec",
+        "execUsd",
+        "ef",
+        "vdf",
+        "rigExecInputValues"
+      ]
+    },
+    "rigExec::rigExec": {
+      "kind": "STATIC",
+      "sources": [
+        "ALIAS",
+        "rigExec"
+      ],
+      "links": []
+    },
+    "rigExec::rigExecBake": {
+      "kind": "STATIC",
+      "sources": [
+        "ALIAS",
+        "rigExecBake"
+      ],
+      "links": []
+    },
+    "rigExec::rigExecFlatBuffers": {
+      "kind": "STATIC",
+      "sources": [
+        "ALIAS",
+        "rigExecFlatBuffers"
+      ],
+      "links": []
+    },
+    "rigExec::rigExecGraph": {
+      "kind": "STATIC",
+      "sources": [
+        "ALIAS",
+        "rigExecGraph"
+      ],
+      "links": []
+    },
+    "rigExec::rigExecLzma": {
+      "kind": "STATIC",
+      "sources": [
+        "ALIAS",
+        "rigExecLzma"
+      ],
+      "links": []
+    },
+    "rigExec::rigExecRuntime": {
+      "kind": "STATIC",
+      "sources": [
+        "ALIAS",
+        "rigExecRuntime"
+      ],
+      "links": []
+    },
+    "rigExec::rigExecSampler": {
+      "kind": "STATIC",
+      "sources": [
+        "ALIAS",
+        "rigExecSampler"
+      ],
+      "links": []
+    },
+    "rigExecBake": {
+      "kind": "SHARED",
+      "sources": [
+        "libs/rigExecBake/arrayReads.cpp",
+        "libs/rigExecBake/bake.cpp",
+        "libs/rigExecBake/serialize.cpp",
+        "libs/rigExecBake/computedCapture.cpp",
+        "libs/rigExecBake/pathTable.cpp",
+        "libs/rigExecBake/revisionReads.cpp",
+        "libs/rigExecBake/staticCapture.cpp",
+        "libs/rigExecBake/staticReport.cpp"
+      ],
+      "links": [
+        "rigExec",
+        "rigExecBinary"
+      ]
+    },
+    "rigExecBinary": {
+      "kind": "STATIC",
+      "sources": [
+        "libs/rigExecBinary/format.cpp",
+        "libs/rigExecBinary/transport.cpp"
+      ],
+      "links": [
+        "rigExecFlatBuffers",
+        "rigExecLzma"
+      ]
+    },
+    "rigExecFlatBuffers": {
+      "kind": "INTERFACE",
+      "sources": [],
+      "links": []
+    },
+    "rigExecGraph": {
+      "kind": "STATIC",
+      "sources": [
+        "libs/rigExecGraph/opGraph.cpp"
+      ],
+      "links": []
+    },
+    "rigExecImaging": {
+      "kind": "SHARED",
+      "sources": [
+        "libs/rigExecImaging/sceneIndices.cpp",
+        "libs/rigExecImaging/bridge.cpp",
+        "libs/rigExecImaging/registry.cpp",
+        "libs/rigExecImaging/playback.cpp",
+        "libs/rigExecImaging/sceneIndexPlugin.cpp",
+        "libs/rigExecImaging/rigAdapter.cpp",
+        "libs/rigExecImaging/touchOverlayAdapter.cpp",
+        "libs/rigExecImaging/touchPoseMesh.cpp",
+        "libs/rigExecImaging/touchPoseHighlight.cpp",
+        "libs/rigExecImaging/touchPoseApi.cpp",
+        "libs/rigExecImaging/warmIndex.cpp",
+        "libs/rigExecImaging/profilerApi.cpp",
+        "libs/rigExecImaging/liveDebug.cpp",
+        "libs/rigExecImaging/upstreamTable.cpp"
+      ],
+      "links": [
+        "rigExec",
+        "hd",
+        "usdImaging",
+        "usdUtils",
+        "hio",
+        "sdr",
+        "work",
+        "rigExecRuntime",
+        "rigExecSampler"
+      ]
+    },
+    "rigExecInputValues": {
+      "kind": "STATIC",
+      "sources": [
+        "libs/rigExec/inputReplayValues.cpp"
+      ],
+      "links": [
+        "vt",
+        "sdf",
+        "ts"
+      ]
+    },
+    "rigExecLzma": {
+      "kind": "STATIC",
+      "sources": [
+        "third_party/lzma/C/LzmaEnc.c",
+        "third_party/lzma/C/LzmaDec.c",
+        "third_party/lzma/C/LzFind.c",
+        "third_party/lzma/C/CpuArch.c"
+      ],
+      "links": []
+    },
+    "rigExecMath": {
+      "kind": "STATIC",
+      "sources": [
+        "libs/rigExecMath/affineFrameKernels.cpp",
+        "libs/rigExecMath/pointFrame.cpp",
+        "libs/rigExecMath/solvers.cpp",
+        "libs/rigExecMath/singleChainIk.cpp",
+        "libs/rigExecMath/propertyMath.cpp",
+        "libs/rigExecMath/geometryKernels.cpp",
+        "libs/rigExecMath/weightFields.cpp",
+        "libs/rigExecMath/simdKernels.cpp",
+        "libs/rigExecMath/dualQuat.cpp",
+        "libs/rigExecMath/splineIk.cpp",
+        "libs/rigExecMath/rbf.cpp"
+      ],
+      "links": [
+        "arch",
+        "tf",
+        "gf",
+        "vt"
+      ]
+    },
+    "rigExecRigging": {
+      "kind": "SHARED",
+      "sources": [
+        "libs/rigExecRigging/rigBuilder.cpp",
+        "libs/rigExecRigging/schemaAuthoring.cpp"
+      ],
+      "links": [
+        "rigExecMath",
+        "sdf",
+        "tf",
+        "gf",
+        "vt",
+        "usd"
+      ]
+    },
+    "rigExecRuntime": {
+      "kind": "STATIC",
+      "sources": [
+        "libs/rigExecRuntime/open.cpp",
+        "libs/rigExecRuntime/exec.cpp",
+        "libs/rigExecRuntime/closure.cpp",
+        "libs/rigExecRuntime/publish.cpp",
+        "libs/rigExecRuntime/kernels.cpp",
+        "libs/rigExecRuntime/pose.cpp",
+        "libs/rigExecRuntime/poseConstraints.cpp",
+        "libs/rigExecRuntime/poseInterpolation.cpp",
+        "libs/rigExecRuntime/poseMath.cpp",
+        "libs/rigExecRuntime/poseSolvers.cpp",
+        "libs/rigExecRuntime/poseSteps.cpp",
+        "libs/rigExecRuntime/geometry.cpp",
+        "libs/rigExecRuntime/weights.cpp",
+        "libs/rigExecRuntime/inputs.cpp",
+        "libs/rigExecRuntime/labels.cpp",
+        "libs/rigExecRuntime/properties.cpp",
+        "libs/rigExecRuntime/spaces.cpp"
+      ],
+      "links": [
+        "rigExecBinary",
+        "rigExecGraph"
+      ]
+    },
+    "rigExecSampler": {
+      "kind": "STATIC",
+      "sources": [
+        "libs/rigExecSampler/inputSampler.cpp",
+        "libs/rigExecSampler/runtimePoseProjection.cpp"
+      ],
+      "links": [
+        "rigExecRuntime",
+        "usd",
+        "sdf",
+        "tf",
+        "gf"
+      ]
+    },
+    "rigExecStandalone": {
+      "kind": "SHARED",
+      "sources": [
+        "libs/rigExecStandalone/sceneDb.cpp",
+        "libs/rigExecStandalone/sceneAccess.cpp",
+        "libs/rigExecStandalone/graphFrontend.cpp",
+        "libs/rigExecStandalone/providerRuntime.cpp",
+        "libs/rigExecStandalone/sceneRuntime.cpp",
+        "libs/rigExecStandalone/adapter.cpp",
+        "libs/rigExecStandalone/system.cpp",
+        "libs/rigExecStandalone/pack.cpp"
+      ],
+      "links": [
+        "rigExec",
+        "exec",
+        "esf",
+        "usd",
+        "sdf"
+      ]
+    },
+    "rigExecUsdPch": {
+      "kind": "OBJECT",
+      "sources": [
+        "\"${CMAKE_CURRENT_BINARY_DIR}/rigExecUsdPch.cpp\""
+      ],
+      "links": [
+        "usd"
+      ]
+    }
+  },
+  "executables": {
+    "benchCommitLag": {
+      "sources": [
+        "tests/benchCommitLag.cpp"
+      ],
+      "links": [
+        "rigExecImaging",
+        "rigExecBake"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "hd",
+        "hio",
+        "plug",
+        "rigExec",
+        "rigExecBake",
+        "rigExecBinary",
+        "rigExecFlatBuffers",
+        "rigExecGraph",
+        "rigExecImaging",
+        "rigExecInputValues",
+        "rigExecLzma",
+        "rigExecMath",
+        "rigExecRuntime",
+        "rigExecSampler",
+        "sdf",
+        "sdr",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdImaging",
+        "usdSkel",
+        "usdUtils",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "benchEditLatency": {
+      "sources": [
+        "tests/benchEditLatency.cpp"
+      ],
+      "links": [
+        "rigExec"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecMath",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "benchFrameCache": {
+      "sources": [
+        "tests/benchFrameCache.cpp"
+      ],
+      "links": [
+        "rigExec"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecMath",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "benchFrameCacheWarm": {
+      "sources": [
+        "tests/benchFrameCacheWarm.cpp"
+      ],
+      "links": [
+        "rigExec"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecMath",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "benchPathLookup": {
+      "sources": [
+        "tests/benchPathLookup.cpp"
+      ],
+      "links": [
+        "rigExec"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecMath",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "benchPlayback": {
+      "sources": [
+        "tests/benchPlayback.cpp"
+      ],
+      "links": [
+        "rigExecImaging",
+        "rigExecBake"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "hd",
+        "hio",
+        "plug",
+        "rigExec",
+        "rigExecBake",
+        "rigExecBinary",
+        "rigExecFlatBuffers",
+        "rigExecGraph",
+        "rigExecImaging",
+        "rigExecInputValues",
+        "rigExecLzma",
+        "rigExecMath",
+        "rigExecRuntime",
+        "rigExecSampler",
+        "sdf",
+        "sdr",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdImaging",
+        "usdSkel",
+        "usdUtils",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "benchStageReads": {
+      "sources": [
+        "tests/benchStageReads.cpp"
+      ],
+      "links": [
+        "rigExec"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecMath",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "probeCodingError": {
+      "sources": [
+        "tests/probeCodingError.cpp"
+      ],
+      "links": [
+        "rigExec"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecMath",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "probeEsfCompatibility": {
+      "sources": [
+        "EXCLUDE_FROM_ALL",
+        "tests/probeEsfCompatibility.cpp"
+      ],
+      "links": [
+        "exec",
+        "esfUsd",
+        "usd"
+      ],
+      "closure": [
+        "esfUsd",
+        "exec",
+        "usd"
+      ]
+    },
+    "probeImagingPipeline": {
+      "sources": [
+        "tests/probeImagingPipeline.cpp"
+      ],
+      "links": [
+        "rigExecImaging",
+        "usdImaging",
+        "usdGeom"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "hd",
+        "hio",
+        "plug",
+        "rigExec",
+        "rigExecBinary",
+        "rigExecFlatBuffers",
+        "rigExecGraph",
+        "rigExecImaging",
+        "rigExecInputValues",
+        "rigExecLzma",
+        "rigExecMath",
+        "rigExecRuntime",
+        "rigExecSampler",
+        "sdf",
+        "sdr",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdImaging",
+        "usdSkel",
+        "usdUtils",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "rigExecBakeTool": {
+      "sources": [
+        "tools/rigExecBake.cpp"
+      ],
+      "links": [
+        "rigExecBake"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecBake",
+        "rigExecBinary",
+        "rigExecFlatBuffers",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecLzma",
+        "rigExecMath",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "rigExecPose": {
+      "sources": [
+        "tools/rigExecPose.cpp"
+      ],
+      "links": [
+        "rigExec",
+        "rigExecRuntime",
+        "rigExecSampler"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecBinary",
+        "rigExecFlatBuffers",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecLzma",
+        "rigExecMath",
+        "rigExecRuntime",
+        "rigExecSampler",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "rigExecReplayInputs": {
+      "sources": [
+        "tools/rigExecReplayInputs.cpp"
+      ],
+      "links": [
+        "rigExec"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecMath",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecAffineFrames": {
+      "sources": [
+        "tests/testRigExecAffineFrames.cpp"
+      ],
+      "links": [
+        "rigExec",
+        "rigExecBake",
+        "rigExecRuntime",
+        "rigExecSampler"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecBake",
+        "rigExecBinary",
+        "rigExecFlatBuffers",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecLzma",
+        "rigExecMath",
+        "rigExecRuntime",
+        "rigExecSampler",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecArm": {
+      "sources": [
+        "tests/testRigExecArm.cpp"
+      ],
+      "links": [
+        "rigExec"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecMath",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecBackgroundScheduler": {
+      "sources": [
+        "tests/testRigExecBackgroundScheduler.cpp"
+      ],
+      "links": [
+        "rigExec"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecMath",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecBakedAttribute": {
+      "sources": [
+        "tests/testRigExecBakedAttribute.cpp"
+      ],
+      "links": [
+        "rigExec"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecMath",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecBakedMode": {
+      "sources": [
+        "tests/testRigExecBakedMode.cpp"
+      ],
+      "links": [
+        "rigExec"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecMath",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecBakedSchedule": {
+      "sources": [
+        "tests/testRigExecBakedSchedule.cpp"
+      ],
+      "links": [
+        "rigExec"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecMath",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecBinary": {
+      "sources": [
+        "tests/testRigExecBinary.cpp"
+      ],
+      "links": [
+        "rigExecBake",
+        "rigExecRigging"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecBake",
+        "rigExecBinary",
+        "rigExecFlatBuffers",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecLzma",
+        "rigExecMath",
+        "rigExecRigging",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecBounds": {
+      "sources": [
+        "tests/testRigExecBounds.cpp"
+      ],
+      "links": [
+        "plug",
+        "tf",
+        "gf",
+        "usd",
+        "usdGeom"
+      ],
+      "closure": [
+        "gf",
+        "plug",
+        "tf",
+        "usd",
+        "usdGeom"
+      ]
+    },
+    "testRigExecChainLevels": {
+      "sources": [
+        "tests/testRigExecChainLevels.cpp"
+      ],
+      "links": [
+        "rigExec",
+        "work"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecMath",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecConstraints": {
+      "sources": [
+        "tests/testRigExecConstraints.cpp"
+      ],
+      "links": [
+        "rigExec",
+        "rigExecBake",
+        "rigExecRuntime",
+        "rigExecSampler"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecBake",
+        "rigExecBinary",
+        "rigExecFlatBuffers",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecLzma",
+        "rigExecMath",
+        "rigExecRuntime",
+        "rigExecSampler",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecCrossDomainInputs": {
+      "sources": [
+        "tests/testRigExecCrossDomainInputs.cpp"
+      ],
+      "links": [
+        "rigExec"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecMath",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecDefaultSpaces": {
+      "sources": [
+        "tests/testRigExecDefaultSpaces.cpp"
+      ],
+      "links": [
+        "rigExec"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecMath",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecDeltaMush": {
+      "sources": [
+        "tests/testRigExecDeltaMush.cpp"
+      ],
+      "links": [
+        "rigExec",
+        "rigExecRigging",
+        "rigExecBake",
+        "rigExecRuntime",
+        "rigExecSampler"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecBake",
+        "rigExecBinary",
+        "rigExecFlatBuffers",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecLzma",
+        "rigExecMath",
+        "rigExecRigging",
+        "rigExecRuntime",
+        "rigExecSampler",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecDeltaMushRuntime": {
+      "sources": [
+        "tests/testRigExecDeltaMushRuntime.cpp"
+      ],
+      "links": [
+        "rigExecRuntime"
+      ],
+      "closure": [
+        "rigExecBinary",
+        "rigExecFlatBuffers",
+        "rigExecGraph",
+        "rigExecLzma",
+        "rigExecRuntime"
+      ]
+    },
+    "testRigExecDualQuat": {
+      "sources": [
+        "tests/testRigExecDualQuat.cpp"
+      ],
+      "links": [
+        "rigExecMath"
+      ],
+      "closure": [
+        "arch",
+        "gf",
+        "rigExecMath",
+        "tf",
+        "vt"
+      ]
+    },
+    "testRigExecEnvelopeVolumes": {
+      "sources": [
+        "tests/testRigExecEnvelopeVolumes.cpp"
+      ],
+      "links": [
+        "rigExec"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecMath",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecEpochRests": {
+      "sources": [
+        "tests/testRigExecEpochRests.cpp"
+      ],
+      "links": [
+        "rigExec"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecMath",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecExampleParity": {
+      "sources": [
+        "tests/testRigExecExampleParity.cpp"
+      ],
+      "links": [
+        "rigExec"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecMath",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecExecCrossCheck": {
+      "sources": [
+        "tests/testRigExecExecCrossCheck.cpp"
+      ],
+      "links": [
+        "rigExec"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecMath",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecExecCrossCheckRows": {
+      "sources": [
+        "tests/testRigExecExecCrossCheckRows.cpp"
+      ],
+      "links": [
+        "rigExec"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecMath",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecExternalMovers": {
+      "sources": [
+        "tests/testRigExecExternalMovers.cpp"
+      ],
+      "links": [
+        "rigExec",
+        "rigExecRigging",
+        "rigExecBake",
+        "rigExecRuntime",
+        "usd",
+        "usdGeom",
+        "plug"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecBake",
+        "rigExecBinary",
+        "rigExecFlatBuffers",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecLzma",
+        "rigExecMath",
+        "rigExecRigging",
+        "rigExecRuntime",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecFormat": {
+      "sources": [
+        "tests/testRigExecFormat.cpp"
+      ],
+      "links": [
+        "rigExecBinary"
+      ],
+      "closure": [
+        "rigExecBinary",
+        "rigExecFlatBuffers",
+        "rigExecLzma"
+      ]
+    },
+    "testRigExecFrameCache": {
+      "sources": [
+        "tests/testRigExecFrameCache.cpp"
+      ],
+      "links": [
+        "rigExec"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecMath",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecFrameCacheCones_Verify": {
+      "sources": [
+        "tests/testRigExecFrameCacheCones_Verify.cpp"
+      ],
+      "links": [
+        "rigExec"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecMath",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecFrameCacheSparsity": {
+      "sources": [
+        "tests/testRigExecFrameCacheSparsity.cpp"
+      ],
+      "links": [
+        "rigExec"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecMath",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecFrozenContext": {
+      "sources": [
+        "tests/testRigExecFrozenContext.cpp"
+      ],
+      "links": [
+        "rigExec",
+        "rigExecRigging",
+        "rigExecBake",
+        "rigExecSampler"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecBake",
+        "rigExecBinary",
+        "rigExecFlatBuffers",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecLzma",
+        "rigExecMath",
+        "rigExecRigging",
+        "rigExecRuntime",
+        "rigExecSampler",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecGeometryOpsBakedParity": {
+      "sources": [
+        "tests/testRigExecGeometryOpsBakedParity.cpp"
+      ],
+      "links": [
+        "rigExec"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecMath",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecGeometryProgram": {
+      "sources": [
+        "tests/testRigExecGeometryProgram.cpp"
+      ],
+      "links": [
+        "rigExec"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecMath",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecGoldenPose": {
+      "sources": [
+        "tests/testRigExecGoldenPose.cpp"
+      ],
+      "links": [
+        "rigExec"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecMath",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecGoldenSuiteObserver": {
+      "sources": [
+        "tests/testRigExecGoldenSuiteObserver.cpp"
+      ],
+      "links": [
+        "rigExec"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecMath",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecGraphBindings": {
+      "sources": [
+        "tests/testRigExecGraphBindings.cpp"
+      ],
+      "links": [
+        "rigExec"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecMath",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecImaging": {
+      "sources": [
+        "tests/testRigExecImaging.cpp"
+      ],
+      "links": [
+        "rigExecImaging",
+        "rigExecBake",
+        "rigExecRuntime",
+        "rigExecSampler"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "hd",
+        "hio",
+        "plug",
+        "rigExec",
+        "rigExecBake",
+        "rigExecBinary",
+        "rigExecFlatBuffers",
+        "rigExecGraph",
+        "rigExecImaging",
+        "rigExecInputValues",
+        "rigExecLzma",
+        "rigExecMath",
+        "rigExecRuntime",
+        "rigExecSampler",
+        "sdf",
+        "sdr",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdImaging",
+        "usdSkel",
+        "usdUtils",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecImagingFrameCache": {
+      "sources": [
+        "tests/testRigExecImagingFrameCache.cpp"
+      ],
+      "links": [
+        "rigExecImaging",
+        "rigExecBake"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "hd",
+        "hio",
+        "plug",
+        "rigExec",
+        "rigExecBake",
+        "rigExecBinary",
+        "rigExecFlatBuffers",
+        "rigExecGraph",
+        "rigExecImaging",
+        "rigExecInputValues",
+        "rigExecLzma",
+        "rigExecMath",
+        "rigExecRuntime",
+        "rigExecSampler",
+        "sdf",
+        "sdr",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdImaging",
+        "usdSkel",
+        "usdUtils",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecImagingMultiStage": {
+      "sources": [
+        "tests/testRigExecImagingMultiStage.cpp"
+      ],
+      "links": [
+        "rigExecImaging"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "hd",
+        "hio",
+        "plug",
+        "rigExec",
+        "rigExecBinary",
+        "rigExecFlatBuffers",
+        "rigExecGraph",
+        "rigExecImaging",
+        "rigExecInputValues",
+        "rigExecLzma",
+        "rigExecMath",
+        "rigExecRuntime",
+        "rigExecSampler",
+        "sdf",
+        "sdr",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdImaging",
+        "usdSkel",
+        "usdUtils",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecImagingPlayback": {
+      "sources": [
+        "tests/testRigExecImagingPlayback.cpp"
+      ],
+      "links": [
+        "rigExecImaging",
+        "rigExecBake"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "hd",
+        "hio",
+        "plug",
+        "rigExec",
+        "rigExecBake",
+        "rigExecBinary",
+        "rigExecFlatBuffers",
+        "rigExecGraph",
+        "rigExecImaging",
+        "rigExecInputValues",
+        "rigExecLzma",
+        "rigExecMath",
+        "rigExecRuntime",
+        "rigExecSampler",
+        "sdf",
+        "sdr",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdImaging",
+        "usdSkel",
+        "usdUtils",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecInputActions": {
+      "sources": [
+        "tests/testRigExecInputActions.cpp"
+      ],
+      "links": [
+        "rigExec"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecMath",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecInputReplayValues": {
+      "sources": [
+        "tests/testRigExecInputReplayValues.cpp"
+      ],
+      "links": [
+        "rigExec"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecMath",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecInteractive": {
+      "sources": [
+        "tests/testRigExecInteractive.cpp"
+      ],
+      "links": [
+        "rigExec"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecMath",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecLattice": {
+      "sources": [
+        "tests/testRigExecLattice.cpp"
+      ],
+      "links": [
+        "rigExec",
+        "rigExecBake",
+        "rigExecRuntime",
+        "rigExecSampler"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecBake",
+        "rigExecBinary",
+        "rigExecFlatBuffers",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecLzma",
+        "rigExecMath",
+        "rigExecRuntime",
+        "rigExecSampler",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecLeaves": {
+      "sources": [
+        "tests/testRigExecLeaves.cpp"
+      ],
+      "links": [
+        "rigExecBake",
+        "rigExecRigging"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecBake",
+        "rigExecBinary",
+        "rigExecFlatBuffers",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecLzma",
+        "rigExecMath",
+        "rigExecRigging",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecLiveDebug": {
+      "sources": [
+        "tests/testRigExecLiveDebug.cpp"
+      ],
+      "links": [
+        "rigExecImaging"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "hd",
+        "hio",
+        "plug",
+        "rigExec",
+        "rigExecBinary",
+        "rigExecFlatBuffers",
+        "rigExecGraph",
+        "rigExecImaging",
+        "rigExecInputValues",
+        "rigExecLzma",
+        "rigExecMath",
+        "rigExecRuntime",
+        "rigExecSampler",
+        "sdf",
+        "sdr",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdImaging",
+        "usdSkel",
+        "usdUtils",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecMath": {
+      "sources": [
+        "tests/testRigExecMath.cpp"
+      ],
+      "links": [
+        "rigExecMath"
+      ],
+      "closure": [
+        "arch",
+        "gf",
+        "rigExecMath",
+        "tf",
+        "vt"
+      ]
+    },
+    "testRigExecMoverGraph": {
+      "sources": [
+        "tests/testRigExecMoverGraph.cpp"
+      ],
+      "links": [
+        "rigExec"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecMath",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecNoAuthoring": {
+      "sources": [
+        "tests/testRigExecNoAuthoring.cpp"
+      ],
+      "links": [
+        "rigExecImaging"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "hd",
+        "hio",
+        "plug",
+        "rigExec",
+        "rigExecBinary",
+        "rigExecFlatBuffers",
+        "rigExecGraph",
+        "rigExecImaging",
+        "rigExecInputValues",
+        "rigExecLzma",
+        "rigExecMath",
+        "rigExecRuntime",
+        "rigExecSampler",
+        "sdf",
+        "sdr",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdImaging",
+        "usdSkel",
+        "usdUtils",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecOneLoopAcceptance": {
+      "sources": [
+        "tests/testRigExecOneLoopAcceptance.cpp"
+      ],
+      "links": [
+        "rigExec",
+        "rigExecBake",
+        "rigExecRuntime"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecBake",
+        "rigExecBinary",
+        "rigExecFlatBuffers",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecLzma",
+        "rigExecMath",
+        "rigExecRuntime",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecOpGraph": {
+      "sources": [
+        "tests/testRigExecOpGraph.cpp"
+      ],
+      "links": [
+        "rigExecGraph",
+        "work",
+        "Threads::Threads"
+      ],
+      "closure": [
+        "Threads::Threads",
+        "rigExecGraph",
+        "work"
+      ]
+    },
+    "testRigExecOpTrace": {
+      "sources": [
+        "tests/testRigExecOpTrace.cpp"
+      ],
+      "links": [
+        "rigExec"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecMath",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecOpValues": {
+      "sources": [
+        "tests/testRigExecOpValues.cpp"
+      ],
+      "links": [
+        "rigExec"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecMath",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecOracleInputs": {
+      "sources": [
+        "tests/testRigExecOracleInputs.cpp"
+      ],
+      "links": [
+        "rigExec"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecMath",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecPack": {
+      "sources": [
+        "tests/testRigExecPack.cpp"
+      ],
+      "links": [
+        "rigExecStandalone",
+        "rigExecRigging"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "esf",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecMath",
+        "rigExecRigging",
+        "rigExecStandalone",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecParallelKernels": {
+      "sources": [
+        "tests/testRigExecParallelKernels.cpp"
+      ],
+      "links": [
+        "rigExec",
+        "work"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecMath",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecPhaseBindings": {
+      "sources": [
+        "tests/testRigExecPhaseBindings.cpp"
+      ],
+      "links": [
+        "rigExec"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecMath",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecPoseInterpolator": {
+      "sources": [
+        "tests/testRigExecPoseInterpolator.cpp"
+      ],
+      "links": [
+        "rigExec",
+        "rigExecMath"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecMath",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecProfiler": {
+      "sources": [
+        "tests/testRigExecProfiler.cpp"
+      ],
+      "links": [
+        "rigExec"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecMath",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecProfilerApi": {
+      "sources": [
+        "tests/testRigExecProfilerApi.cpp"
+      ],
+      "links": [
+        "rigExecImaging",
+        "js"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "hd",
+        "hio",
+        "js",
+        "plug",
+        "rigExec",
+        "rigExecBinary",
+        "rigExecFlatBuffers",
+        "rigExecGraph",
+        "rigExecImaging",
+        "rigExecInputValues",
+        "rigExecLzma",
+        "rigExecMath",
+        "rigExecRuntime",
+        "rigExecSampler",
+        "sdf",
+        "sdr",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdImaging",
+        "usdSkel",
+        "usdUtils",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecPropertyOps": {
+      "sources": [
+        "tests/testRigExecPropertyOps.cpp"
+      ],
+      "links": [
+        "rigExecBake"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecBake",
+        "rigExecBinary",
+        "rigExecFlatBuffers",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecLzma",
+        "rigExecMath",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecRbf": {
+      "sources": [
+        "tests/testRigExecRbf.cpp"
+      ],
+      "links": [
+        "rigExecMath"
+      ],
+      "closure": [
+        "arch",
+        "gf",
+        "rigExecMath",
+        "tf",
+        "vt"
+      ]
+    },
+    "testRigExecRestOps": {
+      "sources": [
+        "tests/testRigExecRestOps.cpp"
+      ],
+      "links": [
+        "rigExec"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecMath",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecRigBuilder": {
+      "sources": [
+        "tests/testRigExecRigBuilder.cpp"
+      ],
+      "links": [
+        "rigExecRigging"
+      ],
+      "closure": [
+        "arch",
+        "gf",
+        "rigExecMath",
+        "rigExecRigging",
+        "sdf",
+        "tf",
+        "usd",
+        "vt"
+      ]
+    },
+    "testRigExecRuntimeGeometry": {
+      "sources": [
+        "tests/testRigExecRuntimeGeometry.cpp"
+      ],
+      "links": [
+        "rigExecRuntime",
+        "rigExecBake",
+        "rigExecSampler"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecBake",
+        "rigExecBinary",
+        "rigExecFlatBuffers",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecLzma",
+        "rigExecMath",
+        "rigExecRuntime",
+        "rigExecSampler",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecRuntimeInputs": {
+      "sources": [
+        "tests/testRigExecRuntimeInputs.cpp"
+      ],
+      "links": [
+        "rigExec",
+        "rigExecBake",
+        "rigExecRuntime",
+        "rigExecSampler"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecBake",
+        "rigExecBinary",
+        "rigExecFlatBuffers",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecLzma",
+        "rigExecMath",
+        "rigExecRuntime",
+        "rigExecSampler",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecRuntimeLoader": {
+      "sources": [
+        "tests/testRigExecRuntimeLoader.cpp"
+      ],
+      "links": [
+        "rigExecRuntime",
+        "rigExecBake",
+        "rigExecSampler"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecBake",
+        "rigExecBinary",
+        "rigExecFlatBuffers",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecLzma",
+        "rigExecMath",
+        "rigExecRuntime",
+        "rigExecSampler",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecRuntimeMath": {
+      "sources": [
+        "tests/testRigExecRuntimeMath.cpp"
+      ],
+      "links": [
+        "rigExecRuntime",
+        "gf"
+      ],
+      "closure": [
+        "gf",
+        "rigExecBinary",
+        "rigExecFlatBuffers",
+        "rigExecGraph",
+        "rigExecLzma",
+        "rigExecRuntime"
+      ]
+    },
+    "testRigExecRuntimePose": {
+      "sources": [
+        "tests/testRigExecRuntimePose.cpp"
+      ],
+      "links": [
+        "rigExecRuntime",
+        "rigExecBake",
+        "rigExecSampler"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecBake",
+        "rigExecBinary",
+        "rigExecFlatBuffers",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecLzma",
+        "rigExecMath",
+        "rigExecRuntime",
+        "rigExecSampler",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecRuntimeWeights": {
+      "sources": [
+        "tests/testRigExecRuntimeWeights.cpp"
+      ],
+      "links": [
+        "rigExecRuntime",
+        "rigExecBake",
+        "rigExecSampler"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecBake",
+        "rigExecBinary",
+        "rigExecFlatBuffers",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecLzma",
+        "rigExecMath",
+        "rigExecRuntime",
+        "rigExecSampler",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecSchemaAuthoring": {
+      "sources": [
+        "tests/testRigExecSchemaAuthoring.cpp"
+      ],
+      "links": [
+        "rigExecRigging"
+      ],
+      "closure": [
+        "arch",
+        "gf",
+        "rigExecMath",
+        "rigExecRigging",
+        "sdf",
+        "tf",
+        "usd",
+        "vt"
+      ]
+    },
+    "testRigExecScopedClears": {
+      "sources": [
+        "tests/testRigExecScopedClears.cpp"
+      ],
+      "links": [
+        "rigExec"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecMath",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecSingleChainIk": {
+      "sources": [
+        "tests/testRigExecSingleChainIk.cpp"
+      ],
+      "links": [
+        "rigExecMath"
+      ],
+      "closure": [
+        "arch",
+        "gf",
+        "rigExecMath",
+        "tf",
+        "vt"
+      ]
+    },
+    "testRigExecSkinTopology": {
+      "sources": [
+        "tests/testRigExecSkinTopology.cpp"
+      ],
+      "links": [
+        "rigExec"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecMath",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecSolverBake": {
+      "sources": [
+        "tests/testRigExecSolverBake.cpp"
+      ],
+      "links": [
+        "rigExec"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecMath",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecSolverStacking": {
+      "sources": [
+        "tests/testRigExecSolverStacking.cpp"
+      ],
+      "links": [
+        "rigExec"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecMath",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecSplineIk": {
+      "sources": [
+        "tests/testRigExecSplineIk.cpp"
+      ],
+      "links": [
+        "rigExecMath"
+      ],
+      "closure": [
+        "arch",
+        "gf",
+        "rigExecMath",
+        "tf",
+        "vt"
+      ]
+    },
+    "testRigExecStandalone": {
+      "sources": [
+        "tests/testRigExecStandalone.cpp"
+      ],
+      "links": [
+        "rigExecStandalone",
+        "rigExecRigging"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "esf",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecMath",
+        "rigExecRigging",
+        "rigExecStandalone",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecStaticInputCache": {
+      "sources": [
+        "tests/testRigExecStaticInputCache.cpp"
+      ],
+      "links": [
+        "rigExec"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecMath",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecSurfaceBinding": {
+      "sources": [
+        "tests/testRigExecSurfaceBinding.cpp"
+      ],
+      "links": [
+        "rigExec",
+        "rigExecBake",
+        "rigExecRuntime",
+        "rigExecSampler"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecBake",
+        "rigExecBinary",
+        "rigExecFlatBuffers",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecLzma",
+        "rigExecMath",
+        "rigExecRuntime",
+        "rigExecSampler",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecSurfaceKernelCache": {
+      "sources": [
+        "tests/testRigExecSurfaceKernelCache.cpp"
+      ],
+      "links": [
+        "rigExecMath"
+      ],
+      "closure": [
+        "arch",
+        "gf",
+        "rigExecMath",
+        "tf",
+        "vt"
+      ]
+    },
+    "testRigExecSurfaceProjector": {
+      "sources": [
+        "tests/testRigExecSurfaceProjector.cpp"
+      ],
+      "links": [
+        "rigExec"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecMath",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecSurfaceSnap": {
+      "sources": [
+        "tests/testRigExecSurfaceSnap.cpp"
+      ],
+      "links": [
+        "rigExec",
+        "rigExecBake",
+        "rigExecRuntime",
+        "rigExecSampler"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecBake",
+        "rigExecBinary",
+        "rigExecFlatBuffers",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecLzma",
+        "rigExecMath",
+        "rigExecRuntime",
+        "rigExecSampler",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecTouchPose": {
+      "sources": [
+        "tests/testRigExecTouchPose.cpp"
+      ],
+      "links": [
+        "rigExecImaging"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "hd",
+        "hio",
+        "plug",
+        "rigExec",
+        "rigExecBinary",
+        "rigExecFlatBuffers",
+        "rigExecGraph",
+        "rigExecImaging",
+        "rigExecInputValues",
+        "rigExecLzma",
+        "rigExecMath",
+        "rigExecRuntime",
+        "rigExecSampler",
+        "sdf",
+        "sdr",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdImaging",
+        "usdSkel",
+        "usdUtils",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecTypedValues": {
+      "sources": [
+        "tests/testRigExecTypedValues.cpp"
+      ],
+      "links": [
+        "rigExec"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecMath",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecUpstreamInputs": {
+      "sources": [
+        "tests/testRigExecUpstreamInputs.cpp"
+      ],
+      "links": [
+        "rigExecBake",
+        "rigExecImaging",
+        "rigExecRuntime",
+        "rigExecSampler"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "hd",
+        "hio",
+        "plug",
+        "rigExec",
+        "rigExecBake",
+        "rigExecBinary",
+        "rigExecFlatBuffers",
+        "rigExecGraph",
+        "rigExecImaging",
+        "rigExecInputValues",
+        "rigExecLzma",
+        "rigExecMath",
+        "rigExecRuntime",
+        "rigExecSampler",
+        "sdf",
+        "sdr",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdImaging",
+        "usdSkel",
+        "usdUtils",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecValueEdits": {
+      "sources": [
+        "tests/testRigExecValueEdits.cpp"
+      ],
+      "links": [
+        "rigExec"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecMath",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecVolumeWeights": {
+      "sources": [
+        "tests/testRigExecVolumeWeights.cpp"
+      ],
+      "links": [
+        "rigExec"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecMath",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecWeightFields": {
+      "sources": [
+        "tests/testRigExecWeightFields.cpp"
+      ],
+      "links": [
+        "rigExecMath"
+      ],
+      "closure": [
+        "arch",
+        "gf",
+        "rigExecMath",
+        "tf",
+        "vt"
+      ]
+    },
+    "testRigExecWeightOverlay": {
+      "sources": [
+        "tests/testRigExecWeightOverlay.cpp"
+      ],
+      "links": [
+        "rigExecImaging"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "hd",
+        "hio",
+        "plug",
+        "rigExec",
+        "rigExecBinary",
+        "rigExecFlatBuffers",
+        "rigExecGraph",
+        "rigExecImaging",
+        "rigExecInputValues",
+        "rigExecLzma",
+        "rigExecMath",
+        "rigExecRuntime",
+        "rigExecSampler",
+        "sdf",
+        "sdr",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdImaging",
+        "usdSkel",
+        "usdUtils",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecWeightProgram": {
+      "sources": [
+        "tests/testRigExecWeightProgram.cpp"
+      ],
+      "links": [
+        "rigExec"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecMath",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecWrinkle": {
+      "sources": [
+        "tests/testRigExecWrinkle.cpp"
+      ],
+      "links": [
+        "rigExec",
+        "rigExecRigging",
+        "rigExecBake",
+        "rigExecRuntime",
+        "rigExecSampler"
+      ],
+      "closure": [
+        "arch",
+        "ef",
+        "exec",
+        "execUsd",
+        "gf",
+        "plug",
+        "rigExec",
+        "rigExecBake",
+        "rigExecBinary",
+        "rigExecFlatBuffers",
+        "rigExecGraph",
+        "rigExecInputValues",
+        "rigExecLzma",
+        "rigExecMath",
+        "rigExecRigging",
+        "rigExecRuntime",
+        "rigExecSampler",
+        "sdf",
+        "tf",
+        "ts",
+        "usd",
+        "usdGeom",
+        "usdSkel",
+        "vdf",
+        "vt",
+        "work"
+      ]
+    },
+    "testRigExecWrinkleMath": {
+      "sources": [
+        "tests/testRigExecWrinkleMath.cpp"
+      ],
+      "links": [
+        "rigExecMath"
+      ],
+      "closure": [
+        "arch",
+        "gf",
+        "rigExecMath",
+        "tf",
+        "vt"
+      ]
+    },
+    "testRigExecWrinkleRuntime": {
+      "sources": [
+        "tests/testRigExecWrinkleRuntime.cpp"
+      ],
+      "links": [
+        "rigExecRuntime"
+      ],
+      "closure": [
+        "rigExecBinary",
+        "rigExecFlatBuffers",
+        "rigExecGraph",
+        "rigExecLzma",
+        "rigExecRuntime"
+      ]
+    }
+  },
+  "tests": [
+    {
+      "name": "testRigExecExternalMovers",
+      "executable": "testRigExecExternalMovers",
+      "command": [
+        "testRigExecExternalMovers",
+        "\"${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources\"",
+        "\"$<TARGET_GENEX_EVAL:testExternalMover,$<TARGET_PROPERTY:testExternalMover,RIGEXEC_PLUGIN_RESOURCE_DIR>>\""
+      ]
+    },
+    {
+      "name": "testRigExecWrinkleMath",
+      "executable": "testRigExecWrinkleMath",
+      "command": [
+        "testRigExecWrinkleMath"
+      ]
+    },
+    {
+      "name": "testRigExecWrinkle",
+      "executable": "testRigExecWrinkle",
+      "command": [
+        "testRigExecWrinkle",
+        "\"${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources\"",
+        "\"${CMAKE_CURRENT_BINARY_DIR}/wrinkle_test.rigexec\""
+      ]
+    },
+    {
+      "name": "testRigExecWrinkleRuntime",
+      "executable": "testRigExecWrinkleRuntime",
+      "command": [
+        "testRigExecWrinkleRuntime",
+        "\"${CMAKE_CURRENT_BINARY_DIR}/wrinkle_test.rigexec\""
+      ]
+    },
+    {
+      "name": "testRigExecDeltaMush",
+      "executable": "testRigExecDeltaMush",
+      "command": [
+        "testRigExecDeltaMush",
+        "\"${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources\""
+      ]
+    },
+    {
+      "name": "testRigExecDeltaMushBakeFile",
+      "executable": "rigExecBakeTool",
+      "command": [
+        "rigExecBakeTool",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/docs/examples/delta_mush_mover.usda\"",
+        "--rig",
+        "/Rig",
+        "--time",
+        "1",
+        "-o",
+        "\"${CMAKE_CURRENT_BINARY_DIR}/delta_mush_test.rigexec\""
+      ]
+    },
+    {
+      "name": "testRigExecDeltaMushRuntime",
+      "executable": "testRigExecDeltaMushRuntime",
+      "command": [
+        "testRigExecDeltaMushRuntime",
+        "\"${CMAKE_CURRENT_BINARY_DIR}/delta_mush_test.rigexec\""
+      ]
+    },
+    {
+      "name": "testRigExecMath",
+      "executable": "testRigExecMath",
+      "command": [
+        "testRigExecMath"
+      ]
+    },
+    {
+      "name": "testRigExecSingleChainIk",
+      "executable": "testRigExecSingleChainIk",
+      "command": [
+        "testRigExecSingleChainIk"
+      ]
+    },
+    {
+      "name": "testRigExecDualQuat",
+      "executable": "testRigExecDualQuat",
+      "command": [
+        "testRigExecDualQuat"
+      ]
+    },
+    {
+      "name": "testRigExecSplineIk",
+      "executable": "testRigExecSplineIk",
+      "command": [
+        "testRigExecSplineIk"
+      ]
+    },
+    {
+      "name": "testRigExecRbf",
+      "executable": "testRigExecRbf",
+      "command": [
+        "testRigExecRbf"
+      ]
+    },
+    {
+      "name": "testRigExecConstraints",
+      "executable": "testRigExecConstraints",
+      "command": [
+        "testRigExecConstraints"
+      ]
+    },
+    {
+      "name": "${name}Golden",
+      "executable": "${name}",
+      "command": [
+        "${name}",
+        "${_args}"
+      ]
+    },
+    {
+      "name": "${name}Graph_serial",
+      "executable": "${name}",
+      "command": [
+        "${name}",
+        "${_args}"
+      ]
+    },
+    {
+      "name": "${_cone_test}",
+      "executable": "${name}",
+      "command": [
+        "${name}",
+        "${_args}"
+      ]
+    },
+    {
+      "name": "${name}Graph_parallel",
+      "executable": "${name}",
+      "command": [
+        "${name}",
+        "${_args}"
+      ]
+    },
+    {
+      "name": "testRigExecAffineFrames",
+      "executable": "testRigExecAffineFrames",
+      "command": [
+        "testRigExecAffineFrames",
+        "\"${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources\""
+      ]
+    },
+    {
+      "name": "example_graph_${A_NAME}",
+      "executable": "rigExecPose",
+      "command": [
+        "rigExecPose",
+        "\"${A_STAGE}\"",
+        "--frames",
+        "\"${A_FRAMES}\"",
+        "--exec-crosscheck",
+        "--cpu-reference",
+        "${_guides}"
+      ]
+    },
+    {
+      "name": "testRigExecExampleParity",
+      "executable": "testRigExecExampleParity",
+      "command": [
+        "testRigExecExampleParity",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/examples\""
+      ]
+    },
+    {
+      "name": "testRigExecExampleParityCones_serial",
+      "executable": "testRigExecExampleParity",
+      "command": [
+        "testRigExecExampleParity",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/examples\""
+      ]
+    },
+    {
+      "name": "testRigExecExampleParityCones_grain0_serial",
+      "executable": "testRigExecExampleParity",
+      "command": [
+        "testRigExecExampleParity",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/examples\""
+      ]
+    },
+    {
+      "name": "testRigExecExampleParityCones_parallel",
+      "executable": "testRigExecExampleParity",
+      "command": [
+        "testRigExecExampleParity",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/examples\""
+      ]
+    },
+    {
+      "name": "testRigExecExampleParityCones_grain0_parallel",
+      "executable": "testRigExecExampleParity",
+      "command": [
+        "testRigExecExampleParity",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/examples\""
+      ]
+    },
+    {
+      "name": "testRigExecSurfaceSnap",
+      "executable": "testRigExecSurfaceSnap",
+      "command": [
+        "testRigExecSurfaceSnap"
+      ]
+    },
+    {
+      "name": "testRigExecSurfaceBinding",
+      "executable": "testRigExecSurfaceBinding",
+      "command": [
+        "testRigExecSurfaceBinding"
+      ]
+    },
+    {
+      "name": "testRigExecLattice",
+      "executable": "testRigExecLattice",
+      "command": [
+        "testRigExecLattice"
+      ]
+    },
+    {
+      "name": "testRigExecSurfaceProjector",
+      "executable": "testRigExecSurfaceProjector",
+      "command": [
+        "testRigExecSurfaceProjector",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/examples\""
+      ]
+    },
+    {
+      "name": "testRigExecGeometryOpsBakedParity",
+      "executable": "testRigExecGeometryOpsBakedParity",
+      "command": [
+        "testRigExecGeometryOpsBakedParity",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/examples\"",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/rigExecRibbonProbe.usda\""
+      ]
+    },
+    {
+      "name": "testRigExecGeometryOpsBakedParityCones_serial",
+      "executable": "testRigExecGeometryOpsBakedParity",
+      "command": [
+        "testRigExecGeometryOpsBakedParity",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/examples\"",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/rigExecRibbonProbe.usda\""
+      ]
+    },
+    {
+      "name": "testRigExecGeometryOpsBakedParityCones_grain0_serial",
+      "executable": "testRigExecGeometryOpsBakedParity",
+      "command": [
+        "testRigExecGeometryOpsBakedParity",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/examples\"",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/rigExecRibbonProbe.usda\""
+      ]
+    },
+    {
+      "name": "testRigExecGeometryOpsBakedParityCones_parallel",
+      "executable": "testRigExecGeometryOpsBakedParity",
+      "command": [
+        "testRigExecGeometryOpsBakedParity",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/examples\"",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/rigExecRibbonProbe.usda\""
+      ]
+    },
+    {
+      "name": "testRigExecGeometryOpsBakedParityCones_grain0_parallel",
+      "executable": "testRigExecGeometryOpsBakedParity",
+      "command": [
+        "testRigExecGeometryOpsBakedParity",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/examples\"",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/rigExecRibbonProbe.usda\""
+      ]
+    },
+    {
+      "name": "testRigExecOpGraph",
+      "executable": "testRigExecOpGraph",
+      "command": [
+        "testRigExecOpGraph"
+      ]
+    },
+    {
+      "name": "testRigExecExecCrossCheck",
+      "executable": "testRigExecExecCrossCheck",
+      "command": [
+        "testRigExecExecCrossCheck"
+      ]
+    },
+    {
+      "name": "testRigExecOpValues",
+      "executable": "testRigExecOpValues",
+      "command": [
+        "testRigExecOpValues"
+      ]
+    },
+    {
+      "name": "testRigExecSurfaceKernelCache",
+      "executable": "testRigExecSurfaceKernelCache",
+      "command": [
+        "testRigExecSurfaceKernelCache"
+      ]
+    },
+    {
+      "name": "exec_crosscheck_01_FkChainTail",
+      "executable": "testRigExecExecCrossCheckRows",
+      "command": [
+        "testRigExecExecCrossCheckRows",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/examples/01_FkChainTail.usda\"",
+        "1001"
+      ]
+    },
+    {
+      "name": "exec_crosscheck_03_IkFkBlendClamp",
+      "executable": "testRigExecExecCrossCheckRows",
+      "command": [
+        "testRigExecExecCrossCheckRows",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/examples/03_IkFkBlendClamp.usda\"",
+        "1001"
+      ]
+    },
+    {
+      "name": "exec_crosscheck_05_TwistRibbonSpine",
+      "executable": "testRigExecExecCrossCheckRows",
+      "command": [
+        "testRigExecExecCrossCheckRows",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/examples/05_TwistRibbonSpine.usda\"",
+        "1001"
+      ]
+    },
+    {
+      "name": "exec_crosscheck_11_VolumeWeights",
+      "executable": "testRigExecExecCrossCheckRows",
+      "command": [
+        "testRigExecExecCrossCheckRows",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/examples/11_VolumeWeights.usda\"",
+        "1001"
+      ]
+    },
+    {
+      "name": "exec_crosscheck_13_ReadPhases",
+      "executable": "testRigExecExecCrossCheckRows",
+      "command": [
+        "testRigExecExecCrossCheckRows",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/examples/13_ReadPhases.usda\"",
+        "1001"
+      ]
+    },
+    {
+      "name": "exec_crosscheck_ArmRig",
+      "executable": "testRigExecExecCrossCheckRows",
+      "command": [
+        "testRigExecExecCrossCheckRows",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/examples/ArmRig.usda\"",
+        "1001"
+      ]
+    },
+    {
+      "name": "exec_crosscheck_computed_ik_space",
+      "executable": "testRigExecExecCrossCheckRows",
+      "command": [
+        "testRigExecExecCrossCheckRows",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/computed_ik_space.usda\"",
+        "1"
+      ]
+    },
+    {
+      "name": "testRigExecInputActions",
+      "executable": "",
+      "command": [
+        "\"${CMAKE_COMMAND}\"",
+        "\"-DDRIVER=$<TARGET_FILE:testRigExecInputActions>\"",
+        "\"-DBINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}\"",
+        "\"-DSCHEMA=${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources\"",
+        "-P",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/checkInputActions.cmake\""
+      ]
+    },
+    {
+      "name": "testRigExecGoldenSuiteObserver",
+      "executable": "",
+      "command": [
+        "\"${CMAKE_COMMAND}\"",
+        "\"-DDRIVER=$<TARGET_FILE:testRigExecGoldenSuiteObserver>\"",
+        "\"-DBINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}\"",
+        "-P",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/checkGoldenSuiteObserver.cmake\""
+      ]
+    },
+    {
+      "name": "testRigExecGeometryProgram",
+      "executable": "testRigExecGeometryProgram",
+      "command": [
+        "testRigExecGeometryProgram"
+      ]
+    },
+    {
+      "name": "testRigExecWeightProgram",
+      "executable": "testRigExecWeightProgram",
+      "command": [
+        "testRigExecWeightProgram"
+      ]
+    },
+    {
+      "name": "testRigExecEnvelopeVolumes_serial",
+      "executable": "testRigExecEnvelopeVolumes",
+      "command": [
+        "testRigExecEnvelopeVolumes",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures\""
+      ]
+    },
+    {
+      "name": "testRigExecEnvelopeVolumes_parallel",
+      "executable": "testRigExecEnvelopeVolumes",
+      "command": [
+        "testRigExecEnvelopeVolumes",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures\""
+      ]
+    },
+    {
+      "name": "testRigExecGraphBindings",
+      "executable": "testRigExecGraphBindings",
+      "command": [
+        "testRigExecGraphBindings"
+      ]
+    },
+    {
+      "name": "testRigExecInputReplayValues",
+      "executable": "testRigExecInputReplayValues",
+      "command": [
+        "testRigExecInputReplayValues"
+      ]
+    },
+    {
+      "name": "testRigExecTypedValues",
+      "executable": "testRigExecTypedValues",
+      "command": [
+        "testRigExecTypedValues"
+      ]
+    },
+    {
+      "name": "testRigExecGoldenPose",
+      "executable": "testRigExecGoldenPose",
+      "command": [
+        "testRigExecGoldenPose"
+      ]
+    },
+    {
+      "name": "testRigExecOracleInputs",
+      "executable": "testRigExecOracleInputs",
+      "command": [
+        "testRigExecOracleInputs"
+      ]
+    },
+    {
+      "name": "testRigExecStandalone",
+      "executable": "testRigExecStandalone",
+      "command": [
+        "testRigExecStandalone"
+      ]
+    },
+    {
+      "name": "testRigExecRuntimeMath",
+      "executable": "testRigExecRuntimeMath",
+      "command": [
+        "testRigExecRuntimeMath"
+      ]
+    },
+    {
+      "name": "testRigExecRuntimeLoader",
+      "executable": "testRigExecRuntimeLoader",
+      "command": [
+        "testRigExecRuntimeLoader",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/examples\""
+      ]
+    },
+    {
+      "name": "testRigExecRuntimePose",
+      "executable": "testRigExecRuntimePose",
+      "command": [
+        "testRigExecRuntimePose",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/examples\""
+      ]
+    },
+    {
+      "name": "testRigExecRuntimeAutoClavicle",
+      "executable": "testRigExecRuntimePose",
+      "command": [
+        "testRigExecRuntimePose",
+        "--auto-clavicle",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/examples\""
+      ]
+    },
+    {
+      "name": "testRigExecRuntimePoseFineClusters",
+      "executable": "testRigExecRuntimePose",
+      "command": [
+        "testRigExecRuntimePose",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/examples\""
+      ]
+    },
+    {
+      "name": "testRigExecRuntimeWeights",
+      "executable": "testRigExecRuntimeWeights",
+      "command": [
+        "testRigExecRuntimeWeights",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/examples\""
+      ]
+    },
+    {
+      "name": "testRigExecRuntimeWeightsFineClusters",
+      "executable": "testRigExecRuntimeWeights",
+      "command": [
+        "testRigExecRuntimeWeights",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/examples\""
+      ]
+    },
+    {
+      "name": "testRigExecRuntimeGeometry",
+      "executable": "testRigExecRuntimeGeometry",
+      "command": [
+        "testRigExecRuntimeGeometry",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/examples\""
+      ]
+    },
+    {
+      "name": "testRigExecRuntimeGeometryFineClusters",
+      "executable": "testRigExecRuntimeGeometry",
+      "command": [
+        "testRigExecRuntimeGeometry",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/examples\""
+      ]
+    },
+    {
+      "name": "testRigExecRuntimeInputs",
+      "executable": "testRigExecRuntimeInputs",
+      "command": [
+        "testRigExecRuntimeInputs",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/examples\"",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures\""
+      ]
+    },
+    {
+      "name": "testRigExecFormat",
+      "executable": "testRigExecFormat",
+      "command": [
+        "testRigExecFormat"
+      ]
+    },
+    {
+      "name": "testRigExecBinary",
+      "executable": "testRigExecBinary",
+      "command": [
+        "testRigExecBinary",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/examples\""
+      ]
+    },
+    {
+      "name": "verify_binary_${A_NAME}",
+      "executable": "",
+      "command": [
+        "\"${CMAKE_COMMAND}\"",
+        "\"-DBAKE=$<TARGET_FILE:rigExecBakeTool>\"",
+        "\"-DPOSE=$<TARGET_FILE:rigExecPose>\"",
+        "\"-DCONFORMANCE=$<TARGET_FILE:testRigExecBinary>\"",
+        "\"-DSTAGE=${A_STAGE}\"",
+        "\"-DFRAMES=${A_FRAMES}\"",
+        "\"-DOUT=${_out}\"",
+        "${_options}",
+        "-P",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/runVerifyBinary.cmake\""
+      ]
+    },
+    {
+      "name": "testRigExecPack",
+      "executable": "testRigExecPack",
+      "command": [
+        "testRigExecPack"
+      ]
+    },
+    {
+      "name": "testRigExecWeightFields",
+      "executable": "testRigExecWeightFields",
+      "command": [
+        "testRigExecWeightFields"
+      ]
+    },
+    {
+      "name": "testRigExecBakedMode",
+      "executable": "testRigExecBakedMode",
+      "command": [
+        "testRigExecBakedMode",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/examples\""
+      ]
+    },
+    {
+      "name": "testRigExecBakedAttribute",
+      "executable": "testRigExecBakedAttribute",
+      "command": [
+        "testRigExecBakedAttribute",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/examples\""
+      ]
+    },
+    {
+      "name": "testRigExecBakedAttributeEnvironment",
+      "executable": "testRigExecBakedAttribute",
+      "command": [
+        "testRigExecBakedAttribute",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/examples\""
+      ]
+    },
+    {
+      "name": "testRigExecBakedSchedule",
+      "executable": "testRigExecBakedSchedule",
+      "command": [
+        "testRigExecBakedSchedule",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/examples\""
+      ]
+    },
+    {
+      "name": "testRigExecBakedScheduleCones_serial",
+      "executable": "testRigExecBakedSchedule",
+      "command": [
+        "testRigExecBakedSchedule",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/examples\""
+      ]
+    },
+    {
+      "name": "testRigExecBakedScheduleCones_grain0_serial",
+      "executable": "testRigExecBakedSchedule",
+      "command": [
+        "testRigExecBakedSchedule",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/examples\""
+      ]
+    },
+    {
+      "name": "testRigExecBakedScheduleCones_parallel",
+      "executable": "testRigExecBakedSchedule",
+      "command": [
+        "testRigExecBakedSchedule",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/examples\""
+      ]
+    },
+    {
+      "name": "testRigExecBakedScheduleCones_grain0_parallel",
+      "executable": "testRigExecBakedSchedule",
+      "command": [
+        "testRigExecBakedSchedule",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/examples\""
+      ]
+    },
+    {
+      "name": "testRigExecLiveDebug_serial",
+      "executable": "testRigExecLiveDebug",
+      "command": [
+        "testRigExecLiveDebug",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/examples\"",
+        "\"${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources\""
+      ]
+    },
+    {
+      "name": "testRigExecLiveDebug_parallel",
+      "executable": "testRigExecLiveDebug",
+      "command": [
+        "testRigExecLiveDebug",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/examples\"",
+        "\"${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources\""
+      ]
+    },
+    {
+      "name": "testRigExecOpTrace_serial",
+      "executable": "testRigExecOpTrace",
+      "command": [
+        "testRigExecOpTrace",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/examples\""
+      ]
+    },
+    {
+      "name": "testRigExecOpTrace_parallel",
+      "executable": "testRigExecOpTrace",
+      "command": [
+        "testRigExecOpTrace",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/examples\""
+      ]
+    },
+    {
+      "name": "testRigExecOpTrace_calibrate",
+      "executable": "testRigExecOpTrace",
+      "command": [
+        "testRigExecOpTrace",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/examples\""
+      ]
+    },
+    {
+      "name": "testRigExecOneLoopAcceptance_serial",
+      "executable": "testRigExecOneLoopAcceptance",
+      "command": [
+        "testRigExecOneLoopAcceptance",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures\""
+      ]
+    },
+    {
+      "name": "testRigExecOneLoopAcceptance_parallel",
+      "executable": "testRigExecOneLoopAcceptance",
+      "command": [
+        "testRigExecOneLoopAcceptance",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures\""
+      ]
+    },
+    {
+      "name": "testRigExecCrossDomainInputs_serial",
+      "executable": "testRigExecCrossDomainInputs",
+      "command": [
+        "testRigExecCrossDomainInputs",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures\""
+      ]
+    },
+    {
+      "name": "testRigExecCrossDomainInputs_parallel",
+      "executable": "testRigExecCrossDomainInputs",
+      "command": [
+        "testRigExecCrossDomainInputs",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures\""
+      ]
+    },
+    {
+      "name": "testRigExecOneLoopAcceptance_production",
+      "executable": "testRigExecOneLoopAcceptance",
+      "command": [
+        "testRigExecOneLoopAcceptance",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures\""
+      ]
+    },
+    {
+      "name": "testRigExecOneLoopRetired",
+      "executable": "",
+      "command": [
+        "\"${CMAKE_COMMAND}\"",
+        "\"-DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}\"",
+        "\"-DMANIFEST=${CMAKE_CURRENT_SOURCE_DIR}/tests/oneLoopRetiredSymbols.cmake\"",
+        "-P",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/checkOneLoopRetired.cmake\""
+      ]
+    },
+    {
+      "name": "testRigExecSolverBake",
+      "executable": "testRigExecSolverBake",
+      "command": [
+        "testRigExecSolverBake",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/examples\""
+      ]
+    },
+    {
+      "name": "testRigExecSolverBakeSpaceRestCandidates",
+      "executable": "testRigExecSolverBake",
+      "command": [
+        "testRigExecSolverBake",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/examples\"",
+        "--space-rest-candidates"
+      ]
+    },
+    {
+      "name": "testRigExecSolverStacking",
+      "executable": "testRigExecSolverStacking",
+      "command": [
+        "testRigExecSolverStacking",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/examples\""
+      ]
+    },
+    {
+      "name": "testRigExecArm",
+      "executable": "testRigExecArm",
+      "command": [
+        "testRigExecArm",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/examples\""
+      ]
+    },
+    {
+      "name": "testRigExecImaging",
+      "executable": "testRigExecImaging",
+      "command": [
+        "testRigExecImaging",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/examples\""
+      ]
+    },
+    {
+      "name": "testRigExecImagingFineClusters",
+      "executable": "testRigExecImaging",
+      "command": [
+        "testRigExecImaging",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/examples\""
+      ]
+    },
+    {
+      "name": "testRigExecImagingFineClustersReference",
+      "executable": "testRigExecImaging",
+      "command": [
+        "testRigExecImaging",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/examples\""
+      ]
+    },
+    {
+      "name": "testRigExecProfilerApi",
+      "executable": "testRigExecProfilerApi",
+      "command": [
+        "testRigExecProfilerApi",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/examples\""
+      ]
+    },
+    {
+      "name": "testRigExecImagingMultiStage",
+      "executable": "testRigExecImagingMultiStage",
+      "command": [
+        "testRigExecImagingMultiStage",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/examples\""
+      ]
+    },
+    {
+      "name": "testRigExecImagingPlayback",
+      "executable": "testRigExecImagingPlayback",
+      "command": [
+        "testRigExecImagingPlayback",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/examples\""
+      ]
+    },
+    {
+      "name": "testRigExecTouchPose",
+      "executable": "testRigExecTouchPose",
+      "command": [
+        "testRigExecTouchPose"
+      ]
+    },
+    {
+      "name": "testRigExecVolumeWeights",
+      "executable": "testRigExecVolumeWeights",
+      "command": [
+        "testRigExecVolumeWeights",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/examples\""
+      ]
+    },
+    {
+      "name": "testRigExecPhaseBindings",
+      "executable": "testRigExecPhaseBindings",
+      "command": [
+        "testRigExecPhaseBindings",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/examples\""
+      ]
+    },
+    {
+      "name": "testRigExecWeightOverlay",
+      "executable": "testRigExecWeightOverlay",
+      "command": [
+        "testRigExecWeightOverlay",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/examples\""
+      ]
+    },
+    {
+      "name": "testRigExecMoverGraph",
+      "executable": "testRigExecMoverGraph",
+      "command": [
+        "testRigExecMoverGraph"
+      ]
+    },
+    {
+      "name": "testRigExecSkinTopology",
+      "executable": "testRigExecSkinTopology",
+      "command": [
+        "testRigExecSkinTopology"
+      ]
+    },
+    {
+      "name": "testRigExecStaticInputCache",
+      "executable": "testRigExecStaticInputCache",
+      "command": [
+        "testRigExecStaticInputCache"
+      ]
+    },
+    {
+      "name": "testRigExecPoseInterpolator",
+      "executable": "testRigExecPoseInterpolator",
+      "command": [
+        "testRigExecPoseInterpolator"
+      ]
+    },
+    {
+      "name": "testRigExecEpochRests",
+      "executable": "testRigExecEpochRests",
+      "command": [
+        "testRigExecEpochRests",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/examples\""
+      ]
+    },
+    {
+      "name": "testRigExecParallelKernels",
+      "executable": "testRigExecParallelKernels",
+      "command": [
+        "testRigExecParallelKernels"
+      ]
+    },
+    {
+      "name": "testRigExecParallelKernelsSerial",
+      "executable": "testRigExecParallelKernels",
+      "command": [
+        "testRigExecParallelKernels"
+      ]
+    },
+    {
+      "name": "testRigExecChainLevels",
+      "executable": "testRigExecChainLevels",
+      "command": [
+        "testRigExecChainLevels"
+      ]
+    },
+    {
+      "name": "testRigExecChainLevelsRepeat",
+      "executable": "testRigExecChainLevels",
+      "command": [
+        "testRigExecChainLevels",
+        "20"
+      ]
+    },
+    {
+      "name": "testRigExecProfiler",
+      "executable": "testRigExecProfiler",
+      "command": [
+        "testRigExecProfiler"
+      ]
+    },
+    {
+      "name": "testRigExecFrameCache",
+      "executable": "testRigExecFrameCache",
+      "command": [
+        "testRigExecFrameCache"
+      ]
+    },
+    {
+      "name": "testRigExecFrozenContext",
+      "executable": "testRigExecFrozenContext",
+      "command": [
+        "testRigExecFrozenContext",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/examples\""
+      ]
+    },
+    {
+      "name": "testRigExecBackgroundScheduler",
+      "executable": "testRigExecBackgroundScheduler",
+      "command": [
+        "testRigExecBackgroundScheduler"
+      ]
+    },
+    {
+      "name": "testRigExecFrameCacheSparsity",
+      "executable": "testRigExecFrameCacheSparsity",
+      "command": [
+        "testRigExecFrameCacheSparsity"
+      ]
+    },
+    {
+      "name": "testRigExecFrameCacheCones_Verify",
+      "executable": "testRigExecFrameCacheCones_Verify",
+      "command": [
+        "testRigExecFrameCacheCones_Verify",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/examples\""
+      ]
+    },
+    {
+      "name": "testRigExecImagingFrameCache",
+      "executable": "testRigExecImagingFrameCache",
+      "command": [
+        "testRigExecImagingFrameCache",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/examples\""
+      ]
+    },
+    {
+      "name": "testRigExecImagingFrameCacheDefault",
+      "executable": "",
+      "command": [
+        "\"${CMAKE_COMMAND}\"",
+        "-E",
+        "env",
+        "--unset=RIGEXEC_BAKED_SCHEDULE",
+        "RIGEXEC_FRAME_CACHE=on",
+        "RIGEXEC_ENABLE_PARALLEL_EVAL=1",
+        "\"$<TARGET_FILE:testRigExecImagingFrameCache>\"",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/examples\"",
+        "--default-mode"
+      ]
+    },
+    {
+      "name": "testRigExecInteractive",
+      "executable": "testRigExecInteractive",
+      "command": [
+        "testRigExecInteractive"
+      ]
+    },
+    {
+      "name": "testRigExecValueEdits",
+      "executable": "testRigExecValueEdits",
+      "command": [
+        "testRigExecValueEdits",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/examples\""
+      ]
+    },
+    {
+      "name": "testRigExecLeaves",
+      "executable": "testRigExecLeaves",
+      "command": [
+        "testRigExecLeaves",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/examples\""
+      ]
+    },
+    {
+      "name": "testRigExecPropertyOps",
+      "executable": "testRigExecPropertyOps",
+      "command": [
+        "testRigExecPropertyOps",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/examples\""
+      ]
+    },
+    {
+      "name": "testRigExecRestOps",
+      "executable": "testRigExecRestOps",
+      "command": [
+        "testRigExecRestOps",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/examples\""
+      ]
+    },
+    {
+      "name": "testRigExecUpstreamInputs",
+      "executable": "testRigExecUpstreamInputs",
+      "command": [
+        "testRigExecUpstreamInputs",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/examples\""
+      ]
+    },
+    {
+      "name": "testRigExecScopedClears",
+      "executable": "testRigExecScopedClears",
+      "command": [
+        "testRigExecScopedClears"
+      ]
+    },
+    {
+      "name": "testRigExecDefaultSpaces",
+      "executable": "testRigExecDefaultSpaces",
+      "command": [
+        "testRigExecDefaultSpaces"
+      ]
+    },
+    {
+      "name": "testRigExecSchemaAuthoring",
+      "executable": "testRigExecSchemaAuthoring",
+      "command": [
+        "testRigExecSchemaAuthoring"
+      ]
+    },
+    {
+      "name": "testRigExecSchemaAuthoringMissing",
+      "executable": "testRigExecSchemaAuthoring",
+      "command": [
+        "testRigExecSchemaAuthoring",
+        "--missing-schema"
+      ]
+    },
+    {
+      "name": "testRigExecRigBuilder",
+      "executable": "testRigExecRigBuilder",
+      "command": [
+        "testRigExecRigBuilder"
+      ]
+    },
+    {
+      "name": "testRigExecNoAuthoring",
+      "executable": "testRigExecNoAuthoring",
+      "command": [
+        "testRigExecNoAuthoring",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/examples\""
+      ]
+    },
+    {
+      "name": "testRigExecBounds",
+      "executable": "testRigExecBounds",
+      "command": [
+        "testRigExecBounds",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/examples\""
+      ]
+    },
+    {
+      "name": "${name}Serial",
+      "executable": "${name}",
+      "command": [
+        "${name}",
+        "${ARGN}"
+      ]
+    },
+    {
+      "name": "${name}DigestGate",
+      "executable": "${ARGN}",
+      "command": [
+        "${ARGN}"
+      ]
+    },
+    {
+      "name": "${name}ScopedClears",
+      "executable": "${ARGN}",
+      "command": [
+        "${ARGN}"
+      ]
+    },
+    {
+      "name": "testRigExecPython",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_python.py\"",
+        "\"${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources\""
+      ]
+    },
+    {
+      "name": "testRigExecPythonSchemaAuthoring",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_schema_authoring.py\"",
+        "\"${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources\""
+      ]
+    },
+    {
+      "name": "testRigExecSplineIkPython",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_spline_ik.py\"",
+        "\"${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources\""
+      ]
+    },
+    {
+      "name": "testRigExecFkControlSpacePython",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_fk_control_space.py\"",
+        "\"${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources\""
+      ]
+    },
+    {
+      "name": "testRigExecFkStartFramePython",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_fk_start_frame.py\"",
+        "\"${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources\""
+      ]
+    },
+    {
+      "name": "testRigExecBipedHandPython",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_biped_hand.py\"",
+        "\"${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources\""
+      ]
+    },
+    {
+      "name": "testRigExecTrsMastersPython",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_trs_masters.py\"",
+        "\"${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources\""
+      ]
+    },
+    {
+      "name": "testRigExecWireInvariantPython",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_wire_invariant.py\"",
+        "\"${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources\""
+      ]
+    },
+    {
+      "name": "testRigExecDeformerOrderPython",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_deformer_order.py\"",
+        "\"${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources\""
+      ]
+    },
+    {
+      "name": "testRigExecPoseRotationsPython",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_pose_rotations.py\"",
+        "\"${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources\""
+      ]
+    },
+    {
+      "name": "testRigExecEyeSymmetryPython",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_eye_symmetry.py\"",
+        "\"${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources\""
+      ]
+    },
+    {
+      "name": "testRigExecFaceSmoothPython",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_face_smooth.py\"",
+        "\"${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources\""
+      ]
+    },
+    {
+      "name": "testRigExecRigidHeadPython",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_rigid_head.py\"",
+        "\"${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources\""
+      ]
+    },
+    {
+      "name": "testRigExecBlinkClearancePython",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_blink_clearance.py\"",
+        "\"${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources\"",
+        "\"$<TARGET_FILE:rigExecBakeTool>\"",
+        "\"$<TARGET_FILE:rigExecPose>\""
+      ]
+    },
+    {
+      "name": "testRigExecFaceDrivesPython",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_face_drives.py\"",
+        "\"${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources\""
+      ]
+    },
+    {
+      "name": "testRigExecDeformerEnabledPython",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_deformer_enabled.py\"",
+        "\"${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources\""
+      ]
+    },
+    {
+      "name": "testRigExecPoseCyclePython",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_pose_cycle.py\"",
+        "\"${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources\""
+      ]
+    },
+    {
+      "name": "testRigExecPsdNumeric",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_psd_numeric.py\"",
+        "\"${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources\""
+      ]
+    },
+    {
+      "name": "testRigExecSpaceSwitch",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_space_switch.py\"",
+        "\"${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources\""
+      ]
+    },
+    {
+      "name": "testRigExecLiveOperationGraph",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_live_operation_graph.py\"",
+        "\"${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources\""
+      ]
+    },
+    {
+      "name": "testRigExecSpaceSwitchVersions",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_space_switch_versions.py\"",
+        "\"${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources\"",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/examples\""
+      ]
+    },
+    {
+      "name": "testRigExecSpaceSwitchVersionsCones",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_space_switch_versions.py\"",
+        "\"${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources\"",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/examples\""
+      ]
+    },
+    {
+      "name": "testRigExecBake",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_bake.py\"",
+        "\"${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources\""
+      ]
+    },
+    {
+      "name": "testRigExecInverse",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_inverse.py\"",
+        "\"${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources\""
+      ]
+    },
+    {
+      "name": "testRigExecSkinLayoutOverrides",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_skin_layout_overrides.py\"",
+        "\"${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources\""
+      ]
+    },
+    {
+      "name": "testRigExecBakedCone",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_baked_cone.py\"",
+        "\"${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources\""
+      ]
+    },
+    {
+      "name": "testRigExecOpTracePython",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_op_trace.py\"",
+        "\"${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources\""
+      ]
+    },
+    {
+      "name": "testRigExecOpTracePython_serial",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_op_trace.py\"",
+        "\"${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources\""
+      ]
+    },
+    {
+      "name": "testRigExecGil",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_gil.py\"",
+        "\"${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources\""
+      ]
+    },
+    {
+      "name": "testRigExecBakedPsd",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_baked_psd.py\"",
+        "\"${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources\""
+      ]
+    },
+    {
+      "name": "testRestLocal",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rest_local.py\"",
+        "\"${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources\""
+      ]
+    },
+    {
+      "name": "testRestMigration",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rest_migration.py\"",
+        "\"${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources\""
+      ]
+    },
+    {
+      "name": "testInterveningXform",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_intervening_xform.py\"",
+        "\"${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources\""
+      ]
+    },
+    {
+      "name": "testRigExecEpochConstants",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_epoch_constants.py\"",
+        "\"${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources\""
+      ]
+    },
+    {
+      "name": "testRigExecWireMover",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_wire_mover.py\"",
+        "\"${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources\""
+      ]
+    },
+    {
+      "name": "testRigExecFloatCurveOp",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_float_curve_op.py\"",
+        "\"${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources\""
+      ]
+    },
+    {
+      "name": "testRigExecMatrixSpace",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_matrix_space.py\"",
+        "\"${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources\""
+      ]
+    },
+    {
+      "name": "testRigExecMoverDiscovery",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_mover_discovery.py\"",
+        "\"${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources\""
+      ]
+    },
+    {
+      "name": "testRigExecSkippedOperations",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_skipped_operations.py\"",
+        "\"${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources\""
+      ]
+    },
+    {
+      "name": "testRigExecBakedAvarPatch",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_baked_avar_patch.py\"",
+        "\"${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources\""
+      ]
+    },
+    {
+      "name": "testRigExecPxrHygiene",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_pxr_import_hygiene.py\"",
+        "\"${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources\""
+      ]
+    },
+    {
+      "name": "testRigExecBakedAttributePython",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_baked_attribute.py\"",
+        "\"${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources\""
+      ]
+    },
+    {
+      "name": "testRigExecUndo",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_undo.py\"",
+        "\"${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources\""
+      ]
+    },
+    {
+      "name": "testGizmoMath",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_gizmo_math.py\"",
+        "\"${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources\""
+      ]
+    },
+    {
+      "name": "testPoseReaderViz",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_pose_reader_viz.py\"",
+        "\"${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources\""
+      ]
+    },
+    {
+      "name": "testLayerOpinionsModel",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_layer_opinions_model.py\"",
+        "\"${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources\""
+      ]
+    },
+    {
+      "name": "testAvarEditorModel",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_avar_editor_model.py\"",
+        "\"${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources\""
+      ]
+    },
+    {
+      "name": "testCompositionArcsModel",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_composition_arcs_model.py\""
+      ]
+    },
+    {
+      "name": "testPathSpelling",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_path_spelling.py\""
+      ]
+    },
+    {
+      "name": "testMoverChainOrder",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_mover_chain_order.py\""
+      ]
+    },
+    {
+      "name": "testIkFkMatch",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_ikfk_match.py\"",
+        "\"${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources\""
+      ]
+    },
+    {
+      "name": "testSpaceMatch",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_space_match.py\"",
+        "\"${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources\""
+      ]
+    },
+    {
+      "name": "testAutoClavicle",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_auto_clavicle.py\"",
+        "\"${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources\""
+      ]
+    },
+    {
+      "name": "testGizmoPreview",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_gizmo_preview.py\""
+      ]
+    },
+    {
+      "name": "testGizmoDeferredRelease",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_gizmo_deferred_release.py\""
+      ]
+    },
+    {
+      "name": "testGizmoOwnCommit",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_gizmo_own_commit.py\""
+      ]
+    },
+    {
+      "name": "testGizmoScreen",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_gizmo_screen.py\""
+      ]
+    },
+    {
+      "name": "testGizmoSettings",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_gizmo_settings.py\""
+      ]
+    },
+    {
+      "name": "testGraphModel",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_graph_model.py\"",
+        "\"${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources\""
+      ]
+    },
+    {
+      "name": "testGraphScreen",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_graph_screen.py\""
+      ]
+    },
+    {
+      "name": "testRigExecStageEdits",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_stage_edits.py\"",
+        "\"${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources\""
+      ]
+    },
+    {
+      "name": "testGizmoDrag",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_gizmo_drag.py\""
+      ]
+    },
+    {
+      "name": "testGizmoSnap",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_gizmo_snap.py\""
+      ]
+    },
+    {
+      "name": "testViewCubeMath",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_viewcube_math.py\""
+      ]
+    },
+    {
+      "name": "testGizmoMarquee",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_gizmo_marquee.py\""
+      ]
+    },
+    {
+      "name": "testCacheStripModel",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_cache_strip_model.py\""
+      ]
+    },
+    {
+      "name": "testCacheStripPanel",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_cache_strip_panel.py\""
+      ]
+    },
+    {
+      "name": "testUsdviewFrameCacheDriver",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_usdview_frame_cache.py\""
+      ]
+    },
+    {
+      "name": "testImagingHandle",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_imaging_handle.py\""
+      ]
+    },
+    {
+      "name": "testSessionState",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_session_state.py\""
+      ]
+    },
+    {
+      "name": "testRigExecProfilerModel",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_profiler_model.py\""
+      ]
+    },
+    {
+      "name": "testUsdNoodles",
+      "executable": "${Python3_EXECUTABLE}",
+      "command": [
+        "${Python3_EXECUTABLE}",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        ".",
+        "-p",
+        "\"test*.py\"",
+        "WORKING_DIRECTORY",
+        "\"${CMAKE_CURRENT_BINARY_DIR}/python/UsdNoodles/testenv\""
+      ]
+    }
+  ],
+  "tests_for_library": {
+    "rigExec": [
+      "exec_crosscheck_01_FkChainTail",
+      "exec_crosscheck_03_IkFkBlendClamp",
+      "exec_crosscheck_05_TwistRibbonSpine",
+      "exec_crosscheck_11_VolumeWeights",
+      "exec_crosscheck_13_ReadPhases",
+      "exec_crosscheck_ArmRig",
+      "exec_crosscheck_computed_ik_space",
+      "testRigExecAffineFrames",
+      "testRigExecArm",
+      "testRigExecBackgroundScheduler",
+      "testRigExecBakedAttribute",
+      "testRigExecBakedAttributeEnvironment",
+      "testRigExecBakedMode",
+      "testRigExecBakedSchedule",
+      "testRigExecBakedScheduleCones_grain0_parallel",
+      "testRigExecBakedScheduleCones_grain0_serial",
+      "testRigExecBakedScheduleCones_parallel",
+      "testRigExecBakedScheduleCones_serial",
+      "testRigExecBinary",
+      "testRigExecChainLevels",
+      "testRigExecChainLevelsRepeat",
+      "testRigExecConstraints",
+      "testRigExecCrossDomainInputs_parallel",
+      "testRigExecCrossDomainInputs_serial",
+      "testRigExecDefaultSpaces",
+      "testRigExecDeltaMush",
+      "testRigExecDeltaMushBakeFile",
+      "testRigExecEnvelopeVolumes_parallel",
+      "testRigExecEnvelopeVolumes_serial",
+      "testRigExecEpochRests",
+      "testRigExecExampleParity",
+      "testRigExecExampleParityCones_grain0_parallel",
+      "testRigExecExampleParityCones_grain0_serial",
+      "testRigExecExampleParityCones_parallel",
+      "testRigExecExampleParityCones_serial",
+      "testRigExecExecCrossCheck",
+      "testRigExecExternalMovers",
+      "testRigExecFrameCache",
+      "testRigExecFrameCacheCones_Verify",
+      "testRigExecFrameCacheSparsity",
+      "testRigExecFrozenContext",
+      "testRigExecGeometryOpsBakedParity",
+      "testRigExecGeometryOpsBakedParityCones_grain0_parallel",
+      "testRigExecGeometryOpsBakedParityCones_grain0_serial",
+      "testRigExecGeometryOpsBakedParityCones_parallel",
+      "testRigExecGeometryOpsBakedParityCones_serial",
+      "testRigExecGeometryProgram",
+      "testRigExecGoldenPose",
+      "testRigExecGraphBindings",
+      "testRigExecImaging",
+      "testRigExecImagingFineClusters",
+      "testRigExecImagingFineClustersReference",
+      "testRigExecImagingFrameCache",
+      "testRigExecImagingMultiStage",
+      "testRigExecImagingPlayback",
+      "testRigExecInputReplayValues",
+      "testRigExecInteractive",
+      "testRigExecLattice",
+      "testRigExecLeaves",
+      "testRigExecLiveDebug_parallel",
+      "testRigExecLiveDebug_serial",
+      "testRigExecMoverGraph",
+      "testRigExecNoAuthoring",
+      "testRigExecOneLoopAcceptance_parallel",
+      "testRigExecOneLoopAcceptance_production",
+      "testRigExecOneLoopAcceptance_serial",
+      "testRigExecOpTrace_calibrate",
+      "testRigExecOpTrace_parallel",
+      "testRigExecOpTrace_serial",
+      "testRigExecOpValues",
+      "testRigExecOracleInputs",
+      "testRigExecPack",
+      "testRigExecParallelKernels",
+      "testRigExecParallelKernelsSerial",
+      "testRigExecPhaseBindings",
+      "testRigExecPoseInterpolator",
+      "testRigExecProfiler",
+      "testRigExecProfilerApi",
+      "testRigExecPropertyOps",
+      "testRigExecRestOps",
+      "testRigExecRuntimeAutoClavicle",
+      "testRigExecRuntimeGeometry",
+      "testRigExecRuntimeGeometryFineClusters",
+      "testRigExecRuntimeInputs",
+      "testRigExecRuntimeLoader",
+      "testRigExecRuntimePose",
+      "testRigExecRuntimePoseFineClusters",
+      "testRigExecRuntimeWeights",
+      "testRigExecRuntimeWeightsFineClusters",
+      "testRigExecScopedClears",
+      "testRigExecSkinTopology",
+      "testRigExecSolverBake",
+      "testRigExecSolverBakeSpaceRestCandidates",
+      "testRigExecSolverStacking",
+      "testRigExecStandalone",
+      "testRigExecStaticInputCache",
+      "testRigExecSurfaceBinding",
+      "testRigExecSurfaceProjector",
+      "testRigExecSurfaceSnap",
+      "testRigExecTouchPose",
+      "testRigExecTypedValues",
+      "testRigExecUpstreamInputs",
+      "testRigExecValueEdits",
+      "testRigExecVolumeWeights",
+      "testRigExecWeightOverlay",
+      "testRigExecWeightProgram",
+      "testRigExecWrinkle"
+    ],
+    "rigExecBake": [
+      "testRigExecAffineFrames",
+      "testRigExecBinary",
+      "testRigExecConstraints",
+      "testRigExecDeltaMush",
+      "testRigExecDeltaMushBakeFile",
+      "testRigExecExternalMovers",
+      "testRigExecFrozenContext",
+      "testRigExecImaging",
+      "testRigExecImagingFineClusters",
+      "testRigExecImagingFineClustersReference",
+      "testRigExecImagingFrameCache",
+      "testRigExecImagingPlayback",
+      "testRigExecLattice",
+      "testRigExecLeaves",
+      "testRigExecOneLoopAcceptance_parallel",
+      "testRigExecOneLoopAcceptance_production",
+      "testRigExecOneLoopAcceptance_serial",
+      "testRigExecPropertyOps",
+      "testRigExecRuntimeAutoClavicle",
+      "testRigExecRuntimeGeometry",
+      "testRigExecRuntimeGeometryFineClusters",
+      "testRigExecRuntimeInputs",
+      "testRigExecRuntimeLoader",
+      "testRigExecRuntimePose",
+      "testRigExecRuntimePoseFineClusters",
+      "testRigExecRuntimeWeights",
+      "testRigExecRuntimeWeightsFineClusters",
+      "testRigExecSurfaceBinding",
+      "testRigExecSurfaceSnap",
+      "testRigExecUpstreamInputs",
+      "testRigExecWrinkle"
+    ],
+    "rigExecBinary": [
+      "testRigExecAffineFrames",
+      "testRigExecBinary",
+      "testRigExecConstraints",
+      "testRigExecDeltaMush",
+      "testRigExecDeltaMushBakeFile",
+      "testRigExecDeltaMushRuntime",
+      "testRigExecExternalMovers",
+      "testRigExecFormat",
+      "testRigExecFrozenContext",
+      "testRigExecImaging",
+      "testRigExecImagingFineClusters",
+      "testRigExecImagingFineClustersReference",
+      "testRigExecImagingFrameCache",
+      "testRigExecImagingMultiStage",
+      "testRigExecImagingPlayback",
+      "testRigExecLattice",
+      "testRigExecLeaves",
+      "testRigExecLiveDebug_parallel",
+      "testRigExecLiveDebug_serial",
+      "testRigExecNoAuthoring",
+      "testRigExecOneLoopAcceptance_parallel",
+      "testRigExecOneLoopAcceptance_production",
+      "testRigExecOneLoopAcceptance_serial",
+      "testRigExecProfilerApi",
+      "testRigExecPropertyOps",
+      "testRigExecRuntimeAutoClavicle",
+      "testRigExecRuntimeGeometry",
+      "testRigExecRuntimeGeometryFineClusters",
+      "testRigExecRuntimeInputs",
+      "testRigExecRuntimeLoader",
+      "testRigExecRuntimeMath",
+      "testRigExecRuntimePose",
+      "testRigExecRuntimePoseFineClusters",
+      "testRigExecRuntimeWeights",
+      "testRigExecRuntimeWeightsFineClusters",
+      "testRigExecSurfaceBinding",
+      "testRigExecSurfaceSnap",
+      "testRigExecTouchPose",
+      "testRigExecUpstreamInputs",
+      "testRigExecWeightOverlay",
+      "testRigExecWrinkle",
+      "testRigExecWrinkleRuntime"
+    ],
+    "rigExecFlatBuffers": [
+      "testRigExecAffineFrames",
+      "testRigExecBinary",
+      "testRigExecConstraints",
+      "testRigExecDeltaMush",
+      "testRigExecDeltaMushBakeFile",
+      "testRigExecDeltaMushRuntime",
+      "testRigExecExternalMovers",
+      "testRigExecFormat",
+      "testRigExecFrozenContext",
+      "testRigExecImaging",
+      "testRigExecImagingFineClusters",
+      "testRigExecImagingFineClustersReference",
+      "testRigExecImagingFrameCache",
+      "testRigExecImagingMultiStage",
+      "testRigExecImagingPlayback",
+      "testRigExecLattice",
+      "testRigExecLeaves",
+      "testRigExecLiveDebug_parallel",
+      "testRigExecLiveDebug_serial",
+      "testRigExecNoAuthoring",
+      "testRigExecOneLoopAcceptance_parallel",
+      "testRigExecOneLoopAcceptance_production",
+      "testRigExecOneLoopAcceptance_serial",
+      "testRigExecProfilerApi",
+      "testRigExecPropertyOps",
+      "testRigExecRuntimeAutoClavicle",
+      "testRigExecRuntimeGeometry",
+      "testRigExecRuntimeGeometryFineClusters",
+      "testRigExecRuntimeInputs",
+      "testRigExecRuntimeLoader",
+      "testRigExecRuntimeMath",
+      "testRigExecRuntimePose",
+      "testRigExecRuntimePoseFineClusters",
+      "testRigExecRuntimeWeights",
+      "testRigExecRuntimeWeightsFineClusters",
+      "testRigExecSurfaceBinding",
+      "testRigExecSurfaceSnap",
+      "testRigExecTouchPose",
+      "testRigExecUpstreamInputs",
+      "testRigExecWeightOverlay",
+      "testRigExecWrinkle",
+      "testRigExecWrinkleRuntime"
+    ],
+    "rigExecGraph": [
+      "exec_crosscheck_01_FkChainTail",
+      "exec_crosscheck_03_IkFkBlendClamp",
+      "exec_crosscheck_05_TwistRibbonSpine",
+      "exec_crosscheck_11_VolumeWeights",
+      "exec_crosscheck_13_ReadPhases",
+      "exec_crosscheck_ArmRig",
+      "exec_crosscheck_computed_ik_space",
+      "testRigExecAffineFrames",
+      "testRigExecArm",
+      "testRigExecBackgroundScheduler",
+      "testRigExecBakedAttribute",
+      "testRigExecBakedAttributeEnvironment",
+      "testRigExecBakedMode",
+      "testRigExecBakedSchedule",
+      "testRigExecBakedScheduleCones_grain0_parallel",
+      "testRigExecBakedScheduleCones_grain0_serial",
+      "testRigExecBakedScheduleCones_parallel",
+      "testRigExecBakedScheduleCones_serial",
+      "testRigExecBinary",
+      "testRigExecChainLevels",
+      "testRigExecChainLevelsRepeat",
+      "testRigExecConstraints",
+      "testRigExecCrossDomainInputs_parallel",
+      "testRigExecCrossDomainInputs_serial",
+      "testRigExecDefaultSpaces",
+      "testRigExecDeltaMush",
+      "testRigExecDeltaMushBakeFile",
+      "testRigExecDeltaMushRuntime",
+      "testRigExecEnvelopeVolumes_parallel",
+      "testRigExecEnvelopeVolumes_serial",
+      "testRigExecEpochRests",
+      "testRigExecExampleParity",
+      "testRigExecExampleParityCones_grain0_parallel",
+      "testRigExecExampleParityCones_grain0_serial",
+      "testRigExecExampleParityCones_parallel",
+      "testRigExecExampleParityCones_serial",
+      "testRigExecExecCrossCheck",
+      "testRigExecExternalMovers",
+      "testRigExecFrameCache",
+      "testRigExecFrameCacheCones_Verify",
+      "testRigExecFrameCacheSparsity",
+      "testRigExecFrozenContext",
+      "testRigExecGeometryOpsBakedParity",
+      "testRigExecGeometryOpsBakedParityCones_grain0_parallel",
+      "testRigExecGeometryOpsBakedParityCones_grain0_serial",
+      "testRigExecGeometryOpsBakedParityCones_parallel",
+      "testRigExecGeometryOpsBakedParityCones_serial",
+      "testRigExecGeometryProgram",
+      "testRigExecGoldenPose",
+      "testRigExecGraphBindings",
+      "testRigExecImaging",
+      "testRigExecImagingFineClusters",
+      "testRigExecImagingFineClustersReference",
+      "testRigExecImagingFrameCache",
+      "testRigExecImagingMultiStage",
+      "testRigExecImagingPlayback",
+      "testRigExecInputReplayValues",
+      "testRigExecInteractive",
+      "testRigExecLattice",
+      "testRigExecLeaves",
+      "testRigExecLiveDebug_parallel",
+      "testRigExecLiveDebug_serial",
+      "testRigExecMoverGraph",
+      "testRigExecNoAuthoring",
+      "testRigExecOneLoopAcceptance_parallel",
+      "testRigExecOneLoopAcceptance_production",
+      "testRigExecOneLoopAcceptance_serial",
+      "testRigExecOpGraph",
+      "testRigExecOpTrace_calibrate",
+      "testRigExecOpTrace_parallel",
+      "testRigExecOpTrace_serial",
+      "testRigExecOpValues",
+      "testRigExecOracleInputs",
+      "testRigExecPack",
+      "testRigExecParallelKernels",
+      "testRigExecParallelKernelsSerial",
+      "testRigExecPhaseBindings",
+      "testRigExecPoseInterpolator",
+      "testRigExecProfiler",
+      "testRigExecProfilerApi",
+      "testRigExecPropertyOps",
+      "testRigExecRestOps",
+      "testRigExecRuntimeAutoClavicle",
+      "testRigExecRuntimeGeometry",
+      "testRigExecRuntimeGeometryFineClusters",
+      "testRigExecRuntimeInputs",
+      "testRigExecRuntimeLoader",
+      "testRigExecRuntimeMath",
+      "testRigExecRuntimePose",
+      "testRigExecRuntimePoseFineClusters",
+      "testRigExecRuntimeWeights",
+      "testRigExecRuntimeWeightsFineClusters",
+      "testRigExecScopedClears",
+      "testRigExecSkinTopology",
+      "testRigExecSolverBake",
+      "testRigExecSolverBakeSpaceRestCandidates",
+      "testRigExecSolverStacking",
+      "testRigExecStandalone",
+      "testRigExecStaticInputCache",
+      "testRigExecSurfaceBinding",
+      "testRigExecSurfaceProjector",
+      "testRigExecSurfaceSnap",
+      "testRigExecTouchPose",
+      "testRigExecTypedValues",
+      "testRigExecUpstreamInputs",
+      "testRigExecValueEdits",
+      "testRigExecVolumeWeights",
+      "testRigExecWeightOverlay",
+      "testRigExecWeightProgram",
+      "testRigExecWrinkle",
+      "testRigExecWrinkleRuntime"
+    ],
+    "rigExecInputValues": [
+      "exec_crosscheck_01_FkChainTail",
+      "exec_crosscheck_03_IkFkBlendClamp",
+      "exec_crosscheck_05_TwistRibbonSpine",
+      "exec_crosscheck_11_VolumeWeights",
+      "exec_crosscheck_13_ReadPhases",
+      "exec_crosscheck_ArmRig",
+      "exec_crosscheck_computed_ik_space",
+      "testRigExecAffineFrames",
+      "testRigExecArm",
+      "testRigExecBackgroundScheduler",
+      "testRigExecBakedAttribute",
+      "testRigExecBakedAttributeEnvironment",
+      "testRigExecBakedMode",
+      "testRigExecBakedSchedule",
+      "testRigExecBakedScheduleCones_grain0_parallel",
+      "testRigExecBakedScheduleCones_grain0_serial",
+      "testRigExecBakedScheduleCones_parallel",
+      "testRigExecBakedScheduleCones_serial",
+      "testRigExecBinary",
+      "testRigExecChainLevels",
+      "testRigExecChainLevelsRepeat",
+      "testRigExecConstraints",
+      "testRigExecCrossDomainInputs_parallel",
+      "testRigExecCrossDomainInputs_serial",
+      "testRigExecDefaultSpaces",
+      "testRigExecDeltaMush",
+      "testRigExecDeltaMushBakeFile",
+      "testRigExecEnvelopeVolumes_parallel",
+      "testRigExecEnvelopeVolumes_serial",
+      "testRigExecEpochRests",
+      "testRigExecExampleParity",
+      "testRigExecExampleParityCones_grain0_parallel",
+      "testRigExecExampleParityCones_grain0_serial",
+      "testRigExecExampleParityCones_parallel",
+      "testRigExecExampleParityCones_serial",
+      "testRigExecExecCrossCheck",
+      "testRigExecExternalMovers",
+      "testRigExecFrameCache",
+      "testRigExecFrameCacheCones_Verify",
+      "testRigExecFrameCacheSparsity",
+      "testRigExecFrozenContext",
+      "testRigExecGeometryOpsBakedParity",
+      "testRigExecGeometryOpsBakedParityCones_grain0_parallel",
+      "testRigExecGeometryOpsBakedParityCones_grain0_serial",
+      "testRigExecGeometryOpsBakedParityCones_parallel",
+      "testRigExecGeometryOpsBakedParityCones_serial",
+      "testRigExecGeometryProgram",
+      "testRigExecGoldenPose",
+      "testRigExecGraphBindings",
+      "testRigExecImaging",
+      "testRigExecImagingFineClusters",
+      "testRigExecImagingFineClustersReference",
+      "testRigExecImagingFrameCache",
+      "testRigExecImagingMultiStage",
+      "testRigExecImagingPlayback",
+      "testRigExecInputReplayValues",
+      "testRigExecInteractive",
+      "testRigExecLattice",
+      "testRigExecLeaves",
+      "testRigExecLiveDebug_parallel",
+      "testRigExecLiveDebug_serial",
+      "testRigExecMoverGraph",
+      "testRigExecNoAuthoring",
+      "testRigExecOneLoopAcceptance_parallel",
+      "testRigExecOneLoopAcceptance_production",
+      "testRigExecOneLoopAcceptance_serial",
+      "testRigExecOpTrace_calibrate",
+      "testRigExecOpTrace_parallel",
+      "testRigExecOpTrace_serial",
+      "testRigExecOpValues",
+      "testRigExecOracleInputs",
+      "testRigExecPack",
+      "testRigExecParallelKernels",
+      "testRigExecParallelKernelsSerial",
+      "testRigExecPhaseBindings",
+      "testRigExecPoseInterpolator",
+      "testRigExecProfiler",
+      "testRigExecProfilerApi",
+      "testRigExecPropertyOps",
+      "testRigExecRestOps",
+      "testRigExecRuntimeAutoClavicle",
+      "testRigExecRuntimeGeometry",
+      "testRigExecRuntimeGeometryFineClusters",
+      "testRigExecRuntimeInputs",
+      "testRigExecRuntimeLoader",
+      "testRigExecRuntimePose",
+      "testRigExecRuntimePoseFineClusters",
+      "testRigExecRuntimeWeights",
+      "testRigExecRuntimeWeightsFineClusters",
+      "testRigExecScopedClears",
+      "testRigExecSkinTopology",
+      "testRigExecSolverBake",
+      "testRigExecSolverBakeSpaceRestCandidates",
+      "testRigExecSolverStacking",
+      "testRigExecStandalone",
+      "testRigExecStaticInputCache",
+      "testRigExecSurfaceBinding",
+      "testRigExecSurfaceProjector",
+      "testRigExecSurfaceSnap",
+      "testRigExecTouchPose",
+      "testRigExecTypedValues",
+      "testRigExecUpstreamInputs",
+      "testRigExecValueEdits",
+      "testRigExecVolumeWeights",
+      "testRigExecWeightOverlay",
+      "testRigExecWeightProgram",
+      "testRigExecWrinkle"
+    ],
+    "rigExecLzma": [
+      "testRigExecAffineFrames",
+      "testRigExecBinary",
+      "testRigExecConstraints",
+      "testRigExecDeltaMush",
+      "testRigExecDeltaMushBakeFile",
+      "testRigExecDeltaMushRuntime",
+      "testRigExecExternalMovers",
+      "testRigExecFormat",
+      "testRigExecFrozenContext",
+      "testRigExecImaging",
+      "testRigExecImagingFineClusters",
+      "testRigExecImagingFineClustersReference",
+      "testRigExecImagingFrameCache",
+      "testRigExecImagingMultiStage",
+      "testRigExecImagingPlayback",
+      "testRigExecLattice",
+      "testRigExecLeaves",
+      "testRigExecLiveDebug_parallel",
+      "testRigExecLiveDebug_serial",
+      "testRigExecNoAuthoring",
+      "testRigExecOneLoopAcceptance_parallel",
+      "testRigExecOneLoopAcceptance_production",
+      "testRigExecOneLoopAcceptance_serial",
+      "testRigExecProfilerApi",
+      "testRigExecPropertyOps",
+      "testRigExecRuntimeAutoClavicle",
+      "testRigExecRuntimeGeometry",
+      "testRigExecRuntimeGeometryFineClusters",
+      "testRigExecRuntimeInputs",
+      "testRigExecRuntimeLoader",
+      "testRigExecRuntimeMath",
+      "testRigExecRuntimePose",
+      "testRigExecRuntimePoseFineClusters",
+      "testRigExecRuntimeWeights",
+      "testRigExecRuntimeWeightsFineClusters",
+      "testRigExecSurfaceBinding",
+      "testRigExecSurfaceSnap",
+      "testRigExecTouchPose",
+      "testRigExecUpstreamInputs",
+      "testRigExecWeightOverlay",
+      "testRigExecWrinkle",
+      "testRigExecWrinkleRuntime"
+    ],
+    "rigExecMath": [
+      "exec_crosscheck_01_FkChainTail",
+      "exec_crosscheck_03_IkFkBlendClamp",
+      "exec_crosscheck_05_TwistRibbonSpine",
+      "exec_crosscheck_11_VolumeWeights",
+      "exec_crosscheck_13_ReadPhases",
+      "exec_crosscheck_ArmRig",
+      "exec_crosscheck_computed_ik_space",
+      "testRigExecAffineFrames",
+      "testRigExecArm",
+      "testRigExecBackgroundScheduler",
+      "testRigExecBakedAttribute",
+      "testRigExecBakedAttributeEnvironment",
+      "testRigExecBakedMode",
+      "testRigExecBakedSchedule",
+      "testRigExecBakedScheduleCones_grain0_parallel",
+      "testRigExecBakedScheduleCones_grain0_serial",
+      "testRigExecBakedScheduleCones_parallel",
+      "testRigExecBakedScheduleCones_serial",
+      "testRigExecBinary",
+      "testRigExecChainLevels",
+      "testRigExecChainLevelsRepeat",
+      "testRigExecConstraints",
+      "testRigExecCrossDomainInputs_parallel",
+      "testRigExecCrossDomainInputs_serial",
+      "testRigExecDefaultSpaces",
+      "testRigExecDeltaMush",
+      "testRigExecDeltaMushBakeFile",
+      "testRigExecDualQuat",
+      "testRigExecEnvelopeVolumes_parallel",
+      "testRigExecEnvelopeVolumes_serial",
+      "testRigExecEpochRests",
+      "testRigExecExampleParity",
+      "testRigExecExampleParityCones_grain0_parallel",
+      "testRigExecExampleParityCones_grain0_serial",
+      "testRigExecExampleParityCones_parallel",
+      "testRigExecExampleParityCones_serial",
+      "testRigExecExecCrossCheck",
+      "testRigExecExternalMovers",
+      "testRigExecFrameCache",
+      "testRigExecFrameCacheCones_Verify",
+      "testRigExecFrameCacheSparsity",
+      "testRigExecFrozenContext",
+      "testRigExecGeometryOpsBakedParity",
+      "testRigExecGeometryOpsBakedParityCones_grain0_parallel",
+      "testRigExecGeometryOpsBakedParityCones_grain0_serial",
+      "testRigExecGeometryOpsBakedParityCones_parallel",
+      "testRigExecGeometryOpsBakedParityCones_serial",
+      "testRigExecGeometryProgram",
+      "testRigExecGoldenPose",
+      "testRigExecGraphBindings",
+      "testRigExecImaging",
+      "testRigExecImagingFineClusters",
+      "testRigExecImagingFineClustersReference",
+      "testRigExecImagingFrameCache",
+      "testRigExecImagingMultiStage",
+      "testRigExecImagingPlayback",
+      "testRigExecInputReplayValues",
+      "testRigExecInteractive",
+      "testRigExecLattice",
+      "testRigExecLeaves",
+      "testRigExecLiveDebug_parallel",
+      "testRigExecLiveDebug_serial",
+      "testRigExecMath",
+      "testRigExecMoverGraph",
+      "testRigExecNoAuthoring",
+      "testRigExecOneLoopAcceptance_parallel",
+      "testRigExecOneLoopAcceptance_production",
+      "testRigExecOneLoopAcceptance_serial",
+      "testRigExecOpTrace_calibrate",
+      "testRigExecOpTrace_parallel",
+      "testRigExecOpTrace_serial",
+      "testRigExecOpValues",
+      "testRigExecOracleInputs",
+      "testRigExecPack",
+      "testRigExecParallelKernels",
+      "testRigExecParallelKernelsSerial",
+      "testRigExecPhaseBindings",
+      "testRigExecPoseInterpolator",
+      "testRigExecProfiler",
+      "testRigExecProfilerApi",
+      "testRigExecPropertyOps",
+      "testRigExecRbf",
+      "testRigExecRestOps",
+      "testRigExecRigBuilder",
+      "testRigExecRuntimeAutoClavicle",
+      "testRigExecRuntimeGeometry",
+      "testRigExecRuntimeGeometryFineClusters",
+      "testRigExecRuntimeInputs",
+      "testRigExecRuntimeLoader",
+      "testRigExecRuntimePose",
+      "testRigExecRuntimePoseFineClusters",
+      "testRigExecRuntimeWeights",
+      "testRigExecRuntimeWeightsFineClusters",
+      "testRigExecSchemaAuthoring",
+      "testRigExecSchemaAuthoringMissing",
+      "testRigExecScopedClears",
+      "testRigExecSingleChainIk",
+      "testRigExecSkinTopology",
+      "testRigExecSolverBake",
+      "testRigExecSolverBakeSpaceRestCandidates",
+      "testRigExecSolverStacking",
+      "testRigExecSplineIk",
+      "testRigExecStandalone",
+      "testRigExecStaticInputCache",
+      "testRigExecSurfaceBinding",
+      "testRigExecSurfaceKernelCache",
+      "testRigExecSurfaceProjector",
+      "testRigExecSurfaceSnap",
+      "testRigExecTouchPose",
+      "testRigExecTypedValues",
+      "testRigExecUpstreamInputs",
+      "testRigExecValueEdits",
+      "testRigExecVolumeWeights",
+      "testRigExecWeightFields",
+      "testRigExecWeightOverlay",
+      "testRigExecWeightProgram",
+      "testRigExecWrinkle",
+      "testRigExecWrinkleMath"
+    ],
+    "rigExecRuntime": [
+      "testRigExecAffineFrames",
+      "testRigExecConstraints",
+      "testRigExecDeltaMush",
+      "testRigExecDeltaMushRuntime",
+      "testRigExecExternalMovers",
+      "testRigExecFrozenContext",
+      "testRigExecImaging",
+      "testRigExecImagingFineClusters",
+      "testRigExecImagingFineClustersReference",
+      "testRigExecImagingFrameCache",
+      "testRigExecImagingMultiStage",
+      "testRigExecImagingPlayback",
+      "testRigExecLattice",
+      "testRigExecLiveDebug_parallel",
+      "testRigExecLiveDebug_serial",
+      "testRigExecNoAuthoring",
+      "testRigExecOneLoopAcceptance_parallel",
+      "testRigExecOneLoopAcceptance_production",
+      "testRigExecOneLoopAcceptance_serial",
+      "testRigExecProfilerApi",
+      "testRigExecRuntimeAutoClavicle",
+      "testRigExecRuntimeGeometry",
+      "testRigExecRuntimeGeometryFineClusters",
+      "testRigExecRuntimeInputs",
+      "testRigExecRuntimeLoader",
+      "testRigExecRuntimeMath",
+      "testRigExecRuntimePose",
+      "testRigExecRuntimePoseFineClusters",
+      "testRigExecRuntimeWeights",
+      "testRigExecRuntimeWeightsFineClusters",
+      "testRigExecSurfaceBinding",
+      "testRigExecSurfaceSnap",
+      "testRigExecTouchPose",
+      "testRigExecUpstreamInputs",
+      "testRigExecWeightOverlay",
+      "testRigExecWrinkle",
+      "testRigExecWrinkleRuntime"
+    ],
+    "rigExecSampler": [
+      "testRigExecAffineFrames",
+      "testRigExecConstraints",
+      "testRigExecDeltaMush",
+      "testRigExecFrozenContext",
+      "testRigExecImaging",
+      "testRigExecImagingFineClusters",
+      "testRigExecImagingFineClustersReference",
+      "testRigExecImagingFrameCache",
+      "testRigExecImagingMultiStage",
+      "testRigExecImagingPlayback",
+      "testRigExecLattice",
+      "testRigExecLiveDebug_parallel",
+      "testRigExecLiveDebug_serial",
+      "testRigExecNoAuthoring",
+      "testRigExecProfilerApi",
+      "testRigExecRuntimeAutoClavicle",
+      "testRigExecRuntimeGeometry",
+      "testRigExecRuntimeGeometryFineClusters",
+      "testRigExecRuntimeInputs",
+      "testRigExecRuntimeLoader",
+      "testRigExecRuntimePose",
+      "testRigExecRuntimePoseFineClusters",
+      "testRigExecRuntimeWeights",
+      "testRigExecRuntimeWeightsFineClusters",
+      "testRigExecSurfaceBinding",
+      "testRigExecSurfaceSnap",
+      "testRigExecTouchPose",
+      "testRigExecUpstreamInputs",
+      "testRigExecWeightOverlay",
+      "testRigExecWrinkle"
+    ],
+    "rigExecRigging": [
+      "testRigExecBinary",
+      "testRigExecDeltaMush",
+      "testRigExecExternalMovers",
+      "testRigExecFrozenContext",
+      "testRigExecLeaves",
+      "testRigExecPack",
+      "testRigExecRigBuilder",
+      "testRigExecSchemaAuthoring",
+      "testRigExecSchemaAuthoringMissing",
+      "testRigExecStandalone",
+      "testRigExecWrinkle"
+    ],
+    "rigExecStandalone": [
+      "testRigExecPack",
+      "testRigExecStandalone"
+    ],
+    "rigExecImaging": [
+      "testRigExecImaging",
+      "testRigExecImagingFineClusters",
+      "testRigExecImagingFineClustersReference",
+      "testRigExecImagingFrameCache",
+      "testRigExecImagingMultiStage",
+      "testRigExecImagingPlayback",
+      "testRigExecLiveDebug_parallel",
+      "testRigExecLiveDebug_serial",
+      "testRigExecNoAuthoring",
+      "testRigExecProfilerApi",
+      "testRigExecTouchPose",
+      "testRigExecUpstreamInputs",
+      "testRigExecWeightOverlay"
+    ]
+  },
+  "usd_free_executables": [
+    "testRigExecDeltaMushRuntime",
+    "testRigExecFormat",
+    "testRigExecWrinkleRuntime"
+  ],
+  "notes": [
+    "Link edges are not split into PUBLIC and PRIVATE.",
+    "rigexec_add_graph_test cone and graph variants are synthesized.",
+    "Example-fixture loops (IN LISTS) are not expanded.",
+    "A change inside libs/rigExec selects every test that links the rigExec shared library."
+  ]
+}
