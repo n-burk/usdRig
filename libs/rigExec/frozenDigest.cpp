@@ -375,7 +375,8 @@ RigExecPatchFrozenAvarConstants(const RigExecFrozenProgram &base,
         return fail("avar region changed shape: re-freeze, do not patch");
     }
     auto snapshot = std::make_shared<RigExecFrozenProgram>();
-    _CloneImpl(S, &snapshot->program);
+    // Settled after the patch below; the copy's lanes inherit that verdict.
+    _CloneImpl(S, &snapshot->program, _CloneVerdict::Defer);
     RigExecBakedProgramImpl &P = snapshot->program;
     // Every field the live patch writes, carried onto the copy. The
     // consumed table for constant slots comes along too: no run recomputes
@@ -406,6 +407,7 @@ RigExecPatchFrozenAvarConstants(const RigExecFrozenProgram &base,
     P.promotedAvars = L.promotedAvars;
     P.varyingInputs = L.varyingInputs;
     P.avarConstants = L.avarConstants;
+    ++P.avarConstantSerial;
     // And every value edit routed since the snapshot was taken or last
     // patched, added to the copy's own pending ones: the copy's first run
     // owes them all. Asked of the per-index edit counts, not of the live
@@ -446,6 +448,7 @@ RigExecPatchFrozenAvarConstants(const RigExecFrozenProgram &base,
     snapshot->moverHasMethod = base.moverHasMethod;
     snapshot->moverDefaultWeightKeys = base.moverDefaultWeightKeys;
     snapshot->weightArrayKeys = base.weightArrayKeys;
+    _SettleCloneVerdict(&P);
     *out = std::move(snapshot);
     return true;
 }

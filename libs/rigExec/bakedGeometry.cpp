@@ -3116,6 +3116,13 @@ RigExecBakedAssembleFromLeaves(
         if (!sample.layout || !RigExecSameBlendLayout(*sample.layout,*layout))
             sample.layout = std::move(layout);
     }
+    // The sum reuses the buffer the packet before last held: it assigns
+    // zeros before it accumulates, and every failure leaves it empty. Only
+    // where channels exist, which is where the sum always runs.
+    if (revision->op == RigExecRevisionOp::BlendShape &&
+        !revision->blendChannels.empty()) {
+        values.blendDeltas.swap(revision->deltasSpare);
+    }
     GatherBlendChannels(B, revision, _LeafBlendReads{*view.values},
                         /*record=*/true, &values);
     return RigExecAssembleGeometry(revision->kernelRecord.op, revision->kernelRecord.binding, view,
@@ -4179,6 +4186,11 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
                                     revision.parameters.blendDeltas.data(),
                                     revision.parameters.blendDeltas.size())) {
             ++revision.deltasVersion;
+        }
+        // The replaced packet's delta buffer becomes the next assembly's
+        // (RigExecBakedAssembleFromLeaves); nothing reads it before then.
+        if (revision.op == RigExecRevisionOp::BlendShape) {
+            revision.deltasSpare = std::move(revision.parameters.blendDeltas);
         }
         revision.parameters = std::move(assembled);
         if (rangeLattice) {

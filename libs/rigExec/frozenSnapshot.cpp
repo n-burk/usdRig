@@ -3,6 +3,7 @@
 #include "frozenContextInternal.h"
 #include "inputReplay.h"
 #include "bakedOpValues.h"
+#include "pxr/base/tf/getenv.h"
 #include <algorithm>
 #include <cmath>
 #include <set>
@@ -12,6 +13,68 @@ namespace rigExec {
 using namespace frozenDetail;
 
 namespace frozenDetail {
+
+namespace {
+
+// Lets go of a scratch buffer whose contents are not state.
+template <class T>
+void
+_DropScratch(std::vector<T> *scratch)
+{
+    std::vector<T>().swap(*scratch);
+}
+
+// A revision's idle scratch: every step that reads one of these buffers
+// fills it first in the same step.
+void
+_DropRevisionScratch(RigExecBakedProgramImpl::GeomRevision *revision)
+{
+    _DropScratch(&revision->resolveScratch);
+    _DropScratch(&revision->deltasSpare);
+    _DropScratch(&revision->wholeEntering);
+    for (RigExecBakedPointsBinding &binding : revision->pointBindings) {
+        _DropScratch(&binding.gather);
+    }
+    for (auto &channel : revision->blendChannels) {
+        for (auto &sample : channel.samples) {
+            _DropScratch(&sample.pointBinding.gather);
+        }
+    }
+}
+
+// Whether the op keys \p copy holds, copied from \p src, stand: \p src
+// completed a run, and every value an op writes is initialized, exactly
+// keyed, and still described by its key in \p copy. A pure function of
+// the two programs' contents.
+bool
+_CloneKeysStand(const RigExecBakedProgramImpl &src,
+                const RigExecBakedProgramImpl &copy)
+{
+    bool retainedComplete = src.everRan && src.opAdapter.compiled &&
+        src.opAdapter.everRan && src.opAdapter.inputKeys.size()==src.steps.size() &&
+        src.opAdapter.sourceKeys.size()==src.steps.size() &&
+        src.opAdapter.inputExact.size()==src.steps.size();
+    for(const auto &op:src.opGraph.ops)for(const auto id:op.descriptor.writes) {
+        if(id>=copy.opAdapter.values.size()) { retainedComplete=false; continue; }
+        const auto &value=copy.opAdapter.values[size_t(id)];
+        const auto domain=RigExecBakedSlotDomain(value.domain);
+        if(!value.initialized || !RigExecBakedOpValueKeyIsExact(copy,domain,value.slot)) {
+            retainedComplete=false; continue;
+        }
+        if(!RigExecBakedOpValueKeyStands(copy,domain,value.slot,value.key))
+            retainedComplete=false;
+    }
+    return retainedComplete;
+}
+
+void
+_AdoptCloneVerdict(RigExecBakedProgramImpl *program, bool stands)
+{
+    program->opAdapter.everRan = stands;
+    if (!stands) program->opAdapter.retainedFirst.clear();
+}
+
+}  // namespace
 
 // Memberwise program clone. The copy is explicit, field by field, in struct
 // order. Live pointers are nulled -- the worker repoints
@@ -23,7 +86,8 @@ namespace frozenDetail {
 // missing per-frame field silently changes its history. The bit-identity
 // test is the backstop, not the discipline.
 void
-_CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst)
+_CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst,
+           _CloneVerdict verdict)
 {
     RigExecBakedProgramImpl &D = *dst;
     D.evaluator = nullptr;
@@ -121,6 +185,9 @@ _CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst)
     D.needFinal = src.needFinal;
     D.needBase = src.needBase;
     D.solvers = src.solvers;
+    for (auto &solver : D.solvers) {
+        _DropScratch(&solver.ribbonPointsBinding.gather);
+    }
     D.guideSolvers = src.guideSolvers;
     D.solverIndex = src.solverIndex;
     D.aggregates = src.aggregates;
@@ -134,6 +201,8 @@ _CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst)
     D.excludedSteps = src.excludedSteps;
     D.opGraph = src.opGraph;
     D.opAdapter = src.opAdapter;
+    // The reset judge only: the clone's first execution resets whole.
+    D.opWorkspace.verifyReset = src.opWorkspace.verifyReset;
     D.verifyChainVersions = src.verifyChainVersions;
     D.chainContentKeys = src.chainContentKeys;
     D.chainVersionMismatches = 0;
@@ -148,6 +217,7 @@ _CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst)
     D.verifySourceKeys = src.verifySourceKeys;
     D.sourceKeyMismatches = 0;
     D.sourceKeysBuilt = 0;
+    D.sourceWatchVisits = 0;
     D.composeGroups = src.composeGroups;
     // The space switches, and the per-slot index the compose step
     // asks before it takes the switched branch. Left out, the
@@ -232,20 +302,26 @@ _CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst)
     D.measurementSuspended = false;
     // The steps above carry the source's stamps; the clone clears them too.
     D.stampedSteps = src.stampedSteps;
+    D.timedClusters = src.timedClusters;
     D.jointMatrixPublished = src.jointMatrixPublished;
     D.chains = src.chains;
     // Per-consumer overlays borrow the live source layer only during a body.
     // A frozen clone rebases them on its own source layer when consumed.
     // Published and computed vertex groups stay shared with the source; the
     // clone lets go of the spare buffers, so the source's writers still find
-    // their scratch unique and the clone allocates on its first write.
+    // their scratch unique and the clone allocates on its first write. The
+    // same for the revisions' idle scratch, whose contents are not state.
     for (auto &chain : D.chains) {
         for (auto &revision : chain.revisions) {
             revision.revisionInputs.Clear();
             for (auto &group : revision.groups) RigExecDropGroupSpare(&group);
+            _DropRevisionScratch(&revision);
         }
         for (auto &group : chain.baseGroups) RigExecDropGroupSpare(&group);
-        for (auto &derived : chain.derived) derived.revision.revisionInputs.Clear();
+        for (auto &derived : chain.derived) {
+            derived.revision.revisionInputs.Clear();
+            _DropRevisionScratch(&derived.revision);
+        }
     }
     D.deltaValues = src.deltaValues;
     D.deltaPresent = src.deltaPresent;
@@ -258,6 +334,10 @@ _CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst)
     D.weightProgram = src.weightProgram;
     D.weightCycleBlocked = src.weightCycleBlocked;
     D.weightFields = src.weightFields;
+    for (auto &field : D.weightFields) {
+        _DropScratch(&field.enteringGather);
+        for (auto &input : field.pointReads) _DropScratch(&input.binding.gather);
+    }
     D.volumePlacementBase = src.volumePlacementBase;
     D.weightIndex = src.weightIndex;
     D.volumePlacement = src.volumePlacement;
@@ -305,6 +385,18 @@ _CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst)
     D.pathLeafSamples = src.pathLeafSamples;
     // The run the copied leaves' observed values and versions refer to.
     D.pathLeafRun = src.pathLeafRun;
+    // The prologue's Build knobs and the stamps its flags answer to; a stamp
+    // that disagrees only makes the clone's next pass whole. The sparse
+    // index and the override paths are rebuilt by their owners.
+    D.pathLeafGating = src.pathLeafGating;
+    D.verifyPathLeafGating = src.verifyPathLeafGating;
+    D.pathLeafGateMismatches = 0;
+    D.leafFlagEpoch = src.leafFlagEpoch;
+    D.avarConstantSerial = src.avarConstantSerial;
+    D.sparseSampling = src.sparseSampling;
+    D.verifySparseSampling = src.verifySparseSampling;
+    D.sparseSamplingMismatches = 0;
+    D.leafVisits = 0;
     D.resolvedRoutedPrims = src.resolvedRoutedPrims;
     D.avarsDisturbed = src.avarsDisturbed;
     D.folded = src.folded;
@@ -336,6 +428,9 @@ _CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst)
     D.poseProviderInputs = src.poseProviderInputs;
     D.connectedPoseProviders = src.connectedPoseProviders;
     D.providerParentRawLeaves = src.providerParentRawLeaves;
+    D.providerPruneViolations = src.providerPruneViolations;
+    D.providerStepsPruned = src.providerStepsPruned;
+    D.providerPruneRoots = src.providerPruneRoots;
     D.providerRefreshes = src.providerRefreshes;
     D.providerRefreshBefore = src.providerRefreshBefore;
     D.propertyVersionCount = src.propertyVersionCount;
@@ -367,25 +462,34 @@ _CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst)
     D.readerWalkMoved = src.readerWalkMoved;
     D.readerWalkChanged = src.readerWalkChanged;
     D.avarHeadReads = src.avarHeadReads;
+    D.verifyCloneKeys = src.verifyCloneKeys;
+    D.cloneVerdictMismatches = 0;
     // Adopt only a completed snapshot whose owned outputs still match the
     // signatures copied from that completion. A patched or poisoned payload
     // must run cold rather than borrowing a signature for a different value.
-    bool retainedComplete = src.everRan && src.opAdapter.compiled &&
-        src.opAdapter.everRan && src.opAdapter.inputKeys.size()==src.steps.size() &&
-        src.opAdapter.sourceKeys.size()==src.steps.size() &&
-        src.opAdapter.inputExact.size()==src.steps.size();
-    for(const auto &op:src.opGraph.ops)for(const auto id:op.descriptor.writes) {
-        if(id>=D.opAdapter.values.size()) { retainedComplete=false; continue; }
-        const auto &value=D.opAdapter.values[size_t(id)];
-        const auto domain=RigExecBakedSlotDomain(value.domain);
-        if(!value.initialized || !RigExecBakedOpValueKeyIsExact(D,domain,value.slot)) {
-            retainedComplete=false; continue;
+    switch (verdict) {
+    case _CloneVerdict::Compute:
+        _AdoptCloneVerdict(&D, _CloneKeysStand(src, D));
+        break;
+    case _CloneVerdict::Defer:
+        // everRan and retainedFirst as copied; the caller settles them.
+        break;
+    case _CloneVerdict::Inherit:
+        // The check is a pure function of contents the copy shares with its
+        // settled source, so the source's verdict is the copy's.
+        _AdoptCloneVerdict(&D, src.opAdapter.everRan);
+        if (src.verifyCloneKeys &&
+            _CloneKeysStand(src, D) != src.opAdapter.everRan) {
+            ++D.cloneVerdictMismatches;
         }
-        if(!RigExecBakedOpValueKeyStands(D,domain,value.slot,value.key))
-            retainedComplete=false;
+        break;
     }
-    D.opAdapter.everRan=retainedComplete;
-    if(!retainedComplete)D.opAdapter.retainedFirst.clear();
+}
+
+void
+_SettleCloneVerdict(RigExecBakedProgramImpl *program)
+{
+    _AdoptCloneVerdict(program, _CloneKeysStand(*program, *program));
 }
 
 } // namespace frozenDetail
@@ -528,7 +632,10 @@ RigExecFreezeProgram(const RigExecRigEvaluator &evaluator,
     const RigExecBakedProgramImpl &B =
         evaluator.GetBakedProgram()->GetStepGraph();
     auto snapshot = std::make_shared<RigExecFrozenProgram>();
-    _CloneImpl(B, &snapshot->program);
+    // Settled below, after the snapshot's own edits; its lanes inherit it.
+    _CloneImpl(B, &snapshot->program, _CloneVerdict::Defer);
+    snapshot->program.verifyCloneKeys =
+        TfGetenvBool("RIGEXEC_VERIFY_CLONE_KEYS", false);
     // Workers clone this snapshot and index its spelled slot paths unchecked.
     if (!TF_VERIFY(snapshot->program.pathTexts &&
                    snapshot->program.pathTexts->size() ==
@@ -555,6 +662,7 @@ RigExecFreezeProgram(const RigExecRigEvaluator &evaluator,
         reference.oraclePublications.emplace();
         RigExecBakedBeginOracleReference(&reference, 0, B.lastTime);
     }
+    _SettleCloneVerdict(&snapshot->program);
     if (B.jointSolverBinding) {
         snapshot->jointSolverBinding = *B.jointSolverBinding;
     }

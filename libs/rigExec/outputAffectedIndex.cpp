@@ -48,18 +48,18 @@ RigExecOutputAffectedIndex::Build(const RigExecBakedProgramImpl &program,
     if (_clusterCount == 0) {
         return;
     }
-    // The closures, copied -- not re-derived. Build refuses a program whose
-    // cones do not cover its clustering (a BuildCones that never ran) by
-    // treating it as empty: an index that answered empty closures would skip
-    // every cluster and serve stale poses.
-    if (program.cones.cone.size() != _clusterCount) {
+    // The closures, shared -- not re-derived, not copied: BuildCones sizes
+    // every set to the clustering and never writes the table again. Build
+    // refuses a program whose cones do not cover its clustering (a
+    // BuildCones that never ran) by treating it as empty: an index that
+    // answered empty closures would skip every cluster and serve stale
+    // poses.
+    if (program.cones.Cone().size() != _clusterCount) {
         Clear();
         return;
     }
     _cones = program.cones.cone;
-    for (RigExecBakedClusterSet &cone : _cones) {
-        cone.words.resize((_clusterCount + 63) / 64, 0);
-    }
+    const std::vector<RigExecBakedClusterSet> &cones = *_cones;
     _always = program.cones.always;
     _always.words.resize((_clusterCount + 63) / 64, 0);
     _empty.Resize(_clusterCount);
@@ -72,8 +72,8 @@ RigExecOutputAffectedIndex::Build(const RigExecBakedProgramImpl &program,
         if (step >= 0 &&
             size_t(step) < program.clustering.clusterOf.size()) {
             const int cluster = program.clustering.clusterOf[size_t(step)];
-            if (cluster >= 0 && size_t(cluster) < _cones.size()) {
-                _varying.Union(_cones[size_t(cluster)]);
+            if (cluster >= 0 && size_t(cluster) < cones.size()) {
+                _varying.Union(cones[size_t(cluster)]);
             }
         }
     }
@@ -81,8 +81,8 @@ RigExecOutputAffectedIndex::Build(const RigExecBakedProgramImpl &program,
         if (step >= 0 &&
             size_t(step) < program.clustering.clusterOf.size()) {
             const int cluster = program.clustering.clusterOf[size_t(step)];
-            if (cluster >= 0 && size_t(cluster) < _cones.size()) {
-                _override.Union(_cones[size_t(cluster)]);
+            if (cluster >= 0 && size_t(cluster) < cones.size()) {
+                _override.Union(cones[size_t(cluster)]);
             }
         }
     }
@@ -247,7 +247,7 @@ RigExecOutputAffectedIndex::Clear()
 {
     _clusterCount = 0;
     _epochDigest = 0;
-    _cones.clear();
+    _cones.reset();
     _always = RigExecBakedClusterSet();
     _varying = RigExecBakedClusterSet();
     _override = RigExecBakedClusterSet();
@@ -305,8 +305,8 @@ RigExecOutputAffectedIndex::AffectedClusters(
     RigExecBakedClusterSet out;
     out.Resize(_clusterCount);
     for (const int seed : seeds) {
-        if (seed >= 0 && size_t(seed) < _cones.size()) {
-            out.Union(_cones[size_t(seed)]);
+        if (seed >= 0 && size_t(seed) < _clusterCount) {
+            out.Union((*_cones)[size_t(seed)]);
         }
     }
     _walks.fetch_add(1, std::memory_order_relaxed);
@@ -326,7 +326,7 @@ RigExecOutputAffectedIndex::AffectedClusters(
         const bool set = word < seeds.words.size() &&
                          ((seeds.words[word] >> (c & 63)) & 1) != 0;
         if (set) {
-            out.Union(_cones[c]);
+            out.Union((*_cones)[c]);
         }
     }
     _walks.fetch_add(1, std::memory_order_relaxed);
@@ -352,7 +352,7 @@ RigExecOutputAffectedIndex::AffectedByControls(
             continue;
         }
         for (const int seed : found->second) {
-            out.Union(_cones[size_t(seed)]);
+            out.Union((*_cones)[size_t(seed)]);
         }
     }
     _walks.fetch_add(1, std::memory_order_relaxed);
@@ -370,10 +370,10 @@ RigExecOutputAffectedIndex::AllClusters() const
 const RigExecBakedClusterSet &
 RigExecOutputAffectedIndex::ConeOf(int cluster) const
 {
-    if (cluster < 0 || size_t(cluster) >= _cones.size()) {
+    if (cluster < 0 || size_t(cluster) >= _clusterCount) {
         return _empty;
     }
-    return _cones[size_t(cluster)];
+    return (*_cones)[size_t(cluster)];
 }
 
 std::vector<RigExecControlId>

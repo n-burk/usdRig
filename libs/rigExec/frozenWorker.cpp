@@ -36,9 +36,11 @@ RigExecFrozenWorkspace::RigExecFrozenWorkspace(
 {
     _impl->snapshot = std::move(snapshot);
     _impl->worker.snapshot = _impl->snapshot.get();
-    _CloneImpl(_impl->snapshot->program, &_impl->worker.B);
+    _CloneImpl(_impl->snapshot->program, &_impl->worker.B,
+               _CloneVerdict::Inherit);
     _impl->worker.B.opAdapter.parallel = false;
-    // _CloneImpl adopts only completed owned output/signature state.
+    // _CloneImpl adopts only completed owned output/signature state, by the
+    // snapshot's settled verdict.
 }
 
 RigExecFrozenWorkspace::~RigExecFrozenWorkspace() = default;
@@ -689,7 +691,7 @@ _RunFrozen(const RigExecFrozenEvalContext &context,
         if (!lane) return false;
     } else {
         ephemeral.snapshot = &snapshot;
-        _CloneImpl(snapshot.program, &ephemeral.B);
+        _CloneImpl(snapshot.program, &ephemeral.B, _CloneVerdict::Inherit);
         ephemeral.B.opAdapter.parallel = false;
         // The same completed-state guard applies to ephemeral workers.
         lane = &ephemeral;

@@ -2225,8 +2225,8 @@ TestTheConeClosuresAreSound(const BuiltProgram &built, const char *name)
     const auto &B=built.program->GetStepGraph();
     const size_t clusters=B.clustering.clusters.size();
     const size_t words=(clusters+63)/64;
-    CHECK(B.cones.cone.size()==clusters);
-    if(B.cones.cone.size()!=clusters)return;
+    CHECK(B.cones.Cone().size()==clusters);
+    if(B.cones.Cone().size()!=clusters)return;
     for(const auto &cluster:B.clustering.clusters) {
         for(int next:cluster.succs) {
             CHECK(next>=0 && size_t(next)<clusters);
@@ -2250,8 +2250,8 @@ TestTheConeClosuresAreSound(const BuiltProgram &built, const char *name)
         rank[size_t(c)]=int(i);
     }
     for(size_t c=0;c<clusters;++c) {
-        CHECK(B.cones.cone[c].words.size()==words);
-        if(B.cones.cone[c].words.size()!=words)return;
+        CHECK(B.cones.Cone()[c].words.size()==words);
+        if(B.cones.Cone()[c].words.size()!=words)return;
         for(int next:B.clustering.clusters[c].succs) {
             CHECK(next>=0 && size_t(next)<clusters);
             if(next<0 || size_t(next)>=clusters)return;
@@ -2260,17 +2260,17 @@ TestTheConeClosuresAreSound(const BuiltProgram &built, const char *name)
         }
         if(clusters%64) {
             const uint64_t mask=(uint64_t(1)<<(clusters%64))-1;
-            CHECK((B.cones.cone[c].words.back()&~mask)==0);
+            CHECK((B.cones.Cone()[c].words.back()&~mask)==0);
         }
     }
     size_t edges=0,wordChecks=0;
-    const size_t broken=ConeRecurrenceViolations(B.clustering,B.cones.cone,&edges,&wordChecks);
+    const size_t broken=ConeRecurrenceViolations(B.clustering,B.cones.Cone(),&edges,&wordChecks);
     if(broken) {
         ++failures;
         std::printf("FAIL %s: %zu cone recurrence word violation(s)\n",name,broken);
     }
     size_t reach=0;
-    for(const auto &cone:B.cones.cone)reach+=cone.Count();
+    for(const auto &cone:B.cones.Cone())reach+=cone.Count();
     std::printf("  %s: %zu cluster(s), %.1f cluster(s) in the average cone; %zu edges, %zu word checks\n",
         name,clusters,clusters?double(reach)/double(clusters):0.0,edges,wordChecks);
 }
@@ -2598,7 +2598,7 @@ ConeBound(const RigExecBakedProgramImpl &B,
     }
     for (size_t c = 0; c < clusters; ++c) {
         if (seeds.Test(int(c))) {
-            closed.Union(B.cones.cone[c]);
+            closed.Union(B.cones.Cone()[c]);
         }
     }
     return closed.Count();
@@ -9229,6 +9229,57 @@ TestAWholeSkinChunkOutlivesAStaleFuse()
                 forgotten);
 }
 
+/// The cone table is built once and immutable after: BuildCones publishes a
+/// new table rather than writing the one a frozen snapshot or an affected
+/// index may share, and cones that never built answer an empty table.
+void
+TestTheConeTableIsPublishedOnce()
+{
+    const BuiltProgram built = BuildStage(MakeStackedChainStage());
+    if (!built.program) {
+        ++failures;
+        std::printf("FAIL cone table: the stacked chain did not build\n");
+        return;
+    }
+    // Build allocates the program non-const, and nothing else holds it.
+    RigExecBakedProgramImpl &B =
+        const_cast<RigExecBakedProgramImpl &>(built.program->GetStepGraph());
+    const size_t clusters = B.clustering.clusters.size();
+    CHECK(clusters > 0);
+    CHECK(B.cones.cone != nullptr);
+    CHECK(B.cones.Cone().size() == clusters);
+    if (!B.cones.cone || B.cones.Cone().size() != clusters) {
+        return;
+    }
+    // A holder of the table, as a snapshot or the bridge's index is.
+    const std::shared_ptr<const std::vector<RigExecBakedClusterSet>> held =
+        B.cones.cone;
+    std::vector<std::vector<uint64_t>> words;
+    for (const RigExecBakedClusterSet &cone : *held) {
+        words.push_back(cone.words);
+    }
+    RigExecBakedBuildCones(&B);
+    CHECK(B.cones.cone != nullptr);
+    CHECK(B.cones.cone != held);
+    // The holder's table is untouched, and the same program closes to the
+    // same cones.
+    CHECK(held->size() == clusters);
+    CHECK(B.cones.Cone().size() == clusters);
+    size_t differ = 0;
+    for (size_t c = 0; c < clusters && c < held->size() &&
+                       c < B.cones.Cone().size(); ++c) {
+        differ += (*held)[c].words != words[c] ? 1 : 0;
+        differ += B.cones.Cone()[c].words != words[c] ? 1 : 0;
+    }
+    CHECK(differ == 0);
+    const RigExecBakedCones none{};
+    CHECK(none.cone == nullptr);
+    CHECK(none.Cone().empty());
+    CHECK(&none.Cone() == &kRigExecBakedNoCones);
+    std::printf("  the cone table of %zu cluster(s) is published once\n",
+                clusters);
+}
+
 }  // namespace
 
 int
@@ -9523,6 +9574,8 @@ main(int argc, char **argv)
         TestWholeReadersGatherAfterRangeRevisions();
     }
     TestTheLiveGrainFollowsTheMachine(examplesDir + "/biped/Biped.usda");
+    // Wave 7 W7-cow: the shared cone table.
+    TestTheConeTableIsPublishedOnce();
     if (failures) {
         std::printf("%d FAILURE(S)\n", failures);
         return 1;

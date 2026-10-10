@@ -2539,6 +2539,10 @@ def Xform "Asset"
     poison.SetTranslate(GfVec3d(0, 100, 0));
     const_cast<RigExecFrozenProgram &>(*poisoned)
         .program.volumePlacement[size_t(guideSlot->second)] = poison;
+    // An edit after the freeze settles the snapshot's clone verdict again,
+    // as RigExecPatchFrozenAvarConstants does: its lanes inherit it.
+    frozenDetail::_SettleCloneVerdict(
+        &const_cast<RigExecFrozenProgram &>(*poisoned).program);
 
     auto workspace = RigExecCreateFrozenWorkspace(poisoned);
     CHECK(workspace);
@@ -7382,6 +7386,485 @@ TestFrozenEnvelopeVolumesRecovery(const std::string &examples)
     }
 }
 
+// RIGEXEC_VERIFY_CLONE_KEYS set to \p on for one scope (a freeze inside it
+// reads it), and put back as it was after.
+struct _CloneKeysJudgeScope {
+    explicit _CloneKeysJudgeScope(bool on)
+        : before(TfGetenv("RIGEXEC_VERIFY_CLONE_KEYS"))
+    {
+        TfSetenv("RIGEXEC_VERIFY_CLONE_KEYS", on ? "1" : "0");
+    }
+    ~_CloneKeysJudgeScope()
+    {
+        if (before.empty()) {
+            TfUnsetenv("RIGEXEC_VERIFY_CLONE_KEYS");
+        } else {
+            TfSetenv("RIGEXEC_VERIFY_CLONE_KEYS", before);
+        }
+    }
+    const std::string before;
+};
+
+// The chain revision \p mover runs, or null.
+static const RigExecBakedProgramImpl::GeomRevision *
+_RevisionOf(const RigExecBakedProgramImpl &B, const SdfPath &mover)
+{
+    for (const auto &chain : B.chains) {
+        for (const auto &revision : chain.revisions) {
+            if (revision.moverPath == mover) {
+                return &revision;
+            }
+        }
+    }
+    return nullptr;
+}
+
+// The capacity of every idle scratch buffer a clone lets go of.
+static size_t
+_HeldScratch(const RigExecBakedProgramImpl &B)
+{
+    size_t held = 0;
+    const auto revisionScratch =
+        [&held](const RigExecBakedProgramImpl::GeomRevision &revision) {
+            held += revision.resolveScratch.capacity() +
+                    revision.deltasSpare.capacity() +
+                    revision.wholeEntering.capacity();
+            for (const RigExecBakedPointsBinding &binding :
+                 revision.pointBindings) {
+                held += binding.gather.capacity();
+            }
+            for (const auto &channel : revision.blendChannels) {
+                for (const auto &sample : channel.samples) {
+                    held += sample.pointBinding.gather.capacity();
+                }
+            }
+        };
+    for (const auto &chain : B.chains) {
+        for (const auto &revision : chain.revisions) {
+            revisionScratch(revision);
+        }
+        for (const auto &derived : chain.derived) {
+            revisionScratch(derived.revision);
+        }
+    }
+    for (const auto &field : B.weightFields) {
+        held += field.enteringGather.capacity();
+        for (const auto &input : field.pointReads) {
+            held += input.binding.gather.capacity();
+        }
+    }
+    for (const auto &solver : B.solvers) {
+        held += solver.ribbonPointsBinding.gather.capacity();
+    }
+    return held;
+}
+
+// The blend face (examples/04_BlendShapeFace.usda) with Smile's weight keyed
+// in the session layer at frames 1-5, frame 5 repeating frame 3's weight.
+// The session's time samples are stronger than the root layer's spline;
+// BrowRaise holds its spline's first value (0) over those frames.
+static UsdStageRefPtr
+_KeyedBlendFace(const std::string &examplesDir)
+{
+    UsdStageRefPtr stage =
+        UsdStage::Open(examplesDir + "/04_BlendShapeFace.usda");
+    if (!stage) {
+        return stage;
+    }
+    stage->SetEditTarget(stage->GetSessionLayer());
+    const UsdAttribute weight = stage->GetAttributeAtPath(
+        SdfPath("/FaceAsset/Rig/BlendInputs/Smile.inputs:weight"));
+    CHECK(weight);
+    const float keys[5] = {0.2f, 0.6f, 0.9f, 0.4f, 0.9f};
+    for (int frame = 1; frame <= 5; ++frame) {
+        CHECK(weight.Set(keys[frame - 1], UsdTimeCode(double(frame))));
+    }
+    return stage;
+}
+
+static VtVec3fArray
+_FaceCardPoints(const RigExecRigPose &pose)
+{
+    const auto found =
+        pose.movedProperties.find(SdfPath("/FaceAsset/Geom/FaceCard.points"));
+    if (found == pose.movedProperties.end() ||
+        !found->second.IsHolding<VtVec3fArray>()) {
+        return VtVec3fArray();
+    }
+    return found->second.UncheckedGet<VtVec3fArray>();
+}
+
+static bool
+_SamePointBits(const VtVec3fArray &a, const VtVec3fArray &b)
+{
+    return a.size() == b.size() &&
+           (a.empty() ||
+            std::memcmp(a.cdata(), b.cdata(), a.size() * sizeof(GfVec3f)) ==
+                0);
+}
+
+// A freeze shares the live program's cone table rather than copying it, and
+// so does every lane cloned from the snapshot. A rebuild publishes a new
+// table; the snapshot and its lane keep the one they share.
+void
+TestAFreezeSharesTheConeTable(const std::string &examplesDir)
+{
+    UsdStageRefPtr stage = UsdStage::Open(examplesDir + "/biped/Biped.usda");
+    CHECK(stage);
+    if (!stage) {
+        return;
+    }
+    SdfPath rig;
+    for (const UsdPrim &prim : stage->TraverseAll()) {
+        if (prim.GetTypeName() == "RigExecRoot") {
+            rig = prim.GetPath();
+            break;
+        }
+    }
+    CHECK(!rig.IsEmpty());
+    if (rig.IsEmpty()) {
+        return;
+    }
+    RigExecRigEvaluator evaluator(stage, rig);
+    std::vector<std::string> errors;
+    CHECK(evaluator.Compile(&errors));
+    CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
+    const RigExecBakedProgram *program = evaluator.GetBakedProgram();
+    CHECK(program != nullptr);
+    if (!program) {
+        return;
+    }
+    const RigExecBakedProgramImpl &live = program->GetStepGraph();
+    const size_t clusters = live.clustering.clusters.size();
+    CHECK(clusters > 0);
+    CHECK(live.cones.cone != nullptr);
+    CHECK(live.cones.Cone().size() == clusters);
+    const void *const table = live.cones.cone.get();
+    std::shared_ptr<const RigExecFrozenProgram> frozen;
+    std::string error;
+    CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
+    if (!frozen) {
+        std::printf("FAIL cone sharing: freeze refused: %s\n", error.c_str());
+        ++failures;
+        return;
+    }
+    CHECK(frozen->program.cones.cone.get() == table);
+    auto lane = std::make_unique<RigExecBakedProgramImpl>();
+    frozenDetail::_CloneImpl(frozen->program, lane.get(),
+                             frozenDetail::_CloneVerdict::Inherit);
+    CHECK(lane->cones.cone.get() == table);
+
+    const size_t builds = evaluator.GetBakedProgramBuildCount();
+    CHECK(evaluator.Compile(&errors));
+    CHECK(evaluator.GetBakedProgramBuildCount() > builds);
+    const RigExecBakedProgram *rebuilt = evaluator.GetBakedProgram();
+    CHECK(rebuilt != nullptr);
+    if (rebuilt) {
+        const RigExecBakedProgramImpl &after = rebuilt->GetStepGraph();
+        CHECK(after.cones.cone != nullptr);
+        CHECK(after.cones.cone.get() != table);
+        CHECK(after.cones.Cone().size() == after.clustering.clusters.size());
+    }
+    CHECK(frozen->program.cones.cone.get() == table);
+    CHECK(frozen->program.cones.Cone().size() == clusters);
+    CHECK(lane->cones.cone.get() == table);
+}
+
+// A lane inherits its snapshot's settled clone verdict, and the judge
+// (RIGEXEC_VERIFY_CLONE_KEYS, read at freeze) agrees with it. A patched
+// snapshot settles its own verdict after the patch, and its jobs equal
+// live. A key edited after the settle is caught by the judge, which counts
+// without deciding, and a settle turns the verdict cold.
+void
+TestAWorkspaceInheritsTheVerdict()
+{
+    _TinyRigOptions options;
+    options.staticTx = true;
+    const SdfPath rig("/Asset/Rig");
+    std::string error;
+    RigExecBackgroundScheduler scheduler;
+
+    UsdStageRefPtr stage = MakeTinyRigWith(options);
+    RigExecRigEvaluator evaluator(stage, rig);
+    CHECK(evaluator.Compile());
+    CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
+    CHECK(evaluator.Evaluate(UsdTimeCode(2.0)).valid);
+    std::shared_ptr<const RigExecFrozenProgram> unjudged, frozen;
+    {
+        const _CloneKeysJudgeScope judge(false);
+        CHECK(RigExecFreezeProgram(evaluator, &unjudged, &error));
+    }
+    {
+        const _CloneKeysJudgeScope judge(true);
+        CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
+    }
+    CHECK(unjudged && frozen);
+    if (!unjudged || !frozen) {
+        std::printf("FAIL inherited verdict: freeze refused: %s\n",
+                    error.c_str());
+        ++failures;
+        return;
+    }
+    CHECK(!unjudged->program.verifyCloneKeys);
+    CHECK(frozen->program.verifyCloneKeys);
+    // A completed run's snapshot: its keys stand.
+    CHECK(frozen->program.opAdapter.everRan);
+    {
+        auto inherited = std::make_unique<RigExecBakedProgramImpl>();
+        frozenDetail::_CloneImpl(frozen->program, inherited.get(),
+                                 frozenDetail::_CloneVerdict::Inherit);
+        auto computed = std::make_unique<RigExecBakedProgramImpl>();
+        frozenDetail::_CloneImpl(frozen->program, computed.get());
+        CHECK(inherited->opAdapter.everRan ==
+              frozen->program.opAdapter.everRan);
+        CHECK(inherited->opAdapter.everRan == computed->opAdapter.everRan);
+        CHECK(inherited->opAdapter.retainedFirst ==
+              computed->opAdapter.retainedFirst);
+        CHECK(inherited->verifyCloneKeys);
+        CHECK(inherited->cloneVerdictMismatches == 0);
+    }
+    RigExecFrameInputs at3;
+    CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(3.0), {}, &at3,
+                                   &error));
+    const RigExecRigPose warmed3 =
+        RunWarmingJob(&evaluator, rig, frozen, at3, &scheduler, nullptr);
+    auto workspace = RigExecCreateFrozenWorkspace(frozen);
+    CHECK(workspace);
+    RigExecRigPose laned3;
+    if (workspace) {
+        RigExecFrozenEvalContext context;
+        context.frozen = frozen.get();
+        context.workspace = workspace.get();
+        context.epochDigest = evaluator.GetBindingEpochDigest();
+        context.slotCount = evaluator.GetBakedProgram()->GetProviderCount();
+        context.varyingInputCount = at3.values.size();
+        laned3 = RigExecEvaluateFrozen(
+            context, at3, RigExecMakeProductionStepRunner(), nullptr, rig);
+    }
+    const RigExecRigPose live3 = evaluator.Evaluate(UsdTimeCode(3.0));
+    CHECK(live3.valid);
+    CheckPosesBitIdentical("an inherited verdict's job, frame 3", live3,
+                           warmed3);
+    CheckPosesBitIdentical("an inherited verdict's workspace, frame 3",
+                           live3, laned3);
+
+    // A key that no longer describes its bytes, on a copy whose verdict was
+    // deferred (the source's, as copied).
+    auto poisoned = std::make_unique<RigExecBakedProgramImpl>();
+    frozenDetail::_CloneImpl(frozen->program, poisoned.get(),
+                             frozenDetail::_CloneVerdict::Defer);
+    CHECK(poisoned->opAdapter.everRan);
+    bool edited = false;
+    for (const auto &op : poisoned->opGraph.ops) {
+        for (const auto id : op.descriptor.writes) {
+            if (!edited && id < poisoned->opAdapter.values.size() &&
+                poisoned->opAdapter.values[size_t(id)].initialized) {
+                poisoned->opAdapter.values[size_t(id)].key.push_back('\x01');
+                edited = true;
+            }
+        }
+    }
+    CHECK(edited);
+    for (const bool judged : {true, false}) {
+        poisoned->verifyCloneKeys = judged;
+        auto inherited = std::make_unique<RigExecBakedProgramImpl>();
+        frozenDetail::_CloneImpl(*poisoned, inherited.get(),
+                                 frozenDetail::_CloneVerdict::Inherit);
+        CHECK(inherited->opAdapter.everRan);
+        CHECK(inherited->cloneVerdictMismatches == (judged ? 1u : 0u));
+    }
+    frozenDetail::_SettleCloneVerdict(poisoned.get());
+    CHECK(!poisoned->opAdapter.everRan);
+    CHECK(poisoned->opAdapter.retainedFirst.empty());
+    {
+        auto inherited = std::make_unique<RigExecBakedProgramImpl>();
+        frozenDetail::_CloneImpl(*poisoned, inherited.get(),
+                                 frozenDetail::_CloneVerdict::Inherit);
+        CHECK(!inherited->opAdapter.everRan);
+        CHECK(inherited->opAdapter.retainedFirst.empty());
+    }
+
+    // A patched snapshot: the patch moves the constant tx under the AlongX
+    // AvarInputs op's key, so its settled verdict is cold, exactly what a
+    // lane computing its own check finds.
+    UsdStageRefPtr patchStage = MakeTinyRigWith(options);
+    RigExecRigEvaluator patchEvaluator(patchStage, rig);
+    CHECK(patchEvaluator.Compile());
+    CHECK(patchEvaluator.Evaluate(UsdTimeCode(1.0)).valid);
+    CHECK(patchEvaluator.Evaluate(UsdTimeCode(2.0)).valid);
+    std::shared_ptr<const RigExecFrozenProgram> base, patched;
+    {
+        const _CloneKeysJudgeScope judge(true);
+        CHECK(RigExecFreezeProgram(patchEvaluator, &base, &error));
+    }
+    CHECK(base != nullptr);
+    if (!base) {
+        return;
+    }
+    CHECK(base->program.opAdapter.everRan);
+    patchStage->GetAttributeAtPath(SdfPath("/Asset/Rig/AlongX.avars:tx"))
+        .Set(TinyTx(2.0) + 1.5);
+    const RigExecBakedProgram *liveProgram = patchEvaluator.GetBakedProgram();
+    CHECK(liveProgram != nullptr);
+    if (!liveProgram) {
+        return;
+    }
+    RigExecFrameInputs patchedAt3;
+    CHECK(RigExecSampleFrameInputs(patchEvaluator, UsdTimeCode(3.0), {},
+                                   &patchedAt3, &error));
+    const RigExecRigPose patchedLive3 = patchEvaluator.Evaluate(UsdTimeCode(3.0));
+    CHECK(patchedLive3.valid);
+    CHECK(RigExecPatchFrozenAvarConstants(*base, *liveProgram, &patched,
+                                          &error));
+    CHECK(patched != nullptr);
+    if (!patched) {
+        return;
+    }
+    CHECK(patched->program.verifyCloneKeys);
+    CHECK(patched->program.avarConstantSerial ==
+          base->program.avarConstantSerial + 1);
+    CHECK(!patched->program.opAdapter.everRan);
+    {
+        auto inherited = std::make_unique<RigExecBakedProgramImpl>();
+        frozenDetail::_CloneImpl(patched->program, inherited.get(),
+                                 frozenDetail::_CloneVerdict::Inherit);
+        auto computed = std::make_unique<RigExecBakedProgramImpl>();
+        frozenDetail::_CloneImpl(patched->program, computed.get());
+        CHECK(inherited->opAdapter.everRan == computed->opAdapter.everRan);
+        CHECK(inherited->cloneVerdictMismatches == 0);
+    }
+    const RigExecRigPose patchedWarm3 = RunWarmingJob(
+        &patchEvaluator, rig, patched, patchedAt3, &scheduler, nullptr);
+    CheckPosesBitIdentical("a patched snapshot's job, frame 3", patchedLive3,
+                           patchedWarm3);
+}
+
+// RevisionStatic sums a blend's deltas into the buffer the packet before
+// last held: the packet's delta array alternates between two buffers and
+// the one it replaced waits as the spare. Every frame's points equal a
+// fresh evaluator's at that frame: frames 3 and 4 are summed into buffers
+// that held other weights' deltas, frame 5 into the one that held frame
+// 3's, whose weight it repeats.
+void
+TestBlendDeltasAlternateBuffers(const std::string &examplesDir)
+{
+    const SdfPath rig("/FaceAsset/Rig");
+    const SdfPath mover("/FaceAsset/Rig/Movers/Geometry/FaceShapes");
+    UsdStageRefPtr stage = _KeyedBlendFace(examplesDir);
+    CHECK(stage);
+    if (!stage) {
+        return;
+    }
+    RigExecRigEvaluator evaluator(stage, rig);
+    std::vector<std::string> errors;
+    CHECK(evaluator.Compile(&errors));
+    std::vector<const GfVec3f *> packet, spare;
+    std::vector<VtVec3fArray> points;
+    for (int frame = 1; frame <= 5; ++frame) {
+        const RigExecRigPose pose =
+            evaluator.Evaluate(UsdTimeCode(double(frame)));
+        CHECK(pose.valid);
+        const RigExecBakedProgram *program = evaluator.GetBakedProgram();
+        const RigExecBakedProgramImpl::GeomRevision *revision =
+            program ? _RevisionOf(program->GetStepGraph(), mover) : nullptr;
+        CHECK(revision != nullptr);
+        if (!revision) {
+            return;
+        }
+        CHECK(revision->op == RigExecRevisionOp::BlendShape);
+        CHECK(!revision->parameters.blendDeltas.empty());
+        packet.push_back(revision->parameters.blendDeltas.data());
+        spare.push_back(revision->deltasSpare.data());
+        points.push_back(_FaceCardPoints(pose));
+        CHECK(!points.back().empty());
+    }
+    // The cone verifier runs every frame twice and puts the first run's
+    // state back, which is the instrument's allocation, not the frame's.
+    if (!RigExecBakedVerifyConesRequested()) {
+        CHECK(packet[2] == packet[4]);
+        CHECK(packet[1] == packet[3]);
+        CHECK(packet[2] != packet[3]);
+        for (size_t k = 1; k < packet.size(); ++k) {
+            CHECK(spare[k] == packet[k - 1]);
+        }
+    }
+    // The weight moved every frame, and frame 5 repeats frame 3's.
+    CHECK(!_SamePointBits(points[2], points[3]));
+    CHECK(_SamePointBits(points[2], points[4]));
+    for (int frame = 1; frame <= 5; ++frame) {
+        RigExecRigEvaluator fresh(stage, rig);
+        CHECK(fresh.Compile(&errors));
+        const RigExecRigPose pose = fresh.Evaluate(UsdTimeCode(double(frame)));
+        CHECK(pose.valid);
+        if (!_SamePointBits(_FaceCardPoints(pose),
+                            points[size_t(frame - 1)])) {
+            std::printf("FAIL blend delta buffers: frame %d differs from a "
+                        "fresh evaluator's\n", frame);
+            ++failures;
+        }
+    }
+}
+
+// A freeze, and every lane cloned from it, lets go of the idle scratch the
+// live program holds -- the blend delta spare, the resolve, entering and
+// gather buffers -- and the snapshot's job still equals live bit for bit.
+void
+TestAClonesDropsIdleScratch(const std::string &examplesDir)
+{
+    const SdfPath rig("/FaceAsset/Rig");
+    const SdfPath mover("/FaceAsset/Rig/Movers/Geometry/FaceShapes");
+    UsdStageRefPtr stage = _KeyedBlendFace(examplesDir);
+    CHECK(stage);
+    if (!stage) {
+        return;
+    }
+    RigExecRigEvaluator evaluator(stage, rig);
+    std::vector<std::string> errors;
+    CHECK(evaluator.Compile(&errors));
+    for (int frame = 1; frame <= 3; ++frame) {
+        CHECK(evaluator.Evaluate(UsdTimeCode(double(frame))).valid);
+    }
+    const RigExecBakedProgram *program = evaluator.GetBakedProgram();
+    CHECK(program != nullptr);
+    if (!program) {
+        return;
+    }
+    // Not vacuous: after its second packet the live revision holds a spare.
+    const RigExecBakedProgramImpl::GeomRevision *live =
+        _RevisionOf(program->GetStepGraph(), mover);
+    CHECK(live != nullptr);
+    CHECK(live && live->deltasSpare.capacity() > 0);
+    CHECK(_HeldScratch(program->GetStepGraph()) > 0);
+    std::shared_ptr<const RigExecFrozenProgram> frozen;
+    std::string error;
+    CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
+    if (!frozen) {
+        std::printf("FAIL clone scratch: freeze refused: %s\n",
+                    error.c_str());
+        ++failures;
+        return;
+    }
+    auto lane = std::make_unique<RigExecBakedProgramImpl>();
+    frozenDetail::_CloneImpl(frozen->program, lane.get(),
+                             frozenDetail::_CloneVerdict::Inherit);
+    const RigExecBakedProgramImpl *const clones[] = {&frozen->program,
+                                                     lane.get()};
+    for (const RigExecBakedProgramImpl *clone : clones) {
+        CHECK(_RevisionOf(*clone, mover) != nullptr);
+        CHECK(_HeldScratch(*clone) == 0);
+    }
+    RigExecBackgroundScheduler scheduler;
+    RigExecFrameInputs at4;
+    CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(4.0), {}, &at4,
+                                   &error));
+    const RigExecRigPose warmed4 =
+        RunWarmingJob(&evaluator, rig, frozen, at4, &scheduler, nullptr);
+    const RigExecRigPose live4 = evaluator.Evaluate(UsdTimeCode(4.0));
+    CHECK(live4.valid);
+    CheckPosesBitIdentical("a clone without its idle scratch, frame 4", live4,
+                           warmed4);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -7482,6 +7965,14 @@ main(int argc, char **argv)
     TestBindIntoNullDeclines();
     TestStaleChainBindingsDeclineSampling();
     TestBurstBuildIntoNullDeclines();
+    // Wave 7 W7-cow: clone verdicts, shared cones, blend delta buffers and
+    // clone scratch.
+    TestAWorkspaceInheritsTheVerdict();
+    if (argc > 1) {
+        TestAFreezeSharesTheConeTable(argv[1]);
+        TestBlendDeltasAlternateBuffers(argv[1]);
+        TestAClonesDropsIdleScratch(argv[1]);
+    }
 
     if (failures) {
         std::printf("%d FAILURE(S)\n", failures);

@@ -2496,8 +2496,9 @@ TestGeometryFixtureInputs(const std::string &examples)
 // Build's settings reach a frozen clone (frozenDetail::_CloneImpl): the
 // clone's partition settings and the worker's kernels are the live
 // program's choices, and its bodies count into their own audit counter.
-// The clone starts from other values, so a field the clone skips fails
-// here.
+// The stamps the prologue's flags answer to travel with them, and the
+// clone's judges count from zero. The clone starts from other values, so a
+// field the clone skips fails here.
 void
 TestAFrozenCloneKeepsTheBuildSettings(const std::string &examples)
 {
@@ -2531,18 +2532,73 @@ TestAFrozenCloneKeepsTheBuildSettings(const std::string &examples)
     CHECK(B->chunkVertexTarget == 7);
     CHECK(B->chunkCap == 3);
     CHECK(B->purityAudit);
+    // The other settings away from their defaults, and every stamp and
+    // counter non-zero, on the source; nothing runs it again.
+    RigExecBakedProgramImpl *source = const_cast<RigExecBakedProgramImpl *>(B);
+    source->pathLeafGating = false;
+    source->verifyPathLeafGating = true;
+    source->sparseSampling = false;
+    source->verifySparseSampling = true;
+    source->verifyCloneKeys = true;
+    source->opWorkspace.verifyReset = true;
+    source->leafFlagEpoch = 11;
+    source->avarConstantSerial = 13;
+    const std::vector<uint32_t> timed{2, 0};
+    source->timedClusters = timed;
+    source->providerStepsPruned = 17;
+    source->providerPruneRoots = 19;
+    source->providerPruneViolations = 23;
+    source->pathLeafGateMismatches = 3;
+    source->sparseSamplingMismatches = 5;
+    source->cloneVerdictMismatches = 7;
+    source->leafVisits = 29;
+    source->sourceWatchVisits = 31;
     auto clone = std::make_unique<RigExecBakedProgramImpl>();
     clone->chunkVertexTarget = 1;
     clone->chunkCap = 1;
     clone->useSimd = !B->useSimd;
     clone->purityAudit = false;
     clone->purityViolations.count.store(5);
+    clone->pathLeafGating = true;
+    clone->verifyPathLeafGating = false;
+    clone->sparseSampling = true;
+    clone->verifySparseSampling = false;
+    clone->verifyCloneKeys = false;
+    clone->opWorkspace.verifyReset = false;
+    clone->leafFlagEpoch = 1;
+    clone->avarConstantSerial = 1;
+    clone->timedClusters.assign(1, 9);
+    clone->providerStepsPruned = 1;
+    clone->providerPruneRoots = 1;
+    clone->providerPruneViolations = 1;
+    clone->pathLeafGateMismatches = 1;
+    clone->sparseSamplingMismatches = 1;
+    clone->cloneVerdictMismatches = 1;
+    clone->leafVisits = 1;
+    clone->sourceWatchVisits = 1;
     frozenDetail::_CloneImpl(*B, clone.get());
     CHECK(clone->chunkVertexTarget == B->chunkVertexTarget);
     CHECK(clone->chunkCap == B->chunkCap);
     CHECK(clone->useSimd == B->useSimd);
     CHECK(clone->purityAudit);
     CHECK(clone->purityViolations.count.load() == 0);
+    CHECK(!clone->pathLeafGating);
+    CHECK(clone->verifyPathLeafGating);
+    CHECK(!clone->sparseSampling);
+    CHECK(clone->verifySparseSampling);
+    CHECK(clone->verifyCloneKeys);
+    CHECK(clone->opWorkspace.verifyReset);
+    CHECK(clone->leafFlagEpoch == 11);
+    CHECK(clone->avarConstantSerial == 13);
+    CHECK(clone->timedClusters == timed);
+    CHECK(clone->providerStepsPruned == 17);
+    CHECK(clone->providerPruneRoots == 19);
+    CHECK(clone->providerPruneViolations == 23);
+    CHECK(clone->pathLeafGateMismatches == 0);
+    CHECK(clone->sparseSamplingMismatches == 0);
+    CHECK(clone->cloneVerdictMismatches == 0);
+    CHECK(clone->leafVisits == 0);
+    CHECK(clone->sourceWatchVisits == 0);
 }
 
 // Body purity. The thread mark itself: a read under RigExecOpBodyScope is

@@ -1456,6 +1456,10 @@ enum : uint8_t {
     kEditRouteHead = 4,
 };
 
+/// The cone table of a program whose cones were never built. Namespace
+/// scope, so reading it takes no initialization guard.
+inline const std::vector<RigExecBakedClusterSet> kRigExecBakedNoCones{};
+
 /// What Build knows about re-running part of a program (§7).
 ///
 /// Both families are closures computed once, over clusters rather than over
@@ -1465,12 +1469,19 @@ enum : uint8_t {
 /// its program point saw rather than the version the end of the last run
 /// left behind.
 struct RigExecBakedCones {
-    /// Forward closure of each cluster, including itself.
+    /// Forward closure of each cluster, including itself. Built once by
+    /// RigExecBakedBuildCones and immutable after; program copies and the
+    /// imaging bridge's affected index share it. Null before BuildCones.
     ///
     /// The only closure there is. The restore closure that used to sit
     /// beside it -- "run this cluster and all of THIS had to have run first"
     /// -- is gone with the storage that made it necessary (§3.1).
-    std::vector<RigExecBakedClusterSet> cone;
+    std::shared_ptr<const std::vector<RigExecBakedClusterSet>> cone;
+    /// *cone, or kRigExecBakedNoCones when null.
+    const std::vector<RigExecBakedClusterSet> &Cone() const
+    {
+        return cone ? *cone : kRigExecBakedNoCones;
+    }
     /// Clusters holding a step that reads outside the graph at a point the
     /// graph cannot order. Dirty every run.
     RigExecBakedClusterSet always;
@@ -3392,6 +3403,10 @@ struct RigExecBakedProgramImpl {
         /// RevisionStatic, BlendShape of a range chain: content version of
         /// parameters.blendDeltas (memcmp), keyed in place of the bytes.
         uint64_t deltasVersion = 0;
+        /// The blend delta buffer the next assembly sums into: the one the
+        /// packet before last held. Private to this revision's static step,
+        /// never published; a clone drops it.
+        std::vector<GfVec3f> deltasSpare;
         /// RevisionStatic, Lattice: parameters.restPoints holds the base at
         /// `restBaseVersion` (kept without a copy while it stands).
         bool restBaseHeld = false;
@@ -3909,6 +3924,10 @@ struct RigExecBakedProgramImpl {
     /// every memoized leaf and check it, and the vector's digest, against
     /// the unmemoized answer.
     bool verifyFrozenStatic = false;
+    /// RIGEXEC_VERIFY_CLONE_KEYS, read by RigExecFreezeProgram: an inherited
+    /// clone verdict is also computed and a disagreement counted here.
+    bool verifyCloneKeys = false;
+    size_t cloneVerdictMismatches = 0;
     /// The reads after the head tier that a chain result or a record can
     /// answer (RigExecBakedReaderWalk), bound at Build; per walk, whether
     /// something it depends on moved this run (RigExecBakedNoteReaderWalks)
@@ -5606,6 +5625,8 @@ void RigExecBakedDeclareInputDependencies(RigExecBakedProgramImpl *program);
 ///    arrays after runs that agree exactly about the published one, which is
 ///    `result` -- the buffer is storage, and only what `result` names in it
 ///    is an answer.
+///  * each revision's `deltasSpare`, the blend delta buffer the packet
+///    before last held: storage the next assembly sums into, never read.
 ///  * each revision's `revisionInputs` overlay, which its RevisionStatic
 ///    writes and reads within the one body, so no other step can see a
 ///    stale one. It is captured and restored -- it costs nothing and it

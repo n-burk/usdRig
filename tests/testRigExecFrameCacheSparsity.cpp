@@ -262,6 +262,51 @@ TestOutputAffectedIndex()
     CHECK(refused.Empty());
 }
 
+// The index shares the program's cone table, the one BuildCones published,
+// rather than copying it; a table that does not cover the clustering, or
+// none, is still refused.
+void
+TestTheAffectedIndexSharesTheCones()
+{
+    const RigExecBakedProgramImpl program = MakeDiamond(false);
+    CHECK(program.cones.cone != nullptr);
+    CHECK(program.cones.Cone().size() == 6);
+    RigExecOutputAffectedIndex index;
+    CHECK(index.ConeTableForTesting() == nullptr);
+    index.Build(program, 7);
+    CHECK(!index.Empty());
+    CHECK(index.ConeTableForTesting() == program.cones.cone.get());
+    CHECK(SetIs(index.ConeOf(1), {1, 3, 4}));
+    CHECK(SetIs(index.AffectedClusters(std::vector<int>{2}), {2, 3, 4}));
+    // A second index over the same program holds the same table, which
+    // outlives the first index's Clear.
+    RigExecOutputAffectedIndex second;
+    second.Build(program, 8);
+    CHECK(second.ConeTableForTesting() == index.ConeTableForTesting());
+    index.Clear();
+    CHECK(index.ConeTableForTesting() == nullptr);
+    CHECK(second.ConeTableForTesting() == program.cones.cone.get());
+    CHECK(SetIs(second.ConeOf(0), {0, 1, 2, 3, 4}));
+
+    // Cones built for six clusters do not cover seven.
+    RigExecBakedProgramImpl grown = MakeDiamond(false);
+    grown.clustering.clusters.resize(7);
+    RigExecOutputAffectedIndex misSized;
+    misSized.Build(grown, 7);
+    CHECK(misSized.Empty());
+    CHECK(misSized.ConeTableForTesting() == nullptr);
+
+    RigExecBakedProgramImpl unconed{};
+    unconed.clustering.clusters.resize(3);
+    CHECK(unconed.cones.cone == nullptr);
+    CHECK(unconed.cones.Cone().empty());
+    RigExecOutputAffectedIndex refused;
+    refused.Build(unconed, 7);
+    CHECK(refused.Empty());
+    CHECK(refused.ConeTableForTesting() == nullptr);
+    CHECK(refused.ConeOf(0).Count() == 0);
+}
+
 void
 TestLadderLeafUsesUnifiedCone()
 {
@@ -1343,6 +1388,8 @@ main()
     TestOverrideSeeds();
     TestRecomposedVersionSeedsSparseReuse();
     TestRetainedBytesUnchangedByTheOrder();
+    // Wave 7 W7-cow: the shared cone table.
+    TestTheAffectedIndexSharesTheCones();
     if (failures == 0) {
         std::printf("PASS testRigExecFrameCacheSparsity\n");
     } else {

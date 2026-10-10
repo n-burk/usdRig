@@ -1865,11 +1865,13 @@ RigExecBakedBuildCones(RigExecBakedProgramImpl *program)
     if (count == 0) {
         return;
     }
-    cones.cone.resize(count);
+    // Filled here and published once at the end: from then on the table is
+    // immutable, and program copies and the affected index share it.
+    std::vector<RigExecBakedClusterSet> closures(count);
     cones.always.Resize(count);
     cones.poseClusters.Resize(count);
     for (size_t c = 0; c < count; ++c) {
-        cones.cone[c].Resize(count);
+        closures[c].Resize(count);
     }
     cones.alwaysSteps.Resize(stepCount);
     cones.poseSteps.Resize(stepCount);
@@ -2098,14 +2100,14 @@ RigExecBakedBuildCones(RigExecBakedProgramImpl *program)
     const std::vector<int> &order = B.clustering.topologicalOrder;
     for (size_t k = order.size(); k-- > 0;) {
         const int cluster = order[k];
-        RigExecBakedClusterSet &cone = cones.cone[size_t(cluster)];
+        RigExecBakedClusterSet &cone = closures[size_t(cluster)];
         cone.Set(cluster);
         for (const int succ : B.clustering.clusters[size_t(cluster)].succs) {
-            cone.Union(cones.cone[size_t(succ)]);
+            cone.Union(closures[size_t(succ)]);
         }
     }
-
-
+    cones.cone = std::make_shared<const std::vector<RigExecBakedClusterSet>>(
+        std::move(closures));
 }
 
 // Step-body purity (bodyPurity.h). Namespace-scope and constant-initialised,

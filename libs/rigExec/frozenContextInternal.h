@@ -325,8 +325,19 @@ _ForEachPatchableInput(Impl &B, Fn &&fn, bool includeIntervening = true)
     }
 }
 
+/// How a clone decides whether its copied op keys stand (retainedComplete):
+/// Compute runs the check now; Defer copies the source's verdict for the
+/// caller to settle after its own edits; Inherit takes the source's
+/// settled verdict (the source is a settled, immutable snapshot).
+enum class _CloneVerdict : uint8_t { Compute, Defer, Inherit };
+
 void
-_CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst);
+_CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst,
+           _CloneVerdict verdict = _CloneVerdict::Compute);
+
+/// The clone check run on \p program as both source and copy; sets
+/// opAdapter.everRan and clears retainedFirst when the keys do not stand.
+void _SettleCloneVerdict(RigExecBakedProgramImpl *program);
 
 // Worker-side state and input patching.
 
