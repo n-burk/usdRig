@@ -3081,8 +3081,10 @@ TestSparseProviderLeaves(const std::string &examples)
         }
         return SdfPath();
     };
-    const SdfPath body = avar("M_Body", "avars:ry");
-    const SdfPath shoulder = avar("L_Shldr", "avars:rz");
+    // Default channels, whose provider leaves the default-space expression
+    // reads; Build prunes the avars' provider leaves, which no step reads.
+    const SdfPath body = avar("M_Body", "default:ry");
+    const SdfPath shoulder = avar("L_Shldr", "default:rz");
     CHECK(!body.IsEmpty() && !shoulder.IsEmpty());
     const size_t all = B->spaceLeafRekey.size();
     TfErrorMark mark;

@@ -1834,8 +1834,9 @@ WithoutHeadLeaves(const RigExecFrameInputs &inputs,
 // nothing: the worker resolves it to the chain's result. Two jobs whose
 // targets differ only in the authored value, which the clamp folds to one
 // result, have different digests -- the own value moves them -- and each
-// serves a pose equal to live. The provider source pool independently
-// transports the same authored target at its raw alias. Removing both
+// serves a pose equal to live. The provider source pool transports the same
+// authored target at its raw alias while a provider step reads it (Build
+// prunes an avar's provider leaf, which no step reads). Removing both
 // source routes leaves equal states because the clamp produces equal poses.
 void
 TestAChainTargetOwnValueKeyIsDistinct()
@@ -1892,10 +1893,11 @@ TestAChainTargetOwnValueKeyIsDistinct()
           own4->Get<double>() == 4.0);
     const VtValue *raw3 = three.inputs.Find(rawOwnKey);
     const VtValue *raw4 = four.inputs.Find(rawOwnKey);
-    CHECK(raw3 != nullptr && raw3->IsHolding<double>() &&
-          raw3->Get<double>() == 3.0);
-    CHECK(raw4 != nullptr && raw4->IsHolding<double>() &&
-          raw4->Get<double>() == 4.0);
+    CHECK((raw3 == nullptr) == (raw4 == nullptr));
+    CHECK(raw3 == nullptr || (raw3->IsHolding<double>() &&
+                              raw3->Get<double>() == 3.0));
+    CHECK(raw4 == nullptr || (raw4->IsHolding<double>() &&
+                              raw4->Get<double>() == 4.0));
     CHECK(RigExecFrozenControlDigest(three.inputs) !=
           RigExecFrozenControlDigest(four.inputs));
     CHECK(RigExecControlStateDigest(three.inputs, {}) !=
@@ -3285,7 +3287,14 @@ TestStaticLeavesFollowEdits()
         skin.leaves.decl.Role(RigExecRevisionLeafRole::DefaultWeight);
     const int layoutWeights =
         skin.layoutLeaves.decl.Role(RigExecRevisionLeafRole::JointWeights);
-    const SdfPath restTzPath("/Asset/Rig/AlongX.rest:tz");
+    // A provider leaf a step reads (the ladder's rest channel): Build prunes
+    // the leaves of rest:tz and the other rest avars, which no step reads.
+    const SdfPath restTzPath("/Asset/Rig/AlongX.rest:space");
+    const auto restAt = [](double z) {
+        GfMatrix4d m(1.0);
+        m[3][2] = z;
+        return m;
+    };
     size_t restTz = B.providerFrozenKeys.size();
     for (size_t k = 0; k < B.providerLeaves.decl.keys.size() &&
                        k < B.providerFrozenKeys.size();
@@ -3362,8 +3371,8 @@ TestStaticLeavesFollowEdits()
     };
     const auto restTzAt = [&](const RigExecFrameInputs &inputs) {
         const RigExecSampledInput *found = providerSample(inputs, restTz);
-        return found && found->value.IsHolding<double>()
-                   ? found->value.UncheckedGet<double>()
+        return found && found->value.IsHolding<GfMatrix4d>()
+                   ? found->value.UncheckedGet<GfMatrix4d>()[3][2]
                    : -1.0;
     };
 
@@ -3426,7 +3435,7 @@ TestStaticLeavesFollowEdits()
     // A value edit reaches the next sample: a new table, the edited value,
     // a moved digest.
     const UsdAttribute restTzAttr = stage->GetAttributeAtPath(restTzPath);
-    CHECK(restTzAttr.Set(0.75));
+    CHECK(restTzAttr.Set(restAt(0.75)));
     const RigExecFrameInputs edited = sample(UsdTimeCode(2.0), {}, {});
     CHECK(edited.staticSamples != nullptr &&
           edited.staticSamples != at2.staticSamples);
@@ -3443,7 +3452,7 @@ TestStaticLeavesFollowEdits()
     // One time sample over the default: every numeric time reads it and
     // Default reads the default, so a table stands per Default-ness. A
     // second makes the read vary, and it is read at every sample.
-    CHECK(restTzAttr.Set(1.25, UsdTimeCode(3.0)));
+    CHECK(restTzAttr.Set(restAt(1.25), UsdTimeCode(3.0)));
     const RigExecFrameInputs keyed = sample(UsdTimeCode(2.0), {}, {});
     CHECK(restTzAt(keyed) == 1.25);
     checkProviders(keyed);
@@ -3463,7 +3472,7 @@ TestStaticLeavesFollowEdits()
         sample(UsdTimeCode::Default(), {}, {});
     CHECK(restTzAt(defaultAgain) == 0.75);
     CHECK(defaultAgain.staticSamples == atDefault.staticSamples);
-    CHECK(restTzAttr.Set(2.5, UsdTimeCode(4.0)));
+    CHECK(restTzAttr.Set(restAt(2.5), UsdTimeCode(4.0)));
     for (const double t : {3.0, 3.5, 4.0}) {
         const RigExecFrameInputs varying = sample(UsdTimeCode(t), {}, {});
         const RigExecSampledInput *tz = providerSample(varying, restTz);

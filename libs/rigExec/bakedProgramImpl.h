@@ -539,6 +539,11 @@ struct RigExecBakedPathLeaves {
         }
         return false;
     }
+    /// Keeps the keys k with keep[k] != 0, in order, in `decl.keys` and every
+    /// per-key vector of this table, and remaps `decl.roles`. False, changing
+    /// nothing, when a key-range start (`scalarBegin`, `externalBegin`,
+    /// `dialBegin`) is set. Scalars are untouched. Build only.
+    bool Select(const std::vector<char> &keep);
 
     /// Key \p k's value as \p T, or \p fallback when \p k is out of range or
     /// holds another type.
@@ -2015,6 +2020,15 @@ struct RigExecBakedProgramImpl {
     std::vector<std::vector<int>> poseProviderInputs;
     std::vector<char> connectedPoseProviders;
     std::vector<int> providerParentRawLeaves;
+    /// RIGEXEC_VERIFY_PROVIDER_PRUNE: holders the compacted program fails
+    /// (a surviving op that is not a root and whose output nothing reads, an
+    /// id out of range, a sampled row that is not a SpaceLeaf read). Zero
+    /// when the knob is off.
+    size_t providerPruneViolations = 0;
+    /// Provider steps the last Build removed (0 with RIGEXEC_PROVIDER_PRUNE=0)
+    /// and the diagnostic roots it kept besides the routed inputs (which are
+    /// always kept): structurally invalid ops and provider cycle members.
+    size_t providerStepsPruned = 0, providerPruneRoots = 0;
     std::vector<RigExecValueId> providerRefreshTemplates;
     std::vector<size_t> providerRefreshTemplateOps;
     struct ProviderRefresh {
@@ -4220,6 +4234,13 @@ bool RigExecBakedBuildSpaces(RigExecBakedProgramImpl *program, UsdTimeCode captu
     std::string *error, const RigExecSceneDescriptors *scene = nullptr,
     const UsdStageWeakPtr &sceneStage = UsdStageWeakPtr(), uint64_t sceneSerial = 0);
 bool RigExecBakedBindOwnPropertySpaces(RigExecBakedProgramImpl *program, std::string *error);
+/// Build, once every non-provider step and cross-domain read is declared and
+/// before the provider leaves are numbered: binds the routed inputs' reads,
+/// erases the refresh templates and, unless RIGEXEC_PROVIDER_PRUNE=0, drops
+/// every provider op, sampled row, external and frame input no consumer or
+/// diagnostic root reaches, renumbering the survivors densely in their
+/// order. False with \p error when a holder cannot be compacted.
+bool RigExecBakedPruneProviderProgram(RigExecBakedProgramImpl *program, std::string *error);
 void RigExecBakedBuildSpaceSteps(RigExecBakedProgramImpl *program);
 void RigExecBakedSampleSpaces(RigExecBakedProgramImpl *program, UsdTimeCode time, bool all);
 void RigExecBakedRunSpaceOp(RigExecBakedProgramImpl *program, RigExecBakedStep *step);

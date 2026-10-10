@@ -6,10 +6,13 @@
 #include "rigExecGraph/providerContextBinding.h"
 #include "rigExecGraph/providerRefresh.h"
 #include "parallel.h"
+#include "pxr/base/tf/diagnostic.h"
+#include "pxr/base/tf/getenv.h"
 #include "pxr/usd/sdf/types.h"
 #include "pxr/usd/usd/resolveInfo.h"
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <unordered_map>
 
 namespace rigExec {
@@ -25,6 +28,356 @@ RigExecRevisionLeafType _Type(const SdfValueTypeName &type)
     if(type==SdfValueTypeNames->Int) return T::Int;
     if(type==SdfValueTypeNames->Bool) return T::Bool;
     return T::Double;
+}
+
+// Keeps the entries k of \p values with keep[k] != 0, in order; an entry
+// past keep's end is dropped.
+template<class T>
+void _KeepRows(std::vector<T> *values,const std::vector<char> &keep)
+{
+    size_t out=0;
+    for(size_t k=0;k<values->size();++k) {
+        if(k>=keep.size() || !keep[k]) continue;
+        if(out!=k) (*values)[out]=std::move((*values)[k]);
+        ++out;
+    }
+    values->erase(values->begin()+std::ptrdiff_t(out),values->end());
+}
+
+// What the provider prune keeps. Producers are numbered ops, sampled rows,
+// external inputs, routed inputs, frame inputs, in that order.
+struct _ProviderLiveness {
+    size_t ops=0,rows=0,externals=0,routed=0,frames=0;
+    std::vector<char> value,producer;
+    /// Ops kept only as diagnostic roots: structurally invalid ops and
+    /// provider cycle members.
+    size_t roots=0;
+    size_t Rows() const {return ops;}
+    size_t Externals() const {return ops+rows;}
+    size_t Routed() const {return ops+rows+externals;}
+    size_t Frames() const {return ops+rows+externals+routed;}
+    size_t Count() const {return Frames()+frames;}
+};
+
+// Backward reachability over the provider producer graph. Roots: every
+// SpaceValue and SpaceLeaf an existing (non-provider) step declares, every
+// ladder channel, cross-domain read and refresh value, every routed input,
+// every op that fails RigExecProviderOpStructurallyValid and every member of
+// a provider cycle, so no pruned producer could have published a value a
+// reader sees, a step diagnostic or a cycle skip reason. Owning thread,
+// vectors only, O(values + edges).
+bool _ProviderLive(const RigExecBakedProgramImpl &B,_ProviderLiveness *out,std::string *error)
+{
+    const auto &p=B.providerProgram;
+    auto &L=*out;
+    L=_ProviderLiveness();
+    L.ops=p.ops.size(); L.rows=p.sampled.size(); L.externals=p.externalInputs.size();
+    L.routed=p.routedInputs.size(); L.frames=B.providerFrameInputs.size();
+    if(p.descriptors.size()!=L.ops || B.providerRoutedReads.size()!=L.routed) {
+        if(error) *error="provider operations, descriptors and routed reads are not parallel";
+        return false;
+    }
+    const size_t values=p.valueKeys.size(),count=L.Count();
+    L.value.assign(values,0); L.producer.assign(count,0);
+    const auto writes=[&](size_t u,const auto &fn) {
+        if(u<L.ops) {
+            fn(p.ops[u].output);
+            for(const auto id:p.descriptors[u].writes) fn(id);
+        } else if(u<L.Externals()) fn(p.sampled[u-L.Rows()].value);
+        else if(u<L.Routed()) fn(p.externalInputs[u-L.Externals()].value);
+        else if(u<L.Frames()) fn(p.routedInputs[u-L.Routed()].value);
+        else fn(B.providerFrameInputs[u-L.Frames()].value);
+    };
+    const auto reads=[&](size_t u,const auto &fn) {
+        if(u<L.ops) {
+            const auto &op=p.ops[u];
+            for(const auto id:op.inputs) fn(id);
+            for(const auto &xform:op.xforms) fn(xform.raw);
+            for(const auto id:p.descriptors[u].reads) fn(id);
+        } else if(u>=L.Routed() && u<L.Frames()) {
+            const int read=B.providerRoutedReads[u-L.Routed()];
+            if(read>=0 && size_t(read)<B.crossDomainReads.size() &&
+               B.crossDomainReads[size_t(read)].spaceValue>=0)
+                fn(RigExecValueId(B.crossDomainReads[size_t(read)].spaceValue));
+        }
+    };
+    // The producers of each value, compressed.
+    std::vector<uint32_t> begin(values+1,0),list;
+    for(size_t u=0;u<count;++u) writes(u,[&](RigExecValueId v){if(v<values) ++begin[size_t(v)+1];});
+    for(size_t v=0;v<values;++v) begin[v+1]+=begin[v];
+    list.resize(begin[values]);
+    {
+        std::vector<uint32_t> at(begin.begin(),begin.end()-1);
+        for(size_t u=0;u<count;++u)
+            writes(u,[&](RigExecValueId v){if(v<values) list[at[size_t(v)]++]=uint32_t(u);});
+    }
+    std::vector<RigExecValueId> pendingValues;
+    std::vector<uint32_t> pendingProducers;
+    const auto markValue=[&](RigExecValueId v) {
+        if(v<values && !L.value[size_t(v)]) {L.value[size_t(v)]=1; pendingValues.push_back(v);}
+    };
+    const auto markProducer=[&](size_t u) {
+        if(u<count && !L.producer[u]) {L.producer[u]=1; pendingProducers.push_back(uint32_t(u));}
+    };
+    for(const auto &step:B.steps)
+        for(const auto *ranges:{&step.reads,&step.writes})
+            for(const auto &range:*ranges) {
+                if(range.domain==RigExecBakedSlotDomain::SpaceValue)
+                    for(uint32_t id=range.begin;id<range.end;++id) markValue(id);
+                else if(range.domain==RigExecBakedSlotDomain::SpaceLeaf)
+                    for(uint32_t k=range.begin;k<range.end && k<L.rows;++k) markProducer(L.Rows()+k);
+            }
+    for(const auto &ladder:B.ladders)
+        for(const int id:ladder.spaceValues) if(id>=0) markValue(RigExecValueId(id));
+    for(const auto &read:B.crossDomainReads)
+        if(read.spaceValue>=0) markValue(RigExecValueId(read.spaceValue));
+    for(const auto &refresh:B.providerRefreshes) {markValue(refresh.baseValue); markValue(refresh.currentValue);}
+    for(size_t k=0;k<L.routed;++k) markProducer(L.Routed()+k);
+    std::vector<char> root(L.ops,0);
+    for(size_t i=0;i<L.ops;++i)
+        if(!RigExecProviderOpStructurallyValid(p,uint32_t(i),nullptr)) root[i]=1;
+    // Provider cycles (Tarjan, iterative) over the ops and routed inputs,
+    // the only producers that read provider values.
+    const size_t nodes=L.ops+L.routed;
+    const auto producerOf=[&](size_t node){return node<L.ops?node:L.Routed()+(node-L.ops);};
+    const auto nodeOf=[&](size_t u)->size_t {
+        if(u<L.ops) return u;
+        return u>=L.Routed() && u<L.Frames()?L.ops+(u-L.Routed()):nodes;
+    };
+    std::vector<uint32_t> edgeBegin(nodes+1,0),edges;
+    std::vector<char> selfLoop(nodes,0);
+    for(size_t n=0;n<nodes;++n) {
+        edgeBegin[n]=uint32_t(edges.size());
+        reads(producerOf(n),[&](RigExecValueId v) {
+            if(v>=values) return;
+            for(uint32_t at=begin[size_t(v)];at<begin[size_t(v)+1];++at) {
+                const size_t m=nodeOf(list[at]);
+                if(m>=nodes) continue;
+                if(m==n) selfLoop[n]=1;
+                edges.push_back(uint32_t(m));
+            }
+        });
+    }
+    edgeBegin[nodes]=uint32_t(edges.size());
+    std::vector<int32_t> index(nodes,-1),low(nodes,0);
+    std::vector<char> onStack(nodes,0);
+    std::vector<uint32_t> stack;
+    std::vector<std::pair<uint32_t,uint32_t>> call;
+    int32_t counter=0;
+    const auto enter=[&](uint32_t n) {
+        index[n]=low[n]=counter++;
+        stack.push_back(n); onStack[n]=1;
+        call.emplace_back(n,edgeBegin[n]);
+    };
+    for(size_t start=0;start<nodes;++start) {
+        if(index[start]>=0) continue;
+        enter(uint32_t(start));
+        while(!call.empty()) {
+            const uint32_t n=call.back().first;
+            if(call.back().second<edgeBegin[n+1]) {
+                const uint32_t m=edges[call.back().second++];
+                if(index[m]<0) enter(m);
+                else if(onStack[m]) low[n]=std::min(low[n],index[m]);
+                continue;
+            }
+            call.pop_back();
+            if(!call.empty()) low[call.back().first]=std::min(low[call.back().first],low[n]);
+            if(low[n]!=index[n]) continue;
+            size_t first=stack.size();
+            do {--first;} while(stack[first]!=n);
+            const bool cyclic=stack.size()-first>1 || selfLoop[n];
+            for(size_t at=first;at<stack.size();++at) {
+                onStack[stack[at]]=0;
+                if(cyclic && stack[at]<L.ops) root[stack[at]]=1;
+            }
+            stack.resize(first);
+        }
+    }
+    for(size_t i=0;i<L.ops;++i) if(root[i]) {++L.roots; markProducer(i);}
+    while(!pendingValues.empty() || !pendingProducers.empty()) {
+        while(!pendingValues.empty()) {
+            const RigExecValueId v=pendingValues.back(); pendingValues.pop_back();
+            for(uint32_t at=begin[size_t(v)];at<begin[size_t(v)+1];++at) markProducer(list[at]);
+        }
+        while(!pendingProducers.empty()) {
+            const size_t u=pendingProducers.back(); pendingProducers.pop_back();
+            writes(u,markValue); reads(u,markValue);
+        }
+    }
+    return true;
+}
+
+// The one function that rewrites provider ids. Drops the producers and the
+// values the prune left out and renumbers the surviving values and sampled
+// rows densely in their old order, in every holder Build has filled by the
+// prune point: the provider program (keys, maps, leaves, ops, descriptors,
+// sampled, external and routed inputs), the provider leaves and their side
+// tables, frame inputs, refreshes and their templates, ladders,
+// cross-domain reads, the value store and the SpaceValue / SpaceLeaf ranges
+// of the steps built so far. An id past the old layout stays past the new
+// one, so a structurally invalid op keeps its failure.
+bool _RemapProviderHolders(RigExecBakedProgramImpl *program,
+    const std::vector<RigExecValueId> &oldToNew,const std::vector<char> &keepRow,
+    const std::vector<char> &keepOp,const std::vector<char> &keepExternal,
+    const std::vector<char> &keepFrame,size_t liveValues,std::string *error)
+{
+    auto &B=*program;
+    auto &p=B.providerProgram;
+    const size_t oldValues=oldToNew.size(),oldRows=keepRow.size();
+    const auto value=[&](RigExecValueId v)->RigExecValueId {
+        if(v==RigExecNoProviderValue) return v;
+        return v<oldValues?oldToNew[size_t(v)]:v-oldValues+liveValues;
+    };
+    const auto valueSlot=[&](int v)->int {
+        if(v<0) return v;
+        const RigExecValueId mapped=value(RigExecValueId(v));
+        return mapped==RigExecNoProviderValue?-1:int(mapped);
+    };
+    std::vector<int> rowOf(oldRows,-1);
+    int liveRows=0;
+    for(size_t k=0;k<oldRows;++k) if(keepRow[k]) rowOf[k]=liveRows++;
+    const auto row=[&](int k)->int {
+        if(k<0) return k;
+        return size_t(k)<oldRows?rowOf[size_t(k)]:k-int(oldRows)+liveRows;
+    };
+    if(!B.providerLeaves.Select(keepRow)) {
+        if(error) *error="the provider leaves declare a key range";
+        return false;
+    }
+    _KeepRows(&p.sampled,keepRow);
+    for(auto &leaf:p.sampled) leaf.value=value(leaf.value);
+    _KeepRows(&B.providerLeafValues,keepRow);
+    for(auto &id:B.providerLeafValues) id=value(id);
+    _KeepRows(&B.providerLeafBlocked,keepRow);
+    _KeepRows(&B.providerFrozenKeys,keepRow);
+    if(B.providerLeafChains.size()==oldRows) _KeepRows(&B.providerLeafChains,keepRow);
+    for(int &k:B.providerParentRawLeaves) k=row(k);
+    _KeepRows(&p.ops,keepOp);
+    _KeepRows(&p.descriptors,keepOp);
+    for(auto &op:p.ops) {
+        op.output=value(op.output);
+        for(auto &id:op.inputs) id=value(id);
+        for(auto &xform:op.xforms) xform.raw=value(xform.raw);
+    }
+    for(auto &descriptor:p.descriptors) {
+        for(auto &id:descriptor.reads) id=value(id);
+        for(auto &id:descriptor.writes) id=value(id);
+    }
+    _KeepRows(&p.externalInputs,keepExternal);
+    _KeepRows(&B.providerExternalSlots,keepExternal);
+    for(auto &input:p.externalInputs) input.value=value(input.value);
+    for(auto &input:p.routedInputs) input.value=value(input.value);
+    _KeepRows(&B.providerFrameInputs,keepFrame);
+    for(auto &input:B.providerFrameInputs) input.value=value(input.value);
+    for(auto &refresh:B.providerRefreshes) {
+        refresh.baseValue=value(refresh.baseValue);
+        refresh.currentValue=value(refresh.currentValue);
+    }
+    for(auto &id:B.providerRefreshTemplates) id=value(id);
+    for(auto &ladder:B.ladders) for(int &id:ladder.spaceValues) id=valueSlot(id);
+    for(auto &read:B.crossDomainReads) read.spaceValue=valueSlot(read.spaceValue);
+    std::vector<std::string> keys;
+    keys.reserve(liveValues);
+    for(size_t v=0;v<oldValues && v<p.valueKeys.size();++v)
+        if(oldToNew[v]!=RigExecNoProviderValue) keys.push_back(std::move(p.valueKeys[v]));
+    p.valueKeys=std::move(keys);
+    const auto remapMap=[&](auto *map) {
+        for(auto it=map->begin();it!=map->end();) {
+            const RigExecValueId mapped=value(it->second);
+            if(mapped==RigExecNoProviderValue && it->second!=RigExecNoProviderValue) it=map->erase(it);
+            else {it->second=mapped; ++it;}
+        }
+    };
+    remapMap(&p.valueIds);
+    remapMap(&p.rawInputs);
+    remapMap(&p.attributeValues);
+    std::vector<RigExecValueId> leaves;
+    leaves.reserve(p.leaves.size());
+    for(const auto id:p.leaves) {
+        const RigExecValueId mapped=value(id);
+        if(mapped!=RigExecNoProviderValue || id==RigExecNoProviderValue) leaves.push_back(mapped);
+    }
+    p.leaves=std::move(leaves);
+    std::vector<RigExecTypedValueState> states(liveValues);
+    for(size_t v=0;v<oldValues && v<B.providerValues.values.size();++v)
+        if(oldToNew[v]!=RigExecNoProviderValue) states[size_t(oldToNew[v])]=std::move(B.providerValues.values[v]);
+    B.providerValues.values=std::move(states);
+    // A range of ids that all survive stays one range; one that lost an id
+    // is split around it.
+    std::vector<RigExecBakedSlotRange> rewritten;
+    const auto rewrite=[&](std::vector<RigExecBakedSlotRange> *ranges) {
+        const bool provider=std::any_of(ranges->begin(),ranges->end(),[](const RigExecBakedSlotRange &range) {
+            return range.domain==RigExecBakedSlotDomain::SpaceValue || range.domain==RigExecBakedSlotDomain::SpaceLeaf;
+        });
+        if(!provider) return;
+        rewritten.clear();
+        for(const auto &range:*ranges) {
+            const bool space=range.domain==RigExecBakedSlotDomain::SpaceValue;
+            if(!space && range.domain!=RigExecBakedSlotDomain::SpaceLeaf) {rewritten.push_back(range); continue;}
+            const size_t first=rewritten.size();
+            for(uint32_t id=range.begin;id<range.end;++id) {
+                const int mapped=space?valueSlot(int(id)):row(int(id));
+                if(mapped<0) continue;
+                if(rewritten.size()>first && rewritten.back().end==uint32_t(mapped)) ++rewritten.back().end;
+                else rewritten.push_back(RigExecBakedOne(range.domain,mapped));
+            }
+        }
+        *ranges=rewritten;
+    };
+    for(auto &step:B.steps) {rewrite(&step.reads); rewrite(&step.writes);}
+    return true;
+}
+
+// RIGEXEC_VERIFY_PROVIDER_PRUNE: the compacted program, reached again from
+// the same roots, keeps no producer nothing reaches, and every holder id is
+// inside the compacted layout.
+size_t _ProviderPruneViolations(const RigExecBakedProgramImpl &B)
+{
+    _ProviderLiveness L;
+    std::string ignored;
+    if(!_ProviderLive(B,&L,&ignored)) return 1;
+    size_t violations=0;
+    for(const char live:L.producer) if(!live) ++violations;
+    const auto &p=B.providerProgram;
+    const size_t values=p.valueKeys.size(),rows=p.sampled.size();
+    const auto outside=[&](RigExecValueId v) {return v!=RigExecNoProviderValue && v>=values;};
+    const auto count=[&](bool bad) {if(bad) ++violations;};
+    for(const auto &leaf:p.sampled) count(outside(leaf.value));
+    for(const auto &input:p.externalInputs) count(outside(input.value));
+    for(const auto &input:p.routedInputs) count(outside(input.value));
+    for(const auto &input:B.providerFrameInputs) count(outside(input.value));
+    for(size_t i=0;i<p.ops.size();++i) {
+        if(!RigExecProviderOpStructurallyValid(p,uint32_t(i),nullptr)) continue;
+        for(const auto id:p.ops[i].inputs) count(outside(id));
+        for(const auto &xform:p.ops[i].xforms) count(outside(xform.raw));
+        for(const auto id:p.descriptors[i].reads) count(outside(id));
+        for(const auto id:p.descriptors[i].writes) count(outside(id));
+    }
+    for(const auto id:p.leaves) count(outside(id));
+    for(const auto &entry:p.valueIds) count(outside(entry.second));
+    for(const auto &entry:p.rawInputs) count(outside(entry.second));
+    for(const auto &entry:p.attributeValues) count(outside(entry.second));
+    for(const auto &ladder:B.ladders)
+        for(const int id:ladder.spaceValues) count(id>=0 && size_t(id)>=values);
+    for(const auto &read:B.crossDomainReads) count(read.spaceValue>=0 && size_t(read.spaceValue)>=values);
+    for(const auto &refresh:B.providerRefreshes) {
+        count(outside(refresh.baseValue));
+        count(outside(refresh.currentValue));
+    }
+    for(const int k:B.providerParentRawLeaves) count(k>=0 && size_t(k)>=rows);
+    for(const auto &step:B.steps)
+        for(const auto *ranges:{&step.reads,&step.writes})
+            for(const auto &range:*ranges) {
+                count(range.domain==RigExecBakedSlotDomain::SpaceValue && range.end>values);
+                count(range.domain==RigExecBakedSlotDomain::SpaceLeaf && range.end>rows);
+            }
+    count(B.providerValues.values.size()!=values);
+    count(B.providerLeaves.decl.keys.size()!=rows || B.providerLeaves.values.size()!=rows ||
+          B.providerLeaves.attributes.size()!=rows);
+    count(B.providerLeafValues.size()!=rows || B.providerLeafBlocked.size()!=rows ||
+          B.providerFrozenKeys.size()!=rows);
+    count(B.providerExternalSlots.size()!=p.externalInputs.size());
+    return violations;
 }
 }
 bool RigExecBakedBuildSpaces(RigExecBakedProgramImpl *program,UsdTimeCode capture,
@@ -493,14 +846,100 @@ bool RigExecBakedBindOwnPropertySpaces(RigExecBakedProgramImpl *program,
     return true;
 }
 
+bool RigExecBakedPathLeaves::Select(const std::vector<char> &keep)
+{
+    if(decl.scalarBegin>=0 || decl.externalBegin>=0 || decl.dialBegin>=0) return false;
+    std::vector<int> keyOf(decl.keys.size(),-1);
+    int next=0;
+    for(size_t k=0;k<decl.keys.size();++k) if(k<keep.size() && keep[k]) keyOf[k]=next++;
+    for(int &role:decl.roles) role=role>=0 && size_t(role)<keyOf.size()?keyOf[size_t(role)]:-1;
+    _KeepRows(&decl.keys,keep);
+    _KeepRows(&attributes,keep);
+    _KeepRows(&hops,keep);
+    _KeepRows(&varying,keep);
+    _KeepRows(&epoch,keep);
+    _KeepRows(&overrideReached,keep);
+    _KeepRows(&walks,keep);
+    _KeepRows(&exactVersions,keep);
+    _KeepRows(&exactRecordIndices,keep);
+    _KeepRows(&exactValueTypes,keep);
+    _KeepRows(&values,keep);
+    _KeepRows(&consumedValues,keep);
+    _KeepRows(&changed,keep);
+    _KeepRows(&versions,keep);
+    _KeepRows(&observed,keep);
+    _KeepRows(&observedVersions,keep);
+    _KeepRows(&observedRuns,keep);
+    _KeepRows(&mustSample,keep);
+    return true;
+}
+bool RigExecBakedPruneProviderProgram(RigExecBakedProgramImpl *program,std::string *error)
+{
+    auto &B=*program;
+    auto &p=B.providerProgram;
+    B.providerStepsPruned=0; B.providerPruneRoots=0; B.providerPruneViolations=0;
+    // The refresh templates were clone sources for the contexts the pose
+    // steps bound; no step runs them.
+    for(auto it=B.providerRefreshTemplateOps.rbegin();it!=B.providerRefreshTemplateOps.rend();++it) {
+        p.ops.erase(p.ops.begin()+*it);
+        p.descriptors.erase(p.descriptors.begin()+*it);
+    }
+    B.providerRefreshTemplateOps.clear();
+    // Bound before reachability, so a routed value's source is an edge.
+    B.providerRoutedReads.clear();
+    for(size_t k=0;k<p.routedInputs.size();++k) {
+        const auto &input=p.routedInputs[k];
+        RigExecReadPhase phase; std::string why;
+        RigExecCrossDomainRead read;
+        if(!RigExecParseReadPhase(input.readPhase.GetString(),&phase,&why) ||
+           !RigExecBakedBindConnectionValue(B,input.consumer,input.source,phase,&read)) {
+            read.unavailable=why.empty()?"connected provider phase has no native value":why;
+        }
+        B.providerRoutedReads.push_back(int(B.crossDomainReads.size()));
+        B.crossDomainReads.push_back(std::move(read));
+    }
+    // Read at every Build, so one process can compare the two programs.
+    if(!TfGetenvBool("RIGEXEC_PROVIDER_PRUNE",true)) return true;
+    const bool verify=TfGetenvBool("RIGEXEC_VERIFY_PROVIDER_PRUNE",false);
+    const size_t rows=p.sampled.size();
+    if(B.providerLeaves.decl.keys.size()!=rows || B.providerLeafValues.size()!=rows ||
+       B.providerLeafBlocked.size()!=rows || B.providerFrozenKeys.size()!=rows ||
+       B.providerExternalSlots.size()!=p.externalInputs.size() ||
+       B.providerValues.values.size()!=p.valueKeys.size()) {
+        if(error) *error="the provider tables are not parallel to the provider program";
+        return false;
+    }
+    _ProviderLiveness live;
+    if(!_ProviderLive(B,&live,error)) return false;
+    const size_t values=p.valueKeys.size();
+    std::vector<RigExecValueId> oldToNew(values,RigExecNoProviderValue);
+    size_t kept=0;
+    for(size_t v=0;v<values;++v) if(live.value[v]) oldToNew[v]=RigExecValueId(kept++);
+    const auto slice=[&](size_t begin,size_t count) {
+        return std::vector<char>(live.producer.begin()+std::ptrdiff_t(begin),
+                                 live.producer.begin()+std::ptrdiff_t(begin+count));
+    };
+    const std::vector<char> keepOp=slice(0,live.ops),keepRow=slice(live.Rows(),live.rows),
+        keepExternal=slice(live.Externals(),live.externals),keepFrame=slice(live.Frames(),live.frames);
+    const auto dropped=[](const std::vector<char> &keep) {
+        return size_t(std::count(keep.begin(),keep.end(),char(0)));
+    };
+    const size_t pruned=dropped(keepOp)+dropped(keepRow)+dropped(keepExternal)+dropped(keepFrame);
+    if((pruned || kept!=values) &&
+       !_RemapProviderHolders(&B,oldToNew,keepRow,keepOp,keepExternal,keepFrame,kept,error)) return false;
+    B.providerStepsPruned=pruned;
+    B.providerPruneRoots=live.roots;
+    if(verify) {
+        B.providerPruneViolations=_ProviderPruneViolations(B);
+        if(B.providerPruneViolations)
+            TF_WARN("RIGEXEC_VERIFY_PROVIDER_PRUNE: %zu provider holder(s) fail after pruning",
+                    B.providerPruneViolations);
+    }
+    return true;
+}
 void RigExecBakedBuildSpaceSteps(RigExecBakedProgramImpl *program)
 {
     auto &B=*program;
-    for(auto it=B.providerRefreshTemplateOps.rbegin();it!=B.providerRefreshTemplateOps.rend();++it) {
-        B.providerProgram.ops.erase(B.providerProgram.ops.begin()+*it);
-        B.providerProgram.descriptors.erase(B.providerProgram.descriptors.begin()+*it);
-    }
-    B.providerRefreshTemplateOps.clear();
     B.providerLeafChains.assign(B.providerProgram.sampled.size(),-1);
     for(size_t k=0;k<B.providerProgram.sampled.size();++k) {
         const auto &input=B.providerProgram.sampled[k];
@@ -511,17 +950,9 @@ void RigExecBakedBuildSpaceSteps(RigExecBakedProgramImpl *program)
         step.writes.push_back(RigExecBakedOne(RigExecBakedSlotDomain::SpaceValue,int(input.value)));
         B.steps.push_back(std::move(step));
     }
-    B.providerRoutedReads.clear();
+    // RigExecBakedPruneProviderProgram bound each routed input's read.
     for(size_t k=0;k<B.providerProgram.routedInputs.size();++k) {
         const auto &input=B.providerProgram.routedInputs[k];
-        RigExecReadPhase phase; std::string error;
-        RigExecCrossDomainRead read;
-        if(!RigExecParseReadPhase(input.readPhase.GetString(),&phase,&error) ||
-           !RigExecBakedBindConnectionValue(B,input.consumer,input.source,phase,&read)) {
-            read.unavailable=error.empty()?"connected provider phase has no native value":error;
-        }
-        B.providerRoutedReads.push_back(int(B.crossDomainReads.size()));
-        B.crossDomainReads.push_back(std::move(read));
         RigExecBakedStep step; step.kind=RigExecBakedStepKind::SpaceExpression;
         step.object=int(k); step.part=3;
         step.label="SpaceConnection "+B.providerProgram.valueKeys[size_t(input.value)];
@@ -563,6 +994,9 @@ void RigExecBakedBuildSpaceSteps(RigExecBakedProgramImpl *program)
         B.steps.push_back(std::move(step));
     }
 }
+// Build prunes every provider step no root reaches: a consumer of a provider
+// value must be a declared step read, a ladder channel or a cross-domain read,
+// and an op that can fail here must fail RigExecProviderOpStructurallyValid.
 void RigExecBakedRunSpaceOp(RigExecBakedProgramImpl *program,RigExecBakedStep *step)
 {
     auto &B=*program;

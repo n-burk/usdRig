@@ -25,7 +25,9 @@
 #include "rigExec/bakedProgramImpl.h"
 
 #include "pxr/base/plug/registry.h"
+#include "pxr/base/tf/getenv.h"
 #include "pxr/base/tf/pathUtils.h"
+#include "pxr/base/tf/setenv.h"
 #include "pxr/usd/sdf/types.h"
 #include "pxr/usd/usd/attribute.h"
 #include "pxr/usd/usd/editTarget.h"
@@ -619,12 +621,13 @@ TestAPropertyChainOnARestRefusesTheEpochPath(const std::string &examplesDir)
     CHECK(slot != B.index.end());
     if (slot == B.index.end()) return;
     const SdfPath target = RestSpace(stage).GetPath();
+    // The shared expression, when a reader keeps it from pruning, is not the
+    // value the ladder reads.
     const auto shared = B.providerProgram.attributeValues.find(target);
-    CHECK(shared != B.providerProgram.attributeValues.end());
-    if (shared == B.providerProgram.attributeValues.end()) return;
     const int ownValue = B.ladders[slot->second].spaceValues[0];
     CHECK(ownValue >= 0);
-    CHECK(uint32_t(ownValue) != shared->second);
+    CHECK(shared == B.providerProgram.attributeValues.end() ||
+          uint32_t(ownValue) != shared->second);
     bool ownFinal = false;
     for (const auto &route : B.providerProgram.routedInputs)
         if (route.value == uint32_t(ownValue))
@@ -1039,6 +1042,168 @@ TestARestValueEditOnAnAncestorReachesTheParityOracle(
                                            "a rest:rx edit on an ancestor");
 }
 
+// RIGEXEC_PROVIDER_PRUNE and RIGEXEC_VERIFY_PROVIDER_PRUNE set to \p on for
+// the scope's lifetime, then restored; Build reads both.
+struct PruneKnobs {
+    explicit PruneKnobs(bool on)
+        : prune(TfGetenv("RIGEXEC_PROVIDER_PRUNE")),
+          verify(TfGetenv("RIGEXEC_VERIFY_PROVIDER_PRUNE"))
+    {
+        TfSetenv("RIGEXEC_PROVIDER_PRUNE", on ? "1" : "0");
+        TfSetenv("RIGEXEC_VERIFY_PROVIDER_PRUNE", on ? "1" : "0");
+    }
+    ~PruneKnobs()
+    {
+        Restore("RIGEXEC_PROVIDER_PRUNE", prune);
+        Restore("RIGEXEC_VERIFY_PROVIDER_PRUNE", verify);
+    }
+    static void Restore(const std::string &name, const std::string &saved)
+    {
+        if (saved.empty()) {
+            TfUnsetenv(name);
+        } else {
+            TfSetenv(name, saved);
+        }
+    }
+    std::string prune, verify;
+};
+
+// Pruning keeps every provider producer whose only effect can be a
+// diagnostic. A connected rest:space revised by its own property chain (a
+// routed final read) publishes the same lines, skipped operations and poses
+// with RIGEXEC_PROVIDER_PRUNE on and off, and keeps its routed inputs. So
+// does a connection cycle between two controls' avars:rspin, which only
+// unread provider steps form, when the compile accepts it: its members are
+// the roots that keep its cycle skip reason. No authored stage reaches the
+// routed read's "has no native value" line: the capture validates every read
+// phase and every routed source is a provider program attribute, so the
+// binding always answers.
+void
+TestPruningKeepsProviderDiagnostics(const std::string &examplesDir)
+{
+    struct Outcome {
+        bool compiled = false;
+        std::vector<RigExecRigPose> poses;
+        std::map<SdfPath, std::string> skipped;
+        std::vector<std::vector<std::string>> cycles;
+        size_t routed = 0, pruned = 0, roots = 0, violations = 0;
+    };
+    const auto run = [&](const _Edit &edit, bool prune) {
+        Outcome out;
+        const PruneKnobs knobs(prune);
+        const UsdStageRefPtr stage = UsdStage::Open(StagePath(examplesDir));
+        CHECK(stage);
+        if (!stage) return out;
+        edit(stage);
+        RigExecRigEvaluator rig(stage, kRig);
+        std::vector<std::string> errors;
+        out.compiled = rig.Compile(&errors) && rig.GetBakedProgram() != nullptr;
+        if (!out.compiled) {
+            for (const std::string &error : errors) {
+                std::printf("    compile: %s\n", error.c_str());
+            }
+            return out;
+        }
+        for (double frame : kFrames) {
+            out.poses.push_back(rig.Evaluate(UsdTimeCode(frame)));
+        }
+        out.skipped = rig.GetSkippedOperations();
+        const RigExecBakedProgram *program = rig.GetBakedProgram();
+        CHECK(program != nullptr);
+        if (!program) return out;
+        const RigExecBakedProgramImpl &B = program->GetStepGraph();
+        out.cycles = B.opGraph.cycles;
+        out.routed = B.providerProgram.routedInputs.size();
+        out.pruned = B.providerStepsPruned;
+        out.roots = B.providerPruneRoots;
+        out.violations = B.providerPruneViolations;
+        return out;
+    };
+    const auto compare = [](const std::string &what, const Outcome &off,
+                            const Outcome &on) {
+        CHECK(off.compiled == on.compiled);
+        CHECK(off.poses.size() == on.poses.size());
+        for (size_t i = 0; i < off.poses.size() && i < on.poses.size(); ++i) {
+            CHECK(off.poses[i].valid == on.poses[i].valid);
+            ComparePoses(what + " at frame " +
+                             std::to_string(int(kFrames[i])),
+                         off.poses[i], on.poses[i]);
+            CHECK(off.poses[i].diagnostics == on.poses[i].diagnostics);
+        }
+        CHECK(off.skipped == on.skipped);
+        CHECK(off.cycles == on.cycles);
+        CHECK(off.routed == on.routed);
+        CHECK(off.pruned == 0);
+        CHECK(on.violations == 0);
+    };
+
+    const _Edit routed = [](const UsdStageRefPtr &stage) {
+        EditInSession(stage);
+        GfMatrix4d rawRest(1.0);
+        CHECK(RestSpace(stage).Get(&rawRest));
+        const UsdAttribute driver = stage->GetPrimAtPath(kJoint).CreateAttribute(
+            TfToken("inputs:ownRestDriver"), SdfValueTypeNames->Matrix4d);
+        CHECK(driver.Set(rawRest));
+        CHECK(RestSpace(stage).SetConnections({driver.GetPath()}));
+        const UsdPrim prim = stage->DefinePrim(
+            kRig.AppendChild(TfToken("Movers")).AppendChild(TfToken("RestOffset")),
+            TfToken("RigExecMatrixMathMover"));
+        prim.ApplyAPI(TfToken("RigExecMoverAPI"));
+        prim.CreateAttribute(TfToken("rigExec:operation"),
+                             SdfValueTypeNames->Token)
+            .Set(TfToken("multiply"));
+        prim.CreateAttribute(TfToken("inputs:value"),
+                             SdfValueTypeNames->Matrix4d)
+            .Set(Translation(3.0));
+        prim.CreateAttribute(TfToken("inputs:defaultWeight"),
+                             SdfValueTypeNames->Float)
+            .Set(1.0f);
+        prim.CreateRelationship(TfToken("rigExec:moves"))
+            .SetTargets({kJoint.AppendProperty(TfToken("rest:space"))});
+    };
+    const Outcome routedOff = run(routed, false);
+    const Outcome routedOn = run(routed, true);
+    CHECK(routedOff.compiled && routedOn.compiled);
+    compare("a routed own rest:space", routedOff, routedOn);
+    CHECK(routedOn.routed > 0);
+    CHECK(routedOn.pruned > 0);
+    std::printf("  pruning a routed rest:space: %zu routed input(s) kept, "
+                "%zu provider step(s) pruned, %zu line(s) per frame\n",
+                routedOn.routed, routedOn.pruned,
+                routedOn.poses.empty() ? size_t(0)
+                                       : routedOn.poses[0].diagnostics.size());
+
+    const _Edit cycle = [](const UsdStageRefPtr &stage) {
+        EditInSession(stage);
+        const SdfPath controls = kRig.AppendChild(TfToken("Controls"));
+        const UsdAttribute a =
+            stage->GetPrimAtPath(controls.AppendChild(TfToken("Tail3")))
+                .CreateAttribute(TfToken("avars:rspin"),
+                                 SdfValueTypeNames->Double);
+        const UsdAttribute b =
+            stage->GetPrimAtPath(controls.AppendChild(TfToken("Tail4")))
+                .CreateAttribute(TfToken("avars:rspin"),
+                                 SdfValueTypeNames->Double);
+        CHECK(a && b);
+        if (!a || !b) return;
+        CHECK(a.SetConnections({b.GetPath()}));
+        CHECK(b.SetConnections({a.GetPath()}));
+    };
+    const Outcome cycleOff = run(cycle, false);
+    const Outcome cycleOn = run(cycle, true);
+    compare("an avars:rspin connection cycle", cycleOff, cycleOn);
+    if (!cycleOff.compiled || cycleOff.cycles.empty()) {
+        std::printf("  skipping the cycle half: the connection cycle %s\n",
+                    cycleOff.compiled ? "forms no operation cycle"
+                                      : "does not compile");
+        return;
+    }
+    CHECK(cycleOn.roots > 0);
+    std::printf("  pruning kept %zu provider cycle member(s) as roots, %zu "
+                "operation cycle(s)\n",
+                cycleOn.roots, cycleOn.cycles.size());
+}
+
 std::string
 SchemaResourceDir(const std::string &examplesDir)
 {
@@ -1082,6 +1247,7 @@ main(int argc, char **argv)
     TestARestValueEditOnAnAncestorReachesTheOracle(examplesDir);
     TestARestValueEditAfterCompileReachesTheParityOracle(examplesDir);
     TestARestValueEditOnAnAncestorReachesTheParityOracle(examplesDir);
+    TestPruningKeepsProviderDiagnostics(examplesDir);
 
     if (failures) {
         std::printf("%d FAILURE(S)\n", failures);

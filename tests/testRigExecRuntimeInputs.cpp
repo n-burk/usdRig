@@ -37,6 +37,8 @@
 
 #include "pxr/base/gf/rotation.h"
 #include "pxr/base/plug/registry.h"
+#include "pxr/base/tf/getenv.h"
+#include "pxr/base/tf/setenv.h"
 #include "pxr/usd/sdf/types.h"
 #include "pxr/usd/usd/editContext.h"
 #include "pxr/usd/usd/primRange.h"
@@ -2405,6 +2407,147 @@ _TestStaticProviderInputsAreReadOnce(const UsdStageRefPtr &stage,
     }
 }
 
+// RIGEXEC_PROVIDER_PRUNE set to \p on for the scope's lifetime, then
+// restored; Build reads it.
+struct _PruneKnob {
+    explicit _PruneKnob(bool on) : saved(TfGetenv("RIGEXEC_PROVIDER_PRUNE"))
+    {
+        TfSetenv("RIGEXEC_PROVIDER_PRUNE", on ? "1" : "0");
+    }
+    ~_PruneKnob()
+    {
+        if (saved.empty()) {
+            TfUnsetenv("RIGEXEC_PROVIDER_PRUNE");
+        } else {
+            TfSetenv("RIGEXEC_PROVIDER_PRUNE", saved);
+        }
+    }
+    std::string saved;
+};
+
+// A pruned bake of Biped_anim whose first animated control avar is
+// value-blocked at frame 2 (in the session layer, keyed at 1 and 3 with its
+// own values, so it stays animated) plays frames 1-3 through the stage
+// sampler as the evaluator publishes them, bit for bit: a slot whose
+// provider leaf was pruned still reaches its readers. The provider-source
+// slots only the unpruned bake lists are printed, the static ones marked
+// (decision D7-1).
+static void
+_TestAPrunedBakeKeepsABlockedAnimatedAvar(const std::string &examples)
+{
+    const UsdStageRefPtr stage = _Open(examples + "/biped/Biped_anim.usda");
+    if (!stage) {
+        return;
+    }
+    const SdfPath rig = _FindRig(stage);
+    UsdAttribute avar;
+    for (const UsdPrim &prim : stage->Traverse()) {
+        if (avar) {
+            break;
+        }
+        if (!prim.GetPath().HasPrefix(rig) ||
+            prim.GetTypeName() != TfToken("RigExecControl")) {
+            continue;
+        }
+        for (const UsdAttribute &attribute : prim.GetAttributes()) {
+            if (attribute.GetName().GetString().rfind("avars:", 0) == 0 &&
+                attribute.ValueMightBeTimeVarying()) {
+                avar = attribute;
+                break;
+            }
+        }
+    }
+    CHECK(avar);
+    if (!avar) {
+        return;
+    }
+    VtValue first, last;
+    CHECK(avar.Get(&first, UsdTimeCode(1.0)) &&
+          avar.Get(&last, UsdTimeCode(3.0)));
+    {
+        UsdEditContext context(stage, stage->GetSessionLayer());
+        CHECK(avar.Set(first, UsdTimeCode(1.0)));
+        CHECK(avar.Set(SdfValueBlock(), UsdTimeCode(2.0)));
+        CHECK(avar.Set(last, UsdTimeCode(3.0)));
+    }
+    CHECK(avar.ValueMightBeTimeVarying());
+    CHECK(avar.GetResolveInfo(UsdTimeCode(2.0)).ValueIsBlocked());
+    const std::string label =
+        "pruned bake, " + avar.GetPath().GetString() + " blocked at 2";
+    std::vector<uint8_t> bytes, unprunedBytes;
+    bool baked = false, unprunedBaked = false;
+    {
+        const _PruneKnob knob(true);
+        baked = _BakeArrays(label, stage, rig, 1.0, &bytes);
+    }
+    {
+        const _PruneKnob knob(false);
+        unprunedBaked = _BakeArrays(label + " (unpruned)", stage, rig, 1.0,
+                                    &unprunedBytes);
+    }
+    if (!baked || !unprunedBaked) {
+        return;
+    }
+    std::string error;
+    std::unique_ptr<RigExecRuntimeReader> reader =
+        RigExecRuntimeReader::Open(bytes.data(), bytes.size(), &error);
+    CHECK(reader);
+    if (!reader) {
+        std::printf("%s: open: %s\n", label.c_str(), error.c_str());
+        return;
+    }
+    RigExecInputSampler sampler;
+    CHECK(sampler.Bind(stage, *reader, &error));
+    CHECK(sampler.GetWarnings().empty());
+    for (const std::string &warning : sampler.GetWarnings()) {
+        std::printf("%s: sampler: %s\n", label.c_str(), warning.c_str());
+    }
+    RigExecRigEvaluator evaluator(stage, rig);
+    std::vector<std::string> errors;
+    CHECK(evaluator.Compile(&errors));
+    for (const double frame : {1.0, 2.0, 3.0}) {
+        CHECK(RigExecTestDrive(reader.get(), &sampler, frame, &error));
+        const RigExecRigPose pose = evaluator.Evaluate(UsdTimeCode(frame));
+        CHECK(pose.valid);
+        std::vector<std::string> diffs;
+        const bool same = RigExecCompareRuntimeRun(pose, *reader, &diffs);
+        for (const std::string &line : diffs) {
+            std::printf("%s frame %g: %s\n", label.c_str(), frame,
+                        line.c_str());
+        }
+        CHECK(same);
+    }
+    // D7-1 evidence: the provider-source slots pruning took off the list.
+    std::unique_ptr<RigExecRuntimeReader> unpruned = RigExecRuntimeReader::Open(
+        unprunedBytes.data(), unprunedBytes.size(), &error);
+    CHECK(unpruned);
+    if (!unpruned) {
+        return;
+    }
+    const auto listedPruned =
+        RigExecRuntimeStageArrayInputs::EnumerateProviderValues(*reader);
+    size_t lost = 0, lostStatic = 0;
+    for (const RigExecStageArrayInputInfo &info :
+         RigExecRuntimeStageArrayInputs::EnumerateProviderValues(*unpruned)) {
+        const bool kept = std::any_of(
+            listedPruned.begin(), listedPruned.end(),
+            [&](const RigExecStageArrayInputInfo &other) {
+                return other.name == info.name;
+            });
+        if (kept) {
+            continue;
+        }
+        ++lost;
+        lostStatic += info.animated ? 0 : 1;
+        std::printf("  provider-source slot only the unpruned bake lists: "
+                    "%s%s\n",
+                    info.name.c_str(), info.animated ? "" : " (static)");
+    }
+    std::printf("%s: %zu of %zu provider-source slot(s) unlisted by pruning, "
+                "%zu static\n",
+                label.c_str(), lost, listedPruned.size() + lost, lostStatic);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -2637,6 +2780,7 @@ main(int argc, char **argv)
             _TestStaticProviderInputsAreReadOnce(stage, bytes);
         }
     }
+    _TestAPrunedBakeKeepsABlockedAnimatedAvar(examples);
     if (failures == 0) {
         std::printf("testRigExecRuntimeInputs: all tests passed\n");
         return 0;

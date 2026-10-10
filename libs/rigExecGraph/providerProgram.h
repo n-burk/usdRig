@@ -76,6 +76,14 @@ bool RigExecCloneProviderContext(RigExecProviderProgram *,RigExecValueId result,
     RigExecValueId *output,std::string *error=nullptr);
 bool RigExecRunProviderOp(const RigExecProviderProgram &program,uint32_t originalIndex,
     RigExecTypedValueStore *store,std::string *error=nullptr);
+/// Whether op \p index of \p program can run at all: it exists, its output
+/// is inside the typed layout, its kind is one the kernels handle, and a
+/// LocalXform or InterveningXform owner was spelled at build. The per-op
+/// half of RigExecRunProviderOp's failures (the other half is the store
+/// binding); on false, \p error gets the message RigExecRunProviderOp
+/// fails with. A provider op that fails here is a pruning root.
+bool RigExecProviderOpStructurallyValid(const RigExecProviderProgram &program,
+                                        uint32_t index, std::string *error);
 /// Sampling/overlays publish raw slots before entering the readiness loop.
 bool RigExecSampleProviderProgram(const RigExecProviderProgram &program,
     const RigExecSceneDescriptors &scene,size_t identity,

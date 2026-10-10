@@ -3826,6 +3826,16 @@ RigExecBakedProgram::_BuildWithSceneCaptureAttempt(RigExecRigEvaluator *evaluato
     RigExecBakedBuildAvarSteps(&B);
     RigExecBakedDeclareInputDependencies(&B);
     RigExecBakedDeclareLayoutReads(&B);
+    // Every reader of a provider value outside the provider program is
+    // declared now; the provider steps none of them reaches go before their
+    // leaves are numbered and their steps built.
+    {
+        std::string invalid;
+        if(!RigExecBakedPruneProviderProgram(&B,&invalid)) {
+            refuse("provider pruning failed: "+invalid,E._rigPath);
+            return nullptr;
+        }
+    }
     // The complete prefix changes every region index. Rebuild all shared
     // edges, levels, clusters and cones from the final declarations.
 

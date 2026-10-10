@@ -9280,6 +9280,233 @@ TestTheConeTableIsPublishedOnce()
                 clusters);
 }
 
+/// RIGEXEC_PROVIDER_PRUNE and RIGEXEC_VERIFY_PROVIDER_PRUNE set to \p on for
+/// the scope's lifetime, then restored. Build reads both, so a program built
+/// inside the scope is pruned (and judged) as asked.
+struct PruneKnobs {
+    explicit PruneKnobs(bool on)
+        : prune(TfGetenv("RIGEXEC_PROVIDER_PRUNE")),
+          verify(TfGetenv("RIGEXEC_VERIFY_PROVIDER_PRUNE"))
+    {
+        TfSetenv("RIGEXEC_PROVIDER_PRUNE", on ? "1" : "0");
+        TfSetenv("RIGEXEC_VERIFY_PROVIDER_PRUNE", on ? "1" : "0");
+    }
+    ~PruneKnobs()
+    {
+        Restore("RIGEXEC_PROVIDER_PRUNE", prune);
+        Restore("RIGEXEC_VERIFY_PROVIDER_PRUNE", verify);
+    }
+    static void Restore(const std::string &name, const std::string &saved)
+    {
+        if (saved.empty()) {
+            TfUnsetenv(name);
+        } else {
+            TfSetenv(name, saved);
+        }
+    }
+    std::string prune, verify;
+};
+
+/// Build prunes the provider steps no reader reaches (user decision U1) and
+/// no value moves: Biped_anim built with RIGEXEC_PROVIDER_PRUNE off and on
+/// publishes the same generations, bit for bit, diagnostics included, over
+/// frames 1, 2, 3, 2 and a three-step drag of M_Body's rz. The pruned
+/// program lost exactly the steps it counts, its judge
+/// (RIGEXEC_VERIFY_PROVIDER_PRUNE) found nothing, it kept no diagnostic root
+/// besides the routed inputs, and each SpaceExpression step it kept writes a
+/// value some step, ladder, cross-domain read or refresh reads.
+void
+TestPruningKeepsEveryValue(const std::string &examplesDir)
+{
+    const std::string path = examplesDir + "/biped/Biped_anim.usda";
+    const SdfPath body("/Biped/Rig/Main/Shot/Aux/Controls/M_Body");
+    struct PruneRun {
+        UsdStageRefPtr stage;
+        std::unique_ptr<RigExecRigEvaluator> evaluator;
+        std::vector<RigExecRigPose> poses;
+    };
+    const auto run = [&](bool prune, PruneRun *out) {
+        const PruneKnobs knobs(prune);
+        out->stage = UsdStage::Open(path);
+        CHECK(out->stage);
+        if (!out->stage) {
+            return;
+        }
+        out->evaluator = std::make_unique<RigExecRigEvaluator>(
+            out->stage, FindRig(out->stage));
+        std::vector<std::string> errors;
+        CHECK(out->evaluator->Compile(&errors));
+        for (const double frame : {1.0, 2.0, 3.0, 2.0}) {
+            out->poses.push_back(out->evaluator->Evaluate(UsdTimeCode(frame)));
+        }
+        for (const double rz : {15.0, 30.0, 45.0}) {
+            out->evaluator->SetInteractiveOverrides({RigExecValueOverride{
+                body, TfToken(), TfToken("avars:rz"), VtValue(rz)}});
+            out->poses.push_back(out->evaluator->Evaluate(UsdTimeCode(2.0)));
+        }
+        out->evaluator->ClearInteractiveOverrides();
+        out->poses.push_back(out->evaluator->Evaluate(UsdTimeCode(2.0)));
+    };
+    PruneRun off, on;
+    run(false, &off);
+    run(true, &on);
+    const bool built = off.evaluator && on.evaluator &&
+                       off.evaluator->GetBakedProgram() &&
+                       on.evaluator->GetBakedProgram();
+    CHECK(built);
+    if (!built) {
+        return;
+    }
+    CHECK(off.poses.size() == on.poses.size());
+    for (size_t i = 0; i < off.poses.size() && i < on.poses.size(); ++i) {
+        CHECK(off.poses[i].valid && on.poses[i].valid);
+        rigExecTest::ComparePose(&failures,
+                                 "Biped_anim pruned, generation " +
+                                     std::to_string(i),
+                                 off.poses[i], on.poses[i]);
+    }
+    // Both answered from the program, so the comparison is the program's.
+    CHECK(on.evaluator->GetBakedGenerationCount() > 0);
+    CHECK(on.evaluator->GetBakedGenerationCount() ==
+          off.evaluator->GetBakedGenerationCount());
+    const RigExecBakedProgramImpl &U =
+        off.evaluator->GetBakedProgram()->GetStepGraph();
+    const RigExecBakedProgramImpl &P =
+        on.evaluator->GetBakedProgram()->GetStepGraph();
+    CHECK(U.providerStepsPruned == 0);
+    CHECK(P.providerStepsPruned > 0);
+    CHECK(P.providerPruneViolations == 0);
+    CHECK(P.providerPruneRoots == 0);
+    CHECK(P.steps.size() < U.steps.size());
+    CHECK(P.steps.size() + P.providerStepsPruned == U.steps.size());
+    CHECK(P.providerProgram.routedInputs.size() ==
+          U.providerProgram.routedInputs.size());
+    CHECK(P.opGraph.cycles == U.opGraph.cycles);
+    // Every written SpaceValue of a kept step has a reader or is a root.
+    std::vector<char> read(P.providerProgram.valueKeys.size(), 0);
+    const auto mark = [&read](int64_t id) {
+        if (id >= 0 && uint64_t(id) < read.size()) {
+            read[size_t(id)] = 1;
+        }
+    };
+    for (const RigExecBakedStep &step : P.steps) {
+        for (const RigExecBakedSlotRange &range : step.reads) {
+            if (range.domain == RigExecBakedSlotDomain::SpaceValue) {
+                for (uint32_t id = range.begin; id < range.end; ++id) {
+                    mark(int64_t(id));
+                }
+            }
+        }
+    }
+    for (const auto &ladder : P.ladders) {
+        for (const int id : ladder.spaceValues) {
+            mark(id);
+        }
+    }
+    for (const auto &crossRead : P.crossDomainReads) {
+        mark(crossRead.spaceValue);
+    }
+    for (const auto &refresh : P.providerRefreshes) {
+        mark(int64_t(refresh.baseValue));
+        mark(int64_t(refresh.currentValue));
+    }
+    size_t kept = 0, unread = 0;
+    for (const RigExecBakedStep &step : P.steps) {
+        // A routed input is a root: its body may publish a diagnostic.
+        if (step.kind != RigExecBakedStepKind::SpaceExpression ||
+            step.part == 3) {
+            continue;
+        }
+        ++kept;
+        for (const RigExecBakedSlotRange &range : step.writes) {
+            if (range.domain != RigExecBakedSlotDomain::SpaceValue) {
+                continue;
+            }
+            for (uint32_t id = range.begin; id < range.end; ++id) {
+                if (id >= read.size() || !read[id]) {
+                    ++unread;
+                    std::printf("FAIL pruned step %s writes an unread "
+                                "value\n", step.label.c_str());
+                }
+            }
+        }
+    }
+    CHECK(kept > 0);
+    CHECK(unread == 0);
+    std::printf("  provider pruning on Biped_anim: %zu of %zu steps "
+                "pruned, %zu routed inputs, %zu other roots\n",
+                P.providerStepsPruned, U.steps.size(),
+                P.providerProgram.routedInputs.size(),
+                P.providerPruneRoots);
+}
+
+/// A connection authored on an attribute whose provider leaf the program
+/// pruned rebuilds the program as it does with pruning off: Build keeps the
+/// pruned attribute among the paths whose non-value edits invalidate it.
+/// The driver's rest:tx has a spec before the compile, so the edit changes
+/// only its connection list.
+void
+TestAnEditOnAPrunedAttributeStillRebuilds()
+{
+    const SdfPath driver("/Asset/Rig/Driver");
+    const SdfPath restTx = driver.AppendProperty(TfToken("rest:tx"));
+    struct Outcome {
+        bool sampled = false, compiled = false;
+        size_t builds = 0;
+        bool digestMoved = false;
+        RigExecRigPose pose;
+    };
+    const auto run = [&](bool prune) {
+        Outcome out;
+        const PruneKnobs knobs(prune);
+        const UsdStageRefPtr stage = MakeStackedChainStage();
+        const UsdPrim prim = stage->GetPrimAtPath(driver);
+        const UsdAttribute rest = prim.GetAttribute(TfToken("rest:tx"));
+        CHECK(rest && rest.Set(0.0));
+        const UsdAttribute source = prim.CreateAttribute(
+            TfToken("inputs:restDriver"), SdfValueTypeNames->Double);
+        CHECK(source.Set(0.5));
+        RigExecRigEvaluator rig(stage, SdfPath("/Asset/Rig"));
+        std::vector<std::string> errors;
+        out.compiled = rig.Compile(&errors);
+        CHECK(out.compiled);
+        CHECK(rig.Evaluate(UsdTimeCode(1.0)).valid);
+        const RigExecBakedProgram *program = rig.GetBakedProgram();
+        CHECK(program != nullptr);
+        if (!program) {
+            return out;
+        }
+        for (const auto &leaf : program->GetStepGraph().providerProgram.sampled) {
+            out.sampled = out.sampled || leaf.attribute == restTx;
+        }
+        const size_t builds = rig.GetBakedProgramBuildCount();
+        const size_t digest = rig.GetBindingEpochDigest();
+        CHECK(rest.SetConnections({source.GetPath()}));
+        out.pose = rig.Evaluate(UsdTimeCode(1.0));
+        CHECK(out.pose.valid);
+        out.builds = rig.GetBakedProgramBuildCount() - builds;
+        out.digestMoved = rig.GetBindingEpochDigest() != digest;
+        return out;
+    };
+    const Outcome off = run(false);
+    const Outcome on = run(true);
+    // The leaf exists unpruned and is gone pruned: the edit lands on a
+    // pruned attribute.
+    CHECK(off.sampled);
+    CHECK(!on.sampled);
+    CHECK(off.builds > 0);
+    CHECK(on.builds == off.builds);
+    CHECK(on.digestMoved == off.digestMoved);
+    if (off.compiled && on.compiled) {
+        rigExecTest::ComparePose(&failures,
+                                 "a connection on a pruned rest:tx",
+                                 off.pose, on.pose);
+    }
+    std::printf("  a connection on a pruned rest:tx rebuilt %zu time(s); "
+                "binding digest %s\n",
+                on.builds, on.digestMoved ? "moved" : "held");
+}
+
 }  // namespace
 
 int
@@ -9576,6 +9803,12 @@ main(int argc, char **argv)
     TestTheLiveGrainFollowsTheMachine(examplesDir + "/biped/Biped.usda");
     // Wave 7 W7-cow: the shared cone table.
     TestTheConeTableIsPublishedOnce();
+    {
+        // Provider steps no reader reaches are pruned at Build, and no
+        // value, diagnostic or rebuild moves with them.
+        TestPruningKeepsEveryValue(examplesDir);
+        TestAnEditOnAPrunedAttributeStillRebuilds();
+    }
     if (failures) {
         std::printf("%d FAILURE(S)\n", failures);
         return 1;

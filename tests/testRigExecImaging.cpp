@@ -6785,7 +6785,9 @@ TestTheRuntimeUpstreamCone(const std::string &fixture)
                             CHECK(readers == 1);
                         }
                     }
-                    CHECK(providerSource);
+                    // Build prunes an avar's provider leaf, which no step
+                    // reads: the ladder and AvarInputs bind avars directly.
+                    CHECK(providerSource == (path != kUpA0Rz));
                     CHECK(std::find(cone.begin(), cone.end(), char(1)) != cone.end());
                     for (size_t n = 0; n < cone.size(); ++n) {
                         for (size_t i = 0; i < cone.size(); ++i) {

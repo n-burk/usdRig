@@ -346,12 +346,45 @@ bool RigExecCloneProviderContext(RigExecProviderProgram *program,RigExecValueId 
     };
     *output=clone(result);return true;
 }
+namespace {
+// The kinds RigExecRunProviderOp hands to RigExecRunProviderArithmetic.
+bool ArithmeticKind(RigExecProviderOpKind kind) {
+    return kind<=RigExecProviderOpKind::JointMatrix || kind==RigExecProviderOpKind::AvarMatrix ||
+        kind==RigExecProviderOpKind::RelativeXform;
+}
+// The cases of RigExecRunProviderArithmetic's switch: the only kinds for
+// which it does not return false.
+bool ArithmeticHandles(RigExecProviderOpKind kind) {
+    switch(kind) {
+    case RigExecProviderOpKind::Attribute: case RigExecProviderOpKind::SpaceExpression:
+    case RigExecProviderOpKind::RestFrame: case RigExecProviderOpKind::DefaultSpace:
+    case RigExecProviderOpKind::FrameToSpace: case RigExecProviderOpKind::MatrixToFrame:
+    case RigExecProviderOpKind::PosedFrame: case RigExecProviderOpKind::AvarMatrix:
+    case RigExecProviderOpKind::RelativeXform: case RigExecProviderOpKind::JointMatrix:
+        return true;
+    default: return false;
+    }
+}
+}
+bool RigExecProviderOpStructurallyValid(const RigExecProviderProgram &program,
+    uint32_t index,std::string *error) {
+    if(index>=program.ops.size())return Fail(error,"invalid provider kernel/store binding");
+    const auto &op=program.ops[index];
+    if(op.output>=program.valueKeys.size())return Fail(error,"provider output is outside its typed layout");
+    if(ArithmeticKind(op.kind))
+        return ArithmeticHandles(op.kind) || Fail(error,"unsupported provider arithmetic operation kind");
+    if(op.kind!=RigExecProviderOpKind::LocalXform && op.kind!=RigExecProviderOpKind::InterveningXform)
+        return Fail(error,"unknown provider operation kind");
+    if(op.ownerText>=program.ownerTexts.size())
+        return Fail(error,"provider operation owner was not spelled at build");
+    return true;
+}
 bool RigExecRunProviderOp(const RigExecProviderProgram &program,uint32_t index,
     RigExecTypedValueStore *store,std::string *error) {
     if(!store || index>=program.ops.size() || store->values.size()<program.valueKeys.size())
         return Fail(error,"invalid provider kernel/store binding");
+    if(!RigExecProviderOpStructurallyValid(program,index,error))return false;
     const auto &op=program.ops[index];
-    if(op.output>=program.valueKeys.size())return Fail(error,"provider output is outside its typed layout");
     const auto id=[&](size_t input){return input<op.inputs.size()?op.inputs[input]:RigExecNoProviderValue;};
     const auto raw=[&](RigExecValueId value)->const VtValue* {
         return value<store->values.size() && store->values[size_t(value)].initialized &&
@@ -364,16 +397,15 @@ bool RigExecRunProviderOp(const RigExecProviderProgram &program,uint32_t index,
         if(error)*error=message;
         return true;
     };
-    if((op.kind<=RigExecProviderOpKind::JointMatrix || op.kind==RigExecProviderOpKind::AvarMatrix || op.kind==RigExecProviderOpKind::RelativeXform)) {
+    if(ArithmeticKind(op.kind)) {
         GfProviderStore adapter{*store};
         if(!RigExecRunProviderArithmetic<GfProviderMath>(op,adapter))
             return Fail(error,"unsupported provider arithmetic operation kind");
         return true;
     }
-    // The owner as the build spelled it, for the failure diagnostics below.
+    // The owner as the build spelled it, for the failure diagnostics below;
+    // the structural check refused a LocalXform or InterveningXform without one.
     const std::string *spelled=op.ownerText<program.ownerTexts.size()?&program.ownerTexts[op.ownerText]:nullptr;
-    if(!spelled && (op.kind==RigExecProviderOpKind::LocalXform || op.kind==RigExecProviderOpKind::InterveningXform))
-        return Fail(error,"provider operation owner was not spelled at build");
     switch(op.kind) {
     case RigExecProviderOpKind::LocalXform: {
         const std::string &owner=*spelled;

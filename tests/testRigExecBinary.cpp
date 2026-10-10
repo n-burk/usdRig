@@ -17,6 +17,7 @@
 
 #include "pxr/base/plug/registry.h"
 #include "pxr/base/tf/getenv.h"
+#include "pxr/base/tf/setenv.h"
 #include "pxr/base/work/threadLimits.h"
 #include "pxr/usd/sdf/types.h"
 #include "pxr/usd/usd/editContext.h"
@@ -3780,6 +3781,134 @@ TestBake(const std::string &fixture, const std::vector<double> &tableFrames,
     CHECK(result.bytes.empty());
 }
 
+// RIGEXEC_PROVIDER_PRUNE set to \p on (and RIGEXEC_VERIFY_PROVIDER_PRUNE with
+// it) for the scope's lifetime, then restored; Build reads both.
+struct _PruneKnobs {
+    explicit _PruneKnobs(bool on)
+        : prune(TfGetenv("RIGEXEC_PROVIDER_PRUNE")),
+          verify(TfGetenv("RIGEXEC_VERIFY_PROVIDER_PRUNE"))
+    {
+        TfSetenv("RIGEXEC_PROVIDER_PRUNE", on ? "1" : "0");
+        TfSetenv("RIGEXEC_VERIFY_PROVIDER_PRUNE", on ? "1" : "0");
+    }
+    ~_PruneKnobs()
+    {
+        Restore("RIGEXEC_PROVIDER_PRUNE", prune);
+        Restore("RIGEXEC_VERIFY_PROVIDER_PRUNE", verify);
+    }
+    static void Restore(const std::string &name, const std::string &saved)
+    {
+        if (saved.empty()) {
+            TfUnsetenv(name);
+        } else {
+            TfSetenv(name, saved);
+        }
+    }
+    std::string prune, verify;
+};
+
+// Biped_anim baked with RIGEXEC_PROVIDER_PRUNE off and on: each file holds
+// the program it was baked from (_BinaryCompareProgram) and validates; the
+// pruned file carries fewer provider operations and lists the same public
+// inputs, name and type, in the same order. The private slots only the
+// unpruned file holds (read by pruned provider leaves alone) are printed.
+// The runtime replay of the pruned bake against the evaluator runs in
+// testRigExecRuntimeInputs and verify_binary_biped_Biped_anim; this suite
+// does not link the runtime.
+static void
+TestAPrunedBakeReplaysTheSameValues()
+{
+    const std::string fixture =
+        (std::filesystem::path(RIGEXEC_EXAMPLES_DIR) / "biped" /
+         "Biped_anim.usda")
+            .string();
+    struct _Baked {
+        bool ok = false;
+        size_t pruned = 0, violations = 0, providerOps = 0;
+        std::vector<std::pair<std::string, uint8_t>> listed;
+        std::vector<std::string> unlisted;
+    };
+    const auto bake = [&](bool prune) {
+        _Baked out;
+        const _PruneKnobs knobs(prune);
+        const UsdStageRefPtr stage = UsdStage::Open(fixture);
+        CHECK(stage);
+        if (!stage) {
+            return out;
+        }
+        RigExecRigEvaluator evaluator(stage, FindRig(stage));
+        RigExecBakeOpts opts;
+        opts.time = 1.0;
+        RigExecBakeResult result;
+        std::string error;
+        const bool baked =
+            RigExecBakeToBinary(evaluator, opts, &result, &error);
+        if (!baked) {
+            std::printf("pruned bake diagnostic: %s\n", error.c_str());
+        }
+        CHECK(baked);
+        CHECK(evaluator.GetBakedProgram() != nullptr);
+        if (!baked || !evaluator.GetBakedProgram()) {
+            return out;
+        }
+        const RigExecBakedProgramImpl &program =
+            evaluator.GetBakedProgram()->GetStepGraph();
+        out.pruned = program.providerStepsPruned;
+        out.violations = program.providerPruneViolations;
+        const std::unique_ptr<_BinaryFile> file = _BinaryCompareProgram(
+            evaluator, result.bytes,
+            fixture + (prune ? " (pruned)" : " (unpruned)"));
+        CHECK(file);
+        if (!file) {
+            return out;
+        }
+        std::string why;
+        const bool valid = RigExecFormatValidate(*file, &why);
+        if (!valid) {
+            std::printf("  pruned=%d bake does not validate: %s\n", int(prune),
+                        why.c_str());
+        }
+        CHECK(valid);
+        out.providerOps =
+            file->providerProgram ? file->providerProgram->ops.size() : 0;
+        for (size_t s = 0; s < file->inputs.size(); ++s) {
+            const std::string name = _BinaryText(*file, file->inputs[s].name());
+            if (s < file->listedInputs) {
+                out.listed.emplace_back(name, uint8_t(file->inputs[s].type()));
+            } else {
+                out.unlisted.push_back(name);
+            }
+        }
+        out.ok = valid;
+        return out;
+    };
+    const _Baked off = bake(false);
+    const _Baked on = bake(true);
+    CHECK(off.ok && on.ok);
+    if (!off.ok || !on.ok) {
+        return;
+    }
+    CHECK(off.pruned == 0);
+    CHECK(on.pruned > 0);
+    CHECK(on.violations == 0);
+    CHECK(on.providerOps < off.providerOps);
+    CHECK(on.listed == off.listed);
+    size_t onlyUnpruned = 0;
+    for (const std::string &name : off.unlisted) {
+        if (std::find(on.unlisted.begin(), on.unlisted.end(), name) ==
+            on.unlisted.end()) {
+            ++onlyUnpruned;
+            std::printf("  private slot only the unpruned bake holds: %s\n",
+                        name.c_str());
+        }
+    }
+    std::printf("pruned bake: %zu provider step(s) pruned, provider ops %zu "
+                "-> %zu, %zu listed input(s) identical, %zu of %zu private "
+                "slot(s) left\n",
+                on.pruned, off.providerOps, on.providerOps, on.listed.size(),
+                onlyUnpruned, off.unlisted.size());
+}
+
 int
 main(int argc, char **argv)
 {
@@ -3853,6 +3982,7 @@ main(int argc, char **argv)
     TestExportKeepSetBake();
     TestBakeRestoresLiveRoles();
     TestTheExportIgnoresTheWorkLimit();
+    TestAPrunedBakeReplaysTheSameValues();
     // Each example's positive capture/default/source conformance and two
     // fresh bakes run in its existing verify_binary registration before
     // the unchanged runtime defaults, frame sampling and drag ledger.
