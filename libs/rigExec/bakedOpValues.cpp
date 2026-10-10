@@ -1169,6 +1169,8 @@ static bool InputKey(const RigExecBakedProgramImpl &B,
         bindings(B.avarBindings,B.avarBindingBegin);
         bindings(B.avarConstantBindings,B.avarConstantBindingBegin);
     }
+    // Reads state only through a native id >= 0 or a delta base;
+    // RigExecBakedConstraintSourceTracked tests the same gates.
     if(step.kind==RigExecBakedStepKind::Constraint) {
         Put(out,uint8_t(36)); Put(out,step.object);
         const int index = step.object >= 0 && size_t(step.object) < B.walkSteps.size()
@@ -1339,6 +1341,22 @@ bool RigExecBakedOpInputKeyIsConstant(const RigExecBakedProgramImpl &B,const Rig
     return step.kind!=RigExecBakedStepKind::AvarInputs && step.kind!=RigExecBakedStepKind::Constraint &&
         step.bindingLeaves.empty() && step.leaves.empty() && step.overrideSlots.empty() &&
         step.readerWalks.empty() && !KeysWeightOverlay(B,step);
+}
+// The Constraint arm's gates: valid, not a solver batch, every native id
+// negative (a source or pole held by a slot keeps a -1 entry) and no delta
+// base. Its bytes are then Build state, and the rest of the key is the four
+// lists the source index watches.
+bool RigExecBakedConstraintSourceTracked(const RigExecBakedProgramImpl &B,const RigExecBakedStep &step) {
+    if(step.kind!=RigExecBakedStepKind::Constraint || step.object<0 ||
+       size_t(step.object)>=B.walkSteps.size() || B.walkSteps[size_t(step.object)].solverBatch) return false;
+    const int index=B.walkSteps[size_t(step.object)].index;
+    if(index<0 || size_t(index)>=B.constraints.size()) return false;
+    const auto &constraint=B.constraints[size_t(index)];
+    const auto none=[](const std::vector<int> &ids) {
+        return std::all_of(ids.begin(),ids.end(),[](int id) { return id<0; });
+    };
+    return none(constraint.sourceNatives) && constraint.worldUpNative<0 &&
+        constraint.effectorNative<0 && none(constraint.poleObjectNatives) && constraint.deltaBase<0;
 }
 bool RigExecBakedOpEffectiveInputKey(const RigExecBakedProgramImpl &B,const RigExecBakedStep &step,
     std::string *out,std::vector<uint32_t> *covered,std::vector<std::pair<uint32_t,uint32_t>> *typed,const RigExecBakedOpIdentityRemap *remap,

@@ -4092,6 +4092,565 @@ TestAFrozenCloneKeepsSparseSourceKeys(const std::string &examples)
     CHECK(mark.IsClean());
 }
 
+// Sets an environment knob for the scope, then puts back what stood
+// before; a program built inside the scope reads the knob at Build.
+struct WatchKnob {
+    std::string name, was;
+    bool had = false;
+    WatchKnob(const char *knob, const char *value)
+        : name(knob), was(ArchGetEnv(knob)), had(ArchHasEnv(knob))
+    {
+        ArchSetEnv(name, value, /*overwrite=*/true);
+    }
+    ~WatchKnob()
+    {
+        if (had) {
+            ArchSetEnv(name, was, /*overwrite=*/true);
+        } else {
+            ArchRemoveEnv(name);
+        }
+    }
+    WatchKnob(const WatchKnob &) = delete;
+    WatchKnob &operator=(const WatchKnob &) = delete;
+};
+
+// Property \p name of the first prim named \p prim on \p stage.
+SdfPath
+WatchAvar(const UsdStageRefPtr &stage, const char *prim, const char *name)
+{
+    for (const UsdPrim &p : stage->Traverse()) {
+        if (p.GetName() == prim) {
+            return p.GetPath().AppendProperty(TfToken(name));
+        }
+    }
+    return SdfPath();
+}
+
+// One frozen job of \p evaluator's inputs at \p time on \p lane, a
+// workspace of \p snapshot.
+RigExecRigPose
+WatchFrozenJob(const RigExecRigEvaluator &evaluator,
+               const std::shared_ptr<const RigExecFrozenProgram> &snapshot,
+               RigExecFrozenWorkspace *lane, double time, const SdfPath &rig,
+               RigExecFrozenRunReport *report)
+{
+    RigExecFrameInputs inputs;
+    std::string error;
+    const RigExecBakedProgram *program = evaluator.GetBakedProgram();
+    if (!program || !RigExecSampleFrameInputs(evaluator, UsdTimeCode(time),
+                                              {}, &inputs, &error)) {
+        std::printf("FAIL frozen job at %g: not sampled: %s\n", time,
+                    error.c_str());
+        ++failures;
+        return RigExecRigPose();
+    }
+    RigExecFrozenEvalContext context;
+    context.epochDigest = evaluator.GetBindingEpochDigest();
+    context.slotCount = program->GetProviderCount();
+    context.varyingInputCount = inputs.values.size();
+    if (evaluator.GetPublishWeightFields()) {
+        context.flags |= kRigExecFrozenPublishWeightFields;
+    }
+    if (evaluator.GetSolverGuidesEnabled()) {
+        context.flags |= kRigExecFrozenSolverGuidesEnabled;
+    }
+    context.frozen = snapshot.get();
+    context.workspace = lane;
+    return RigExecEvaluateFrozen(context, inputs,
+                                 RigExecMakeProductionStepRunner(), nullptr,
+                                 rig, report);
+}
+
+// The sparse source watch compares only what can have moved, and its
+// verdict is the full compare's. Three programs of one stage run one
+// script: the default (sparse visit, merged source loop), one built with
+// RIGEXEC_SPARSE_SOURCE_WATCH=0 (every entry compared, every sourceVisits
+// op looped) and one under RIGEXEC_VERIFY_SOURCE_KEYS (each kept key
+// rebuilt and checked). Every run's dirty ops, seeds, candidates, keys
+// built and pose are the same in the first two; a drag step compares fewer
+// entries than the index holds and the knob-off program all of them; no
+// kept key moved, frozen jobs included.
+void
+TestTheSparseWatchVisitsWhatMoved(const std::string &examples)
+{
+    const Fixture f = FixtureNamed(Fixtures(examples), "biped");
+    const UsdStageRefPtr stage = UsdStage::Open(f.stage);
+    CHECK(stage);
+    if (!stage) {
+        return;
+    }
+    std::unique_ptr<RigExecRigEvaluator> sparse, full, verify;
+    {
+        WatchKnob on("RIGEXEC_SPARSE_SOURCE_WATCH", "1");
+        sparse = MakeEvaluator(stage, f.rig);
+        WatchKnob judge("RIGEXEC_VERIFY_SOURCE_KEYS", "1");
+        verify = MakeEvaluator(stage, f.rig);
+    }
+    {
+        WatchKnob off("RIGEXEC_SPARSE_SOURCE_WATCH", "0");
+        full = MakeEvaluator(stage, f.rig);
+    }
+    const RigExecBakedProgramImpl *S0 = Program(*sparse);
+    const RigExecBakedProgramImpl *F0 = Program(*full);
+    const RigExecBakedProgramImpl *V0 = Program(*verify);
+    CHECK(S0 && F0 && V0);
+    if (!S0 || !F0 || !V0) {
+        return;
+    }
+    CHECK(S0->sourceWatch.sparseVisit);
+    CHECK(!F0->sourceWatch.sparseVisit);
+    CHECK(V0->sourceWatch.sparseVisit && V0->verifySourceKeys);
+    const SdfPath body = WatchAvar(stage, "M_Body", "avars:ry");
+    const SdfPath shoulder = WatchAvar(stage, "L_Shldr", "avars:rz");
+    CHECK(!body.IsEmpty() && !shoulder.IsEmpty());
+    RigExecRigEvaluator *const all[] = {sparse.get(), full.get(),
+                                        verify.get()};
+    TfErrorMark mark;
+    size_t dragSteps = 0;
+    const auto step = [&](double time, const std::string &what, bool drag) {
+        RigExecRigPose poses[3];
+        for (size_t i = 0; i < 3; ++i) {
+            poses[i] = all[i]->Evaluate(UsdTimeCode(time));
+            CHECK(poses[i].valid);
+        }
+        const RigExecBakedProgramImpl *S = Program(*sparse);
+        const RigExecBakedProgramImpl *F = Program(*full);
+        const RigExecBakedProgramImpl *V = Program(*verify);
+        CHECK(S && F && V);
+        if (!S || !F || !V || !S->sourceWatch.index ||
+            !F->sourceWatch.index) {
+            return;
+        }
+        CHECK(PoseMismatches(poses[1], poses[0], what + ", sparse") == 0);
+        CHECK(PoseMismatches(poses[1], poses[2], what + ", verified") == 0);
+        const auto &sw = S->sourceWatch;
+        const auto &fw = F->sourceWatch;
+        const bool same = sw.dirtyList == fw.dirtyList &&
+                          S->opAdapter.seeds == F->opAdapter.seeds &&
+                          S->opAdapter.candidateOps ==
+                              F->opAdapter.candidateOps &&
+                          S->sourceKeysBuilt == F->sourceKeysBuilt;
+        if (!same) {
+            std::printf("FAIL %s: sparse and full watch disagree: dirty "
+                        "%zu/%zu, seeds %zu/%zu, candidates %zu/%zu, keys "
+                        "%zu/%zu\n",
+                        what.c_str(), sw.dirtyList.size(),
+                        fw.dirtyList.size(), S->opAdapter.seeds.size(),
+                        F->opAdapter.seeds.size(),
+                        S->opAdapter.candidateOps.size(),
+                        F->opAdapter.candidateOps.size(), S->sourceKeysBuilt,
+                        F->sourceKeysBuilt);
+        }
+        CHECK(same);
+        if (V->sourceKeyMismatches) {
+            std::printf("FAIL %s: %zu kept source key(s) moved\n",
+                        what.c_str(), V->sourceKeyMismatches);
+        }
+        CHECK(V->sourceKeyMismatches == 0);
+        if (drag) {
+            ++dragSteps;
+            const size_t entries = sw.index->entries.size();
+            const size_t always = sw.index->alwaysEntries.size();
+            std::printf("%s: the sparse watch compared %zu of %zu entries "
+                        "(%.3f), %zu always compared\n",
+                        what.c_str(), S->sourceWatchVisits, entries,
+                        entries ? double(S->sourceWatchVisits) /
+                                      double(entries)
+                                : 0.0,
+                        always);
+            CHECK(always <= S->sourceWatchVisits);
+            CHECK(S->sourceWatchVisits < entries);
+            CHECK(F->sourceWatchVisits == fw.index->entries.size());
+        }
+    };
+    const auto placeDrag = [&](double value) {
+        for (RigExecRigEvaluator *e : all) {
+            e->SetInteractiveOverrides({DragOf(body, value)});
+        }
+    };
+    const auto placeUpstream =
+        [&](const std::vector<RigExecValueOverride> &upstream) {
+            for (RigExecRigEvaluator *e : all) {
+                e->SetUpstreamInputs(upstream);
+            }
+        };
+    step(1, "first", false);
+    step(1, "held", false);
+    step(2, "time", false);
+    placeDrag(20.0);
+    step(2, "drag 1", true);
+    placeDrag(25.0);
+    step(2, "drag 2", true);
+    placeDrag(30.0);
+    step(2, "drag 3", true);
+    for (RigExecRigEvaluator *e : all) {
+        e->ClearInteractiveOverrides();
+    }
+    step(2, "drag lifted", false);
+    step(2, "held after the lift", false);
+    placeUpstream({DragOf(shoulder, 30.0)});
+    step(2, "upstream", false);
+    placeUpstream({});
+    step(2, "upstream lifted", false);
+    CHECK(dragSteps == 3);
+
+    // An authored avar value, patched in place (RigExecProgramAvarPatch).
+    const RigExecBakedProgramImpl *E = Program(*sparse);
+    CHECK(E && !E->patchableAvars.empty());
+    if (E && !E->patchableAvars.empty()) {
+        UsdAttribute attribute =
+            stage->GetAttributeAtPath(E->patchableAvars.begin()->first);
+        double value = 0.0;
+        attribute.Get(&value, UsdTimeCode::Default());
+        CHECK(attribute.Set(value + 0.5));
+        step(2, "avar value edit", false);
+    }
+    step(3, "time after the edit", false);
+    step(3, "held after the edit", false);
+    CHECK(mark.IsClean());
+
+    // A frozen clone of the verified program: its lane's jobs keep keys only
+    // where a rebuild agrees.
+    std::string error;
+    std::shared_ptr<const RigExecFrozenProgram> frozen;
+    if (!RigExecFreezeProgram(*verify, &frozen, &error) || !frozen) {
+        std::printf("FAIL sparse watch: freeze refused: %s\n", error.c_str());
+        CHECK(false);
+        return;
+    }
+    auto lane = RigExecCreateFrozenWorkspace(frozen);
+    CHECK(lane);
+    if (!lane) {
+        return;
+    }
+    for (const double time : {3.0, 3.0, 4.0}) {
+        RigExecFrozenRunReport report;
+        const RigExecRigPose pose =
+            WatchFrozenJob(*verify, frozen, lane.get(), time, f.rig, &report);
+        CHECK(pose.valid && report.ran);
+        CHECK(report.sourceKeyMismatches == 0);
+        CHECK(PoseMismatches(verify->Evaluate(UsdTimeCode(time)), pose,
+                             "sparse watch, frozen job") == 0);
+    }
+    CHECK(mark.IsClean());
+}
+
+// A lane's job patches every avar binding's constant from its samples
+// (_PatchInputs); a job that moves the bits of one increments the lane's
+// avarConstantSerial, so its watch compares the AvarConstant entries again.
+// Jobs at frames 1, 2, 2, 3, 2 on one workspace of Biped_anim, whose
+// animated avar moves on every frame change: under
+// RIGEXEC_VERIFY_SOURCE_KEYS no kept key moved, the serial advances exactly
+// on the jobs that changed frame, and every job's pose equals live.
+void
+TestALaneWatchFollowsPatchedConstants(const std::string &examples)
+{
+    const Fixture f = FixtureNamed(Fixtures(examples), "biped");
+    const UsdStageRefPtr stage = UsdStage::Open(f.stage);
+    CHECK(stage);
+    if (!stage) {
+        return;
+    }
+    std::unique_ptr<RigExecRigEvaluator> evaluator;
+    {
+        WatchKnob judge("RIGEXEC_VERIFY_SOURCE_KEYS", "1");
+        evaluator = MakeEvaluator(stage, f.rig);
+    }
+    const RigExecBakedProgramImpl *B = Program(*evaluator);
+    CHECK(B && B->verifySourceKeys);
+    if (!B) {
+        return;
+    }
+    // A sampled (unwalked) avar binding whose value moves bitwise between
+    // frames 1, 2 and 3.
+    bool animated = false;
+    for (const RigExecBakedProgramImpl::AvarBinding &binding :
+         B->avarBindings) {
+        const UsdAttribute &head = binding.input.head;
+        double a = 0.0, b = 0.0, c = 0.0;
+        if (binding.input.varying && binding.input.walk < 0 && head &&
+            head.Get(&a, UsdTimeCode(1)) && head.Get(&b, UsdTimeCode(2)) &&
+            head.Get(&c, UsdTimeCode(3)) && !Same(a, b) && !Same(b, c)) {
+            animated = true;
+            break;
+        }
+    }
+    CHECK(animated);
+    CHECK(evaluator->Evaluate(UsdTimeCode(1)).valid);
+    std::string error;
+    std::shared_ptr<const RigExecFrozenProgram> frozen;
+    if (!RigExecFreezeProgram(*evaluator, &frozen, &error) || !frozen) {
+        std::printf("FAIL lane watch: freeze refused: %s\n", error.c_str());
+        CHECK(false);
+        return;
+    }
+    CHECK(frozen->program.verifySourceKeys);
+    auto lane = RigExecCreateFrozenWorkspace(frozen);
+    CHECK(lane);
+    if (!lane) {
+        return;
+    }
+    TfErrorMark mark;
+    const auto job = [&](double time) {
+        char what[64];
+        std::snprintf(what, sizeof(what), "lane job at %g", time);
+        RigExecFrozenRunReport report;
+        const RigExecRigPose pose = WatchFrozenJob(
+            *evaluator, frozen, lane.get(), time, f.rig, &report);
+        CHECK(pose.valid && report.ran);
+        if (report.sourceKeyMismatches) {
+            std::printf("FAIL %s: %zu kept source key(s) moved\n", what,
+                        report.sourceKeyMismatches);
+        }
+        CHECK(report.sourceKeyMismatches == 0);
+        CHECK(PoseMismatches(evaluator->Evaluate(UsdTimeCode(time)), pose,
+                             what) == 0);
+        return report.avarConstantSerial;
+    };
+    const uint64_t first = job(1);
+    const uint64_t moved = job(2);
+    CHECK(moved == first + 1);
+    const uint64_t held = job(2);
+    CHECK(held == moved);
+    const uint64_t later = job(3);
+    CHECK(later == held + 1);
+    CHECK(job(2) == later + 1);
+    CHECK(mark.IsClean());
+}
+
+// Whether the watch replaced entry \p w's stored value between \p before
+// and \p after: a visit stores a value only when it moved.
+bool
+WatchEntryReplaced(const RigExecBakedSourceLeafIndex &index, size_t w,
+                   const RigExecBakedSourceWatch &before,
+                   const RigExecBakedSourceWatch &after)
+{
+    using Kind = RigExecBakedSourceLeafIndex::Kind;
+    if (w >= index.entries.size() || w >= before.values.size() ||
+        w >= after.values.size() || w >= before.words.size() ||
+        w >= after.words.size()) {
+        return true;
+    }
+    const RigExecBakedSourceLeafIndex::Entry &entry = index.entries[w];
+    const auto typed = [&](auto tag) {
+        using T = decltype(tag);
+        const auto &a = before.typed.Of<T>().value;
+        const auto &b = after.typed.Of<T>().value;
+        return entry.at >= a.size() || entry.at >= b.size() ||
+               !Same(a[entry.at], b[entry.at]);
+    };
+    switch (entry.kind) {
+    case Kind::Typed:
+        switch (RigExecBakedLeafType(entry.type)) {
+        case RigExecBakedLeafType::Double: return typed(double());
+        case RigExecBakedLeafType::Float: return typed(float());
+        case RigExecBakedLeafType::Int: return typed(int());
+        case RigExecBakedLeafType::Bool: return typed(bool());
+        case RigExecBakedLeafType::Token: return typed(TfToken());
+        case RigExecBakedLeafType::Matrix4d: return typed(GfMatrix4d());
+        case RigExecBakedLeafType::Vec3d: return typed(GfVec3d());
+        case RigExecBakedLeafType::Vec3f: return typed(GfVec3f());
+        }
+        return true;
+    case Kind::PathVersion:
+    case Kind::AvarConstant:
+        return before.words[w] != after.words[w];
+    default:
+        return before.words[w] != after.words[w] ||
+               !RigExecExactSourceValueEqual(before.values[w],
+                                             after.values[w]);
+    }
+}
+
+// A Constraint whose source key reads only Build state and the indexed
+// lists is watched like any op (RigExecBakedConstraintSourceTracked). On
+// Biped_anim: tracked constraints exist; a held step leaves every exact
+// tracked one clean and every untracked one standing; a drag step marks an
+// exact tracked one only when an entry it reads moved, keeps at least one,
+// and builds no more keys than it marked. A constraint whose source is a
+// plain Xform reads that native frame in its key and stays untracked:
+// moving the Xform re-runs it, and its pose equals a fresh program's.
+void
+TestATrackedConstraintKeepsItsKey(const std::string &examples)
+{
+    const auto dirty = [](const RigExecBakedProgramImpl &P, uint32_t c) {
+        return std::binary_search(P.sourceWatch.dirtyList.begin(),
+                                  P.sourceWatch.dirtyList.end(), c);
+    };
+    {
+        const Fixture f = FixtureNamed(Fixtures(examples), "biped");
+        const UsdStageRefPtr stage = UsdStage::Open(f.stage);
+        CHECK(stage);
+        if (!stage) {
+            return;
+        }
+        auto evaluator = MakeEvaluator(stage, f.rig);
+        const RigExecBakedProgramImpl *B = Program(*evaluator);
+        CHECK(B && B->sourceWatch.index);
+        if (!B || !B->sourceWatch.index) {
+            return;
+        }
+        const std::shared_ptr<const RigExecBakedSourceLeafIndex> held =
+            B->sourceWatch.index;
+        const RigExecBakedSourceLeafIndex &index = *held;
+        std::vector<uint32_t> tracked, untracked;
+        for (const uint32_t c : B->opAdapter.sourceVisits) {
+            if (c >= B->opGraph.ops.size() || c >= index.untracked.size()) {
+                continue;
+            }
+            const RigExecBakedStep &s =
+                B->steps[B->opGraph.ops[c].originalIndex];
+            if (s.kind != RigExecBakedStepKind::Constraint) {
+                continue;
+            }
+            const bool keeps = RigExecBakedConstraintSourceTracked(*B, s);
+            CHECK(keeps == !index.untracked[c]);
+            (keeps ? tracked : untracked).push_back(c);
+        }
+        std::printf("constraint source keys: %zu tracked, %zu untracked\n",
+                    tracked.size(), untracked.size());
+        CHECK(!tracked.empty());
+        const SdfPath body = WatchAvar(stage, "M_Body", "avars:ry");
+        CHECK(!body.IsEmpty());
+        CHECK(evaluator->Evaluate(UsdTimeCode(1)).valid);
+        CHECK(evaluator->Evaluate(UsdTimeCode(1)).valid);
+        const RigExecBakedProgramImpl *H = Program(*evaluator);
+        CHECK(H && H->sourceWatch.index == held);
+        if (!H || H->sourceWatch.index != held) {
+            return;
+        }
+        // Held: only the standing ops (untracked or inexact) are dirty.
+        CHECK(H->sourceKeysBuilt < KeyedSourceOps(*H));
+        size_t exactDirty = 0;
+        for (const uint32_t c : tracked) {
+            if (dirty(*H, c) && H->sourceWatch.exact[c]) {
+                ++exactDirty;
+            }
+        }
+        CHECK(exactDirty == 0);
+        for (const uint32_t c : untracked) {
+            CHECK(dirty(*H, c));
+        }
+        const RigExecBakedSourceWatch before = H->sourceWatch;
+        evaluator->SetInteractiveOverrides({DragOf(body, 20.0)});
+        CHECK(evaluator->Evaluate(UsdTimeCode(1)).valid);
+        const RigExecBakedProgramImpl *D = Program(*evaluator);
+        CHECK(D && D->sourceWatch.index == held);
+        if (D && D->sourceWatch.index == held) {
+            CHECK(D->sourceKeysBuilt < KeyedSourceOps(*D));
+            CHECK(D->sourceKeysBuilt <= D->sourceWatch.dirtyList.size());
+            std::vector<char> readsMoved(D->opGraph.ops.size(), 0);
+            for (size_t w = 0; w < index.entries.size(); ++w) {
+                if (!WatchEntryReplaced(index, w, before, D->sourceWatch)) {
+                    continue;
+                }
+                for (uint32_t i = index.begin[w]; i < index.begin[w + 1];
+                     ++i) {
+                    if (index.ops[i] < readsMoved.size()) {
+                        readsMoved[index.ops[i]] = 1;
+                    }
+                }
+            }
+            size_t kept = 0, unexplained = 0;
+            for (const uint32_t c : tracked) {
+                if (!dirty(*D, c)) {
+                    ++kept;
+                } else if (c < before.exact.size() && before.exact[c] &&
+                           !readsMoved[c]) {
+                    ++unexplained;
+                }
+            }
+            std::printf("drag: %zu of %zu tracked constraint keys kept, %zu "
+                        "marked with nothing they read moved\n",
+                        kept, tracked.size(), unexplained);
+            CHECK(kept > 0);
+            CHECK(unexplained == 0);
+        }
+        evaluator->ClearInteractiveOverrides();
+        CHECK(evaluator->Evaluate(UsdTimeCode(1)).valid);
+    }
+
+    // A position constraint on a control whose source is a plain Xform
+    // outside the rig: a native source.
+    const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    stage->DefinePrim(SdfPath("/Asset"), TfToken("Xform"));
+    const UsdPrim source =
+        stage->DefinePrim(SdfPath("/Asset/Source"), TfToken("Xform"));
+    const UsdAttribute translate = source.CreateAttribute(
+        TfToken("xformOp:translate"), SdfValueTypeNames->Double3);
+    CHECK(translate.Set(GfVec3d(3, 0, 0)));
+    CHECK(source
+              .CreateAttribute(TfToken("xformOpOrder"),
+                               SdfValueTypeNames->TokenArray)
+              .Set(VtArray<TfToken>{TfToken("xformOp:translate")}));
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    const UsdPrim target = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Controls/Target"), TfToken("RigExecControl"));
+    const UsdPrim follow =
+        stage->DefinePrim(SdfPath("/Asset/Rig/Movers/Follow"),
+                          TfToken("RigExecPositionConstraint"));
+    CHECK(follow.ApplyAPI(TfToken("RigExecMoverAPI")));
+    follow.CreateRelationship(TfToken("rigExec:moves"))
+        .SetTargets({target.GetPath()});
+    follow.CreateRelationship(TfToken("rigExec:sources"))
+        .SetTargets({source.GetPath()});
+    const SdfPath rig("/Asset/Rig");
+    auto evaluator = MakeEvaluator(stage, rig);
+    const RigExecRigPose placed = evaluator->Evaluate(UsdTimeCode(1));
+    CHECK(placed.valid);
+    const uint32_t none = ~uint32_t(0);
+    const auto opOf = [&](const RigExecBakedProgramImpl &P) {
+        for (uint32_t c = 0; c < P.opGraph.ops.size(); ++c) {
+            const RigExecBakedStep &s = P.steps[P.opGraph.ops[c].originalIndex];
+            if (s.kind != RigExecBakedStepKind::Constraint || s.object < 0 ||
+                size_t(s.object) >= P.walkSteps.size() ||
+                P.walkSteps[size_t(s.object)].solverBatch) {
+                continue;
+            }
+            const int k = P.walkSteps[size_t(s.object)].index;
+            if (k >= 0 && size_t(k) < P.constraints.size() &&
+                P.constraints[size_t(k)].path == follow.GetPath()) {
+                return c;
+            }
+        }
+        return none;
+    };
+    const RigExecBakedProgramImpl *B = Program(*evaluator);
+    CHECK(B && B->sourceWatch.index);
+    if (!B || !B->sourceWatch.index) {
+        return;
+    }
+    const uint32_t op = opOf(*B);
+    CHECK(op < B->opGraph.ops.size());
+    if (op >= B->opGraph.ops.size() ||
+        op >= B->sourceWatch.index->untracked.size()) {
+        return;
+    }
+    CHECK(!RigExecBakedConstraintSourceTracked(
+        *B, B->steps[B->opGraph.ops[op].originalIndex]));
+    CHECK(B->sourceWatch.index->untracked[op]);
+    CHECK(evaluator->Evaluate(UsdTimeCode(1)).valid);
+    const RigExecBakedProgramImpl *H = Program(*evaluator);
+    CHECK(H && op < H->opExecution.ran.size() && !H->opExecution.ran[op]);
+    CHECK(translate.Set(GfVec3d(5, 0, 0)));
+    const RigExecRigPose moved = evaluator->Evaluate(UsdTimeCode(1));
+    CHECK(moved.valid);
+    const RigExecBakedProgramImpl *M = Program(*evaluator);
+    const uint32_t movedOp = M ? opOf(*M) : none;
+    CHECK(M && movedOp < M->opExecution.ran.size() &&
+          M->opExecution.ran[movedOp]);
+    const auto was = placed.controlFrames.find(target.GetPath());
+    const auto now = moved.controlFrames.find(target.GetPath());
+    CHECK(was != placed.controlFrames.end() &&
+          now != moved.controlFrames.end());
+    if (was != placed.controlFrames.end() &&
+        now != moved.controlFrames.end()) {
+        CHECK(was->second.Origin() != now->second.Origin());
+    }
+    CHECK(PoseMismatches(FreshPose(stage, rig, UsdTimeCode(1)), moved,
+                         "native constraint source moved") == 0);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -4123,6 +4682,9 @@ main(int argc, char **argv)
     TestEqualLatticeBindsShareOneBasis();
     TestSparseSourceKeys(examples);
     TestAFrozenCloneKeepsSparseSourceKeys(examples);
+    TestTheSparseWatchVisitsWhatMoved(examples);
+    TestALaneWatchFollowsPatchedConstants(examples);
+    TestATrackedConstraintKeepsItsKey(examples);
     std::printf("testRigExecLeaves: %d failure(s)\n", failures);
     return failures ? 1 : 0;
 }

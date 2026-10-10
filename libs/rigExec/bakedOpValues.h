@@ -50,6 +50,11 @@ bool RigExecBakedOpInputKey(const RigExecBakedProgramImpl &,
 /// compiled step, so the executor builds that key once per program.
 bool RigExecBakedOpInputKeyIsConstant(const RigExecBakedProgramImpl &,
     const RigExecBakedStep &);
+/// Whether Constraint step \p step's source key reads only what
+/// RigExecBakedSourceLeafIndex indexes: a constraint with no native source,
+/// world-up, effector or pole frame and no geometry delta base.
+bool RigExecBakedConstraintSourceTracked(const RigExecBakedProgramImpl &B,
+                                         const RigExecBakedStep &step);
 bool RigExecBakedOpEffectiveInputKey(const RigExecBakedProgramImpl &,
     const RigExecBakedStep &,std::string *key,std::vector<uint32_t> *coveredPropertyVersions,
     std::vector<std::pair<uint32_t,uint32_t>> *coveredTyped=nullptr,

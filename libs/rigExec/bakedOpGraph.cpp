@@ -502,9 +502,11 @@ void BuildSpaceLeafIndex(RigExecBakedProgramImpl *program)
 // Indexes, per keyed op, every state RigExecBakedOpInputKey's source tier
 // reads (InputKey with effective false): the typed and path leaves of its
 // bindingLeaves, its head leaves and override slots and those of its walks,
-// and an AvarInputs op's binding constants and double leaves. An id out of
+// and an AvarInputs op's binding constants and double leaves. A Constraint
+// whose key reads a native frame or a delta base is untracked. An id out of
 // range keys as invalid, which is never exact, and its entry reports moved
-// while it stays out of range. Owner thread, once per compile.
+// while it stays out of range; the reverse maps list such an entry among
+// those always compared. Owner thread, once per compile.
 void BuildSourceLeafIndex(RigExecBakedProgramImpl *program)
 {
     auto &B=*program; const auto &state=B.opAdapter;
@@ -527,7 +529,9 @@ void BuildSourceLeafIndex(RigExecBakedProgramImpl *program)
     for(const uint32_t c:state.sourceVisits) {
         if(c>=ops || (c<state.constantSource.size() && state.constantSource[c])) continue;
         const auto &step=B.steps[B.opGraph.ops[c].originalIndex];
-        if(step.kind==RigExecBakedStepKind::Constraint) { index->untracked[c]=1; continue; }
+        if(step.kind==RigExecBakedStepKind::Constraint && !RigExecBakedConstraintSourceTracked(B,step)) {
+            index->untracked[c]=1; continue;
+        }
         const auto head=[&](uint32_t id) { watch(K::Head,0,id,c); };
         const auto slot=[&](uint32_t id) { watch(K::Override,0,id,c); };
         if(step.kind==RigExecBakedStepKind::AvarInputs) {
@@ -568,7 +572,23 @@ void BuildSourceLeafIndex(RigExecBakedProgramImpl *program)
     for(size_t w=0;w<index->entries.size();++w) index->begin[w+1]+=index->begin[w];
     index->ops.reserve(reads.size());
     for(const auto &read:reads) index->ops.push_back(read.second);
+    index->typedEntry.resize(index->pools.size());
+    for(size_t t=0;t<index->pools.size();++t) index->typedEntry[t].assign(index->pools[t],-1);
+    index->overrideEntry.assign(B.headOverrideSlots.size(),-1);
+    for(size_t w=0;w<index->entries.size();++w) {
+        const auto &entry=index->entries[w];
+        if(entry.kind==K::Typed && entry.type<index->typedEntry.size() &&
+           entry.at<index->typedEntry[entry.type].size())
+            index->typedEntry[entry.type][entry.at]=int32_t(w);
+        else if(entry.kind==K::Override && entry.at<index->overrideEntry.size())
+            index->overrideEntry[entry.at]=int32_t(w);
+        else if(entry.kind==K::AvarConstant) index->avarEntries.push_back(uint32_t(w));
+        else index->alwaysEntries.push_back(uint32_t(w));
+    }
+    for(uint32_t c=0;c<ops;++c)
+        if(B.steps[B.opGraph.ops[c].originalIndex].alwaysRuns) index->alwaysRunOps.push_back(c);
     B.sourceWatch=RigExecBakedSourceWatch();
+    B.sourceWatch.sparseVisit=TfGetenvBool("RIGEXEC_SPARSE_SOURCE_WATCH",true);
     B.sourceWatch.index=std::move(index);
 }
 
@@ -654,11 +674,25 @@ bool WatchEntry(const RigExecBakedProgramImpl &B,const RigExecBakedSourceLeafInd
 // for every key. A clean op's entries all hold the bytes its stored key
 // was built from, and that key was exact, so a rebuild would give the same
 // bytes and exactness: an equal compare. Owner thread, before the region.
+//
+// A sparse verdict compares only the entries that can have moved since the
+// last visit; every other one still holds the value that visit stored:
+//  * Typed: a typed value moves only through RigExecBakedNoteLeafWrite,
+//    which lists it in its pool's changedList, and a Run writes them all in
+//    its prologue, after the first sample pass reset the lists. Exactly one
+//    flag epoch since the last visit means the lists name every write since
+//    it; any other distance compares every Typed entry.
+//  * Override: a slot empty now and at the last visit held the empty value.
+//  * AvarConstant: every writer of an avar binding's constant
+//    (RigExecProgramAvarPatch, RigExecPatchFrozenAvarConstants and a frozen
+//    job's input patch) increments avarConstantSerial.
+//  * Head, PathVersion, PathValue: always compared.
 bool WatchSourceLeaves(RigExecBakedProgramImpl *program,bool full)
 {
     auto &B=*program; auto &watch=B.sourceWatch; auto &state=B.opAdapter;
     const auto *index=watch.index.get();
     const size_t ops=B.opGraph.ops.size();
+    B.sourceWatchVisits=0;
     if(!index || index->untracked.size()!=ops) { state.sourceWatchSerial=0; return false; }
     bool shaped=index->leafRefs==B.leafRefs.size() &&
         index->pathLeafRefs==B.pathLeafRefs.size() &&
@@ -673,18 +707,77 @@ bool WatchSourceLeaves(RigExecBakedProgramImpl *program,bool full)
         watch.publishWeightFields==B.publishWeightFields &&
         watch.exact.size()==ops && watch.values.size()==index->entries.size() &&
         watch.words.size()==index->entries.size();
-    if(!sparse) {
-        watch.values.assign(index->entries.size(),VtValue());
-        watch.words.assign(index->entries.size(),0);
-        watch.exact.assign(ops,0);
+    std::vector<uint32_t> held;
+    for(size_t s=0;s<B.headOverrides.size();++s)
+        if(!B.headOverrides[s].IsEmpty()) held.push_back(uint32_t(s));
+    const bool visitSparse=sparse && watch.sparseVisit && watch.dirty.size()==ops &&
+        index->typedEntry.size()==index->pools.size() &&
+        index->overrideEntry.size()==B.headOverrides.size();
+    if(!visitSparse) {
+        if(!sparse) {
+            watch.values.assign(index->entries.size(),VtValue());
+            watch.words.assign(index->entries.size(),0);
+            watch.exact.assign(ops,0);
+        }
+        watch.dirty.assign(ops,0);
+        if(sparse)
+            for(size_t c=0;c<ops;++c)
+                if(index->untracked[c] || !watch.exact[c]) watch.dirty[c]=1;
+        for(size_t w=0;w<index->entries.size();++w)
+            if(WatchEntry(B,*index,w,&watch,!sparse) && sparse)
+                for(uint32_t i=index->begin[w];i<index->begin[w+1];++i) watch.dirty[index->ops[i]]=1;
+        B.sourceWatchVisits=index->entries.size();
+        watch.dirtyList.clear();
+        for(uint32_t c=0;c<ops;++c) if(watch.dirty[c]) watch.dirtyList.push_back(c);
+        watch.standingStale=true;
+    } else {
+        // `dirty` holds 1 exactly at dirtyList's ops.
+        for(const uint32_t c:watch.dirtyList) if(c<ops) watch.dirty[c]=0;
+        watch.dirtyList.clear();
+        const auto mark=[&](uint32_t c) {
+            if(c<ops && !watch.dirty[c]) { watch.dirty[c]=1; watch.dirtyList.push_back(c); }
+        };
+        if(watch.standingStale) {
+            watch.standing.clear();
+            for(uint32_t c=0;c<ops;++c)
+                if(index->untracked[c] || !watch.exact[c]) watch.standing.push_back(c);
+            watch.standingStale=false;
+        }
+        for(const uint32_t c:watch.standing) mark(c);
+        const auto visit=[&](uint32_t w) {
+            ++B.sourceWatchVisits;
+            if(WatchEntry(B,*index,w,&watch,false))
+                for(uint32_t i=index->begin[w];i<index->begin[w+1];++i) mark(index->ops[i]);
+        };
+        const bool listed=B.leafFlagEpoch==watch.flagEpoch+1;
+        size_t t=0;
+        B.leaves.ForEach([&](auto &pool) {
+            const auto &entries=index->typedEntry[t++];
+            if(listed) {
+                for(const uint32_t k:pool.changedList)
+                    if(k<entries.size() && entries[k]>=0) visit(uint32_t(entries[k]));
+            } else {
+                for(const int32_t w:entries) if(w>=0) visit(uint32_t(w));
+            }
+        });
+        const auto slot=[&](uint32_t s) {
+            if(s<index->overrideEntry.size() && index->overrideEntry[s]>=0)
+                visit(uint32_t(index->overrideEntry[s]));
+        };
+        const auto &was=watch.overrideSlotsHeld;
+        for(size_t i=0,j=0;i<held.size() || j<was.size();) {
+            if(j==was.size() || (i<held.size() && held[i]<was[j])) slot(held[i++]);
+            else if(i==held.size() || was[j]<held[i]) slot(was[j++]);
+            else { slot(held[i++]); ++j; }
+        }
+        if(B.avarConstantSerial!=watch.avarSerial)
+            for(const uint32_t w:index->avarEntries) visit(w);
+        for(const uint32_t w:index->alwaysEntries) visit(w);
+        std::sort(watch.dirtyList.begin(),watch.dirtyList.end());
     }
-    watch.dirty.assign(ops,0);
-    if(sparse)
-        for(size_t c=0;c<ops;++c)
-            if(index->untracked[c] || !watch.exact[c]) watch.dirty[c]=1;
-    for(size_t w=0;w<index->entries.size();++w)
-        if(WatchEntry(B,*index,w,&watch,!sparse) && sparse)
-            for(uint32_t i=index->begin[w];i<index->begin[w+1];++i) watch.dirty[index->ops[i]]=1;
+    watch.flagEpoch=B.leafFlagEpoch;
+    watch.avarSerial=B.avarConstantSerial;
+    watch.overrideSlotsHeld.swap(held);
     watch.publishWeightFields=B.publishWeightFields;
     state.sourceWatchSerial=++watch.serial;
     return sparse;
@@ -1054,7 +1147,11 @@ bool RigExecBakedExecuteOpGraph(RigExecBakedProgramImpl *program,UsdTimeCode tim
         } else if(rebuildSources || c>=state.constantSource.size() || !state.constantSource[c]) {
             exact=RigExecBakedOpInputKey(B,step,&scratch);
             directChanged=!exact || input!=scratch;
-            if(c<sourceExact.size()) sourceExact[c]=exact?1:0;
+            // The watch's standing list is the ops untracked or inexact.
+            if(c<sourceExact.size() && sourceExact[c]!=(exact?1:0)) {
+                sourceExact[c]=exact?1:0;
+                B.sourceWatch.standingStale=true;
+            }
             if(c>=state.constantSource.size() || !state.constantSource[c]) ++B.sourceKeysBuilt;
             if(verifyVersions) {
                 std::string content;
@@ -1074,9 +1171,26 @@ bool RigExecBakedExecuteOpGraph(RigExecBakedProgramImpl *program,UsdTimeCode tim
         if(seed) state.seeds.push_back(c);
         else if(directChanged || (first && c<state.retainedFirst.size() && state.retainedFirst[c])) state.candidateOps.push_back(c);
     };
-    if(rebuildSources || state.verifyConstantSources || state.constantSource.size()!=B.opGraph.ops.size())
-        for(uint32_t c=0;c<B.opGraph.ops.size();++c) source(c);
-    else for(const uint32_t c:state.sourceVisits) source(c);
+    const size_t opCount=B.opGraph.ops.size();
+    if(rebuildSources || state.verifyConstantSources || state.constantSource.size()!=opCount)
+        for(uint32_t c=0;c<opCount;++c) source(c);
+    else if(sparseSources && B.sourceWatch.sparseVisit && !B.verifySourceKeys && B.sourceWatch.index) {
+        // Not a first run, so a clean op of sourceVisits neither seeds nor
+        // changes unless it always runs: the ascending merge of the dirty
+        // ops and the always-run ops, inside sourceVisits, yields the same
+        // seeds and candidates in the same order as the loop below.
+        const auto &dirtyList=B.sourceWatch.dirtyList;
+        const auto &always=B.sourceWatch.index->alwaysRunOps;
+        const auto visit=[&](uint32_t c) {
+            if(c<opCount && (!state.constantSource[c] || B.steps[B.opGraph.ops[c].originalIndex].alwaysRuns))
+                source(c);
+        };
+        for(size_t i=0,j=0;i<dirtyList.size() || j<always.size();) {
+            if(j==always.size() || (i<dirtyList.size() && dirtyList[i]<always[j])) visit(dirtyList[i++]);
+            else if(i==dirtyList.size() || always[j]<dirtyList[i]) visit(always[j++]);
+            else { visit(dirtyList[i++]); ++j; }
+        }
+    } else for(const uint32_t c:state.sourceVisits) source(c);
     // Owner thread, before dispatch: one report for the run.
     if(keptMoved) {
         B.sourceKeyMismatches+=keptMoved;

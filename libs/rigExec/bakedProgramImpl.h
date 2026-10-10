@@ -635,6 +635,16 @@ struct RigExecBakedSourceLeafIndex {
     size_t leafRefs = 0, pathLeafRefs = 0;
     size_t avarBindings = 0, avarConstantBindings = 0;
     std::vector<size_t> pools;
+    /// Reverse maps for a sparse visit: per pool (RigExecBakedLeafType
+    /// order) and pool index, its Typed entry or -1; per head override slot,
+    /// its Override entry or -1; every AvarConstant entry; every Head,
+    /// PathVersion and PathValue entry, and any entry the maps cannot hold
+    /// (always compared).
+    std::vector<std::vector<int32_t>> typedEntry;
+    std::vector<int32_t> overrideEntry;
+    std::vector<uint32_t> avarEntries, alwaysEntries;
+    /// Ops whose step always runs, ascending.
+    std::vector<uint32_t> alwaysRunOps;
 };
 
 /// The values the stored source keys were built from, at each entry of
@@ -655,6 +665,14 @@ struct RigExecBakedSourceWatch {
     /// Per op: whether its last key build was exact, and this run's verdict
     /// that its key can have moved.
     std::vector<char> exact, dirty;
+    /// The leafFlagEpoch and avarConstantSerial at the last visit, the head
+    /// override slots non-empty then, the ops its verdict marked dirty (each
+    /// once, ascending) and the standing ones (untracked or inexact).
+    uint64_t flagEpoch = 0, avarSerial = 0;
+    std::vector<uint32_t> overrideSlotsHeld, dirtyList, standing;
+    bool standingStale = true;
+    /// RIGEXEC_SPARSE_SOURCE_WATCH (default on), read with the index.
+    bool sparseVisit = true;
 };
 
 /// Publishes \p value at \p key into \p map, in one comparison when the
@@ -3627,6 +3645,8 @@ struct RigExecBakedProgramImpl {
     /// What the source keys read and the values they were built from: a
     /// run rebuilds only the keys of ops whose entries moved.
     RigExecBakedSourceWatch sourceWatch;
+    /// Watch entries compared by the last visit (a cost counter).
+    size_t sourceWatchVisits = 0;
     /// RIGEXEC_VERIFY_SOURCE_KEYS, read at compile: every run also rebuilds
     /// each source key the watch kept and counts those whose bytes or
     /// exactness moved.

@@ -546,6 +546,8 @@ struct RigExecFrozenRunReport {
     /// lane's life (a workspace's jobs accumulate; a fresh clone starts at 0).
     size_t sourceKeysBuilt = 0;
     size_t sourceKeyMismatches = 0;
+    /// The worker program's avarConstantSerial after the job.
+    uint64_t avarConstantSerial = 0;
 
     void Clear()
     {
@@ -553,6 +555,7 @@ struct RigExecFrozenRunReport {
         ran = false;
         sourceKeysBuilt = 0;
         sourceKeyMismatches = 0;
+        avarConstantSerial = 0;
     }
 };
 

@@ -90,6 +90,9 @@ namespace {
 // handles are nulled. A varying input with no sample, or a sample holding a
 // type the typed read cannot consume, retains its authored fallback.
 // Missing declarations decline a job sampled from a different program.
+// Like every writer of an avar binding's constant, a job that moves the
+// bits of one increments avarConstantSerial, which the source watch keys
+// its AvarConstant entries by.
 bool
 _PatchInputs(RigExecBakedProgramImpl &B,
              const RigExecFrozenProgram &snapshot,
@@ -98,7 +101,7 @@ _PatchInputs(RigExecBakedProgramImpl &B,
 {
     size_t walked = 0;
     bool ok = true;
-    _ForEachPatchableInput(B, [&](auto &input) {
+    const auto patch = [&](auto &input) {
         if (!ok) {
             return;
         }
@@ -148,7 +151,31 @@ _PatchInputs(RigExecBakedProgramImpl &B,
         input.head = UsdAttribute();
         input.query = UsdAttributeQuery();
         input.resolvedAttr = UsdAttribute();
+    };
+    // The visitor's first two loops are the avar bindings' double inputs.
+    const size_t avarInputs =
+        B.avarBindings.size() + B.avarConstantBindings.size();
+    size_t visited = 0;
+    bool avarMoved = false;
+    _ForEachPatchableInput(B, [&](auto &input) {
+        using T = std::decay_t<decltype(input.constant)>;
+        if constexpr (std::is_same_v<T, double>) {
+            if (visited++ < avarInputs) {
+                uint64_t before = 0, after = 0;
+                std::memcpy(&before, &input.constant, sizeof(before));
+                patch(input);
+                std::memcpy(&after, &input.constant, sizeof(after));
+                avarMoved = avarMoved || before != after;
+                return;
+            }
+        } else {
+            ++visited;
+        }
+        patch(input);
     }, /*includeIntervening=*/false);
+    if (avarMoved) {
+        ++B.avarConstantSerial;
+    }
     return ok && walked == snapshot.inputHeadPaths.size();
 }
 
@@ -764,6 +791,7 @@ _RunFrozen(const RigExecFrozenEvalContext &context,
         report->ran = true;
         report->sourceKeysBuilt = B.sourceKeysBuilt;
         report->sourceKeyMismatches = B.sourceKeyMismatches;
+        report->avarConstantSerial = B.avarConstantSerial;
     }
     release.complete = true;
     return true;
