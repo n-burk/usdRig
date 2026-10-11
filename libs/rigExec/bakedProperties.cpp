@@ -1,7 +1,7 @@
 // Property revisions: immutable compile bindings, sampled typed inputs,
 // canonical graph bodies and publication. Native and detached SceneDb
 // revisions use the same numerical property runner.
-#include "rigExecGraph/propertyProgram.h"
+#include "rigExecScene/propertyProgram.h"
 #include "bakedProgram.h"
 #include "bakedProgramImpl.h"
 #include "bodyPurity.h"

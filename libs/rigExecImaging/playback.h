@@ -43,9 +43,6 @@
 
 #include "bridge.h"
 
-#include "rigExecRuntime/runtime.h"
-#include "rigExecSampler/inputSampler.h"
-
 #include "pxr/base/tf/type.h"
 #include "pxr/base/vt/value.h"
 #include "pxr/usd/sdf/path.h"
@@ -60,6 +57,9 @@
 #include <vector>
 
 namespace rigExec {
+class RigExecRuntimeReader;
+class RigExecInputSampler;
+enum class RrInputTag : uint8_t;
 
 /// Plays one rig's .rigexec file into the imaging chain. Constructed over
 /// an externally owned store, like the bridge; Open() must succeed before
@@ -95,7 +95,7 @@ public:
     /// bound input again, the static ones included, and re-decides which
     /// are static. The registry calls it for every notice of its stage,
     /// under its lock. Sets a flag only.
-    void NoteStageChanged() { _sampler.NoteStageChanged(); }
+    void NoteStageChanged();
 
     /// Stable per file (FNV-1a over the bytes): the published prim set of
     /// a binary never changes, so one epoch is published ever.
@@ -148,7 +148,7 @@ private:
     struct _UpstreamKey {
         size_t index = 0;
         std::string name;
-        RrInputTag tag = RrInputTag::Double;
+        RrInputTag tag{};
         bool animated = false;
         UsdAttribute attribute;
         VtValue value;
@@ -164,7 +164,7 @@ private:
     SdfPath _assetRoot;
     std::shared_ptr<RigExecSnapshotStore> _store;
     std::unique_ptr<RigExecRuntimeReader> _reader;
-    RigExecInputSampler _sampler;
+    std::unique_ptr<RigExecInputSampler> _sampler;
     std::string _assetPath;
     uint64_t _epochDigest = 0;
     // RIGEXEC_RUNTIME_DISPATCH under the parallel schedule, read at Open:

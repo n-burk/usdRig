@@ -1,7 +1,7 @@
 #ifndef RIGEXEC_STANDALONE_SCENE_ACCESS_H
 #define RIGEXEC_STANDALONE_SCENE_ACCESS_H
 #include "sceneDb.h"
-#include "rigExecGraph/sceneAccess.h"
+#include "rigExecScene/sceneAccess.h"
 
 namespace rigExec {
 /// Non-owning compiler view. The database must outlive descriptor capture.

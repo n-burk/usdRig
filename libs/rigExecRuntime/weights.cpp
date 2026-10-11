@@ -32,6 +32,7 @@
 #include "rigExecRuntime/labels.h"
 #include "rigExecRuntime/store.h"
 #include "rigExecRuntime/spaces.h"
+#include "rigExecMath/volumeFieldCheck.h"
 
 #include <algorithm>
 #include <cmath>
@@ -1787,18 +1788,12 @@ _RrOracleVolume(const RrProgram *program, const RrWeightScratch &scratch,
         if (boundsName == "bounded") {
             extentU = read(wire.extentU, 1.0f);
             extentV = read(wire.extentV, 1.0f);
-            for (const float e : {extentU, extentV}) {
-                if (!std::isfinite(e) || e <= 0.0f) {
-                    *error = who() +
-                             ": inputs:extentU/V must be finite and positive "
-                             "when rigExec:planeBounds is `bounded`";
-                    return false;
-                }
+            if (!RigExecVolumeExtentsOk(who(), extentU, extentV, error)) {
+                return false;
             }
             bounded = true;
         } else if (boundsName != "unbounded") {
-            *error = who() + ": unknown rigExec:planeBounds " +
-                     boundsName;
+            *error = RigExecUnknownPlaneBoundsMessage(who(), boundsName);
             return false;
         }
         _RrPlaneWeightField(*samples, worldToLocal, axis,
@@ -1811,11 +1806,8 @@ _RrOracleVolume(const RrProgram *program, const RrWeightScratch &scratch,
     const float sx = read(wire.scaleX, 1.0f);
     const float sy = read(wire.scaleY, 1.0f);
     const float sz = read(wire.scaleZ, 1.0f);
-    for (float s : {sx, sy, sz}) {
-        if (!std::isfinite(s) || s <= 0.0f) {
-            *error = who() + ": inputs:scaleX/Y/Z must be finite and positive";
-            return false;
-        }
+    if (!RigExecVolumeAxisScalesOk(who(), sx, sy, sz, error)) {
+        return false;
     }
     worldToLocal = _RrApplyAxisScales(worldToLocal, RrVec3f(sx, sy, sz));
 
@@ -1826,15 +1818,9 @@ _RrOracleVolume(const RrProgram *program, const RrWeightScratch &scratch,
         const RrVec3f negativeScales(read(wire.scaleXNeg, 1.0f),
                                      read(wire.scaleYNeg, 1.0f),
                                      read(wire.scaleZNeg, 1.0f));
-        for (int axis = 0; axis < 3; ++axis) {
-            if (!std::isfinite(positiveScales[axis]) ||
-                positiveScales[axis] <= 0 ||
-                !std::isfinite(negativeScales[axis]) ||
-                negativeScales[axis] <= 0) {
-                *error = who() +
-                         ": signed axis scales must be finite and positive";
-                return false;
-            }
+        if (!RigExecSignedAxisScalesOk(who(), positiveScales, negativeScales,
+                                       error)) {
+            return false;
         }
         _RrSphereWeightField(*samples, worldToLocal, falloffMin, falloffMax,
                              invert, strength, curve, weights, positiveScales,

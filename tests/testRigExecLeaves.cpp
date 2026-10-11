@@ -1913,24 +1913,31 @@ TestRevisionLeavesCoverTheExporterEnumeration(const std::string &examples)
                     (found ? mistimed : uncovered) += 1;
                 }
             };
-            for (const auto &chain : B.chains) {
+            for (size_t chainIndex = 0; chainIndex < B.chains.size();
+                 ++chainIndex) {
+                const auto &chain = B.chains[chainIndex];
                 const auto revisionKeys =
-                    [&](const RigExecBakedProgramImpl::GeomRevision &revision) {
+                    [&](const RigExecBakedProgramImpl::GeomRevision &revision,
+                        size_t revisionIndex, bool derived) {
                         if (!revision.leaves.decl.assembles) {
                             return;
                         }
                         ++ops[revision.op];
                         RigExecBakeEnumerateRevisionReads(
-                            B, revision, t.GetValue(),
+                            B, chainIndex, revisionIndex, derived, t.GetValue(),
                             [&](RigExecBakeRevisionRead &&read) {
                                 check(revision.leaves, read);
                             });
                     };
-                for (const auto &revision : chain.revisions) {
-                    revisionKeys(revision);
+                for (size_t revisionIndex = 0;
+                     revisionIndex < chain.revisions.size(); ++revisionIndex) {
+                    revisionKeys(chain.revisions[revisionIndex], revisionIndex,
+                                 false);
                 }
-                for (const auto &derived : chain.derived) {
-                    revisionKeys(derived.revision);
+                for (size_t revisionIndex = 0;
+                     revisionIndex < chain.derived.size(); ++revisionIndex) {
+                    revisionKeys(chain.derived[revisionIndex].revision,
+                                 revisionIndex, true);
                 }
             }
             for (size_t w = 0; w < B.weightObjects.size(); ++w) {

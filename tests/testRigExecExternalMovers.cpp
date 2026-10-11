@@ -10,8 +10,8 @@
 #include "rigExecRuntime/inputs.h"
 #include "rigExecRuntime/store.h"
 #include "rigExecRuntime/stageArrayInputs.h"
-#include "rigExecGraph/usdSceneAccess.h"
-#include "rigExecGraph/sceneProgramLowering.h"
+#include "rigExecScene/usdSceneAccess.h"
+#include "rigExecScene/sceneProgramLowering.h"
 
 #include "pxr/base/plug/plugin.h"
 #include "pxr/base/plug/registry.h"
@@ -502,7 +502,7 @@ const std::vector<RrVec3f> &Points(const RigExecRuntimeReader &reader,
                                    const SdfPath &path)
 {
     for (const RigExecRuntimePoints &moved : reader.GetPoints()) {
-        if (moved.path == path.GetString()) return moved.points;
+        if (moved.path == path.GetString()) return moved.points.Vector();
     }
     throw std::runtime_error("playback published no " + path.GetString());
 }

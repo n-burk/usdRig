@@ -567,7 +567,7 @@ RigExecRuntimeReader::Execute(std::string *error)
     RrInputsApplyTouched(&program);
 
     std::vector<std::string> poseDiagnostics;
-    if (!RrProloguePose(&program, &poseDiagnostics, error)) return false;
+    RrProloguePose(&program);
     if (!RrPrologueGeometry(&program, &poseDiagnostics, error)) return false;
     const bool ran = RrRunSteps(&program, false, error);
     // Joined: the binds this run built share now, not at the next run.
@@ -671,7 +671,7 @@ RigExecRuntimeReader::Execute(std::string *error)
     for (const auto &entry : store.movedProperties) {
         RigExecRuntimePoints moved;
         moved.path = program.TextOrEmpty(entry.first);
-        moved.points = entry.second.Read();
+        moved.points = RigExecSharedArray<RrVec3f>(entry.second.Share());
         points.push_back(std::move(moved));
     }
     std::vector<RigExecRuntimeMatrixPrimvar> matrixPrimvars;
@@ -704,11 +704,15 @@ RigExecRuntimeReader::Execute(std::string *error)
         RigExecRuntimeWeightField field;
         field.path = program.TextOrEmpty(entry.first);
         field.target = program.TextOrEmpty(entry.second.target);
-        field.weights = entry.second.weights.Read();
+        field.weights =
+            RigExecSharedArray<float>(entry.second.weights.Share());
         weightFieldsOut.push_back(std::move(field));
     }
-    // The API holds its copies now: releasing the epilogue's shares leaves
-    // the producers' buffers unique, so the next run's swaps reuse them.
+    // The outputs share the retained buffers. Clearing the maps drops the
+    // epilogue's extra retainers. A buffer this reader still owns alone is
+    // returned to the spare pool; the chain has already published the new
+    // one. A share the caller kept is left alone, and the next fill of that
+    // array allocates.
     store.movedProperties.clear();
     store.weightFields.clear();
     _SortByPath(&jointMatrices);
@@ -730,6 +734,12 @@ RigExecRuntimeReader::Execute(std::string *error)
         providerXforms.push_back(std::move(revised));
     }
     _SortByPath(&providerXforms);
+    for (RigExecRuntimePoints &old : _points) {
+        RrRetainedRecycle(old.points.Release());
+    }
+    for (RigExecRuntimeWeightField &old : _weightFields) {
+        RrRetainedRecycle(old.weights.Release());
+    }
     _jointMatrices = std::move(jointMatrices);
     _points = std::move(points);
     _matrixPrimvars = std::move(matrixPrimvars);

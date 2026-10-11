@@ -3,7 +3,7 @@
 // Numerical/source references: docs/references.md.
 #include "rigExec/movers/moverRegistry.h"
 #include "rigExec/movers/externalPlayback.h"
-#include "rigExecGraph/sceneDescriptors.h"
+#include "rigExecScene/sceneDescriptors.h"
 #include "rigExecMath/solvers.h"
 #include "pxr/base/vt/dictionary.h"
 #include "pxr/usd/usdGeom/pointBased.h"

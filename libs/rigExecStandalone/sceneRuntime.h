@@ -1,7 +1,7 @@
 #ifndef RIGEXEC_STANDALONE_SCENE_RUNTIME_H
 #define RIGEXEC_STANDALONE_SCENE_RUNTIME_H
 #include "sceneAccess.h"
-#include "rigExecGraph/sceneProgramLowering.h"
+#include "rigExecScene/sceneProgramLowering.h"
 namespace rigExec {
 /// Direct SceneDb frontend for the shared production scene program. Preparation
 /// captures detached facts; evaluation samples owned rows and runs typed SSA.

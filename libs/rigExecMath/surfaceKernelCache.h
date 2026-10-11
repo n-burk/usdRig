@@ -69,6 +69,7 @@ template<class Point,class Wide> class RigExecSurfaceKernelCache {
     uint64_t latticeRestVersion=0;
     size_t latticeBuilds=0;
     size_t latticeBudget=RigExecLatticeBindBudgetBytes;
+    std::vector<Point> smoothSource;
 public:
     /// A boxed-array caller can retain the vector adapter without converting
     /// unchanged source arrays every frame. No borrowed pointer survives here.
@@ -183,6 +184,10 @@ public:
     size_t LatticeBuilds() const { return latticeBuilds; }
     /// Test observable: the rest version the retained bind was built from.
     uint64_t LatticeRestVersion() const { return latticeRestVersion; }
+    /// Scratch swapped with the points Laplacian smooth is about to write.
+    /// The owning revision's thread uses it when mesh adjacency is cached,
+    /// so that pass does not copy the point vector.
+    std::vector<Point> &SmoothSource() { return smoothSource; }
 };
 }
 #endif

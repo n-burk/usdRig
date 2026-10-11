@@ -4,7 +4,7 @@
 #include "rigExecBake/pathTable.h"
 #include "rigExecBake/staticCapture.h"
 #include "rigExec/bakedProgramImpl.h"
-#include "rigExecGraph/providerRecordExport.h"
+#include "rigExecScene/providerRecordExport.h"
 
 #include <algorithm>
 #include <map>

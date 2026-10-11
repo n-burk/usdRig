@@ -400,8 +400,8 @@ RigExecRigEvaluator::_RebuildBakedProgram(
     }
     // Refusing is a property of the epoch, not of the moment: remember it so
     // the lazy build in Evaluate asks once rather than once per frame. The
-    // reasons ride with it: the fallback that reports them happens per
-    // frame, long after the one build that could say why.
+    // reasons ride with it. Evaluate reports them on each frame that has no
+    // program; it does not run a second evaluator.
     _bakeRefused = !_bakedProgram;
     _bakeRefusalReasons = std::move(reasons);
     // Last, once the replacement has taken what it adopts from it.

@@ -1,6 +1,6 @@
 #include "sceneProgramLowering.h"
 #include "providerContextBinding.h"
-#include "poseArithmetic.h"
+#include "rigExecGraph/poseArithmetic.h"
 #include "rigExec/movers/moverRegistry.h"
 #include <set>
 #include <algorithm>

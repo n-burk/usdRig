@@ -1782,7 +1782,8 @@ _CompareRuns(const RigExecRuntimeReader &a, const RigExecRuntimeReader &b,
             return "points count";
         }
         for (size_t i = 0; i < x.size(); ++i) {
-            if (x[i].path != y[i].path || !_SameBits(x[i].points, y[i].points)) {
+            if (x[i].path != y[i].path ||
+                !_SameBits(x[i].points.Vector(), y[i].points.Vector())) {
                 return "points " + x[i].path;
             }
         }
@@ -1819,7 +1820,7 @@ _CompareRuns(const RigExecRuntimeReader &a, const RigExecRuntimeReader &b,
         }
         for (size_t i = 0; i < x.size(); ++i) {
             if (x[i].path != y[i].path || x[i].target != y[i].target ||
-                !_SameBits(x[i].weights, y[i].weights)) {
+                !_SameBits(x[i].weights.Vector(), y[i].weights.Vector())) {
                 return "weight field " + x[i].path;
             }
         }

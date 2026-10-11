@@ -1,4 +1,4 @@
-#include "rigExecGraph/geometryProgram.h"
+#include "rigExecScene/geometryProgram.h"
 #include "rigExecGraph/blendLayout.h"
 #include "rigExec/weightField.h"
 // The baked program's geometry half: the chain/revision bake and the frame
@@ -10,6 +10,7 @@
 // with the dynamic walk were captured into RigExecBakedProgramImpl at Build.
 #include "bakedOpValues.h"
 #include "bakedProgramImpl.h"
+#include "sceneDispatch.h"
 #include "bakedSchedule.h"
 
 #include "frameExtraction.h"
@@ -482,7 +483,7 @@ RigExecBakedBuildGeometry(RigExecBakedBuildContext *ctx,
         // handles above remain confined to the native sampling adapter.
         if(B.sceneDescriptors) {
             std::string error;
-            if(!RigExecLowerSceneGeometry(*B.sceneDescriptors,out.moverPath,out.target,
+            if(!RigExecDispatchLowerSceneGeometry(*B.sceneDescriptors,out.moverPath,out.target,
                     &out.sceneGeometry,&error,&out.kernelRecord))
                 refuse(error,out.moverPath);
         }

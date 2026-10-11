@@ -1,6 +1,6 @@
 #ifndef RIGEXEC_GRAPH_POSE_PROGRAM_H
 #define RIGEXEC_GRAPH_POSE_PROGRAM_H
-#include "poseArithmetic.h"
+#include "rigExecGraph/poseArithmetic.h"
 #include "rigExecMath/rbf.h"
 #include "rigExecMath/pointFrame.h"
 #include "pxr/base/gf/matrix4d.h"

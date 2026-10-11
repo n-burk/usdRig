@@ -104,7 +104,7 @@
 #include "rigExecBake/bake.h"
 #include "rigExec/backgroundScheduler.h"
 #include "rigExec/bakedProgramImpl.h"
-#include "rigExec/goldenPose.h"
+#include "rigExec/rigEvaluator.h"
 #include "rigExec/frameCache.h"
 #include "rigExec/frameCacheSparsity.h"
 #include "rigExec/frozenContext.h"
@@ -3009,19 +3009,12 @@ TestStackFullRangeCursorWarmsEveryFrame(const std::string &examplesDir)
     const std::vector<double> spots = {
         frames[frames.size() / 4], frames[frames.size() / 2],
         frames[3 * frames.size() / 4]};
-    std::map<double, uint64_t> backgroundDigests;
-    const auto poseDigest = [](const RigExecRigPose &pose, uint64_t *digest) {
-        std::vector<RigExecGoldenValue> values;
-        if (!RigExecEncodeGoldenPose(pose, &values)) return false;
-        *digest = RigExecGoldenDigest(RigExecGoldenVisit(
-            "background-native", 0, pose, values, true));
-        return true;
-    };
+    std::map<double, std::shared_ptr<RigExecRigPose>> backgroundPoses;
     struct PublicationCell {
         std::atomic<uint8_t> state{0}; // one claim; release-ready after payload
         std::atomic<size_t> count{0};
         RigExecFrameCacheKey key{0, 0};
-        uint64_t digest = 0;
+        std::shared_ptr<RigExecRigPose> pose;
         bool exact = false;
         bool encoded = false;
         bool spot = false;
@@ -3038,8 +3031,8 @@ TestStackFullRangeCursorWarmsEveryFrame(const std::string &examplesDir)
         for (size_t i = 0; i < frames.size(); ++i) {
             const auto &cell = publicationCells[i];
             if (cell.state.load(std::memory_order_acquire) != 2) continue;
-            if (cell.spot && cell.exact && cell.encoded)
-                backgroundDigests[frames[i]] = cell.digest;
+            if (cell.spot && cell.exact && cell.encoded && cell.pose)
+                backgroundPoses[frames[i]] = cell.pose;
             if (cell.exact) {
                 auto &row = publications[frames[i]];
                 row.key = cell.key;
@@ -3079,12 +3072,11 @@ TestStackFullRangeCursorWarmsEveryFrame(const std::string &examplesDir)
                 result.time == time && served.time == time &&
                 comparison.comparisonMismatches == 0 &&
                 std::binary_search(frames.begin(), frames.end(), time.GetValue());
-            uint64_t digest = 0;
             const bool spot = std::find(spots.begin(), spots.end(),
                 time.GetValue()) != spots.end();
-            const bool encoded = !spot || poseDigest(result, &digest);
+            if (spot) cell.pose = std::make_shared<RigExecRigPose>(result);
+            const bool encoded = !spot || static_cast<bool>(cell.pose);
             cell.key = key;
-            cell.digest = digest;
             cell.spot = spot;
             cell.exact = exact;
             cell.encoded = encoded;
@@ -3205,13 +3197,13 @@ TestStackFullRangeCursorWarmsEveryFrame(const std::string &examplesDir)
         // default-worker result, even when that cache entry was evicted.
         RigExecImagingBridge *bridge = registry.GetBridge(rig);
         CHECK(bridge != nullptr);
-        uint64_t liveDigest = 0;
-        CHECK(backgroundDigests.count(frame) == 1);
-        if (bridge) {
+        CHECK(backgroundPoses.count(frame) == 1);
+        if (bridge && backgroundPoses.count(frame) == 1) {
             auto &evaluator = const_cast<RigExecRigEvaluator &>(bridge->GetEvaluator());
-            CHECK(poseDigest(evaluator.Evaluate(UsdTimeCode(frame)),
-                &liveDigest));
-            CHECK(backgroundDigests[frame] == liveDigest);
+            RigExecRigPose comparison;
+            RigExecComparePoses(*backgroundPoses[frame],
+                evaluator.Evaluate(UsdTimeCode(frame)), &comparison);
+            CHECK(comparison.comparisonMismatches == 0);
         }
         if (!_SameGeometry(warmed[frame], live)) {
             std::printf("warmed-vs-live differs at frame %g\n", frame);

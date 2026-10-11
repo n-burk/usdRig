@@ -16,10 +16,10 @@
 #     usdNoodles needs an OpenUSD built with Python + garch/glf, then
 #     FetchContent of facebookexperimental/noodles. testusdview needs a
 #     display / usdview. None of those are in this first gate.
-#   * CTest has no T0/T1 labels here. The gate is the C++ suite
-#     (`^testRigExec`) minus cone-verify doubles and the example-parity
-#     sweep, which are workstation-scale relative to the 120 s per-test
-#     TIMEOUT in CMakeLists.txt.
+#   * CTest labels (fast, usd-free, one per project library) select local
+#     runs. The gate is still the C++ suite (`^testRigExec`) minus
+#     cone-verify doubles and the example-parity sweep. The per-test
+#     TIMEOUT is 300s.
 #
 # Jobs:
 #
@@ -30,6 +30,7 @@
 #   build-release    configure + ninja -j$(nproc) + rigExecPose smoke.
 #                    Uploads the build tree so later jobs do not rebuild.
 #   ctest-cpp        ctest -R '^testRigExec' -E 'Cones_|ExampleParity'.
+#   runtime-usd-free compiles the runtime with no pxr include path.
 #   install-check    cmake --install into a scratch prefix; verify layout
 #                    and that both plugInfo.json files parse.
 #
@@ -59,6 +60,20 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  runtime-usd-free:
+    name: runtime compiles without OpenUSD
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout usdRig
+        uses: actions/checkout@v4
+
+      - name: Install a compiler
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends g++
+
+      - name: Compile the runtime with no pxr include path
+        run: bin/check_runtime_usd_free.sh
+
   # --------------------------------------------------------------------------
   # OpenUSD v26.08 (PixarAnimationStudios/OpenUSD @ tag v26.08).
   # Cache key = OS + arch + resolved commit + recipe epoch. Bump the epoch
@@ -181,7 +196,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            ninja-build libgl1-mesa-dev xorg-dev
+            ninja-build ccache libgl1-mesa-dev xorg-dev
 
       - name: Download OpenUSD prefix
         uses: actions/download-artifact@v4
@@ -197,6 +212,9 @@ jobs:
         run: |
           cmake -S . -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DUSD_INSTALL_DIR="${GITHUB_WORKSPACE}/usd-install" \
             -DCMAKE_PREFIX_PATH="${GITHUB_WORKSPACE}/usd-install" \
             -DRIGEXEC_BUILD_PYTHON=OFF \
@@ -218,7 +236,14 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            ninja-build libgl1-mesa-dev xorg-dev
+            ninja-build ccache libgl1-mesa-dev xorg-dev
+
+      - name: ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-${{ runner.os }}-${{ github.sha }}
+          restore-keys: ccache-${{ runner.os }}-
 
       - name: Download OpenUSD prefix
         uses: actions/download-artifact@v4
@@ -234,6 +259,9 @@ jobs:
         run: |
           cmake -S . -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DUSD_INSTALL_DIR="${GITHUB_WORKSPACE}/usd-install" \
             -DCMAKE_PREFIX_PATH="${GITHUB_WORKSPACE}/usd-install" \
             -DRIGEXEC_BUILD_PYTHON=OFF \
@@ -260,9 +288,10 @@ jobs:
           retention-days: 5
 
   # --------------------------------------------------------------------------
-  # C++ CTest gate. -R is a regex on the test name; there are no T0/T1
-  # labels in this tree. Cone-verify doubles and the example-parity sweep
-  # stay out of the first gate (TIMEOUT 120 s, 4 vCPU).
+  # C++ CTest gate. -R is a regex on the test name. fast / usd-free /
+  # per-library labels exist for local selection; this job still runs the
+  # suite. Cone-verify doubles and the example-parity sweep stay out of
+  # the first gate (TIMEOUT 300 s, 4 vCPU).
   # --------------------------------------------------------------------------
   ctest-cpp:
     name: ctest (C++)
@@ -335,6 +364,8 @@ jobs:
           P="${GITHUB_WORKSPACE}/usdrig-install"
           for f in \
             "$P/lib/librigExec.so" \
+            "$P/lib/librigExecScene.so" \
+            "$P/lib/librigExecOracle.so" \
             "$P/lib/librigExecImaging.so" \
             "$P/lib/librigExecStandalone.so" \
             "$P/lib/librigExecRigging.so" \

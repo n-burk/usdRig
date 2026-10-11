@@ -1,6 +1,6 @@
 #ifndef RIGEXEC_GRAPH_TYPED_VALUES_H
 #define RIGEXEC_GRAPH_TYPED_VALUES_H
-#include "opGraph.h"
+#include "rigExecGraph/opGraph.h"
 #include "rigExecMath/pointFrame.h"
 #include "pxr/base/vt/value.h"
 #include <cstring>

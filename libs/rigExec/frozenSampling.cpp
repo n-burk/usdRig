@@ -1,6 +1,7 @@
 // Stage-side frame sampling and burst sample caches.
 
 #include "frozenContextInternal.h"
+#include "oracleDispatch.h"
 #include "frameCache.h"
 #include "movers/moverRegistry.h"
 #include "rigExecMath/geometryKernels.h"
@@ -2470,13 +2471,13 @@ void _SampleOracleReference(const RigExecRigEvaluator &evaluator,
         for(const auto &revision:chain.revisions)roots.push_back(revision.moverPath);
     }
     for(const auto &weight:B.weightObjects)roots.push_back(weight.path);
-    auto scene=RigExecCaptureOracleInputs(B.stage,original,time,0,roots,upstream,
+    auto scene=RigExecDispatchCaptureOracleInputs(B.stage,original,time,0,roots,upstream,
         RigExecOracleCaptureMode::PublicationFacts);
     out->oraclePublications.emplace();
     out->oraclePublications->Begin(0,std::move(scene),B.propertyChains.size(),produced,protectedPaths);
     const auto noPlacement=[](const SdfPath &) -> const GfMatrix4d * {return nullptr;};
     for(const auto &weight:B.weightObjects)out->oracleWeightInputs.emplace(weight.path,
-        RigExecCaptureWeightReference(B.stage,weight.path,original,upstream,time,noPlacement));
+        RigExecDispatchCaptureWeightReference(B.stage,weight.path,original,upstream,time,noPlacement));
 }
 
 // The constraint operator arrays, read raw off the prim as the prologue

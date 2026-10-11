@@ -1679,7 +1679,6 @@ CheckBakedWeightFramesMatchTheWalk(const UsdStageRefPtr &stage,
     }
     CHECK(!rigPath.IsEmpty());
     RigExecRigEvaluator walk(stage, rigPath);
-    walk.cpuReference = true;
     RigExecRigEvaluator baked(stage, rigPath);
     std::vector<std::string> errors;
     if (!walk.Compile(&errors) || !baked.Compile(&errors)) {
